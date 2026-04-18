@@ -90,6 +90,15 @@ fi
 # Per-example trace for hone's reflective_dataset.
 echo "${CHALLENGE}: $FIXED/$BROKEN fixed" >&2
 
-# Score: solve ratio.
-SCORE=$(awk -v f="$FIXED" -v b="$BROKEN" 'BEGIN { if (b+0 <= 0) { print "0.0000"; exit } printf "%.4f\n", f / b }')
+# Score: solve ratio, capped at 1.0.
+# agentelo's finalFixed can exceed broken_by_bug when the runtime-observed baseline
+# drifts from the stored challenge.baseline_passing (e.g. deps upgraded since
+# challenge was mined). We cap to [0, 1] so GEPA's perfect_score logic works.
+SCORE=$(awk -v f="$FIXED" -v b="$BROKEN" 'BEGIN {
+  if (b+0 <= 0) { print "0.0000"; exit }
+  s = f / b
+  if (s > 1.0) s = 1.0
+  if (s < 0.0) s = 0.0
+  printf "%.4f\n", s
+}')
 echo "$SCORE"
