@@ -47,11 +47,23 @@ class HoneProposer:
         reflective_dataset: dict[str, list[dict[str, Any]]],
         components_to_update: list[str],
     ) -> dict[str, str]:
+        import os
+
+        debug = os.environ.get("HONE_DEBUG") == "1"
         out: dict[str, str] = {}
         for component in components_to_update:
             current = candidate.get(component, "")
             rows = reflective_dataset.get(component, [])
+            if debug:
+                print(
+                    f"[hone debug] component={component!r} "
+                    f"current_len={len(current)} n_rows={len(rows)}"
+                )
+                for r in rows[:5]:
+                    print(f"[hone debug]   row: {r}")
             prompt = _build_mutator_prompt(current, rows, component)
+            if debug:
+                print(f"[hone debug] mutator_prompt_len={len(prompt)}")
             result = self._try_propose(prompt)
             self._account(result)
             out[component] = result.new_prompt
