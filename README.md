@@ -56,12 +56,13 @@ hone run prompt.md --grader ./grader.sh --mutator claude-code:sonnet --budget 20
 | Mutator | Requires | Example |
 |---------|----------|---------|
 | `claude-code` | Claude Code CLI + Claude Pro subscription | `claude-code:sonnet` |
-| `codex` | OpenAI Codex CLI | `codex:gpt-5.4-mini` |
-| `opencode` | OpenCode CLI | `opencode:glm-5` |
-| `gemini` | Gemini CLI | `gemini:gemini-3-flash-preview` |
 | `anthropic` | `ANTHROPIC_API_KEY` | `anthropic:claude-sonnet-4-6` |
-| `openai` | `OPENAI_API_KEY` | `openai:gpt-5.4-mini` |
+| `harness:<adapter>` | [`harness`](https://github.com/twaldin/harness) installed | `harness:gemini:gemini-2.5-pro` |
 | `./my-script.sh` | Custom script | `./my-mutator.sh` |
+
+The `harness:` prefix dispatches through [twaldin/harness](https://github.com/twaldin/harness), the unified Python interface for AI coding-agent CLIs. Any harness adapter that produces text output (`claude-code`, `gemini`) is usable as a mutator. Coding-loop adapters (`codex`, `aider`, `swe-agent`) raise a clear error.
+
+Adding a new LLM backend used to mean writing a hone mutator class. Now it's "ship a new adapter in harness."
 
 ## Grader contract
 
