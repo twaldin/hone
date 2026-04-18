@@ -1,6 +1,7 @@
 """Mutator adapters — backends that propose new prompt variants."""
 from __future__ import annotations
 
+from hone.mutators.anthropic_api import AnthropicApiMutator
 from hone.mutators.base import Mutator, MutatorError, MutatorResult
 from hone.mutators.claude_code import ClaudeCodeMutator
 from hone.mutators.custom_script import CustomScriptMutator
@@ -8,6 +9,7 @@ from hone.mutators.custom_script import CustomScriptMutator
 # Registry: slug -> factory(model: str | None) -> Mutator
 _REGISTRY: dict[str, type[Mutator]] = {
     "claude-code": ClaudeCodeMutator,
+    "anthropic": AnthropicApiMutator,
 }
 
 
@@ -40,6 +42,7 @@ def resolve(spec: str) -> Mutator:
 
 
 __all__ = [
+    "AnthropicApiMutator",
     "ClaudeCodeMutator",
     "CustomScriptMutator",
     "Mutator",

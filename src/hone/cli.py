@@ -111,6 +111,8 @@ def run(
         seed_prompt=seed_prompt,
         grader_path=grader,
         mutator=mutator_instance,
+        mutator_spec=mutator,
+        prompt_path=prompt_path,
         budget=budget,
         component_name=component,
         grader_timeout_seconds=grader_timeout,
@@ -130,7 +132,8 @@ def run(
             f"([red]{result.mutator_failures} failed[/red])\n"
             f"[bold]mutator tokens[/bold]     in={result.mutator_tokens_in:,}  "
             f"out={result.mutator_tokens_out:,}\n"
-            f"[bold]mutator cost[/bold]       ${result.mutator_cost_usd:.4f}\n\n"
+            f"[bold]mutator cost[/bold]       ${result.mutator_cost_usd:.4f}\n"
+            f"[bold]run dir[/bold]            {result.run_dir}\n\n"
             f"best prompt written to [bold]{output}[/bold]",
             title="done",
         )
