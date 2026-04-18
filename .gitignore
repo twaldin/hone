@@ -19,5 +19,6 @@ build/
 .vscode/
 .idea/
 
-# hone run state
+# hone run state + outputs
 .hone/
+*.honed.md
