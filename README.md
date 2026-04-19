@@ -11,6 +11,19 @@ hone run prompt.md \
 
 `hone` wraps [GEPA](https://github.com/gepa-ai/gepa)'s Pareto-frontier prompt optimization with a CLI-first interface that uses Claude Code, Codex, OpenCode, or Gemini subscriptions to propose mutations — no API keys required.
 
+## Proof of concept — Claude Haiku 4.5 on real GitHub bugs
+
+Same model, same unseen bugs, only the system prompt differs:
+
+|                          | bare seed prompt (14 words) | hone-discovered prompt (6-step methodology) |
+|--------------------------|------------------------------|-----------------------------------------------|
+| 20-challenge training    | **0.5476** (55% solve)       | **0.9176** (92%)                              |
+| 9-challenge hold-out ×3  | **0.6496** (65%)             | **0.8462** (85%)                              |
+
+**+20 absolute percentage points / +30% relative lift on bugs GEPA never trained on.** All 3 hold-out samples improved; no regressions. 3 GEPA iterations, ~$1 in Sonnet mutator tokens, ~7 hours on a Claude Max subscription. Graded against [agentelo](https://github.com/twaldin/agentelo) challenges (real PRs from `click`, `qs`, `marshmallow`, `jinja`, `koa`, `requests`, `flask`, `fastify`). Full writeup and the honed prompt text: [writeup/2026-04-18-haiku-20train-9holdout.md](writeup/2026-04-18-haiku-20train-9holdout.md).
+
+The discovered prompt isn't bug-specific — it's a methodology prompt that patches a known haiku failure mode (stopping after the first test passes). That's why it transfers.
+
 ## Why
 
 Every existing prompt optimizer (GEPA, DSPy, Arize Prompt Learning) requires paid API keys. If you already pay for Claude Pro or ChatGPT Plus, you can use that subscription as the optimization engine by shelling out to the official CLIs. That's what `hone` does.
