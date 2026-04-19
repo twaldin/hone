@@ -111,6 +111,65 @@ def test_harness_mutator_uses_harness_run(monkeypatch, tmp_path) -> None:
     assert captured["spec"].prompt == "mutate this prompt"
 
 
+def test_claude_code_mutator_delegates_to_harness(monkeypatch) -> None:
+    """ClaudeCodeMutator should route through harness.run() with harness='claude-code'.
+
+    Locks in the post-migration behavior: no direct subprocess.run('claude', ...)
+    calls; all CLI plumbing lives in harness.
+    """
+    from harness import RunResult
+
+    captured = {}
+
+    def fake_run(spec):
+        captured["spec"] = spec
+        return RunResult(
+            harness="claude-code",
+            model=spec.model,
+            exit_code=0,
+            duration_seconds=1.0,
+            stdout='{"type":"result","result":"mutated","usage":{"input_tokens":7,"output_tokens":3},"total_cost_usd":0.0005}',
+            stderr="",
+            timed_out=False,
+            cost_usd=0.0005,
+            tokens_in=7,
+            tokens_out=3,
+            raw={"type": "result", "result": "mutated", "usage": {"input_tokens": 7, "output_tokens": 3}, "total_cost_usd": 0.0005},
+        )
+
+    monkeypatch.setattr("harness.run", fake_run)
+
+    m = ClaudeCodeMutator(model=None)
+    result = m.propose("please mutate")
+
+    assert result.new_prompt == "mutated"
+    assert result.tokens_in == 7
+    assert result.tokens_out == 3
+    assert result.cost_usd == 0.0005
+    assert captured["spec"].harness == "claude-code"
+    # Default model "sonnet" is applied at propose time when init model is None.
+    assert captured["spec"].model == "sonnet"
+
+
+def test_claude_code_mutator_passes_explicit_model(monkeypatch) -> None:
+    from harness import RunResult
+
+    captured = {}
+
+    def fake_run(spec):
+        captured["spec"] = spec
+        return RunResult(
+            harness="claude-code", model=spec.model, exit_code=0, duration_seconds=0.1,
+            stdout='{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1},"total_cost_usd":0.0001}',
+            stderr="", timed_out=False, cost_usd=0.0001, tokens_in=1, tokens_out=1,
+            raw={"type": "result", "result": "ok", "usage": {"input_tokens": 1, "output_tokens": 1}, "total_cost_usd": 0.0001},
+        )
+
+    monkeypatch.setattr("harness.run", fake_run)
+    ClaudeCodeMutator(model="haiku").propose("x")
+    assert captured["spec"].model == "haiku"
+
+
 def test_harness_mutator_raises_on_failure(monkeypatch) -> None:
     from harness import RunResult
 
