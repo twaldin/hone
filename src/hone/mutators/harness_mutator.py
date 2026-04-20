@@ -130,3 +130,45 @@ class _NoCleanup:
 
     def __exit__(self, *exc) -> None:
         return None
+
+
+# ---------------------------------------------------------------------------
+# v2 edit-mode — for dir-mode mutations where the agent uses Edit tool in
+# a pre-populated workdir. Caller reads files back from workdir; we ignore
+# the text response.
+# ---------------------------------------------------------------------------
+
+def propose_edit_mode_method(self, mutator_prompt: str, workdir: Path) -> MutatorResult:
+    try:
+        from harness import HarnessError, RunSpec, run
+    except ImportError as e:
+        raise MutatorError("harness library not installed.") from e
+
+    spec = RunSpec(
+        harness=self.harness_name,
+        prompt=mutator_prompt,
+        workdir=Path(workdir),
+        model=self.model,
+        timeout_seconds=self.timeout_seconds,
+    )
+    try:
+        result = run(spec)
+    except HarnessError as e:
+        raise MutatorError(f"edit-mode harness {self.harness_name!r}: {e}") from e
+
+    if not result.ok:
+        tail = (result.stderr or result.stdout or "").strip()[:500]
+        raise MutatorError(
+            f"edit-mode harness {self.harness_name!r} exited {result.exit_code}: {tail}"
+        )
+
+    return MutatorResult(
+        new_prompt="",
+        tokens_in=result.tokens_in,
+        tokens_out=result.tokens_out,
+        cost_usd=result.cost_usd,
+        raw_response=result.stdout,
+    )
+
+
+HarnessMutator.propose_edit_mode = propose_edit_mode_method

@@ -1,6 +1,6 @@
 [project]
 name = "hone"
-version = "0.1.0"
+version = "0.3.0"
 description = "CLI prompt optimizer that uses your coding CLI subscriptions as the mutation engine"
 readme = "README.md"
 license = { text = "MIT" }

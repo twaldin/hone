@@ -181,3 +181,64 @@ def _build_mutator_prompt(
         f"Return ONLY the improved prompt text. No preamble, no explanation, "
         f"no code fences. Just the new prompt, ready to replace the current one.\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# v2 dir-mode — propose_for_file edits one file in a directory snapshot using
+# the Edit tool inside a temp workdir.
+# ---------------------------------------------------------------------------
+
+def propose_for_file(
+    proposer: HoneProposer,
+    target_rel,          # Path relative to dir root
+    snapshot,            # DirSnapshot
+    grader_stderr_tail: str,
+    claude_md_path,      # Path to the live ACE-managed CLAUDE.md
+) -> str:
+    import tempfile
+    from pathlib import Path as _P
+    from hone.mutators.harness_mutator import HarnessMutator
+    from hone.kinds import detect_component_kind
+
+    with tempfile.TemporaryDirectory(prefix="hone-dir-mut-") as wd:
+        wd = _P(wd)
+        snapshot.materialize(wd)
+        (wd / "CLAUDE.md").write_text(
+            _P(claude_md_path).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+        kind = detect_component_kind(target_rel)
+        language = _KIND_LANGUAGE.get(kind, "text")
+        prompt = (
+            f"You are editing exactly ONE file in this directory: {target_rel}.\n"
+            f"Use the Edit tool. Do NOT touch any other file.\n"
+            f"The file is {language}; your edit must leave it as valid {language}.\n\n"
+            f"Follow the rules in CLAUDE.md (injected as system prompt).\n\n"
+            f"=== CURRENT CONTENTS OF {target_rel} ===\n"
+            f"{snapshot.files[target_rel]}\n\n"
+            f"=== RECENT GRADER FEEDBACK ===\n"
+            f"{grader_stderr_tail}\n\n"
+            f"Edit {target_rel} so the grader scores higher. Return no prose.\n"
+        )
+
+        if not isinstance(proposer.mutator, HarnessMutator):
+            raise MutatorError("dir-mode currently requires a HarnessMutator")
+
+        result = proposer.mutator.propose_edit_mode(prompt, workdir=wd)
+        proposer._account(result)
+
+        new_contents = (wd / target_rel).read_text(encoding="utf-8")
+
+        if str(target_rel).endswith(".py"):
+            import ast
+            try:
+                ast.parse(new_contents)
+            except SyntaxError as e:
+                proposer.stats.failures += 1
+                raise MutatorError(
+                    f"invalid_output: {target_rel} syntax error: {e}"
+                )
+        return new_contents
+
+
+HoneProposer.propose_for_file = propose_for_file

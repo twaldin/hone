@@ -35,6 +35,11 @@ class RunManifest:
     best_score: float | None = None
     total_iterations: int = 0
     variants: list[VariantRecord] = field(default_factory=list)
+    # v2 dir-mode fields (defaults for back-compat)
+    mode: str = "single-file"          # "single-file" | "dir"
+    dir_root: str | None = None
+    scheduler_spec: str | None = None
+    observer_spec: str | None = None
 
 
 class RunStorage:

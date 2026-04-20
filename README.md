@@ -1,114 +1,126 @@
 # hone
 
-> hone = [harness](https://github.com/twaldin/harness) + [GEPA](https://github.com/gepa-ai/gepa). Optimize any prompt against any grader, using your AI coding-agent subscriptions as the mutation engine.
+**Implementation of GEPA's `optimize_anything` using coding CLI agents.**
 
-```bash
-hone run prompt.md \
-  --grader ./grader.sh \
-  --budget 20
-```
+[GEPA](https://github.com/gepa-ai/gepa) is a reflective Pareto optimizer that
+evolves text parameters — prompts, code, instructions — against a grader. Its
+`optimize_anything` API accepts any text component and any scorer. `hone` is
+the canonical implementation of that API where the **mutator is a coding CLI
+agent** (Claude Code, Codex, Gemini, Aider, opencode, or swe-agent via
+[harness](https://github.com/twaldin/harness)) rather than a single-completion
+call.
 
-`hone` wraps GEPA's Pareto-frontier prompt optimization with a CLI-first interface. The default mutator routes through the [harness](https://github.com/twaldin/harness) library — the same unified adapter layer [agentelo](https://github.com/twaldin/agentelo) uses to run 6 different coding CLIs (Claude Code, Codex, OpenCode, Gemini, Aider, SWE-agent). No API keys required; uses your subscription.
+v0.3 adds multi-file targeting (`--dir`), a dynamic scheduler that picks which
+file to mutate per iteration based on diagnosed bottlenecks, and an ACE
+observer ([Zhang et al., arxiv 2510.04618](https://arxiv.org/abs/2510.04618))
+that incrementally edits the mutator's `CLAUDE.md` between iterations.
 
-## Proof of concept — Claude Haiku 4.5 on real GitHub bugs
+## What this is
 
-Same model, same unseen bugs, only the system prompt differs:
+An optimizer that calls `claude-code` (or any CLI agent) as the mutation step,
+then uses your grader to score each candidate, then keeps the best. GEPA
+handles the Pareto-frontier bookkeeping; `hone` handles the coding-agent
+dispatch, the grader contract, and the multi-file / observer machinery on top.
 
-|                          | bare seed prompt (14 words) | hone-discovered prompt (6-step methodology) |
-|--------------------------|------------------------------|-----------------------------------------------|
-| 20-challenge training    | **0.5476** (55% solve)       | **0.9176** (92%)                              |
-| 9-challenge hold-out ×3  | **0.6496** (65%)             | **0.8462** (85%)                              |
+Use it when your improvement target is code or instructions that a coding
+agent can edit, and you have a script that scores the result.
 
-**+20 absolute percentage points / +30% relative lift on bugs GEPA never trained on.** All 3 hold-out samples improved; no regressions. 3 GEPA iterations, ~$1 in Sonnet mutator tokens, ~7 hours on a Claude Max subscription. Graded against [agentelo](https://github.com/twaldin/agentelo) challenges (real PRs from `click`, `qs`, `marshmallow`, `jinja`, `koa`, `requests`, `flask`, `fastify`). Full writeup and the honed prompt text: [writeup/2026-04-18-haiku-20train-9holdout.md](writeup/2026-04-18-haiku-20train-9holdout.md).
+## What this isn't
 
-The discovered prompt isn't bug-specific — it's a methodology prompt that patches a known haiku failure mode (stopping after the first test passes). That's why it transfers.
-
-## Why
-
-Every existing prompt optimizer (GEPA, DSPy, Arize Prompt Learning) requires paid API keys. If you already pay for Claude Pro or ChatGPT Plus, you can use that subscription as the optimization engine by shelling out to the official CLIs. That's what `hone` does.
+- **Not another prompt-only optimizer.** `hone` is GEPA's `optimize_anything`
+  applied to source files via coding agents. The mutator gets Edit-tool
+  access and a workdir, not just a text completion.
+- **Not an API-key wrapper.** The default mutator is `claude-code`, which uses
+  your Claude subscription. API backends (`anthropic:`, `openai:`) are
+  available but not required.
+- **Not tied to a single model.** Any CLI agent exposed through
+  [harness](https://github.com/twaldin/harness) works as a mutator.
 
 ## Install
 
 ```bash
-pip install hone
-# or
-uv pip install hone
+pip install git+https://github.com/twaldin/hone
 ```
 
-## Quick start
+> The PyPI name `hone` is currently taken by an unrelated project. A public
+> PyPI release under a different name is pending.
 
-1. Write a prompt file:
+Requires Python 3.11+ and a coding CLI on your `PATH` (e.g. `claude-code`).
 
-```markdown
-# prompt.md
-You are a helpful assistant. Answer questions concisely.
-```
-
-2. Write a grader script (any executable that reads a prompt file path as `$1`, prints a float on stdout's last line):
+## Quickstart: pack circles
 
 ```bash
-#!/bin/bash
-# grader.sh
-score=$(my-eval --prompt "$1")
-echo "$score"
+git clone https://github.com/twaldin/hone
+cd hone/examples/circle-packing
+hone run placer.py --grader ./grader.sh --mutator claude-code:sonnet --budget 10
 ```
 
-3. Run `hone`:
+`placer.py` seeds with a grid packing (score `4.666667`). Each iteration the
+mutator rewrites it; good solutions push past `5.0` within a few iterations
+and a few minutes of wall time. See `examples/circle-packing/README.md` for
+the full explainer, including a variant with the ACE observer.
 
-```bash
-hone run prompt.md --grader ./grader.sh --mutator claude-code:sonnet --budget 20
-```
+## v0.3 features
 
-`hone` iterates: proposes new variants of your prompt, runs the grader on each, keeps the winners on a Pareto frontier. Final output: the best-scoring variant.
+| flag | purpose |
+|------|---------|
+| `--dir <path>` | Optimize every mutable file under a directory as one candidate. Scheduler picks one file per iteration. Single-file mode still works with no flag. |
+| `--scheduler <name>` | `round-robin` (default), `diagnose` (routes on grader-reported fail classes), `random`. Only meaningful with `--dir`. |
+| `--observer <cli>:<model>` | Enable the ACE observer. Reflector is the given agent; curator is deterministic Python that applies deltas to the `managed:ace` block of the mutator's `CLAUDE.md`. Off by default. |
+| `--observer-interval N` | Fire the observer every N iterations. Default 10. |
+| `--observer-window N` | How many most-recent mutation rows the observer reads. Default 20. |
 
-## Mutators
+The observer is a port of [Zhang et al. (ICLR
+2026)](https://arxiv.org/abs/2510.04618). Reflector = LLM; Curator =
+deterministic Python. Auto-applied edits are rolled back automatically if the
+5-iteration rolling score drops after an update.
 
-`--mutator <name>:<model>` picks the backend that proposes prompt mutations:
+## See it on something hard
 
-| Mutator | Requires | Example |
-|---------|----------|---------|
-| `claude-code` | Claude Code CLI + Claude Pro subscription | `claude-code:sonnet` |
-| `anthropic` | `ANTHROPIC_API_KEY` | `anthropic:claude-sonnet-4-6` |
-| `harness:<adapter>` | [`harness`](https://github.com/twaldin/harness) installed | `harness:gemini:gemini-2.5-pro` |
-| `./my-script.sh` | Custom script | `./my-mutator.sh` |
+[`hone-a-drone`](https://github.com/twaldin/hone-a-drone) runs `hone` against
+a quadrotor flight controller on a physics-sim racing course. Headline result
+from a single-file v0.1 run:
 
-The `harness:` prefix dispatches through [twaldin/harness](https://github.com/twaldin/harness), the unified Python interface for AI coding-agent CLIs. Any harness adapter that produces text output (`claude-code`, `gemini`) is usable as a mutator. Coding-loop adapters (`codex`, `aider`, `swe-agent`) raise a clear error.
+- **+33% aggregate** score gain across all difficulty levels
+- **+270%** on level 2 (the hardest non-trivial tier)
+- **+100%** on level 3 (from zero completions to reliable ones)
+- 13 mutator calls, `$4.08` in subscription wall costs
 
-Adding a new LLM backend used to mean writing a hone mutator class. Now it's "ship a new adapter in harness."
+See that repo for the full log, the seed controller, and the honed
+controller.
 
 ## Grader contract
 
-Your grader script receives the candidate prompt file path as `$1`:
+Your grader is called as `<grader> <path>`:
 
-- **stdout**: last line must be a float (the score). Other stdout is ignored.
-- **stderr**: structured trace of how the prompt performed. `hone` parses this into GEPA's `reflective_dataset` so the mutator LLM knows what went wrong.
+- **stdout**: last line is the score (a float). Higher is better.
+- **stderr**: one JSON object per rollout, fed back to the mutator (and to
+  the diagnose scheduler). Include `fail_class` or domain-specific fields to
+  enable routing.
 
-Example grader stderr (per-example breakdown):
+Example stderr line from the circle-packing grader:
 
+```json
+{"n": 12, "valid": true, "score": 1.5}
 ```
-click-pr2421: 3/3 fixed
-koa-1834: 10/7 fixed
-qs-pr506: 0/4 failed (modified wrong file)
-```
 
-## Citations
+## Credits
 
-`hone` stands on the shoulders of:
+- [GEPA](https://github.com/gepa-ai/gepa) (Khattab et al.) — the Pareto
+  optimization algorithm and the `optimize_anything` API `hone` implements.
+- [ACE](https://arxiv.org/abs/2510.04618) (Zhang et al., ICLR 2026) — the
+  reflector-curator context-engineering loop ported for the observer.
+- [harness](https://github.com/twaldin/harness) — the unified adapter layer
+  that lets `hone` treat every coding CLI (Claude Code, Codex, Gemini, Aider,
+  opencode, swe-agent) as one kind of mutator.
 
-- **[GEPA](https://github.com/gepa-ai/gepa)** (MIT) — the Pareto-frontier optimization algorithm. `hone` uses GEPA's `custom_candidate_proposer` hook to plug in CLI mutators.
-- **[ACE](https://arxiv.org/abs/2510.04618)** — conceptual inspiration for continuous context engineering.
-- **[Arize Prompt Learning](https://docs.arize.com/arize/prompt-engineering/prompt-learning)** — prior art, API-key based. Demonstrated +10% SWE-Bench Lite improvement from optimizing CLAUDE.md alone.
-- **[Karpathy's autoresearch](https://karpathy.ai/autoresearch.html)** — the shape of offline improvement loops.
-- **[DSPy](https://github.com/stanfordnlp/dspy)** — the BaseLM pattern informs `hone`'s mutator abstraction.
+## Prior work in this repo
 
-## A note on subscriptions
-
-When you use a subscription mutator (`claude-code`, `codex`, etc.), `hone` shells out to the official CLI as a subprocess. You're using the tool as intended — we're not scraping OAuth tokens or bypassing auth. That said, check your provider's ToS before heavy use. API mutators (`anthropic:`, `openai:`) are also supported for users who prefer that path.
-
-## Status
-
-v0.1 — early alpha. Designed for Python 3.11+.
+A v0.1 run improved Claude Haiku 4.5's bug-fixing solve rate from 55% to 92%
+on 20 training bugs and 65% → 85% on a held-out 9-bug set, by evolving the
+system prompt alone. Full writeup:
+[`writeup/2026-04-18-haiku-20train-9holdout.md`](writeup/2026-04-18-haiku-20train-9holdout.md).
 
 ## License
 
-MIT
+MIT.
