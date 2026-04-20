@@ -1,15 +1,14 @@
 # hone
 
-> Optimize any prompt file against any grader. Uses your coding CLI subscriptions as the mutation engine.
+> hone = [harness](https://github.com/twaldin/harness) + [GEPA](https://github.com/gepa-ai/gepa). Optimize any prompt against any grader, using your AI coding-agent subscriptions as the mutation engine.
 
 ```bash
 hone run prompt.md \
   --grader ./grader.sh \
-  --mutator claude-code:sonnet \
   --budget 20
 ```
 
-`hone` wraps [GEPA](https://github.com/gepa-ai/gepa)'s Pareto-frontier prompt optimization with a CLI-first interface that uses Claude Code, Codex, OpenCode, or Gemini subscriptions to propose mutations — no API keys required.
+`hone` wraps GEPA's Pareto-frontier prompt optimization with a CLI-first interface. The default mutator routes through the [harness](https://github.com/twaldin/harness) library — the same unified adapter layer [agentelo](https://github.com/twaldin/agentelo) uses to run 6 different coding CLIs (Claude Code, Codex, OpenCode, Gemini, Aider, SWE-agent). No API keys required; uses your subscription.
 
 ## Proof of concept — Claude Haiku 4.5 on real GitHub bugs
 
