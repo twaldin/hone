@@ -1,19 +1,15 @@
 # hone
 
-**Implementation of GEPA's `optimize_anything` using coding CLI agents.**
-
-[GEPA](https://github.com/gepa-ai/gepa) is a reflective Pareto optimizer that
-evolves text parameters — prompts, code, instructions — against a grader. Its
-`optimize_anything` API accepts any text component and any scorer. `hone` is
-the canonical implementation of that API where the **mutator is a coding CLI
-agent** (Claude Code, Codex, Gemini, Aider, opencode, or swe-agent via
-[harness](https://github.com/twaldin/harness)) rather than a single-completion
-call.
+> ## Read the source papers first — I can't explain them better than they do
+>
+> - **GEPA** ([repo](https://github.com/gepa-ai/gepa)) — reflective Pareto optimizer. The core loop `hone` implements.
+> - **ACE** ([arxiv 2510.04618](https://arxiv.org/abs/2510.04618), Zhang et al., ICLR 2026) — reflector/curator context engineering. The observer loop `hone` ports.
+>
+> `hone` is the composition and implementation of these ideas, with one addition: the mutator is an **agentic coding CLI** (Claude Code, Codex, Gemini, Aider, opencode via [harness](https://github.com/twaldin/harness)) rather than a single-completion API call. The agent reads the codebase, runs tools, and iterates internally inside a single mutator step.
 
 v0.3 adds multi-file targeting (`--dir`), a dynamic scheduler that picks which
 file to mutate per iteration based on diagnosed bottlenecks, and an ACE
-observer ([Zhang et al., arxiv 2510.04618](https://arxiv.org/abs/2510.04618))
-that incrementally edits the mutator's `CLAUDE.md` between iterations.
+observer that incrementally edits the mutator's `CLAUDE.md` between iterations.
 
 ## What this is
 
