@@ -42,9 +42,10 @@ def run(
         "Must print a float on stdout's last line.",
     ),
     mutator: str = typer.Option(
-        "claude-code:sonnet",
+        "harness:claude-code:sonnet",
         "--mutator",
-        help="Mutator backend. Examples: claude-code:sonnet, codex:gpt-5.4-mini, "
+        help="Mutator backend. Default uses HarnessMutator (harness library). "
+        "Examples: harness:claude-code:sonnet, harness:gemini:gemini-2.5-pro, "
         "anthropic:claude-sonnet-4-6, ./my-mutate.sh",
     ),
     budget: int = typer.Option(

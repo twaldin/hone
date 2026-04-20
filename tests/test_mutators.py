@@ -13,15 +13,29 @@ from hone.mutators.custom_script import CustomScriptMutator
 
 
 def test_resolve_claude_code_with_model() -> None:
-    m = resolve("claude-code:sonnet")
+    with pytest.warns(DeprecationWarning, match="HarnessMutator"):
+        m = resolve("claude-code:sonnet")
     assert isinstance(m, ClaudeCodeMutator)
     assert m.model == "sonnet"
 
 
 def test_resolve_claude_code_default_model() -> None:
-    m = resolve("claude-code")
+    with pytest.warns(DeprecationWarning, match="HarnessMutator"):
+        m = resolve("claude-code")
     assert isinstance(m, ClaudeCodeMutator)
     assert m.model is None
+
+
+def test_cli_default_mutator_is_harness() -> None:
+    m = resolve("harness:claude-code:sonnet")
+    assert isinstance(m, HarnessMutator)
+    assert m.harness_name == "claude-code"
+    assert m.model == "sonnet"
+
+
+def test_claude_code_mutator_warns_on_direct_instantiation() -> None:
+    with pytest.warns(DeprecationWarning, match="HarnessMutator"):
+        ClaudeCodeMutator(model="sonnet")
 
 
 def test_resolve_custom_script_relative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

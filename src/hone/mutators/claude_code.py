@@ -1,14 +1,26 @@
-"""Claude Code CLI mutator — shells out to `claude -p` using the user's subscription."""
+"""Claude Code CLI mutator — shells out to `claude -p` using the user's subscription.
+
+.. deprecated::
+    Use ``HarnessMutator(harness_name="claude-code")`` (``--mutator harness:claude-code:sonnet``)
+    instead. This class duplicates subprocess plumbing that the harness library handles
+    more robustly and will be removed in a future release.
+"""
 from __future__ import annotations
 
 import json
 import subprocess
+import warnings
 
 from hone.mutators.base import Mutator, MutatorError, MutatorResult
 
 
 class ClaudeCodeMutator(Mutator):
     """Invoke Claude Code as a subprocess.
+
+    .. deprecated::
+        Use :class:`~hone.mutators.harness_mutator.HarnessMutator` with
+        ``harness_name="claude-code"`` (CLI: ``--mutator harness:claude-code:sonnet``).
+        This class will be removed in a future release.
 
     Assumes the user has `claude` on PATH and is logged in (via Claude Pro
     subscription or ANTHROPIC_API_KEY). We use `--output-format json` to get
@@ -19,6 +31,15 @@ class ClaudeCodeMutator(Mutator):
 
     DEFAULT_MODEL = "sonnet"
     TIMEOUT_SECONDS = 300
+
+    def __init__(self, model: str | None = None) -> None:
+        warnings.warn(
+            "ClaudeCodeMutator is deprecated and will be removed in a future release. "
+            "Use HarnessMutator instead: --mutator harness:claude-code:sonnet",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(model=model)
 
     def propose(self, mutator_prompt: str) -> MutatorResult:
         model = self.model or self.DEFAULT_MODEL

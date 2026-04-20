@@ -1,15 +1,14 @@
 # hone
 
-> Optimize any prompt file against any grader. Uses your coding CLI subscriptions as the mutation engine.
+> hone = [harness](https://github.com/twaldin/harness) + [GEPA](https://github.com/gepa-ai/gepa). Optimize any prompt against any grader, using your AI coding-agent subscriptions as the mutation engine.
 
 ```bash
 hone run prompt.md \
   --grader ./grader.sh \
-  --mutator claude-code:sonnet \
   --budget 20
 ```
 
-`hone` wraps [GEPA](https://github.com/gepa-ai/gepa)'s Pareto-frontier prompt optimization with a CLI-first interface that uses Claude Code, Codex, OpenCode, or Gemini subscriptions to propose mutations — no API keys required.
+`hone` wraps GEPA's Pareto-frontier prompt optimization with a CLI-first interface. The default mutator is `HarnessMutator` (`harness:claude-code:sonnet`), which routes mutations through the [harness](https://github.com/twaldin/harness) library — a unified adapter for Claude Code, Gemini, OpenCode, and more. No API keys required.
 
 ## Proof of concept — Claude Haiku 4.5 on real GitHub bugs
 
@@ -57,7 +56,8 @@ echo "$score"
 3. Run `hone`:
 
 ```bash
-hone run prompt.md --grader ./grader.sh --mutator claude-code:sonnet --budget 20
+hone run prompt.md --grader ./grader.sh --budget 20
+# default mutator: harness:claude-code:sonnet (HarnessMutator)
 ```
 
 `hone` iterates: proposes new variants of your prompt, runs the grader on each, keeps the winners on a Pareto frontier. Final output: the best-scoring variant.
@@ -68,12 +68,12 @@ hone run prompt.md --grader ./grader.sh --mutator claude-code:sonnet --budget 20
 
 | Mutator | Requires | Example |
 |---------|----------|---------|
-| `claude-code` | Claude Code CLI + Claude Pro subscription | `claude-code:sonnet` |
+| `harness:<adapter>` (**default**) | [`harness`](https://github.com/twaldin/harness) installed | `harness:claude-code:sonnet` |
 | `anthropic` | `ANTHROPIC_API_KEY` | `anthropic:claude-sonnet-4-6` |
-| `harness:<adapter>` | [`harness`](https://github.com/twaldin/harness) installed | `harness:gemini:gemini-2.5-pro` |
 | `./my-script.sh` | Custom script | `./my-mutator.sh` |
+| `claude-code` *(deprecated)* | Claude Code CLI + Claude Pro subscription | `claude-code:sonnet` |
 
-The `harness:` prefix dispatches through [twaldin/harness](https://github.com/twaldin/harness), the unified Python interface for AI coding-agent CLIs. Any harness adapter that produces text output (`claude-code`, `gemini`) is usable as a mutator. Coding-loop adapters (`codex`, `aider`, `swe-agent`) raise a clear error.
+The default mutator is `HarnessMutator` (`harness:claude-code:sonnet`). It dispatches through [twaldin/harness](https://github.com/twaldin/harness), the unified Python interface for AI coding-agent CLIs. Any harness adapter that produces text output (`claude-code`, `gemini`) is usable as a mutator. Coding-loop adapters (`codex`, `aider`, `swe-agent`) raise a clear error.
 
 Adding a new LLM backend used to mean writing a hone mutator class. Now it's "ship a new adapter in harness."
 
