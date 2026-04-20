@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from hone import __version__
+from hone.kinds import detect_component_kind
 from hone.mutators import resolve as resolve_mutator
 from hone.optimizer import optimize
 
@@ -32,7 +33,7 @@ def run(
         ...,
         exists=True,
         readable=True,
-        help="Path to the prompt file to optimize.",
+        help="Path to the component file to optimize.",
     ),
     grader: Path = typer.Option(
         ...,
@@ -81,9 +82,11 @@ def run(
         help="Show GEPA's progress bar.",
     ),
 ) -> None:
-    """Optimize `prompt_path` against `grader`, writing the best variant to `--output`."""
+    """Optimize the component at `prompt_path` against `grader`, writing the best variant to `--output`."""
     # Load seed prompt
     seed_prompt = prompt_path.read_text(encoding="utf-8")
+    kind = detect_component_kind(prompt_path)
+    console.print(f"[hone] component kind: {kind}")
 
     # Resolve mutator
     try:
@@ -98,11 +101,11 @@ def run(
 
     console.print(
         Panel.fit(
-            f"[bold]prompt[/bold]   {prompt_path}\n"
-            f"[bold]grader[/bold]   {grader}\n"
-            f"[bold]mutator[/bold]  {mutator_instance}\n"
-            f"[bold]budget[/bold]   {budget} iterations\n"
-            f"[bold]output[/bold]   {output}",
+            f"[bold]component[/bold] {prompt_path} ({kind})\n"
+            f"[bold]grader[/bold]    {grader}\n"
+            f"[bold]mutator[/bold]   {mutator_instance}\n"
+            f"[bold]budget[/bold]    {budget} iterations\n"
+            f"[bold]output[/bold]    {output}",
             title="hone",
         )
     )
@@ -116,6 +119,7 @@ def run(
         prompt_path=prompt_path,
         budget=budget,
         component_name=component,
+        component_kind=kind,
         grader_timeout_seconds=grader_timeout,
         seed=seed,
         display_progress_bar=progress,

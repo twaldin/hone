@@ -35,6 +35,7 @@ def optimize(
     prompt_path: str | Path,
     budget: int = 20,
     component_name: str = "instruction",
+    component_kind: str = "prompt",
     grader_timeout_seconds: int = 3600,
     run_dir: str | Path | None = None,
     seed: int = 0,
@@ -80,7 +81,7 @@ def optimize(
         component_name=component_name,
         grader_timeout_seconds=grader_timeout_seconds,
     )
-    proposer = HoneProposer(mutator=mutator)
+    proposer = HoneProposer(mutator=mutator, kind=component_kind)
 
     seed_candidate = {component_name: seed_prompt}
     trainset: list[GraderSpec] = [GraderSpec(name="full-run")]
