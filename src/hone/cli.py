@@ -9,7 +9,9 @@ from rich.console import Console
 from rich.panel import Panel
 
 from hone import __version__
+from hone.bootstrap import load_run_data, build_reflector_input, parse_config_output, apply_warmed_config, write_config_dir, run_bootstrap
 from hone.mutators import resolve as resolve_mutator
+from hone.policy import SEED_POLICY
 from hone.repo_frontier import optimize_repo_frontier
 from hone.storage import new_run_dir
 
@@ -57,6 +59,12 @@ def run(
         "Improve the repository so the grader score increases.", "--objective",
         help="One-line objective passed to the mutator each iteration.",
     ),
+    policy_dir: Path | None = typer.Option(
+        None, "--policy",
+        exists=True, file_okay=False, dir_okay=True,
+        help="Config dir with playbook.md, prompt-template.md, knobs.json. "
+             "If omitted, uses built-in seed policy.",
+    ),
 ) -> None:
     """Optimize a directory against a grader via git-branch frontier search."""
     try:
@@ -64,6 +72,11 @@ def run(
     except Exception as e:
         console.print(f"[red]Failed to resolve mutator {mutator!r}: {e}[/red]")
         raise typer.Exit(code=2) from e
+
+    from hone.bootstrap import read_config_dir
+    policy = SEED_POLICY
+    if policy_dir is not None:
+        policy = read_config_dir(policy_dir)
 
     run_dir = new_run_dir()
     console.print(Panel.fit(
@@ -86,6 +99,7 @@ def run(
         run_dir=run_dir,
         frontier_size=frontier_size,
         objective=objective,
+        policy=policy,
     )
 
     output_note = ""
@@ -116,6 +130,59 @@ def run(
         f"{output_note}",
         title="done",
     ))
+
+
+@app.command()
+def reflect(
+    runs: list[Path] = typer.Option(
+        ..., "--runs",
+        exists=True, file_okay=False, dir_okay=True,
+        help="Hone run directories to analyze (each should contain mutations.jsonl).",
+    ),
+    model: str = typer.Option(
+        "harness:claude-code:sonnet", "--model",
+        help="LLM spec for the Reflector call.",
+    ),
+    output: Path = typer.Option(
+        ..., "--output", "-o",
+        help="Write warmed config to this directory.",
+    ),
+    detail_window: int = typer.Option(
+        20, "--detail-window", min=5,
+        help="Number of recent mutations to include per run.",
+    ),
+) -> None:
+    """Reflect on past run data to produce a warmed-start mutator config."""
+    try:
+        mutator_instance = resolve_mutator(model)
+    except Exception as e:
+        console.print(f"[red]Failed to resolve model {model!r}: {e}[/red]")
+        raise typer.Exit(code=2) from e
+
+    run_data = load_run_data(runs)
+    total_mutations = sum(r.total_mutations for r in run_data)
+    console.print(Panel.fit(
+        f"[bold]runs[/bold]            {len(run_data)}\n"
+        f"[bold]total mutations[/bold] {total_mutations}\n"
+        f"[bold]improvements[/bold]    {sum(r.improvements for r in run_data)}\n"
+        f"[bold]regressions[/bold]     {sum(r.regressions for r in run_data)}\n"
+        f"[bold]reflector model[/bold] {mutator_instance}\n"
+        f"[bold]output[/bold]          {output.resolve()}",
+        title=f"hone reflect ({__version__})",
+    ))
+
+    warmed = run_bootstrap(
+        run_dirs=runs,
+        model_spec=model,
+        output_dir=output,
+        detail_window=detail_window,
+    )
+
+    console.print()
+    console.print(f"[green]Warmed config written to {output.resolve()}[/green]")
+    console.print(f"  playbook.md:       {len(warmed.playbook_text)} chars")
+    console.print(f"  prompt-template.md: {len(warmed.prompt_template)} chars")
+    console.print(f"  knobs.json:        {warmed.knobs}")
 
 
 def main() -> None:

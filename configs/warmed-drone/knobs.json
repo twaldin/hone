@@ -1,0 +1,9 @@
+{
+  "include_structured_traces": true,
+  "include_recent_attempts": true,
+  "include_parent_diff_stat": true,
+  "include_base_diff_stat": true,
+  "recent_attempts_window": 2,
+  "max_trace_chars": 4000,
+  "max_trace_summary_chars": 1200
+}
