@@ -1,0 +1,454 @@
+"""v1 git-native frontier search over repository states.
+
+hone copies the user's source directory into a managed workspace
+(`<run_dir>/workdir/`) and initializes it as a private git repo. All
+iterations create branches in that workspace. The user's source
+directory is never touched.
+
+Per iteration:
+  1. checkout --detach parent_sha; create hone/<run_id>/iter-N branch
+  2. inject playbook file, run mutator in-place in workdir
+  3. restore playbook (so it isn't committed)
+  4. commit whatever the mutator left (squashes any agent-side commits)
+  5. grade the working tree
+  6. record child sha + diffs vs parent and seed
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from hone.grader import run_grader
+from hone.mutators.base import MutatorError
+from hone.policy import (
+    MutatorPolicy,
+    PromptContext,
+    SEED_POLICY,
+    adapter_playbook_filename,
+    build_iteration_prompt,
+)
+from hone.storage import RunManifest, RunStorage, utcnow
+
+
+@dataclass
+class RepoCandidate:
+    idx: int
+    sha: str
+    branch: str
+    score: float
+    trace_stderr: str
+    raw_stdout: str
+    parent_idx: int | None
+    parent_sha: str | None
+    parent_diff_stat: str
+    parent_diff_patch: str
+    base_diff_stat: str
+    base_diff_patch: str
+    changed_files_from_parent: list[str]
+
+
+@dataclass
+class AttemptRecord:
+    iteration: int
+    parent_idx: int
+    child_idx: int | None
+    parent_score: float
+    child_score: float | None
+    changed_files: list[str]
+    trace_summary: str
+    accepted: bool
+    error: str | None = None
+
+
+@dataclass
+class RepoFrontierResult:
+    best_score: float
+    best_sha: str
+    total_iterations: int
+    mutator_calls: int
+    mutator_failures: int
+    mutator_tokens_in: int
+    mutator_tokens_out: int
+    mutator_cost_usd: float
+    run_dir: Path
+
+
+_WORKSPACE_IGNORE = (
+    ".git", ".hone", "__pycache__", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", ".venv", "venv", "node_modules",
+    "*.pyc", "*.pyo",
+)
+
+
+def optimize_repo_frontier(
+    *,
+    src_dir: Path,
+    grader_path: Path,
+    mutator,
+    mutator_spec: str,
+    budget: int,
+    grader_timeout_seconds: int,
+    run_dir: Path,
+    frontier_size: int = 4,
+    objective: str = "Improve the repository so the grader score increases.",
+    policy: MutatorPolicy = SEED_POLICY,
+) -> RepoFrontierResult:
+    src_dir = Path(src_dir).resolve()
+    grader_path = Path(grader_path).resolve()
+    storage = RunStorage(run_dir)
+    prompts_dir = storage.root / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+
+    playbook_name = adapter_playbook_filename(mutator_spec)
+    (storage.root / "seed-playbook.md").write_text(policy.rendered_playbook(), encoding="utf-8")
+    (storage.root / "seed-prompt-template.md").write_text(policy.prompt_template, encoding="utf-8")
+
+    workdir = storage.root / "workdir"
+    _init_managed_workspace(src=src_dir, dest=workdir)
+    seed_sha = _git(["rev-parse", "HEAD"], cwd=workdir).strip()
+    run_id = storage.root.name
+    branch_prefix = f"hone/{run_id}"
+
+    _emit(f"managed workspace: {workdir}")
+    _emit(f"source: {src_dir}")
+
+    manifest = RunManifest(
+        run_id=run_id,
+        created_at=utcnow(),
+        src_dir=str(src_dir),
+        grader_path=str(grader_path),
+        mutator_spec=mutator_spec,
+        budget=budget,
+    )
+    storage.save_manifest(manifest)
+
+    seed_grade = run_grader(grader_path, workdir, timeout_seconds=grader_timeout_seconds)
+    seed_candidate = RepoCandidate(
+        idx=0, sha=seed_sha, branch="main",
+        score=seed_grade.score,
+        trace_stderr=seed_grade.trace_stderr, raw_stdout=seed_grade.raw_stdout,
+        parent_idx=None, parent_sha=None,
+        parent_diff_stat="(seed)", parent_diff_patch="",
+        base_diff_stat="(seed)", base_diff_patch="",
+        changed_files_from_parent=[],
+    )
+
+    all_candidates = [seed_candidate]
+    frontier = [seed_candidate]
+    attempts: list[AttemptRecord] = []
+    best = seed_candidate
+
+    mutator_calls = 0
+    mutator_failures = 0
+    tokens_in = 0
+    tokens_out = 0
+    cost_usd = 0.0
+
+    _append_jsonl(storage.root / "mutations.jsonl", {
+        "iter": 0, "candidate_idx": 0, "sha": seed_sha,
+        "score": seed_candidate.score, "kind": "seed", "frontier": [0],
+    })
+    _emit(
+        f"[iter 0/{budget}] SEED sha={seed_sha[:8]} "
+        f"score={seed_candidate.score:.4f} best={seed_candidate.score:.4f}"
+    )
+
+    for iteration in range(1, budget + 1):
+        iter_started = time.time()
+        parent = frontier[(iteration - 1) % len(frontier)]
+
+        prompt_ctx = PromptContext(
+            repo_name=workdir.name,
+            objective=objective,
+            current_score=parent.score,
+            best_score=best.score,
+            seed_score=seed_candidate.score,
+            trace_summary=_summarize_trace(parent.trace_stderr, policy.knobs.max_trace_summary_chars),
+            structured_traces=parent.trace_stderr.strip() or "(none)",
+            recent_attempts=_format_recent_attempts(attempts, policy.knobs.recent_attempts_window),
+            parent_diff_stat=parent.parent_diff_stat,
+            base_diff_stat=parent.base_diff_stat,
+            constraints=_workspace_file_list(workdir),
+        )
+        prompt = build_iteration_prompt(policy, prompt_ctx)
+        (prompts_dir / f"iter-{iteration:03d}.txt").write_text(prompt, encoding="utf-8")
+
+        child_branch = f"{branch_prefix}/iter-{iteration:03d}"
+        _checkout_clean(workdir, parent.sha, new_branch=child_branch)
+
+        playbook_path = workdir / playbook_name
+        original_playbook = playbook_path.read_text(encoding="utf-8") if playbook_path.exists() else None
+        playbook_path.write_text(_compose_playbook(original_playbook, policy.rendered_playbook()), encoding="utf-8")
+
+        try:
+            if not hasattr(mutator, "propose_edit_mode"):
+                raise MutatorError(
+                    "dir mode requires a mutator with propose_edit_mode(workdir=...) support"
+                )
+            result = mutator.propose_edit_mode(prompt, workdir=workdir)
+            mutator_calls += 1
+            if result.tokens_in:
+                tokens_in += result.tokens_in
+            if result.tokens_out:
+                tokens_out += result.tokens_out
+            if result.cost_usd:
+                cost_usd += result.cost_usd
+        except Exception as exc:
+            mutator_failures += 1
+            _restore_playbook(playbook_path, original_playbook)
+            _reset_to(workdir, parent.sha)
+            _delete_branch(workdir, child_branch)
+            attempts.append(AttemptRecord(
+                iteration=iteration, parent_idx=parent.idx, child_idx=None,
+                parent_score=parent.score, child_score=None, changed_files=[],
+                trace_summary="", accepted=False, error=str(exc),
+            ))
+            _append_jsonl(storage.root / "mutations.jsonl", {
+                "iter": iteration, "parent_idx": parent.idx,
+                "error": str(exc), "frontier": [c.idx for c in frontier],
+            })
+            _emit(
+                f"[iter {iteration}/{budget}] ERROR parent=c{parent.idx:03d} "
+                f"({time.time()-iter_started:.0f}s): {exc}"
+            )
+            continue
+
+        _restore_playbook(playbook_path, original_playbook)
+
+        _git(["add", "-A"], cwd=workdir)
+        if _has_changes_vs_parent(workdir, parent.sha):
+            _git(["commit", "-m", f"hone iter {iteration}", "--no-verify"], cwd=workdir)
+        child_sha = _git(["rev-parse", "HEAD"], cwd=workdir).strip()
+
+        child_grade = run_grader(grader_path, workdir, timeout_seconds=grader_timeout_seconds)
+
+        parent_diff_stat = _git(["diff", "--stat", parent.sha, child_sha], cwd=workdir).strip() or "(no changes)"
+        parent_diff_patch = _git(["diff", parent.sha, child_sha], cwd=workdir)[:4000]
+        base_diff_stat = _git(["diff", "--stat", seed_sha, child_sha], cwd=workdir).strip() or "(no changes)"
+        base_diff_patch = _git(["diff", seed_sha, child_sha], cwd=workdir)[:4000]
+        changed_from_parent = [
+            ln for ln in _git(["diff", "--name-only", parent.sha, child_sha], cwd=workdir).splitlines()
+            if ln.strip()
+        ]
+
+        child_idx = len(all_candidates)
+        child = RepoCandidate(
+            idx=child_idx, sha=child_sha, branch=child_branch,
+            score=child_grade.score,
+            trace_stderr=child_grade.trace_stderr, raw_stdout=child_grade.raw_stdout,
+            parent_idx=parent.idx, parent_sha=parent.sha,
+            parent_diff_stat=parent_diff_stat, parent_diff_patch=parent_diff_patch,
+            base_diff_stat=base_diff_stat, base_diff_patch=base_diff_patch,
+            changed_files_from_parent=changed_from_parent,
+        )
+        all_candidates.append(child)
+        attempts.append(AttemptRecord(
+            iteration=iteration, parent_idx=parent.idx, child_idx=child.idx,
+            parent_score=parent.score, child_score=child.score,
+            changed_files=changed_from_parent,
+            trace_summary=_summarize_trace(child.trace_stderr, policy.knobs.max_trace_summary_chars),
+            accepted=True,
+        ))
+
+        if child.score > best.score:
+            best = child
+
+        frontier = _update_frontier(frontier, child, frontier_size)
+        _append_jsonl(storage.root / "mutations.jsonl", {
+            "iter": iteration, "parent_idx": parent.idx, "child_idx": child.idx,
+            "parent_sha": parent.sha, "child_sha": child_sha,
+            "parent_score": parent.score, "child_score": child.score,
+            "delta": child.score - parent.score,
+            "changed_files": changed_from_parent,
+            "trace_summary": _summarize_trace(child.trace_stderr, 400),
+            "frontier": [c.idx for c in frontier],
+        })
+        delta = child.score - parent.score
+        kept = "kept" if child in frontier else "dropped"
+        changed_str = ",".join(changed_from_parent[:3]) or "none"
+        if len(changed_from_parent) > 3:
+            changed_str += f"+{len(changed_from_parent)-3}"
+        _emit(
+            f"[iter {iteration}/{budget}] "
+            f"c{parent.idx:03d}({parent.score:.3f}) -> c{child.idx:03d}({child.score:.3f}) "
+            f"delta={delta:+.3f} best={best.score:.3f} {kept} "
+            f"changed={changed_str} ({time.time()-iter_started:.0f}s)"
+        )
+
+    _checkout_clean(workdir, best.sha, new_branch=None)
+    best_tag = f"{branch_prefix}/best"
+    try:
+        _git(["tag", "-f", best_tag, best.sha], cwd=workdir)
+    except subprocess.CalledProcessError:
+        pass
+
+    manifest.status = "done"
+    manifest.best_idx = best.idx
+    manifest.best_score = best.score
+    manifest.best_sha = best.sha
+    manifest.total_iterations = budget
+    storage.save_manifest(manifest)
+
+    return RepoFrontierResult(
+        best_score=best.score,
+        best_sha=best.sha,
+        total_iterations=budget,
+        mutator_calls=mutator_calls,
+        mutator_failures=mutator_failures,
+        mutator_tokens_in=tokens_in,
+        mutator_tokens_out=tokens_out,
+        mutator_cost_usd=cost_usd,
+        run_dir=storage.root,
+    )
+
+
+# ---------------------------------------------------------------------------
+# managed workspace
+# ---------------------------------------------------------------------------
+
+def _init_managed_workspace(*, src: Path, dest: Path) -> None:
+    if dest.exists():
+        raise RuntimeError(f"managed workspace already exists: {dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(*_WORKSPACE_IGNORE))
+    _git(["init", "-q", "-b", "main"], cwd=dest)
+    gitignore = dest / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(
+            "__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\n.mypy_cache/\n.ruff_cache/\n",
+            encoding="utf-8",
+        )
+    _git(["add", "-A"], cwd=dest)
+    _git(["commit", "-q", "-m", "hone: seed", "--no-verify"], cwd=dest)
+
+
+def _workspace_file_list(workdir: Path) -> str:
+    try:
+        files = [
+            f for f in _git(["ls-tree", "-r", "--name-only", "HEAD"], cwd=workdir).splitlines()
+            if f.strip() and not f.startswith(".")
+        ]
+    except subprocess.CalledProcessError:
+        return "(unable to list files)"
+    preview = files[:30]
+    more = "" if len(files) <= 30 else f" ... (+{len(files)-30} more)"
+    return f"workspace={workdir.name}; tracked files: {', '.join(preview)}{more}"
+
+
+# ---------------------------------------------------------------------------
+# git helpers
+# ---------------------------------------------------------------------------
+
+def _git(args: list[str], *, cwd: Path) -> str:
+    res = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True
+    )
+    return res.stdout
+
+
+def _checkout_clean(target: Path, sha: str, *, new_branch: str | None) -> None:
+    _git(["reset", "--hard", "HEAD"], cwd=target)
+    _git(["clean", "-fd"], cwd=target)
+    _git(["checkout", "--detach", sha], cwd=target)
+    if new_branch is not None:
+        _git(["checkout", "-b", new_branch], cwd=target)
+
+
+def _reset_to(target: Path, sha: str) -> None:
+    _git(["reset", "--hard", sha], cwd=target)
+    _git(["clean", "-fd"], cwd=target)
+
+
+def _delete_branch(target: Path, branch: str) -> None:
+    current = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=target).strip()
+    if current == branch:
+        _git(["checkout", "--detach", "HEAD"], cwd=target)
+    try:
+        _git(["branch", "-D", branch], cwd=target)
+    except subprocess.CalledProcessError:
+        pass
+
+
+def _has_changes_vs_parent(target: Path, parent_sha: str) -> bool:
+    head = _git(["rev-parse", "HEAD"], cwd=target).strip()
+    if head != parent_sha:
+        return True
+    status = _git(["status", "--porcelain"], cwd=target).strip()
+    return bool(status)
+
+
+# ---------------------------------------------------------------------------
+# formatting + frontier helpers
+# ---------------------------------------------------------------------------
+
+def _format_recent_attempts(attempts: list[AttemptRecord], window: int) -> str:
+    if not attempts:
+        return "(none)"
+    lines: list[str] = []
+    for attempt in attempts[-window:]:
+        if attempt.child_idx is None:
+            lines.append(
+                f"iter {attempt.iteration}: parent c{attempt.parent_idx:03d} "
+                f"mutator_error={attempt.error}"
+            )
+            continue
+        delta = (attempt.child_score or 0.0) - attempt.parent_score
+        changed = ", ".join(attempt.changed_files[:5]) or "(no file changes detected)"
+        lines.append(
+            f"c{attempt.parent_idx:03d} -> c{attempt.child_idx:03d}: "
+            f"delta={delta:+.4f}; changed={changed}; "
+            f"trace={attempt.trace_summary or '(none)'}"
+        )
+    return "\n".join(lines)
+
+
+def _update_frontier(
+    frontier: list[RepoCandidate], child: RepoCandidate, frontier_size: int
+) -> list[RepoCandidate]:
+    merged = frontier + [child]
+    unique: dict[str, RepoCandidate] = {}
+    for candidate in sorted(merged, key=lambda c: (c.score, -c.idx), reverse=True):
+        unique.setdefault(candidate.sha, candidate)
+    kept = sorted(unique.values(), key=lambda c: (c.score, -c.idx), reverse=True)
+    return kept[:frontier_size]
+
+
+def _summarize_trace(trace: str, limit: int) -> str:
+    stripped = trace.strip()
+    if not stripped:
+        return "(none)"
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    summary = " | ".join(lines[:5])
+    if len(summary) <= limit:
+        return summary
+    return summary[: max(0, limit - 13)] + "...[truncated]"
+
+
+def _restore_playbook(path: Path, original: str | None) -> None:
+    if original is None:
+        path.unlink(missing_ok=True)
+        return
+    path.write_text(original, encoding="utf-8")
+
+
+def _compose_playbook(original: str | None, seed_playbook: str) -> str:
+    if not original or not original.strip():
+        return seed_playbook
+    return original.rstrip() + "\n\n<!-- hone:v1 seed playbook -->\n\n" + seed_playbook
+
+
+def _append_jsonl(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def _emit(msg: str) -> None:
+    ts = time.strftime("%H:%M:%S")
+    sys.stdout.write(f"{ts} {msg}\n")
+    sys.stdout.flush()

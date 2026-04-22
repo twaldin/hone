@@ -23,7 +23,7 @@ class HarnessMutator(Mutator):
 
     name = "harness"
 
-    DEFAULT_TIMEOUT_SECONDS = 300
+    DEFAULT_TIMEOUT_SECONDS = 1800
 
     def __init__(
         self,

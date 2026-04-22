@@ -1,3 +1,3 @@
-"""hone — CLI prompt optimizer built on GEPA."""
+"""hone — repository-state optimizer. v1: one core loop, git-backed state."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0-dev"

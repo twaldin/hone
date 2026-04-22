@@ -1,12 +1,12 @@
 [project]
 name = "hone"
-version = "0.3.0"
-description = "CLI prompt optimizer that uses your coding CLI subscriptions as the mutation engine"
+version = "1.0.0-dev"
+description = "Repository-state optimizer. Frontier search over git branches, coding-agent CLIs as mutators."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "Tim Waldin", email = "timnwaldin@gmail.com" }]
-keywords = ["prompt", "optimization", "llm", "gepa", "claude", "codex"]
+keywords = ["repository", "optimization", "llm", "coding-agent", "claude", "codex"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
@@ -16,10 +16,6 @@ classifiers = [
 dependencies = [
     "typer>=0.15",
     "rich>=13.9",
-    "gepa>=0.0.7",
-    "anthropic>=0.40",
-    "openai>=1.55",
-    "pydantic>=2.9",
 ]
 
 [project.optional-dependencies]

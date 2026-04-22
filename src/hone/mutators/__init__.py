@@ -1,66 +1,38 @@
-"""Mutator adapters — backends that propose new prompt variants."""
+"""Mutator resolver — v1 supports only harness-backed mutators."""
 from __future__ import annotations
 
-from hone.mutators.anthropic_api import AnthropicApiMutator
 from hone.mutators.base import Mutator, MutatorError, MutatorResult
-from hone.mutators.claude_code import ClaudeCodeMutator
-from hone.mutators.custom_script import CustomScriptMutator
 from hone.mutators.harness_mutator import HarnessMutator
-
-# Registry: slug -> factory(model: str | None) -> Mutator
-_REGISTRY: dict[str, type[Mutator]] = {
-    "claude-code": ClaudeCodeMutator,
-    "anthropic": AnthropicApiMutator,
-}
 
 
 def resolve(spec: str) -> Mutator:
     """Parse a --mutator spec into a Mutator instance.
 
+    Only `harness:<adapter>[:<model>]` is supported in v1.
+
     Examples:
-        "claude-code:sonnet"               -> ClaudeCodeMutator(model="sonnet")
-        "claude-code"                      -> ClaudeCodeMutator(model=None)
-        "./mutate.sh"                      -> CustomScriptMutator("./mutate.sh")
-        "/abs/path/to/mutate.sh"           -> CustomScriptMutator("/abs/...")
-        "harness:claude-code:sonnet"       -> HarnessMutator("claude-code", "sonnet")
-        "harness:gemini:gemini-2.5-pro"    -> HarnessMutator("gemini", "gemini-2.5-pro")
+        "harness:claude-code:sonnet"
+        "harness:opencode:openai/gpt-5.3-codex-spark"
+        "harness:codex:gpt-5.3-codex"
     """
-    # Custom script: anything starting with ./ / / or ending in .sh / .py
-    if spec.startswith(("./", "/")) or spec.endswith((".sh", ".py")):
-        return CustomScriptMutator(spec)
-
-    # Namespaced harness backend — dispatches via the `harness` library.
-    if spec.startswith("harness:"):
-        rest = spec[len("harness:"):]
-        if not rest:
-            raise ValueError(
-                "harness mutator spec must include a harness name, e.g. 'harness:claude-code:sonnet'"
-            )
-        if ":" in rest:
-            harness_name, model = rest.split(":", 1)
-        else:
-            harness_name, model = rest, None
-        return HarnessMutator(harness_name=harness_name, model=model)
-
-    if ":" in spec:
-        backend, model = spec.split(":", 1)
-    else:
-        backend, model = spec, None
-
-    if backend not in _REGISTRY:
-        available = ", ".join(sorted(_REGISTRY)) or "(none)"
+    if not spec.startswith("harness:"):
         raise ValueError(
-            f"Unknown mutator backend: {backend!r}. "
-            f"Available: {available}. Or pass 'harness:<name>:<model>' or a script path."
+            f"v1 only supports harness-backed mutators. Got {spec!r}. "
+            f"Use e.g. 'harness:claude-code:sonnet' or 'harness:opencode:openai/gpt-5.4'."
         )
-
-    return _REGISTRY[backend](model=model)
+    rest = spec[len("harness:"):]
+    if not rest:
+        raise ValueError(
+            "harness mutator spec must include an adapter name, e.g. 'harness:claude-code:sonnet'"
+        )
+    if ":" in rest:
+        harness_name, model = rest.split(":", 1)
+    else:
+        harness_name, model = rest, None
+    return HarnessMutator(harness_name=harness_name, model=model)
 
 
 __all__ = [
-    "AnthropicApiMutator",
-    "ClaudeCodeMutator",
-    "CustomScriptMutator",
     "HarnessMutator",
     "Mutator",
     "MutatorError",
