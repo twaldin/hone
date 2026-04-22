@@ -65,6 +65,16 @@ def run(
         help="Config dir with playbook.md, prompt-template.md, knobs.json. "
              "If omitted, uses built-in seed policy.",
     ),
+    ace_interval: int = typer.Option(
+        0, "--ace-interval", min=0,
+        help="ACE outer loop: reflect and evolve config every N iterations. "
+             "0 = disabled.",
+    ),
+    ace_model: str = typer.Option(
+        "", "--ace-model",
+        help="ACE reflector model spec. Defaults to same as --mutator. "
+             "Must support text-only propose() (e.g. gemini, claude-code).",
+    ),
 ) -> None:
     """Optimize a directory against a grader via git-branch frontier search."""
     try:
@@ -73,19 +83,31 @@ def run(
         console.print(f"[red]Failed to resolve mutator {mutator!r}: {e}[/red]")
         raise typer.Exit(code=2) from e
 
+    ace_mutator_instance = None
+    if ace_interval > 0 and ace_model:
+        try:
+            ace_mutator_instance = resolve_mutator(ace_model)
+        except Exception as e:
+            console.print(f"[red]Failed to resolve ACE model {ace_model!r}: {e}[/red]")
+            raise typer.Exit(code=2) from e
+
     from hone.bootstrap import read_config_dir
     policy = SEED_POLICY
     if policy_dir is not None:
         policy = read_config_dir(policy_dir)
 
     run_dir = new_run_dir()
+    ace_info = f"\n[bold]ACE interval[/bold]  {ace_interval}" + (
+        f"\n[bold]ACE model[/bold]      {ace_mutator_instance}" if ace_mutator_instance else ""
+    ) if ace_interval > 0 else ""
     console.print(Panel.fit(
         f"[bold]source[/bold]         {dir.resolve()}\n"
         f"[bold]grader[/bold]         {grader.resolve()}\n"
         f"[bold]mutator[/bold]        {mutator_instance}\n"
         f"[bold]budget[/bold]         {budget}\n"
         f"[bold]frontier size[/bold]  {frontier_size}\n"
-        f"[bold]run dir[/bold]        {run_dir}",
+        f"[bold]run dir[/bold]        {run_dir}"
+        f"{ace_info}",
         title=f"hone v1 ({__version__})",
     ))
 
@@ -100,6 +122,8 @@ def run(
         frontier_size=frontier_size,
         objective=objective,
         policy=policy,
+        ace_interval=ace_interval,
+        ace_mutator=ace_mutator_instance,
     )
 
     output_note = ""

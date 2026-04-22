@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from hone.ace import ace_reflect, should_reflect
 from hone.grader import run_grader
 from hone.mutators.base import MutatorError
 from hone.policy import (
@@ -97,6 +98,8 @@ def optimize_repo_frontier(
     frontier_size: int = 4,
     objective: str = "Improve the repository so the grader score increases.",
     policy: MutatorPolicy = SEED_POLICY,
+    ace_interval: int = 0,
+    ace_mutator=None,
 ) -> RepoFrontierResult:
     src_dir = Path(src_dir).resolve()
     grader_path = Path(grader_path).resolve()
@@ -142,6 +145,7 @@ def optimize_repo_frontier(
     frontier = [seed_candidate]
     attempts: list[AttemptRecord] = []
     best = seed_candidate
+    active_policy = policy
 
     mutator_calls = 0
     mutator_failures = 0
@@ -168,14 +172,14 @@ def optimize_repo_frontier(
             current_score=parent.score,
             best_score=best.score,
             seed_score=seed_candidate.score,
-            trace_summary=_summarize_trace(parent.trace_stderr, policy.knobs.max_trace_summary_chars),
+            trace_summary=_summarize_trace(parent.trace_stderr, active_policy.knobs.max_trace_summary_chars),
             structured_traces=parent.trace_stderr.strip() or "(none)",
-            recent_attempts=_format_recent_attempts(attempts, policy.knobs.recent_attempts_window),
+            recent_attempts=_format_recent_attempts(attempts, active_policy.knobs.recent_attempts_window),
             parent_diff_stat=parent.parent_diff_stat,
             base_diff_stat=parent.base_diff_stat,
             constraints=_workspace_file_list(workdir),
         )
-        prompt = build_iteration_prompt(policy, prompt_ctx)
+        prompt = build_iteration_prompt(active_policy, prompt_ctx)
         (prompts_dir / f"iter-{iteration:03d}.txt").write_text(prompt, encoding="utf-8")
 
         child_branch = f"{branch_prefix}/iter-{iteration:03d}"
@@ -183,7 +187,7 @@ def optimize_repo_frontier(
 
         playbook_path = workdir / playbook_name
         original_playbook = playbook_path.read_text(encoding="utf-8") if playbook_path.exists() else None
-        playbook_path.write_text(_compose_playbook(original_playbook, policy.rendered_playbook()), encoding="utf-8")
+        playbook_path.write_text(_compose_playbook(original_playbook, active_policy.rendered_playbook()), encoding="utf-8")
 
         try:
             if not hasattr(mutator, "propose_edit_mode"):
@@ -279,6 +283,19 @@ def optimize_repo_frontier(
             f"delta={delta:+.3f} best={best.score:.3f} {kept} "
             f"changed={changed_str} ({time.time()-iter_started:.0f}s)"
         )
+
+        # ACE: reflect and update config
+        if should_reflect(iteration, ace_interval):
+            reflector = ace_mutator if ace_mutator is not None else mutator
+            new_policy = ace_reflect(
+                mutator=reflector,
+                run_dir=storage.root,
+                current_policy=active_policy,
+                iteration=iteration,
+                budget=budget,
+            )
+            if new_policy is not None:
+                active_policy = new_policy
 
     _checkout_clean(workdir, best.sha, new_branch=None)
     best_tag = f"{branch_prefix}/best"
