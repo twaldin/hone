@@ -75,6 +75,14 @@ def run(
         help="ACE reflector model spec. Defaults to same as --mutator. "
              "Must support text-only propose() (e.g. gemini, claude-code).",
     ),
+    resume: Path | None = typer.Option(
+        None, "--resume",
+        exists=True, file_okay=False, dir_okay=True,
+        help="Resume an interrupted run. Pass the existing run dir "
+             "(.hone/run-<id>/). Reuses its workdir, mutations.jsonl, "
+             "and git state. --dir/--grader/--mutator/--budget should match "
+             "the original run; budget is the TOTAL iters (not additional).",
+    ),
 ) -> None:
     """Optimize a directory against a grader via git-branch frontier search."""
     try:
@@ -96,10 +104,16 @@ def run(
     if policy_dir is not None:
         policy = read_config_dir(policy_dir)
 
-    run_dir = new_run_dir()
+    if resume is not None:
+        run_dir = resume.resolve()
+        resume_mode = True
+    else:
+        run_dir = new_run_dir()
+        resume_mode = False
     ace_info = f"\n[bold]ACE interval[/bold]  {ace_interval}" + (
         f"\n[bold]ACE model[/bold]      {ace_mutator_instance}" if ace_mutator_instance else ""
     ) if ace_interval > 0 else ""
+    resume_badge = "\n[bold yellow]resume[/bold yellow]         ON" if resume_mode else ""
     console.print(Panel.fit(
         f"[bold]source[/bold]         {dir.resolve()}\n"
         f"[bold]grader[/bold]         {grader.resolve()}\n"
@@ -107,7 +121,8 @@ def run(
         f"[bold]budget[/bold]         {budget}\n"
         f"[bold]frontier size[/bold]  {frontier_size}\n"
         f"[bold]run dir[/bold]        {run_dir}"
-        f"{ace_info}",
+        f"{ace_info}"
+        f"{resume_badge}",
         title=f"hone v1 ({__version__})",
     ))
 
@@ -124,6 +139,7 @@ def run(
         policy=policy,
         ace_interval=ace_interval,
         ace_mutator=ace_mutator_instance,
+        resume=resume_mode,
     )
 
     output_note = ""

@@ -107,8 +107,12 @@ mutation-quality advice. Do not rewrite or reason around them.
 Scope:
 - Stay inside this workdir. Do NOT read, list, or cd into directories outside
   of it (no `.hone/`, no sibling runs, no parent project dirs).
-- Do NOT use git (no commit, checkout, reset, stash, diff-of-other-SHA). Hone
-  handles commits.
+- Read-only git is allowed: `git log`, `git show`, `git diff`, `git branch`.
+  Use these to inspect prior iterations (branches are named
+  `hone/<run_id>/iter-N`). `git show <branch>:path/to/file` reads any past
+  file version; `git diff <branch1> <branch2> -- path` compares.
+- Do NOT write via git: no commit, checkout that moves HEAD, reset, stash,
+  merge, rebase. Hone handles all commits.
 
 Grading compute:
 - Do NOT run the full grader, `grader.sh`, or `run_parallel.py`. That's the
@@ -121,6 +125,17 @@ Grading compute:
 Time:
 - Aim to finish in 2-5 minutes. Correctness of the edit matters more than
   speed, but do not re-grade across all courses.
+
+Principle over recipe:
+- Your changes must be general principles ("use git log to see history",
+  "enumerate invariants before editing", "check for WAL files when a
+  SQLite database fails to open") NOT task-specific recipes ("for
+  db-wal-recovery task, run X command", "for fix-git, do Y").
+- If your proposed AGENTS.md change mentions a specific task ID by name,
+  lists exact command invocations for one domain, or adds >15 lines of
+  procedural content, you are memorizing. Rewrite as principle.
+- Good mutation: +3 lines abstract guidance that would help across 20+
+  task types. Bad mutation: +20 lines of specific recipe for one task.
 """
 
 

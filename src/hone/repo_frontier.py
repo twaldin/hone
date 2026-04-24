@@ -100,6 +100,7 @@ def optimize_repo_frontier(
     policy: MutatorPolicy = SEED_POLICY,
     ace_interval: int = 0,
     ace_mutator=None,
+    resume: bool = False,
 ) -> RepoFrontierResult:
     src_dir = Path(src_dir).resolve()
     grader_path = Path(grader_path).resolve()
@@ -108,43 +109,65 @@ def optimize_repo_frontier(
     prompts_dir.mkdir(parents=True, exist_ok=True)
 
     playbook_name = adapter_playbook_filename(mutator_spec)
-    (storage.root / "seed-playbook.md").write_text(policy.rendered_playbook(), encoding="utf-8")
-    (storage.root / "seed-prompt-template.md").write_text(policy.prompt_template, encoding="utf-8")
-
     workdir = storage.root / "workdir"
-    _init_managed_workspace(src=src_dir, dest=workdir)
-    seed_sha = _git(["rev-parse", "HEAD"], cwd=workdir).strip()
     run_id = storage.root.name
     branch_prefix = f"hone/{run_id}"
 
-    _emit(f"managed workspace: {workdir}")
-    _emit(f"source: {src_dir}")
+    if resume:
+        # Resume mode: workdir, seed-playbook, manifest, mutations.jsonl all exist.
+        # Reconstruct in-memory state from mutations.jsonl + git.
+        if not (storage.root / "mutations.jsonl").exists():
+            raise FileNotFoundError(f"resume requires mutations.jsonl in {storage.root}")
+        if not workdir.exists():
+            raise FileNotFoundError(f"resume requires workdir in {storage.root}")
+        _emit(f"RESUMING from {storage.root}")
+        manifest = storage.load_manifest()
+        # Clean any dirty working tree before we start iterating again.
+        _git(["reset", "--hard", "HEAD"], cwd=workdir)
+        _git(["clean", "-fd"], cwd=workdir)
+        seed_candidate, all_candidates, frontier, best, attempts_resumed, start_iter = _load_resume_state(
+            storage=storage, workdir=workdir, branch_prefix=branch_prefix,
+        )
+        seed_sha = seed_candidate.sha
+        _emit(
+            f"resumed: {len(all_candidates)} candidates, best=c{best.idx:03d}({best.score:.3f}), "
+            f"frontier=[{','.join(str(c.idx) for c in frontier)}], resuming at iter {start_iter}/{budget}"
+        )
+    else:
+        (storage.root / "seed-playbook.md").write_text(policy.rendered_playbook(), encoding="utf-8")
+        (storage.root / "seed-prompt-template.md").write_text(policy.prompt_template, encoding="utf-8")
+        _init_managed_workspace(src=src_dir, dest=workdir)
+        seed_sha = _git(["rev-parse", "HEAD"], cwd=workdir).strip()
 
-    manifest = RunManifest(
-        run_id=run_id,
-        created_at=utcnow(),
-        src_dir=str(src_dir),
-        grader_path=str(grader_path),
-        mutator_spec=mutator_spec,
-        budget=budget,
-    )
-    storage.save_manifest(manifest)
+        _emit(f"managed workspace: {workdir}")
+        _emit(f"source: {src_dir}")
 
-    seed_grade = run_grader(grader_path, workdir, timeout_seconds=grader_timeout_seconds)
-    seed_candidate = RepoCandidate(
-        idx=0, sha=seed_sha, branch="main",
-        score=seed_grade.score,
-        trace_stderr=seed_grade.trace_stderr, raw_stdout=seed_grade.raw_stdout,
-        parent_idx=None, parent_sha=None,
-        parent_diff_stat="(seed)", parent_diff_patch="",
-        base_diff_stat="(seed)", base_diff_patch="",
-        changed_files_from_parent=[],
-    )
+        manifest = RunManifest(
+            run_id=run_id,
+            created_at=utcnow(),
+            src_dir=str(src_dir),
+            grader_path=str(grader_path),
+            mutator_spec=mutator_spec,
+            budget=budget,
+        )
+        storage.save_manifest(manifest)
 
-    all_candidates = [seed_candidate]
-    frontier = [seed_candidate]
-    attempts: list[AttemptRecord] = []
-    best = seed_candidate
+        seed_grade = run_grader(grader_path, workdir, timeout_seconds=grader_timeout_seconds)
+        seed_candidate = RepoCandidate(
+            idx=0, sha=seed_sha, branch="main",
+            score=seed_grade.score,
+            trace_stderr=seed_grade.trace_stderr, raw_stdout=seed_grade.raw_stdout,
+            parent_idx=None, parent_sha=None,
+            parent_diff_stat="(seed)", parent_diff_patch="",
+            base_diff_stat="(seed)", base_diff_patch="",
+            changed_files_from_parent=[],
+        )
+        all_candidates = [seed_candidate]
+        frontier = [seed_candidate]
+        best = seed_candidate
+        attempts_resumed = []
+        start_iter = 1
+    attempts: list[AttemptRecord] = list(attempts_resumed)
     active_policy = policy
 
     mutator_calls = 0
@@ -153,16 +176,17 @@ def optimize_repo_frontier(
     tokens_out = 0
     cost_usd = 0.0
 
-    _append_jsonl(storage.root / "mutations.jsonl", {
-        "iter": 0, "candidate_idx": 0, "sha": seed_sha,
-        "score": seed_candidate.score, "kind": "seed", "frontier": [0],
-    })
-    _emit(
-        f"[iter 0/{budget}] SEED sha={seed_sha[:8]} "
-        f"score={seed_candidate.score:.4f} best={seed_candidate.score:.4f}"
-    )
+    if not resume:
+        _append_jsonl(storage.root / "mutations.jsonl", {
+            "iter": 0, "candidate_idx": 0, "sha": seed_sha,
+            "score": seed_candidate.score, "kind": "seed", "frontier": [0],
+        })
+        _emit(
+            f"[iter 0/{budget}] SEED sha={seed_sha[:8]} "
+            f"score={seed_candidate.score:.4f} best={seed_candidate.score:.4f}"
+        )
 
-    for iteration in range(1, budget + 1):
+    for iteration in range(start_iter, budget + 1):
         iter_started = time.time()
         parent = frontier[(iteration - 1) % len(frontier)]
 
@@ -222,7 +246,7 @@ def optimize_repo_frontier(
             )
             continue
 
-        _restore_playbook(playbook_path, original_playbook)
+        _strip_seed_playbook_section(playbook_path)
 
         _git(["add", "-A"], cwd=workdir)
         if _has_changes_vs_parent(workdir, parent.sha):
@@ -446,6 +470,22 @@ def _summarize_trace(trace: str, limit: int) -> str:
     return summary[: max(0, limit - 13)] + "...[truncated]"
 
 
+def _strip_seed_playbook_section(path: Path) -> None:
+    """Strip the appended seed-playbook section so mutations survive git commit.
+
+    When the playbook filename equals the artifact being mutated (e.g. AGENTS.md
+    for opencode targets), _restore_playbook would clobber the mutation before
+    git add. Instead, strip just the marker+trailing section so the committed
+    file contains the mutator's edit without the playbook boilerplate.
+    """
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8")
+    marker = "\n\n<!-- hone:v1 seed playbook -->"
+    if marker in content:
+        path.write_text(content.split(marker)[0].rstrip(), encoding="utf-8")
+
+
 def _restore_playbook(path: Path, original: str | None) -> None:
     if original is None:
         path.unlink(missing_ok=True)
@@ -469,3 +509,110 @@ def _emit(msg: str) -> None:
     ts = time.strftime("%H:%M:%S")
     sys.stdout.write(f"{ts} {msg}\n")
     sys.stdout.flush()
+
+
+def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str):
+    """Reconstruct candidates + frontier + best + attempts + start_iter from mutations.jsonl + git.
+
+    Trace fields lost in resume (trace_stderr, raw_stdout) — we have only the short
+    trace_summary persisted per-iteration. That's enough for recent_attempts formatting
+    but means the resumed iter's PromptContext sees empty structured_traces for prior
+    iterations. Acceptable tradeoff for emergency recovery.
+    """
+    jsonl_path = storage.root / "mutations.jsonl"
+    all_candidates: list[RepoCandidate] = []
+    attempts: list[AttemptRecord] = []
+    last_frontier_indices: list[int] = [0]
+    last_iter = 0
+    seed_sha: str | None = None
+
+    with jsonl_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+
+            if rec.get("kind") == "seed":
+                seed_sha = rec["sha"]
+                seed = RepoCandidate(
+                    idx=0, sha=seed_sha, branch="main",
+                    score=rec["score"],
+                    trace_stderr="", raw_stdout="",
+                    parent_idx=None, parent_sha=None,
+                    parent_diff_stat="(seed)", parent_diff_patch="",
+                    base_diff_stat="(seed)", base_diff_patch="",
+                    changed_files_from_parent=[],
+                )
+                all_candidates.append(seed)
+                last_frontier_indices = rec.get("frontier", [0])
+                continue
+
+            it = rec.get("iter", 0)
+            last_iter = max(last_iter, it)
+
+            if "child_idx" in rec and "child_sha" in rec:
+                parent_sha = rec["parent_sha"]
+                child_sha = rec["child_sha"]
+                try:
+                    parent_diff_stat = _git(["diff", "--stat", parent_sha, child_sha], cwd=workdir).strip() or "(no changes)"
+                    parent_diff_patch = _git(["diff", parent_sha, child_sha], cwd=workdir)[:4000]
+                    base_diff_stat = _git(["diff", "--stat", seed_sha, child_sha], cwd=workdir).strip() or "(no changes)" if seed_sha else "(resume)"
+                    base_diff_patch = _git(["diff", seed_sha, child_sha], cwd=workdir)[:4000] if seed_sha else ""
+                except Exception:
+                    parent_diff_stat = "(resume)"
+                    parent_diff_patch = ""
+                    base_diff_stat = "(resume)"
+                    base_diff_patch = ""
+                child = RepoCandidate(
+                    idx=rec["child_idx"],
+                    sha=child_sha,
+                    branch=f"{branch_prefix}/iter-{it:03d}",
+                    score=rec["child_score"],
+                    trace_stderr="", raw_stdout="",
+                    parent_idx=rec["parent_idx"],
+                    parent_sha=parent_sha,
+                    parent_diff_stat=parent_diff_stat,
+                    parent_diff_patch=parent_diff_patch,
+                    base_diff_stat=base_diff_stat,
+                    base_diff_patch=base_diff_patch,
+                    changed_files_from_parent=rec.get("changed_files", []),
+                )
+                all_candidates.append(child)
+                attempts.append(AttemptRecord(
+                    iteration=it,
+                    parent_idx=rec["parent_idx"],
+                    child_idx=child.idx,
+                    parent_score=rec["parent_score"],
+                    child_score=child.score,
+                    changed_files=rec.get("changed_files", []),
+                    trace_summary=rec.get("trace_summary", "")[:1200],
+                    accepted=True,
+                ))
+                last_frontier_indices = rec.get("frontier", last_frontier_indices)
+            elif "error" in rec:
+                attempts.append(AttemptRecord(
+                    iteration=it,
+                    parent_idx=rec.get("parent_idx", -1),
+                    child_idx=None,
+                    parent_score=0.0,
+                    child_score=None,
+                    changed_files=[],
+                    trace_summary="",
+                    accepted=False,
+                    error=rec["error"],
+                ))
+                last_frontier_indices = rec.get("frontier", last_frontier_indices)
+
+    if not all_candidates:
+        raise ValueError(f"mutations.jsonl at {jsonl_path} has no seed entry")
+
+    # Reconstruct frontier — indices may not all have corresponding candidates
+    # if failed attempts were logged after. Filter defensively.
+    idx_to_cand = {c.idx: c for c in all_candidates}
+    frontier = [idx_to_cand[i] for i in last_frontier_indices if i in idx_to_cand]
+    if not frontier:
+        frontier = [all_candidates[0]]
+    best = max(all_candidates, key=lambda c: c.score)
+    start_iter = last_iter + 1
+    return all_candidates[0], all_candidates, frontier, best, attempts, start_iter
