@@ -162,6 +162,7 @@ def optimize_repo_frontier(
             base_diff_stat="(seed)", base_diff_patch="",
             changed_files_from_parent=[],
         )
+        _write_trace(storage, 0, seed_grade.trace_stderr, seed_grade.raw_stdout)
         all_candidates = [seed_candidate]
         frontier = [seed_candidate]
         best = seed_candidate
@@ -254,6 +255,7 @@ def optimize_repo_frontier(
         child_sha = _git(["rev-parse", "HEAD"], cwd=workdir).strip()
 
         child_grade = run_grader(grader_path, workdir, timeout_seconds=grader_timeout_seconds)
+        _write_trace(storage, iteration, child_grade.trace_stderr, child_grade.raw_stdout)
 
         parent_diff_stat = _git(["diff", "--stat", parent.sha, child_sha], cwd=workdir).strip() or "(no changes)"
         parent_diff_patch = _git(["diff", parent.sha, child_sha], cwd=workdir)[:4000]
@@ -535,10 +537,11 @@ def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str
 
             if rec.get("kind") == "seed":
                 seed_sha = rec["sha"]
+                seed_trace, seed_stdout = _read_trace(storage, 0)
                 seed = RepoCandidate(
                     idx=0, sha=seed_sha, branch="main",
                     score=rec["score"],
-                    trace_stderr="", raw_stdout="",
+                    trace_stderr=seed_trace, raw_stdout=seed_stdout,
                     parent_idx=None, parent_sha=None,
                     parent_diff_stat="(seed)", parent_diff_patch="",
                     base_diff_stat="(seed)", base_diff_patch="",
@@ -564,12 +567,13 @@ def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str
                     parent_diff_patch = ""
                     base_diff_stat = "(resume)"
                     base_diff_patch = ""
+                child_trace, child_stdout = _read_trace(storage, it)
                 child = RepoCandidate(
                     idx=rec["child_idx"],
                     sha=child_sha,
                     branch=f"{branch_prefix}/iter-{it:03d}",
                     score=rec["child_score"],
-                    trace_stderr="", raw_stdout="",
+                    trace_stderr=child_trace, raw_stdout=child_stdout,
                     parent_idx=rec["parent_idx"],
                     parent_sha=parent_sha,
                     parent_diff_stat=parent_diff_stat,
@@ -616,3 +620,30 @@ def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str
     best = max(all_candidates, key=lambda c: c.score)
     start_iter = last_iter + 1
     return all_candidates[0], all_candidates, frontier, best, attempts, start_iter
+
+
+def _write_trace(storage: RunStorage, iteration: int, trace_stderr: str, raw_stdout: str) -> None:
+    """Persist full grader trace + stdout for an iteration (enables resume without trace loss)."""
+    traces_dir = storage.root / "traces"
+    traces_dir.mkdir(parents=True, exist_ok=True)
+    path = traces_dir / f"iter-{iteration:03d}.json"
+    try:
+        path.write_text(
+            json.dumps({"trace_stderr": trace_stderr or "", "raw_stdout": raw_stdout or ""}),
+            encoding="utf-8",
+        )
+    except Exception:
+        # Trace persistence is best-effort — never break a run.
+        pass
+
+
+def _read_trace(storage: RunStorage, iteration: int) -> tuple[str, str]:
+    """Load persisted trace for an iteration. Returns ('', '') if not present."""
+    path = storage.root / "traces" / f"iter-{iteration:03d}.json"
+    if not path.exists():
+        return "", ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("trace_stderr", "") or "", data.get("raw_stdout", "") or ""
+    except Exception:
+        return "", ""
