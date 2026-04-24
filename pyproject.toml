@@ -1,6 +1,6 @@
 [project]
 name = "hone"
-version = "1.0.0-dev"
+version = "1.0.0"
 description = "Repository-state optimizer. Frontier search over git branches, coding-agent CLIs as mutators."
 readme = "README.md"
 license = { text = "MIT" }
