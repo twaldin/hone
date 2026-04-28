@@ -1,5 +1,5 @@
 Previous reviewer failure feedback, if this is a retry:
-
+unrelated .flt/uv.lock changes and resume metric_direction bug
 
 Implement the hone scorer + gates + metric/stall core. This is the foundation node — no CLI/UX/report changes here.
 
