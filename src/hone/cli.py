@@ -16,6 +16,7 @@ from hone.gates import GateSpec
 from hone.mutators import resolve as resolve_mutator
 from hone.policy import SEED_POLICY
 from hone.repo_frontier import optimize_repo_frontier
+from hone.report import generate_report, write_report
 from hone.storage import new_run_dir
 
 app = typer.Typer(
@@ -410,6 +411,32 @@ def reflect(
     console.print(f"  playbook.md:       {len(warmed.playbook_text)} chars")
     console.print(f"  prompt-template.md: {len(warmed.prompt_template)} chars")
     console.print(f"  knobs.json:        {warmed.knobs}")
+
+
+@app.command()
+def report(
+    run: Path = typer.Option(
+        ..., "--run",
+        exists=True, file_okay=False, dir_okay=True, readable=True,
+        help="Run directory (contains run.json and mutations.jsonl).",
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o",
+        help="Output markdown path (defaults to <run>/report.md).",
+    ),
+    stdout: bool = typer.Option(
+        False, "--stdout",
+        help="Print report markdown to stdout instead of writing a file.",
+    ),
+) -> None:
+    """Generate a static markdown report from a hone run directory."""
+    if stdout:
+        print(generate_report(run), end="")
+        return
+
+    destination = output or (run / "report.md")
+    written = write_report(run, destination)
+    console.print(f"[green]Report written to {written}[/green]")
 
 
 def main() -> None:
