@@ -173,6 +173,30 @@ def run(
 
 
 @app.command()
+def discover(
+    src: Path = typer.Option(
+        ..., "--src",
+        exists=True, file_okay=False, dir_okay=True, readable=True,
+        help="Source directory to inspect for discovery.",
+    ),
+    suggest: Path = typer.Option(
+        ..., "--suggest",
+        help="Output directory for suggested benchmark skeleton artifacts.",
+    ),
+    strict: bool = typer.Option(
+        False, "--strict",
+        help="Exit non-zero until discover is implemented.",
+    ),
+) -> None:
+    """Stub for benchmark discovery workflow design surface."""
+    console.print(
+        "[yellow]hone discover is not yet implemented.[/yellow] "
+        "Planned surface: hone discover --src <dir> --suggest <out_dir>."
+    )
+    raise typer.Exit(code=2 if strict else 0)
+
+
+@app.command()
 def reflect(
     runs: list[Path] = typer.Option(
         ..., "--runs",
