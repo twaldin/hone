@@ -642,6 +642,20 @@ def _load_resume_state(
             it = rec.get("iter", 0)
             last_iter = max(last_iter, it)
 
+            if rec.get("kind") == "gate_rejected":
+                attempts.append(AttemptRecord(
+                    iteration=it,
+                    parent_idx=rec.get("parent_idx", -1),
+                    child_idx=None,
+                    parent_score=rec.get("parent_score", 0.0),
+                    child_score=rec.get("child_score"),
+                    changed_files=rec.get("changed_files", []),
+                    trace_summary=rec.get("trace_summary", "")[:1200],
+                    accepted=False,
+                ))
+                last_frontier_indices = rec.get("frontier", last_frontier_indices)
+                continue
+
             if "child_idx" in rec and "child_sha" in rec:
                 parent_sha = rec["parent_sha"]
                 child_sha = rec["child_sha"]
