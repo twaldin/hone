@@ -19,17 +19,25 @@ from pathlib import Path
 
 @dataclass
 class RunManifest:
+    """Per-run manifest stored as run.json.
+
+    total_iterations equals completed_iterations on stall/early-stop, NOT budget.
+    """
+
     run_id: str
     created_at: str
     src_dir: str
     grader_path: str
     mutator_spec: str
     budget: int
-    status: str = "running"  # running | done | cancelled | error
+    status: str = "running"  # running | done | cancelled | error | stalled
     best_idx: int | None = None
     best_score: float | None = None
     best_sha: str | None = None
     total_iterations: int = 0
+    metric_direction: str = "max"
+    stall: int | None = None
+    completed_iterations: int = 0
 
 
 class RunStorage:
