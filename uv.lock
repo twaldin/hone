@@ -34,7 +34,7 @@ wheels = [
 
 [[package]]
 name = "hone"
-version = "1.0.0"
+version = "1.0.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "rich" },
