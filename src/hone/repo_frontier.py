@@ -299,10 +299,14 @@ def optimize_repo_frontier(
                 iters_without_best_improvement += 1
                 failing = [r.name for r in gate_results_list if not r.passed]
                 _append_jsonl(storage.root / "mutations.jsonl", {
-                    "iter": iteration, "parent_idx": parent.idx,
+                    "iter": iteration, "parent_idx": parent.idx, "child_idx": child_idx,
                     "kind": "gate_rejected",
                     "child_sha": child_sha,
-                    "parent_score": parent.raw_score,
+                    "parent_score": parent.raw_score, "child_score": child_grade.raw_score,
+                    "utility": child_grade.utility,
+                    "delta": child_grade.raw_score - parent.raw_score,
+                    "changed_files": changed_from_parent,
+                    "trace_summary": _summarize_trace(child_grade.trace_stderr, 400),
                     "failing_gates": failing,
                     "gate_results": [_gate_result_dict(r) for r in gate_results_list],
                     "frontier": [c.idx for c in frontier],
