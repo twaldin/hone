@@ -92,6 +92,22 @@ def test_run_legacy_invocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert result.exit_code == 0, result.output
 
 
+def test_run_scorer_timeout_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake_optimize(**kwargs: Any) -> RepoFrontierResult:
+        captured.update(kwargs)
+        return _fake_result(tmp_path / "run")
+
+    _setup(monkeypatch, tmp_path, optimize_fn=fake_optimize)
+    src, scorer = _make_src_and_scorer(tmp_path)
+    result = runner.invoke(app, [
+        "run", "--dir", str(src), "--scorer", str(scorer), "--scorer-timeout", "120"
+    ])
+    assert result.exit_code == 0, result.output
+    assert captured.get("grader_timeout_seconds") == 120
+
+
 # ---------------------------------------------------------------------------
 # hone run — stall / metric / gate forwarding
 # ---------------------------------------------------------------------------

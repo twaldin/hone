@@ -181,7 +181,7 @@ def run(
         help="Mutator spec. e.g. harness:claude-code:sonnet",
     ),
     budget: int = typer.Option(20, "--budget", min=1, help="Max iterations."),
-    grader_timeout: int = typer.Option(3600, "--grader-timeout", min=1),
+    grader_timeout: int = typer.Option(3600, "--scorer-timeout", "--grader-timeout", min=1),
     output: Optional[Path] = typer.Option(
         None, "--output", "-o",
         help="Write the best candidate's files here at the end.",

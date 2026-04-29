@@ -28,9 +28,18 @@ _REQUIRED = ("src_dir", "scorer")
 _VALID_METRIC_DIRECTIONS = frozenset({"max", "min"})
 
 
+def _resolve_relative(val: str, base: Path) -> str:
+    p = Path(val)
+    if not p.is_absolute():
+        return str((base / p).resolve())
+    return val
+
+
 def load_config(path: Path | None = None) -> HoneConfig:
     if path is None:
         path = Path("hone.toml")
+    path = Path(path)
+    config_dir = path.parent
     with open(path, "rb") as fh:
         data = tomllib.load(fh)
     for key in _REQUIRED:
@@ -42,8 +51,8 @@ def load_config(path: Path | None = None) -> HoneConfig:
             f"hone.toml: metric_direction must be 'max' or 'min', got {metric_direction!r}"
         )
     return HoneConfig(
-        src_dir=data["src_dir"],
-        scorer=data["scorer"],
+        src_dir=_resolve_relative(data["src_dir"], config_dir),
+        scorer=_resolve_relative(data["scorer"], config_dir),
         mutator=data.get("mutator", "harness:claude-code:sonnet"),
         budget=data.get("budget", 20),
         scorer_timeout=data.get("scorer_timeout", 3600),
