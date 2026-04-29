@@ -1,5 +1,5 @@
 Previous reviewer failure feedback, if this is a retry:
-unrelated fleet/local harness files are included in the diff
+unrelated fleet/local files and full test suite is not green
 
 Implement the hone scorer + gates + metric/stall core. This is the foundation node — no CLI/UX/report changes here.
 
