@@ -1,5 +1,5 @@
 Previous reviewer failure feedback, if this is a retry:
-unrelated fleet/local files and full test suite is not green
+unrelated .flt files committed and full test suite fails
 
 Wire the new scorer/gates/metric/stall machinery into the CLI and add project-mode UX (`hone init` / `hone optimize`). The aborted predecessor run failed on this node specifically because CLI tests launched a real harness/mutator and because retry rounds re-introduced the same blockers — read the retry context above carefully and DO NOT regress these guarantees.
 
