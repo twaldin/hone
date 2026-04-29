@@ -8,7 +8,26 @@ import pytest
 
 from hone.gates import GateSpec
 from hone.mutators.base import MutatorError, MutatorResult
-from hone.repo_frontier import optimize_repo_frontier
+from hone.repo_frontier import RepoCandidate, _select_parent, optimize_repo_frontier
+
+
+def _candidate(idx: int, utility: float) -> RepoCandidate:
+    return RepoCandidate(
+        idx=idx,
+        sha=f"sha-{idx}",
+        branch=f"b-{idx}",
+        raw_score=utility,
+        utility=utility,
+        trace_stderr="",
+        raw_stdout="",
+        parent_idx=None,
+        parent_sha=None,
+        parent_diff_stat="",
+        parent_diff_patch="",
+        base_diff_stat="",
+        base_diff_patch="",
+        changed_files_from_parent=[],
+    )
 
 
 class _EditingMutator:
@@ -21,6 +40,23 @@ class _EditingMutator:
         self.calls += 1
         (workdir / "planner.py").write_text("score = 1\n", encoding="utf-8")
         return MutatorResult(new_prompt="", tokens_in=10, tokens_out=5, cost_usd=0.01)
+
+
+def test_select_parent_does_not_lock_onto_bad_tail_candidate() -> None:
+    frontier = [
+        _candidate(0, 1.173),
+        _candidate(1, 1.167),
+        _candidate(2, 1.167),
+        _candidate(3, 1.167),
+        _candidate(4, 1.167),
+        _candidate(5, 1.167),
+        _candidate(6, 0.142),
+    ]
+
+    selected = [_select_parent(frontier, iteration=i, frontier_size=24).idx for i in range(7, 15)]
+
+    assert selected.count(6) <= 1
+    assert selected.count(0) >= 2
 
 
 def test_frontier_managed_workspace_end_to_end(tmp_path: Path) -> None:

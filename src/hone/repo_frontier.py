@@ -204,7 +204,7 @@ def optimize_repo_frontier(
     for iteration in range(start_iter, budget + 1):
         completed_iterations += 1
         iter_started = time.time()
-        parent = frontier[(iteration - 1) % len(frontier)]
+        parent = _select_parent(frontier, iteration, frontier_size)
 
         prompt_ctx = PromptContext(
             repo_name=workdir.name,
@@ -531,6 +531,31 @@ def _update_frontier(
         unique.setdefault(candidate.sha, candidate)
     kept = sorted(unique.values(), key=lambda c: (c.utility, -c.idx), reverse=True)
     return kept[:frontier_size]
+
+
+def _select_parent(
+    frontier: list[RepoCandidate], iteration: int, frontier_size: int
+) -> RepoCandidate:
+    """Pick a mutation parent from the ranked frontier without tail lock-in.
+
+    The frontier itself is worth keeping: lower-scoring states can contain useful
+    partial repairs or alternate structure. But the old `iteration % len(frontier)`
+    policy interacted badly with a growing, score-sorted frontier during warm-up:
+    a catastrophic tail candidate could be selected repeatedly until the frontier
+    filled, causing many mutations to merely revert it back to an already-known
+    working state.
+
+    Rank on every selection, always revisit the current best regularly, and only
+    round-robin across a bounded top window. This preserves exploration while
+    preventing repeated selection of the same bad tail candidate.
+    """
+    if not frontier:
+        raise ValueError("frontier must not be empty")
+    ranked = sorted(frontier, key=lambda c: (c.utility, -c.idx), reverse=True)
+    if iteration == 1 or iteration % 3 == 1:
+        return ranked[0]
+    window = min(len(ranked), max(1, frontier_size // 2))
+    return ranked[(iteration - 1) % window]
 
 
 def _summarize_trace(trace: str, limit: int) -> str:
