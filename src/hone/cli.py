@@ -244,7 +244,7 @@ def report(
 ) -> None:
     """Generate a static markdown report from a hone run directory."""
     if stdout:
-        console.print(generate_report(run))
+        print(generate_report(run), end="")
         return
 
     destination = output or (run / "report.md")

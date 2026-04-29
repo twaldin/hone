@@ -68,6 +68,44 @@ def test_generate_report_contains_required_sections(tmp_path: Path) -> None:
     assert "gate_rejected" in report
 
 
+def test_generate_report_best_fallback_handles_zero_utility(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-live",
+                "status": "running",
+                "metric_direction": "max",
+                "budget": 10,
+                "total_iterations": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = [
+        {"iter": 0, "candidate_idx": 0, "sha": "seedsha", "score": 0.0, "utility": 0.0, "kind": "seed", "frontier": [0]},
+        {
+            "iter": 1,
+            "parent_idx": 0,
+            "child_idx": 1,
+            "child_sha": "childsha",
+            "parent_score": 0.0,
+            "child_score": -1.0,
+            "utility": -1.0,
+            "delta": -1.0,
+            "changed_files": ["x.py"],
+            "frontier": [0],
+        },
+    ]
+    (run_dir / "mutations.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    report = generate_report(run_dir)
+    assert "- idx: `0`" in report
+
+
 def test_write_report_to_directory(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     out_dir = tmp_path / "out"

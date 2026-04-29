@@ -50,7 +50,13 @@ def generate_report(run_dir: Path) -> str:
 
     best = candidates.get(best_idx) if isinstance(best_idx, int) else None
     if best is None:
-        best = max(candidates.values(), key=lambda c: float(c.get("utility") or -10**18), default=None)
+        def _utility_key(candidate: dict) -> float:
+            utility = candidate.get("utility")
+            if utility is None:
+                return -10**18
+            return float(utility)
+
+        best = max(candidates.values(), key=_utility_key, default=None)
 
     lines: list[str] = []
     lines.append(f"# Hone Run Report: {run_id}")
