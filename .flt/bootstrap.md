@@ -1,5 +1,5 @@
 Previous reviewer failure feedback, if this is a retry:
-
+unrelated fleet/local harness files are included in the diff
 
 Add a SKELETON-ONLY `hone discover` command + design doc. Do NOT implement autonomous benchmark construction. The goal is to lock the surface and the docs so future work can hang implementation off it without re-litigating UX.
 
