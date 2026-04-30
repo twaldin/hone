@@ -149,6 +149,54 @@ def test_harness_worker_two_attempts_picks_best(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Regression: no-stash scenario must still clean post-score edits
+# ---------------------------------------------------------------------------
+
+def test_no_stash_post_score_edits_cleaned(tmp_path, monkeypatch):
+    """Scorer called on clean tree (pushed=False); harness makes post-score edits.
+    After propose(), workdir must be restored to the clean scored state."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    workdir = run_dir / "workdir"
+    workdir.mkdir()
+    _init_repo(workdir)
+    grader = _make_fake_grader(tmp_path)
+    _write_manifest(run_dir, grader)
+
+    def fake_run(spec):
+        budget_file = Path(spec.env["HONE_BUDGET_FILE"])
+        data = json.loads(budget_file.read_text())
+        data["remaining"] = 0
+        data["attempts"].append({
+            "attempt_idx": 0, "score": 0.7, "submetrics": {},
+            "pushed": False,
+            "stash_ref": None, "traces_path": None,
+            "trace_stderr": "", "raw_stdout": "", "parsed_envelope": None, "notes": "",
+        })
+        budget_file.write_text(json.dumps(data), encoding="utf-8")
+        # Harness makes an unscored edit after the scorer call
+        (workdir / "file.txt").write_text("post-score-edit\n", encoding="utf-8")
+        return RunResult(
+            harness="claude-code", model=None, exit_code=0,
+            duration_seconds=0.5, stdout="", stderr="", timed_out=False,
+            cost_usd=None, tokens_in=None, tokens_out=None, raw=None,
+        )
+
+    monkeypatch.setattr("harness.run", fake_run)
+
+    worker = HarnessWorker("claude-code", worker_budget=1, scorer_readonly=False)
+    result = worker.propose(
+        prompt="x", workdir=workdir, scorer=_noop_scorer, scorer_budget=1,
+    )
+
+    assert result.error is None
+    assert len(result.attempts) == 1
+    assert result.attempts[0].score == pytest.approx(0.7)
+    # Post-score unscored edit must NOT be present
+    assert (workdir / "file.txt").read_text(encoding="utf-8") == "v0\n"
+
+
+# ---------------------------------------------------------------------------
 # Budget enforcement
 # ---------------------------------------------------------------------------
 

@@ -203,12 +203,13 @@ def _restore_best_stash(
     """Restore the best attempt's stash and drop all stashes."""
     pushed = [(rec["attempt_idx"], i) for i, rec in enumerate(attempt_records) if rec.get("pushed", False)]
     total = len(pushed)
-    if total == 0:
-        return
 
-    # Clear any uncommitted agent edits so stash apply is conflict-free.
+    # Always reset to remove unscored agent edits made after the last scorer call.
     _git(["reset", "--hard", "HEAD"], cwd=workdir)
     _git(["clean", "-fd"], cwd=workdir)
+
+    if total == 0:
+        return
 
     push_pos = next((pos for pos, (ai, _) in enumerate(pushed) if ai == best_attempt_idx), None)
     if push_pos is not None:
