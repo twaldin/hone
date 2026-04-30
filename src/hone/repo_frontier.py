@@ -289,7 +289,7 @@ def optimize_repo_frontier(
         if worker_result.cost_usd:
             cost_usd += worker_result.cost_usd
 
-        _restore_best_stash(workdir, worker_result.best_attempt_idx, stash_log)
+        _restore_best_stash(workdir, worker_result.best_attempt.attempt_idx, stash_log)
         _strip_seed_playbook_section(playbook_path)
 
         _git(["add", "-A"], cwd=workdir)
@@ -502,10 +502,19 @@ def _make_scorer_fn(
     workdir: Path,
     grader_timeout_seconds: int,
 ) -> tuple:
-    """Build a scorer callable that grades and stashes each attempt.
+    """Build a scorer callable that stashes the pre-grader tree, grades, then cleans.
+
+    Per-call protocol:
+    1. Stash the candidate edit (before grader runs) — captures only mutator changes.
+    2. Apply the stash so the grader sees the candidate tree.
+    3. Run the grader.
+    4. Hard-reset + clean workdir — removes grader side effects; workdir -> parent HEAD.
+    5. Return ScorerResult.
 
     Returns (scorer_fn, stash_log). stash_log accumulates (attempt_idx, pushed)
-    entries in push order; pushed=False when nothing to stash.
+    in call order; pushed=False when workdir had no changes (no-op attempt).
+    Callers of _restore_best_stash must pass WorkerAttempt.attempt_idx (the scorer call
+    index), not the list position in WorkerResult.attempts.
     """
     stash_log: list[tuple[int, bool]] = []
     counter = [0]
@@ -513,16 +522,25 @@ def _make_scorer_fn(
     def scorer_fn(wd: Path) -> ScorerResult:
         attempt_idx = counter[0]
         counter[0] += 1
+
+        stash_output = _git(
+            ["stash", "push", "--include-untracked", "-m", f"hone-worker-attempt-{attempt_idx}"],
+            cwd=wd,
+        )
+        pushed = "No local changes to save" not in stash_output
+        stash_log.append((attempt_idx, pushed))
+
+        if pushed:
+            # Re-apply the stash so the candidate tree is visible to the grader.
+            _git(["stash", "apply", "stash@{0}"], cwd=wd)
+
         grader_result = run_grader(grader_path, wd, timeout_seconds=grader_timeout_seconds)
         sr = to_scorer_result(grader_result)
-        try:
-            _git(
-                ["stash", "push", "--include-untracked", "-m", f"hone-worker-attempt-{attempt_idx}"],
-                cwd=wd,
-            )
-            stash_log.append((attempt_idx, True))
-        except subprocess.CalledProcessError:
-            stash_log.append((attempt_idx, False))
+
+        # Remove grader side effects; workdir returns to parent HEAD for the next attempt.
+        _git(["reset", "--hard", "HEAD"], cwd=wd)
+        _git(["clean", "-fd"], cwd=wd)
+
         return sr
 
     return scorer_fn, stash_log
@@ -533,7 +551,11 @@ def _restore_best_stash(
     best_attempt_idx: int,
     stash_log: list[tuple[int, bool]],
 ) -> None:
-    """Apply the best attempt's stash to workdir and drop all stashes."""
+    """Apply the best attempt's stash to workdir and drop all stashes.
+
+    best_attempt_idx must be WorkerAttempt.attempt_idx (the scorer call index,
+    0-based call order), NOT a list position in WorkerResult.attempts.
+    """
     pushed = [(idx, i) for i, (idx, stashed) in enumerate(stash_log) if stashed]
     total = len(pushed)
     if total == 0:
