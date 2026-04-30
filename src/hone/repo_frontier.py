@@ -26,7 +26,6 @@ from pathlib import Path
 from hone.ace import ace_reflect, should_reflect
 from hone.grader import run_grader
 from hone.memory_packet import build_memory_packet, render_memory_packet
-from hone.mutators.base import MutatorError
 from hone.policy import (
     MutatorPolicy,
     PromptContext,
@@ -34,7 +33,10 @@ from hone.policy import (
     adapter_playbook_filename,
     build_iteration_prompt,
 )
+from hone.scorer_result import ScorerResult, parse_stderr_traces, to_scorer_result
 from hone.storage import RunManifest, RunStorage, utcnow
+from hone.workers.base import Worker, WorkerResult
+from hone.workers.local_worker import LocalWorker
 
 
 @dataclass
@@ -82,6 +84,7 @@ class RepoFrontierResult:
     mutator_tokens_out: int
     mutator_cost_usd: float
     run_dir: Path
+    scorer_calls: int = 0
 
 
 _WORKSPACE_IGNORE = (
@@ -106,6 +109,8 @@ def optimize_repo_frontier(
     ace_interval: int = 0,
     ace_mutator=None,
     resume: bool = False,
+    worker: Worker | None = None,
+    worker_scorer_budget: int = 1,
 ) -> RepoFrontierResult:
     src_dir = Path(src_dir).resolve()
     grader_path = Path(grader_path).resolve()
@@ -188,6 +193,9 @@ def optimize_repo_frontier(
     tokens_in = 0
     tokens_out = 0
     cost_usd = 0.0
+    total_scorer_calls = 0
+
+    _effective_worker: Worker = worker if worker is not None else LocalWorker(mutator)
 
     if not resume:
         _append_jsonl(storage.root / "mutations.jsonl", {
@@ -243,39 +251,45 @@ def optimize_repo_frontier(
         original_playbook = playbook_path.read_text(encoding="utf-8") if playbook_path.exists() else None
         playbook_path.write_text(_compose_playbook(original_playbook, active_policy.rendered_playbook()), encoding="utf-8")
 
-        try:
-            if not hasattr(mutator, "propose_edit_mode"):
-                raise MutatorError(
-                    "dir mode requires a mutator with propose_edit_mode(workdir=...) support"
-                )
-            result = mutator.propose_edit_mode(prompt, workdir=workdir)
-            mutator_calls += 1
-            if result.tokens_in:
-                tokens_in += result.tokens_in
-            if result.tokens_out:
-                tokens_out += result.tokens_out
-            if result.cost_usd:
-                cost_usd += result.cost_usd
-        except Exception as exc:
+        scorer_fn, stash_log = _make_scorer_fn(grader_path, workdir, grader_timeout_seconds)
+        worker_result = _effective_worker.propose(
+            prompt=prompt,
+            workdir=workdir,
+            scorer=scorer_fn,
+            scorer_budget=worker_scorer_budget,
+        )
+
+        if worker_result.error is not None:
             mutator_failures += 1
+            _drop_all_stashes(workdir, stash_log)
             _restore_playbook(playbook_path, original_playbook)
             _reset_to(workdir, parent.sha)
             _delete_branch(workdir, child_branch)
             attempts.append(AttemptRecord(
                 iteration=iteration, parent_idx=parent.idx, child_idx=None,
                 parent_score=parent.score, child_score=None, changed_files=[],
-                trace_summary="", accepted=False, error=str(exc),
+                trace_summary="", accepted=False, error=worker_result.error,
             ))
             _append_jsonl(storage.root / "mutations.jsonl", {
                 "iter": iteration, "parent_idx": parent.idx,
-                "error": str(exc), "frontier": [c.idx for c in frontier],
+                "error": worker_result.error, "frontier": [c.idx for c in frontier],
             })
             _emit(
                 f"[iter {iteration}/{budget}] ERROR parent=c{parent.idx:03d} "
-                f"({time.time()-iter_started:.0f}s): {exc}"
+                f"({time.time()-iter_started:.0f}s): {worker_result.error}"
             )
             continue
 
+        mutator_calls += 1
+        total_scorer_calls += worker_result.scorer_calls
+        if worker_result.tokens_in:
+            tokens_in += worker_result.tokens_in
+        if worker_result.tokens_out:
+            tokens_out += worker_result.tokens_out
+        if worker_result.cost_usd:
+            cost_usd += worker_result.cost_usd
+
+        _restore_best_stash(workdir, worker_result.best_attempt_idx, stash_log)
         _strip_seed_playbook_section(playbook_path)
 
         _git(["add", "-A"], cwd=workdir)
@@ -283,11 +297,30 @@ def optimize_repo_frontier(
             _git(["commit", "-m", f"hone iter {iteration}", "--no-verify"], cwd=workdir)
         child_sha = _git(["rev-parse", "HEAD"], cwd=workdir).strip()
 
-        child_grade = run_grader(grader_path, workdir, timeout_seconds=grader_timeout_seconds)
+        best_att = worker_result.best_attempt
+        child_traces = (
+            [t for t in best_att.parsed_envelope.get("traces", []) if isinstance(t, dict)]
+            if best_att.parsed_envelope
+            else parse_stderr_traces(best_att.trace_stderr)
+        )
+        attempts_for_trace = [
+            {
+                "attempt_idx": a.attempt_idx,
+                "score": a.score,
+                "submetrics": a.submetrics,
+                "trace_stderr": a.trace_stderr,
+                "raw_stdout": a.raw_stdout,
+                "parsed_envelope": a.parsed_envelope,
+                "commit_sha": a.commit_sha,
+                "notes": a.notes,
+            }
+            for a in worker_result.attempts
+        ]
         _write_trace(
-            storage, iteration, child_grade.trace_stderr, child_grade.raw_stdout,
-            submetrics=child_grade.submetrics, traces=child_grade.traces,
-            parsed_envelope=child_grade.parsed_envelope,
+            storage, iteration, best_att.trace_stderr, best_att.raw_stdout,
+            submetrics=best_att.submetrics, traces=child_traces,
+            parsed_envelope=best_att.parsed_envelope,
+            attempts=attempts_for_trace,
         )
 
         parent_diff_stat = _git(["diff", "--stat", parent.sha, child_sha], cwd=workdir).strip() or "(no changes)"
@@ -302,15 +335,15 @@ def optimize_repo_frontier(
         child_idx = len(all_candidates)
         child = RepoCandidate(
             idx=child_idx, sha=child_sha, branch=child_branch,
-            score=child_grade.score,
-            trace_stderr=child_grade.trace_stderr, raw_stdout=child_grade.raw_stdout,
+            score=best_att.score,
+            trace_stderr=best_att.trace_stderr, raw_stdout=best_att.raw_stdout,
             parent_idx=parent.idx, parent_sha=parent.sha,
             parent_diff_stat=parent_diff_stat, parent_diff_patch=parent_diff_patch,
             base_diff_stat=base_diff_stat, base_diff_patch=base_diff_patch,
             changed_files_from_parent=changed_from_parent,
-            submetrics=child_grade.submetrics,
-            traces=child_grade.traces,
-            parsed_envelope=child_grade.parsed_envelope,
+            submetrics=best_att.submetrics,
+            traces=child_traces,
+            parsed_envelope=best_att.parsed_envelope,
         )
         all_submetric_keys = set(child.submetrics) | set(parent.submetrics)
         submetric_deltas = {
@@ -341,7 +374,8 @@ def optimize_repo_frontier(
             "frontier": [c.idx for c in frontier],
             "submetrics": child.submetrics,
             "submetric_deltas": submetric_deltas,
-            "trace_count": len(child.traces),
+            "trace_count": len(child_traces),
+            "scorer_calls": worker_result.scorer_calls,
         })
         delta = child.score - parent.score
         kept = "kept" if child in frontier else "dropped"
@@ -392,6 +426,7 @@ def optimize_repo_frontier(
         mutator_tokens_out=tokens_out,
         mutator_cost_usd=cost_usd,
         run_dir=storage.root,
+        scorer_calls=total_scorer_calls,
     )
 
 
@@ -460,6 +495,71 @@ def _delete_branch(target: Path, branch: str) -> None:
         _git(["branch", "-D", branch], cwd=target)
     except subprocess.CalledProcessError:
         pass
+
+
+def _make_scorer_fn(
+    grader_path: Path,
+    workdir: Path,
+    grader_timeout_seconds: int,
+) -> tuple:
+    """Build a scorer callable that grades and stashes each attempt.
+
+    Returns (scorer_fn, stash_log). stash_log accumulates (attempt_idx, pushed)
+    entries in push order; pushed=False when nothing to stash.
+    """
+    stash_log: list[tuple[int, bool]] = []
+    counter = [0]
+
+    def scorer_fn(wd: Path) -> ScorerResult:
+        attempt_idx = counter[0]
+        counter[0] += 1
+        grader_result = run_grader(grader_path, wd, timeout_seconds=grader_timeout_seconds)
+        sr = to_scorer_result(grader_result)
+        try:
+            _git(
+                ["stash", "push", "--include-untracked", "-m", f"hone-worker-attempt-{attempt_idx}"],
+                cwd=wd,
+            )
+            stash_log.append((attempt_idx, True))
+        except subprocess.CalledProcessError:
+            stash_log.append((attempt_idx, False))
+        return sr
+
+    return scorer_fn, stash_log
+
+
+def _restore_best_stash(
+    workdir: Path,
+    best_attempt_idx: int,
+    stash_log: list[tuple[int, bool]],
+) -> None:
+    """Apply the best attempt's stash to workdir and drop all stashes."""
+    pushed = [(idx, i) for i, (idx, stashed) in enumerate(stash_log) if stashed]
+    total = len(pushed)
+    if total == 0:
+        return
+    push_pos = next((i for i, (idx, _) in enumerate(pushed) if idx == best_attempt_idx), None)
+    if push_pos is not None:
+        stash_ref = f"stash@{{{total - 1 - push_pos}}}"
+        try:
+            _git(["stash", "apply", stash_ref], cwd=workdir)
+        except subprocess.CalledProcessError:
+            pass
+    for _ in range(total):
+        try:
+            _git(["stash", "drop", "stash@{0}"], cwd=workdir)
+        except subprocess.CalledProcessError:
+            break
+
+
+def _drop_all_stashes(workdir: Path, stash_log: list[tuple[int, bool]]) -> None:
+    """Drop all stashes accumulated by scorer_fn (error-path cleanup)."""
+    pushed_count = sum(1 for _, stashed in stash_log if stashed)
+    for _ in range(pushed_count):
+        try:
+            _git(["stash", "drop", "stash@{0}"], cwd=workdir)
+        except subprocess.CalledProcessError:
+            break
 
 
 def _has_changes_vs_parent(target: Path, parent_sha: str) -> bool:
@@ -683,6 +783,7 @@ def _write_trace(
     submetrics: dict | None = None,
     traces: list | None = None,
     parsed_envelope: dict | None = None,
+    attempts: list | None = None,
 ) -> None:
     """Persist full grader trace + stdout + scorer envelope for an iteration."""
     traces_dir = storage.root / "traces"
@@ -696,6 +797,7 @@ def _write_trace(
                 "submetrics": submetrics or {},
                 "traces": traces or [],
                 "parsed_envelope": parsed_envelope,
+                "attempts": attempts or [],
             }),
             encoding="utf-8",
         )

@@ -8,6 +8,8 @@ import pytest
 
 from hone.mutators.base import MutatorResult
 from hone.repo_frontier import optimize_repo_frontier
+from hone.scorer_result import ScorerResult
+from hone.workers.base import Worker, WorkerAttempt, WorkerResult
 
 
 class _EditingMutator:
@@ -162,3 +164,81 @@ def test_frontier_json_envelope_submetrics_in_mutations(tmp_path: Path) -> None:
     assert iter_row["submetrics"] == {"acc": pytest.approx(0.9), "f1": pytest.approx(0.85)}
     assert "submetric_deltas" in iter_row
     assert "trace_count" in iter_row
+
+
+def test_frontier_multi_attempt_worker(tmp_path: Path) -> None:
+    """FakeMultiWorker with 2 attempts: best attempt (0.8) wins; scorer_calls==2."""
+
+    class _TwoAttemptWorker(Worker):
+        name = "two_attempt"
+
+        def propose(self, *, prompt, workdir, scorer, scorer_budget):
+            # Attempt 0: write low-score file
+            (workdir / "planner.py").write_text("score = low\n", encoding="utf-8")
+            sr0 = scorer(workdir)
+            att0 = WorkerAttempt(
+                attempt_idx=0, score=sr0.score, submetrics=sr0.submetrics,
+                trace_stderr=sr0.trace_stderr, raw_stdout=sr0.raw_stdout,
+                parsed_envelope=sr0.parsed_envelope, commit_sha=None,
+            )
+            # Attempt 1: write best-score file
+            (workdir / "planner.py").write_text("score = best\n", encoding="utf-8")
+            sr1 = scorer(workdir)
+            att1 = WorkerAttempt(
+                attempt_idx=1, score=sr1.score, submetrics=sr1.submetrics,
+                trace_stderr=sr1.trace_stderr, raw_stdout=sr1.raw_stdout,
+                parsed_envelope=sr1.parsed_envelope, commit_sha=None,
+            )
+            return WorkerResult(
+                attempts=[att0, att1], best_attempt_idx=1, scorer_calls=2,
+                tokens_in=None, tokens_out=None, cost_usd=None,
+            )
+
+    src = tmp_path / "controllers"
+    src.mkdir()
+    (src / "planner.py").write_text("score = 0\n", encoding="utf-8")
+
+    grader = tmp_path / "grader.py"
+    grader.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "root = pathlib.Path(sys.argv[1])\n"
+        "text = (root / 'planner.py').read_text()\n"
+        "if 'score = best' in text:\n"
+        "    print(0.8)\n"
+        "elif 'score = low' in text:\n"
+        "    print(0.3)\n"
+        "else:\n"
+        "    print(0.0)\n",
+        encoding="utf-8",
+    )
+    grader.chmod(0o755)
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    class _StubMutator:
+        def propose_edit_mode(self, prompt, workdir): ...
+
+    result = optimize_repo_frontier(
+        src_dir=src,
+        grader_path=grader,
+        mutator=_StubMutator(),
+        mutator_spec="harness:claude-code:sonnet",
+        budget=1,
+        grader_timeout_seconds=30,
+        run_dir=run_dir,
+        worker=_TwoAttemptWorker(),
+        worker_scorer_budget=2,
+    )
+
+    assert result.best_score == pytest.approx(0.8)
+
+    workdir = run_dir / "workdir"
+    content = (workdir / "planner.py").read_text(encoding="utf-8")
+    assert "score = best" in content
+
+    mutations_path = run_dir / "mutations.jsonl"
+    rows = [json.loads(line) for line in mutations_path.read_text().splitlines() if line.strip()]
+    iter_row = next(r for r in rows if r.get("kind") != "seed")
+    assert iter_row["scorer_calls"] == 2

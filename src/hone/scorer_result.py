@@ -18,6 +18,22 @@ class ScorerResult:
     returncode: int = 0
 
 
+def to_scorer_result(grader_result) -> ScorerResult:
+    """Adapt a GraderResult to ScorerResult.
+
+    Uses duck typing to avoid a circular import with hone.grader.
+    """
+    return ScorerResult(
+        score=grader_result.score,
+        submetrics=grader_result.submetrics,
+        traces=grader_result.traces,
+        parsed_envelope=grader_result.parsed_envelope,
+        trace_stderr=grader_result.trace_stderr,
+        raw_stdout=grader_result.raw_stdout,
+        returncode=grader_result.returncode,
+    )
+
+
 def parse_scorer_stdout(
     stdout: str,
 ) -> tuple[float, dict[str, float], list[dict], dict | None]:
