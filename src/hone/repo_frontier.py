@@ -20,11 +20,12 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from hone.ace import ace_reflect, should_reflect
 from hone.grader import run_grader
+from hone.memory_packet import build_memory_packet, render_memory_packet
 from hone.mutators.base import MutatorError
 from hone.policy import (
     MutatorPolicy,
@@ -51,6 +52,9 @@ class RepoCandidate:
     base_diff_stat: str
     base_diff_patch: str
     changed_files_from_parent: list[str]
+    submetrics: dict[str, float] = field(default_factory=dict)
+    traces: list[dict] = field(default_factory=list)
+    parsed_envelope: dict | None = None
 
 
 @dataclass
@@ -64,6 +68,7 @@ class AttemptRecord:
     trace_summary: str
     accepted: bool
     error: str | None = None
+    submetric_deltas: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -161,8 +166,15 @@ def optimize_repo_frontier(
             parent_diff_stat="(seed)", parent_diff_patch="",
             base_diff_stat="(seed)", base_diff_patch="",
             changed_files_from_parent=[],
+            submetrics=seed_grade.submetrics,
+            traces=seed_grade.traces,
+            parsed_envelope=seed_grade.parsed_envelope,
         )
-        _write_trace(storage, 0, seed_grade.trace_stderr, seed_grade.raw_stdout)
+        _write_trace(
+            storage, 0, seed_grade.trace_stderr, seed_grade.raw_stdout,
+            submetrics=seed_grade.submetrics, traces=seed_grade.traces,
+            parsed_envelope=seed_grade.parsed_envelope,
+        )
         all_candidates = [seed_candidate]
         frontier = [seed_candidate]
         best = seed_candidate
@@ -181,6 +193,7 @@ def optimize_repo_frontier(
         _append_jsonl(storage.root / "mutations.jsonl", {
             "iter": 0, "candidate_idx": 0, "sha": seed_sha,
             "score": seed_candidate.score, "kind": "seed", "frontier": [0],
+            "submetrics": seed_candidate.submetrics,
         })
         _emit(
             f"[iter 0/{budget}] SEED sha={seed_sha[:8]} "
@@ -190,6 +203,20 @@ def optimize_repo_frontier(
     for iteration in range(start_iter, budget + 1):
         iter_started = time.time()
         parent = frontier[(iteration - 1) % len(frontier)]
+
+        mem_packet = build_memory_packet(
+            parent=parent, best=best, seed=seed_candidate,
+            attempts=attempts, window=active_policy.knobs.memory_packet_window,
+        )
+        rendered_memory_packet = render_memory_packet(
+            mem_packet,
+            max_trace_chars=active_policy.knobs.memory_packet_max_chars,
+            max_attempts=active_policy.knobs.memory_packet_window,
+        )
+        submetrics_str = (
+            "\n".join(f"{k}={v:.6f}" for k, v in parent.submetrics.items())
+            if parent.submetrics else ""
+        )
 
         prompt_ctx = PromptContext(
             repo_name=workdir.name,
@@ -203,6 +230,8 @@ def optimize_repo_frontier(
             parent_diff_stat=parent.parent_diff_stat,
             base_diff_stat=parent.base_diff_stat,
             constraints=_workspace_file_list(workdir),
+            submetrics=submetrics_str,
+            memory_packet=rendered_memory_packet,
         )
         prompt = build_iteration_prompt(active_policy, prompt_ctx)
         (prompts_dir / f"iter-{iteration:03d}.txt").write_text(prompt, encoding="utf-8")
@@ -255,7 +284,11 @@ def optimize_repo_frontier(
         child_sha = _git(["rev-parse", "HEAD"], cwd=workdir).strip()
 
         child_grade = run_grader(grader_path, workdir, timeout_seconds=grader_timeout_seconds)
-        _write_trace(storage, iteration, child_grade.trace_stderr, child_grade.raw_stdout)
+        _write_trace(
+            storage, iteration, child_grade.trace_stderr, child_grade.raw_stdout,
+            submetrics=child_grade.submetrics, traces=child_grade.traces,
+            parsed_envelope=child_grade.parsed_envelope,
+        )
 
         parent_diff_stat = _git(["diff", "--stat", parent.sha, child_sha], cwd=workdir).strip() or "(no changes)"
         parent_diff_patch = _git(["diff", parent.sha, child_sha], cwd=workdir)[:4000]
@@ -275,7 +308,15 @@ def optimize_repo_frontier(
             parent_diff_stat=parent_diff_stat, parent_diff_patch=parent_diff_patch,
             base_diff_stat=base_diff_stat, base_diff_patch=base_diff_patch,
             changed_files_from_parent=changed_from_parent,
+            submetrics=child_grade.submetrics,
+            traces=child_grade.traces,
+            parsed_envelope=child_grade.parsed_envelope,
         )
+        all_submetric_keys = set(child.submetrics) | set(parent.submetrics)
+        submetric_deltas = {
+            k: child.submetrics.get(k, 0.0) - parent.submetrics.get(k, 0.0)
+            for k in all_submetric_keys
+        }
         all_candidates.append(child)
         attempts.append(AttemptRecord(
             iteration=iteration, parent_idx=parent.idx, child_idx=child.idx,
@@ -283,6 +324,7 @@ def optimize_repo_frontier(
             changed_files=changed_from_parent,
             trace_summary=_summarize_trace(child.trace_stderr, policy.knobs.max_trace_summary_chars),
             accepted=True,
+            submetric_deltas=submetric_deltas,
         ))
 
         if child.score > best.score:
@@ -297,6 +339,9 @@ def optimize_repo_frontier(
             "changed_files": changed_from_parent,
             "trace_summary": _summarize_trace(child.trace_stderr, 400),
             "frontier": [c.idx for c in frontier],
+            "submetrics": child.submetrics,
+            "submetric_deltas": submetric_deltas,
+            "trace_count": len(child.traces),
         })
         delta = child.score - parent.score
         kept = "kept" if child in frontier else "dropped"
@@ -537,7 +582,7 @@ def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str
 
             if rec.get("kind") == "seed":
                 seed_sha = rec["sha"]
-                seed_trace, seed_stdout = _read_trace(storage, 0)
+                seed_trace, seed_stdout, seed_submetrics, seed_traces, seed_envelope = _read_trace(storage, 0)
                 seed = RepoCandidate(
                     idx=0, sha=seed_sha, branch="main",
                     score=rec["score"],
@@ -546,6 +591,9 @@ def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str
                     parent_diff_stat="(seed)", parent_diff_patch="",
                     base_diff_stat="(seed)", base_diff_patch="",
                     changed_files_from_parent=[],
+                    submetrics=seed_submetrics,
+                    traces=seed_traces,
+                    parsed_envelope=seed_envelope,
                 )
                 all_candidates.append(seed)
                 last_frontier_indices = rec.get("frontier", [0])
@@ -567,7 +615,7 @@ def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str
                     parent_diff_patch = ""
                     base_diff_stat = "(resume)"
                     base_diff_patch = ""
-                child_trace, child_stdout = _read_trace(storage, it)
+                child_trace, child_stdout, child_submetrics, child_traces, child_envelope = _read_trace(storage, it)
                 child = RepoCandidate(
                     idx=rec["child_idx"],
                     sha=child_sha,
@@ -581,6 +629,9 @@ def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str
                     base_diff_stat=base_diff_stat,
                     base_diff_patch=base_diff_patch,
                     changed_files_from_parent=rec.get("changed_files", []),
+                    submetrics=child_submetrics,
+                    traces=child_traces,
+                    parsed_envelope=child_envelope,
                 )
                 all_candidates.append(child)
                 attempts.append(AttemptRecord(
@@ -592,6 +643,7 @@ def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str
                     changed_files=rec.get("changed_files", []),
                     trace_summary=rec.get("trace_summary", "")[:1200],
                     accepted=True,
+                    submetric_deltas=rec.get("submetric_deltas", {}),
                 ))
                 last_frontier_indices = rec.get("frontier", last_frontier_indices)
             elif "error" in rec:
@@ -622,14 +674,29 @@ def _load_resume_state(*, storage: RunStorage, workdir: Path, branch_prefix: str
     return all_candidates[0], all_candidates, frontier, best, attempts, start_iter
 
 
-def _write_trace(storage: RunStorage, iteration: int, trace_stderr: str, raw_stdout: str) -> None:
-    """Persist full grader trace + stdout for an iteration (enables resume without trace loss)."""
+def _write_trace(
+    storage: RunStorage,
+    iteration: int,
+    trace_stderr: str,
+    raw_stdout: str,
+    *,
+    submetrics: dict | None = None,
+    traces: list | None = None,
+    parsed_envelope: dict | None = None,
+) -> None:
+    """Persist full grader trace + stdout + scorer envelope for an iteration."""
     traces_dir = storage.root / "traces"
     traces_dir.mkdir(parents=True, exist_ok=True)
     path = traces_dir / f"iter-{iteration:03d}.json"
     try:
         path.write_text(
-            json.dumps({"trace_stderr": trace_stderr or "", "raw_stdout": raw_stdout or ""}),
+            json.dumps({
+                "trace_stderr": trace_stderr or "",
+                "raw_stdout": raw_stdout or "",
+                "submetrics": submetrics or {},
+                "traces": traces or [],
+                "parsed_envelope": parsed_envelope,
+            }),
             encoding="utf-8",
         )
     except Exception:
@@ -637,13 +704,21 @@ def _write_trace(storage: RunStorage, iteration: int, trace_stderr: str, raw_std
         pass
 
 
-def _read_trace(storage: RunStorage, iteration: int) -> tuple[str, str]:
-    """Load persisted trace for an iteration. Returns ('', '') if not present."""
+def _read_trace(
+    storage: RunStorage, iteration: int
+) -> tuple[str, str, dict, list, dict | None]:
+    """Load persisted trace for an iteration. Returns defaults if not present."""
     path = storage.root / "traces" / f"iter-{iteration:03d}.json"
     if not path.exists():
-        return "", ""
+        return "", "", {}, [], None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("trace_stderr", "") or "", data.get("raw_stdout", "") or ""
+        return (
+            data.get("trace_stderr", "") or "",
+            data.get("raw_stdout", "") or "",
+            data.get("submetrics", {}) or {},
+            data.get("traces", []) or [],
+            data.get("parsed_envelope"),
+        )
     except Exception:
-        return "", ""
+        return "", "", {}, [], None

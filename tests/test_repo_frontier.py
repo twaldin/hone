@@ -1,7 +1,10 @@
 """End-to-end test for the v1 git-native frontier loop with managed workspace."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from hone.mutators.base import MutatorResult
 from hone.repo_frontier import optimize_repo_frontier
@@ -108,3 +111,54 @@ def test_source_dir_with_existing_git_is_not_mutated(tmp_path: Path) -> None:
     ).stdout.strip()
     assert post_sha == original_sha
     assert (src / "planner.py").read_text(encoding="utf-8") == "score = 0\n"
+
+
+def test_frontier_json_envelope_submetrics_in_mutations(tmp_path: Path) -> None:
+    """Grader emitting JSON envelope: submetrics appear in mutations.jsonl seed + iter rows."""
+    src = tmp_path / "controllers"
+    src.mkdir()
+    (src / "planner.py").write_text("score = 0\n", encoding="utf-8")
+
+    grader = tmp_path / "grader.py"
+    grader.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys, json\n"
+        "root = pathlib.Path(sys.argv[1])\n"
+        "text = (root / 'planner.py').read_text()\n"
+        "if 'score = 1' in text:\n"
+        "    print(json.dumps({'score': 1.0, 'submetrics': {'acc': 0.9, 'f1': 0.85}}))\n"
+        "else:\n"
+        "    print(json.dumps({'score': 0.0, 'submetrics': {'acc': 0.1, 'f1': 0.05}}))\n",
+        encoding="utf-8",
+    )
+    grader.chmod(0o755)
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    result = optimize_repo_frontier(
+        src_dir=src,
+        grader_path=grader,
+        mutator=_EditingMutator(),
+        mutator_spec="harness:claude-code:sonnet",
+        budget=1,
+        grader_timeout_seconds=30,
+        run_dir=run_dir,
+    )
+
+    assert result.best_score == 1.0
+
+    mutations_path = run_dir / "mutations.jsonl"
+    rows = [json.loads(line) for line in mutations_path.read_text().splitlines() if line.strip()]
+    assert len(rows) == 2
+
+    seed_row = rows[0]
+    assert seed_row.get("kind") == "seed"
+    assert "submetrics" in seed_row
+    assert seed_row["submetrics"] == {"acc": pytest.approx(0.1), "f1": pytest.approx(0.05)}
+
+    iter_row = rows[1]
+    assert "submetrics" in iter_row
+    assert iter_row["submetrics"] == {"acc": pytest.approx(0.9), "f1": pytest.approx(0.85)}
+    assert "submetric_deltas" in iter_row
+    assert "trace_count" in iter_row

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from hone.scorer_result import parse_scorer_stdout, parse_stderr_traces
 
 
 class GraderError(RuntimeError):
@@ -18,6 +20,9 @@ class GraderResult:
     trace_stderr: str
     raw_stdout: str
     returncode: int
+    submetrics: dict[str, float] = field(default_factory=dict)
+    traces: list[dict] = field(default_factory=list)
+    parsed_envelope: dict | None = None
 
 
 def run_grader(
@@ -29,9 +34,10 @@ def run_grader(
 
     Contract:
       - grader is invoked as: `<grader> <prompt_path>`
-      - stdout: the LAST non-empty line must be a float (the score)
-      - stderr: free-form trace, passed to the mutator LLM via reflective_dataset
-      - non-zero exit is logged but treated as score=0.0 (caller decides what to do)
+      - stdout: last non-empty line is a float or a JSON envelope with 'score'
+      - stderr: free-form trace; JSON-per-line is collected into traces when
+        stdout is float-only
+      - non-zero exit is treated as score=0.0; stderr traces are still collected
     """
     grader_path = Path(grader).expanduser().resolve()
     if not grader_path.exists():
@@ -51,33 +57,28 @@ def run_grader(
         ) from e
 
     if proc.returncode != 0:
-        # Grader failure -> score 0.0, but preserve the stderr for the trace.
         return GraderResult(
             score=0.0,
             trace_stderr=proc.stderr,
             raw_stdout=proc.stdout,
             returncode=proc.returncode,
+            traces=parse_stderr_traces(proc.stderr),
         )
 
-    score = _parse_score(proc.stdout)
+    try:
+        score, submetrics, traces, parsed_envelope = parse_scorer_stdout(proc.stdout)
+    except ValueError as exc:
+        raise GraderError(str(exc)) from exc
+
+    if parsed_envelope is None:
+        traces = parse_stderr_traces(proc.stderr)
+
     return GraderResult(
         score=score,
         trace_stderr=proc.stderr,
         raw_stdout=proc.stdout,
         returncode=0,
-    )
-
-
-def _parse_score(stdout: str) -> float:
-    """Extract the final float from stdout. Tolerates leading junk."""
-    for line in reversed(stdout.splitlines()):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            return float(stripped)
-        except ValueError:
-            continue
-    raise GraderError(
-        f"Grader stdout had no parseable float on any line. Got: {stdout[:200]!r}"
+        submetrics=submetrics,
+        traces=traces,
+        parsed_envelope=parsed_envelope,
     )

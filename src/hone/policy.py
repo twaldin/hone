@@ -164,6 +164,12 @@ base_diff_stat:
 
 constraints:
 {constraints}
+
+submetrics:
+{submetrics}
+
+memory_packet:
+{memory_packet}
 """
 
 
@@ -176,6 +182,10 @@ class PromptKnobs:
     recent_attempts_window: int = 2
     max_trace_chars: int = 4000
     max_trace_summary_chars: int = 1200
+    include_submetrics: bool = True
+    include_memory_packet: bool = True
+    memory_packet_window: int = 6
+    memory_packet_max_chars: int = 2000
 
 
 @dataclass(frozen=True)
@@ -215,6 +225,8 @@ class PromptContext:
     parent_diff_stat: str
     base_diff_stat: str
     constraints: str
+    submetrics: str = ""
+    memory_packet: str = ""
 
 
 def build_iteration_prompt(policy: MutatorPolicy, ctx: PromptContext) -> str:
@@ -225,6 +237,8 @@ def build_iteration_prompt(policy: MutatorPolicy, ctx: PromptContext) -> str:
     recent_attempts = ctx.recent_attempts if policy.knobs.include_recent_attempts else "(omitted)"
     parent_diff_stat = ctx.parent_diff_stat if policy.knobs.include_parent_diff_stat else "(omitted)"
     base_diff_stat = ctx.base_diff_stat if policy.knobs.include_base_diff_stat else "(omitted)"
+    submetrics = ctx.submetrics if policy.knobs.include_submetrics else "(omitted)"
+    memory_packet = ctx.memory_packet if policy.knobs.include_memory_packet else "(omitted)"
     return policy.prompt_template.format(
         repo_name=ctx.repo_name,
         objective=ctx.objective,
@@ -237,6 +251,8 @@ def build_iteration_prompt(policy: MutatorPolicy, ctx: PromptContext) -> str:
         parent_diff_stat=parent_diff_stat or "(none)",
         base_diff_stat=base_diff_stat or "(none)",
         constraints=ctx.constraints or "(none)",
+        submetrics=submetrics or "(none)",
+        memory_packet=memory_packet or "(none)",
     ).strip() + "\n"
 
 
