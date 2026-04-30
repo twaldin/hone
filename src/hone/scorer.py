@@ -25,6 +25,9 @@ class ScorerResult:
     tasks: list = field(default_factory=list)
     gate_results: list = field(default_factory=list)
     json_path_used: bool = False
+    submetrics: dict[str, float] = field(default_factory=dict)
+    traces: list[dict] = field(default_factory=list)
+    parsed_envelope: dict | None = None
 
     @property
     def score(self) -> float:
@@ -85,11 +88,13 @@ def run_scorer(
                 trace_stderr=proc.stderr,
                 raw_stdout=proc.stdout,
                 returncode=proc.returncode,
+                traces=_parse_stderr_traces(proc.stderr),
             )
 
         raw_score: float | None = None
         metrics: dict = {}
         tasks: list = []
+        parsed_envelope: dict | None = None
         json_path_used = False
         utility_override: float | None = None
 
@@ -99,8 +104,9 @@ def run_scorer(
                 data = json.loads(result_content)
                 if isinstance(data, dict) and isinstance(data.get("score"), (int, float)):
                     raw_score = float(data["score"])
-                    metrics = data.get("metrics") or {}
-                    tasks = data.get("tasks") or []
+                    metrics = data.get("metrics") or data.get("submetrics") or {}
+                    tasks = data.get("tasks") or data.get("traces") or []
+                    parsed_envelope = data
                     if isinstance(data.get("utility"), (int, float)):
                         utility_override = float(data["utility"])
                     json_path_used = True
@@ -108,7 +114,14 @@ def run_scorer(
                 pass
 
         if raw_score is None:
-            raw_score = _parse_score(proc.stdout)
+            stdout_envelope = _parse_stdout_envelope(proc.stdout)
+            if stdout_envelope is not None:
+                raw_score = stdout_envelope["score"]
+                metrics = stdout_envelope.get("metrics", {})
+                tasks = stdout_envelope.get("tasks", [])
+                parsed_envelope = stdout_envelope.get("parsed_envelope")
+            else:
+                raw_score = _parse_score(proc.stdout)
 
         if utility_override is not None and json_path_used:
             utility = utility_override
@@ -126,6 +139,9 @@ def run_scorer(
             metrics=metrics,
             tasks=tasks,
             json_path_used=json_path_used,
+            submetrics={str(k): float(v) for k, v in metrics.items() if isinstance(v, (int, float))},
+            traces=[t for t in tasks if isinstance(t, dict)] or _parse_stderr_traces(proc.stderr),
+            parsed_envelope=parsed_envelope,
         )
     finally:
         try:
@@ -137,6 +153,44 @@ def run_scorer(
         except Exception:
             pass
 
+
+
+
+def _parse_stderr_traces(stderr: str) -> list[dict]:
+    traces: list[dict] = []
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            traces.append(data)
+    return traces
+
+def _parse_stdout_envelope(stdout: str) -> dict | None:
+    """Parse a JSON score envelope from the last non-empty stdout line, if present."""
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("score"), (int, float)):
+            return None
+        metrics = data.get("metrics") or data.get("submetrics") or {}
+        tasks = data.get("tasks") or data.get("traces") or []
+        return {
+            "score": float(data["score"]),
+            "metrics": metrics if isinstance(metrics, dict) else {},
+            "tasks": tasks if isinstance(tasks, list) else [],
+            "parsed_envelope": data,
+        }
+    return None
 
 def _parse_score(stdout: str) -> float:
     """Extract the final float from stdout. Tolerates leading junk."""

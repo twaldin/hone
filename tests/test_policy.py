@@ -62,3 +62,49 @@ def test_build_iteration_prompt_renders_structured_state() -> None:
     assert "current: 0.800000" in prompt
     assert "parent_diff_stat:" in prompt
     assert "constraints:" in prompt
+
+
+def test_build_iteration_prompt_renders_submetrics_and_memory_packet() -> None:
+    prompt = build_iteration_prompt(
+        SEED_POLICY,
+        PromptContext(
+            repo_name="test-repo",
+            objective="maximize score",
+            current_score=0.5,
+            best_score=0.7,
+            seed_score=0.3,
+            trace_summary="some trace",
+            structured_traces="{}",
+            recent_attempts="",
+            parent_diff_stat="M foo.py",
+            base_diff_stat="M foo.py",
+            constraints="files: foo.py",
+            submetrics="acc=0.800000\nf1=0.700000",
+            memory_packet="scores: parent=0.500000 best=0.700000 seed=0.300000",
+        ),
+    )
+    assert "submetrics:" in prompt
+    assert "memory_packet:" in prompt
+    assert "acc=0.800000" in prompt
+    assert "scores: parent=0.500000" in prompt
+
+
+def test_build_iteration_prompt_submetrics_defaults_to_none() -> None:
+    prompt = build_iteration_prompt(
+        SEED_POLICY,
+        PromptContext(
+            repo_name="r",
+            objective="o",
+            current_score=0.0,
+            best_score=0.0,
+            seed_score=0.0,
+            trace_summary="",
+            structured_traces="",
+            recent_attempts="",
+            parent_diff_stat="",
+            base_diff_stat="",
+            constraints="",
+        ),
+    )
+    assert "submetrics:\n(none)" in prompt
+    assert "memory_packet:\n(none)" in prompt

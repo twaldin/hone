@@ -25,6 +25,7 @@ def _build_harness_stub() -> types.ModuleType:
         workdir: Any = None
         model: str | None = None
         timeout_seconds: int = 1800
+        env: dict[str, str] = field(default_factory=dict)
 
     @dataclass
     class RunResult:
