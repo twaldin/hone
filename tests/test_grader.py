@@ -72,3 +72,50 @@ def test_non_zero_exit_returns_zero_score(tmp_path: Path) -> None:
     assert result.score == 0.0
     assert result.returncode == 1
     assert "broken" in result.trace_stderr
+
+
+def test_json_envelope_stdout_populates_submetrics_and_traces(tmp_path: Path) -> None:
+    grader = _write_grader(
+        tmp_path,
+        'echo \'{"score":0.7,"submetrics":{"acc":0.9},"traces":[{"case":"x","ok":true}]}\'',
+    )
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello")
+
+    result = run_grader(grader, prompt)
+    assert result.score == pytest.approx(0.7)
+    assert result.submetrics == {"acc": pytest.approx(0.9)}
+    assert result.traces == [{"case": "x", "ok": True}]
+    assert result.parsed_envelope is not None
+    assert result.returncode == 0
+
+
+def test_stderr_jsonl_traces_collected_for_float_stdout(tmp_path: Path) -> None:
+    grader = _write_grader(
+        tmp_path,
+        'printf \'{"case":"a","score":1}\\n{"case":"b"}\\n\' >&2\necho "0.5"',
+    )
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello")
+
+    result = run_grader(grader, prompt)
+    assert result.score == pytest.approx(0.5)
+    assert result.parsed_envelope is None
+    assert len(result.traces) == 2
+    assert result.traces[0]["case"] == "a"
+    assert result.traces[1]["case"] == "b"
+
+
+def test_non_zero_exit_collects_stderr_traces(tmp_path: Path) -> None:
+    grader = _write_grader(
+        tmp_path,
+        'printf \'{"case":"fail"}\' >&2\nexit 1',
+    )
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello")
+
+    result = run_grader(grader, prompt)
+    assert result.score == 0.0
+    assert result.returncode == 1
+    assert len(result.traces) == 1
+    assert result.traces[0]["case"] == "fail"

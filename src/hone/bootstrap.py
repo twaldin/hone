@@ -237,6 +237,10 @@ def apply_warmed_config(
                 recent_attempts_window=int(kdict.get("recent_attempts_window", knobs.recent_attempts_window)),
                 max_trace_chars=int(kdict.get("max_trace_chars", knobs.max_trace_chars)),
                 max_trace_summary_chars=int(kdict.get("max_trace_summary_chars", knobs.max_trace_summary_chars)),
+                include_submetrics=kdict.get("include_submetrics", knobs.include_submetrics),
+                include_memory_packet=kdict.get("include_memory_packet", knobs.include_memory_packet),
+                memory_packet_window=int(kdict.get("memory_packet_window", knobs.memory_packet_window)),
+                memory_packet_max_chars=int(kdict.get("memory_packet_max_chars", knobs.memory_packet_max_chars)),
             )
         except (json.JSONDecodeError, ValueError):
             pass
@@ -274,6 +278,10 @@ def read_config_dir(config_dir: Path) -> MutatorPolicy:
         recent_attempts_window=int(kdict.get("recent_attempts_window", 2)),
         max_trace_chars=int(kdict.get("max_trace_chars", 4000)),
         max_trace_summary_chars=int(kdict.get("max_trace_summary_chars", 1200)),
+        include_submetrics=kdict.get("include_submetrics", True),
+        include_memory_packet=kdict.get("include_memory_packet", True),
+        memory_packet_window=int(kdict.get("memory_packet_window", 6)),
+        memory_packet_max_chars=int(kdict.get("memory_packet_max_chars", 2000)),
     )
     return MutatorPolicy(
         prompt_template=template,
@@ -328,6 +336,10 @@ def _knobs_dict(knobs: PromptKnobs) -> dict:
         "recent_attempts_window": knobs.recent_attempts_window,
         "max_trace_chars": knobs.max_trace_chars,
         "max_trace_summary_chars": knobs.max_trace_summary_chars,
+        "include_submetrics": knobs.include_submetrics,
+        "include_memory_packet": knobs.include_memory_packet,
+        "memory_packet_window": knobs.memory_packet_window,
+        "memory_packet_max_chars": knobs.memory_packet_max_chars,
     }
 
 
