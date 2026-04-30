@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+_SRC_DIR = str(Path(__file__).parent.parent / "src")
 
 
 def _git(args, *, cwd):
@@ -43,9 +46,10 @@ def _make_budget_file(path: Path, remaining: int = 3) -> Path:
 
 
 def _run_proxy(env: dict) -> subprocess.CompletedProcess:
+    run_env = {**os.environ, **env, "PYTHONPATH": _SRC_DIR}
     return subprocess.run(
         [sys.executable, "-m", "hone.workers._scorer_proxy"],
-        env={**env, "PATH": "/usr/bin:/bin:/usr/local/bin"},
+        env=run_env,
         capture_output=True, text=True,
     )
 
@@ -238,3 +242,52 @@ def test_proxy_restores_working_state(tmp_path):
     assert proc.returncode == 0
     # Agent's edit should still be present
     assert (workdir / "file.txt").read_text(encoding="utf-8") == "agent-in-progress\n"
+
+
+# ---------------------------------------------------------------------------
+# Grader failure: no leaked stash, workdir restored, budget decremented
+# ---------------------------------------------------------------------------
+
+def test_proxy_grader_failure_no_leaked_stash(tmp_path):
+    """If run_grader raises (e.g. missing grader), stash is dropped and agent edits restored."""
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    _init_repo(workdir)
+
+    # Give workdir some uncommitted changes
+    (workdir / "file.txt").write_text("in-progress-edit\n", encoding="utf-8")
+
+    # Non-existent grader triggers GraderError("Grader not found: ...")
+    grader = tmp_path / "does_not_exist.py"
+
+    budget_file = _make_budget_file(tmp_path, remaining=2)
+
+    env = {
+        "HONE_BUDGET_FILE": str(budget_file),
+        "HONE_GRADER_PATH": str(grader),
+        "HONE_WORKDIR": str(workdir),
+        "HONE_RUN_DIR": str(tmp_path),
+        "HONE_GRADER_TIMEOUT": "30",
+        "HONE_SCORER_READONLY": "0",
+    }
+    proc = _run_proxy(env)
+
+    # Proxy should exit non-zero on grader failure
+    assert proc.returncode != 0
+
+    # Budget file must record a failed attempt (pushed=False) and decrement remaining
+    budget_data = json.loads(budget_file.read_text())
+    assert budget_data["remaining"] == 1
+    assert len(budget_data["attempts"]) == 1
+    attempt = budget_data["attempts"][0]
+    assert "grader-error" in attempt["notes"]
+    assert attempt["pushed"] is False  # stash was dropped to avoid orphan
+
+    # No stashes should remain (stash was dropped after re-applying agent edits)
+    stash_list = subprocess.run(
+        ["git", "stash", "list"], cwd=str(workdir), capture_output=True, text=True,
+    )
+    assert stash_list.stdout.strip() == "", f"Stash leaked: {stash_list.stdout}"
+
+    # Agent's in-progress edits should be restored
+    assert (workdir / "file.txt").read_text(encoding="utf-8") == "in-progress-edit\n"

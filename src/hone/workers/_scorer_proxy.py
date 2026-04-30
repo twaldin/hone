@@ -64,26 +64,55 @@ def main() -> None:
     if pushed:
         subprocess.run(
             ["git", "stash", "apply", "stash@{0}"],
-            cwd=str(workdir), capture_output=True, check=True,
+            cwd=str(workdir), capture_output=True,
         )
 
-    # Run grader
+    # Run grader; always clean up regardless of success/failure
     from hone.grader import run_grader
     from hone.scorer_result import to_scorer_result
 
-    grader_result = run_grader(grader_path, workdir, timeout_seconds=grader_timeout)
-    sr = to_scorer_result(grader_result)
+    sr = None
+    grade_error: str | None = None
+    try:
+        grader_result = run_grader(grader_path, workdir, timeout_seconds=grader_timeout)
+        sr = to_scorer_result(grader_result)
+    except Exception as exc:
+        grade_error = str(exc)
+    finally:
+        # Reset grader side effects; workdir returns to HEAD
+        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(workdir), capture_output=True)
+        subprocess.run(["git", "clean", "-fd"], cwd=str(workdir), capture_output=True)
+        if pushed:
+            # Restore agent's in-progress edits
+            subprocess.run(
+                ["git", "stash", "apply", "stash@{0}"],
+                cwd=str(workdir), capture_output=True,
+            )
+            if grade_error is not None:
+                # Drop the stash: agent's edits are now in workdir, and recording
+                # pushed=False prevents HarnessWorker from orphaning this stash.
+                subprocess.run(
+                    ["git", "stash", "drop", "stash@{0}"],
+                    cwd=str(workdir), capture_output=True,
+                )
 
-    # Reset grader side effects; workdir returns to HEAD
-    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(workdir), capture_output=True, check=True)
-    subprocess.run(["git", "clean", "-fd"], cwd=str(workdir), capture_output=True, check=True)
-
-    # Re-apply stash so agent can continue editing from its pre-call state
-    if pushed:
-        subprocess.run(
-            ["git", "stash", "apply", "stash@{0}"],
-            cwd=str(workdir), capture_output=True, check=True,
-        )
+    if grade_error is not None:
+        budget_data["remaining"] -= 1
+        budget_data["attempts"].append({
+            "attempt_idx": attempt_idx,
+            "score": 0.0,
+            "submetrics": {},
+            "pushed": False,  # stash was dropped; HarnessWorker stash indexing unaffected
+            "stash_ref": None,
+            "traces_path": None,
+            "trace_stderr": grade_error,
+            "raw_stdout": "",
+            "parsed_envelope": None,
+            "notes": f"grader-error: {grade_error}",
+        })
+        _write_json_atomic(budget_file, budget_data)
+        print(json.dumps({"error": grade_error}), file=sys.stderr)
+        sys.exit(1)
 
     # Scorer-readonly: check grader was not tampered with during the call
     notes = ""
