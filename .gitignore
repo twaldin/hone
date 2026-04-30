@@ -22,3 +22,18 @@ build/
 # hone run state + outputs
 .hone/
 *.honed.md
+
+# Agent instruction files (never ship)
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+
+# Agent runtime dirs
+.opencode/
+.claude/
+.flt/
+
+# Internal artifact dirs
+handoffs/
+specs/
+writeup/
