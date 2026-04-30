@@ -8,6 +8,7 @@ HarnessWorker picks the best-scoring attempt and restores its stash.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import uuid
 from pathlib import Path
@@ -61,7 +62,7 @@ class HarnessWorker(Worker):
 
         workdir = Path(workdir)
         run_dir = workdir.parent
-        grader_path, grader_timeout = self._load_grader_config(run_dir)
+        grader_path = self._load_grader_config(run_dir)
 
         budget_file = run_dir / f".hone-budget-{uuid.uuid4().hex[:12]}.json"
         budget_data: dict = {"remaining": effective_budget, "attempts": [], "policy_decisions": []}
@@ -74,7 +75,7 @@ class HarnessWorker(Worker):
             grader_path=grader_path,
             workdir=workdir,
             run_dir=run_dir,
-            grader_timeout=grader_timeout,
+            grader_timeout=self.timeout_seconds,
             scorer_readonly=self.scorer_readonly,
         )
 
@@ -183,15 +184,15 @@ class HarnessWorker(Worker):
             cost_usd=harness_result.cost_usd,
         )
 
-    def _load_grader_config(self, run_dir: Path) -> tuple[Path, int]:
+    def _load_grader_config(self, run_dir: Path) -> Path:
         manifest_path = run_dir / "run.json"
         if manifest_path.exists():
             try:
                 data = json.loads(manifest_path.read_text(encoding="utf-8"))
-                return Path(data["grader_path"]), int(data.get("grader_timeout_seconds", 3600))
+                return Path(data["grader_path"])
             except Exception:
                 pass
-        return Path("/dev/null"), 3600
+        return Path("/dev/null")
 
 
 def _restore_best_stash(
@@ -236,12 +237,12 @@ def _write_proxy_script(
 ) -> None:
     script = (
         "#!/usr/bin/env bash\n"
-        f'export HONE_BUDGET_FILE="{budget_file}"\n'
-        f'export HONE_GRADER_PATH="{grader_path}"\n'
-        f'export HONE_WORKDIR="{workdir}"\n'
-        f'export HONE_RUN_DIR="{run_dir}"\n'
-        f'export HONE_GRADER_TIMEOUT="{grader_timeout}"\n'
-        f'export HONE_SCORER_READONLY="{1 if scorer_readonly else 0}"\n'
+        f'export HONE_BUDGET_FILE={shlex.quote(str(budget_file))}\n'
+        f'export HONE_GRADER_PATH={shlex.quote(str(grader_path))}\n'
+        f'export HONE_WORKDIR={shlex.quote(str(workdir))}\n'
+        f'export HONE_RUN_DIR={shlex.quote(str(run_dir))}\n'
+        f'export HONE_GRADER_TIMEOUT={shlex.quote(str(grader_timeout))}\n'
+        f'export HONE_SCORER_READONLY={shlex.quote("1" if scorer_readonly else "0")}\n'
         'exec python3 -m hone.workers._scorer_proxy "$@"\n'
     )
     proxy_path.write_text(script, encoding="utf-8")

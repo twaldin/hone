@@ -285,3 +285,86 @@ def test_resolve_worker_unknown_spec_still_raises():
     from unittest.mock import MagicMock
     with pytest.raises(WorkerError):
         resolve_worker("unknown", mutator=MagicMock())
+
+
+# ---------------------------------------------------------------------------
+# Timeout propagation
+# ---------------------------------------------------------------------------
+
+def test_harness_worker_timeout_plumbed_into_proxy(tmp_path, monkeypatch):
+    """HONE_GRADER_TIMEOUT in proxy script must equal constructor timeout_seconds."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    workdir = run_dir / "workdir"
+    workdir.mkdir()
+    _init_repo(workdir)
+    grader = _make_fake_grader(tmp_path)
+    _write_manifest(run_dir, grader)
+
+    captured_timeout_line: list[str] = []
+
+    def fake_run(spec):
+        proxy_path = Path(spec.env["HONE_SCORER_PROXY"])
+        for line in proxy_path.read_text().splitlines():
+            if "HONE_GRADER_TIMEOUT" in line:
+                captured_timeout_line.append(line)
+        budget_file = Path(spec.env["HONE_BUDGET_FILE"])
+        data = json.loads(budget_file.read_text())
+        data["remaining"] = 0
+        data["attempts"].append({
+            "attempt_idx": 0, "score": 0.4, "submetrics": {},
+            "pushed": False, "stash_ref": None, "traces_path": None,
+            "trace_stderr": "", "raw_stdout": "", "parsed_envelope": None, "notes": "",
+        })
+        budget_file.write_text(json.dumps(data), encoding="utf-8")
+        return RunResult(
+            harness="claude-code", model=None, exit_code=0,
+            duration_seconds=0.5, stdout="", stderr="", timed_out=False,
+            cost_usd=None, tokens_in=None, tokens_out=None, raw=None,
+        )
+
+    monkeypatch.setattr("harness.run", fake_run)
+
+    worker = HarnessWorker("claude-code", worker_budget=1, scorer_readonly=False, timeout_seconds=999)
+    worker.propose(prompt="x", workdir=workdir, scorer=_noop_scorer, scorer_budget=1)
+
+    assert captured_timeout_line, "HONE_GRADER_TIMEOUT line not found in proxy script"
+    assert "999" in captured_timeout_line[0], (
+        f"Expected 999 in timeout line, got: {captured_timeout_line[0]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shell-safe path quoting in proxy script
+# ---------------------------------------------------------------------------
+
+def test_proxy_script_shell_quotes_special_paths(tmp_path):
+    """_write_proxy_script must shell-quote all interpolated values."""
+    import shlex
+    from hone.workers.harness_worker import _write_proxy_script
+
+    proxy = tmp_path / "proxy.sh"
+    budget = tmp_path / "path with spaces" / "budget.json"
+    budget.parent.mkdir()
+    budget.write_text("{}", encoding="utf-8")
+
+    _write_proxy_script(
+        proxy,
+        budget_file=budget,
+        grader_path=Path("/grader path/g.py"),
+        workdir=Path("/work dir"),
+        run_dir=Path("/run dir"),
+        grader_timeout=300,
+        scorer_readonly=True,
+    )
+
+    script = proxy.read_text()
+    for line in script.splitlines():
+        if not line.startswith("export ") or "=" not in line:
+            continue
+        _, value_part = line.split("=", 1)
+        tokens = shlex.split(value_part)
+        assert len(tokens) == 1, (
+            f"Unsafe shell quoting in proxy script line: {line!r} "
+            f"(parsed as {len(tokens)} tokens)"
+        )
