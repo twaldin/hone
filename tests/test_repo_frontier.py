@@ -243,6 +243,16 @@ def test_frontier_multi_attempt_worker(tmp_path: Path) -> None:
     iter_row = next(r for r in rows if r.get("kind") != "seed")
     assert iter_row["scorer_calls"] == 2
 
+    # Best attempt's commit_sha must be filled in the persisted trace.
+    import json as _json
+    traces_dir = run_dir / "traces"
+    # iter-000 is the seed (no worker attempts); iter-001 is the first worker iteration.
+    iter001 = traces_dir / "iter-001.json"
+    assert iter001.exists(), "iter-001.json trace not written"
+    trace = _json.loads(iter001.read_text())
+    best_attempt_trace = next(a for a in trace["attempts"] if a["attempt_idx"] == 1)
+    assert best_attempt_trace["commit_sha"] is not None, "best attempt commit_sha not set"
+
 
 def test_frontier_grader_side_effects_not_committed(tmp_path: Path) -> None:
     """Grader writes output files inside workdir; those files must not be committed."""

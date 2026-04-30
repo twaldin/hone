@@ -298,6 +298,7 @@ def optimize_repo_frontier(
         child_sha = _git(["rev-parse", "HEAD"], cwd=workdir).strip()
 
         best_att = worker_result.best_attempt
+        best_att.commit_sha = child_sha
         child_traces = (
             [t for t in best_att.parsed_envelope.get("traces", []) if isinstance(t, dict)]
             if best_att.parsed_envelope

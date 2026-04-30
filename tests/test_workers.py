@@ -42,6 +42,21 @@ def test_local_worker_one_attempt_and_scorer_call() -> None:
     mutator.propose_edit_mode.assert_called_once()
 
 
+def test_local_worker_zero_budget_returns_error_no_scorer() -> None:
+    mutator = MagicMock()
+    scorer = MagicMock()
+
+    worker = LocalWorker(mutator)
+    result = worker.propose(prompt="test", workdir=Path("/tmp"), scorer=scorer, scorer_budget=0)
+
+    assert result.attempts == []
+    assert result.best_attempt_idx == -1
+    assert result.scorer_calls == 0
+    assert result.error is not None
+    scorer.assert_not_called()
+    mutator.propose_edit_mode.assert_not_called()
+
+
 def test_local_worker_mutator_failure_does_not_call_scorer() -> None:
     mutator = MagicMock()
     mutator.propose_edit_mode.side_effect = RuntimeError("boom")

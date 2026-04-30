@@ -24,6 +24,17 @@ class LocalWorker(Worker):
         scorer: Callable[[Path], ScorerResult],
         scorer_budget: int,
     ) -> WorkerResult:
+        if scorer_budget < 1:
+            return WorkerResult(
+                attempts=[],
+                best_attempt_idx=-1,
+                scorer_calls=0,
+                tokens_in=None,
+                tokens_out=None,
+                cost_usd=None,
+                error="scorer budget exhausted",
+            )
+
         try:
             result = self._mutator.propose_edit_mode(prompt, workdir=workdir)
         except Exception as exc:
