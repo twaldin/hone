@@ -3,16 +3,20 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import List, Optional
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 
 from hone import __version__
-from hone.bootstrap import load_run_data, build_reflector_input, parse_config_output, apply_warmed_config, write_config_dir, run_bootstrap
+from hone.bootstrap import load_run_data, run_bootstrap
+from hone.config import HoneConfig, load_config, save_config
+from hone.gates import GateSpec
 from hone.mutators import resolve as resolve_mutator
 from hone.policy import SEED_POLICY
 from hone.repo_frontier import optimize_repo_frontier
+from hone.report import generate_report, write_report
 from hone.storage import new_run_dir
 
 app = typer.Typer(
@@ -29,80 +33,46 @@ def version() -> None:
     console.print(f"hone {__version__}")
 
 
-@app.command()
-def run(
-    dir: Path = typer.Option(
-        ..., "--dir",
-        exists=True, file_okay=False, dir_okay=True, readable=True,
-        help="Source directory to optimize. hone copies it into a managed "
-             "workspace — your dir is never touched.",
-    ),
-    grader: Path = typer.Option(
-        ..., "--grader", exists=True,
-        help="Grader script. Invoked as `<grader> <workdir>`. "
-             "Stdout last line = float score. Stderr = trace.",
-    ),
-    mutator: str = typer.Option(
-        "harness:claude-code:sonnet", "--mutator",
-        help="Mutator spec. Only harness-backed supported in v1. "
-             "e.g. harness:claude-code:sonnet, harness:opencode:openai/gpt-5.4",
-    ),
-    budget: int = typer.Option(20, "--budget", min=1, help="Max iterations."),
-    grader_timeout: int = typer.Option(3600, "--grader-timeout", min=1),
-    output: Path | None = typer.Option(
-        None, "--output", "-o",
-        help="Write the best candidate's files here at the end. "
-             "If omitted, the best state is left in the managed workdir on a tagged branch.",
-    ),
-    frontier_size: int = typer.Option(4, "--frontier-size", min=1),
-    objective: str = typer.Option(
-        "Improve the repository so the grader score increases.", "--objective",
-        help="One-line objective passed to the mutator each iteration.",
-    ),
-    policy_dir: Path | None = typer.Option(
-        None, "--policy",
-        exists=True, file_okay=False, dir_okay=True,
-        help="Config dir with playbook.md, prompt-template.md, knobs.json. "
-             "If omitted, uses built-in seed policy.",
-    ),
-    ace_interval: int = typer.Option(
-        0, "--ace-interval", min=0,
-        help="ACE outer loop: reflect and evolve config every N iterations. "
-             "0 = disabled.",
-    ),
-    ace_model: str = typer.Option(
-        "", "--ace-model",
-        help="ACE reflector model spec. Defaults to same as --mutator. "
-             "Must support text-only propose() (e.g. gemini, claude-code).",
-    ),
-    resume: Path | None = typer.Option(
-        None, "--resume",
-        exists=True, file_okay=False, dir_okay=True,
-        help="Resume an interrupted run. Pass the existing run dir "
-             "(.hone/run-<id>/). Reuses its workdir, mutations.jsonl, "
-             "and git state. --dir/--grader/--mutator/--budget should match "
-             "the original run; budget is the TOTAL iters (not additional).",
-    ),
+def _parse_gate(s: str) -> GateSpec:
+    if "=" in s:
+        name, _, command = s.partition("=")
+    elif ":" in s:
+        name, _, command = s.partition(":")
+    else:
+        raise ValueError(f"Gate spec must be 'name=command' or 'name:command', got: {s!r}")
+    return GateSpec(name=name.strip(), command=command.strip())
+
+
+def _run_optimize(
+    cfg: HoneConfig,
+    *,
+    output: Path | None,
+    resume: Path | None,
 ) -> None:
-    """Optimize a directory against a grader via git-branch frontier search."""
     try:
-        mutator_instance = resolve_mutator(mutator)
+        mutator_instance = resolve_mutator(cfg.mutator)
     except Exception as e:
-        console.print(f"[red]Failed to resolve mutator {mutator!r}: {e}[/red]")
+        console.print(f"[red]Failed to resolve mutator {cfg.mutator!r}: {e}[/red]")
         raise typer.Exit(code=2) from e
 
     ace_mutator_instance = None
-    if ace_interval > 0 and ace_model:
+    if cfg.ace_interval > 0 and cfg.ace_model:
         try:
-            ace_mutator_instance = resolve_mutator(ace_model)
+            ace_mutator_instance = resolve_mutator(cfg.ace_model)
         except Exception as e:
-            console.print(f"[red]Failed to resolve ACE model {ace_model!r}: {e}[/red]")
+            console.print(f"[red]Failed to resolve ACE model {cfg.ace_model!r}: {e}[/red]")
             raise typer.Exit(code=2) from e
 
     from hone.bootstrap import read_config_dir
     policy = SEED_POLICY
-    if policy_dir is not None:
-        policy = read_config_dir(policy_dir)
+    if cfg.policy_dir is not None:
+        policy = read_config_dir(Path(cfg.policy_dir))
+
+    gates = (
+        [GateSpec(name=g["name"], command=g["command"]) for g in cfg.gates]
+        if cfg.gates
+        else []
+    )
 
     if resume is not None:
         run_dir = resume.resolve()
@@ -110,16 +80,26 @@ def run(
     else:
         run_dir = new_run_dir()
         resume_mode = False
-    ace_info = f"\n[bold]ACE interval[/bold]  {ace_interval}" + (
-        f"\n[bold]ACE model[/bold]      {ace_mutator_instance}" if ace_mutator_instance else ""
-    ) if ace_interval > 0 else ""
+
+    stall_val = cfg.stall if cfg.stall and cfg.stall > 0 else None
+
+    ace_info = (
+        f"\n[bold]ACE interval[/bold]  {cfg.ace_interval}"
+        + (
+            f"\n[bold]ACE model[/bold]      {ace_mutator_instance}"
+            if ace_mutator_instance
+            else ""
+        )
+        if cfg.ace_interval > 0
+        else ""
+    )
     resume_badge = "\n[bold yellow]resume[/bold yellow]         ON" if resume_mode else ""
     console.print(Panel.fit(
-        f"[bold]source[/bold]         {dir.resolve()}\n"
-        f"[bold]grader[/bold]         {grader.resolve()}\n"
+        f"[bold]source[/bold]         {Path(cfg.src_dir).resolve()}\n"
+        f"[bold]scorer[/bold]         {cfg.scorer}\n"
         f"[bold]mutator[/bold]        {mutator_instance}\n"
-        f"[bold]budget[/bold]         {budget}\n"
-        f"[bold]frontier size[/bold]  {frontier_size}\n"
+        f"[bold]budget[/bold]         {cfg.budget}\n"
+        f"[bold]frontier size[/bold]  {cfg.frontier_size}\n"
         f"[bold]run dir[/bold]        {run_dir}"
         f"{ace_info}"
         f"{resume_badge}",
@@ -127,19 +107,22 @@ def run(
     ))
 
     result = optimize_repo_frontier(
-        src_dir=dir.resolve(),
-        grader_path=grader.resolve(),
+        src_dir=Path(cfg.src_dir).resolve(),
+        grader_path=Path(cfg.scorer),
         mutator=mutator_instance,
-        mutator_spec=mutator,
-        budget=budget,
-        grader_timeout_seconds=grader_timeout,
+        mutator_spec=cfg.mutator,
+        budget=cfg.budget,
+        grader_timeout_seconds=cfg.scorer_timeout,
         run_dir=run_dir,
-        frontier_size=frontier_size,
-        objective=objective,
+        frontier_size=cfg.frontier_size,
+        objective=cfg.objective,
         policy=policy,
-        ace_interval=ace_interval,
+        ace_interval=cfg.ace_interval,
         ace_mutator=ace_mutator_instance,
         resume=resume_mode,
+        metric_direction=cfg.metric_direction,
+        stall=stall_val,
+        gates=gates or None,
     )
 
     output_note = ""
@@ -156,6 +139,10 @@ def run(
         )
         output_note = f"\n[bold]output written[/bold] {output}"
 
+    stall_note = ""
+    if stall_val is not None and result.total_iterations < cfg.budget:
+        stall_note = f"\n[yellow]stalled after {result.total_iterations} iters[/yellow]"
+
     console.print()
     console.print(Panel.fit(
         f"[bold green]best score[/bold green]      {result.best_score:.4f}\n"
@@ -167,14 +154,215 @@ def run(
         f"out={result.mutator_tokens_out:,}\n"
         f"[bold]mutator cost[/bold]     ${result.mutator_cost_usd:.4f}\n"
         f"[bold]run dir[/bold]          {result.run_dir}"
-        f"{output_note}",
+        f"{output_note}"
+        f"{stall_note}",
         title="done",
     ))
 
 
 @app.command()
+def discover(
+    src: Path = typer.Option(
+        ..., "--src",
+        exists=True, file_okay=False, dir_okay=True, readable=True,
+        help="Source directory to inspect for discovery.",
+    ),
+    suggest: Path = typer.Option(
+        ..., "--suggest",
+        help="Output directory for suggested benchmark skeleton artifacts.",
+    ),
+    strict: bool = typer.Option(
+        False, "--strict",
+        help="Exit non-zero until discover is implemented.",
+    ),
+) -> None:
+    """Stub for benchmark discovery workflow design surface."""
+    console.print(
+        "[yellow]hone discover is not yet implemented.[/yellow] "
+        "Planned surface: hone discover --src <dir> --suggest <out_dir>."
+    )
+    raise typer.Exit(code=2 if strict else 0)
+
+
+@app.command()
+def run(
+    dir: Path = typer.Option(
+        ..., "--dir",
+        exists=True, file_okay=False, dir_okay=True, readable=True,
+        help="Source directory to optimize. hone copies it into a managed "
+             "workspace — your dir is never touched.",
+    ),
+    scorer: Optional[Path] = typer.Option(
+        None, "--scorer",
+        help="Scorer script. Invoked as `<scorer> <workdir>`. "
+             "Stdout last line = float score. Stderr = trace.",
+    ),
+    grader: Optional[Path] = typer.Option(
+        None, "--grader",
+        help="[Deprecated] Alias for --scorer.",
+    ),
+    mutator: str = typer.Option(
+        "harness:claude-code:sonnet", "--mutator",
+        help="Mutator spec. e.g. harness:claude-code:sonnet",
+    ),
+    budget: int = typer.Option(20, "--budget", min=1, help="Max iterations."),
+    grader_timeout: int = typer.Option(3600, "--scorer-timeout", "--grader-timeout", min=1),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Write the best candidate's files here at the end.",
+    ),
+    frontier_size: int = typer.Option(4, "--frontier-size", min=1),
+    objective: str = typer.Option(
+        "Improve the repository so the scorer score increases.", "--objective",
+        help="One-line objective passed to the mutator each iteration.",
+    ),
+    policy_dir: Optional[Path] = typer.Option(
+        None, "--policy",
+        exists=True, file_okay=False, dir_okay=True,
+        help="Config dir with playbook.md, prompt-template.md, knobs.json.",
+    ),
+    ace_interval: int = typer.Option(
+        0, "--ace-interval", min=0,
+        help="ACE outer loop: reflect and evolve config every N iterations. 0 = disabled.",
+    ),
+    ace_model: str = typer.Option(
+        "", "--ace-model",
+        help="ACE reflector model spec.",
+    ),
+    resume: Optional[Path] = typer.Option(
+        None, "--resume",
+        exists=True, file_okay=False, dir_okay=True,
+        help="Resume an interrupted run.",
+    ),
+    stall: Optional[int] = typer.Option(
+        None, "--stall",
+        help="Stop after N consecutive iterations with no best-score improvement. 0 = disabled.",
+    ),
+    metric_direction: str = typer.Option(
+        "max", "--metric",
+        help="Optimization direction: 'max' or 'min'.",
+    ),
+    gate: Optional[List[str]] = typer.Option(
+        None, "--gate",
+        help="Gate spec in 'name=command' or 'name:command' format. Repeatable.",
+    ),
+) -> None:
+    """Optimize a directory against a scorer via git-branch frontier search."""
+    if scorer is not None:
+        effective_scorer = scorer
+    elif grader is not None:
+        typer.echo("Warning: --grader is deprecated, use --scorer instead", err=True)
+        effective_scorer = grader
+    else:
+        console.print("[red]Either --scorer or --grader is required[/red]")
+        raise typer.Exit(code=2)
+
+    if metric_direction not in ("max", "min"):
+        console.print(f"[red]--metric must be 'max' or 'min', got {metric_direction!r}[/red]")
+        raise typer.Exit(code=2)
+
+    gate_list = gate or []
+    try:
+        gate_specs = [_parse_gate(g) for g in gate_list]
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2) from e
+
+    cfg = HoneConfig(
+        src_dir=str(dir.resolve()),
+        scorer=str(effective_scorer),
+        mutator=mutator,
+        budget=budget,
+        scorer_timeout=grader_timeout,
+        frontier_size=frontier_size,
+        objective=objective,
+        metric_direction=metric_direction,
+        stall=stall,
+        gates=[{"name": g.name, "command": g.command} for g in gate_specs],
+        ace_interval=ace_interval,
+        ace_model=ace_model,
+        policy_dir=str(policy_dir) if policy_dir is not None else None,
+    )
+    _run_optimize(cfg, output=output, resume=resume)
+
+
+@app.command()
+def init(
+    src_dir: str = typer.Option(..., "--src-dir", help="Source directory to optimize."),
+    scorer: str = typer.Option(..., "--scorer", help="Scorer script path."),
+    to: Path = typer.Option(Path("hone.toml"), "--to", help="Output path for hone.toml."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing hone.toml."),
+    mutator: str = typer.Option("harness:claude-code:sonnet", "--mutator"),
+    budget: int = typer.Option(20, "--budget"),
+    scorer_timeout: int = typer.Option(3600, "--scorer-timeout"),
+    frontier_size: int = typer.Option(4, "--frontier-size"),
+    objective: str = typer.Option(
+        "Improve the repository so the scorer score increases.", "--objective"
+    ),
+    metric_direction: str = typer.Option("max", "--metric"),
+    stall: Optional[int] = typer.Option(None, "--stall"),
+    ace_interval: int = typer.Option(0, "--ace-interval"),
+    ace_model: str = typer.Option("", "--ace-model"),
+    policy_dir: Optional[str] = typer.Option(None, "--policy"),
+    gate: Optional[List[str]] = typer.Option(None, "--gate"),
+) -> None:
+    """Write hone.toml in cwd (or --to path)."""
+    if to.exists() and not force:
+        console.print(f"[red]{to} already exists. Use --force to overwrite.[/red]")
+        raise typer.Exit(code=1)
+
+    if metric_direction not in ("max", "min"):
+        console.print(f"[red]--metric must be 'max' or 'min', got {metric_direction!r}[/red]")
+        raise typer.Exit(code=2)
+
+    gate_list = gate or []
+    try:
+        gate_specs = [_parse_gate(g) for g in gate_list]
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2) from e
+
+    cfg = HoneConfig(
+        src_dir=src_dir,
+        scorer=scorer,
+        mutator=mutator,
+        budget=budget,
+        scorer_timeout=scorer_timeout,
+        frontier_size=frontier_size,
+        objective=objective,
+        metric_direction=metric_direction,
+        stall=stall,
+        gates=[{"name": g.name, "command": g.command} for g in gate_specs],
+        ace_interval=ace_interval,
+        ace_model=ace_model,
+        policy_dir=policy_dir,
+    )
+    save_config(cfg, to)
+    console.print(f"[green]Wrote {to}[/green]")
+
+
+@app.command()
+def optimize(
+    config: Path = typer.Option(Path("hone.toml"), "--config", "-c", help="Path to hone.toml."),
+    output: Optional[Path] = typer.Option(None, "--output", "-o"),
+    resume: Optional[Path] = typer.Option(
+        None, "--resume",
+        exists=True, file_okay=False, dir_okay=True,
+    ),
+) -> None:
+    """Run hone using settings from hone.toml."""
+    try:
+        cfg = load_config(config)
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[red]Failed to load config {config}: {e}[/red]")
+        raise typer.Exit(code=2) from e
+    _run_optimize(cfg, output=output, resume=resume)
+
+
+
+@app.command()
 def reflect(
-    runs: list[Path] = typer.Option(
+    runs: List[Path] = typer.Option(
         ..., "--runs",
         exists=True, file_okay=False, dir_okay=True,
         help="Hone run directories to analyze (each should contain mutations.jsonl).",
@@ -223,6 +411,32 @@ def reflect(
     console.print(f"  playbook.md:       {len(warmed.playbook_text)} chars")
     console.print(f"  prompt-template.md: {len(warmed.prompt_template)} chars")
     console.print(f"  knobs.json:        {warmed.knobs}")
+
+
+@app.command()
+def report(
+    run: Path = typer.Option(
+        ..., "--run",
+        exists=True, file_okay=False, dir_okay=True, readable=True,
+        help="Run directory (contains run.json and mutations.jsonl).",
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o",
+        help="Output markdown path (defaults to <run>/report.md).",
+    ),
+    stdout: bool = typer.Option(
+        False, "--stdout",
+        help="Print report markdown to stdout instead of writing a file.",
+    ),
+) -> None:
+    """Generate a static markdown report from a hone run directory."""
+    if stdout:
+        print(generate_report(run), end="")
+        return
+
+    destination = output or (run / "report.md")
+    written = write_report(run, destination)
+    console.print(f"[green]Report written to {written}[/green]")
 
 
 def main() -> None:

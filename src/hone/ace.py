@@ -174,6 +174,10 @@ def curate(new_policy: MutatorPolicy, old_policy: MutatorPolicy) -> bool:
         return False
     if not (50 <= knobs.max_trace_summary_chars <= 10000):
         return False
+    if not (0 <= knobs.memory_packet_window <= 50):
+        return False
+    if not (200 <= knobs.memory_packet_max_chars <= 20000):
+        return False
 
     return True
 
