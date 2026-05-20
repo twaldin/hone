@@ -12,6 +12,12 @@ from rich.panel import Panel
 from hone import __version__
 from hone.bootstrap import load_run_data, run_bootstrap
 from hone.config import HoneConfig, load_config, save_config
+from hone.gepa_faithful import (
+    HarnessAdapterConfig,
+    HarnessMutatorAdapter,
+    OptimizeCodeConfig,
+    optimize_code,
+)
 from hone.gates import GateSpec
 from hone.mutators import resolve as resolve_mutator
 from hone.policy import SEED_POLICY
@@ -284,6 +290,68 @@ def run(
         policy_dir=str(policy_dir) if policy_dir is not None else None,
     )
     _run_optimize(cfg, output=output, resume=resume)
+
+
+@app.command("optimize-code")
+def optimize_code_command(
+    repo: Path = typer.Option(
+        ..., "--repo",
+        exists=True, file_okay=False, dir_okay=True, readable=True,
+        help="Git repository to optimize as GEPA code-state candidates.",
+    ),
+    test_command: str = typer.Option(
+        ..., "--test-command",
+        help="Command GEPA's evaluator runs inside candidate worktrees.",
+    ),
+    seed_instructions: str = typer.Option(
+        "Improve the repository so the tests pass faster and reliably.",
+        "--seed-instructions",
+        help="Initial candidate instructions GEPA tracks with the base commit.",
+    ),
+    base_commit: Optional[str] = typer.Option(
+        None, "--base-commit",
+        help="Base commit SHA. Defaults to repository HEAD.",
+    ),
+    max_metric_calls: int = typer.Option(20, "--max-metric-calls", min=1),
+    objective: Optional[str] = typer.Option(None, "--objective"),
+    background: Optional[str] = typer.Option(None, "--background"),
+    harness: str = typer.Option("codex", "--harness"),
+    model: Optional[str] = typer.Option(None, "--model"),
+    harness_timeout: int = typer.Option(1800, "--harness-timeout", min=1),
+    worktree_root: Optional[Path] = typer.Option(None, "--worktree-root"),
+    keep_worktrees: bool = typer.Option(True, "--keep-worktrees/--remove-worktrees"),
+    run_dir: Optional[str] = typer.Option(None, "--run-dir"),
+) -> None:
+    """Run first-class GEPA optimize_anything over committed code states."""
+    config = OptimizeCodeConfig(max_metric_calls=max_metric_calls, run_dir=run_dir)
+    adapter = HarnessMutatorAdapter(
+        HarnessAdapterConfig(
+            harness=harness,
+            model=model,
+            timeout_seconds=harness_timeout,
+        ),
+        worktree_root=worktree_root,
+        keep_worktrees=keep_worktrees,
+    )
+    result = optimize_code(
+        repo_path=repo,
+        test_command=test_command,
+        seed_instructions=seed_instructions,
+        base_commit=base_commit,
+        max_metric_calls=max_metric_calls,
+        objective=objective,
+        background=background,
+        config=config,
+        mutator_adapter=adapter,
+    )
+    console.print(Panel.fit(
+        f"[bold]optimizer[/bold]        {result.metadata['optimizer']}\n"
+        f"[bold]adapter[/bold]          {result.metadata['adapter']}\n"
+        f"[bold]frontier[/bold]         {result.metadata['frontier_type']}\n"
+        f"[bold]metric calls[/bold]     {result.metadata['total_metric_calls']}\n"
+        f"[bold green]best commit[/bold green]     {result.best_commit_sha}",
+        title="gepa optimize-code done",
+    ))
 
 
 @app.command()

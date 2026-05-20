@@ -5,9 +5,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from typer.testing import CliRunner
 
 from harness import RunResult
 
+from hone.cli import app
 from hone.gepa_faithful import (
     DEFAULT_FRONTIER_TYPE,
     GEPAResultMetadata,
@@ -222,6 +224,114 @@ def test_harness_mutator_adapter_uses_stable_runspec_contract(
     assert "HONE_SCORER_PROXY" not in captured["spec"].env
 
 
+def test_harness_adapter_exposes_gepa_proposer_that_commits_cli_code_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    base, _passing = _init_repo(repo)
+
+    def fake_run(spec):
+        assert Path(spec.workdir).exists()
+        assert _git(["rev-parse", "HEAD"], cwd=Path(spec.workdir)) == base
+        (Path(spec.workdir) / "marker.txt").write_text("from cli\n", encoding="utf-8")
+        return RunResult(
+            harness=spec.harness,
+            model=spec.model,
+            exit_code=0,
+            duration_seconds=2.0,
+            stdout="mutated",
+            stderr="",
+            timed_out=False,
+            cost_usd=0.1,
+            tokens_in=11,
+            tokens_out=22,
+            raw={"ok": True},
+        )
+
+    monkeypatch.setattr("harness.run", fake_run)
+    adapter = HarnessMutatorAdapter(
+        HarnessAdapterConfig(harness="codex", model="gpt-5.5"),
+        worktree_root=tmp_path / "worktrees",
+    )
+    example = HoneTaskExample(
+        id="one",
+        repo_path=repo,
+        base_commit=base,
+        test_command="python check.py",
+    )
+
+    proposed = adapter.propose_new_texts(
+        candidate={"commit_sha": base, "instructions": "seed"},
+        reflective_dataset={"instructions": [{"Feedback": "make marker say from cli"}]},
+        components_to_update=["instructions"],
+        example=example,
+        iteration=7,
+    )
+
+    assert set(proposed) == {"commit_sha", "instructions"}
+    assert proposed["commit_sha"] != base
+    assert proposed["instructions"] == "seed"
+    assert _git(["diff", "--name-only", f"{base}..{proposed['commit_sha']}"], cwd=repo) == "marker.txt"
+    assert (tmp_path / "worktrees").exists()
+
+
+def test_optimize_code_wires_harness_adapter_as_gepa_custom_proposer(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    base, _passing = _init_repo(repo)
+    captured = {}
+
+    class FakeRunner:
+        def optimize_anything(self, **kwargs):
+            captured.update(kwargs)
+            proposed = kwargs["custom_candidate_proposer"](
+                kwargs["seed_candidate"],
+                {"instructions": [{"Feedback": "fix marker"}]},
+                ["instructions"],
+            )
+            return {
+                "best_candidate": proposed,
+                "best_idx": 1,
+                "candidates": [kwargs["seed_candidate"], proposed],
+                "val_aggregate_scores": [0.0, 1.0],
+                "val_subscores": [{"repo": 0.0}, {"repo": 1.0}],
+                "val_aggregate_subscores": [{"pass": 0.0}, {"pass": 1.0}],
+                "total_metric_calls": 2,
+                "run_dir": None,
+            }
+
+    class FakeAdapter:
+        name = "harness"
+
+        def __init__(self):
+            self.calls = []
+
+        def propose_new_texts(self, candidate, reflective_dataset, components_to_update, **kwargs):
+            self.calls.append((candidate, reflective_dataset, components_to_update, kwargs))
+            return {"commit_sha": "child-sha", "instructions": candidate["instructions"]}
+
+    adapter = FakeAdapter()
+    result = optimize_code(
+        repo_path=repo,
+        test_command="python check.py",
+        seed_instructions="seed instructions",
+        base_commit=base,
+        max_metric_calls=7,
+        objective="pass tests",
+        runner=FakeRunner(),
+        mutator_adapter=adapter,
+    )
+
+    assert result.best_commit_sha == "child-sha"
+    assert captured["reflection_lm"] is None
+    assert callable(captured["custom_candidate_proposer"])
+    assert adapter.calls[0][0] == {"commit_sha": base, "instructions": "seed instructions"}
+    assert adapter.calls[0][3]["example"].repo_path == repo
+    assert adapter.calls[0][3]["iteration"] == 1
+
+
 def test_optimize_code_delegates_optimizer_semantics_to_gepa_ts_runner(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -263,6 +373,60 @@ def test_optimize_code_delegates_optimizer_semantics_to_gepa_ts_runner(tmp_path:
     assert captured["config"]["engine"]["frontier_type"] == "hybrid"
     assert captured["config"]["engine"]["candidate_selection_strategy"] == "pareto"
     assert callable(captured["evaluator"])
+
+
+def test_cli_optimize_code_only_surfaces_gepa_owned_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    base, _passing = _init_repo(repo)
+    calls = {}
+
+    def fake_optimize_code(**kwargs):
+        calls.update(kwargs)
+        return SimpleNamespace(
+            best_commit_sha="best-sha",
+            metadata={
+                "optimizer": "gepa-ts optimize_anything",
+                "total_metric_calls": 3,
+                "frontier_type": "hybrid",
+                "adapter": "harness",
+            },
+        )
+
+    monkeypatch.setattr("hone.cli.optimize_code", fake_optimize_code)
+    result = CliRunner().invoke(
+        app,
+        [
+            "optimize-code",
+            "--repo",
+            str(repo),
+            "--test-command",
+            "python check.py",
+            "--seed-instructions",
+            "seed",
+            "--base-commit",
+            base,
+            "--max-metric-calls",
+            "3",
+            "--harness",
+            "codex",
+            "--model",
+            "gpt-5.5",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls["repo_path"] == repo
+    assert calls["test_command"] == "python check.py"
+    assert calls["seed_instructions"] == "seed"
+    assert calls["base_commit"] == base
+    assert calls["config"].max_metric_calls == 3
+    assert calls["mutator_adapter"].config.harness == "codex"
+    assert "gepa-ts optimize_anything" in result.output
+    assert "repo_frontier" not in result.output
 
 
 def test_result_metadata_derives_hone_summary_fields() -> None:
