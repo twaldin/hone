@@ -1,5 +1,7 @@
 # hone
 
+<img src=".github/social-card.png" alt="hone" width="100%" />
+
 > ## Read the source papers first — I can't explain them better than they do
 >
 > - **GEPA** ([repo](https://github.com/gepa-ai/gepa)) — reflective Pareto optimizer. The core loop `hone` implements.
