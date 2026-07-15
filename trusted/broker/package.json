@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@hone/schema": "workspace:*",
+    "@hone/scoring": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

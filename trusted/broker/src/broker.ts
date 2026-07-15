@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
@@ -34,6 +34,7 @@ import {
   type ArtifactRef,
   type RunEvent,
 } from "@hone/schema";
+import { HoldoutBudgetExceededError, HoldoutLedger } from "@hone/scoring";
 import { MAX_ARTIFACT_BYTES, canonicalizeWorkspaceTar, diffProtectedPaths, dirSizeBytes, unpackArtifact } from "./artifact.js";
 import { CasStore } from "./cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "./command.js";
@@ -61,6 +62,16 @@ export interface BrokerConfig {
   capsuleRootDir: string;
   /** CAS hash of the trusted-measured baseline artifact. */
   baselineArtifactHash: string;
+  /** Full canonical capsule digest ("sha256:<64 hex>") — pins the frozen capsule in the eval memo key. */
+  capsuleDigest: string;
+  /** Digest of the optimizer artifact driving this run ("sha256:<64 hex>") — also memo-key material. */
+  optimizerDigest: string;
+  /**
+   * Repo-lifetime holdout ledger file (shared across runs of this capsule).
+   * The broker creates it on first init(); the lifetime access count NEVER
+   * resets when a new run opens the same path.
+   */
+  holdoutLedgerPath: string;
   /** OCI image for both mutation and eval sandboxes (seed: one image). */
   image: string;
   /** Per-run dir: sockets, scratch, unpack cache, durable run state live here. */
@@ -74,7 +85,7 @@ export interface BrokerConfig {
   reaperIntervalMs?: number | undefined;
   evalTimeoutSec?: number | undefined;
   execOutputLimitBytes?: number | undefined;
-  /** Lifetime holdout-access ledger budget; defaults to maxEvaluatorInvocations. */
+  /** Lifetime holdout-access ledger budget (immutable once the ledger file exists); defaults to maxEvaluatorInvocations. */
   holdoutBudget?: number | undefined;
   /**
    * Network mode for MUTATION sandboxes only (WP7 macOS decision: proxy runs
@@ -136,6 +147,8 @@ interface SandboxEntry {
   lastExecStdoutHash: string | null;
   /** Exit code of the most recent exec; a candidate save requires 0. */
   lastExecExitCode: number | null;
+  /** Whether the most recent exec's captured output hit the size cap — a candidate requires a COMPLETE trace. */
+  lastExecTruncated: boolean | null;
 }
 
 const MISSING_CONTAINER_RE = /no such container|is not running|no such object/i;
@@ -297,7 +310,10 @@ export class Broker {
   /** Synchronous admission reservation: real evaluations in flight but not yet charged. */
   private pendingEvaluations = 0;
   private readonly exhaustedAnnounced = new Set<string>();
+  /** Per-run journal ordinal for holdout charges (observability only — the persistent ledger is authority). */
   private holdoutCount = 0;
+  /** Repo-lifetime holdout ledger — the ONLY holdout-access authority; opened in init(), never reset per run. */
+  private ledger: HoldoutLedger | undefined;
   private lastIncumbent: ReportIncumbentP | undefined;
   private best: ArtifactRef | undefined;
   private reaper: NodeJS.Timeout | undefined;
@@ -356,6 +372,12 @@ export class Broker {
     await mkdir(this.scratchDir, { recursive: true });
     await mkdir(this.unpackRoot, { recursive: true });
     await mkdir(this.tmpDir, { recursive: true });
+    // Repo-lifetime holdout authority: the ledger file outlives this run. A
+    // fresh file is created with the immutable budget; an existing one keeps
+    // its lifetime count — a new run can NEVER reset it (budget mismatch
+    // fails closed inside HoldoutLedger.open).
+    await mkdir(path.dirname(this.config.holdoutLedgerPath), { recursive: true });
+    this.ledger = await HoldoutLedger.open(this.config.holdoutLedgerPath, { budget: this.holdoutBudget });
     if (this.config.scratchVolume) await this.provisionScratchVolume();
     const interval = this.config.reaperIntervalMs ?? 30_000;
     this.reaper = setInterval(() => {
@@ -373,6 +395,9 @@ export class Broker {
       await this.run(["docker", "volume", "rm", "-f", this.scratchVolumeName]);
       this.scratchVolumeName = undefined;
     }
+    const ledger = this.ledger;
+    this.ledger = undefined;
+    await ledger?.close();
     this.stateLog?.close();
     this.stateLog = undefined;
   }
@@ -767,6 +792,7 @@ export class Broker {
       parentHash,
       lastExecStdoutHash: null,
       lastExecExitCode: null,
+      lastExecTruncated: null,
     });
     if (repair === undefined) this.emit({ type: "episode.started", episode, parent: { hash: parentHash } });
     return { sandboxId };
@@ -775,6 +801,13 @@ export class Broker {
   async exec(params: ExecP, _ctx: CallContext): Promise<ExecR> {
     this.budgetGate();
     const sb = await this.requireSandbox(params.sandboxId);
+    // Candidate admission keys off the LAST COMPLETED exec. Clear the record
+    // BEFORE the spawn so a saveArtifact that interleaves with an in-flight
+    // exec (or observes a timed-out one) can never reuse stale prior-success
+    // provenance — it degrades to a repair snapshot instead.
+    sb.lastExecExitCode = null;
+    sb.lastExecStdoutHash = null;
+    sb.lastExecTruncated = null;
     const argv = ["docker", "exec", "-i"];
     if (params.cwd !== undefined) argv.push("-w", params.cwd);
     argv.push(sb.containerId, ...params.argv);
@@ -791,10 +824,21 @@ export class Broker {
       // so the orphan cannot keep computing against the run.
       this.sandboxes.delete(params.sandboxId);
       await this.run(["docker", "rm", "-f", sb.containerId]);
+      // Record the timeout outcome (exit 124) with its CAS-backed partial
+      // stdout — anyone still holding the entry sees a failed exec, never the
+      // previous success.
+      sb.lastExecExitCode = 124;
+      sb.lastExecTruncated = res.truncated;
+      sb.lastExecStdoutHash = await this.cas.putBuffer(res.stdout);
       return { exitCode: 124, stdout: res.stdout.toString("utf8"), stderr: res.stderr.toString("utf8"), truncated: res.truncated };
     }
     sb.lastExecExitCode = res.exitCode;
-    sb.lastExecStdoutHash = `sha256:${createHash("sha256").update(res.stdout).digest("hex")}`;
+    sb.lastExecTruncated = res.truncated;
+    // Session-trace provenance: the EXACT stdout bytes are persisted to CAS
+    // and the returned hash recorded BEFORE this exec is acknowledged — so an
+    // episode.candidate.sessionTrace always dereferences to the real bytes,
+    // never a naked digest with no blob behind it.
+    sb.lastExecStdoutHash = await this.cas.putBuffer(res.stdout);
     return {
       exitCode: res.exitCode,
       stdout: res.stdout.toString("utf8"),
@@ -870,17 +914,26 @@ export class Broker {
       throw err;
     }
 
-    if (sb.lastExecExitCode === 0) {
-      // Candidate: the last exec in the episode exited 0. Durable lineage
-      // BEFORE the candidate event — promotion authority survives restarts.
+    // Candidate admission requires a COMPLETE successful exec record: exit 0
+    // AND an untruncated capture — a capped trace is stored in CAS for
+    // diagnostics but can never be cited as candidate provenance.
+    if (sb.lastExecExitCode === 0 && sb.lastExecTruncated === false) {
+      // Durable lineage BEFORE the candidate event — promotion authority
+      // survives restarts.
       if (!this.lineage.has(hash) && hash !== sb.parentHash) {
+        // exec() CAS-writes stdout before recording the hash, so a zero exit
+        // implies a dereferenceable trace; a bare digest here is a bug.
+        const sessionTrace = sb.lastExecStdoutHash;
+        if (sessionTrace === null) {
+          throw new BrokerError("INTERNAL", "candidate save without a CAS-backed exec trace");
+        }
         this.state().append({ t: "lineage", candidate: hash, parent: sb.parentHash, episode: sb.episode });
         this.lineage.set(hash, { parent: sb.parentHash, episode: sb.episode });
         // Graduation: the hash may have been journaled as a repair snapshot
         // earlier; lineage supersedes it (replay treats the lineage line as
         // the tombstone), so descendants pair against THIS artifact.
         this.repairs.delete(hash);
-        this.emit({ type: "episode.candidate", episode: sb.episode, candidate: { hash }, sessionTrace: sb.lastExecStdoutHash ?? "" });
+        this.emit({ type: "episode.candidate", episode: sb.episode, candidate: { hash }, sessionTrace });
       }
     } else if (hash !== sb.parentHash && !this.lineage.has(hash) && !this.repairs.has(hash)) {
       // Repair snapshot (no exec, or last exec failed): NOT a candidate, no
@@ -920,10 +973,13 @@ export class Broker {
       if (!ctx.privileged) {
         throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout asset groups are only reachable on the admin socket");
       }
-      this.chargeHoldout();
+      await this.chargeHoldout();
     }
 
-    const memoKey = `${params.artifact.hash}|${this.manifest.id}|${params.assetGroupId}|${params.seed}`;
+    // Memo key pins the FULL provenance of a measurement: artifact, frozen
+    // capsule digest, optimizer digest, asset group, seed. A different capsule
+    // or optimizer build can never alias onto a cached record.
+    const memoKey = `${params.artifact.hash}|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}`;
     const memoHash = await this.cas.indexGet("eval", memoKey);
     if (memoHash !== undefined && (await this.cas.has(memoHash))) {
       const record = EvaluationRecord.parse(JSON.parse((await this.cas.readBuffer(memoHash)).toString("utf8")));
@@ -1039,13 +1095,24 @@ export class Broker {
   }
 
   /**
-   * Write-ahead holdout charge against the durable ledger. Synchronous
-   * check-then-append — single-threaded JS serializes concurrent charges, so
-   * the budget can never be double-granted.
+   * Holdout charge against the repo-lifetime ledger (@hone/scoring
+   * HoldoutLedger) — the ONLY authority over lifetime holdout access. The
+   * charge is written + fsynced by the ledger BEFORE the access is granted;
+   * a run-local journal line is kept afterwards purely for replay
+   * observability (it never gates anything, so a new run against the same
+   * ledger path can never reset the lifetime count).
    */
-  private chargeHoldout(): void {
-    if (this.holdoutCount >= this.holdoutBudget) {
-      throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout ledger budget exhausted");
+  private async chargeHoldout(): Promise<void> {
+    const ledger = this.ledger;
+    if (!ledger) throw new BrokerError("INTERNAL", "holdout ledger not open (broker not initialized)");
+    let charged: { count: number; budget: number };
+    try {
+      charged = await ledger.charge();
+    } catch (err) {
+      if (err instanceof HoldoutBudgetExceededError) {
+        throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout ledger budget exhausted");
+      }
+      throw err;
     }
     const seq = this.holdoutCount + 1;
     this.state().append({ t: "holdout", seq });
@@ -1053,8 +1120,8 @@ export class Broker {
     this.emit({
       type: "holdout.accessed",
       capsuleId: this.manifest.id,
-      ledgerCount: seq,
-      ledgerBudget: this.holdoutBudget,
+      ledgerCount: charged.count,
+      ledgerBudget: charged.budget,
     });
   }
 
