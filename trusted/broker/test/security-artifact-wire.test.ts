@@ -10,7 +10,7 @@ import { canonicalizeWorkspaceTar, diffProtectedPaths, packDirAsArtifact, unpack
 import { ArtifactValidationError, validateWorkspaceTar } from "../src/tarcheck.js";
 import { deferred } from "../src/deferred.js";
 import { runCommand, type RunCommand } from "../src/command.js";
-import { buildTestCapsule, TEST_IMAGE } from "./helpers.js";
+import { buildTestCapsule, TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // In-test tar writer: crafts adversarial archives byte-by-byte so the
@@ -825,6 +825,9 @@ describe("broker wire hardening", () => {
       manifest: capsule.manifest,
       capsuleRootDir: capsule.capsuleRootDir,
       baselineArtifactHash: `sha256:${"0".repeat(64)}`,
+      capsuleDigest: TEST_CAPSULE_DIGEST,
+      optimizerDigest: TEST_OPTIMIZER_DIGEST,
+      holdoutLedgerPath: path.join(base, "run", "holdout-ledger.ndjson"),
       image: TEST_IMAGE,
       runDir: path.join(base, "run"),
       casDir: path.join(base, "cas"),

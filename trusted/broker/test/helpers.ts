@@ -8,6 +8,12 @@ import { deferred } from "../src/deferred.js";
 import { runCommand } from "../src/command.js";
 
 export const TEST_IMAGE = "busybox:1.36";
+/** Manifest-level immutable image ref (schema v2 requires repo@sha256); live docker uses TEST_IMAGE via config.image. */
+export const MANIFEST_IMAGE = `busybox@sha256:${"0".repeat(64)}`;
+/** Opaque full-capsule digest for BrokerConfig.capsuleDigest in tests. */
+export const TEST_CAPSULE_DIGEST = `sha256:${"c".repeat(64)}`;
+/** Opaque optimizer-artifact digest for BrokerConfig.optimizerDigest in tests. */
+export const TEST_OPTIMIZER_DIGEST = `sha256:${"d".repeat(64)}`;
 
 const RpcError = z.object({
   code: z.number(),
@@ -168,14 +174,15 @@ export async function buildTestCapsule(
   await writeFile(path.join(baselineDir, "protected", "frozen.txt"), "do not touch");
 
   const manifest: CapsuleManifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "cap_0123456789ab",
     objective: "make the answer bigger without touching protected files",
     // Placeholder; tests overwrite with the packed baseline hash before use.
     baseline: { kind: "cas", hash: `sha256:${"0".repeat(64)}` },
-    image: TEST_IMAGE,
+    image: MANIFEST_IMAGE,
     evalEntrypoint: ["sh", "-c", EVAL_SCRIPT],
     protectedPaths: ["protected/**"],
+    diagnosticOrdering: { path: "diagnostics/ordering.json", hash: sha256("ordering-fixture") },
     assetGroups: [
       { id: "train", visibility: "public", paths: ["train"] },
       { id: "secret", visibility: "protected", paths: ["protected"] },

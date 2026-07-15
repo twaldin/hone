@@ -9,7 +9,7 @@ import { packDirAsArtifact } from "../src/artifact.js";
 import { CasStore } from "../src/cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "../src/command.js";
 import { BrokerError } from "../src/errors.js";
-import { TEST_IMAGE, ensureImage, waitForDocker } from "./helpers.js";
+import { MANIFEST_IMAGE, TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST, ensureImage, waitForDocker } from "./helpers.js";
 
 /**
  * Security / authority / lifecycle hardening tests. Everything except the
@@ -37,17 +37,18 @@ let candidate2Hash: string;
 
 function makeManifest(over: Partial<CapsuleManifest> = {}): CapsuleManifest {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "cap_0123456789ab",
     objective: "make the answer bigger",
     baseline: { kind: "cas", hash: `sha256:${"0".repeat(64)}` },
-    image: TEST_IMAGE,
+    image: MANIFEST_IMAGE,
     evalEntrypoint: [
       "sh",
       "-c",
       'S="$(cat /workspace/answer.txt 2>/dev/null || echo 0)"; printf \'{"valid":true,"objectives":{"score":%s}}\' "$S"',
     ],
     protectedPaths: [],
+    diagnosticOrdering: { path: "diagnostics/ordering.json", hash: `sha256:${"e".repeat(64)}` },
     assetGroups: [
       { id: "train", visibility: "public", paths: ["train"] },
       { id: "secret", visibility: "protected", paths: ["protected"] },
@@ -110,12 +111,18 @@ function makeTar(
 interface FakeCtl {
   /** Exit code for client execs; "timeout" simulates a hung exec. */
   execExit: number | "timeout";
+  /** Stdout bytes client execs produce — session-trace fixture material. */
+  execStdout: Buffer;
+  /** When true, client execs report output hit the size cap (truncated capture). */
+  execTruncated: boolean;
   /** Tar bytes `docker cp <c>:/workspace -` returns for saveArtifact. */
   saveTar: Buffer;
   /** artifactHash -> EvaluatorOutput JSON for eval containers (matched via the /workspace mount). */
   evalOutputs: Map<string, unknown>;
   /** When "timeout", eval containers simulate a hang. */
   evalMode: "normal" | "timeout";
+  /** When set, client execs signal entry then block until `gate` resolves (in-flight exec simulation). */
+  execBarrier: { entered: () => void; gate: Promise<void> } | null;
 }
 
 interface Booted {
@@ -140,6 +147,9 @@ async function boot(
     runDir?: string;
     casDir?: string;
     holdoutBudget?: number;
+    capsuleDigest?: string;
+    optimizerDigest?: string;
+    holdoutLedgerPath?: string;
     maxActiveSandboxes?: number;
     scratchQuotaBytes?: number;
     scratchVolume?: boolean;
@@ -153,7 +163,15 @@ async function boot(
   const casDir = opts.casDir ?? path.join(tmpBase, "cas", id);
   await mkdir(runDir, { recursive: true });
 
-  const ctl: FakeCtl = { execExit: 0, saveTar: candidateTar, evalOutputs: new Map(), evalMode: "normal" };
+  const ctl: FakeCtl = {
+    execExit: 0,
+    execStdout: Buffer.alloc(0),
+    execTruncated: false,
+    saveTar: candidateTar,
+    evalOutputs: new Map(),
+    evalMode: "normal",
+    execBarrier: null,
+  };
   const log: string[][] = [];
   const events: RunEvent[] = [];
   let containerSeq = 0;
@@ -179,8 +197,14 @@ async function boot(
       const joined = argv.join(" ");
       if (joined.includes('echo "$(id -u):$(id -g)"')) return fakeResult({ stdout: Buffer.from("0:0\n") });
       if (argv[2] === "-u") return fakeResult(); // chown fixup
+      if (ctl.execBarrier) {
+        const barrier = ctl.execBarrier;
+        ctl.execBarrier = null;
+        barrier.entered();
+        await barrier.gate;
+      }
       if (ctl.execExit === "timeout") return fakeResult({ exitCode: -1, timedOut: true });
-      return fakeResult({ exitCode: ctl.execExit });
+      return fakeResult({ exitCode: ctl.execExit, stdout: Buffer.from(ctl.execStdout), truncated: ctl.execTruncated });
     }
     if (sub === "volume" && argv[2] === "create") {
       return opts.volumeCreateFails === true
@@ -195,6 +219,9 @@ async function boot(
     manifest: opts.manifest ?? makeManifest(),
     capsuleRootDir,
     baselineArtifactHash: baselineHash,
+    capsuleDigest: opts.capsuleDigest ?? TEST_CAPSULE_DIGEST,
+    optimizerDigest: opts.optimizerDigest ?? TEST_OPTIMIZER_DIGEST,
+    holdoutLedgerPath: opts.holdoutLedgerPath ?? path.join(runDir, "holdout-ledger.ndjson"),
     image: TEST_IMAGE,
     runDir,
     casDir,
@@ -340,6 +367,43 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
     }
     const holdoutLines = (await stateLines(b)).filter((l) => l["t"] === "holdout");
     expect(holdoutLines).toEqual([{ t: "holdout", seq: 1 }]);
+  });
+
+  it("a new run against the same ledger path continues the lifetime holdout count — it never resets", async () => {
+    const ledgerPath = path.join(tmpBase, "ledgers", "persist.ndjson");
+    const a = await boot({ holdoutBudget: 1, holdoutLedgerPath: ledgerPath });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    await a.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 0 }, ADMIN);
+    await a.broker.close();
+
+    // Fresh run: new runDir, new journal, new casDir — SAME ledger path.
+    const b = await boot({ holdoutBudget: 1, holdoutLedgerPath: ledgerPath });
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    await expect(
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 1 }, ADMIN),
+    ).rejects.toThrow(/holdout ledger budget exhausted/);
+    // The denied access left no per-run journal record and no event.
+    expect((await stateLines(b)).filter((l) => l["t"] === "holdout")).toHaveLength(0);
+    expect(b.events.filter((e) => e.type === "holdout.accessed")).toHaveLength(0);
+  });
+
+  it("two live broker instances on one ledger path cannot double-grant the last slot", async () => {
+    const ledgerPath = path.join(tmpBase, "ledgers", "two-instance.ndjson");
+    const a = await boot({ holdoutBudget: 1, holdoutLedgerPath: ledgerPath });
+    const b = await boot({ holdoutBudget: 1, holdoutLedgerPath: ledgerPath });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const results = await Promise.allSettled([
+      a.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 0 }, ADMIN),
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 1 }, ADMIN),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const loser = results.find((r) => r.status === "rejected");
+    expect(loser).toBeDefined();
+    if (loser?.status === "rejected") {
+      expect(loser.reason).toBeInstanceOf(BrokerError);
+      expect(String(loser.reason)).toMatch(/holdout ledger budget exhausted/);
+    }
   });
 
   it("truncates a torn partial-JSON tail on open and never fuses new records onto it", async () => {
@@ -626,6 +690,120 @@ describe("trusted event ordering and candidacy", () => {
   });
 });
 
+describe("session-trace provenance (episode.candidate always dereferences)", () => {
+  it("sessionTrace round-trips the exact exec stdout bytes through CAS", async () => {
+    const b = await boot();
+    // Includes NUL and invalid-UTF8 bytes: exactness means BYTES, not text.
+    const bytes = Buffer.from([0x74, 0x72, 0x61, 0x63, 0x65, 0x00, 0xff, 0xfe, 0x0a, 0x80]);
+    b.ctl.execStdout = bytes;
+    b.ctl.saveTar = candidateTar;
+    const { sandboxId } = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT);
+    await b.broker.saveArtifact({ sandboxId }, CLIENT);
+
+    const cand = b.events.find(
+      (e): e is Extract<RunEvent, { type: "episode.candidate" }> => e.type === "episode.candidate",
+    );
+    expect(cand).toBeDefined();
+    const trace = cand?.sessionTrace ?? "";
+    expect(trace).toMatch(/^sha256:[0-9a-f]{64}$/);
+    // The hash dereferences, and the blob is byte-identical to the stdout.
+    expect(await b.broker.cas.has(trace)).toBe(true);
+    expect((await b.broker.cas.readBuffer(trace)).equals(bytes)).toBe(true);
+  });
+
+  it("a save interleaved with an in-flight exec never reuses stale prior-success provenance", async () => {
+    const b = await boot();
+    b.ctl.execStdout = Buffer.from("prior success\n");
+    b.ctl.saveTar = candidateTar;
+    const { sandboxId } = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT); // completed success on record
+
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredP = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    b.ctl.execBarrier = { entered, gate };
+    const inflight = b.broker.exec({ sandboxId, argv: ["sh", "-c", "mutate"] }, CLIENT);
+    await enteredP; // the second exec is now in flight inside docker
+
+    const saved = await b.broker.saveArtifact({ sandboxId }, CLIENT);
+    expect(saved.hash).toBe(candidateHash);
+    // NOT a candidate: the in-flight exec cleared completed-exec provenance,
+    // so the save degrades to a repair snapshot instead of borrowing the
+    // previous exec's trace.
+    expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(0);
+    const lines = await stateLines(b);
+    expect(lines.filter((l) => l["t"] === "lineage")).toHaveLength(0);
+    expect(lines.filter((l) => l["t"] === "repair")).toHaveLength(1);
+
+    release();
+    await inflight;
+  });
+
+  it("a zero-exit exec with a TRUNCATED capture cannot mint a candidate — the save is a repair snapshot", async () => {
+    const b = await boot();
+    b.ctl.execStdout = Buffer.from("capped partial output");
+    b.ctl.execTruncated = true;
+    b.ctl.saveTar = candidateTar;
+    const { sandboxId } = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const res = await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT);
+    expect(res.exitCode).toBe(0);
+    expect(res.truncated).toBe(true);
+
+    const saved = await b.broker.saveArtifact({ sandboxId }, CLIENT);
+    expect(saved.hash).toBe(candidateHash);
+    // An incomplete trace can never be cited as candidate provenance.
+    expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(0);
+    const lines = await stateLines(b);
+    expect(lines.filter((l) => l["t"] === "lineage")).toHaveLength(0);
+    expect(lines.filter((l) => l["t"] === "repair")).toHaveLength(1);
+
+    // A follow-up COMPLETE exec on a fresh sandbox from the snapshot still
+    // graduates normally — the capped bytes stay in CAS as diagnostics only.
+    b.ctl.execTruncated = false;
+    const second = await b.broker.createSandbox({ artifact: { hash: saved.hash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId: second.sandboxId, argv: ["true"] }, CLIENT);
+    const graduated = await b.broker.saveArtifact({ sandboxId: second.sandboxId }, CLIENT);
+    expect(graduated.hash).toBe(candidateHash);
+    expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(1);
+  });
+});
+
+describe("evaluation memo provenance (digests key the cache)", () => {
+  it("distinct capsule or optimizer digests never alias onto a cached evaluation", async () => {
+    const casDir = path.join(tmpBase, "cas", "memo-digests");
+    const evalRuns = (b: Booted): number => b.log.filter((argv) => argv[1] === "run" && !argv.includes("-d")).length;
+    const coord = { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 } as const;
+
+    const a = await boot({ casDir });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    expect((await a.broker.evaluate(coord, CLIENT)).cached).toBe(false);
+    expect(evalRuns(a)).toBe(1);
+    // Same digests, same coordinate: memo hit, no second container.
+    expect((await a.broker.evaluate(coord, CLIENT)).cached).toBe(true);
+    expect(evalRuns(a)).toBe(1);
+
+    // Different CAPSULE digest, same CAS: miss — a real evaluation runs.
+    const c = await boot({ casDir, capsuleDigest: `sha256:${"1".repeat(64)}` });
+    c.ctl.evalOutputs.set(baselineHash, score(1));
+    expect((await c.broker.evaluate(coord, CLIENT)).cached).toBe(false);
+    expect(evalRuns(c)).toBe(1);
+
+    // Different OPTIMIZER digest, same CAS: miss — a real evaluation runs.
+    const o = await boot({ casDir, optimizerDigest: `sha256:${"2".repeat(64)}` });
+    o.ctl.evalOutputs.set(baselineHash, score(1));
+    expect((await o.broker.evaluate(coord, CLIENT)).cached).toBe(false);
+    expect(evalRuns(o)).toBe(1);
+
+    // A fresh broker with the ORIGINAL digests still hits the shared memo.
+    const d = await boot({ casDir });
+    d.ctl.evalOutputs.set(baselineHash, score(1));
+    expect((await d.broker.evaluate(coord, CLIENT)).cached).toBe(true);
+    expect(evalRuns(d)).toBe(0);
+  });
+});
+
 // ---------- result minimization ----------
 
 describe("protected result minimization", () => {
@@ -710,6 +888,9 @@ describe("evaluator containment", () => {
           manifest,
           capsuleRootDir,
           baselineArtifactHash: baselineHash,
+          capsuleDigest: TEST_CAPSULE_DIGEST,
+          optimizerDigest: TEST_OPTIMIZER_DIGEST,
+          holdoutLedgerPath: path.join(tmpBase, "runs", "overlap", "holdout-ledger.ndjson"),
           image: TEST_IMAGE,
           runDir: path.join(tmpBase, "runs", "overlap"),
           casDir: path.join(tmpBase, "cas", "overlap"),
@@ -736,6 +917,9 @@ describe("evaluator containment", () => {
         }),
         capsuleRootDir: evilRoot,
         baselineArtifactHash: baselineHash,
+        capsuleDigest: TEST_CAPSULE_DIGEST,
+        optimizerDigest: TEST_OPTIMIZER_DIGEST,
+        holdoutLedgerPath: path.join(tmpBase, "runs", "symlink", "holdout-ledger.ndjson"),
         image: TEST_IMAGE,
         runDir: path.join(tmpBase, "runs", "symlink"),
         casDir: path.join(tmpBase, "cas", "symlink"),
@@ -767,6 +951,9 @@ describe("evaluator containment", () => {
           }),
           capsuleRootDir: evilRoot,
           baselineArtifactHash: baselineHash,
+          capsuleDigest: TEST_CAPSULE_DIGEST,
+          optimizerDigest: TEST_OPTIMIZER_DIGEST,
+          holdoutLedgerPath: path.join(tmpBase, "runs", "hardlink", "holdout-ledger.ndjson"),
           image: TEST_IMAGE,
           runDir: path.join(tmpBase, "runs", "hardlink"),
           casDir: path.join(tmpBase, "cas", "hardlink"),
@@ -796,6 +983,9 @@ describe("evaluator containment", () => {
           }),
           capsuleRootDir: evilRoot,
           baselineArtifactHash: baselineHash,
+          capsuleDigest: TEST_CAPSULE_DIGEST,
+          optimizerDigest: TEST_OPTIMIZER_DIGEST,
+          holdoutLedgerPath: path.join(tmpBase, "runs", "nested-hardlink", "holdout-ledger.ndjson"),
           image: TEST_IMAGE,
           runDir: path.join(tmpBase, "runs", "nested-hardlink"),
           casDir: path.join(tmpBase, "cas", "nested-hardlink"),
@@ -981,11 +1171,13 @@ describe("saveArtifact canonicalization (unchanged trees repack to the parent ha
       { name: "workspace/", type: "5" },
       { name: "workspace/link", type: "2", linkname: "/etc" },
     ]);
-    const before = await casBlobCount(b.casDir);
     b.ctl.saveTar = evil;
     b.ctl.execExit = 0;
     const { sandboxId } = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
     await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT);
+    // Snapshot AFTER the exec: its CAS-backed session trace is a legitimate
+    // blob; the rejected artifact itself must grow CAS by nothing.
+    const before = await casBlobCount(b.casDir);
     await expect(b.broker.saveArtifact({ sandboxId }, CLIENT)).rejects.toThrow(/saved artifact rejected.*symlink/);
     expect(await casBlobCount(b.casDir)).toBe(before);
     expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(0);
@@ -1012,6 +1204,9 @@ describe("live docker smoke (quota volume + full loop, no leaks)", () => {
       manifest: makeManifest(),
       capsuleRootDir,
       baselineArtifactHash: baselineHash,
+      capsuleDigest: TEST_CAPSULE_DIGEST,
+      optimizerDigest: TEST_OPTIMIZER_DIGEST,
+      holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
       image: TEST_IMAGE,
       runDir,
       casDir,

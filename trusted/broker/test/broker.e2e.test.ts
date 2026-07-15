@@ -15,7 +15,7 @@ import { startBroker, type RunningBroker, type SandboxNetworkMode } from "../src
 import { CasStore } from "../src/cas.js";
 import { packDirAsArtifact } from "../src/artifact.js";
 import { runCommand, type RunCommand } from "../src/command.js";
-import { RpcClient, TEST_IMAGE, buildTestCapsule, ensureImage, waitForDocker } from "./helpers.js";
+import { RpcClient, TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST, buildTestCapsule, ensureImage, waitForDocker } from "./helpers.js";
 
 const GetTaskShape = z.object({
   capsuleId: z.string(),
@@ -79,6 +79,9 @@ async function bootBroker(
     manifest: capsule.manifest,
     capsuleRootDir: capsule.capsuleRootDir,
     baselineArtifactHash: baselineHash,
+    capsuleDigest: TEST_CAPSULE_DIGEST,
+    optimizerDigest: TEST_OPTIMIZER_DIGEST,
+    holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
     image: TEST_IMAGE,
     runDir,
     casDir: path.join(tmpBase, "cas"),
