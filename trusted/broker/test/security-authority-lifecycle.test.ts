@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CapsuleManifest, RunEvent } from "@hone/schema";
@@ -451,6 +451,99 @@ describe("trusted event ordering and candidacy", () => {
     expect(b.broker.reportIncumbent({ artifact: { hash: fixed.hash } }, CLIENT)).toEqual({});
     expect(b.broker.trustedIncumbent).toMatchObject({ hash: fixed.hash, episode: 0 });
   });
+
+  it("a graduated repair is a candidate, not a repair — later sandboxes from it start a NEW episode", async () => {
+    const shared = { runDir: path.join(tmpBase, "runs", "graduate"), casDir: path.join(tmpBase, "cas", "graduate"), runId: "run-graduate" };
+    const b = await boot(shared);
+    const { sandboxId } = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT); // ep 0
+    b.ctl.execExit = 7;
+    await b.broker.exec({ sandboxId, argv: ["false"] }, CLIENT);
+    b.ctl.saveTar = candidateTar;
+    await b.broker.saveArtifact({ sandboxId }, CLIENT); // repair snapshot of candidateTar
+
+    // Follow-up sandbox from the repair: same episode; a SUCCESSFUL save of
+    // the SAME hash graduates it to candidate.
+    const second = await b.broker.createSandbox({ artifact: { hash: candidateHash }, role: "mutation" }, CLIENT);
+    b.ctl.execExit = 0;
+    await b.broker.exec({ sandboxId: second.sandboxId, argv: ["true"] }, CLIENT);
+    const graduated = await b.broker.saveArtifact({ sandboxId: second.sandboxId }, CLIENT);
+    expect(graduated.hash).toBe(candidateHash);
+    expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(1);
+
+    // Sandboxes from the graduated candidate must NOT reuse the stale repair
+    // episode/parent: a fresh episode starts with the candidate as parent.
+    await b.broker.createSandbox({ artifact: { hash: candidateHash }, role: "mutation" }, CLIENT);
+    const started = b.events.filter((e) => e.type === "episode.started");
+    expect(started).toHaveLength(2);
+    expect(started[1]).toMatchObject({ episode: 1, parent: { hash: candidateHash } });
+
+    // And the graduation survives a restart (lineage line is the tombstone).
+    await b.broker.close();
+    const c = await boot(shared);
+    await c.broker.createSandbox({ artifact: { hash: candidateHash }, role: "mutation" }, CLIENT);
+    const restarted = c.events.filter((e) => e.type === "episode.started");
+    expect(restarted).toHaveLength(1);
+    expect(restarted[0]).toMatchObject({ episode: 2, parent: { hash: candidateHash } });
+  });
+
+  it("deltaVsBaseline is computed over paired keys only, and promotion requires a baseline pair", async () => {
+    const b = await boot();
+    b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(3)).set(candidate2Hash, score(4));
+
+    // Episode 0: candA promoted on train|0 (baseline paired there).
+    const candA = await saveCandidate(b, candidateTar);
+    await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await b.broker.evaluate({ artifact: { hash: candA }, assetGroupId: "train", seed: 0 }, CLIENT);
+    expect(b.broker.reportIncumbent({ artifact: { hash: candA } }, CLIENT)).toEqual({});
+    expect(b.events.filter((e) => e.type === "incumbent.new")[0]).toMatchObject({ deltaVsBaseline: 2 });
+
+    // Episode 1: candB (parent candA) measured only at seed 5 — parent and
+    // incumbent pair there, but the BASELINE was never measured at seed 5.
+    const candB = await saveCandidate(b, candidate2Tar, candA);
+    await b.broker.evaluate({ artifact: { hash: candA }, assetGroupId: "train", seed: 5 }, CLIENT);
+    await b.broker.evaluate({ artifact: { hash: candB }, assetGroupId: "train", seed: 5 }, CLIENT);
+    expect(() => b.broker.reportIncumbent({ artifact: { hash: candB } }, CLIENT)).toThrow(/candidate and baseline/);
+
+    // Measuring the baseline at the promoted key unblocks promotion, and the
+    // delta is paired-mean over the INTERSECTION only (4 - 1), not a
+    // client-steerable mean-vs-mean over disjoint key sets.
+    await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 5 }, CLIENT);
+    expect(b.broker.reportIncumbent({ artifact: { hash: candB } }, CLIENT)).toEqual({});
+    const promotions = b.events.filter((e) => e.type === "incumbent.new");
+    expect(promotions).toHaveLength(2);
+    expect(promotions[1]).toMatchObject({ artifact: { hash: candB }, deltaVsBaseline: 3 });
+  });
+
+  it("replayIncumbentEvents restores journal-ahead promotions exactly once after a crash", async () => {
+    const shared = { runDir: path.join(tmpBase, "runs", "recover"), casDir: path.join(tmpBase, "cas", "recover"), runId: "run-recover" };
+    const a = await boot(shared);
+    a.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const cand = await saveCandidate(a, candidateTar);
+    await a.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await a.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
+    a.broker.reportIncumbent({ artifact: { hash: cand } }, CLIENT);
+    const original = a.events.filter((e) => e.type === "incumbent.new");
+    expect(original).toHaveLength(1);
+    await a.broker.close();
+
+    // Crash window: the journal has the promotion, the runner's event log
+    // does not (alreadyLogged = 0). Recovery re-emits the ORIGINAL payload.
+    const b = await boot(shared);
+    expect(b.broker.replayIncumbentEvents(0)).toBe(1);
+    const recovered = b.events.filter((e) => e.type === "incumbent.new");
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({ artifact: { hash: cand }, aggregate: 2, deltaVsBaseline: 1, episode: 0 });
+
+    // Aligned logs recover nothing — exactly once.
+    expect(b.broker.replayIncumbentEvents(1)).toBe(0);
+    expect(b.events.filter((e) => e.type === "incumbent.new")).toHaveLength(1);
+    // A count beyond the journal is a corrupt event log — refuse.
+    expect(() => b.broker.replayIncumbentEvents(2)).toThrow(/journal has 1/);
+
+    // Fresh run: nothing to recover.
+    const fresh = await boot({});
+    expect(fresh.broker.replayIncumbentEvents(0)).toBe(0);
+  });
 });
 
 // ---------- result minimization ----------
@@ -511,6 +604,10 @@ describe("evaluator containment", () => {
     expect(argv).toContain("--memory");
     expect(argv).toContain("--cpus");
     expect(argv).toContain("no-new-privileges");
+    // The trusted scorer runs as root so it can drop candidate workers to an
+    // unprivileged uid — candidate-to-scorer signal//proc reach is severed.
+    const userIdx = argv.indexOf("--user");
+    expect(argv[userIdx + 1]).toBe("0:0");
     // Only the SELECTED asset group is mounted — nothing else from the capsule.
     const assetMounts = argv.filter((a) => a.includes(":/capsule/assets/"));
     expect(assetMounts).toHaveLength(1);
@@ -570,6 +667,33 @@ describe("evaluator containment", () => {
     // And a declared path that does not exist fails closed at boot.
     expect(() => bootEvil(["nope"])).toThrow(/asset path missing on host/);
   });
+
+  it("rejects hard-link aliases across visibility classes at construction", async () => {
+    const evilRoot = path.join(tmpBase, "capsule-hardlink");
+    await mkdir(path.join(evilRoot, "holdout"), { recursive: true });
+    await mkdir(path.join(evilRoot, "pub"), { recursive: true });
+    await writeFile(path.join(evilRoot, "holdout", "secret.txt"), "holdout-data");
+    // Same inode, two names: lexically disjoint, physically identical bytes.
+    await link(path.join(evilRoot, "holdout", "secret.txt"), path.join(evilRoot, "pub", "leak.txt"));
+    expect(
+      () =>
+        new Broker({
+          runId: "run-hardlink",
+          manifest: makeManifest({
+            assetGroups: [
+              { id: "pub", visibility: "public", paths: ["pub/leak.txt"] },
+              { id: "holdout", visibility: "holdout", paths: ["holdout/secret.txt"] },
+            ],
+          }),
+          capsuleRootDir: evilRoot,
+          baselineArtifactHash: baselineHash,
+          image: TEST_IMAGE,
+          runDir: path.join(tmpBase, "runs", "hardlink"),
+          casDir: path.join(tmpBase, "cas", "hardlink"),
+          onEvent: () => {},
+        }),
+    ).toThrow(/alias the same files across visibility classes/);
+  });
 });
 
 // ---------- lifecycle and resources ----------
@@ -628,13 +752,41 @@ describe("sandbox lifecycle and resource ceilings", () => {
     expect(b.log.some((a) => a[1] === "volume" && a[2] === "rm" && a.includes(`hone-scratch-${b.runId}`))).toBe(true);
   });
 
-  it("scratchVolume fallback fails closed: host bind mount stays under the polling quota", async () => {
-    const b = await boot({ scratchVolume: true, volumeCreateFails: true, scratchQuotaBytes: 16 });
-    // Volume unavailable → host scratch dir + polling quota still bind.
-    await writeFile(path.join(b.runDir, "scratch", "big.bin"), Buffer.alloc(1024));
-    await expect(b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT)).rejects.toThrow(
-      /exceeds quota/,
+  it("scratchVolume provisioning failure fails closed — init aborts instead of an unquota'd host fallback", async () => {
+    await expect(boot({ scratchVolume: true, volumeCreateFails: true, scratchQuotaBytes: 16 })).rejects.toThrow(
+      /scratch volume provisioning failed/,
     );
+  });
+
+  it("parallel createSandbox calls cannot overrun the active-sandbox cap", async () => {
+    const b = await boot({ maxActiveSandboxes: 1 });
+    const results = await Promise.allSettled(
+      Array.from({ length: 3 }, () => b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT)),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    for (const r of results) {
+      if (r.status === "rejected") expect(String(r.reason)).toMatch(/active sandbox cap/);
+    }
+    // Exactly one mutation container was ever spawned.
+    expect(b.log.filter((a) => a[1] === "run" && a.includes("-d"))).toHaveLength(1);
+  });
+
+  it("parallel evaluations cannot overrun maxEvaluatorInvocations", async () => {
+    const b = await boot({ manifest: makeManifest({ budget: { ...GENEROUS_BUDGET, maxEvaluatorInvocations: 1 } }) });
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const results = await Promise.allSettled(
+      Array.from({ length: 4 }, (_, i) =>
+        b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 100 + i }, CLIENT),
+      ),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    for (const r of results) {
+      if (r.status === "rejected") expect(String(r.reason)).toMatch(/evaluatorInvocations/);
+    }
+    // Exactly one durable charge, one evaluator container.
+    expect((await stateLines(b)).filter((l) => l["t"] === "inv")).toHaveLength(1);
+    expect(b.log.filter((a) => a[1] === "run" && a.includes("--rm"))).toHaveLength(1);
+    expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(1);
   });
 });
 
