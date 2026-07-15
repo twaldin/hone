@@ -21,6 +21,7 @@ import type { CmdIo } from "./io.js";
 import { resolveOptimizerDigest } from "./optimizer-digest.js";
 import { deferred, sleep } from "./promise.js";
 import { exitReport, formatDelta, formatHumanReport, formatSpend } from "./report.js";
+import { resumeSealError } from "./resume-seal.js";
 import {
   CONTRACT_FILE,
   SUPERVISOR_FILE,
@@ -34,7 +35,7 @@ import {
 import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "./types.js";
 
 const RUN_USAGE =
-  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--resume] [--backend stub|local|<module>] [--config <json>] [--repo <dir>]";
+  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--resume] [--backend stub|local|<module>] [--config <json>]";
 
 /** Optional per-run overrides (routing, seat, seed, budget dims, promotion rule) — the CLI flags cover the common ones. */
 const ConfigOverrides = z
@@ -116,7 +117,7 @@ const DEFAULT_MUTATION_MODEL = "glm-5.2";
 function buildConfig(
   manifest: CapsuleManifest,
   overrides: ConfigOverrides,
-  flags: { headless: boolean; apply: string | undefined; budgetUsd: number | undefined },
+  flags: { headless: boolean; apply: string | undefined; budgetUsd: number | undefined; backend: string },
   env: NodeJS.ProcessEnv,
 ): RunConfig {
   const routing: ModelRouting = { ...(overrides.routing ?? {}) };
@@ -138,6 +139,9 @@ function buildConfig(
     routing,
     apply: flags.apply ?? overrides.apply ?? "none",
     headless: flags.headless || overrides.headless === true,
+    // Sealed at run creation: a resume with an absent --backend reuses it;
+    // a conflicting flag refuses (see runCommand's resume branch).
+    backend: flags.backend,
     improverSeat: overrides.improverSeat ?? false,
     seed: overrides.seed ?? 0,
     ...(overrides.promotion !== undefined ? { promotion: overrides.promotion } : {}),
@@ -195,9 +199,34 @@ async function promptApproval(
   }
 }
 
-/** Interactive probe gate: print the trusted paired measurement, ask to continue. */
-async function promptProbe(report: ProbeReport, io: CmdIo): Promise<boolean> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+/**
+ * M0 VI.4 headless probe policy: the probe is ONE paired eval + approval —
+ * NOT the N≥2 statistical PromotionGate (that rule stays frozen in the
+ * contract and governs the M1 outer champion decision; consulting it here
+ * would make a one-eval probe mathematically impossible). Headless
+ * auto-approves only a VALID completed pair whose broker-authored candidate
+ * delta is strictly positive; anything else declines and the run stops.
+ */
+export function headlessProbeVerdict(report: ProbeReport): boolean {
+  return report.candidate !== null && report.candidate.delta > 0;
+}
+
+/**
+ * Interactive probe gate: print the trusted paired measurement, ask to
+ * continue. Abort-aware (exported for the abort-during-probe regression): a
+ * stop landing while the question is pending resolves false immediately —
+ * the backend then observes the aborted signal and seals NO durable verdict,
+ * so the run stays resumable and re-gates on the next resume. `streams` is a
+ * DI seam for tests; production reads the real TTY.
+ */
+export async function promptProbe(
+  report: ProbeReport,
+  io: CmdIo,
+  signal: AbortSignal,
+  streams: { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } = { input: process.stdin, output: process.stdout },
+): Promise<boolean> {
+  if (signal.aborted) return false;
+  const rl = createInterface({ input: streams.input, output: streams.output });
   try {
     io.out("");
     io.out("probe episode complete — trusted paired measurement (broker events, not optimizer claims):");
@@ -209,7 +238,12 @@ async function promptProbe(report: ProbeReport, io: CmdIo): Promise<boolean> {
     }
     io.out(`  measured on ${report.assetGroupId} (seed ${report.seed}) | ${formatSpend(report.budget)}`);
     for (;;) {
-      const answer = (await rl.question("continue the full run? [Y]es / [N]o: ")).trim().toLowerCase();
+      let answer: string;
+      try {
+        answer = (await rl.question("continue the full run? [Y]es / [N]o: ", { signal })).trim().toLowerCase();
+      } catch {
+        return false; // aborted mid-question — no verdict
+      }
       if (answer === "" || answer === "y" || answer === "yes") return true;
       if (answer === "n" || answer === "no") return false;
     }
@@ -221,7 +255,9 @@ async function promptProbe(report: ProbeReport, io: CmdIo): Promise<boolean> {
 export async function runCommand(args: string[], io: CmdIo): Promise<number> {
   const { positionals, flags } = parseFlags(args, {
     booleans: ["headless", "resume"],
-    strings: ["budget-usd", "apply", "backend", "config", "repo"],
+    // Deliberately NO --repo: automatic delivery always targets io.root; the
+    // operator-driven `hone apply/stop --repo` remains the explicit path.
+    strings: ["budget-usd", "apply", "backend", "config"],
   });
   const capsuleArg = positionals[0];
   if (capsuleArg === undefined) throw new UsageError(RUN_USAGE);
@@ -242,8 +278,8 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
   }
   // Production default: the trusted local backend. Arbitrary module specs are
   // refused here, before a runId is minted or any run state touches disk.
-  const backendSpec = strFlag(flags, "backend") ?? "local";
-  if (!backendSpecAllowed(backendSpec, io.env)) {
+  const backendFlag = strFlag(flags, "backend");
+  if (backendFlag !== undefined && !backendSpecAllowed(backendFlag, io.env)) {
     io.err(UNSAFE_BACKEND_REFUSAL);
     return 2;
   }
@@ -269,8 +305,23 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
         `optimizer drift since the run started: digest ${optimizerDigest} != sealed ${found.state.optimizerDigest} — refusing to resume (start a fresh run)`,
       );
     }
-    let config = loadRunConfigFile(found.runDir);
-    if (boolFlag(flags, "headless") && !config.headless) config = { ...config, headless: true };
+    const config = loadRunConfigFile(found.runDir);
+    // The backend is sealed at run creation: an absent flag reuses it; a
+    // conflicting flag refuses. The stored spec still passes the trust gate
+    // (a module spec needs HONE_UNSAFE_BACKEND=1 on THIS invocation too).
+    if (backendFlag !== undefined && backendFlag !== config.backend) {
+      throw new UsageError(`--backend ${backendFlag} conflicts with the run's sealed backend "${config.backend}" — resume without --backend, or start a fresh run`);
+    }
+    if (!backendSpecAllowed(config.backend, io.env)) {
+      io.err(UNSAFE_BACKEND_REFUSAL);
+      return 2;
+    }
+    // Headless is sealed too: absence preserves the stored mode; --headless
+    // on a run approved interactively (stored false) may NOT flip it — the
+    // probe gate and stop semantics the owner approved would silently change.
+    if (boolFlag(flags, "headless") && !config.headless) {
+      throw new UsageError("--headless conflicts with the run's sealed interactive mode (headless=false) — resume without --headless, or start a fresh run");
+    }
     plan = { runId: found.runId, runDir: found.runDir, config, resumed: true };
   } else {
     let config = buildConfig(
@@ -280,6 +331,7 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
         headless: boolFlag(flags, "headless"),
         apply: applyFlag,
         budgetUsd,
+        backend: backendFlag ?? "local",
       },
       io.env,
     );
@@ -322,7 +374,7 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
       capsuleDir,
       capsuleDigest: admitted.digest,
       optimizerDigest,
-      flags: { backend: strFlag(flags, "backend"), repo: strFlag(flags, "repo") },
+      orderingReport: admitted.orderingReport,
     },
     io,
   );
@@ -544,10 +596,19 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
   throw new Error(`run lock ${sockPath}: could not acquire after repeated stale-rebind attempts`);
 }
 
+/** Frozen inputs superviseRun carries beside the plan (all admission-derived). */
+export interface SuperviseExtra {
+  manifest: CapsuleManifest;
+  capsuleDir: string;
+  capsuleDigest: string;
+  optimizerDigest: string;
+  orderingReport: DiagnosticOrderingReport;
+}
+
 /** Exported for the late-contender lock regression only. */
 export async function superviseRun(
   plan: RunPlan,
-  extra: { manifest: CapsuleManifest; capsuleDir: string; capsuleDigest: string; optimizerDigest: string; flags: { backend: string | undefined; repo: string | undefined } },
+  extra: SuperviseExtra,
   io: CmdIo,
 ): Promise<number> {
   // The lock precedes ANY event append or docker sweep: a competing resume
@@ -572,7 +633,7 @@ export async function superviseRun(
 
 async function superviseLocked(
   plan: RunPlan,
-  extra: { manifest: CapsuleManifest; capsuleDir: string; capsuleDigest: string; optimizerDigest: string; flags: { backend: string | undefined; repo: string | undefined } },
+  extra: SuperviseExtra,
   io: CmdIo,
   nonce: string,
 ): Promise<number> {
@@ -622,8 +683,28 @@ async function superviseLocked(
   };
 
   if (plan.resumed) {
-    const cursor = replayRun(runDir).cursor;
-    emit({ runId, at: new Date().toISOString(), type: "run.resumed", fromCursor: cursor });
+    // Under-lock seal verification (the plan was chosen from PRE-lock reads):
+    // runconfig.json, contract.md, the run.started contract hash, and the
+    // capsule/optimizer/backend/headless seals must all still hold before
+    // run.resumed is appended or any backend launches. Tamper refuses with
+    // NO event and NO terminal — the run stays resumable as-is.
+    const underLock = replayRun(runDir);
+    const sealError = resumeSealError({
+      runId,
+      runDir,
+      config,
+      manifest,
+      capsuleDigest,
+      optimizerDigest,
+      orderingReport: extra.orderingReport,
+      sealedContractHash: underLock.contractHash,
+      sealedOptimizerDigest: underLock.optimizerDigest,
+    });
+    if (sealError !== null) {
+      io.err(`resume seal violated: ${sealError}`);
+      return 1;
+    }
+    emit({ runId, at: new Date().toISOString(), type: "run.resumed", fromCursor: underLock.cursor });
   } else {
     emit({
       runId,
@@ -636,7 +717,8 @@ async function superviseLocked(
   }
 
   const replayed = replayRun(runDir);
-  const backend = await loadBackend(extra.flags.backend ?? "local", io.root, io.env);
+  // The backend is the SEALED one from the run config — never a flag.
+  const backend = await loadBackend(config.backend, io.root, io.env);
 
   const abort = new AbortController();
   const children = new Set<ChildLike>();
@@ -707,6 +789,8 @@ async function superviseLocked(
   let backendFenced = false;
   // Trusted-authority barrier: null = backend never registered = ready.
   let authorityBarrier: Promise<void> | null = null;
+  // Full-teardown barrier: null = backend never registered = clean.
+  let cleanupBarrier: Promise<void> | null = null;
   const ctx: RunnerBackendContext = {
     runId,
     root: io.root,
@@ -727,11 +811,15 @@ async function superviseLocked(
         children.delete(child);
       };
     },
-    probeGate: (report) => (headless ? Promise.resolve(true) : promptProbe(report, io)),
+    probeGate: (report) => (headless ? Promise.resolve(headlessProbeVerdict(report)) : promptProbe(report, io, abort.signal)),
     requestStop: () => onSignal(),
     registerAuthorityBarrier: (barrier) => {
       authorityBarrier = barrier;
       // A rejection may land before anything awaits it — keep it handled.
+      void barrier.catch(() => {});
+    },
+    registerCleanupBarrier: (barrier) => {
+      cleanupBarrier = barrier;
       void barrier.catch(() => {});
     },
   };
@@ -763,20 +851,52 @@ async function superviseLocked(
       backendFenced = true;
     }
 
+    // Termination is not only for aborts: a FAILED backend (or one whose
+    // trusted authority could not be recovered) may have left process groups
+    // behind — every registered child is TERM'd, KILL'd after grace, and
+    // confirmed reaped before anything else happens. On the success path the
+    // barrier still runs whenever an abort landed: a TERM-ignoring
+    // descendant must never outlive delivery or the terminal event.
+    if (abort.signal.aborted || failure !== null || authorityFailure !== null) await termThenKill();
+
+    /**
+     * Full-teardown gate: the supervisor never delivers, emits run.finished,
+     * or returns while backend resources (optimizer/build containers,
+     * broker, proxy, egress, temp snapshots) may still be open. A rejected
+     * or timed-out barrier means cleanup is incomplete — the run is left
+     * WITHOUT a terminal event, resumable after the operator intervenes.
+     */
+    const awaitCleanup = async (): Promise<Error | null> => {
+      if (cleanupBarrier === null) return null;
+      const timeoutMs = Number(io.env["HONE_CLEANUP_TIMEOUT_MS"] ?? 60_000);
+      const timedOut = deferred<never>();
+      const timer = setTimeout(() => timedOut.reject(new Error(`backend cleanup did not complete within ${timeoutMs}ms`)), timeoutMs);
+      try {
+        await Promise.race([cleanupBarrier, timedOut.promise]);
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e : new Error(String(e));
+      } finally {
+        clearTimeout(timer);
+        void timedOut.promise.catch(() => {}); // settled-after-race rejection stays handled
+      }
+    };
+
     if (authorityFailure !== null) {
       // Trusted authority could not be established: sealing the run now
       // would terminalize stale state. No delivery, no run.finished — the
       // run stays resumable.
-      if (abort.signal.aborted) await termThenKill();
+      const cleanupFailure = await awaitCleanup();
+      if (cleanupFailure !== null) io.err(`backend cleanup incomplete: ${cleanupFailure.message}`);
       io.err(`trusted authority recovery failed: ${authorityFailure.message} — run left unfinished (resume with \`hone run --resume\`)`);
       return 1;
     }
 
-    // On any abort, every child group must be TERM'd, KILL'd after grace,
-    // and confirmed reaped BEFORE delivery and run.finished — even (and
-    // especially) when the backend promise settled first: a TERM-ignoring
-    // descendant would otherwise outlive the terminal event.
-    if (abort.signal.aborted) await termThenKill();
+    const cleanupFailure = await awaitCleanup();
+    if (cleanupFailure !== null) {
+      io.err(`backend cleanup incomplete: ${cleanupFailure.message} — run left unfinished (resume with \`hone run --resume\`)`);
+      return 1;
+    }
 
     if (failure !== null) {
       const err: Error = failure;
@@ -794,7 +914,9 @@ async function superviseLocked(
     // the synchronous delivery is queued and handled — never the OS default
     // that would kill the supervisor mid-delivery with no terminal event.
     if (!stopRequested && failure === null && config.apply !== "none" && best !== null) {
-      const repo = extra.flags.repo !== undefined ? resolve(io.root, extra.flags.repo) : io.root;
+      // Automatic delivery ALWAYS targets io.root — per-run delivery has no
+      // --repo escape; `hone apply/stop --repo` is the deliberate operator path.
+      const repo = io.root;
       if (isGitRepo(repo)) {
         try {
           const result = deliver({
@@ -819,7 +941,7 @@ async function superviseLocked(
           else io.err(`delivery (${config.apply}) failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       } else {
-        io.err(`apply ${config.apply}: ${repo} is not a git repository — skipping delivery (pass --repo <dir>)`);
+        io.err(`apply ${config.apply}: ${repo} is not a git repository — skipping delivery (use \`hone apply --repo <dir>\`)`);
       }
     }
 

@@ -277,9 +277,9 @@ describe("optimizer digest resolution", () => {
     expect(computeOptimizerDigest(`other@sha256:${"b".repeat(64)}`)).not.toBe(a);
   });
 
-  it("an overridden optimizer (CMD or ENTRY) REQUIRES a valid explicit digest", () => {
+  it("an overridden in-container command REQUIRES a valid explicit digest; ENTRY is refused outright", () => {
     expect(() => resolveOptimizerDigest({ HONE_OPTIMIZER_CMD: "node" }, FIX_IMAGE)).toThrow(/explicit HONE_OPTIMIZER_DIGEST/);
-    expect(() => resolveOptimizerDigest({ HONE_OPTIMIZER_ENTRY: "/tmp/x.mjs" }, FIX_IMAGE)).toThrow(/explicit HONE_OPTIMIZER_DIGEST/);
+    expect(() => resolveOptimizerDigest({ HONE_OPTIMIZER_ENTRY: "/tmp/x.mjs" }, FIX_IMAGE)).toThrow(/no longer supported/);
     expect(() => resolveOptimizerDigest({ HONE_OPTIMIZER_CMD: "node", HONE_OPTIMIZER_DIGEST: "not-a-digest" }, FIX_IMAGE)).toThrow(
       /explicit HONE_OPTIMIZER_DIGEST/,
     );

@@ -3,19 +3,32 @@ import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, 
 import net from "node:net";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { RunConfig } from "@hone/schema";
+import { DiagnosticOrderingReport, RunConfig, capsuleDigest } from "@hone/schema";
 import type { BudgetState, RunEvent } from "@hone/schema";
 import { runCommand } from "@hone/broker";
 import type { CallContext, CmdResult, RunCommand } from "@hone/broker";
 import type { ProxyHandle } from "@hone/proxy";
 import { writeCapsuleSnapshot } from "../src/admission.js";
+import { contractHash, renderContract } from "../src/contract.js";
 import { reconcileBrokerAuthority, setupEgress, sweepStaleRunResources } from "../src/backends/local.js";
 import type { AuthorityRecoverySource } from "../src/backends/local.js";
 import { appendEvent, bestArtifact, eventsPath, readEvents, replayRun } from "../src/eventlog.js";
 import { deferred, sleep } from "../src/promise.js";
 import { loadRunConfigFile, writeRunConfigFile } from "../src/runs.js";
 import { acquireRunLock, probeRunLockIdentity, runCommand as cliRunCommand, runLockPath, superviseRun } from "../src/supervisor.js";
-import { CAP_ID, at, fakeHash, fixtureEvents, makeCapsule, makeIo, makeRoot, manifestObject, writeEvents } from "./helpers.js";
+import {
+  CAP_ID,
+  FIX_OPTIMIZER_DIGEST,
+  at,
+  fakeHash,
+  fixtureEvents,
+  makeCapsule,
+  makeIo,
+  makeRoot,
+  manifestObject,
+  orderingReportRaw,
+  writeEvents,
+} from "./helpers.js";
 
 /**
  * Second-pass review findings 10 + 11: crash-resume must sweep stale docker
@@ -290,22 +303,42 @@ describe("live docker smoke (finding 10)", () => {
   });
 });
 
+/**
+ * A resumable run whose seals are REAL: the contract on disk renders from the
+ * stored runconfig + frozen identity, run.started carries its true hash, and
+ * the sealed backend is the stub the tests resume with — exactly what a
+ * genuine interrupted run leaves behind (the under-lock seal check verifies
+ * all of it before run.resumed).
+ */
 function resumableFixture(root: string, runId: string): string {
   makeCapsule(root);
-  const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false }));
-  // Frozen-admission resume gate: the run dir must carry the capsule snapshot.
-  writeCapsuleSnapshot(runDir, manifestObject());
-  writeRunConfigFile(
-    runDir,
-    RunConfig.parse({
-      version: 1,
-      capsuleId: CAP_ID,
-      objective: "fixture objective",
-      budget: { maxTokens: 1_000_000, maxUsd: 25, maxWallClockSec: 3600, maxEvaluatorInvocations: 100 },
-      routing: { mutation: { model: "test-model" } },
-      headless: true,
-    }),
+  const manifest = manifestObject();
+  const config = RunConfig.parse({
+    version: 1,
+    capsuleId: CAP_ID,
+    objective: "fixture objective",
+    budget: { maxTokens: 1_000_000, maxUsd: 25, maxWallClockSec: 3600, maxEvaluatorInvocations: 100 },
+    routing: { mutation: { model: "test-model" } },
+    headless: true,
+    backend: "stub",
+  });
+  const contract = renderContract({
+    runId,
+    config,
+    manifest,
+    capsuleDigest: capsuleDigest(manifest),
+    optimizerDigest: FIX_OPTIMIZER_DIGEST,
+    orderingReport: DiagnosticOrderingReport.parse(orderingReportRaw()),
+  });
+  const runDir = writeEvents(
+    root,
+    runId,
+    fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false, contractHash: contractHash(contract) }),
   );
+  writeFileSync(join(runDir, "contract.md"), contract);
+  // Frozen-admission resume gate: the run dir must carry the capsule snapshot.
+  writeCapsuleSnapshot(runDir, manifest);
+  writeRunConfigFile(runDir, config);
   return runDir;
 }
 
@@ -483,7 +516,7 @@ describe("run lock (FinalSecurityGate finding 2 — OS-enforced exclusivity)", (
           capsuleDir: join(root, "capsule"),
           capsuleDigest: fakeHash("f"),
           optimizerDigest: fakeHash("0"),
-          flags: { backend: "stub", repo: undefined },
+          orderingReport: DiagnosticOrderingReport.parse(orderingReportRaw()),
         },
         io,
       ),

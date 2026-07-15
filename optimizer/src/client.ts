@@ -49,12 +49,36 @@ interface Pending {
   reject: (err: Error) => void;
 }
 
+/**
+ * Broker endpoint forms the trusted runner hands the optimizer:
+ *   unix   a filesystem socket path (mounted into the container on Linux)
+ *   tcp    `tcp://host:port` (the runner's authenticated public listener on
+ *          macOS, where VirtioFS blocks mounted unix sockets)
+ */
+export type BrokerEndpoint = { kind: "unix"; path: string } | { kind: "tcp"; host: string; port: number };
+
+export function parseBrokerEndpoint(endpoint: string): BrokerEndpoint {
+  if (!endpoint.startsWith("tcp://")) return { kind: "unix", path: endpoint };
+  const rest = endpoint.slice("tcp://".length);
+  const colon = rest.lastIndexOf(":");
+  const host = colon > 0 ? rest.slice(0, colon) : "";
+  const port = colon > 0 ? Number(rest.slice(colon + 1)) : Number.NaN;
+  if (host.length === 0 || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`invalid tcp broker endpoint: ${endpoint} (expected tcp://host:port)`);
+  }
+  return { kind: "tcp", host, port };
+}
+
 export class BrokerClient {
   private nextId = 1;
   private buf = "";
   private readonly pending = new Map<number, Pending>();
 
-  private constructor(private readonly sock: net.Socket) {
+  private constructor(
+    private readonly sock: net.Socket,
+    /** Capability for the authenticated TCP listener; sent per request, never logged. */
+    private readonly token: string | undefined,
+  ) {
     sock.setEncoding("utf8");
     sock.on("data", (chunk: string) => this.onData(chunk));
     const fail = (err: Error) => {
@@ -65,13 +89,18 @@ export class BrokerClient {
     sock.on("close", () => fail(new Error("broker connection closed")));
   }
 
-  static async connect(socketPath: string): Promise<BrokerClient> {
-    const sock = net.connect(socketPath);
+  static async connect(endpoint: string, opts: { token?: string | undefined } = {}): Promise<BrokerClient> {
+    const parsed = parseBrokerEndpoint(endpoint);
+    // The trusted runner injects HONE_BROKER_TOKEN into the container env for
+    // the authenticated TCP transport; the loop's connect call stays
+    // transport-agnostic. The token is attached per request and never logged.
+    const token = opts.token ?? process.env["HONE_BROKER_TOKEN"];
+    const sock = parsed.kind === "tcp" ? net.connect(parsed.port, parsed.host) : net.connect(parsed.path);
     const ready = deferred<void>();
     sock.once("connect", () => ready.resolve());
     sock.once("error", ready.reject);
     await ready.promise;
-    return new BrokerClient(sock);
+    return new BrokerClient(sock, token);
   }
 
   close(): void {
@@ -113,7 +142,7 @@ export class BrokerClient {
     const id = this.nextId++;
     const { promise, resolve, reject } = deferred<unknown>();
     this.pending.set(id, { resolve, reject });
-    this.sock.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    this.sock.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params, ...(this.token !== undefined ? { token: this.token } : {}) })}\n`);
     const raw = await promise;
     return BrokerMethods[method].result.parse(raw) as ResultOf<M>;
   }

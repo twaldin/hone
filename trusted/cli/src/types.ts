@@ -74,6 +74,17 @@ export interface RunnerBackendContext {
    * register are ready by default.
    */
   registerAuthorityBarrier(barrier: Promise<void>): void;
+  /**
+   * Full-teardown barrier. A backend that opens external resources
+   * (containers, broker, proxy, egress network, temp snapshots) MUST
+   * register a promise SYNCHRONOUSLY before its first await. The supervisor
+   * never delivers, emits run.finished, or returns until it settles:
+   * resolution proves every resource is fully closed; rejection (or a
+   * timeout) means cleanup is incomplete — the supervisor fails the run
+   * WITHOUT a terminal event so it stays resumable. Backends that never
+   * register are clean by default.
+   */
+  registerCleanupBarrier(barrier: Promise<void>): void;
 }
 
 export interface RunnerBackend {

@@ -10,8 +10,10 @@ import { runCommand as cliRunCommand } from "../src/supervisor.js";
 import type { ProbeReport, RunnerBackendContext } from "../src/types.js";
 import {
   CAP_ID,
+  FIX_IMAGE,
   at,
   fakeHash,
+  fakeOptimizerSpawn,
   gitIn,
   initScratchRepo,
   makeCapsule,
@@ -120,7 +122,7 @@ interface ProbeFlow {
  * Run the REAL local backend (stubbed docker, unix egress, scripted optimizer
  * that records each invocation's env and exits 0) over a pre-seeded event log.
  */
-async function runProbeFlow(opts: { seed: RunEvent[]; verdict: boolean }): Promise<ProbeFlow> {
+async function runProbeFlow(opts: { seed: RunEvent[]; verdict: boolean; abortOnGate?: boolean }): Promise<ProbeFlow> {
   const root = makeRoot();
   const runId = "run_probe";
   const runDir = writeEvents(root, runId, opts.seed);
@@ -157,7 +159,10 @@ async function runProbeFlow(opts: { seed: RunEvent[]; verdict: boolean }): Promi
   };
 
   const run: RunCommand = () => Promise.resolve(res());
-  const backend = createBackend({ run });
+  // In-container argv override + fake docker spawn: the backend believes it
+  // launched the sealed container; lifecycle (env wiring, exit codes) is real.
+  const backend = createBackend({ run, spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE) });
+  const abort = new AbortController();
   const ctx: RunnerBackendContext = {
     runId,
     root,
@@ -176,23 +181,27 @@ async function runProbeFlow(opts: { seed: RunEvent[]; verdict: boolean }): Promi
     env: {
       PATH: process.env["PATH"] ?? "",
       HONE_EGRESS: "socket",
-      HONE_OPTIMIZER_CMD: process.execPath,
-      HONE_OPTIMIZER_ENTRY: optimizerEntry,
+      HONE_OPTIMIZER_CMD: `${process.execPath} ${optimizerEntry}`,
     },
     capsuleDigest: digest,
     optimizerDigest: fakeHash("0"),
     replayed: replayRun(runDir),
-    signal: new AbortController().signal,
+    signal: abort.signal,
     emit: (event) => appendEvent(runDir, event),
     registerChild: () => () => {},
     probeGate: (report) => {
       flow.probeReports.push(report);
+      // A stop landing WHILE the owner is being asked: the gate resolves
+      // (promptProbe returns false on abort) but the backend must seal NO
+      // durable verdict.
+      if (opts.abortOnGate === true) abort.abort(new Error("stop requested"));
       return Promise.resolve(opts.verdict);
     },
     requestStop: () => {
       flow.stops++;
     },
     registerAuthorityBarrier: () => {},
+    registerCleanupBarrier: () => {},
   };
 
   await backend.start(ctx);
@@ -280,6 +289,18 @@ describe("probe gate flow (real local backend, scripted optimizer)", () => {
     expect(flow.invocations().length).toBe(0);
     expect(flow.probeReports.length).toBe(0);
     expect(flow.stops).toBe(1);
+  });
+
+  it("an abort DURING the gate seals no durable verdict — the run stays resumable and re-gates", { timeout: 30_000 }, async () => {
+    const flow = await runProbeFlow({ seed: seededLog("run_probe"), verdict: false, abortOnGate: true });
+    // The bounded probe ran and the gate was consulted…
+    expect(flow.invocations().length).toBe(1);
+    expect(flow.probeReports.length).toBe(1);
+    // …but the abort raced the answer: NO probe.completed was appended (a
+    // durable false would wrongly stop every future resume), no stop was
+    // requested by the gate path, and no full launch happened.
+    expect(flow.events().filter((e) => e.type === "probe.completed").length).toBe(0);
+    expect(flow.stops).toBe(0);
   });
 });
 

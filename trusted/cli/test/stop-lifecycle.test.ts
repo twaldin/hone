@@ -12,7 +12,9 @@ import { sleep } from "../src/promise.js";
 import { acquireRunLock, pidAlive, readSupervisorPid, runCommand as cliRunCommand } from "../src/supervisor.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
+  FIX_IMAGE,
   fakeHash,
+  fakeOptimizerSpawn,
   fixtureEvents,
   gitIn,
   hone,
@@ -386,7 +388,7 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
     const abort = new AbortController();
     abort.abort(new Error("stop requested")); // stop landed BEFORE startup
     const run: RunCommand = () => Promise.resolve(res()); // every docker call succeeds
-    const backend = createBackend({ run });
+    const backend = createBackend({ run, spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE) });
     let registeredBarrier: Promise<void> | null = null;
     const ctx: RunnerBackendContext = {
       runId: "run_seed",
@@ -405,8 +407,7 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
       env: {
         PATH: process.env["PATH"] ?? "",
         HONE_EGRESS: "socket",
-        HONE_OPTIMIZER_CMD: process.execPath,
-        HONE_OPTIMIZER_ENTRY: optimizerEntry,
+        HONE_OPTIMIZER_CMD: `${process.execPath} ${optimizerEntry}`,
       },
       capsuleDigest: digest,
       optimizerDigest: fakeHash("0"),
@@ -419,6 +420,7 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
       registerAuthorityBarrier: (b) => {
         registeredBarrier = b;
       },
+      registerCleanupBarrier: () => {},
     };
 
     await backend.start(ctx);

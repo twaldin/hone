@@ -23,6 +23,7 @@ import {
   makeRoot,
   manifestObject,
   tarToCas,
+  testOptimizerRuntime,
   writeEvents,
 } from "./helpers.js";
 
@@ -353,8 +354,6 @@ describe("optimizer stdout is diagnostic-only — no event authority", () => {
       }),
       env: {
         PATH: process.env["PATH"] ?? "",
-        HONE_OPTIMIZER_CMD: process.execPath,
-        HONE_OPTIMIZER_ENTRY: script,
       },
       capsuleDigest: fakeHash("f"),
       optimizerDigest: fakeHash("0"),
@@ -368,9 +367,10 @@ describe("optimizer stdout is diagnostic-only — no event authority", () => {
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
       registerAuthorityBarrier: () => {},
+      registerCleanupBarrier: () => {},
     };
 
-    await runOptimizer(ctx, join(root, "broker.sock"));
+    await runOptimizer(ctx, testOptimizerRuntime({ runId: "run_forge", argv: [process.execPath, script] }));
 
     // the trusted event channel saw NOTHING from the child
     expect(emitted).toEqual([]);

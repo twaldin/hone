@@ -15,7 +15,7 @@ const USAGE = `hone — trusted run supervisor + anytime surface
 
 usage:
   hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--resume]
-           [--backend stub|<module>] [--config <json>] [--repo <dir>]
+           [--backend stub|local|<module>] [--config <json>]
   hone status [--run ID]
   hone best [--run ID]
   hone diff [--stat] [--run ID]

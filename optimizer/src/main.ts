@@ -1,9 +1,14 @@
 /**
- * Optimizer child-process entry (WP7): the trusted runner spawns this as an
- * unprivileged host process with env pointing at the run's broker socket.
+ * Optimizer child entry (WP7): the trusted runner executes this as a bundled,
+ * unprivileged CONTAINER process with env pointing at the run's broker
+ * endpoint. It never sees the host repo, run dir, CAS, or credentials.
  *
  * Wire contract with the runner:
- *   env  HONE_BROKER_SOCK   path to runDir/broker.sock            (required)
+ *   env  HONE_BROKER_SOCK   broker endpoint — a unix socket path (Linux
+ *                           bind-mount) or `tcp://host:port` (macOS
+ *                           authenticated public TCP listener)   (required)
+ *   env  HONE_BROKER_TOKEN  capability for the TCP listener; attached to
+ *                           every request by BrokerClient, never logged
  *   env  HONE_RUN_ID        run id stamped into every event       (required)
  *   env  HONE_SEED          base seed for the ε-restart draw      (default 0)
  *   env  HONE_MAX_EPISODES  positive-integer cap on outer episodes attempted

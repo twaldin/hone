@@ -18,6 +18,7 @@ import {
   makeRoot,
   manifestObject,
   readLogLines,
+  testOptimizerRuntime,
   tarToCas,
 } from "./helpers.js";
 
@@ -127,8 +128,6 @@ describe("optimizer process-group kill", () => {
       }),
       env: {
         PATH: process.env["PATH"] ?? "",
-        HONE_OPTIMIZER_CMD: process.execPath,
-        HONE_OPTIMIZER_ENTRY: script,
       },
       capsuleDigest: fakeHash("f"),
       optimizerDigest: fakeHash("0"),
@@ -142,9 +141,10 @@ describe("optimizer process-group kill", () => {
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
       registerAuthorityBarrier: () => {},
+      registerCleanupBarrier: () => {},
     };
 
-    const done = runOptimizer(ctx, join(root, "broker.sock"));
+    const done = runOptimizer(ctx, testOptimizerRuntime({ runId: "run_grp", argv: [process.execPath, script] }));
     const spawnDeadline = Date.now() + 10_000;
     while (!existsSync(pidFile) && Date.now() < spawnDeadline) await sleep(50);
     expect(existsSync(pidFile)).toBe(true);
