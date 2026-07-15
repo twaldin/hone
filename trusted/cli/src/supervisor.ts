@@ -320,7 +320,8 @@ export async function acquireRunLock(runDir: string, runId: string): Promise<() 
   throw new Error(`run lock ${sockPath}: could not acquire after repeated stale-rebind attempts`);
 }
 
-async function superviseRun(
+/** Exported for the late-contender lock regression only. */
+export async function superviseRun(
   plan: RunPlan,
   extra: { manifest: CapsuleManifest; capsuleDir: string; flags: { backend: string | undefined; repo: string | undefined } },
   io: CmdIo,
@@ -329,6 +330,13 @@ async function superviseRun(
   // must fail before it can touch the log or rm -f live containers.
   const releaseLock = await acquireRunLock(plan.runDir, plan.runId);
   try {
+    // The resume plan was chosen BEFORE the lock: a contender that planned
+    // against an unfinished log can acquire only after the winner released —
+    // by then the run may have finished. Re-validate under the lock, before
+    // any append or sweep, or a late contender re-runs a settled run.
+    if (plan.resumed && replayRun(plan.runDir).finished !== null) {
+      throw new UsageError(`run ${plan.runId} already finished — nothing to resume`);
+    }
     return await superviseLocked(plan, extra, io);
   } finally {
     await releaseLock();
