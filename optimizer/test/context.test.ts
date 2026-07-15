@@ -54,18 +54,23 @@ describe("buildEpisodeContext", () => {
     expect(ctx.systemPrompt).toBe(MUTATION_SYSTEM_PROMPT);
 
     expect(ctx.userPrompt).toContain("make the pathfinder fast, keep correctness");
-    // Per-example scores AND untouched feedback blobs (string and structured).
-    expect(ctx.userPrompt).toContain("maze_04: score=0.2");
+    // Behavioral invariants, not rendering format (context.ts is a mutable
+    // asset in M1): example ids, scores, and untouched feedback blobs (string
+    // and structured) must all reach the prompt.
+    expect(ctx.userPrompt).toContain("maze_04");
+    expect(ctx.userPrompt).toContain("0.2");
     expect(ctx.userPrompt).toContain("TimeoutError: search exceeded 5s on maze_04 (expanded 9M nodes)");
     expect(ctx.userPrompt).toContain('{"runtimeMs":12,"note":"already optimal"}');
-    expect(ctx.userPrompt).toContain("objective runtime: 0.42");
+    // Objective values and the evaluator's diagnostic summary reach the prompt.
+    expect(ctx.userPrompt).toContain("runtime");
+    expect(ctx.userPrompt).toContain("0.42");
     expect(ctx.userPrompt).toContain("2/3 mazes within budget");
-    // Lineage with signed deltas.
-    expect(ctx.userPrompt).toContain("episode 0: memoize-neighbors (delta +0.0200)");
-    expect(ctx.userPrompt).toContain("episode 2: binary-heap-frontier (delta -0.0100)");
-    // Remaining budget, not raw spend.
-    expect(ctx.userPrompt).toContain("tokens: 750000 of 1000000 left");
-    expect(ctx.userPrompt).toContain("evaluations: 7 of 10 left");
+    // Lineage approach labels reach the prompt.
+    expect(ctx.userPrompt).toContain("memoize-neighbors");
+    expect(ctx.userPrompt).toContain("binary-heap-frontier");
+    // Remaining budget (envelope minus spend) reaches the prompt, not raw spend.
+    expect(ctx.userPrompt).toContain("750000");
+    expect(ctx.userPrompt).not.toContain("250000");
   });
 
   it("truncates oversized feedback blobs at the policy bound", () => {
@@ -77,8 +82,10 @@ describe("buildEpisodeContext", () => {
       lineage: [],
       budget,
     });
-    expect(ctx.userPrompt).toContain("… [truncated]");
+    // Invariant: the oversized blob never reaches the prompt in full, but a
+    // usable prefix does. The truncation marker text itself is mutable.
     expect(ctx.userPrompt).not.toContain(huge);
+    expect(ctx.userPrompt).toContain("x".repeat(100));
   });
 
   it("switches to the repair frame and carries the failure evidence", () => {

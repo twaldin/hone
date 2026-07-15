@@ -6,6 +6,8 @@
  *   env  HONE_BROKER_SOCK   path to runDir/broker.sock            (required)
  *   env  HONE_RUN_ID        run id stamped into every event       (required)
  *   env  HONE_SEED          base seed for the ε-restart draw      (default 0)
+ *   env  HONE_MAX_EPISODES  positive-integer cap on outer episode ordinals;
+ *                           unset = unbounded, anything else fails closed
  *   env  HONE_RESUME        JSON {nextEpisode, incumbent}         (default fresh)
  *   stdout                  one RunEvent as JSON per line, NOTHING else
  *   stderr                  free-form diagnostics
@@ -14,7 +16,7 @@
  * to SIGKILL after its grace window.
  */
 import type { ArtifactRef, RunEvent } from "@hone/schema";
-import { runEpisodeLoop } from "./loop.js";
+import { parseMaxEpisodes, runEpisodeLoop } from "./loop.js";
 
 interface ResumeState {
   nextEpisode: number;
@@ -46,6 +48,7 @@ async function main(): Promise<number> {
   const seed = Number(process.env["HONE_SEED"] ?? 0);
   if (!Number.isInteger(seed) || seed < 0) throw new Error("HONE_SEED must be a nonnegative integer");
   const resume = parseResume(process.env["HONE_RESUME"]);
+  const maxEpisodes = parseMaxEpisodes(process.env["HONE_MAX_EPISODES"]);
 
   const abort = new AbortController();
   const onSignal = (): void => abort.abort(new Error("runner requested stop"));
@@ -58,7 +61,15 @@ async function main(): Promise<number> {
   };
 
   try {
-    await runEpisodeLoop({ brokerSocket, runId, emit, signal: abort.signal, seed, resume });
+    await runEpisodeLoop({
+      brokerSocket,
+      runId,
+      emit,
+      signal: abort.signal,
+      seed,
+      resume,
+      ...(maxEpisodes !== undefined ? { maxEpisodes } : {}),
+    });
     return 0;
   } finally {
     process.removeListener("SIGTERM", onSignal);
