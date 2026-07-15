@@ -8,7 +8,15 @@ import { z } from "zod";
  * droppable `meta` block. A capsule is a shareable task, not a run record.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+
+/**
+ * Immutable OCI image reference: lowercase repo path pinned to a sha256
+ * digest. Mutable tags (":latest") are rejected — a capsule that can silently
+ * change its runtime image is not content-addressed.
+ */
+export const IMAGE_DIGEST_REF =
+  /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*@sha256:[0-9a-f]{64}$/;
 
 /** Visibility of an asset group relative to the mutable optimizer. */
 export const AssetVisibility = z.enum([
@@ -54,14 +62,25 @@ export const CapsuleManifest = z.object({
     z.object({ kind: z.literal("git"), commit: z.string().regex(/^[0-9a-f]{40}$/) }),
     z.object({ kind: z.literal("cas"), hash: z.string().regex(/^sha256:[0-9a-f]{64}$/) }),
   ]),
-  /** OCI image ref+digest used for BOTH mutation and evaluation sandboxes in the seed. */
-  image: z.string().min(1),
+  /** Immutable OCI image ref (repo@sha256:<64>) used for BOTH mutation and evaluation sandboxes. */
+  image: z.string().regex(IMAGE_DIGEST_REF),
   /** Command argv executed inside the eval sandbox; must emit EvaluatorOutput JSON on stdout. */
   evalEntrypoint: z.array(z.string().min(1)).min(1),
   /** Paths (relative to artifact root) the optimizer MUST NOT modify. Trusted runtime enforces by diff-reject. */
   protectedPaths: z.array(z.string()).default([]),
   assetGroups: z.array(AssetGroup).min(1),
   budget: BudgetEnvelope,
+  /**
+   * Reference to the persisted diagnostic-ordering report proving the
+   * evaluator discriminates (broken < naive < baseline < improved, split
+   * integrity, stability). `path` is capsule-root-relative; `hash` covers the
+   * report file bytes. Core (inside the id/digest), not meta: a capsule
+   * without evidence its evaluator orders is not a runnable task.
+   */
+  diagnosticOrdering: z.object({
+    path: z.string().min(1),
+    hash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  }),
   /** sha256 hashes of every file referenced by assetGroups, keyed by path. */
   contentHashes: z.record(z.string().regex(/^sha256:[0-9a-f]{64}$/)),
   /**

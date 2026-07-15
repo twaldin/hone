@@ -1,5 +1,10 @@
+import { DiagnosticOrderingReport } from "@hone/schema";
 import { describe, expect, it } from "vitest";
-import { runOrderingCheck } from "../tools/ordering-check.js";
+import {
+  runOrderingCheck,
+  serializeOrderingReport,
+  summarizeOrderingReport,
+} from "../tools/ordering-check.js";
 
 describe("seeded-astar diagnostic ordering", () => {
   it(
@@ -17,6 +22,21 @@ describe("seeded-astar diagnostic ordering", () => {
       expect(baseline.combined).toBeLessThan(improved.combined);
       expect(shortcut.train).toBeGreaterThan(baseline.train);
       expect(shortcut.validation).toBeLessThan(baseline.validation);
+
+      // The persisted summary of the SAME run is schema-valid and its
+      // serialization is deterministic byte-for-byte.
+      const summary = summarizeOrderingReport(report);
+      expect(() => DiagnosticOrderingReport.parse(summary)).not.toThrow();
+      expect(summary.stability.aggregates.length).toBeGreaterThanOrEqual(3);
+      expect(summary.variants.baseline.trainTestsPass).toBe(true);
+      expect(summary.variants.baseline.validationTestsPass).toBe(true);
+      expect(summary.variants.improved.trainTestsPass).toBe(true);
+      expect(summary.variants.improved.validationTestsPass).toBe(true);
+      const bytes = serializeOrderingReport(summary);
+      expect(serializeOrderingReport(summary)).toBe(bytes);
+      expect(serializeOrderingReport(DiagnosticOrderingReport.parse(JSON.parse(bytes)))).toBe(
+        bytes,
+      );
     },
   );
 });
