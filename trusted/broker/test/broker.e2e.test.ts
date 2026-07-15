@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import {
 } from "@hone/schema";
 import { z } from "zod";
 import { startBroker, type RunningBroker, type SandboxNetworkMode } from "../src/index.js";
+import { deferred } from "../src/deferred.js";
 import { CasStore } from "../src/cas.js";
 import { packDirAsArtifact } from "../src/artifact.js";
 import { runCommand, type RunCommand } from "../src/command.js";
@@ -42,7 +43,7 @@ let cas: CasStore;
 let baselineHash: string;
 let capsuleRootDir: string;
 
-let main: RunningBroker;
+let main: RunningBroker & { adminSocketPath: string };
 let mainEvents: RunEvent[] = [];
 let client: RpcClient;
 let admin: RpcClient;
@@ -57,24 +58,31 @@ const countingRunCommand: RunCommand = (argv, opts) => {
   return runCommand(argv, opts);
 };
 
-async function bootBroker(
+interface BootExtras {
+  events?: RunEvent[];
+  runCommand?: RunCommand;
+  scratchQuotaBytes?: number;
+  reaperIntervalMs?: number;
+  now?: () => number;
+  sandboxNetwork?: SandboxNetworkMode;
+  /** Overrides config.image (e.g. the uid-2000 sandbox-user image). */
+  image?: string;
+  /** Overrides the capsule's eval entrypoint (live containment probes). */
+  evalEntrypoint?: string[];
+}
+
+async function makeBrokerConfig(
   name: string,
   budget: typeof GENEROUS_BUDGET,
-  extras: {
-    events?: RunEvent[];
-    runCommand?: RunCommand;
-    scratchQuotaBytes?: number;
-    reaperIntervalMs?: number;
-    now?: () => number;
-    sandboxNetwork?: SandboxNetworkMode;
-  } = {},
-): Promise<RunningBroker> {
+  extras: BootExtras = {},
+): Promise<{ config: Parameters<typeof startBroker>[0]; runDir: string }> {
   const runDir = path.join(tmpBase, "runs", name);
   await mkdir(runDir, { recursive: true });
   const capsule = await buildTestCapsule(path.join(tmpBase, "capsules", name), budget);
   capsule.manifest.baseline = { kind: "cas", hash: baselineHash };
+  if (extras.evalEntrypoint) capsule.manifest.evalEntrypoint = extras.evalEntrypoint;
   const sink = extras.events;
-  return startBroker({
+  const config: Parameters<typeof startBroker>[0] = {
     runId: `run-${name}`,
     manifest: capsule.manifest,
     capsuleRootDir: capsule.capsuleRootDir,
@@ -82,7 +90,7 @@ async function bootBroker(
     capsuleDigest: TEST_CAPSULE_DIGEST,
     optimizerDigest: TEST_OPTIMIZER_DIGEST,
     holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
-    image: TEST_IMAGE,
+    image: extras.image ?? TEST_IMAGE,
     runDir,
     casDir: path.join(tmpBase, "cas"),
     onEvent: (event) => {
@@ -93,7 +101,18 @@ async function bootBroker(
     ...(extras.reaperIntervalMs !== undefined ? { reaperIntervalMs: extras.reaperIntervalMs } : {}),
     ...(extras.now ? { now: extras.now } : {}),
     ...(extras.sandboxNetwork ? { sandboxNetwork: extras.sandboxNetwork } : {}),
-  });
+  };
+  return { config, runDir };
+}
+
+async function bootBroker(
+  name: string,
+  budget: typeof GENEROUS_BUDGET,
+  extras: BootExtras = {},
+): Promise<RunningBroker & { adminSocketPath: string }> {
+  const { config, runDir } = await makeBrokerConfig(name, budget, extras);
+  // Tests exercise privileged methods — explicit admin-socket opt-in (production default has none).
+  return startBroker(config, { adminSocketPath: path.join(runDir, "broker-admin.sock") });
 }
 
 beforeAll(async () => {
@@ -247,6 +266,20 @@ describe("wire protocol round-trip (every method)", () => {
 });
 
 describe("mutation sandbox isolation", () => {
+  // saveArtifact is TERMINAL — the wire-protocol block above retired the
+  // shared sandbox, so isolation probes run in a fresh one.
+  let isoSandboxId: string;
+
+  beforeAll(async () => {
+    const ref = (await client.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })) as SandboxRef;
+    isoSandboxId = ref.sandboxId;
+  });
+
+  it("retired the saved sandbox: exec on it now fails SANDBOX_NOT_FOUND", async () => {
+    const res = await client.callRaw("exec", { sandboxId, argv: ["true"] });
+    expect(res.error?.data?.code).toBe("SANDBOX_NOT_FOUND");
+  });
+
   it("cannot read the protected/ capsule fixture", async () => {
     const attempts = [
       "/capsule/assets/protected/secret.txt",
@@ -254,7 +287,7 @@ describe("mutation sandbox isolation", () => {
       "/capsule/assets/holdout/holdout.txt",
     ];
     for (const target of attempts) {
-      const res = ExecShape.parse(await client.call("exec", { sandboxId, argv: ["cat", target] }));
+      const res = ExecShape.parse(await client.call("exec", { sandboxId: isoSandboxId, argv: ["cat", target] }));
       expect(res.exitCode, `should not be readable: ${target}`).not.toBe(0);
       expect(res.stdout).not.toContain("TOP-SECRET-FIXTURE");
       expect(res.stdout).not.toContain("holdout-data");
@@ -264,7 +297,7 @@ describe("mutation sandbox isolation", () => {
   it("has no network egress (wget to 1.1.1.1 fails)", async () => {
     const res = ExecShape.parse(
       await client.call("exec", {
-        sandboxId,
+        sandboxId: isoSandboxId,
         argv: ["wget", "-T", "3", "-q", "-O", "-", "http://1.1.1.1"],
         timeoutSec: 30,
       }),
@@ -273,7 +306,7 @@ describe("mutation sandbox isolation", () => {
   });
 
   it("does not expose the docker socket", async () => {
-    const res = ExecShape.parse(await client.call("exec", { sandboxId, argv: ["ls", "/var/run/docker.sock"] }));
+    const res = ExecShape.parse(await client.call("exec", { sandboxId: isoSandboxId, argv: ["ls", "/var/run/docker.sock"] }));
     expect(res.exitCode).not.toBe(0);
   });
 });
@@ -465,4 +498,146 @@ describe("sandbox lifecycle", () => {
   it("finish records the best artifact", async () => {
     expect(await client.call("finish", { best: { hash: candidateHash } })).toEqual({});
   });
+});
+
+describe("production default surface (no admin endpoint exists at all)", () => {
+  it("startBroker(config) exposes neither an admin socket nor a TCP listener", async () => {
+    const { config, runDir } = await makeBrokerConfig("noadmin", GENEROUS_BUDGET);
+    const b = await startBroker(config);
+    try {
+      expect(b.adminSocketPath).toBeUndefined();
+      expect(b.publicTcpAddress).toBeUndefined();
+      // Nothing admin-shaped on disk — a same-UID child finds no privileged endpoint.
+      const entries = await readdir(runDir);
+      expect(entries).toContain("broker.sock");
+      expect(entries.some((e) => e.includes("admin"))).toBe(false);
+      // Privileged methods are not even name-visible on the public socket.
+      const c = await RpcClient.connect(b.socketPath);
+      const resp = await c.callRaw("recordSpend", { tokens: 1, usd: 0 });
+      expect(resp.error?.code).toBe(-32601);
+      c.close();
+    } finally {
+      await b.close();
+    }
+  });
+});
+
+describe("opt-in authenticated public TCP listener", () => {
+  it("binds {host,port:0}, returns the resolved address, and gates every request on the exact token before method lookup", async () => {
+    const token = randomBytes(32).toString("hex");
+    const { config } = await makeBrokerConfig("tcp", GENEROUS_BUDGET);
+    const b = await startBroker(config, { publicTcp: { host: "127.0.0.1", port: 0, token } });
+    try {
+      expect(b.adminSocketPath).toBeUndefined();
+      const addr = b.publicTcpAddress;
+      if (!addr) throw new Error("publicTcpAddress missing");
+      expect(addr.host).toBe("127.0.0.1");
+      expect(addr.port).toBeGreaterThan(0);
+
+      const good = await RpcClient.connectTcp(addr.host, addr.port, token);
+      const task = GetTaskShape.parse(await good.call("getTask"));
+      expect(task.baselineArtifact.hash).toBe(baselineHash);
+
+      // Wrong token: refused with -32060 BEFORE any method lookup — an
+      // unknown method probes the same -32060, never -32601.
+      const wrong = await RpcClient.connectTcp(addr.host, addr.port, `${token.slice(0, 63)}${token.endsWith("0") ? "1" : "0"}`);
+      const denied = await wrong.callRaw("getTask");
+      expect(denied.error?.code).toBe(-32060);
+      expect(denied.error?.message).toBe("unauthorized");
+      expect((await wrong.callRaw("noSuchMethod")).error?.code).toBe(-32060);
+
+      const missing = await RpcClient.connectTcp(addr.host, addr.port);
+      expect((await missing.callRaw("getTask")).error?.code).toBe(-32060);
+
+      // TCP is PUBLIC privilege only — admin methods stay invisible even authenticated.
+      expect((await good.callRaw("recordSpend", { tokens: 1, usd: 0 })).error?.code).toBe(-32601);
+
+      // The unix public socket is untouched: token-free requests still served.
+      const unix = await RpcClient.connect(b.socketPath);
+      GetTaskShape.parse(await unix.call("getTask"));
+
+      good.close();
+      wrong.close();
+      missing.close();
+      unix.close();
+    } finally {
+      await b.close();
+    }
+  });
+
+  it("refuses a sub-256-bit token and tears the partial listeners back down", async () => {
+    const { config, runDir } = await makeBrokerConfig("tcpshort", GENEROUS_BUDGET);
+    await expect(startBroker(config, { publicTcp: { host: "127.0.0.1", port: 0, token: "short" } })).rejects.toThrow(/32 bytes/);
+    // The public unix listener bound before the token check must not leak.
+    await expect(RpcClient.connect(path.join(runDir, "broker.sock"))).rejects.toThrow();
+  });
+});
+
+describe("eval asset confidentiality (live docker uid boundary)", () => {
+  const SANDBOX_USER_IMAGE = "hone-test-busybox-sandbox:1.36";
+  /** Probe entrypoint: reads the staged asset as root, then re-tries as the uid-2000 `sandbox` user. */
+  const UID_PROBE_SCRIPT = [
+    'R="$(cat /capsule/assets/train/data.txt 2>/dev/null || echo root-denied)"',
+    "U=\"$(su sandbox -c 'cat /capsule/assets/train/data.txt' 2>/dev/null || echo uid2000-denied)\"",
+    "L=\"$(su sandbox -c 'ls /capsule/assets' 2>/dev/null || echo uid2000-ls-denied)\"",
+    'printf \'{"valid":true,"objectives":{"score":1},"perExample":{"ex1":{"score":1,"feedback":"root=%s uid=%s ls=%s"}}}\' "$R" "$U" "$L"',
+  ].join("\n");
+
+  it("the root evaluator reads staged assets; the uid-2000 candidate user can neither read nor enumerate them", async () => {
+    const inspect = await runCommand(["docker", "image", "inspect", SANDBOX_USER_IMAGE]);
+    if (inspect.exitCode !== 0) {
+      const build = await runCommand(["docker", "build", "-t", SANDBOX_USER_IMAGE, "-"], {
+        stdin: `FROM ${TEST_IMAGE}\nRUN adduser -D -H -u 2000 sandbox\n`,
+        timeoutMs: 240_000,
+      });
+      if (build.exitCode !== 0) throw new Error(`sandbox-user image build failed: ${build.stderr.toString("utf8")}`);
+    }
+    const b = await bootBroker("uiddenial", GENEROUS_BUDGET, {
+      image: SANDBOX_USER_IMAGE,
+      evalEntrypoint: ["sh", "-c", UID_PROBE_SCRIPT],
+    });
+    const c = await RpcClient.connect(b.socketPath);
+    try {
+      // Suite-unique seed: the memo index lives in the SHARED test CAS and is
+      // keyed by digests+artifact+group+seed, not by the eval entrypoint.
+      const rec = EvaluationRecord.parse(
+        await c.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 424242 }),
+      );
+      expect(rec.output.valid).toBe(true);
+      expect(rec.output.perExample["ex1"]?.feedback).toBe("root=train-data uid=uid2000-denied ls=uid2000-ls-denied");
+      // The per-eval staging copy never outlives the evaluation.
+      const tmpEntries = await readdir(path.join(tmpBase, "runs", "uiddenial", "tmp"));
+      expect(tmpEntries.filter((e) => e.startsWith("assets-"))).toHaveLength(0);
+    } finally {
+      c.close();
+      await b.close();
+    }
+  }, 300_000);
+});
+
+describe("quiescent close under live in-flight work", () => {
+  it("close() aborts a sleeping exec's container, drains the handler, and refuses the socket afterwards", async () => {
+    const b = await bootBroker("quiesce", GENEROUS_BUDGET);
+    const c = await RpcClient.connect(b.socketPath);
+    const ref = (await c.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })) as SandboxRef;
+
+    const slow = c.callRaw("exec", { sandboxId: ref.sandboxId, argv: ["sleep", "600"], timeoutSec: 590 });
+    // Yield event-loop turns (no wall-clock wait) until the server accounts
+    // the exec handler as in flight — then close() must drain THROUGH it.
+    while (b.server.stats.inFlight === 0) {
+      const turn = deferred<void>();
+      setImmediate(turn.resolve);
+      await turn.promise;
+    }
+
+    // The test timeout is far below `sleep 600`: close() returning at all
+    // proves the container was aborted rather than waited out.
+    await b.close();
+
+    // The drained handler settled its frame before teardown (or the teardown
+    // closed the socket) — either way the client is released, never deadlocked.
+    await Promise.race([slow, c.closed]);
+    await expect(RpcClient.connect(b.socketPath)).rejects.toThrow();
+    c.close();
+  }, 120_000);
 });

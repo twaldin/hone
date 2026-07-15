@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
+  constants as fsConstants,
   fsyncSync,
   ftruncateSync,
   lstatSync,
@@ -11,7 +12,7 @@ import {
   realpathSync,
   writeSync,
 } from "node:fs";
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -38,6 +39,7 @@ import { HoldoutBudgetExceededError, HoldoutLedger } from "@hone/scoring";
 import { MAX_ARTIFACT_BYTES, canonicalizeWorkspaceTar, diffProtectedPaths, dirSizeBytes, unpackArtifact } from "./artifact.js";
 import { CasStore } from "./cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "./command.js";
+import { deferred } from "./deferred.js";
 import { BrokerError } from "./errors.js";
 import { ArtifactValidationError, validateWorkspaceTar } from "./tarcheck.js";
 
@@ -178,7 +180,8 @@ type EmittableEvent =
   | { type: "holdout.accessed"; capsuleId: string; ledgerCount: number; ledgerBudget: number }
   | { type: "episode.started"; episode: number; parent: ArtifactRef }
   | { type: "episode.candidate"; episode: number; candidate: ArtifactRef; sessionTrace: string }
-  | { type: "eval.completed"; artifact: ArtifactRef; assetGroupId: string; seed: number; aggregate: number; cached: boolean }
+  | { type: "eval.completed"; episode?: number; artifact: ArtifactRef; assetGroupId: string; seed: number; aggregate: number; cached: boolean }
+  | { type: "gate.paired"; episode: number; parentScore: number; childScore: number; passed: boolean }
   | { type: "incumbent.new"; artifact: ArtifactRef; aggregate: number; deltaVsBaseline: number; episode: number }
   | { type: "budget.snapshot"; budget: BudgetState };
 
@@ -337,6 +340,14 @@ export class Broker {
   private stateLog: RunStateLog | undefined;
   /** Set when /scratch is a quota-enforcing docker tmpfs volume (else host bind + polling quota). */
   private scratchVolumeName: string | undefined;
+  /** Set once close() begins: no new operation is admitted. */
+  private closing = false;
+  /** Async operations (createSandbox/exec/putFile/getFile/saveArtifact/evaluate) in flight. */
+  private inFlightOps = 0;
+  /** close() callers awaiting the in-flight operation count to reach zero. */
+  private readonly opDrainWaiters: Array<() => void> = [];
+  /** Names of live eval containers — close() aborts them so drains are prompt. */
+  private readonly activeEvalContainers = new Set<string>();
 
   constructor(private readonly config: BrokerConfig) {
     this.manifest = CapsuleManifest.parse(config.manifest);
@@ -386,11 +397,30 @@ export class Broker {
     this.reaper.unref();
   }
 
+  /**
+   * Graceful close (final-gate finding): new operations are rejected, every
+   * ACTIVE container — eval containers by name and mutation sandboxes — is
+   * force-removed first (in-flight docker CLIs die with their container, so
+   * the drain is prompt), then every in-flight operation promise is awaited
+   * before the ledger and the run journal are closed. After close() returns,
+   * nothing can emit, spend, or write: methods reject at entry and the
+   * journal is gone.
+   */
   async close(): Promise<void> {
+    this.closing = true;
     clearInterval(this.reaper);
+    const evalNames = [...this.activeEvalContainers];
     const ids = [...this.sandboxes.values()].map((s) => s.containerId);
     this.sandboxes.clear();
-    await Promise.all(ids.map((id) => this.run(["docker", "rm", "-f", id])));
+    await Promise.all([
+      ...ids.map((id) => this.run(["docker", "rm", "-f", id])),
+      ...evalNames.map((name) => this.run(["docker", "rm", "-f", name])),
+    ]);
+    if (this.inFlightOps > 0) {
+      const drained = deferred<void>();
+      this.opDrainWaiters.push(drained.resolve);
+      await drained.promise;
+    }
     if (this.scratchVolumeName !== undefined) {
       await this.run(["docker", "volume", "rm", "-f", this.scratchVolumeName]);
       this.scratchVolumeName = undefined;
@@ -400,6 +430,19 @@ export class Broker {
     await ledger?.close();
     this.stateLog?.close();
     this.stateLog = undefined;
+  }
+
+  /** Admission for async operations: rejected once close() has begun. */
+  private enterOp(): void {
+    if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
+    this.inFlightOps += 1;
+  }
+
+  private exitOp(): void {
+    this.inFlightOps -= 1;
+    if (this.inFlightOps === 0) {
+      for (const waiter of this.opDrainWaiters.splice(0)) waiter();
+    }
   }
 
   // ---------- durable run state ----------
@@ -482,6 +525,8 @@ export class Broker {
   // ---------- events + budget ----------
 
   private emit(event: EmittableEvent): void {
+    // A fully closed broker (journal gone) has no event authority left.
+    if (this.stateLog === undefined) return;
     const full: RunEvent = {
       runId: this.config.runId,
       at: new Date(this.now()).toISOString(),
@@ -646,6 +691,82 @@ export class Broker {
     return abs;
   }
 
+  /**
+   * Asset confidentiality (M0 blocker): the selected group's assets are
+   * STAGED — copied, never bind-mounted from the capsule root — into a
+   * per-evaluation host directory (root and every directory 0700, every file
+   * 0600, owned by the broker user) that becomes the SINGLE read-only source
+   * of /capsule/assets. Selected fixtures therefore never reach a container
+   * with their original owner-readable modes, and only the root evaluator
+   * can read them in-container (see the tmpfs parent in evaluateReserved).
+   * Sources must be regular files reached without following symlinks;
+   * anything else fails closed before the invocation is burned.
+   */
+  private async stageAssets(group: CapsuleManifest["assetGroups"][number]): Promise<string> {
+    const stageDir = path.join(this.tmpDir, `assets-${randomUUID()}`);
+    await mkdir(stageDir, { recursive: true, mode: 0o700 });
+    await chmod(stageDir, 0o700); // umask-independent
+    try {
+      for (const raw of group.paths) {
+        const rel = path.posix.normalize(raw).replace(/\/+$/, "");
+        const host = this.resolveAssetHostPath(rel);
+        if (rel === "." || rel === "") {
+          // The whole capsule root as one group: stage its children directly.
+          for (const name of await readdir(host)) {
+            await this.stageEntry(path.join(host, name), path.join(stageDir, name), group.id, name);
+          }
+          continue;
+        }
+        const parts = rel.split("/");
+        let parent = stageDir;
+        for (const part of parts.slice(0, -1)) {
+          parent = path.join(parent, part);
+          await mkdir(parent, { recursive: true, mode: 0o700 });
+          await chmod(parent, 0o700);
+        }
+        await this.stageEntry(host, path.join(parent, parts[parts.length - 1] ?? ""), group.id, rel);
+      }
+    } catch (err) {
+      await rm(stageDir, { recursive: true, force: true });
+      throw err;
+    }
+    return stageDir;
+  }
+
+  /** Copies one admitted asset (file or directory tree) into the staging dir. Fail closed on anything non-regular. */
+  private async stageEntry(src: string, dst: string, groupId: string, rel: string): Promise<void> {
+    let st;
+    try {
+      st = await lstat(src);
+    } catch {
+      throw new BrokerError("INTERNAL", `asset path missing on host: ${rel}`);
+    }
+    if (st.isDirectory()) {
+      await mkdir(dst, { recursive: true, mode: 0o700 });
+      await chmod(dst, 0o700);
+      for (const name of await readdir(src)) {
+        await this.stageEntry(path.join(src, name), path.join(dst, name), groupId, `${rel}/${name}`);
+      }
+      return;
+    }
+    if (!st.isFile()) {
+      throw new BrokerError("INTERNAL", `asset group ${groupId}: refusing non-regular asset source: ${rel}`);
+    }
+    // O_NOFOLLOW pins the lstat verdict: the EXACT admitted bytes are copied
+    // through the opened handle, or the evaluation fails closed — a symlink
+    // (pre-existing or raced in) can never be dereferenced into the stage.
+    const fh = await open(src, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      if (!(await fh.stat()).isFile()) {
+        throw new BrokerError("INTERNAL", `asset group ${groupId}: refusing non-regular asset source: ${rel}`);
+      }
+      await writeFile(dst, await fh.readFile(), { mode: 0o600, flag: "wx" });
+    } finally {
+      await fh.close();
+    }
+    await chmod(dst, 0o600);
+  }
+
   private async ensureUnpacked(hash: string): Promise<string> {
     await this.requireArtifact(hash);
     return unpackArtifact(this.cas, hash, this.unpackRoot, this.run);
@@ -675,18 +796,23 @@ export class Broker {
   }
 
   async createSandbox(params: CreateSandboxP, _ctx: CallContext): Promise<SandboxRef> {
-    this.budgetGate();
-    // Atomic admission: the check and the reservation are one synchronous
-    // step, so parallel creations cannot all observe the same free slot and
-    // stampede past the cap while creation awaits docker.
-    if (this.sandboxes.size + this.pendingSandboxes >= this.maxActiveSandboxes) {
-      throw new BrokerError("QUOTA_EXCEEDED", `active sandbox cap reached (${this.maxActiveSandboxes})`);
-    }
-    this.pendingSandboxes += 1;
+    this.enterOp();
     try {
-      return await this.createSandboxReserved(params);
+      this.budgetGate();
+      // Atomic admission: the check and the reservation are one synchronous
+      // step, so parallel creations cannot all observe the same free slot and
+      // stampede past the cap while creation awaits docker.
+      if (this.sandboxes.size + this.pendingSandboxes >= this.maxActiveSandboxes) {
+        throw new BrokerError("QUOTA_EXCEEDED", `active sandbox cap reached (${this.maxActiveSandboxes})`);
+      }
+      this.pendingSandboxes += 1;
+      try {
+        return await this.createSandboxReserved(params);
+      } finally {
+        this.pendingSandboxes -= 1;
+      }
     } finally {
-      this.pendingSandboxes -= 1;
+      this.exitOp();
     }
   }
 
@@ -738,6 +864,9 @@ export class Broker {
     for (const m of mounts) argv.push("-v", `${m.host}:${m.container}:${m.mode}`);
     argv.push(this.config.image, "sleep", "2147483647");
 
+    // Last-instant closing check: this read and the spawn are one synchronous
+    // block, so close() can never interleave between them.
+    if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
     const res = await this.run(argv, { timeoutMs: 120_000 });
     if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `docker run failed: ${stderrText(res)}`);
     const containerId = res.stdout.toString("utf8").trim();
@@ -762,6 +891,13 @@ export class Broker {
     if (chown.exitCode !== 0) {
       await this.run(["docker", "rm", "-f", containerId]);
       throw new BrokerError("INTERNAL", `workspace ownership fixup failed: ${stderrText(chown)}`);
+    }
+
+    // close() snapshots the sandbox map — a container spawned in flight but
+    // not yet registered would leak past it. Reap it here instead.
+    if (this.closing) {
+      await this.run(["docker", "rm", "-f", containerId]);
+      throw new BrokerError("INTERNAL", "broker is closed");
     }
 
     const ttlSec = params.ttlSec ?? this.defaultTtlSec;
@@ -798,7 +934,16 @@ export class Broker {
     return { sandboxId };
   }
 
-  async exec(params: ExecP, _ctx: CallContext): Promise<ExecR> {
+  async exec(params: ExecP, ctx: CallContext): Promise<ExecR> {
+    this.enterOp();
+    try {
+      return await this.execOp(params, ctx);
+    } finally {
+      this.exitOp();
+    }
+  }
+
+  private async execOp(params: ExecP, _ctx: CallContext): Promise<ExecR> {
     this.budgetGate();
     const sb = await this.requireSandbox(params.sandboxId);
     // Candidate admission keys off the LAST COMPLETED exec. Clear the record
@@ -847,7 +992,16 @@ export class Broker {
     };
   }
 
-  async putFile(params: PutFileP, _ctx: CallContext): Promise<Record<string, never>> {
+  async putFile(params: PutFileP, ctx: CallContext): Promise<Record<string, never>> {
+    this.enterOp();
+    try {
+      return await this.putFileOp(params, ctx);
+    } finally {
+      this.exitOp();
+    }
+  }
+
+  private async putFileOp(params: PutFileP, _ctx: CallContext): Promise<Record<string, never>> {
     this.budgetGate();
     const sb = await this.requireSandbox(params.sandboxId);
     const target = this.containerPath(params.path);
@@ -869,7 +1023,16 @@ export class Broker {
     return {};
   }
 
-  async getFile(params: GetFileP, _ctx: CallContext): Promise<GetFileR> {
+  async getFile(params: GetFileP, ctx: CallContext): Promise<GetFileR> {
+    this.enterOp();
+    try {
+      return await this.getFileOp(params, ctx);
+    } finally {
+      this.exitOp();
+    }
+  }
+
+  private async getFileOp(params: GetFileP, _ctx: CallContext): Promise<GetFileR> {
     this.budgetGate();
     const sb = await this.requireSandbox(params.sandboxId);
     const target = this.containerPath(params.path);
@@ -883,7 +1046,16 @@ export class Broker {
     return { contentBase64: res.stdout.toString("base64") };
   }
 
-  async saveArtifact(params: SaveArtifactP, _ctx: CallContext): Promise<ArtifactRef> {
+  async saveArtifact(params: SaveArtifactP, ctx: CallContext): Promise<ArtifactRef> {
+    this.enterOp();
+    try {
+      return await this.saveArtifactOp(params, ctx);
+    } finally {
+      this.exitOp();
+    }
+  }
+
+  private async saveArtifactOp(params: SaveArtifactP, _ctx: CallContext): Promise<ArtifactRef> {
     this.budgetGate();
     const sb = await this.requireSandbox(params.sandboxId);
     await this.checkScratchQuota();
@@ -941,10 +1113,34 @@ export class Broker {
       this.state().append({ t: "repair", hash, parent: sb.parentHash, episode: sb.episode });
       this.repairs.set(hash, { parent: sb.parentHash, episode: sb.episode });
     }
+
+    // Terminal save (final-gate finding): a successful save RETIRES the
+    // sandbox — the container is removed and its active-quota slot released
+    // BEFORE the save is acknowledged, so an optimizer iterating
+    // create→exec→save can never strand `maxActiveSandboxes` exhausted
+    // containers that keep holding the cap, /scratch, and the proxy token.
+    // Nothing needs the old container afterwards: candidates AND repair
+    // snapshots both resume from the saved CAS artifact in a fresh sandbox.
+    // Fail closed — if docker cannot remove it, the entry stays registered
+    // (the TTL reaper remains the backup) and the save is not acknowledged.
+    const retired = await this.run(["docker", "rm", "-f", sb.containerId]);
+    if (retired.exitCode !== 0 && !MISSING_CONTAINER_RE.test(retired.stderr.toString("utf8"))) {
+      throw new BrokerError("INTERNAL", `sandbox retirement failed after save: ${stderrText(retired)}`);
+    }
+    this.sandboxes.delete(params.sandboxId);
     return { hash };
   }
 
   async evaluate(params: EvaluateP, ctx: CallContext): Promise<EvaluationRecord> {
+    this.enterOp();
+    try {
+      return await this.evaluateOp(params, ctx);
+    } finally {
+      this.exitOp();
+    }
+  }
+
+  private async evaluateOp(params: EvaluateP, ctx: CallContext): Promise<EvaluationRecord> {
     this.budgetGate();
     const group = this.manifest.assetGroups.find((g) => g.id === params.assetGroupId);
     if (!group) throw new BrokerError("INTERNAL", `unknown asset group: ${params.assetGroupId}`);
@@ -1006,69 +1202,83 @@ export class Broker {
       }
     }
 
-    // Resolve asset mounts BEFORE burning the invocation: a missing host
-    // asset is trusted-side misconfiguration, not an attempted evaluation.
-    const assetMounts: string[] = [];
-    for (const rel of group.paths) {
-      const host = this.resolveAssetHostPath(rel);
-      try {
-        await stat(host);
-      } catch {
-        throw new BrokerError("INTERNAL", `asset path missing on host: ${rel}`);
-      }
-      assetMounts.push("-v", `${host}:${path.posix.join("/capsule/assets", rel)}:ro`);
-    }
+    // Stage the selected group BEFORE burning the invocation: a missing or
+    // non-regular host asset is trusted-side misconfiguration, not an
+    // attempted evaluation.
+    const stageDir = await this.stageAssets(group);
 
-    // Burn the invocation DURABLY before the spawn so a crashed evaluator (or
-    // a crashed broker) still counts — candidates cannot farm free retries,
-    // and a restart replays the charge.
-    this.state().append({ t: "inv" });
-    this.spent.evaluatorInvocations += 1;
-
-    const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
-    const argv = [
-      "docker",
-      "run",
-      "--rm",
-      "--name",
-      evalName,
-      "--network",
-      "none",
-      "--label",
-      `hone.runId=${this.config.runId}`,
-      ...this.resourceArgs(),
-      "--read-only",
-      "--tmpfs",
-      "/tmp",
-      // The trusted scorer runs as ROOT inside the eval container so it can
-      // drop the candidate worker to an unprivileged uid (2000) — same-uid
-      // signal//proc reach from candidate code to the scorer is severed
-      // (capsule contract with WP6; hardened images ship a `sandbox` user).
-      "--user",
-      "0:0",
-      // Entrypoints are baseline-relative; the candidate workspace is DATA,
-      // never the working directory the evaluator executes from.
-      "-w",
-      "/trusted/baseline",
-      "-e",
-      `HONE_SEED=${params.seed}`,
-      "-v",
-      `${workspaceDir}:/workspace:ro`,
-      "-v",
-      `${baselineDir}:/trusted/baseline:ro`,
-      ...assetMounts,
-    ];
-    argv.push(this.config.image, ...this.manifest.evalEntrypoint);
-
-    const startedMs = Date.now();
     let res: CmdResult;
+    const startedMs = Date.now();
+    const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
     try {
-      res = await this.run(argv, { timeoutMs: this.evalTimeoutSec * 1000, maxOutputBytes: 32 * 1024 * 1024 });
+      // Last-instant closing check (synchronous with the registration and the
+      // spawn below): close() either sees this eval container in the active
+      // set and reaps it by name, or this op throws before spawning.
+      if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
+      this.activeEvalContainers.add(evalName);
+
+      // Burn the invocation DURABLY before the spawn so a crashed evaluator (or
+      // a crashed broker) still counts — candidates cannot farm free retries,
+      // and a restart replays the charge.
+      this.state().append({ t: "inv" });
+      this.spent.evaluatorInvocations += 1;
+
+      const argv = [
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        evalName,
+        "--network",
+        "none",
+        "--label",
+        `hone.runId=${this.config.runId}`,
+        ...this.resourceArgs(),
+        "--read-only",
+        "--tmpfs",
+        "/tmp",
+        // The trusted scorer runs as ROOT inside the eval container so it can
+        // drop the candidate worker to an unprivileged uid (2000) — same-uid
+        // signal//proc reach from candidate code to the scorer is severed
+        // (capsule contract with WP6; hardened images ship a `sandbox` user).
+        "--user",
+        "0:0",
+        // Entrypoints are baseline-relative; the candidate workspace is DATA,
+        // never the working directory the evaluator executes from.
+        "-w",
+        "/trusted/baseline",
+        "-e",
+        `HONE_SEED=${params.seed}`,
+        "-v",
+        `${workspaceDir}:/workspace:ro`,
+        "-v",
+        `${baselineDir}:/trusted/baseline:ro`,
+        // Asset confidentiality: the assets bind mount is parented under a
+        // root-owned mode=0700 tmpfs, so the dropped uid-2000 candidate
+        // worker cannot even traverse to it. The kernel enforces this on the
+        // tmpfs everywhere — Docker Desktop's VirtioFS bind mounts do NOT
+        // enforce host file modes in-container, so the 0700/0600 staged host
+        // tree alone is only sufficient on native Linux.
+        "--tmpfs",
+        "/capsule:mode=0700,size=1m",
+        "-v",
+        `${stageDir}:/capsule/assets:ro`,
+      ];
+      argv.push(this.config.image, ...this.manifest.evalEntrypoint);
+
+      try {
+        res = await this.run(argv, { timeoutMs: this.evalTimeoutSec * 1000, maxOutputBytes: 32 * 1024 * 1024 });
+      } finally {
+        // A timed-out `docker run` kills only the local CLI; the container (and
+        // the adversarial code inside it) keeps running. Always reap by name —
+        // a no-op for containers --rm already removed.
+        await this.run(["docker", "rm", "-f", evalName]);
+      }
     } finally {
-      // A timed-out `docker run` kills only the local CLI; the container (and
-      // the adversarial code inside it) keeps running. Always reap by name —
-      // a no-op for containers --rm already removed.
-      await this.run(["docker", "rm", "-f", evalName]);
+      this.activeEvalContainers.delete(evalName);
+      // Confidentiality teardown on EVERY path (success, error, timeout):
+      // the staged copies never outlive the evaluation.
+      await rm(stageDir, { recursive: true, force: true });
     }
     const durationMs = Date.now() - startedMs;
     if (res.timedOut) throw new BrokerError("INTERNAL", `evaluator timed out after ${this.evalTimeoutSec}s`);
@@ -1137,22 +1347,50 @@ export class Broker {
    * any failed constraint) grant no authority. Pre-episode evaluations (the
    * optimizer measuring its parent before any sandbox exists) populate
    * authority but emit nothing — the event log keeps episode.started first.
+   *
+   * Trusted probe evidence (M0 blocker, run_mrmklm7i738484): the FIRST
+   * accepted evaluation of a saved candidate is tagged with its
+   * broker-validated lineage episode, and — when the lineage parent already
+   * holds a trusted aggregate at the SAME group/seed coordinate — followed by
+   * a broker-authored `gate.paired` carrying exactly those trusted scores
+   * (greedy: the child must strictly beat the parent). Optimizer events and
+   * claims are never consulted. Later evaluations of the same artifact (an
+   * old candidate re-measured as a parent of the next episode) are untagged
+   * and re-emit no gate — the artifact already holds trusted records, and
+   * replay repopulates those records before any live call, so a restart can
+   * never make an old candidate look first again.
    */
   private recordEvaluation(record: EvaluationRecord, visibility: string): void {
     if (visibility === "holdout") return;
+    // Computed BEFORE acceptRecord mutates the trusted table.
+    const hadTrusted = (this.trusted.get(record.artifactHash)?.size ?? 0) > 0;
     const aggregate = this.acceptRecord(record);
     if (aggregate === undefined) return;
     // Durable BEFORE the event: replayed authority is exactly what was announced.
     this.state().append({ t: "eval", record });
     if (!this.anyEpisodeStarted) return;
+    const lin = hadTrusted ? undefined : this.lineage.get(record.artifactHash);
     this.emit({
       type: "eval.completed",
+      ...(lin !== undefined ? { episode: lin.episode } : {}),
       artifact: { hash: record.artifactHash },
       assetGroupId: record.assetGroupId,
       seed: record.seed,
       aggregate,
       cached: record.cached,
     });
+    if (lin !== undefined) {
+      const parentScore = this.trusted.get(lin.parent)?.get(`${record.assetGroupId}|${record.seed}`);
+      if (parentScore !== undefined) {
+        this.emit({
+          type: "gate.paired",
+          episode: lin.episode,
+          parentScore,
+          childScore: aggregate,
+          passed: aggregate > parentScore,
+        });
+      }
+    }
   }
 
   /**
