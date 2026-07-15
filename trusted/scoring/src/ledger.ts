@@ -30,6 +30,8 @@ export class HoldoutLedger {
   #handle: FileHandle;
   #count: number;
   #budget: number;
+  /** Tail of the charge queue — concurrent charge() calls run strictly one at a time. */
+  #chain: Promise<unknown> = Promise.resolve();
 
   private constructor(path: string, handle: FileHandle, count: number, budget: number) {
     this.path = path;
@@ -96,8 +98,17 @@ export class HoldoutLedger {
   /**
    * Charge one holdout access. Write-ahead: the line is durable BEFORE the
    * new count is returned; past the budget it throws and writes NOTHING.
+   * Concurrent calls are SERIALIZED — the budget check and its write are one
+   * atomic step, so charge N and charge N+1 can never both read count N-1
+   * and double-grant the last slot.
    */
-  async charge(): Promise<{ count: number; budget: number }> {
+  charge(): Promise<{ count: number; budget: number }> {
+    const run = this.#chain.then(() => this.#chargeLocked());
+    this.#chain = run.catch(() => undefined);
+    return run;
+  }
+
+  async #chargeLocked(): Promise<{ count: number; budget: number }> {
     if (this.#count >= this.#budget) throw new HoldoutBudgetExceededError(this.#count, this.#budget);
     const seq = this.#count + 1;
     await this.#handle.write(`${JSON.stringify({ seq, at: new Date().toISOString() })}\n`, null, "utf8");

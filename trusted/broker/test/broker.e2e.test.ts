@@ -210,9 +210,16 @@ describe("wire protocol round-trip (every method)", () => {
     expect(budget.envelope).toEqual(GENEROUS_BUDGET);
   });
 
-  it("reportIncumbent accepts claimed metrics", async () => {
-    const res = await client.call("reportIncumbent", { artifact: { hash: candidateHash }, claimed: { score: 2 } });
+  it("reportIncumbent promotes on paired trusted evidence; claimed metrics stay display-only", async () => {
+    // Promotion authority needs a same-group/same-seed PAIR: measure the
+    // parent (baseline) at the seed the candidate was measured at.
+    await client.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 });
+    const res = await client.call("reportIncumbent", { artifact: { hash: candidateHash }, claimed: { score: 999 } });
     expect(res).toEqual({});
+    const promoted = mainEvents.filter((e) => e.type === "incumbent.new");
+    expect(promoted).toHaveLength(1);
+    // Aggregate is the broker's own measurement (2), never the claimed 999.
+    expect(promoted[0]).toMatchObject({ artifact: { hash: candidateHash }, aggregate: 2, deltaVsBaseline: 1 });
   });
 
   it("reserved methods return NOT_IMPLEMENTED", async () => {

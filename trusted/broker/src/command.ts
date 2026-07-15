@@ -8,6 +8,14 @@ export interface CmdOptions {
   stdin?: Buffer | string | undefined;
   /** File streamed to stdin (for large payloads, e.g. artifact tars). */
   stdinFile?: string | undefined;
+  /**
+   * Timeout semantics — read carefully: on expiry the LOCAL process group
+   * (the spawned CLI and its host-side children) is SIGKILLed and `timedOut`
+   * is set. For `docker` this kills only the CLIENT; work already running
+   * INSIDE a container is untouched. A caller that owns a container MUST
+   * treat `timedOut` as "container state unknown" and reap it (`docker rm
+   * -f`) itself — the broker does exactly that for sandboxes and evals.
+   */
   timeoutMs?: number | undefined;
   /** Per-stream capture cap; excess is dropped and `truncated` set. */
   maxOutputBytes?: number | undefined;
@@ -36,7 +44,9 @@ export const runCommand: RunCommand = (argv, opts = {}) => {
     reject(new Error("runCommand: empty argv"));
     return promise;
   }
-  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+  // detached: the child leads its own process group, so a timeout kill takes
+  // out any host-side helpers it spawned — not just the top-level CLI.
+  const child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
   const cap = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
 
   let truncated = false;
@@ -68,7 +78,14 @@ export const runCommand: RunCommand = (argv, opts = {}) => {
     opts.timeoutMs !== undefined
       ? setTimeout(() => {
           timedOut = true;
-          child.kill("SIGKILL");
+          // Kill the local process GROUP (see CmdOptions.timeoutMs): this
+          // never reaches in-container work — the caller owns that cleanup.
+          try {
+            if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+            else child.kill("SIGKILL");
+          } catch {
+            child.kill("SIGKILL");
+          }
         }, opts.timeoutMs)
       : undefined;
 
