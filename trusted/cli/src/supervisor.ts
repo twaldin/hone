@@ -7,6 +7,7 @@ import { z } from "zod";
 import { ApplyMode, BudgetEnvelope, ModelRouting, RunConfig } from "@hone/schema";
 import type { CapsuleManifest, RunEvent } from "@hone/schema";
 import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
+import { createBackend as createLocalBackend } from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
 import { loadCapsule } from "./capsule.js";
 import { contractHash, renderContract } from "./contract.js";
@@ -29,7 +30,7 @@ import {
 import type { ChildLike, RunnerBackend, RunnerBackendContext } from "./types.js";
 
 const RUN_USAGE =
-  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--resume] [--backend stub|<module>] [--config <json>] [--repo <dir>]";
+  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--resume] [--backend stub|local|<module>] [--config <json>] [--repo <dir>]";
 
 /** Optional per-run overrides (routing, seat, seed, budget dims) — the CLI flags cover the common ones. */
 const ConfigOverrides = z
@@ -78,6 +79,7 @@ function loadBackendModule(mod: unknown, spec: string): RunnerBackend {
 
 async function loadBackend(spec: string, root: string): Promise<RunnerBackend> {
   if (spec === "stub") return createStubBackend();
+  if (spec === "local") return createLocalBackend();
   const url = pathToFileURL(resolve(root, spec)).href;
   // Plugin boundary: the backend module is runtime-selected via --backend (WP7 injects the real runner).
   const mod: unknown = await import(url);

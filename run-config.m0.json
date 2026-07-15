@@ -1,0 +1,11 @@
+{
+  "routing": {
+    "mutation": { "model": "glm-5.2" }
+  },
+  "budget": {
+    "maxEvaluatorInvocations": 6,
+    "maxWallClockSec": 2400,
+    "maxTokens": 1500000,
+    "maxUsd": 5
+  }
+}

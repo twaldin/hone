@@ -84,6 +84,12 @@ importers:
 
   trusted/cli:
     dependencies:
+      '@hone/broker':
+        specifier: workspace:*
+        version: link:../broker
+      '@hone/proxy':
+        specifier: workspace:*
+        version: link:../proxy
       '@hone/schema':
         specifier: workspace:*
         version: link:../../schema

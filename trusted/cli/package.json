@@ -11,6 +11,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@hone/broker": "workspace:*",
+    "@hone/proxy": "workspace:*",
     "@hone/schema": "workspace:*",
     "tsx": "^4.19.0",
     "zod": "^3.23.0"
