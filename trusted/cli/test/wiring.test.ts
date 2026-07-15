@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CapsuleManifest, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
+import { CapsuleManifest, DEFAULT_PROMOTION_RULE, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { createBackend } from "../src/backends/local.js";
 import { deliver } from "../src/deliver.js";
 import { appendEvent, replayRun } from "../src/eventlog.js";
+import { loadRunConfigFile } from "../src/runs.js";
 import { runCommand as cliRunCommand } from "../src/supervisor.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
@@ -57,6 +58,44 @@ describe("bare run: default mutation route", () => {
     const { io } = makeIo(root, { HONE_STUB_EPISODES: "1", HONE_MODEL_ID: "ignored" });
     expect(await cliRunCommand(["capsule", "--headless", "--backend", "stub", "--config", "cfg.json"], io)).toBe(0);
     expect(soleRunConfig(root).routing["mutation"]?.model).toBe("picked-explicitly");
+  });
+});
+
+describe("promotion rule: frozen into runconfig persistence at campaign start", () => {
+  it("a bare headless run persists the default rule and renders it in the contract", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    expect(await cliRunCommand(["capsule", "--headless", "--backend", "stub"], io)).toBe(0);
+    expect(soleRunConfig(root).promotion).toEqual(DEFAULT_PROMOTION_RULE);
+    const runsDir = join(root, ".hone-runs");
+    const runDir = join(runsDir, readdirSync(runsDir)[0] ?? "");
+    expect(readFileSync(join(runDir, "contract.md"), "utf8")).toContain("## Promotion rule (pre-registered — frozen at campaign start)");
+  });
+
+  it("--config pre-registers a custom rule that persists verbatim", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const rule = { minDeltaOverSe: 3, minSignConsistency: 0.9, replicates: 5, requireNegativeControls: false };
+    writeFileSync(join(root, "cfg.json"), JSON.stringify({ promotion: rule }));
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    expect(await cliRunCommand(["capsule", "--headless", "--backend", "stub", "--config", "cfg.json"], io)).toBe(0);
+    expect(soleRunConfig(root).promotion).toEqual(rule);
+  });
+
+  it("a legacy runconfig.json without a promotion rule resumes with the default", () => {
+    const root = makeRoot();
+    const runDir = join(root, "run_legacy");
+    mkdirSync(runDir, { recursive: true });
+    const legacy = {
+      version: 1,
+      capsuleId: "cap_000000000000",
+      objective: "legacy",
+      budget: { maxTokens: 1, maxUsd: 0, maxWallClockSec: 1, maxEvaluatorInvocations: 1 },
+      routing: {},
+    };
+    writeFileSync(join(runDir, "runconfig.json"), JSON.stringify(legacy, null, 2));
+    expect(loadRunConfigFile(runDir).promotion).toEqual(DEFAULT_PROMOTION_RULE);
   });
 });
 

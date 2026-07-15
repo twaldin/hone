@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { RunConfig } from "@hone/schema";
-import type { CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
+import type { BudgetEnvelope, CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
 import { LADDER_REFUSAL, ladderLocked } from "./deliver.js";
 
 /**
@@ -103,6 +103,17 @@ export function renderContract(inputs: ContractInputs): string {
     `- estimated cost: between $0 and $${config.budget.maxUsd} — an honest range, not a prediction. Spend stops at the hard USD cap; the run also terminates after ${config.budget.maxWallClockSec}s wall clock, ${config.budget.maxTokens} tokens, or ${config.budget.maxEvaluatorInvocations} evaluator invocations, whichever binds first.`,
   );
   lines.push("");
+  lines.push("## Promotion rule (pre-registered — frozen at campaign start)");
+  lines.push("");
+  lines.push(`- paired delta must exceed **${config.promotion.minDeltaOverSe}×** its standard error`);
+  lines.push(`- sign consistency: at least **${config.promotion.minSignConsistency}** of tasks improve`);
+  lines.push(`- replicates per arm per task: **${config.promotion.replicates}**`);
+  lines.push(`- negative controls required: **${config.promotion.requireNegativeControls ? "yes" : "no"}**`);
+  lines.push("");
+  lines.push(
+    "_The M0 seed's inner artifact search stays greedy; this rule is sealed into the contract hash now and governs the outer champion promotion decision (M1)._",
+  );
+  lines.push("");
   lines.push("## Model routing");
   lines.push("");
   const roles = Object.entries(config.routing);
@@ -137,6 +148,25 @@ export function renderContract(inputs: ContractInputs): string {
 
 export function contractHash(text: string): string {
   return `sha256:${createHash("sha256").update(text).digest("hex")}`;
+}
+
+/**
+ * The frozen capsule budget is a hard upper envelope: every metered dimension
+ * of `budget` must be at or under it. Returns the exact violation message, or
+ * null when the budget only tightens. Shared by the initial run paths (bare
+ * defaults, --config, CLI flags) and interactive contract revisions so the
+ * two can never drift.
+ */
+export function budgetEnvelopeError(budget: BudgetEnvelope, envelope: BudgetEnvelope): string | null {
+  const over: string[] = [];
+  if (budget.maxUsd > envelope.maxUsd) over.push(`maxUsd ${budget.maxUsd} > ${envelope.maxUsd}`);
+  if (budget.maxTokens > envelope.maxTokens) over.push(`maxTokens ${budget.maxTokens} > ${envelope.maxTokens}`);
+  if (budget.maxWallClockSec > envelope.maxWallClockSec) over.push(`maxWallClockSec ${budget.maxWallClockSec} > ${envelope.maxWallClockSec}`);
+  if (budget.maxEvaluatorInvocations > envelope.maxEvaluatorInvocations) {
+    over.push(`maxEvaluatorInvocations ${budget.maxEvaluatorInvocations} > ${envelope.maxEvaluatorInvocations}`);
+  }
+  if (over.length === 0) return null;
+  return `budget exceeds the capsule envelope: ${over.join(", ")}`;
 }
 
 /** The one executable block's body, or an error when it is missing/duplicated. */
@@ -195,15 +225,8 @@ export function applyContractRevision(opts: {
   if (config.capsuleId !== manifest.id) {
     return { ok: false, error: `capsuleId is frozen (${manifest.id}) — it cannot be edited to ${config.capsuleId}` };
   }
-  const envelope = manifest.budget;
-  const over: string[] = [];
-  if (config.budget.maxUsd > envelope.maxUsd) over.push(`maxUsd ${config.budget.maxUsd} > ${envelope.maxUsd}`);
-  if (config.budget.maxTokens > envelope.maxTokens) over.push(`maxTokens ${config.budget.maxTokens} > ${envelope.maxTokens}`);
-  if (config.budget.maxWallClockSec > envelope.maxWallClockSec) over.push(`maxWallClockSec ${config.budget.maxWallClockSec} > ${envelope.maxWallClockSec}`);
-  if (config.budget.maxEvaluatorInvocations > envelope.maxEvaluatorInvocations) {
-    over.push(`maxEvaluatorInvocations ${config.budget.maxEvaluatorInvocations} > ${envelope.maxEvaluatorInvocations}`);
-  }
-  if (over.length > 0) return { ok: false, error: `budget exceeds the capsule envelope: ${over.join(", ")}` };
+  const envelopeError = budgetEnvelopeError(config.budget, manifest.budget);
+  if (envelopeError !== null) return { ok: false, error: envelopeError };
   if (config.headless !== original.headless) return { ok: false, error: "headless is not editable mid-approval" };
   if (config.improverSeat !== original.improverSeat) return { ok: false, error: "improverSeat is not editable mid-approval" };
   if (ladderLocked(config.apply, config.improverSeat, env)) return { ok: false, error: LADDER_REFUSAL };

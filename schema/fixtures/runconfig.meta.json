@@ -17,5 +17,11 @@
   "apply": "none",
   "headless": true,
   "improverSeat": true,
-  "seed": 42
+  "seed": 42,
+  "promotion": {
+    "minDeltaOverSe": 3,
+    "minSignConsistency": 0.75,
+    "replicates": 5,
+    "requireNegativeControls": true
+  }
 }

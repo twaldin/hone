@@ -96,6 +96,28 @@ describe("contract checkpoint rendering (VI.4)", () => {
   });
 });
 
+describe("promotion rule in the contract (campaign-start freeze)", () => {
+  it("renders the pre-registered rule visibly and inside the executable block", () => {
+    const text = renderContract(inputs());
+    expect(text).toContain("## Promotion rule (pre-registered — frozen at campaign start)");
+    // defaults: {minDeltaOverSe:2, minSignConsistency:0.8, replicates:3, requireNegativeControls:true}
+    expect(text).toContain("paired delta must exceed **2×** its standard error");
+    expect(text).toContain("sign consistency: at least **0.8**");
+    expect(text).toContain("replicates per arm per task: **3**");
+    expect(text).toContain("negative controls required: **yes**");
+    const block = extractRunConfigBlock(text);
+    if ("error" in block) throw new Error(block.error);
+    expect(JSON.parse(block.body).promotion).toEqual({ minDeltaOverSe: 2, minSignConsistency: 0.8, replicates: 3, requireNegativeControls: true });
+  });
+
+  it("a different rule changes the contract hash — the rule is sealed at campaign start", () => {
+    const custom = config({ promotion: { minDeltaOverSe: 4, minSignConsistency: 0.9, replicates: 5, requireNegativeControls: false } });
+    const customText = renderContract(inputs(custom));
+    expect(contractHash(customText)).not.toBe(contractHash(renderContract(inputs())));
+    expect(customText).toContain("negative controls required: **no**");
+  });
+});
+
 describe("contract revision (interactive E — parse back, fail closed)", () => {
   const pre = (): string => renderContract(inputs());
 
@@ -146,6 +168,41 @@ describe("contract revision (interactive E — parse back, fail closed)", () => 
     });
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.error).toMatch(/exceeds the capsule envelope/);
+  });
+
+  it("allows an owner promotion-rule edit under schema validation", () => {
+    const preEdit = pre();
+    const rule = { minDeltaOverSe: 3, minSignConsistency: 0.9, replicates: 5, requireNegativeControls: true };
+    const revised = { ...config(), promotion: rule };
+    const outcome = applyContractRevision({
+      preEdit,
+      edited: withBlock(preEdit, JSON.stringify(revised, null, 2)),
+      original: config(),
+      manifest: manifestObject(),
+      env: {},
+    });
+    expect(outcome.ok, JSON.stringify(outcome)).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.config.promotion).toEqual(rule);
+      // the re-render freezes the revised rule into the narrative and the block
+      const rerendered = renderContract(inputs(outcome.config));
+      expect(rerendered).toContain("replicates per arm per task: **5**");
+      expect(rerendered).toContain('"minDeltaOverSe": 3');
+    }
+  });
+
+  it("fails closed on an out-of-range promotion rule", () => {
+    const preEdit = pre();
+    const revised = { ...config(), promotion: { minDeltaOverSe: 2, minSignConsistency: 1.5, replicates: 3, requireNegativeControls: true } };
+    const outcome = applyContractRevision({
+      preEdit,
+      edited: withBlock(preEdit, JSON.stringify(revised, null, 2)),
+      original: config(),
+      manifest: manifestObject(),
+      env: {},
+    });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error).toMatch(/promotion\.minSignConsistency/);
   });
 
   it("fails closed on a non-parseable block", () => {
