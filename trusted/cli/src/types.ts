@@ -29,6 +29,16 @@ export interface RunnerBackendContext {
   emit(event: RunEvent): RunEvent;
   /** Register spawned processes for SIGTERM-then-SIGKILL enforcement. */
   registerChild(child: ChildLike): void;
+  /**
+   * Trusted-authority barrier. A backend that recovers durable authority
+   * (broker journal reconciliation) MUST register a promise SYNCHRONOUSLY
+   * before its first await: the supervisor will not fence backend events,
+   * deliver, or emit run.finished until it settles. Rejection means trusted
+   * authority could not be established — the supervisor fails the run
+   * WITHOUT a terminal event so it stays resumable. Backends that never
+   * register are ready by default.
+   */
+  registerAuthorityBarrier(barrier: Promise<void>): void;
 }
 
 export interface RunnerBackend {
