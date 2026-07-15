@@ -35,6 +35,8 @@ interface MockUpstream {
   flags: { closedEarly: boolean };
   /** "slow"-mode completions held open; invoke an entry to release its response. */
   slow: Array<() => void>;
+  /** "stall"-mode completions: headers + partial body flushed, then hung; invoke to release. */
+  stalled: Array<() => void>;
   close(): Promise<void>;
 }
 
@@ -55,6 +57,7 @@ async function startMockUpstream(): Promise<MockUpstream> {
   const calls: UpstreamCall[] = [];
   const flags = { closedEarly: false };
   const slow: Array<() => void> = [];
+  const stalled: Array<() => void> = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
@@ -102,6 +105,14 @@ async function startMockUpstream(): Promise<MockUpstream> {
           res.writeHead(200, { "content-type": "application/json" });
           res.write('{"partial":');
           setTimeout(() => res.destroy(), 10);
+          return;
+        }
+        if (mode === "stall") {
+          // Headers plus a partial SSE body flushed, then the response hangs
+          // forever unless the test releases it (quiescence tests never do).
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "par" } }] })}\n\n`);
+          stalled.push(() => res.end());
           return;
         }
         if (mode === "flood") {
@@ -154,6 +165,7 @@ async function startMockUpstream(): Promise<MockUpstream> {
     calls,
     flags,
     slow,
+    stalled,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -1125,5 +1137,99 @@ describe("active request slots", () => {
     }
     expect(ok).toBe(true);
     expect(ctx.upstream.calls.filter((c) => c.url === "/v1/chat/completions")).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// adversarial: close() is a true handler-quiescence barrier
+// ---------------------------------------------------------------------------
+
+describe("close() quiescence barrier", () => {
+  it("close during an upstream that never responds completes boundedly, settles fail-closed, and stays byte-stable", async () => {
+    const ctx = await setup();
+    const token = ctx.proxy.tokenFor("mutation");
+    // Two requests hang before the upstream sends ANY response bytes.
+    const hung = [1, 2].map(() =>
+      postCompletions(ctx, token, {
+        messages: [{ role: "user", content: "slow" }],
+        max_tokens: 7,
+      }).catch(() => undefined),
+    );
+    await until(() => ctx.upstream.slow.length === 2);
+    expect(ctx.spends).toHaveLength(0);
+
+    const begun = Date.now();
+    await ctx.proxy.close();
+    // Bounded: the hung upstream never responds; close must not wait on it.
+    expect(Date.now() - begun).toBeLessThan(2000);
+
+    // Both admitted requests settled BEFORE close resolved. The abort is an
+    // ambiguous transport failure (the upstream accepted the connection), so
+    // the conservative policy charges the full reservation ceiling — never
+    // zero, never fabricated usage.
+    expect(ctx.spends).toHaveLength(2);
+    const traces = await readTrace(ctx.runDir);
+    expect(traces).toHaveLength(2);
+    for (const [i, t] of traces.entries()) {
+      expect(t.status).toBe(502);
+      expect(t.usage.completionTokens).toBe(7);
+      expect(t.usage.totalTokens).toBe(t.usage.promptTokens + 7);
+      expect(ctx.spends[i]?.tokens).toBe(t.usage.totalTokens);
+      expect(ctx.spends[i]?.usd).toBeGreaterThan(0);
+    }
+
+    // Post-close quiescence: no late spend, trace append, or CAS write.
+    const traceSize = (await stat(join(ctx.runDir, "proxy-trace.ndjson"))).size;
+    const casFiles = (await walkFiles(ctx.casDir)).sort();
+    await sleep(200);
+    expect(ctx.spends).toHaveLength(2);
+    expect((await stat(join(ctx.runDir, "proxy-trace.ndjson"))).size).toBe(traceSize);
+    expect((await walkFiles(ctx.casDir)).sort()).toEqual(casFiles);
+
+    // Closed means closed: new connections are refused; close is idempotent.
+    await expect(postCompletions(ctx, token, { messages: [] })).rejects.toThrow();
+    await ctx.proxy.close();
+    await Promise.all(hung);
+  });
+
+  it("close mid-stream (headers sent, body stalled) aborts the upstream and finalizes ceiling accounting", async () => {
+    const ctx = await setup();
+    const token = ctx.proxy.tokenFor("mutation");
+    const hung = postCompletions(ctx, token, {
+      messages: [{ role: "user", content: "stall" }],
+      max_tokens: 3,
+      stream: true,
+    }).then(
+      // Headers may already have arrived; drain the truncated body quietly.
+      async (res) => {
+        await res.text().catch(() => undefined);
+      },
+      () => undefined,
+    );
+    await until(() => ctx.upstream.stalled.length === 1);
+
+    const begun = Date.now();
+    await ctx.proxy.close();
+    expect(Date.now() - begun).toBeLessThan(2000);
+
+    // The partial SSE body carries no usage record → not trustworthy → the
+    // full reservation ceiling is charged, exactly once.
+    expect(ctx.spends).toHaveLength(1);
+    const traces = await readTrace(ctx.runDir);
+    expect(traces).toHaveLength(1);
+    expect(traces[0]?.status).toBe(200);
+    expect(traces[0]?.usage.completionTokens).toBe(3);
+    expect(ctx.spends[0]?.tokens).toBe(traces[0]?.usage.totalTokens);
+    // The trace captured exactly the partial body that crossed the proxy.
+    expect(await casContent(ctx.casDir, traces[0]?.responseBody ?? "")).toContain("par");
+
+    // Post-close quiescence: byte/count stable after a delay.
+    const traceSize = (await stat(join(ctx.runDir, "proxy-trace.ndjson"))).size;
+    const casFiles = (await walkFiles(ctx.casDir)).sort();
+    await sleep(200);
+    expect(ctx.spends).toHaveLength(1);
+    expect((await stat(join(ctx.runDir, "proxy-trace.ndjson"))).size).toBe(traceSize);
+    expect((await walkFiles(ctx.casDir)).sort()).toEqual(casFiles);
+    await hung;
   });
 });

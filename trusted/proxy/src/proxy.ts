@@ -122,6 +122,13 @@ export interface ProxyHandle {
   listenUnix(socketPath: string): Promise<void>;
   /** Bind 127.0.0.1 TCP (tests); returns the bound port. */
   listenTcp(port: number, host?: string): Promise<number>;
+  /**
+   * True handler-quiescence barrier: stops accepting, aborts every in-flight
+   * upstream exchange, destroys client connections, and resolves only after
+   * every admitted handler has settled its reservation, recorded spend, and
+   * appended its CAS/trace records. No recordSpend call, reservation change,
+   * CAS write, or trace append can occur after resolution. Idempotent.
+   */
   close(): Promise<void>;
 }
 
@@ -454,6 +461,9 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
   }
 
   function sendJson(res: ServerResponse, status: number, body: string): void {
+    // The socket may already be gone (client abort, shutdown teardown);
+    // accounting must not be disturbed by an unwritable response.
+    if (res.destroyed) return;
     res.writeHead(status, { "content-type": "application/json" });
     res.end(body);
   }
@@ -585,8 +595,31 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       reservedUsd -= reservation.usd;
     };
 
+    const controller = new AbortController();
+    upstreamControllers.add(controller);
     try {
-      const controller = new AbortController();
+      if (closing) {
+        // Admitted after shutdown began but before any upstream dispatch:
+        // the upstream is provably untouched, so release the reservation
+        // without charge and record the deterministic refusal.
+        await settle({ tokens: 0, usd: 0 });
+        const errText = JSON.stringify({
+          error: { type: "hone_shutting_down", message: "proxy is shutting down" },
+        });
+        await trace({
+          role: identity.role,
+          model: route.model,
+          requestAt,
+          startedAt,
+          status: 503,
+          usage: ZERO_USAGE,
+          estimatedUsd: 0,
+          requestText: forwardText,
+          responseText: errText,
+        });
+        sendJson(res, 503, errText);
+        return;
+      }
       const base = route.upstreamBaseUrl ?? config.upstreamBaseUrl ?? DEFAULT_UPSTREAM;
       let upstream: Response;
       try {
@@ -626,9 +659,11 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       // accumulating the concatenated stream for usage capture + trace.
       // Streams and non-streams share the same accumulation cap; crossing it
       // aborts the upstream connection instead of buffering without bound.
-      res.writeHead(upstream.status, {
-        "content-type": upstream.headers.get("content-type") ?? "application/json",
-      });
+      if (!res.destroyed) {
+        res.writeHead(upstream.status, {
+          "content-type": upstream.headers.get("content-type") ?? "application/json",
+        });
+      }
       const chunks: Buffer[] = [];
       let received = 0;
       let truncated = false;
@@ -644,7 +679,7 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
             }
             received += buf.length;
             chunks.push(buf);
-            res.write(buf);
+            if (!res.destroyed) res.write(buf);
           }
         }
       } catch {
@@ -705,10 +740,11 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         // Deterministic client-side failure: the response is incomplete by
         // construction; never pretend it ended cleanly.
         res.destroy();
-      } else {
+      } else if (!res.destroyed) {
         res.end();
       }
     } finally {
+      upstreamControllers.delete(controller);
       if (!settled) {
         // Unexpected error path after admission: fail closed on the full
         // ceiling. Swallow secondary settle failures — the reservation is
@@ -723,51 +759,58 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     const startedAt = Date.now();
     const base = config.upstreamBaseUrl ?? DEFAULT_UPSTREAM;
     const controller = new AbortController();
-    let upstream: Response;
+    upstreamControllers.add(controller);
     try {
-      upstream = await fetch(new URL("/v1/models", base), {
-        headers: upstreamHeaders(),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      sendClientError(
-        res,
-        502,
-        "hone_upstream_unreachable",
-        err instanceof Error ? err.message : String(err),
-      );
-      return;
-    }
-    const chunks: Buffer[] = [];
-    let received = 0;
-    if (upstream.body !== null) {
-      for await (const chunk of upstream.body) {
-        const buf = Buffer.from(chunk);
-        received += buf.length;
-        if (received > limits.maxResponseBytes) {
-          controller.abort();
-          sendClientError(res, 502, "hone_upstream_too_large", "models response exceeds cap");
-          return;
-        }
-        chunks.push(buf);
+      let upstream: Response;
+      try {
+        upstream = await fetch(new URL("/v1/models", base), {
+          headers: upstreamHeaders(),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        sendClientError(
+          res,
+          502,
+          "hone_upstream_unreachable",
+          err instanceof Error ? err.message : String(err),
+        );
+        return;
       }
+      const chunks: Buffer[] = [];
+      let received = 0;
+      if (upstream.body !== null) {
+        for await (const chunk of upstream.body) {
+          const buf = Buffer.from(chunk);
+          received += buf.length;
+          if (received > limits.maxResponseBytes) {
+            controller.abort();
+            sendClientError(res, 502, "hone_upstream_too_large", "models response exceeds cap");
+            return;
+          }
+          chunks.push(buf);
+        }
+      }
+      const responseText = Buffer.concat(chunks).toString("utf8");
+      await trace({
+        role: identity.role,
+        model: "",
+        requestAt,
+        startedAt,
+        status: upstream.status,
+        usage: ZERO_USAGE,
+        estimatedUsd: 0,
+        requestText: "",
+        responseText,
+      });
+      if (!res.destroyed) {
+        res.writeHead(upstream.status, {
+          "content-type": upstream.headers.get("content-type") ?? "application/json",
+        });
+        res.end(responseText);
+      }
+    } finally {
+      upstreamControllers.delete(controller);
     }
-    const responseText = Buffer.concat(chunks).toString("utf8");
-    await trace({
-      role: identity.role,
-      model: "",
-      requestAt,
-      startedAt,
-      status: upstream.status,
-      usage: ZERO_USAGE,
-      estimatedUsd: 0,
-      requestText: "",
-      responseText,
-    });
-    res.writeHead(upstream.status, {
-      "content-type": upstream.headers.get("content-type") ?? "application/json",
-    });
-    res.end(responseText);
   }
 
   // -------------------------------------------------------------------------
@@ -797,6 +840,7 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
    */
   function rejectOverloaded(req: IncomingMessage, res: ServerResponse): void {
     const finish = (): void => {
+      if (res.destroyed) return;
       res.writeHead(503, {
         "content-type": "application/json",
         connection: "close",
@@ -820,7 +864,39 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     req.resume();
   }
 
+  // -------------------------------------------------------------------------
+  // Shutdown quiescence.
+  //
+  // INVARIANT: once `close()` resolves, no recordSpend call, reservation
+  // mutation, CAS write, or trace append can ever run again. Achieved by
+  // (1) `closing` — new requests are refused before ANY accounting work,
+  // (2) aborting every registered upstream exchange so a hung upstream can
+  //     never stall a handler, (3) destroying client sockets so stalled
+  //     uploads/downloads cannot pin handlers, and (4) awaiting every
+  //     tracked handler promise — settlement, CAS writes, and the trace
+  //     append are awaited INSIDE each handler before it resolves, so
+  //     handler completion implies accounting completion.
+  // -------------------------------------------------------------------------
+  let closing = false;
+  let closePromise: Promise<void> | undefined;
+  const inflightHandlers = new Set<Promise<void>>();
+  const upstreamControllers = new Set<AbortController>();
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (closing) {
+      // Shutdown refusal precedes ALL work — no auth, no buffering, no
+      // accounting. Covers the narrow window where a request was already
+      // parsed on a keep-alive socket before teardown destroys it.
+      if (!res.destroyed) {
+        res.writeHead(503, { "content-type": "application/json", connection: "close" });
+        res.end(
+          JSON.stringify({
+            error: { type: "hone_shutting_down", message: "proxy is shutting down" },
+          }),
+        );
+      }
+      return;
+    }
     const auth = req.headers.authorization;
     const bearer = auth?.startsWith("Bearer ") === true ? auth.slice("Bearer ".length) : undefined;
     const identity = bearer !== undefined ? byToken.get(bearer) : undefined;
@@ -854,14 +930,23 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
   }
 
   const server: Server = createServer((req, res) => {
-    handle(req, res).catch((err: unknown) => {
+    // Shutdown destroys client sockets while handlers finish accounting; a
+    // late write against a destroyed response must never crash the process.
+    res.on("error", () => undefined);
+    const done = handle(req, res).catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
-      if (!res.headersSent) {
-        sendClientError(res, 500, "hone_internal", message);
-      } else {
-        res.end();
+      try {
+        if (!res.headersSent) {
+          sendClientError(res, 500, "hone_internal", message);
+        } else if (!res.destroyed) {
+          res.end();
+        }
+      } catch {
+        res.destroy();
       }
     });
+    inflightHandlers.add(done);
+    void done.finally(() => inflightHandlers.delete(done));
   });
   // Socket-layer ingress bounds behind the slot gate: connection count, header
   // count, and slow-client header/body deadlines are capped so pre-slot work
@@ -901,10 +986,38 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       throw new Error("tcp listen did not yield an address");
     },
     async close(): Promise<void> {
-      await new Promise<void>((resolve, reject) => {
-        server.close((err) => (err !== undefined ? reject(err) : resolve()));
+      closePromise ??= (async () => {
+        closing = true;
+        // Stop accepting new connections. The close error (if any) is
+        // captured rather than rejected immediately so it cannot become an
+        // unhandled rejection while quiescence is still being awaited.
+        let closeErr: Error | undefined;
+        const serverClosed = new Promise<void>((resolve) => {
+          server.close((err) => {
+            closeErr = err;
+            resolve();
+          });
+        });
+        // Abort every in-flight upstream exchange: a hung or slow upstream
+        // must not stall shutdown. Handlers observe the abort and settle via
+        // the existing conservative failure policy (captured usage if
+        // trustworthy, otherwise the full reservation ceiling — never
+        // fabricated, never zero for a possibly-accepted request).
+        for (const controller of upstreamControllers) controller.abort();
+        // Destroy client sockets: stalled uploads/downloads cannot pin
+        // handlers, and keep-alive sockets stop holding the server open.
         server.closeAllConnections();
-      });
+        // Handler quiescence: every tracked handler has settled its
+        // reservation, recorded its spend, and appended its trace. Loop
+        // because requests already inside Node's parser may register after
+        // the snapshot; `closing` guarantees those do no accounting.
+        while (inflightHandlers.size > 0) {
+          await Promise.allSettled([...inflightHandlers]);
+        }
+        await serverClosed;
+        if (closeErr !== undefined) throw closeErr;
+      })();
+      return closePromise;
     },
   };
 }
