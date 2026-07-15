@@ -26,14 +26,21 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
     const pid = readSupervisorPid(runDir);
     if (pid !== null && pidAlive(pid)) {
       process.kill(pid, "SIGTERM");
+      // Terminal order: callers apply the result right after we return, so
+      // wait for BOTH run.finished AND actual supervisor exit — a lingering
+      // process could still be draining delivery or killing children.
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
         state = replayRun(runDir);
-        if (state.finished !== null) break;
+        if (state.finished !== null && !pidAlive(pid)) break;
         await sleep(200);
       }
       if (state.finished === null) {
         io.err(`run ${runId}: supervisor (pid ${pid}) did not finish within 15s`);
+        return 1;
+      }
+      if (pidAlive(pid)) {
+        io.err(`run ${runId}: run.finished is logged but the supervisor (pid ${pid}) has not exited within 15s`);
         return 1;
       }
       io.out(`run ${runId} stopped (${state.finished.status})`);

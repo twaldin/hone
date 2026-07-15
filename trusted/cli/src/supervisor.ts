@@ -7,8 +7,8 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { ApplyMode, BudgetEnvelope, ModelRouting, RunConfig } from "@hone/schema";
-import type { CapsuleManifest, RunEvent } from "@hone/schema";
+import { ApplyMode, BudgetEnvelope, ModelRouting, RunConfig, RunEvent } from "@hone/schema";
+import type { CapsuleManifest } from "@hone/schema";
 import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
 import { createBackend as createLocalBackend } from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
@@ -439,6 +439,11 @@ async function superviseLocked(
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
 
+  // Terminal-order fence: once the backend settled or the hard-stop deadline
+  // passed, a late ctx.emit from an abort-ignoring backend (or a straggler
+  // optimizer event) must never reach the log or stdout — run.finished is
+  // the final event. The supervisor's own emit stays unfenced.
+  let backendFenced = false;
   const ctx: RunnerBackendContext = {
     runId,
     root: io.root,
@@ -450,7 +455,7 @@ async function superviseLocked(
     env: io.env,
     replayed,
     signal: abort.signal,
-    emit,
+    emit: (event) => (backendFenced ? RunEvent.parse(event) : emit(event)),
     registerChild: (child) => children.push(child),
   };
 
@@ -467,6 +472,7 @@ async function superviseLocked(
     abort.signal.addEventListener("abort", () => armTimer(hardStop.resolve, graceMs + 1000), { once: true });
     await Promise.race([settled, hardStop.promise]);
   } finally {
+    backendFenced = true;
     for (const t of timers) clearTimeout(t);
     process.removeListener("SIGTERM", onSignal);
     process.removeListener("SIGINT", onSignal);
@@ -488,15 +494,10 @@ async function superviseLocked(
 
   const preFinish = replayRun(runDir);
   const best = preFinish.incumbent?.artifact ?? null;
-  emit({
-    runId,
-    at: new Date().toISOString(),
-    type: "run.finished",
-    ...(best !== null ? { best } : {}),
-    status,
-  });
 
   // Delivery policy is per-run and immutable once started (contract 5).
+  // Delivery runs BEFORE run.finished so the terminal event is always the
+  // log's final line (stop/apply key on it).
   if (status !== "failed" && config.apply !== "none" && best !== null) {
     const repo = extra.flags.repo !== undefined ? resolve(io.root, extra.flags.repo) : io.root;
     if (isGitRepo(repo)) {
@@ -526,6 +527,14 @@ async function superviseLocked(
       io.err(`apply ${config.apply}: ${repo} is not a git repository — skipping delivery (pass --repo <dir>)`);
     }
   }
+
+  emit({
+    runId,
+    at: new Date().toISOString(),
+    type: "run.finished",
+    ...(best !== null ? { best } : {}),
+    status,
+  });
 
   try {
     unlinkSync(join(runDir, SUPERVISOR_FILE));
