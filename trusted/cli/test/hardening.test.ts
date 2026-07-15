@@ -155,22 +155,65 @@ describe("delivery artifact contract — workspace/-rooted tars only", () => {
     await applyExpectingRejection(root, "run_git2", /\.git/i);
   });
 
+  /** Frame one pax record: "<len> key=value\n" where len counts the whole record in BYTES. */
+  function paxRecord(kv: string): string {
+    for (let len = Buffer.byteLength(kv) + 3; ; len++) {
+      const candidate = `${len} ${kv}\n`;
+      if (Buffer.byteLength(candidate) === len) return candidate;
+    }
+  }
+
   it("rejects pax linkpath overrides", () => {
-    const pax = "linkpath=/etc/passwd";
-    // canonical pax record framing: "<len> key=value\n" where len counts the whole record in bytes
-    const body = (() => {
-      for (let len = pax.length + 3; len < pax.length + 10; len++) {
-        const candidate = `${len} ${pax}\n`;
-        if (candidate.length === len) return candidate;
-      }
-      throw new Error("unreachable");
-    })();
     const blob = buildTar([
       { name: "workspace/", type: "5" },
-      { name: "PaxHeader/link", type: "x", content: body },
+      { name: "PaxHeader/link", type: "x", content: paxRecord("linkpath=/etc/passwd") },
       { name: "workspace/file", content: "x\n" },
     ]);
     expect(() => validateWorkspaceTar(blob)).toThrow(ArtifactLayoutError);
+  });
+
+  it("rejects pax size overrides (effective-size/header-size differential)", () => {
+    // The visible file's RAW data region embeds a complete ustar header for a
+    // hidden entry. A tar that honors the pax `size=0` override reads zero
+    // data bytes and parses that region as the NEXT entry — smuggling a .git
+    // path (or symlink) past a walker framed by the ustar octal size field.
+    const hiddenGit = buildTar([{ name: "workspace/.git/config", content: "[core]\n\tfsmonitor = touch /tmp/pwned\n" }]).subarray(0, 1024);
+    const gitBlob = buildTar([
+      { name: "workspace/", type: "5" },
+      { name: "PaxHeader/decoy", type: "x", content: paxRecord("size=0") },
+      { name: "workspace/decoy", content: hiddenGit.toString("latin1") },
+    ]);
+    expect(() => validateWorkspaceTar(gitBlob)).toThrow(/size override/);
+
+    const hiddenLink = buildTar([{ name: "workspace/link", type: "2", linkname: "/etc/passwd" }]).subarray(0, 512);
+    const linkBlob = buildTar([
+      { name: "workspace/", type: "5" },
+      { name: "PaxHeader/decoy", type: "x", content: paxRecord("size=0") },
+      { name: "workspace/decoy", content: hiddenLink.toString("latin1") },
+    ]);
+    expect(() => validateWorkspaceTar(linkBlob)).toThrow(/size override/);
+
+    // Global pax headers get the same treatment.
+    const globalBlob = buildTar([
+      { name: "pax_global_header", type: "g", content: paxRecord("size=0") },
+      { name: "workspace/", type: "5" },
+      { name: "workspace/file", content: "x\n" },
+    ]);
+    expect(() => validateWorkspaceTar(globalBlob)).toThrow(/size/);
+  });
+
+  it("accepts benign pax metadata records (bsdtar/libarchive style)", () => {
+    const body =
+      paxRecord("mtime=1752562134.123456789") +
+      paxRecord("atime=1752562134.5") +
+      paxRecord("LIBARCHIVE.xattr.com.apple.provenance=AQID") +
+      paxRecord("SCHILY.xattr.user.title=café — naïve"); // multibyte: framing must count bytes
+    const blob = buildTar([
+      { name: "workspace/", type: "5" },
+      { name: "PaxHeader/meta", type: "x", content: body },
+      { name: "workspace/file", content: "x\n" },
+    ]);
+    expect(() => validateWorkspaceTar(blob)).not.toThrow();
   });
 
   it("staged-index guard rejects gitlinks (mode 160000)", () => {
