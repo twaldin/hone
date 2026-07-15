@@ -5,8 +5,10 @@ import { fileURLToPath } from "node:url";
 import {
   BrokerMethods,
   CapsuleManifest,
+  DEFAULT_PROMOTION_RULE,
   DiagnosticOrderingReport,
   EvaluatorOutput,
+  PromotionRule,
   RunConfig,
   RunEvent,
   ProxyTraceRecord,
@@ -190,6 +192,8 @@ describe("contract 5: run config", () => {
     expect(rc.improverSeat).toBe(true);
     expect(rc.apply).toBe("none");
     expect(rc.routing["mutation"]?.model).toBe("gpt-5.6-terra");
+    // The fixture pre-registers a non-default promotion rule; it must survive parse verbatim.
+    expect(rc.promotion).toEqual({ minDeltaOverSe: 3, minSignConsistency: 0.75, replicates: 5, requireNegativeControls: true });
   });
 
   it("defaults: apply=none, headless=false — safe by default", () => {
@@ -203,6 +207,29 @@ describe("contract 5: run config", () => {
     expect(rc.apply).toBe("none");
     expect(rc.headless).toBe(false);
     expect(rc.improverSeat).toBe(false);
+    // Campaign field: required after parse, pre-registered defaults when absent.
+    expect(rc.promotion).toEqual(DEFAULT_PROMOTION_RULE);
+  });
+
+  it("promotion rule default is not aliased across parses", () => {
+    const base = {
+      version: 1,
+      capsuleId: "cap_000000000000",
+      objective: "x",
+      budget: { maxTokens: 1, maxUsd: 0, maxWallClockSec: 1, maxEvaluatorInvocations: 1 },
+      routing: {},
+    };
+    const a = RunConfig.parse(base);
+    a.promotion.replicates = 99;
+    expect(RunConfig.parse(base).promotion.replicates).toBe(DEFAULT_PROMOTION_RULE.replicates);
+    expect(DEFAULT_PROMOTION_RULE.replicates).toBe(3);
+  });
+
+  it("rejects out-of-range promotion rules — the pre-registered gate cannot be degenerate", () => {
+    expect(() => PromotionRule.parse({ minDeltaOverSe: 0, minSignConsistency: 0.8, replicates: 3 })).toThrow();
+    expect(() => PromotionRule.parse({ minDeltaOverSe: 2, minSignConsistency: 1.5, replicates: 3 })).toThrow();
+    expect(() => PromotionRule.parse({ minDeltaOverSe: 2, minSignConsistency: 0.8, replicates: 0 })).toThrow();
+    expect(PromotionRule.parse({ minDeltaOverSe: 2, minSignConsistency: 0.8, replicates: 3 }).requireNegativeControls).toBe(true);
   });
 });
 

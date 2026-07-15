@@ -15,21 +15,6 @@ export const RUN_CONFIG_VERSION = 1;
 export const ApplyMode = z.enum(["none", "branch", "pr", "auto"]);
 export type ApplyMode = z.infer<typeof ApplyMode>;
 
-export const RunConfig = z.object({
-  version: z.literal(RUN_CONFIG_VERSION),
-  capsuleId: z.string(),
-  objective: z.string().min(1),
-  budget: BudgetEnvelope,
-  routing: ModelRouting,
-  apply: ApplyMode.default("none"),
-  headless: z.boolean().default(false),
-  /** Improver-seat runs get the extra autonomy-ladder lock on apply:auto. */
-  improverSeat: z.boolean().default(false),
-  /** Deterministic base seed; episode seeds derive from it. */
-  seed: z.number().int().nonnegative().default(0),
-});
-export type RunConfig = z.infer<typeof RunConfig>;
-
 /** Pre-registered promotion rule — frozen at campaign start, trusted-enforced. */
 export const PromotionRule = z.object({
   /** Minimum paired mean delta, in units of its own standard error. */
@@ -42,3 +27,32 @@ export const PromotionRule = z.object({
   requireNegativeControls: z.boolean().default(true),
 });
 export type PromotionRule = z.infer<typeof PromotionRule>;
+
+/** The rule a campaign gets when none is pre-registered explicitly. */
+export const DEFAULT_PROMOTION_RULE: PromotionRule = {
+  minDeltaOverSe: 2,
+  minSignConsistency: 0.8,
+  replicates: 3,
+  requireNegativeControls: true,
+};
+
+export const RunConfig = z.object({
+  version: z.literal(RUN_CONFIG_VERSION),
+  capsuleId: z.string(),
+  objective: z.string().min(1),
+  budget: BudgetEnvelope,
+  routing: ModelRouting,
+  apply: ApplyMode.default("none"),
+  headless: z.boolean().default(false),
+  /** Improver-seat runs get the extra autonomy-ladder lock on apply:auto. */
+  improverSeat: z.boolean().default(false),
+  /** Deterministic base seed; episode seeds derive from it. */
+  seed: z.number().int().nonnegative().default(0),
+  /**
+   * Pre-registered promotion rule, frozen into the contract at campaign
+   * start. The M0 seed's artifact-level incumbent stays greedy; this rule
+   * governs the M1 outer champion promotion decision.
+   */
+  promotion: PromotionRule.default(DEFAULT_PROMOTION_RULE),
+});
+export type RunConfig = z.infer<typeof RunConfig>;

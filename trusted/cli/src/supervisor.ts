@@ -7,13 +7,13 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { ApplyMode, BudgetEnvelope, ModelRouting, RunConfig, RunEvent } from "@hone/schema";
+import { ApplyMode, BudgetEnvelope, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
 import type { CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
 import { admitCapsule, revalidateForResume, writeCapsuleSnapshot } from "./admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
 import { createBackend as createLocalBackend } from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
-import { applyContractRevision, contractHash, renderContract } from "./contract.js";
+import { applyContractRevision, budgetEnvelopeError, contractHash, renderContract } from "./contract.js";
 import { LadderLockedError, deliver, isGitRepo, ladderLocked, LADDER_REFUSAL } from "./deliver.js";
 import { appendEvent, replayRun } from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
@@ -36,7 +36,7 @@ import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from
 const RUN_USAGE =
   "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--resume] [--backend stub|local|<module>] [--config <json>] [--repo <dir>]";
 
-/** Optional per-run overrides (routing, seat, seed, budget dims) — the CLI flags cover the common ones. */
+/** Optional per-run overrides (routing, seat, seed, budget dims, promotion rule) — the CLI flags cover the common ones. */
 const ConfigOverrides = z
   .object({
     routing: ModelRouting.optional(),
@@ -45,6 +45,7 @@ const ConfigOverrides = z
     improverSeat: z.boolean().optional(),
     seed: z.number().int().nonnegative().optional(),
     budget: BudgetEnvelope.partial().optional(),
+    promotion: PromotionRule.optional(),
   })
   .strict();
 type ConfigOverrides = z.infer<typeof ConfigOverrides>;
@@ -125,7 +126,7 @@ function buildConfig(
     // default (vibeproxy); only the model id is chosen here.
     routing["mutation"] = { model: env["HONE_MODEL_ID"] ?? DEFAULT_MUTATION_MODEL };
   }
-  return RunConfig.parse({
+  const config = RunConfig.parse({
     version: 1,
     capsuleId: manifest.id,
     objective: manifest.objective,
@@ -139,7 +140,14 @@ function buildConfig(
     headless: flags.headless || overrides.headless === true,
     improverSeat: overrides.improverSeat ?? false,
     seed: overrides.seed ?? 0,
+    ...(overrides.promotion !== undefined ? { promotion: overrides.promotion } : {}),
   });
+  // Hard upper envelope (same validator as interactive E-edits): a --config or
+  // --budget-usd value above the frozen capsule manifest refuses HERE, before
+  // any run state exists. Tightening (or exact-cap) always passes.
+  const envelopeError = budgetEnvelopeError(config.budget, manifest.budget);
+  if (envelopeError !== null) throw new UsageError(envelopeError);
+  return config;
 }
 
 /**
