@@ -91,14 +91,18 @@ export function listTarEntries(blob: Buffer): TarEntry[] {
     if (type === "x") {
       const records = parsePaxRecords(data);
       if (records.has("linkpath")) throw new ArtifactLayoutError("artifact tar carries a pax linkpath override — link entries are rejected");
+      // A pax size record makes extracting tars frame the NEXT entry's data
+      // by the pax value while this walker uses the ustar octal field — the
+      // resulting boundary differential can hide entries from validation.
+      if (records.has("size")) throw new ArtifactLayoutError("artifact tar carries a pax size override — entry framing must come from the ustar header");
       const path = records.get("path");
       if (path !== undefined) overrideName = path;
       continue;
     }
     if (type === "g") {
       const records = parsePaxRecords(data);
-      if (records.has("path") || records.has("linkpath")) {
-        throw new ArtifactLayoutError("artifact tar carries global pax path overrides — rejected");
+      if (records.has("path") || records.has("linkpath") || records.has("size")) {
+        throw new ArtifactLayoutError("artifact tar carries global pax path/size overrides — rejected");
       }
       continue;
     }
