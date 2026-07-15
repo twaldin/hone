@@ -12,7 +12,7 @@ import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
 import type { BudgetDecision, ProxyHandle } from "@hone/proxy";
 import { readEvents, replayRun } from "../eventlog.js";
 import { deferred } from "../promise.js";
-import type { RunnerBackend, RunnerBackendContext } from "../types.js";
+import type { ChildLike, RunnerBackend, RunnerBackendContext } from "../types.js";
 
 /**
  * The real runner backend (WP7): composes broker + metering proxy + the
@@ -220,6 +220,33 @@ function resumeHint(runDir: string): { nextEpisode: number; incumbent: { artifac
   };
 }
 
+/**
+ * Kill handle covering the optimizer's whole POSIX process group — the tsx
+ * launcher nests a node child, and a stop that only signals the immediate
+ * child leaves descendants emitting broker calls after run.finished. Falls
+ * back to the direct child handle on Windows or when the group is gone.
+ */
+function groupKillHandle(child: ChildLike): ChildLike {
+  return {
+    pid: child.pid,
+    kill(signal?: NodeJS.Signals): boolean {
+      if (process.platform !== "win32" && typeof child.pid === "number") {
+        try {
+          process.kill(-child.pid, signal ?? "SIGTERM");
+          return true;
+        } catch {
+          // group already reaped — fall through to the direct handle
+        }
+      }
+      try {
+        return child.kill(signal);
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
 /** Exported for the trusted-boundary test: optimizer stdout must never become events. */
 export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): Promise<void> {
   const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
@@ -253,8 +280,10 @@ export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): P
       HONE_RESUME: JSON.stringify(resumeHint(ctx.runDir)),
     },
     stdio: ["ignore", "pipe", "pipe"],
+    // Own process group so SIGTERM/SIGKILL reaches every descendant.
+    detached: process.platform !== "win32",
   });
-  ctx.registerChild(child);
+  ctx.registerChild(groupKillHandle(child));
   child.stdout.pipe(optLog, { end: false });
   child.stderr.pipe(optLog, { end: false });
 
@@ -314,6 +343,7 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
 
       const cas = new CasStore(ctx.casDir);
       const baselineArtifactHash = await measureBaseline(ctx.capsuleDir, cas);
+      if (ctx.signal.aborted) return;
 
       // Broker + proxy are mutually referential (proxy meters INTO the broker,
       // broker env points sandboxes AT the proxy); the late-bound ref breaks the cycle.
@@ -353,7 +383,9 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
         // deterministic relay/network, and dead sockets must be gone before
         // this run mints the same names again.
         await sweepStaleRunResources(ctx.runId, ctx.runDir, run);
+        if (ctx.signal.aborted) return;
         egress = await setupEgress(ctx, proxy, image, run);
+        if (ctx.signal.aborted) return;
 
         running = await startBroker({
           runId: ctx.runId,
@@ -376,6 +408,10 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
           },
           episodeOrigin: ctx.replayed.nextEpisode,
         });
+
+        // A stop during broker startup must not launch the optimizer at all;
+        // the finally below unwinds proxy/broker/egress promptly.
+        if (ctx.signal.aborted) return;
 
         // Finding 11: replay journaled-but-unlogged promotions into
         // events.ndjson BEFORE the optimizer resumes, so best/status/delivery
