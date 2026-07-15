@@ -40,6 +40,14 @@ export interface ArtifactTarEntry {
   kind: ArtifactEntryKind;
   /** Payload bytes (always 0 for directories). */
   size: number;
+  /**
+   * Owner-exec bit from the raw ustar mode field (files only; always false
+   * for directories). The ONLY mode signal an artifact carries — SUID/SGID/
+   * sticky and group/other bits are never honored. Consumers restore modes
+   * from this bit exactly, so a restrictive process umask during extraction
+   * can never change what an artifact means.
+   */
+  ownerExec: boolean;
 }
 
 export class ArtifactValidationError extends Error {
@@ -65,11 +73,28 @@ function isZeroBlock(block: Buffer): boolean {
   return true;
 }
 
-/** NUL-terminated string field. */
+const utf8Fatal = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * Strict UTF-8 decode. A lossy decode (Buffer.prototype.toString replaces
+ * invalid sequences with U+FFFD) would let the validator reason about a
+ * DIFFERENT name than the raw bytes a tar binary writes to disk — e.g. a
+ * raw-\xff mode-000 directory that the decoded expected-tree pass can never
+ * chmod or match. Invalid bytes are fatal, BEFORE anything is extracted.
+ */
+function strictUtf8(bytes: Buffer, what: string): string {
+  try {
+    return utf8Fatal.decode(bytes);
+  } catch {
+    fail(`${what} contains invalid UTF-8`);
+  }
+}
+
+/** NUL-terminated string field; strict UTF-8 (invalid bytes are fatal). */
 function cString(block: Buffer, off: number, len: number): string {
   let end = off;
   while (end < off + len && block[end] !== 0) end++;
-  return block.subarray(off, end).toString("utf8");
+  return strictUtf8(block.subarray(off, end), "header string field");
 }
 
 /** `workspace/a/b` → `workspace/a`; `workspace` → `""`. */
@@ -116,7 +141,7 @@ function parsePaxRecords(content: Buffer): Map<string, string> {
     const len = parseInt(lenText, 10);
     if (len < sp - off + 3 || off + len > content.length) fail("malformed pax record: length out of range");
     if (content[off + len - 1] !== 0x0a) fail("malformed pax record: missing newline");
-    const body = content.subarray(sp + 1, off + len - 1).toString("utf8");
+    const body = strictUtf8(content.subarray(sp + 1, off + len - 1), "pax record");
     const eq = body.indexOf("=");
     if (eq < 0) fail("malformed pax record: missing '='");
     const key = body.slice(0, eq);
@@ -228,7 +253,7 @@ export function validateWorkspaceTar(bytes: Buffer): ArtifactTarEntry[] {
         if (pendingLongName !== null) fail("consecutive GNU longname headers");
         let end = content.length;
         while (end > 0 && content[end - 1] === 0) end--;
-        pendingLongName = content.subarray(0, end).toString("utf8");
+        pendingLongName = strictUtf8(content.subarray(0, end), "GNU longname");
       }
       continue;
     }
@@ -257,7 +282,8 @@ export function validateWorkspaceTar(bytes: Buffer): ArtifactTarEntry[] {
       if (explicit.get(anc) === "file") fail("file entry used as a directory", anc);
       impliedDirs.add(anc);
     }
-    entries.push({ path: p, kind, size: kind === "dir" ? 0 : size });
+    const mode = numericField(header, 100, 8, "mode");
+    entries.push({ path: p, kind, size: kind === "dir" ? 0 : size, ownerExec: kind === "file" && (mode & 0o100) !== 0 });
   }
 
   if (pendingPax !== null || pendingLongName !== null) fail("dangling metadata header at end of archive");

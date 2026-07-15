@@ -32,11 +32,13 @@ interface TarEntrySpec {
   mtime?: number;
   /** Override the header mode field (defaults to "0000755"). */
   mode?: string;
+  /** Encoding used to write the name field (default "utf8"); "latin1" injects raw high bytes. */
+  nameEncoding?: BufferEncoding;
 }
 
 function tarHeader(spec: TarEntrySpec): Buffer {
   const b = Buffer.alloc(BLOCK);
-  b.write(spec.name, 0, 100, "utf8");
+  b.write(spec.name, 0, 100, spec.nameEncoding ?? "utf8");
   b.write(`${spec.mode ?? "0000755"}\0`, 100, "latin1"); // mode
   b.write("0000000\0", 108, "latin1"); // uid
   b.write("0000000\0", 116, "latin1"); // gid
@@ -106,10 +108,10 @@ describe("validateWorkspaceTar", () => {
       ]),
     );
     expect(entries).toEqual([
-      { path: "workspace", kind: "dir", size: 0 },
-      { path: "workspace/src", kind: "dir", size: 0 },
-      { path: "workspace/src/main.ts", kind: "file", size: 10 },
-      { path: "workspace/README", kind: "file", size: 1 },
+      { path: "workspace", kind: "dir", size: 0, ownerExec: false },
+      { path: "workspace/src", kind: "dir", size: 0, ownerExec: false },
+      { path: "workspace/src/main.ts", kind: "file", size: 10, ownerExec: true },
+      { path: "workspace/README", kind: "file", size: 1, ownerExec: true },
     ]);
   });
 
@@ -604,6 +606,87 @@ describe("canonical artifact packing", () => {
       }
     } finally {
       await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("owner-exec and traversal survive a restrictive process umask", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-um-"));
+    try {
+      // Canonical truth, computed under the normal umask: pkg/run.sh IS
+      // executable, pkg/data.txt is not.
+      const clean = path.join(base, "clean");
+      await makeTree(clean, { "pkg/run.sh": "#!/bin/sh\n", "pkg/data.txt": "d" });
+      await chmod(path.join(clean, "pkg", "run.sh"), 0o755);
+      const cas = new CasStore(path.join(base, "cas"));
+      const want = await packDirAsArtifact(clean, cas);
+
+      // Sandbox-style tar of the same tree; workspace/pkg/ is IMPLIED (no
+      // explicit dir entry), so extraction must also create it traversable.
+      const noisy = makeTar([
+        { name: "workspace/", type: "5" },
+        { name: "workspace/pkg/run.sh", content: "#!/bin/sh\n", mode: "0000755", mtime: 5555 },
+        { name: "workspace/pkg/data.txt", content: "d", mode: "0000644", mtime: 5555 },
+      ]);
+
+      // Controlled-umask window (child processes inherit it): 0177 makes
+      // --no-same-permissions extraction strip owner-x from files and leave
+      // implied dirs untraversable — pre-fix the canonical hash (or the save
+      // itself) depended on the broker's umask.
+      const prev = process.umask(0o177);
+      let got: string;
+      try {
+        got = await canonicalizeWorkspaceTar(noisy, cas);
+      } finally {
+        process.umask(prev);
+      }
+      expect(got).toBe(want);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects invalid UTF-8 in entry names before anything is extracted", async () => {
+    // A lossy decode would let the validator chmod/compare a U+FFFD name
+    // while tar writes the raw bytes — e.g. a raw-\xff mode-000 dir the
+    // cleanup pass can never reach. Strict decode fails CLOSED instead.
+    const rawByteName = makeTar([
+      { name: "workspace/", type: "5" },
+      { name: "workspace/\u00ffdir/", type: "5", mode: "0000000", nameEncoding: "latin1" },
+    ]);
+
+    const longnamePayload = Buffer.concat([Buffer.from("workspace/"), Buffer.from([0xff]), Buffer.from("d")]);
+    const rawByteLongname = makeTar([
+      { name: "workspace/", type: "5" },
+      { name: "././@LongLink", type: "L", content: longnamePayload },
+      { name: "workspace/placeholder", content: "x" },
+    ]);
+
+    const paxValue = Buffer.concat([Buffer.from("path=workspace/"), Buffer.from([0xff]), Buffer.from("f\n")]);
+    let len = paxValue.length + 3;
+    while (String(len).length + 1 + paxValue.length !== len) len = String(len).length + 1 + paxValue.length;
+    const paxBody = Buffer.concat([Buffer.from(`${len} `), paxValue]);
+    const rawBytePax = makeTar([
+      { name: "workspace/", type: "5" },
+      { name: "pax", type: "x", content: paxBody },
+      { name: "workspace/f", content: "x" },
+    ]);
+
+    for (const evil of [rawByteName, rawByteLongname, rawBytePax]) {
+      expect(() => validateWorkspaceTar(evil)).toThrowError(/invalid UTF-8/);
+      const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-u8-"));
+      try {
+        const casDir = path.join(base, "cas");
+        const spawned: string[][] = [];
+        const run: RunCommand = async (argv) => {
+          spawned.push([...argv]);
+          throw new Error("no process may run for a rejected artifact");
+        };
+        await expect(canonicalizeWorkspaceTar(evil, new CasStore(casDir), run)).rejects.toThrowError(/invalid UTF-8/);
+        expect(spawned).toEqual([]); // zero spawns: rejected before extraction
+        await expect(readdir(casDir)).rejects.toThrowError(); // CAS empty
+      } finally {
+        await rm(base, { recursive: true, force: true });
+      }
     }
   });
 });
