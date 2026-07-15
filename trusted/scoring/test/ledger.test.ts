@@ -81,4 +81,22 @@ describe("holdout ledger — hard lifetime budget", () => {
     appendFileSync(path, "garbage-line\n" + '{"seq":2,"at":"2026-07-14T12:00:00.000Z"}\n');
     await expect(HoldoutLedger.open(path)).rejects.toThrow(/corrupt/i);
   });
+
+  it("serializes concurrent charges — the last slot is never double-granted", async () => {
+    const path = join(tmp(), "holdout.ledger");
+    const ledger = await HoldoutLedger.open(path, { budget: 3 });
+    const results = await Promise.allSettled(Array.from({ length: 10 }, () => ledger.charge()));
+    const granted = results.flatMap((r) => (r.status === "fulfilled" ? [r.value.count] : []));
+    expect(granted.sort((a, b) => a - b)).toEqual([1, 2, 3]);
+    for (const r of results) {
+      if (r.status === "rejected") expect(r.reason).toBeInstanceOf(HoldoutBudgetExceededError);
+    }
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(7);
+    await ledger.close();
+
+    // The on-disk ledger replays cleanly: strictly monotone seqs, count 3.
+    const reopened = await HoldoutLedger.open(path);
+    expect(reopened.state()).toEqual({ count: 3, budget: 3 });
+    await reopened.close();
+  });
 });
