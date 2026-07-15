@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { CasStore } from "./cas.js";
 import { runCommand, type RunCommand } from "./command.js";
-import { matchesAnyGlob } from "./glob.js";
+import { globToRegExp } from "./glob.js";
+import { validateWorkspaceTar } from "./tarcheck.js";
 
 /**
  * Artifact layout contract (broker-local): an artifact is a tar whose entries
@@ -52,6 +53,10 @@ export async function unpackArtifact(
   } catch {
     // not unpacked yet
   }
+  // Adversarial-artifact gate: structurally validate the archive (single
+  // workspace/ root, no links/devices/traversal/.git) BEFORE any tar binary
+  // touches it. Extant CAS blobs get the same treatment as fresh ones.
+  validateWorkspaceTar(await cas.readBuffer(hash));
   const tmp = `${finalDir}.tmp-${process.pid}-${Date.now()}`;
   await mkdir(tmp, { recursive: true });
   const res = await run(["tar", "-xf", cas.blobPath(hash), "-C", tmp]);
@@ -68,20 +73,28 @@ export async function unpackArtifact(
   return workspaceDir;
 }
 
-async function walkFiles(root: string, rel = ""): Promise<Map<string, string>> {
+/**
+ * Walks a tree into rel-path → fingerprint. Directories are first-class
+ * (`dir`) so an added/deleted/type-changed directory diffs like any leaf;
+ * symlinks fingerprint their target so a retarget diffs too.
+ */
+async function walkTree(root: string, rel = ""): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   const entries = await readdir(path.join(root, rel), { withFileTypes: true });
   for (const entry of entries) {
     const entryRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
     if (entry.isDirectory()) {
-      for (const [k, v] of await walkFiles(root, entryRel)) out.set(k, v);
+      out.set(entryRel, "dir");
+      for (const [k, v] of await walkTree(root, entryRel)) out.set(k, v);
     } else if (entry.isFile()) {
       const digest = createHash("sha256")
         .update(await readFile(path.join(root, rel, entry.name)))
         .digest("hex");
-      out.set(entryRel, digest);
+      out.set(entryRel, `file:${digest}`);
+    } else if (entry.isSymbolicLink()) {
+      out.set(entryRel, `link:${await readlink(path.join(root, rel, entry.name))}`);
     } else {
-      // symlinks/devices inside an artifact: record kind so a type change diffs
+      // devices/FIFOs inside an unpacked tree: record kind so a type change diffs
       out.set(entryRel, "special");
     }
   }
@@ -89,9 +102,28 @@ async function walkFiles(root: string, rel = ""): Promise<Map<string, string>> {
 }
 
 /**
- * Diffs two unpacked trees over the protected globs. Returns every relative
- * path matching a glob that was modified, deleted, or added — any of which is
- * a violation (the protected namespace is frozen wholesale).
+ * Protected-spec matching: a spec containing glob metacharacters keeps glob
+ * semantics (see glob.ts); a PLAIN path is a namespace — it protects itself
+ * and every descendant, so `protected` freezes `protected`, `protected/a`,
+ * `protected/a/b`, … without needing `/**`.
+ */
+function matchesProtected(rel: string, specs: readonly string[]): boolean {
+  for (const spec of specs) {
+    if (/[*?]/.test(spec)) {
+      if (globToRegExp(spec).test(rel)) return true;
+    } else {
+      const p = spec.replace(/\/+$/, "");
+      if (rel === p || rel.startsWith(`${p}/`)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Diffs two unpacked trees over the protected specs. Returns every relative
+ * path in a protected namespace that was modified, deleted, added, or changed
+ * type (file/dir/link) — any of which is a violation (the protected namespace
+ * is frozen wholesale, directories included).
  */
 export async function diffProtectedPaths(
   baselineDir: string,
@@ -99,14 +131,14 @@ export async function diffProtectedPaths(
   protectedGlobs: readonly string[],
 ): Promise<string[]> {
   if (protectedGlobs.length === 0) return [];
-  const [base, cand] = await Promise.all([walkFiles(baselineDir), walkFiles(candidateDir)]);
+  const [base, cand] = await Promise.all([walkTree(baselineDir), walkTree(candidateDir)]);
   const violations = new Set<string>();
   for (const [rel, digest] of base) {
-    if (!matchesAnyGlob(rel, protectedGlobs)) continue;
+    if (!matchesProtected(rel, protectedGlobs)) continue;
     if (cand.get(rel) !== digest) violations.add(rel);
   }
   for (const rel of cand.keys()) {
-    if (!base.has(rel) && matchesAnyGlob(rel, protectedGlobs)) violations.add(rel);
+    if (!base.has(rel) && matchesProtected(rel, protectedGlobs)) violations.add(rel);
   }
   return [...violations].sort();
 }

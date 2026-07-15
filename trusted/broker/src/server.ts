@@ -139,21 +139,28 @@ function buildMethodTable(broker: Broker): Map<string, MethodEntry> {
   return table;
 }
 
+/** Hard cap on one newline-delimited JSON-RPC frame (adversarial clients). */
+export const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
+
 export interface BrokerServerOptions {
   socketPath: string;
   adminSocketPath: string;
+  /** Max bytes per frame before the connection is rejected; default 1 MiB. */
+  maxFrameBytes?: number | undefined;
 }
 
 export class BrokerServer {
   private readonly table: Map<string, MethodEntry>;
   private readonly servers: net.Server[] = [];
   private readonly connections = new Set<net.Socket>();
+  private readonly maxFrameBytes: number;
 
   constructor(
     broker: Broker,
     private readonly opts: BrokerServerOptions,
   ) {
     this.table = buildMethodTable(broker);
+    this.maxFrameBytes = opts.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
   }
 
   async listen(): Promise<void> {
@@ -185,24 +192,46 @@ export class BrokerServer {
     this.servers.length = 0;
   }
 
+  /**
+   * Byte-exact framing with a hard cap: the pending frame is bounded by
+   * maxFrameBytes plus one kernel-sized chunk, so an adversarial client can
+   * never make the broker buffer an unbounded line. An oversized frame —
+   * complete or still fragmented — gets ONE parse-error response, then the
+   * connection is torn down.
+   */
   private onConnection(sock: net.Socket, privileged: boolean): void {
     this.connections.add(sock);
     sock.on("close", () => this.connections.delete(sock));
     sock.on("error", () => sock.destroy());
-    let buf = "";
-    sock.setEncoding("utf8");
-    sock.on("data", (chunk: string) => {
-      buf += chunk;
+    let buf: Buffer = Buffer.alloc(0);
+    sock.on("data", (chunk: Buffer) => {
+      buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
       let nl: number;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
+      while ((nl = buf.indexOf(0x0a)) >= 0) {
+        if (nl > this.maxFrameBytes) return this.rejectOversizedFrame(sock);
+        const line = buf.subarray(0, nl).toString("utf8");
+        buf = buf.subarray(nl + 1);
         if (line.trim().length === 0) continue;
-        void this.handleLine(line, privileged).then((resp) => {
-          if (resp && !sock.destroyed) sock.write(`${JSON.stringify(resp)}\n`);
-        });
+        void this.handleLine(line, privileged)
+          .then((resp) => {
+            if (resp && !sock.destroyed) sock.write(`${JSON.stringify(resp)}\n`);
+          })
+          .catch(() => sock.destroy());
       }
+      if (buf.length > this.maxFrameBytes) this.rejectOversizedFrame(sock);
     });
+  }
+
+  /** One safe error frame, then close — never buffer past the cap. */
+  private rejectOversizedFrame(sock: net.Socket): void {
+    sock.removeAllListeners("data");
+    if (sock.destroyed) return;
+    const resp: RpcResponse = {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: PARSE_ERROR, message: `frame exceeds ${this.maxFrameBytes} bytes` },
+    };
+    sock.write(`${JSON.stringify(resp)}\n`, () => sock.destroy());
   }
 
   private async handleLine(line: string, privileged: boolean): Promise<RpcResponse | undefined> {
