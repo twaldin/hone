@@ -9,7 +9,7 @@ import { createBackend } from "../src/backends/local.js";
 import { stopCommand } from "../src/commands/stop.js";
 import { appendEvent, bestArtifact, readEvents, replayRun } from "../src/eventlog.js";
 import { sleep } from "../src/promise.js";
-import { pidAlive, readSupervisorPid, runCommand as cliRunCommand } from "../src/supervisor.js";
+import { acquireRunLock, pidAlive, readSupervisorPid, runCommand as cliRunCommand } from "../src/supervisor.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
   fakeHash,
@@ -488,6 +488,110 @@ describe("dead-supervisor seal guard (P1: stop must not finalize stale events)",
     const runDir = crashedRun(root, "run_seal4", null);
     const { io } = makeIo(root);
     expect(await stopCommand([], io)).toBe(0);
+    expect(readEvents(runDir).at(-1)?.type).toBe("run.finished");
+  });
+});
+
+describe("dead-stop vs concurrent resume (P1: crash finalization only under the run lock)", () => {
+  it("a stop contending with a live resume defers; exactly one terminal, take-best applies the FINAL best", { timeout: 30_000 }, async () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const runId = "run_race1";
+    const best = tarToCas(root, { "hello.txt": "improved\n" });
+    const finalBest = tarToCas(root, { "hello.txt": "final\n" });
+    const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: best, finished: false }));
+    writeFileSync(
+      join(runDir, "broker-state.ndjson"),
+      `${JSON.stringify({ t: "incumbent", hash: best, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 })}\n`,
+    );
+
+    // Simulated resume winner: holds the run lock while stop starts.
+    const release = await acquireRunLock(runDir, runId);
+    const stopPromise = stopCommand(["--take-best", "--repo", "repo"], makeIo(root).io);
+    await sleep(50); // stop observes dead+unfinished, loses the lock, enters its retry loop
+
+    // The "resume" completes the run and releases the lock.
+    appendEvent(runDir, { runId, at: at(), type: "run.resumed", fromCursor: 7 });
+    appendEvent(runDir, { runId, at: at(), type: "incumbent.new", artifact: { hash: finalBest }, aggregate: 0.8, deltaVsBaseline: 0.3, episode: 1 });
+    appendEvent(runDir, { runId, at: at(), type: "run.finished", best: { hash: finalBest }, status: "completed" });
+    await release();
+
+    const code = await stopPromise;
+    expect(code).toBe(0);
+    const events = readEvents(runDir);
+    // exactly one authority path won; nothing was appended after its terminal
+    expect(events.filter((e) => e.type === "run.finished").length).toBe(1);
+    expect(events.at(-1)?.type).toBe("run.finished");
+    // take-best applied the FINAL best, never the stale pre-resume one
+    expect(gitIn(repo, "show", `hone/${runId}:hello.txt`)).toBe("final");
+  });
+
+  it("a stop that wins the lock finalizes exactly once; a following resume refuses", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const runId = "run_race2";
+    const best = tarToCas(root, { "hello.txt": "improved\n" });
+    const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: best, finished: false }));
+    writeFileSync(
+      join(runDir, "broker-state.ndjson"),
+      `${JSON.stringify({ t: "incumbent", hash: best, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 })}\n`,
+    );
+    expect(await stopCommand([], makeIo(root).io)).toBe(0);
+    await expect(cliRunCommand(["capsule", "--headless", "--resume", "--backend", "stub"], makeIo(root).io)).rejects.toThrow(/nothing to resume/);
+    const events = readEvents(runDir);
+    expect(events.filter((e) => e.type === "run.finished").length).toBe(1);
+    expect(events.some((e) => e.type === "run.resumed")).toBe(false);
+  });
+});
+
+describe("durable supervisor sentinel (exit-hook ownership race)", () => {
+  it("survives clean exit with a dead pid; the next locked supervisor overwrites, never unlinks", { timeout: 60_000 }, async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    // Phase 1: a killed run leaves sentinel A (SIGKILL leftover).
+    const child = honeSpawn(["run", "capsule", "--headless", "--backend", "stub"], {
+      cwd: root,
+      env: { HONE_STUB_EPISODES: "100", HONE_STUB_DELAY_MS: "100" },
+    });
+    let runDir: string | null = null;
+    let pidA: number | null = null;
+    try {
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        const runs = join(root, ".hone-runs");
+        const ids = existsSync(runs) ? readdirSync(runs) : [];
+        const candidate = ids[0];
+        if (candidate !== undefined) {
+          runDir = join(runs, candidate);
+          pidA = readSupervisorPid(runDir);
+          if (pidA !== null && readLogLines(root, candidate).length >= 2) break;
+        }
+        await sleep(100);
+      }
+    } finally {
+      killTree(child);
+    }
+    expect(runDir).not.toBeNull();
+    expect(pidA).not.toBeNull();
+    if (runDir === null || pidA === null) throw new Error("unreachable");
+    await sleep(400); // let the killed tree die
+    expect(existsSync(join(runDir, "supervisor.json"))).toBe(true); // stale sentinel is the SAFE steady state
+
+    // Phase 2: resume overwrites the sentinel under its lock and completes.
+    const r = await hone(["run", "capsule", "--headless", "--backend", "stub", "--resume"], {
+      cwd: root,
+      env: { HONE_STUB_EPISODES: "100" },
+    });
+    expect(r.code, r.stderr).toBe(0);
+    const pidB = readSupervisorPid(runDir);
+    // Durable last-supervisor metadata REMAINS after clean exit (no exit
+    // unlink — an exit hook could race a successor and delete ITS sentinel)…
+    expect(pidB).not.toBeNull();
+    if (pidB === null) throw new Error("unreachable");
+    // …names the SUCCESSOR (locked overwrite), and is safely dead.
+    expect(pidB).not.toBe(pidA);
+    expect(pidAlive(pidB)).toBe(false);
     expect(readEvents(runDir).at(-1)?.type).toBe("run.finished");
   });
 });

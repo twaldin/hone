@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -353,12 +353,13 @@ async function superviseLocked(
   const headless = config.headless;
   const casDir = casRoot(io.root);
   mkdirSync(casDir, { recursive: true });
+  // Durable last-supervisor metadata, written ONLY while holding the run
+  // lock and NEVER unlinked — not even at exit. An exit-time unlink is a
+  // path-CAS race: after this supervisor releases the lock, the next one
+  // overwrites the file, and a late exit hook would delete the SUCCESSOR's
+  // sentinel. A dead/stale sentinel is tiny and safe (same semantics as a
+  // SIGKILL leftover); every consumer gates on pidAlive().
   writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId })}\n`);
-  // The PID sentinel lives until REAL process exit — `stop` keys on it to
-  // wait out straggler teardown (backend finally, group kills) that outlives
-  // run.finished. Never unlinked on the return path; a SIGKILL leaves a
-  // stale file, which pidAlive() disambiguates.
-  armSentinelCleanup(join(runDir, SUPERVISOR_FILE));
 
   let liveBudget = replayRun(runDir).lastBudget;
   const emit = (event: RunEvent): RunEvent => {
@@ -619,24 +620,6 @@ async function superviseLocked(
     process.removeListener("SIGTERM", onSignal);
     process.removeListener("SIGINT", onSignal);
   }
-}
-
-/** Sentinel files removed synchronously at process exit — one hook, many runs. */
-const sentinelsToClear = new Set<string>();
-let sentinelHookInstalled = false;
-function armSentinelCleanup(path: string): void {
-  sentinelsToClear.add(path);
-  if (sentinelHookInstalled) return;
-  sentinelHookInstalled = true;
-  process.on("exit", () => {
-    for (const p of sentinelsToClear) {
-      try {
-        unlinkSync(p);
-      } catch {
-        // already gone / never written
-      }
-    }
-  });
 }
 
 /** Shared by `stop` for liveness checks. */
