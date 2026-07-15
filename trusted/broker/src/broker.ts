@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync } from "node:fs";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -281,6 +281,7 @@ export class Broker {
   constructor(private readonly config: BrokerConfig) {
     this.manifest = CapsuleManifest.parse(config.manifest);
     assertAssetGroupIsolation(this.manifest);
+    assertAssetPathsResolveSafely(this.manifest, config.capsuleRootDir);
     this.cas = new CasStore(config.casDir);
     this.run = config.runCommand ?? runCommand;
     this.now = config.now ?? Date.now;
@@ -1132,11 +1133,50 @@ function assertAssetGroupIsolation(manifest: CapsuleManifest): void {
   for (const [i, a] of entries.entries()) {
     for (const b of entries.slice(i + 1)) {
       if (a.visibility === b.visibility) continue;
-      if (a.path === b.path || a.path.startsWith(`${b.path}/`) || b.path.startsWith(`${a.path}/`)) {
+      // "." mounts the whole capsule root — it is an ancestor of everything.
+      if (a.path === "." || b.path === "." || a.path === b.path || a.path.startsWith(`${b.path}/`) || b.path.startsWith(`${a.path}/`)) {
         throw new BrokerError(
           "INTERNAL",
           `asset group paths overlap across visibility classes: ${a.group}:${a.path} (${a.visibility}) vs ${b.group}:${b.path} (${b.visibility})`,
         );
+      }
+    }
+  }
+}
+
+/**
+ * Preflight (constructor), filesystem half: the overlap check above is
+ * LEXICAL, so a symlink inside the capsule root could still alias one
+ * visibility class into another (public/train -> holdout). Reject any
+ * symlink component in a declared asset path, require every path to exist,
+ * and require its resolution to stay inside the (resolved) capsule root.
+ * Fails closed at boot — independent of whatever capsule ingestion rejects.
+ */
+function assertAssetPathsResolveSafely(manifest: CapsuleManifest, capsuleRootDir: string): void {
+  const realRoot = realpathSync(capsuleRootDir);
+  for (const g of manifest.assetGroups) {
+    for (const rel of g.paths) {
+      const norm = path.posix.normalize(rel).replace(/\/+$/, "");
+      let cur = capsuleRootDir;
+      for (const part of norm.split("/")) {
+        if (part === "." || part === "") continue;
+        cur = path.join(cur, part);
+        let st;
+        try {
+          st = lstatSync(cur);
+        } catch {
+          throw new BrokerError("INTERNAL", `asset group ${g.id}: asset path missing on host: ${rel}`);
+        }
+        if (st.isSymbolicLink()) {
+          throw new BrokerError(
+            "INTERNAL",
+            `asset group ${g.id}: symlink in asset path is not allowed: ${path.relative(capsuleRootDir, cur)}`,
+          );
+        }
+      }
+      const real = realpathSync(path.join(capsuleRootDir, norm));
+      if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+        throw new BrokerError("INTERNAL", `asset group ${g.id}: asset path escapes capsule root after resolution: ${rel}`);
       }
     }
   }
