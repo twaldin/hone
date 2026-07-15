@@ -186,21 +186,104 @@ async function makeTreeOwnerAccessible(root: string): Promise<void> {
   }
 }
 
+/** Expected node in an extracted validated tree. */
+interface ExpectedNode {
+  kind: ArtifactEntryKind;
+  /** Owner-exec signal from the validated header; meaningless for dirs. */
+  ownerExec: boolean;
+}
+
 /**
  * Expected extracted tree for accepted archive entries: rel path (under
- * `workspace/`) → kind, with every implied ancestor materialized as a dir.
- * The validator already rejected any file/dir conflicts among these.
+ * `workspace/`) → kind + owner-exec, with every implied ancestor
+ * materialized as a dir. The validator already rejected any file/dir
+ * conflicts among these.
  */
-function expectedTreeOf(entries: ArtifactTarEntry[]): Map<string, ArtifactEntryKind> {
-  const expected = new Map<string, ArtifactEntryKind>();
+function expectedTreeOf(entries: ArtifactTarEntry[]): Map<string, ExpectedNode> {
+  const expected = new Map<string, ExpectedNode>();
   for (const e of entries) {
     if (e.path === "workspace") continue;
     const rel = e.path.slice("workspace/".length);
-    expected.set(rel, e.kind);
+    expected.set(rel, { kind: e.kind, ownerExec: e.ownerExec });
     const segs = rel.split("/");
-    for (let i = 1; i < segs.length; i++) expected.set(segs.slice(0, i).join("/"), "dir");
+    for (let i = 1; i < segs.length; i++) {
+      const anc = segs.slice(0, i).join("/");
+      if (!expected.has(anc)) expected.set(anc, { kind: "dir", ownerExec: false });
+    }
   }
   return expected;
+}
+
+/**
+ * Restores EXACT safe modes on an extracted validated tree, parents first:
+ * directories `dirMode`; files `plainFileMode` plus `execBits` when the
+ * VALIDATED header carried owner-exec. `--no-same-permissions` extraction
+ * applies the process umask (under e.g. 0177 a 0755 file lands with owner-x
+ * stripped and implied dirs untraversable), so modes are SET, never OR'd
+ * with the umask-mutated filesystem mode — the archive's owner-exec signal,
+ * not the broker's umask, decides the canonical mode. SUID/SGID/sticky are
+ * never restored. Paths that are missing or of the wrong lstat type are
+ * skipped: the fidelity gate / pack step reports them precisely, and a
+ * symlink target is never chmod'd.
+ */
+async function restoreValidatedModes(
+  wsDir: string,
+  expected: Map<string, ExpectedNode>,
+  modes: { dir: number; plainFile: number; execBits: number },
+): Promise<void> {
+  try {
+    await chmod(wsDir, modes.dir);
+  } catch {
+    // missing workspace root — the fidelity walk fails with the real error
+  }
+  // Lexicographic order visits every parent before its children (prefix
+  // property), so each dir is traversable before its contents are touched.
+  const rels = [...expected.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  for (const rel of rels) {
+    const node = expected.get(rel) as ExpectedNode;
+    const abs = path.join(wsDir, rel);
+    let st;
+    try {
+      st = await lstat(abs);
+    } catch {
+      continue; // absent — fidelity gate rejects
+    }
+    try {
+      if (node.kind === "dir" && st.isDirectory()) await chmod(abs, modes.dir);
+      else if (node.kind === "file" && st.isFile()) {
+        await chmod(abs, node.ownerExec ? modes.plainFile | modes.execBits : modes.plainFile);
+      }
+    } catch {
+      // unreadable/unwritable leftovers surface in the pack step
+    }
+  }
+}
+
+/**
+ * Pre-creates a validated archive's directory skeleton (explicit AND implied
+ * dirs) with owner-only access before extraction. bsdtar creates missing
+ * intermediate directories with umask-masked modes and then cannot descend
+ * into them under a restrictive umask (0177 → d600); pre-existing traversable
+ * dirs sidestep that, and restoreValidatedModes sets the final modes after
+ * extraction. Failures (EEXIST on a name-collapsing filesystem) are
+ * tolerated: the fidelity gate rejects the tree afterwards.
+ */
+async function precreateDirSkeleton(wsDir: string, expected: Map<string, ExpectedNode>): Promise<void> {
+  await mkdir(wsDir, { recursive: true });
+  await chmod(wsDir, 0o700);
+  const rels = [...expected.entries()]
+    .filter(([, node]) => node.kind === "dir")
+    .map(([rel]) => rel)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)); // parents before children
+  for (const rel of rels) {
+    const abs = path.join(wsDir, rel);
+    try {
+      await mkdir(abs);
+      await chmod(abs, 0o700);
+    } catch {
+      // collapsed/duplicate name on this host — the fidelity walk rejects it
+    }
+  }
 }
 
 /** Exact byte-name/type enumeration of an extracted tree (no normalization). */
@@ -220,8 +303,9 @@ async function walkExtracted(root: string, rel: string, out: Map<string, "file" 
  * Canonicalizes an UNTRUSTED workspace tar (e.g. `docker cp` output from an
  * adversarial sandbox) into CAS: structural validation FIRST — nothing
  * malformed is ever written to disk or handed to a tar binary — then
- * extraction into a trusted temp dir (access-normalized so hostile mode bits
- * cannot block packing or cleanup), then an EXTRACTION FIDELITY check —
+ * extraction into a trusted temp dir, then EXACT mode restoration from the
+ * validated headers (umask-independent; hostile mode bits cannot block
+ * packing or cleanup), then an EXTRACTION FIDELITY check —
  * the extracted tree must contain exactly the accepted entry paths, byte for
  * byte, with matching types, so a case-insensitive or Unicode-normalizing
  * host filesystem that collapses distinct entries (Linux `A`/`a`, NFC/NFD on
@@ -232,25 +316,29 @@ async function walkExtracted(root: string, rel: string, out: Map<string, "file" 
 export async function canonicalizeWorkspaceTar(tarBytes: Buffer, cas: CasStore, run: RunCommand = runCommand): Promise<string> {
   const accepted = validateWorkspaceTar(tarBytes);
   const tmp = await mkdtemp(path.join(os.tmpdir(), "hone-canon-"));
+  await chmod(tmp, 0o700); // mkdtemp honors the process umask; 0177 would make tmp unusable
   try {
     const tarPath = path.join(tmp, "incoming.tar");
     await writeFile(tarPath, tarBytes);
     const treeDir = path.join(tmp, "tree");
     await mkdir(treeDir);
-    const res = await run(["tar", ...EXTRACT_FLAGS, "-xf", tarPath, "-C", treeDir]);
-    await makeTreeOwnerAccessible(treeDir); // even a failed extract left a partial tree to walk/remove
-    if (res.exitCode !== 0) throw new Error(`tar extract failed: ${res.stderr.toString()}`);
+    await chmod(treeDir, 0o700); // ditto: mkdir masks its mode with the umask
     const wsDir = path.join(treeDir, "workspace");
+    const expected = expectedTreeOf(accepted);
+    await precreateDirSkeleton(wsDir, expected);
+    const res = await run(["tar", ...EXTRACT_FLAGS, "-xf", tarPath, "-C", treeDir]);
+    if (res.exitCode !== 0) throw new Error(`tar extract failed: ${res.stderr.toString()}`);
+    // Private temp tree: owner-only access is all the pack step needs.
+    await restoreValidatedModes(wsDir, expected, { dir: 0o700, plainFile: 0o600, execBits: 0o100 });
     const actual = new Map<string, "file" | "dir" | "other">();
     await walkExtracted(wsDir, "", actual);
-    const expected = expectedTreeOf(accepted);
     if (actual.size !== expected.size) {
       throw new ArtifactValidationError(
         `extracted tree has ${actual.size} entries but the archive declared ${expected.size} — host filesystem collapsed or invented paths`,
       );
     }
-    for (const [rel, kind] of expected) {
-      if (actual.get(rel) !== kind) {
+    for (const [rel, node] of expected) {
+      if (actual.get(rel) !== node.kind) {
         throw new ArtifactValidationError(
           "extracted tree does not match accepted archive entries — host filesystem collision or unfaithful extraction",
           `workspace/${rel}`,
@@ -287,14 +375,26 @@ export async function unpackArtifact(
   // Adversarial-artifact gate: structurally validate the archive (single
   // workspace/ root, no links/devices/traversal/.git) BEFORE any tar binary
   // touches it. Extant CAS blobs get the same treatment as fresh ones.
-  validateWorkspaceTar(await cas.readBuffer(hash));
+  const accepted = validateWorkspaceTar(await cas.readBuffer(hash));
   const tmp = `${finalDir}.tmp-${process.pid}-${Date.now()}`;
   await mkdir(tmp, { recursive: true });
+  await chmod(tmp, 0o700); // mkdir masks with the process umask
+  const expected = expectedTreeOf(accepted);
+  await precreateDirSkeleton(path.join(tmp, "workspace"), expected);
   const res = await run(["tar", ...EXTRACT_FLAGS, "-xf", cas.blobPath(hash), "-C", tmp]);
   if (res.exitCode !== 0) {
     await rm(tmp, { recursive: true, force: true });
     throw new Error(`tar unpack failed for ${hash}: ${res.stderr.toString()}`);
   }
+  // Unpacked trees feed eval RO-mounts and protected-path diffs: restore the
+  // modes the artifact DECLARES (world-readable 0644/0755 exactly as the
+  // canonical tar states) so a restrictive broker umask can neither strip
+  // owner-x nor make historical artifacts unreadable. SUID/SGID never return.
+  await restoreValidatedModes(path.join(tmp, "workspace"), expected, {
+    dir: 0o755,
+    plainFile: 0o644,
+    execBits: 0o111,
+  });
   try {
     await rename(tmp, finalDir);
   } catch {
