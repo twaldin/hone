@@ -2,6 +2,7 @@ import http from "node:http";
 import { mkdtemp, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { BudgetExceededError, ProxyTraceRecord } from "@hone/schema";
 import {
@@ -28,14 +29,27 @@ interface UpstreamCall {
 interface MockUpstream {
   port: number;
   calls: UpstreamCall[];
+  /** Set when a completions response was closed by the PROXY before the mock finished writing. */
+  flags: { closedEarly: boolean };
   close(): Promise<void>;
 }
 
 const MOCK_USAGE = { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 };
 const MOCK_STREAM_USAGE = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 };
 
+/** Generous quantitative headroom for tests that are not about reservations. */
+const GENEROUS_REMAINING = { tokens: 1_000_000_000, usd: 1_000_000 };
+
+/** Shape authored by this file's own tests — the mock parses its own traffic. */
+interface MockCompletionBody {
+  model?: string;
+  stream?: boolean;
+  messages?: Array<{ content?: unknown }>;
+}
+
 async function startMockUpstream(): Promise<MockUpstream> {
   const calls: UpstreamCall[] = [];
+  const flags = { closedEarly: false };
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
@@ -43,7 +57,59 @@ async function startMockUpstream(): Promise<MockUpstream> {
       const body = Buffer.concat(chunks).toString("utf8");
       calls.push({ method: req.method ?? "", url: req.url ?? "", headers: req.headers, body });
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
-        const parsed = JSON.parse(body) as { model?: string; stream?: boolean };
+        const parsed = JSON.parse(body) as MockCompletionBody;
+        const first = parsed.messages?.[0]?.content;
+        const mode = typeof first === "string" ? first : "";
+        const jsonCompletion = (usage: unknown): string =>
+          JSON.stringify({
+            id: "c1",
+            object: "chat.completion",
+            model: parsed.model,
+            choices: [{ index: 0, message: { role: "assistant", content: "hello" }, finish_reason: "stop" }],
+            ...(usage === undefined ? {} : { usage }),
+          });
+        if (mode === "no-usage") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(jsonCompletion(undefined));
+          return;
+        }
+        if (mode === "zero-usage") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(jsonCompletion({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }));
+          return;
+        }
+        if (mode === "bad-usage") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(jsonCompletion({ prompt_tokens: -5, completion_tokens: "many", total_tokens: 1e30 }));
+          return;
+        }
+        if (mode === "reset") {
+          // Accept the request, start a body, then kill the socket mid-flight.
+          res.writeHead(200, { "content-type": "application/json" });
+          res.write('{"partial":');
+          setTimeout(() => res.destroy(), 10);
+          return;
+        }
+        if (mode === "flood") {
+          // Rogue provider: streams far more than any sane completion.
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          const payload = `data: ${JSON.stringify({ choices: [{ delta: { content: "x".repeat(900) } }] })}\n\n`;
+          let sent = 0;
+          const timer = setInterval(() => {
+            if (sent >= 200) {
+              clearInterval(timer);
+              res.end();
+              return;
+            }
+            sent += 1;
+            res.write(payload);
+          }, 5);
+          res.on("close", () => {
+            clearInterval(timer);
+            if (sent < 200) flags.closedEarly = true;
+          });
+          return;
+        }
         if (parsed.stream === true) {
           res.writeHead(200, { "content-type": "text/event-stream" });
           res.write(
@@ -55,15 +121,7 @@ async function startMockUpstream(): Promise<MockUpstream> {
           res.end();
         } else {
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(
-            JSON.stringify({
-              id: "c1",
-              object: "chat.completion",
-              model: parsed.model,
-              choices: [{ index: 0, message: { role: "assistant", content: "hello" }, finish_reason: "stop" }],
-              usage: MOCK_USAGE,
-            }),
-          );
+          res.end(jsonCompletion(MOCK_USAGE));
         }
       } else if (req.method === "GET" && req.url === "/v1/models") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -80,6 +138,7 @@ async function startMockUpstream(): Promise<MockUpstream> {
   return {
     port,
     calls,
+    flags,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -123,7 +182,7 @@ async function setup(overrides: Partial<ProxyConfig> = {}): Promise<Ctx> {
     upstreamBaseUrl: `http://127.0.0.1:${upstream.port}`,
     upstreamApiKey: UPSTREAM_KEY,
     pricing: { "routed-model": { inputUsdPerMTok: 3, outputUsdPerMTok: 15 } },
-    checkBudget: () => ({ allowed: true }),
+    checkBudget: () => ({ allowed: true, remaining: GENEROUS_REMAINING }),
     recordSpend: (s) => {
       spends.push(s);
     },
@@ -344,7 +403,9 @@ describe("budget enforcement", () => {
     let exhausted = false;
     const ctx = await setup({
       checkBudget: (): BudgetDecision =>
-        exhausted ? { allowed: false, dimension: "tokens", message: "cap hit" } : { allowed: true },
+        exhausted
+          ? { allowed: false, dimension: "tokens", message: "cap hit" }
+          : { allowed: true, remaining: GENEROUS_REMAINING },
     });
     const token = ctx.proxy.tokenFor("mutation");
 
@@ -439,7 +500,7 @@ describe("unix socket", () => {
       runDir: join(base, "run"),
       casDir: join(base, "cas"),
       upstreamBaseUrl: `http://127.0.0.1:${upstream.port}`,
-      checkBudget: () => ({ allowed: true }),
+      checkBudget: () => ({ allowed: true, remaining: GENEROUS_REMAINING }),
       recordSpend: (s) => {
         spends.push(s);
       },
@@ -496,7 +557,7 @@ describe("live smoke (skip-if-unreachable)", () => {
       runDir: join(base, "run"),
       casDir: join(base, "cas"),
       upstreamBaseUrl: "http://127.0.0.1:8317",
-      checkBudget: () => ({ allowed: true }),
+      checkBudget: () => ({ allowed: true, remaining: GENEROUS_REMAINING }),
       recordSpend: (s) => {
         spends.push(s);
       },
@@ -525,5 +586,339 @@ describe("live smoke (skip-if-unreachable)", () => {
     const rec = ProxyTraceRecord.parse(JSON.parse(raw.trim()));
     expect(rec.model).toBe("glm-5.2");
     expect(rec.usage.totalTokens).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// adversarial: atomic admission reservations + fail-closed reconciliation
+// ---------------------------------------------------------------------------
+
+async function until(cond: () => boolean, ms = 5000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > ms) throw new Error("timed out waiting for condition");
+    await sleep(20);
+  }
+}
+
+describe("admission reservations", () => {
+  it("two parallel requests cannot both spend the same remaining headroom", async () => {
+    const spends: SpendRecord[] = [];
+    const ctx = await setup({
+      checkBudget: (): BudgetDecision => ({
+        allowed: true,
+        remaining: { tokens: 1100 - spends.reduce((a, s) => a + s.tokens, 0), usd: 1000 },
+      }),
+      recordSpend: (s) => {
+        spends.push(s);
+      },
+    });
+    const token = ctx.proxy.tokenFor("mutation");
+    const body = { messages: [{ role: "user", content: "hi" }], max_tokens: 1000 };
+    const [a, b] = await Promise.all([
+      postCompletions(ctx, token, body),
+      postCompletions(ctx, token, body),
+    ]);
+    const statuses = [a.status, b.status].sort((x, y) => x - y);
+    expect(statuses).toEqual([200, 402]);
+    const denied = a.status === 402 ? a : b;
+    expect(BudgetExceededError.parse(await denied.json()).error.dimension).toBe("tokens");
+    // exactly one request reached upstream, exactly one settlement
+    expect(ctx.upstream.calls.filter((c) => c.url === "/v1/chat/completions")).toHaveLength(1);
+    await (a.status === 200 ? a : b).text();
+    expect(spends).toHaveLength(1);
+    expect(spends[0]?.tokens).toBe(120);
+  });
+
+  it("reservations release after settlement — no leak across sequential requests", async () => {
+    const spends: SpendRecord[] = [];
+    const ctx = await setup({
+      // constant headroom that fits exactly ONE worst-case reservation:
+      // any leaked reservation would 402 the next request
+      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1100, usd: 1000 } }),
+      recordSpend: (s) => {
+        spends.push(s);
+      },
+    });
+    const token = ctx.proxy.tokenFor("mutation");
+    for (let i = 0; i < 3; i += 1) {
+      const res = await postCompletions(ctx, token, {
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 1000,
+      });
+      expect(res.status).toBe(200);
+      await res.text();
+    }
+    expect(spends).toHaveLength(3);
+  });
+
+  it("streaming settlements charge actual usage and release the reservation", async () => {
+    const spends: SpendRecord[] = [];
+    const ctx = await setup({
+      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1100, usd: 1000 } }),
+      recordSpend: (s) => {
+        spends.push(s);
+      },
+    });
+    const token = ctx.proxy.tokenFor("mutation");
+    for (let i = 0; i < 2; i += 1) {
+      const res = await postCompletions(ctx, token, {
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 1000,
+      });
+      expect(res.status).toBe(200);
+      await res.text();
+    }
+    expect(spends.map((s) => s.tokens)).toEqual([15, 15]);
+  });
+
+  it("402 with hone_budget_exceeded before any upstream call when nothing fits", async () => {
+    const ctx = await setup({
+      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 5, usd: 1000 } }),
+    });
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [],
+      max_tokens: 1000,
+    });
+    expect(res.status).toBe(402);
+    expect(BudgetExceededError.parse(await res.json()).error.dimension).toBe("tokens");
+    expect(ctx.upstream.calls).toHaveLength(0);
+    expect(ctx.spends).toHaveLength(0);
+  });
+
+  it("usd headroom gates admission independently of tokens", async () => {
+    const ctx = await setup({
+      checkBudget: (): BudgetDecision => ({
+        allowed: true,
+        remaining: { tokens: 1_000_000_000, usd: 0.0001 },
+      }),
+    });
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [],
+      max_tokens: 32_768,
+    });
+    expect(res.status).toBe(402);
+    expect(BudgetExceededError.parse(await res.json()).error.dimension).toBe("usd");
+    expect(ctx.upstream.calls).toHaveLength(0);
+  });
+
+  it("derives the completion ceiling from remaining headroom when the client omits one", async () => {
+    const ctx = await setup({
+      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 5000, usd: 1_000_000 } }),
+    });
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    const seen = JSON.parse(ctx.upstream.calls[0]?.body ?? "{}") as { max_tokens?: number };
+    // ceiling = headroom - prompt estimate: strictly below 5000, near it
+    expect(seen.max_tokens).toBeGreaterThan(4800);
+    expect(seen.max_tokens).toBeLessThan(5000);
+  });
+});
+
+describe("completion multiplicity and token ceilings", () => {
+  it("rejects n != 1 — multi-choice output cannot multiply admitted budget", async () => {
+    const ctx = await setup();
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), { messages: [], n: 3 });
+    expect(res.status).toBe(400);
+    expect(ctx.upstream.calls).toHaveLength(0);
+    expect(ctx.spends).toHaveLength(0);
+  });
+
+  it("allows an explicit n === 1", async () => {
+    const ctx = await setup();
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), { messages: [], n: 1 });
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects best_of outright", async () => {
+    const ctx = await setup();
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [],
+      best_of: 4,
+    });
+    expect(res.status).toBe(400);
+    expect(ctx.upstream.calls).toHaveLength(0);
+  });
+
+  it("rejects conflicting max_tokens / max_completion_tokens", async () => {
+    const ctx = await setup();
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [],
+      max_tokens: 5,
+      max_completion_tokens: 6,
+    });
+    expect(res.status).toBe(400);
+    expect(ctx.upstream.calls).toHaveLength(0);
+  });
+
+  it("collapses equal duplicate ceilings to one canonical field", async () => {
+    const ctx = await setup();
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [],
+      max_tokens: 5,
+      max_completion_tokens: 5,
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    const seen = JSON.parse(ctx.upstream.calls[0]?.body ?? "{}") as Record<string, unknown>;
+    expect(seen["max_tokens"]).toBe(5);
+    expect("max_completion_tokens" in seen).toBe(false);
+  });
+
+  it("preserves max_completion_tokens when it is the client's field", async () => {
+    const ctx = await setup();
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [],
+      max_completion_tokens: 7,
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    const seen = JSON.parse(ctx.upstream.calls[0]?.body ?? "{}") as Record<string, unknown>;
+    expect(seen["max_completion_tokens"]).toBe(7);
+    expect("max_tokens" in seen).toBe(false);
+  });
+
+  it("clamps client ceilings to the hard cap", async () => {
+    const ctx = await setup({ limits: { maxCompletionTokens: 1000 } });
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [],
+      max_tokens: 10_000_000,
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    const seen = JSON.parse(ctx.upstream.calls[0]?.body ?? "{}") as { max_tokens?: number };
+    expect(seen.max_tokens).toBe(1000);
+  });
+
+  it("injects the default hard cap when the client omits a ceiling", async () => {
+    const ctx = await setup();
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), { messages: [] });
+    expect(res.status).toBe(200);
+    await res.text();
+    const seen = JSON.parse(ctx.upstream.calls[0]?.body ?? "{}") as { max_tokens?: number };
+    expect(seen.max_tokens).toBe(32_768);
+  });
+
+  it("rejects non-positive-integer ceilings", async () => {
+    const ctx = await setup();
+    const token = ctx.proxy.tokenFor("mutation");
+    for (const bad of ["lots", 0, -1, 1.5]) {
+      const res = await postCompletions(ctx, token, { messages: [], max_tokens: bad });
+      expect(res.status).toBe(400);
+    }
+    expect(ctx.upstream.calls).toHaveLength(0);
+  });
+});
+
+describe("fail-closed usage reconciliation", () => {
+  async function assertCeilingCharged(mode: string): Promise<void> {
+    const ctx = await setup();
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [{ role: "user", content: mode }],
+      max_tokens: 100,
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(ctx.spends).toHaveLength(1);
+    const trace = await readTrace(ctx.runDir);
+    // charged at the admitted ceiling: prompt estimate + full completion cap
+    expect(trace[0]?.usage.completionTokens).toBe(100);
+    expect(trace[0]?.usage.promptTokens).toBeGreaterThan(0);
+    expect(ctx.spends[0]?.tokens).toBe(trace[0]?.usage.totalTokens);
+    expect(ctx.spends[0]?.tokens).toBeGreaterThanOrEqual(101);
+    expect(ctx.spends[0]?.usd).toBeGreaterThan(0);
+    expect(trace[0]?.estimatedUsd).toBeCloseTo(ctx.spends[0]?.usd ?? -1, 10);
+  }
+
+  it("missing usage charges the full reservation ceiling, never zero", async () => {
+    await assertCeilingCharged("no-usage");
+  });
+
+  it("all-zero usage is untrustworthy and charges the ceiling", async () => {
+    await assertCeilingCharged("zero-usage");
+  });
+
+  it("malformed usage (negative / non-numeric counts) charges the ceiling", async () => {
+    await assertCeilingCharged("bad-usage");
+  });
+});
+
+describe("body and response caps", () => {
+  it("rejects oversized request bodies with 413 before upstream", async () => {
+    const ctx = await setup({ limits: { maxRequestBytes: 1024 } });
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [{ role: "user", content: "y".repeat(4096) }],
+    });
+    expect(res.status).toBe(413);
+    const parsed: unknown = await res.json();
+    expect(parsed).toMatchObject({ error: { type: "hone_request_too_large" } });
+    expect(ctx.upstream.calls).toHaveLength(0);
+    expect(ctx.spends).toHaveLength(0);
+  });
+
+  it("aborts a flooding upstream at the response cap and charges the ceiling", async () => {
+    const ctx = await setup({ limits: { maxResponseBytes: 2048 } });
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      stream: true,
+      messages: [{ role: "user", content: "flood" }],
+      max_tokens: 50,
+    });
+    expect(res.status).toBe(200);
+    let text = "";
+    try {
+      text = await res.text();
+    } catch {
+      // proxy destroys the truncated response: a client-side error is the contract
+    }
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(2048);
+    // the upstream connection was ABORTED mid-flood, not drained
+    await until(() => ctx.upstream.flags.closedEarly);
+    await until(() => ctx.spends.length === 1);
+    const trace = await readTrace(ctx.runDir);
+    expect(trace[0]?.usage.completionTokens).toBe(50);
+    expect(ctx.spends[0]?.tokens).toBeGreaterThanOrEqual(51);
+  });
+});
+
+describe("transport failure reconciliation", () => {
+  it("connection-refused releases the reservation without charge", async () => {
+    const spends: SpendRecord[] = [];
+    const ctx = await setup({
+      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1100, usd: 1000 } }),
+      recordSpend: (s) => {
+        spends.push(s);
+      },
+    });
+    await ctx.upstream.close(); // refuse all connections from now on
+    const token = ctx.proxy.tokenFor("mutation");
+    const first = await postCompletions(ctx, token, { messages: [], max_tokens: 1000 });
+    expect(first.status).toBe(502);
+    expect(spends).toHaveLength(0); // provably never accepted upstream: no charge
+    // reservation must be gone: an identical request re-admits (502 again, NOT 402)
+    const second = await postCompletions(ctx, token, { messages: [], max_tokens: 1000 });
+    expect(second.status).toBe(502);
+  });
+
+  it("a mid-flight connection reset charges the full reservation ceiling", async () => {
+    const ctx = await setup();
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [{ role: "user", content: "reset" }],
+      max_tokens: 100,
+    });
+    expect(res.status).toBe(200); // headers were sent before the reset
+    try {
+      await res.text();
+    } catch {
+      // body is broken by construction
+    }
+    await until(() => ctx.spends.length === 1);
+    const trace = await readTrace(ctx.runDir);
+    expect(trace[0]?.usage.completionTokens).toBe(100);
+    expect(ctx.spends[0]?.tokens).toBe(trace[0]?.usage.totalTokens);
+    expect(ctx.spends[0]?.tokens).toBeGreaterThanOrEqual(101);
   });
 });
