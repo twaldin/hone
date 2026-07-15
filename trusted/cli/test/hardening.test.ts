@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
@@ -6,7 +7,7 @@ import { RunConfig, RunEvent } from "@hone/schema";
 import { validateWorkspaceTar, ArtifactLayoutError } from "../src/artifact.js";
 import { runOptimizer } from "../src/backends/local.js";
 import { writeCas } from "../src/cas.js";
-import { assertNoStagedGitlinks } from "../src/deliver.js";
+import { assertTreeMatchesStage } from "../src/deliver.js";
 import { replay } from "../src/eventlog.js";
 import { applyCommand } from "../src/commands/apply.js";
 import { runCommand } from "../src/supervisor.js";
@@ -217,21 +218,23 @@ describe("delivery artifact contract — workspace/-rooted tars only", () => {
     expect(() => validateWorkspaceTar(blob)).not.toThrow();
   });
 
-  it("staged-index guard rejects gitlinks (mode 160000)", () => {
+  it("delivery-tree guard rejects gitlinks (mode 160000)", () => {
     const root = makeRoot();
     const repo = join(root, "repo");
     initScratchRepo(repo);
-    // embed a nested repo in the working tree and stage it -> gitlink in the index
-    const sub = join(repo, "sub");
-    mkdirSync(sub);
-    gitIn(sub, "init");
-    gitIn(sub, "config", "user.name", "t");
-    gitIn(sub, "config", "user.email", "t@localhost");
-    writeFileSync(join(sub, "f.txt"), "x\n");
-    gitIn(sub, "add", "-A");
-    gitIn(sub, "commit", "-m", "x");
-    gitIn(repo, "add", "-A");
-    expect(() => assertNoStagedGitlinks(repo)).toThrow(/160000|gitlink/i);
+    // forge a tree carrying a gitlink via plumbing — the verification gate
+    // that runs before every ref update must refuse it
+    const headSha = gitIn(repo, "rev-parse", "HEAD");
+    const indexFile = join(root, "gitlink-index");
+    const r = spawnSync(
+      "git",
+      ["-C", repo, "update-index", "-z", "--index-info"],
+      { encoding: "utf8", input: `160000 ${headSha}\tsub\0`, env: { ...process.env, GIT_INDEX_FILE: indexFile } },
+    );
+    expect(r.status).toBe(0);
+    const tree = spawnSync("git", ["-C", repo, "write-tree"], { encoding: "utf8", env: { ...process.env, GIT_INDEX_FILE: indexFile } }).stdout.trim();
+    const emptyStage = mkdtempSync(join(tmpdir(), "hone-stage-"));
+    expect(() => assertTreeMatchesStage(repo, tree, emptyStage)).toThrow(/160000|gitlink|commit/i);
   });
 });
 
