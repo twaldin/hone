@@ -18,6 +18,10 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 # Non-root user for sandbox sessions; workdir matches broker mount convention.
-RUN useradd --create-home --uid 1000 hone
+# `sandbox` (uid 2000) exists for evaluator privilege separation: when an eval
+# container runs as root, the trusted eval.py setuid-drops the candidate
+# worker subprocess to it (see seeded-astar/baseline/eval.py).
+RUN useradd --create-home --uid 1000 hone \
+  && useradd --no-create-home --uid 2000 --shell /usr/sbin/nologin sandbox
 WORKDIR /work
 USER hone

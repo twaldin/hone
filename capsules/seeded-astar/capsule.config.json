@@ -1,8 +1,8 @@
 {
-  "objective": "Make the grid A* pathfinder in astar.py substantially faster (lower runtime_ms) while preserving correctness: every pytest test must keep passing and returned paths must remain optimal shortest paths. Only the pathfinder implementation may change; eval.py and test_astar.py are protected.",
+  "objective": "Make the grid A* pathfinder in astar.py substantially faster while preserving correctness: the trusted correctness suite must keep passing and returned paths must remain optimal shortest paths. Only the pathfinder implementation may change; eval.py, worker.py, and test_astar.py are protected.",
   "image": "hone-task:latest",
-  "evalEntrypoint": ["python3", "eval.py"],
-  "protectedPaths": ["eval.py", "test_astar.py"],
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": ["eval.py", "worker.py", "test_astar.py"],
   "assetGroups": [
     { "id": "train", "visibility": "public", "paths": ["assets/train"] },
     { "id": "validation", "visibility": "protected", "paths": ["assets/validation"] },

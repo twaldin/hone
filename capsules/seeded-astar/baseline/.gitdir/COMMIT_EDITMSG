@@ -1,1 +1,1 @@
-eval: direction-correct objectives (score, higher is better); runtime_ms/quality to diagnostics
+Freeze evaluator isolation baseline

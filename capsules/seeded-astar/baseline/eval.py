@@ -1,71 +1,107 @@
 #!/usr/bin/env python3
-"""Mechanical evaluator for the seeded-astar capsule.
+"""Trusted evaluator for the seeded-astar capsule.
 
-Reads maze fixtures (*.json) from $CAPSULE_ASSETS (default /capsule/assets),
-runs astar.find_path on each with a wall-clock measurement (median of 5 inner
-reps), runs the pytest correctness suite, and emits EvaluatorOutput JSON on
-stdout. Nothing else is written to stdout.
+Runs from the FROZEN baseline (`/trusted/baseline`, this file's directory)
+under isolated Python (`python3 -I -B eval.py`). Candidate code is NEVER
+imported into this process: every candidate call happens in a narrow worker
+subprocess (worker.py) that imports astar.py from $CAPSULE_WORKSPACE
+(default /workspace) and exchanges newline-delimited JSON over pipes.
 
-Scoring:
-  correctness = 0                       if the call crashed, timed out,
-                                        returned no path, or returned an
-                                        invalid path
-              = (optimal / actual)**4   for a valid path (harshly sublinear in
-                                        suboptimality: a 2x-too-long path is
-                                        worth ~6% of an optimal one)
-  score       = 1 / (1 + median_ms) * correctness
+Authority split (the point of the design):
+  * parent (this process) alone loads fixtures, measures wall-clock time
+    around each pipe round-trip, validates paths, computes objectives /
+    constraints / feedback, and serializes the single EvaluatorOutput line on
+    stdout;
+  * the worker child returns only raw answer cells — a compromised child can
+    at worst return wrong/instant answers, which the parent scores on its own
+    clock against its own fixtures.
 
-Objectives (higher is better — the trusted default scalarization is the mean
-of objective values, so every objective must reward improvement):
-  score       mean per-example score (correctness / (1 + median_ms));
-              faster and more-correct pathfinders raise it
+Fail-closed protocol handling: per-request random nonce must be echoed;
+timeouts, worker death, oversized responses, extra bytes, or id mismatches
+kill the worker's process group, score that call 0, and respawn for the next.
 
-Constraints:
-  tests_pass  pytest suite in the artifact root exits 0
+Correctness constraint: the former candidate-side pytest run is replaced by a
+trusted mechanical suite (embedded mazes + BFS reference) driven through the
+same worker boundary — candidate conftest.py / pytest.ini / plugins / shadow
+modules have no authority here.
 
-Diagnostics (informational, never aggregated):
-  runtime_ms  median across examples of the per-example median-of-5 ms
-  quality     mean correctness across examples
+Scoring (per example):
+  correctness = 0                       crash, timeout, protocol violation,
+                                        no path, or invalid path
+              = (optimal / actual)**4   valid path
+  score       = correctness / (1 + median_of_5_ms)
 
-stdlib + pytest only.
+Objectives (higher is better — the trusted scalarization is the mean of
+objective values): score = mean per-example score.
+Diagnostics (informational): runtime_ms (median of per-example medians),
+quality (mean correctness).
+
+Environment (all trusted-runtime supplied):
+  CAPSULE_ASSETS               fixture dir            (default /capsule/assets)
+  CAPSULE_WORKSPACE            candidate artifact dir (default /workspace)
+  CAPSULE_CALL_TIMEOUT_SEC     per-call wall limit    (default 10)
+  CAPSULE_MAX_RESPONSE_BYTES   per-response cap       (default 8000000)
+  CAPSULE_WORKER_UID           uid for the worker when running as root
+                               (default 2000, the image's `sandbox` user)
+
+stdlib only. Runs the candidate only via worker.py.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import random
+import resource
+import secrets
+import selectors
 import signal
 import statistics
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
-REPO_DIR = Path(__file__).resolve().parent
+TRUSTED_DIR = Path(__file__).resolve().parent
+WORKER = TRUSTED_DIR / "worker.py"
 INNER_REPS = 5
-CALL_TIMEOUT_SEC = 10.0
+
+CALL_TIMEOUT_SEC = float(os.environ.get("CAPSULE_CALL_TIMEOUT_SEC", "10"))
+MAX_RESPONSE_BYTES = int(os.environ.get("CAPSULE_MAX_RESPONSE_BYTES", "8000000"))
+WORKER_UID = int(os.environ.get("CAPSULE_WORKER_UID", "2000"))
 
 
-class CallTimeout(Exception):
-    pass
+# --------------------------------------------------------------------------
+# Trusted references
+# --------------------------------------------------------------------------
+
+def bfs_shortest(grid: list[str], start: tuple[int, int], goal: tuple[int, int]) -> int | None:
+    """Shortest 4-connected path cell count (endpoints inclusive), or None."""
+    h, w = len(grid), len(grid[0])
+    dist = {start: 1}
+    q = deque([start])
+    while q:
+        r, c = q.popleft()
+        if (r, c) == goal:
+            return dist[(r, c)]
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < h and 0 <= nc < w and grid[nr][nc] != "#" and (nr, nc) not in dist:
+                dist[(nr, nc)] = dist[(r, c)] + 1
+                q.append((nr, nc))
+    return None
 
 
-def _alarm_handler(signum, frame):  # noqa: ARG001
-    raise CallTimeout(f"find_path exceeded {CALL_TIMEOUT_SEC}s")
-
-
-def load_mazes(assets_dir: Path) -> list[dict]:
-    fixtures = sorted(assets_dir.rglob("*.json"))
-    return [json.loads(p.read_text()) for p in fixtures]
-
-
-def path_is_valid(maze: dict, path) -> bool:
-    if not isinstance(path, (list, tuple)) or len(path) == 0:
+def path_is_valid(grid: list[str], start: list[int], goal: list[int], path) -> bool:
+    if not isinstance(path, list) or len(path) == 0:
         return False
-    grid = maze["grid"]
-    h, w = maze["height"], maze["width"]
-    cells = [tuple(cell) for cell in path]
-    if cells[0] != tuple(maze["start"]) or cells[-1] != tuple(maze["goal"]):
+    h, w = len(grid), len(grid[0])
+    try:
+        cells = [(int(r), int(c)) for r, c in path]
+    except (TypeError, ValueError):
+        return False
+    if cells[0] != tuple(start) or cells[-1] != tuple(goal):
         return False
     for r, c in cells:
         if not (0 <= r < h and 0 <= c < w) or grid[r][c] == "#":
@@ -76,93 +112,277 @@ def path_is_valid(maze: dict, path) -> bool:
     return True
 
 
-def timed_call(find_path, maze: dict):
-    """One measured invocation. Returns (elapsed_ms, result, error_str)."""
-    grid = maze["grid"]
-    start = tuple(maze["start"])
-    goal = tuple(maze["goal"])
-    signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.setitimer(signal.ITIMER_REAL, CALL_TIMEOUT_SEC)
-    t0 = time.perf_counter()
-    try:
-        result = find_path(grid, start, goal)
-        return (time.perf_counter() - t0) * 1000.0, result, None
-    except Exception as exc:  # noqa: BLE001 — candidate code may raise anything
-        return (time.perf_counter() - t0) * 1000.0, None, f"{type(exc).__name__}: {exc}"
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0.0)
+# --------------------------------------------------------------------------
+# Worker supervision
+# --------------------------------------------------------------------------
+
+class CallOutcome:
+    __slots__ = ("elapsed_ms", "path", "error")
+
+    def __init__(self, elapsed_ms: float, path, error: str | None) -> None:
+        self.elapsed_ms = elapsed_ms
+        self.path = path
+        self.error = error
 
 
-def evaluate_example(find_path, maze: dict) -> tuple[float, float, dict]:
+def _worker_preexec() -> None:
+    for limit, value in (
+        (resource.RLIMIT_CORE, 0),
+        (resource.RLIMIT_AS, 4 << 30),
+    ):
+        try:
+            resource.setrlimit(limit, (value, value))
+        except (OSError, ValueError):
+            pass  # best-effort (e.g. RLIMIT_AS is unsupported on macOS)
+    if os.geteuid() == 0:
+        # Privilege separation: scorer stays root-side, candidate drops to an
+        # unprivileged uid that cannot signal/ptrace the parent. MUST succeed
+        # when we are root — a failure aborts the spawn (fail closed).
+        os.setgroups([])
+        os.setgid(WORKER_UID)
+        os.setuid(WORKER_UID)
+
+
+class Worker:
+    """One candidate worker process behind the narrow JSON-line protocol."""
+
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+        self.proc: subprocess.Popen | None = None
+        self.buffer = b""
+        self.import_error: str | None = None
+
+    def ensure(self) -> bool:
+        """Worker alive and handshaken. False = candidate import failed."""
+        if self.proc is not None and self.proc.poll() is None:
+            return self.import_error is None
+        self.buffer = b""
+        try:
+            self.proc = subprocess.Popen(
+                [sys.executable, "-I", "-B", str(WORKER), str(self.workspace)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                preexec_fn=_worker_preexec,
+                cwd=str(TRUSTED_DIR),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.proc = None
+            self.import_error = f"worker spawn failed: {exc}"
+            return False
+        line, violation = self._read_line(time.monotonic() + CALL_TIMEOUT_SEC)
+        if violation is not None or line is None:
+            self.import_error = violation or "worker produced no handshake"
+            self.kill()
+            return False
+        try:
+            ready = json.loads(line)
+        except ValueError:
+            self.import_error = "malformed handshake"
+            self.kill()
+            return False
+        if not (isinstance(ready, dict) and ready.get("ready") is True):
+            err = ready.get("error") if isinstance(ready, dict) else None
+            self.import_error = str(err or "candidate import failed")
+            self.kill()
+            return False
+        self.import_error = None
+        return True
+
+    def kill(self) -> None:
+        if self.proc is None:
+            return
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        self.proc.wait()
+        self.proc = None
+        self.buffer = b""
+
+    def _read_line(self, deadline: float) -> tuple[bytes | None, str | None]:
+        """One protocol line by `deadline`. Returns (line, violation)."""
+        assert self.proc is not None and self.proc.stdout is not None
+        fd = self.proc.stdout.fileno()
+        os.set_blocking(fd, False)
+        sel = selectors.DefaultSelector()
+        sel.register(fd, selectors.EVENT_READ)
+        try:
+            while b"\n" not in self.buffer:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None, f"timeout after {CALL_TIMEOUT_SEC:g}s"
+                if not sel.select(remaining):
+                    continue
+                chunk = os.read(fd, 65536)
+                if chunk == b"":
+                    return None, "worker died mid-call"
+                self.buffer += chunk
+                if len(self.buffer) > MAX_RESPONSE_BYTES:
+                    return None, f"response exceeded {MAX_RESPONSE_BYTES} bytes"
+            line, _, rest = self.buffer.partition(b"\n")
+            self.buffer = rest
+            return line, None
+        finally:
+            sel.close()
+
+    def call(self, grid: list[str], start: list[int], goal: list[int]) -> CallOutcome:
+        """One timed candidate invocation; fail-closed on protocol anomalies."""
+        if not self.ensure():
+            return CallOutcome(0.0, None, f"candidate import failed: {self.import_error}")
+        assert self.proc is not None and self.proc.stdin is not None
+        nonce = secrets.token_hex(8)
+        request = (
+            json.dumps(
+                {"id": nonce, "grid": grid, "start": start, "goal": goal},
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+
+        t0 = time.perf_counter()
+        try:
+            self.proc.stdin.write(request)
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self.kill()
+            return CallOutcome(0.0, None, "worker died before call")
+        line, violation = self._read_line(time.monotonic() + CALL_TIMEOUT_SEC)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+        if violation is not None or line is None:
+            self.kill()
+            return CallOutcome(elapsed_ms, None, violation or "no response")
+        if self.buffer:
+            # Extra unsolicited bytes after the response line: forged/sprayed
+            # protocol traffic. Fail the call, not just the leftovers.
+            self.kill()
+            return CallOutcome(elapsed_ms, None, "protocol violation: extra data after response")
+        try:
+            response = json.loads(line)
+        except ValueError:
+            self.kill()
+            return CallOutcome(elapsed_ms, None, "protocol violation: unparseable response")
+        if not isinstance(response, dict) or response.get("id") != nonce:
+            self.kill()
+            return CallOutcome(elapsed_ms, None, "protocol violation: response id mismatch")
+        if "error" in response:
+            return CallOutcome(elapsed_ms, None, str(response["error"]))
+        if "path" not in response:
+            self.kill()
+            return CallOutcome(elapsed_ms, None, "protocol violation: no path field")
+        return CallOutcome(elapsed_ms, response["path"], None)
+
+
+# --------------------------------------------------------------------------
+# Trusted mechanical correctness suite (replaces candidate-side pytest)
+# --------------------------------------------------------------------------
+
+def _random_maze(seed: int, size: int, density: float = 0.25):
+    rng = random.Random(seed)
+    while True:
+        grid = [
+            "".join("#" if rng.random() < density else "." for _ in range(size))
+            for _ in range(size)
+        ]
+        rows = [list(row) for row in grid]
+        rows[0][0] = "."
+        rows[-1][-1] = "."
+        grid = ["".join(r) for r in rows]
+        if bfs_shortest(grid, (0, 0), (size - 1, size - 1)) is not None:
+            return grid, [0, 0], [size - 1, size - 1]
+
+
+def _suite_cases() -> list[tuple[str, list[str], list[int], list[int], bool]]:
+    """(label, grid, start, goal, solvable) — mirrors the dev pytest suite."""
+    cases: list[tuple[str, list[str], list[int], list[int], bool]] = [
+        ("open3", ["...", "...", "..."], [0, 0], [2, 2], True),
+        ("ring4", ["....", ".##.", ".##.", "...."], [0, 0], [3, 3], True),
+        ("hook3", [".#.", ".#.", "..."], [0, 0], [0, 2], True),
+        ("snake6", ["......", "#####.", "......", ".#####", "......"], [0, 0], [4, 5], True),
+        ("blocked", ["...", "###", "..."], [0, 0], [2, 2], False),
+        ("walled-start", ["#..", "...", "..#"], [0, 0], [1, 1], False),
+        ("walled-goal", ["#..", "...", "..#"], [1, 1], [2, 2], False),
+    ]
+    for seed, size in ((1, 12), (2, 16), (3, 20), (4, 28), (5, 34), (6, 40)):
+        grid, start, goal = _random_maze(seed, size)
+        cases.append((f"rand{size}", grid, start, goal, True))
+    return cases
+
+
+def run_trusted_suite(worker: Worker) -> tuple[bool, str]:
+    """All-or-nothing mechanical checks through the worker boundary."""
+    for label, grid, start, goal, solvable in _suite_cases():
+        outcome = worker.call(grid, start, goal)
+        if outcome.error is not None:
+            return False, f"{label}: {outcome.error}"
+        if not solvable:
+            if outcome.path is not None:
+                return False, f"{label}: expected no path"
+            continue
+        if not path_is_valid(grid, start, goal, outcome.path):
+            return False, f"{label}: invalid path"
+        optimal = bfs_shortest(grid, tuple(start), tuple(goal))
+        if len(outcome.path) != optimal:
+            return False, f"{label}: path len {len(outcome.path)} != optimal {optimal}"
+    return True, "all checks passed"
+
+
+# --------------------------------------------------------------------------
+# Example scoring
+# --------------------------------------------------------------------------
+
+def evaluate_example(worker: Worker, maze: dict) -> tuple[float, float, dict]:
     """Returns (median_ms, correctness, perExample entry)."""
     reps: list[float] = []
-    result = None
-    error: str | None = None
+    outcome: CallOutcome | None = None
     for _ in range(INNER_REPS):
-        ms, result, error = timed_call(find_path, maze)
-        reps.append(ms)
-        if error is not None:
-            break  # a crashing candidate is not re-run
+        outcome = worker.call(maze["grid"], maze["start"], maze["goal"])
+        reps.append(outcome.elapsed_ms)
+        if outcome.error is not None:
+            break  # a failing call is not re-run
+    assert outcome is not None
     median_ms = statistics.median(reps)
     optimal = maze["optimal_length"]
 
-    if error is not None:
+    if outcome.error is not None:
         correctness = 0.0
-        feedback = f"error: {error} in {median_ms:.2f} ms"
-    elif result is None:
+        feedback = f"error: {outcome.error} in {median_ms:.2f} ms"
+    elif outcome.path is None:
         correctness = 0.0
         feedback = f"no path found (optimal {optimal}) in {median_ms:.2f} ms"
-    elif not path_is_valid(maze, result):
+    elif not path_is_valid(maze["grid"], maze["start"], maze["goal"], outcome.path):
         correctness = 0.0
-        feedback = f"invalid path (len {len(result)} vs optimal {optimal}) in {median_ms:.2f} ms"
+        feedback = (
+            f"invalid path (len {len(outcome.path)} vs optimal {optimal})"
+            f" in {median_ms:.2f} ms"
+        )
     else:
-        correctness = (optimal / len(result)) ** 4
-        feedback = f"path len {len(result)} vs optimal {optimal} in {median_ms:.2f} ms"
+        correctness = (optimal / len(outcome.path)) ** 4
+        feedback = f"path len {len(outcome.path)} vs optimal {optimal} in {median_ms:.2f} ms"
 
     score = correctness / (1.0 + median_ms)
     return median_ms, correctness, {"score": score, "feedback": feedback}
 
 
-def run_pytest() -> bool:
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider"],
-        cwd=REPO_DIR,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=300,
-    )
-    return proc.returncode == 0
-
-
 def main() -> None:
     assets_dir = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
-    mazes = load_mazes(assets_dir)
+    workspace = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
+    mazes = [json.loads(p.read_text()) for p in sorted(assets_dir.rglob("*.json"))]
 
-    sys.path.insert(0, str(REPO_DIR))
-    import_error: str | None = None
-    find_path = None
-    try:
-        from astar import find_path  # noqa: PLC0415 — candidate module
-    except Exception as exc:  # noqa: BLE001
-        import_error = f"{type(exc).__name__}: {exc}"
-
+    worker = Worker(workspace)
     per_example: dict[str, dict] = {}
     runtimes: list[float] = []
     correctnesses: list[float] = []
     for maze in mazes:
-        if find_path is None:
-            per_example[maze["id"]] = {
-                "score": 0.0,
-                "feedback": f"error: astar import failed: {import_error}",
-            }
-            correctnesses.append(0.0)
-            continue
-        median_ms, correctness, entry = evaluate_example(find_path, maze)
+        median_ms, correctness, entry = evaluate_example(worker, maze)
         per_example[maze["id"]] = entry
         runtimes.append(median_ms)
         correctnesses.append(correctness)
 
-    tests_pass = run_pytest()
+    tests_pass, suite_detail = run_trusted_suite(worker)
+    worker.kill()
 
     output = {
         "valid": len(mazes) > 0,
@@ -176,7 +396,10 @@ def main() -> None:
         "constraints": {"tests_pass": tests_pass},
         "perExample": per_example,
         "diagnostics": {
-            "summary": f"{len(mazes)} mazes from {assets_dir}; tests_pass={tests_pass}",
+            "summary": (
+                f"{len(mazes)} mazes from {assets_dir}; candidate {workspace};"
+                f" trusted suite: {suite_detail}"
+            ),
             "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
             "quality": statistics.fmean(correctnesses) if correctnesses else 0.0,
         },
