@@ -6,7 +6,8 @@
  *   env  HONE_BROKER_SOCK   path to runDir/broker.sock            (required)
  *   env  HONE_RUN_ID        run id stamped into every event       (required)
  *   env  HONE_SEED          base seed for the ε-restart draw      (default 0)
- *   env  HONE_MAX_EPISODES  positive-integer cap on outer episode ordinals;
+ *   env  HONE_MAX_EPISODES  positive-integer cap on outer episodes attempted
+ *                           this invocation, counted from HONE_RESUME.nextEpisode;
  *                           unset = unbounded, anything else fails closed
  *   env  HONE_RESUME        JSON {nextEpisode, incumbent}         (default fresh)
  *   stdout                  one RunEvent as JSON per line, NOTHING else
