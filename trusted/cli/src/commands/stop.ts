@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { boolFlag, parseFlags, strFlag } from "../args.js";
-import { appendEvent, replayRun } from "../eventlog.js";
+import { incumbentsAligned, readJournalIncumbents } from "../backends/local.js";
+import { appendEvent, readEvents, replayRun } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
 import { sleep } from "../promise.js";
 import { resolveRun } from "../runs.js";
@@ -58,7 +59,24 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
       }
       io.out(`run ${runId} stopped (${state.finished.status})`);
     } else {
-      // Crash finalization: no live supervisor, no run.finished — settle the log.
+      // Crash finalization: no live supervisor, no run.finished — settle the
+      // log. But NEVER seal from stale events: the fsynced broker journal
+      // may hold promotions the event sink never saw (crash in that window,
+      // or an authority-barrier rejection). Sealing/applying then would
+      // strand the durable incumbent forever. No journal = stub/legacy runs
+      // — nothing to reconcile; corruption or mismatch fails CLOSED.
+      try {
+        const journal = readJournalIncumbents(runDir);
+        if (journal !== null && !incumbentsAligned(journal, readEvents(runDir))) {
+          io.err(
+            `run ${runId}: the broker journal holds incumbent authority the event log never saw — resume required (\`hone run --resume\`) before stop or apply`,
+          );
+          return 1;
+        }
+      } catch (e) {
+        io.err(`run ${runId}: ${e instanceof Error ? e.message : String(e)} — resume required; refusing to finalize`);
+        return 1;
+      }
       const best = state.incumbent?.artifact ?? null;
       appendEvent(runDir, {
         runId,

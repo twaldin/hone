@@ -358,6 +358,7 @@ describe("optimizer stdout is diagnostic-only — no event authority", () => {
         return event;
       },
       registerChild: () => {},
+      registerAuthorityBarrier: () => {},
     };
 
     await runOptimizer(ctx, join(root, "broker.sock"));

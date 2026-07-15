@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 import type { ArtifactRef, BudgetState, CapsuleManifest, RunEvent } from "@hone/schema";
 import { CasStore, packDirAsArtifact, runCommand, startBroker } from "@hone/broker";
 import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from "@hone/broker";
@@ -329,16 +330,82 @@ export function reconcileBrokerAuthority(
   return recovered;
 }
 
+/** Journal filename — mirrors the broker's internal STATE_FILE (not exported; format owned by @hone/broker RunStateLog). */
+const BROKER_STATE_FILE = "broker-state.ndjson";
+
+/** The journal's promotion line — the authority a dead-supervisor seal must not strand. */
+const JournalIncumbentLine = z.object({
+  t: z.literal("incumbent"),
+  hash: z.string(),
+  aggregate: z.number(),
+  deltaVsBaseline: z.number(),
+  episode: z.number().int().nonnegative(),
+});
+export type JournalIncumbent = z.infer<typeof JournalIncumbentLine>;
+
+const JournalLinePeek = z.object({ t: z.string() }).passthrough();
+
+/**
+ * Dead-supervisor seal guard (final-gate finding): the broker journal's full
+ * ordered promotion history. Returns null when the run never had a journal
+ * (stub/legacy backends — nothing to reconcile). Throws on an unreadable or
+ * corrupt journal — fail CLOSED: an explicit resume beats sealing stale
+ * state. Torn-tail semantics mirror the broker's RunStateLog: only
+ * newline-terminated lines exist; a trailing partial was never acknowledged.
+ */
+export function readJournalIncumbents(runDir: string): JournalIncumbent[] | null {
+  const p = join(runDir, BROKER_STATE_FILE);
+  if (!existsSync(p)) return null;
+  const lines = readFileSync(p, "utf8").split("\n");
+  lines.pop(); // torn or empty tail
+  const incumbents: JournalIncumbent[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(lines[i] ?? "");
+    } catch {
+      throw new Error(`broker journal corrupt at line ${i + 1}: ${p}`);
+    }
+    const peek = JournalLinePeek.safeParse(raw);
+    if (!peek.success) throw new Error(`broker journal corrupt at line ${i + 1}: ${p}`);
+    if (peek.data["t"] !== "incumbent") continue;
+    const inc = JournalIncumbentLine.safeParse(raw);
+    if (!inc.success) throw new Error(`broker journal incumbent line ${i + 1} malformed: ${p}`);
+    incumbents.push(inc.data);
+  }
+  return incumbents;
+}
+
+/**
+ * Exact sequence alignment between the journal's promotion history and the
+ * public incumbent.new events — count, order, hash, aggregate, delta, and
+ * episode all match. Anything less means the event log is missing durable
+ * authority and MUST NOT be sealed or applied.
+ */
+export function incumbentsAligned(journal: readonly JournalIncumbent[], events: readonly RunEvent[]): boolean {
+  const publicSeq = events.flatMap((e) => (e.type === "incumbent.new" ? [e] : []));
+  if (publicSeq.length !== journal.length) return false;
+  return journal.every((j, i) => {
+    const e = publicSeq[i];
+    return (
+      e !== undefined &&
+      e.artifact.hash === j.hash &&
+      e.aggregate === j.aggregate &&
+      e.deltaVsBaseline === j.deltaVsBaseline &&
+      e.episode === j.episode
+    );
+  });
+}
+
 export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
   const run = deps.run ?? runCommand;
-  return {
-    async start(ctx: RunnerBackendContext): Promise<void> {
-      // NO abort check anywhere in setup: even a stop landing at startup
-      // must reach the broker journal + reconciliation below, or the
-      // supervisor would terminalize a STALE event-log best while the
-      // journal holds a newer durable incumbent (permanently, since a
-      // finished run never resumes). Abort is honored only after reconcile.
-      validateCapsule(ctx.capsuleDir, ctx.manifest);
+  const startWithAuthority = async (ctx: RunnerBackendContext, authority: { resolve(): void }): Promise<void> => {
+    // NO abort check anywhere in setup: even a stop landing at startup
+    // must reach the broker journal + reconciliation below, or the
+    // supervisor would terminalize a STALE event-log best while the
+    // journal holds a newer durable incumbent (permanently, since a
+    // finished run never resumes). Abort is honored only after reconcile.
+    validateCapsule(ctx.capsuleDir, ctx.manifest);
 
       const route = ctx.config.routing["mutation"];
       if (route === undefined) {
@@ -415,6 +482,7 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
         // best/status/delivery and the resume hint all see the durable
         // incumbent exactly once — even when a stop aborted mid-startup.
         reconcileBrokerAuthority(ctx.runDir, running.broker, ctx.emit, ctx.runId);
+        authority.resolve();
 
         // Only AFTER durable authority is reconciled may a stop short-circuit:
         // the optimizer never launches; the finally unwinds proxy/broker/egress.
@@ -433,6 +501,24 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
         await proxy.close().catch(() => {});
         if (running !== null) await running.close().catch(() => {});
         if (egress !== null) await egress.cleanup().catch(() => {});
+      }
+  };
+
+  return {
+    async start(ctx: RunnerBackendContext): Promise<void> {
+      // Registered SYNCHRONOUSLY, before the first await: the supervisor's
+      // hard-stop may fence events while the (slow, docker-bound) setup
+      // above is still running — the fence and any terminal event must wait
+      // for this barrier so the reconciled incumbent is never dropped.
+      const authority = deferred<void>();
+      ctx.registerAuthorityBarrier(authority.promise);
+      try {
+        await startWithAuthority(ctx, authority);
+      } catch (err) {
+        // Settle-once: a no-op when authority was already established; a
+        // pre-reconcile failure marks the run non-terminalizable.
+        authority.reject(err instanceof Error ? err : new Error(String(err)));
+        throw err;
       }
     },
   };

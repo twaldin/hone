@@ -134,6 +134,7 @@ describe("optimizer process-group kill", () => {
       signal: abort.signal,
       emit: (event) => event,
       registerChild: (child) => children.push(child),
+      registerAuthorityBarrier: () => {},
     };
 
     const done = runOptimizer(ctx, join(root, "broker.sock"));

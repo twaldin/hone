@@ -465,6 +465,8 @@ async function superviseLocked(
   // optimizer event) must never reach the log or stdout — run.finished is
   // the final event. The supervisor's own emit stays unfenced.
   let backendFenced = false;
+  // Trusted-authority barrier: null = backend never registered = ready.
+  let authorityBarrier: Promise<void> | null = null;
   const ctx: RunnerBackendContext = {
     runId,
     root: io.root,
@@ -478,9 +480,15 @@ async function superviseLocked(
     signal: abort.signal,
     emit: (event) => (backendFenced ? RunEvent.parse(event) : emit(event)),
     registerChild: (child) => children.push(child),
+    registerAuthorityBarrier: (barrier) => {
+      authorityBarrier = barrier;
+      // A rejection may land before anything awaits it — keep it handled.
+      void barrier.catch(() => {});
+    },
   };
 
   let failure: Error | null = null;
+  let authorityFailure: Error | null = null;
   try {
     try {
       const settled = backend
@@ -494,7 +502,25 @@ async function superviseLocked(
       abort.signal.addEventListener("abort", () => armTimer(hardStop.resolve, graceMs + 1000), { once: true });
       await Promise.race([settled, hardStop.promise]);
     } finally {
+      // A hard-stopped backend may STILL be recovering durable authority
+      // (slow pre-reconcile docker setup): the fence must stay open until
+      // the barrier settles, or the recovered incumbent emit is dropped and
+      // the terminal best seals stale state.
+      try {
+        if (authorityBarrier !== null) await authorityBarrier;
+      } catch (e) {
+        authorityFailure = e instanceof Error ? e : new Error(String(e));
+      }
       backendFenced = true;
+    }
+
+    if (authorityFailure !== null) {
+      // Trusted authority could not be established: sealing the run now
+      // would terminalize stale state. No delivery, no run.finished — the
+      // run stays resumable.
+      if (abort.signal.aborted) await termThenKill();
+      io.err(`trusted authority recovery failed: ${authorityFailure.message} — run left unfinished (resume with \`hone run --resume\`)`);
+      return 1;
     }
 
     // On any abort, every child group must be TERM'd, KILL'd after grace,
