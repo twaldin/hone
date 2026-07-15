@@ -5,7 +5,7 @@ import path from "node:path";
 import { CasStore } from "./cas.js";
 import { runCommand, type RunCommand } from "./command.js";
 import { globToRegExp } from "./glob.js";
-import { validateWorkspaceTar } from "./tarcheck.js";
+import { ArtifactValidationError, validateWorkspaceTar, type ArtifactEntryKind, type ArtifactTarEntry } from "./tarcheck.js";
 
 /**
  * Artifact layout contract (broker-local): an artifact is a tar whose entries
@@ -100,9 +100,10 @@ async function collectTree(root: string, rel: string, out: SourceEntry[]): Promi
  * Packs a directory tree into a canonical `workspace/`-rooted tar and stores
  * it in CAS. Same tree in, same bytes (and hash) out — independent of wall
  * time, umask beyond the owner-exec bit, platform tar binary, or traversal
- * order. Output is self-validated before it enters CAS.
+ * order. Output is self-validated before it enters CAS. The size cap covers
+ * the COMPLETE archive, terminal end-of-archive blocks included.
  */
-export async function packDirAsArtifact(dir: string, cas: CasStore): Promise<string> {
+export async function packDirAsArtifact(dir: string, cas: CasStore, maxBytes: number = MAX_ARTIFACT_BYTES): Promise<string> {
   const entries: SourceEntry[] = [];
   await collectTree(dir, "", entries);
   entries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
@@ -111,7 +112,7 @@ export async function packDirAsArtifact(dir: string, cas: CasStore): Promise<str
   let total = BLOCK;
   const charge = (n: number): void => {
     total += n;
-    if (total > MAX_ARTIFACT_BYTES) throw new Error("artifact exceeds size cap");
+    if (total > maxBytes) throw new Error("artifact exceeds size cap");
   };
   for (const e of entries) {
     const entryPath = `workspace/${e.rel}`;
@@ -130,6 +131,7 @@ export async function packDirAsArtifact(dir: string, cas: CasStore): Promise<str
     const pad = (BLOCK - (content.length % BLOCK)) % BLOCK;
     if (pad !== 0) parts.push(Buffer.alloc(pad));
   }
+  charge(2 * BLOCK); // end-of-archive marker counts against the cap too
   parts.push(Buffer.alloc(2 * BLOCK));
   const bytes = Buffer.concat(parts);
   // Self-check: only validator-clean bytes ever enter CAS, so the unpack
@@ -185,16 +187,50 @@ async function makeTreeOwnerAccessible(root: string): Promise<void> {
 }
 
 /**
+ * Expected extracted tree for accepted archive entries: rel path (under
+ * `workspace/`) → kind, with every implied ancestor materialized as a dir.
+ * The validator already rejected any file/dir conflicts among these.
+ */
+function expectedTreeOf(entries: ArtifactTarEntry[]): Map<string, ArtifactEntryKind> {
+  const expected = new Map<string, ArtifactEntryKind>();
+  for (const e of entries) {
+    if (e.path === "workspace") continue;
+    const rel = e.path.slice("workspace/".length);
+    expected.set(rel, e.kind);
+    const segs = rel.split("/");
+    for (let i = 1; i < segs.length; i++) expected.set(segs.slice(0, i).join("/"), "dir");
+  }
+  return expected;
+}
+
+/** Exact byte-name/type enumeration of an extracted tree (no normalization). */
+async function walkExtracted(root: string, rel: string, out: Map<string, "file" | "dir" | "other">): Promise<void> {
+  for (const d of await readdir(rel === "" ? root : path.join(root, rel), { withFileTypes: true })) {
+    const entryRel = rel === "" ? d.name : `${rel}/${d.name}`;
+    if (d.isDirectory()) {
+      out.set(entryRel, "dir");
+      await walkExtracted(root, entryRel, out);
+    } else {
+      out.set(entryRel, d.isFile() ? "file" : "other");
+    }
+  }
+}
+
+/**
  * Canonicalizes an UNTRUSTED workspace tar (e.g. `docker cp` output from an
  * adversarial sandbox) into CAS: structural validation FIRST — nothing
  * malformed is ever written to disk or handed to a tar binary — then
  * extraction into a trusted temp dir (access-normalized so hostile mode bits
- * cannot block packing or cleanup), then a canonical repack of the extracted
- * `workspace/` tree. Returns the canonical hash; the temp dir is always
- * cleaned up.
+ * cannot block packing or cleanup), then an EXTRACTION FIDELITY check —
+ * the extracted tree must contain exactly the accepted entry paths, byte for
+ * byte, with matching types, so a case-insensitive or Unicode-normalizing
+ * host filesystem that collapses distinct entries (Linux `A`/`a`, NFC/NFD on
+ * Darwin) rejects instead of silently repacking a mangled tree — then a
+ * canonical repack of the extracted `workspace/` tree. Returns the canonical
+ * hash; the temp dir is always cleaned up.
  */
 export async function canonicalizeWorkspaceTar(tarBytes: Buffer, cas: CasStore, run: RunCommand = runCommand): Promise<string> {
-  validateWorkspaceTar(tarBytes);
+  const accepted = validateWorkspaceTar(tarBytes);
   const tmp = await mkdtemp(path.join(os.tmpdir(), "hone-canon-"));
   try {
     const tarPath = path.join(tmp, "incoming.tar");
@@ -204,7 +240,24 @@ export async function canonicalizeWorkspaceTar(tarBytes: Buffer, cas: CasStore, 
     const res = await run(["tar", ...EXTRACT_FLAGS, "-xf", tarPath, "-C", treeDir]);
     await makeTreeOwnerAccessible(treeDir); // even a failed extract left a partial tree to walk/remove
     if (res.exitCode !== 0) throw new Error(`tar extract failed: ${res.stderr.toString()}`);
-    return await packDirAsArtifact(path.join(treeDir, "workspace"), cas);
+    const wsDir = path.join(treeDir, "workspace");
+    const actual = new Map<string, "file" | "dir" | "other">();
+    await walkExtracted(wsDir, "", actual);
+    const expected = expectedTreeOf(accepted);
+    if (actual.size !== expected.size) {
+      throw new ArtifactValidationError(
+        `extracted tree has ${actual.size} entries but the archive declared ${expected.size} — host filesystem collapsed or invented paths`,
+      );
+    }
+    for (const [rel, kind] of expected) {
+      if (actual.get(rel) !== kind) {
+        throw new ArtifactValidationError(
+          "extracted tree does not match accepted archive entries — host filesystem collision or unfaithful extraction",
+          `workspace/${rel}`,
+        );
+      }
+    }
+    return await packDirAsArtifact(wsDir, cas);
   } finally {
     // Cleanup must survive whatever mode bits extraction restored.
     await makeTreeOwnerAccessible(tmp);

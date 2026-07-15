@@ -532,6 +532,80 @@ describe("canonical artifact packing", () => {
       await rm(base, { recursive: true, force: true });
     }
   });
+
+  it("the size cap covers the complete archive including the end-of-archive blocks", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-cap-"));
+    try {
+      // Canonical layout for one 512-byte file: 512 (workspace hdr) +
+      // 512 (file hdr) + 512 (data) + 1024 (end-of-archive) = 2560 bytes.
+      const src = path.join(base, "src");
+      await makeTree(src, { "data.bin": "x".repeat(512) });
+      const cas = new CasStore(path.join(base, "cas"));
+      const hash = await packDirAsArtifact(src, cas, 2560); // exact boundary: accepted
+      expect((await cas.readBuffer(hash)).length).toBe(2560);
+      // One byte less of budget must fail — a blob may NEVER exceed the cap,
+      // and pre-fix the two terminal blocks escaped the accounting.
+      await expect(packDirAsArtifact(src, new CasStore(path.join(base, "cas2")), 2559)).rejects.toThrowError(/size cap/);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when host extraction cannot reproduce the accepted entries exactly", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-fid-"));
+    try {
+      // Probe THIS host's filesystem semantics rather than assuming platform.
+      const probe = path.join(base, "probe");
+      await mkdir(probe);
+      await writeFile(path.join(probe, "CaseProbe"), "p");
+      const caseInsensitive = await stat(path.join(probe, "caseprobe")).then(
+        () => true,
+        () => false,
+      );
+
+      const twoCase = makeTar([
+        { name: "workspace/", type: "5" },
+        { name: "workspace/CaseFile", content: "upper", mode: "0000644" },
+        { name: "workspace/casefile", content: "lower", mode: "0000644" },
+      ]);
+      const casDir = path.join(base, "cas");
+      const cas = new CasStore(casDir);
+      if (caseInsensitive) {
+        // Darwin default (APFS case-insensitive): the two names collapse to
+        // one on disk — the fidelity gate must reject, and nothing may enter
+        // CAS (pre-fix a silently mangled tree was repacked and admitted).
+        await expect(canonicalizeWorkspaceTar(twoCase, cas)).rejects.toThrowError(ArtifactValidationError);
+        await expect(readdir(casDir)).rejects.toThrowError();
+      } else {
+        // Case-sensitive host (Linux): both files round-trip faithfully.
+        const hash = await canonicalizeWorkspaceTar(twoCase, cas);
+        const paths = validateWorkspaceTar(await cas.readBuffer(hash)).map((e) => e.path);
+        expect(paths).toContain("workspace/CaseFile");
+        expect(paths).toContain("workspace/casefile");
+      }
+
+      // Ordinary Unicode names are preserved exactly where the host stores
+      // them byte-exact; a normalizing filesystem must reject, never mangle.
+      const nfc = "caf\u00e9.txt"; // NFC: U+00E9
+      await writeFile(path.join(probe, nfc), "u");
+      const names = await readdir(probe);
+      const preservesBytes = names.includes(nfc);
+      const unicodeTar = makeTar([
+        { name: "workspace/", type: "5" },
+        { name: `workspace/${nfc}`, content: "u", mode: "0000644" },
+      ]);
+      const cas3 = new CasStore(path.join(base, "cas3"));
+      if (preservesBytes) {
+        const hash = await canonicalizeWorkspaceTar(unicodeTar, cas3);
+        const paths = validateWorkspaceTar(await cas3.readBuffer(hash)).map((e) => e.path);
+        expect(paths).toContain(`workspace/${nfc}`);
+      } else {
+        await expect(canonicalizeWorkspaceTar(unicodeTar, cas3)).rejects.toThrowError(ArtifactValidationError);
+      }
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("protected namespaces", () => {
