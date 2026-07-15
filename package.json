@@ -7,7 +7,7 @@
   },
   "scripts": {
     "typecheck": "pnpm -r exec tsc --noEmit",
-    "test": "pnpm -r test"
+    "test": "pnpm -r --workspace-concurrency=1 test"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
