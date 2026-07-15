@@ -1,5 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import net from "node:net";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
@@ -15,7 +18,7 @@ import { LadderLockedError, deliver, isGitRepo, ladderLocked, LADDER_REFUSAL } f
 import { appendEvent, replayRun } from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
 import type { CmdIo } from "./io.js";
-import { deferred } from "./promise.js";
+import { deferred, sleep } from "./promise.js";
 import { exitReport, formatDelta, formatHumanReport, formatSpend } from "./report.js";
 import {
   CONTRACT_FILE,
@@ -184,13 +187,6 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
   if (boolFlag(flags, "resume")) {
     const found = findResumableRun(io.root, manifest.id);
     if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${manifest.id} under ${runsRoot(io.root)}`);
-    // A live supervisor means the run is NOT resumable: proceeding would let
-    // the crash sweep rm -f the live run's containers and sockets, and two
-    // supervisors would interleave one events.ndjson.
-    const livePid = readSupervisorPid(found.runDir);
-    if (livePid !== null && pidAlive(livePid)) {
-      throw new UsageError(`run ${found.runId} is still running (supervisor pid ${livePid}) — \`hone stop\` it first`);
-    }
     let config = loadRunConfigFile(found.runDir);
     if (boolFlag(flags, "headless") && !config.headless) config = { ...config, headless: true };
     plan = { runId: found.runId, runDir: found.runDir, config, resumed: true };
@@ -230,7 +226,116 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
   return superviseRun(plan, { manifest, capsuleDir, flags: { backend: strFlag(flags, "backend"), repo: strFlag(flags, "repo") } }, io);
 }
 
+/**
+ * Lock socket path: SHORT and deterministic. macOS truncates a unix bind
+ * path silently at sun_path (~104 bytes) — a lock inside a deep runDir would
+ * bind a DIFFERENT, truncated path (colliding with the run dir itself), so
+ * the socket lives under tmpdir keyed by the runDir's real path.
+ */
+export function runLockPath(runDir: string): string {
+  const key = createHash("sha256").update(realpathSync(runDir)).digest("hex").slice(0, 16);
+  return join(tmpdir(), `hone-${key}.lck`);
+}
+
+/** Probe: will anyone accept on this socket? Fails CLOSED (treated as live) on unexpected errors or a hung peer. */
+function lockHolderAlive(sockPath: string): Promise<boolean> {
+  const { promise, resolve } = deferred<boolean>();
+  const probe = net.connect(sockPath);
+  const settle = (alive: boolean): void => {
+    probe.destroy();
+    resolve(alive);
+  };
+  probe.once("connect", () => settle(true));
+  probe.once("error", (err) => {
+    const code = (err as NodeJS.ErrnoException).code;
+    // ECONNREFUSED/ENOENT: crashed owner's leftover. ENOTSOCK: junk file.
+    settle(code !== "ECONNREFUSED" && code !== "ENOENT" && code !== "ENOTSOCK");
+  });
+  probe.setTimeout(1000, () => settle(true));
+  return promise;
+}
+
+/**
+ * OS-enforced exclusive per-run lock (FinalSecurityGate finding 2): a bound
+ * unix-domain socket. Liveness is the kernel accepting a connection — the
+ * pid file is display metadata only (pids recycle). Bind is the atomic
+ * arbiter; a stale leftover may be unlinked ONLY while holding an O_EXCL
+ * claim file and ONLY after a re-probe under that claim. A socket can become
+ * live only by binding an ABSENT path, and absence is only ever created by a
+ * claim holder, so no contender can ever unlink a live lock — concurrent
+ * stale contenders yield exactly one winner. Returned closure releases and
+ * unlinks.
+ */
+export async function acquireRunLock(runDir: string, runId: string): Promise<() => Promise<void>> {
+  const sockPath = runLockPath(runDir);
+  const claimPath = `${sockPath}.claim`;
+  const alreadySupervised = (): UsageError =>
+    new UsageError(`run ${runId} is already being supervised by a live process — \`hone stop\` it first`);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const server = net.createServer();
+    server.unref(); // the lock must never keep a finished supervisor alive
+    const bound = deferred<boolean>();
+    server.once("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") bound.resolve(false);
+      else bound.reject(err);
+    });
+    server.listen(sockPath, () => bound.resolve(true));
+    if (await bound.promise) {
+      return () => {
+        const closed = deferred<void>();
+        server.close(() => {
+          rmSync(sockPath, { force: true });
+          closed.resolve();
+        });
+        return closed.promise;
+      };
+    }
+    if (await lockHolderAlive(sockPath)) throw alreadySupervised();
+
+    // Stale leftover. Claim the exclusive right to clear it.
+    let claimFd: number;
+    try {
+      claimFd = openSync(claimPath, "wx");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // A sibling holds the claim; expire a claim orphaned by a crash.
+      try {
+        if (Date.now() - statSync(claimPath).mtimeMs > 10_000) rmSync(claimPath, { force: true });
+      } catch {
+        // claim vanished — sibling finished; just retry
+      }
+      await sleep(25);
+      continue;
+    }
+    try {
+      // Re-probe UNDER the claim: the leftover may have gone live since ours.
+      if (await lockHolderAlive(sockPath)) throw alreadySupervised();
+      rmSync(sockPath, { force: true });
+    } finally {
+      closeSync(claimFd);
+      rmSync(claimPath, { force: true });
+    }
+    // Loop: the next bind is kernel-arbitrated among contenders.
+  }
+  throw new Error(`run lock ${sockPath}: could not acquire after repeated stale-rebind attempts`);
+}
+
 async function superviseRun(
+  plan: RunPlan,
+  extra: { manifest: CapsuleManifest; capsuleDir: string; flags: { backend: string | undefined; repo: string | undefined } },
+  io: CmdIo,
+): Promise<number> {
+  // The lock precedes ANY event append or docker sweep: a competing resume
+  // must fail before it can touch the log or rm -f live containers.
+  const releaseLock = await acquireRunLock(plan.runDir, plan.runId);
+  try {
+    return await superviseLocked(plan, extra, io);
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function superviseLocked(
   plan: RunPlan,
   extra: { manifest: CapsuleManifest; capsuleDir: string; flags: { backend: string | undefined; repo: string | undefined } },
   io: CmdIo,
