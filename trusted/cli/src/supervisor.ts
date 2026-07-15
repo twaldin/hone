@@ -184,6 +184,13 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
   if (boolFlag(flags, "resume")) {
     const found = findResumableRun(io.root, manifest.id);
     if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${manifest.id} under ${runsRoot(io.root)}`);
+    // A live supervisor means the run is NOT resumable: proceeding would let
+    // the crash sweep rm -f the live run's containers and sockets, and two
+    // supervisors would interleave one events.ndjson.
+    const livePid = readSupervisorPid(found.runDir);
+    if (livePid !== null && pidAlive(livePid)) {
+      throw new UsageError(`run ${found.runId} is still running (supervisor pid ${livePid}) — \`hone stop\` it first`);
+    }
     let config = loadRunConfigFile(found.runDir);
     if (boolFlag(flags, "headless") && !config.headless) config = { ...config, headless: true };
     plan = { runId: found.runId, runDir: found.runDir, config, resumed: true };
@@ -431,5 +438,15 @@ export function readSupervisorPid(runDir: string): number | null {
     return parsed.pid;
   } catch {
     return null;
+  }
+}
+
+/** True when `pid` names a live process (signal-0 probe) — shared by the stop and resume guards. */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
