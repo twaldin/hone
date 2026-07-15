@@ -199,6 +199,118 @@ describe("runEpisodeLoop", () => {
   });
 });
 
+describe("runEpisodeLoop paired comparator evidence", () => {
+  it("grandchild episode asks the broker for the baseline on the candidate's exact coordinate before reporting", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {
+        1: { score: 0.6 }, // episode 0 candidate → incumbent
+        2: { score: 0.7 }, // episode 1 grandchild, mutated from the incumbent
+      },
+      execPlan: [
+        { exitCode: 0, stdout: okStdout("first-improvement") },
+        { exitCode: 0, stdout: okStdout("grandchild-improvement") },
+      ],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        emit: collectEmit(events),
+        rand: () => 0.99, // always greedy
+        maxEpisodes: 2,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    const c0 = stubHash(1);
+    const c1 = stubHash(2);
+    // Episode 0: baseline parent doubles as the baseline pair — no extra ask.
+    // Episode 1: incumbent parent + grandchild, then the paired baseline ask
+    // completes the evidence set on (assetGroup, seed=1) BEFORE reportIncumbent.
+    expect(stub.evaluateAsks).toEqual([
+      `${BASELINE}@0`,
+      `${c0}@0`,
+      `${c0}@1`,
+      `${c1}@1`,
+      `${BASELINE}@1`,
+    ]);
+    expect(stub.reportedIncumbents).toEqual([c0, c1]);
+    const incumbents = eventsOf(events, "incumbent.new");
+    expect(incumbents.map((e) => [e.artifact.hash, e.episode])).toEqual([
+      [c0, 0],
+      [c1, 1],
+    ]);
+    // deltaVsBaseline is computed from the same-coordinate baseline measurement.
+    expect(incumbents[1]?.deltaVsBaseline).toBeCloseTo(0.2, 10);
+    expect(stub.finished).toEqual([c1]);
+  });
+
+  it("ε-restart challenger is paired against the current incumbent on its own seed; a worse challenger is never reported", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {
+        1: { score: 0.6 }, // episode 0 candidate → incumbent (measured 0.6 at seed 0)
+        2: { score: 0.65 }, // episode 1 restart challenger at seed 1
+      },
+      // On the challenger's coordinate the incumbent scores 0.7: the challenger
+      // beats the incumbent's stale seed-0 mean (0.6) but loses the paired
+      // comparison — cumulative unpaired means must never decide.
+      objectivesBySaveIndexAndSeed: { "1:1": { score: 0.7 } },
+      execPlan: [
+        { exitCode: 0, stdout: okStdout("first-improvement") },
+        { exitCode: 0, stdout: okStdout("restart-challenger") },
+      ],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        emit: collectEmit(events),
+        rand: (episode) => (episode === 1 ? 0.0 : 0.99), // restart on episode 1
+        maxEpisodes: 2,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    const c0 = stubHash(1);
+    const c1 = stubHash(2);
+    // Episode 1 restarts from the baseline (parent doubles as baseline pair);
+    // after the challenger beats its parent, the loop asks the broker for the
+    // CURRENT incumbent on the challenger's exact coordinate.
+    expect(stub.evaluateAsks).toEqual([
+      `${BASELINE}@0`,
+      `${c0}@0`,
+      `${BASELINE}@1`,
+      `${c1}@1`,
+      `${c0}@1`,
+    ]);
+    // gate.paired passes vs the baseline parent...
+    const gates = eventsOf(events, "gate.paired");
+    expect(gates.map((e) => [e.episode, e.passed])).toEqual([
+      [0, true],
+      [1, true],
+    ]);
+    // ...but the paired incumbent comparison rejects the challenger: never
+    // reported, never selected.
+    expect(eventsOf(events, "incumbent.new").map((e) => e.artifact.hash)).toEqual([c0]);
+    expect(stub.reportedIncumbents).toEqual([c0]);
+    expect(stub.finished).toEqual([c0]);
+  });
+});
+
 describe("runEpisodeLoop maxEpisodes cap", () => {
   it("runs exactly one episode on the successful path when maxEpisodes=1", async () => {
     const stub = new StubBroker({

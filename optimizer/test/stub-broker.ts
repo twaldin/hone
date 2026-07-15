@@ -34,6 +34,8 @@ export interface StubScript {
   baselineObjectives: Record<string, number>;
   /** Objectives per saveArtifact call index (1-based). Missing index => evaluating it is a test failure. */
   objectivesBySaveIndex: Record<number, Record<string, number>>;
+  /** Seed-specific override: objectives keyed `${saveIndex}:${seed}`, consulted before objectivesBySaveIndex. */
+  objectivesBySaveIndexAndSeed?: Record<string, Record<string, number>>;
   /** saveArtifact indices whose evaluation comes back output.valid=false. */
   invalidSaveIndices?: number[];
   /** Consumed in exec-call order; running past the end fails the test. */
@@ -61,6 +63,8 @@ export class StubBroker {
   readonly savedArtifacts: string[] = [];
   /** Artifact hashes evaluated fresh (memo misses), in order. */
   readonly evaluated: string[] = [];
+  /** Every evaluate ask (memo hits included) as `hash@seed`, in call order. */
+  readonly evaluateAsks: string[] = [];
   readonly reportedIncumbents: string[] = [];
   readonly finished: string[] = [];
   readonly execArgvs: string[][] = [];
@@ -175,6 +179,7 @@ export class StubBroker {
       case "evaluate": {
         const params = BrokerMethods.evaluate.params.parse(rawParams);
         const key = `${params.artifact.hash}|${params.assetGroupId}|${params.seed}`;
+        this.evaluateAsks.push(`${params.artifact.hash}@${params.seed}`);
         const memoized = this.memo.get(key);
         if (memoized !== undefined) return { ...memoized, cached: true };
         this.evalInvocations++;
@@ -184,7 +189,7 @@ export class StubBroker {
           artifactHash: params.artifact.hash,
           assetGroupId: params.assetGroupId,
           seed: params.seed,
-          output: this.outputFor(params.artifact.hash),
+          output: this.outputFor(params.artifact.hash, params.seed),
           costUsd: 0,
           durationMs: 5,
           cached: false,
@@ -212,7 +217,7 @@ export class StubBroker {
     }
   }
 
-  private outputFor(hash: string): Record<string, unknown> {
+  private outputFor(hash: string, seed: number): Record<string, unknown> {
     if (hash === this.script.baselineHash) {
       return { valid: true, objectives: this.script.baselineObjectives, constraints: {}, perExample: {} };
     }
@@ -227,7 +232,8 @@ export class StubBroker {
         diagnostics: { summary: `candidate ${index} failed the harness` },
       };
     }
-    const objectives = this.script.objectivesBySaveIndex[index];
+    const objectives =
+      this.script.objectivesBySaveIndexAndSeed?.[`${index}:${seed}`] ?? this.script.objectivesBySaveIndex[index];
     if (objectives === undefined) throw new Error(`unscripted evaluation of artifact #${index} (${hash})`);
     return { valid: true, objectives, constraints: {}, perExample: {} };
   }

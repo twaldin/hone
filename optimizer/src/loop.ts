@@ -102,7 +102,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
     const baseline = task.baselineArtifact;
     let incumbent = opts.resume?.incumbent ?? null;
     const lineage: LineageEntry[] = [];
-    /** Latest trusted baseline aggregate, refreshed whenever the baseline is this episode's parent. */
+    /** Latest trusted baseline aggregate, refreshed whenever the baseline is measured as parent or paired comparator. */
     let baselineAggregate: number | null = null;
 
     const evaluate = async (artifact: ArtifactRef, seed: number, episode: number): Promise<EvaluationRecord> => {
@@ -284,18 +284,41 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       });
       lineage.push({ episode, approach: attempt.result.approach, delta: childAggregate - parentAggregate });
 
-      if (passed && (incumbent === null || childAggregate > incumbent.aggregate)) {
-        incumbent = { artifact: candidate, aggregate: childAggregate };
-        emit({
-          ...base,
-          at: now(),
-          type: "incumbent.new",
-          artifact: candidate,
-          aggregate: childAggregate,
-          deltaVsBaseline: baselineAggregate === null ? childAggregate : childAggregate - baselineAggregate,
-          episode,
-        });
-        await broker.reportIncumbent({ artifact: candidate, claimed: { aggregate: childAggregate } });
+      if (passed) {
+        // Same-coordinate comparator evidence (this assetGroupId + this
+        // episode's seed). The broker is the final incumbent authority and
+        // requires paired candidate↔parent, candidate↔baseline, and (when it
+        // differs) candidate↔current-incumbent records; the local
+        // keep-if-better hint must never compare aggregates measured on
+        // different seeds. The parent is already measured on this coordinate;
+        // coinciding hashes reuse it, and memo hits keep re-asks free while
+        // still minting evidence.
+        let incumbentPairAggregate: number | null = null;
+        if (incumbent !== null) {
+          incumbentPairAggregate =
+            incumbent.artifact.hash === parent.hash
+              ? parentAggregate
+              : aggregateOf(await evaluate(incumbent.artifact, episode, episode));
+          if (incumbent.artifact.hash === baseline.hash) baselineAggregate = incumbentPairAggregate;
+        }
+        if (incumbentPairAggregate === null || childAggregate > incumbentPairAggregate) {
+          // Candidate beats parent AND current incumbent on this coordinate:
+          // complete the evidence set with the paired baseline before reporting.
+          if (parent.hash !== baseline.hash && incumbent?.artifact.hash !== baseline.hash) {
+            baselineAggregate = aggregateOf(await evaluate(baseline, episode, episode));
+          }
+          incumbent = { artifact: candidate, aggregate: childAggregate };
+          emit({
+            ...base,
+            at: now(),
+            type: "incumbent.new",
+            artifact: candidate,
+            aggregate: childAggregate,
+            deltaVsBaseline: baselineAggregate === null ? childAggregate : childAggregate - baselineAggregate,
+            episode,
+          });
+          await broker.reportIncumbent({ artifact: candidate, claimed: { aggregate: childAggregate } });
+        }
       }
 
       emit({ ...base, at: now(), type: "budget.snapshot", budget: await broker.getBudget() });
