@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { RunEvent } from "@hone/schema";
 import { EpisodeContext } from "../src/episode.js";
-import { runEpisodeLoop, WORKER_PATH } from "../src/loop.js";
+import { parseMaxEpisodes, runEpisodeLoop, WORKER_PATH } from "../src/loop.js";
 import { okStdout, StubBroker, stubHash } from "./stub-broker.js";
 
 /**
@@ -196,5 +196,164 @@ describe("runEpisodeLoop", () => {
     expect(eventsOf(events, "episode.started")).toHaveLength(1);
     // Aborted runs don't call finish — the supervisor owns shutdown bookkeeping.
     expect(stub.finished).toEqual([]);
+  });
+});
+
+describe("runEpisodeLoop maxEpisodes cap", () => {
+  it("runs exactly one episode on the successful path when maxEpisodes=1", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: { 1: { score: 0.6 } },
+      execPlan: [{ exitCode: 0, stdout: okStdout("probe-improvement") }],
+      // Budget could fund many more episodes — only the cap may stop the loop.
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(eventsOf(events, "episode.started")).toHaveLength(1);
+    expect(eventsOf(events, "budget.exhausted")).toHaveLength(0);
+    expect(eventsOf(events, "incumbent.new")).toHaveLength(1);
+    // The capped run still hands its best artifact to finish().
+    expect(stub.finished).toEqual([stubHash(1)]);
+  });
+
+  it("counts a repaired episode as one episode against the cap", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      // save 1 = failed workspace snapshot (never evaluated), save 2 = repaired candidate.
+      objectivesBySaveIndex: { 2: { score: 0.7 } },
+      execPlan: [
+        { exitCode: 1, stderr: "TypeError: boom" }, // ep0 mutation fails
+        { exitCode: 0, stdout: okStdout("fix-boom") }, // ep0 repair succeeds
+      ],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(eventsOf(events, "episode.started")).toHaveLength(1);
+    expect(eventsOf(events, "episode.invalid")).toEqual([expect.objectContaining({ episode: 0, repaired: true })]);
+    expect(eventsOf(events, "budget.exhausted")).toHaveLength(0);
+    expect(stub.finished).toEqual([stubHash(2)]);
+  });
+
+  it("holds the cap across an invalid episode's discard continue", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {}, // nothing valid is ever produced
+      invalidSaveIndices: [1, 2],
+      execPlan: [
+        { exitCode: 0, stdout: okStdout("bad-idea") }, // candidate evaluates invalid
+        { exitCode: 0, stdout: okStdout("bad-repair") }, // repair also evaluates invalid
+      ],
+      // Ample budget: without the cap the loop would demand a third exec and
+      // the stub would fail the test with an unscripted-exec error.
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(eventsOf(events, "episode.started")).toHaveLength(1);
+    expect(eventsOf(events, "episode.invalid")).toEqual([expect.objectContaining({ episode: 0, repaired: false })]);
+    expect(eventsOf(events, "budget.exhausted")).toHaveLength(0);
+    expect(eventsOf(events, "incumbent.new")).toHaveLength(0);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
+  it("caps on episode ordinals: a resume at or past the cap starts nothing", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [], // any exec would be an unscripted-call test failure
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        resume: { nextEpisode: 1, incumbent: null },
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(eventsOf(events, "episode.started")).toHaveLength(0);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
+  it("fails closed on a non-positive or non-integer maxEpisodes before touching the broker", async () => {
+    const base = {
+      brokerSocket: "/nonexistent/broker.sock",
+      runId: "run-test",
+      emit: collectEmit([]),
+    };
+    await expect(runEpisodeLoop({ ...base, maxEpisodes: 0 })).rejects.toThrow(/maxEpisodes/);
+    await expect(runEpisodeLoop({ ...base, maxEpisodes: -1 })).rejects.toThrow(/maxEpisodes/);
+    await expect(runEpisodeLoop({ ...base, maxEpisodes: 1.5 })).rejects.toThrow(/maxEpisodes/);
+    await expect(runEpisodeLoop({ ...base, maxEpisodes: Number.NaN })).rejects.toThrow(/maxEpisodes/);
+  });
+});
+
+describe("parseMaxEpisodes", () => {
+  it("treats unset as unbounded", () => {
+    expect(parseMaxEpisodes(undefined)).toBeUndefined();
+  });
+
+  it("parses a positive integer", () => {
+    expect(parseMaxEpisodes("1")).toBe(1);
+    expect(parseMaxEpisodes("25")).toBe(25);
+  });
+
+  it("fails closed on zero, negatives, fractions, garbage, and empty strings", () => {
+    for (const raw of ["0", "-3", "1.5", "abc", "", "  ", "Infinity", "1e999"]) {
+      expect(() => parseMaxEpisodes(raw)).toThrow(/HONE_MAX_EPISODES/);
+    }
   });
 });

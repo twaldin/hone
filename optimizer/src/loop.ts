@@ -33,6 +33,12 @@ export interface EpisodeLoopOptions {
     nextEpisode: number;
     incumbent: { artifact: ArtifactRef; aggregate: number } | null;
   };
+  /**
+   * Hard cap on outer episode ORDINALS: no episode with ordinal >= maxEpisodes
+   * ever starts, including after an invalid episode's discard `continue`.
+   * Must be a positive integer when present; anything else fails closed.
+   */
+  maxEpisodes?: number;
   /** Test seam: uniform [0,1) draw per episode for the ε-restart decision. */
   rand?: (episode: number) => number;
 }
@@ -73,6 +79,10 @@ interface MutateAttempt {
 }
 
 export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
+  const maxEpisodes = opts.maxEpisodes;
+  if (maxEpisodes !== undefined && (!Number.isSafeInteger(maxEpisodes) || maxEpisodes <= 0)) {
+    throw new Error(`maxEpisodes must be a positive integer, got ${String(maxEpisodes)}`);
+  }
   const broker = await BrokerClient.connect(opts.brokerSocket);
   const baseSeed = opts.seed ?? 0;
   const rand = opts.rand ?? ((episode: number) => episodeRand(baseSeed, episode));
@@ -167,6 +177,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
     let episode = opts.resume?.nextEpisode ?? 0;
     for (; ; episode++) {
       if (opts.signal?.aborted) return;
+      if (maxEpisodes !== undefined && episode >= maxEpisodes) break;
       const budget = await broker.getBudget();
       const exhausted = exhaustedDimension(budget);
       if (exhausted !== null) {
@@ -321,10 +332,24 @@ export interface OptimizerRunnerBackend {
   start(ctx: OptimizerBackendContext): Promise<void>;
 }
 
+/**
+ * Parse the HONE_MAX_EPISODES wire value: unset means unbounded; anything set
+ * that is not a positive integer fails closed (including empty strings).
+ */
+export function parseMaxEpisodes(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (raw.trim().length === 0 || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`HONE_MAX_EPISODES must be a positive integer, got ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
+
 /** RunnerBackend-shaped factory so WP4's supervisor can host the loop directly. */
 export function createBackend(): OptimizerRunnerBackend {
   return {
     async start(ctx: OptimizerBackendContext): Promise<void> {
+      const maxEpisodes = parseMaxEpisodes(ctx.env["HONE_MAX_EPISODES"]);
       await runEpisodeLoop({
         brokerSocket: join(ctx.runDir, "broker.sock"),
         runId: ctx.runId,
@@ -335,6 +360,7 @@ export function createBackend(): OptimizerRunnerBackend {
           nextEpisode: ctx.replayed.nextEpisode,
           incumbent: ctx.replayed.incumbent,
         },
+        ...(maxEpisodes !== undefined ? { maxEpisodes } : {}),
       });
     },
   };

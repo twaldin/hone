@@ -7,6 +7,7 @@ export {
   aggregateOf,
   createBackend,
   episodeRand,
+  parseMaxEpisodes,
   runEpisodeLoop,
   WORKER_PATH,
   type EpisodeLoopOptions,
