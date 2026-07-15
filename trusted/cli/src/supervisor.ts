@@ -360,20 +360,48 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
       // supervisor's (possibly recycled) PID.
       if (identity !== undefined) writeLockMetadata(sockPath, identity);
       else rmSync(metaPath, { force: true });
+      // Ownership token for the path-CAS at release: server.close stops the
+      // listener BEFORE its callback fires (it drains live connections), so
+      // a contender can connect-fail, reclaim, and rebind a successor socket
+      // while our callback is still pending — the callback may only ever
+      // unlink THIS bind's inode, never whatever the path holds by then.
+      const sockStat = statSync(sockPath, { bigint: true });
       return () => {
         const closed = deferred<void>();
         server.close(() => {
-          // Close, then remove OWNED metadata, then free the bind path —
-          // while the socket file still exists no contender can bind, so
-          // only a metadata file that still holds OUR identity is removed
-          // (a reclaimer that raced the close already owns the path).
-          if (identity !== undefined) {
-            const current = readLockMetadata(sockPath);
-            if (current !== null && current.pid === identity.pid && current.nonce === identity.nonce && current.runId === identity.runId) {
-              rmSync(metaPath, { force: true });
-            }
+          // Post-close cleanup runs under the SAME O_EXCL claim as stale
+          // arbitration. No claim (a live claimant is mid-reclaim): remove
+          // NOTHING — the claimant owns clearing our now-dead leftovers.
+          // The claim serializes against claimants, but a fresh binder needs
+          // no claim once the path is free (node may unlink the path at
+          // close-initiation), so each removal is ownership-guarded on its
+          // own: the socket only by dev+ino equality with OUR bind, the
+          // metadata only by exact identity match — a successor's socket or
+          // metadata is never removed.
+          let claimFd: number;
+          try {
+            claimFd = openSync(claimPath, "wx");
+          } catch {
+            closed.resolve();
+            return;
           }
-          rmSync(sockPath, { force: true });
+          try {
+            if (identity !== undefined) {
+              const current = readLockMetadata(sockPath);
+              if (current !== null && current.pid === identity.pid && current.nonce === identity.nonce && current.runId === identity.runId) {
+                rmSync(metaPath, { force: true });
+              }
+            }
+            try {
+              const now = statSync(sockPath, { bigint: true });
+              if (now.dev === sockStat.dev && now.ino === sockStat.ino) rmSync(sockPath, { force: true });
+            } catch {
+              // already gone — a claimant cleared it before our claim
+            }
+          } finally {
+            closeSync(claimFd);
+            rmSync(claimPath, { force: true });
+          }
           closed.resolve();
         });
         return closed.promise;
