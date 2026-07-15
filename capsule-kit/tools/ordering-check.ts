@@ -15,8 +15,8 @@
  *      band of 0.15 on aggregate ((max-min)/mean). Measured spread over 9
  *      baseline evals on an M3 Max: 0.004-0.009, dominated by wall-clock
  *      noise in the 1/(1+ms) term — the band leaves >15x headroom.
- *   4. sanity: baseline and improved pass the pytest constraint with
- *      quality 1.0
+ *   4. sanity: baseline and improved pass the trusted correctness constraint
+ *      with quality 1.0
  *
  * Usage: npx tsx capsules/tools/ordering-check.ts
  */
@@ -31,7 +31,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { EvaluatorOutput } from "@hone/schema";
+import { readFileSync } from "node:fs";
+import { CapsuleManifest, EvaluatorOutput } from "@hone/schema";
 
 const CAPSULE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "seeded-astar");
 const SPLITS = ["train", "validation"] as const;
@@ -44,6 +45,7 @@ type Variant = "baseline" | (typeof DIAGNOSTICS)[number];
 
 const SKIP_ENTRIES: Record<string, true> = {
   ".git": true,
+  ".gitdir": true,
   __pycache__: true,
   ".pytest_cache": true,
 };
@@ -67,13 +69,31 @@ function composeArtifact(variant: Variant): string {
   return artifact;
 }
 
+/** Frozen manifest evalEntrypoint — the ordering check runs it verbatim. */
+const MANIFEST = CapsuleManifest.parse(
+  JSON.parse(readFileSync(join(CAPSULE_DIR, "manifest.json"), "utf8")),
+);
+
+/**
+ * Faithful local reproduction of the broker eval contract: entrypoint runs
+ * from the FROZEN baseline (cwd = /trusted/baseline equivalent) while the
+ * candidate artifact is only reachable via CAPSULE_WORKSPACE (= /workspace)
+ * and fixtures via CAPSULE_ASSETS (= /capsule/assets). Candidate code never
+ * shadows the trusted evaluator.
+ */
 function runEval(artifactDir: string, split: Split): EvaluatorOutput {
-  const stdout = execFileSync("python3", ["eval.py"], {
-    cwd: artifactDir,
+  const [command, ...args] = MANIFEST.evalEntrypoint;
+  if (command === undefined) throw new Error("manifest evalEntrypoint is empty");
+  const stdout = execFileSync(command, args, {
+    cwd: join(CAPSULE_DIR, "baseline"),
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     timeout: 600_000,
-    env: { ...process.env, CAPSULE_ASSETS: join(CAPSULE_DIR, "assets", split) },
+    env: {
+      ...process.env,
+      CAPSULE_WORKSPACE: artifactDir,
+      CAPSULE_ASSETS: join(CAPSULE_DIR, "assets", split),
+    },
   });
   return EvaluatorOutput.parse(JSON.parse(stdout));
 }
