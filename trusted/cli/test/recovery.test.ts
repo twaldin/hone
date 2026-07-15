@@ -1,16 +1,20 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { RunConfig } from "@hone/schema";
 import type { BudgetState, RunEvent } from "@hone/schema";
 import { runCommand } from "@hone/broker";
 import type { CallContext, CmdResult, RunCommand } from "@hone/broker";
 import type { ProxyHandle } from "@hone/proxy";
 import { reconcileBrokerAuthority, setupEgress, sweepStaleRunResources } from "../src/backends/local.js";
 import type { AuthorityRecoverySource } from "../src/backends/local.js";
-import { appendEvent, bestArtifact, readEvents, replayRun } from "../src/eventlog.js";
-import { runCommand as cliRunCommand } from "../src/supervisor.js";
-import { at, fakeHash, fixtureEvents, makeCapsule, makeIo, makeRoot, writeEvents } from "./helpers.js";
+import { appendEvent, bestArtifact, eventsPath, readEvents, replayRun } from "../src/eventlog.js";
+import { deferred } from "../src/promise.js";
+import { writeRunConfigFile } from "../src/runs.js";
+import { acquireRunLock, runCommand as cliRunCommand, runLockPath } from "../src/supervisor.js";
+import { CAP_ID, at, fakeHash, fixtureEvents, makeCapsule, makeIo, makeRoot, writeEvents } from "./helpers.js";
 
 /**
  * Second-pass review findings 10 + 11: crash-resume must sweep stale docker
@@ -285,19 +289,145 @@ describe("live docker smoke (finding 10)", () => {
   });
 });
 
-describe("resume liveness guard (finding 10 — the sweep must never hit a live run)", () => {
-  it("refuses --resume while the recorded supervisor pid is alive", async () => {
+function resumableFixture(root: string, runId: string): string {
+  makeCapsule(root);
+  const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false }));
+  writeRunConfigFile(
+    runDir,
+    RunConfig.parse({
+      version: 1,
+      capsuleId: CAP_ID,
+      objective: "fixture objective",
+      budget: { maxTokens: 1_000_000, maxUsd: 25, maxWallClockSec: 3600, maxEvaluatorInvocations: 100 },
+      routing: { mutation: { model: "test-model" } },
+      headless: true,
+    }),
+  );
+  return runDir;
+}
+
+describe("run lock (FinalSecurityGate finding 2 — OS-enforced exclusivity)", () => {
+  it("holds exclusively: a competitor rejects while held and acquires after release", async () => {
+    const runDir = makeRoot();
+    const release = await acquireRunLock(runDir, "run_l1");
+    await expect(acquireRunLock(runDir, "run_l1")).rejects.toThrow(/already being supervised/);
+    await release();
+    expect(existsSync(runLockPath(runDir))).toBe(false);
+    const release2 = await acquireRunLock(runDir, "run_l1");
+    await release2();
+  });
+
+  it("reclaims a junk file squatting on the lock path", async () => {
+    const runDir = makeRoot();
+    writeFileSync(runLockPath(runDir), "not a socket");
+    const release = await acquireRunLock(runDir, "run_l2");
+    await release();
+  });
+
+  it("reclaims a dead owner's socket file (ECONNREFUSED probe)", async () => {
+    const runDir = makeRoot();
+    const sockPath = runLockPath(runDir);
+    const dead = net.createServer();
+    const listening = deferred<void>();
+    dead.listen(sockPath, () => listening.resolve());
+    await listening.promise;
+    const closed = deferred<void>();
+    dead.close(() => closed.resolve());
+    await closed.promise;
+    // whether or not node unlinked the file on close, acquisition must win
+    const release = await acquireRunLock(runDir, "run_l3");
+    await release();
+  });
+
+  it("concurrent contenders over a stale lock yield exactly one winner", async () => {
+    const runDir = makeRoot();
+    writeFileSync(runLockPath(runDir), "");
+    const results = await Promise.allSettled(Array.from({ length: 5 }, () => acquireRunLock(runDir, "run_l4")));
+    const winners = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    expect(winners.length).toBe(1);
+    for (const r of results) {
+      if (r.status === "rejected") expect(String(r.reason)).toMatch(/already being supervised/);
+    }
+    const winner = winners[0];
+    if (winner !== undefined) await winner();
+  });
+
+  it("refuses --resume while the run lock is held by a live process", async () => {
     const root = makeRoot();
-    makeCapsule(root);
-    const runId = "run_live1";
-    const runDir = writeEvents(
-      root,
-      runId,
-      fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false }),
-    );
-    // The test process itself: a pid that is certainly alive.
-    writeFileSync(join(runDir, "supervisor.json"), `${JSON.stringify({ pid: process.pid, runId })}\n`);
-    const { io } = makeIo(root);
-    await expect(cliRunCommand(["capsule", "--headless", "--resume"], io)).rejects.toThrow(/still running/);
+    const runDir = resumableFixture(root, "run_live1");
+    const release = await acquireRunLock(runDir, "run_live1");
+    try {
+      const { io } = makeIo(root);
+      await expect(cliRunCommand(["capsule", "--headless", "--resume", "--backend", "stub"], io)).rejects.toThrow(/already being supervised/);
+    } finally {
+      await release();
+    }
+    // no event was appended by the refused contender
+    expect(readEvents(runDir).filter((e) => e.type === "run.resumed").length).toBe(0);
+  });
+
+  it("two simultaneous resumes: exactly one proceeds and finalizes the log once", { timeout: 30_000 }, async () => {
+    const root = makeRoot();
+    const runDir = resumableFixture(root, "run_dual1");
+    const env = { HONE_STUB_EPISODES: "4", HONE_STUB_DELAY_MS: "250" };
+    const results = await Promise.allSettled([
+      cliRunCommand(["capsule", "--headless", "--resume", "--backend", "stub"], makeIo(root, env).io),
+      cliRunCommand(["capsule", "--headless", "--resume", "--backend", "stub"], makeIo(root, env).io),
+    ]);
+    const ok = results.filter((r) => r.status === "fulfilled" && r.value === 0);
+    const rejected = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
+    expect(ok.length, JSON.stringify(results)).toBe(1);
+    expect(rejected.length).toBe(1);
+    expect(String(rejected[0])).toMatch(/already being supervised/);
+    // the winner's log is complete and clean; the loser never touched it
+    const events = readEvents(runDir);
+    expect(events.filter((e) => e.type === "run.started").length).toBe(1);
+    expect(events.filter((e) => e.type === "run.resumed").length).toBe(1);
+    expect(events.filter((e) => e.type === "run.finished").length).toBe(1);
+    const episodes = events.flatMap((e) => (e.type === "episode.started" ? [e.episode] : []));
+    expect(new Set(episodes).size).toBe(episodes.length);
+  });
+});
+
+describe("event log torn-tail repair (FinalSecurityGate finding 3)", () => {
+  const started: RunEvent = {
+    runId: "run_t1",
+    at: at(),
+    type: "run.started",
+    capsuleId: CAP_ID,
+    contractHash: fakeHash("c"),
+    optimizerDigest: "unpinned",
+  };
+
+  it("append after a torn tail truncates the torn bytes instead of fusing lines", () => {
+    const runDir = makeRoot();
+    appendEvent(runDir, started);
+    appendFileSync(eventsPath(runDir), '{"runId":"run_t1","at":"2026-07-'); // SIGKILL mid-append
+    appendEvent(runDir, { runId: "run_t1", at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } });
+    const events = readEvents(runDir); // throws on any fused interior line
+    expect(events.map((e) => e.type)).toEqual(["run.started", "episode.started"]);
+    const rawLines = readFileSync(eventsPath(runDir), "utf8").split("\n").filter((l) => l.trim() !== "");
+    expect(rawLines.length).toBe(2);
+  });
+
+  it("repairs a torn tail with no complete predecessor line", () => {
+    const runDir = makeRoot();
+    writeFileSync(eventsPath(runDir), '{"half":');
+    appendEvent(runDir, started);
+    const events = readEvents(runDir);
+    expect(events.length).toBe(1);
+    expect(events[0]?.type).toBe("run.started");
+  });
+
+  it("survives repeated crash/append cycles without corrupting replay", () => {
+    const runDir = makeRoot();
+    for (let i = 0; i < 3; i++) {
+      appendEvent(runDir, { runId: "run_t1", at: at(), type: "episode.started", episode: i, parent: { hash: fakeHash("b") } });
+      appendFileSync(eventsPath(runDir), `{"torn":${i}`); // crash leaves a torn tail every cycle
+    }
+    appendEvent(runDir, started);
+    const events = readEvents(runDir);
+    expect(events.length).toBe(4);
+    expect(replayRun(runDir).episodes.size).toBe(3);
   });
 });

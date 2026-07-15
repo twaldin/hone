@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { RunEvent } from "@hone/schema";
 import type { ArtifactRef, BudgetState } from "@hone/schema";
@@ -15,21 +15,57 @@ export function eventsPath(runDir: string): string {
 }
 
 /**
- * Durable append (review finding 11): broker authority is journaled+fsynced
- * before it reaches this sink, so the sink itself must not sit in the page
- * cache — an acknowledged event survives power loss, keeping the two
- * append-only logs' counts alignable on resume.
+ * Durable append (review finding 11 + FinalSecurityGate finding 3): broker
+ * authority is journaled+fsynced before it reaches this sink, so the sink
+ * itself must not sit in the page cache, must never fuse with a crashed
+ * writer's torn tail, and must survive short writes. An acknowledged event
+ * is a complete, newline-terminated, fsynced line.
  */
 export function appendEvent(runDir: string, event: RunEvent): RunEvent {
   const parsed = RunEvent.parse(event);
-  const fd = openSync(eventsPath(runDir), "a");
+  const fd = openSync(eventsPath(runDir), "a+");
   try {
-    writeSync(fd, `${JSON.stringify(parsed)}\n`);
+    repairTornTail(fd);
+    const data = Buffer.from(`${JSON.stringify(parsed)}\n`, "utf8");
+    let written = 0;
+    while (written < data.length) {
+      written += writeSync(fd, data, written, data.length - written);
+    }
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
   return parsed;
+}
+
+/**
+ * A SIGKILL mid-append leaves a torn, non-newline-terminated tail; appending
+ * after it would fuse two records into one corrupt interior line that replay
+ * hard-rejects. Truncate (+fsync) to the last complete line first — the torn
+ * bytes were never acknowledged, so dropping them is the resume contract.
+ */
+function repairTornTail(fd: number): void {
+  const size = fstatSync(fd).size;
+  if (size === 0) return;
+  const probe = Buffer.alloc(1);
+  readSync(fd, probe, 0, 1, size - 1);
+  if (probe[0] === 0x0a) return;
+  // Torn tail confirmed: scan backwards for the last newline.
+  const chunk = Buffer.alloc(4096);
+  let pos = size - 1;
+  let keep = 0;
+  while (pos > 0) {
+    const n = Math.min(chunk.length, pos);
+    readSync(fd, chunk, 0, n, pos - n);
+    const idx = chunk.subarray(0, n).lastIndexOf(0x0a);
+    if (idx !== -1) {
+      keep = pos - n + idx + 1;
+      break;
+    }
+    pos -= n;
+  }
+  ftruncateSync(fd, keep);
+  fsyncSync(fd);
 }
 
 /**
