@@ -200,6 +200,45 @@ describe("validateWorkspaceTar", () => {
     );
   });
 
+  it("rejects pax size overrides that desynchronize validator and extractor block-walks", () => {
+    // Differential: the raw ustar header says 1024 bytes of data, the pax
+    // override says 0. A validator walking by the raw size treats the next
+    // 1024 bytes as opaque payload; an extractor honoring the pax override
+    // parses them as HEADERS — so forbidden entries hide in the disputed
+    // region. The payload here embeds a real symlink header and a .git dir
+    // header, byte-exact.
+    const hidden = Buffer.concat([
+      tarHeader({ name: "workspace/evil-link", type: "2", linkname: "/etc/passwd" }),
+      tarHeader({ name: "workspace/.git/", type: "5" }),
+    ]);
+    expect(hidden.length).toBe(1024);
+    rejects(
+      [
+        ...validSpecs(),
+        { name: "x", type: "x", content: paxRecord("size", "0") },
+        { name: "workspace/decoy.bin", content: hidden, size: 1024 },
+      ],
+      /pax size override is not allowed/,
+    );
+    // Nonzero override with the same raw/logical mismatch is equally rejected.
+    rejects(
+      [
+        ...validSpecs(),
+        { name: "x", type: "x", content: paxRecord("size", "512") },
+        { name: "workspace/decoy.bin", content: hidden, size: 1024 },
+      ],
+      /pax size override is not allowed/,
+    );
+  });
+
+  it("still accepts benign libarchive/pax metadata records", () => {
+    const meta = paxRecord("mtime", "1752537600.123456789") + paxRecord("LIBARCHIVE.creationtime", "1752537600") + paxRecord("SCHILY.dev", "16777232");
+    const entries = validateWorkspaceTar(
+      makeTar([...validSpecs(), { name: "x", type: "x", content: meta }, { name: "workspace/meta.txt", content: "m" }]),
+    );
+    expect(entries.map((e) => e.path)).toContain("workspace/meta.txt");
+  });
+
   it("handles GNU longnames and rejects traversal through them", () => {
     const long = `workspace/${"a".repeat(150)}.txt`;
     const entries = validateWorkspaceTar(

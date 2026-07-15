@@ -19,7 +19,10 @@
  *   - no duplicate entries and no file/directory type conflicts
  *   - PAX (`x`) per-entry headers and GNU longnames (`L`) are understood so
  *     overrides cannot smuggle a second, unvalidated name; PAX globals (`g`),
- *     GNU longlinks (`K`), and sparse markers are rejected outright
+ *     GNU longlinks (`K`), sparse markers, and pax `size`/`linkpath`
+ *     overrides are rejected outright — size overrides would let the
+ *     validator and a spec-honoring extractor walk DIFFERENT block
+ *     sequences, hiding forbidden headers in the disputed bytes
  *
  * Deliberately dependency-free: this is trusted-kernel code and must be
  * auditable at a glance (same rule as glob.ts).
@@ -195,7 +198,7 @@ export function validateWorkspaceTar(bytes: Buffer): ArtifactTarEntry[] {
 
     const typeByte = header[156]!;
     const typeflag = typeByte === 0 ? "0" : String.fromCharCode(typeByte);
-    let size = numericField(header, 124, 12, "size");
+    const size = numericField(header, 124, 12, "size");
     const dataStart = off + BLOCK;
     const paddedSize = Math.ceil(size / BLOCK) * BLOCK;
     if (dataStart + paddedSize > bytes.length) fail("truncated archive: entry data exceeds archive length");
@@ -211,6 +214,13 @@ export function validateWorkspaceTar(bytes: Buffer): ArtifactTarEntry[] {
         if (pendingPax !== null) fail("consecutive pax headers");
         pendingPax = parsePaxRecords(content);
         if (pendingPax.has("linkpath")) fail("pax linkpath override is not allowed");
+        // A pax `size` override creates a parsing DIFFERENTIAL: this validator
+        // walks blocks by the raw ustar size field, but a spec-honoring
+        // extractor would honor the override — letting forbidden headers hide
+        // inside bytes one side treats as data and the other as structure.
+        // Artifacts are far below the 8 GiB octal limit, so no legitimate
+        // producer needs it; reject outright.
+        if (pendingPax.has("size")) fail("pax size override is not allowed");
         for (const key of pendingPax.keys()) {
           if (key.startsWith("GNU.sparse")) fail("GNU sparse pax entries are not allowed");
         }
@@ -235,12 +245,6 @@ export function validateWorkspaceTar(bytes: Buffer): ArtifactTarEntry[] {
     if (pendingLongName !== null && paxPath !== undefined) fail("both pax path and GNU longname present", name);
     if (pendingLongName !== null) name = pendingLongName;
     else if (paxPath !== undefined) name = paxPath;
-    const paxSize = pendingPax?.get("size");
-    if (paxSize !== undefined) {
-      if (!/^[0-9]+$/.test(paxSize)) fail("malformed pax size override", name);
-      size = parseInt(paxSize, 10);
-      if (!Number.isSafeInteger(size)) fail("pax size override overflows", name);
-    }
     pendingPax = null;
     pendingLongName = null;
 
