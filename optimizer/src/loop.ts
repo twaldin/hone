@@ -34,8 +34,10 @@ export interface EpisodeLoopOptions {
     incumbent: { artifact: ArtifactRef; aggregate: number } | null;
   };
   /**
-   * Hard cap on outer episode ORDINALS: no episode with ordinal >= maxEpisodes
-   * ever starts, including after an invalid episode's discard `continue`.
+   * Hard cap on outer episodes ATTEMPTED by this invocation, counted from the
+   * resume ordinal: at most maxEpisodes loop iterations ever start, including
+   * episodes discarded through an invalid `continue`. A resumed run always
+   * gets its full allowance (crash-after-start resumes still probe once).
    * Must be a positive integer when present; anything else fails closed.
    */
   maxEpisodes?: number;
@@ -174,10 +176,12 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       return { artifact, result, stdoutHash, failure: null };
     };
 
-    let episode = opts.resume?.nextEpisode ?? 0;
+    const startEpisode = opts.resume?.nextEpisode ?? 0;
+    let episode = startEpisode;
     for (; ; episode++) {
       if (opts.signal?.aborted) return;
-      if (maxEpisodes !== undefined && episode >= maxEpisodes) break;
+      // Attempted-count cap: ordinals [startEpisode, startEpisode + maxEpisodes).
+      if (maxEpisodes !== undefined && episode - startEpisode >= maxEpisodes) break;
       const budget = await broker.getBudget();
       const exhausted = exhaustedDimension(budget);
       if (exhausted !== null) {

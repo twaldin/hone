@@ -300,12 +300,14 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
     expect(stub.finished).toEqual([BASELINE]);
   });
 
-  it("caps on episode ordinals: a resume at or past the cap starts nothing", async () => {
+  it("grants the full allowance from the resume ordinal: nextEpisode=1 + cap=1 runs exactly episode 1", async () => {
     const stub = new StubBroker({
       baselineHash: BASELINE,
       baselineObjectives: { score: 0.5 },
-      objectivesBySaveIndex: {},
-      execPlan: [], // any exec would be an unscripted-call test failure
+      objectivesBySaveIndex: { 1: { score: 0.6 } },
+      // Exactly one episode's mutation is scripted; a second would be an
+      // unscripted-call test failure.
+      execPlan: [{ exitCode: 0, stdout: okStdout("resumed-probe") }],
       envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
     });
     await stub.listen();
@@ -317,6 +319,8 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
         runId: "run-test",
         emit: collectEmit(events),
         rand: () => 0.99,
+        // Crash-after-start replay: the probe episode was journaled as started
+        // but never completed — the relaunch MUST still attempt one episode.
         resume: { nextEpisode: 1, incumbent: null },
         maxEpisodes: 1,
       });
@@ -324,8 +328,10 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
       await stub.close();
     }
 
-    expect(eventsOf(events, "episode.started")).toHaveLength(0);
-    expect(stub.finished).toEqual([BASELINE]);
+    const started = eventsOf(events, "episode.started");
+    expect(started.map((e) => e.episode)).toEqual([1]);
+    expect(eventsOf(events, "budget.exhausted")).toHaveLength(0);
+    expect(stub.finished).toEqual([stubHash(1)]);
   });
 
   it("fails closed on a non-positive or non-integer maxEpisodes before touching the broker", async () => {
