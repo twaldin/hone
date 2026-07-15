@@ -16,7 +16,7 @@ export async function statusCommand(args: string[], io: CmdIo): Promise<number> 
   io.out(`episodes: ${state.episodes.size}`);
   if (state.incumbent !== null) {
     io.out(`incumbent: ${state.incumbent.artifact.hash} (episode ${state.incumbent.episode})`);
-    io.out(`aggregate: ${state.incumbent.aggregate} (validation — not holdout)`);
+    io.out(`aggregate: ${state.incumbent.aggregate} (non-holdout search score)`);
     io.out(`delta vs baseline: ${formatDelta(state.incumbent.deltaVsBaseline)}`);
   } else {
     io.out("incumbent: (none yet)");

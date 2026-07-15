@@ -37,7 +37,7 @@ export async function diffCommand(args: string[], io: CmdIo): Promise<number> {
     if (r.error) throw r.error;
     if (r.status !== 0 && r.status !== 1) throw new Error(`git diff failed: ${r.stderr.trim()}`);
     io.out(`# baseline  ${baseline.hash}`);
-    io.out(`# incumbent ${best.hash} (validation — not holdout)`);
+    io.out(`# incumbent ${best.hash} (selected by non-holdout search score)`);
     io.out(r.stdout.replaceAll(`${a}/`, "").replaceAll(`${b}/`, ""));
     return 0;
   } finally {
