@@ -1,1 +1,1 @@
-seeded-astar baseline: linear-scan A*, pytest suite, evaluator
+eval: direction-correct objectives (score, higher is better); runtime_ms/quality to diagnostics

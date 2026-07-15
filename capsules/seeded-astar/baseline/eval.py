@@ -15,12 +15,17 @@ Scoring:
                                         worth ~6% of an optimal one)
   score       = 1 / (1 + median_ms) * correctness
 
-Objectives:
-  runtime_ms  median across examples of the per-example median-of-5 ms
-  quality     mean correctness across examples
+Objectives (higher is better — the trusted default scalarization is the mean
+of objective values, so every objective must reward improvement):
+  score       mean per-example score (correctness / (1 + median_ms));
+              faster and more-correct pathfinders raise it
 
 Constraints:
   tests_pass  pytest suite in the artifact root exits 0
+
+Diagnostics (informational, never aggregated):
+  runtime_ms  median across examples of the per-example median-of-5 ms
+  quality     mean correctness across examples
 
 stdlib + pytest only.
 """
@@ -162,13 +167,18 @@ def main() -> None:
     output = {
         "valid": len(mazes) > 0,
         "objectives": {
-            "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
-            "quality": statistics.fmean(correctnesses) if correctnesses else 0.0,
+            "score": statistics.fmean(
+                [entry["score"] for entry in per_example.values()]
+            )
+            if per_example
+            else 0.0,
         },
         "constraints": {"tests_pass": tests_pass},
         "perExample": per_example,
         "diagnostics": {
-            "summary": f"{len(mazes)} mazes from {assets_dir}; tests_pass={tests_pass}"
+            "summary": f"{len(mazes)} mazes from {assets_dir}; tests_pass={tests_pass}",
+            "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
+            "quality": statistics.fmean(correctnesses) if correctnesses else 0.0,
         },
     }
     json.dump(output, sys.stdout)

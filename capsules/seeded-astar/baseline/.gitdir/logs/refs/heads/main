@@ -1,1 +1,2 @@
 0000000000000000000000000000000000000000 ef86c54919c6aaace0cb80cbf8284b0340b75526 hone <hone@local> 1783987200 +0000	commit (initial): seeded-astar baseline: linear-scan A*, pytest suite, evaluator
+ef86c54919c6aaace0cb80cbf8284b0340b75526 e420fc509f40bd0be5871a5d5d6819e53f4af5e5 twaldin <timothy@waldin.net> 1784111820 -0700	commit: eval: direction-correct objectives (score, higher is better); runtime_ms/quality to diagnostics

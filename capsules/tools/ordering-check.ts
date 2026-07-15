@@ -178,7 +178,7 @@ export function runOrderingCheck(): OrderingReport {
       );
       check(
         `${variant}/${split} quality == 1`,
-        out.objectives["quality"] === 1.0,
+        out.diagnostics?.["quality"] === 1.0,
       );
     }
   }
