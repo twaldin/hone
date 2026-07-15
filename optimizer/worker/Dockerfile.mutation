@@ -1,0 +1,42 @@
+# hone-mutation — mutation-sandbox image: hone-task + Bun + the Pi-session
+# worker baked at /opt/hone-worker/mutate.ts with its own node_modules.
+#
+# The worker binary surface is deliberately frozen at image-build time; the
+# high-leverage mutable surface (prompts/context/policy) flows per-episode via
+# /scratch/episode.json, so optimizer-asset mutations need no rebuild.
+#
+# Build:  docker build -t hone-mutation:latest -f optimizer/worker/Dockerfile.mutation optimizer/worker
+# Smoke:  docker run --rm hone-mutation:latest bun /opt/hone-worker/mutate.ts --selftest
+FROM hone-task:latest
+
+USER root
+
+# Bun, pinned. Release asset arch names: amd64 -> x64, arm64 -> aarch64.
+ARG BUN_VERSION=1.3.14
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl unzip \
+  && arch="$(dpkg --print-architecture)" \
+  && case "$arch" in arm64) bunArch=aarch64 ;; amd64) bunArch=x64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac \
+  && curl -fsSL -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-${bunArch}.zip" \
+  && unzip -q /tmp/bun.zip -d /tmp \
+  && mv "/tmp/bun-linux-${bunArch}/bun" /usr/local/bin/bun \
+  && chmod 755 /usr/local/bin/bun \
+  && rm -rf /tmp/bun.zip "/tmp/bun-linux-${bunArch}" \
+  && apt-get purge -y curl unzip \
+  && apt-get autoremove -y \
+  && rm -rf /var/lib/apt/lists/*
+
+# Pi SDK pinned exact; pnpm resolves the platform natives (linux arm64/x64)
+# through @oh-my-pi/pi-natives optionalDependencies. Store pruned afterwards —
+# node_modules keeps the content via hardlinks.
+WORKDIR /opt/hone-worker
+RUN npm install -g pnpm@9 --no-fund --no-audit \
+  && pnpm add --save-exact @oh-my-pi/pi-coding-agent@16.5.2 \
+  && pnpm store prune \
+  && rm -rf /root/.cache /root/.npm
+
+# Worker source last: iterating on mutate.ts must not bust the dependency layer.
+COPY mutate.ts /opt/hone-worker/mutate.ts
+
+USER hone
+WORKDIR /work
