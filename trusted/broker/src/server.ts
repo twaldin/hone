@@ -146,6 +146,12 @@ export const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_CONCURRENT_PER_CONNECTION = 8;
 export const DEFAULT_MAX_CONCURRENT_GLOBAL = 64;
 export const DEFAULT_MAX_QUEUED_BYTES_PER_CONNECTION = 256 * 1024;
+/** Hard cap on simultaneous connections across BOTH sockets. */
+export const DEFAULT_MAX_CONNECTIONS = 64;
+/** Global budget for RETAINED bytes — pending pre-newline fragments plus
+ * queued complete frames, summed across all connections. Bounds broker
+ * memory even when many connections each stay under their own caps. */
+export const DEFAULT_MAX_BUFFERED_BYTES_GLOBAL = 8 * 1024 * 1024;
 
 /** Server-defined JSON-RPC error for backlog overflow — distinct from every
  * BROKER_ERROR_NUMBER code (-32000..-32006). */
@@ -163,6 +169,11 @@ export interface BrokerServerOptions {
   /** Max bytes of complete frames queued behind the concurrency caps before
    * the connection is rejected; default 256 KiB. */
   maxQueuedBytesPerConnection?: number | undefined;
+  /** Max simultaneous connections across both sockets; default 64. */
+  maxConnections?: number | undefined;
+  /** Global budget for retained bytes (fragments + queued frames) across all
+   * connections; the largest holder is evicted on overflow. Default 8 MiB. */
+  maxBufferedBytesGlobal?: number | undefined;
 }
 
 /** Per-connection dispatch state: in-flight permits + bounded frame backlog. */
@@ -170,19 +181,25 @@ interface ConnState {
   sock: net.Socket;
   privileged: boolean;
   inFlight: number;
-  queue: string[];
+  queue: Array<{ line: string; bytes: number }>;
+  /** Raw bytes of queued complete frames (incl. newline). */
   queuedBytes: number;
+  /** Raw bytes RETAINED for this connection: pending fragment + queued frames. */
+  bufferedBytes: number;
 }
 
 export class BrokerServer {
   private readonly table: Map<string, MethodEntry>;
   private readonly servers: net.Server[] = [];
-  private readonly connections = new Set<net.Socket>();
+  private readonly conns = new Set<ConnState>();
   private readonly maxFrameBytes: number;
   private readonly maxConcurrentPerConnection: number;
   private readonly maxConcurrentGlobal: number;
   private readonly maxQueuedBytesPerConnection: number;
+  private readonly maxConnections: number;
+  private readonly maxBufferedBytesGlobal: number;
   private globalInFlight = 0;
+  private globalBufferedBytes = 0;
   /** Connections with a non-empty backlog, FIFO by first queued frame. */
   private readonly waiting = new Set<ConnState>();
 
@@ -195,6 +212,8 @@ export class BrokerServer {
     this.maxConcurrentPerConnection = opts.maxConcurrentPerConnection ?? DEFAULT_MAX_CONCURRENT_PER_CONNECTION;
     this.maxConcurrentGlobal = opts.maxConcurrentGlobal ?? DEFAULT_MAX_CONCURRENT_GLOBAL;
     this.maxQueuedBytesPerConnection = opts.maxQueuedBytesPerConnection ?? DEFAULT_MAX_QUEUED_BYTES_PER_CONNECTION;
+    this.maxConnections = opts.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+    this.maxBufferedBytesGlobal = opts.maxBufferedBytesGlobal ?? DEFAULT_MAX_BUFFERED_BYTES_GLOBAL;
   }
 
   async listen(): Promise<void> {
@@ -215,8 +234,8 @@ export class BrokerServer {
 
   async close(): Promise<void> {
     this.waiting.clear();
-    for (const sock of this.connections) sock.destroy();
-    this.connections.clear();
+    // Socket close events release each connection's byte accounting.
+    for (const conn of this.conns) conn.sock.destroy();
     await Promise.all(
       this.servers.map((server) => {
         const { promise, resolve } = deferred<void>();
@@ -228,10 +247,21 @@ export class BrokerServer {
   }
 
   /** Live dispatch counters — observability for callers and adversarial tests. */
-  get stats(): { connections: number; inFlight: number; queuedBytes: number } {
+  get stats(): { connections: number; inFlight: number; queuedBytes: number; bufferedBytes: number } {
     let queuedBytes = 0;
     for (const conn of this.waiting) queuedBytes += conn.queuedBytes;
-    return { connections: this.connections.size, inFlight: this.globalInFlight, queuedBytes };
+    return {
+      connections: this.conns.size,
+      inFlight: this.globalInFlight,
+      queuedBytes,
+      bufferedBytes: this.globalBufferedBytes,
+    };
+  }
+
+  /** Return `bytes` of a connection's retained budget to the global pool. */
+  private release(conn: ConnState, bytes: number): void {
+    conn.bufferedBytes -= bytes;
+    this.globalBufferedBytes -= bytes;
   }
 
   /**
@@ -239,61 +269,96 @@ export class BrokerServer {
    * maxFrameBytes, complete frames run under per-connection and global
    * concurrency permits, and frames that cannot run yet queue up to
    * maxQueuedBytesPerConnection while the socket is paused (backpressure).
-   * A client that exceeds any cap gets ONE error response, then the
-   * connection is torn down deterministically.
+   * Retained bytes (fragment + queue) are additionally charged against a
+   * GLOBAL budget so many connections cannot multiply the per-connection
+   * caps into host memory exhaustion. A client that exceeds any cap gets
+   * ONE error response, then the connection is torn down deterministically.
    */
   private onConnection(sock: net.Socket, privileged: boolean): void {
-    const conn: ConnState = { sock, privileged, inFlight: 0, queue: [], queuedBytes: 0 };
-    this.connections.add(sock);
+    if (this.conns.size >= this.maxConnections) {
+      // Deterministic rejection of the excess socket: one error frame, close.
+      sock.on("error", () => sock.destroy());
+      const resp: RpcResponse = {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: OVERLOADED, message: `too many connections (max ${this.maxConnections})` },
+      };
+      sock.write(`${JSON.stringify(resp)}\n`, () => sock.destroy());
+      return;
+    }
+    const conn: ConnState = { sock, privileged, inFlight: 0, queue: [], queuedBytes: 0, bufferedBytes: 0 };
+    this.conns.add(conn);
     sock.on("close", () => {
-      this.connections.delete(sock);
-      // Drop the dead client's backlog; in-flight handlers release their
-      // permits in run()'s finally and their writes are skipped.
+      this.conns.delete(conn);
+      // Drop the dead client's backlog and return its retained bytes;
+      // in-flight handlers release their permits in run()'s finally and
+      // their writes are skipped.
       this.waiting.delete(conn);
       conn.queue.length = 0;
       conn.queuedBytes = 0;
+      this.release(conn, conn.bufferedBytes);
     });
     sock.on("error", () => sock.destroy());
     let buf: Buffer = Buffer.alloc(0);
     sock.on("data", (chunk: Buffer) => {
       buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
+      conn.bufferedBytes += chunk.length;
+      this.globalBufferedBytes += chunk.length;
       let nl: number;
       while ((nl = buf.indexOf(0x0a)) >= 0) {
         if (nl > this.maxFrameBytes) {
           return this.rejectConnection(conn, PARSE_ERROR, `frame exceeds ${this.maxFrameBytes} bytes`);
         }
+        const consumed = nl + 1; // line + newline, raw wire bytes
         const line = buf.subarray(0, nl).toString("utf8");
-        buf = buf.subarray(nl + 1);
-        if (line.trim().length === 0) continue;
-        if (!this.admit(conn, line)) return; // backlog overflow — torn down
+        buf = buf.subarray(consumed);
+        if (line.trim().length === 0) {
+          this.release(conn, consumed);
+          continue;
+        }
+        if (!this.admit(conn, line, consumed)) return; // backlog overflow — torn down
       }
       if (buf.length > this.maxFrameBytes) {
-        this.rejectConnection(conn, PARSE_ERROR, `frame exceeds ${this.maxFrameBytes} bytes`);
+        return this.rejectConnection(conn, PARSE_ERROR, `frame exceeds ${this.maxFrameBytes} bytes`);
+      }
+      // Retained bytes settled for this chunk; if the global budget is now
+      // exceeded, evict holders (largest first) until it fits again.
+      while (this.globalBufferedBytes > this.maxBufferedBytesGlobal) {
+        let victim: ConnState | undefined;
+        for (const c of this.conns) {
+          if (!victim || c.bufferedBytes > victim.bufferedBytes) victim = c;
+        }
+        if (!victim || victim.bufferedBytes === 0) break;
+        this.rejectConnection(
+          victim,
+          OVERLOADED,
+          `global buffered-byte budget exceeded (${this.maxBufferedBytesGlobal} bytes)`,
+        );
       }
     });
   }
 
   /**
-   * Admit one complete frame: run immediately when both permits are free and
-   * nothing is queued ahead of it (per-connection FIFO order), otherwise
-   * queue it and pause reads. Returns false when the backlog cap is exceeded
-   * and the connection has been rejected.
+   * Admit one complete frame of `bytes` raw wire bytes: run immediately when
+   * both permits are free and nothing is queued ahead of it (per-connection
+   * FIFO order), otherwise queue it and pause reads. Returns false when the
+   * backlog cap is exceeded and the connection has been rejected.
    */
-  private admit(conn: ConnState, line: string): boolean {
+  private admit(conn: ConnState, line: string, bytes: number): boolean {
     if (
       conn.queue.length === 0 &&
       conn.inFlight < this.maxConcurrentPerConnection &&
       this.globalInFlight < this.maxConcurrentGlobal
     ) {
+      this.release(conn, bytes); // dispatched — no longer retained
       this.run(conn, line);
       return true;
     }
-    const bytes = Buffer.byteLength(line, "utf8");
     if (conn.queuedBytes + bytes > this.maxQueuedBytesPerConnection) {
       this.rejectConnection(conn, OVERLOADED, `pipelined backlog exceeds ${this.maxQueuedBytesPerConnection} bytes`);
       return false;
     }
-    conn.queue.push(line);
+    conn.queue.push({ line, bytes });
     conn.queuedBytes += bytes;
     this.waiting.add(conn);
     conn.sock.pause(); // backpressure: stop reading until the backlog drains
@@ -330,10 +395,11 @@ export class BrokerServer {
         continue;
       }
       while (conn.inFlight < this.maxConcurrentPerConnection && this.globalInFlight < this.maxConcurrentGlobal) {
-        const line = conn.queue.shift();
-        if (line === undefined) break;
-        conn.queuedBytes -= Buffer.byteLength(line, "utf8");
-        this.run(conn, line);
+        const entry = conn.queue.shift();
+        if (entry === undefined) break;
+        conn.queuedBytes -= entry.bytes;
+        this.release(conn, entry.bytes); // dispatched — no longer retained
+        this.run(conn, entry.line);
       }
       if (conn.queue.length === 0) {
         this.waiting.delete(conn);
@@ -342,11 +408,13 @@ export class BrokerServer {
     }
   }
 
-  /** One safe error frame, then close — deterministic teardown for cap abuse. */
+  /** One safe error frame, then close — deterministic teardown for cap abuse.
+   * Returns the connection's whole retained budget (fragment + backlog). */
   private rejectConnection(conn: ConnState, code: number, message: string): void {
     this.waiting.delete(conn);
     conn.queue.length = 0;
     conn.queuedBytes = 0;
+    this.release(conn, conn.bufferedBytes);
     const { sock } = conn;
     sock.removeAllListeners("data");
     if (sock.destroyed) return;
