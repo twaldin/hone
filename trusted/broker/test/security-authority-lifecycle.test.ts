@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFile, link, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, link, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CapsuleManifest, RunEvent } from "@hone/schema";
@@ -61,14 +61,20 @@ function makeManifest(over: Partial<CapsuleManifest> = {}): CapsuleManifest {
 
 // ---------- minimal ustar builder (hostile-archive fixtures) ----------
 
-function tarHeader(name: string, size: number, typeflag: string, linkname: string): Buffer {
+function tarHeader(
+  name: string,
+  size: number,
+  typeflag: string,
+  linkname: string,
+  opts: { mode?: string; mtime?: number } = {},
+): Buffer {
   const h = Buffer.alloc(512);
   h.write(name, 0, 100, "utf8");
-  h.write("0000755\0", 100, 8, "utf8");
+  h.write(`${opts.mode ?? "0000755"}\0`, 100, 8, "utf8");
   h.write("0000000\0", 108, 8, "utf8");
   h.write("0000000\0", 116, 8, "utf8");
   h.write(`${size.toString(8).padStart(11, "0")}\0`, 124, 12, "utf8");
-  h.write("00000000000\0", 136, 12, "utf8");
+  h.write(`${(opts.mtime ?? 0).toString(8).padStart(11, "0")}\0`, 136, 12, "utf8");
   h.write("        ", 148, 8, "utf8");
   h.write(typeflag, 156, 1, "utf8");
   h.write(linkname, 157, 100, "utf8");
@@ -80,11 +86,15 @@ function tarHeader(name: string, size: number, typeflag: string, linkname: strin
   return h;
 }
 
-function makeTar(entries: ReadonlyArray<{ name: string; type: string; content?: string; linkname?: string }>): Buffer {
+function makeTar(
+  entries: ReadonlyArray<{ name: string; type: string; content?: string; linkname?: string; mode?: string; mtime?: number }>,
+): Buffer {
   const parts: Buffer[] = [];
   for (const e of entries) {
     const body = Buffer.from(e.content ?? "");
-    parts.push(tarHeader(e.name, e.type === "0" ? body.length : 0, e.type, e.linkname ?? ""));
+    parts.push(
+      tarHeader(e.name, e.type === "0" ? body.length : 0, e.type, e.linkname ?? "", { ...(e.mode !== undefined ? { mode: e.mode } : {}), ...(e.mtime !== undefined ? { mtime: e.mtime } : {}) }),
+    );
     if (e.type === "0" && body.length > 0) {
       const padded = Buffer.alloc(Math.ceil(body.length / 512) * 512);
       body.copy(padded);
@@ -913,6 +923,71 @@ describe("artifact validation at every ingestion point", () => {
     b.ctl.saveTar = evil;
     await expect(b.broker.saveArtifact({ sandboxId }, CLIENT)).rejects.toThrow(/rejected/);
     expect(await b.broker.cas.has(evilHash)).toBe(false);
+    expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(0);
+  });
+});
+
+// ---------- saveArtifact canonicalization ----------
+
+describe("saveArtifact canonicalization (unchanged trees repack to the parent hash)", () => {
+  async function casBlobCount(casDir: string): Promise<number> {
+    let n = 0;
+    for (const shard of await readdir(path.join(casDir, "sha256"))) {
+      n += (await readdir(path.join(casDir, "sha256", shard))).length;
+    }
+    return n;
+  }
+
+  it("a metadata-noisy repack of the UNCHANGED parent tree is the parent, not a new candidate", async () => {
+    // run_mrmbrlmv312b68 regression: after SIGKILL/resume the sandbox emitted
+    // the byte-identical baseline TREE repacked with fresh mtimes plus
+    // __pycache__ detritus — pre-fix that minted a spurious candidate hash.
+    const b = await boot();
+    const noisy = makeTar([
+      { name: "workspace/", type: "5", mtime: 777_777 },
+      { name: "workspace/answer.txt", type: "0", content: "1", mode: "0000644", mtime: 777_777 },
+      { name: "workspace/__pycache__/", type: "5", mtime: 777_777 },
+      { name: "workspace/__pycache__/junk.cpython-311.pyc", type: "0", content: "junk", mode: "0000644", mtime: 777_777 },
+    ]);
+    expect(noisy.equals(baselineTar)).toBe(false); // wire bytes differ...
+    const hash = await saveCandidate(b, noisy);
+    expect(hash).toBe(baselineHash); // ...but the canonical hash is the parent's
+    expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(0);
+    expect((await stateLines(b)).filter((l) => l["t"] === "lineage")).toHaveLength(0);
+  });
+
+  it("byte-different saves of the same CHANGED tree land on one canonical hash and one lineage record", async () => {
+    const b = await boot();
+    const noisy = (mtime: number): Buffer =>
+      makeTar([
+        { name: "workspace/", type: "5", mtime },
+        { name: "workspace/answer.txt", type: "0", content: "2", mode: "0000644", mtime },
+        { name: "workspace/.pytest_cache/", type: "5", mtime },
+        { name: "workspace/.pytest_cache/lastfailed", type: "0", content: "{}", mode: "0000644", mtime },
+      ]);
+    expect(noisy(1000).equals(noisy(2000))).toBe(false);
+    const h1 = await saveCandidate(b, noisy(1000));
+    const h2 = await saveCandidate(b, noisy(2000));
+    // Both collapse onto the trusted canonical pack of {answer.txt: "2"}.
+    expect(h1).toBe(candidateHash);
+    expect(h2).toBe(h1);
+    expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(1);
+    expect((await stateLines(b)).filter((l) => l["t"] === "lineage")).toHaveLength(1);
+  });
+
+  it("a structurally malicious sandbox tar is rejected before extraction and grows CAS by nothing", async () => {
+    const b = await boot();
+    const evil = makeTar([
+      { name: "workspace/", type: "5" },
+      { name: "workspace/link", type: "2", linkname: "/etc" },
+    ]);
+    const before = await casBlobCount(b.casDir);
+    b.ctl.saveTar = evil;
+    b.ctl.execExit = 0;
+    const { sandboxId } = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT);
+    await expect(b.broker.saveArtifact({ sandboxId }, CLIENT)).rejects.toThrow(/saved artifact rejected.*symlink/);
+    expect(await casBlobCount(b.casDir)).toBe(before);
     expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(0);
   });
 });

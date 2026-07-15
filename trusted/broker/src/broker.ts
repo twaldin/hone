@@ -34,7 +34,7 @@ import {
   type ArtifactRef,
   type RunEvent,
 } from "@hone/schema";
-import { diffProtectedPaths, dirSizeBytes, unpackArtifact } from "./artifact.js";
+import { MAX_ARTIFACT_BYTES, canonicalizeWorkspaceTar, diffProtectedPaths, dirSizeBytes, unpackArtifact } from "./artifact.js";
 import { CasStore } from "./cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "./command.js";
 import { BrokerError } from "./errors.js";
@@ -139,7 +139,6 @@ interface SandboxEntry {
 }
 
 const MISSING_CONTAINER_RE = /no such container|is not running|no such object/i;
-const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const STATE_FILE = "broker-state.ndjson";
 
 type CreateSandboxP = z.infer<typeof CreateSandboxParams>;
@@ -853,9 +852,14 @@ export class Broker {
     if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `docker cp out failed: ${stderrText(res)}`);
     if (res.truncated) throw new BrokerError("QUOTA_EXCEEDED", "artifact exceeds size cap");
     // The sandbox ran adversarial code — its tar is untrusted until the
-    // archive validator accepts it. Nothing malformed ever enters CAS.
+    // archive validator accepts it; validation runs BEFORE anything is
+    // extracted, and nothing malformed ever enters CAS. The accepted tree is
+    // then repacked canonically (sorted entries, zeroed metadata, runtime
+    // detritus stripped) so an unchanged tree always lands on the same hash —
+    // lineage, events, and evaluation all key off the canonical hash.
+    let hash: string;
     try {
-      validateWorkspaceTar(res.stdout);
+      hash = await canonicalizeWorkspaceTar(res.stdout, this.cas, this.run);
     } catch (err) {
       if (err instanceof ArtifactValidationError) {
         throw new BrokerError("INTERNAL", `saved artifact rejected: ${err.message}`, {
@@ -865,7 +869,6 @@ export class Broker {
       }
       throw err;
     }
-    const hash = await this.cas.putBuffer(res.stdout);
 
     if (sb.lastExecExitCode === 0) {
       // Candidate: the last exec in the episode exited 0. Durable lineage

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { CasStore } from "./cas.js";
@@ -12,23 +12,151 @@ import { validateWorkspaceTar } from "./tarcheck.js";
  * are rooted at `workspace/` — exactly what `docker cp <c>:/workspace -`
  * emits. Extracting it at `/` inside a container recreates /workspace, and
  * extracting it on the host yields `<dir>/workspace/…`.
+ *
+ * Canonical form: artifacts are BYTE-STABLE for an unchanged file tree.
+ * Packing writes ustar bytes directly (no tar binary), with entries sorted by
+ * path, mtime/uid/gid forced to 0, uname/gname empty, and mode collapsed to
+ * 0644/0755 by the owner-exec bit — the tree's content alone determines the
+ * hash, on Darwin and Linux alike. Runtime/VCS detritus (.git, .gitdir,
+ * .pytest_cache, __pycache__, *.pyc, *.pyo) is excluded at every depth.
  */
 
-/** Packs a directory tree into a `workspace/`-rooted tar and stores it in CAS. */
-export async function packDirAsArtifact(dir: string, cas: CasStore, run: RunCommand = runCommand): Promise<string> {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "hone-pack-"));
+/** Hard cap on artifact tar size — applies to sandbox output AND canonical repacks. */
+export const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
+
+const BLOCK = 512;
+
+/** Runtime/VCS detritus never admitted into a canonical artifact, at any depth. */
+const DETRITUS_NAMES: Record<string, true> = { ".git": true, ".gitdir": true, ".pytest_cache": true, "__pycache__": true };
+const DETRITUS_SUFFIXES = [".pyc", ".pyo"];
+
+/**
+ * Splits a path into ustar (name, prefix) fields: leftmost `/` split whose
+ * suffix fits the 100-byte name field and prefix the 155-byte prefix field.
+ * Deterministic; paths that cannot split are rejected (fail-closed).
+ */
+function splitUstarName(p: string): { name: string; prefix: string } {
+  if (Buffer.byteLength(p) <= 100) return { name: p, prefix: "" };
+  for (let i = p.indexOf("/"); i !== -1; i = p.indexOf("/", i + 1)) {
+    const prefix = p.slice(0, i);
+    const name = p.slice(i + 1);
+    if (Buffer.byteLength(prefix) <= 155 && Buffer.byteLength(name) <= 100) return { name, prefix };
+  }
+  throw new Error(`artifact path does not fit ustar name+prefix fields: ${p}`);
+}
+
+/** One canonical ustar header block. Every non-content field is fixed. */
+function ustarHeader(entryPath: string, kind: "file" | "dir", size: number, mode: number): Buffer {
+  const h = Buffer.alloc(BLOCK);
+  const { name, prefix } = splitUstarName(kind === "dir" ? `${entryPath}/` : entryPath);
+  h.write(name, 0, 100, "utf8");
+  h.write(`${mode.toString(8).padStart(7, "0")}\0`, 100, "latin1");
+  h.write("0000000\0", 108, "latin1"); // uid 0
+  h.write("0000000\0", 116, "latin1"); // gid 0
+  h.write(`${size.toString(8).padStart(11, "0")}\0`, 124, "latin1");
+  h.write("00000000000\0", 136, "latin1"); // mtime 0: wall time never reaches the bytes
+  h.write(kind === "dir" ? "5" : "0", 156, "latin1");
+  h.write("ustar\0", 257, "latin1");
+  h.write("00", 263, "latin1");
+  // uname/gname/devmajor/devminor stay NUL — no host identity leaks in.
+  if (prefix !== "") h.write(prefix, 345, 155, "utf8");
+  h.fill(0x20, 148, 156);
+  let sum = 0;
+  for (const byte of h) sum += byte;
+  h.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, "latin1");
+  return h;
+}
+
+interface SourceEntry {
+  rel: string;
+  kind: "file" | "dir";
+  abs: string;
+}
+
+/**
+ * Collects the packable tree under `root`. Detritus is pruned recursively;
+ * anything that is not a regular file or directory (symlink, FIFO, device,
+ * socket) is rejected outright — links are never followed.
+ */
+async function collectTree(root: string, rel: string, out: SourceEntry[]): Promise<void> {
+  const dirents = await readdir(rel === "" ? root : path.join(root, rel), { withFileTypes: true });
+  for (const d of dirents) {
+    if (DETRITUS_NAMES[d.name] === true || DETRITUS_SUFFIXES.some((s) => d.name.endsWith(s))) continue;
+    const entryRel = rel === "" ? d.name : `${rel}/${d.name}`;
+    const abs = path.join(root, entryRel);
+    if (d.isDirectory()) {
+      out.push({ rel: entryRel, kind: "dir", abs });
+      await collectTree(root, entryRel, out);
+    } else if (d.isFile()) {
+      out.push({ rel: entryRel, kind: "file", abs });
+    } else {
+      const what = d.isSymbolicLink() ? "symlink" : "special file";
+      throw new Error(`unsupported ${what} in artifact tree: ${entryRel}`);
+    }
+  }
+}
+
+/**
+ * Packs a directory tree into a canonical `workspace/`-rooted tar and stores
+ * it in CAS. Same tree in, same bytes (and hash) out — independent of wall
+ * time, umask beyond the owner-exec bit, platform tar binary, or traversal
+ * order. Output is self-validated before it enters CAS.
+ */
+export async function packDirAsArtifact(dir: string, cas: CasStore): Promise<string> {
+  const entries: SourceEntry[] = [];
+  await collectTree(dir, "", entries);
+  entries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+
+  const parts: Buffer[] = [ustarHeader("workspace", "dir", 0, 0o755)];
+  let total = BLOCK;
+  const charge = (n: number): void => {
+    total += n;
+    if (total > MAX_ARTIFACT_BYTES) throw new Error("artifact exceeds size cap");
+  };
+  for (const e of entries) {
+    const entryPath = `workspace/${e.rel}`;
+    if (e.kind === "dir") {
+      parts.push(ustarHeader(entryPath, "dir", 0, 0o755));
+      charge(BLOCK);
+      continue;
+    }
+    const st = await lstat(e.abs);
+    charge(BLOCK + Math.ceil(st.size / BLOCK) * BLOCK); // fail-closed BEFORE reading a huge file
+    const content = await readFile(e.abs);
+    if (content.length !== st.size) throw new Error(`artifact tree changed while packing: ${e.rel}`);
+    const mode = (st.mode & 0o100) !== 0 ? 0o755 : 0o644;
+    parts.push(ustarHeader(entryPath, "file", content.length, mode));
+    parts.push(content);
+    const pad = (BLOCK - (content.length % BLOCK)) % BLOCK;
+    if (pad !== 0) parts.push(Buffer.alloc(pad));
+  }
+  parts.push(Buffer.alloc(2 * BLOCK));
+  const bytes = Buffer.concat(parts);
+  // Self-check: only validator-clean bytes ever enter CAS, so the unpack
+  // gate can never reject an artifact this function produced.
+  validateWorkspaceTar(bytes);
+  return await cas.putBuffer(bytes);
+}
+
+/**
+ * Canonicalizes an UNTRUSTED workspace tar (e.g. `docker cp` output from an
+ * adversarial sandbox) into CAS: structural validation FIRST — nothing
+ * malformed is ever written to disk or handed to a tar binary — then
+ * extraction into a trusted temp dir, then a canonical repack of the
+ * extracted `workspace/` tree. Returns the canonical hash; the temp dir is
+ * always cleaned up.
+ */
+export async function canonicalizeWorkspaceTar(tarBytes: Buffer, cas: CasStore, run: RunCommand = runCommand): Promise<string> {
+  validateWorkspaceTar(tarBytes);
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "hone-canon-"));
   try {
-    await cp(dir, path.join(tmp, "workspace"), { recursive: true });
-    const tarPath = path.join(tmp, "artifact.tar");
-    // Strip host metadata: macOS xattrs (com.apple.provenance & co.) cannot be
-    // restored inside minimal container rootfs and would poison docker cp.
-    const metaFlags =
-      process.platform === "darwin"
-        ? ["--no-xattrs", "--no-mac-metadata", "--no-acls", "--no-fflags"]
-        : ["--no-xattrs"];
-    const res = await run(["tar", "-C", tmp, ...metaFlags, "-cf", tarPath, "workspace"]);
-    if (res.exitCode !== 0) throw new Error(`tar pack failed: ${res.stderr.toString()}`);
-    return await cas.putFile(tarPath);
+    const tarPath = path.join(tmp, "incoming.tar");
+    await writeFile(tarPath, tarBytes);
+    const treeDir = path.join(tmp, "tree");
+    await mkdir(treeDir);
+    const res = await run(["tar", "-xf", tarPath, "-C", treeDir]);
+    if (res.exitCode !== 0) throw new Error(`tar extract failed: ${res.stderr.toString()}`);
+    return await packDirAsArtifact(path.join(treeDir, "workspace"), cas);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
