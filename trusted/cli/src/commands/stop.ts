@@ -4,17 +4,9 @@ import { appendEvent, replayRun } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
 import { sleep } from "../promise.js";
 import { resolveRun } from "../runs.js";
-import { readSupervisorPid } from "../supervisor.js";
+import { pidAlive, readSupervisorPid } from "../supervisor.js";
 import { applyBest } from "./apply.js";
 
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Stop a run: SIGTERM the live supervisor and wait for its run.finished; if
@@ -32,7 +24,7 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
     io.out(`run ${runId} already finished (${state.finished.status})`);
   } else {
     const pid = readSupervisorPid(runDir);
-    if (pid !== null && alive(pid)) {
+    if (pid !== null && pidAlive(pid)) {
       process.kill(pid, "SIGTERM");
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {

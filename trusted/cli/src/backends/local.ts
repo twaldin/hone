@@ -5,11 +5,12 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CapsuleManifest } from "@hone/schema";
+import type { ArtifactRef, BudgetState, CapsuleManifest, RunEvent } from "@hone/schema";
 import { CasStore, packDirAsArtifact, runCommand, startBroker } from "@hone/broker";
-import type { RunningBroker, SandboxNetworkMode } from "@hone/broker";
+import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from "@hone/broker";
 import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
 import type { BudgetDecision, ProxyHandle } from "@hone/proxy";
+import { readEvents, replayRun } from "../eventlog.js";
 import { deferred } from "../promise.js";
 import type { RunnerBackend, RunnerBackendContext } from "../types.js";
 
@@ -96,10 +97,43 @@ async function measureBaseline(capsuleDir: string, cas: CasStore): Promise<strin
   }
 }
 
-async function mustRun(argv: string[], what: string): Promise<string> {
-  const res = await runCommand(argv, { timeoutMs: 120_000 });
+async function mustRun(run: RunCommand, argv: string[], what: string): Promise<string> {
+  const res = await run(argv, { timeoutMs: 120_000 });
   if (res.exitCode !== 0) throw new Error(`${what} failed: ${res.stderr.toString("utf8").slice(0, 2000)}`);
   return res.stdout.toString("utf8").trim();
+}
+
+/** Docker's name alphabet is narrower than a run id's; label filters use the RAW id, names the sanitized one. */
+function dockerNames(runId: string): { network: string; relay: string } {
+  const safe = runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
+  return { network: `hone-${safe}`, relay: `hone-proxy-${safe}` };
+}
+
+/**
+ * Crash-recovery sweep (review finding 10): a SIGKILLed supervisor leaves the
+ * run's labeled sandbox/eval/relay containers and the deterministic
+ * --internal network behind, and the next `--resume` would die at
+ * `docker network create` before any cleanup handler exists. Best-effort
+ * teardown of every per-run docker resource plus stale socket files; durable
+ * run data (events.ndjson, broker-state.ndjson, CAS, the labeled scratch
+ * VOLUME) is deliberately untouched.
+ */
+export async function sweepStaleRunResources(runId: string, runDir: string, run: RunCommand = runCommand): Promise<void> {
+  const { network, relay } = dockerNames(runId);
+  // Every container this run ever labeled (mutation/eval sandboxes + relay).
+  const ls = await run(["docker", "ps", "-aq", "--filter", `label=hone.runId=${runId}`], { timeoutMs: 30_000 });
+  if (ls.exitCode === 0) {
+    const ids = ls.stdout.toString("utf8").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+    if (ids.length > 0) await run(["docker", "rm", "-f", ...ids], { timeoutMs: 120_000 });
+  }
+  // Deterministic names, in case the label listing failed or was incomplete.
+  await run(["docker", "rm", "-f", relay], { timeoutMs: 30_000 });
+  await run(["docker", "network", "rm", network], { timeoutMs: 30_000 });
+  // Half-dead endpoints: every listener also unlinks defensively, but a swept
+  // run dir must not present a crashed process's sockets to other tooling.
+  for (const sock of ["proxy.sock", "broker.sock", "broker-admin.sock"]) {
+    rmSync(join(runDir, sock), { force: true });
+  }
 }
 
 interface Egress {
@@ -109,7 +143,13 @@ interface Egress {
   cleanup(): Promise<void>;
 }
 
-async function setupEgress(ctx: RunnerBackendContext, proxy: ProxyHandle, image: string): Promise<Egress> {
+/** Exported for the recovery tests: network create must be idempotent (and isolation-verified) after a crash sweep. */
+export async function setupEgress(
+  ctx: Pick<RunnerBackendContext, "runId" | "runDir" | "env">,
+  proxy: ProxyHandle,
+  image: string,
+  run: RunCommand,
+): Promise<Egress> {
   const mode = ctx.env["HONE_EGRESS"] ?? (process.platform === "darwin" ? "network" : "socket");
   if (mode === "socket") {
     await proxy.listenUnix(join(ctx.runDir, "proxy.sock"));
@@ -117,17 +157,26 @@ async function setupEgress(ctx: RunnerBackendContext, proxy: ProxyHandle, image:
   }
   if (mode !== "network") throw new Error(`HONE_EGRESS must be "socket" or "network", got "${mode}"`);
 
-  const safeRunId = ctx.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
-  const network = `hone-${safeRunId}`;
-  const relay = `hone-proxy-${safeRunId}`;
+  const { network, relay } = dockerNames(ctx.runId);
   const port = await proxy.listenTcp(0);
-  await mustRun(["docker", "network", "create", "--internal", network], `docker network create ${network}`);
+  const created = await run(["docker", "network", "create", "--internal", network], { timeoutMs: 120_000 });
+  if (created.exitCode !== 0) {
+    const stderr = created.stderr.toString("utf8");
+    if (!/already exists/i.test(stderr)) throw new Error(`docker network create ${network} failed: ${stderr.slice(0, 2000)}`);
+    // Idempotent reuse after the crash sweep is safe ONLY for a network with
+    // our exact isolation config — a same-named NON-internal network would
+    // silently grant every sandbox real egress.
+    const inspect = await run(["docker", "network", "inspect", "--format", "{{.Internal}}", network], { timeoutMs: 30_000 });
+    if (inspect.exitCode !== 0 || inspect.stdout.toString("utf8").trim() !== "true") {
+      throw new Error(`docker network ${network} already exists but is not --internal — refusing to attach sandboxes`);
+    }
+  }
   const cleanup = async (): Promise<void> => {
-    await runCommand(["docker", "rm", "-f", relay]);
-    await runCommand(["docker", "network", "rm", network]);
+    await run(["docker", "rm", "-f", relay]);
+    await run(["docker", "network", "rm", network]);
   };
   try {
-    await mustRun(
+    await mustRun(run,
       [
         "docker", "run", "-d",
         "--name", relay,
@@ -141,7 +190,7 @@ async function setupEgress(ctx: RunnerBackendContext, proxy: ProxyHandle, image:
       "docker run (proxy relay)",
     );
     // Second leg: bridge gives the relay (and ONLY the relay) a route to the host proxy.
-    await mustRun(["docker", "network", "connect", "bridge", relay], "docker network connect bridge");
+    await mustRun(run, ["docker", "network", "connect", "bridge", relay], "docker network connect bridge");
   } catch (err) {
     await cleanup();
     throw err;
@@ -160,6 +209,15 @@ function optimizerCommand(env: NodeJS.ProcessEnv): string[] {
   const require = createRequire(import.meta.url);
   const tsxCli = join(dirname(require.resolve("tsx/package.json")), "dist", "cli.mjs");
   return [process.execPath, tsxCli];
+}
+
+/** Optimizer resume payload, always from the on-disk log (post-reconciliation truth). */
+function resumeHint(runDir: string): { nextEpisode: number; incumbent: { artifact: ArtifactRef; aggregate: number } | null } {
+  const replayed = replayRun(runDir);
+  return {
+    nextEpisode: replayed.nextEpisode,
+    incumbent: replayed.incumbent === null ? null : { artifact: replayed.incumbent.artifact, aggregate: replayed.incumbent.aggregate },
+  };
 }
 
 /** Exported for the trusted-boundary test: optimizer stdout must never become events. */
@@ -189,10 +247,10 @@ export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): P
       HONE_BROKER_SOCK: brokerSocket,
       HONE_RUN_ID: ctx.runId,
       HONE_SEED: String(ctx.config.seed),
-      HONE_RESUME: JSON.stringify({
-        nextEpisode: ctx.replayed.nextEpisode,
-        incumbent: ctx.replayed.incumbent === null ? null : { artifact: ctx.replayed.incumbent.artifact, aggregate: ctx.replayed.incumbent.aggregate },
-      }),
+      // Events.ndjson is the store of record and reconciliation may have just
+      // appended recovered incumbents — replay from disk, not the supervisor's
+      // pre-backend snapshot, so the resume hint sees the durable authority.
+      HONE_RESUME: JSON.stringify(resumeHint(ctx.runDir)),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -211,7 +269,39 @@ export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): P
   return done.promise;
 }
 
-export function createBackend(): RunnerBackend {
+/** The slice of the broker's runner API that resume reconciliation needs (DI seam for the recovery tests). */
+export interface AuthorityRecoverySource {
+  replayIncumbentEvents(alreadyLogged: number): number;
+  getBudget(ctx: CallContext): BudgetState;
+}
+
+/**
+ * Review finding 11: promotions are fsynced into broker-state.ndjson BEFORE
+ * their incumbent.new event reaches events.ndjson, so a crash in that window
+ * leaves the event log behind the journal — replay would then finish or
+ * deliver an older/null "best" while the broker idempotently swallows the
+ * re-report. Count alignment over the two append-only ordered logs re-emits
+ * exactly the missing promotions through the normal event sink, then one
+ * budget snapshot so budget authority reconverges too. Idempotent across
+ * repeated resumes; throws (fail closed) when the event log claims MORE
+ * promotions than the durable journal.
+ */
+export function reconcileBrokerAuthority(
+  runDir: string,
+  broker: AuthorityRecoverySource,
+  emit: (event: RunEvent) => RunEvent,
+  runId: string,
+): number {
+  const alreadyLogged = readEvents(runDir).filter((e) => e.type === "incumbent.new").length;
+  const recovered = broker.replayIncumbentEvents(alreadyLogged);
+  if (recovered > 0) {
+    emit({ runId, at: new Date().toISOString(), type: "budget.snapshot", budget: broker.getBudget({ privileged: true }) });
+  }
+  return recovered;
+}
+
+export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
+  const run = deps.run ?? runCommand;
   return {
     async start(ctx: RunnerBackendContext): Promise<void> {
       if (ctx.signal.aborted) return;
@@ -259,7 +349,11 @@ export function createBackend(): RunnerBackend {
       const image = ctx.env["HONE_MUTATION_IMAGE"] ?? "hone-mutation:latest";
       let egress: Egress | null = null;
       try {
-        egress = await setupEgress(ctx, proxy, image);
+        // Finding 10: a crashed prior supervisor's labeled containers, the
+        // deterministic relay/network, and dead sockets must be gone before
+        // this run mints the same names again.
+        await sweepStaleRunResources(ctx.runId, ctx.runDir, run);
+        egress = await setupEgress(ctx, proxy, image, run);
 
         running = await startBroker({
           runId: ctx.runId,
@@ -270,6 +364,7 @@ export function createBackend(): RunnerBackend {
           image,
           runDir: ctx.runDir,
           casDir: ctx.casDir,
+          runCommand: run,
           // Quota-enforcing docker tmpfs volume for /scratch (landed broker API).
           scratchVolume: true,
           onEvent: (event) => ctx.emit(event),
@@ -281,6 +376,11 @@ export function createBackend(): RunnerBackend {
           },
           episodeOrigin: ctx.replayed.nextEpisode,
         });
+
+        // Finding 11: replay journaled-but-unlogged promotions into
+        // events.ndjson BEFORE the optimizer resumes, so best/status/delivery
+        // and the resume hint all see the durable incumbent exactly once.
+        reconcileBrokerAuthority(ctx.runDir, running.broker, ctx.emit, ctx.runId);
 
         await runOptimizer(ctx, running.socketPath);
 

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { RunEvent } from "@hone/schema";
 import type { ArtifactRef, BudgetState } from "@hone/schema";
@@ -14,9 +14,21 @@ export function eventsPath(runDir: string): string {
   return join(runDir, EVENTS_FILE);
 }
 
+/**
+ * Durable append (review finding 11): broker authority is journaled+fsynced
+ * before it reaches this sink, so the sink itself must not sit in the page
+ * cache — an acknowledged event survives power loss, keeping the two
+ * append-only logs' counts alignable on resume.
+ */
 export function appendEvent(runDir: string, event: RunEvent): RunEvent {
   const parsed = RunEvent.parse(event);
-  appendFileSync(eventsPath(runDir), `${JSON.stringify(parsed)}\n`, "utf8");
+  const fd = openSync(eventsPath(runDir), "a");
+  try {
+    writeSync(fd, `${JSON.stringify(parsed)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   return parsed;
 }
 
