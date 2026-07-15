@@ -2,14 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { Broker } from "../src/broker.js";
 import { BrokerServer } from "../src/server.js";
 import { CasStore } from "../src/cas.js";
 import { canonicalizeWorkspaceTar, diffProtectedPaths, packDirAsArtifact, unpackArtifact } from "../src/artifact.js";
 import { ArtifactValidationError, validateWorkspaceTar } from "../src/tarcheck.js";
 import { deferred } from "../src/deferred.js";
-import type { RunCommand } from "../src/command.js";
+import { runCommand, type RunCommand } from "../src/command.js";
 import { buildTestCapsule, TEST_IMAGE } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -490,6 +490,44 @@ describe("canonical artifact packing", () => {
       await expect(canonicalizeWorkspaceTar(evil, cas, run)).rejects.toThrowError(ArtifactValidationError);
       expect(spawned).toEqual([]); // validation failed CLOSED before extraction
       await expect(readdir(casDir)).rejects.toThrowError(); // nothing entered CAS
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("canonicalizes hostile mode bits (000 dirs/files, exec-only) and never leaks temp trees", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-p-"));
+    try {
+      // Validated-but-hostile modes: an unreadable/untraversable dir hiding a
+      // mode-000 file, plus an exec-only (0111) script. Pre-fix, host tar
+      // restored these, the canonical pack could not walk them, and the
+      // finally-cleanup could not traverse them — leaking one hone-canon-*
+      // temp tree per save.
+      const hostile = makeTar([
+        { name: "workspace/", type: "5" },
+        { name: "workspace/locked/", type: "5", mode: "0000000" },
+        { name: "workspace/locked/secret.txt", content: "s", mode: "0000000" },
+        { name: "workspace/runme", content: "#!/bin/sh\n", mode: "0000111" },
+      ]);
+      const cas = new CasStore(path.join(base, "cas"));
+      // Capture the extraction dir so temp cleanup is asserted on the exact path.
+      let extractDir: string | undefined;
+      const spyRun: RunCommand = async (argv, opts) => {
+        const c = argv.indexOf("-C");
+        if (c >= 0) extractDir = argv[c + 1];
+        return runCommand(argv, opts);
+      };
+      const hash = await canonicalizeWorkspaceTar(hostile, cas, spyRun);
+      expect(extractDir).toBeDefined();
+      await expect(stat(path.dirname(extractDir as string))).rejects.toThrowError(); // temp tree fully removed
+      // Repeated canonicalization is stable and leak-free too.
+      expect(await canonicalizeWorkspaceTar(hostile, cas)).toBe(hash);
+      // Canonical mode keeps only the owner-exec signal: the same tree built
+      // with sane modes (runme executable) hashes identically.
+      const clean = path.join(base, "clean");
+      await makeTree(clean, { "locked/secret.txt": "s", "runme": "#!/bin/sh\n" });
+      await chmod(path.join(clean, "runme"), 0o755);
+      expect(await packDirAsArtifact(clean, cas)).toBe(hash);
     } finally {
       await rm(base, { recursive: true, force: true });
     }
