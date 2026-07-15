@@ -44,11 +44,11 @@ import type { OptimizerChildLike, OptimizerRuntime, OptimizerSpawn, OptimizerTra
  * holdout/credential/Docker-socket exposure. Broker transport follows the
  * egress topology:
  *   network (darwin default)  the broker opens its authenticated public TCP
- *           listener on 127.0.0.1:0 with a fresh ≥256-bit token; the
- *           optimizer joins the already-internal egress network and dials
- *           tcp://host.docker.internal:<resolved port>, presenting the token
- *           on every request. The token travels via the docker client's env
- *           (value-less -e), never argv, and is never logged.
+ *           listener on 127.0.0.1:0 with a fresh ≥256-bit token; a second
+ *           dual-network relay exposes that listener only inside the
+ *           per-run internal network. The optimizer dials the relay and
+ *           presents the token on every request. The token travels via the
+ *           docker client's env (value-less -e), never argv or logs.
  *   socket (linux default)    ONLY the public broker.sock is bind-mounted
  *           read/write at /run/hone/broker.sock; --network none; no admin
  *           socket, no token.
@@ -143,9 +143,13 @@ async function mustRun(run: RunCommand, argv: string[], what: string): Promise<s
 }
 
 /** Docker's name alphabet is narrower than a run id's; label filters use the RAW id, names the sanitized one. */
-function dockerNames(runId: string): { network: string; relay: string } {
+function dockerNames(runId: string): { network: string; relay: string; brokerRelay: string } {
   const safe = runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
-  return { network: `hone-${safe}`, relay: `hone-proxy-${safe}` };
+  return {
+    network: `hone-${safe}`,
+    relay: `hone-proxy-${safe}`,
+    brokerRelay: `hone-broker-${safe}`,
+  };
 }
 
 /**
@@ -158,7 +162,7 @@ function dockerNames(runId: string): { network: string; relay: string } {
  * VOLUME) is deliberately untouched.
  */
 export async function sweepStaleRunResources(runId: string, runDir: string, run: RunCommand = runCommand): Promise<void> {
-  const { network, relay } = dockerNames(runId);
+  const { network, relay, brokerRelay } = dockerNames(runId);
   // Every container this run ever labeled (mutation/eval sandboxes + relay).
   const ls = await run(["docker", "ps", "-aq", "--filter", `label=hone.runId=${runId}`], { timeoutMs: 30_000 });
   if (ls.exitCode === 0) {
@@ -167,6 +171,7 @@ export async function sweepStaleRunResources(runId: string, runDir: string, run:
   }
   // Deterministic names, in case the label listing failed or was incomplete.
   await run(["docker", "rm", "-f", relay], { timeoutMs: 30_000 });
+  await run(["docker", "rm", "-f", brokerRelay], { timeoutMs: 30_000 });
   await run(["docker", "network", "rm", network], { timeoutMs: 30_000 });
   // Half-dead endpoints: every listener also unlinks defensively, but a swept
   // run dir must not present a crashed process's sockets to other tooling.
@@ -179,6 +184,8 @@ interface Egress {
   sandboxNetwork: SandboxNetworkMode;
   /** HONE_PROXY_BASE_URL for sandboxes; null on the unix-socket path (the worker bridges the mounted socket). */
   proxyBaseUrl: string | null;
+  /** Expose a host-loopback broker listener through a token-authenticated relay on the internal network. */
+  exposeBroker(hostPort: number): Promise<string>;
   cleanup(): Promise<void>;
 }
 
@@ -192,11 +199,18 @@ export async function setupEgress(
   const mode = ctx.env["HONE_EGRESS"] ?? (process.platform === "darwin" ? "network" : "socket");
   if (mode === "socket") {
     await proxy.listenUnix(join(ctx.runDir, "proxy.sock"));
-    return { sandboxNetwork: { mode: "none" }, proxyBaseUrl: null, cleanup: async () => {} };
+    return {
+      sandboxNetwork: { mode: "none" },
+      proxyBaseUrl: null,
+      exposeBroker: async () => {
+        throw new Error("broker TCP relay is unavailable on socket egress");
+      },
+      cleanup: async () => {},
+    };
   }
   if (mode !== "network") throw new Error(`HONE_EGRESS must be "socket" or "network", got "${mode}"`);
 
-  const { network, relay } = dockerNames(ctx.runId);
+  const { network, relay, brokerRelay } = dockerNames(ctx.runId);
   const port = await proxy.listenTcp(0);
   const created = await run(["docker", "network", "create", "--internal", network], { timeoutMs: 120_000 });
   if (created.exitCode !== 0) {
@@ -210,7 +224,9 @@ export async function setupEgress(
       throw new Error(`docker network ${network} already exists but is not --internal — refusing to attach sandboxes`);
     }
   }
+  let brokerRelayStarted = false;
   const cleanup = async (): Promise<void> => {
+    await run(["docker", "rm", "-f", brokerRelay]);
     await run(["docker", "rm", "-f", relay]);
     await run(["docker", "network", "rm", network]);
   };
@@ -234,9 +250,38 @@ export async function setupEgress(
     await cleanup();
     throw err;
   }
+  const exposeBroker = async (hostPort: number): Promise<string> => {
+    if (!Number.isInteger(hostPort) || hostPort <= 0 || hostPort > 65_535) {
+      throw new Error(`invalid broker relay target port: ${hostPort}`);
+    }
+    if (brokerRelayStarted) throw new Error("broker relay already started");
+    try {
+      await mustRun(
+        run,
+        [
+          "docker", "run", "-d",
+          "--name", brokerRelay,
+          "--network", network,
+          "--label", `hone.runId=${ctx.runId}`,
+          "--add-host", "host.docker.internal:host-gateway",
+          "-e", `HONE_RELAY_PORT=${hostPort}`,
+          image,
+          "node", "-e", RELAY_JS,
+        ],
+        "docker run (broker relay)",
+      );
+      await mustRun(run, ["docker", "network", "connect", "bridge", brokerRelay], "docker network connect broker relay");
+      brokerRelayStarted = true;
+      return `tcp://${brokerRelay}:${RELAY_PORT}`;
+    } catch (err) {
+      await run(["docker", "rm", "-f", brokerRelay], { timeoutMs: 30_000 });
+      throw err;
+    }
+  };
   return {
     sandboxNetwork: { mode: "internal", network },
     proxyBaseUrl: `http://${relay}:${RELAY_PORT}/v1`,
+    exposeBroker,
     cleanup,
   };
 }
@@ -647,7 +692,7 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
           if (addr === undefined) throw new Error("broker did not open the requested public TCP listener");
           transport = {
             kind: "tcp",
-            endpoint: `tcp://host.docker.internal:${addr.port}`,
+            endpoint: await egress.exposeBroker(addr.port),
             token: tcpToken,
             network: egress.sandboxNetwork.network,
           };

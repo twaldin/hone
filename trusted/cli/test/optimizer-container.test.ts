@@ -305,7 +305,7 @@ describe("full local backend: TCP broker + one build reused by probe AND full la
     // The optimizer dialed the authenticated TCP listener with the capability.
     const lines = readFileSync(invocations, "utf8").split("\n").filter((l) => l.trim() !== "").map((l) => JSON.parse(l) as { sock: string; tokenPresent: boolean; maxEpisodes: string | null });
     expect(lines.length).toBe(2);
-    expect(lines[0]?.sock).toMatch(/^tcp:\/\/host\.docker\.internal:\d+$/);
+    expect(lines[0]?.sock).toBe(`tcp://hone-broker-${runId}:8080`);
     expect(lines[0]?.tokenPresent).toBe(true);
     expect(lines[0]?.maxEpisodes).toBe("1"); // probe bound
     expect(lines[1]?.maxEpisodes).toBeNull(); // full relaunch
