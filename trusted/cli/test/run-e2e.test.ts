@@ -26,7 +26,7 @@ describe("hone run — headless end-to-end (scripted stub backend)", () => {
   it("produces a schema-valid event log, NDJSON stdout, and a machine-readable exit report", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     makeCapsule(root);
-    const r = await hone(["run", "capsule", "--headless"], { cwd: root, env: { HONE_STUB_EPISODES: "3" } });
+    const r = await hone(["run", "capsule", "--headless", "--backend", "stub"], { cwd: root, env: { HONE_STUB_EPISODES: "3" } });
     expect(r.code, r.stderr).toBe(0);
 
     // stdout: every line but the last parses as a RunEvent, the last is the exit report
@@ -60,7 +60,7 @@ describe("hone run — headless end-to-end (scripted stub backend)", () => {
   it("--budget-usd overrides the USD cap in the run config and contract", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     makeCapsule(root);
-    const r = await hone(["run", "capsule", "--headless", "--budget-usd", "3.5"], { cwd: root, env: { HONE_STUB_EPISODES: "1" } });
+    const r = await hone(["run", "capsule", "--headless", "--backend", "stub", "--budget-usd", "3.5"], { cwd: root, env: { HONE_STUB_EPISODES: "1" } });
     expect(r.code, r.stderr).toBe(0);
     const { report } = splitHeadless(r.stdout);
     const cfg = JSON.parse(readFileSync(join(root, ".hone-runs", report.runId, "runconfig.json"), "utf8"));
@@ -84,7 +84,7 @@ describe("hone run — headless end-to-end (scripted stub backend)", () => {
       }
       `,
     );
-    const r = await hone(["run", "capsule", "--headless", "--backend", "./custom-backend.mjs"], { cwd: root });
+    const r = await hone(["run", "capsule", "--headless", "--backend", "./custom-backend.mjs"], { cwd: root, env: { HONE_UNSAFE_BACKEND: "1" } });
     expect(r.code, r.stderr).toBe(0);
     const { report } = splitHeadless(r.stdout);
     expect(report.best).toBe(hash);

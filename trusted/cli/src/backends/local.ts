@@ -162,7 +162,8 @@ function optimizerCommand(env: NodeJS.ProcessEnv): string[] {
   return [process.execPath, tsxCli];
 }
 
-function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): Promise<void> {
+/** Exported for the trusted-boundary test: optimizer stdout must never become events. */
+export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): Promise<void> {
   const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
   const entry = ctx.env["HONE_OPTIMIZER_ENTRY"] ?? join(repoRoot, "optimizer", "src", "main.ts");
   if (!existsSync(entry)) throw new Error(`optimizer entry not found: ${entry} (set HONE_OPTIMIZER_ENTRY)`);
@@ -234,7 +235,12 @@ export function createBackend(): RunnerBackend {
         if (spent.usd >= envelope.maxUsd) return { allowed: false, dimension: "usd" };
         if (spent.wallClockSec >= envelope.maxWallClockSec) return { allowed: false, dimension: "wallClockSec" };
         if (spent.evaluatorInvocations >= envelope.maxEvaluatorInvocations) return { allowed: false, dimension: "evaluatorInvocations" };
-        return { allowed: true };
+        // Raw remaining = envelope - recorded spend; the proxy layers its own
+        // in-flight reservations on top (do not pre-subtract proxy activity).
+        return {
+          allowed: true,
+          remaining: { tokens: envelope.maxTokens - spent.tokens, usd: envelope.maxUsd - spent.usd },
+        };
       };
 
       const proxy = createProxy({
@@ -264,6 +270,8 @@ export function createBackend(): RunnerBackend {
           image,
           runDir: ctx.runDir,
           casDir: ctx.casDir,
+          // Quota-enforcing docker tmpfs volume for /scratch (landed broker API).
+          scratchVolume: true,
           onEvent: (event) => ctx.emit(event),
           sandboxNetwork: egress.sandboxNetwork,
           mutationEnv: {

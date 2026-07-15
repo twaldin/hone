@@ -22,7 +22,7 @@ describe("kill -9 mid-run + hone run --resume", () => {
     const total = 40;
 
     // phase 1: slow scripted run, killed after >=2 episodes have started
-    const child = honeSpawn(["run", "capsule", "--headless"], {
+    const child = honeSpawn(["run", "capsule", "--headless", "--backend", "stub"], {
       cwd: root,
       env: { HONE_STUB_EPISODES: String(total), HONE_STUB_DELAY_MS: "100" },
     });
@@ -57,7 +57,7 @@ describe("kill -9 mid-run + hone run --resume", () => {
     expect(logText(root, runId)).not.toContain('"run.finished"');
 
     // phase 2: resume, fast
-    const r = await hone(["run", "capsule", "--headless", "--resume"], {
+    const r = await hone(["run", "capsule", "--headless", "--backend", "stub", "--resume"], {
       cwd: root,
       env: { HONE_STUB_EPISODES: String(total), HONE_STUB_DELAY_MS: "0" },
     });
@@ -97,7 +97,7 @@ describe("kill -9 mid-run + hone run --resume", () => {
   it("--resume with nothing to resume is a usage error", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     makeCapsule(root);
-    const r = await hone(["run", "capsule", "--headless", "--resume"], { cwd: root });
+    const r = await hone(["run", "capsule", "--headless", "--backend", "stub", "--resume"], { cwd: root });
     expect(r.code).toBe(2);
     expect(r.stderr).toMatch(/resum/i);
   });

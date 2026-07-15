@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ApplyMode } from "@hone/schema";
+import { extractWorkspaceArtifact, validateWorkspaceTar } from "./artifact.js";
 import { casPath } from "./cas.js";
 
 /**
@@ -78,7 +79,38 @@ function binExists(bin: string): boolean {
   }
 }
 
-/** Unpack the artifact into a fresh worktree branch; the main working tree is never touched. */
+/**
+ * Run a git command in the delivery worktree with candidate-influence vectors
+ * disabled: hooks point at an empty trusted dir and config-driven executable
+ * knobs (fsmonitor) are cleared. Repo identity/config otherwise applies.
+ */
+function gitSafe(worktree: string, hooksDir: string, ...args: string[]): string {
+  return git(worktree, "-c", `core.hooksPath=${hooksDir}`, "-c", "core.fsmonitor=", ...args);
+}
+
+/**
+ * Reject staged gitlinks (mode 160000) and staged symlinks (mode 120000) —
+ * defense-in-depth behind the tar-layout validation (a gitlink would let the
+ * candidate smuggle an unreviewable commit reference into the delivery).
+ */
+export function assertNoStagedGitlinks(worktree: string): void {
+  const staged = git(worktree, "ls-files", "--stage");
+  for (const line of staged.split("\n")) {
+    if (line.startsWith("160000 ")) {
+      throw new Error(`staged index contains a gitlink (mode 160000): ${line.slice(line.indexOf("\t") + 1)} — rejected`);
+    }
+    if (line.startsWith("120000 ")) {
+      throw new Error(`staged index contains a symlink (mode 120000): ${line.slice(line.indexOf("\t") + 1)} — rejected`);
+    }
+  }
+}
+
+/**
+ * Unpack the artifact into a fresh worktree branch; the main working tree is
+ * never touched. The artifact MUST be a single-`workspace/`-root tar of plain
+ * files/dirs (validated pre-extraction); files land at the repo root with the
+ * workspace component stripped.
+ */
 function branchDeliver(opts: DeliverOptions): { branch: string; commit: string } {
   const branch = opts.branch ?? `hone/${opts.runId}`;
   if (!isGitRepo(opts.repo)) throw new Error(`${opts.repo} is not a git repository`);
@@ -87,25 +119,35 @@ function branchDeliver(opts: DeliverOptions): { branch: string; commit: string }
   }
   const blob = casPath(opts.casDir, opts.artifact);
   if (!existsSync(blob)) throw new Error(`artifact ${opts.artifact} not found in CAS (${blob})`);
+  // Reject adversarial layouts BEFORE the repo is mutated (branch/worktree):
+  // a refused artifact must leave no trace in the target repository.
+  validateWorkspaceTar(readFileSync(blob));
 
   const parent = mkdtempSync(join(tmpdir(), "hone-worktree-"));
   const worktree = join(parent, "wt");
+  const hooksDir = join(parent, "no-hooks");
+  mkdirSync(hooksDir);
   git(opts.repo, "worktree", "add", "-b", branch, worktree);
+  let landed = false;
   try {
     for (const entry of readdirSync(worktree)) {
       if (entry === ".git") continue;
       rmSync(join(worktree, entry), { recursive: true, force: true });
     }
-    const tar = exec("tar", ["-xf", blob, "-C", worktree]);
-    if (tar.code !== 0) throw new Error(`tar extract of ${opts.artifact} failed: ${tar.stderr.trim()}`);
-    git(worktree, "add", "-A");
-    if (git(worktree, "status", "--porcelain") !== "") {
-      git(worktree, "commit", "-m", `hone(${opts.runId}): best artifact ${opts.artifact}`);
+    // Validates layout (single workspace/ root, files/dirs only, no .git,
+    // no traversal/links) and strips the workspace component.
+    extractWorkspaceArtifact(opts.casDir, opts.artifact, worktree);
+    gitSafe(worktree, hooksDir, "add", "-A");
+    assertNoStagedGitlinks(worktree);
+    if (gitSafe(worktree, hooksDir, "status", "--porcelain") !== "") {
+      gitSafe(worktree, hooksDir, "commit", "-m", `hone(${opts.runId}): best artifact ${opts.artifact}`);
     }
     const commit = git(worktree, "rev-parse", "HEAD");
+    landed = true;
     return { branch, commit };
   } finally {
     exec("git", ["-C", opts.repo, "worktree", "remove", "--force", worktree]);
+    if (!landed) exec("git", ["-C", opts.repo, "branch", "-D", branch]);
     rmSync(parent, { recursive: true, force: true });
   }
 }

@@ -24,7 +24,7 @@ describe("wall-clock budget enforcement", () => {
       `,
     );
     writeFileSync(join(root, "cfg.json"), JSON.stringify({ budget: { maxWallClockSec: 1 } }));
-    const { io, out } = makeIo(root);
+    const { io, out } = makeIo(root, { HONE_UNSAFE_BACKEND: "1" });
     const code = await runCommand(
       ["capsule", "--headless", "--backend", "./waiter.mjs", "--config", "cfg.json"],
       io,

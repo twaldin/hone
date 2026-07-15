@@ -33,7 +33,7 @@ describe("autonomy-ladder lock: apply=auto on improver-seat runs", () => {
     makeCapsule(root);
     writeFileSync(join(root, "cfg.json"), JSON.stringify({ improverSeat: true }));
     const { io, out } = makeIo(root, { HONE_LADDER_OK: "1", HONE_STUB_EPISODES: "1" });
-    const code = await runCommand(["capsule", "--headless", "--apply", "auto", "--config", "cfg.json"], io);
+    const code = await runCommand(["capsule", "--headless", "--backend", "stub", "--apply", "auto", "--config", "cfg.json"], io);
     expect(code).toBe(0);
     const report = JSON.parse(out[out.length - 1] ?? "");
     expect(report.status).toBe("completed");
@@ -44,11 +44,11 @@ describe("autonomy-ladder lock: apply=auto on improver-seat runs", () => {
     makeCapsule(root);
     writeFileSync(join(root, "cfg.json"), JSON.stringify({ improverSeat: true }));
     const seatOnly = makeIo(root, { HONE_LADDER_OK: undefined, HONE_STUB_EPISODES: "1" });
-    expect(await runCommand(["capsule", "--headless", "--apply", "none", "--config", "cfg.json"], seatOnly.io)).toBe(0);
+    expect(await runCommand(["capsule", "--headless", "--backend", "stub", "--apply", "none", "--config", "cfg.json"], seatOnly.io)).toBe(0);
 
     const root2 = makeRoot();
     makeCapsule(root2);
     const autoOnly = makeIo(root2, { HONE_LADDER_OK: undefined, HONE_STUB_EPISODES: "1" });
-    expect(await runCommand(["capsule", "--headless", "--apply", "auto"], autoOnly.io)).toBe(0);
+    expect(await runCommand(["capsule", "--headless", "--backend", "stub", "--apply", "auto"], autoOnly.io)).toBe(0);
   });
 });

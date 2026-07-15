@@ -77,11 +77,23 @@ function loadBackendModule(mod: unknown, spec: string): RunnerBackend {
   throw new UsageError(`backend module ${spec} must export createBackend() or a default { start } object`);
 }
 
-async function loadBackend(spec: string, root: string): Promise<RunnerBackend> {
-  if (spec === "stub") return createStubBackend();
+/** Backends compiled into the trusted CLI — selectable without any trust escape hatch. */
+const BUILTIN_BACKENDS: Record<string, true> = { local: true, stub: true };
+
+export const UNSAFE_BACKEND_REFUSAL =
+  "--backend <module> loads arbitrary code into the trusted supervisor process and is a test-only seam; production runs use the built-in backends (local, stub). Set HONE_UNSAFE_BACKEND=1 to acknowledge the trust collapse in a development run.";
+
+/** Checked BEFORE any run state exists — a refused spec never mints a run. */
+export function backendSpecAllowed(spec: string, env: NodeJS.ProcessEnv): boolean {
+  return BUILTIN_BACKENDS[spec] === true || env["HONE_UNSAFE_BACKEND"] === "1";
+}
+
+async function loadBackend(spec: string, root: string, env: NodeJS.ProcessEnv): Promise<RunnerBackend> {
   if (spec === "local") return createLocalBackend();
+  if (spec === "stub") return createStubBackend();
+  if (!backendSpecAllowed(spec, env)) throw new UsageError(UNSAFE_BACKEND_REFUSAL);
   const url = pathToFileURL(resolve(root, spec)).href;
-  // Plugin boundary: the backend module is runtime-selected via --backend (WP7 injects the real runner).
+  // Plugin boundary (dev/test only, gated above): the module is runtime-selected via --backend.
   const mod: unknown = await import(url);
   return loadBackendModule(mod, spec);
 }
@@ -159,6 +171,13 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
   const applyFlag = strFlag(flags, "apply");
   if (applyFlag !== undefined && !ApplyMode.safeParse(applyFlag).success) {
     throw new UsageError(`--apply must be one of ${ApplyMode.options.join("|")}`);
+  }
+  // Production default: the trusted local backend. Arbitrary module specs are
+  // refused here, before a runId is minted or any run state touches disk.
+  const backendSpec = strFlag(flags, "backend") ?? "local";
+  if (!backendSpecAllowed(backendSpec, io.env)) {
+    io.err(UNSAFE_BACKEND_REFUSAL);
+    return 2;
   }
 
   let plan: RunPlan;
@@ -250,7 +269,7 @@ async function superviseRun(
   }
 
   const replayed = replayRun(runDir);
-  const backend = await loadBackend(extra.flags.backend ?? "stub", io.root);
+  const backend = await loadBackend(extra.flags.backend ?? "local", io.root, io.env);
 
   const abort = new AbortController();
   const children: ChildLike[] = [];
