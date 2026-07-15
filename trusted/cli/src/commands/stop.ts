@@ -59,9 +59,13 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
         // (draining delivery/teardown). Wait for release AND death — the pid
         // was identity-confirmed live, so waiting on it is bound to the real
         // supervisor, never a recycled number.
+        // The initial identity proof is the authorization to wait. Do not
+        // re-probe during teardown: each probe is a live lock-server
+        // connection, and a polling storm can delay server.close() and thus
+        // the very process exit this loop awaits.
         const deadline = Date.now() + 15_000;
         while (Date.now() < deadline) {
-          if ((await confirmedSupervisorPid(runDir, runId)) === null && !pidAlive(confirmed)) break;
+          if (!pidAlive(confirmed)) break;
           await sleep(200);
         }
         if (pidAlive(confirmed)) {
@@ -77,11 +81,14 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
       process.kill(confirmed, "SIGTERM");
       // Terminal order: callers apply the result right after we return, so
       // wait for the terminal event, the lock release, AND process death.
+      // The initial identity proof is enough: no further signal is sent, and
+      // process death implies superviseRun's awaited lock release completed.
+      // Re-probing here would keep feeding connections into that release.
       const deadline = Date.now() + 15_000;
       let live = replayRun(runDir);
       while (Date.now() < deadline) {
         live = replayRun(runDir);
-        if (live.finished !== null && (await confirmedSupervisorPid(runDir, runId)) === null && !pidAlive(confirmed)) break;
+        if (live.finished !== null && !pidAlive(confirmed)) break;
         await sleep(200);
       }
       if (live.finished === null) {
