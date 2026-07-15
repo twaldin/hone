@@ -1,0 +1,20 @@
+{
+  "name": "@hone/capsules",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "scaffold": "tsx tools/scaffold.ts seeded-astar",
+    "ordering-check": "tsx tools/ordering-check.ts"
+  },
+  "dependencies": {
+    "@hone/schema": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}
