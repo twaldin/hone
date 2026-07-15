@@ -977,9 +977,14 @@ export class Broker {
     }
 
     // Memo key pins the FULL provenance of a measurement: artifact, frozen
-    // capsule digest, optimizer digest, asset group, seed. A different capsule
-    // or optimizer build can never alias onto a cached record.
-    const memoKey = `${params.artifact.hash}|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}`;
+    // capsule digest, optimizer digest, asset group, seed, AND the effective
+    // evaluator wall-time cap (config.evalTimeoutSec). The cap sets the
+    // docker timeout for the evaluator run, so a per-run overlay can change
+    // it while capsuleDigest stays the frozen capsule digest — a
+    // timing-sensitive result measured under one cap must never be served to
+    // a run with a different cap. A different capsule or optimizer build can
+    // likewise never alias onto a cached record.
+    const memoKey = `${params.artifact.hash}|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}`;
     const memoHash = await this.cas.indexGet("eval", memoKey);
     if (memoHash !== undefined && (await this.cas.has(memoHash))) {
       const record = EvaluationRecord.parse(JSON.parse((await this.cas.readBuffer(memoHash)).toString("utf8")));

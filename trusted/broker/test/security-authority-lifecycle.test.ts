@@ -154,6 +154,7 @@ async function boot(
     scratchQuotaBytes?: number;
     scratchVolume?: boolean;
     volumeCreateFails?: boolean;
+    evalTimeoutSec?: number;
     runId?: string;
   } = {},
 ): Promise<Booted> {
@@ -231,6 +232,7 @@ async function boot(
     ...(opts.maxActiveSandboxes !== undefined ? { maxActiveSandboxes: opts.maxActiveSandboxes } : {}),
     ...(opts.scratchQuotaBytes !== undefined ? { scratchQuotaBytes: opts.scratchQuotaBytes } : {}),
     ...(opts.scratchVolume !== undefined ? { scratchVolume: opts.scratchVolume } : {}),
+    ...(opts.evalTimeoutSec !== undefined ? { evalTimeoutSec: opts.evalTimeoutSec } : {}),
   };
   const broker = new Broker(config);
   await broker.init();
@@ -801,6 +803,39 @@ describe("evaluation memo provenance (digests key the cache)", () => {
     d.ctl.evalOutputs.set(baselineHash, score(1));
     expect((await d.broker.evaluate(coord, CLIENT)).cached).toBe(true);
     expect(evalRuns(d)).toBe(0);
+  });
+
+  it("a different effective evaluator wall-time cap never aliases onto a cached evaluation; same cap still hits", async () => {
+    const casDir = path.join(tmpBase, "cas", "memo-wallcap");
+    const evalRuns = (b: Booted): number => b.log.filter((argv) => argv[1] === "run" && !argv.includes("-d")).length;
+    const coord = { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 7 } as const;
+
+    // Same artifact/capsuleDigest/optimizerDigest/group/seed throughout —
+    // only the evaluator wall-time cap (docker timeout) differs.
+    const a = await boot({ casDir, evalTimeoutSec: 600 });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    expect((await a.broker.evaluate(coord, CLIENT)).cached).toBe(false);
+    expect(evalRuns(a)).toBe(1);
+
+    // Different cap, same CAS + identical digests/coordinate: miss — a real
+    // evaluation runs (a result measured under 600s must not answer a 30s run).
+    const tight = await boot({ casDir, evalTimeoutSec: 30 });
+    tight.ctl.evalOutputs.set(baselineHash, score(1));
+    expect((await tight.broker.evaluate(coord, CLIENT)).cached).toBe(false);
+    expect(evalRuns(tight)).toBe(1);
+
+    // A fresh broker with the SAME cap still hits the shared memo.
+    const same = await boot({ casDir, evalTimeoutSec: 600 });
+    same.ctl.evalOutputs.set(baselineHash, score(1));
+    expect((await same.broker.evaluate(coord, CLIENT)).cached).toBe(true);
+    expect(evalRuns(same)).toBe(0);
+
+    // The DEFAULT cap (600) is the same effective condition as an explicit
+    // 600 — memo hit, not a spurious miss on config spelling.
+    const dflt = await boot({ casDir });
+    dflt.ctl.evalOutputs.set(baselineHash, score(1));
+    expect((await dflt.broker.evaluate(coord, CLIENT)).cached).toBe(true);
+    expect(evalRuns(dflt)).toBe(0);
   });
 });
 
