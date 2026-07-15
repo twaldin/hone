@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -203,15 +204,24 @@ class RunStateLog {
   ) {}
 
   static open(filePath: string): RunStateLog {
-    let content = "";
+    let content = Buffer.alloc(0);
     try {
-      content = readFileSync(filePath, "utf8");
+      content = readFileSync(filePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
-    // Only newline-terminated lines exist; a trailing partial is a torn
-    // crash-write whose action was never acknowledged — discard it.
-    const rawLines = content.split("\n");
+    // Only newline-terminated lines are authoritative; bytes after the last
+    // newline are a torn crash-write whose action was never acknowledged.
+    // Durably truncate them BEFORE replay/append — otherwise the next record
+    // would fuse onto the torn tail and corrupt the journal on the restart
+    // after that.
+    const keep = content.lastIndexOf(0x0a) + 1; // 0 when no newline exists
+    const fd = openSync(filePath, "a");
+    if (keep !== content.length) {
+      ftruncateSync(fd, keep);
+      fsyncSync(fd);
+    }
+    const rawLines = content.subarray(0, keep).toString("utf8").split("\n");
     rawLines.pop();
     const replayed = rawLines.map((line, i) => {
       try {
@@ -220,12 +230,16 @@ class RunStateLog {
         throw new BrokerError("INTERNAL", `run state log corrupt at line ${i + 1}: ${filePath}`);
       }
     });
-    return new RunStateLog(openSync(filePath, "a"), replayed);
+    return new RunStateLog(fd, replayed);
   }
 
-  /** Append + fsync, blocking. Returns only once the line is durable. */
+  /** Append + fsync, blocking. Returns only once the whole line is durable. */
   append(line: StateLine): void {
-    writeSync(this.fd, `${JSON.stringify(line)}\n`);
+    const buf = Buffer.from(`${JSON.stringify(line)}\n`, "utf8");
+    let written = 0;
+    while (written < buf.length) {
+      written += writeSync(this.fd, buf, written, buf.length - written);
+    }
     fsyncSync(this.fd);
   }
 
