@@ -5,7 +5,7 @@ import { appendEvent, readEvents, replayRun } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
 import { sleep } from "../promise.js";
 import { resolveRun } from "../runs.js";
-import { acquireRunLock, pidAlive, readSupervisorPid } from "../supervisor.js";
+import { acquireRunLock, pidAlive, probeRunLockIdentity, readSupervisorSentinel } from "../supervisor.js";
 import { applyBest } from "./apply.js";
 
 interface StopFlags {
@@ -15,12 +15,27 @@ interface StopFlags {
 }
 
 /**
- * Stop a run: SIGTERM the live supervisor and wait for its run.finished AND
- * its real process exit; if the supervisor is already dead (crash), finalize
- * the log as stopped — but ONLY while holding the same per-run lock the
- * supervisor uses, so a concurrent resume and this finalization can never
- * both write authority. --take-best additionally lands the incumbent on a
- * branch (same path as `hone apply --best`).
+ * The sentinel PID confirmed by the live lock holder's identity handshake,
+ * or null. PIDs recycle: a live pid in supervisor.json is NEVER trusted (let
+ * alone signalled) unless the run-lock socket serves the exact same
+ * pid/nonce/runId — a bare live PID with no matching lock is an unrelated
+ * process wearing a recycled number.
+ */
+async function confirmedSupervisorPid(runDir: string, runId: string): Promise<number | null> {
+  const sentinel = readSupervisorSentinel(runDir);
+  if (sentinel === null || sentinel.nonce === undefined || !pidAlive(sentinel.pid)) return null;
+  const lock = await probeRunLockIdentity(runDir);
+  if (lock === null || lock.pid !== sentinel.pid || lock.nonce !== sentinel.nonce || lock.runId !== runId) return null;
+  return sentinel.pid;
+}
+
+/**
+ * Stop a run. A live, identity-confirmed supervisor is SIGTERM'd and awaited
+ * (terminal event + lock release + process death). A dead run is finalized
+ * as stopped — but ONLY while holding the same per-run lock the supervisor
+ * uses and only when the broker journal is aligned, so a concurrent resume
+ * and this finalization can never both write authority, and no stale state
+ * is ever sealed or applied. --take-best lands the incumbent on a branch.
  */
 export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
   const { flags } = parseFlags(args, { booleans: ["take-best"], strings: ["run", "repo", "branch"] });
@@ -34,18 +49,21 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
   // so exactly one authority path (resume or finalization) wins.
   for (let attempt = 0; attempt < 4; attempt++) {
     const state = replayRun(runDir);
-    const pid = readSupervisorPid(runDir);
+    const confirmed = await confirmedSupervisorPid(runDir, runId);
 
     if (state.finished !== null) {
-      // The PID sentinel outlives run.finished by design (removed only at
-      // real process exit): a supervisor may still be draining teardown or
-      // group kills. Whenever the sentinel names a live pid, wait for actual
-      // death before returning — `--take-best` must never race a live run.
-      if (pid !== null && pidAlive(pid)) {
+      if (confirmed !== null) {
+        // Terminal logged but the confirmed supervisor still holds its lock
+        // (draining delivery/teardown). Wait for release AND death — the pid
+        // was identity-confirmed live, so waiting on it is bound to the real
+        // supervisor, never a recycled number.
         const deadline = Date.now() + 15_000;
-        while (pidAlive(pid) && Date.now() < deadline) await sleep(200);
-        if (pidAlive(pid)) {
-          io.err(`run ${runId}: run.finished is logged but the supervisor (pid ${pid}) has not exited within 15s`);
+        while (Date.now() < deadline) {
+          if ((await confirmedSupervisorPid(runDir, runId)) === null && !pidAlive(confirmed)) break;
+          await sleep(200);
+        }
+        if (pidAlive(confirmed)) {
+          io.err(`run ${runId}: run.finished is logged but the supervisor (pid ${confirmed}) has not exited within 15s`);
           return 1;
         }
       }
@@ -53,50 +71,51 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
       return takeBest(stopFlags, io, runDir);
     }
 
-    if (pid !== null && pidAlive(pid)) {
-      process.kill(pid, "SIGTERM");
+    if (confirmed !== null) {
+      process.kill(confirmed, "SIGTERM");
       // Terminal order: callers apply the result right after we return, so
-      // wait for BOTH run.finished AND actual supervisor exit — a lingering
-      // process could still be draining delivery or killing children.
+      // wait for the terminal event, the lock release, AND process death.
       const deadline = Date.now() + 15_000;
       let live = replayRun(runDir);
       while (Date.now() < deadline) {
         live = replayRun(runDir);
-        if (live.finished !== null && !pidAlive(pid)) break;
+        if (live.finished !== null && (await confirmedSupervisorPid(runDir, runId)) === null && !pidAlive(confirmed)) break;
         await sleep(200);
       }
       if (live.finished === null) {
-        io.err(`run ${runId}: supervisor (pid ${pid}) did not finish within 15s`);
+        io.err(`run ${runId}: supervisor (pid ${confirmed}) did not finish within 15s`);
         return 1;
       }
-      if (pidAlive(pid)) {
-        io.err(`run ${runId}: run.finished is logged but the supervisor (pid ${pid}) has not exited within 15s`);
+      if (pidAlive(confirmed)) {
+        io.err(`run ${runId}: run.finished is logged but the supervisor (pid ${confirmed}) has not exited within 15s`);
         return 1;
       }
       io.out(`run ${runId} stopped (${live.finished.status})`);
       return takeBest(stopFlags, io, runDir);
     }
 
-    // Dead + unfinished: crash finalization. NEVER without the run lock — a
-    // concurrent resume acquiring between our reads and our append would
-    // leave a run executing past a terminal event.
+    // No identity-confirmed supervisor: dead run, stale/unrelated sentinel,
+    // or a holder that has not written its sentinel yet. Finalization NEVER
+    // happens without the run lock — and never signals an unconfirmed PID.
     let release: () => Promise<void>;
     try {
       release = await acquireRunLock(runDir, runId);
     } catch (e) {
       if (e instanceof UsageError) {
-        // A resume owns the run right now — observe its outcome and retry.
+        // Someone owns the run right now (e.g. a resume between lock and
+        // sentinel write) — observe its outcome and retry.
         await sleep(150);
         continue;
       }
       throw e;
     }
     try {
-      // Re-validate UNDER the lock: a resume may have started (and even
-      // finished) between our observation and this acquisition.
+      // Re-validate UNDER the lock: a resume may have started and finished
+      // between our observation and this acquisition. Holding the lock also
+      // proves no supervisor is live — a still-alive sentinel PID here is a
+      // recycled number and must NOT block finalization (or be signalled).
       const under = replayRun(runDir);
-      const underPid = readSupervisorPid(runDir);
-      if (under.finished !== null || (underPid !== null && pidAlive(underPid))) continue;
+      if (under.finished !== null) continue;
 
       // Seal guard: never finalize from stale events — the fsynced broker
       // journal may hold promotions the event sink never saw. No journal =
