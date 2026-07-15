@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeSync,
+} from "node:fs";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -1315,6 +1325,40 @@ function assertAssetPathsResolveSafely(manifest: CapsuleManifest, capsuleRootDir
         );
       }
     }
+  }
+
+  // Content scan: hard links BELOW the declared paths can alias one class's
+  // bytes into another even when the declared roots are disjoint. Enumerate
+  // every mounted regular file/dir (lstat, symlinks never followed — inside
+  // the container they resolve within the mount or dangle) and reject any
+  // inode shared across visibility classes. Seed asset trees are small, so
+  // this stays a boot-time cost.
+  const seen = new Map<string, { group: string; visibility: string; rel: string }>();
+  const record = (visibility: string, group: string, rel: string, dev: number, ino: number): void => {
+    const key = `${dev}:${ino}`;
+    const prior = seen.get(key);
+    if (prior === undefined) {
+      seen.set(key, { group, visibility, rel });
+    } else if (prior.visibility !== visibility) {
+      throw new BrokerError(
+        "INTERNAL",
+        `asset paths alias the same files across visibility classes: ${group}:${rel} (${visibility}) vs ${prior.group}:${prior.rel} (${prior.visibility})`,
+      );
+    }
+  };
+  const walk = (visibility: string, group: string, dirAbs: string, relBase: string): void => {
+    for (const entry of readdirSync(dirAbs, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
+      const abs = path.join(dirAbs, entry.name);
+      const rel = `${relBase}/${entry.name}`;
+      const st = lstatSync(abs);
+      record(visibility, group, rel, st.dev, st.ino);
+      if (entry.isDirectory()) walk(visibility, group, abs, rel);
+    }
+  };
+  for (const r of resolved) {
+    record(r.visibility, r.group, r.rel, r.dev, r.ino);
+    if (lstatSync(r.canonical).isDirectory()) walk(r.visibility, r.group, r.canonical, r.rel);
   }
 }
 

@@ -694,6 +694,35 @@ describe("evaluator containment", () => {
         }),
     ).toThrow(/alias the same files across visibility classes/);
   });
+
+  it("rejects hard links NESTED below declared asset dirs — the content scan walks the mounted trees", async () => {
+    const evilRoot = path.join(tmpBase, "capsule-nested-hardlink");
+    await mkdir(path.join(evilRoot, "holdout"), { recursive: true });
+    await mkdir(path.join(evilRoot, "pub", "deep"), { recursive: true });
+    await writeFile(path.join(evilRoot, "holdout", "secret.txt"), "holdout-data");
+    await writeFile(path.join(evilRoot, "pub", "ok.txt"), "public");
+    // Declared paths are the disjoint DIRECTORIES; the alias hides deep
+    // inside the public tree.
+    await link(path.join(evilRoot, "holdout", "secret.txt"), path.join(evilRoot, "pub", "deep", "leak.txt"));
+    expect(
+      () =>
+        new Broker({
+          runId: "run-nested-hardlink",
+          manifest: makeManifest({
+            assetGroups: [
+              { id: "pub", visibility: "public", paths: ["pub"] },
+              { id: "holdout", visibility: "holdout", paths: ["holdout"] },
+            ],
+          }),
+          capsuleRootDir: evilRoot,
+          baselineArtifactHash: baselineHash,
+          image: TEST_IMAGE,
+          runDir: path.join(tmpBase, "runs", "nested-hardlink"),
+          casDir: path.join(tmpBase, "cas", "nested-hardlink"),
+          onEvent: () => {},
+        }),
+    ).toThrow(/alias the same files across visibility classes/);
+  });
 });
 
 // ---------- lifecycle and resources ----------
