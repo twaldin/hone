@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -79,11 +79,20 @@ export interface BrokerConfig {
   runCommand?: RunCommand | undefined;
   /** Injectable clock (ms) for TTL/wall-clock determinism in tests. */
   now?: (() => number) | undefined;
+  /**
+   * First episode ordinal (resume: the runner passes replayed nextEpisode so
+   * trusted episode numbering stays monotone across restarts). Default 0.
+   */
+  episodeOrigin?: number | undefined;
 }
 
 interface SandboxEntry {
   containerId: string;
   expiresAtMs: number;
+  /** Trusted episode ordinal assigned at creation (one per mutation sandbox). */
+  episode: number;
+  /** sha256 of the most recent exec stdout — trusted session-trace provenance. */
+  lastExecStdoutHash: string | null;
 }
 
 const MISSING_CONTAINER_RE = /no such container|is not running|no such object/i;
@@ -101,9 +110,20 @@ type ReportIncumbentP = z.infer<typeof ReportIncumbentParams>;
 type FinishP = z.infer<typeof FinishParams>;
 type GetTaskR = z.infer<typeof GetTaskResult>;
 type RecordSpendP = z.infer<typeof RecordSpendParams>;
+/**
+ * Trusted-side event derivation (WP7 boundary ruling): the mutable optimizer
+ * has NO event authority — every RunEvent about its activity is derived here
+ * from the broker method calls it makes, with scores recomputed from the
+ * broker's own EvaluationRecords (claimed metrics are never trusted).
+ */
 type EmittableEvent =
   | { type: "budget.exhausted"; dimension: string }
-  | { type: "holdout.accessed"; capsuleId: string; ledgerCount: number; ledgerBudget: number };
+  | { type: "holdout.accessed"; capsuleId: string; ledgerCount: number; ledgerBudget: number }
+  | { type: "episode.started"; episode: number; parent: ArtifactRef }
+  | { type: "episode.candidate"; episode: number; candidate: ArtifactRef; sessionTrace: string }
+  | { type: "eval.completed"; artifact: ArtifactRef; assetGroupId: string; seed: number; aggregate: number; cached: boolean }
+  | { type: "incumbent.new"; artifact: ArtifactRef; aggregate: number; deltaVsBaseline: number; episode: number }
+  | { type: "budget.snapshot"; budget: BudgetState };
 
 /**
  * Sandbox broker (review IV.1): the optimizer is an unprivileged CLIENT; all
@@ -134,6 +154,12 @@ export class Broker {
   private lastIncumbent: ReportIncumbentP | undefined;
   private best: ArtifactRef | undefined;
   private reaper: NodeJS.Timeout | undefined;
+  /** Next trusted episode ordinal (one per mutation sandbox created). */
+  private episodeOrdinal: number;
+  /** Ordinal of the most recently created mutation sandbox (stamps incumbent.new). */
+  private lastEpisode: number | null = null;
+  /** artifactHash -> trusted aggregate recomputed from this run's non-holdout EvaluationRecords. */
+  private readonly trustedAggregates = new Map<string, number>();
 
   constructor(private readonly config: BrokerConfig) {
     this.manifest = CapsuleManifest.parse(config.manifest);
@@ -149,6 +175,7 @@ export class Broker {
     this.evalTimeoutSec = config.evalTimeoutSec ?? 600;
     this.execOutputLimitBytes = config.execOutputLimitBytes ?? 1024 * 1024;
     this.holdoutBudget = config.holdoutBudget ?? this.manifest.budget.maxEvaluatorInvocations;
+    this.episodeOrdinal = config.episodeOrigin ?? 0;
     this.startedAtMs = this.now();
   }
 
@@ -364,8 +391,26 @@ export class Broker {
       throw new BrokerError("INTERNAL", `artifact unpack failed: ${stderrText(unpack)}`);
     }
 
+    // `docker cp` preserves the tar's host uid; the image may run as a
+    // different unprivileged user — hand the workspace to whoever execs run as.
+    const whoami = await this.run(["docker", "exec", containerId, "sh", "-c", "echo \"$(id -u):$(id -g)\""]);
+    const owner = whoami.stdout.toString("utf8").trim();
+    const chown =
+      whoami.exitCode === 0 && /^\d+:\d+$/.test(owner)
+        ? await this.run(["docker", "exec", "-u", "root", containerId, "chown", "-R", owner, "/workspace"])
+        : whoami;
+    if (chown.exitCode !== 0) {
+      await this.run(["docker", "rm", "-f", containerId]);
+      throw new BrokerError("INTERNAL", `workspace ownership fixup failed: ${stderrText(chown)}`);
+    }
+
     const ttlSec = params.ttlSec ?? this.defaultTtlSec;
-    this.sandboxes.set(sandboxId, { containerId, expiresAtMs: this.now() + ttlSec * 1000 });
+    // Trusted episode boundary: one ordinal per mutation sandbox. The parent
+    // artifact is whatever the client asked to unpack — recorded verbatim.
+    const episode = this.episodeOrdinal++;
+    this.lastEpisode = episode;
+    this.sandboxes.set(sandboxId, { containerId, expiresAtMs: this.now() + ttlSec * 1000, episode, lastExecStdoutHash: null });
+    this.emit({ type: "episode.started", episode, parent: { hash: params.artifact.hash } });
     return { sandboxId };
   }
 
@@ -382,6 +427,7 @@ export class Broker {
     });
     const gone = this.missingContainer(res, params.sandboxId);
     if (gone) throw gone;
+    sb.lastExecStdoutHash = `sha256:${createHash("sha256").update(res.stdout).digest("hex")}`;
     return {
       exitCode: res.timedOut ? 124 : res.exitCode,
       stdout: res.stdout.toString("utf8"),
@@ -439,6 +485,7 @@ export class Broker {
     if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `docker cp out failed: ${stderrText(res)}`);
     if (res.truncated) throw new BrokerError("QUOTA_EXCEEDED", "artifact exceeds size cap");
     const hash = await this.cas.putBuffer(res.stdout);
+    this.emit({ type: "episode.candidate", episode: sb.episode, candidate: { hash }, sessionTrace: sb.lastExecStdoutHash ?? "" });
     return { hash };
   }
 
@@ -467,7 +514,9 @@ export class Broker {
     const memoHash = await this.cas.indexGet("eval", memoKey);
     if (memoHash !== undefined && (await this.cas.has(memoHash))) {
       const record = EvaluationRecord.parse(JSON.parse((await this.cas.readBuffer(memoHash)).toString("utf8")));
-      return { ...record, cached: true };
+      const cached = { ...record, cached: true };
+      this.recordEvaluation(cached, group.visibility);
+      return cached;
     }
 
     const workspaceDir = await this.ensureUnpacked(params.artifact.hash);
@@ -493,6 +542,10 @@ export class Broker {
       "none",
       "--label",
       `hone.runId=${this.config.runId}`,
+      // Entrypoints are workspace-relative (e.g. ["python3", "eval.py"]);
+      // never trust the image's WORKDIR.
+      "-w",
+      "/workspace",
       "-e",
       `HONE_SEED=${params.seed}`,
       "-v",
@@ -535,12 +588,53 @@ export class Broker {
     });
     const recordHash = await this.cas.putBuffer(Buffer.from(JSON.stringify(record)));
     await this.cas.indexPut("eval", memoKey, recordHash);
+    this.recordEvaluation(record, group.visibility);
+    this.emit({ type: "budget.snapshot", budget: this.budgetStateNow() });
     return record;
+  }
+
+  /**
+   * Trusted scalarization (scoring default: mean of objective values) + the
+   * eval.completed event. Holdout results NEVER enter the log or the
+   * incumbent-verification table — scores of ledger-gated groups stay
+   * admin-side. Invalid/objective-less outputs record no aggregate.
+   */
+  private recordEvaluation(record: EvaluationRecord, visibility: string): void {
+    if (visibility === "holdout") return;
+    const values = Object.values(record.output.objectives);
+    if (!record.output.valid || values.length === 0) return;
+    const aggregate = values.reduce((a, b) => a + b, 0) / values.length;
+    if (!Number.isFinite(aggregate)) return;
+    this.trustedAggregates.set(record.artifactHash, aggregate);
+    this.emit({
+      type: "eval.completed",
+      artifact: { hash: record.artifactHash },
+      assetGroupId: record.assetGroupId,
+      seed: record.seed,
+      aggregate,
+      cached: record.cached,
+    });
   }
 
   reportIncumbent(params: ReportIncumbentP, _ctx: CallContext): Record<string, never> {
     this.budgetGate();
+    // Claimed metrics are display-only (contract 2); the incumbent event
+    // carries the aggregate this broker measured itself. An artifact we never
+    // evaluated cannot become incumbent.
+    const trusted = this.trustedAggregates.get(params.artifact.hash);
+    if (trusted === undefined) {
+      throw new BrokerError("INTERNAL", `reportIncumbent: no trusted evaluation for artifact ${params.artifact.hash}`);
+    }
+    const baseline = this.trustedAggregates.get(this.config.baselineArtifactHash);
     this.lastIncumbent = params;
+    this.emit({
+      type: "incumbent.new",
+      artifact: { hash: params.artifact.hash },
+      aggregate: trusted,
+      deltaVsBaseline: baseline === undefined ? trusted : trusted - baseline,
+      episode: this.lastEpisode ?? 0,
+    });
+    this.emit({ type: "budget.snapshot", budget: this.budgetStateNow() });
     return {};
   }
 
