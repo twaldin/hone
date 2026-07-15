@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CapsuleManifest, RunEvent } from "@hone/schema";
@@ -539,6 +539,36 @@ describe("evaluator containment", () => {
           onEvent: () => {},
         }),
     ).toThrow(/overlap across visibility classes/);
+  });
+
+  it("rejects symlinked asset paths at construction — a symlink cannot alias holdout into a public mount", async () => {
+    const evilRoot = path.join(tmpBase, "capsule-symlink");
+    await mkdir(path.join(evilRoot, "holdout"), { recursive: true });
+    await writeFile(path.join(evilRoot, "holdout", "holdout.txt"), "holdout-data");
+    // public "train" is a SYMLINK to the holdout dir: lexically disjoint,
+    // physically the same files.
+    await symlink(path.join(evilRoot, "holdout"), path.join(evilRoot, "train"));
+    const bootEvil = (paths: string[]): Broker =>
+      new Broker({
+        runId: "run-symlink",
+        manifest: makeManifest({
+          assetGroups: [
+            { id: "train", visibility: "public", paths },
+            { id: "holdout", visibility: "holdout", paths: ["holdout"] },
+          ],
+        }),
+        capsuleRootDir: evilRoot,
+        baselineArtifactHash: baselineHash,
+        image: TEST_IMAGE,
+        runDir: path.join(tmpBase, "runs", "symlink"),
+        casDir: path.join(tmpBase, "cas", "symlink"),
+        onEvent: () => {},
+      });
+    expect(() => bootEvil(["train"])).toThrow(/symlink in asset path/);
+    // A symlink COMPONENT mid-path is caught too.
+    expect(() => bootEvil(["train/holdout.txt"])).toThrow(/symlink in asset path/);
+    // And a declared path that does not exist fails closed at boot.
+    expect(() => bootEvil(["nope"])).toThrow(/asset path missing on host/);
   });
 });
 
