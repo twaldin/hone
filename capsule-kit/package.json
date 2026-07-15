@@ -10,6 +10,7 @@
     "ordering-check": "tsx tools/ordering-check.ts"
   },
   "dependencies": {
+    "@hone/broker": "workspace:*",
     "@hone/schema": "workspace:*"
   },
   "devDependencies": {

@@ -9,10 +9,15 @@ import {
 describe("seeded-astar diagnostic ordering", () => {
   it(
     "orders broken < naive < baseline < improved and proves split integrity",
-    { timeout: 300_000 },
-    () => {
-      const report = runOrderingCheck();
+    { timeout: 1_200_000 },
+    async () => {
+      const report = await runOrderingCheck();
       expect(report.failures).toEqual([]);
+
+      // Every measurement was a real broker container eval — the tool throws
+      // on memo hits, host exec, or leaks, so reaching here already proves
+      // them; the count pins the exact invocation shape.
+      expect(report.evalInvocations).toBe(14);
 
       // Redundant with report.failures, but keeps the invariants visible in
       // the test output when something regresses.
