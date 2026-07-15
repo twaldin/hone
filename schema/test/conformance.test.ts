@@ -15,6 +15,7 @@ import {
   canonicalJson,
   capsuleDigest,
   deriveCapsuleId,
+  validateDiagnosticOrdering,
 } from "../src/index.js";
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
@@ -117,6 +118,7 @@ describe("diagnostic ordering report", () => {
     expect(r.version).toBe(1);
     expect(r.failures).toEqual([]);
     expect(r.stability.aggregates.length).toBeGreaterThanOrEqual(3);
+    expect(validateDiagnosticOrdering(r)).toEqual([]);
   });
 
   it("is strict — unknown keys are tampering", () => {
@@ -146,6 +148,130 @@ describe("diagnostic ordering report", () => {
     expect(() => DiagnosticOrderingReport.parse(r)).toThrow();
   });
 });
+
+describe("diagnostic ordering semantic invariants (validateDiagnosticOrdering)", () => {
+  const loadReport = () => DiagnosticOrderingReport.parse(load("ordering-report.json"));
+
+  it("returns zero violations for the self-consistent fixture", () => {
+    expect(validateDiagnosticOrdering(loadReport())).toEqual([]);
+  });
+
+  it("returns zero violations for the real seeded-astar report", () => {
+    const seeded = DiagnosticOrderingReport.parse(
+      JSON.parse(
+        readFileSync(
+          join(fixtures, "..", "..", "capsules", "seeded-astar", "diagnostics", "ordering-report.json"),
+          "utf8",
+        ),
+      ),
+    );
+    expect(validateDiagnosticOrdering(seeded)).toEqual([]);
+  });
+
+  it("catches each broken discrimination ordering independently", () => {
+    const brokenHigh = loadReport();
+    brokenHigh.variants.broken.combined = brokenHigh.variants.naive.combined;
+    expect(validateDiagnosticOrdering(brokenHigh)).toEqual([
+      expect.stringContaining("broken"),
+    ]);
+
+    const naiveHigh = loadReport();
+    naiveHigh.variants.naive.combined = naiveHigh.variants.baseline.combined + 0.01;
+    expect(validateDiagnosticOrdering(naiveHigh)).toEqual([
+      expect.stringContaining("naive"),
+    ]);
+
+    const improvedLow = loadReport();
+    improvedLow.variants.improved.combined = improvedLow.variants.baseline.combined;
+    expect(validateDiagnosticOrdering(improvedLow)).toEqual([
+      expect.stringContaining("improved"),
+    ]);
+  });
+
+  it("catches a shortcut without a train advantage", () => {
+    const r = loadReport();
+    r.variants.shortcut.train = r.variants.baseline.train;
+    expect(validateDiagnosticOrdering(r)).toEqual([
+      expect.stringContaining("shortcut must beat baseline on train"),
+    ]);
+  });
+
+  it("catches a shortcut whose cheat transfers to validation (no split failure)", () => {
+    const r = loadReport();
+    r.variants.shortcut.validation = r.variants.baseline.validation;
+    expect(validateDiagnosticOrdering(r)).toEqual([
+      expect.stringContaining("shortcut must NOT beat baseline on validation"),
+    ]);
+  });
+
+  it("catches failed constraint gates on baseline and improved, each split", () => {
+    for (const name of ["baseline", "improved"] as const) {
+      for (const field of ["trainTestsPass", "validationTestsPass"] as const) {
+        const r = loadReport();
+        r.variants[name][field] = false;
+        expect(validateDiagnosticOrdering(r)).toEqual([
+          expect.stringContaining(`${name} ${field} must be true`),
+        ]);
+      }
+    }
+  });
+
+  it("catches a stability head that is not the baseline combined aggregate", () => {
+    const r = loadReport();
+    // Keep the recomputed spread exact (all-equal aggregates, spread 0) so the
+    // head mismatch is the ONLY violation.
+    r.stability.aggregates = [0.49, 0.49, 0.49];
+    r.stability.spread = 0;
+    expect(validateDiagnosticOrdering(r)).toEqual([
+      expect.stringContaining("stability.aggregates[0]"),
+    ]);
+  });
+
+  it("catches a recorded spread that does not recompute from the aggregates", () => {
+    const r = loadReport();
+    r.stability.spread = r.stability.spread + 0.01;
+    const violations = validateDiagnosticOrdering(r);
+    expect(violations).toEqual([expect.stringContaining("does not recompute")]);
+  });
+
+  it("catches a spread at or above the band even when recorded consistently", () => {
+    const r = loadReport();
+    const combined = r.variants.baseline.combined;
+    // Self-consistent aggregates whose true relative spread far exceeds the band.
+    const aggs = [combined, combined - 0.2, combined + 0.2];
+    const mean = aggs.reduce((a, b) => a + b, 0) / aggs.length;
+    const spread = (Math.max(...aggs) - Math.min(...aggs)) / mean;
+    r.stability.aggregates = aggs;
+    r.stability.spread = spread;
+    expect(validateDiagnosticOrdering(r)).toEqual([
+      expect.stringContaining("strictly under band"),
+    ]);
+
+    // Exactly AT the band is also a forgery: the tool asserts spread < band,
+    // so a failures-free report with spread == band cannot be honest.
+    const atBand = loadReport();
+    atBand.stability.band = atBand.stability.spread;
+    expect(validateDiagnosticOrdering(atBand)).toEqual([
+      expect.stringContaining("strictly under band"),
+    ]);
+  });
+
+  it("catches recorded failures even when every aggregate is consistent", () => {
+    const r = loadReport();
+    r.failures = ["synthetic"];
+    expect(validateDiagnosticOrdering(r)).toEqual([
+      expect.stringContaining("records 1 failure(s)"),
+    ]);
+  });
+
+  it("fails closed on non-finite numbers in a hand-built report (schema bypass)", () => {
+    const r = loadReport();
+    r.variants.naive.combined = Number.NaN;
+    const violations = validateDiagnosticOrdering(r);
+    expect(violations).toContainEqual(expect.stringContaining("naive.combined is not a finite number"));
+  });
+});
+
 
 describe("contract: evaluator output", () => {
   it("accepts §7.3 output with unbounded per-example feedback blobs", () => {

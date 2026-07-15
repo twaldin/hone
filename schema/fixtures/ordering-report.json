@@ -39,7 +39,7 @@
   },
   "stability": {
     "aggregates": [0.5095, 0.5088, 0.5101],
-    "spread": 0.0026,
+    "spread": 0.0025516880397800992,
     "band": 0.15
   },
   "failures": []
