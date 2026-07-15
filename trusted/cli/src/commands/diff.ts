@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boolFlag, parseFlags, strFlag } from "../args.js";
-import { extractArtifact } from "../cas.js";
+import { extractWorkspaceArtifact } from "../artifact.js";
 import { bestArtifact, replayRun } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
 import { casRoot, resolveRun } from "../runs.js";
@@ -26,8 +26,10 @@ export async function diffCommand(args: string[], io: CmdIo): Promise<number> {
   try {
     const a = join(scratch, "baseline");
     const b = join(scratch, "incumbent");
-    extractArtifact(casRoot(io.root), baseline.hash, a);
-    extractArtifact(casRoot(io.root), best.hash, b);
+    // Same validated, workspace-stripped extraction as delivery: adversarial
+    // tars (links, traversal, .git) are rejected before touching the tmp dirs.
+    extractWorkspaceArtifact(casRoot(io.root), baseline.hash, a);
+    extractWorkspaceArtifact(casRoot(io.root), best.hash, b);
     const gitArgs = ["-c", "core.pager=cat", "diff", "--no-index"];
     if (boolFlag(flags, "stat")) gitArgs.push("--stat");
     gitArgs.push("--src-prefix=baseline/", "--dst-prefix=incumbent/", a, b);

@@ -105,19 +105,65 @@ export function sleep(ms: number): Promise<void> {
   return promise;
 }
 
-/** Build a tar of `files` and store it in the root CAS; returns the sha256:<hex> hash. */
+/**
+ * Build a broker-convention artifact tar (files nested under a single
+ * `workspace/` root, packed by the real host tar) and store it in the root
+ * CAS; returns the sha256:<hex> hash.
+ */
 export function tarToCas(root: string, files: Record<string, string>): string {
   const stage = mkdtempSync(join(tmpdir(), "hone-stage-"));
   for (const [rel, content] of Object.entries(files)) {
-    const p = join(stage, rel);
+    const p = join(stage, "workspace", rel);
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, content);
   }
   const tarPath = join(mkdtempSync(join(tmpdir(), "hone-tarout-")), "artifact.tar");
-  const entries = readdirSync(stage);
-  const r = spawnSync("tar", ["-cf", tarPath, "-C", stage, ...entries], { encoding: "utf8" });
+  // Same host-metadata stripping as the broker's packDirAsArtifact — real
+  // artifacts never carry AppleDouble (._*) entries or xattr pax records.
+  const metaFlags =
+    process.platform === "darwin" ? ["--no-xattrs", "--no-mac-metadata", "--no-acls", "--no-fflags"] : ["--no-xattrs"];
+  const r = spawnSync("tar", ["-C", stage, ...metaFlags, "-cf", tarPath, "workspace"], { encoding: "utf8" });
   if (r.status !== 0) throw new Error(`tar failed: ${r.stderr}`);
   return writeCas(join(root, ".hone-cas"), readFileSync(tarPath));
+}
+
+export interface RawTarEntry {
+  name: string;
+  /** ustar typeflag: "0" file (default), "5" dir, "1" hardlink, "2" symlink, "x" pax, "L" GNU longname… */
+  type?: string;
+  content?: string;
+  linkname?: string;
+}
+
+/** Byte-level ustar builder — expresses adversarial layouts host tar refuses to create. */
+export function buildTar(entries: RawTarEntry[]): Buffer {
+  const blocks: Buffer[] = [];
+  for (const entry of entries) {
+    const data = Buffer.from(entry.content ?? "", "utf8");
+    const header = Buffer.alloc(512);
+    header.write(entry.name, 0, 100, "utf8");
+    header.write("0000644\0", 100); // mode
+    header.write("0000000\0", 108); // uid
+    header.write("0000000\0", 116); // gid
+    header.write(`${data.length.toString(8).padStart(11, "0")}\0`, 124); // size
+    header.write("00000000000\0", 136); // mtime
+    header.fill(0x20, 148, 156); // checksum placeholder = spaces
+    header.write(entry.type ?? "0", 156, 1, "utf8");
+    if (entry.linkname !== undefined) header.write(entry.linkname, 157, 100, "utf8");
+    header.write("ustar\0", 257);
+    header.write("00", 263);
+    let sum = 0;
+    for (const byte of header) sum += byte;
+    header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148);
+    blocks.push(header);
+    if (data.length > 0) {
+      const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
+      data.copy(padded);
+      blocks.push(padded);
+    }
+  }
+  blocks.push(Buffer.alloc(1024)); // end-of-archive
+  return Buffer.concat(blocks);
 }
 
 export function writeEvents(root: string, runId: string, events: unknown[]): string {
