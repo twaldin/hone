@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "id": "cap_a24cbf9283bb",
+  "objective": "Make the grid A* pathfinder in astar.py substantially faster (lower runtime_ms) while preserving correctness: every pytest test must keep passing and returned paths must remain optimal shortest paths. Only the pathfinder implementation may change; eval.py and test_astar.py are protected.",
+  "baseline": {
+    "kind": "git",
+    "commit": "ef86c54919c6aaace0cb80cbf8284b0340b75526"
+  },
+  "image": "hone-task:latest",
+  "evalEntrypoint": [
+    "python3",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "test_astar.py"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/train_01.json",
+        "assets/train/train_02.json",
+        "assets/train/train_03.json",
+        "assets/train/train_04.json",
+        "assets/train/train_05.json",
+        "assets/train/train_06.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/validation_01.json",
+        "assets/validation/validation_02.json",
+        "assets/validation/validation_03.json",
+        "assets/validation/validation_04.json"
+      ]
+    },
+    {
+      "id": "holdout",
+      "visibility": "holdout",
+      "paths": [
+        "assets/holdout/holdout_01.json",
+        "assets/holdout/holdout_02.json",
+        "assets/holdout/holdout_03.json",
+        "assets/holdout/holdout_04.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 2000000,
+    "maxUsd": 20,
+    "maxWallClockSec": 3600,
+    "maxEvaluatorInvocations": 200
+  },
+  "contentHashes": {
+    "assets/train/train_01.json": "sha256:56211c5000c79b9a07746379223292008fc9a1727a981cdf28b1dce6d394da37",
+    "assets/train/train_02.json": "sha256:cb322e913ea2d4ed7f007d66e57c795cad52f0dc3796d959e183863757f8706d",
+    "assets/train/train_03.json": "sha256:046e76981a6c6d65873c157e694b467fcaf45b038d1c2ee1067a4207ad270712",
+    "assets/train/train_04.json": "sha256:e5ebc2a8a9dd1a5ec57a9c1fa9c14252922a18c01d903e05a6678a8fcfe192e5",
+    "assets/train/train_05.json": "sha256:7c71b3b3e3789e71eee208f12dec56977dc876c875db26262ea52aadd7deadbe",
+    "assets/train/train_06.json": "sha256:22006c0c3daa013341b74571260b00db962bcd1be5ecd864561b53fc2d81671c",
+    "assets/validation/validation_01.json": "sha256:fc743b7557a173b250ec6fd4b609becc3753a4ede1e538710826bae39b448ab3",
+    "assets/validation/validation_02.json": "sha256:a07a92337a290504b04cc44da34fabb1431ebac047371c8549f9a49b63c27ffa",
+    "assets/validation/validation_03.json": "sha256:db9770262be0645baf843a71affe1956b9cea7c0db09c56c0e590d360f970363",
+    "assets/validation/validation_04.json": "sha256:ded0967b2929885f6c78f0b868a37d66fbc37d092abc8ea6ac77fe524169cb44",
+    "assets/holdout/holdout_01.json": "sha256:46f3dff73a1e8304e97dfe855b12d36b62b3c89ab92d808271b749859ecba6e5",
+    "assets/holdout/holdout_02.json": "sha256:5e9aec249fa7bcc61bd7c2dcbfd4d082e8dc1e4a5f4beb4c52465bc2a69aebd2",
+    "assets/holdout/holdout_03.json": "sha256:613b52bd082929a3318c2607f44e2ab4383d1f12c4a580bda6284ac544519086",
+    "assets/holdout/holdout_04.json": "sha256:051b8163c9b1b9f4379ce17938957501e4fc6d2be46812a36fa848b137f7af5a"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "hone seed WP6: agent-authored tier-1 bootstrap capsule",
+    "tags": [
+      "tier-1",
+      "performance",
+      "python"
+    ]
+  }
+}

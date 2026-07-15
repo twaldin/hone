@@ -2,3 +2,4 @@ packages:
   - schema
   - trusted/*
   - optimizer
+  - capsules

@@ -1,0 +1,178 @@
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ApplyMode } from "@hone/schema";
+import { casPath } from "./cas.js";
+
+/**
+ * Delivery modes (review VI.4 / IV.2). Invariant across ALL modes: the user's
+ * working tree is never touched — branch/pr build in a throwaway worktree,
+ * auto merges by ref-only plumbing (merge-tree + commit-tree + update-ref).
+ */
+
+export class LadderLockedError extends Error {}
+
+export const LADDER_REFUSAL =
+  "refusing apply mode 'auto' on an improver-seat run: the autonomy ladder is locked (set HONE_LADDER_OK=1 once the IV.2 criteria are met)";
+
+export function ladderLocked(mode: ApplyMode, improverSeat: boolean, env: NodeJS.ProcessEnv): boolean {
+  return mode === "auto" && improverSeat && env["HONE_LADDER_OK"] !== "1";
+}
+
+export function assertLadder(mode: ApplyMode, improverSeat: boolean, env: NodeJS.ProcessEnv): void {
+  if (ladderLocked(mode, improverSeat, env)) throw new LadderLockedError(LADDER_REFUSAL);
+}
+
+export interface DeliverOptions {
+  mode: ApplyMode;
+  /** Target git repository — never the artifact staging area. */
+  repo: string;
+  runId: string;
+  /** CAS hash of the artifact tar to deliver. */
+  artifact: string;
+  casDir: string;
+  branch?: string;
+  improverSeat: boolean;
+  env: NodeJS.ProcessEnv;
+}
+
+export interface DeliverResult {
+  /** The ref the artifact landed on (branch name), or null for mode=none. */
+  ref: string | null;
+  notes: string[];
+}
+
+interface ExecResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+function exec(cmd: string, args: string[], cwd?: string): ExecResult {
+  const r = spawnSync(cmd, args, { cwd, encoding: "utf8" });
+  if (r.error) throw r.error;
+  return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+function git(repo: string, ...args: string[]): string {
+  const r = exec("git", ["-C", repo, ...args]);
+  if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${(r.stderr || r.stdout).trim()}`);
+  return r.stdout.trim();
+}
+
+export function isGitRepo(dir: string): boolean {
+  if (!existsSync(dir)) return false;
+  try {
+    return exec("git", ["-C", dir, "rev-parse", "--git-dir"]).code === 0;
+  } catch {
+    return false;
+  }
+}
+
+function binExists(bin: string): boolean {
+  try {
+    return exec(bin, ["--version"]).code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Unpack the artifact into a fresh worktree branch; the main working tree is never touched. */
+function branchDeliver(opts: DeliverOptions): { branch: string; commit: string } {
+  const branch = opts.branch ?? `hone/${opts.runId}`;
+  if (!isGitRepo(opts.repo)) throw new Error(`${opts.repo} is not a git repository`);
+  if (exec("git", ["-C", opts.repo, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).code === 0) {
+    throw new Error(`branch ${branch} already exists in ${opts.repo} — pass --branch to pick another name`);
+  }
+  const blob = casPath(opts.casDir, opts.artifact);
+  if (!existsSync(blob)) throw new Error(`artifact ${opts.artifact} not found in CAS (${blob})`);
+
+  const parent = mkdtempSync(join(tmpdir(), "hone-worktree-"));
+  const worktree = join(parent, "wt");
+  git(opts.repo, "worktree", "add", "-b", branch, worktree);
+  try {
+    for (const entry of readdirSync(worktree)) {
+      if (entry === ".git") continue;
+      rmSync(join(worktree, entry), { recursive: true, force: true });
+    }
+    const tar = exec("tar", ["-xf", blob, "-C", worktree]);
+    if (tar.code !== 0) throw new Error(`tar extract of ${opts.artifact} failed: ${tar.stderr.trim()}`);
+    git(worktree, "add", "-A");
+    if (git(worktree, "status", "--porcelain") !== "") {
+      git(worktree, "commit", "-m", `hone(${opts.runId}): best artifact ${opts.artifact}`);
+    }
+    const commit = git(worktree, "rev-parse", "HEAD");
+    return { branch, commit };
+  } finally {
+    exec("git", ["-C", opts.repo, "worktree", "remove", "--force", worktree]);
+    rmSync(parent, { recursive: true, force: true });
+  }
+}
+
+function prDeliver(opts: DeliverOptions, notes: string[]): string {
+  const { branch } = branchDeliver(opts);
+  const title = `hone(${opts.runId}): apply best artifact`;
+  const body = `Best artifact ${opts.artifact} from hone run ${opts.runId}.`;
+  const manual = `gh pr create --head ${branch} --title ${JSON.stringify(title)} --body ${JSON.stringify(body)}`;
+  if (binExists("gh")) {
+    const r = exec("gh", ["pr", "create", "--head", branch, "--title", title, "--body", body], opts.repo);
+    if (r.code === 0) {
+      notes.push(r.stdout.trim());
+    } else {
+      notes.push(`gh pr create failed (${(r.stderr || r.stdout).trim()}); run manually: ${manual}`);
+    }
+  } else {
+    notes.push(`gh not found; create the PR manually: ${manual}`);
+  }
+  return branch;
+}
+
+/**
+ * auto = branch + ref-only merge into the repo's HEAD branch. No working tree
+ * (the user's or anyone's) is written; a conflicted merge degrades to branch.
+ */
+function autoDeliver(opts: DeliverOptions, notes: string[]): string {
+  const { branch } = branchDeliver(opts);
+  let base: string;
+  try {
+    base = git(opts.repo, "symbolic-ref", "--short", "HEAD");
+  } catch {
+    notes.push(`repo HEAD is detached; left the result on branch ${branch}`);
+    return branch;
+  }
+  const merge = exec("git", ["-C", opts.repo, "merge-tree", "--write-tree", base, branch]);
+  if (merge.code !== 0) {
+    notes.push(`auto-merge into ${base} has conflicts; left the result on branch ${branch}`);
+    return branch;
+  }
+  const tree = merge.stdout.trim().split("\n")[0];
+  if (tree === undefined || tree === "") {
+    notes.push(`auto-merge produced no tree; left the result on branch ${branch}`);
+    return branch;
+  }
+  const baseSha = git(opts.repo, "rev-parse", base);
+  const branchSha = git(opts.repo, "rev-parse", branch);
+  const commit = git(opts.repo, "commit-tree", tree, "-p", baseSha, "-p", branchSha, "-m", `hone(${opts.runId}): auto-apply ${branch}`);
+  git(opts.repo, "update-ref", `refs/heads/${base}`, commit, baseSha);
+  notes.push(`auto-applied to ${base} @ ${commit} (ref-only update; no working tree was written)`);
+  return base;
+}
+
+export function deliver(opts: DeliverOptions): DeliverResult {
+  assertLadder(opts.mode, opts.improverSeat, opts.env);
+  const notes: string[] = [];
+  switch (opts.mode) {
+    case "none":
+      return { ref: null, notes: ["apply mode none — report only; use `hone apply --best` to land it manually"] };
+    case "branch": {
+      const { branch, commit } = branchDeliver(opts);
+      notes.push(`applied ${opts.artifact} to branch ${branch} @ ${commit}`);
+      return { ref: branch, notes };
+    }
+    case "pr":
+      return { ref: prDeliver(opts, notes), notes };
+    case "auto":
+      return { ref: autoDeliver(opts, notes), notes };
+  }
+}

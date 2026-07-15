@@ -1,0 +1,22 @@
+{
+  "objective": "Make the grid A* pathfinder in astar.py substantially faster (lower runtime_ms) while preserving correctness: every pytest test must keep passing and returned paths must remain optimal shortest paths. Only the pathfinder implementation may change; eval.py and test_astar.py are protected.",
+  "image": "hone-task:latest",
+  "evalEntrypoint": ["python3", "eval.py"],
+  "protectedPaths": ["eval.py", "test_astar.py"],
+  "assetGroups": [
+    { "id": "train", "visibility": "public", "paths": ["assets/train"] },
+    { "id": "validation", "visibility": "protected", "paths": ["assets/validation"] },
+    { "id": "holdout", "visibility": "holdout", "paths": ["assets/holdout"] }
+  ],
+  "budget": {
+    "maxTokens": 2000000,
+    "maxUsd": 20,
+    "maxWallClockSec": 3600,
+    "maxEvaluatorInvocations": 200
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "hone seed WP6: agent-authored tier-1 bootstrap capsule",
+    "tags": ["tier-1", "performance", "python"]
+  }
+}

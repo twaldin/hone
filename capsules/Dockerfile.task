@@ -1,0 +1,23 @@
+# hone-task — single shared seed image for BOTH mutation and evaluation
+# sandboxes (build plan §2 contract 1: one image per capsule in the seed).
+#
+# Contents: debian-slim + python3 (3.11) + node 18 (bookworm ships nodejs 18.x)
+# + git. Python deps policy: stdlib + pytest ONLY (apt python3-pytest, no pip).
+#
+# Build:  docker build -t hone-task -f capsules/Dockerfile.task capsules/
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    nodejs \
+    npm \
+    python3 \
+    python3-pytest \
+  && rm -rf /var/lib/apt/lists/*
+
+# Non-root user for sandbox sessions; workdir matches broker mount convention.
+RUN useradd --create-home --uid 1000 hone
+WORKDIR /work
+USER hone
