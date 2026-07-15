@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { CasStore } from "./cas.js";
@@ -139,12 +139,59 @@ export async function packDirAsArtifact(dir: string, cas: CasStore): Promise<str
 }
 
 /**
+ * Extraction flags shared by every host-side `tar -x` of a validated
+ * artifact: never adopt archive ownership, and never restore "full"
+ * permissions (SUID/SGID, BSD file flags, ACLs, xattrs) — GNU tar and bsdtar
+ * both honor these spellings, so no shell-specific cleanup is needed.
+ */
+const EXTRACT_FLAGS = ["--no-same-owner", "--no-same-permissions"];
+
+/**
+ * Owner-recursive access normalization for an extracted (possibly partial)
+ * hostile tree: a validated tar may still carry mode-000/0111 entries, which
+ * host tar restores — unwalkable by the canonical pack and untraversable by
+ * cleanup. Directories gain u+rwx BEFORE their children are visited; regular
+ * files gain u+rw while keeping the owner-exec bit (the canonical-mode
+ * signal). Missing paths and chmod failures are tolerated — the caller's
+ * readdir/read fails with a precise error if access is still impossible.
+ */
+async function makeTreeOwnerAccessible(root: string): Promise<void> {
+  let st;
+  try {
+    st = await lstat(root); // never follows: a symlink target is never chmod'd
+  } catch {
+    return; // partial extraction — path never materialized
+  }
+  if (st.isDirectory()) {
+    try {
+      await chmod(root, (st.mode & 0o777) | 0o700);
+    } catch {
+      // fall through: readdir below reports the real failure if any
+    }
+    let names: string[];
+    try {
+      names = await readdir(root);
+    } catch {
+      return;
+    }
+    for (const name of names) await makeTreeOwnerAccessible(path.join(root, name));
+  } else if (st.isFile()) {
+    try {
+      await chmod(root, (st.mode & 0o777) | 0o600);
+    } catch {
+      // tolerated — pack's readFile surfaces the failure
+    }
+  }
+}
+
+/**
  * Canonicalizes an UNTRUSTED workspace tar (e.g. `docker cp` output from an
  * adversarial sandbox) into CAS: structural validation FIRST — nothing
  * malformed is ever written to disk or handed to a tar binary — then
- * extraction into a trusted temp dir, then a canonical repack of the
- * extracted `workspace/` tree. Returns the canonical hash; the temp dir is
- * always cleaned up.
+ * extraction into a trusted temp dir (access-normalized so hostile mode bits
+ * cannot block packing or cleanup), then a canonical repack of the extracted
+ * `workspace/` tree. Returns the canonical hash; the temp dir is always
+ * cleaned up.
  */
 export async function canonicalizeWorkspaceTar(tarBytes: Buffer, cas: CasStore, run: RunCommand = runCommand): Promise<string> {
   validateWorkspaceTar(tarBytes);
@@ -154,10 +201,13 @@ export async function canonicalizeWorkspaceTar(tarBytes: Buffer, cas: CasStore, 
     await writeFile(tarPath, tarBytes);
     const treeDir = path.join(tmp, "tree");
     await mkdir(treeDir);
-    const res = await run(["tar", "-xf", tarPath, "-C", treeDir]);
+    const res = await run(["tar", ...EXTRACT_FLAGS, "-xf", tarPath, "-C", treeDir]);
+    await makeTreeOwnerAccessible(treeDir); // even a failed extract left a partial tree to walk/remove
     if (res.exitCode !== 0) throw new Error(`tar extract failed: ${res.stderr.toString()}`);
     return await packDirAsArtifact(path.join(treeDir, "workspace"), cas);
   } finally {
+    // Cleanup must survive whatever mode bits extraction restored.
+    await makeTreeOwnerAccessible(tmp);
     await rm(tmp, { recursive: true, force: true });
   }
 }
@@ -187,7 +237,7 @@ export async function unpackArtifact(
   validateWorkspaceTar(await cas.readBuffer(hash));
   const tmp = `${finalDir}.tmp-${process.pid}-${Date.now()}`;
   await mkdir(tmp, { recursive: true });
-  const res = await run(["tar", "-xf", cas.blobPath(hash), "-C", tmp]);
+  const res = await run(["tar", ...EXTRACT_FLAGS, "-xf", cas.blobPath(hash), "-C", tmp]);
   if (res.exitCode !== 0) {
     await rm(tmp, { recursive: true, force: true });
     throw new Error(`tar unpack failed for ${hash}: ${res.stderr.toString()}`);
