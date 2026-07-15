@@ -34,7 +34,11 @@ export class RpcClient {
   private nextId = 1;
   private pending = new Map<number | string, (r: RpcResponse) => void>();
 
-  private constructor(private sock: net.Socket) {
+  private constructor(
+    private sock: net.Socket,
+    /** When set, every request carries this bearer (public TCP listener). */
+    private readonly token?: string,
+  ) {
     sock.setEncoding("utf8");
     sock.on("data", (chunk: string) => {
       this.buf += chunk;
@@ -52,6 +56,14 @@ export class RpcClient {
         }
       }
     });
+    sock.on("close", () => this.closedSignal.resolve());
+    sock.on("error", () => this.closedSignal.resolve());
+  }
+
+  private readonly closedSignal = deferred<void>();
+  /** Resolves when the server (or close()) tears the connection down. */
+  get closed(): Promise<void> {
+    return this.closedSignal.promise;
   }
 
   static connect(socketPath: string): Promise<RpcClient> {
@@ -62,12 +74,23 @@ export class RpcClient {
     return promise;
   }
 
+  /** Connect to the opt-in authenticated public TCP listener. */
+  static connectTcp(host: string, port: number, token?: string): Promise<RpcClient> {
+    const { promise, resolve, reject } = deferred<RpcClient>();
+    const sock = net.connect(port, host);
+    sock.once("connect", () => resolve(new RpcClient(sock, token)));
+    sock.once("error", reject);
+    return promise;
+  }
+
   /** Raw round-trip: returns the full JSON-RPC response (result or error). */
   callRaw(method: string, params: unknown = {}): Promise<RpcResponse> {
     const id = this.nextId++;
     const { promise, resolve } = deferred<RpcResponse>();
     this.pending.set(id, resolve);
-    this.sock.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    this.sock.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id, method, params, ...(this.token !== undefined ? { token: this.token } : {}) })}\n`,
+    );
     return promise;
   }
 

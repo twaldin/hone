@@ -1,4 +1,5 @@
 import net from "node:net";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { z, ZodError } from "zod";
@@ -8,9 +9,14 @@ import { BROKER_ERROR_NUMBER, BrokerError } from "./errors.js";
 import { deferred } from "./deferred.js";
 
 /**
- * Newline-delimited JSON-RPC 2.0 over two unix sockets:
- *   broker.sock       — optimizer clients (unprivileged)
- *   broker-admin.sock — runner/meta/proxy (privileged: holdout, recordSpend)
+ * Newline-delimited JSON-RPC 2.0 over unix sockets:
+ *   broker.sock       — optimizer clients (unprivileged), always present
+ *   broker-admin.sock — OPT-IN privileged socket (holdout, recordSpend) for
+ *                       trusted callers/tests only; production startBroker
+ *                       creates none — the runner makes privileged calls
+ *                       directly on the Broker instance, so a same-UID
+ *                       optimizer process finds no privileged endpoint on
+ *                       disk to escalate through.
  * Same protocol on both; privilege is a property of the CONNECTION, decided by
  * which socket file the peer could reach — filesystem permissions are the
  * authn boundary.
@@ -21,12 +27,16 @@ const RpcRequest = z.object({
   id: z.union([z.string(), z.number(), z.null()]).optional(),
   method: z.string(),
   params: z.unknown().optional(),
+  /** Bearer for the opt-in public TCP listener; ignored on unix sockets. */
+  token: z.string().optional(),
 });
 
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
+/** Server-defined JSON-RPC error: missing/wrong TCP auth token. */
+const UNAUTHORIZED = -32060;
 
 interface RpcErrorShape {
   code: number;
@@ -159,7 +169,17 @@ const OVERLOADED = -32050;
 
 export interface BrokerServerOptions {
   socketPath: string;
-  adminSocketPath: string;
+  /** Opt-in privileged socket; omitted = no admin endpoint exists at all. */
+  adminSocketPath?: string | undefined;
+  /**
+   * Opt-in authenticated PUBLIC (unprivileged) TCP listener for containerized
+   * optimizer clients that cannot reach the unix socket. `port: 0` binds an
+   * ephemeral port — read the resolved address from `publicTcpAddress` after
+   * listen(). Every JSON-RPC request on this listener must carry the exact
+   * `token` (constant-time compare); anything else is rejected BEFORE method
+   * dispatch. Unix-socket behavior is unchanged and never requires a token.
+   */
+  publicTcp?: { host: string; port: number; token: string } | undefined;
   /** Max bytes per frame before the connection is rejected; default 1 MiB. */
   maxFrameBytes?: number | undefined;
   /** Max handlers in flight per connection; default 8. */
@@ -180,12 +200,22 @@ export interface BrokerServerOptions {
 interface ConnState {
   sock: net.Socket;
   privileged: boolean;
+  /** True on the public TCP listener: every request must present the exact token. */
+  tokenRequired: boolean;
   inFlight: number;
   queue: Array<{ line: string; bytes: number }>;
   /** Raw bytes of queued complete frames (incl. newline). */
   queuedBytes: number;
   /** Raw bytes RETAINED for this connection: pending fragment + queued frames. */
   bufferedBytes: number;
+}
+
+/** Constant-time token equality (length-safe via digest normalization). */
+function tokenMatches(expected: string, presented: string | undefined): boolean {
+  if (presented === undefined) return false;
+  const a = createHash("sha256").update(presented, "utf8").digest();
+  const b = createHash("sha256").update(expected, "utf8").digest();
+  return timingSafeEqual(a, b);
 }
 
 export class BrokerServer {
@@ -202,6 +232,12 @@ export class BrokerServer {
   private globalBufferedBytes = 0;
   /** Connections with a non-empty backlog, FIFO by first queued frame. */
   private readonly waiting = new Set<ConnState>();
+  /** Resolved address of the opt-in public TCP listener (after listen()). */
+  private tcpAddress: { host: string; port: number } | undefined;
+  /** Set once close() begins: no new connection, frame, or dispatch is admitted. */
+  private closing = false;
+  /** close() callers awaiting the in-flight handler count to reach zero. */
+  private readonly drainWaiters: Array<() => void> = [];
 
   constructor(
     broker: Broker,
@@ -219,12 +255,34 @@ export class BrokerServer {
   async listen(): Promise<void> {
     await mkdir(path.dirname(this.opts.socketPath), { recursive: true });
     await this.listenOne(this.opts.socketPath, false);
-    await this.listenOne(this.opts.adminSocketPath, true);
+    if (this.opts.adminSocketPath !== undefined) await this.listenOne(this.opts.adminSocketPath, true);
+    const tcp = this.opts.publicTcp;
+    if (tcp !== undefined) {
+      // Capability floor: the bearer must carry >=256 bits — refuse to listen
+      // behind a guessable token (generate with randomBytes(32).toString("hex")).
+      if (Buffer.byteLength(tcp.token, "utf8") < 32) {
+        throw new Error("publicTcp.token must be at least 32 bytes (a >=256-bit capability)");
+      }
+      const server = net.createServer((sock) => this.onConnection(sock, false, true));
+      const { promise, resolve, reject } = deferred<void>();
+      server.once("error", reject);
+      server.listen(tcp.port, tcp.host, resolve);
+      await promise;
+      this.servers.push(server);
+      const addr = server.address();
+      if (addr === null || typeof addr === "string") throw new Error("publicTcp listener has no resolved TCP address");
+      this.tcpAddress = { host: addr.address, port: addr.port };
+    }
+  }
+
+  /** Resolved host+port of the public TCP listener; undefined when not enabled. */
+  get publicTcpAddress(): { host: string; port: number } | undefined {
+    return this.tcpAddress;
   }
 
   private async listenOne(socketPath: string, privileged: boolean): Promise<void> {
     await rm(socketPath, { force: true });
-    const server = net.createServer((sock) => this.onConnection(sock, privileged));
+    const server = net.createServer((sock) => this.onConnection(sock, privileged, false));
     const { promise, resolve, reject } = deferred<void>();
     server.once("error", reject);
     server.listen(socketPath, resolve);
@@ -232,9 +290,30 @@ export class BrokerServer {
     this.servers.push(server);
   }
 
+  /**
+   * Graceful close (final-gate finding): new connections and new frames are
+   * rejected IMMEDIATELY (synchronous flag), queued-but-unstarted frames are
+   * dropped with their byte accounting released, and every IN-FLIGHT handler
+   * is awaited before sockets are destroyed and the call returns — so the
+   * caller can tear the Broker down afterwards knowing no handler will
+   * emit, spend, or write against it.
+   */
   async close(): Promise<void> {
+    this.closing = true;
+    // Drop unstarted backlogs; their retained bytes go back to the pool.
+    for (const conn of this.waiting) {
+      conn.queue.length = 0;
+      conn.queuedBytes = 0;
+    }
     this.waiting.clear();
-    // Socket close events release each connection's byte accounting.
+    for (const conn of this.conns) this.release(conn, conn.bufferedBytes);
+    // Await every in-flight handler (responses still reach live sockets).
+    if (this.globalInFlight > 0) {
+      const drained = deferred<void>();
+      this.drainWaiters.push(drained.resolve);
+      await drained.promise;
+    }
+    // Socket close events release each connection's remaining accounting.
     for (const conn of this.conns) conn.sock.destroy();
     await Promise.all(
       this.servers.map((server) => {
@@ -274,7 +353,13 @@ export class BrokerServer {
    * caps into host memory exhaustion. A client that exceeds any cap gets
    * ONE error response, then the connection is torn down deterministically.
    */
-  private onConnection(sock: net.Socket, privileged: boolean): void {
+  private onConnection(sock: net.Socket, privileged: boolean, tokenRequired: boolean): void {
+    if (this.closing) {
+      sock.on("error", () => sock.destroy());
+      const resp: RpcResponse = { jsonrpc: "2.0", id: null, error: { code: OVERLOADED, message: "server closing" } };
+      sock.write(`${JSON.stringify(resp)}\n`, () => sock.destroy());
+      return;
+    }
     if (this.conns.size >= this.maxConnections) {
       // Deterministic rejection of the excess socket: one error frame, close.
       sock.on("error", () => sock.destroy());
@@ -286,7 +371,7 @@ export class BrokerServer {
       sock.write(`${JSON.stringify(resp)}\n`, () => sock.destroy());
       return;
     }
-    const conn: ConnState = { sock, privileged, inFlight: 0, queue: [], queuedBytes: 0, bufferedBytes: 0 };
+    const conn: ConnState = { sock, privileged, tokenRequired, inFlight: 0, queue: [], queuedBytes: 0, bufferedBytes: 0 };
     this.conns.add(conn);
     sock.on("close", () => {
       this.conns.delete(conn);
@@ -301,6 +386,8 @@ export class BrokerServer {
     sock.on("error", () => sock.destroy());
     let buf: Buffer = Buffer.alloc(0);
     sock.on("data", (chunk: Buffer) => {
+      // Closing: reject instead of admitting new work behind the drain.
+      if (this.closing) return this.rejectConnection(conn, OVERLOADED, "server closing");
       buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
       conn.bufferedBytes += chunk.length;
       this.globalBufferedBytes += chunk.length;
@@ -370,7 +457,7 @@ export class BrokerServer {
   private run(conn: ConnState, line: string): void {
     conn.inFlight++;
     this.globalInFlight++;
-    void this.handleLine(line, conn.privileged)
+    void this.handleLine(line, conn)
       .then((resp) => {
         if (resp && !conn.sock.destroyed) conn.sock.write(`${JSON.stringify(resp)}\n`);
       })
@@ -379,6 +466,9 @@ export class BrokerServer {
         conn.inFlight--;
         this.globalInFlight--;
         this.pump();
+        if (this.closing && this.globalInFlight === 0) {
+          for (const waiter of this.drainWaiters.splice(0)) waiter();
+        }
       });
   }
 
@@ -388,6 +478,7 @@ export class BrokerServer {
    * backlog drains resumes reading.
    */
   private pump(): void {
+    if (this.closing) return; // drained frames are dropped, never dispatched
     for (const conn of this.waiting) {
       if (this.globalInFlight >= this.maxConcurrentGlobal) return;
       if (conn.sock.destroyed) {
@@ -422,7 +513,7 @@ export class BrokerServer {
     sock.write(`${JSON.stringify(resp)}\n`, () => sock.destroy());
   }
 
-  private async handleLine(line: string, privileged: boolean): Promise<RpcResponse | undefined> {
+  private async handleLine(line: string, conn: { privileged: boolean; tokenRequired: boolean }): Promise<RpcResponse | undefined> {
     let raw: unknown;
     try {
       raw = JSON.parse(line);
@@ -438,12 +529,18 @@ export class BrokerServer {
     const respond = (resp: Omit<RpcResponse, "jsonrpc" | "id">): RpcResponse | undefined =>
       isNotification ? undefined : { jsonrpc: "2.0", id: id ?? null, ...resp };
 
+    // TCP auth precedes EVERYTHING method-shaped: a wrong or missing token
+    // learns nothing about the method table, not even method-not-found.
+    if (conn.tokenRequired && !tokenMatches(this.opts.publicTcp?.token ?? "", req.data.token)) {
+      return respond({ error: { code: UNAUTHORIZED, message: "unauthorized" } });
+    }
+
     const entry = this.table.get(method);
-    if (!entry || (entry.adminOnly && !privileged)) {
+    if (!entry || (entry.adminOnly && !conn.privileged)) {
       return respond({ error: { code: METHOD_NOT_FOUND, message: `method not found: ${method}` } });
     }
     try {
-      const result = await entry.handler(params, { privileged });
+      const result = await entry.handler(params, { privileged: conn.privileged });
       return respond({ result });
     } catch (err) {
       if (err instanceof InvalidParamsError) {
@@ -470,30 +567,78 @@ export class BrokerServer {
   }
 }
 
-/** A started broker: both sockets listening, reaper armed. */
+/** A started broker: client socket listening, reaper armed. `adminSocketPath`
+ * and `publicTcpAddress` are set only when those opt-ins were requested. */
 export interface RunningBroker {
   broker: Broker;
   server: BrokerServer;
   socketPath: string;
-  adminSocketPath: string;
+  adminSocketPath: string | undefined;
+  /** Resolved host+port of the opt-in authenticated public TCP listener. */
+  publicTcpAddress: { host: string; port: number } | undefined;
   close(): Promise<void>;
 }
 
-export async function startBroker(config: BrokerConfig): Promise<RunningBroker> {
+/** Opt-in extras for trusted callers; production local runs pass nothing. */
+export interface StartBrokerOptions {
+  /**
+   * Create the privileged admin socket at this path. The LOCAL runner MUST
+   * NOT set this: it calls privileged broker methods in-process, and a
+   * same-UID optimizer child must find no privileged RPC endpoint on disk.
+   * (This removes only that gratuitous escalation path — it does not solve
+   * the accepted M0 same-UID host-child isolation gate, which remains M1.)
+   */
+  adminSocketPath?: string | undefined;
+  /**
+   * Authenticated PUBLIC (unprivileged) TCP listener for a containerized
+   * optimizer. `port: 0` binds an ephemeral port; the resolved address is
+   * returned as `publicTcpAddress`. Every request must carry the exact
+   * `token` or it is rejected before method dispatch.
+   */
+  publicTcp?: { host: string; port: number; token: string } | undefined;
+}
+
+export async function startBroker(config: BrokerConfig): Promise<RunningBroker & { adminSocketPath: undefined; publicTcpAddress: undefined }>;
+export async function startBroker(
+  config: BrokerConfig,
+  opts: StartBrokerOptions & { adminSocketPath: string },
+): Promise<RunningBroker & { adminSocketPath: string }>;
+export async function startBroker(
+  config: BrokerConfig,
+  opts: StartBrokerOptions & { publicTcp: { host: string; port: number; token: string } },
+): Promise<RunningBroker & { publicTcpAddress: { host: string; port: number } }>;
+export async function startBroker(config: BrokerConfig, opts: StartBrokerOptions = {}): Promise<RunningBroker> {
   const broker = new Broker(config);
   await broker.init();
   const socketPath = path.join(config.runDir, "broker.sock");
-  const adminSocketPath = path.join(config.runDir, "broker-admin.sock");
-  const server = new BrokerServer(broker, { socketPath, adminSocketPath });
-  await server.listen();
+  const adminSocketPath = opts.adminSocketPath;
+  const server = new BrokerServer(broker, {
+    socketPath,
+    ...(adminSocketPath !== undefined ? { adminSocketPath } : {}),
+    ...(opts.publicTcp !== undefined ? { publicTcp: opts.publicTcp } : {}),
+  });
+  try {
+    await server.listen();
+  } catch (err) {
+    // A partially bound server (e.g. a rejected publicTcp token after the
+    // unix socket bound) must not leak listeners or the opened journal.
+    await server.close();
+    await broker.close();
+    throw err;
+  }
   return {
     broker,
     server,
     socketPath,
     adminSocketPath,
+    publicTcpAddress: server.publicTcpAddress,
     close: async () => {
-      await server.close();
+      // server.close() synchronously stops admitting new RPC, then awaits the
+      // handler drain; broker.close() runs CONCURRENTLY and force-removes
+      // every active container, so a slow eval/exec cannot stall the drain.
+      const serverClosed = server.close();
       await broker.close();
+      await serverClosed;
     },
   };
 }
