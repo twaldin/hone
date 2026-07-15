@@ -216,16 +216,15 @@ function seededLog(runId: string): RunEvent[] {
 }
 
 describe("probe gate flow (real local backend, scripted optimizer)", () => {
-  it("approve: bounded first invocation, measured probe.completed, full relaunch from CURRENT replay state", { timeout: 30_000 }, async () => {
+  it("resume with an unsealed completed pair re-gates it without buying another probe episode", { timeout: 30_000 }, async () => {
     const flow = await runProbeFlow({ seed: seededLog("run_probe"), verdict: true });
 
-    // Two invocations: the probe pinned to ONE episode, the relaunch unbounded.
+    // The completed broker-authored pair is sufficient evidence: only the
+    // post-approval full invocation launches, from the existing cursor.
     const invocations = flow.invocations();
-    expect(invocations.length).toBe(2);
-    expect(invocations[0]?.maxEpisodes).toBe("1");
-    expect(invocations[1]?.maxEpisodes).toBeNull();
-    // The relaunch resumed from the replayed episode cursor — no duplicate episode.
-    expect(invocations[1]?.resume.nextEpisode).toBe(1);
+    expect(invocations.length).toBe(1);
+    expect(invocations[0]?.maxEpisodes).toBeNull();
+    expect(invocations[0]?.resume.nextEpisode).toBe(1);
 
     // The gate saw the TRUSTED paired measurement from the broker events.
     expect(flow.probeReports.length).toBe(1);
@@ -244,7 +243,7 @@ describe("probe gate flow (real local backend, scripted optimizer)", () => {
 
   it("decline: probe.completed approved=false is sealed, a trusted stop is requested, no full launch", { timeout: 30_000 }, async () => {
     const flow = await runProbeFlow({ seed: seededLog("run_probe"), verdict: false });
-    expect(flow.invocations().length).toBe(1); // only the bounded probe
+    expect(flow.invocations().length).toBe(0); // recovered evidence is gated before any launch
     const probes = flow.events().flatMap((e) => (e.type === "probe.completed" ? [e] : []));
     expect(probes.length).toBe(1);
     expect(probes[0]?.approved).toBe(false);
@@ -293,8 +292,8 @@ describe("probe gate flow (real local backend, scripted optimizer)", () => {
 
   it("an abort DURING the gate seals no durable verdict — the run stays resumable and re-gates", { timeout: 30_000 }, async () => {
     const flow = await runProbeFlow({ seed: seededLog("run_probe"), verdict: false, abortOnGate: true });
-    // The bounded probe ran and the gate was consulted…
-    expect(flow.invocations().length).toBe(1);
+    // The recovered pair was gated without another optimizer invocation.
+    expect(flow.invocations().length).toBe(0);
     expect(flow.probeReports.length).toBe(1);
     // …but the abort raced the answer: NO probe.completed was appended (a
     // durable false would wrongly stop every future resume), no stop was
