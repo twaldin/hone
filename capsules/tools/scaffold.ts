@@ -2,13 +2,15 @@
  * Capsule scaffolder.
  *
  * Given a task directory containing `capsule.config.json` plus the capsule
- * tree (baseline/ git repo, assets/), this:
+ * tree (baseline/ git repo, assets/, diagnostics/ordering-report.json), this:
  *   1. expands asset-group paths to files and sha256-hashes every one,
  *   2. reads the baseline git HEAD commit,
- *   3. assembles a CapsuleManifest and zod-validates it,
- *   4. derives the content-addressed id: "cap_" + first 12 hex of sha256 over
- *      the canonical (sorted-key, no-whitespace JSON) manifest sans id,
- *   5. writes manifest.json into the task dir.
+ *   3. validates + hashes the persisted diagnostic-ordering report and embeds
+ *      the {path, hash} reference,
+ *   4. assembles a CapsuleManifest and zod-validates it,
+ *   5. derives the content-addressed id via the canonical @hone/schema
+ *      deriveCapsuleId (sha256 over sorted-key no-whitespace JSON sans id),
+ *   6. writes manifest.json into the task dir.
  *
  * Re-running over an unchanged tree yields byte-identical output — the id is
  * reproducible because nothing time- or machine-dependent enters the hash.
@@ -21,32 +23,13 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { CapsuleManifest, SCHEMA_VERSION } from "@hone/schema";
+import {
+  CapsuleManifest,
+  DiagnosticOrderingReport,
+  SCHEMA_VERSION,
+  deriveCapsuleId,
+} from "@hone/schema";
 
-/** Deterministic JSON: recursively sorted object keys, no whitespace. */
-export function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
-  }
-  if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, v]) => v !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return `{${entries
-      .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-/** "cap_" + first 12 hex of sha256 over the canonical manifest sans id. */
-export function deriveCapId(manifestSansId: Record<string, unknown>): string {
-  const { id: _dropped, ...rest } = manifestSansId;
-  const digest = createHash("sha256")
-    .update(canonicalJson(rest))
-    .digest("hex");
-  return `cap_${digest.slice(0, 12)}`;
-}
 
 function sha256File(path: string): string {
   return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
@@ -87,22 +70,107 @@ function baselineGitHead(taskDir: string): string {
   }
 }
 
+/**
+ * Validate the persisted diagnostic-ordering report against the schema and
+ * return the manifest reference: capsule-relative path + hash of the exact
+ * file bytes. A report that does not parse (or records failures) is not
+ * evidence, so scaffolding refuses it.
+ */
+export function loadDiagnosticOrdering(
+  taskDir: string,
+  relPath: string,
+): { path: string; hash: string } {
+  const abs = join(taskDir, relPath);
+  if (!existsSync(abs)) {
+    throw new Error(
+      `diagnostic ordering report missing at ${relPath} — run "pnpm ordering-check -- --report" first`,
+    );
+  }
+  const bytes = readFileSync(abs);
+  const report = DiagnosticOrderingReport.parse(JSON.parse(bytes.toString("utf8")));
+  if (report.failures.length > 0) {
+    throw new Error(
+      `diagnostic ordering report records failures — refusing to scaffold: ${report.failures.join("; ")}`,
+    );
+  }
+  return {
+    path: relPath,
+    hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+  };
+}
+
 /** Scaffold input, colocated with the capsule tree. */
 interface CapsuleConfig {
   objective: string;
   image: string;
   evalEntrypoint: string[];
-  protectedPaths?: string[];
+  protectedPaths: string[];
   assetGroups: { id: string; visibility: string; paths: string[] }[];
   budget: Record<string, number>;
+  diagnosticOrdering: { path: string };
   meta?: Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((x) => typeof x === "string");
+}
+
+/**
+ * Boundary validation for capsule.config.json. Structural only — the emitted
+ * manifest goes through the authoritative CapsuleManifest.parse afterwards,
+ * so anything semantically off (bad visibility, mutable image, partial
+ * budget) is still rejected by the shared schema.
+ */
+function parseCapsuleConfig(raw: unknown): CapsuleConfig {
+  const fail = (field: string): never => {
+    throw new Error(`capsule.config.json: invalid or missing "${field}"`);
+  };
+  if (!isRecord(raw)) return fail("<root>");
+  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, meta } = raw;
+  if (typeof objective !== "string" || objective.length === 0) return fail("objective");
+  if (typeof image !== "string" || image.length === 0) return fail("image");
+  if (!isStringArray(evalEntrypoint) || evalEntrypoint.length === 0) return fail("evalEntrypoint");
+  if (protectedPaths !== undefined && !isStringArray(protectedPaths)) return fail("protectedPaths");
+  if (!Array.isArray(assetGroups) || assetGroups.length === 0) return fail("assetGroups");
+  const groups = assetGroups.map((g, index) => {
+    if (!isRecord(g)) return fail(`assetGroups[${index}]`);
+    const { id, visibility, paths } = g;
+    if (typeof id !== "string" || id.length === 0) return fail(`assetGroups[${index}].id`);
+    if (typeof visibility !== "string") return fail(`assetGroups[${index}].visibility`);
+    if (!isStringArray(paths) || paths.length === 0) return fail(`assetGroups[${index}].paths`);
+    return { id, visibility, paths };
+  });
+  if (!isRecord(budget)) return fail("budget");
+  const budgetNumbers: Record<string, number> = {};
+  for (const [key, value] of Object.entries(budget)) {
+    if (typeof value !== "number") return fail(`budget.${key}`);
+    budgetNumbers[key] = value;
+  }
+  if (!isRecord(diagnosticOrdering) || typeof diagnosticOrdering.path !== "string" || diagnosticOrdering.path.length === 0) {
+    return fail("diagnosticOrdering.path");
+  }
+  if (meta !== undefined && !isRecord(meta)) return fail("meta");
+  return {
+    objective,
+    image,
+    evalEntrypoint,
+    protectedPaths: protectedPaths ?? [],
+    assetGroups: groups,
+    budget: budgetNumbers,
+    diagnosticOrdering: { path: diagnosticOrdering.path },
+    ...(meta !== undefined ? { meta } : {}),
+  };
 }
 
 export function scaffold(taskDirArg: string): CapsuleManifest {
   const taskDir = resolve(taskDirArg);
-  const config = JSON.parse(
-    readFileSync(join(taskDir, "capsule.config.json"), "utf8"),
-  ) as CapsuleConfig;
+  const config = parseCapsuleConfig(
+    JSON.parse(readFileSync(join(taskDir, "capsule.config.json"), "utf8")),
+  );
 
   const assetGroups = config.assetGroups.map((group) => ({
     ...group,
@@ -124,11 +192,12 @@ export function scaffold(taskDirArg: string): CapsuleManifest {
     protectedPaths: config.protectedPaths ?? [],
     assetGroups,
     budget: config.budget,
+    diagnosticOrdering: loadDiagnosticOrdering(taskDir, config.diagnosticOrdering.path),
     contentHashes,
     ...(config.meta !== undefined ? { meta: config.meta } : {}),
   };
 
-  const manifest = CapsuleManifest.parse({ ...sansId, id: deriveCapId(sansId) });
+  const manifest = CapsuleManifest.parse({ ...sansId, id: deriveCapsuleId(sansId) });
   writeFileSync(
     join(taskDir, "manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,

@@ -18,21 +18,30 @@
  *   4. sanity: baseline and improved pass the trusted correctness constraint
  *      with quality 1.0
  *
- * Usage: npx tsx capsules/tools/ordering-check.ts
+ * Usage: npx tsx capsules/tools/ordering-check.ts [--report [path]]
+ *   --report writes the schema-validated compact JSON summary (default path:
+ *   capsules/seeded-astar/diagnostics/ordering-report.json) on success.
  */
 
 import { execFileSync } from "node:child_process";
 import {
   cpSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { readFileSync } from "node:fs";
-import { CapsuleManifest, EvaluatorOutput } from "@hone/schema";
+import {
+  DIAGNOSTIC_ORDERING_REPORT_VERSION,
+  DiagnosticOrderingReport,
+  EvaluatorOutput,
+  canonicalJson,
+} from "@hone/schema";
 
 const CAPSULE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "seeded-astar");
 const SPLITS = ["train", "validation"] as const;
@@ -69,10 +78,29 @@ function composeArtifact(variant: Variant): string {
   return artifact;
 }
 
-/** Frozen manifest evalEntrypoint — the ordering check runs it verbatim. */
-const MANIFEST = CapsuleManifest.parse(
-  JSON.parse(readFileSync(join(CAPSULE_DIR, "manifest.json"), "utf8")),
-);
+/**
+ * Eval entrypoint from capsule.config.json — the pre-manifest source of
+ * truth. The ordering report is an INPUT to the manifest (scaffold hashes it
+ * into diagnosticOrdering), so this tool cannot depend on manifest.json;
+ * scaffold copies the same entrypoint verbatim into the manifest it emits.
+ */
+const EVAL_ENTRYPOINT: readonly string[] = (() => {
+  const raw: unknown = JSON.parse(
+    readFileSync(join(CAPSULE_DIR, "capsule.config.json"), "utf8"),
+  );
+  if (raw === null || typeof raw !== "object" || !("evalEntrypoint" in raw)) {
+    throw new Error("capsule.config.json: missing evalEntrypoint");
+  }
+  const entrypoint = raw.evalEntrypoint;
+  if (
+    !Array.isArray(entrypoint) ||
+    entrypoint.length === 0 ||
+    !entrypoint.every((x): x is string => typeof x === "string" && x.length > 0)
+  ) {
+    throw new Error("capsule.config.json: evalEntrypoint must be a non-empty string array");
+  }
+  return entrypoint;
+})();
 
 /**
  * Faithful local reproduction of the broker eval contract: entrypoint runs
@@ -82,8 +110,8 @@ const MANIFEST = CapsuleManifest.parse(
  * shadows the trusted evaluator.
  */
 function runEval(artifactDir: string, split: Split): EvaluatorOutput {
-  const [command, ...args] = MANIFEST.evalEntrypoint;
-  if (command === undefined) throw new Error("manifest evalEntrypoint is empty");
+  const [command, ...args] = EVAL_ENTRYPOINT;
+  if (command === undefined) throw new Error("config evalEntrypoint is empty");
   const stdout = execFileSync(command, args, {
     cwd: join(CAPSULE_DIR, "baseline"),
     encoding: "utf8",
@@ -206,6 +234,47 @@ export function runOrderingCheck(): OrderingReport {
   return { results, stabilityAggregates, stabilitySpread, failures };
 }
 
+/**
+ * Compact persisted summary of a full ordering check — the shape the capsule
+ * manifest pins by hash (`diagnosticOrdering`). Parsed through the shared
+ * schema so a malformed summary can never be generated in the first place.
+ */
+export function summarizeOrderingReport(report: OrderingReport): DiagnosticOrderingReport {
+  const variant = (r: VariantResult) => ({
+    train: r.train,
+    validation: r.validation,
+    combined: r.combined,
+    trainTestsPass: r.bySplit.train.constraints["tests_pass"] === true,
+    validationTestsPass: r.bySplit.validation.constraints["tests_pass"] === true,
+  });
+  return DiagnosticOrderingReport.parse({
+    version: DIAGNOSTIC_ORDERING_REPORT_VERSION,
+    variants: {
+      baseline: variant(report.results.baseline),
+      broken: variant(report.results.broken),
+      naive: variant(report.results.naive),
+      shortcut: variant(report.results.shortcut),
+      improved: variant(report.results.improved),
+    },
+    stability: {
+      aggregates: report.stabilityAggregates,
+      spread: report.stabilitySpread,
+      band: STABILITY_BAND,
+    },
+    failures: report.failures,
+  });
+}
+
+/**
+ * Deterministic bytes for the persisted report: the canonical JSON (sorted
+ * keys, no whitespace) plus a trailing newline. Serializing the same summary
+ * twice is byte-identical, so a scaffold rerun over the persisted file
+ * reproduces the same hash and capsule id.
+ */
+export function serializeOrderingReport(summary: DiagnosticOrderingReport): string {
+  return `${canonicalJson(summary)}\n`;
+}
+
 function formatReport(report: OrderingReport): string {
   const lines: string[] = [];
   lines.push("variant    train        validation   combined     tests_pass(train/val)");
@@ -232,11 +301,23 @@ const invokedDirectly =
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (invokedDirectly) {
+  const args = process.argv.slice(2);
+  const flagIndex = args.indexOf("--report");
+  const reportPath =
+    flagIndex === -1
+      ? undefined
+      : (args[flagIndex + 1] ?? join(CAPSULE_DIR, "diagnostics", "ordering-report.json"));
+
   const report = runOrderingCheck();
   console.log(formatReport(report));
   if (report.failures.length > 0) {
     console.error(`\nORDERING CHECK FAILED:\n- ${report.failures.join("\n- ")}`);
     process.exit(1);
+  }
+  if (reportPath !== undefined) {
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, serializeOrderingReport(summarizeOrderingReport(report)));
+    console.log(`\nreport -> ${reportPath}`);
   }
   console.log("\nordering check PASSED");
 }

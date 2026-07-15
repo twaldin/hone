@@ -5,18 +5,89 @@ import { fileURLToPath } from "node:url";
 import {
   BrokerMethods,
   CapsuleManifest,
+  DiagnosticOrderingReport,
   EvaluatorOutput,
   RunConfig,
   RunEvent,
   ProxyTraceRecord,
+  canonicalJson,
+  capsuleDigest,
+  deriveCapsuleId,
 } from "../src/index.js";
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 const load = (name: string) => JSON.parse(readFileSync(join(fixtures, name), "utf8"));
 
-describe("contract 1: capsule manifest", () => {
-  it("accepts the seeded-astar fixture", () => {
-    expect(() => CapsuleManifest.parse(load("capsule.seeded-astar.json"))).not.toThrow();
+describe("canonical json + capsule addressing", () => {
+  it("sorts object keys recursively, preserves array order, drops undefined", () => {
+    expect(canonicalJson({ b: { d: 2, c: [3, 1] }, a: 0, u: undefined })).toBe(
+      '{"a":0,"b":{"c":[3,1],"d":2}}',
+    );
+  });
+
+  it("deriveCapsuleId is key-order-insensitive and ignores a present id", () => {
+    const a = deriveCapsuleId({ x: 1, y: [2, 3], id: "cap_aaaaaaaaaaaa" });
+    const b = deriveCapsuleId({ y: [2, 3], x: 1 });
+    expect(a).toBe(b);
+    expect(a).toMatch(/^cap_[0-9a-f]{12}$/);
+  });
+
+  it("capsuleDigest covers the FULL manifest including id", () => {
+    const m = CapsuleManifest.parse(load("capsule.seeded-astar.json"));
+    const digest = capsuleDigest(m);
+    expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(capsuleDigest({ ...m, id: "cap_000000000000" })).not.toBe(digest);
+  });
+});
+
+describe("contract 1: capsule manifest (v2)", () => {
+  it("accepts the seeded-astar fixture and its id derives exactly", () => {
+    const m = CapsuleManifest.parse(load("capsule.seeded-astar.json"));
+    expect(m.schemaVersion).toBe(2);
+    expect(deriveCapsuleId(m)).toBe(m.id);
+  });
+
+  it("rejects schemaVersion 1 — v2 is a clean cutover", () => {
+    const m = load("capsule.seeded-astar.json");
+    m.schemaVersion = 1;
+    expect(() => CapsuleManifest.parse(m)).toThrow();
+  });
+
+  it("rejects a mutable image tag — only repo@sha256:<64> is admissible", () => {
+    const m = load("capsule.seeded-astar.json");
+    for (const bad of [
+      "hone-task:latest",
+      "hone-task",
+      "hone-task@sha256:abc",
+      "Hone-Task@sha256:" + "a".repeat(64),
+      "hone-task@sha512:" + "a".repeat(64),
+    ]) {
+      m.image = bad;
+      expect(() => CapsuleManifest.parse(m), bad).toThrow();
+    }
+  });
+
+  it("tampering any field breaks the id derivation", () => {
+    const m = CapsuleManifest.parse(load("capsule.seeded-astar.json"));
+    expect(deriveCapsuleId(m)).toBe(m.id);
+    const imageTampered = {
+      ...m,
+      image: "hone-task@sha256:" + "f".repeat(64),
+    };
+    expect(deriveCapsuleId(imageTampered)).not.toBe(m.id);
+    const reportTampered = {
+      ...m,
+      diagnosticOrdering: { ...m.diagnosticOrdering, hash: "sha256:" + "e".repeat(64) },
+    };
+    expect(deriveCapsuleId(reportTampered)).not.toBe(m.id);
+  });
+
+  it("requires the diagnostic-ordering reference — evidence is core, not meta", () => {
+    const m = load("capsule.seeded-astar.json");
+    delete m.diagnosticOrdering;
+    expect(() => CapsuleManifest.parse(m)).toThrow();
+    m.diagnosticOrdering = { path: "diagnostics/ordering-report.json", hash: "not-a-hash" };
+    expect(() => CapsuleManifest.parse(m)).toThrow();
   });
 
   it("meta block is droppable without breaking replay (minimality rule)", () => {
@@ -35,6 +106,42 @@ describe("contract 1: capsule manifest", () => {
     const m = load("capsule.seeded-astar.json");
     delete m.budget.maxWallClockSec;
     expect(() => CapsuleManifest.parse(m)).toThrow();
+  });
+});
+
+describe("diagnostic ordering report", () => {
+  it("accepts the persisted-summary fixture", () => {
+    const r = DiagnosticOrderingReport.parse(load("ordering-report.json"));
+    expect(r.version).toBe(1);
+    expect(r.failures).toEqual([]);
+    expect(r.stability.aggregates.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("is strict — unknown keys are tampering", () => {
+    const r = load("ordering-report.json");
+    r.extra = true;
+    expect(() => DiagnosticOrderingReport.parse(r)).toThrow();
+    const r2 = load("ordering-report.json");
+    r2.variants.baseline.note = "sneaky";
+    expect(() => DiagnosticOrderingReport.parse(r2)).toThrow();
+  });
+
+  it("rejects non-finite aggregates", () => {
+    const r = load("ordering-report.json");
+    r.variants.broken.combined = Number.POSITIVE_INFINITY;
+    expect(() => DiagnosticOrderingReport.parse(r)).toThrow();
+  });
+
+  it("requires three or more baseline stability aggregates", () => {
+    const r = load("ordering-report.json");
+    r.stability.aggregates = [0.5, 0.51];
+    expect(() => DiagnosticOrderingReport.parse(r)).toThrow();
+  });
+
+  it("rejects a missing variant", () => {
+    const r = load("ordering-report.json");
+    delete r.variants.shortcut;
+    expect(() => DiagnosticOrderingReport.parse(r)).toThrow();
   });
 });
 
@@ -116,6 +223,68 @@ describe("contract 4: event log", () => {
   it("holdout access events carry the ledger count — no unlogged holdout reads", () => {
     expect(() =>
       RunEvent.parse({ runId: "r", at: new Date().toISOString(), type: "holdout.accessed", capsuleId: "c" }),
+    ).toThrow();
+  });
+
+  it("probe.completed carries the verdict, both measured aggregates, coordinate, and budget", () => {
+    const budget = {
+      envelope: { maxTokens: 100, maxUsd: 1, maxWallClockSec: 60, maxEvaluatorInvocations: 10 },
+      spent: { tokens: 5, usd: 0.01, wallClockSec: 2.5, evaluatorInvocations: 2 },
+    };
+    const e = RunEvent.parse({
+      runId: "run_1",
+      at: new Date().toISOString(),
+      type: "probe.completed",
+      approved: true,
+      baseline: { artifact: { hash: "sha256:" + "a".repeat(64) }, aggregate: 0.5 },
+      candidate: {
+        artifact: { hash: "sha256:" + "b".repeat(64) },
+        aggregate: 0.55,
+        delta: 0.05,
+      },
+      assetGroupId: "validation",
+      seed: 7,
+      budget,
+    });
+    expect(e.type).toBe("probe.completed");
+  });
+
+  it("probe.completed admits a null candidate but not a missing one", () => {
+    const budget = {
+      envelope: { maxTokens: 100, maxUsd: 1, maxWallClockSec: 60, maxEvaluatorInvocations: 10 },
+      spent: { tokens: 5, usd: 0.01, wallClockSec: 2.5, evaluatorInvocations: 2 },
+    };
+    const base = {
+      runId: "run_1",
+      at: new Date().toISOString(),
+      type: "probe.completed",
+      approved: false,
+      baseline: { artifact: { hash: "sha256:" + "a".repeat(64) }, aggregate: 0.5 },
+      assetGroupId: "validation",
+      seed: 7,
+      budget,
+    };
+    expect(RunEvent.parse({ ...base, candidate: null }).type).toBe("probe.completed");
+    expect(() => RunEvent.parse(base)).toThrow();
+  });
+
+  it("probe.completed rejects non-finite aggregates", () => {
+    const budget = {
+      envelope: { maxTokens: 100, maxUsd: 1, maxWallClockSec: 60, maxEvaluatorInvocations: 10 },
+      spent: { tokens: 5, usd: 0.01, wallClockSec: 2.5, evaluatorInvocations: 2 },
+    };
+    expect(() =>
+      RunEvent.parse({
+        runId: "run_1",
+        at: new Date().toISOString(),
+        type: "probe.completed",
+        approved: false,
+        baseline: { artifact: { hash: "sha256:" + "a".repeat(64) }, aggregate: Number.NaN },
+        candidate: null,
+        assetGroupId: "validation",
+        seed: 7,
+        budget,
+      }),
     ).toThrow();
   });
 });
