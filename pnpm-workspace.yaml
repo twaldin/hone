@@ -1,0 +1,4 @@
+packages:
+  - schema
+  - trusted/*
+  - optimizer

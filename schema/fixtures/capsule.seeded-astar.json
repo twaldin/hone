@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "cap_0a1b2c3d4e5f",
+  "objective": "Make the A* pathfinder substantially faster while keeping every correctness test green.",
+  "baseline": { "kind": "git", "commit": "0123456789abcdef0123456789abcdef01234567" },
+  "image": "hone-task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "evalEntrypoint": ["python3", "/capsule/eval.py"],
+  "protectedPaths": [],
+  "assetGroups": [
+    { "id": "train", "visibility": "public", "paths": ["assets/train"] },
+    { "id": "validation", "visibility": "protected", "paths": ["assets/validation"] },
+    { "id": "holdout", "visibility": "holdout", "paths": ["assets/holdout"] }
+  ],
+  "budget": {
+    "maxTokens": 4000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 14400,
+    "maxEvaluatorInvocations": 200
+  },
+  "contentHashes": {
+    "assets/train": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "meta": {
+    "evaluatorSource": "meta",
+    "tags": ["tier-1", "bootstrap"]
+  }
+}

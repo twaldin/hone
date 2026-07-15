@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "capsuleId": "cap_ffeeddccbbaa",
+  "objective": "Improve the mutation episode - prompt, reflective-context assembly, parent/restart policy in optimizer/assets - to raise mean normalized improvement across train capsules at fixed inner budget.",
+  "budget": {
+    "maxTokens": 250000000,
+    "maxUsd": 1500,
+    "maxWallClockSec": 345600,
+    "maxEvaluatorInvocations": 5000
+  },
+  "routing": {
+    "mutation": { "model": "gpt-5.6-terra" },
+    "meta": { "model": "gpt-5.6-sol" },
+    "evaluator-author": { "model": "gpt-5.6-sol" },
+    "validator": { "model": "claude-fable-5" }
+  },
+  "apply": "none",
+  "headless": true,
+  "improverSeat": true,
+  "seed": 42
+}
