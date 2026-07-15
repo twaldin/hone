@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "id": "cap_94d7d2e49d5b",
+  "id": "cap_96bc838f5f4a",
   "objective": "Make the grid A* pathfinder in astar.py substantially faster while preserving correctness: the trusted correctness suite must keep passing and returned paths must remain optimal shortest paths. Only the pathfinder implementation may change; eval.py, worker.py, and test_astar.py are protected.",
   "baseline": {
     "kind": "git",
@@ -60,7 +60,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:71f56d0ba64bdec6cdfd9589a2c7ce046ecca6be12ebf56251b885140879f458"
+    "hash": "sha256:11f83d17947ca401086d7d4c826cfd19a74ea40b15d176f313cfac54d1efd586"
   },
   "contentHashes": {
     "assets/train/train_01.json": "sha256:56211c5000c79b9a07746379223292008fc9a1727a981cdf28b1dce6d394da37",
