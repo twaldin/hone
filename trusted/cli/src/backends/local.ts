@@ -705,14 +705,11 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
         optimizer = await prepareOptimizerRuntime(ctx, { image, transport, run, spawnImpl });
         if (ctx.signal.aborted) return;
 
-        // VI.4 probe gate: the FIRST invocation is bounded to one outer
-        // episode; the paired baseline/candidate measurement is derived from
-        // broker-authored events (never optimizer claims), sealed as a
-        // probe.completed event, and gated. Headless auto-approves;
-        // interactive decline requests a trusted stop (terminal status
-        // "stopped"). An approved probe in the log never re-runs — the full
-        // relaunch resumes from the CURRENT replay state, so the probe
-        // episode is never duplicated.
+        // VI.4 probe gate: a fresh run gets one optimizer episode; a resume
+        // that crashed while the owner was answering reuses the already
+        // completed broker-authored pair instead of buying another episode.
+        // The verdict is sealed as probe.completed. A durable approval skips
+        // this gate forever; a durable decline requests a trusted stop.
         const probe = replayRun(ctx.runDir).probe;
         if (probe !== null && !probe.approved) {
           // Durable decline that never terminalized (crash window): honor it.
@@ -720,9 +717,20 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
           return;
         }
         if (probe === null) {
-          await runOptimizer(ctx, optimizer, { maxEpisodes: 1 });
-          if (ctx.signal.aborted) return;
-          const report = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
+          let report: ProbeReport | undefined;
+          try {
+            const recovered = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
+            // A lone parent measurement is startup state, not a completed
+            // candidate pair. Only recover evidence that can support approval.
+            if (recovered.candidate !== null) report = recovered;
+          } catch {
+            // No complete pair exists yet: run the one-episode probe now.
+          }
+          if (report === undefined) {
+            await runOptimizer(ctx, optimizer, { maxEpisodes: 1 });
+            if (ctx.signal.aborted) return;
+            report = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
+          }
           const approved = await ctx.probeGate(report);
           // An abort that landed DURING the gate must not seal a durable
           // verdict — the owner never answered; the run stays resumable and
