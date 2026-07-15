@@ -1,10 +1,12 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CapsuleManifest, RunEvent } from "@hone/schema";
+import { CapsuleManifest, RunEvent, deriveCapsuleId } from "@hone/schema";
 import { writeCas } from "../src/cas.js";
+import { computeOptimizerDigest } from "../src/optimizer-digest.js";
 import { deferred } from "../src/promise.js";
 import type { CmdIo } from "../src/io.js";
 
@@ -16,35 +18,91 @@ export function makeRoot(): string {
   return mkdtempSync(join(tmpdir(), "hone-cli-"));
 }
 
-export const CAP_ID = "cap_00000000abcd";
+/** Immutable fixture image (v2 schema: repo@sha256 only). */
+export const FIX_IMAGE = `hone-task@sha256:${"a".repeat(64)}`;
 
-/** Raw manifest JSON — deliberately unvalidated so tests can feed the CLI broken capsules. */
-export function manifestRaw(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function sha256Of(content: string): string {
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+const TRAIN_CONTENT = "train\n";
+const VAL_CONTENT = "val\n";
+
+/** A schema-valid persisted ordering report with zero failures (admission accepts it). */
+export function orderingReportRaw(): Record<string, unknown> {
+  const variant = (train: number, validation: number): Record<string, unknown> => ({
+    train,
+    validation,
+    combined: (train + validation) / 2,
+    trainTestsPass: true,
+    validationTestsPass: true,
+  });
   return {
-    schemaVersion: 1,
-    id: CAP_ID,
+    version: 1,
+    variants: {
+      baseline: variant(0.5, 0.5),
+      broken: variant(0.1, 0.1),
+      naive: variant(0.3, 0.3),
+      shortcut: { train: 0.9, validation: 0.2, combined: 0.55, trainTestsPass: true, validationTestsPass: false },
+      improved: variant(0.7, 0.7),
+    },
+    stability: { aggregates: [0.5, 0.5, 0.5], spread: 0, band: 0.15 },
+    failures: [],
+  };
+}
+
+export const ORDERING_REPORT_JSON = `${JSON.stringify(orderingReportRaw(), null, 2)}\n`;
+export const ORDERING_REPORT_PATH = "diagnostics/ordering-report.json";
+
+/**
+ * Raw manifest JSON — deliberately unvalidated so tests can feed the CLI
+ * broken capsules. The id is content-derived AFTER overrides (pass `id` to
+ * break identity on purpose). Content references exactly the files
+ * makeCapsule writes, so a default capsule passes frozen admission.
+ */
+export function manifestRaw(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    schemaVersion: 2,
     objective: "Make the fixture task measurably better while keeping every test green.",
-    baseline: { kind: "git", commit: "0123456789abcdef0123456789abcdef01234567" },
-    image: `hone-task@sha256:${"a".repeat(64)}`,
+    baseline: { kind: "cas", hash: fakeHash("b") },
+    image: FIX_IMAGE,
     evalEntrypoint: ["python3", "/capsule/eval.py"],
     protectedPaths: ["protected/keep.txt"],
     assetGroups: [
-      { id: "train", visibility: "public", paths: ["assets/train"] },
-      { id: "validation", visibility: "protected", paths: ["assets/validation"] },
+      { id: "train", visibility: "public", paths: ["assets/train/data.txt"] },
+      { id: "validation", visibility: "protected", paths: ["assets/validation/data.txt"] },
     ],
     budget: { maxTokens: 1_000_000, maxUsd: 25, maxWallClockSec: 3600, maxEvaluatorInvocations: 100 },
-    contentHashes: { "assets/train": `sha256:${"b".repeat(64)}` },
+    diagnosticOrdering: { path: ORDERING_REPORT_PATH, hash: sha256Of(ORDERING_REPORT_JSON) },
+    contentHashes: {
+      "assets/train/data.txt": sha256Of(TRAIN_CONTENT),
+      "assets/validation/data.txt": sha256Of(VAL_CONTENT),
+    },
     ...overrides,
   };
+  if (base["id"] === undefined) base["id"] = deriveCapsuleId(base);
+  return base;
 }
+
+/** The default fixture capsule's content-derived id. */
+export const CAP_ID = String(manifestRaw()["id"]);
+
+/** The computed default-optimizer digest for the fixture image — what runCommand seals. */
+export const FIX_OPTIMIZER_DIGEST = computeOptimizerDigest(FIX_IMAGE);
 
 export function manifestObject(): CapsuleManifest {
   return CapsuleManifest.parse(manifestRaw());
 }
 
+/** A capsule directory that passes frozen admission (assets + hashed ordering report on disk). */
 export function makeCapsule(root: string, overrides: Record<string, unknown> = {}): string {
   const dir = join(root, "capsule");
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(dir, "assets", "train"), { recursive: true });
+  mkdirSync(join(dir, "assets", "validation"), { recursive: true });
+  mkdirSync(join(dir, "diagnostics"), { recursive: true });
+  writeFileSync(join(dir, "assets", "train", "data.txt"), TRAIN_CONTENT);
+  writeFileSync(join(dir, "assets", "validation", "data.txt"), VAL_CONTENT);
+  writeFileSync(join(dir, ORDERING_REPORT_PATH), ORDERING_REPORT_JSON);
   writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifestRaw(overrides), null, 2));
   return dir;
 }
@@ -194,7 +252,7 @@ export function fixtureEvents(opts: {
 }): RunEvent[] {
   const base = { runId: opts.runId };
   const events: RunEvent[] = [
-    { ...base, at: at(), type: "run.started", capsuleId: CAP_ID, contractHash: fakeHash("c"), optimizerDigest: "unpinned" },
+    { ...base, at: at(), type: "run.started", capsuleId: CAP_ID, contractHash: fakeHash("c"), optimizerDigest: FIX_OPTIMIZER_DIGEST },
     { ...base, at: at(), type: "episode.started", episode: 0, parent: { hash: opts.baselineHash } },
     { ...base, at: at(), type: "episode.candidate", episode: 0, candidate: { hash: opts.bestHash }, sessionTrace: fakeHash("e") },
     { ...base, at: at(), type: "eval.completed", episode: 0, artifact: { hash: opts.bestHash }, assetGroupId: "validation", seed: 0, aggregate: 0.62, cached: false },

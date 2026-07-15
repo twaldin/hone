@@ -130,10 +130,17 @@ describe("optimizer process-group kill", () => {
         HONE_OPTIMIZER_CMD: process.execPath,
         HONE_OPTIMIZER_ENTRY: script,
       },
+      capsuleDigest: fakeHash("f"),
+      optimizerDigest: fakeHash("0"),
       replayed: replay([]),
       signal: abort.signal,
       emit: (event) => event,
-      registerChild: (child) => children.push(child),
+      registerChild: (child) => {
+        children.push(child);
+        return () => {};
+      },
+      probeGate: () => Promise.resolve(true),
+      requestStop: () => {},
       registerAuthorityBarrier: () => {},
     };
 

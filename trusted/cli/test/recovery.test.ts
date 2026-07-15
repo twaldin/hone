@@ -8,6 +8,7 @@ import type { BudgetState, RunEvent } from "@hone/schema";
 import { runCommand } from "@hone/broker";
 import type { CallContext, CmdResult, RunCommand } from "@hone/broker";
 import type { ProxyHandle } from "@hone/proxy";
+import { writeCapsuleSnapshot } from "../src/admission.js";
 import { reconcileBrokerAuthority, setupEgress, sweepStaleRunResources } from "../src/backends/local.js";
 import type { AuthorityRecoverySource } from "../src/backends/local.js";
 import { appendEvent, bestArtifact, eventsPath, readEvents, replayRun } from "../src/eventlog.js";
@@ -292,6 +293,8 @@ describe("live docker smoke (finding 10)", () => {
 function resumableFixture(root: string, runId: string): string {
   makeCapsule(root);
   const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false }));
+  // Frozen-admission resume gate: the run dir must carry the capsule snapshot.
+  writeCapsuleSnapshot(runDir, manifestObject());
   writeRunConfigFile(
     runDir,
     RunConfig.parse({
@@ -473,7 +476,17 @@ describe("run lock (FinalSecurityGate finding 2 — OS-enforced exclusivity)", (
     appendEvent(runDir, { runId, at: at(), type: "run.finished", best: { hash: fakeHash("d") }, status: "completed" });
     const { io } = makeIo(root, { HONE_STUB_EPISODES: "4" });
     await expect(
-      superviseRun(plan, { manifest: manifestObject(), capsuleDir: join(root, "capsule"), flags: { backend: "stub", repo: undefined } }, io),
+      superviseRun(
+        plan,
+        {
+          manifest: manifestObject(),
+          capsuleDir: join(root, "capsule"),
+          capsuleDigest: fakeHash("f"),
+          optimizerDigest: fakeHash("0"),
+          flags: { backend: "stub", repo: undefined },
+        },
+        io,
+      ),
     ).rejects.toThrow(/already finished/);
     const events = readEvents(runDir);
     // exactly one run.finished; the late contender appended nothing and started no backend

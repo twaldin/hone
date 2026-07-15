@@ -116,6 +116,10 @@ export interface RunState {
   runId: string | null;
   capsuleId: string | null;
   contractHash: string | null;
+  /** Optimizer digest sealed by run.started (null before the run started). */
+  optimizerDigest: string | null;
+  /** Last probe.completed outcome (null when no probe has been decided). */
+  probe: { approved: boolean } | null;
   /** Number of events consumed = the next event's 0-based line index. */
   cursor: number;
   status: RunStatus;
@@ -135,6 +139,8 @@ export function replay(events: RunEvent[]): RunState {
     runId: null,
     capsuleId: null,
     contractHash: null,
+    optimizerDigest: null,
+    probe: null,
     cursor: 0,
     status: "pending",
     episodes: new Set<number>(),
@@ -154,10 +160,14 @@ export function replay(events: RunEvent[]): RunState {
         state.runId = event.runId;
         state.capsuleId = event.capsuleId;
         state.contractHash = event.contractHash;
+        state.optimizerDigest = event.optimizerDigest;
         state.status = "running";
         break;
       case "run.resumed":
         state.resumeCount++;
+        break;
+      case "probe.completed":
+        state.probe = { approved: event.approved };
         break;
       case "episode.started":
         state.episodes.add(event.episode);

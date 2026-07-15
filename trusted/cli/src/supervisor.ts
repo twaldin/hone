@@ -8,16 +8,17 @@ import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { ApplyMode, BudgetEnvelope, ModelRouting, RunConfig, RunEvent } from "@hone/schema";
-import type { CapsuleManifest } from "@hone/schema";
+import type { CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
+import { admitCapsule, revalidateForResume, writeCapsuleSnapshot } from "./admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
 import { createBackend as createLocalBackend } from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
-import { loadCapsule } from "./capsule.js";
-import { contractHash, renderContract } from "./contract.js";
+import { applyContractRevision, contractHash, renderContract } from "./contract.js";
 import { LadderLockedError, deliver, isGitRepo, ladderLocked, LADDER_REFUSAL } from "./deliver.js";
 import { appendEvent, replayRun } from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
 import type { CmdIo } from "./io.js";
+import { resolveOptimizerDigest } from "./optimizer-digest.js";
 import { deferred, sleep } from "./promise.js";
 import { exitReport, formatDelta, formatHumanReport, formatSpend } from "./report.js";
 import {
@@ -30,7 +31,7 @@ import {
   runsRoot,
   writeRunConfigFile,
 } from "./runs.js";
-import type { ChildLike, RunnerBackend, RunnerBackendContext } from "./types.js";
+import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "./types.js";
 
 const RUN_USAGE =
   "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--resume] [--backend stub|local|<module>] [--config <json>] [--repo <dir>]";
@@ -108,11 +109,22 @@ interface RunPlan {
   resumed: boolean;
 }
 
+/** Default mutation model for a bare `hone run` (no --config): HONE_MODEL_ID or glm-5.2 via the standard upstream. */
+const DEFAULT_MUTATION_MODEL = "glm-5.2";
+
 function buildConfig(
   manifest: CapsuleManifest,
   overrides: ConfigOverrides,
   flags: { headless: boolean; apply: string | undefined; budgetUsd: number | undefined },
+  env: NodeJS.ProcessEnv,
 ): RunConfig {
+  const routing: ModelRouting = { ...(overrides.routing ?? {}) };
+  if (routing["mutation"] === undefined) {
+    // Bare run: default the mutation route so `hone run <capsule>` works with
+    // zero config. The upstream base URL stays the proxy's single configured
+    // default (vibeproxy); only the model id is chosen here.
+    routing["mutation"] = { model: env["HONE_MODEL_ID"] ?? DEFAULT_MUTATION_MODEL };
+  }
   return RunConfig.parse({
     version: 1,
     capsuleId: manifest.id,
@@ -122,7 +134,7 @@ function buildConfig(
       ...(overrides.budget ?? {}),
       ...(flags.budgetUsd !== undefined ? { maxUsd: flags.budgetUsd } : {}),
     },
-    routing: overrides.routing ?? {},
+    routing,
     apply: flags.apply ?? overrides.apply ?? "none",
     headless: flags.headless || overrides.headless === true,
     improverSeat: overrides.improverSeat ?? false,
@@ -130,22 +142,68 @@ function buildConfig(
   });
 }
 
-async function promptApproval(contractPath: string, io: CmdIo): Promise<boolean> {
+/**
+ * Interactive approval loop. `E` opens $EDITOR on the contract; afterwards the
+ * unique executable run-config block is parsed back, validated (frozen
+ * capsule id, capsule budget envelope, ladder), and the WHOLE contract is
+ * re-rendered from the approved config so no narrative goes stale. Any
+ * revision that does not survive that pipeline fails closed: no run starts.
+ * Returns the approved (possibly revised) config, or null when declined.
+ */
+async function promptApproval(
+  contractPath: string,
+  seal: { runId: string; manifest: CapsuleManifest; capsuleDigest: string; optimizerDigest: string; orderingReport: DiagnosticOrderingReport },
+  initial: RunConfig,
+  io: CmdIo,
+): Promise<RunConfig | null> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let config = initial;
   try {
     for (;;) {
       io.out("");
       io.out(readFileSync(contractPath, "utf8"));
       io.out(`(contract on disk: ${contractPath})`);
       const answer = (await rl.question("approve run contract? [Y]es / [E]dit / [N]o: ")).trim().toLowerCase();
-      if (answer === "" || answer === "y" || answer === "yes") return true;
-      if (answer === "n" || answer === "no") return false;
+      if (answer === "" || answer === "y" || answer === "yes") return config;
+      if (answer === "n" || answer === "no") return null;
       if (answer === "e" || answer === "edit") {
         const editor = io.env["EDITOR"] ?? io.env["VISUAL"] ?? "vi";
         const before = readFileSync(contractPath, "utf8");
         spawnSync(editor, [contractPath], { stdio: "inherit" });
-        if (readFileSync(contractPath, "utf8") !== before) io.out("contract revised — re-review before approving:");
+        const after = readFileSync(contractPath, "utf8");
+        if (after === before) continue;
+        const outcome = applyContractRevision({ preEdit: before, edited: after, original: config, manifest: seal.manifest, env: io.env });
+        if (!outcome.ok) {
+          io.err(`contract revision rejected (fail closed): ${outcome.error}`);
+          return null;
+        }
+        config = outcome.config;
+        writeFileSync(contractPath, renderContract({ ...seal, config }));
+        io.out("contract re-rendered from the revised run config — re-review before approving:");
       }
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+/** Interactive probe gate: print the trusted paired measurement, ask to continue. */
+async function promptProbe(report: ProbeReport, io: CmdIo): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    io.out("");
+    io.out("probe episode complete — trusted paired measurement (broker events, not optimizer claims):");
+    io.out(`  baseline  ${report.baseline.artifact.hash}  aggregate ${report.baseline.aggregate}`);
+    if (report.candidate !== null) {
+      io.out(`  candidate ${report.candidate.artifact.hash}  aggregate ${report.candidate.aggregate} (Δ ${formatDelta(report.candidate.delta)})`);
+    } else {
+      io.out("  candidate: none produced by the probe episode");
+    }
+    io.out(`  measured on ${report.assetGroupId} (seed ${report.seed}) | ${formatSpend(report.budget)}`);
+    for (;;) {
+      const answer = (await rl.question("continue the full run? [Y]es / [N]o: ")).trim().toLowerCase();
+      if (answer === "" || answer === "y" || answer === "yes") return true;
+      if (answer === "n" || answer === "no") return false;
     }
   } finally {
     rl.close();
@@ -160,7 +218,6 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
   const capsuleArg = positionals[0];
   if (capsuleArg === undefined) throw new UsageError(RUN_USAGE);
   const capsuleDir = resolve(io.root, capsuleArg);
-  const manifest = loadCapsule(capsuleDir);
 
   const configPath = strFlag(flags, "config");
   const overrides: ConfigOverrides = configPath
@@ -183,19 +240,41 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
     return 2;
   }
 
+  // Frozen admission (M0 conformance): id recompute, exact asset-hash set,
+  // hashed+schema-validated ordering report, clean baseline worktree — all
+  // BEFORE any run state exists. The optimizer identity resolves here too, so
+  // a refused digest never mints a run.
+  const admitted = admitCapsule(capsuleDir);
+  const manifest = admitted.manifest;
+  const optimizerDigest = resolveOptimizerDigest(io.env, manifest.image);
+
   let plan: RunPlan;
   if (boolFlag(flags, "resume")) {
     const found = findResumableRun(io.root, manifest.id);
     if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${manifest.id} under ${runsRoot(io.root)}`);
+    // The capsule must re-admit at the EXACT digest snapshotted when the run
+    // was created, and the optimizer identity sealed into run.started must
+    // still describe the optimizer that would relaunch.
+    revalidateForResume(found.runDir, capsuleDir);
+    if (found.state.optimizerDigest !== null && found.state.optimizerDigest !== optimizerDigest) {
+      throw new UsageError(
+        `optimizer drift since the run started: digest ${optimizerDigest} != sealed ${found.state.optimizerDigest} — refusing to resume (start a fresh run)`,
+      );
+    }
     let config = loadRunConfigFile(found.runDir);
     if (boolFlag(flags, "headless") && !config.headless) config = { ...config, headless: true };
     plan = { runId: found.runId, runDir: found.runDir, config, resumed: true };
   } else {
-    const config = buildConfig(manifest, overrides, {
-      headless: boolFlag(flags, "headless"),
-      apply: applyFlag,
-      budgetUsd,
-    });
+    let config = buildConfig(
+      manifest,
+      overrides,
+      {
+        headless: boolFlag(flags, "headless"),
+        apply: applyFlag,
+        budgetUsd,
+      },
+      io.env,
+    );
 
     // Autonomy-ladder lock (review IV.2): trusted-side, checked before ANY run state exists.
     if (ladderLocked(config.apply, config.improverSeat, io.env)) {
@@ -210,20 +289,35 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
     const runId = mintRunId();
     const runDir = join(runsRoot(io.root), runId);
     mkdirSync(runDir, { recursive: true });
-    writeFileSync(join(runDir, CONTRACT_FILE), renderContract(runId, config, manifest));
+    // Snapshot the ADMITTED manifest: resume proves capsule identity against it.
+    writeCapsuleSnapshot(runDir, manifest);
+    const seal = { runId, manifest, capsuleDigest: admitted.digest, optimizerDigest, orderingReport: admitted.orderingReport };
+    writeFileSync(join(runDir, CONTRACT_FILE), renderContract({ ...seal, config }));
     if (!config.headless) {
-      const approved = await promptApproval(join(runDir, CONTRACT_FILE), io);
-      if (!approved) {
+      const approved = await promptApproval(join(runDir, CONTRACT_FILE), seal, config, io);
+      if (approved === null) {
         rmSync(runDir, { recursive: true, force: true });
         io.err("contract declined — no run started");
         return 1;
       }
+      config = approved;
     }
+    // Persist the APPROVED config — the one the (possibly revised) contract renders.
     writeRunConfigFile(runDir, config);
     plan = { runId, runDir, config, resumed: false };
   }
 
-  return superviseRun(plan, { manifest, capsuleDir, flags: { backend: strFlag(flags, "backend"), repo: strFlag(flags, "repo") } }, io);
+  return superviseRun(
+    plan,
+    {
+      manifest,
+      capsuleDir,
+      capsuleDigest: admitted.digest,
+      optimizerDigest,
+      flags: { backend: strFlag(flags, "backend"), repo: strFlag(flags, "repo") },
+    },
+    io,
+  );
 }
 
 /**
@@ -445,7 +539,7 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
 /** Exported for the late-contender lock regression only. */
 export async function superviseRun(
   plan: RunPlan,
-  extra: { manifest: CapsuleManifest; capsuleDir: string; flags: { backend: string | undefined; repo: string | undefined } },
+  extra: { manifest: CapsuleManifest; capsuleDir: string; capsuleDigest: string; optimizerDigest: string; flags: { backend: string | undefined; repo: string | undefined } },
   io: CmdIo,
 ): Promise<number> {
   // The lock precedes ANY event append or docker sweep: a competing resume
@@ -470,12 +564,12 @@ export async function superviseRun(
 
 async function superviseLocked(
   plan: RunPlan,
-  extra: { manifest: CapsuleManifest; capsuleDir: string; flags: { backend: string | undefined; repo: string | undefined } },
+  extra: { manifest: CapsuleManifest; capsuleDir: string; capsuleDigest: string; optimizerDigest: string; flags: { backend: string | undefined; repo: string | undefined } },
   io: CmdIo,
   nonce: string,
 ): Promise<number> {
   const { runId, runDir, config } = plan;
-  const { manifest, capsuleDir } = extra;
+  const { manifest, capsuleDir, capsuleDigest, optimizerDigest } = extra;
   const headless = config.headless;
   const casDir = casRoot(io.root);
   mkdirSync(casDir, { recursive: true });
@@ -488,10 +582,22 @@ async function superviseLocked(
   // probe (a bare PID is meaningless — PIDs recycle, nonces do not).
   writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId, nonce })}\n`);
 
+  // Terminal-status flags, declared BEFORE the emit closure (TDZ) so it can
+  // normalize a broker-authored budget.exhausted into the terminal status.
+  let budgetDimension: string | null = null;
+  let budgetEventLogged = false;
+  let stopRequested = false;
+
   let liveBudget = replayRun(runDir).lastBudget;
   const emit = (event: RunEvent): RunEvent => {
     const parsed = appendEvent(runDir, event);
     if (parsed.type === "budget.snapshot") liveBudget = parsed.budget;
+    if (parsed.type === "budget.exhausted") {
+      // Trusted broker budget authority: ANY logged exhaustion normalizes the
+      // terminal/report status to "budget" (an explicit stop still wins).
+      budgetDimension ??= parsed.dimension;
+      budgetEventLogged = true;
+    }
     if (headless) {
       io.out(JSON.stringify(parsed));
     } else if (parsed.type === "incumbent.new") {
@@ -517,7 +623,7 @@ async function superviseLocked(
       type: "run.started",
       capsuleId: manifest.id,
       contractHash: contractHash(readFileSync(join(runDir, CONTRACT_FILE), "utf8")),
-      optimizerDigest: io.env["HONE_OPTIMIZER_DIGEST"] ?? "unpinned",
+      optimizerDigest,
     });
   }
 
@@ -525,11 +631,9 @@ async function superviseLocked(
   const backend = await loadBackend(extra.flags.backend ?? "local", io.root, io.env);
 
   const abort = new AbortController();
-  const children: ChildLike[] = [];
+  const children = new Set<ChildLike>();
   const timers: NodeJS.Timeout[] = [];
   const graceMs = Number(io.env["HONE_KILL_GRACE_MS"] ?? 5000);
-  let budgetDimension: string | null = null;
-  let stopRequested = false;
 
   // Watchdog timers stay referenced (they must keep a headless process alive
   // while a listener-only backend waits); every one is cleared in the finally.
@@ -564,7 +668,7 @@ async function superviseLocked(
       }
       // Confirm the leaders are reaped (descendants die with the group kill).
       const settleDeadline = Date.now() + 2000;
-      while (Date.now() < settleDeadline && children.some((c) => typeof c.pid === "number" && pidAlive(c.pid))) {
+      while (Date.now() < settleDeadline && [...children].some((c) => typeof c.pid === "number" && pidAlive(c.pid))) {
         await sleep(50);
       }
     })();
@@ -604,10 +708,19 @@ async function superviseLocked(
     manifest,
     config,
     env: io.env,
+    capsuleDigest,
+    optimizerDigest,
     replayed,
     signal: abort.signal,
     emit: (event) => (backendFenced ? RunEvent.parse(event) : emit(event)),
-    registerChild: (child) => children.push(child),
+    registerChild: (child) => {
+      children.add(child);
+      return () => {
+        children.delete(child);
+      };
+    },
+    probeGate: (report) => (headless ? Promise.resolve(true) : promptProbe(report, io)),
+    requestStop: () => onSignal(),
     registerAuthorityBarrier: (barrier) => {
       authorityBarrier = barrier;
       // A rejection may land before anything awaits it — keep it handled.
@@ -721,7 +834,7 @@ async function superviseLocked(
     else if (failure !== null) status = "failed";
     else status = "completed";
 
-    if (budgetDimension !== null) {
+    if (budgetDimension !== null && !budgetEventLogged) {
       emit({ runId, at: new Date().toISOString(), type: "budget.exhausted", dimension: budgetDimension });
     }
 

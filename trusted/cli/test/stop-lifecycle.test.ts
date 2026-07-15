@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CapsuleManifest, RunConfig, RunEvent } from "@hone/schema";
+import { CapsuleManifest, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { createBackend } from "../src/backends/local.js";
 import { stopCommand } from "../src/commands/stop.js";
@@ -345,27 +345,14 @@ function res(overrides: Partial<CmdResult> = {}): CmdResult {
   return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false, ...overrides };
 }
 
-/** A drift-free capsule the REAL local backend accepts (validateCapsule + broker asset preflight). */
-function validCapsule(root: string): { capsuleDir: string; manifest: CapsuleManifest } {
-  const capsuleDir = join(root, "capsule");
-  mkdirSync(join(capsuleDir, "assets", "train"), { recursive: true });
-  mkdirSync(join(capsuleDir, "assets", "validation"), { recursive: true });
-  mkdirSync(join(capsuleDir, "protected"), { recursive: true });
-  writeFileSync(join(capsuleDir, "assets", "train", "data.txt"), "train\n");
-  writeFileSync(join(capsuleDir, "assets", "validation", "data.txt"), "val\n");
-  writeFileSync(join(capsuleDir, "protected", "keep.txt"), "keep\n");
-  const baseline = join(capsuleDir, "baseline");
+/** A drift-free capsule the REAL local backend accepts (frozen admission + broker asset preflight). */
+function validCapsule(root: string): { capsuleDir: string; manifest: CapsuleManifest; digest: string } {
+  const baseline = join(root, "capsule", "baseline");
   initScratchRepo(baseline);
   const commit = gitIn(baseline, "rev-parse", "HEAD");
-  const trainSha = `sha256:${createHash("sha256").update(readFileSync(join(capsuleDir, "assets", "train", "data.txt"))).digest("hex")}`;
-  const manifest = CapsuleManifest.parse(
-    manifestRaw({
-      baseline: { kind: "git", commit },
-      contentHashes: { "assets/train/data.txt": trainSha },
-    }),
-  );
-  writeFileSync(join(capsuleDir, "manifest.json"), JSON.stringify(manifest, null, 2));
-  return { capsuleDir, manifest };
+  const capsuleDir = makeCapsule(root, { baseline: { kind: "git", commit } });
+  const manifest = CapsuleManifest.parse(JSON.parse(readFileSync(join(capsuleDir, "manifest.json"), "utf8")));
+  return { capsuleDir, manifest, digest: capsuleDigest(manifest) };
 }
 
 describe("abort during resume startup (P1: reconcile before any terminal)", () => {
@@ -374,7 +361,7 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
     const runDir = join(root, ".hone-runs", "run_seed");
     mkdirSync(runDir, { recursive: true });
     mkdirSync(join(root, ".hone-cas"), { recursive: true });
-    const { capsuleDir, manifest } = validCapsule(root);
+    const { capsuleDir, manifest, digest } = validCapsule(root);
 
     // Crash-window fixture: the broker journal is one promotion AHEAD of the
     // event log. (Journal line format owned by @hone/broker RunStateLog.)
@@ -421,10 +408,14 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
         HONE_OPTIMIZER_CMD: process.execPath,
         HONE_OPTIMIZER_ENTRY: optimizerEntry,
       },
+      capsuleDigest: digest,
+      optimizerDigest: fakeHash("0"),
       replayed: replayRun(runDir),
       signal: abort.signal,
       emit: (event) => appendEvent(runDir, event),
-      registerChild: () => {},
+      registerChild: () => () => {},
+      probeGate: () => Promise.resolve(true),
+      requestStop: () => {},
       registerAuthorityBarrier: (b) => {
         registeredBarrier = b;
       },

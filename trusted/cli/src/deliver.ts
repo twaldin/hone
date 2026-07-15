@@ -71,14 +71,6 @@ export function isGitRepo(dir: string): boolean {
   }
 }
 
-function binExists(bin: string): boolean {
-  try {
-    return exec(bin, ["--version"]).code === 0;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Run a git command in the delivery worktree with candidate-influence vectors
  * disabled: hooks point at an empty trusted dir and config-driven executable
@@ -152,21 +144,19 @@ function branchDeliver(opts: DeliverOptions): { branch: string; commit: string }
   }
 }
 
+/**
+ * apply:pr is LOCAL-ONLY in the M0 seed: build the branch (throwaway
+ * worktree, same as branch mode) and print the manual `gh pr create`
+ * instruction. The trusted CLI never invokes gh, pushes, or touches the
+ * network — opening the PR is a deliberate human act.
+ */
 function prDeliver(opts: DeliverOptions, notes: string[]): string {
   const { branch } = branchDeliver(opts);
   const title = `hone(${opts.runId}): apply best artifact`;
   const body = `Best artifact ${opts.artifact} from hone run ${opts.runId}.`;
-  const manual = `gh pr create --head ${branch} --title ${JSON.stringify(title)} --body ${JSON.stringify(body)}`;
-  if (binExists("gh")) {
-    const r = exec("gh", ["pr", "create", "--head", branch, "--title", title, "--body", body], opts.repo);
-    if (r.code === 0) {
-      notes.push(r.stdout.trim());
-    } else {
-      notes.push(`gh pr create failed (${(r.stderr || r.stdout).trim()}); run manually: ${manual}`);
-    }
-  } else {
-    notes.push(`gh not found; create the PR manually: ${manual}`);
-  }
+  notes.push(
+    `apply pr (local-only): branch ${branch} created — push it and open the PR yourself: git push -u origin ${branch} && gh pr create --head ${branch} --title ${JSON.stringify(title)} --body ${JSON.stringify(body)}`,
+  );
   return branch;
 }
 
