@@ -15,11 +15,13 @@ interface StopFlags {
 }
 
 /**
- * The sentinel PID confirmed by the live lock holder's identity handshake,
- * or null. PIDs recycle: a live pid in supervisor.json is NEVER trusted (let
- * alone signalled) unless the run-lock socket serves the exact same
- * pid/nonce/runId — a bare live PID with no matching lock is an unrelated
- * process wearing a recycled number.
+ * The sentinel PID confirmed against the live run-lock holder's identity
+ * metadata, or null. PIDs recycle: a live pid in supervisor.json is NEVER
+ * trusted (let alone signalled) unless the run lock is live (kernel-level
+ * connect) AND its metadata names the exact same pid/nonce/runId — a bare
+ * live PID with no matching lock is an unrelated process wearing a recycled
+ * number. The probe needs no event-loop progress from the holder, so a
+ * supervisor blocked in synchronous delivery is still confirmable.
  */
 async function confirmedSupervisorPid(runDir: string, runId: string): Promise<number | null> {
   const sentinel = readSupervisorSentinel(runDir);

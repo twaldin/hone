@@ -107,6 +107,78 @@ describe("SIGTERM during synchronous delivery (P1: handlers must outlive the bac
   });
 });
 
+describe("external stop during blocked synchronous delivery (final gate: identity without holder event-loop progress)", () => {
+  it("authenticates via lock metadata while the supervisor JS loop is blocked >5s; SIGTERM queues, delivery lands, run stops", { timeout: 60_000 }, async () => {
+    const root = makeRoot();
+    initScratchRepo(root);
+    makeCapsule(root);
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    writeFileSync(join(root, "delivering-backend.mjs"), incumbentBackendSrc(hash));
+
+    // PATH shim: the FIRST git invocation inside the supervisor (isGitRepo,
+    // the head of the synchronous delivery stretch) drops a marker and
+    // blocks >5s in spawnSync — for that whole window the supervisor's JS
+    // loop can run neither its lock accept handler nor its SIGTERM handler.
+    // Later git calls pass straight through to the real git.
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    const marker = join(root, "blocked.marker");
+    const shimDir = join(root, "shim");
+    mkdirSync(shimDir);
+    writeFileSync(join(shimDir, "git"), `#!/bin/sh\nif [ ! -f "${marker}" ]; then : > "${marker}"; sleep 6; fi\nexec "${realGit}" "$@"\n`, {
+      mode: 0o755,
+    });
+
+    const child = honeSpawn(["run", "capsule", "--headless", "--backend", "./delivering-backend.mjs", "--apply", "branch"], {
+      cwd: root,
+      env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "200", PATH: `${shimDir}:${process.env["PATH"] ?? ""}` },
+    });
+    try {
+      const armed = Date.now() + 30_000;
+      while (!existsSync(marker) && Date.now() < armed) await sleep(50);
+      expect(existsSync(marker)).toBe(true);
+
+      const runId = soleRunId(root);
+      const runDir = join(root, ".hone-runs", runId);
+      const supPid = readSupervisorPid(runDir);
+      expect(supPid).not.toBeNull();
+      if (supPid === null) throw new Error("unreachable");
+      expect(pidAlive(supPid)).toBe(true);
+
+      // External stop DURING the blocked window: identity must be proven
+      // without any holder socket response (metadata + kernel-level connect),
+      // the SIGTERM queued, and stop must ride out the block — never report
+      // contention or finalize over a live supervisor.
+      const { io, err } = makeIo(root);
+      const code = await stopCommand([], io);
+      expect(code, err.join("\n")).toBe(0);
+      // stop returning 0 already implies the supervisor exited (identity-bound wait)
+      expect(pidAlive(supPid)).toBe(false);
+
+      const events = runEvents(root, runId);
+      const types = events.map((e) => e.type);
+      expect(types[types.length - 1]).toBe("run.finished");
+      expect(types.filter((t) => t === "run.finished").length).toBe(1);
+      const finished = events[events.length - 1];
+      if (finished?.type === "run.finished") expect(finished.status).toBe("stopped");
+      // The delivery the signal landed inside still finished atomically, before the terminal.
+      const deliveryIdx = types.indexOf("delivery.applied");
+      expect(deliveryIdx, types.join(",")).toBeGreaterThanOrEqual(0);
+      expect(deliveryIdx).toBeLessThan(types.indexOf("run.finished"));
+      expect(gitIn(root, "show", `hone/${runId}:hello.txt`)).toBe("improved");
+
+      // The spawned process tree exits on its own after the stop.
+      if (child.exitCode === null) {
+        await new Promise<void>((resolveClose) => {
+          child.once("close", () => resolveClose());
+          setTimeout(resolveClose, 10_000);
+        });
+      }
+    } finally {
+      killTree(child);
+    }
+  });
+});
+
 describe("explicit stop before delivery (P1)", () => {
   it("skips automatic delivery entirely and terminates stopped", { timeout: 30_000 }, async () => {
     const root = makeRoot();

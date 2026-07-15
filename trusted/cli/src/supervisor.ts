@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -237,8 +237,21 @@ export function runLockPath(runDir: string): string {
   return join(tmpdir(), `hone-${key}.lck`);
 }
 
-/** Probe: will anyone accept on this socket? Fails CLOSED (treated as live) on unexpected errors or a hung peer. */
-function lockHolderAlive(sockPath: string): Promise<boolean> {
+/** Short path of the lock's identity metadata file, beside the socket. */
+function runLockMetaPath(sockPath: string): string {
+  return `${sockPath}.id`;
+}
+
+/**
+ * Kernel-level connect probe. A unix connect to a bound, listening socket
+ * completes in the KERNEL (backlog) — it succeeds even while the holder's JS
+ * loop is blocked for seconds inside a synchronous delivery, and it fails
+ * (ECONNREFUSED/ENOENT) on a crashed holder's leftover. `onTimeout` picks the
+ * fail direction: the stale-arbitration probe fails CLOSED (treated as live,
+ * never unlink a possibly-live lock); the identity probe fails OPEN to null
+ * (never confirm without positive proof).
+ */
+function connectProbe(sockPath: string, onTimeout: boolean): Promise<boolean> {
   const { promise, resolve } = deferred<boolean>();
   const probe = net.connect(sockPath);
   const settle = (alive: boolean): void => {
@@ -249,9 +262,9 @@ function lockHolderAlive(sockPath: string): Promise<boolean> {
   probe.once("error", (err) => {
     const code = (err as NodeJS.ErrnoException).code;
     // ECONNREFUSED/ENOENT: crashed owner's leftover. ENOTSOCK: junk file.
-    settle(code !== "ECONNREFUSED" && code !== "ENOENT" && code !== "ENOTSOCK");
+    settle(code !== "ECONNREFUSED" && code !== "ENOENT" && code !== "ENOTSOCK" && onTimeout);
   });
-  probe.setTimeout(1000, () => settle(true));
+  probe.setTimeout(1000, () => settle(onTimeout));
   return promise;
 }
 
@@ -268,34 +281,44 @@ const RunLockIdentitySchema = z.object({
   nonce: z.string().min(1),
 });
 
+function readLockMetadata(sockPath: string): RunLockIdentity | null {
+  try {
+    const parsed = RunLockIdentitySchema.safeParse(JSON.parse(readFileSync(runLockMetaPath(sockPath), "utf8")));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Atomic (write + rename) so a probe never reads a torn identity. */
+function writeLockMetadata(sockPath: string, identity: RunLockIdentity): void {
+  const metaPath = runLockMetaPath(sockPath);
+  const tmpPath = `${metaPath}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify(identity)}\n`);
+  renameSync(tmpPath, metaPath);
+}
+
 /**
- * Ask the live lock holder who it is. Resolves null when nobody is listening
- * or the holder serves no identity (e.g. `stop`'s own transient lock) — a
- * null identity NEVER licenses signalling a sentinel PID.
+ * Who holds the run lock? Identity proof deliberately requires NO event-loop
+ * progress from the holder (FinalSecurityGate): a supervisor blocked >5s in
+ * synchronous delivery must still be identifiable, or an external stop can
+ * never signal it. Proof = durable metadata written by the bind holder PLUS
+ * a kernel-level connect success on the socket. The metadata is read on BOTH
+ * sides of the connect and must match exactly — a bind→metadata or
+ * release→rebind race yields a mismatch, which resolves null (callers
+ * re-observe; a null identity NEVER licenses signalling a sentinel PID).
+ * Stale crash metadata is harmless: the connect fails. An identity-less
+ * holder (e.g. `stop`'s transient lock) clears predecessor metadata at bind,
+ * so its live socket can never vouch for a dead supervisor's identity.
  */
-export function probeRunLockIdentity(runDir: string): Promise<RunLockIdentity | null> {
-  const { promise, resolve } = deferred<RunLockIdentity | null>();
-  const probe = net.connect(runLockPath(runDir));
-  let buf = "";
-  const settle = (identity: RunLockIdentity | null): void => {
-    probe.destroy();
-    resolve(identity);
-  };
-  probe.setEncoding("utf8");
-  probe.on("data", (chunk: string) => {
-    buf += chunk;
-  });
-  probe.once("end", () => {
-    try {
-      const parsed = RunLockIdentitySchema.safeParse(JSON.parse(buf.trim()));
-      settle(parsed.success ? parsed.data : null);
-    } catch {
-      settle(null);
-    }
-  });
-  probe.once("error", () => settle(null));
-  probe.setTimeout(1000, () => settle(null));
-  return promise;
+export async function probeRunLockIdentity(runDir: string): Promise<RunLockIdentity | null> {
+  const sockPath = runLockPath(runDir);
+  const before = readLockMetadata(sockPath);
+  if (before === null) return null;
+  if (!(await connectProbe(sockPath, false))) return null;
+  const after = readLockMetadata(sockPath);
+  if (after === null || after.pid !== before.pid || after.nonce !== before.nonce || after.runId !== before.runId) return null;
+  return after;
 }
 
 /**
@@ -306,20 +329,20 @@ export function probeRunLockIdentity(runDir: string): Promise<RunLockIdentity | 
  * claim file and ONLY after a re-probe under that claim. A socket can become
  * live only by binding an ABSENT path, and absence is only ever created by a
  * claim holder, so no contender can ever unlink a live lock — concurrent
- * stale contenders yield exactly one winner. Returned closure releases and
- * unlinks.
+ * stale contenders yield exactly one winner. An identity-bearing holder
+ * publishes {pid,runId,nonce} in an adjacent metadata file at bind (see
+ * probeRunLockIdentity). Returned closure releases and unlinks.
  */
 export async function acquireRunLock(runDir: string, runId: string, identity?: RunLockIdentity): Promise<() => Promise<void>> {
   const sockPath = runLockPath(runDir);
+  const metaPath = runLockMetaPath(sockPath);
   const claimPath = `${sockPath}.claim`;
   const alreadySupervised = (): UsageError =>
     new UsageError(`run ${runId} is already being supervised by a live process — \`hone stop\` it first`);
   for (let attempt = 0; attempt < 10; attempt++) {
-    // Identity handshake: every connection learns WHO holds the lock, so a
-    // sentinel PID is only trusted when the live holder vouches for it.
-    const server = net.createServer((sock) => {
-      sock.end(identity !== undefined ? `${JSON.stringify(identity)}\n` : "");
-    });
+    // Incoming probe connections carry no payload — identity lives in the
+    // metadata file, so a probe needs no accept-handler progress from us.
+    const server = net.createServer((sock) => sock.end());
     server.unref(); // the lock must never keep a finished supervisor alive
     const bound = deferred<boolean>();
     server.once("error", (err) => {
@@ -328,16 +351,35 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
     });
     server.listen(sockPath, () => bound.resolve(true));
     if (await bound.promise) {
+      // Under the bind, the metadata file is OURS alone: contenders cannot
+      // bind while the socket path exists, and reclaimers only touch it
+      // after a connect-probe proves the holder dead. An identity holder
+      // publishes atomically; an identity-less holder (stop's transient
+      // lock) clears any predecessor leftover IMMEDIATELY — otherwise stale
+      // crash metadata plus OUR live socket would falsely confirm a dead
+      // supervisor's (possibly recycled) PID.
+      if (identity !== undefined) writeLockMetadata(sockPath, identity);
+      else rmSync(metaPath, { force: true });
       return () => {
         const closed = deferred<void>();
         server.close(() => {
+          // Close, then remove OWNED metadata, then free the bind path —
+          // while the socket file still exists no contender can bind, so
+          // only a metadata file that still holds OUR identity is removed
+          // (a reclaimer that raced the close already owns the path).
+          if (identity !== undefined) {
+            const current = readLockMetadata(sockPath);
+            if (current !== null && current.pid === identity.pid && current.nonce === identity.nonce && current.runId === identity.runId) {
+              rmSync(metaPath, { force: true });
+            }
+          }
           rmSync(sockPath, { force: true });
           closed.resolve();
         });
         return closed.promise;
       };
     }
-    if (await lockHolderAlive(sockPath)) throw alreadySupervised();
+    if (await connectProbe(sockPath, true)) throw alreadySupervised();
 
     // Stale leftover. Claim the exclusive right to clear it.
     let claimFd: number;
@@ -356,7 +398,12 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
     }
     try {
       // Re-probe UNDER the claim: the leftover may have gone live since ours.
-      if (await lockHolderAlive(sockPath)) throw alreadySupervised();
+      if (await connectProbe(sockPath, true)) throw alreadySupervised();
+      // Dead holder confirmed. Its metadata goes FIRST — while the stale
+      // socket path still exists nobody can bind, so this can never delete
+      // a successor's metadata; removing the socket path then frees the
+      // kernel-arbitrated bind.
+      rmSync(metaPath, { force: true });
       rmSync(sockPath, { force: true });
     } finally {
       closeSync(claimFd);
@@ -375,8 +422,8 @@ export async function superviseRun(
 ): Promise<number> {
   // The lock precedes ANY event append or docker sweep: a competing resume
   // must fail before it can touch the log or rm -f live containers. The
-  // lock serves this supervisor's identity; the sentinel repeats the nonce,
-  // so `stop` only ever trusts a PID the live lock holder vouches for.
+  // lock publishes this supervisor's identity metadata; the sentinel repeats
+  // the nonce, so `stop` only ever trusts a PID the live lock holder vouches for.
   const identity: RunLockIdentity = { pid: process.pid, runId: plan.runId, nonce: randomUUID() };
   const releaseLock = await acquireRunLock(plan.runDir, plan.runId, identity);
   try {
@@ -410,7 +457,7 @@ async function superviseLocked(
   // overwrites the file, and a late exit hook would delete the SUCCESSOR's
   // sentinel. A dead/stale sentinel is tiny and safe (same semantics as a
   // SIGKILL leftover); consumers gate on pidAlive AND the lock identity
-  // handshake (a bare PID is meaningless — PIDs recycle, nonces do not).
+  // probe (a bare PID is meaningless — PIDs recycle, nonces do not).
   writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId, nonce })}\n`);
 
   let liveBudget = replayRun(runDir).lastBudget;
@@ -682,7 +729,7 @@ export interface SupervisorSentinel {
 
 const SentinelSchema = z.object({ pid: z.number().int().positive(), nonce: z.string().min(1).optional() });
 
-/** Durable last-supervisor metadata; a bare PID here is NEVER trusted without the lock-identity handshake. */
+/** Durable last-supervisor metadata; a bare PID here is NEVER trusted without the lock-identity probe. */
 export function readSupervisorSentinel(runDir: string): SupervisorSentinel | null {
   const path = join(runDir, SUPERVISOR_FILE);
   if (!existsSync(path)) return null;
