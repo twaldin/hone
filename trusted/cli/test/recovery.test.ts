@@ -12,9 +12,9 @@ import { reconcileBrokerAuthority, setupEgress, sweepStaleRunResources } from ".
 import type { AuthorityRecoverySource } from "../src/backends/local.js";
 import { appendEvent, bestArtifact, eventsPath, readEvents, replayRun } from "../src/eventlog.js";
 import { deferred } from "../src/promise.js";
-import { writeRunConfigFile } from "../src/runs.js";
-import { acquireRunLock, runCommand as cliRunCommand, runLockPath } from "../src/supervisor.js";
-import { CAP_ID, at, fakeHash, fixtureEvents, makeCapsule, makeIo, makeRoot, writeEvents } from "./helpers.js";
+import { loadRunConfigFile, writeRunConfigFile } from "../src/runs.js";
+import { acquireRunLock, runCommand as cliRunCommand, runLockPath, superviseRun } from "../src/supervisor.js";
+import { CAP_ID, at, fakeHash, fixtureEvents, makeCapsule, makeIo, makeRoot, manifestObject, writeEvents } from "./helpers.js";
 
 /**
  * Second-pass review findings 10 + 11: crash-resume must sweep stale docker
@@ -386,6 +386,28 @@ describe("run lock (FinalSecurityGate finding 2 — OS-enforced exclusivity)", (
     expect(events.filter((e) => e.type === "run.finished").length).toBe(1);
     const episodes = events.flatMap((e) => (e.type === "episode.started" ? [e.episode] : []));
     expect(new Set(episodes).size).toBe(episodes.length);
+  });
+
+  it("late contender: a resume planned while unfinished rejects under the lock after the winner finished", async () => {
+    const root = makeRoot();
+    const runId = "run_late1";
+    const runDir = resumableFixture(root, runId);
+    // Contender's plan, chosen from the UNFINISHED log (exactly what runCommand builds pre-lock).
+    const plan = { runId, runDir, config: loadRunConfigFile(runDir), resumed: true };
+    // Winner finishes and releases the lock before the contender acquires.
+    appendEvent(runDir, { runId, at: at(), type: "run.finished", best: { hash: fakeHash("d") }, status: "completed" });
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "4" });
+    await expect(
+      superviseRun(plan, { manifest: manifestObject(), capsuleDir: join(root, "capsule"), flags: { backend: "stub", repo: undefined } }, io),
+    ).rejects.toThrow(/already finished/);
+    const events = readEvents(runDir);
+    // exactly one run.finished; the late contender appended nothing and started no backend
+    expect(events.filter((e) => e.type === "run.finished").length).toBe(1);
+    expect(events.filter((e) => e.type === "run.resumed").length).toBe(0);
+    expect(events[events.length - 1]?.type).toBe("run.finished");
+    // and the lock was released on the rejection path: a fresh acquire succeeds
+    const release = await acquireRunLock(runDir, runId);
+    await release();
   });
 });
 
