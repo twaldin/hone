@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
-import { link, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, link, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CapsuleManifest, RunEvent } from "@hone/schema";
@@ -330,6 +330,76 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
     }
     const holdoutLines = (await stateLines(b)).filter((l) => l["t"] === "holdout");
     expect(holdoutLines).toEqual([{ t: "holdout", seq: 1 }]);
+  });
+
+  it("truncates a torn partial-JSON tail on open and never fuses new records onto it", async () => {
+    const shared = { runDir: path.join(tmpBase, "runs", "resume-torn"), casDir: path.join(tmpBase, "cas", "resume-torn"), runId: "run-resume-torn" };
+    const a = await boot(shared);
+    a.broker.recordSpend({ tokens: 100, usd: 5 }, ADMIN);
+    a.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const cand = await saveCandidate(a, candidateTar);
+    await a.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await a.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
+    a.broker.reportIncumbent({ artifact: { hash: cand } }, CLIENT);
+    await a.broker.close();
+
+    // Simulate a torn crash-write: append a partial JSON record with NO newline.
+    const stateFile = path.join(shared.runDir, "broker-state.ndjson");
+    await appendFile(stateFile, '{"t":"spend","tokens":424242');
+
+    // Two append/restart cycles: prior authority must survive, the torn tail
+    // must be gone from disk, and nothing may fuse onto it.
+    let prev = a;
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const b = await boot(shared);
+      expect(b.broker.getBudget(ADMIN).spent).toMatchObject({ tokens: 100 + cycle, usd: 5 });
+      expect(b.broker.trustedIncumbent).toMatchObject({ hash: cand, aggregate: 2, episode: 0 });
+      b.broker.recordSpend({ tokens: 1, usd: 0 }, ADMIN); // append after recovery
+      await b.broker.close();
+      prev = b;
+    }
+    const raw = await readFile(stateFile, "utf8");
+    expect(raw.endsWith("\n")).toBe(true);
+    expect(raw).not.toContain("424242"); // torn fragment fully gone, not fused
+    for (const line of raw.split("\n").filter((l) => l.length > 0)) JSON.parse(line); // every interior line is intact JSON
+    const spends = (await stateLines(prev)).filter((l) => l["t"] === "spend");
+    expect(spends).toEqual([
+      { t: "spend", tokens: 100, usd: 5 },
+      { t: "spend", tokens: 1, usd: 0 },
+      { t: "spend", tokens: 1, usd: 0 },
+    ]);
+  });
+
+  it("discards a complete-JSON tail that lacks its newline (unacknowledged write) without fusing", async () => {
+    const shared = { runDir: path.join(tmpBase, "runs", "resume-nonl"), casDir: path.join(tmpBase, "cas", "resume-nonl"), runId: "run-resume-nonl" };
+    const a = await boot(shared);
+    a.broker.recordSpend({ tokens: 7, usd: 1 }, ADMIN);
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT); // episode 0
+    await a.broker.close();
+
+    // Complete JSON but missing the terminating newline: the fsync barrier
+    // means its action was never acknowledged — it must NOT replay, and a
+    // later append must not fuse onto it ({...}{...} on one line).
+    const stateFile = path.join(shared.runDir, "broker-state.ndjson");
+    await appendFile(stateFile, '{"t":"spend","tokens":999999,"usd":99}');
+
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const b = await boot(shared);
+      const budget = b.broker.getBudget(ADMIN);
+      expect(budget.spent.tokens).toBe(7 + cycle); // 999999 never replays, even after re-append
+      expect(budget.spent.usd).toBe(1);
+      b.broker.recordSpend({ tokens: 1, usd: 0 }, ADMIN);
+      // Episode numbering also survives: next episode continues, never resets.
+      await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+      const started = b.events.filter((e) => e.type === "episode.started");
+      expect(started).toHaveLength(1);
+      expect(started[0]).toMatchObject({ episode: 1 + cycle });
+      await b.broker.close();
+    }
+    const raw = await readFile(stateFile, "utf8");
+    expect(raw.endsWith("\n")).toBe(true);
+    expect(raw).not.toContain("999999");
+    for (const line of raw.split("\n").filter((l) => l.length > 0)) JSON.parse(line);
   });
 });
 
