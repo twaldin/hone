@@ -20,10 +20,23 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
   let state = replayRun(runDir);
   const runId = state.runId ?? basename(runDir);
 
+  const pid = readSupervisorPid(runDir);
+
   if (state.finished !== null) {
+    // The PID sentinel outlives run.finished by design (it is removed only
+    // at real process exit): a supervisor may still be draining teardown or
+    // group kills. Whenever the sentinel names a live pid, wait for actual
+    // death before returning — `--take-best` must never race a live run.
+    if (pid !== null && pidAlive(pid)) {
+      const deadline = Date.now() + 15_000;
+      while (pidAlive(pid) && Date.now() < deadline) await sleep(200);
+      if (pidAlive(pid)) {
+        io.err(`run ${runId}: run.finished is logged but the supervisor (pid ${pid}) has not exited within 15s`);
+        return 1;
+      }
+    }
     io.out(`run ${runId} already finished (${state.finished.status})`);
   } else {
-    const pid = readSupervisorPid(runDir);
     if (pid !== null && pidAlive(pid)) {
       process.kill(pid, "SIGTERM");
       // Terminal order: callers apply the result right after we return, so

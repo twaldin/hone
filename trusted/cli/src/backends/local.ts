@@ -333,7 +333,11 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
   const run = deps.run ?? runCommand;
   return {
     async start(ctx: RunnerBackendContext): Promise<void> {
-      if (ctx.signal.aborted) return;
+      // NO abort check anywhere in setup: even a stop landing at startup
+      // must reach the broker journal + reconciliation below, or the
+      // supervisor would terminalize a STALE event-log best while the
+      // journal holds a newer durable incumbent (permanently, since a
+      // finished run never resumes). Abort is honored only after reconcile.
       validateCapsule(ctx.capsuleDir, ctx.manifest);
 
       const route = ctx.config.routing["mutation"];
@@ -343,7 +347,6 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
 
       const cas = new CasStore(ctx.casDir);
       const baselineArtifactHash = await measureBaseline(ctx.capsuleDir, cas);
-      if (ctx.signal.aborted) return;
 
       // Broker + proxy are mutually referential (proxy meters INTO the broker,
       // broker env points sandboxes AT the proxy); the late-bound ref breaks the cycle.
@@ -383,9 +386,7 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
         // deterministic relay/network, and dead sockets must be gone before
         // this run mints the same names again.
         await sweepStaleRunResources(ctx.runId, ctx.runDir, run);
-        if (ctx.signal.aborted) return;
         egress = await setupEgress(ctx, proxy, image, run);
-        if (ctx.signal.aborted) return;
 
         running = await startBroker({
           runId: ctx.runId,
@@ -409,14 +410,15 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
           episodeOrigin: ctx.replayed.nextEpisode,
         });
 
-        // A stop during broker startup must not launch the optimizer at all;
-        // the finally below unwinds proxy/broker/egress promptly.
-        if (ctx.signal.aborted) return;
-
         // Finding 11: replay journaled-but-unlogged promotions into
-        // events.ndjson BEFORE the optimizer resumes, so best/status/delivery
-        // and the resume hint all see the durable incumbent exactly once.
+        // events.ndjson BEFORE anything can terminalize the run, so
+        // best/status/delivery and the resume hint all see the durable
+        // incumbent exactly once — even when a stop aborted mid-startup.
         reconcileBrokerAuthority(ctx.runDir, running.broker, ctx.emit, ctx.runId);
+
+        // Only AFTER durable authority is reconciled may a stop short-circuit:
+        // the optimizer never launches; the finally unwinds proxy/broker/egress.
+        if (ctx.signal.aborted) return;
 
         await runOptimizer(ctx, running.socketPath);
 

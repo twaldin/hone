@@ -354,6 +354,11 @@ async function superviseLocked(
   const casDir = casRoot(io.root);
   mkdirSync(casDir, { recursive: true });
   writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId })}\n`);
+  // The PID sentinel lives until REAL process exit — `stop` keys on it to
+  // wait out straggler teardown (backend finally, group kills) that outlives
+  // run.finished. Never unlinked on the return path; a SIGKILL leaves a
+  // stale file, which pidAlive() disambiguates.
+  armSentinelCleanup(join(runDir, SUPERVISOR_FILE));
 
   let liveBudget = replayRun(runDir).lastBudget;
   const emit = (event: RunEvent): RunEvent => {
@@ -403,15 +408,25 @@ async function superviseLocked(
   const armTimer = (fn: () => void, ms: number): void => {
     timers.push(setTimeout(fn, ms));
   };
-  const termThenKill = (): void => {
-    for (const child of children) {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // already gone
+  /**
+   * Idempotent termination barrier, deliberately OUTSIDE the generic timer
+   * pool: SIGTERM every registered child group, wait the grace, SIGKILL,
+   * then a short reap settle. A settling backend promise must NEVER cancel
+   * the escalation — the optimizer leader exiting can leave a TERM-ignoring
+   * descendant that only the delayed group SIGKILL removes. Any abort path
+   * awaits this barrier before delivery and the terminal event.
+   */
+  let terminationBarrier: Promise<void> | null = null;
+  const termThenKill = (): Promise<void> => {
+    terminationBarrier ??= (async () => {
+      for (const child of children) {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // already gone
+        }
       }
-    }
-    armTimer(() => {
+      await sleep(graceMs);
       for (const child of children) {
         try {
           child.kill("SIGKILL");
@@ -419,7 +434,13 @@ async function superviseLocked(
           // already gone
         }
       }
-    }, graceMs);
+      // Confirm the leaders are reaped (descendants die with the group kill).
+      const settleDeadline = Date.now() + 2000;
+      while (Date.now() < settleDeadline && children.some((c) => typeof c.pid === "number" && pidAlive(c.pid))) {
+        await sleep(50);
+      }
+    })();
+    return terminationBarrier;
   };
 
   // Wall-clock budget: remaining = envelope minus what the log says was already spent.
@@ -428,13 +449,13 @@ async function superviseLocked(
   armTimer(() => {
     budgetDimension = "wallClockSec";
     abort.abort(new Error("wall-clock budget exhausted"));
-    termThenKill();
+    void termThenKill();
   }, remainMs);
 
   const onSignal = (): void => {
     stopRequested = true;
     abort.abort(new Error("stop requested"));
-    termThenKill();
+    void termThenKill();
   };
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
@@ -461,94 +482,135 @@ async function superviseLocked(
 
   let failure: Error | null = null;
   try {
-    const settled = backend
-      .start(ctx)
-      .then(() => undefined)
-      .catch((e: unknown) => {
-        failure = e instanceof Error ? e : new Error(String(e));
-      });
-    // If the backend ignores the abort, proceed after the kill grace anyway.
-    const hardStop = deferred<void>();
-    abort.signal.addEventListener("abort", () => armTimer(hardStop.resolve, graceMs + 1000), { once: true });
-    await Promise.race([settled, hardStop.promise]);
+    try {
+      const settled = backend
+        .start(ctx)
+        .then(() => undefined)
+        .catch((e: unknown) => {
+          failure = e instanceof Error ? e : new Error(String(e));
+        });
+      // If the backend ignores the abort, proceed after the kill grace anyway.
+      const hardStop = deferred<void>();
+      abort.signal.addEventListener("abort", () => armTimer(hardStop.resolve, graceMs + 1000), { once: true });
+      await Promise.race([settled, hardStop.promise]);
+    } finally {
+      backendFenced = true;
+    }
+
+    // On any abort, every child group must be TERM'd, KILL'd after grace,
+    // and confirmed reaped BEFORE delivery and run.finished — even (and
+    // especially) when the backend promise settled first: a TERM-ignoring
+    // descendant would otherwise outlive the terminal event.
+    if (abort.signal.aborted) await termThenKill();
+
+    if (failure !== null) {
+      const err: Error = failure;
+      io.err(`backend failed: ${err.message}`);
+    }
+
+    const preFinish = replayRun(runDir);
+    const best = preFinish.incumbent?.artifact ?? null;
+
+    // Delivery policy is per-run and immutable once started (contract 5).
+    // Delivery runs BEFORE run.finished so the terminal event is always the
+    // log's final line. An explicit stop that already landed skips automatic
+    // delivery (`stop --take-best` is the deliberate path); the SIGTERM/
+    // SIGINT handlers are still installed here, so a stop arriving during
+    // the synchronous delivery is queued and handled — never the OS default
+    // that would kill the supervisor mid-delivery with no terminal event.
+    if (!stopRequested && failure === null && config.apply !== "none" && best !== null) {
+      const repo = extra.flags.repo !== undefined ? resolve(io.root, extra.flags.repo) : io.root;
+      if (isGitRepo(repo)) {
+        try {
+          const result = deliver({
+            mode: config.apply,
+            repo,
+            runId,
+            artifact: best.hash,
+            casDir,
+            improverSeat: config.improverSeat,
+            env: io.env,
+          });
+          emit({
+            runId,
+            at: new Date().toISOString(),
+            type: "delivery.applied",
+            mode: config.apply,
+            ...(result.ref !== null ? { ref: result.ref } : {}),
+          });
+          for (const note of result.notes) io.err(note);
+        } catch (e) {
+          if (e instanceof LadderLockedError) io.err(e.message);
+          else io.err(`delivery (${config.apply}) failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      } else {
+        io.err(`apply ${config.apply}: ${repo} is not a git repository — skipping delivery (pass --repo <dir>)`);
+      }
+    }
+
+    // Drain the signal queue: a SIGTERM raised during the synchronous
+    // delivery is only DISPATCHED in a later poll phase — a single
+    // setImmediate can land in the same iteration's check phase and miss it
+    // (verified empirically). A timer forces at least one full iteration
+    // through poll, so the handler runs before the terminal status is
+    // chosen: delivery finishes atomically, the run still stops.
+    await sleep(25);
+
+    // A signal that landed during delivery (or between backend settle and
+    // the drain) started the barrier but nothing awaited it yet — the same
+    // idempotent barrier guarantees children are reaped before the terminal.
+    if (abort.signal.aborted) await termThenKill();
+
+    let status: "completed" | "stopped" | "failed" | "budget";
+    if (stopRequested) status = "stopped";
+    else if (budgetDimension !== null) status = "budget";
+    else if (failure !== null) status = "failed";
+    else status = "completed";
+
+    if (budgetDimension !== null) {
+      emit({ runId, at: new Date().toISOString(), type: "budget.exhausted", dimension: budgetDimension });
+    }
+
+    emit({
+      runId,
+      at: new Date().toISOString(),
+      type: "run.finished",
+      ...(best !== null ? { best } : {}),
+      status,
+    });
+
+    const report = exitReport(runId, replayRun(runDir));
+    if (headless) {
+      io.out(JSON.stringify(report));
+    } else {
+      for (const line of formatHumanReport(report, liveBudget)) io.out(line);
+    }
+    return status === "failed" ? 1 : 0;
   } finally {
-    backendFenced = true;
+    // Handlers and timers live through delivery, the terminal event, and the
+    // report — removed only once no further trusted append can happen.
     for (const t of timers) clearTimeout(t);
     process.removeListener("SIGTERM", onSignal);
     process.removeListener("SIGINT", onSignal);
   }
+}
 
-  let status: "completed" | "stopped" | "failed" | "budget";
-  if (stopRequested) status = "stopped";
-  else if (budgetDimension !== null) status = "budget";
-  else if (failure !== null) status = "failed";
-  else status = "completed";
-
-  if (budgetDimension !== null) {
-    emit({ runId, at: new Date().toISOString(), type: "budget.exhausted", dimension: budgetDimension });
-  }
-  if (failure !== null) {
-    const err: Error = failure;
-    io.err(`backend failed: ${err.message}`);
-  }
-
-  const preFinish = replayRun(runDir);
-  const best = preFinish.incumbent?.artifact ?? null;
-
-  // Delivery policy is per-run and immutable once started (contract 5).
-  // Delivery runs BEFORE run.finished so the terminal event is always the
-  // log's final line (stop/apply key on it).
-  if (status !== "failed" && config.apply !== "none" && best !== null) {
-    const repo = extra.flags.repo !== undefined ? resolve(io.root, extra.flags.repo) : io.root;
-    if (isGitRepo(repo)) {
+/** Sentinel files removed synchronously at process exit — one hook, many runs. */
+const sentinelsToClear = new Set<string>();
+let sentinelHookInstalled = false;
+function armSentinelCleanup(path: string): void {
+  sentinelsToClear.add(path);
+  if (sentinelHookInstalled) return;
+  sentinelHookInstalled = true;
+  process.on("exit", () => {
+    for (const p of sentinelsToClear) {
       try {
-        const result = deliver({
-          mode: config.apply,
-          repo,
-          runId,
-          artifact: best.hash,
-          casDir,
-          improverSeat: config.improverSeat,
-          env: io.env,
-        });
-        emit({
-          runId,
-          at: new Date().toISOString(),
-          type: "delivery.applied",
-          mode: config.apply,
-          ...(result.ref !== null ? { ref: result.ref } : {}),
-        });
-        for (const note of result.notes) io.err(note);
-      } catch (e) {
-        if (e instanceof LadderLockedError) io.err(e.message);
-        else io.err(`delivery (${config.apply}) failed: ${e instanceof Error ? e.message : String(e)}`);
+        unlinkSync(p);
+      } catch {
+        // already gone / never written
       }
-    } else {
-      io.err(`apply ${config.apply}: ${repo} is not a git repository — skipping delivery (pass --repo <dir>)`);
     }
-  }
-
-  emit({
-    runId,
-    at: new Date().toISOString(),
-    type: "run.finished",
-    ...(best !== null ? { best } : {}),
-    status,
   });
-
-  try {
-    unlinkSync(join(runDir, SUPERVISOR_FILE));
-  } catch {
-    // best-effort
-  }
-
-  const report = exitReport(runId, replayRun(runDir));
-  if (headless) {
-    io.out(JSON.stringify(report));
-  } else {
-    for (const line of formatHumanReport(report, liveBudget)) io.out(line);
-  }
-  return status === "failed" ? 1 : 0;
 }
 
 /** Shared by `stop` for liveness checks. */
