@@ -7,18 +7,35 @@ export interface Usage {
 
 export const ZERO_USAGE: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
-/** Accepts an OpenAI wire-format `usage` object; undefined when absent/malformed. */
+/** Runtime guard: a plain JSON object (not null, not an array). */
+export function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A usage field is only meaningful as a non-negative safe integer. */
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+/**
+ * Accepts an OpenAI wire-format `usage` object; undefined when absent/malformed.
+ * Fail-closed hardening: negative, fractional, or non-numeric counts are
+ * MALFORMED (undefined), never coerced — a provider (or tampered upstream)
+ * must not be able to shrink recorded spend below its own component counts,
+ * so `totalTokens` is never less than prompt+completion.
+ */
 export function normalizeUsage(value: unknown): Usage | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const rec = value as Record<string, unknown>;
-  const prompt = rec["prompt_tokens"];
-  const completion = rec["completion_tokens"];
-  if (typeof prompt !== "number" || typeof completion !== "number") return undefined;
-  const total = rec["total_tokens"];
+  if (!isJsonObject(value)) return undefined;
+  const prompt = tokenCount(value["prompt_tokens"]);
+  const completion = tokenCount(value["completion_tokens"]);
+  if (prompt === undefined || completion === undefined) return undefined;
+  const reportedTotal = tokenCount(value["total_tokens"]) ?? 0;
   return {
     promptTokens: prompt,
     completionTokens: completion,
-    totalTokens: typeof total === "number" ? total : prompt + completion,
+    totalTokens: Math.max(reportedTotal, prompt + completion),
   };
 }
 
@@ -39,8 +56,8 @@ export function extractSseUsage(raw: string): Usage | undefined {
     } catch {
       continue;
     }
-    if (typeof parsed === "object" && parsed !== null) {
-      const found = normalizeUsage((parsed as Record<string, unknown>)["usage"]);
+    if (isJsonObject(parsed)) {
+      const found = normalizeUsage(parsed["usage"]);
       if (found) usage = found;
     }
   }
