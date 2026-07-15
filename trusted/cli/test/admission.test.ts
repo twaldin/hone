@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CapsuleManifest, RunConfig, capsuleDigest } from "@hone/schema";
+import { CapsuleManifest, DiagnosticOrderingReport, RunConfig, capsuleDigest } from "@hone/schema";
 import { admitCapsule, readCapsuleSnapshot, revalidateForResume, writeCapsuleSnapshot } from "../src/admission.js";
 import { computeOptimizerDigest, resolveOptimizerDigest } from "../src/optimizer-digest.js";
 import { runCommand as cliRunCommand } from "../src/supervisor.js";
@@ -22,6 +22,7 @@ import {
   manifestObject,
   manifestRaw,
   orderingReportRaw,
+  pkgRoot,
   writeEvents,
 } from "./helpers.js";
 
@@ -90,6 +91,91 @@ describe("frozen capsule admission", () => {
     const dir = makeCapsule(root, { diagnosticOrdering: { path: ORDERING_REPORT_PATH, hash: sha(body) } });
     writeFileSync(join(dir, ORDERING_REPORT_PATH), body);
     expect(() => admitCapsule(dir)).toThrow(/failure/);
+  });
+
+  /**
+   * A SEMANTIC forgery: mutate the fixture ordering report, then re-pin the
+   * tampered bytes' real hash so the manifest id recomputes and every
+   * byte-level check (contentHashes, report hash, id) passes. Only the
+   * recomputed semantic invariants can catch it.
+   */
+  function forgedCapsule(root: string, mutate: (r: DiagnosticOrderingReport) => void): string {
+    const report = DiagnosticOrderingReport.parse(orderingReportRaw());
+    mutate(report);
+    const body = `${JSON.stringify(report, null, 2)}\n`;
+    const dir = makeCapsule(root, { diagnosticOrdering: { path: ORDERING_REPORT_PATH, hash: sha(body) } });
+    writeFileSync(join(dir, ORDERING_REPORT_PATH), body);
+    return dir;
+  }
+
+  it("refuses a hash-valid, id-valid report whose combined ordering is forged", () => {
+    // broken >= naive: the evaluator no longer discriminates, yet failures:[]
+    const dir = forgedCapsule(makeRoot(), (r) => {
+      r.variants.broken.combined = r.variants.naive.combined;
+    });
+    expect(() => admitCapsule(dir)).toThrow(/semantic invariant/);
+    expect(() => admitCapsule(dir)).toThrow(/broken/);
+  });
+
+  it("refuses a forged shortcut with no train advantage (split check hollowed out)", () => {
+    const dir = forgedCapsule(makeRoot(), (r) => {
+      r.variants.shortcut.train = r.variants.baseline.train - 0.1;
+    });
+    expect(() => admitCapsule(dir)).toThrow(/semantic invariant.*shortcut must beat baseline on train/);
+  });
+
+  it("refuses a forged shortcut whose cheat transfers to validation", () => {
+    const dir = forgedCapsule(makeRoot(), (r) => {
+      r.variants.shortcut.validation = r.variants.baseline.validation + 0.1;
+    });
+    expect(() => admitCapsule(dir)).toThrow(/semantic invariant.*shortcut must NOT beat baseline on validation/);
+  });
+
+  it("refuses forged constraint-gate booleans on baseline/improved", () => {
+    const dir = forgedCapsule(makeRoot(), (r) => {
+      r.variants.improved.validationTestsPass = false;
+    });
+    expect(() => admitCapsule(dir)).toThrow(/semantic invariant.*improved validationTestsPass/);
+  });
+
+  it("refuses a recorded stability spread that does not recompute from the aggregates", () => {
+    const dir = forgedCapsule(makeRoot(), (r) => {
+      // True spread of [0.5, 0.5, 0.9] is far from the recorded 0.
+      r.stability.aggregates = [0.5, 0.5, 0.9];
+    });
+    expect(() => admitCapsule(dir)).toThrow(/semantic invariant.*does not recompute/);
+  });
+
+  it("refuses stability aggregates decoupled from the baseline's own combined score", () => {
+    const dir = forgedCapsule(makeRoot(), (r) => {
+      r.stability.aggregates = [0.6, 0.6, 0.6]; // self-consistent spread 0, wrong head
+    });
+    expect(() => admitCapsule(dir)).toThrow(/semantic invariant.*stability\.aggregates\[0\]/);
+  });
+
+  it("refuses a self-consistent spread that breaches the band", () => {
+    const dir = forgedCapsule(makeRoot(), (r) => {
+      const aggs = [0.5, 0.4, 0.6];
+      const mean = aggs.reduce((a, b) => a + b, 0) / aggs.length;
+      r.stability.aggregates = aggs;
+      r.stability.spread = (Math.max(...aggs) - Math.min(...aggs)) / mean; // honest recompute, > band
+    });
+    expect(() => admitCapsule(dir)).toThrow(/semantic invariant.*strictly under band/);
+  });
+
+  it("admits the real seeded-astar ordering report end to end", () => {
+    const seededBody = readFileSync(
+      join(pkgRoot, "..", "..", "capsules", "seeded-astar", "diagnostics", "ordering-report.json"),
+      "utf8",
+    );
+    const root = makeRoot();
+    const dir = makeCapsule(root, { diagnosticOrdering: { path: ORDERING_REPORT_PATH, hash: sha(seededBody) } });
+    writeFileSync(join(dir, ORDERING_REPORT_PATH), seededBody);
+    const admitted = admitCapsule(dir);
+    expect(admitted.orderingReport.failures).toEqual([]);
+    expect(admitted.orderingReport.variants.improved.combined).toBeGreaterThan(
+      admitted.orderingReport.variants.baseline.combined,
+    );
   });
 
   it("requires a git baseline to be a CLEAN nested worktree at the declared HEAD", () => {

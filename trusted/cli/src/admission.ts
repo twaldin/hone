@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { CapsuleManifest, DiagnosticOrderingReport, capsuleDigest, deriveCapsuleId } from "@hone/schema";
+import { CapsuleManifest, DiagnosticOrderingReport, capsuleDigest, deriveCapsuleId, validateDiagnosticOrdering } from "@hone/schema";
 import { UsageError } from "./args.js";
 import { loadCapsule } from "./capsule.js";
 
@@ -17,7 +17,9 @@ import { loadCapsule } from "./capsule.js";
  *  - contentHashes covers EXACTLY the asset-group file set — no missing
  *    entries, no unreferenced extras — and every hash matches the bytes;
  *  - the diagnostic ordering report exists, hashes to the manifest's pinned
- *    hash, parses against the schema, and recorded zero failures;
+ *    hash, parses against the schema, recorded zero failures, AND its
+ *    semantic invariants recompute from the recorded aggregates
+ *    (validateDiagnosticOrdering) — `failures: []` alone is never trusted;
  *  - a git baseline is a CLEAN nested worktree at the declared HEAD.
  */
 
@@ -90,6 +92,14 @@ function checkOrderingReport(capsuleDir: string, manifest: CapsuleManifest): Dia
   }
   if (parsed.data.failures.length > 0) {
     refuse(capsuleDir, `diagnostic ordering report records ${parsed.data.failures.length} failure(s) — a capsule whose diagnostics failed cannot be admitted: ${parsed.data.failures.join("; ")}`);
+  }
+  // Never trust `failures: []` or the recorded booleans: recompute the
+  // semantic invariants (ordering, split integrity, gates, stability) from
+  // the recorded aggregates themselves. A byte-perfect, hash-valid report
+  // whose numbers do not actually prove the ordering is a semantic forgery.
+  const violations = validateDiagnosticOrdering(parsed.data);
+  if (violations.length > 0) {
+    refuse(capsuleDir, `diagnostic ordering report ${rel} violates recomputed semantic invariant(s): ${violations.join("; ")}`);
   }
   return parsed.data;
 }
