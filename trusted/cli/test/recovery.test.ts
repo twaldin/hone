@@ -78,12 +78,15 @@ describe("sweepStaleRunResources (finding 10 — crashed prior process)", () => 
 
     const rmRelay = findCall(calls, "docker", "rm", "-f", "hone-proxy-run-7f3a");
     expect(rmRelay).toBeGreaterThanOrEqual(0);
+    const rmBrokerRelay = findCall(calls, "docker", "rm", "-f", "hone-broker-run-7f3a");
+    expect(rmBrokerRelay).toBeGreaterThanOrEqual(0);
 
     const rmNet = findCall(calls, "docker", "network", "rm");
     expect(calls[rmNet]).toEqual(["docker", "network", "rm", "hone-run-7f3a"]);
     // containers must be gone BEFORE the network removal (attached containers block it)
     expect(rmLabeled).toBeLessThan(rmNet);
     expect(rmRelay).toBeLessThan(rmNet);
+    expect(rmBrokerRelay).toBeLessThan(rmNet);
 
     for (const sock of ["proxy.sock", "broker.sock", "broker-admin.sock"]) {
       expect(existsSync(join(runDir, sock))).toBe(false);
@@ -99,6 +102,7 @@ describe("sweepStaleRunResources (finding 10 — crashed prior process)", () => 
 
     await expect(sweepStaleRunResources("run_x", runDir, run)).resolves.toBeUndefined();
     expect(findCall(calls, "docker", "rm", "-f", "hone-proxy-run_x")).toBeGreaterThanOrEqual(0);
+    expect(findCall(calls, "docker", "rm", "-f", "hone-broker-run_x")).toBeGreaterThanOrEqual(0);
     expect(findCall(calls, "docker", "network", "rm", "hone-run_x")).toBeGreaterThanOrEqual(0);
     // no batch rm for an unknown container list
     expect(findCall(calls, "docker", "rm", "-f", "aaa111")).toBe(-1);
@@ -144,6 +148,21 @@ describe("setupEgress network create (finding 10 — idempotent after cleanup)",
     // relay container still launched and bridged
     expect(findCall(calls, "docker", "run")).toBeGreaterThanOrEqual(0);
     expect(findCall(calls, "docker", "network", "connect")).toBeGreaterThanOrEqual(0);
+    const brokerEndpoint = await egress.exposeBroker(54321);
+    expect(brokerEndpoint).toBe("tcp://hone-broker-run_y:8080");
+    const brokerRelayRun = calls.find(
+      (argv) => argv[0] === "docker" && argv[1] === "run" && argv.includes("hone-broker-run_y"),
+    );
+    expect(brokerRelayRun).toEqual(expect.arrayContaining([
+      "--network",
+      "hone-run_y",
+      "--add-host",
+      "host.docker.internal:host-gateway",
+      "-e",
+      "HONE_RELAY_PORT=54321",
+      "img:latest",
+    ]));
+    expect(findCall(calls, "docker", "network", "connect", "bridge", "hone-broker-run_y")).toBeGreaterThanOrEqual(0);
   });
 
   it("refuses to attach sandboxes to a pre-existing NON-internal network of the same name", async () => {
