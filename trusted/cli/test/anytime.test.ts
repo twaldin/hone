@@ -34,14 +34,14 @@ describe("hone status", () => {
 });
 
 describe("hone best — incumbent scorecard", () => {
-  it("prints aggregate, delta, episode, spend, and the validation label", async () => {
+  it("prints aggregate, delta, episode, spend, and the honest score scope", async () => {
     const { root, bestHash } = setup(false);
     const { io, out } = makeIo(root);
     expect(await bestCommand([], io)).toBe(0);
     const text = out.join("\n");
     expect(text).toContain(bestHash);
     expect(text).toContain("0.62");
-    expect(text).toContain("validation — not holdout");
+    expect(text).toContain("non-holdout search score");
     expect(text).toContain("+0.12");
     expect(text).toMatch(/episode:?\s+0/);
     expect(text).toContain("1.25");

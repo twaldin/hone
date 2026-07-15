@@ -36,7 +36,7 @@ export function formatDelta(delta: number): string {
 export function formatHumanReport(report: ExitReport, budget: BudgetState | null): string[] {
   const lines = [`run ${report.runId} finished: ${report.status}`];
   if (report.best !== null) lines.push(`best: ${report.best}`);
-  if (report.aggregate !== null) lines.push(`aggregate: ${report.aggregate} (validation — not holdout)`);
+  if (report.aggregate !== null) lines.push(`aggregate: ${report.aggregate} (non-holdout search score)`);
   if (report.deltaVsBaseline !== null) lines.push(`delta vs baseline: ${formatDelta(report.deltaVsBaseline)}`);
   lines.push(`spend: ${formatSpend(budget)}`);
   return lines;

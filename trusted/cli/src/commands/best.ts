@@ -14,7 +14,7 @@ export async function bestCommand(args: string[], io: CmdIo): Promise<number> {
     return 1;
   }
   io.out(`best: ${state.incumbent.artifact.hash}`);
-  io.out(`aggregate: ${state.incumbent.aggregate} (validation — not holdout)`);
+  io.out(`aggregate: ${state.incumbent.aggregate} (non-holdout search score)`);
   io.out(`delta vs baseline: ${formatDelta(state.incumbent.deltaVsBaseline)}`);
   io.out(`episode: ${state.incumbent.episode}`);
   io.out(`spend: ${formatSpend(state.lastBudget)}`);
