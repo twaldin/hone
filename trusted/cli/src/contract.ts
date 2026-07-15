@@ -130,6 +130,7 @@ export function renderContract(inputs: ContractInputs): string {
   lines.push(`- apply mode: **${config.apply}**${config.apply === "pr" ? " (local-only in the M0 seed: branch + manual PR instruction; never pushes or calls gh)" : ""}`);
   lines.push(`- improver seat: ${config.improverSeat ? "yes (apply:auto additionally requires HONE_LADDER_OK=1)" : "no"}`);
   lines.push(`- headless: ${config.headless ? "yes" : "no"}`);
+  lines.push(`- backend: **${config.backend}** (sealed — resume reuses it; a conflicting --backend refuses)`);
   lines.push(`- seed: ${config.seed}`);
   lines.push("");
   lines.push("## Run config (executable — the ONLY editable section)");
@@ -229,6 +230,7 @@ export function applyContractRevision(opts: {
   if (envelopeError !== null) return { ok: false, error: envelopeError };
   if (config.headless !== original.headless) return { ok: false, error: "headless is not editable mid-approval" };
   if (config.improverSeat !== original.improverSeat) return { ok: false, error: "improverSeat is not editable mid-approval" };
+  if (config.backend !== original.backend) return { ok: false, error: "backend is not editable mid-approval" };
   if (ladderLocked(config.apply, config.improverSeat, env)) return { ok: false, error: LADDER_REFUSAL };
   return { ok: true, config };
 }

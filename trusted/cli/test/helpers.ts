@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CapsuleManifest, RunEvent, deriveCapsuleId } from "@hone/schema";
+import type { RunCommand } from "@hone/broker";
+import type { OptimizerRuntime, OptimizerSpawn, OptimizerTransport } from "../src/backends/optimizer-container.js";
 import { writeCas } from "../src/cas.js";
 import { computeOptimizerDigest } from "../src/optimizer-digest.js";
 import { deferred } from "../src/promise.js";
@@ -249,10 +251,12 @@ export function fixtureEvents(opts: {
   baselineHash: string;
   bestHash: string;
   finished: boolean;
+  /** Real sealed hash for resume-seal fixtures; defaults to a fake. */
+  contractHash?: string;
 }): RunEvent[] {
   const base = { runId: opts.runId };
   const events: RunEvent[] = [
-    { ...base, at: at(), type: "run.started", capsuleId: CAP_ID, contractHash: fakeHash("c"), optimizerDigest: FIX_OPTIMIZER_DIGEST },
+    { ...base, at: at(), type: "run.started", capsuleId: CAP_ID, contractHash: opts.contractHash ?? fakeHash("c"), optimizerDigest: FIX_OPTIMIZER_DIGEST },
     { ...base, at: at(), type: "episode.started", episode: 0, parent: { hash: opts.baselineHash } },
     { ...base, at: at(), type: "episode.candidate", episode: 0, candidate: { hash: opts.bestHash }, sessionTrace: fakeHash("e") },
     { ...base, at: at(), type: "eval.completed", episode: 0, artifact: { hash: opts.bestHash }, assetGroupId: "validation", seed: 0, aggregate: 0.62, cached: false },
@@ -310,3 +314,86 @@ export function initScratchRepo(dir: string): void {
 }
 
 export { git as gitIn };
+
+/** Every-call-succeeds RunCommand stub (docker teardown calls etc.). */
+export function okRun(): RunCommand {
+  return () => Promise.resolve({ exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false });
+}
+
+/**
+ * Fake optimizer spawn: asserts the production code launched `docker run`,
+ * then executes the CONTAINER argv as a host process with ONLY the env the
+ * container would have seen (-e K=V pairs, plus value-less -e resolved from
+ * the docker client env — exactly docker's semantics). Lifecycle (stdout
+ * piping, process-group kill, exit codes) stays real.
+ */
+export function fakeOptimizerSpawn(image: string, seen?: { argvs: string[][]; envs: NodeJS.ProcessEnv[] }): OptimizerSpawn {
+  return (cmd, args, opts) => {
+    const argv = [cmd, ...args];
+    seen?.argvs.push(argv);
+    seen?.envs.push(opts.env);
+    const imageIdx = argv.indexOf(image);
+    if (cmd !== "docker" || argv[1] !== "run" || imageIdx < 0) {
+      throw new Error(`optimizer launch is not a docker run of the manifest image: ${argv.join(" ")}`);
+    }
+    const env: Record<string, string> = {};
+    const mounts: [container: string, host: string][] = [];
+    for (let i = 2; i < imageIdx; i++) {
+      if (argv[i] === "-e") {
+        const kv = argv[i + 1] ?? "";
+        const eq = kv.indexOf("=");
+        if (eq >= 0) env[kv.slice(0, eq)] = kv.slice(eq + 1);
+        else {
+          const passthrough = opts.env[kv];
+          if (passthrough !== undefined) env[kv] = passthrough;
+        }
+      } else if (argv[i] === "-v") {
+        const spec = (argv[i + 1] ?? "").split(":");
+        if (spec[0] !== undefined && spec[1] !== undefined) mounts.push([spec[1], spec[0]]);
+      }
+    }
+    // Execute the container argv on the host, translating mounted container
+    // paths back to their host sources (what the container would see).
+    const mapPath = (arg: string): string => {
+      for (const [container, host] of mounts) {
+        if (arg === container) return host;
+        if (arg.startsWith(`${container}/`)) return host + arg.slice(container.length);
+      }
+      return arg;
+    };
+    const containerArgv = argv.slice(imageIdx + 1).map(mapPath);
+    const [prog, ...progArgs] = containerArgv;
+    if (prog === undefined) throw new Error("optimizer container argv is empty");
+    return spawn(prog, progArgs, {
+      env: { ...env, PATH: process.env["PATH"] ?? "" },
+      stdio: opts.stdio,
+      detached: opts.detached,
+    });
+  };
+}
+
+/** A ready OptimizerRuntime for direct runOptimizer tests (no build; scripted argv). */
+export function testOptimizerRuntime(opts: {
+  runId: string;
+  argv: string[];
+  image?: string;
+  transport?: OptimizerTransport;
+  run?: RunCommand;
+  spawnImpl?: OptimizerSpawn;
+}): OptimizerRuntime {
+  const image = opts.image ?? FIX_IMAGE;
+  const runtime: OptimizerRuntime = {
+    image,
+    runId: opts.runId,
+    safeRunId: opts.runId.replace(/[^a-zA-Z0-9_.-]/g, "-"),
+    transport: opts.transport ?? { kind: "unix", hostSocketPath: "/dev/null" },
+    bundleDir: null,
+    runArgv: opts.argv,
+    spawnImpl: opts.spawnImpl ?? fakeOptimizerSpawn(image),
+    run: opts.run ?? okRun(),
+    spawnedNames: [],
+    invocation: 0,
+    cleanup: () => Promise.resolve(),
+  };
+  return runtime;
+}

@@ -44,6 +44,12 @@ export const RunConfig = z.object({
   routing: ModelRouting,
   apply: ApplyMode.default("none"),
   headless: z.boolean().default(false),
+  /**
+   * Runner backend sealed at run creation ("local"/"stub", or a dev-only
+   * module spec). Resume reuses the stored backend; a conflicting --backend
+   * flag refuses.
+   */
+  backend: z.string().min(1).default("local"),
   /** Improver-seat runs get the extra autonomy-ladder lock on apply:auto. */
   improverSeat: z.boolean().default(false),
   /** Deterministic base seed; episode seeds derive from it. */

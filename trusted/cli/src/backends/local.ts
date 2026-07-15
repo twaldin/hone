@@ -1,9 +1,8 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { z } from "zod";
 import type { ArtifactRef, BudgetState, CapsuleManifest, RunEvent } from "@hone/schema";
 import { CasStore, packDirAsArtifact, runCommand, startBroker } from "@hone/broker";
@@ -14,10 +13,17 @@ import { admitCapsule } from "../admission.js";
 import { readEvents, replayRun } from "../eventlog.js";
 import { deferred } from "../promise.js";
 import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "../types.js";
+import {
+  optimizerRunArgs,
+  optimizerRunName,
+  prepareOptimizerRuntime,
+  transportEndpoint,
+} from "./optimizer-container.js";
+import type { OptimizerChildLike, OptimizerRuntime, OptimizerSpawn, OptimizerTransport } from "./optimizer-container.js";
 
 /**
  * The real runner backend (WP7): composes broker + metering proxy + the
- * optimizer child process behind the same seam the stub implements.
+ * containerized optimizer behind the same seam the stub implements.
  *
  * Egress topology (mutation sandboxes -> LLM):
  *   linux   proxy binds runDir/proxy.sock; the broker mounts it at
@@ -32,15 +38,27 @@ import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from
  *           sandbox -> relay:8080 -> host proxy -> vibeproxy upstream.
  *   Override with HONE_EGRESS=socket|network.
  *
- * The optimizer runs as an unprivileged host child (node + tsx, override via
- * HONE_OPTIMIZER_CMD) with a minimal explicit env and NO event authority:
- * its stdout/stderr go verbatim to runDir/optimizer.log as opaque
- * diagnostics. Every RunEvent is derived trusted-side — runner lifecycle
- * here/in the supervisor, everything else by the broker from the method
- * calls it serves (see trusted/broker recordEvaluation/reportIncumbent).
+ * Optimizer topology (see backends/optimizer-container.ts): the loop executes
+ * ONLY as a bundle compiled from the digest-sealed snapshot, inside an
+ * unprivileged uid/gid-2000 container with no host repo/runDir/CAS/capsule/
+ * holdout/credential/Docker-socket exposure. Broker transport follows the
+ * egress topology:
+ *   network (darwin default)  the broker opens its authenticated public TCP
+ *           listener on 127.0.0.1:0 with a fresh ≥256-bit token; the
+ *           optimizer joins the already-internal egress network and dials
+ *           tcp://host.docker.internal:<resolved port>, presenting the token
+ *           on every request. The token travels via the docker client's env
+ *           (value-less -e), never argv, and is never logged.
+ *   socket (linux default)    ONLY the public broker.sock is bind-mounted
+ *           read/write at /run/hone/broker.sock; --network none; no admin
+ *           socket, no token.
+ * The child has NO event authority: its stdout/stderr go verbatim to
+ * runDir/optimizer.log as opaque diagnostics. Every RunEvent is derived
+ * trusted-side — runner lifecycle here/in the supervisor, everything else by
+ * the broker from the method calls it serves.
  */
 
-/** Entries never packed into the baseline artifact (mirrors capsules/tools/ordering-check.ts). */
+/** Entries never packed into a NON-git (cas) baseline artifact (mirrors capsules/tools/ordering-check.ts). */
 const BASELINE_SKIP: Record<string, true> = { ".git": true, ".gitdir": true, __pycache__: true, ".pytest_cache": true };
 
 const RELAY_PORT = 8080;
@@ -70,12 +88,44 @@ export function validateCapsule(capsuleDir: string, expectedDigest: string): voi
 }
 
 
-/** Anti-sandbagging: the baseline artifact is measured (packed) by the trusted runner, never taken from capsule metadata. */
-async function measureBaseline(capsuleDir: string, cas: CasStore): Promise<string> {
+/**
+ * Anti-sandbagging: the baseline artifact is measured (packed) by the trusted
+ * runner, never taken from capsule metadata. A git baseline is EXACT: the
+ * declared commit's tree is materialized through a temporary detached
+ * worktree, so ignored/untracked worktree content (an injected module, a
+ * stray __pycache__) can never enter the canonical artifact. A cas baseline
+ * has no commit to materialize; its directory is packed minus worktree noise.
+ */
+export async function measureBaseline(capsuleDir: string, manifest: CapsuleManifest, cas: CasStore): Promise<string> {
   const baselineDir = join(capsuleDir, "baseline");
   if (!existsSync(baselineDir)) throw new Error(`capsule has no baseline/ directory: ${capsuleDir}`);
   const staging = mkdtempSync(join(tmpdir(), "hone-baseline-"));
   try {
+    if (manifest.baseline.kind === "git") {
+      const gitDir = existsSync(join(baselineDir, ".gitdir")) ? join(baselineDir, ".gitdir") : join(baselineDir, ".git");
+      const worktree = join(staging, "wt");
+      try {
+        try {
+          execFileSync("git", ["--git-dir", gitDir, "worktree", "add", "--detach", worktree, manifest.baseline.commit], { stdio: "pipe" });
+        } catch (e) {
+          throw new Error(`baseline worktree materialization failed for commit ${manifest.baseline.commit}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        // The worktree's .git link is checkout plumbing, never baseline content.
+        rmSync(join(worktree, ".git"), { recursive: true, force: true });
+        return await packDirAsArtifact(worktree, cas);
+      } finally {
+        // Deregister on every path: remove the temp tree first, then prune
+        // the (now dangling) registration — including any left by a crashed
+        // predecessor. Best-effort; a locked gitdir leaves only inert
+        // metadata behind, never baseline bytes.
+        rmSync(staging, { recursive: true, force: true });
+        try {
+          execFileSync("git", ["--git-dir", gitDir, "worktree", "prune", "--expire", "now"], { stdio: "pipe" });
+        } catch {
+          // gitdir gone or locked — nothing left to deregister
+        }
+      }
+    }
     for (const entry of readdirSync(baselineDir)) {
       if (BASELINE_SKIP[entry] === true) continue;
       cpSync(join(baselineDir, entry), join(staging, entry), { recursive: true });
@@ -191,15 +241,6 @@ export async function setupEgress(
   };
 }
 
-/** Spawn command for the optimizer child: HONE_OPTIMIZER_CMD override, else host node + the cli's own tsx. */
-function optimizerCommand(env: NodeJS.ProcessEnv): string[] {
-  const override = env["HONE_OPTIMIZER_CMD"];
-  if (override !== undefined && override.trim().length > 0) return override.trim().split(/\s+/);
-  const require = createRequire(import.meta.url);
-  const tsxCli = join(dirname(require.resolve("tsx/package.json")), "dist", "cli.mjs");
-  return [process.execPath, tsxCli];
-}
-
 /** Optimizer resume payload, always from the on-disk log (post-reconciliation truth). */
 function resumeHint(runDir: string): { nextEpisode: number; incumbent: { artifact: ArtifactRef; aggregate: number } | null } {
   const replayed = replayRun(runDir);
@@ -210,25 +251,29 @@ function resumeHint(runDir: string): { nextEpisode: number; incumbent: { artifac
 }
 
 /**
- * Kill handle covering the optimizer's whole POSIX process group — the tsx
- * launcher nests a node child, and a stop that only signals the immediate
- * child leaves descendants emitting broker calls after run.finished. Falls
- * back to the direct child handle on Windows or when the group is gone.
+ * Kill handle covering the optimizer container AND its docker client. The
+ * foreground `docker run` proxies SIGTERM into the container (sig-proxy), but
+ * SIGKILLing the client alone would ORPHAN the container — so the handle also
+ * drives the daemon directly: TERM -> `docker kill -s TERM`, KILL ->
+ * `docker rm -f`. Fire-and-forget: the supervisor's barrier polls the client
+ * PID, which exits when the container dies.
  */
-function groupKillHandle(child: ChildLike): ChildLike {
+function containerKillHandle(child: OptimizerChildLike, name: string, run: RunCommand): ChildLike {
   return {
     pid: child.pid,
     kill(signal?: NodeJS.Signals): boolean {
+      const sig = signal ?? "SIGTERM";
+      void run(sig === "SIGKILL" ? ["docker", "rm", "-f", name] : ["docker", "kill", "-s", "TERM", name], { timeoutMs: 30_000 }).catch(() => {});
       if (process.platform !== "win32" && typeof child.pid === "number") {
         try {
-          process.kill(-child.pid, signal ?? "SIGTERM");
+          process.kill(-child.pid, sig);
           return true;
         } catch {
-          // group already reaped — fall through to the direct handle
+          // client group already reaped — fall through to the direct handle
         }
       }
       try {
-        return child.kill(signal);
+        return child.kill(sig);
       } catch {
         return false;
       }
@@ -237,35 +282,28 @@ function groupKillHandle(child: ChildLike): ChildLike {
 }
 
 /**
- * Exported for the trusted-boundary test: optimizer stdout must never become
- * events. `opts.maxEpisodes` bounds the invocation (probe gate); otherwise an
- * operator HONE_MAX_EPISODES passes through and the optimizer fails closed on
- * invalid values.
+ * Launch ONE invocation of the sealed optimizer container. Exported for the
+ * trusted-boundary tests: optimizer stdout must never become events.
+ * `opts.maxEpisodes` bounds the invocation (probe gate); otherwise an
+ * operator HONE_MAX_EPISODES passes through and the optimizer fails closed
+ * on invalid values.
  */
-export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string, opts: { maxEpisodes?: number } = {}): Promise<void> {
-  const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
-  const entry = ctx.env["HONE_OPTIMIZER_ENTRY"] ?? join(repoRoot, "optimizer", "src", "main.ts");
-  if (!existsSync(entry)) throw new Error(`optimizer entry not found: ${entry} (set HONE_OPTIMIZER_ENTRY)`);
-  const [cmd, ...args] = optimizerCommand(ctx.env);
-  if (cmd === undefined) throw new Error("empty HONE_OPTIMIZER_CMD");
+export function runOptimizer(ctx: RunnerBackendContext, runtime: OptimizerRuntime, opts: { maxEpisodes?: number } = {}): Promise<void> {
+  const name = optimizerRunName(runtime.safeRunId, ++runtime.invocation);
+  runtime.spawnedNames.push(name);
 
   // Opaque diagnostics sink — NEVER parsed, NEVER an event source.
   const optLog = createWriteStream(join(ctx.runDir, "optimizer.log"), { flags: "a" });
-  const scratch = join(ctx.runDir, "opt-scratch");
-  mkdirSync(scratch, { recursive: true });
 
-  // ACCEPTED RISK (M0 boundary ruling): this is a same-UID host process, so
-  // OS-level containment (Docker socket, CAS, admin socket) is not enforced —
-  // acceptable only because at M0 the loop binary is session-authored seed
-  // code, never mutated output. M1 (first mutated optimizer) requires the
-  // loop in a container + broker TCP relay (VirtioFS blocks unix-socket
-  // mounts on macOS). Mitigations here: minimal explicit env (no inherited
-  // shell env / credentials), cwd outside the repo, no event channel.
-  const child = spawn(cmd, [...args, entry], {
-    cwd: scratch,
+  const argv = optimizerRunArgs({
+    name,
+    runId: ctx.runId,
+    image: runtime.image,
+    transport: runtime.transport,
+    bundleDir: runtime.bundleDir,
+    runArgv: runtime.runArgv,
     env: {
-      ...(ctx.env["PATH"] !== undefined ? { PATH: ctx.env["PATH"] } : {}),
-      HONE_BROKER_SOCK: brokerSocket,
+      HONE_BROKER_SOCK: transportEndpoint(runtime.transport),
       HONE_RUN_ID: ctx.runId,
       HONE_SEED: String(ctx.config.seed),
       // Episode bound: the probe pins 1; a full launch inherits any operator
@@ -280,28 +318,53 @@ export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string, op
       // pre-backend snapshot, so the resume hint sees the durable authority.
       HONE_RESUME: JSON.stringify(resumeHint(ctx.runDir)),
     },
+  });
+  const [cmd, ...args] = argv;
+  if (cmd === undefined) throw new Error("empty optimizer container argv");
+  // The docker CLIENT env is minimal and explicit: PATH/HOME so the client
+  // itself works, plus the TCP capability resolved by the value-less -e —
+  // the token never enters argv and is never logged.
+  const child = runtime.spawnImpl(cmd, args, {
+    env: {
+      ...(ctx.env["PATH"] !== undefined ? { PATH: ctx.env["PATH"] } : {}),
+      ...(ctx.env["HOME"] !== undefined ? { HOME: ctx.env["HOME"] } : {}),
+      ...(ctx.env["DOCKER_HOST"] !== undefined ? { DOCKER_HOST: ctx.env["DOCKER_HOST"] } : {}),
+      ...(runtime.transport.kind === "tcp" ? { HONE_BROKER_TOKEN: runtime.transport.token } : {}),
+    },
     stdio: ["ignore", "pipe", "pipe"],
-    // Own process group so SIGTERM/SIGKILL reaches every descendant.
+    // Own process group so signals reach the docker client and any fakes.
     detached: process.platform !== "win32",
   });
-  const handle = groupKillHandle(child);
+  const handle = containerKillHandle(child, name, runtime.run);
   const unregister = ctx.registerChild(handle);
-  child.stdout.pipe(optLog, { end: false });
-  child.stderr.pipe(optLog, { end: false });
+  child.stdout?.pipe(optLog, { end: false });
+  child.stderr?.pipe(optLog, { end: false });
 
   const done = deferred<void>();
-  child.on("error", (err) => done.reject(err));
+  const reap = (): void => {
+    // --rm removes the container on exit; force the name free for the next
+    // invocation even when the daemon's async removal lags or wedges.
+    void runtime.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 }).catch(() => {});
+  };
+  child.on("error", (err) => {
+    reap();
+    done.reject(err);
+  });
   child.on("close", (code, signal) => {
     optLog.end();
-    if (ctx.signal.aborted) return done.resolve(); // supervisor wind-down owns the TERM→KILL barrier
+    if (ctx.signal.aborted) {
+      reap();
+      return done.resolve(); // supervisor wind-down owns the TERM→KILL barrier
+    }
     if (code === 0) {
-      // Positively reaped, normal exit: SIGKILL any TERM-ignoring residue of
-      // the process group NOW, then unregister — the supervisor must never
-      // signal this (soon recycled) PID/PGID during a much-later stop.
+      // Positively reaped, normal exit: remove any container residue NOW,
+      // then unregister — the supervisor must never signal this (soon
+      // recycled) PID/PGID or container name during a much-later stop.
       handle.kill("SIGKILL");
       unregister();
       return done.resolve();
     }
+    reap();
     done.reject(new Error(`optimizer exited ${code ?? `signal ${signal ?? "?"}`} — see ${join(ctx.runDir, "optimizer.log")}`));
   });
   return done.promise;
@@ -452,9 +515,14 @@ export function deriveProbeReport(events: readonly RunEvent[], budget: BudgetSta
   };
 }
 
-export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
+export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: OptimizerSpawn } = {}): RunnerBackend {
   const run = deps.run ?? runCommand;
-  const startWithAuthority = async (ctx: RunnerBackendContext, authority: { resolve(): void }): Promise<void> => {
+  const spawnImpl: OptimizerSpawn = deps.spawnOptimizer ?? ((cmd, args, opts) => spawn(cmd, args, opts));
+  const startWithAuthority = async (
+    ctx: RunnerBackendContext,
+    authority: { resolve(): void },
+    cleanup: { resolve(): void; reject(err: Error): void },
+  ): Promise<void> => {
     // NO abort check anywhere in setup: even a stop landing at startup
     // must reach the broker journal + reconciliation below, or the
     // supervisor would terminalize a STALE event-log best while the
@@ -468,7 +536,7 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
       }
 
       const cas = new CasStore(ctx.casDir);
-      const baselineArtifactHash = await measureBaseline(ctx.capsuleDir, cas);
+      const baselineArtifactHash = await measureBaseline(ctx.capsuleDir, ctx.manifest, cas);
 
       // Broker + proxy are mutually referential (proxy meters INTO the broker,
       // broker env points sandboxes AT the proxy); the late-bound ref breaks the cycle.
@@ -502,18 +570,26 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
       });
 
       // The frozen manifest's immutable image is THE image — mutation
-      // sandboxes, eval sandboxes, and the macOS relay all run it. There is
-      // deliberately no environment override.
+      // sandboxes, eval sandboxes, the macOS relay, AND both optimizer
+      // containers (build + run) all run it. There is deliberately no
+      // environment override.
       const image = ctx.manifest.image;
       let egress: Egress | null = null;
+      let optimizer: OptimizerRuntime | null = null;
       try {
-        // Finding 10: a crashed prior supervisor's labeled containers, the
-        // deterministic relay/network, and dead sockets must be gone before
-        // this run mints the same names again.
+        // Finding 10: a crashed prior supervisor's labeled containers (incl.
+        // optimizer build/run), the deterministic relay/network, and dead
+        // sockets must be gone before this run mints the same names again.
         await sweepStaleRunResources(ctx.runId, ctx.runDir, run);
         egress = await setupEgress(ctx, proxy, image, run);
 
-        running = await startBroker({
+        // Broker transport for the containerized optimizer follows the
+        // egress topology: internal-network egress (darwin default) gets the
+        // authenticated public TCP listener with a fresh ≥256-bit capability;
+        // unix egress (linux default) bind-mounts ONLY public broker.sock.
+        const tcpToken = egress.sandboxNetwork.mode === "internal" ? randomBytes(32).toString("hex") : null;
+
+        const brokerConfig = {
           runId: ctx.runId,
           // The RUN config is what the broker enforces: its envelope may
           // tighten the capsule's, and an approved contract edit may have
@@ -540,7 +616,7 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
           runCommand: run,
           // Quota-enforcing docker tmpfs volume for /scratch (landed broker API).
           scratchVolume: true,
-          onEvent: (event) => ctx.emit(event),
+          onEvent: (event: RunEvent) => ctx.emit(event),
           sandboxNetwork: egress.sandboxNetwork,
           mutationEnv: {
             ...(egress.proxyBaseUrl !== null ? { HONE_PROXY_BASE_URL: egress.proxyBaseUrl } : {}),
@@ -548,7 +624,11 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
             HONE_MODEL_ID: route.model,
           },
           episodeOrigin: ctx.replayed.nextEpisode,
-        });
+        };
+        running =
+          tcpToken !== null
+            ? await startBroker(brokerConfig, { publicTcp: { host: "127.0.0.1", port: 0, token: tcpToken } })
+            : await startBroker(brokerConfig);
 
         // Finding 11: replay journaled-but-unlogged promotions into
         // events.ndjson BEFORE anything can terminalize the run, so
@@ -559,6 +639,25 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
 
         // Only AFTER durable authority is reconciled may a stop short-circuit:
         // the optimizer never launches; the finally unwinds proxy/broker/egress.
+        if (ctx.signal.aborted) return;
+
+        let transport: OptimizerTransport;
+        if (tcpToken !== null && egress.sandboxNetwork.mode === "internal") {
+          const addr = running.publicTcpAddress;
+          if (addr === undefined) throw new Error("broker did not open the requested public TCP listener");
+          transport = {
+            kind: "tcp",
+            endpoint: `tcp://host.docker.internal:${addr.port}`,
+            token: tcpToken,
+            network: egress.sandboxNetwork.network,
+          };
+        } else {
+          transport = { kind: "unix", hostSocketPath: running.socketPath };
+        }
+
+        // One-time exact-snapshot proof + container build, reused by BOTH the
+        // probe invocation and the full relaunch.
+        optimizer = await prepareOptimizerRuntime(ctx, { image, transport, run, spawnImpl });
         if (ctx.signal.aborted) return;
 
         // VI.4 probe gate: the FIRST invocation is bounded to one outer
@@ -576,10 +675,14 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
           return;
         }
         if (probe === null) {
-          await runOptimizer(ctx, running.socketPath, { maxEpisodes: 1 });
+          await runOptimizer(ctx, optimizer, { maxEpisodes: 1 });
           if (ctx.signal.aborted) return;
           const report = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
           const approved = await ctx.probeGate(report);
+          // An abort that landed DURING the gate must not seal a durable
+          // verdict — the owner never answered; the run stays resumable and
+          // the probe re-gates on the next resume.
+          if (ctx.signal.aborted) return;
           ctx.emit({
             runId: ctx.runId,
             at: new Date().toISOString(),
@@ -598,7 +701,7 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
           if (ctx.signal.aborted) return;
         }
 
-        await runOptimizer(ctx, running.socketPath);
+        await runOptimizer(ctx, optimizer);
 
         // Final trusted budget line so the exit report reflects total spend.
         ctx.emit({
@@ -608,27 +711,48 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
           budget: running.broker.getBudget({ privileged: true }),
         });
       } finally {
-        await proxy.close().catch(() => {});
-        if (running !== null) await running.close().catch(() => {});
-        if (egress !== null) await egress.cleanup().catch(() => {});
+        // Full-teardown barrier: every failure is COLLECTED — a half-closed
+        // proxy must not skip broker/egress/container teardown. Any failure
+        // rejects the cleanup barrier (run stays unterminalized) WITHOUT
+        // masking the body's own error; full success resolves it.
+        const failures: string[] = [];
+        const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+        await proxy.close().catch((e: unknown) => failures.push(`proxy: ${message(e)}`));
+        if (running !== null) await running.close().catch((e: unknown) => failures.push(`broker: ${message(e)}`));
+        if (optimizer !== null) await optimizer.cleanup().catch((e: unknown) => failures.push(`optimizer containers: ${message(e)}`));
+        if (egress !== null) await egress.cleanup().catch((e: unknown) => failures.push(`egress: ${message(e)}`));
+        if (failures.length > 0) cleanup.reject(new Error(`backend teardown incomplete: ${failures.join("; ")}`));
+        else cleanup.resolve();
       }
   };
 
   return {
     async start(ctx: RunnerBackendContext): Promise<void> {
-      // Registered SYNCHRONOUSLY, before the first await: the supervisor's
-      // hard-stop may fence events while the (slow, docker-bound) setup
-      // above is still running — the fence and any terminal event must wait
-      // for this barrier so the reconciled incumbent is never dropped.
+      // Both barriers are registered SYNCHRONOUSLY, before the first await.
+      // Authority: the supervisor's hard-stop may fence events while the
+      // (slow, docker-bound) setup above is still running — the fence and any
+      // terminal event must wait for this barrier so the reconciled incumbent
+      // is never dropped. Cleanup: the supervisor never delivers, emits
+      // run.finished, or returns until optimizer/build containers, broker,
+      // proxy, egress, and temp snapshots have fully closed; a cleanup
+      // failure rejects the barrier and leaves the run unterminalized.
       const authority = deferred<void>();
       ctx.registerAuthorityBarrier(authority.promise);
+      const cleanup = deferred<void>();
+      ctx.registerCleanupBarrier(cleanup.promise);
       try {
-        await startWithAuthority(ctx, authority);
+        await startWithAuthority(ctx, authority, cleanup);
       } catch (err) {
+        const failure = err instanceof Error ? err : new Error(String(err));
         // Settle-once: a no-op when authority was already established; a
         // pre-reconcile failure marks the run non-terminalizable.
-        authority.reject(err instanceof Error ? err : new Error(String(err)));
-        throw err;
+        authority.reject(failure);
+        throw failure;
+      } finally {
+        // Backstop for throws BEFORE the teardown try (capsule validation,
+        // baseline measurement, proxy construction): nothing was opened, so
+        // cleanup is trivially complete. No-op when already settled.
+        cleanup.resolve();
       }
     },
   };

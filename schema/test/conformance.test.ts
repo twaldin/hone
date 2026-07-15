@@ -333,8 +333,23 @@ describe("contract 5: run config", () => {
     expect(rc.apply).toBe("none");
     expect(rc.headless).toBe(false);
     expect(rc.improverSeat).toBe(false);
+    // Runner backend is sealed per run; a legacy config without it is the local backend.
+    expect(rc.backend).toBe("local");
     // Campaign field: required after parse, pre-registered defaults when absent.
     expect(rc.promotion).toEqual(DEFAULT_PROMOTION_RULE);
+  });
+
+  it("rejects an empty backend spec — the sealed backend must name something", () => {
+    expect(() =>
+      RunConfig.parse({
+        version: 1,
+        capsuleId: "cap_000000000000",
+        objective: "x",
+        budget: { maxTokens: 1, maxUsd: 0, maxWallClockSec: 1, maxEvaluatorInvocations: 1 },
+        routing: {},
+        backend: "",
+      }),
+    ).toThrow();
   });
 
   it("promotion rule default is not aliased across parses", () => {

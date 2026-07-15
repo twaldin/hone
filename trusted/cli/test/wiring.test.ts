@@ -145,8 +145,6 @@ describe("image wiring: manifest.image is THE image, no environment override", (
         PATH: process.env["PATH"] ?? "",
         HONE_EGRESS: "network", // exercise the relay container path
         HONE_MUTATION_IMAGE: "evil:latest", // MUST be ignored
-        HONE_OPTIMIZER_CMD: process.execPath,
-        HONE_OPTIMIZER_ENTRY: join(root, "never-runs.mjs"),
       },
       capsuleDigest: capsuleDigest(manifest),
       optimizerDigest: fakeHash("0"),
@@ -157,6 +155,7 @@ describe("image wiring: manifest.image is THE image, no environment override", (
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
       registerAuthorityBarrier: () => {},
+      registerCleanupBarrier: () => {},
     };
 
     await createBackend({ run }).start(ctx);
