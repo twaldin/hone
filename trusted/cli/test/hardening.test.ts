@@ -13,6 +13,7 @@ import { runCommand } from "../src/supervisor.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
   buildTar,
+  fakeHash,
   fixtureEvents,
   gitIn,
   initScratchRepo,
@@ -257,14 +258,15 @@ describe("delivery commit safety — repo hooks cannot run on candidate content"
 describe("production backend selection", () => {
   it("plain `hone run` selects the trusted local backend by default", async () => {
     const root = makeRoot();
-    // contentHashes points at an asset that does not exist on disk -> the LOCAL
-    // backend's trusted pre-flight refuses with "capsule drift". The stub would
-    // have completed happily, so this failure proves local is the default.
+    // The fixture capsule has a CAS baseline and no baseline/ directory on
+    // disk -> the LOCAL backend's trusted baseline measurement refuses. The
+    // stub would have completed happily, so this failure proves local is the
+    // default.
     makeCapsule(root);
     const { io, err } = makeIo(root);
     const code = await runCommand(["capsule", "--headless"], io);
     expect(code).toBe(1);
-    expect(err.join("\n")).toMatch(/capsule drift/);
+    expect(err.join("\n")).toMatch(/no baseline\/ directory/);
   });
 
   it("rejects arbitrary --backend modules in production (before any run state exists)", async () => {
@@ -351,13 +353,17 @@ describe("optimizer stdout is diagnostic-only — no event authority", () => {
         HONE_OPTIMIZER_CMD: process.execPath,
         HONE_OPTIMIZER_ENTRY: script,
       },
+      capsuleDigest: fakeHash("f"),
+      optimizerDigest: fakeHash("0"),
       replayed: replay([]),
       signal: new AbortController().signal,
       emit: (event) => {
         emitted.push(event);
         return event;
       },
-      registerChild: () => {},
+      registerChild: () => () => {},
+      probeGate: () => Promise.resolve(true),
+      requestStop: () => {},
       registerAuthorityBarrier: () => {},
     };
 

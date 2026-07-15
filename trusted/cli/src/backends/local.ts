@@ -1,5 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -11,9 +10,10 @@ import { CasStore, packDirAsArtifact, runCommand, startBroker } from "@hone/brok
 import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from "@hone/broker";
 import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
 import type { BudgetDecision, ProxyHandle } from "@hone/proxy";
+import { admitCapsule } from "../admission.js";
 import { readEvents, replayRun } from "../eventlog.js";
 import { deferred } from "../promise.js";
-import type { ChildLike, RunnerBackend, RunnerBackendContext } from "../types.js";
+import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "../types.js";
 
 /**
  * The real runner backend (WP7): composes broker + metering proxy + the
@@ -56,31 +56,19 @@ const RELAY_JS = [
   `}).listen(${RELAY_PORT},'0.0.0.0');`,
 ].join("");
 
-function sha256File(path: string): string {
-  return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+/**
+ * Trusted pre-flight drift gate (defense in depth behind runCommand's frozen
+ * admission): the capsule must RE-ADMIT — id recompute, exact asset-hash set,
+ * hashed ordering report, clean baseline worktree — and reproduce the exact
+ * digest the supervisor sealed for this run.
+ */
+export function validateCapsule(capsuleDir: string, expectedDigest: string): void {
+  const admitted = admitCapsule(capsuleDir);
+  if (admitted.digest !== expectedDigest) {
+    throw new Error(`capsule drift: digest ${admitted.digest} != sealed ${expectedDigest} — start a fresh run (or re-run capsules/tools/scaffold.ts)`);
+  }
 }
 
-/**
- * Trusted pre-flight: the manifest on disk must still describe the tree.
- * Asset hashes + baseline git HEAD are recomputed; a drifted capsule refuses
- * to run (re-scaffold with capsules/tools/scaffold.ts).
- */
-export function validateCapsule(capsuleDir: string, manifest: CapsuleManifest): void {
-  for (const [rel, expected] of Object.entries(manifest.contentHashes)) {
-    const abs = resolve(capsuleDir, rel);
-    if (!existsSync(abs)) throw new Error(`capsule drift: asset missing on disk: ${rel}`);
-    const actual = sha256File(abs);
-    if (actual !== expected) throw new Error(`capsule drift: ${rel} hash ${actual} != manifest ${expected} — re-run capsules/tools/scaffold.ts`);
-  }
-  if (manifest.baseline.kind === "git") {
-    const baselineDir = join(capsuleDir, "baseline");
-    const gitDir = existsSync(join(baselineDir, ".gitdir")) ? join(baselineDir, ".gitdir") : join(baselineDir, ".git");
-    const head = execFileSync("git", ["--git-dir", gitDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    if (head !== manifest.baseline.commit) {
-      throw new Error(`capsule drift: baseline HEAD ${head} != manifest commit ${manifest.baseline.commit} — re-run capsules/tools/scaffold.ts`);
-    }
-  }
-}
 
 /** Anti-sandbagging: the baseline artifact is measured (packed) by the trusted runner, never taken from capsule metadata. */
 async function measureBaseline(capsuleDir: string, cas: CasStore): Promise<string> {
@@ -248,8 +236,13 @@ function groupKillHandle(child: ChildLike): ChildLike {
   };
 }
 
-/** Exported for the trusted-boundary test: optimizer stdout must never become events. */
-export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): Promise<void> {
+/**
+ * Exported for the trusted-boundary test: optimizer stdout must never become
+ * events. `opts.maxEpisodes` bounds the invocation (probe gate); otherwise an
+ * operator HONE_MAX_EPISODES passes through and the optimizer fails closed on
+ * invalid values.
+ */
+export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string, opts: { maxEpisodes?: number } = {}): Promise<void> {
   const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
   const entry = ctx.env["HONE_OPTIMIZER_ENTRY"] ?? join(repoRoot, "optimizer", "src", "main.ts");
   if (!existsSync(entry)) throw new Error(`optimizer entry not found: ${entry} (set HONE_OPTIMIZER_ENTRY)`);
@@ -275,6 +268,13 @@ export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): P
       HONE_BROKER_SOCK: brokerSocket,
       HONE_RUN_ID: ctx.runId,
       HONE_SEED: String(ctx.config.seed),
+      // Episode bound: the probe pins 1; a full launch inherits any operator
+      // cap (count of episodes attempted THIS invocation, optimizer-enforced).
+      ...(opts.maxEpisodes !== undefined
+        ? { HONE_MAX_EPISODES: String(opts.maxEpisodes) }
+        : ctx.env["HONE_MAX_EPISODES"] !== undefined
+          ? { HONE_MAX_EPISODES: ctx.env["HONE_MAX_EPISODES"] }
+          : {}),
       // Events.ndjson is the store of record and reconciliation may have just
       // appended recovered incumbents — replay from disk, not the supervisor's
       // pre-backend snapshot, so the resume hint sees the durable authority.
@@ -284,7 +284,8 @@ export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): P
     // Own process group so SIGTERM/SIGKILL reaches every descendant.
     detached: process.platform !== "win32",
   });
-  ctx.registerChild(groupKillHandle(child));
+  const handle = groupKillHandle(child);
+  const unregister = ctx.registerChild(handle);
   child.stdout.pipe(optLog, { end: false });
   child.stderr.pipe(optLog, { end: false });
 
@@ -292,8 +293,15 @@ export function runOptimizer(ctx: RunnerBackendContext, brokerSocket: string): P
   child.on("error", (err) => done.reject(err));
   child.on("close", (code, signal) => {
     optLog.end();
-    if (ctx.signal.aborted) return done.resolve(); // supervisor-initiated wind-down
-    if (code === 0) return done.resolve();
+    if (ctx.signal.aborted) return done.resolve(); // supervisor wind-down owns the TERM→KILL barrier
+    if (code === 0) {
+      // Positively reaped, normal exit: SIGKILL any TERM-ignoring residue of
+      // the process group NOW, then unregister — the supervisor must never
+      // signal this (soon recycled) PID/PGID during a much-later stop.
+      handle.kill("SIGKILL");
+      unregister();
+      return done.resolve();
+    }
     done.reject(new Error(`optimizer exited ${code ?? `signal ${signal ?? "?"}`} — see ${join(ctx.runDir, "optimizer.log")}`));
   });
   return done.promise;
@@ -397,6 +405,53 @@ export function incumbentsAligned(journal: readonly JournalIncumbent[], events: 
   });
 }
 
+/**
+ * Trusted paired probe measurement, derived ONLY from broker-authored events
+ * in the run log. Uses the newest episode that produced a completed
+ * evaluation; a probe attempt that measured nothing fails closed (the run
+ * stays resumable — an incomplete episode is never a successful probe).
+ */
+export function deriveProbeReport(events: readonly RunEvent[], budget: BudgetState): ProbeReport {
+  let episode = -1;
+  for (const e of events) {
+    if (e.type === "eval.completed" && e.episode !== undefined && e.episode > episode) episode = e.episode;
+  }
+  if (episode < 0) throw new Error("probe produced no completed evaluation — cannot derive a paired report (see optimizer.log)");
+  let parent: ArtifactRef | null = null;
+  let candidate: ArtifactRef | null = null;
+  let parentScore: number | null = null;
+  let childScore: number | null = null;
+  const evals = new Map<string, { aggregate: number; assetGroupId: string; seed: number }>();
+  for (const e of events) {
+    if (e.type === "episode.started" && e.episode === episode) parent = e.parent;
+    else if (e.type === "episode.candidate" && e.episode === episode) candidate = e.candidate;
+    else if (e.type === "gate.paired" && e.episode === episode) {
+      parentScore = e.parentScore;
+      childScore = e.childScore;
+    } else if (e.type === "eval.completed" && e.episode === episode) {
+      evals.set(e.artifact.hash, { aggregate: e.aggregate, assetGroupId: e.assetGroupId, seed: e.seed });
+    }
+  }
+  if (parent === null) throw new Error(`probe episode ${episode} has no episode.started — the log is not a complete probe`);
+  const parentEval = evals.get(parent.hash);
+  const baselineAggregate = parentEval?.aggregate ?? parentScore;
+  if (baselineAggregate === null) throw new Error(`probe episode ${episode} has no baseline measurement — cannot derive a paired report`);
+  const candidateEval = candidate !== null ? evals.get(candidate.hash) : undefined;
+  const candidateAggregate = candidateEval?.aggregate ?? childScore;
+  const coordinate = candidateEval ?? parentEval ?? [...evals.values()][0];
+  if (coordinate === undefined) throw new Error(`probe episode ${episode} has no evaluations`);
+  return {
+    baseline: { artifact: parent, aggregate: baselineAggregate },
+    candidate:
+      candidate !== null && candidateAggregate !== null
+        ? { artifact: candidate, aggregate: candidateAggregate, delta: candidateAggregate - baselineAggregate }
+        : null,
+    assetGroupId: coordinate.assetGroupId,
+    seed: coordinate.seed,
+    budget,
+  };
+}
+
 export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
   const run = deps.run ?? runCommand;
   const startWithAuthority = async (ctx: RunnerBackendContext, authority: { resolve(): void }): Promise<void> => {
@@ -405,7 +460,7 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
     // supervisor would terminalize a STALE event-log best while the
     // journal holds a newer durable incumbent (permanently, since a
     // finished run never resumes). Abort is honored only after reconcile.
-    validateCapsule(ctx.capsuleDir, ctx.manifest);
+    validateCapsule(ctx.capsuleDir, ctx.capsuleDigest);
 
       const route = ctx.config.routing["mutation"];
       if (route === undefined) {
@@ -446,7 +501,10 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
         },
       });
 
-      const image = ctx.env["HONE_MUTATION_IMAGE"] ?? "hone-mutation:latest";
+      // The frozen manifest's immutable image is THE image — mutation
+      // sandboxes, eval sandboxes, and the macOS relay all run it. There is
+      // deliberately no environment override.
+      const image = ctx.manifest.image;
       let egress: Egress | null = null;
       try {
         // Finding 10: a crashed prior supervisor's labeled containers, the
@@ -457,11 +515,26 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
 
         running = await startBroker({
           runId: ctx.runId,
-          // The RUN envelope (config) is what the broker meters — it may tighten the capsule's.
-          manifest: { ...ctx.manifest, budget: ctx.config.budget },
+          // The RUN config is what the broker enforces: its envelope may
+          // tighten the capsule's, and an approved contract edit may have
+          // revised the objective the optimizer pursues (broker/getTask
+          // serves manifest.objective). The frozen snapshot keeps the
+          // capsule's original identity; the contract hash seals this run's
+          // overrides.
+          manifest: { ...ctx.manifest, objective: ctx.config.objective, budget: ctx.config.budget },
           capsuleRootDir: ctx.capsuleDir,
           baselineArtifactHash,
           image,
+          capsuleDigest: ctx.capsuleDigest,
+          optimizerDigest: ctx.optimizerDigest,
+          // Repo-lifetime holdout ledger, keyed by capsule digest so every
+          // run of this exact capsule draws from ONE budget. Lives under the
+          // CAS root (broker creates the file and parents).
+          holdoutLedgerPath: join(ctx.casDir, "ledgers", `${ctx.capsuleDigest.replace(/^sha256:/, "")}.ndjson`),
+          // The lifetime ledger budget is pinned to the FROZEN capsule
+          // envelope, never the editable per-run budget — the shared ledger
+          // header must stay identical across every run of this capsule.
+          holdoutBudget: ctx.manifest.budget.maxEvaluatorInvocations,
           runDir: ctx.runDir,
           casDir: ctx.casDir,
           runCommand: run,
@@ -487,6 +560,43 @@ export function createBackend(deps: { run?: RunCommand } = {}): RunnerBackend {
         // Only AFTER durable authority is reconciled may a stop short-circuit:
         // the optimizer never launches; the finally unwinds proxy/broker/egress.
         if (ctx.signal.aborted) return;
+
+        // VI.4 probe gate: the FIRST invocation is bounded to one outer
+        // episode; the paired baseline/candidate measurement is derived from
+        // broker-authored events (never optimizer claims), sealed as a
+        // probe.completed event, and gated. Headless auto-approves;
+        // interactive decline requests a trusted stop (terminal status
+        // "stopped"). An approved probe in the log never re-runs — the full
+        // relaunch resumes from the CURRENT replay state, so the probe
+        // episode is never duplicated.
+        const probe = replayRun(ctx.runDir).probe;
+        if (probe !== null && !probe.approved) {
+          // Durable decline that never terminalized (crash window): honor it.
+          ctx.requestStop();
+          return;
+        }
+        if (probe === null) {
+          await runOptimizer(ctx, running.socketPath, { maxEpisodes: 1 });
+          if (ctx.signal.aborted) return;
+          const report = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
+          const approved = await ctx.probeGate(report);
+          ctx.emit({
+            runId: ctx.runId,
+            at: new Date().toISOString(),
+            type: "probe.completed",
+            approved,
+            baseline: report.baseline,
+            candidate: report.candidate,
+            assetGroupId: report.assetGroupId,
+            seed: report.seed,
+            budget: report.budget,
+          });
+          if (!approved) {
+            ctx.requestStop();
+            return;
+          }
+          if (ctx.signal.aborted) return;
+        }
 
         await runOptimizer(ctx, running.socketPath);
 
