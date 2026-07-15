@@ -389,4 +389,129 @@ describe("bounded JSON-RPC concurrency", () => {
     expect(r.error).toBeUndefined();
     c2.destroy();
   });
+
+  it("rejects excess connections deterministically and frees the slot on disconnect", async () => {
+    const { server, socketPath } = await makeServer({
+      maxFrameBytes: MAX_FRAME,
+      maxConnections: 2,
+    });
+    const c1 = await connectLines(socketPath);
+    const c2 = await connectLines(socketPath);
+    await eventually(() => server.stats.connections === 2, "both connections registered");
+
+    // Third socket: one overload frame, then close — never registered.
+    const c3 = await connectLines(socketPath);
+    const rejected = JSON.parse(await c3.nextLine());
+    expect(rejected.id).toBeNull();
+    expect(rejected.error.code).toBe(-32050);
+    expect(rejected.error.message).toMatch(/too many connections \(max 2\)/);
+    await c3.closed;
+    expect(server.stats.connections).toBe(2);
+
+    // The two admitted connections still work (no mock needed: -32601 is a
+    // full request/response round trip).
+    c1.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "noSuchMethod" })}\n`);
+    expect(JSON.parse(await c1.nextLine()).error.code).toBe(-32601);
+
+    // Disconnecting frees the slot for a new client.
+    c2.destroy();
+    await eventually(() => server.stats.connections === 1, "slot freed on disconnect");
+    const c4 = await connectLines(socketPath);
+    c4.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "noSuchMethod" })}\n`);
+    expect(JSON.parse(await c4.nextLine()).error.code).toBe(-32601);
+    c1.destroy();
+    c4.destroy();
+  });
+
+  it("evicts the largest holder when pre-newline fragments exceed the global byte budget", async () => {
+    const { server, socketPath } = await makeServer({
+      maxFrameBytes: 8192,
+      maxQueuedBytesPerConnection: 8192,
+      maxBufferedBytesGlobal: 10_000,
+    });
+    // Three clients hold incomplete frames (no newline): 2000 + 3000 bytes
+    // fit the 10_000 budget, the 6000-byte holder pushes it to 11_000 and,
+    // as the largest holder, is evicted; the smaller two are untouched.
+    const frag = (id: number, size: number): string => {
+      const req = { jsonrpc: "2.0", id, method: "noSuchMethod", params: { pad: "" } };
+      req.params.pad = "p".repeat(size - JSON.stringify(req).length);
+      return JSON.stringify(req); // exactly `size` bytes, NO trailing newline
+    };
+    const c1 = await connectLines(socketPath);
+    const c2 = await connectLines(socketPath);
+    const c3 = await connectLines(socketPath);
+    c1.write(frag(1, 2000));
+    c2.write(frag(2, 3000));
+    await eventually(() => server.stats.bufferedBytes === 5000, "two fragments retained");
+
+    c3.write(frag(3, 6000));
+    const evicted = JSON.parse(await c3.nextLine());
+    expect(evicted.id).toBeNull();
+    expect(evicted.error.code).toBe(-32050);
+    expect(evicted.error.message).toMatch(/global buffered-byte budget exceeded \(10000 bytes\)/);
+    await c3.closed;
+    expect(server.stats.bufferedBytes).toBe(5000); // eviction returned its bytes
+    expect(server.stats.bufferedBytes).toBeLessThanOrEqual(10_000);
+
+    // Survivors complete their frames and get real responses; dispatch
+    // releases the retained bytes.
+    c1.write("\n");
+    c2.write("\n");
+    expect(JSON.parse(await c1.nextLine()).id).toBe(1);
+    expect(JSON.parse(await c2.nextLine()).id).toBe(2);
+    await eventually(() => server.stats.bufferedBytes === 0, "all retained bytes released");
+    c1.destroy();
+    c2.destroy();
+  });
+
+  it("counts queued complete frames against the global budget and releases on dispatch and close", async () => {
+    const g = gateExec(broker);
+    // Per-connection queue caps (4096) would allow far more than the global
+    // budget across connections — the budget must bind first.
+    const c1Burst = Array.from({ length: 13 }, (_, i) => execFrame(i + 1)).join("");
+    const c2Burst = Array.from({ length: 11 }, (_, i) => execFrame(i + 101)).join("");
+    const c1First = execFrame(1);
+    const c2First = execFrame(101);
+    const c1Retained = Buffer.byteLength(c1Burst) - Buffer.byteLength(c1First); // 12 queued frames
+    const c2Retained = Buffer.byteLength(c2Burst) - Buffer.byteLength(c2First); // 10 queued frames
+    const budget = c1Retained + c2Retained + 100;
+    const { server, socketPath } = await makeServer({
+      maxFrameBytes: MAX_FRAME,
+      maxConcurrentPerConnection: 1,
+      maxConcurrentGlobal: 8,
+      maxQueuedBytesPerConnection: 4096,
+      maxBufferedBytesGlobal: budget,
+    });
+
+    const c1 = await connectLines(socketPath);
+    c1.write(c1Burst); // frame 1 runs (blocked), 12 frames queue
+    await g.admitted(1);
+    const c2 = await connectLines(socketPath);
+    c2.write(c2Burst); // frame 101 runs (blocked), 10 frames queue
+    await g.admitted(2);
+    await eventually(() => server.stats.bufferedBytes === c1Retained + c2Retained, "both backlogs retained");
+
+    // A third connection's 200-byte fragment pushes the total 100 bytes over
+    // budget; the LARGEST holder (c1's backlog) is evicted, not the sender.
+    const c3 = await connectLines(socketPath);
+    c3.write("x".repeat(200)); // incomplete frame, no newline
+    const evicted = JSON.parse(await c1.nextLine());
+    expect(evicted.id).toBeNull();
+    expect(evicted.error.code).toBe(-32050);
+    expect(evicted.error.message).toMatch(/global buffered-byte budget exceeded/);
+    await c1.closed;
+    await eventually(() => server.stats.bufferedBytes === c2Retained + 200, "c1 backlog returned to the pool");
+
+    // c2's queued frames still dispatch to completion and release their bytes.
+    g.drain();
+    const r2 = await collectResponses(c2, 11);
+    expect(new Set(r2.map((r) => r.id))).toEqual(new Set(Array.from({ length: 11 }, (_, i) => i + 101)));
+    await eventually(() => server.stats.bufferedBytes === 200, "only c3's fragment retained");
+
+    // Closing c3 returns its fragment bytes.
+    c3.destroy();
+    await eventually(() => server.stats.bufferedBytes === 0, "fragment released on close");
+    expect(server.stats.inFlight).toBe(0);
+    c2.destroy();
+  });
 });
