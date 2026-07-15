@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,9 +11,9 @@ import type { ProxyHandle } from "@hone/proxy";
 import { reconcileBrokerAuthority, setupEgress, sweepStaleRunResources } from "../src/backends/local.js";
 import type { AuthorityRecoverySource } from "../src/backends/local.js";
 import { appendEvent, bestArtifact, eventsPath, readEvents, replayRun } from "../src/eventlog.js";
-import { deferred } from "../src/promise.js";
+import { deferred, sleep } from "../src/promise.js";
 import { loadRunConfigFile, writeRunConfigFile } from "../src/runs.js";
-import { acquireRunLock, runCommand as cliRunCommand, runLockPath, superviseRun } from "../src/supervisor.js";
+import { acquireRunLock, probeRunLockIdentity, runCommand as cliRunCommand, runLockPath, superviseRun } from "../src/supervisor.js";
 import { CAP_ID, at, fakeHash, fixtureEvents, makeCapsule, makeIo, makeRoot, manifestObject, writeEvents } from "./helpers.js";
 
 /**
@@ -350,6 +350,81 @@ describe("run lock (FinalSecurityGate finding 2 — OS-enforced exclusivity)", (
     }
     const winner = winners[0];
     if (winner !== undefined) await winner();
+  });
+
+  it("a close delayed by a live connection never unlinks a successor's rebind (release path-CAS)", { timeout: 15_000 }, async () => {
+    const runDir = makeRoot();
+    const runId = "run_l6";
+    const sockPath = runLockPath(runDir);
+    const idA = { pid: process.pid, runId, nonce: "nonce-cas-A" };
+    const releaseA = await acquireRunLock(runDir, runId, idA);
+
+    // Pin A's close callback open: server.close stops the LISTENER first,
+    // then waits for live connections to drain — a half-open client (server
+    // ended its side, we never end ours) blocks the drain indefinitely.
+    const holdOpen = net.connect({ path: sockPath, allowHalfOpen: true });
+    await new Promise<void>((r) => holdOpen.once("connect", () => r()));
+    await new Promise<void>((r) => holdOpen.once("end", () => r()));
+
+    const releasedA = releaseA(); // close begins; cleanup callback is now blocked on holdOpen
+
+    // Wait until the listener actually stopped accepting…
+    for (;;) {
+      const refused = await new Promise<boolean>((r) => {
+        const p = net.connect(sockPath);
+        p.once("connect", () => {
+          p.destroy();
+          r(false);
+        });
+        p.once("error", () => {
+          p.destroy();
+          r(true);
+        });
+      });
+      if (refused) break;
+      await sleep(25);
+    }
+
+    // …so a contender's probe connect-fails: it stale-reclaims and rebinds a
+    // SUCCESSOR lock while A's cleanup callback is still pending.
+    const idB = { pid: process.pid, runId, nonce: "nonce-cas-B" };
+    const releaseB = await acquireRunLock(runDir, runId, idB);
+    expect(await probeRunLockIdentity(runDir)).toEqual(idB);
+
+    // Unblock A's delayed cleanup — it must remove NOTHING of B's.
+    holdOpen.destroy();
+    await releasedA;
+
+    // The successor is still live, still identified, and still exclusive.
+    expect(await probeRunLockIdentity(runDir)).toEqual(idB);
+    await expect(acquireRunLock(runDir, runId)).rejects.toThrow(/already being supervised/);
+
+    await releaseB();
+    expect(existsSync(sockPath)).toBe(false);
+    expect(existsSync(`${sockPath}.id`)).toBe(false);
+  });
+
+  it("release under a foreign claim removes nothing — the claimant owns cleanup", async () => {
+    const runDir = makeRoot();
+    const runId = "run_l7";
+    const sockPath = runLockPath(runDir);
+    const releaseA = await acquireRunLock(runDir, runId, { pid: process.pid, runId, nonce: "nonce-claim-A" });
+    // A live claimant is mid-arbitration: release must not race its view of
+    // the socket/metadata pair — deferred cleanup removes nothing. (Node
+    // itself may unlink the socket PATH at close-initiation, while the path
+    // is still provably A's; the identity metadata is the guarded artifact.)
+    const claimFd = openSync(`${sockPath}.claim`, "wx");
+    await releaseA();
+    expect(JSON.parse(readFileSync(`${sockPath}.id`, "utf8"))).toEqual({ pid: process.pid, runId, nonce: "nonce-claim-A" });
+    closeSync(claimFd);
+    rmSync(`${sockPath}.claim`);
+    // The next acquirer arbitrates the now-dead leftovers normally.
+    const idB = { pid: process.pid, runId, nonce: "nonce-claim-B" };
+    const releaseB = await acquireRunLock(runDir, runId, idB);
+    expect(await probeRunLockIdentity(runDir)).toEqual(idB);
+    await releaseB();
+    expect(existsSync(sockPath)).toBe(false);
+    expect(existsSync(`${sockPath}.id`)).toBe(false);
   });
 
   it("refuses --resume while the run lock is held by a live process", async () => {
