@@ -98,11 +98,20 @@ export interface BrokerConfig {
   /**
    * When true, /scratch is a per-run docker LOCAL tmpfs volume sized to
    * scratchQuotaBytes — the kernel enforces the quota at write time. If the
-   * daemon cannot create such a volume, the broker falls back CLOSED to the
-   * host bind mount whose polling quota (checkScratchQuota) still binds;
-   * scratch is never silently unquota'd. Default false (host bind + polling).
+   * daemon cannot create such a volume, init() FAILS: the host bind mount's
+   * polling quota only measures between broker calls and would let one exec
+   * fill the host disk. Production runs set this; the default false keeps the
+   * host bind + polling quota for tests/dev only.
    */
   scratchVolume?: boolean | undefined;
+}
+
+/** A journaled promotion — the unit of trusted incumbent authority. */
+export interface IncumbentState {
+  hash: string;
+  aggregate: number;
+  deltaVsBaseline: number;
+  episode: number;
 }
 
 interface SandboxEntry {
@@ -167,7 +176,13 @@ const StateLine = z.discriminatedUnion("t", [
   z.object({ t: z.literal("episode"), episode: z.number().int().nonnegative() }),
   z.object({ t: z.literal("lineage"), candidate: z.string(), parent: z.string(), episode: z.number().int().nonnegative() }),
   z.object({ t: z.literal("repair"), hash: z.string(), parent: z.string(), episode: z.number().int().nonnegative() }),
-  z.object({ t: z.literal("incumbent"), hash: z.string(), aggregate: z.number(), episode: z.number().int().nonnegative() }),
+  z.object({
+    t: z.literal("incumbent"),
+    hash: z.string(),
+    aggregate: z.number(),
+    deltaVsBaseline: z.number(),
+    episode: z.number().int().nonnegative(),
+  }),
 ]);
 type StateLine = z.infer<typeof StateLine>;
 
@@ -254,6 +269,10 @@ export class Broker {
   private startedAtMs: number;
   private readonly spent = { tokens: 0, usd: 0, evaluatorInvocations: 0 };
   private readonly sandboxes = new Map<string, SandboxEntry>();
+  /** Synchronous admission reservation: creations in flight but not yet in `sandboxes`. */
+  private pendingSandboxes = 0;
+  /** Synchronous admission reservation: real evaluations in flight but not yet charged. */
+  private pendingEvaluations = 0;
   private readonly exhaustedAnnounced = new Set<string>();
   private holdoutCount = 0;
   private lastIncumbent: ReportIncumbentP | undefined;
@@ -273,7 +292,9 @@ export class Broker {
   /** Failed-exec repair snapshots: NOT candidates; sandboxes resumed from one reuse its episode. */
   private readonly repairs = new Map<string, { parent: string; episode: number }>();
   /** Trusted current incumbent — promotion is monotone against this. */
-  private currentIncumbent: { hash: string; aggregate: number; episode: number } | undefined;
+  private currentIncumbent: IncumbentState | undefined;
+  /** Full ordered promotion history (replayed + live) — crash-resume event recovery. */
+  private readonly incumbentHistory: IncumbentState[] = [];
   private stateLog: RunStateLog | undefined;
   /** Set when /scratch is a quota-enforcing docker tmpfs volume (else host bind + polling quota). */
   private scratchVolumeName: string | undefined;
@@ -371,13 +392,19 @@ export class Broker {
           break;
         case "lineage":
           this.lineage.set(line.candidate, { parent: line.parent, episode: line.episode });
+          // Graduation: once a hash has candidate lineage it is never a
+          // repair snapshot again — the lineage line is the tombstone.
+          this.repairs.delete(line.candidate);
           break;
         case "repair":
           this.repairs.set(line.hash, { parent: line.parent, episode: line.episode });
           break;
-        case "incumbent":
-          this.currentIncumbent = { hash: line.hash, aggregate: line.aggregate, episode: line.episode };
+        case "incumbent": {
+          const inc = { hash: line.hash, aggregate: line.aggregate, deltaVsBaseline: line.deltaVsBaseline, episode: line.episode };
+          this.incumbentHistory.push(inc);
+          this.currentIncumbent = inc;
           break;
+        }
       }
     }
     // Wall clock is metered from the FIRST start of this run, ever — a
@@ -507,10 +534,10 @@ export class Broker {
   }
 
   /**
-   * Attempts a per-run size-capped tmpfs volume for /scratch. On ANY failure
-   * the broker falls back to the host bind mount, whose polling quota
-   * (checkScratchQuota) still binds — the fallback fails closed, never
-   * silently unquota'd.
+   * Provisions the per-run size-capped tmpfs volume for /scratch. When
+   * scratchVolume is requested it MUST exist: the host bind mount's polling
+   * quota is only checked between broker calls, so falling back would let a
+   * single exec fill the host disk. Fail closed — init aborts.
    */
   private async provisionScratchVolume(): Promise<void> {
     const name = `hone-scratch-${this.safeRunId}`;
@@ -526,7 +553,10 @@ export class Broker {
       ],
       { timeoutMs: 30_000 },
     );
-    if (res.exitCode === 0) this.scratchVolumeName = name;
+    if (res.exitCode !== 0) {
+      throw new BrokerError("INTERNAL", `scratch volume provisioning failed (refusing unquota'd fallback): ${stderrText(res)}`);
+    }
+    this.scratchVolumeName = name;
   }
 
   private missingContainer(res: CmdResult, sandboxId: string): BrokerError | undefined {
@@ -598,9 +628,21 @@ export class Broker {
 
   async createSandbox(params: CreateSandboxP, _ctx: CallContext): Promise<SandboxRef> {
     this.budgetGate();
-    if (this.sandboxes.size >= this.maxActiveSandboxes) {
+    // Atomic admission: the check and the reservation are one synchronous
+    // step, so parallel creations cannot all observe the same free slot and
+    // stampede past the cap while creation awaits docker.
+    if (this.sandboxes.size + this.pendingSandboxes >= this.maxActiveSandboxes) {
       throw new BrokerError("QUOTA_EXCEEDED", `active sandbox cap reached (${this.maxActiveSandboxes})`);
     }
+    this.pendingSandboxes += 1;
+    try {
+      return await this.createSandboxReserved(params);
+    } finally {
+      this.pendingSandboxes -= 1;
+    }
+  }
+
+  private async createSandboxReserved(params: CreateSandboxP): Promise<SandboxRef> {
     await this.checkScratchQuota();
     // A CAS hash is not trusted layout — validate the archive before any
     // container extracts it.
@@ -678,8 +720,9 @@ export class Broker {
     // Trusted episode boundary: one ordinal per mutation sandbox — EXCEPT a
     // sandbox resumed from a failed-exec repair snapshot, which safely
     // continues the snapshot's original episode (the snapshot was never a
-    // candidate, so no episode boundary passed).
-    const repair = this.repairs.get(params.artifact.hash);
+    // candidate, so no episode boundary passed). A repair that later
+    // GRADUATED to a candidate (lineage exists) is a normal parent again.
+    const repair = this.lineage.has(params.artifact.hash) ? undefined : this.repairs.get(params.artifact.hash);
     let episode: number;
     let parentHash: string;
     if (repair !== undefined) {
@@ -806,6 +849,10 @@ export class Broker {
       if (!this.lineage.has(hash) && hash !== sb.parentHash) {
         this.state().append({ t: "lineage", candidate: hash, parent: sb.parentHash, episode: sb.episode });
         this.lineage.set(hash, { parent: sb.parentHash, episode: sb.episode });
+        // Graduation: the hash may have been journaled as a repair snapshot
+        // earlier; lineage supersedes it (replay treats the lineage line as
+        // the tombstone), so descendants pair against THIS artifact.
+        this.repairs.delete(hash);
         this.emit({ type: "episode.candidate", episode: sb.episode, candidate: { hash }, sessionTrace: sb.lastExecStdoutHash ?? "" });
       }
     } else if (hash !== sb.parentHash && !this.lineage.has(hash) && !this.repairs.has(hash)) {
@@ -822,6 +869,26 @@ export class Broker {
     const group = this.manifest.assetGroups.find((g) => g.id === params.assetGroupId);
     if (!group) throw new BrokerError("INTERNAL", `unknown asset group: ${params.assetGroupId}`);
 
+    // Atomic admission: check + reservation is one synchronous step, so
+    // parallel cache misses cannot all pass the gate and overrun
+    // maxEvaluatorInvocations while awaiting memo/unpack/diff. Cache hits
+    // release without charging (cached evals stay free).
+    if (this.spent.evaluatorInvocations + this.pendingEvaluations >= this.manifest.budget.maxEvaluatorInvocations) {
+      throw new BrokerError("BUDGET_EXCEEDED", "budget dimension exhausted: evaluatorInvocations");
+    }
+    this.pendingEvaluations += 1;
+    try {
+      return await this.evaluateReserved(params, group, ctx);
+    } finally {
+      this.pendingEvaluations -= 1;
+    }
+  }
+
+  private async evaluateReserved(
+    params: EvaluateP,
+    group: CapsuleManifest["assetGroups"][number],
+    ctx: CallContext,
+  ): Promise<EvaluationRecord> {
     if (group.visibility === "holdout") {
       if (!ctx.privileged) {
         throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout asset groups are only reachable on the admin socket");
@@ -885,6 +952,12 @@ export class Broker {
       "--read-only",
       "--tmpfs",
       "/tmp",
+      // The trusted scorer runs as ROOT inside the eval container so it can
+      // drop the candidate worker to an unprivileged uid (2000) — same-uid
+      // signal//proc reach from candidate code to the scorer is severed
+      // (capsule contract with WP6; hardened images ship a `sandbox` user).
+      "--user",
+      "0:0",
       // Entrypoints are baseline-relative; the candidate workspace is DATA,
       // never the working directory the evaluator executes from.
       "-w",
@@ -1050,16 +1123,27 @@ export class Broker {
     }
 
     const aggregate = meanOver(cand, [...cand.keys()]);
+    // deltaVsBaseline is only meaningful over PAIRED keys: the client picks
+    // which evaluations exist, so disjoint mean-vs-mean would let it steer
+    // the trusted progress number arbitrarily. No paired baseline
+    // measurement -> no promotion (the parent chain starts at the baseline,
+    // so honest optimizers always have one for the keys they promote on).
     const baselineScores = this.trusted.get(this.config.baselineArtifactHash);
-    const deltaVsBaseline =
-      baselineScores !== undefined && baselineScores.size > 0
-        ? aggregate - meanOver(baselineScores, [...baselineScores.keys()])
-        : aggregate;
+    const pairedBaseline = baselineScores === undefined ? [] : [...cand.keys()].filter((k) => baselineScores.has(k));
+    if (baselineScores === undefined || pairedBaseline.length === 0) {
+      throw new BrokerError(
+        "INTERNAL",
+        "reportIncumbent: insufficient authority — no same-group/same-seed paired evaluations of candidate and baseline",
+      );
+    }
+    const deltaVsBaseline = meanOver(cand, pairedBaseline) - meanOver(baselineScores, pairedBaseline);
 
     // Durable BEFORE the ack and the event — a restart replays exactly the
     // promotions that were announced.
-    this.state().append({ t: "incumbent", hash, aggregate, episode: lin.episode });
-    this.currentIncumbent = { hash, aggregate, episode: lin.episode };
+    this.state().append({ t: "incumbent", hash, aggregate, deltaVsBaseline, episode: lin.episode });
+    const promoted = { hash, aggregate, deltaVsBaseline, episode: lin.episode };
+    this.incumbentHistory.push(promoted);
+    this.currentIncumbent = promoted;
     this.lastIncumbent = params;
     this.emit({
       type: "incumbent.new",
@@ -1101,8 +1185,34 @@ export class Broker {
   }
 
   /** Trusted current incumbent (survives restarts via the run state log). */
-  get trustedIncumbent(): { hash: string; aggregate: number; episode: number } | undefined {
+  get trustedIncumbent(): IncumbentState | undefined {
     return this.currentIncumbent;
+  }
+
+  /**
+   * Crash-resume event recovery (runner API): promotions are journaled+fsynced
+   * BEFORE their incumbent.new event reaches the runner's (non-durable) event
+   * log, so a crash in that window leaves authority the log never saw. The
+   * runner passes how many incumbent.new events its log already has for this
+   * run; every journaled promotion after that index is re-emitted through the
+   * normal event sink, in order, with the original payload. Returns the count
+   * re-emitted (0 when the logs already align — fresh runs included).
+   */
+  replayIncumbentEvents(alreadyLogged: number): number {
+    if (!Number.isInteger(alreadyLogged) || alreadyLogged < 0 || alreadyLogged > this.incumbentHistory.length) {
+      throw new BrokerError("INTERNAL", `replayIncumbentEvents: event log claims ${alreadyLogged} incumbents, journal has ${this.incumbentHistory.length}`);
+    }
+    const missing = this.incumbentHistory.slice(alreadyLogged);
+    for (const inc of missing) {
+      this.emit({
+        type: "incumbent.new",
+        artifact: { hash: inc.hash },
+        aggregate: inc.aggregate,
+        deltaVsBaseline: inc.deltaVsBaseline,
+        episode: inc.episode,
+      });
+    }
+    return missing.length;
   }
 
   get finishedBest(): ArtifactRef | undefined {
@@ -1146,22 +1256,31 @@ function assertAssetGroupIsolation(manifest: CapsuleManifest): void {
 
 /**
  * Preflight (constructor), filesystem half: the overlap check above is
- * LEXICAL, so a symlink inside the capsule root could still alias one
- * visibility class into another (public/train -> holdout). Reject any
- * symlink component in a declared asset path, require every path to exist,
- * and require its resolution to stay inside the (resolved) capsule root.
+ * LEXICAL, so a symlink, a case alias (default macOS filesystems are
+ * case-insensitive), or a hard link inside the capsule root could still
+ * alias one visibility class into another (public/train -> holdout). Reject
+ * any symlink component in a declared asset path, require every path to
+ * exist and resolve inside the (resolved) capsule root, then compare
+ * CANONICAL identities across visibility classes: native realpaths (true
+ * on-disk casing) for equality/ancestry, and dev+ino for hard-link aliases.
  * Fails closed at boot — independent of whatever capsule ingestion rejects.
  */
 function assertAssetPathsResolveSafely(manifest: CapsuleManifest, capsuleRootDir: string): void {
-  const realRoot = realpathSync(capsuleRootDir);
+  const realRoot = realpathSync.native(capsuleRootDir);
+  const resolved: Array<{ group: string; visibility: string; rel: string; canonical: string; dev: number; ino: number }> = [];
   for (const g of manifest.assetGroups) {
     for (const rel of g.paths) {
       const norm = path.posix.normalize(rel).replace(/\/+$/, "");
       let cur = capsuleRootDir;
+      let st;
+      try {
+        st = lstatSync(cur);
+      } catch {
+        throw new BrokerError("INTERNAL", `capsule root missing on host: ${capsuleRootDir}`);
+      }
       for (const part of norm.split("/")) {
         if (part === "." || part === "") continue;
         cur = path.join(cur, part);
-        let st;
         try {
           st = lstatSync(cur);
         } catch {
@@ -1174,9 +1293,26 @@ function assertAssetPathsResolveSafely(manifest: CapsuleManifest, capsuleRootDir
           );
         }
       }
-      const real = realpathSync(path.join(capsuleRootDir, norm));
-      if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+      const canonical = realpathSync.native(path.join(capsuleRootDir, norm));
+      if (canonical !== realRoot && !canonical.startsWith(realRoot + path.sep)) {
         throw new BrokerError("INTERNAL", `asset group ${g.id}: asset path escapes capsule root after resolution: ${rel}`);
+      }
+      resolved.push({ group: g.id, visibility: g.visibility, rel, canonical, dev: st.dev, ino: st.ino });
+    }
+  }
+  for (const [i, a] of resolved.entries()) {
+    for (const b of resolved.slice(i + 1)) {
+      if (a.visibility === b.visibility) continue;
+      const aliased =
+        a.canonical === b.canonical ||
+        a.canonical.startsWith(b.canonical + path.sep) ||
+        b.canonical.startsWith(a.canonical + path.sep) ||
+        (a.dev === b.dev && a.ino === b.ino);
+      if (aliased) {
+        throw new BrokerError(
+          "INTERNAL",
+          `asset paths alias the same files across visibility classes: ${a.group}:${a.rel} (${a.visibility}) vs ${b.group}:${b.rel} (${b.visibility})`,
+        );
       }
     }
   }
