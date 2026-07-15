@@ -17,6 +17,9 @@ importers:
 
   capsules:
     dependencies:
+      '@hone/broker':
+        specifier: workspace:*
+        version: link:../trusted/broker
       '@hone/schema':
         specifier: workspace:*
         version: link:../schema
