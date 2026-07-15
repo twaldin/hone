@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -137,55 +137,90 @@ describe("explicit stop before delivery (P1)", () => {
   });
 });
 
-describe("PID sentinel until real exit (P1: stop --take-best must not race teardown)", () => {
-  it("stop blocks on a finished-but-still-alive supervisor, then applies", { timeout: 60_000 }, async () => {
+describe("identity-bound stop wait (P1: --take-best must not race a draining supervisor)", () => {
+  it("stop blocks while the confirmed lock holder drains, applies only after release + death", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     const repo = join(root, "repo");
     initScratchRepo(repo);
-    makeCapsule(root);
-    const hash = tarToCas(root, { "hello.txt": "improved\n" });
-    // Lingers ~6s past run.finished: the pending timer keeps the supervisor
-    // process alive after the terminal event (main.ts sets exitCode only).
-    writeFileSync(join(root, "lingering-backend.mjs"), incumbentBackendSrc(hash, `setTimeout(() => {}, 6000);`));
-    const child = honeSpawn(["run", "capsule", "--headless", "--backend", "./lingering-backend.mjs"], {
-      cwd: root,
-      env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "200" },
-    });
+    const runId = "run_drain1";
+    const best = tarToCas(root, { "hello.txt": "improved\n" });
+    const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: best, finished: true }));
+    // A stand-in supervisor process that is still draining after run.finished.
+    const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
+    const helperPid = helper.pid;
+    expect(helperPid).toBeDefined();
+    if (helperPid === undefined) throw new Error("unreachable");
+    const nonce = "nonce-drain-test";
+    writeFileSync(join(runDir, "supervisor.json"), `${JSON.stringify({ pid: helperPid, runId, nonce })}\n`);
+    // The held lock VOUCHES for the sentinel pid — this is the only license to wait on it.
+    const release = await acquireRunLock(runDir, runId, { pid: helperPid, runId, nonce });
     try {
-      // Wait for the terminal event while the process is still alive.
-      const deadline = Date.now() + 20_000;
-      let runId: string | null = null;
-      while (Date.now() < deadline) {
-        const runs = join(root, ".hone-runs");
-        const ids = existsSync(runs) ? readdirSync(runs) : [];
-        const candidate = ids[0];
-        if (candidate !== undefined && readLogLines(root, candidate).some((l) => l.includes('"run.finished"'))) {
-          runId = candidate;
-          break;
-        }
-        await sleep(100);
-      }
-      expect(runId).not.toBeNull();
-      if (runId === null) throw new Error("unreachable");
-      const runDir = join(root, ".hone-runs", runId);
-
-      // The sentinel survives run.finished (no unlink on the return path)…
-      const pid = readSupervisorPid(runDir);
-      expect(pid).not.toBeNull();
-      if (pid === null) throw new Error("unreachable");
-      expect(pidAlive(pid)).toBe(true);
-      // …and nothing has been applied yet.
+      const stopPromise = stopCommand(["--take-best", "--repo", "repo"], makeIo(root).io);
+      await sleep(400); // stop is in its confirmed-drain wait
+      // Nothing applied while the confirmed supervisor still holds the lock.
       const before = spawnSync("git", ["-C", repo, "show-ref", "--verify", `refs/heads/hone/${runId}`], { encoding: "utf8" });
       expect(before.status).not.toBe(0);
 
-      const { io } = makeIo(root);
-      const code = await stopCommand(["--take-best", "--repo", "repo"], io);
+      await release();
+      helper.kill("SIGKILL"); // …then the supervisor process actually exits
+      const code = await stopPromise;
       expect(code).toBe(0);
-      // stop returned only after REAL death; only then was best applied.
-      expect(pidAlive(pid)).toBe(false);
+      expect(pidAlive(helperPid)).toBe(false);
       expect(gitIn(repo, "show", `hone/${runId}:hello.txt`)).toBe("improved");
     } finally {
-      killTree(child);
+      try {
+        helper.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  });
+});
+
+describe("PID reuse (final gate: a bare live sentinel PID is not identity)", () => {
+  it("never signals an unrelated live process named by a stale sentinel; finalizes under the lock instead", { timeout: 30_000 }, async () => {
+    const root = makeRoot();
+    const runId = "run_reuse1";
+    const best = tarToCas(root, { "hello.txt": "improved\n" });
+    const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: best, finished: false }));
+    writeFileSync(
+      join(runDir, "broker-state.ndjson"),
+      `${JSON.stringify({ t: "incumbent", hash: best, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 })}\n`,
+    );
+    // A live UNRELATED process wearing the recycled pid; it records any SIGTERM.
+    const marker = join(root, "helper-signalled");
+    const helper = spawn(
+      process.execPath,
+      ["-e", `process.on("SIGTERM", () => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "signalled")); setInterval(() => {}, 1000);`],
+      { stdio: "ignore" },
+    );
+    const helperPid = helper.pid;
+    expect(helperPid).toBeDefined();
+    if (helperPid === undefined) throw new Error("unreachable");
+    try {
+      await sleep(400); // helper handler installed
+      expect(pidAlive(helperPid)).toBe(true);
+      // Stale sentinel points at the live helper — but NO lock vouches for it.
+      writeFileSync(join(runDir, "supervisor.json"), `${JSON.stringify({ pid: helperPid, runId, nonce: "stale-nonce" })}\n`);
+
+      const { io } = makeIo(root);
+      const code = await stopCommand([], io);
+      expect(code).toBe(0);
+
+      // stop finalized the dead run under its own lock…
+      const events = readEvents(runDir);
+      const last = events.at(-1);
+      expect(last?.type).toBe("run.finished");
+      if (last?.type === "run.finished") expect(last.status).toBe("stopped");
+      // …and the unrelated process was NEVER signalled and is still alive.
+      expect(existsSync(marker)).toBe(false);
+      expect(pidAlive(helperPid)).toBe(true);
+    } finally {
+      try {
+        helper.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
     }
   });
 });

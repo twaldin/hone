@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -255,6 +255,49 @@ function lockHolderAlive(sockPath: string): Promise<boolean> {
   return promise;
 }
 
+/** Identity served by a supervisor's held run lock — binds a sentinel PID to THIS lock holder (PIDs recycle; nonces do not). */
+export interface RunLockIdentity {
+  pid: number;
+  runId: string;
+  nonce: string;
+}
+
+const RunLockIdentitySchema = z.object({
+  pid: z.number().int().positive(),
+  runId: z.string(),
+  nonce: z.string().min(1),
+});
+
+/**
+ * Ask the live lock holder who it is. Resolves null when nobody is listening
+ * or the holder serves no identity (e.g. `stop`'s own transient lock) — a
+ * null identity NEVER licenses signalling a sentinel PID.
+ */
+export function probeRunLockIdentity(runDir: string): Promise<RunLockIdentity | null> {
+  const { promise, resolve } = deferred<RunLockIdentity | null>();
+  const probe = net.connect(runLockPath(runDir));
+  let buf = "";
+  const settle = (identity: RunLockIdentity | null): void => {
+    probe.destroy();
+    resolve(identity);
+  };
+  probe.setEncoding("utf8");
+  probe.on("data", (chunk: string) => {
+    buf += chunk;
+  });
+  probe.once("end", () => {
+    try {
+      const parsed = RunLockIdentitySchema.safeParse(JSON.parse(buf.trim()));
+      settle(parsed.success ? parsed.data : null);
+    } catch {
+      settle(null);
+    }
+  });
+  probe.once("error", () => settle(null));
+  probe.setTimeout(1000, () => settle(null));
+  return promise;
+}
+
 /**
  * OS-enforced exclusive per-run lock (FinalSecurityGate finding 2): a bound
  * unix-domain socket. Liveness is the kernel accepting a connection — the
@@ -266,13 +309,17 @@ function lockHolderAlive(sockPath: string): Promise<boolean> {
  * stale contenders yield exactly one winner. Returned closure releases and
  * unlinks.
  */
-export async function acquireRunLock(runDir: string, runId: string): Promise<() => Promise<void>> {
+export async function acquireRunLock(runDir: string, runId: string, identity?: RunLockIdentity): Promise<() => Promise<void>> {
   const sockPath = runLockPath(runDir);
   const claimPath = `${sockPath}.claim`;
   const alreadySupervised = (): UsageError =>
     new UsageError(`run ${runId} is already being supervised by a live process — \`hone stop\` it first`);
   for (let attempt = 0; attempt < 10; attempt++) {
-    const server = net.createServer();
+    // Identity handshake: every connection learns WHO holds the lock, so a
+    // sentinel PID is only trusted when the live holder vouches for it.
+    const server = net.createServer((sock) => {
+      sock.end(identity !== undefined ? `${JSON.stringify(identity)}\n` : "");
+    });
     server.unref(); // the lock must never keep a finished supervisor alive
     const bound = deferred<boolean>();
     server.once("error", (err) => {
@@ -327,8 +374,11 @@ export async function superviseRun(
   io: CmdIo,
 ): Promise<number> {
   // The lock precedes ANY event append or docker sweep: a competing resume
-  // must fail before it can touch the log or rm -f live containers.
-  const releaseLock = await acquireRunLock(plan.runDir, plan.runId);
+  // must fail before it can touch the log or rm -f live containers. The
+  // lock serves this supervisor's identity; the sentinel repeats the nonce,
+  // so `stop` only ever trusts a PID the live lock holder vouches for.
+  const identity: RunLockIdentity = { pid: process.pid, runId: plan.runId, nonce: randomUUID() };
+  const releaseLock = await acquireRunLock(plan.runDir, plan.runId, identity);
   try {
     // The resume plan was chosen BEFORE the lock: a contender that planned
     // against an unfinished log can acquire only after the winner released —
@@ -337,7 +387,7 @@ export async function superviseRun(
     if (plan.resumed && replayRun(plan.runDir).finished !== null) {
       throw new UsageError(`run ${plan.runId} already finished — nothing to resume`);
     }
-    return await superviseLocked(plan, extra, io);
+    return await superviseLocked(plan, extra, io, identity.nonce);
   } finally {
     await releaseLock();
   }
@@ -347,6 +397,7 @@ async function superviseLocked(
   plan: RunPlan,
   extra: { manifest: CapsuleManifest; capsuleDir: string; flags: { backend: string | undefined; repo: string | undefined } },
   io: CmdIo,
+  nonce: string,
 ): Promise<number> {
   const { runId, runDir, config } = plan;
   const { manifest, capsuleDir } = extra;
@@ -358,8 +409,9 @@ async function superviseLocked(
   // path-CAS race: after this supervisor releases the lock, the next one
   // overwrites the file, and a late exit hook would delete the SUCCESSOR's
   // sentinel. A dead/stale sentinel is tiny and safe (same semantics as a
-  // SIGKILL leftover); every consumer gates on pidAlive().
-  writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId })}\n`);
+  // SIGKILL leftover); consumers gate on pidAlive AND the lock identity
+  // handshake (a bare PID is meaningless — PIDs recycle, nonces do not).
+  writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId, nonce })}\n`);
 
   let liveBudget = replayRun(runDir).lastBudget;
   const emit = (event: RunEvent): RunEvent => {
@@ -622,16 +674,29 @@ async function superviseLocked(
   }
 }
 
-/** Shared by `stop` for liveness checks. */
-export function readSupervisorPid(runDir: string): number | null {
+export interface SupervisorSentinel {
+  pid: number;
+  /** Absent on legacy sentinels — such a PID can never be identity-confirmed. */
+  nonce: string | undefined;
+}
+
+const SentinelSchema = z.object({ pid: z.number().int().positive(), nonce: z.string().min(1).optional() });
+
+/** Durable last-supervisor metadata; a bare PID here is NEVER trusted without the lock-identity handshake. */
+export function readSupervisorSentinel(runDir: string): SupervisorSentinel | null {
   const path = join(runDir, SUPERVISOR_FILE);
   if (!existsSync(path)) return null;
   try {
-    const parsed = z.object({ pid: z.number().int().positive() }).parse(JSON.parse(readFileSync(path, "utf8")));
-    return parsed.pid;
+    const parsed = SentinelSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+    return { pid: parsed.pid, nonce: parsed.nonce };
   } catch {
     return null;
   }
+}
+
+/** Shared by `stop` and tests for pid-level checks. */
+export function readSupervisorPid(runDir: string): number | null {
+  return readSupervisorSentinel(runDir)?.pid ?? null;
 }
 
 /** True when `pid` names a live process (signal-0 probe) — shared by the stop and resume guards. */
