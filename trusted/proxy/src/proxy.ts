@@ -57,12 +57,25 @@ export interface ProxyLimits {
   maxResponseBytes: number;
   /** Hard per-request completion-token ceiling, and the default ceiling when the client omits one. */
   maxCompletionTokens: number;
+  /**
+   * Global ceiling on concurrently handled requests (completions AND
+   * /v1/models). The slot is acquired BEFORE any body byte is buffered or
+   * any upstream work starts; excess requests are rejected 503 with
+   * `connection: close` and their body is never drained. This makes the
+   * per-request byte caps aggregate bounds: proxy buffering never exceeds
+   * maxActiveRequests * (maxRequestBytes + maxResponseBytes).
+   */
+  maxActiveRequests: number;
+  /** Socket-level connection ceiling — fd/header-buffer backstop behind maxActiveRequests. */
+  maxConnections: number;
 }
 
 export const DEFAULT_LIMITS: ProxyLimits = {
   maxRequestBytes: 4 * 1024 * 1024,
   maxResponseBytes: 32 * 1024 * 1024,
   maxCompletionTokens: 32_768,
+  maxActiveRequests: 16,
+  maxConnections: 256,
 };
 
 /**
@@ -147,13 +160,43 @@ function saneHeadroom(value: number): number {
 }
 
 /**
- * Conservative prompt-token estimate for admission (~4 bytes/token on the
- * forwarded JSON). Only gates CONCURRENT admission; the reservation is
- * reconciled to upstream-reported actual usage after completion, so estimate
- * error never distorts recorded spend.
+ * Framing allowance added to the byte-count prompt bound: tokens the
+ * upstream may charge for that are NOT bytes of the forwarded JSON —
+ * chat-template preamble, BOS/EOS markers, and the admitted ceiling field
+ * injected after admission (`"max_tokens":NNNNN,` is well under 64 bytes).
  */
-function estimatePromptTokens(text: string): number {
-  return Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4));
+export const PROMPT_FRAMING_BASE_TOKENS = 64;
+/** Per-message wrapper allowance (role/name markers a chat template adds around each message). */
+export const PROMPT_FRAMING_PER_MESSAGE_TOKENS = 8;
+
+/**
+ * TRUE upper bound on prompt tokens, used for admission reservations and
+ * for the missing-usage settlement ceiling.
+ *
+ * INVARIANT: a byte-level tokenizer (BPE and every derivative the routed
+ * providers use) cannot emit more than one token per input byte — every
+ * token consumes at least one byte. The raw UTF-8 byte count of the request
+ * is therefore an upper bound on honestly reported prompt tokens for that
+ * text; the bounded framing terms cover provider chat-template overhead.
+ * Unlike an average bytes-per-token ratio, honest usage can never exceed
+ * this reservation, so an admitted request cannot cross the token or
+ * priced-USD envelope in a single upstream call.
+ *
+ * `rawBytes` is the exact client-sent body byte count; `forwardBytes` the
+ * rewritten upstream payload (model overwrite, stream_options injection,
+ * ceiling fields stripped) — the max of the two bounds whichever text the
+ * provider actually tokenizes.
+ */
+export function promptTokenUpperBound(
+  rawBytes: number,
+  forwardBytes: number,
+  messageCount: number,
+): number {
+  return (
+    Math.max(1, rawBytes, forwardBytes) +
+    PROMPT_FRAMING_BASE_TOKENS +
+    PROMPT_FRAMING_PER_MESSAGE_TOKENS * messageCount
+  );
 }
 
 type CompletionBounds =
@@ -265,6 +308,14 @@ function readRequestBody(req: IncomingMessage, maxBytes: number): Promise<BodyRe
       if (done) return;
       done = true;
       reject(err);
+    });
+    // A client that vanishes mid-body emits 'close' WITHOUT 'end' (and not
+    // always 'error'); the promise must still settle or the caller's
+    // request slot would be pinned forever.
+    req.on("close", () => {
+      if (done) return;
+      done = true;
+      reject(new Error("client closed the connection before the request body completed"));
     });
   });
 }
@@ -473,7 +524,12 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     }
 
     const pricing = config.pricing?.[route.model];
-    const promptTokens = estimatePromptTokens(JSON.stringify(forward));
+    const messagesRaw = parsed["messages"];
+    const promptTokens = promptTokenUpperBound(
+      Buffer.byteLength(body.text, "utf8"),
+      Buffer.byteLength(JSON.stringify(forward), "utf8"),
+      Array.isArray(messagesRaw) ? messagesRaw.length : 0,
+    );
 
     // Recursion guard + double-spend guard: atomic worst-case reservation
     // BEFORE any upstream call. Nothing fits → 402, upstream never sees it.
@@ -714,6 +770,56 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     res.end(responseText);
   }
 
+  // -------------------------------------------------------------------------
+  // Active-request slots.
+  //
+  // INVARIANT: at most `limits.maxActiveRequests` requests are past this gate
+  // at any instant, and no body byte is buffered nor any upstream fetch
+  // started before a slot is held. Combined with the per-request byte caps,
+  // aggregate proxy buffering is bounded by
+  //     maxActiveRequests * (maxRequestBytes + maxResponseBytes).
+  // Check + increment are synchronous (no await between them), so parallel
+  // requests cannot race past the gate; release happens in `finally` on
+  // every path — settlement, thrown errors, client aborts, upstream resets.
+  // This gate is deliberately SEPARATE from the reservation/admission lock:
+  // slots bound memory and sockets, reservations bound spend.
+  // -------------------------------------------------------------------------
+  let activeRequests = 0;
+
+  /**
+   * Deterministic overload rejection: nothing buffered, nothing forwarded.
+   * The inbound body is DISCARDED via resume() — no data listener, so no
+   * user-space accumulation — and the 503 is written once the request ends:
+   * Node destroys (RSTs) the socket when a response finishes against an
+   * incomplete request, which would clobber the in-flight 503 for clients
+   * still uploading. Stalled uploads are reaped by the server request
+   * timeout; sockets are bounded by maxConnections.
+   */
+  function rejectOverloaded(req: IncomingMessage, res: ServerResponse): void {
+    const finish = (): void => {
+      res.writeHead(503, {
+        "content-type": "application/json",
+        connection: "close",
+        "retry-after": "1",
+      });
+      res.end(
+        JSON.stringify({
+          error: {
+            type: "hone_overloaded",
+            message: `proxy at capacity (${limits.maxActiveRequests} concurrent requests)`,
+          },
+        }),
+      );
+    };
+    if (req.readableEnded) {
+      finish();
+      return;
+    }
+    req.on("end", finish);
+    req.on("error", () => res.destroy());
+    req.resume();
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const auth = req.headers.authorization;
     const bearer = auth?.startsWith("Bearer ") === true ? auth.slice("Bearer ".length) : undefined;
@@ -724,12 +830,26 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     }
 
     const path = (req.url ?? "").split("?")[0];
-    if (req.method === "POST" && path === "/v1/chat/completions") {
-      await handleCompletions(req, res, identity);
-    } else if (req.method === "GET" && path === "/v1/models") {
-      await handleModels(res, identity);
-    } else {
+    const isCompletions = req.method === "POST" && path === "/v1/chat/completions";
+    const isModels = req.method === "GET" && path === "/v1/models";
+    if (!isCompletions && !isModels) {
       sendClientError(res, 404, "hone_not_found", `no route: ${req.method} ${path}`);
+      return;
+    }
+
+    if (activeRequests >= limits.maxActiveRequests) {
+      rejectOverloaded(req, res);
+      return;
+    }
+    activeRequests += 1;
+    try {
+      if (isCompletions) {
+        await handleCompletions(req, res, identity);
+      } else {
+        await handleModels(res, identity);
+      }
+    } finally {
+      activeRequests -= 1;
     }
   }
 
@@ -743,6 +863,13 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       }
     });
   });
+  // Socket-layer ingress bounds behind the slot gate: connection count, header
+  // count, and slow-client header/body deadlines are capped so pre-slot work
+  // (header parsing, keep-alive sockets) cannot grow without bound either.
+  server.maxConnections = limits.maxConnections;
+  server.maxHeadersCount = 128;
+  server.headersTimeout = 30_000;
+  server.requestTimeout = 300_000;
 
   function bound(listenArgs: () => void): Promise<void> {
     return new Promise<void>((resolve, reject) => {

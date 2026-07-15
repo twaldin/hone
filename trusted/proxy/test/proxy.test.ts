@@ -1,4 +1,5 @@
 import http from "node:http";
+import net from "node:net";
 import { mkdtemp, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { BudgetExceededError, ProxyTraceRecord } from "@hone/schema";
 import {
   createProxy,
+  promptTokenUpperBound,
   type BudgetDecision,
   type ProxyConfig,
   type ProxyHandle,
@@ -31,6 +33,8 @@ interface MockUpstream {
   calls: UpstreamCall[];
   /** Set when a completions response was closed by the PROXY before the mock finished writing. */
   flags: { closedEarly: boolean };
+  /** "slow"-mode completions held open; invoke an entry to release its response. */
+  slow: Array<() => void>;
   close(): Promise<void>;
 }
 
@@ -50,6 +54,7 @@ interface MockCompletionBody {
 async function startMockUpstream(): Promise<MockUpstream> {
   const calls: UpstreamCall[] = [];
   const flags = { closedEarly: false };
+  const slow: Array<() => void> = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
@@ -81,6 +86,15 @@ async function startMockUpstream(): Promise<MockUpstream> {
         if (mode === "bad-usage") {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(jsonCompletion({ prompt_tokens: -5, completion_tokens: "many", total_tokens: 1e30 }));
+          return;
+        }
+        if (mode === "slow") {
+          // Hold the response open until the test releases it — lets tests
+          // pin proxy request slots deterministically.
+          slow.push(() => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(jsonCompletion(MOCK_USAGE));
+          });
           return;
         }
         if (mode === "reset") {
@@ -139,6 +153,7 @@ async function startMockUpstream(): Promise<MockUpstream> {
     port,
     calls,
     flags,
+    slow,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -607,7 +622,7 @@ describe("admission reservations", () => {
     const ctx = await setup({
       checkBudget: (): BudgetDecision => ({
         allowed: true,
-        remaining: { tokens: 1100 - spends.reduce((a, s) => a + s.tokens, 0), usd: 1000 },
+        remaining: { tokens: 1300 - spends.reduce((a, s) => a + s.tokens, 0), usd: 1000 },
       }),
       recordSpend: (s) => {
         spends.push(s);
@@ -635,7 +650,7 @@ describe("admission reservations", () => {
     const ctx = await setup({
       // constant headroom that fits exactly ONE worst-case reservation:
       // any leaked reservation would 402 the next request
-      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1100, usd: 1000 } }),
+      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1300, usd: 1000 } }),
       recordSpend: (s) => {
         spends.push(s);
       },
@@ -655,7 +670,7 @@ describe("admission reservations", () => {
   it("streaming settlements charge actual usage and release the reservation", async () => {
     const spends: SpendRecord[] = [];
     const ctx = await setup({
-      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1100, usd: 1000 } }),
+      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1300, usd: 1000 } }),
       recordSpend: (s) => {
         spends.push(s);
       },
@@ -888,7 +903,7 @@ describe("transport failure reconciliation", () => {
   it("connection-refused releases the reservation without charge", async () => {
     const spends: SpendRecord[] = [];
     const ctx = await setup({
-      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1100, usd: 1000 } }),
+      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1300, usd: 1000 } }),
       recordSpend: (s) => {
         spends.push(s);
       },
@@ -920,5 +935,195 @@ describe("transport failure reconciliation", () => {
     expect(trace[0]?.usage.completionTokens).toBe(100);
     expect(ctx.spends[0]?.tokens).toBe(trace[0]?.usage.totalTokens);
     expect(ctx.spends[0]?.tokens).toBeGreaterThanOrEqual(101);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// adversarial: byte-level prompt reservation upper bound (review finding 6)
+// ---------------------------------------------------------------------------
+
+describe("prompt reservation upper bound", () => {
+  it("honest worst-case usage above the old bytes/4 estimate cannot cross the envelope", async () => {
+    // ~4KiB prompt: the old bytes/4 estimate (~1030 tokens) + max_tokens 1
+    // fits a 3000-token envelope, but a byte-level tokenizer can honestly
+    // report ~4100 prompt tokens and blow through it. The reservation must
+    // therefore reject this request outright — before any upstream call.
+    const ctx = await setup({
+      checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 3000, usd: 1000 } }),
+    });
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
+      messages: [{ role: "user", content: "z".repeat(4000) }],
+      max_tokens: 1,
+    });
+    expect(res.status).toBe(402);
+    expect(BudgetExceededError.parse(await res.json()).error.dimension).toBe("tokens");
+    expect(ctx.upstream.calls).toHaveLength(0);
+    expect(ctx.spends).toHaveLength(0);
+  });
+
+  it("missing-usage settlement charges exactly the byte-level bound plus the completion ceiling", async () => {
+    const ctx = await setup();
+    const body = { messages: [{ role: "user", content: "no-usage" }], max_tokens: 100 };
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), body);
+    expect(res.status).toBe(200);
+    await res.text();
+    // Replicate the forwarded payload: model overwritten, ceiling fields
+    // stripped before the bound is taken (framing allowance covers the
+    // re-injected admitted ceiling).
+    const raw = JSON.stringify(body);
+    const forward = JSON.stringify({ messages: body.messages, model: "routed-model" });
+    const expected =
+      promptTokenUpperBound(Buffer.byteLength(raw, "utf8"), Buffer.byteLength(forward, "utf8"), 1) + 100;
+    expect(ctx.spends).toHaveLength(1);
+    expect(ctx.spends[0]?.tokens).toBe(expected);
+    // the bound is at least one token per raw request byte
+    expect(ctx.spends[0]?.tokens).toBeGreaterThanOrEqual(Buffer.byteLength(raw, "utf8") + 100);
+  });
+
+  it("unicode prompts reserve on UTF-8 bytes, not UTF-16 string length", async () => {
+    const ctx = await setup();
+    // 4 UTF-8 bytes per rocket, 2 UTF-16 code units: a length-based bound
+    // would undercount by half the emoji payload.
+    const emoji = "\u{1F680}".repeat(256);
+    const body = {
+      messages: [
+        { role: "user", content: "no-usage" },
+        { role: "user", content: emoji },
+      ],
+      max_tokens: 1,
+    };
+    const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), body);
+    expect(res.status).toBe(200);
+    await res.text();
+    const raw = JSON.stringify(body);
+    const rawBytes = Buffer.byteLength(raw, "utf8");
+    expect(rawBytes).toBeGreaterThan(raw.length); // multi-byte payload is real
+    const forward = JSON.stringify({ messages: body.messages, model: "routed-model" });
+    const expected =
+      promptTokenUpperBound(rawBytes, Buffer.byteLength(forward, "utf8"), 2) + 1;
+    expect(ctx.spends[0]?.tokens).toBe(expected);
+    // strictly larger than any UTF-16-length-based reservation could be
+    expect(ctx.spends[0]?.tokens).toBeGreaterThan(raw.length + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// adversarial: bounded active-request slots (review finding 8)
+// ---------------------------------------------------------------------------
+
+describe("active request slots", () => {
+  it("excess parallel large-body completions get deterministic 503 + connection close and never reach upstream", async () => {
+    const ctx = await setup({ limits: { maxActiveRequests: 2 } });
+    const token = ctx.proxy.tokenFor("mutation");
+    // pin both slots with held upstream responses
+    const held = [1, 2].map(() =>
+      postCompletions(ctx, token, { messages: [{ role: "user", content: "slow" }], max_tokens: 5 }),
+    );
+    await until(() => ctx.upstream.slow.length === 2);
+    // saturate: six more requests, each carrying a ~4MiB body — none may be
+    // buffered or forwarded; aggregate proxy buffering stays at 2 requests
+    const big = "b".repeat(4 * 1024 * 1024 - 4096);
+    const rejected = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        postCompletions(ctx, token, {
+          messages: [{ role: "user", content: big }],
+          max_tokens: 5,
+        }),
+      ),
+    );
+    for (const res of rejected) {
+      expect(res.status).toBe(503);
+      expect(res.headers.get("connection")).toBe("close");
+      const parsed = (await res.json()) as { error: { type: string } };
+      expect(parsed.error.type).toBe("hone_overloaded");
+    }
+    expect(ctx.upstream.calls.filter((c) => c.url === "/v1/chat/completions")).toHaveLength(2);
+    // release the pinned pair: they complete normally, slots free up
+    for (const release of ctx.upstream.slow.splice(0)) release();
+    for (const res of await Promise.all(held)) {
+      expect(res.status).toBe(200);
+      await res.text();
+    }
+    const after = await postCompletions(ctx, token, { messages: [] });
+    expect(after.status).toBe(200);
+    await after.text();
+  });
+
+  it("/v1/models occupies a slot and is rejected when saturated — no upstream fetch", async () => {
+    const ctx = await setup({ limits: { maxActiveRequests: 1 } });
+    const token = ctx.proxy.tokenFor("mutation");
+    const held = postCompletions(ctx, token, {
+      messages: [{ role: "user", content: "slow" }],
+      max_tokens: 5,
+    });
+    await until(() => ctx.upstream.slow.length === 1);
+    const models = await fetch(`http://127.0.0.1:${ctx.port}/v1/models`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(models.status).toBe(503);
+    expect(models.headers.get("connection")).toBe("close");
+    expect(ctx.upstream.calls.filter((c) => c.url === "/v1/models")).toHaveLength(0);
+    for (const release of ctx.upstream.slow.splice(0)) release();
+    const heldRes = await held;
+    expect(heldRes.status).toBe(200);
+    await heldRes.text();
+  });
+
+  it("slot releases after a mid-flight upstream reset", async () => {
+    const ctx = await setup({ limits: { maxActiveRequests: 1 } });
+    const token = ctx.proxy.tokenFor("mutation");
+    const res = await postCompletions(ctx, token, {
+      messages: [{ role: "user", content: "reset" }],
+      max_tokens: 5,
+    });
+    expect(res.status).toBe(200);
+    try {
+      await res.text();
+    } catch {
+      // truncated by construction
+    }
+    await until(() => ctx.spends.length === 1);
+    // the only slot must be free again
+    const next = await postCompletions(ctx, token, { messages: [] });
+    expect(next.status).toBe(200);
+    await next.text();
+  });
+
+  it("slot releases when the client aborts mid-body upload", async () => {
+    const ctx = await setup({ limits: { maxActiveRequests: 1 } });
+    const token = ctx.proxy.tokenFor("mutation");
+    // half-sent body over a raw socket, then hard-destroy the connection
+    await new Promise<void>((resolve) => {
+      const sock = net.connect(ctx.port, "127.0.0.1", () => {
+        sock.write(
+          "POST /v1/chat/completions HTTP/1.1\r\n" +
+            "host: 127.0.0.1\r\n" +
+            `authorization: Bearer ${token}\r\n` +
+            "content-type: application/json\r\n" +
+            "content-length: 100000\r\n\r\n" +
+            '{"messages":[',
+          () => {
+            // headers + partial body flushed: kill the connection mid-upload
+            sock.destroy();
+            resolve();
+          },
+        );
+      });
+    });
+    // Slot release is driven by the proxy-side socket close, which has no
+    // client-visible signal — poll the observable behavior (admission) itself.
+    let ok = false;
+    for (let i = 0; i < 100 && !ok; i += 1) {
+      const res = await postCompletions(ctx, token, { messages: [] });
+      if (res.status === 200) {
+        await res.text();
+        ok = true;
+      } else {
+        await res.text();
+        await sleep(20);
+      }
+    }
+    expect(ok).toBe(true);
+    expect(ctx.upstream.calls.filter((c) => c.url === "/v1/chat/completions")).toHaveLength(1);
   });
 });
