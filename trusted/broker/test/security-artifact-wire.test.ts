@@ -2,13 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { Broker } from "../src/broker.js";
 import { BrokerServer } from "../src/server.js";
 import { CasStore } from "../src/cas.js";
-import { diffProtectedPaths, packDirAsArtifact, unpackArtifact } from "../src/artifact.js";
+import { canonicalizeWorkspaceTar, diffProtectedPaths, packDirAsArtifact, unpackArtifact } from "../src/artifact.js";
 import { ArtifactValidationError, validateWorkspaceTar } from "../src/tarcheck.js";
 import { deferred } from "../src/deferred.js";
+import type { RunCommand } from "../src/command.js";
 import { buildTestCapsule, TEST_IMAGE } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -27,17 +28,21 @@ interface TarEntrySpec {
   prefix?: string;
   /** Override the header size field (defaults to content length). */
   size?: number;
+  /** Override the header mtime field (defaults to 0). */
+  mtime?: number;
+  /** Override the header mode field (defaults to "0000755"). */
+  mode?: string;
 }
 
 function tarHeader(spec: TarEntrySpec): Buffer {
   const b = Buffer.alloc(BLOCK);
   b.write(spec.name, 0, 100, "utf8");
-  b.write("0000755\0", 100, "latin1"); // mode
+  b.write(`${spec.mode ?? "0000755"}\0`, 100, "latin1"); // mode
   b.write("0000000\0", 108, "latin1"); // uid
   b.write("0000000\0", 116, "latin1"); // gid
   const size = spec.size ?? (spec.content === undefined ? 0 : Buffer.byteLength(spec.content));
   b.write(`${size.toString(8).padStart(11, "0")}\0`, 124, "latin1");
-  b.write("00000000000\0", 136, "latin1"); // mtime
+  b.write(`${(spec.mtime ?? 0).toString(8).padStart(11, "0")}\0`, 136, "latin1"); // mtime
   b.write(spec.type ?? "0", 156, "latin1");
   if (spec.linkname !== undefined) b.write(spec.linkname, 157, 100, "utf8");
   b.write("ustar\0", 257, "latin1");
@@ -306,6 +311,185 @@ describe("artifact pack/unpack through the validator", () => {
       ]);
       const hash = await cas.putBuffer(evil);
       await expect(unpackArtifact(cas, hash, path.join(base, "unpack"))).rejects.toThrowError(/symlink/);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("canonical artifact packing", () => {
+  async function makeTree(root: string, files: Record<string, string>): Promise<void> {
+    for (const [rel, content] of Object.entries(files)) {
+      const p = path.join(root, rel);
+      await mkdir(path.dirname(p), { recursive: true });
+      await writeFile(p, content);
+    }
+  }
+
+  /** All rel paths under `root` (files and dirs), for detritus assertions. */
+  async function listTree(root: string, rel = ""): Promise<string[]> {
+    const out: string[] = [];
+    for (const d of await readdir(rel === "" ? root : path.join(root, rel), { withFileTypes: true })) {
+      const entryRel = rel === "" ? d.name : `${rel}/${d.name}`;
+      out.push(entryRel);
+      if (d.isDirectory()) out.push(...(await listTree(root, entryRel)));
+    }
+    return out.sort();
+  }
+
+  it("emits zero wall-clock metadata: every header has mtime 0, uid 0, gid 0", async () => {
+    // Deterministic repro of the run_mrmbrlmv312b68 instability: the pre-fix
+    // packer stamped real file mtimes into the tar, so the SAME tree packed
+    // at two different times hashed differently. If no header carries wall
+    // time or host identity, the bytes cannot depend on when we packed.
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-t-"));
+    try {
+      const src = path.join(base, "src");
+      await makeTree(src, { "a.txt": "alpha", "sub/b.txt": "beta" });
+      const cas = new CasStore(path.join(base, "cas"));
+      const bytes = await cas.readBuffer(await packDirAsArtifact(src, cas));
+      let entries = 0;
+      for (let off = 0; off + BLOCK <= bytes.length; ) {
+        const header = bytes.subarray(off, off + BLOCK);
+        if (header.every((b) => b === 0)) break; // end-of-archive
+        entries += 1;
+        expect(header.subarray(136, 148).toString("latin1")).toBe("00000000000\0"); // mtime
+        expect(header.subarray(108, 116).toString("latin1")).toBe("0000000\0"); // uid
+        expect(header.subarray(116, 124).toString("latin1")).toBe("0000000\0"); // gid
+        const size = parseInt(header.subarray(124, 136).toString("latin1").replace(/\0.*$/, ""), 8);
+        off += BLOCK + Math.ceil(size / BLOCK) * BLOCK;
+      }
+      expect(entries).toBe(4); // workspace, a.txt, sub, sub/b.txt
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("independently staged copies of the same tree pack to the identical hash", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-r-"));
+    try {
+      const src = path.join(base, "src");
+      await makeTree(src, { "a.txt": "alpha", "sub/b.txt": "beta" });
+      // Backdate one copy and freshly stage another (cp discards mtimes):
+      // the two trees have identical content but wildly different mtimes.
+      await utimes(path.join(src, "a.txt"), new Date(0), new Date(0));
+      const staged = path.join(base, "staged");
+      await cp(src, staged, { recursive: true });
+      const cas = new CasStore(path.join(base, "cas"));
+      expect(await packDirAsArtifact(staged, cas)).toBe(await packDirAsArtifact(src, cas));
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("a source content change changes the hash", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-c-"));
+    try {
+      const src = path.join(base, "src");
+      await makeTree(src, { "a.txt": "alpha" });
+      const cas = new CasStore(path.join(base, "cas"));
+      const before = await packDirAsArtifact(src, cas);
+      await writeFile(path.join(src, "a.txt"), "ALPHA");
+      expect(await packDirAsArtifact(src, cas)).not.toBe(before);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("strips runtime/VCS detritus at every depth, not just the top level", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-d-"));
+    try {
+      const src = path.join(base, "src");
+      await makeTree(src, {
+        "keep.txt": "k",
+        "pkg/mod.py": "print(1)\n",
+        "pkg/__pycache__/mod.cpython-311.pyc": "bytecode",
+        "pkg/stray.pyo": "bytecode",
+        ".pytest_cache/v/cache/lastfailed": "{}",
+        "deep/a/.pytest_cache/x": "x",
+        "deep/a/__pycache__/y.pyc": "y",
+        ".gitdir/HEAD": "ref: refs/heads/main",
+        ".git/config": "[core]",
+        "stray.pyc": "bytecode",
+      });
+      const cas = new CasStore(path.join(base, "cas"));
+      const hash = await packDirAsArtifact(src, cas);
+      const entries = validateWorkspaceTar(await cas.readBuffer(hash));
+      expect(entries.map((e) => e.path)).toEqual([
+        "workspace",
+        "workspace/deep",
+        "workspace/deep/a",
+        "workspace/keep.txt",
+        "workspace/pkg",
+        "workspace/pkg/mod.py",
+      ]);
+      const ws = await unpackArtifact(cas, hash, path.join(base, "unpack"));
+      expect(await listTree(ws)).toEqual(["deep", "deep/a", "keep.txt", "pkg", "pkg/mod.py"]);
+      expect(await readFile(path.join(ws, "pkg", "mod.py"), "utf8")).toBe("print(1)\n");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects symlinks in the source tree instead of following them", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-s-"));
+    try {
+      const src = path.join(base, "src");
+      await makeTree(src, { "a.txt": "alpha" });
+      await symlink("/etc/passwd", path.join(src, "leak"));
+      const cas = new CasStore(path.join(base, "cas"));
+      await expect(packDirAsArtifact(src, cas)).rejects.toThrowError(/unsupported symlink.*leak/);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("canonicalizeWorkspaceTar collapses metadata-noisy tars onto the on-disk canonical hash", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-z-"));
+    try {
+      // Two byte-DIFFERENT tars of the same logical tree: mtimes differ and
+      // both drag __pycache__ junk along — exactly what a sandbox emits.
+      const noisy = (mtime: number): Buffer =>
+        makeTar([
+          { name: "workspace/", type: "5", mtime },
+          { name: "workspace/pkg/", type: "5", mtime },
+          { name: "workspace/pkg/mod.py", content: "print(1)\n", mode: "0000644", mtime },
+          { name: "workspace/pkg/__pycache__/", type: "5", mtime },
+          { name: "workspace/pkg/__pycache__/mod.cpython-311.pyc", content: "junk", mode: "0000644", mtime },
+        ]);
+      const a = noisy(12345);
+      const b = noisy(999999);
+      expect(a.equals(b)).toBe(false);
+      const cas = new CasStore(path.join(base, "cas"));
+      const hashA = await canonicalizeWorkspaceTar(a, cas);
+      const hashB = await canonicalizeWorkspaceTar(b, cas);
+      expect(hashA).toBe(hashB);
+      // ...and both equal the canonical pack of the equivalent clean tree.
+      const clean = path.join(base, "clean");
+      await makeTree(clean, { "pkg/mod.py": "print(1)\n" });
+      expect(await packDirAsArtifact(clean, cas)).toBe(hashA);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("canonicalizeWorkspaceTar never extracts or CAS-admits a malicious tar", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-m-"));
+    try {
+      const evil = makeTar([
+        { name: "workspace/", type: "5" },
+        { name: "workspace/link", type: "2", linkname: "/etc" },
+      ]);
+      const casDir = path.join(base, "cas");
+      const cas = new CasStore(casDir);
+      const spawned: string[][] = [];
+      const run: RunCommand = async (argv) => {
+        spawned.push([...argv]);
+        throw new Error("no process may run for a rejected artifact");
+      };
+      await expect(canonicalizeWorkspaceTar(evil, cas, run)).rejects.toThrowError(ArtifactValidationError);
+      expect(spawned).toEqual([]); // validation failed CLOSED before extraction
+      await expect(readdir(casDir)).rejects.toThrowError(); // nothing entered CAS
     } finally {
       await rm(base, { recursive: true, force: true });
     }
