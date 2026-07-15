@@ -70,6 +70,11 @@ export interface BrokerConfig {
    * Default: { mode: "none" }.
    */
   sandboxNetwork?: SandboxNetworkMode | undefined;
+  /**
+   * Env injected into MUTATION sandboxes only (e.g. HONE_PROXY_BASE_URL,
+   * HONE_PROXY_TOKEN) — trusted config, never transits the client protocol.
+   */
+  mutationEnv?: Record<string, string> | undefined;
   /** DI seam for the docker/tar CLI — tests observe container spawns through it. */
   runCommand?: RunCommand | undefined;
   /** Injectable clock (ms) for TTL/wall-clock determinism in tests. */
@@ -336,6 +341,13 @@ export class Broker {
       "-w",
       "/workspace",
     ];
+    // Trusted-side env injection (WP7 contract with WP5): proxy endpoint +
+    // per-run bearer reach mutation sandboxes via broker config, never over
+    // the client wire protocol. Values are role-scoped and metered; the
+    // upstream credentials themselves never enter any sandbox.
+    for (const [k, v] of Object.entries(this.config.mutationEnv ?? {})) {
+      argv.push("-e", `${k}=${v}`);
+    }
     for (const m of mounts) argv.push("-v", `${m.host}:${m.container}:${m.mode}`);
     argv.push(this.config.image, "sleep", "2147483647");
 
