@@ -162,6 +162,9 @@ export const DEFAULT_MAX_CONNECTIONS = 64;
  * queued complete frames, summed across all connections. Bounds broker
  * memory even when many connections each stay under their own caps. */
 export const DEFAULT_MAX_BUFFERED_BYTES_GLOBAL = 8 * 1024 * 1024;
+/** One serialized JSON response and all queued outbound socket bytes. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 96 * 1024 * 1024;
+export const DEFAULT_MAX_OUTBOUND_BYTES_GLOBAL = 128 * 1024 * 1024;
 
 /** Server-defined JSON-RPC error for backlog overflow — distinct from every
  * BROKER_ERROR_NUMBER code (-32000..-32006). */
@@ -194,6 +197,10 @@ export interface BrokerServerOptions {
   /** Global budget for retained bytes (fragments + queued frames) across all
    * connections; the largest holder is evicted on overflow. Default 8 MiB. */
   maxBufferedBytesGlobal?: number | undefined;
+  /** Max serialized bytes in one RPC response. Default 96 MiB. */
+  maxResponseBytes?: number | undefined;
+  /** Aggregate serialized response bytes waiting on sockets. Default 128 MiB. */
+  maxOutboundBytesGlobal?: number | undefined;
 }
 
 /** Per-connection dispatch state: in-flight permits + bounded frame backlog. */
@@ -208,6 +215,8 @@ interface ConnState {
   queuedBytes: number;
   /** Raw bytes RETAINED for this connection: pending fragment + queued frames. */
   bufferedBytes: number;
+  /** Per-connection write serialization; socket backpressure is awaited. */
+  writeTail: Promise<void>;
 }
 
 /** Constant-time token equality (length-safe via digest normalization). */
@@ -228,8 +237,11 @@ export class BrokerServer {
   private readonly maxQueuedBytesPerConnection: number;
   private readonly maxConnections: number;
   private readonly maxBufferedBytesGlobal: number;
+  private readonly maxResponseBytes: number;
+  private readonly maxOutboundBytesGlobal: number;
   private globalInFlight = 0;
   private globalBufferedBytes = 0;
+  private globalOutboundBytes = 0;
   /** Connections with a non-empty backlog, FIFO by first queued frame. */
   private readonly waiting = new Set<ConnState>();
   /** Resolved address of the opt-in public TCP listener (after listen()). */
@@ -250,6 +262,8 @@ export class BrokerServer {
     this.maxQueuedBytesPerConnection = opts.maxQueuedBytesPerConnection ?? DEFAULT_MAX_QUEUED_BYTES_PER_CONNECTION;
     this.maxConnections = opts.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
     this.maxBufferedBytesGlobal = opts.maxBufferedBytesGlobal ?? DEFAULT_MAX_BUFFERED_BYTES_GLOBAL;
+    this.maxResponseBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+    this.maxOutboundBytesGlobal = opts.maxOutboundBytesGlobal ?? DEFAULT_MAX_OUTBOUND_BYTES_GLOBAL;
   }
 
   async listen(): Promise<void> {
@@ -291,12 +305,12 @@ export class BrokerServer {
   }
 
   /**
-   * Graceful close (final-gate finding): new connections and new frames are
-   * rejected IMMEDIATELY (synchronous flag), queued-but-unstarted frames are
-   * dropped with their byte accounting released, and every IN-FLIGHT handler
-   * is awaited before sockets are destroyed and the call returns — so the
-   * caller can tear the Broker down afterwards knowing no handler will
-   * emit, spend, or write against it.
+   * Graceful close: new connections and frames are rejected immediately;
+   * queued-but-unstarted frames are
+   * dropped with their byte accounting released. Client sockets are then
+   * destroyed to unblock stalled outbound writes, and every in-flight
+   * handler is awaited before return — the caller can tear the Broker down
+   * knowing no handler will emit, spend, or write against it.
    */
   async close(): Promise<void> {
     this.closing = true;
@@ -307,14 +321,15 @@ export class BrokerServer {
     }
     this.waiting.clear();
     for (const conn of this.conns) this.release(conn, conn.bufferedBytes);
-    // Await every in-flight handler (responses still reach live sockets).
+    // Cut clients now: a peer that stopped reading must not hold shutdown at
+    // the outbound backpressure barrier forever. Handlers still drain below.
+    for (const conn of this.conns) conn.sock.destroy();
+    // Await every in-flight handler after their response path is unblocked.
     if (this.globalInFlight > 0) {
       const drained = deferred<void>();
       this.drainWaiters.push(drained.resolve);
       await drained.promise;
     }
-    // Socket close events release each connection's remaining accounting.
-    for (const conn of this.conns) conn.sock.destroy();
     await Promise.all(
       this.servers.map((server) => {
         const { promise, resolve } = deferred<void>();
@@ -326,7 +341,7 @@ export class BrokerServer {
   }
 
   /** Live dispatch counters — observability for callers and adversarial tests. */
-  get stats(): { connections: number; inFlight: number; queuedBytes: number; bufferedBytes: number } {
+  get stats(): { connections: number; inFlight: number; queuedBytes: number; bufferedBytes: number; outboundBytes: number } {
     let queuedBytes = 0;
     for (const conn of this.waiting) queuedBytes += conn.queuedBytes;
     return {
@@ -334,6 +349,7 @@ export class BrokerServer {
       inFlight: this.globalInFlight,
       queuedBytes,
       bufferedBytes: this.globalBufferedBytes,
+      outboundBytes: this.globalOutboundBytes,
     };
   }
 
@@ -371,7 +387,16 @@ export class BrokerServer {
       sock.write(`${JSON.stringify(resp)}\n`, () => sock.destroy());
       return;
     }
-    const conn: ConnState = { sock, privileged, tokenRequired, inFlight: 0, queue: [], queuedBytes: 0, bufferedBytes: 0 };
+    const conn: ConnState = {
+      sock,
+      privileged,
+      tokenRequired,
+      inFlight: 0,
+      queue: [],
+      queuedBytes: 0,
+      bufferedBytes: 0,
+      writeTail: Promise.resolve(),
+    };
     this.conns.add(conn);
     sock.on("close", () => {
       this.conns.delete(conn);
@@ -452,14 +477,62 @@ export class BrokerServer {
     return true;
   }
 
+  private async writeResponse(conn: ConnState, response: RpcResponse): Promise<void> {
+    const payload = Buffer.from(`${JSON.stringify(response)}\n`);
+    if (payload.length > this.maxResponseBytes) {
+      throw new Error(`RPC response exceeds ${this.maxResponseBytes} bytes`);
+    }
+    if (this.globalOutboundBytes + payload.length > this.maxOutboundBytesGlobal) {
+      throw new Error(`broker outbound backlog exceeds ${this.maxOutboundBytesGlobal} bytes`);
+    }
+    this.globalOutboundBytes += payload.length;
+    const previous = conn.writeTail;
+    const turn = deferred<void>();
+    conn.writeTail = previous.then(() => turn.promise);
+    await previous;
+    try {
+      if (conn.sock.destroyed) throw new Error("client socket closed");
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = (): void => {
+          conn.sock.off("drain", onDrain);
+          conn.sock.off("close", onClose);
+          conn.sock.off("error", onError);
+        };
+        const onDrain = (): void => {
+          cleanup();
+          resolve();
+        };
+        const onClose = (): void => {
+          cleanup();
+          reject(new Error("client socket closed during response"));
+        };
+        const onError = (error: Error): void => {
+          cleanup();
+          reject(error);
+        };
+        conn.sock.once("close", onClose);
+        conn.sock.once("error", onError);
+        if (conn.sock.write(payload)) {
+          cleanup();
+          resolve();
+        } else {
+          conn.sock.once("drain", onDrain);
+        }
+      });
+    } finally {
+      this.globalOutboundBytes -= payload.length;
+      turn.resolve();
+    }
+  }
+
   /** Start one handler under both permits; the finally NEVER leaks them —
    * resolve, reject, and write failure all release. */
   private run(conn: ConnState, line: string): void {
     conn.inFlight++;
     this.globalInFlight++;
     void this.handleLine(line, conn)
-      .then((resp) => {
-        if (resp && !conn.sock.destroyed) conn.sock.write(`${JSON.stringify(resp)}\n`);
+      .then(async (resp) => {
+        if (resp && !conn.sock.destroyed) await this.writeResponse(conn, resp);
       })
       .catch(() => conn.sock.destroy())
       .finally(() => {
@@ -609,21 +682,29 @@ export async function startBroker(
 ): Promise<RunningBroker & { publicTcpAddress: { host: string; port: number } }>;
 export async function startBroker(config: BrokerConfig, opts: StartBrokerOptions = {}): Promise<RunningBroker> {
   const broker = new Broker(config);
-  await broker.init();
   const socketPath = path.join(config.runDir, "broker.sock");
   const adminSocketPath = opts.adminSocketPath;
-  const server = new BrokerServer(broker, {
-    socketPath,
-    ...(adminSocketPath !== undefined ? { adminSocketPath } : {}),
-    ...(opts.publicTcp !== undefined ? { publicTcp: opts.publicTcp } : {}),
-  });
+  let server: BrokerServer | undefined;
   try {
+    await broker.init();
+    server = new BrokerServer(broker, {
+      socketPath,
+      ...(adminSocketPath !== undefined ? { adminSocketPath } : {}),
+      ...(opts.publicTcp !== undefined ? { publicTcp: opts.publicTcp } : {}),
+    });
     await server.listen();
   } catch (err) {
-    // A partially bound server (e.g. a rejected publicTcp token after the
-    // unix socket bound) must not leak listeners or the opened journal.
-    await server.close();
-    await broker.close();
+    // Constructor already opens the authority journal; init may open the
+    // holdout ledger or uncertain-create a volume. Unwind every stage.
+    const cleanup = await Promise.allSettled([server?.close(), broker.close()]);
+    const failures = cleanup.flatMap((result) =>
+      result.status === "rejected"
+        ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
+        : [],
+    );
+    if (failures.length > 0) {
+      throw new Error(`${err instanceof Error ? err.message : String(err)}; broker init cleanup incomplete: ${failures.join("; ")}`);
+    }
     throw err;
   }
   return {
@@ -633,12 +714,16 @@ export async function startBroker(config: BrokerConfig, opts: StartBrokerOptions
     adminSocketPath,
     publicTcpAddress: server.publicTcpAddress,
     close: async () => {
-      // server.close() synchronously stops admitting new RPC, then awaits the
-      // handler drain; broker.close() runs CONCURRENTLY and force-removes
-      // every active container, so a slow eval/exec cannot stall the drain.
-      const serverClosed = server.close();
-      await broker.close();
-      await serverClosed;
+      // Stop admission first, then settle BOTH teardown paths even when one
+      // fails. A leaked broker resource must reject the runner's cleanup
+      // barrier instead of being hidden behind a successfully closed socket.
+      const results = await Promise.allSettled([broker.close(), server.close()]);
+      const failures = results.flatMap((result) =>
+        result.status === "rejected"
+          ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
+          : [],
+      );
+      if (failures.length > 0) throw new Error(`broker server cleanup incomplete: ${failures.join("; ")}`);
     },
   };
 }

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CapsuleManifest, RunConfig, capsuleDigest } from "@hone/schema";
@@ -174,6 +174,22 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
     expect(runtime.bundleDir).toBeNull();
     expect(runtime.runArgv).toEqual(["python3", "/evil.py"]);
   });
+  it("rejects cleanup when an optimizer container cannot be removed", async () => {
+    const runtime = await prepareOptimizerRuntime(
+      { runId: "run_leak", env: { HONE_OPTIMIZER_CMD: "node /hone/bundle/optimizer.mjs" }, optimizerDigest: fakeHash("8") },
+      {
+        image: FIX_IMAGE,
+        transport: { kind: "unix", hostSocketPath: "/dev/null" },
+        run: async (argv) =>
+          argv[1] === "rm"
+            ? res({ exitCode: 1, stderr: Buffer.from("daemon refused removal") })
+            : res(),
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE),
+      },
+    );
+    runtime.spawnedNames.push("hone-opt-run_leak-0");
+    await expect(runtime.cleanup()).rejects.toThrow(/optimizer cleanup incomplete.*daemon refused removal/);
+  });
 });
 
 describe("runOptimizer: docker-only launch, token hygiene", () => {
@@ -217,6 +233,22 @@ describe("runOptimizer: docker-only launch, token hygiene", () => {
     expect(seen.argvs[0]?.join(" ")).not.toContain(token);
     expect(seen.envs[0]?.["HONE_BROKER_TOKEN"]).toBe(token); // docker client env — resolved by the value-less -e
     expect(existsSync(join(runDir, "events.ndjson"))).toBe(false);
+  });
+
+  it("caps attacker-controlled optimizer diagnostics across stdout and stderr", async () => {
+    const root = makeRoot();
+    const runDir = join(root, ".hone-runs", "run_logcap");
+    mkdirSync(runDir, { recursive: true });
+    const script = join(root, "noisy-opt.mjs");
+    writeFileSync(script, 'process.stdout.write("o".repeat(1024)); process.stderr.write("e".repeat(1024));\n');
+    const ctx = optCtx(root, runDir, "run_logcap");
+    ctx.env["HONE_OPTIMIZER_LOG_LIMIT_BYTES"] = "128";
+    await runOptimizer(
+      ctx,
+      testOptimizerRuntime({ runId: "run_logcap", argv: [process.execPath, script], spawnImpl: fakeOptimizerSpawn(FIX_IMAGE) }),
+    );
+    expect(statSync(join(runDir, "optimizer.log")).size).toBeLessThanOrEqual(128);
+    expect(readFileSync(join(runDir, "optimizer.log"), "utf8")).toContain("optimizer.log truncated");
   });
 });
 

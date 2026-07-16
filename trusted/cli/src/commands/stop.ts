@@ -1,6 +1,13 @@
 import { basename } from "node:path";
+import { runCommand, type RunCommand } from "@hone/broker";
 import { UsageError, boolFlag, parseFlags, strFlag } from "../args.js";
-import { incumbentsAligned, readJournalIncumbents } from "../backends/local.js";
+import {
+  incumbentsAligned,
+  journalEventsAligned,
+  readJournalEvents,
+  readJournalIncumbents,
+  sweepStaleRunResources,
+} from "../backends/local.js";
 import { appendEvent, readEvents, replayRun } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
 import { sleep } from "../promise.js";
@@ -31,6 +38,40 @@ async function confirmedSupervisorPid(runDir: string, runId: string): Promise<nu
   return sentinel.pid;
 }
 
+async function resourcesSwept(runId: string, runDir: string, run: RunCommand, io: CmdIo): Promise<boolean> {
+  try {
+    await sweepStaleRunResources(runId, runDir, run, true);
+    return true;
+  } catch (err) {
+    io.err(`run ${runId}: resource cleanup incomplete: ${err instanceof Error ? err.message : String(err)} — refusing completion`);
+    return false;
+  }
+}
+
+function journalAuthorityAligned(runId: string, runDir: string, io: CmdIo): boolean {
+  try {
+    const publicEvents = readEvents(runDir);
+    const journalEvents = readJournalEvents(runDir);
+    if (journalEvents !== null && !journalEventsAligned(journalEvents, publicEvents)) {
+      io.err(
+        `run ${runId}: broker event authority and the public event log are not exactly aligned — resume required (\`hone run --resume\`) before stop or apply`,
+      );
+      return false;
+    }
+    const incumbents = readJournalIncumbents(runDir);
+    if (incumbents !== null && !incumbentsAligned(incumbents, publicEvents)) {
+      io.err(
+        `run ${runId}: the broker journal holds incumbent authority the event log never saw — resume required (\`hone run --resume\`) before stop or apply`,
+      );
+      return false;
+    }
+    return true;
+  } catch (e) {
+    io.err(`run ${runId}: ${e instanceof Error ? e.message : String(e)} — resume required; refusing to finalize or apply`);
+    return false;
+  }
+}
+
 /**
  * Stop a run. A live, identity-confirmed supervisor is SIGTERM'd and awaited
  * (terminal event + lock release + process death). A dead run is finalized
@@ -39,7 +80,7 @@ async function confirmedSupervisorPid(runDir: string, runId: string): Promise<nu
  * and this finalization can never both write authority, and no stale state
  * is ever sealed or applied. --take-best lands the incumbent on a branch.
  */
-export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
+export async function stopCommand(args: string[], io: CmdIo, run: RunCommand = runCommand): Promise<number> {
   const { flags } = parseFlags(args, { booleans: ["take-best"], strings: ["run", "repo", "branch"] });
   const runDir = resolveRun(io.root, strFlag(flags, "run"));
   const runId = replayRun(runDir).runId ?? basename(runDir);
@@ -73,6 +114,8 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
           return 1;
         }
       }
+      if (!journalAuthorityAligned(runId, runDir, io)) return 1;
+      if (!(await resourcesSwept(runId, runDir, run, io))) return 1;
       io.out(`run ${runId} already finished (${state.finished.status})`);
       return takeBest(stopFlags, io, runDir);
     }
@@ -99,6 +142,8 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
         io.err(`run ${runId}: run.finished is logged but the supervisor (pid ${confirmed}) has not exited within 15s`);
         return 1;
       }
+      if (!journalAuthorityAligned(runId, runDir, io)) return 1;
+      if (!(await resourcesSwept(runId, runDir, run, io))) return 1;
       io.out(`run ${runId} stopped (${live.finished.status})`);
       return takeBest(stopFlags, io, runDir);
     }
@@ -124,24 +169,16 @@ export async function stopCommand(args: string[], io: CmdIo): Promise<number> {
       // proves no supervisor is live — a still-alive sentinel PID here is a
       // recycled number and must NOT block finalization (or be signalled).
       const under = replayRun(runDir);
-      if (under.finished !== null) continue;
-
-      // Seal guard: never finalize from stale events — the fsynced broker
-      // journal may hold promotions the event sink never saw. No journal =
-      // stub/legacy run; corruption or mismatch fails CLOSED.
-      try {
-        const journal = readJournalIncumbents(runDir);
-        if (journal !== null && !incumbentsAligned(journal, readEvents(runDir))) {
-          io.err(
-            `run ${runId}: the broker journal holds incumbent authority the event log never saw — resume required (\`hone run --resume\`) before stop or apply`,
-          );
-          return 1;
-        }
-      } catch (e) {
-        io.err(`run ${runId}: ${e instanceof Error ? e.message : String(e)} — resume required; refusing to finalize`);
-        return 1;
+      // Validate even an already-finished run before applying it. A stale
+      // terminal must never turn an older public incumbent into authority.
+      if (!journalAuthorityAligned(runId, runDir, io)) return 1;
+      if (under.finished !== null) {
+        if (!(await resourcesSwept(runId, runDir, run, io))) return 1;
+        io.out(`run ${runId} already finished (${under.finished.status})`);
+        return takeBest(stopFlags, io, runDir);
       }
 
+      if (!(await resourcesSwept(runId, runDir, run, io))) return 1;
       const best = under.incumbent?.artifact ?? null;
       appendEvent(runDir, {
         runId,

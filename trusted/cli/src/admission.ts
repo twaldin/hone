@@ -1,10 +1,10 @@
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CapsuleManifest, DiagnosticOrderingReport, capsuleDigest, deriveCapsuleId, validateDiagnosticOrdering } from "@hone/schema";
 import { UsageError } from "./args.js";
 import { loadCapsule } from "./capsule.js";
+import { assertBaselineMatchesGitCommit } from "./git-baseline.js";
 
 /**
  * Frozen capsule admission (VI.4 / M0 conformance): every check here runs
@@ -26,8 +26,6 @@ import { loadCapsule } from "./capsule.js";
 /** Validated-manifest snapshot written into each run dir at admission. */
 export const CAPSULE_SNAPSHOT_FILE = "capsule-manifest.json";
 
-/** Worktree noise that never enters the packed baseline artifact (mirrors backends/local.ts BASELINE_SKIP). */
-const WORKTREE_SKIP = ["__pycache__/", ".pytest_cache/"];
 
 export interface AdmittedCapsule {
   manifest: CapsuleManifest;
@@ -107,31 +105,10 @@ function checkOrderingReport(capsuleDir: string, manifest: CapsuleManifest): Dia
 function checkGitBaseline(capsuleDir: string, commit: string): void {
   const baselineDir = join(capsuleDir, "baseline");
   if (!existsSync(baselineDir)) refuse(capsuleDir, "manifest declares a git baseline but the capsule has no baseline/ directory");
-  const gitDir = existsSync(join(baselineDir, ".gitdir")) ? join(baselineDir, ".gitdir") : join(baselineDir, ".git");
-  let head: string;
-  let porcelain: string;
   try {
-    head = execFileSync("git", ["--git-dir", gitDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    porcelain = execFileSync(
-      "git",
-      ["--git-dir", gitDir, "--work-tree", baselineDir, "-c", "core.fsmonitor=", "status", "--porcelain"],
-      { encoding: "utf8", cwd: baselineDir },
-    );
-  } catch (e) {
-    refuse(capsuleDir, `baseline git inspection failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  if (head !== commit) {
-    refuse(capsuleDir, `baseline HEAD ${head} != manifest commit ${commit} — re-run capsules/tools/scaffold.ts`);
-  }
-  const dirty = porcelain
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .filter((line) => {
-      const path = line.slice(3);
-      return !WORKTREE_SKIP.some((skip) => path === skip || path.startsWith(skip));
-    });
-  if (dirty.length > 0) {
-    refuse(capsuleDir, `baseline worktree is not clean at the declared HEAD (${dirty.length} entr${dirty.length === 1 ? "y" : "ies"}): ${dirty.slice(0, 5).join(", ")}`);
+    assertBaselineMatchesGitCommit(baselineDir, commit);
+  } catch (error) {
+    refuse(capsuleDir, `baseline git inspection failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

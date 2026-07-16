@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CapsuleManifest, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
@@ -559,6 +559,27 @@ describe("dead-supervisor seal guard (P1: stop must not finalize stale events)",
     expect(ref.status).not.toBe(0);
   });
 
+  it("refuses to seal when any non-incumbent broker event transaction is ahead", async () => {
+    const root = makeRoot();
+    const runId = "run_seal_events";
+    const best = tarToCas(root, { "hello.txt": "improved\n" });
+    const hidden = {
+      runId,
+      at: "2026-07-15T00:00:00.000Z",
+      type: "episode.started",
+      episode: 1,
+      parent: { hash: best },
+    };
+    const runDir = crashedRun(root, runId, [
+      alignedLine(best),
+      { t: "episode", episode: 1, events: [hidden] },
+    ]);
+    const { io, err } = makeIo(root);
+    expect(await stopCommand([], io)).toBe(1);
+    expect(err.join("\n")).toMatch(/event authority.*resume required/);
+    expect(readEvents(runDir).some((event) => event.type === "run.finished")).toBe(false);
+  });
+
   it("finalizes normally when the journal and events are exactly aligned", async () => {
     const root = makeRoot();
     const runId = "run_seal2";
@@ -615,6 +636,10 @@ describe("dead-stop vs concurrent resume (P1: crash finalization only under the 
     appendEvent(runDir, { runId, at: at(), type: "run.resumed", fromCursor: 7 });
     appendEvent(runDir, { runId, at: at(), type: "incumbent.new", artifact: { hash: finalBest }, aggregate: 0.8, deltaVsBaseline: 0.3, episode: 1 });
     appendEvent(runDir, { runId, at: at(), type: "run.finished", best: { hash: finalBest }, status: "completed" });
+    appendFileSync(
+      join(runDir, "broker-state.ndjson"),
+      `${JSON.stringify({ t: "incumbent", hash: finalBest, aggregate: 0.8, deltaVsBaseline: 0.3, episode: 1 })}\n`,
+    );
     await release();
 
     const code = await stopPromise;

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -103,7 +103,12 @@ async function collectTree(root: string, rel: string, out: SourceEntry[]): Promi
  * order. Output is self-validated before it enters CAS. The size cap covers
  * the COMPLETE archive, terminal end-of-archive blocks included.
  */
-export async function packDirAsArtifact(dir: string, cas: CasStore, maxBytes: number = MAX_ARTIFACT_BYTES): Promise<string> {
+export async function packDirAsArtifact(
+  dir: string,
+  cas: CasStore,
+  maxBytes: number = MAX_ARTIFACT_BYTES,
+  beforeStore?: (hash: string, bytes: number) => Promise<void> | void,
+): Promise<string> {
   const entries: SourceEntry[] = [];
   await collectTree(dir, "", entries);
   entries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
@@ -137,6 +142,8 @@ export async function packDirAsArtifact(dir: string, cas: CasStore, maxBytes: nu
   // Self-check: only validator-clean bytes ever enter CAS, so the unpack
   // gate can never reject an artifact this function produced.
   validateWorkspaceTar(bytes);
+  const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  await beforeStore?.(hash, bytes.length);
   return await cas.putBuffer(bytes);
 }
 
@@ -313,7 +320,12 @@ async function walkExtracted(root: string, rel: string, out: Map<string, "file" 
  * canonical repack of the extracted `workspace/` tree. Returns the canonical
  * hash; the temp dir is always cleaned up.
  */
-export async function canonicalizeWorkspaceTar(tarBytes: Buffer, cas: CasStore, run: RunCommand = runCommand): Promise<string> {
+export async function canonicalizeWorkspaceTar(
+  tarBytes: Buffer,
+  cas: CasStore,
+  run: RunCommand = runCommand,
+  beforeStore?: (hash: string, bytes: number) => Promise<void> | void,
+): Promise<string> {
   const accepted = validateWorkspaceTar(tarBytes);
   const tmp = await mkdtemp(path.join(os.tmpdir(), "hone-canon-"));
   await chmod(tmp, 0o700); // mkdtemp honors the process umask; 0177 would make tmp unusable
@@ -345,7 +357,7 @@ export async function canonicalizeWorkspaceTar(tarBytes: Buffer, cas: CasStore, 
         );
       }
     }
-    return await packDirAsArtifact(wsDir, cas);
+    return await packDirAsArtifact(wsDir, cas, MAX_ARTIFACT_BYTES, beforeStore);
   } finally {
     // Cleanup must survive whatever mode bits extraction restored.
     await makeTreeOwnerAccessible(tmp);
@@ -376,7 +388,7 @@ export async function unpackArtifact(
   // workspace/ root, no links/devices/traversal/.git) BEFORE any tar binary
   // touches it. Extant CAS blobs get the same treatment as fresh ones.
   const accepted = validateWorkspaceTar(await cas.readBuffer(hash));
-  const tmp = `${finalDir}.tmp-${process.pid}-${Date.now()}`;
+  const tmp = `${finalDir}.tmp-${randomUUID()}`;
   await mkdir(tmp, { recursive: true });
   await chmod(tmp, 0o700); // mkdir masks with the process umask
   const expected = expectedTreeOf(accepted);
@@ -397,9 +409,14 @@ export async function unpackArtifact(
   });
   try {
     await rename(tmp, finalDir);
-  } catch {
-    // A concurrent unpack won the rename; ours is redundant.
+  } catch (error) {
     await rm(tmp, { recursive: true, force: true });
+    try {
+      const entries = await readdir(finalDir);
+      if (!entries.includes("workspace")) throw error;
+    } catch {
+      throw error;
+    }
   }
   return workspaceDir;
 }

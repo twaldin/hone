@@ -236,7 +236,13 @@ async function postCompletions(
 }
 
 async function readTrace(runDir: string): Promise<ProxyTraceRecord[]> {
-  const raw = await readFile(join(runDir, "proxy-trace.ndjson"), "utf8");
+  let raw: string;
+  try {
+    raw = await readFile(join(runDir, "proxy-trace.ndjson"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
   return raw
     .split("\n")
     .filter((l) => l.trim() !== "")
@@ -447,11 +453,11 @@ describe("budget enforcement", () => {
     expect(ctx.upstream.calls).toHaveLength(1); // only the first reached upstream
     expect(ctx.spends).toHaveLength(1);
 
-    // the rejection is still traced for audit
+    // A refused request never reached upstream and is not a session trace.
+    // Persisting attacker-controlled denied bodies would create an unmetered
+    // CAS/disk-growth path behind one held reservation.
     const trace = await readTrace(ctx.runDir);
-    expect(trace).toHaveLength(2);
-    expect(trace[1]?.status).toBe(402);
-    expect(trace[1]?.usage.totalTokens).toBe(0);
+    expect(trace).toHaveLength(1);
   });
 });
 
@@ -510,6 +516,17 @@ describe("/v1/models passthrough", () => {
     expect(body.data[0]?.id).toBe("mock-model");
     const call = ctx.upstream.calls.find((c) => c.url === "/v1/models");
     expect(call?.headers.authorization).toBe(`Bearer ${UPSTREAM_KEY}`);
+    await Promise.all([
+      fetch(`http://127.0.0.1:${ctx.port}/v1/models`, {
+        headers: { authorization: `Bearer ${ctx.proxy.tokenFor("mutation")}` },
+      }),
+      fetch(`http://127.0.0.1:${ctx.port}/v1/models`, {
+        headers: { authorization: `Bearer ${ctx.proxy.tokenFor("mutation")}` },
+      }),
+    ]);
+    expect(ctx.upstream.calls.filter((c) => c.url === "/v1/models")).toHaveLength(1);
+    expect(await readTrace(ctx.runDir)).toHaveLength(0);
+    expect(await walkFiles(ctx.casDir)).toHaveLength(0);
   });
 });
 
@@ -631,6 +648,7 @@ async function until(cond: () => boolean, ms = 5000): Promise<void> {
 describe("admission reservations", () => {
   it("two parallel requests cannot both spend the same remaining headroom", async () => {
     const spends: SpendRecord[] = [];
+    const exhausted: string[] = [];
     const ctx = await setup({
       checkBudget: (): BudgetDecision => ({
         allowed: true,
@@ -638,6 +656,9 @@ describe("admission reservations", () => {
       }),
       recordSpend: (s) => {
         spends.push(s);
+      },
+      recordBudgetExhaustion: (dimension) => {
+        exhausted.push(dimension);
       },
     });
     const token = ctx.proxy.tokenFor("mutation");
@@ -655,6 +676,9 @@ describe("admission reservations", () => {
     await (a.status === 200 ? a : b).text();
     expect(spends).toHaveLength(1);
     expect(spends[0]?.tokens).toBe(120);
+    expect(exhausted).toEqual([]); // reservation pressure is transient, not a run-wide terminal
+    const traces = await readTrace(ctx.runDir);
+    expect(traces).toHaveLength(1);
   });
 
   it("reservations release after settlement — no leak across sequential requests", async () => {
@@ -700,9 +724,13 @@ describe("admission reservations", () => {
     expect(spends.map((s) => s.tokens)).toEqual([15, 15]);
   });
 
-  it("402 with hone_budget_exceeded before any upstream call when nothing fits", async () => {
+  it("402 records trusted exhaustion before any upstream call when nothing fits", async () => {
+    const exhausted: string[] = [];
     const ctx = await setup({
       checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 5, usd: 1000 } }),
+      recordBudgetExhaustion: (dimension) => {
+        exhausted.push(dimension);
+      },
     });
     const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
       messages: [],
@@ -712,6 +740,7 @@ describe("admission reservations", () => {
     expect(BudgetExceededError.parse(await res.json()).error.dimension).toBe("tokens");
     expect(ctx.upstream.calls).toHaveLength(0);
     expect(ctx.spends).toHaveLength(0);
+    expect(exhausted).toEqual(["tokens"]);
   });
 
   it("usd headroom gates admission independently of tokens", async () => {
@@ -928,6 +957,8 @@ describe("transport failure reconciliation", () => {
     // reservation must be gone: an identical request re-admits (502 again, NOT 402)
     const second = await postCompletions(ctx, token, { messages: [], max_tokens: 1000 });
     expect(second.status).toBe(502);
+    expect(await readTrace(ctx.runDir)).toHaveLength(0);
+    expect(await walkFiles(ctx.casDir)).toHaveLength(0);
   });
 
   it("a mid-flight connection reset charges the full reservation ceiling", async () => {

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { RunConfig, RunEvent } from "@hone/schema";
 import { UsageError } from "../src/args.js";
-import { runCommand } from "../src/supervisor.js";
+import { remainingWallBudgetMs, runCommand } from "../src/supervisor.js";
 import { makeCapsule, makeIo, makeRoot, readLogLines } from "./helpers.js";
 
 /** The one persisted runconfig.json — asserts exactly one run was minted. */
@@ -50,6 +50,47 @@ describe("wall-clock budget enforcement", () => {
     const finished = events[events.length - 1];
     expect(finished?.type).toBe("run.finished");
     if (finished?.type === "run.finished") expect(finished.status).toBe("budget");
+  });
+});
+
+describe("broker-authored budget boundaries", () => {
+  it("an exact-cap budget snapshot aborts the backend and terminalizes as budget", { timeout: 20_000 }, async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(
+      join(root, "exact-cap.mjs"),
+      `export function createBackend() {
+        return {
+          async start(ctx) {
+            ctx.emit({
+              runId: ctx.runId,
+              at: new Date().toISOString(),
+              type: "budget.snapshot",
+              budget: {
+                envelope: ctx.config.budget,
+                spent: { tokens: ctx.config.budget.maxTokens, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 },
+              },
+            });
+            if (!ctx.signal.aborted) throw new Error("exact-cap snapshot did not abort the backend");
+          },
+        };
+      }
+      `,
+    );
+    writeFileSync(join(root, "cfg.json"), JSON.stringify({ budget: { maxTokens: 10 } }));
+    const { io, out } = makeIo(root, { HONE_UNSAFE_BACKEND: "1" });
+    expect(await runCommand(["capsule", "--headless", "--backend", "./exact-cap.mjs", "--config", "cfg.json"], io)).toBe(0);
+    const report = JSON.parse(out[out.length - 1] ?? "");
+    expect(report.status).toBe("budget");
+    const events = readLogLines(root, report.runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.filter((event) => event.type === "budget.exhausted")).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "budget" });
+  });
+
+  it("resume wall time includes time elapsed while no supervisor was running", () => {
+    const startedAt = "2026-07-15T00:00:00.000Z";
+    expect(remainingWallBudgetMs(10, 2, startedAt, Date.parse(startedAt) + 5_000)).toBe(5_000);
+    expect(remainingWallBudgetMs(10, 2, startedAt, Date.parse(startedAt) + 11_000)).toBe(0);
   });
 });
 

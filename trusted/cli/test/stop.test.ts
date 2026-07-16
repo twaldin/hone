@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { RunEvent } from "@hone/schema";
+import type { RunCommand } from "@hone/broker";
 import { stopCommand } from "../src/commands/stop.js";
 import { fixtureEvents, gitIn, initScratchRepo, makeIo, makeRoot, readLogLines, tarToCas, writeEvents } from "./helpers.js";
 
@@ -43,5 +44,23 @@ describe("hone stop", () => {
     expect(await stopCommand([], io)).toBe(0);
     const events = readLogLines(root, "run_done").map((l) => RunEvent.parse(JSON.parse(l)));
     expect(events.filter((e) => e.type === "run.finished").length).toBe(1);
+  });
+  it("refuses to terminalize a dead run when Docker resources cannot be verified clean", async () => {
+    const root = makeRoot();
+    const baselineHash = tarToCas(root, { "hello.txt": "baseline\n" });
+    writeEvents(root, "run_leaked", fixtureEvents({ runId: "run_leaked", baselineHash, bestHash: baselineHash, finished: false }));
+    const { io, err } = makeIo(root);
+    const run: RunCommand = async (argv) => ({
+      exitCode: argv[1] === "ps" ? 1 : 0,
+      stdout: Buffer.alloc(0),
+      stderr: argv[1] === "ps" ? Buffer.from("daemon unavailable") : Buffer.alloc(0),
+      truncated: false,
+      timedOut: false,
+    });
+
+    expect(await stopCommand([], io, run)).toBe(1);
+    expect(err.join("\n")).toMatch(/resource cleanup incomplete/);
+    const events = readLogLines(root, "run_leaked").map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.some((event) => event.type === "run.finished")).toBe(false);
   });
 });

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,14 +8,14 @@ import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { ApplyMode, BudgetEnvelope, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
-import type { CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
+import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
 import { admitCapsule, revalidateForResume, writeCapsuleSnapshot } from "./admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
 import { createBackend as createLocalBackend } from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
 import { applyContractRevision, budgetEnvelopeError, contractHash, renderContract } from "./contract.js";
 import { LadderLockedError, deliver, isGitRepo, ladderLocked, LADDER_REFUSAL } from "./deliver.js";
-import { appendEvent, replayRun } from "./eventlog.js";
+import { appendEvent, readEvents, replayRun } from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
 import type { CmdIo } from "./io.js";
 import { resolveOptimizerDigest } from "./optimizer-digest.js";
@@ -475,6 +475,75 @@ export async function probeRunLockIdentity(runDir: string): Promise<RunLockIdent
   return after;
 }
 
+const RunLockClaim = z.object({
+  pid: z.number().int().positive(),
+  birth: z.string().min(1),
+  nonce: z.string().uuid(),
+});
+
+/** Stable process identity: PID plus kernel/ps birth token defeats PID reuse. */
+function processBirthToken(pid: number): string | null {
+  if (!pidAlive(pid)) return null;
+  if (process.platform === "linux") {
+    try {
+      const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const close = raw.lastIndexOf(")");
+      const fields = close < 0 ? [] : raw.slice(close + 2).trim().split(/\s+/);
+      const started = fields[19];
+      if (started !== undefined && started !== "") return `linux:${started}`;
+    } catch {
+      // Fall through to ps; a lookup failure for a live PID fails closed.
+    }
+  }
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+    encoding: "utf8",
+    env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", LC_ALL: "C" },
+  });
+  const value = result.status === 0 ? result.stdout.trim() : "";
+  return value === "" ? null : `${process.platform}:${value}`;
+}
+
+/**
+ * Atomic claim ownership is encoded in a symlink target—creation publishes
+ * pid+birth+nonce in one syscall. A live/SIGSTOP'd owner is never expired.
+ */
+function tryAcquireRunLockClaim(claimPath: string): (() => void) | null {
+  const birth = processBirthToken(process.pid);
+  if (birth === null) throw new Error("cannot establish this process's run-lock claim identity");
+  const payload = JSON.stringify({ pid: process.pid, birth, nonce: randomUUID() });
+  try {
+    symlinkSync(payload, claimPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    let owner: z.infer<typeof RunLockClaim> | null = null;
+    try {
+      const parsed = RunLockClaim.safeParse(JSON.parse(readlinkSync(claimPath)));
+      owner = parsed.success ? parsed.data : null;
+    } catch {
+      // A non-symlink claim may belong to an older live binary. Fail closed:
+      // never age-expire an owner whose liveness cannot be proved.
+      try {
+        if (!statSync(claimPath).isSymbolicLink()) return null;
+      } catch {
+        return null;
+      }
+    }
+    if (owner !== null && pidAlive(owner.pid)) {
+      const currentBirth = processBirthToken(owner.pid);
+      if (currentBirth === null || currentBirth === owner.birth) return null;
+    }
+    rmSync(claimPath, { force: true });
+    return null;
+  }
+  return () => {
+    try {
+      if (readlinkSync(claimPath) === payload) rmSync(claimPath, { force: true });
+    } catch {
+      // Already removed only after this process died—which cannot resume.
+    }
+  };
+}
+
 /**
  * OS-enforced exclusive per-run lock (FinalSecurityGate finding 2): a bound
  * unix-domain socket. Liveness is the kernel accepting a connection — the
@@ -532,10 +601,8 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
           // own: the socket only by dev+ino equality with OUR bind, the
           // metadata only by exact identity match — a successor's socket or
           // metadata is never removed.
-          let claimFd: number;
-          try {
-            claimFd = openSync(claimPath, "wx");
-          } catch {
+          const releaseClaim = tryAcquireRunLockClaim(claimPath);
+          if (releaseClaim === null) {
             closed.resolve();
             return;
           }
@@ -553,8 +620,7 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
               // already gone — a claimant cleared it before our claim
             }
           } finally {
-            closeSync(claimFd);
-            rmSync(claimPath, { force: true });
+            releaseClaim();
           }
           closed.resolve();
         });
@@ -564,17 +630,8 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
     if (await connectProbe(sockPath, true)) throw alreadySupervised();
 
     // Stale leftover. Claim the exclusive right to clear it.
-    let claimFd: number;
-    try {
-      claimFd = openSync(claimPath, "wx");
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      // A sibling holds the claim; expire a claim orphaned by a crash.
-      try {
-        if (Date.now() - statSync(claimPath).mtimeMs > 10_000) rmSync(claimPath, { force: true });
-      } catch {
-        // claim vanished — sibling finished; just retry
-      }
+    const releaseClaim = tryAcquireRunLockClaim(claimPath);
+    if (releaseClaim === null) {
       await sleep(25);
       continue;
     }
@@ -588,12 +645,32 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
       rmSync(metaPath, { force: true });
       rmSync(sockPath, { force: true });
     } finally {
-      closeSync(claimFd);
-      rmSync(claimPath, { force: true });
+      releaseClaim();
     }
     // Loop: the next bind is kernel-arbitrated among contenders.
   }
   throw new Error(`run lock ${sockPath}: could not acquire after repeated stale-rebind attempts`);
+}
+
+function exhaustedBudgetDimension(budget: BudgetState): string | null {
+  if (budget.spent.tokens >= budget.envelope.maxTokens) return "tokens";
+  if (budget.spent.usd >= budget.envelope.maxUsd) return "usd";
+  if (budget.spent.wallClockSec >= budget.envelope.maxWallClockSec) return "wallClockSec";
+  if (budget.spent.evaluatorInvocations >= budget.envelope.maxEvaluatorInvocations) return "evaluatorInvocations";
+  return null;
+}
+
+/** Wall budget is measured from run.started, including time spent offline between supervisors. */
+export function remainingWallBudgetMs(
+  maxWallClockSec: number,
+  lastSpentWallSec: number,
+  runStartedAt: string | undefined,
+  nowMs: number = Date.now(),
+): number {
+  const parsedStart = runStartedAt === undefined ? Number.NaN : Date.parse(runStartedAt);
+  const elapsedSinceStart = Number.isFinite(parsedStart) ? Math.max(0, (nowMs - parsedStart) / 1000) : 0;
+  const spent = Math.max(lastSpentWallSec, elapsedSinceStart);
+  return Math.max(0, (maxWallClockSec - spent) * 1000);
 }
 
 /** Frozen inputs superviseRun carries beside the plan (all admission-derived). */
@@ -656,16 +733,27 @@ async function superviseLocked(
   let budgetDimension: string | null = null;
   let budgetEventLogged = false;
   let stopRequested = false;
+  // Bound after the AbortController/termination barrier exist. Broker events
+  // cannot arrive before backend.start, so this placeholder is never the
+  // active path; it keeps event normalization linear during setup.
+  let requestBudgetAbort = (dimension: string): void => {
+    budgetDimension ??= dimension;
+  };
 
   let liveBudget = replayRun(runDir).lastBudget;
   const emit = (event: RunEvent): RunEvent => {
     const parsed = appendEvent(runDir, event);
-    if (parsed.type === "budget.snapshot") liveBudget = parsed.budget;
+    if (parsed.type === "budget.snapshot") {
+      liveBudget = parsed.budget;
+      const dimension = exhaustedBudgetDimension(parsed.budget);
+      if (dimension !== null) requestBudgetAbort(dimension);
+    }
     if (parsed.type === "budget.exhausted") {
       // Trusted broker budget authority: ANY logged exhaustion normalizes the
-      // terminal/report status to "budget" (an explicit stop still wins).
-      budgetDimension ??= parsed.dimension;
+      // terminal/report status to "budget" and immediately aborts the whole
+      // registered process tree. An explicit operator stop still wins status.
       budgetEventLogged = true;
+      requestBudgetAbort(parsed.dimension);
     }
     if (headless) {
       io.out(JSON.stringify(parsed));
@@ -764,15 +852,18 @@ async function superviseLocked(
     })();
     return terminationBarrier;
   };
-
-  // Wall-clock budget: remaining = envelope minus what the log says was already spent.
-  const spentWallSec = replayed.lastBudget?.spent.wallClockSec ?? 0;
-  const remainMs = Math.max(0, (config.budget.maxWallClockSec - spentWallSec) * 1000);
-  armTimer(() => {
-    budgetDimension = "wallClockSec";
-    abort.abort(new Error("wall-clock budget exhausted"));
+  requestBudgetAbort = (dimension: string): void => {
+    budgetDimension ??= dimension;
+    if (!abort.signal.aborted) abort.abort(new Error(`budget exhausted: ${dimension}`));
     void termThenKill();
-  }, remainMs);
+  };
+
+  // Wall clock is run lifetime, not supervisor uptime: resume includes the
+  // offline interval since the durable run.started timestamp.
+  const runStartedAt = readEvents(runDir).find((event) => event.type === "run.started")?.at;
+  const spentWallSec = replayed.lastBudget?.spent.wallClockSec ?? 0;
+  const remainMs = remainingWallBudgetMs(config.budget.maxWallClockSec, spentWallSec, runStartedAt);
+  armTimer(() => requestBudgetAbort("wallClockSec"), remainMs);
 
   const onSignal = (): void => {
     stopRequested = true;
@@ -868,17 +959,14 @@ async function superviseLocked(
      */
     const awaitCleanup = async (): Promise<Error | null> => {
       if (cleanupBarrier === null) return null;
-      const timeoutMs = Number(io.env["HONE_CLEANUP_TIMEOUT_MS"] ?? 60_000);
-      const timedOut = deferred<never>();
-      const timer = setTimeout(() => timedOut.reject(new Error(`backend cleanup did not complete within ${timeoutMs}ms`)), timeoutMs);
       try {
-        await Promise.race([cleanupBarrier, timedOut.promise]);
+        // The per-run lock remains held until teardown actually settles.
+        // A local timeout would only release the lock while Docker work was
+        // still mutating the same run, allowing a resumed supervisor to race.
+        await cleanupBarrier;
         return null;
       } catch (e) {
         return e instanceof Error ? e : new Error(String(e));
-      } finally {
-        clearTimeout(timer);
-        void timedOut.promise.catch(() => {}); // settled-after-race rejection stays handled
       }
     };
 

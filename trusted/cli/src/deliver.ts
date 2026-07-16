@@ -259,9 +259,6 @@ function branchDeliver(opts: DeliverOptions): { branch: string; commit: string }
     if (exec("git", ["-C", opts.repo, "check-ref-format", `refs/heads/${branch}`], { env }).code !== 0) {
       throw new Error(`invalid branch name: ${branch}`);
     }
-    if (exec("git", ["-C", opts.repo, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { env }).code === 0) {
-      throw new Error(`branch ${branch} already exists in ${opts.repo} — pass --branch to pick another name`);
-    }
     const blob = casPath(opts.casDir, opts.artifact);
     if (!existsSync(blob)) throw new Error(`artifact ${opts.artifact} not found in CAS (${blob})`);
     // Reject adversarial layouts BEFORE anything else happens: a refused
@@ -273,6 +270,20 @@ function branchDeliver(opts: DeliverOptions): { branch: string; commit: string }
     const stage = join(scratch, "stage");
     extractWorkspaceArtifact(opts.casDir, opts.artifact, stage);
     const files = walkStage(stage);
+
+    // Crash-idempotence: a prior attempt may have created the deterministic
+    // run branch before delivery.applied was fsynced. Accept it only when its
+    // complete tree is exactly this artifact; any collision still fails.
+    const branchRef = `refs/heads/${branch}`;
+    const existing = exec("git", ["-C", opts.repo, "rev-parse", "--verify", "--quiet", `${branchRef}^{commit}`], { env });
+    if (existing.code === 0) {
+      const commit = existing.stdout.toString("utf8").trim();
+      assertTreeMatchesStage(opts.repo, commit, stage, env);
+      return { branch, commit };
+    }
+    if (existing.code !== 1) {
+      throw new Error(`cannot inspect branch ${branch} in ${opts.repo}: ${(existing.stderr || existing.stdout.toString("utf8")).trim()}`);
+    }
 
     let tree: string;
     if (files.length === 0) {
@@ -317,7 +328,7 @@ function branchDeliver(opts: DeliverOptions): { branch: string; commit: string }
 
     // Atomic creation of ONLY the requested ref; "" old-value means the ref
     // must not exist yet, so a concurrent creation loses cleanly.
-    git(opts.repo, env, ["update-ref", `refs/heads/${branch}`, commit, ""]);
+    git(opts.repo, env, ["update-ref", branchRef, commit, ""]);
     return { branch, commit };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
@@ -357,6 +368,14 @@ function autoDeliver(opts: DeliverOptions, notes: string[]): string {
     } catch {
       notes.push(`repo HEAD is detached; left the result on branch ${branch}`);
       return branch;
+    }
+    const alreadyApplied = exec("git", ["-C", opts.repo, "merge-base", "--is-ancestor", branch, base], { env });
+    if (alreadyApplied.code === 0) {
+      notes.push(`auto-apply already present on ${base}; recovered prior delivery of ${branch}`);
+      return base;
+    }
+    if (alreadyApplied.code !== 1) {
+      throw new Error(`cannot determine whether ${branch} is already applied to ${base}: ${alreadyApplied.stderr.trim()}`);
     }
     const merge = exec("git", ["-C", opts.repo, "merge-tree", "--write-tree", base, branch], { env });
     if (merge.code !== 0) {

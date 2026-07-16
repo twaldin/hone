@@ -111,6 +111,12 @@ export interface ProxyConfig {
    * may have consumed upstream capacity).
    */
   recordSpend: (spend: SpendRecord) => void | Promise<void>;
+  /**
+   * Trusted notification that admission refused because the requested work
+   * cannot fit in the remaining envelope. The broker persists this as an
+   * exhausted boundary so an unbounded optimizer cannot retry 402 forever.
+   */
+  recordBudgetExhaustion?: (dimension: BudgetDimension) => void | Promise<void>;
 }
 
 export interface ProxyHandle {
@@ -154,7 +160,7 @@ interface Reservation {
 
 type Admission =
   | { ok: true; reservation: Reservation }
-  | { ok: false; dimension: BudgetDimension; message: string };
+  | { ok: false; dimension: BudgetDimension; message: string; terminal: boolean };
 
 /** Positive safe integer (client-supplied token ceilings). */
 function positiveInt(value: unknown): value is number {
@@ -378,10 +384,13 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         ok: false,
         dimension: decision.dimension,
         message: decision.message ?? `run budget exceeded (${decision.dimension})`,
+        terminal: true,
       };
     }
-    const tokenHeadroom = saneHeadroom(decision.remaining.tokens) - reservedTokens;
-    const usdHeadroom = saneHeadroom(decision.remaining.usd) - reservedUsd;
+    const rawTokenHeadroom = saneHeadroom(decision.remaining.tokens);
+    const rawUsdHeadroom = saneHeadroom(decision.remaining.usd);
+    const tokenHeadroom = rawTokenHeadroom - reservedTokens;
+    const usdHeadroom = rawUsdHeadroom - reservedUsd;
     const inUsd = pricing === undefined ? 0 : (promptTokens / 1e6) * pricing.inputUsdPerMTok;
     const outUsdPerTok = pricing === undefined ? 0 : pricing.outputUsdPerMTok / 1e6;
 
@@ -398,10 +407,15 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         completion = Math.min(completion, Math.floor((usdHeadroom - inUsd) / outUsdPerTok));
       }
       if (completion < 1) {
+        let rawCompletion = Math.min(limits.maxCompletionTokens, Math.floor(rawTokenHeadroom) - promptTokens);
+        if (outUsdPerTok > 0) {
+          rawCompletion = Math.min(rawCompletion, Math.floor((rawUsdHeadroom - inUsd) / outUsdPerTok));
+        }
         return {
           ok: false,
           dimension: tokenBound < 1 ? "tokens" : "usd",
           message: "no completion budget remains for this request",
+          terminal: rawCompletion < 1,
         };
       }
     }
@@ -413,6 +427,7 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         ok: false,
         dimension: "tokens",
         message: `worst-case ${wcTokens} tokens exceeds remaining token headroom`,
+        terminal: wcTokens > rawTokenHeadroom,
       };
     }
     if (wcUsd > usdHeadroom) {
@@ -420,6 +435,7 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         ok: false,
         dimension: "usd",
         message: `worst-case $${wcUsd.toFixed(6)} exceeds remaining usd headroom`,
+        terminal: wcUsd > rawUsdHeadroom,
       };
     }
     reservedTokens += wcTokens;
@@ -466,6 +482,33 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     if (res.destroyed) return;
     res.writeHead(status, { "content-type": "application/json" });
     res.end(body);
+  }
+
+  async function writeResponseChunk(res: ServerResponse, chunk: Buffer): Promise<void> {
+    if (res.destroyed) throw new Error("client connection closed");
+    if (res.write(chunk)) return;
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        res.off("drain", onDrain);
+        res.off("close", onClose);
+        res.off("error", onError);
+      };
+      const onDrain = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onClose = (): void => {
+        cleanup();
+        reject(new Error("client connection closed during response"));
+      };
+      const onError = (error: Error): void => {
+        cleanup();
+        reject(error);
+      };
+      res.once("drain", onDrain);
+      res.once("close", onClose);
+      res.once("error", onError);
+    });
   }
 
   function sendClientError(res: ServerResponse, status: number, type: string, message: string): void {
@@ -545,6 +588,7 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     // BEFORE any upstream call. Nothing fits → 402, upstream never sees it.
     const admission = await admitSerialized(promptTokens, bounds.requested, pricing);
     if (!admission.ok) {
+      if (admission.terminal) await config.recordBudgetExhaustion?.(admission.dimension);
       const errBody: BudgetExceededError = {
         error: {
           type: "hone_budget_exceeded",
@@ -553,17 +597,6 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         },
       };
       const errText = JSON.stringify(errBody);
-      await trace({
-        role: identity.role,
-        model: route.model,
-        requestAt,
-        startedAt,
-        status: 402,
-        usage: ZERO_USAGE,
-        estimatedUsd: 0,
-        requestText: JSON.stringify(forward),
-        responseText: errText,
-      });
       sendJson(res, 402, errText);
       return;
     }
@@ -606,17 +639,6 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         const errText = JSON.stringify({
           error: { type: "hone_shutting_down", message: "proxy is shutting down" },
         });
-        await trace({
-          role: identity.role,
-          model: route.model,
-          requestAt,
-          startedAt,
-          status: 503,
-          usage: ZERO_USAGE,
-          estimatedUsd: 0,
-          requestText: forwardText,
-          responseText: errText,
-        });
         sendJson(res, 503, errText);
         return;
       }
@@ -640,17 +662,19 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
             message: err instanceof Error ? err.message : String(err),
           },
         });
-        await trace({
-          role: identity.role,
-          model: route.model,
-          requestAt,
-          startedAt,
-          status: 502,
-          usage: noAccept ? ZERO_USAGE : ceilingUsage,
-          estimatedUsd: noAccept ? 0 : ceilingCharge.usd,
-          requestText: forwardText,
-          responseText: errText,
-        });
+        if (!noAccept) {
+          await trace({
+            role: identity.role,
+            model: route.model,
+            requestAt,
+            startedAt,
+            status: 502,
+            usage: ceilingUsage,
+            estimatedUsd: ceilingCharge.usd,
+            requestText: forwardText,
+            responseText: errText,
+          });
+        }
         sendJson(res, 502, errText);
         return;
       }
@@ -679,12 +703,13 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
             }
             received += buf.length;
             chunks.push(buf);
-            if (!res.destroyed) res.write(buf);
+            await writeResponseChunk(res, buf);
           }
         }
       } catch {
-        // Upstream died mid-body (reset, protocol error). Fall through:
-        // whatever usage we captured decides the charge, else the ceiling.
+        // Upstream failure or downstream backpressure/abort. Terminate the
+        // other half immediately; never keep consuming work nobody can read.
+        controller.abort();
         streamFailed = true;
       }
       const responseText = Buffer.concat(chunks).toString("utf8");
@@ -754,63 +779,64 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     }
   }
 
-  async function handleModels(res: ServerResponse, identity: ProxyAuthToken): Promise<void> {
-    const requestAt = new Date().toISOString();
-    const startedAt = Date.now();
-    const base = config.upstreamBaseUrl ?? DEFAULT_UPSTREAM;
-    const controller = new AbortController();
-    upstreamControllers.add(controller);
-    try {
-      let upstream: Response;
+  type CachedModelsResponse = { status: number; contentType: string; body: Buffer };
+  let modelsResponse: Promise<CachedModelsResponse> | undefined;
+
+  const loadModels = (): Promise<CachedModelsResponse> => {
+    modelsResponse ??= (async () => {
+      const base = config.upstreamBaseUrl ?? DEFAULT_UPSTREAM;
+      const controller = new AbortController();
+      upstreamControllers.add(controller);
       try {
-        upstream = await fetch(new URL("/v1/models", base), {
+        const upstream = await fetch(new URL("/v1/models", base), {
           headers: upstreamHeaders(),
           signal: controller.signal,
         });
-      } catch (err) {
-        sendClientError(
-          res,
-          502,
-          "hone_upstream_unreachable",
-          err instanceof Error ? err.message : String(err),
-        );
-        return;
-      }
-      const chunks: Buffer[] = [];
-      let received = 0;
-      if (upstream.body !== null) {
-        for await (const chunk of upstream.body) {
-          const buf = Buffer.from(chunk);
-          received += buf.length;
-          if (received > limits.maxResponseBytes) {
-            controller.abort();
-            sendClientError(res, 502, "hone_upstream_too_large", "models response exceeds cap");
-            return;
+        const chunks: Buffer[] = [];
+        let received = 0;
+        if (upstream.body !== null) {
+          for await (const chunk of upstream.body) {
+            const buf = Buffer.from(chunk);
+            received += buf.length;
+            if (received > limits.maxResponseBytes) {
+              controller.abort();
+              return {
+                status: 502,
+                contentType: "application/json",
+                body: Buffer.from(JSON.stringify({
+                  error: { type: "hone_upstream_too_large", message: "models response exceeds cap" },
+                })),
+              };
+            }
+            chunks.push(buf);
           }
-          chunks.push(buf);
         }
+        return {
+          status: upstream.status,
+          contentType: upstream.headers.get("content-type") ?? "application/json",
+          body: Buffer.concat(chunks),
+        };
+      } catch {
+        return {
+          status: 502,
+          contentType: "application/json",
+          body: Buffer.from(JSON.stringify({
+            error: { type: "hone_upstream_unreachable", message: "models upstream unavailable" },
+          })),
+        };
+      } finally {
+        upstreamControllers.delete(controller);
       }
-      const responseText = Buffer.concat(chunks).toString("utf8");
-      await trace({
-        role: identity.role,
-        model: "",
-        requestAt,
-        startedAt,
-        status: upstream.status,
-        usage: ZERO_USAGE,
-        estimatedUsd: 0,
-        requestText: "",
-        responseText,
-      });
-      if (!res.destroyed) {
-        res.writeHead(upstream.status, {
-          "content-type": upstream.headers.get("content-type") ?? "application/json",
-        });
-        res.end(responseText);
-      }
-    } finally {
-      upstreamControllers.delete(controller);
-    }
+    })();
+    return modelsResponse;
+  };
+
+  async function handleModels(res: ServerResponse, _identity: ProxyAuthToken): Promise<void> {
+    const response = await loadModels();
+    if (res.destroyed) return;
+    res.writeHead(response.status, { "content-type": response.contentType });
+    await writeResponseChunk(res, response.body);
+    res.end();
   }
 
   // -------------------------------------------------------------------------
@@ -955,6 +981,7 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
   server.maxHeadersCount = 128;
   server.headersTimeout = 30_000;
   server.requestTimeout = 300_000;
+  server.setTimeout(300_000, (socket) => socket.destroy());
 
   function bound(listenArgs: () => void): Promise<void> {
     return new Promise<void>((resolve, reject) => {

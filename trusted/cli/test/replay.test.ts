@@ -38,6 +38,16 @@ describe("event log replay", () => {
     expect(st.status).toBe("running");
   });
 
+  it("ignores a complete JSON event without its acknowledging newline", () => {
+    const root = makeRoot();
+    const all = fixtureEvents({ runId: "run_valid_tail", baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: true });
+    const runDir = writeEvents(root, "run_valid_tail", all.slice(0, -1));
+    appendFileSync(join(runDir, "events.ndjson"), JSON.stringify(all[all.length - 1]));
+    const events = readEvents(runDir);
+    expect(events).toHaveLength(all.length - 1);
+    expect(replay(events).finished).toBeNull();
+  });
+
   it("rejects interior corruption — the log is trusted state", () => {
     const root = makeRoot();
     const good = fixtureEvents({ runId: "run_bad", baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false });
