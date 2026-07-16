@@ -29,12 +29,28 @@ Scoring (per example):
   correctness = 0                       crash, timeout, protocol violation,
                                         no path, or invalid path
               = (optimal / actual)**4   valid path
-  score       = correctness / (1 + median_of_5_ms)
+  score       = correctness / (1 + slowest_of_5_ms)
+
+Timing isolation: each of the 5 timed repetitions runs in a FRESH worker
+process (spawned and handshaken before the clock starts), with a fresh Linux
+network and SysV/POSIX IPC namespace. Before and after each repetition the
+trusted parent kills every candidate-uid process and clears candidate-writable
+files. A hard one-process uid limit blocks fork/thread daemons. The slowest
+repetition has scoring authority, so shared host page-cache residency cannot
+turn one real computation plus four cache hits into an artificial win. The
+per-request nonce authenticates each response.
 
 Objectives (higher is better — the trusted scalarization is the mean of
 objective values): score = mean per-example score.
-Diagnostics (informational): runtime_ms (median of per-example medians),
-quality (mean correctness).
+Diagnostics (informational): runtime_ms (median of per-example slowest
+repetitions), quality (mean correctness).
+
+Hard optimality gate: `valid` is true ONLY when mazes were loaded, the
+trusted suite passed, AND every selected asset response is a valid path of
+exactly optimal_length (constraint `paths_optimal`). A fast candidate that
+aces the fixed suite but returns even one suboptimal asset path is
+promotion-ineligible regardless of its raw score; the per-example scores and
+feedback above are still reported in full as diagnostics for such outputs.
 
 Environment (all trusted-runtime supplied):
   CAPSULE_ASSETS               fixture dir            (default /capsule/assets)
@@ -49,12 +65,15 @@ stdlib only. Runs the candidate only via worker.py.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import json
 import os
 import random
 import resource
 import secrets
 import selectors
+import shutil
 import signal
 import statistics
 import subprocess
@@ -70,6 +89,143 @@ INNER_REPS = 5
 CALL_TIMEOUT_SEC = float(os.environ.get("CAPSULE_CALL_TIMEOUT_SEC", "10"))
 MAX_RESPONSE_BYTES = int(os.environ.get("CAPSULE_MAX_RESPONSE_BYTES", "8000000"))
 WORKER_UID = int(os.environ.get("CAPSULE_WORKER_UID", "2000"))
+
+# The production evaluator is an isolated Linux container. These are its only
+# candidate-writable persistent namespaces: the workspace/baseline/rootfs are
+# read-only and the network is disabled. Host-side unit tests run non-root and
+# deliberately skip global namespace cleanup; the real-container regression
+# exercises this production list.
+CANDIDATE_WRITABLE_ROOTS = (Path("/tmp"), Path("/dev/shm"), Path("/dev/mqueue"))
+PR_SET_CHILD_SUBREAPER = 36
+IPC_RMID = 0
+CLONE_NEWIPC = 0x08000000
+CLONE_NEWNET = 0x40000000
+STATE_RESET_TIMEOUT_SEC = 1.0
+_LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def _configure_candidate_subreaper() -> None:
+    """Make orphaned candidate descendants observable by the trusted scorer."""
+    if not sys.platform.startswith("linux"):
+        return
+    if _LIBC.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        code = ctypes.get_errno()
+        raise RuntimeError(f"cannot become candidate subreaper: {os.strerror(code)}")
+
+
+def _candidate_pids() -> list[int]:
+    """Return every live process running under the dedicated candidate uid."""
+    proc = Path("/proc")
+    if not proc.is_dir() or os.geteuid() != 0:
+        return []
+    found: list[int] = []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = (entry / "status").read_text()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        for line in status.splitlines():
+            if line.startswith("Uid:"):
+                fields = line.split()
+                if len(fields) >= 2 and int(fields[1]) == WORKER_UID:
+                    found.append(int(entry.name))
+                break
+    return found
+
+
+def _reap_candidate_processes() -> None:
+    """Atomically enough for the bounded uid namespace: kill, reap, prove empty."""
+    if os.geteuid() != 0:
+        return
+    deadline = time.monotonic() + STATE_RESET_TIMEOUT_SEC
+    while True:
+        pids = _candidate_pids()
+        if not pids:
+            while True:
+                try:
+                    pid, _ = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if pid == 0:
+                    break
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        while True:
+            try:
+                pid, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if pid == 0:
+                break
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"candidate processes survived reset: {pids}")
+        time.sleep(0.005)
+
+
+def _remove_tree_contents(root: Path) -> None:
+    """Clear one writable namespace without following candidate symlinks."""
+    if not root.is_dir():
+        return
+    for entry in os.scandir(root):
+        path = Path(entry.path)
+        if entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+
+
+def _remove_candidate_sysv_ipc() -> None:
+    """Remove uid-owned SysV objects that otherwise outlive worker processes."""
+    if os.geteuid() != 0:
+        return
+    specs = (
+        ("shm", "shmid", lambda ident: _LIBC.shmctl(ident, IPC_RMID, None)),
+        ("msg", "msqid", lambda ident: _LIBC.msgctl(ident, IPC_RMID, None)),
+        ("sem", "semid", lambda ident: _LIBC.semctl(ident, 0, IPC_RMID)),
+    )
+    for table, id_column, remove in specs:
+        source = Path("/proc/sysvipc") / table
+        try:
+            rows = source.read_text().splitlines()
+        except FileNotFoundError:
+            continue
+        if not rows:
+            continue
+        columns = rows[0].split()
+        try:
+            id_index = columns.index(id_column)
+            uid_index = columns.index("uid")
+        except ValueError as exc:
+            raise RuntimeError(f"unrecognized {source} header") from exc
+        for row in rows[1:]:
+            fields = row.split()
+            if len(fields) <= max(id_index, uid_index) or int(fields[uid_index]) != WORKER_UID:
+                continue
+            ident = int(fields[id_index])
+            ctypes.set_errno(0)
+            if remove(ident) == 0:
+                continue
+            code = ctypes.get_errno()
+            if code not in (errno.EINVAL, errno.EIDRM):
+                raise RuntimeError(
+                    f"cannot remove candidate SysV {table} {ident}: {os.strerror(code)}"
+                )
+
+
+def reset_candidate_state() -> None:
+    """Prove no process or writable namespace survives into another repetition."""
+    _reap_candidate_processes()
+    if os.geteuid() != 0:
+        return
+    for root in CANDIDATE_WRITABLE_ROOTS:
+        _remove_tree_contents(root)
+    _remove_candidate_sysv_ipc()
 
 
 # --------------------------------------------------------------------------
@@ -135,6 +291,20 @@ def _worker_preexec() -> None:
         except (OSError, ValueError):
             pass  # best-effort (e.g. RLIMIT_AS is unsupported on macOS)
     if os.geteuid() == 0:
+        # Each timed repetition owns fresh kernel communication namespaces.
+        # Otherwise a worker can encode a result in loopback TCP TIME_WAIT or
+        # abstract Unix sockets and make four later repetitions look cached.
+        # This is mandatory: the evaluator container grants SYS_ADMIN only to
+        # this trusted root parent, before the candidate uid/capability drop.
+        if _LIBC.unshare(CLONE_NEWNET | CLONE_NEWIPC) != 0:
+            code = ctypes.get_errno()
+            raise RuntimeError(
+                f"cannot isolate candidate network/IPC namespaces: {os.strerror(code)}"
+            )
+        # One candidate process, no threads/forks. This is mandatory in the
+        # production root-side evaluator; cleanup is defense in depth rather
+        # than a race against a daemon that can keep reproducing.
+        resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
         # Privilege separation: scorer stays root-side, candidate drops to an
         # unprivileged uid that cannot signal/ptrace the parent. MUST succeed
         # when we are root — a failure aborts the spawn (fail closed).
@@ -333,59 +503,126 @@ def run_trusted_suite(worker: Worker) -> tuple[bool, str]:
 # Example scoring
 # --------------------------------------------------------------------------
 
-def evaluate_example(worker: Worker, maze: dict) -> tuple[float, float, dict]:
-    """Returns (median_ms, correctness, perExample entry)."""
+def evaluate_example(workspace: Path, maze: dict) -> tuple[float, float, bool, dict]:
+    """Returns (slowest_ms, correctness, optimal_ok, perExample entry).
+
+    Every repetition gets its own worker process and a clean writable/IPC
+    namespace. Worker.call() completes the spawn + import handshake BEFORE
+    starting the request clock, so process startup never pollutes the
+    measurement. The slowest repetition defeats cross-process page-cache
+    channels that can accelerate only calls after the first real computation.
+    """
     reps: list[float] = []
-    outcome: CallOutcome | None = None
+    outcomes: list[CallOutcome] = []
     for _ in range(INNER_REPS):
-        outcome = worker.call(maze["grid"], maze["start"], maze["goal"])
+        reset_candidate_state()
+        worker = Worker(workspace)
+        try:
+            outcome = worker.call(maze["grid"], maze["start"], maze["goal"])
+        finally:
+            try:
+                worker.kill()
+            finally:
+                reset_candidate_state()
+        outcomes.append(outcome)
         reps.append(outcome.elapsed_ms)
         if outcome.error is not None:
             break  # a failing call is not re-run
-    assert outcome is not None
-    median_ms = statistics.median(reps)
+    assert outcomes
+    slowest_ms = max(reps)
     optimal = maze["optimal_length"]
 
-    if outcome.error is not None:
+    # Every timed response has scoring authority. Inspecting only the final
+    # response lets an ordinal-aware candidate answer the middle repetitions
+    # incorrectly and retain their near-zero timings in the median.
+    error_rep = next(
+        ((index, item) for index, item in enumerate(outcomes, 1) if item.error is not None),
+        None,
+    )
+    missing_rep = next(
+        ((index, item) for index, item in enumerate(outcomes, 1) if item.path is None),
+        None,
+    )
+    invalid_rep = next(
+        (
+            (index, item)
+            for index, item in enumerate(outcomes, 1)
+            if item.path is not None
+            and not path_is_valid(maze["grid"], maze["start"], maze["goal"], item.path)
+        ),
+        None,
+    )
+    suboptimal_rep = next(
+        (
+            (index, item)
+            for index, item in enumerate(outcomes, 1)
+            if item.path is not None
+            and path_is_valid(maze["grid"], maze["start"], maze["goal"], item.path)
+            and len(item.path) != optimal
+        ),
+        None,
+    )
+
+    optimal_ok = False
+    if error_rep is not None:
+        index, item = error_rep
         correctness = 0.0
-        feedback = f"error: {outcome.error} in {median_ms:.2f} ms"
-    elif outcome.path is None:
+        feedback = f"rep {index}: error: {item.error} in slowest {slowest_ms:.2f} ms"
+    elif missing_rep is not None:
+        index, _ = missing_rep
         correctness = 0.0
-        feedback = f"no path found (optimal {optimal}) in {median_ms:.2f} ms"
-    elif not path_is_valid(maze["grid"], maze["start"], maze["goal"], outcome.path):
+        feedback = f"rep {index}: no path found (optimal {optimal}) in slowest {slowest_ms:.2f} ms"
+    elif invalid_rep is not None:
+        index, _ = invalid_rep
         correctness = 0.0
+        feedback = f"rep {index}: invalid path (optimal {optimal}) in slowest {slowest_ms:.2f} ms"
+    elif suboptimal_rep is not None:
+        index, item = suboptimal_rep
+        correctness = (optimal / len(item.path)) ** 4
         feedback = (
-            f"invalid path (len {len(outcome.path)} vs optimal {optimal})"
-            f" in {median_ms:.2f} ms"
+            f"rep {index}: suboptimal path (len {len(item.path)} vs optimal {optimal})"
+            f" in slowest {slowest_ms:.2f} ms — hard optimality constraint failed"
         )
     else:
-        correctness = (optimal / len(outcome.path)) ** 4
-        feedback = f"path len {len(outcome.path)} vs optimal {optimal} in {median_ms:.2f} ms"
+        correctness = 1.0
+        feedback = f"all {len(outcomes)} reps returned optimal len {optimal} in slowest {slowest_ms:.2f} ms"
+        optimal_ok = len(outcomes) == INNER_REPS
 
-    score = correctness / (1.0 + median_ms)
-    return median_ms, correctness, {"score": score, "feedback": feedback}
+    score = correctness / (1.0 + slowest_ms)
+    return slowest_ms, correctness, optimal_ok, {"score": score, "feedback": feedback}
 
 
 def main() -> None:
+    _configure_candidate_subreaper()
+    reset_candidate_state()
     assets_dir = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
     workspace = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
     mazes = [json.loads(p.read_text()) for p in sorted(assets_dir.rglob("*.json"))]
 
-    worker = Worker(workspace)
     per_example: dict[str, dict] = {}
     runtimes: list[float] = []
     correctnesses: list[float] = []
+    optimal_flags: list[bool] = []
     for maze in mazes:
-        median_ms, correctness, entry = evaluate_example(worker, maze)
+        slowest_ms, correctness, optimal_ok, entry = evaluate_example(workspace, maze)
         per_example[maze["id"]] = entry
-        runtimes.append(median_ms)
+        runtimes.append(slowest_ms)
         correctnesses.append(correctness)
+        optimal_flags.append(optimal_ok)
 
-    tests_pass, suite_detail = run_trusted_suite(worker)
-    worker.kill()
+    reset_candidate_state()
+    suite_worker = Worker(workspace)
+    try:
+        tests_pass, suite_detail = run_trusted_suite(suite_worker)
+    finally:
+        try:
+            suite_worker.kill()
+        finally:
+            reset_candidate_state()
+    paths_optimal = len(mazes) > 0 and all(optimal_flags)
 
     output = {
-        "valid": len(mazes) > 0,
+        "valid": len(mazes) > 0 and tests_pass and paths_optimal,
         "objectives": {
             "score": statistics.fmean(
                 [entry["score"] for entry in per_example.values()]
@@ -393,7 +630,7 @@ def main() -> None:
             if per_example
             else 0.0,
         },
-        "constraints": {"tests_pass": tests_pass},
+        "constraints": {"tests_pass": tests_pass, "paths_optimal": paths_optimal},
         "perExample": per_example,
         "diagnostics": {
             "summary": (
