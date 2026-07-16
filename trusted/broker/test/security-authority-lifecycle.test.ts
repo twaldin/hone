@@ -1231,6 +1231,18 @@ describe("sandbox lifecycle and resource ceilings", () => {
     expect(argv).toContain("/workspace:rw,exec,nosuid,nodev,size=1073741824,mode=1777");
     expect(argv).toContain("/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777");
   });
+  it("extracts mutation artifacts inside /workspace as the fixed uid", async () => {
+    const b = await boot();
+    await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const argv = b.log.find((entry) => entry[1] === "exec" && entry.includes("/bin/tar") && entry.includes("-x")) ?? [];
+    const userIdx = argv.indexOf("-u");
+    expect(argv[userIdx + 1]).toBe("1000:1000");
+    const stripIdx = argv.indexOf("--strip-components");
+    expect(argv[stripIdx + 1]).toBe("1");
+    const cwdIdx = argv.indexOf("-C");
+    expect(argv[cwdIdx + 1]).toBe("/workspace");
+  });
+
 
   it("scratchVolume: mounts the per-run quota volume and removes it deterministically on close", async () => {
     const b = await boot({ scratchVolume: true, scratchQuotaBytes: 4096 });

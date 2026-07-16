@@ -1354,7 +1354,7 @@ export class Broker {
     // (or CAP_CHOWN) is needed, and the long-lived sandbox retains zero caps.
     const unpack = await this.run([
       "docker", "exec", "-i", "-u", "1000:1000", containerId,
-      "/bin/tar", "-o", "--no-same-permissions", "-x", "-C", "/",
+      "/bin/tar", "-o", "--no-same-permissions", "--strip-components", "1", "-x", "-C", "/workspace",
     ], {
       stdin: artifactBytes,
       timeoutMs: 300_000,
