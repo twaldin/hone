@@ -941,10 +941,17 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
         const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
         await proxy.close().catch((e: unknown) => failures.push(`proxy: ${message(e)}`));
         if (running !== null) {
+          // Close first: close() rejects new RPCs, reaps containers, and waits
+          // every already-admitted handler. A killed optimizer may have left
+          // a request in flight; reconciling before this drain would let that
+          // handler journal after the authority fence and lose its public
+          // event. Broker.close collects teardown errors but always drains
+          // operations and closes the journal before returning.
+          await running.close().catch((e: unknown) => failures.push(`broker: ${message(e)}`));
           try {
-            // Last authority barrier: proxy draining may have journaled spend
-            // after startup. Repair its exact suffix before broker close and
-            // before the supervisor is ever allowed to terminalize/deliver.
+            // No broker fact can be appended after close has drained. Repair
+            // the exact journal suffix, then and only then release the
+            // supervisor's authority fence.
             reconcileBrokerAuthority(ctx.runDir, running.broker, ctx.emit, ctx.runId);
             authority.resolve();
           } catch (e) {
@@ -953,7 +960,6 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
             failures.push(`authority reconciliation: ${failure.message}`);
           }
         }
-        if (running !== null) await running.close().catch((e: unknown) => failures.push(`broker: ${message(e)}`));
         if (optimizer !== null) await optimizer.cleanup().catch((e: unknown) => failures.push(`optimizer containers: ${message(e)}`));
         if (egress !== null) await egress.cleanup().catch((e: unknown) => failures.push(`egress: ${message(e)}`));
         if (failures.length > 0) cleanup.reject(new Error(`backend teardown incomplete: ${failures.join("; ")}`));
