@@ -17,8 +17,13 @@
  * `--selftest` performs the no-LLM smoke: registry + settings constructed
  * offline, sample episode.json parsed, prints "hone-mutation selftest ok".
  *
- * The image bakes this file at /opt/hone-worker/mutate.ts with its own
- * node_modules; it must stay a single self-contained program.
+ * Delivery: this source is part of the sealed optimizer snapshot. The
+ * no-network manifest-image build bundles it (with its captured Pi SDK
+ * closure) into the self-contained /hone/out/worker.mjs; the loop putFiles
+ * those exact bytes into every mutation sandbox and execs the sandbox-local
+ * file under bun. The only image-provided piece is the platform-native
+ * pi_natives addon baked next to bun (a .node binary cannot live in a JS
+ * bundle).
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import http from "node:http";

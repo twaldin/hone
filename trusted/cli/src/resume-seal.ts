@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { RunConfig, canonicalJson } from "@hone/schema";
 import type { CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
 import { contractHash, renderContract } from "./contract.js";
+import type { DeliveryTarget } from "./delivery-target.js";
 import { CONTRACT_FILE, RUN_CONFIG_FILE } from "./runs.js";
 
 /**
@@ -35,6 +36,8 @@ export interface ResumeSealInputs {
   capsuleDigest: string;
   optimizerDigest: string;
   orderingReport: DiagnosticOrderingReport;
+  /** The sealed delivery target (re-validated by the caller), or null for apply=none — the contract re-render must bind it. */
+  deliveryTarget: DeliveryTarget | null;
   /** run.started seals from the replayed log (read under the lock). */
   sealedContractHash: string | null;
   sealedOptimizerDigest: string | null;
@@ -68,6 +71,7 @@ export function resumeSealError(inputs: ResumeSealInputs): string | null {
     capsuleDigest: inputs.capsuleDigest,
     optimizerDigest: inputs.optimizerDigest,
     orderingReport: inputs.orderingReport,
+    deliveryTarget: inputs.deliveryTarget,
   });
   if (rendered !== contractText) {
     return "contract.md does not re-render from the sealed run config and frozen identity — refusing to resume";

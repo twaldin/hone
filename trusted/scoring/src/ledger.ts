@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { open, readFile, type FileHandle } from "node:fs/promises";
-import { setTimeout as sleep } from "node:timers/promises";
+import { link, mkdir, open, readFile, unlink, type FileHandle } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { z } from "zod";
 
 /**
@@ -35,10 +35,6 @@ import { z } from "zod";
 
 const Header = z.object({ v: z.literal(2), budget: z.number().int().positive() }).strict();
 const AttemptLine = z.object({ nonce: z.string().min(1), at: z.string() }).strict();
-
-/** How long a fresh open waits for a concurrent creator to flush the header. */
-const INIT_RACE_RETRIES = 100;
-const INIT_RACE_DELAY_MS = 10;
 
 export class HoldoutBudgetExceededError extends Error {
   readonly count: number;
@@ -115,6 +111,126 @@ async function appendLineDurable(handle: FileHandle, line: string, path: string)
   await handle.sync();
 }
 
+const HEADER_STEM = '{"v":2,"budget":';
+
+/**
+ * Is `raw` a strict prefix of SOME valid v2 header line (a newline would
+ * mean the header completed)? These are exactly — and only — the states the
+ * LEGACY creator (`open('ax')` + in-place header write) could leave behind
+ * by crashing before its header completed. Since no complete header ever
+ * existed at that path, no charge can exist either, so such a file is
+ * provably dead and safely repairable. Any other nonempty content is real
+ * corruption and is refused.
+ */
+function isLegacyHeaderPrefix(raw: Buffer): boolean {
+  let text: string;
+  try {
+    text = utf8Strict.decode(raw);
+  } catch {
+    return false;
+  }
+  if (text.includes("\n")) return false;
+  if (text.length <= HEADER_STEM.length) return HEADER_STEM.startsWith(text);
+  if (!text.startsWith(HEADER_STEM)) return false;
+  return /^[1-9][0-9]*\}?$/.test(text.slice(HEADER_STEM.length));
+}
+
+/**
+ * Complete a crashed LEGACY header in place. The file's bytes must still be
+ * a strict prefix of THIS budget's exact header line; the missing suffix is
+ * written at a FIXED offset, so concurrent repairers with the same budget
+ * write byte-identical data and any interleaving converges on the same
+ * complete header. No name is ever unlinked, renamed, or relinked here —
+ * repair cannot destroy a live ledger, and crashing mid-repair just leaves
+ * a longer prefix: still headerless, still dead, still repairable. A prefix
+ * that cannot extend to this budget's header pins a DIFFERENT identity and
+ * is refused.
+ */
+async function repairLegacyHeader(path: string, budget: number): Promise<void> {
+  const target = Buffer.from(`${JSON.stringify({ v: 2, budget })}\n`, "utf8");
+  const fh = await open(path, "r+");
+  try {
+    // Re-verify through THIS handle so the check and the write are bound to
+    // one inode, whatever happened between the caller's read and now.
+    const raw = await fh.readFile();
+    if (raw.includes(0x0a)) return; // a concurrent repairer finished — the caller rereads
+    if (raw.byteLength >= target.byteLength || !target.subarray(0, raw.byteLength).equals(raw)) {
+      throw new Error(
+        `holdout ledger ${path}: budget mismatch — crashed header prefix cannot complete to budget ${budget}; the lifetime budget is immutable`,
+      );
+    }
+    const suffix = target.subarray(raw.byteLength);
+    const { bytesWritten } = await fh.write(suffix, 0, suffix.byteLength, raw.byteLength);
+    if (bytesWritten !== suffix.byteLength) {
+      throw new Error(`holdout ledger ${path}: short write (${bytesWritten}/${suffix.byteLength} bytes) — refusing`);
+    }
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
+ * Durability primitives, grouped in a mutable object so focused tests can
+ * observe/instrument ordering (mirrors the broker CAS `durability` seam).
+ */
+export const ledgerIo = {
+  /** fsync an existing file (its creator may have crashed before its own fsync). */
+  async syncFile(filePath: string): Promise<void> {
+    const fh = await open(filePath, "r");
+    try {
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+  },
+  /** fsync a directory so a newly created entry (file or subdirectory) survives power loss. */
+  async syncDir(dir: string): Promise<void> {
+    const fh = await open(dir, "r");
+    try {
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+  },
+  /**
+   * Atomically publish `src` at `dest` WITHOUT clobbering: link(2) fails
+   * with EEXIST when `dest` already exists, on every platform — the
+   * strongest portable no-clobber publication primitive. The new dirent is
+   * durable only after its directory is fsynced.
+   */
+  async linkNoClobber(src: string, dest: string): Promise<void> {
+    await link(src, dest);
+  },
+};
+
+/**
+ * Every directory level from `dir` through the PARENT of `durableRoot`, leaf
+ * first (mirrors the broker CAS `dirChain`). `mkdir recursive` may have
+ * created ANY of these levels, and a level is only durable once its parent's
+ * entry for it is fsynced — so every opener syncs the whole chain,
+ * unconditionally. That also repairs a concurrent creator that crashed (or is
+ * still paused) mid-chain: an O_EXCL loser that observes a complete header
+ * must NOT trust the winner to have persisted the directory entries.
+ */
+function dirChain(durableRoot: string, dir: string): string[] {
+  const stop = resolve(durableRoot);
+  const chain: string[] = [];
+  let current = resolve(dir);
+  while (true) {
+    chain.push(current);
+    if (current === stop) {
+      const parent = dirname(current);
+      if (parent !== current) chain.push(parent);
+      break;
+    }
+    const parent = dirname(current);
+    if (parent === current) throw new Error(`holdout ledger dir ${dir} escapes durable root ${durableRoot}`);
+    current = parent;
+  }
+  return chain;
+}
+
 export class HoldoutLedger {
   readonly path: string;
   #handle: FileHandle;
@@ -131,8 +247,38 @@ export class HoldoutLedger {
     this.#budget = budget;
   }
 
-  static async open(path: string, opts: { budget?: number } = {}): Promise<HoldoutLedger> {
-    for (let attempt = 0; ; attempt += 1) {
+  /**
+   * Open (creating if absent) the ledger at `path`.
+   *
+   * Creation never exposes the final pathname until the EXACT header bytes
+   * are fully written and file-fsynced in a same-directory unique temp;
+   * publication is an atomic no-clobber hard link, so concurrent creators
+   * cannot clobber each other and a crash at any phase leaves the final
+   * path either absent or complete — never empty, never a partial header.
+   * A LEGACY leftover (empty, or a strict header-line prefix — the old
+   * in-place creator crashing before its header completed) provably holds
+   * no charge and is repaired in place given an explicit budget; any other
+   * malformed nonempty file is refused.
+   *
+   * The ledger's directory chain is created here and made DURABLE here:
+   * every successful open — creator, publication-race loser, or plain
+   * re-open — fsyncs the ledger bytes and every directory level from the
+   * ledger's dir through the parent of `opts.durableRoot` (default: the
+   * ledger's dir) BEFORE returning. Until open resolves no charge can be
+   * accepted, so no acknowledged fact can ever depend on a directory entry
+   * that would not survive power loss — even when the creating process
+   * crashed (or is still paused) between publishing the header and syncing
+   * the directory chain.
+   */
+  static async open(path: string, opts: { budget?: number; durableRoot?: string } = {}): Promise<HoldoutLedger> {
+    const dir = dirname(path);
+    const chain = dirChain(opts.durableRoot ?? dir, dir); // validates ancestry before any I/O
+    for (;;) {
+      // Recreates the chain if missing — including after a power loss that
+      // discarded an unsynced dirent. Durability of every level (whether we
+      // created it, a concurrent opener did, or it pre-existed) is
+      // established by the unconditional chain sync below.
+      await mkdir(dir, { recursive: true });
       let raw: Buffer | null;
       try {
         raw = await readFile(path);
@@ -145,31 +291,83 @@ export class HoldoutLedger {
         const budget = opts.budget;
         if (budget === undefined) throw new Error(`holdout ledger ${path}: a fresh ledger needs an explicit budget`);
         Header.parse({ v: 2, budget }); // positive-int validation
-        let handle: FileHandle;
+        // Never expose the final pathname before the exact header bytes are
+        // fully written AND file-fsynced: build the ledger in a
+        // same-directory unique temp, then publish it with an atomic
+        // no-clobber hard link.
+        const tmpPath = `${path}.${randomUUID()}.tmp`;
+        let published = false;
         try {
-          handle = await open(path, "ax");
+          const tmpHandle = await open(tmpPath, "wx");
+          try {
+            await appendLineDurable(tmpHandle, `${JSON.stringify({ v: 2, budget })}\n`, tmpPath);
+          } finally {
+            await tmpHandle.close();
+          }
+          try {
+            await ledgerIo.linkNoClobber(tmpPath, path);
+            published = true;
+          } catch (err) {
+            // Lost the no-clobber publication race — adopt the winner's
+            // ledger on the next loop iteration.
+            if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+          }
+        } finally {
+          // Winner and loser alike clean up — but ONLY their own temp; a
+          // foreign temp may belong to a live contender mid-publication.
+          await unlink(tmpPath).catch(() => undefined);
+        }
+        if (!published) continue;
+        // The header bytes were already fsynced through the temp handle
+        // (same inode), so only the DIRECTORY entries still need
+        // durability: sync the chain leaf first — an fsynced file in an
+        // unsynced directory does not survive power loss, and neither does
+        // a subdirectory whose parent's entry for it was never fsynced.
+        const handle = await open(path, "a");
+        try {
+          for (const level of chain) await ledgerIo.syncDir(level);
         } catch (err) {
-          // Lost the O_EXCL creation race — recover by re-reading the
-          // winner's initialized ledger on the next loop iteration.
-          if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+          await handle.close().catch(() => undefined);
           throw err;
         }
-        await appendLineDurable(handle, `${JSON.stringify({ v: 2, budget })}\n`, path);
         return new HoldoutLedger(path, handle, 0, budget);
       }
 
-      const text = decodeStrict(raw, path);
-      if (!text.includes("\n")) {
-        // No complete header line yet. Either a concurrent creator won the
-        // O_EXCL race but has not flushed the header, or the very first init
-        // crashed mid-write. Wait briefly for the former; fail closed on the
-        // latter.
-        if (attempt >= INIT_RACE_RETRIES) throw new Error(`holdout ledger ${path}: corrupt — missing header`);
-        await sleep(INIT_RACE_DELAY_MS);
-        continue;
+      if (!raw.includes(0x0a)) {
+        // No complete header line. The current creator never exposes the
+        // final pathname before its full header is durable, so this is a
+        // LEGACY leftover: the old in-place creator crashed between
+        // creating the final path and completing its header. No complete
+        // header means no charge can exist — repair in place (idempotent,
+        // fixed-offset, identical bytes); refuse anything else.
+        if (!isLegacyHeaderPrefix(raw)) {
+          throw new Error(`holdout ledger ${path}: corrupt — headerless and not a crashed header prefix; refusing`);
+        }
+        const budget = opts.budget;
+        if (budget === undefined) {
+          throw new Error(
+            `holdout ledger ${path}: creation crashed before its header completed — re-open with an explicit budget to repair`,
+          );
+        }
+        Header.parse({ v: 2, budget }); // positive-int validation
+        await repairLegacyHeader(path, budget);
+        continue; // reread and adopt the repaired (or concurrently completed) header
       }
+      const text = decodeStrict(raw, path);
       const { budget, nonces } = parseLedger(text, path, opts.budget);
-      return new HoldoutLedger(path, await open(path, "a"), nonces.length, budget);
+      const handle = await open(path, "a");
+      try {
+        // A complete header proves nothing about durability: the creator may
+        // have crashed — or still be paused — before ITS fsyncs, so this
+        // opener re-establishes durability itself (mirrors the broker CAS
+        // dedup-hit path): bytes first, then the directory chain, leaf first.
+        await ledgerIo.syncFile(path);
+        for (const level of chain) await ledgerIo.syncDir(level);
+      } catch (err) {
+        await handle.close().catch(() => undefined);
+        throw err;
+      }
+      return new HoldoutLedger(path, handle, nonces.length, budget);
     }
   }
 

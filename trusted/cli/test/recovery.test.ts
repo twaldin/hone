@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants as fsConstants, existsSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -13,9 +13,10 @@ import { contractHash, renderContract } from "../src/contract.js";
 import { reconcileBrokerAuthority, setupEgress, sweepStaleRunResources } from "../src/backends/local.js";
 import type { AuthorityRecoverySource } from "../src/backends/local.js";
 import { appendEvent, bestArtifact, eventsPath, readEvents, replayRun } from "../src/eventlog.js";
+
 import { deferred, sleep } from "../src/promise.js";
 import { loadRunConfigFile, writeRunConfigFile } from "../src/runs.js";
-import { acquireRunLock, probeRunLockIdentity, runCommand as cliRunCommand, runLockPath, superviseRun } from "../src/supervisor.js";
+import { RUNTIME_PIN_FILE, acquireRunLock, probeRunLockIdentity, runCommand as cliRunCommand, runLockPath, superviseRun, trustedRuntimeDigest } from "../src/supervisor.js";
 import {
   CAP_ID,
   FIX_OPTIMIZER_DIGEST,
@@ -29,6 +30,15 @@ import {
   orderingReportRaw,
   writeEvents,
 } from "./helpers.js";
+
+const DARWIN_O_EXLOCK = 0x20;
+
+function holdForeignRunClaim(path: string): number {
+  if (process.platform === "darwin") {
+    return openSync(path, fsConstants.O_RDWR | fsConstants.O_NONBLOCK | DARWIN_O_EXLOCK);
+  }
+  return openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+}
 
 /**
  * Second-pass review findings 10 + 11: crash-resume must sweep stale docker
@@ -71,7 +81,7 @@ describe("sweepStaleRunResources (finding 10 — crashed prior process)", () => 
 
     const ps = findCall(calls, "docker", "ps");
     expect(ps).toBeGreaterThanOrEqual(0);
-    expect(calls[ps]).toEqual(["docker", "ps", "-aq", "--filter", "label=hone.runId=run:7f3a"]);
+    expect(calls[ps]).toEqual(["docker", "ps", "-aq", "--no-trunc", "--filter", "label=hone.runId=run:7f3a"]);
 
     const rmLabeled = findCall(calls, "docker", "rm", "-f", "aaa111");
     expect(calls[rmLabeled]).toEqual(["docker", "rm", "-f", "aaa111", "bbb222"]);
@@ -119,20 +129,47 @@ describe("sweepStaleRunResources (finding 10 — crashed prior process)", () => 
     expect(findCall(calls, "docker", "volume", "rm", "-f", "hone-extra-run_x")).toBeGreaterThanOrEqual(0);
   });
 
-  it("snapshots a live scratch keeper before removing any stale container", async () => {
+  it("removes stale scratch writers before taking a quiescent keeper snapshot, then publishes it durably", async () => {
     const runDir = makeRoot();
+    let psCalls = 0;
     const { calls, run } = fakeRunner((argv) => {
-      if (argv[1] === "inspect") return res({ stdout: Buffer.from("true\n") });
-      if (argv[1] === "ps") return res({ stdout: Buffer.from("stale-mutation\n") });
+      if (argv[1] === "inspect") return res({ stdout: Buffer.from("keeper-id true\n") });
+      if (argv[1] === "ps") {
+        psCalls += 1;
+        return res({ stdout: Buffer.from(psCalls === 1 ? "keeper-id\nstale-mutation\n" : "keeper-id\n") });
+      }
+      if (argv[1] === "exec") {
+        // The in-container script only produces the per-attempt temp archive
+        // (exactly the minted HONE_SCRATCH_SNAPSHOT_OUT basename); the HOST
+        // publishes it (fsync → rename → fsync dir) after the exec returns.
+        const out = argv.find((a) => typeof a === "string" && a.startsWith("HONE_SCRATCH_SNAPSHOT_OUT="));
+        if (out === undefined) return res({ exitCode: 1, stderr: Buffer.from("missing HONE_SCRATCH_SNAPSHOT_OUT") });
+        writeFileSync(join(runDir, "scratch-snapshot", out.slice("HONE_SCRATCH_SNAPSHOT_OUT=".length)), "tar-bytes");
+        return res();
+      }
       return undefined;
     });
 
     await sweepStaleRunResources("run_x", runDir, run, true);
-    const snapshot = findCall(calls, "docker", "exec", "-u", "root", "hone-scratch-keeper-run_x");
+    const snapshot = calls.findIndex((c) => c[0] === "docker" && c[1] === "exec" && c.includes("hone-scratch-keeper-run_x"));
     const remove = findCall(calls, "docker", "rm", "-f", "stale-mutation");
-    expect(snapshot).toBeGreaterThanOrEqual(0);
-    expect(snapshot).toBeLessThan(remove);
-    expect(existsSync(join(runDir, "scratch-snapshot"))).toBe(true);
+    expect(remove).toBeGreaterThanOrEqual(0);
+    expect(remove).toBeLessThan(snapshot);
+    // Durable, atomic publication: every unpublished temp swept, final snapshot in place.
+    expect(readdirSync(join(runDir, "scratch-snapshot")).filter((e) => e.startsWith("scratch.tar.tmp"))).toEqual([]);
+    expect(readFileSync(join(runDir, "scratch-snapshot", "scratch.tar"), "utf8")).toBe("tar-bytes");
+  });
+
+  it("strict mode fails closed when the snapshot exec succeeds but no temp archive exists to publish", async () => {
+    const runDir = makeRoot();
+    const { run } = fakeRunner((argv) => {
+      if (argv[1] === "inspect") return res({ stdout: Buffer.from("keeper-id true\n") });
+      if (argv[1] === "ps") return res({ stdout: Buffer.from("keeper-id\n") });
+      return undefined; // exec "succeeds" but writes nothing
+    });
+    await expect(sweepStaleRunResources("run_x", runDir, run, true)).rejects.toThrow(
+      /scratch snapshot finalize/,
+    );
   });
 
   it("strict mode rejects when resource discovery cannot prove cleanup", async () => {
@@ -147,6 +184,8 @@ function fakeProxy(port: number): ProxyHandle {
   return {
     tokens: [],
     tokenFor: () => "tok",
+    dispatchRecovery: () =>
+      Promise.resolve({ poisoned: undefined, recovered: [], chargedTotals: { tokens: 0, usd: 0 } }),
     listenUnix: () => Promise.resolve(),
     listenTcp: () => Promise.resolve(port),
     close: () => Promise.resolve(),
@@ -219,6 +258,30 @@ describe("setupEgress network create (finding 10 — idempotent after cleanup)",
     );
     const egress = await setupEgress(ctx(makeRoot()), fakeProxy(43210), "img:latest", run);
     await expect(egress.cleanup()).rejects.toThrow(/egress cleanup incomplete.*active endpoints/);
+  });
+
+  it("attaches the docker-run lease to BOTH Darwin relay containers when provided", async () => {
+    const { calls, run } = fakeRunner(() => undefined);
+    const egress = await setupEgress(ctx(makeRoot()), fakeProxy(43210), "img:latest", run, "hone-lease-run_y");
+    await egress.exposeBroker(54321);
+
+    const relayRuns = calls.filter((argv) => argv[0] === "docker" && argv[1] === "run");
+    expect(relayRuns).toHaveLength(2); // proxy relay + broker relay
+    for (const argv of relayRuns) {
+      const flag = argv.indexOf("--volumes-from");
+      expect(flag, `--volumes-from missing in: ${argv.join(" ")}`).toBeGreaterThanOrEqual(0);
+      expect(argv[flag + 1]).toBe("hone-lease-run_y:ro");
+      // The lease attachment lands BEFORE the image, where docker parses flags.
+      expect(flag).toBeLessThan(argv.indexOf("img:latest"));
+    }
+  });
+
+  it("omits --volumes-from entirely when no lease is provided", async () => {
+    const { calls, run } = fakeRunner(() => undefined);
+    await setupEgress(ctx(makeRoot()), fakeProxy(43210), "img:latest", run);
+    const relayRuns = calls.filter((argv) => argv[0] === "docker" && argv[1] === "run");
+    expect(relayRuns.length).toBeGreaterThanOrEqual(1);
+    for (const argv of relayRuns) expect(argv).not.toContain("--volumes-from");
   });
 });
 
@@ -411,6 +474,7 @@ function resumableFixture(root: string, runId: string): string {
     capsuleDigest: capsuleDigest(manifest),
     optimizerDigest: FIX_OPTIMIZER_DIGEST,
     orderingReport: DiagnosticOrderingReport.parse(orderingReportRaw()),
+    deliveryTarget: null,
   });
   const runDir = writeEvents(
     root,
@@ -421,6 +485,8 @@ function resumableFixture(root: string, runId: string): string {
   // Frozen-admission resume gate: the run dir must carry the capsule snapshot.
   writeCapsuleSnapshot(runDir, manifest);
   writeRunConfigFile(runDir, config);
+  // The trusted-runtime pin is a resume prerequisite (drift refuses first).
+  writeFileSync(join(runDir, RUNTIME_PIN_FILE), `${trustedRuntimeDigest()}\n`);
   return runDir;
 }
 
@@ -470,50 +536,32 @@ describe("run lock (FinalSecurityGate finding 2 — OS-enforced exclusivity)", (
     if (winner !== undefined) await winner();
   });
 
-  it("a close delayed by a live connection never unlinks a successor's rebind (release path-CAS)", { timeout: 15_000 }, async () => {
+  it("a cleanup wedged during release never disturbs a successor's rebind (ownership-guarded removal)", { timeout: 15_000 }, async () => {
     const runDir = makeRoot();
     const runId = "run_l6";
     const sockPath = runLockPath(runDir);
     const idA = { pid: process.pid, runId, nonce: "nonce-cas-A" };
     const releaseA = await acquireRunLock(runDir, runId, idA);
 
-    // Pin A's close callback open: server.close stops the LISTENER first,
-    // then waits for live connections to drain — a half-open client (server
-    // ended its side, we never end ours) blocks the drain indefinitely.
-    const holdOpen = net.connect({ path: sockPath, allowHalfOpen: true });
-    await new Promise<void>((r) => holdOpen.once("connect", () => r()));
-    await new Promise<void>((r) => holdOpen.once("end", () => r()));
+    // Wedge A's post-close cleanup: a foreign (unprovable) claim makes it
+    // remove NOTHING — A's identity metadata survives its own release, the
+    // exact leftover shape of a release racing a claimant or a power cut.
+    // (Held lease connections no longer delay close: release destroys them.)
+    const claimFd = holdForeignRunClaim(`${sockPath}.claim`);
+    await releaseA();
+    expect(JSON.parse(readFileSync(`${sockPath}.id`, "utf8"))).toEqual({
+      pid: process.pid,
+      runId,
+      nonce: "nonce-cas-A",
+      sock: expect.stringMatching(/^\d+:\d+$/),
+    });
+    closeSync(claimFd);
+    rmSync(`${sockPath}.claim`);
 
-    const releasedA = releaseA(); // close begins; cleanup callback is now blocked on holdOpen
-
-    // Wait until the listener actually stopped accepting…
-    for (;;) {
-      const refused = await new Promise<boolean>((r) => {
-        const p = net.connect(sockPath);
-        p.once("connect", () => {
-          p.destroy();
-          r(false);
-        });
-        p.once("error", () => {
-          p.destroy();
-          r(true);
-        });
-      });
-      if (refused) break;
-      await sleep(25);
-    }
-
-    // …so a contender's probe connect-fails: it stale-reclaims and rebinds a
-    // SUCCESSOR lock while A's cleanup callback is still pending.
+    // A successor arbitrates the leftovers and rebinds; A's stale metadata
+    // can never be confirmed over B's socket, and B is fully identified.
     const idB = { pid: process.pid, runId, nonce: "nonce-cas-B" };
     const releaseB = await acquireRunLock(runDir, runId, idB);
-    expect(await probeRunLockIdentity(runDir)).toEqual(idB);
-
-    // Unblock A's delayed cleanup — it must remove NOTHING of B's.
-    holdOpen.destroy();
-    await releasedA;
-
-    // The successor is still live, still identified, and still exclusive.
     expect(await probeRunLockIdentity(runDir)).toEqual(idB);
     await expect(acquireRunLock(runDir, runId)).rejects.toThrow(/already being supervised/);
 
@@ -531,9 +579,14 @@ describe("run lock (FinalSecurityGate finding 2 — OS-enforced exclusivity)", (
     // the socket/metadata pair — deferred cleanup removes nothing. (Node
     // itself may unlink the socket PATH at close-initiation, while the path
     // is still provably A's; the identity metadata is the guarded artifact.)
-    const claimFd = openSync(`${sockPath}.claim`, "wx");
+    const claimFd = holdForeignRunClaim(`${sockPath}.claim`);
     await releaseA();
-    expect(JSON.parse(readFileSync(`${sockPath}.id`, "utf8"))).toEqual({ pid: process.pid, runId, nonce: "nonce-claim-A" });
+    expect(JSON.parse(readFileSync(`${sockPath}.id`, "utf8"))).toEqual({
+      pid: process.pid,
+      runId,
+      nonce: "nonce-claim-A",
+      sock: expect.stringMatching(/^\d+:\d+$/),
+    });
     closeSync(claimFd);
     rmSync(`${sockPath}.claim`);
     // The next acquirer arbitrates the now-dead leftovers normally.

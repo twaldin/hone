@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { RunConfig, RunEvent } from "@hone/schema";
 import { UsageError } from "../src/args.js";
 import { remainingWallBudgetMs, runCommand } from "../src/supervisor.js";
-import { makeCapsule, makeIo, makeRoot, readLogLines } from "./helpers.js";
+import { hone, honeSpawn, killTree, makeCapsule, makeIo, makeRoot, readLogLines, sleep } from "./helpers.js";
 
 /** The one persisted runconfig.json — asserts exactly one run was minted. */
 function soleRunConfig(root: string): RunConfig {
@@ -84,6 +84,59 @@ describe("broker-authored budget boundaries", () => {
     expect(report.status).toBe("budget");
     const events = readLogLines(root, report.runId).map((line) => RunEvent.parse(JSON.parse(line)));
     expect(events.filter((event) => event.type === "budget.exhausted")).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "budget" });
+  });
+
+  it("resume restores a durable exhaustion latch before backend work and never duplicates the event", { timeout: 30_000 }, async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(
+      join(root, "resume-budget.mjs"),
+      `export function createBackend() {
+        return {
+          async start(ctx) {
+            if (ctx.replayed.resumeCount > 0) {
+              if (!ctx.signal.aborted) throw new Error("durable exhaustion was not relatched");
+              return;
+            }
+            ctx.emit({ runId: ctx.runId, at: new Date().toISOString(), type: "budget.exhausted", dimension: "tokens" });
+            await new Promise(() => {});
+          },
+        };
+      }
+      `,
+    );
+    const child = honeSpawn(["run", "capsule", "--headless", "--backend", "./resume-budget.mjs"], {
+      cwd: root,
+      env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10000" },
+    });
+    let runId = "";
+    for (let attempt = 0; attempt < 500; attempt++) {
+      const runsDir = join(root, ".hone-runs");
+      const entries = existsSync(runsDir) ? readdirSync(runsDir) : [];
+      const candidate = entries.length === 1 ? entries[0] : undefined;
+      if (candidate !== undefined) {
+        const eventFile = join(runsDir, candidate, "events.ndjson");
+        if (existsSync(eventFile) && readFileSync(eventFile, "utf8").includes('"type":"budget.exhausted"')) {
+          runId = candidate;
+          break;
+        }
+      }
+      await sleep(10);
+    }
+    expect(runId).not.toBe("");
+    const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    killTree(child);
+    await exited;
+
+    const resumed = await hone(["run", "capsule", "--headless", "--resume"], {
+      cwd: root,
+      env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" },
+    });
+    expect(resumed.code, resumed.stderr).toBe(0);
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.filter((event) => event.type === "budget.exhausted")).toHaveLength(1);
+    expect(events.some((event) => event.type === "run.resumed")).toBe(true);
     expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "budget" });
   });
 

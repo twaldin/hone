@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
@@ -37,11 +37,11 @@ import {
 } from "@hone/schema";
 import { HoldoutBudgetExceededError, HoldoutLedger } from "@hone/scoring";
 import { MAX_ARTIFACT_BYTES, canonicalizeWorkspaceTar, diffProtectedPaths, dirSizeBytes, unpackArtifact } from "./artifact.js";
-import { CasStore } from "./cas.js";
+import { CasStore, durability } from "./cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "./command.js";
 import { deferred } from "./deferred.js";
 import { BrokerError } from "./errors.js";
-import { ArtifactValidationError, validateWorkspaceTar } from "./tarcheck.js";
+import { ArtifactValidationError, MAX_ARTIFACT_ENTRIES, validateWorkspaceTar } from "./tarcheck.js";
 
 export type BudgetDimension = "tokens" | "usd" | "wallClockSec" | "evaluatorInvocations";
 
@@ -127,12 +127,28 @@ export interface BrokerConfig {
   maxCandidateArtifacts?: number | undefined;
   /** Aggregate canonical candidate/repair artifact bytes admitted to CAS. Default 2 GiB. */
   maxCandidateArtifactBytes?: number | undefined;
+  /**
+   * Aggregate candidate/repair artifact tar ENTRIES admitted across the run.
+   * Every admitted artifact can be retained as an unpacked tree under the
+   * run's unpack cache, so this is the durable ceiling on host inodes a
+   * hostile optimizer can mint; the trusted baseline is never charged.
+   * Default 262,144 (2× MAX_ARTIFACT_ENTRIES).
+   */
+  maxCandidateArtifactEntries?: number | undefined;
   /** docker --pids-limit for every container this broker spawns. Default 512. */
   sandboxPidsLimit?: number | undefined;
   /** docker --memory (bytes) for every container this broker spawns. Default 2 GiB. */
   sandboxMemoryBytes?: number | undefined;
   /** docker --cpus for every container this broker spawns. Default 2. */
   sandboxCpus?: number | undefined;
+  /**
+   * Name of the run's stopped docker-run lease (donor) container. When set,
+   * every container this broker spawns (keeper, mutation sandboxes,
+   * evaluators) declares `--volumes-from <lease>:ro`, so removing the donor
+   * is a daemon-side creation fence: a create that has not resolved the
+   * donor can no longer start after teardown. Lifecycle is owned by the CLI.
+   */
+  containerLease?: string | undefined;
   /**
    * When true, /scratch is a per-run docker LOCAL tmpfs volume sized to
    * scratchQuotaBytes — the kernel enforces the quota at write time. If the
@@ -173,10 +189,117 @@ const containerGone = (res: CmdResult): boolean =>
 const STATE_FILE = "broker-state.ndjson";
 const SCRATCH_SNAPSHOT_DIR = "scratch-snapshot";
 const SCRATCH_SNAPSHOT_FILE = "scratch.tar";
-const SCRATCH_SNAPSHOT_SCRIPT =
-  "set -eu; total=$(find /scratch -type f -exec stat -c %s {} + | awk '{s+=$1} END{print s+0}'); " +
+/** Prefix shared by every unpublished snapshot output (per-attempt files, in-container pid temps, legacy shared temps) — swept, never published as-is. */
+export const SCRATCH_SNAPSHOT_TMP_PREFIX = "scratch.tar.tmp.";
+/**
+ * Mints the collision-proof, unguessable (128-bit random) per-attempt output
+ * basename for ONE snapshot attempt. Trusted HOST code generates it and
+ * passes it into the bounded in-container script via the per-exec env
+ * HONE_SCRATCH_SNAPSHOT_OUT; only that exact basename may be finalized, so an
+ * orphaned exec from an OLDER (e.g. host-timed-out) attempt — which only ever
+ * knows ITS OWN basename — can neither overwrite nor satisfy a newer attempt.
+ */
+export function newScratchSnapshotAttemptName(): string {
+  return `${SCRATCH_SNAPSHOT_TMP_PREFIX}${randomBytes(16).toString("hex")}`;
+}
+/** tmpfs inode cap for the /scratch volume — bounds how many archive entries a hostile tree can mint. */
+export const SCRATCH_INODE_LIMIT = 131072;
+/**
+ * tmpfs inode cap for each mutation /workspace volume: the archive admission
+ * ceiling plus explicit headroom for the tmpfs root itself and transient
+ * temp files a mutating process needs — so an exactly-admitted
+ * MAX_ARTIFACT_ENTRIES tree can still extract and mutate, while saveArtifact
+ * keeps enforcing the exact archive cap at admission.
+ */
+export const WORKSPACE_TMPFS_INODES = MAX_ARTIFACT_ENTRIES + 1024;
+/** Host-side wall clock granted to the snapshot `docker exec`. */
+const SCRATCH_SNAPSHOT_HOST_TIMEOUT_MS = 300_000;
+/** In-container tar deadline — strictly below the host exec timeout, so a
+ * killed host CLI can never leave tar running inside the keeper. */
+export const SCRATCH_SNAPSHOT_DEADLINE_SEC = 270;
+
+/**
+ * Kernel-enforced byte cap for the snapshot archive: the scratch payload
+ * quota plus a bounded per-inode allowance for tar metadata (512 B header +
+ * long-name extension + padding ≈ 2 KiB per entry, entry count bounded by
+ * the volume's inode cap) plus the 10 KiB end-of-archive record. A tree
+ * whose archive outgrows this — e.g. a flood of zero-byte entries or
+ * adversarial path names — kills tar via RLIMIT_FSIZE instead of writing
+ * unbounded bytes to the host.
+ */
+export function scratchSnapshotArchiveCapBytes(scratchQuotaBytes: number): number {
+  return scratchQuotaBytes + SCRATCH_INODE_LIMIT * 2048 + 10240;
+}
+
+/**
+ * Runs inside the scratch keeper (`docker exec -u root <keeper> /bin/sh -c`).
+ * The ENTIRE work sequence — apparent-size preflight (find/stat/awk), the
+ * RLIMIT_FSIZE cap, tar, and the atomic in-container temp rename — is
+ * bounded by a pure-sh watchdog that SIGKILLs the exec's whole PROCESS
+ * GROUP (`kill -9 0`; without job control every process this script spawns
+ * shares the exec's group, and the keeper's own PID 1 lives in a different
+ * session) after HONE_SCRATCH_SNAPSHOT_DEADLINE_SEC:
+ * - the deadline is strictly below the host exec timeout, so a killed host
+ *   CLI can never leave find/stat/awk/tar running, and any orphan from a
+ *   host-timeout attempt is already dead before the next retry or unpause;
+ * - `ulimit -f` (RLIMIT_FSIZE) bounds the archive bytes the kernel lets tar
+ *   write to HONE_SCRATCH_SNAPSHOT_MAX_BYTES (POSIX sh counts 512-byte
+ *   blocks; a shell using 1 KiB units merely doubles the still-hard cap);
+ * - the apparent-size preflight keeps sparse files from smuggling bytes
+ *   past the write-time tmpfs cap;
+ * - the output path is the PER-ATTEMPT basename HONE_SCRATCH_SNAPSHOT_OUT
+ *   (minted by trusted host code, see newScratchSnapshotAttemptName; the
+ *   script validates it as a plain basename). tar writes `$out.$$` and
+ *   renames it over `$out` only on success, so a not-yet-dead orphan from
+ *   an older attempt — which only knows its own basename — can neither
+ *   interleave bytes into nor substitute itself for a newer attempt's
+ *   archive;
+ * - the watchdog's stdio is detached so an orphaned sleep can never hold
+ *   the exec streams open; a deadline kill takes the shell itself, so the
+ *   exec reports SIGKILL (137) rather than printing.
+ * The quota/cap/deadline env vars are baked into the keeper at creation, so
+ * recovery execs (the CLI stale-run sweep) inherit identical bounds;
+ * HONE_SCRATCH_SNAPSHOT_OUT is passed per exec (`-e`). The script only
+ * produces the per-attempt temp; the trusted HOST publishes exactly that
+ * basename durably and atomically via finalizeScratchSnapshot
+ * (fsync tmp → rename → fsync dir) and sweeps every unpublished output on
+ * every outcome.
+ */
+export const SCRATCH_SNAPSHOT_SCRIPT =
+  "set -eu; " +
+  "( set -eu; " +
+  "case \"${HONE_SCRATCH_SNAPSHOT_OUT:?}\" in *[!A-Za-z0-9._-]*|.|..) echo 'invalid snapshot output basename' >&2; exit 1;; esac; " +
+  "out=\"/snapshot/${HONE_SCRATCH_SNAPSHOT_OUT}\"; " +
+  "total=$(find /scratch -type f -exec stat -c %s {} + | awk '{s+=$1} END{print s+0}'); " +
   "[ \"$total\" -le \"${HONE_SCRATCH_QUOTA_BYTES:?}\" ] || { echo 'scratch apparent size exceeds quota' >&2; exit 1; }; " +
-  "tar -cf /snapshot/scratch.tar.tmp -C /scratch .; mv -f /snapshot/scratch.tar.tmp /snapshot/scratch.tar";
+  "ulimit -f $(( (${HONE_SCRATCH_SNAPSHOT_MAX_BYTES:?} + 511) / 512 )); " +
+  "tar -cf \"$out.$$\" -C /scratch .; " +
+  "mv -f \"$out.$$\" \"$out\" " +
+  ") & workpid=$!; " +
+  "( sp=; trap 'kill -9 $sp 2>/dev/null; wait $sp 2>/dev/null; exit 0' TERM; sleep \"${HONE_SCRATCH_SNAPSHOT_DEADLINE_SEC:?}\" & sp=$!; wait \"$sp\" || exit 0; kill -9 0 ) >/dev/null 2>&1 </dev/null & watchpid=$!; " +
+  "rc=0; wait \"$workpid\" || rc=$?; " +
+  "kill \"$watchpid\" 2>/dev/null || true; wait \"$watchpid\" 2>/dev/null || true; " +
+  "[ \"$rc\" -eq 0 ] || { echo \"scratch snapshot failed or exceeded its byte cap: rc=$rc\" >&2; exit 1; }";
+
+/**
+ * Publishes ONE attempt's completed snapshot durably and atomically on the
+ * HOST: fsync(<per-attempt temp>) → rename over scratch.tar → fsync(parent
+ * dir). BusyBox images may lack `sync -f`, so power-loss ordering lives in
+ * trusted host code, never in the container. A crash at any point leaves
+ * either the previous snapshot or the new one — never a torn scratch.tar.
+ * Only the caller's own per-attempt output (newScratchSnapshotAttemptName)
+ * may be published: a leftover written late by any OTHER attempt's orphan
+ * can never satisfy this one.
+ */
+export async function finalizeScratchSnapshot(snapshotDir: string, attemptName: string): Promise<void> {
+  if (path.basename(attemptName) !== attemptName || !attemptName.startsWith(SCRATCH_SNAPSHOT_TMP_PREFIX)) {
+    throw new BrokerError("INTERNAL", `refusing to publish non-attempt snapshot output: ${attemptName}`);
+  }
+  const tmp = path.join(snapshotDir, attemptName);
+  await durability.syncFile(tmp);
+  await durability.rename(tmp, path.join(snapshotDir, SCRATCH_SNAPSHOT_FILE));
+  await durability.syncDir(snapshotDir);
+}
 
 type CreateSandboxP = z.infer<typeof CreateSandboxParams>;
 type ExecP = z.infer<typeof ExecParams>;
@@ -230,17 +353,50 @@ export function isBrokerAuthoredEvent(event: RunEvent): boolean {
  */
 const JournalEvents = z.array(RunEvent).optional();
 
+/**
+ * Persisted parent-first gate identity: the lineage parent's SAME-EPOCH score
+ * captured at the instant the candidate's measurement was accepted. Journaled
+ * inside the eval fact; replay restores it verbatim (never re-derives).
+ */
+const GateFact = z.object({
+  parent: z.string(),
+  parentScore: z.number(),
+  childScore: z.number(),
+  passed: z.boolean(),
+});
+type GateFact = z.infer<typeof GateFact>;
+
 const StateLine = z.discriminatedUnion("t", [
   z.object({ t: z.literal("start"), atMs: z.number(), events: JournalEvents }),
   z.object({ t: z.literal("spend"), tokens: z.number().int().nonnegative(), usd: z.number().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("inv"), events: JournalEvents }),
   z.object({ t: z.literal("holdout"), seq: z.number().int().positive(), events: JournalEvents }),
-  z.object({ t: z.literal("eval"), record: EvaluationRecord, events: JournalEvents }),
+  z.object({
+    t: z.literal("eval"),
+    record: EvaluationRecord,
+    /** Measurement generation (`${bootNonce}:{startup|ep<N>}`); legacy lines lack it and grant no gate authority. */
+    epoch: z.string().optional(),
+    /** Monotone trusted mint ordinal of `epoch` (see mintEpochSeq); pre-ordinal lines rank by first appearance in the journal. */
+    epochSeq: z.number().int().nonnegative().optional(),
+    /** Persisted parent-first same-epoch gate identity (see recordEvaluation). */
+    gate: GateFact.optional(),
+    events: JournalEvents,
+  }),
   z.object({ t: z.literal("episode"), episode: z.number().int().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("lineage"), candidate: z.string(), parent: z.string(), episode: z.number().int().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("repair"), hash: z.string(), parent: z.string(), episode: z.number().int().nonnegative(), events: JournalEvents }),
+  /** M0 candidate attempt: the one public non-baseline evaluator admission, WAL'd before spawn. */
+  z.object({ t: z.literal("slot"), hash: z.string().regex(/^sha256:[0-9a-f]{64}$/), events: JournalEvents }),
   z.object({ t: z.literal("trace"), hash: z.string().regex(/^sha256:[0-9a-f]{64}$/), bytes: z.number().int().nonnegative(), events: JournalEvents }),
-  z.object({ t: z.literal("artifact"), hash: z.string().regex(/^sha256:[0-9a-f]{64}$/), bytes: z.number().int().nonnegative(), events: JournalEvents }),
+  z.object({
+    t: z.literal("artifact"),
+    hash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    bytes: z.number().int().nonnegative(),
+    // Entry count of the canonical archive (host-inode charge). Optional so
+    // pre-entry-quota journals still replay; every new line records it.
+    entries: z.number().int().nonnegative().optional(),
+    events: JournalEvents,
+  }),
   z.object({
     t: z.literal("incumbent"),
     hash: z.string(),
@@ -255,7 +411,32 @@ const StateLine = z.discriminatedUnion("t", [
 type StateLine = z.infer<typeof StateLine>;
 type StateFact = Exclude<StateLine, { t: "event" | "migration" }>;
 
+/**
+ * Journal write primitives, grouped in a mutable object (mirrors cas.ts
+ * `durability`) so focused tests can inject partial-write/fsync failures.
+ * Signatures are narrowed to the exact forms the journal uses.
+ */
+export const journalIo = {
+  write(fd: number, buf: Buffer, offset: number, length: number): number {
+    return writeSync(fd, buf, offset, length);
+  },
+  fsync(fd: number): void {
+    fsyncSync(fd);
+  },
+  syncDir(dir: string): void {
+    const fd = openSync(dir, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  },
+};
+
 class RunStateLog {
+  /** Set on the first append failure; the writer is permanently unusable. */
+  private poisoned: string | undefined;
+
   private constructor(
     private readonly fd: number,
     readonly replayed: readonly StateLine[],
@@ -267,6 +448,7 @@ class RunStateLog {
       content = readFileSync(filePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      // Absent is valid: openSync below creates the journal.
     }
     // Only newline-terminated lines are authoritative; bytes after the last
     // newline are a torn crash-write whose action was never acknowledged.
@@ -275,33 +457,73 @@ class RunStateLog {
     // after that.
     const keep = content.lastIndexOf(0x0a) + 1; // 0 when no newline exists
     const fd = openSync(filePath, "a");
-    if (keep !== content.length) {
-      ftruncateSync(fd, keep);
-      fsyncSync(fd);
-    }
-    const rawLines = content.subarray(0, keep).toString("utf8").split("\n");
-    rawLines.pop();
-    const replayed = rawLines.map((line, i) => {
+    try {
+      if (keep !== content.length) ftruncateSync(fd, keep);
+      // Every opener re-establishes durability before replaying authority.
+      // This closes both recovery windows: a prior failed directory fsync
+      // after creation, and a complete newline write whose file fsync failed.
+      journalIo.fsync(fd);
+      journalIo.syncDir(path.dirname(filePath));
+      const rawLines = content.subarray(0, keep).toString("utf8").split("\n");
+      rawLines.pop();
+      const replayed = rawLines.map((line, i) => {
+        try {
+          return StateLine.parse(JSON.parse(line));
+        } catch {
+          throw new BrokerError("INTERNAL", `run state log corrupt at line ${i + 1}: ${filePath}`);
+        }
+      });
+      return new RunStateLog(fd, replayed);
+    } catch (err) {
+      // Never leak the fd on a post-open failure (truncate/replay/parse).
       try {
-        return StateLine.parse(JSON.parse(line));
+        closeSync(fd);
       } catch {
-        throw new BrokerError("INTERNAL", `run state log corrupt at line ${i + 1}: ${filePath}`);
+        // the original failure wins
       }
-    });
-    return new RunStateLog(fd, replayed);
+      throw err;
+    }
+  }
+
+  /** Throws once a prior append failure has poisoned this writer. */
+  assertUsable(): void {
+    if (this.poisoned !== undefined) {
+      throw new BrokerError(
+        "INTERNAL",
+        `run state log unusable after append failure (${this.poisoned}); restart to truncate the torn tail`,
+      );
+    }
   }
 
   /** Append + fsync, blocking. Returns only once the whole line is durable. */
   append(line: StateLine): void {
+    this.assertUsable();
     const buf = Buffer.from(`${JSON.stringify(line)}\n`, "utf8");
-    let written = 0;
-    while (written < buf.length) {
-      written += writeSync(this.fd, buf, written, buf.length - written);
+    try {
+      let written = 0;
+      while (written < buf.length) {
+        written += journalIo.write(this.fd, buf, written, buf.length - written);
+      }
+      journalIo.fsync(this.fd);
+    } catch (err) {
+      // The failed write/fsync may have left a torn, non-newline-terminated
+      // tail. This writer is permanently poisoned: appending (and thus
+      // acknowledging) any later fact could fuse it onto the torn bytes and
+      // corrupt the journal. Only a restart — whose open() durably truncates
+      // the unterminated tail — may write again.
+      this.poisoned = err instanceof Error ? err.message : String(err);
+      try {
+        closeSync(this.fd);
+      } catch {
+        // fd state is unknown after the I/O failure; poisoning already
+        // guarantees no further use.
+      }
+      throw new BrokerError("INTERNAL", `run state log append failed: ${this.poisoned}`);
     }
-    fsyncSync(this.fd);
   }
 
   close(): void {
+    if (this.poisoned !== undefined) return; // fd already closed when poisoned
     closeSync(this.fd);
   }
 }
@@ -384,9 +606,36 @@ export class Broker {
   private readonly maxMutationEpisodes: number;
   private readonly maxCandidateArtifacts: number;
   private readonly maxCandidateArtifactBytes: number;
+  private readonly maxCandidateArtifactEntries: number;
   private readonly sandboxPidsLimit: number;
   private readonly sandboxMemoryBytes: number;
   private readonly sandboxCpus: number;
+  /** `--volumes-from <lease>:ro` when a docker-run lease fences creates; empty otherwise. */
+  private readonly leaseArgs: readonly string[];
+  /**
+   * Fresh per-Broker-instance measurement generation. Part of the eval memo
+   * key: after a kill/resume the new broker must re-measure comparators
+   * (a parent eval cached hours before the crash must not stand in for
+   * today's conditions), while retries within one boot still memoize.
+   */
+  private readonly bootNonce = randomUUID();
+  /**
+   * Current measurement generation: `${bootNonce}:startup` until the first
+   * sandbox of this boot begins/resumes an episode; thereafter
+   * `${bootNonce}:ep<N>` (set exactly where createSandbox journals or
+   * resumes episode N). Comparator pairing and the eval memo are both scoped
+   * to this value — never derived from ordinal arithmetic at call sites.
+   */
+  private measurementEpoch: string;
+  /**
+   * Trusted mint order of measurement epochs. Every epoch that can admit an
+   * evaluation is assigned a monotone ordinal at the instant TRUSTED code
+   * activates it (constructor startup, createSandbox episode boundary) or at
+   * replay (restored verbatim from the journaled eval facts). Cross-epoch
+   * gate authority compares these ordinals — NEVER async completion order.
+   */
+  private readonly epochSeqByName = new Map<string, number>();
+  private nextEpochSeq = 0;
 
   private startedAtMs: number;
   private readonly spent = { tokens: 0, usd: 0, evaluatorInvocations: 0 };
@@ -405,6 +654,7 @@ export class Broker {
   private readonly inFlightEvaluations = new Map<string, Promise<EvaluationRecord>>();
   private readonly candidateArtifactHashes = new Set<string>();
   private candidateArtifactBytes = 0;
+  private candidateArtifactEntries = 0;
   /** Per-run journal ordinal for holdout charges (observability only — the persistent ledger is authority). */
   private holdoutCount = 0;
   /** Repo-lifetime holdout ledger — the ONLY holdout-access authority; opened in init(), never reset per run. */
@@ -419,10 +669,50 @@ export class Broker {
   /** True once any episode of this RUN (including replayed ones) started — gates eval.completed emission. */
   private anyEpisodeStarted = false;
   /**
-   * artifactHash -> (assetGroupId|seed -> trusted aggregate) over this run's
-   * ELIGIBLE non-holdout EvaluationRecords — the only promotion authority.
+   * Epoch-scoped trusted measurements: `${epoch}|${artifactHash}` ->
+   * (`${assetGroupId}|${seed}` -> aggregate) over this run's ELIGIBLE
+   * non-holdout EvaluationRecords. The epoch is the measurement generation
+   * (`${bootNonce}:{startup|ep<N>}`): a fresh re-measurement in a NEW epoch
+   * is recorded — a stale pre-crash or pre-episode score never wins over
+   * today's comparator — while within one epoch the first record wins, so
+   * retries memoize.
    */
   private readonly trusted = new Map<string, Map<string, number>>();
+  /** Lifetime (all-epoch) coordinates per artifact — public-event dedupe and existence checks, never pairing authority. */
+  private readonly lifetimeCoords = new Map<string, Set<string>>();
+  /**
+   * The persisted promotion gate per candidate: its FIRST valid
+   * parent-before-child SAME-EPOCH pair (exact coordinate + aggregates),
+   * frozen forever the moment it is journaled. There is exactly ONE pair —
+   * no supplementation, same epoch or not: every later parent/child pairing
+   * (a later optimizer-minted episode, an earlier late-completing admission,
+   * a retry, a resume, a lucky extra seed) stays a journaled measurement
+   * that grants no authority. A failed first pair is therefore permanent —
+   * no volume of fresh epochs, seeds, or re-reports can erase it. And the
+   * pair exists at all only when it is the candidate's first-ever trusted
+   * evidence (global artifact taint — see recordEvaluation): any candidate
+   * measurement before a parent pair kills gate authority for that artifact
+   * for good (evaluator cache side-channels make ANY earlier run of the
+   * candidate, at any seed, an information leak worth shopping on). The pair
+   * is journaled inside its eval fact, so replay rebuilds it verbatim.
+   */
+  private readonly gates = new Map<string, { epoch: string; pairKey: string; gate: GateFact }>();
+  /**
+   * M0 promotion attempt (cross-artifact evaluator cache channel): evaluator
+   * containers share host image/page-cache state, so any earlier candidate
+   * invocation can warm a later one. The FIRST public, non-baseline
+   * candidate admitted to evaluate is therefore the run's ONLY such
+   * invocation. Its successful-exec lineage and the admission are journaled
+   * before the evaluator can spawn; failure, timeout, invalid output, crash,
+   * and child-first evaluation all consume the attempt permanently. Every
+   * later public non-baseline request — including a retry of the same hash —
+   * is rejected before memo lookup or Docker. Privileged trusted
+   * measurements are outside this mutable-client authority boundary.
+   *
+   * This deliberately limits M0 to one candidate attempt and one promotion
+   * per run. Fresh cache domains are required before M1 enables more.
+   */
+  private promotionSlot: string | undefined;
   /** Candidate artifact -> trusted lineage (parent it was mutated from + episode). */
   private readonly lineage = new Map<string, { parent: string; episode: number }>();
   /** Failed-exec repair snapshots: NOT candidates; sandboxes resumed from one reuse its episode. */
@@ -448,6 +738,20 @@ export class Broker {
   private readonly trackedContainers = new Set<string>();
   /** One FIFO tail per sandbox; mutable Docker operations never interleave. */
   private readonly sandboxQueues = new Map<string, Promise<void>>();
+  /** Run-wide mutable-operation tail: shared /scratch snapshots need exclusivity across sandboxes. */
+  private mutationQueue: Promise<void> = Promise.resolve();
+  /** Fair run-wide reader/writer gate: evaluations share; mutation Docker ops exclude them. */
+  private readonly runGateQueue: Array<{
+    mode: "evaluation" | "mutation";
+    grant: (release: () => void) => void;
+  }> = [];
+  private runGateReaders = 0;
+  private runGateWriter = false;
+  /** One Docker pause set shared by every overlapping evaluator. */
+  private activeEvaluationLeases = 0;
+  private evaluationQuiescence: Promise<string[]> | undefined;
+  /** A failed thaw permanently refuses further operations; close() can still reap containers. */
+  private quiescencePoisoned: string | undefined;
   private scratchReady = false;
 
   constructor(private readonly config: BrokerConfig) {
@@ -483,12 +787,14 @@ export class Broker {
     this.maxMutationEpisodes = config.maxMutationEpisodes ?? 64;
     this.maxCandidateArtifacts = config.maxCandidateArtifacts ?? 128;
     this.maxCandidateArtifactBytes = config.maxCandidateArtifactBytes ?? 2 * 1024 * 1024 * 1024;
+    this.maxCandidateArtifactEntries = config.maxCandidateArtifactEntries ?? 2 * MAX_ARTIFACT_ENTRIES;
     for (const [name, value] of [
       ["maxActiveSandboxes", this.maxActiveSandboxes],
       ["maxConcurrentEvaluations", this.maxConcurrentEvaluations],
       ["maxMutationEpisodes", this.maxMutationEpisodes],
       ["maxCandidateArtifacts", this.maxCandidateArtifacts],
       ["maxCandidateArtifactBytes", this.maxCandidateArtifactBytes],
+      ["maxCandidateArtifactEntries", this.maxCandidateArtifactEntries],
     ] as const) {
       if (!Number.isSafeInteger(value) || value <= 0) {
         throw new BrokerError("INTERNAL", `${name} must be a positive safe integer`);
@@ -497,7 +803,9 @@ export class Broker {
     this.sandboxPidsLimit = config.sandboxPidsLimit ?? 512;
     this.sandboxMemoryBytes = config.sandboxMemoryBytes ?? 2 * 1024 * 1024 * 1024;
     this.sandboxCpus = config.sandboxCpus ?? 2;
+    this.leaseArgs = config.containerLease !== undefined ? ["--volumes-from", `${config.containerLease}:ro`] : [];
     this.episodeOrdinal = config.episodeOrigin ?? 0;
+    this.measurementEpoch = `${this.bootNonce}:startup`;
     this.startedAtMs = this.now();
     // Durable state opens (and replays) synchronously at construction — a
     // broker NEVER exists without its journal, so no method can act before
@@ -507,6 +815,9 @@ export class Broker {
     try {
       this.validateReplay(stateLog);
       this.replayState(stateLog);
+      // This boot's startup generation is minted ABOVE every replayed epoch:
+      // fresh re-measurements are today's authority; replayed ones are not.
+      this.mintEpochSeq(this.measurementEpoch);
     } catch (error) {
       stateLog.close();
       throw error;
@@ -517,14 +828,32 @@ export class Broker {
     await mkdir(this.scratchDir, { recursive: true });
     await mkdir(this.scratchSnapshotDir, { recursive: true });
     await chmod(this.scratchSnapshotDir, 0o700);
+    await this.sweepScratchSnapshotTemps();
+    // `unpacked/` and `tmp/` are derived exclusively from durable CAS and
+    // admitted inputs. A SIGKILL may strand quota-sized extraction/staging
+    // trees or a power-loss-partial final directory, so every boot discards
+    // the entire run-scoped derived cache before any operation can observe it.
+    await rm(this.unpackRoot, { recursive: true, force: true });
     await mkdir(this.unpackRoot, { recursive: true });
+    await chmod(this.unpackRoot, 0o700);
+    await rm(this.tmpDir, { recursive: true, force: true });
     await mkdir(this.tmpDir, { recursive: true });
+    await chmod(this.tmpDir, 0o700);
     // Repo-lifetime holdout authority: the ledger file outlives this run. A
     // fresh file is created with the immutable budget; an existing one keeps
     // its lifetime count — a new run can NEVER reset it (budget mismatch
-    // fails closed inside HoldoutLedger.open).
-    await mkdir(path.dirname(this.config.holdoutLedgerPath), { recursive: true });
-    this.ledger = await HoldoutLedger.open(this.config.holdoutLedgerPath, { budget: this.holdoutBudget });
+    // fails closed inside HoldoutLedger.open). open() creates the ledger's
+    // directory chain itself and fsyncs every level through the durable
+    // root's parent before it can accept a charge; when the ledger lives
+    // inside the CAS store (the CLI's .hone-cas/ledgers layout) the chain
+    // runs through the CAS root's parent, exactly like CAS publication.
+    const ledgerDir = path.dirname(this.config.holdoutLedgerPath);
+    const relToCas = path.relative(path.resolve(this.config.casDir), path.resolve(ledgerDir));
+    const insideCas = relToCas === "" || (!relToCas.startsWith("..") && !path.isAbsolute(relToCas));
+    this.ledger = await HoldoutLedger.open(this.config.holdoutLedgerPath, {
+      budget: this.holdoutBudget,
+      durableRoot: insideCas ? this.config.casDir : ledgerDir,
+    });
     if (this.config.scratchVolume) {
       await this.provisionScratchVolume();
       await this.restoreScratchSnapshot();
@@ -567,8 +896,11 @@ export class Broker {
     const workStillLive = [...this.trackedContainers].filter((ref) => ref !== this.scratchKeeperName);
     if (workStillLive.length > 0) failures.push(`containers still live: ${workStillLive.join(", ")}`);
 
-    let scratchRemovable = true;
-    if (this.scratchVolumeName !== undefined && this.scratchReady) {
+    // Never snapshot or remove the keeper/volume while a mutation container
+    // may still be writing. Preserve the whole scratch authority for the
+    // next strict resume sweep, which will quiesce writers then snapshot.
+    let scratchRemovable = workStillLive.length === 0;
+    if (scratchRemovable && this.scratchVolumeName !== undefined && this.scratchReady) {
       try {
         await this.snapshotScratchVolume();
       } catch (error) {
@@ -618,9 +950,13 @@ export class Broker {
     }
   }
 
-  /** Admission for async operations: rejected once close() has begun. */
+  /** Admission for async operations: rejected once close() has begun or the
+   * journal writer is poisoned — no staging/CAS/Docker side effect may start
+   * for an operation whose fact could never be acknowledged durably. */
   private enterOp(): void {
     if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
+    this.stateLog?.assertUsable();
+    this.assertQuiescenceUsable();
     this.inFlightOps += 1;
   }
 
@@ -644,6 +980,152 @@ export class Broker {
       if (this.sandboxQueues.get(sandboxId) === tail) this.sandboxQueues.delete(sandboxId);
     }
   }
+  private acquireRunGate(mode: "evaluation" | "mutation"): Promise<() => void> {
+    return new Promise((grant) => {
+      this.runGateQueue.push({ mode, grant });
+      this.drainRunGate();
+    });
+  }
+
+  private drainRunGate(): void {
+    if (this.runGateWriter) return;
+    const next = this.runGateQueue[0];
+    if (next === undefined) return;
+    if (next.mode === "mutation") {
+      if (this.runGateReaders !== 0) return;
+      this.runGateQueue.shift();
+      this.runGateWriter = true;
+      let released = false;
+      next.grant(() => {
+        if (released) return;
+        released = true;
+        this.runGateWriter = false;
+        this.drainRunGate();
+      });
+      return;
+    }
+    while (this.runGateQueue[0]?.mode === "evaluation") {
+      const reader = this.runGateQueue.shift();
+      if (reader === undefined) break;
+      this.runGateReaders += 1;
+      let released = false;
+      reader.grant(() => {
+        if (released) return;
+        released = true;
+        this.runGateReaders -= 1;
+        this.drainRunGate();
+      });
+    }
+  }
+
+  private assertQuiescenceUsable(): void {
+    if (this.quiescencePoisoned !== undefined) {
+      throw new BrokerError("INTERNAL", `evaluator quiescence is poisoned: ${this.quiescencePoisoned}`);
+    }
+  }
+
+  private async serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationQueue;
+    const turn = deferred<void>();
+    this.mutationQueue = previous.then(() => turn.promise);
+    await previous;
+    const releaseRunGate = await this.acquireRunGate("mutation");
+    try {
+      this.assertQuiescenceUsable();
+      return await operation();
+    } finally {
+      releaseRunGate();
+      turn.resolve();
+    }
+  }
+
+  private async enterEvaluationQuiescence(): Promise<() => Promise<void>> {
+    const releaseRunGate = await this.acquireRunGate("evaluation");
+    try {
+      this.assertQuiescenceUsable();
+      if (this.activeEvaluationLeases === 0) {
+        this.evaluationQuiescence = this.pauseRunContainersForEvaluation();
+      }
+      this.activeEvaluationLeases += 1;
+      await this.evaluationQuiescence;
+    } catch (error) {
+      if (this.activeEvaluationLeases > 0) this.activeEvaluationLeases -= 1;
+      if (this.activeEvaluationLeases === 0) this.evaluationQuiescence = undefined;
+      releaseRunGate();
+      throw error;
+    }
+
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      this.activeEvaluationLeases -= 1;
+      try {
+        if (this.activeEvaluationLeases === 0) {
+          const quiescence = this.evaluationQuiescence;
+          this.evaluationQuiescence = undefined;
+          await this.unpauseRunContainersAfterEvaluation(quiescence === undefined ? [] : await quiescence);
+        }
+      } finally {
+        releaseRunGate();
+      }
+    };
+  }
+  /**
+   * The exact run label includes optimizer/relay containers created by the
+   * CLI as well as broker-owned mutation sandboxes. The run-wide reader/
+   * writer gate prevents mutable Docker operations from racing the
+   * list/pause window.
+   */
+  private async pauseRunContainersForEvaluation(): Promise<string[]> {
+    const listed = await this.run(
+      ["docker", "ps", "-q", "--no-trunc", "--filter", `label=hone.runId=${this.config.runId}`],
+      { timeoutMs: 30_000 },
+    );
+    if (listed.exitCode !== 0 || listed.timedOut || listed.truncated) {
+      throw new BrokerError("INTERNAL", `evaluator quiescence listing failed: ${stderrText(listed)}`);
+    }
+    const refs = listed.stdout.toString("utf8").split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+    if (refs.some((ref) => !/^[0-9a-f]{12,64}$/.test(ref))) {
+      throw new BrokerError("INTERNAL", "evaluator quiescence listing returned an invalid container id");
+    }
+
+    const paused: string[] = [];
+    for (const ref of refs) {
+      const result = await this.run(["docker", "pause", ref], { timeoutMs: 30_000 });
+      if (result.exitCode !== 0 || result.timedOut || result.truncated) {
+        try {
+          await this.unpauseRunContainersAfterEvaluation(paused);
+        } catch (cleanupError) {
+          throw new BrokerError(
+            "INTERNAL",
+            `evaluator quiescence failed for ${ref}; rollback failed: ${
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+            }`,
+          );
+        }
+        throw new BrokerError("INTERNAL", `evaluator quiescence failed for ${ref}: ${stderrText(result)}`);
+      }
+      paused.push(ref);
+    }
+    return paused;
+  }
+
+  private async unpauseRunContainersAfterEvaluation(refs: readonly string[]): Promise<void> {
+    const failures: string[] = [];
+    for (const ref of [...refs].reverse()) {
+      const result = await this.run(["docker", "unpause", ref], { timeoutMs: 30_000 });
+      const safelyInactive = /no such container|no such object|is not running|is not paused/i.test(result.stderr.toString("utf8"));
+      if ((result.exitCode !== 0 || result.timedOut || result.truncated) && !safelyInactive) {
+        failures.push(`${ref}: ${stderrText(result)}`);
+      }
+    }
+    if (failures.length > 0) {
+      this.quiescencePoisoned = failures.join("; ");
+      throw new BrokerError("INTERNAL", `evaluator quiescence release failed: ${this.quiescencePoisoned}`);
+    }
+  }
+
 
   // ---------- durable run state ----------
 
@@ -658,6 +1140,7 @@ export class Broker {
     let traceBytes = 0;
     const traces = new Set<string>();
     let artifactBytes = 0;
+    let artifactEntries = 0;
     const artifacts = new Set<string>();
     for (const line of log.replayed) {
       if (line.t === "holdout") {
@@ -674,7 +1157,12 @@ export class Broker {
       } else if (line.t === "artifact" && !artifacts.has(line.hash)) {
         artifacts.add(line.hash);
         artifactBytes += line.bytes;
-        if (artifacts.size > this.maxCandidateArtifacts || artifactBytes > this.maxCandidateArtifactBytes) {
+        artifactEntries += line.entries ?? 0;
+        if (
+          artifacts.size > this.maxCandidateArtifacts ||
+          artifactBytes > this.maxCandidateArtifactBytes ||
+          artifactEntries > this.maxCandidateArtifactEntries
+        ) {
           throw new BrokerError("INTERNAL", "run state log exceeds the configured candidate artifact quota");
         }
       }
@@ -722,23 +1210,54 @@ export class Broker {
           if (!this.candidateArtifactHashes.has(line.hash)) {
             this.candidateArtifactHashes.add(line.hash);
             this.candidateArtifactBytes += line.bytes;
+            this.candidateArtifactEntries += line.entries ?? 0;
           }
           break;
         case "eval":
-          this.acceptRecord(line.record);
+          this.applyJournaledEval(line);
           break;
         case "episode":
           this.episodeOrdinal = Math.max(this.episodeOrdinal, line.episode + 1);
           this.anyEpisodeStarted = true;
           break;
-        case "lineage":
+        case "lineage": {
+          // Live code journals lineage at most once per hash, so a second
+          // line is old-journal/corruption territory: an identical restatement
+          // is idempotent, a DIFFERENT parent or episode is a contradictory
+          // persisted parent fact that could relineage a candidate — fail
+          // closed rather than silently rewrite promotion ancestry.
+          const prior = this.lineage.get(line.candidate);
+          if (prior !== undefined && (prior.parent !== line.parent || prior.episode !== line.episode)) {
+            throw new BrokerError(
+              "INTERNAL",
+              `run state log corrupt: contradictory lineage for ${line.candidate}: ` +
+                `${prior.parent}@ep${prior.episode} vs ${line.parent}@ep${line.episode}`,
+            );
+          }
           this.lineage.set(line.candidate, { parent: line.parent, episode: line.episode });
           // Graduation: once a hash has candidate lineage it is never a
           // repair snapshot again — the lineage line is the tombstone.
           this.repairs.delete(line.candidate);
           break;
+        }
         case "repair":
           this.repairs.set(line.hash, { parent: line.parent, episode: line.episode });
+          break;
+        case "slot":
+          // Live code writes exactly one admission fact. A duplicate is
+          // corruption even when it repeats the same hash: accepting it
+          // would make a forged/replayed journal indistinguishable from the
+          // one-attempt authority this fact represents.
+          if (this.promotionSlot !== undefined) {
+            throw new BrokerError(
+              "INTERNAL",
+              `run state log corrupt: duplicate promotion slot: ${this.promotionSlot} then ${line.hash}`,
+            );
+          }
+          if (!this.lineage.has(line.hash)) {
+            throw new BrokerError("INTERNAL", `run state log corrupt: promotion slot has no prior lineage: ${line.hash}`);
+          }
+          this.promotionSlot = line.hash;
           break;
         case "trace":
           if (!this.sessionTraceHashes.has(line.hash)) {
@@ -766,7 +1285,7 @@ export class Broker {
     }
   }
 
-  private reserveCandidateArtifact(hash: string, bytes: number): void {
+  private reserveCandidateArtifact(hash: string, bytes: number, entries: number): void {
     if (hash === this.config.baselineArtifactHash || this.candidateArtifactHashes.has(hash)) return;
     if (this.candidateArtifactHashes.size >= this.maxCandidateArtifacts) {
       throw new BrokerError("QUOTA_EXCEEDED", `candidate artifact count cap reached (${this.maxCandidateArtifacts})`);
@@ -774,9 +1293,13 @@ export class Broker {
     if (this.candidateArtifactBytes + bytes > this.maxCandidateArtifactBytes) {
       throw new BrokerError("QUOTA_EXCEEDED", `candidate artifact byte cap reached (${this.maxCandidateArtifactBytes})`);
     }
-    this.state().append({ t: "artifact", hash, bytes });
+    if (this.candidateArtifactEntries + entries > this.maxCandidateArtifactEntries) {
+      throw new BrokerError("QUOTA_EXCEEDED", `candidate artifact entry cap reached (${this.maxCandidateArtifactEntries})`);
+    }
+    this.state().append({ t: "artifact", hash, bytes, entries });
     this.candidateArtifactHashes.add(hash);
     this.candidateArtifactBytes += bytes;
+    this.candidateArtifactEntries += entries;
   }
 
   private async persistSessionTrace(bytes: Buffer): Promise<string> {
@@ -812,19 +1335,81 @@ export class Broker {
     }
   }
 
-  /** Stores an eligible record in the trusted table. Returns its aggregate on first sight, else undefined. */
-  private acceptRecord(record: EvaluationRecord): number | undefined {
-    const aggregate = eligibleAggregate(record);
-    if (aggregate === undefined) return undefined;
-    let perArtifact = this.trusted.get(record.artifactHash);
-    if (!perArtifact) {
-      perArtifact = new Map();
-      this.trusted.set(record.artifactHash, perArtifact);
+  /** Assigns (once) the monotone trusted mint ordinal of an epoch activated by trusted code. */
+  private mintEpochSeq(epoch: string): number {
+    let seq = this.epochSeqByName.get(epoch);
+    if (seq === undefined) {
+      seq = this.nextEpochSeq;
+      this.nextEpochSeq += 1;
+      this.epochSeqByName.set(epoch, seq);
     }
-    const pairKey = `${record.assetGroupId}|${record.seed}`;
-    if (perArtifact.has(pairKey)) return undefined;
-    perArtifact.set(pairKey, aggregate);
-    return aggregate;
+    return seq;
+  }
+
+  /** Replay: restore a persisted epoch ordinal verbatim and keep every future mint strictly above it. */
+  private noteReplayedEpochSeq(epoch: string, seq: number): void {
+    this.epochSeqByName.set(epoch, seq);
+    if (seq >= this.nextEpochSeq) this.nextEpochSeq = seq + 1;
+  }
+
+  /**
+   * Registers the candidate's FIRST persisted parent-before-child pair — its
+   * permanent promotion authority (journal order, identical live and at
+   * replay). Everything after the first registration is ignored: the frozen
+   * pair can never be replaced, supplemented, or erased, whatever its epoch,
+   * coordinate, parent, or completion order. Old-journal gate facts that
+   * current live code would not derive are thus inert — they replay as
+   * measurements and grant nothing (fail closed, never open).
+   */
+  private registerGate(child: string, epoch: string, pairKey: string, gate: GateFact): void {
+    if (this.gates.has(child)) return; // frozen: the first pair is permanent
+    this.gates.set(child, { epoch, pairKey, gate });
+  }
+
+  /** Shared live/replay insertion into the epoch-scoped trusted table. False when the coordinate was already measured in this epoch. */
+  private insertMeasurement(epoch: string, hash: string, pairKey: string, aggregate: number): boolean {
+    const key = `${epoch}|${hash}`;
+    let per = this.trusted.get(key);
+    if (per === undefined) {
+      per = new Map();
+      this.trusted.set(key, per);
+    }
+    if (per.has(pairKey)) return false;
+    per.set(pairKey, aggregate);
+    let lifetime = this.lifetimeCoords.get(hash);
+    if (lifetime === undefined) {
+      lifetime = new Set();
+      this.lifetimeCoords.set(hash, lifetime);
+    }
+    lifetime.add(pairKey);
+    return true;
+  }
+
+  /** Replays one journaled eval fact: epoch-scoped measurement plus the PERSISTED gate identity (never re-derived). */
+  private applyJournaledEval(line: { record: EvaluationRecord; epoch?: string | undefined; epochSeq?: number | undefined; gate?: GateFact | undefined }): void {
+    const aggregate = eligibleAggregate(line.record);
+    if (aggregate === undefined) return;
+    const epoch = line.epoch ?? "legacy";
+    // Restore epoch ordinal bookkeeping so this boot's fresh mints stay
+    // strictly above every replayed generation (pre-ordinal journals rank by
+    // first appearance — deterministic per journal).
+    if (line.epochSeq !== undefined) this.noteReplayedEpochSeq(epoch, line.epochSeq);
+    else this.mintEpochSeq(epoch);
+    const pairKey = `${line.record.assetGroupId}|${line.record.seed}`;
+    // Global artifact taint, replay side (checked BEFORE this fact's own
+    // insertion, exactly like live derivation): a persisted gate on a
+    // candidate that already has ANY lifetime evidence earlier in the journal
+    // was either never derivable by current live code or is an old-journal
+    // score-shopping artifact — the measurement replays, the gate grants
+    // nothing (fail closed).
+    const tainted = (this.lifetimeCoords.get(line.record.artifactHash)?.size ?? 0) > 0;
+    this.insertMeasurement(epoch, line.record.artifactHash, pairKey, aggregate);
+    // The M0 promotion slot replays from its own fact, journaled BEFORE the
+    // slot holder's first eval fact — a persisted gate on any other artifact
+    // (old journal, forgery) replays as a measurement only.
+    if (line.gate !== undefined && !tainted && line.record.artifactHash === this.promotionSlot) {
+      this.registerGate(line.record.artifactHash, epoch, pairKey, line.gate);
+    }
   }
 
   // ---------- events + budget ----------
@@ -891,6 +1476,9 @@ export class Broker {
 
   /** Every metered method calls this; getBudget/finish/recordSpend stay reachable for observability + teardown. */
   private budgetGate(): void {
+    // A poisoned journal refuses every new metered operation immediately —
+    // nothing may act when its authority can no longer be journaled.
+    this.stateLog?.assertUsable();
     const persisted = this.exhaustedAnnounced.values().next().value;
     const dim = persisted ?? this.announceExhaustion();
     if (dim !== undefined) throw new BrokerError("BUDGET_EXCEEDED", `budget dimension exhausted: ${dim}`);
@@ -954,17 +1542,19 @@ export class Broker {
       const nowMs = this.now();
       for (const [id, entry] of [...this.sandboxes]) {
         if (nowMs < entry.expiresAtMs) continue;
-        await this.serializeSandbox(id, async () => {
-          const current = this.sandboxes.get(id);
-          if (current === undefined || this.now() < current.expiresAtMs) return;
-          try {
-            const removed = await this.removeTrackedContainer(current.containerId);
-            if (containerGone(removed)) this.sandboxes.delete(id);
-          } catch {
-            // Keep the expired entry tracked: close() retries and fails terminal
-            // cleanup if Docker still cannot remove it.
-          }
-        });
+        await this.serializeMutation(() =>
+          this.serializeSandbox(id, async () => {
+            const current = this.sandboxes.get(id);
+            if (current === undefined || this.now() < current.expiresAtMs) return;
+            try {
+              const removed = await this.removeTrackedContainer(current.containerId);
+              if (containerGone(removed)) this.sandboxes.delete(id);
+            } catch {
+              // Keep the expired entry tracked: close() retries and fails terminal
+              // cleanup if Docker still cannot remove it.
+            }
+          }),
+        );
       }
     } finally {
       this.exitOp();
@@ -997,7 +1587,7 @@ export class Broker {
         "--driver", "local",
         "--opt", "type=tmpfs",
         "--opt", "device=tmpfs",
-        "--opt", `o=size=${this.scratchQuotaBytes},nr_inodes=131072`,
+        "--opt", `o=size=${this.scratchQuotaBytes},nr_inodes=${SCRATCH_INODE_LIMIT}`,
         "--label", `hone.runId=${this.config.runId}`,
         name,
       ],
@@ -1018,8 +1608,20 @@ export class Broker {
         "--cap-drop", "ALL",
         "--cap-add", "DAC_READ_SEARCH",
         "--cap-add", "CHOWN",
+        // Trusted keeper only: native rootful Linux still enforces the
+        // host-owned 0700 /snapshot bind after `--cap-drop ALL`.
+        "--cap-add", "DAC_OVERRIDE",
+        // GNU tar chowns uid-1000 entries before applying their final modes.
+        // Without FOWNER, a real production scratch snapshot cannot resume.
+        "--cap-add", "FOWNER",
+        ...this.leaseArgs,
+        // The pinned image must already exist locally — a create must fail
+        // fast, never sit in a minutes-long daemon-side pull past its fence.
+        "--pull", "never",
         "--security-opt", "no-new-privileges",
         "-e", `HONE_SCRATCH_QUOTA_BYTES=${this.scratchQuotaBytes}`,
+        "-e", `HONE_SCRATCH_SNAPSHOT_MAX_BYTES=${scratchSnapshotArchiveCapBytes(this.scratchQuotaBytes)}`,
+        "-e", `HONE_SCRATCH_SNAPSHOT_DEADLINE_SEC=${SCRATCH_SNAPSHOT_DEADLINE_SEC}`,
         "--pids-limit", "16",
         "--memory", "32m",
         "--memory-swap", "32m",
@@ -1055,12 +1657,79 @@ export class Broker {
 
   private async snapshotScratchVolume(): Promise<void> {
     if (this.scratchVolumeName === undefined) return;
-    const snapshotted = await this.run(
-      ["docker", "exec", "-u", "root", this.scratchKeeperName, "/bin/sh", "-c", SCRATCH_SNAPSHOT_SCRIPT],
-      { timeoutMs: 300_000 },
-    );
-    if (snapshotted.exitCode !== 0 || snapshotted.timedOut) {
-      throw new BrokerError("INTERNAL", `scratch snapshot failed: ${stderrText(snapshotted)}`);
+    const containers = [...new Set([...this.sandboxes.values()].map((entry) => entry.containerId))];
+    let failure: string | undefined;
+    if (containers.length > 0) {
+      // An exec may leave descendants running after the docker CLI returns.
+      // Freeze every mutation cgroup so the shared tmpfs has one coherent
+      // point-in-time view while the trusted keeper archives it.
+      const paused = await this.run(["docker", "pause", ...containers], { timeoutMs: 30_000 });
+      if (paused.exitCode !== 0 || paused.timedOut) failure = `scratch quiesce failed: ${stderrText(paused)}`;
+    }
+    if (failure === undefined) {
+      // Per-attempt unguessable output: an orphaned exec from an older
+      // (e.g. host-timed-out) attempt only ever knows ITS OWN basename — it
+      // can neither overwrite this attempt's output nor be published by it.
+      const attemptName = newScratchSnapshotAttemptName();
+      try {
+        const snapshotted = await this.run(
+          [
+            "docker", "exec", "-u", "root",
+            "-e", `HONE_SCRATCH_SNAPSHOT_OUT=${attemptName}`,
+            this.scratchKeeperName, "/bin/sh", "-c", SCRATCH_SNAPSHOT_SCRIPT,
+          ],
+          { timeoutMs: SCRATCH_SNAPSHOT_HOST_TIMEOUT_MS },
+        );
+        if (snapshotted.exitCode !== 0 || snapshotted.timedOut) {
+          failure = `scratch snapshot failed: ${stderrText(snapshotted)}`;
+        } else {
+          // Durable publication (fsync tmp → rename → fsync dir) happens on
+          // the HOST, BEFORE thaw and before any journal/event acknowledges
+          // the boundary — a power loss never leaves a torn scratch.tar
+          // behind an acknowledged snapshot. Only THIS attempt's exact
+          // output is ever published.
+          try {
+            await finalizeScratchSnapshot(this.scratchSnapshotDir, attemptName);
+          } catch (error) {
+            failure = `scratch snapshot finalize failed: ${error instanceof Error ? error.message : String(error)}`;
+          }
+        }
+      } finally {
+        // EVERY outcome sweeps unpublished outputs (this attempt's residue
+        // and any orphan's late write) — a stale archive never survives to
+        // satisfy or confuse a later attempt.
+        await this.sweepScratchSnapshotTemps();
+      }
+    }
+    if (containers.length > 0) {
+      // Always thaw after an attempted pause, including partial daemon
+      // failures. A failed thaw is terminally visible and cleanup reaps the
+      // affected containers; never strand a silently frozen sandbox.
+      const unpaused = await this.run(["docker", "unpause", ...containers], { timeoutMs: 30_000 });
+      if (unpaused.exitCode !== 0 || unpaused.timedOut) {
+        const thaw = `scratch thaw failed: ${stderrText(unpaused)}`;
+        failure = failure === undefined ? thaw : `${failure}; ${thaw}`;
+      }
+    }
+    if (failure !== undefined) throw new BrokerError("INTERNAL", failure);
+  }
+
+  /** Best-effort sweep of every unpublished snapshot output: per-attempt files, in-container pid temps, and legacy shared temps. */
+  private async sweepScratchSnapshotTemps(): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.scratchSnapshotDir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry === SCRATCH_SNAPSHOT_FILE || !entry.startsWith("scratch.tar.tmp")) continue;
+      try {
+        await rm(path.join(this.scratchSnapshotDir, entry), { force: true });
+      } catch {
+        // Cleanup is not authority: a stale unpublished temp is inert (it can
+        // never be finalized) and the next attempt sweeps again.
+      }
     }
   }
 
@@ -1119,18 +1788,21 @@ export class Broker {
   /**
    * Asset confidentiality (M0 blocker): the selected group's assets are
    * STAGED — copied, never bind-mounted from the capsule root — into a
-   * per-evaluation host directory (root and every directory 0700, every file
-   * 0600, owned by the broker user) that becomes the SINGLE read-only source
-   * of /capsule/assets. Selected fixtures therefore never reach a container
-   * with their original owner-readable modes, and only the root evaluator
-   * can read them in-container (see the tmpfs parent in evaluateReserved).
-   * Sources must be regular files reached without following symlinks;
-   * anything else fails closed before the invocation is burned.
+   * per-evaluation host directory that becomes the SINGLE read-only source
+   * of /capsule/assets. Host-side confidentiality lives on the OUTER,
+   * host-only parent (this.tmpDir, 0700, broker-owned, never mounted); the
+   * staged content itself is dirs 0755 / files 0644 because the evaluator
+   * runs with --cap-drop ALL (no CAP_DAC_OVERRIDE) — on native Linux even
+   * uid 0 cannot traverse a 0700 tree owned by the host uid. In-container
+   * confinement against the uid-2000 candidate remains the /capsule tmpfs
+   * parent (mode=0700) in evaluateReserved. Sources must be regular files
+   * reached without following symlinks; anything else fails closed before
+   * the invocation is burned.
    */
   private async stageAssets(group: CapsuleManifest["assetGroups"][number]): Promise<string> {
     const stageDir = path.join(this.tmpDir, `assets-${randomUUID()}`);
-    await mkdir(stageDir, { recursive: true, mode: 0o700 });
-    await chmod(stageDir, 0o700); // umask-independent
+    await mkdir(stageDir, { recursive: true, mode: 0o755 });
+    await chmod(stageDir, 0o755); // umask-independent
     try {
       for (const raw of group.paths) {
         const rel = path.posix.normalize(raw).replace(/\/+$/, "");
@@ -1146,8 +1818,8 @@ export class Broker {
         let parent = stageDir;
         for (const part of parts.slice(0, -1)) {
           parent = path.join(parent, part);
-          await mkdir(parent, { recursive: true, mode: 0o700 });
-          await chmod(parent, 0o700);
+          await mkdir(parent, { recursive: true, mode: 0o755 });
+          await chmod(parent, 0o755);
         }
         await this.stageEntry(host, path.join(parent, parts[parts.length - 1] ?? ""), group.id, rel);
       }
@@ -1167,8 +1839,8 @@ export class Broker {
       throw new BrokerError("INTERNAL", `asset path missing on host: ${rel}`);
     }
     if (st.isDirectory()) {
-      await mkdir(dst, { recursive: true, mode: 0o700 });
-      await chmod(dst, 0o700);
+      await mkdir(dst, { recursive: true, mode: 0o755 });
+      await chmod(dst, 0o755);
       for (const name of await readdir(src)) {
         await this.stageEntry(path.join(src, name), path.join(dst, name), groupId, `${rel}/${name}`);
       }
@@ -1191,11 +1863,11 @@ export class Broker {
       if (expected === undefined || actual !== expected) {
         throw new BrokerError("INTERNAL", `asset group ${groupId}: frozen content hash mismatch at ${rel}`);
       }
-      await writeFile(dst, bytes, { mode: 0o600, flag: "wx" });
+      await writeFile(dst, bytes, { mode: 0o644, flag: "wx" });
     } finally {
       await fh.close();
     }
-    await chmod(dst, 0o600);
+    await chmod(dst, 0o644);
   }
 
   private async ensureUnpacked(hash: string): Promise<string> {
@@ -1203,7 +1875,8 @@ export class Broker {
     return unpackArtifact(this.cas, hash, this.unpackRoot, this.run);
   }
 
-  /** Shared per-container resource ceilings (mutation AND eval containers). */
+  /** Shared per-container args (mutation AND eval containers): resource
+   * ceilings plus the docker-run lease attachment (creation fence). */
   private resourceArgs(): string[] {
     return [
       "--log-driver", "none",
@@ -1212,6 +1885,10 @@ export class Broker {
       "--cpus", String(this.sandboxCpus),
       "--security-opt", "no-new-privileges",
       "--cap-drop", "ALL",
+      ...this.leaseArgs,
+      // Pinned images are pre-staged; a daemon-side pull must never keep a
+      // timed-out create alive past the run lease fence.
+      "--pull", "never",
     ];
   }
 
@@ -1238,18 +1915,29 @@ export class Broker {
       if (this.sandboxes.size + this.pendingSandboxes >= this.maxActiveSandboxes) {
         throw new BrokerError("QUOTA_EXCEEDED", `active sandbox cap reached (${this.maxActiveSandboxes})`);
       }
-      const repair = this.lineage.has(params.artifact.hash) ? undefined : this.repairs.get(params.artifact.hash);
-      const reservesNewEpisode = repair === undefined;
-      if (reservesNewEpisode && this.episodeOrdinal + this.pendingNewEpisodes >= this.maxMutationEpisodes) {
-        throw new BrokerError("BUDGET_EXCEEDED", `mutation episode cap reached (${this.maxMutationEpisodes})`);
-      }
-      if (reservesNewEpisode) this.pendingNewEpisodes += 1;
       this.pendingSandboxes += 1;
       try {
-        return await this.createSandboxReserved(params, repair);
+        return await this.serializeMutation(async () => {
+          // Lineage/repair admission shares the same critical section as
+          // saveArtifact. A queued save may graduate or create this hash
+          // before our turn; never carry a stale episode decision across it.
+          const repair = this.lineage.has(params.artifact.hash) ? undefined : this.repairs.get(params.artifact.hash);
+          const reservesNewEpisode = repair === undefined;
+          if (reservesNewEpisode && this.episodeOrdinal + this.pendingNewEpisodes >= this.maxMutationEpisodes) {
+            throw new BrokerError(
+              "BUDGET_EXCEEDED",
+              `mutation episode cap reached (${this.maxMutationEpisodes})`,
+            );
+          }
+          if (reservesNewEpisode) this.pendingNewEpisodes += 1;
+          try {
+            return await this.createSandboxReserved(params, repair);
+          } finally {
+            if (reservesNewEpisode) this.pendingNewEpisodes -= 1;
+          }
+        });
       } finally {
         this.pendingSandboxes -= 1;
-        if (reservesNewEpisode) this.pendingNewEpisodes -= 1;
       }
     } finally {
       this.exitOp();
@@ -1297,7 +1985,7 @@ export class Broker {
       "--user", "1000:1000",
       "--read-only",
       "--tmpfs",
-      `/workspace:rw,exec,nosuid,nodev,size=${this.workspaceQuotaBytes},mode=1777`,
+      `/workspace:rw,exec,nosuid,nodev,size=${this.workspaceQuotaBytes},nr_inodes=${WORKSPACE_TMPFS_INODES},mode=1777`,
       "--tmpfs",
       "/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777",
       "--tmpfs",
@@ -1352,53 +2040,81 @@ export class Broker {
 
     // Extract AS the fixed unprivileged mutation identity. No root-side chown
     // (or CAP_CHOWN) is needed, and the long-lived sandbox retains zero caps.
-    const unpack = await this.run([
-      "docker", "exec", "-i", "-u", "1000:1000", containerId,
-      "/bin/tar", "-o", "--no-same-permissions", "--strip-components", "1", "-x", "-C", "/workspace",
-    ], {
-      stdin: artifactBytes,
-      timeoutMs: 300_000,
-    });
-    if (unpack.exitCode !== 0) {
-      await this.removeTrackedContainer(containerId);
-      throw new BrokerError("INTERNAL", `artifact unpack failed: ${stderrText(unpack)}`);
-    }
-
-    // close() snapshots the sandbox map — a container spawned in flight but
-    // not yet registered would leak past it. Reap it here instead.
-    if (this.closing) {
-      await this.removeTrackedContainer(containerId);
-      throw new BrokerError("INTERNAL", "broker is closed");
-    }
-
     const ttlSec = params.ttlSec ?? this.defaultTtlSec;
-    let episode: number;
-    let parentHash: string;
     let startedEvents: RunEvent[] = [];
-    if (repair !== undefined) {
-      episode = repair.episode;
-      parentHash = repair.parent;
-    } else {
-      episode = this.episodeOrdinal;
-      parentHash = params.artifact.hash;
-      // One fsynced fact owns both the ordinal and the public boundary: a
-      // crash can strand neither side of the split journal.
-      startedEvents = this.journalFact(
-        { t: "episode", episode },
-        [{ type: "episode.started", episode, parent: { hash: parentHash } }],
-      );
-      this.episodeOrdinal = episode + 1;
-      this.anyEpisodeStarted = true;
+    try {
+      const unpack = await this.run([
+        "docker", "exec", "-i", "-u", "1000:1000", containerId,
+        "/bin/tar", "-o", "--no-same-permissions", "--strip-components", "1", "-x", "-C", "/workspace",
+      ], {
+        stdin: artifactBytes,
+        timeoutMs: 300_000,
+      });
+      if (unpack.exitCode !== 0) {
+        throw new BrokerError("INTERNAL", `artifact unpack failed: ${stderrText(unpack)}`);
+      }
+
+      // close() snapshots the sandbox map — a container spawned in flight but
+      // not yet registered would leak past it. Reap it here instead.
+      if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
+
+      let episode: number;
+      let parentHash: string;
+      if (repair !== undefined) {
+        episode = repair.episode;
+        parentHash = repair.parent;
+      } else {
+        episode = this.episodeOrdinal;
+        parentHash = params.artifact.hash;
+        // One fsynced fact owns both the ordinal and the public boundary: a
+        // crash can strand neither side of the split journal.
+        startedEvents = this.journalFact(
+          { t: "episode", episode },
+          [{ type: "episode.started", episode, parent: { hash: parentHash } }],
+        );
+        this.episodeOrdinal = episode + 1;
+        this.anyEpisodeStarted = true;
+      }
+      // The ACTIVE episode (new or resumed repair) defines the measurement
+      // generation — set from the episode itself, never derived from ordinal
+      // arithmetic at evaluation sites — but the active generation is
+      // MONOTONE in the trusted epoch ordinal: a resumed repair reuses its
+      // episode's epoch only while that generation is still current. Once a
+      // newer epoch was minted, the reopened sandbox evaluates under the
+      // LATEST generation (fresh comparators); rolling back would let a
+      // stale parent memo from the old epoch pair against — and promote — a
+      // fresh child. A new episode's epoch is always a fresh mint, so it
+      // always becomes current.
+      const sandboxEpoch = `${this.bootNonce}:ep${episode}`;
+      const sandboxEpochSeq = this.mintEpochSeq(sandboxEpoch);
+      const currentSeq = this.epochSeqByName.get(this.measurementEpoch);
+      if (currentSeq === undefined || sandboxEpochSeq >= currentSeq) this.measurementEpoch = sandboxEpoch;
+      this.sandboxes.set(sandboxId, {
+        containerId,
+        expiresAtMs: this.now() + ttlSec * 1000,
+        episode,
+        parentHash,
+        lastExecStdout: null,
+        lastExecExitCode: null,
+        lastExecTruncated: null,
+      });
+    } catch (error) {
+      // No acknowledgment without a registered sandbox: a failure ANYWHERE
+      // after the container exists (unpack, closing fence, journal append —
+      // e.g. a poisoned run state log) must reap the container WITH PROOF.
+      // Otherwise the tracked-but-unregistered container escapes the
+      // active-sandbox cap and repeated creates leak containers unboundedly.
+      const removed = await this.removeTrackedContainer(containerId);
+      if (!containerGone(removed)) {
+        throw new BrokerError(
+          "INTERNAL",
+          `sandbox create failed and container cleanup unproven: ${
+            error instanceof Error ? error.message : String(error)
+          }; ${stderrText(removed)}`,
+        );
+      }
+      throw error;
     }
-    this.sandboxes.set(sandboxId, {
-      containerId,
-      expiresAtMs: this.now() + ttlSec * 1000,
-      episode,
-      parentHash,
-      lastExecStdout: null,
-      lastExecExitCode: null,
-      lastExecTruncated: null,
-    });
     this.publish(startedEvents);
     return { sandboxId };
   }
@@ -1406,7 +2122,9 @@ export class Broker {
   async exec(params: ExecP, ctx: CallContext): Promise<ExecR> {
     this.enterOp();
     try {
-      return await this.serializeSandbox(params.sandboxId, () => this.execOp(params, ctx));
+      return await this.serializeMutation(() =>
+        this.serializeSandbox(params.sandboxId, () => this.execOp(params, ctx)),
+      );
     } finally {
       this.exitOp();
     }
@@ -1462,7 +2180,9 @@ export class Broker {
   async putFile(params: PutFileP, ctx: CallContext): Promise<Record<string, never>> {
     this.enterOp();
     try {
-      return await this.serializeSandbox(params.sandboxId, () => this.putFileOp(params, ctx));
+      return await this.serializeMutation(() =>
+        this.serializeSandbox(params.sandboxId, () => this.putFileOp(params, ctx)),
+      );
     } finally {
       this.exitOp();
     }
@@ -1495,7 +2215,9 @@ export class Broker {
   async getFile(params: GetFileP, ctx: CallContext): Promise<GetFileR> {
     this.enterOp();
     try {
-      return await this.serializeSandbox(params.sandboxId, () => this.getFileOp(params, ctx));
+      return await this.serializeMutation(() =>
+        this.serializeSandbox(params.sandboxId, () => this.getFileOp(params, ctx)),
+      );
     } finally {
       this.exitOp();
     }
@@ -1520,7 +2242,9 @@ export class Broker {
   async saveArtifact(params: SaveArtifactP, ctx: CallContext): Promise<ArtifactRef> {
     this.enterOp();
     try {
-      return await this.serializeSandbox(params.sandboxId, () => this.saveArtifactOp(params, ctx));
+      return await this.serializeMutation(() =>
+        this.serializeSandbox(params.sandboxId, () => this.saveArtifactOp(params, ctx)),
+      );
     } finally {
       this.exitOp();
     }
@@ -1550,7 +2274,8 @@ export class Broker {
         res.stdout,
         this.cas,
         this.run,
-        (candidateHash, bytes) => this.reserveCandidateArtifact(candidateHash, bytes),
+        (candidateHash, bytes, entryCount) => this.reserveCandidateArtifact(candidateHash, bytes, entryCount),
+        this.tmpDir,
       );
     } catch (err) {
       if (err instanceof ArtifactValidationError) {
@@ -1627,9 +2352,49 @@ export class Broker {
     this.budgetGate();
     const group = this.manifest.assetGroups.find((g) => g.id === params.assetGroupId);
     if (!group) throw new BrokerError("INTERNAL", `unknown asset group: ${params.assetGroupId}`);
-    const memoKey = `${params.artifact.hash}|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}`;
+    // Authorization is caller-specific and MUST precede in-flight dedup:
+    // otherwise a public caller can attach to an admin holdout promise.
+    if (group.visibility === "holdout" && !ctx.privileged) {
+      throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout asset groups are only reachable on the admin socket");
+    }
+    // Cross-artifact evaluator cache channel (M0, see promotionSlot): only
+    // public mutation authority is constrained. Trusted privileged harnesses
+    // may measure arbitrary CAS artifacts; they cannot be reached with the
+    // optimizer's public capability.
+    if (!ctx.privileged && params.artifact.hash !== this.config.baselineArtifactHash) {
+      if (!this.lineage.has(params.artifact.hash)) {
+        throw new BrokerError(
+          "INTERNAL",
+          `evaluate: ${params.artifact.hash} is neither the baseline nor a saved candidate of this run — repairs and arbitrary CAS content never reach a public evaluator`,
+        );
+      }
+      if (this.promotionSlot !== undefined) {
+        throw new BrokerError(
+          "QUOTA_EXCEEDED",
+          `candidate evaluation attempt already consumed by ${this.promotionSlot}; M0 admits one public non-baseline evaluator invocation per run`,
+        );
+      }
+      // Synchronous durable admission before ANY await/spawn. JavaScript's
+      // run-to-completion semantics serialize racing A/B calls here.
+      this.state().append({ t: "slot", hash: params.artifact.hash });
+      this.promotionSlot = params.artifact.hash;
+    }
+    // Every ADMITTED privileged holdout request consumes one lifetime ledger
+    // slot — this is information-query budget, not unique-computation budget,
+    // so it is charged BEFORE in-flight coalescing and memo lookup: N
+    // concurrent identical calls burn N slots exactly like N sequential ones.
+    // Immutable measurement generation for THIS evaluation, captured before
+    // any await — a concurrently created episode must not re-scope an
+    // in-flight measurement.
+    const evalEpoch = this.measurementEpoch;
+    if (group.visibility === "holdout") await this.chargeHoldout();
+    const memoKey =
+      `run:${this.config.runId}|gen:${evalEpoch}|${params.artifact.hash}` +
+      `|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}`;
     const existing = this.inFlightEvaluations.get(memoKey);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) {
+      return this.redactRecord(await existing, group.visibility, ctx);
+    }
     if (this.pendingEvaluations >= this.maxConcurrentEvaluations) {
       throw new BrokerError("QUOTA_EXCEEDED", `concurrent evaluator cap reached (${this.maxConcurrentEvaluations})`);
     }
@@ -1637,10 +2402,10 @@ export class Broker {
       throw new BrokerError("BUDGET_EXCEEDED", "budget dimension exhausted: evaluatorInvocations");
     }
     this.pendingEvaluations += 1;
-    const evaluation = this.evaluateReserved(params, group, ctx, memoKey);
+    const evaluation = this.evaluateReserved(params, group, ctx, memoKey, evalEpoch);
     this.inFlightEvaluations.set(memoKey, evaluation);
     try {
-      return await evaluation;
+      return this.redactRecord(await evaluation, group.visibility, ctx);
     } finally {
       this.pendingEvaluations -= 1;
       this.inFlightEvaluations.delete(memoKey);
@@ -1652,28 +2417,29 @@ export class Broker {
     group: CapsuleManifest["assetGroups"][number],
     ctx: CallContext,
     memoKey: string,
+    epoch: string,
   ): Promise<EvaluationRecord> {
-    if (group.visibility === "holdout") {
-      if (!ctx.privileged) {
-        throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout asset groups are only reachable on the admin socket");
-      }
-      await this.chargeHoldout();
-    }
-
-    // Memo key pins the FULL provenance of a measurement: artifact, frozen
-    // capsule digest, optimizer digest, asset group, seed, AND the effective
+    // Memo key pins the FULL provenance of a measurement: run, measurement
+    // generation (`${bootNonce}:{startup|ep<N>}`), artifact, frozen capsule
+    // digest, optimizer digest, asset group, seed, AND the effective
     // evaluator wall-time cap (config.evalTimeoutSec). The cap sets the
     // docker timeout for the evaluator run, so a per-run overlay can change
     // it while capsuleDigest stays the frozen capsule digest — a
     // timing-sensitive result measured under one cap must never be served to
-    // a run with a different cap. A different capsule or optimizer build can
-    // likewise never alias onto a cached record.
+    // a run with a different cap; a different capsule or optimizer build can
+    // likewise never alias onto a cached record. runId keeps one run's
+    // measurements from leaking into another; the boot nonce inside the
+    // generation forces a fresh comparator after any kill/resume (an
+    // hours-old pre-crash parent measurement must not stand in for today's
+    // conditions); the episode number makes every new mutation episode
+    // re-measure parent AND candidate freshly. Retries within one
+    // boot+episode still memoize.
     const memoHash = await this.cas.indexGet("eval", memoKey);
     if (memoHash !== undefined && (await this.cas.has(memoHash))) {
       const record = EvaluationRecord.parse(JSON.parse((await this.cas.readBuffer(memoHash)).toString("utf8")));
       const cached = { ...record, cached: true };
-      this.recordEvaluation(cached, group.visibility);
-      return this.redactRecord(cached, group.visibility, ctx);
+      this.recordEvaluation(cached, group.visibility, epoch);
+      return cached;
     }
 
     const workspaceDir = await this.ensureUnpacked(params.artifact.hash);
@@ -1689,6 +2455,8 @@ export class Broker {
       }
     }
 
+    const releaseEvaluation = await this.enterEvaluationQuiescence();
+    try {
     // Stage the selected group BEFORE burning the invocation: a missing or
     // non-regular host asset is trusted-side misconfiguration, not an
     // attempted evaluation.
@@ -1699,11 +2467,9 @@ export class Broker {
     const startedMs = Date.now();
     const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
     try {
-      // Last-instant closing check (synchronous with the registration and the
-      // spawn below): close() either sees this eval container in the active
-      // set and reaps it by name, or this op throws before spawning.
+      // Closing fence BEFORE the durable burn: a broker that is already
+      // closing must not consume an invocation it will never spawn.
       if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
-      this.trackedContainers.add(evalName);
 
       // Burn the invocation DURABLY before the spawn so a crashed evaluator
       // cannot farm free retries. The projected snapshot/exhaustion are part
@@ -1736,9 +2502,28 @@ export class Broker {
         "SETGID",
         "--cap-add",
         "KILL",
+        // Trusted-parent-only reset authority. setuid(2000) clears these
+        // capabilities from the candidate worker, and no-new-privileges
+        // prevents reacquisition through file capabilities.
+        "--cap-add",
+        "DAC_OVERRIDE",
+        "--cap-add",
+        "FOWNER",
+        "--cap-add",
+        "IPC_OWNER",
+        // Trusted-scorer-only namespace authority (evaluator container ONLY,
+        // never mutation sandboxes/keeper): the scorer's preexec unshares
+        // fresh NET+IPC namespaces per repetition BEFORE the setuid(2000)
+        // drop, so cross-rep loopback state (TIME_WAIT caches, SysV IPC)
+        // cannot leak between repetitions. The drop strips it from the
+        // candidate worker and no-new-privileges prevents reacquisition.
+        "--cap-add",
+        "SYS_ADMIN",
         "--read-only",
         "--tmpfs",
-        "/tmp",
+        "/tmp:size=16m,nosuid,nodev,noexec",
+        "--shm-size",
+        "16m",
         // The trusted scorer runs as ROOT inside the eval container so it can
         // drop the candidate worker to an unprivileged uid (2000) — same-uid
         // signal//proc reach from candidate code to the scorer is severed
@@ -1759,8 +2544,10 @@ export class Broker {
         // root-owned mode=0700 tmpfs, so the dropped uid-2000 candidate
         // worker cannot even traverse to it. The kernel enforces this on the
         // tmpfs everywhere — Docker Desktop's VirtioFS bind mounts do NOT
-        // enforce host file modes in-container, so the 0700/0600 staged host
-        // tree alone is only sufficient on native Linux.
+        // enforce host file modes in-container. Host-side, the staged tree is
+        // dirs 0755 / files 0644 under the 0700 host-only tmp parent: on
+        // native Linux the cap-dropped evaluator (even uid 0 has no
+        // CAP_DAC_OVERRIDE) must be able to read the bind content.
         "--tmpfs",
         "/capsule:mode=0700,size=1m",
         "-v",
@@ -1768,6 +2555,14 @@ export class Broker {
       ];
       argv.push(this.config.image, ...this.manifest.evalEntrypoint);
 
+      // Registration is SYNCHRONOUS with the spawn: close() either sees this
+      // name in the tracked set and reaps it, or this op threw before
+      // spawning. Every post-registration path — resolve, throw, timeout —
+      // runs the reap finally below, so a journal append failure (which
+      // throws ABOVE, before registration) can never strand a phantom
+      // tracked name or repeat staging against a poisoned journal.
+      if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
+      this.trackedContainers.add(evalName);
       try {
         res = await this.run(argv, { timeoutMs: this.evalTimeoutSec * 1000, maxOutputBytes: 32 * 1024 * 1024 });
       } finally {
@@ -1781,7 +2576,7 @@ export class Broker {
       }
     } finally {
       // Confidentiality teardown on EVERY path (success, error, timeout):
-      // the staged copies never outlive the evaluation.
+      // staged fixtures disappear before any untrusted process runs again.
       await rm(stageDir, { recursive: true, force: true });
     }
     const durationMs = Date.now() - startedMs;
@@ -1809,8 +2604,11 @@ export class Broker {
     });
     const recordHash = await this.cas.putBuffer(Buffer.from(JSON.stringify(record)));
     await this.cas.indexPut("eval", memoKey, recordHash);
-    this.recordEvaluation(record, group.visibility);
-    return this.redactRecord(record, group.visibility, ctx);
+    this.recordEvaluation(record, group.visibility, epoch);
+    return record;
+    } finally {
+      await releaseEvaluation();
+    }
   }
 
   /**
@@ -1851,63 +2649,87 @@ export class Broker {
    * Trusted scalarization + the eval.completed event. Holdout results NEVER
    * enter the log or the promotion table — scores of ledger-gated groups stay
    * admin-side. Ineligible outputs (invalid, objective-less, non-finite, or
-   * any failed constraint) grant no authority. Pre-episode evaluations (the
-   * optimizer measuring its parent before any sandbox exists) populate
-   * authority but emit nothing — the event log keeps episode.started first.
+   * any failed constraint) grant no authority.
    *
-   * Trusted probe evidence (M0 blocker, run_mrmklm7i738484): the FIRST
-   * accepted evaluation of a saved candidate is tagged with its
-   * broker-validated lineage episode, and — when the lineage parent already
-   * holds a trusted aggregate at the SAME group/seed coordinate — followed by
-   * a broker-authored `gate.paired` carrying exactly those trusted scores
-   * (greedy: the child must strictly beat the parent). Optimizer events and
-   * claims are never consulted. Later evaluations of the same artifact (an
-   * old candidate re-measured as a parent of the next episode) are untagged
-   * and re-emit no gate — the artifact already holds trusted records, and
-   * replay repopulates those records before any live call, so a restart can
-   * never make an old candidate look first again.
+   * Authority is EPOCH-SCOPED: the measurement lands in the epoch captured
+   * when its evaluation was admitted, and a same-epoch retry is a no-op
+   * (memoized). A gate is derived — and PERSISTED inside the journaled eval
+   * fact — only when BOTH hold:
+   * - the lineage parent already holds a measurement at this exact
+   *   coordinate IN THE SAME EPOCH (parent-before-child): measuring the
+   *   parent after shopping candidate seeds, in an older episode, or before
+   *   a crash pairs nothing; and
+   * - this is the candidate's FIRST trusted evidence EVER (global artifact
+   *   taint): any earlier candidate measurement — child-first, any seed, any
+   *   epoch — permanently disqualifies the artifact from gate authority.
+   *   Coordinate-level taint is not enough: evaluator inode/page-cache state
+   *   survives across evaluator containers and seeds don't change assets, so
+   *   a child-first run at seed 0 warms caches that flatter a "clean"
+   *   parent→child pairing at seed 1. Repairs and byte-identical resaves
+   *   share the hash, so they inherit the taint.
+   *
+   * Public events keep the historical shape: eval.completed once per
+   * artifact/coordinate lifetime (episode-tagged on the artifact's first
+   * record), gate.paired only alongside that first tagged record — fresh
+   * re-measurements in later epochs are measurements, not news and not
+   * authority (see registerGate: the first pair is frozen).
    */
-  private recordEvaluation(record: EvaluationRecord, visibility: string): void {
+  private recordEvaluation(record: EvaluationRecord, visibility: string, epoch: string): void {
     if (visibility === "holdout") return;
     const aggregate = eligibleAggregate(record);
     if (aggregate === undefined) return;
     const pairKey = `${record.assetGroupId}|${record.seed}`;
-    let perArtifact = this.trusted.get(record.artifactHash);
-    if (perArtifact?.has(pairKey) === true) return;
+    if (this.trusted.get(`${epoch}|${record.artifactHash}`)?.has(pairKey) === true) return;
+    const epochSeq = this.epochSeqByName.get(epoch);
+    if (epochSeq === undefined) {
+      throw new BrokerError("INTERNAL", `measurement epoch was never minted by trusted code: ${epoch}`);
+    }
 
-    const hadTrusted = (perArtifact?.size ?? 0) > 0;
-    const lin = this.anyEpisodeStarted && !hadTrusted ? this.lineage.get(record.artifactHash) : undefined;
+    // Gate derivation BEFORE the child's own insertion: parent-before-child
+    // within the SAME epoch, at the same coordinate, and only as the
+    // candidate's first-ever trusted evidence (global taint — any prior
+    // measurement of this artifact kills authority for good).
+    const lin = this.lineage.get(record.artifactHash);
+    const lifetime = this.lifetimeCoords.get(record.artifactHash);
+    const hadTrusted = (lifetime?.size ?? 0) > 0;
+    const lifetimeFirst = lifetime?.has(pairKey) !== true;
+    const parentScore =
+      lin === undefined || hadTrusted || record.artifactHash !== this.promotionSlot
+        ? undefined
+        : this.trusted.get(`${epoch}|${lin.parent}`)?.get(pairKey);
+    const gate: GateFact | undefined =
+      lin !== undefined && parentScore !== undefined
+        ? { parent: lin.parent, parentScore, childScore: aggregate, passed: aggregate > parentScore }
+        : undefined;
+
+    const tagged = this.anyEpisodeStarted && !hadTrusted ? lin : undefined;
     const events: EmittableEvent[] = [];
-    if (this.anyEpisodeStarted) {
+    if (this.anyEpisodeStarted && lifetimeFirst) {
       events.push({
         type: "eval.completed",
-        ...(lin !== undefined ? { episode: lin.episode } : {}),
+        ...(tagged !== undefined ? { episode: tagged.episode } : {}),
         artifact: { hash: record.artifactHash },
         assetGroupId: record.assetGroupId,
         seed: record.seed,
         aggregate,
         cached: record.cached,
       });
-      if (lin !== undefined) {
-        const parentScore = this.trusted.get(lin.parent)?.get(pairKey);
-        if (parentScore !== undefined) {
-          events.push({
-            type: "gate.paired",
-            episode: lin.episode,
-            parentScore,
-            childScore: aggregate,
-            passed: aggregate > parentScore,
-          });
-        }
+      if (tagged !== undefined && gate !== undefined) {
+        events.push({
+          type: "gate.paired",
+          episode: tagged.episode,
+          parentScore: gate.parentScore,
+          childScore: gate.childScore,
+          passed: gate.passed,
+        });
       }
     }
 
-    const journaled = this.journalFact({ t: "eval", record }, events);
-    if (perArtifact === undefined) {
-      perArtifact = new Map();
-      this.trusted.set(record.artifactHash, perArtifact);
-    }
-    perArtifact.set(pairKey, aggregate);
+    const journaled = this.journalFact({ t: "eval", record, epoch, epochSeq, ...(gate !== undefined ? { gate } : {}) }, events);
+    // Tables AFTER the durable fact, via the same helpers replay uses — a
+    // crash rebuilds the exact same measurements and persisted gates.
+    this.insertMeasurement(epoch, record.artifactHash, pairKey, aggregate);
+    if (gate !== undefined) this.registerGate(record.artifactHash, epoch, pairKey, gate);
     this.publish(journaled);
   }
 
@@ -1932,9 +2754,21 @@ export class Broker {
   /**
    * Promotion authority (contract 2): the client's report is a HINT. An
    * artifact becomes incumbent only when this broker's own eligible records
-   * prove it — same-group/same-seed paired child-vs-parent positive delta,
-   * plus monotone improvement over the current incumbent on paired records.
-   * Claimed metrics are never read.
+   * prove it — the ONE persisted SAME-EPOCH, PARENT-FIRST gate pair with a
+   * positive delta, plus monotone improvement over the current incumbent on
+   * same-epoch paired records. Claimed metrics are never read.
+   *
+   * Anti-score-shopping: the gate pair exists only when the lineage parent
+   * was measured BEFORE the candidate within one measurement epoch AND the
+   * pairing was the candidate's first-ever trusted evidence (global taint) —
+   * shopping candidate seeds/epochs and then staging parent→child at a
+   * lucky (or cache-warmed) coordinate pairs nothing, and pre-crash or
+   * pre-episode parent scores pair nothing either. The pair is FROZEN at
+   * first registration — never supplemented or replaced — so a failed first
+   * pairing is permanent: this method reads only that frozen authority, and
+   * no volume of later createSandbox/evaluate epochs, retries, or re-reports
+   * can make an initially losing candidate promotable. The pair replays
+   * verbatim from the journal, so this authority survives crashes.
    */
   reportIncumbent(params: ReportIncumbentP, _ctx: CallContext): Record<string, never> {
     this.budgetGate();
@@ -1945,25 +2779,38 @@ export class Broker {
     if (!lin) {
       throw new BrokerError("INTERNAL", `reportIncumbent: ${hash} is not a saved candidate of this run (no lineage)`);
     }
-    const cand = this.trusted.get(hash);
-    if (!cand || cand.size === 0) {
+    if ((this.lifetimeCoords.get(hash)?.size ?? 0) === 0) {
       throw new BrokerError("INTERNAL", `reportIncumbent: no trusted evaluation for artifact ${hash}`);
     }
-    const parentScores = this.trusted.get(lin.parent);
-    const pairedParent = parentScores === undefined ? [] : [...cand.keys()].filter((k) => parentScores.has(k));
-    if (parentScores === undefined || pairedParent.length === 0) {
+    if (hash !== this.promotionSlot) {
       throw new BrokerError(
         "INTERNAL",
-        "reportIncumbent: insufficient authority — no same-group/same-seed paired evaluations of candidate and parent",
+        "reportIncumbent: insufficient authority — the run's promotion slot " +
+          `is held by ${this.promotionSlot ?? "no artifact"} (M0: the first evaluated candidate is the only promotion-eligible artifact)`,
       );
     }
-    const deltaVsParent = meanOver(cand, pairedParent) - meanOver(parentScores, pairedParent);
+    const gateEntry = this.gates.get(hash);
+    if (gateEntry === undefined || gateEntry.gate.parent !== lin.parent) {
+      throw new BrokerError(
+        "INTERNAL",
+        "reportIncumbent: insufficient authority — no persisted same-epoch parent-first gate pairing candidate and parent " +
+          "(measure the parent BEFORE the candidate's first-ever evaluation, at a shared group+seed coordinate, " +
+          "within the current mutation episode)",
+      );
+    }
+    const deltaVsParent = gateEntry.gate.childScore - gateEntry.gate.parentScore;
     if (!(deltaVsParent > 0)) {
       throw new BrokerError("INTERNAL", `reportIncumbent: no positive trusted delta vs parent (paired delta ${deltaVsParent})`);
     }
+    const cand = this.trusted.get(`${gateEntry.epoch}|${hash}`);
+    if (cand === undefined || cand.size === 0) {
+      throw new BrokerError("INTERNAL", `reportIncumbent: no trusted evaluation for artifact ${hash}`);
+    }
     const inc = this.currentIncumbent;
     if (inc !== undefined && inc.hash !== lin.parent) {
-      const incScores = this.trusted.get(inc.hash);
+      // Same-epoch pairing against the incumbent too — a stale incumbent
+      // score from another generation is not a comparator.
+      const incScores = this.trusted.get(`${gateEntry.epoch}|${inc.hash}`);
       const pairedInc = incScores === undefined ? [] : [...cand.keys()].filter((k) => incScores.has(k));
       if (incScores === undefined || pairedInc.length === 0) {
         throw new BrokerError(
@@ -1978,12 +2825,13 @@ export class Broker {
     }
 
     const aggregate = meanOver(cand, [...cand.keys()]);
-    // deltaVsBaseline is only meaningful over PAIRED keys: the client picks
-    // which evaluations exist, so disjoint mean-vs-mean would let it steer
-    // the trusted progress number arbitrarily. No paired baseline
-    // measurement -> no promotion (the parent chain starts at the baseline,
-    // so honest optimizers always have one for the keys they promote on).
-    const baselineScores = this.trusted.get(this.config.baselineArtifactHash);
+    // deltaVsBaseline is only meaningful over PAIRED same-epoch keys: the
+    // client picks which evaluations exist, so disjoint mean-vs-mean would
+    // let it steer the trusted progress number arbitrarily. No same-epoch
+    // paired baseline measurement -> no promotion (the parent chain starts
+    // at the baseline, so honest optimizers always have one for the keys
+    // they promote on).
+    const baselineScores = this.trusted.get(`${gateEntry.epoch}|${this.config.baselineArtifactHash}`);
     const pairedBaseline = baselineScores === undefined ? [] : [...cand.keys()].filter((k) => baselineScores.has(k));
     if (baselineScores === undefined || pairedBaseline.length === 0) {
       throw new BrokerError(
@@ -2192,6 +3040,7 @@ export class Broker {
     }
     return missing.length;
   }
+
 
   get finishedBest(): ArtifactRef | undefined {
     return this.best;

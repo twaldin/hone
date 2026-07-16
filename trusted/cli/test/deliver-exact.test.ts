@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { assertTreeMatchesStage, deliver, type DeliverOptions } from "../src/deliver.js";
+import { AUTO_DELIVERY_RECEIPT_FILE, assertTreeMatchesStage, deliver, type DeliverOptions } from "../src/deliver.js";
 import { writeCas } from "../src/cas.js";
 import { gitIn, initScratchRepo, makeRoot, tarToCas } from "./helpers.js";
 
@@ -21,9 +21,13 @@ function opts(root: string, repo: string, artifact: string, extra: Partial<Deliv
   return {
     mode: "branch",
     repo,
+    // Scratch repos are born at their sealed baseline: HEAD is the frozen commit.
+    baselineCommit: gitIn(repo, "rev-parse", "HEAD"),
     runId: "run_exact",
+    runDir: root,
     artifact,
     casDir: join(root, CAS),
+    autoRef: "refs/heads/main",
     improverSeat: false,
     env: process.env,
     ...extra,
@@ -152,8 +156,106 @@ describe("delivery is hook-proof — zero hook processes run, including ref-tran
     const applied = gitIn(repo, "rev-parse", "main");
     const recovered = deliver(options);
     expect(recovered.ref).toBe("main");
-    expect(recovered.notes.join("\n")).toMatch(/already present/);
+    expect(recovered.notes.join("\n")).toMatch(/receipt recovered/);
     expect(gitIn(repo, "rev-parse", "main")).toBe(applied);
+  });
+
+  it("auto recovery reuses the sealed destination after HEAD changes", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const options = opts(root, repo, hash, { mode: "auto", autoRef: "refs/heads/main" });
+    expect(deliver(options).ref).toBe("main");
+    gitIn(repo, "branch", "feature", options.baselineCommit);
+    gitIn(repo, "checkout", "feature");
+    const featureBefore = gitIn(repo, "rev-parse", "refs/heads/feature");
+
+    const recovered = deliver(options);
+    expect(recovered.ref).toBe("main");
+    expect(gitIn(repo, "rev-parse", "refs/heads/feature")).toBe(featureBefore);
+    expect(gitIn(repo, "show", "main:hello.txt")).toBe("improved");
+    expect(gitIn(repo, "show", "feature:hello.txt")).toBe("baseline");
+  });
+
+  it("never carries ambient HEAD changes into the sealed automatic destination", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const options = opts(root, repo, hash, { mode: "auto", autoRef: "refs/heads/main" });
+    gitIn(repo, "checkout", "-b", "feature");
+    writeFileSync(join(repo, "feature.txt"), "unapproved\n");
+    gitIn(repo, "add", "feature.txt");
+    gitIn(repo, "commit", "-m", "feature work");
+    const featureTip = gitIn(repo, "rev-parse", "refs/heads/feature");
+
+    expect(deliver(options).ref).toBe("main");
+    expect(gitIn(repo, "show", "main:hello.txt")).toBe("improved");
+    const leaked = spawnSync("git", ["-C", repo, "cat-file", "-e", "main:feature.txt"]);
+    expect(leaked.status).not.toBe(0);
+    expect(gitIn(repo, "rev-parse", "refs/heads/feature")).toBe(featureTip);
+  });
+
+  it("refuses branch ancestry that discarded the candidate tree and has no durable receipt", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const options = opts(root, repo, hash, { mode: "auto" });
+    expect(deliver({ ...options, mode: "branch" }).ref).toBe("hone/run_exact");
+    const base = gitIn(repo, "rev-parse", "refs/heads/main");
+    const candidate = gitIn(repo, "rev-parse", "refs/heads/hone/run_exact");
+    const oldTree = gitIn(repo, "rev-parse", "refs/heads/main^{tree}");
+    const discarded = gitIn(repo, "commit-tree", oldTree, "-p", base, "-p", candidate, "-m", "discard candidate");
+    gitIn(repo, "update-ref", "refs/heads/main", discarded, base);
+
+    expect(() => deliver(options)).toThrow(/already appears.*without.*durable automatic-delivery receipt/);
+    expect(gitIn(repo, "show", "main:hello.txt")).toBe("baseline");
+  });
+
+  it("recovers the exact auto commit from a durable receipt written before the destination CAS", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const options = opts(root, repo, hash, { mode: "auto" });
+    const before = gitIn(repo, "rev-parse", "refs/heads/main");
+    let interrupted = false;
+    expect(() =>
+      deliver({
+        ...options,
+        verifyTarget: () => {
+          if (!interrupted && existsSync(join(root, AUTO_DELIVERY_RECEIPT_FILE))) {
+            interrupted = true;
+            throw new Error("injected crash after receipt");
+          }
+        },
+      }),
+    ).toThrow(/injected crash after receipt/);
+    expect(interrupted).toBe(true);
+    expect(gitIn(repo, "rev-parse", "refs/heads/main")).toBe(before);
+
+    expect(deliver(options).ref).toBe("main");
+    expect(gitIn(repo, "show", "main:hello.txt")).toBe("improved");
+  });
+
+  it("consumes an existing auto receipt before a newly configured external merge-driver fallback", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const marker = join(root, "merge-driver-ran");
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const options = opts(root, repo, hash, { mode: "auto" });
+    expect(deliver(options).ref).toBe("main");
+    const applied = gitIn(repo, "rev-parse", "refs/heads/main");
+    gitIn(repo, "config", "merge.evil.driver", `touch ${marker}`);
+
+    const recovered = deliver(options);
+    expect(recovered.ref).toBe("main");
+    expect(recovered.notes.join("\n")).toMatch(/receipt recovered/);
+    expect(gitIn(repo, "rev-parse", "refs/heads/main")).toBe(applied);
+    expect(existsSync(marker)).toBe(false);
   });
 });
 
@@ -374,5 +476,148 @@ describe("tree verification fails closed on any divergence", () => {
     initScratchRepo(repo);
     const tree = forgeTree(repo, [{ mode: "120000", content: "target", path: "link" }]);
     expect(() => assertTreeMatchesStage(repo, tree, makeStage({}))).toThrow(/120000/);
+  });
+});
+
+describe("delivery targeting — sealed baseline parentage and exact-target validation", () => {
+  it("parents the candidate on the sealed baseline and merges a moved HEAD (post-baseline history preserved)", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const baseline = gitIn(repo, "rev-parse", "HEAD");
+    // the target gained history AFTER the capsule froze
+    writeFileSync(join(repo, "notes.txt"), "post-baseline work\n");
+    gitIn(repo, "add", "-A");
+    gitIn(repo, "commit", "-m", "post-baseline");
+    const head = gitIn(repo, "rev-parse", "HEAD");
+
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const result = deliver(opts(root, repo, hash, { baselineCommit: baseline }));
+    expect(result.ref).toBe("hone/run_exact");
+    // tip is a merge: artifact delta applied WITHOUT reverting notes.txt
+    expect(gitIn(repo, "show", "hone/run_exact:hello.txt")).toBe("improved");
+    expect(gitIn(repo, "show", "hone/run_exact:notes.txt")).toBe("post-baseline work");
+    const parents = gitIn(repo, "rev-list", "--no-walk", "--parents", "hone/run_exact").split(/\s+/).slice(1);
+    expect(parents).toHaveLength(2);
+    expect(parents[0]).toBe(head);
+    const candidate = parents[1];
+    expect(candidate).toBeDefined();
+    // candidate side is the pure delta: exactly the artifact tree, parented on the baseline
+    expect(gitIn(repo, "rev-parse", `${candidate}^1`)).toBe(baseline);
+    expect(gitIn(repo, "ls-tree", "--name-only", String(candidate))).toBe("hello.txt");
+  });
+
+  it("degrades to the raw candidate when the moved HEAD conflicts", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const baseline = gitIn(repo, "rev-parse", "HEAD");
+    writeFileSync(join(repo, "hello.txt"), "conflicting local change\n");
+    gitIn(repo, "add", "-A");
+    gitIn(repo, "commit", "-m", "conflicts with artifact");
+
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const result = deliver(opts(root, repo, hash, { baselineCommit: baseline }));
+    expect(result.notes.join("\n")).toMatch(/merge conflicts.*raw candidate/);
+    expect(gitIn(repo, "show", "hone/run_exact:hello.txt")).toBe("improved");
+    expect(gitIn(repo, "rev-parse", "hone/run_exact^1")).toBe(baseline);
+    // HEAD branch untouched
+    expect(gitIn(repo, "show", "main:hello.txt")).toBe("conflicting local change");
+  });
+
+  it("refuses a target whose history does not contain the sealed baseline commit", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    expect(() => deliver(opts(root, repo, hash, { baselineCommit: "b".repeat(40) }))).toThrow(
+      /does not contain the sealed baseline commit/,
+    );
+    const refs = spawnSync("git", ["-C", repo, "for-each-ref", "refs/heads/hone"], { encoding: "utf8" });
+    expect(refs.stdout.trim()).toBe("");
+  });
+
+  it("refuses a plain subdirectory — parent-repo discovery is structurally impossible", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const baseline = gitIn(repo, "rev-parse", "HEAD");
+    const sub = join(repo, "sub");
+    mkdirSync(sub);
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    expect(() => deliver({ ...opts(root, repo, hash), repo: sub, baselineCommit: baseline })).toThrow(
+      /plain in-tree \.git directory/,
+    );
+    const refs = spawnSync("git", ["-C", repo, "for-each-ref", "refs/heads/hone"], { encoding: "utf8" });
+    expect(refs.stdout.trim()).toBe("");
+  });
+
+  it("re-accepts an idempotent rerun of a merge-tip branch (crash recovery), still refusing foreign branches", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const baseline = gitIn(repo, "rev-parse", "HEAD");
+    writeFileSync(join(repo, "notes.txt"), "post-baseline work\n");
+    gitIn(repo, "add", "-A");
+    gitIn(repo, "commit", "-m", "post-baseline");
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const options = opts(root, repo, hash, { baselineCommit: baseline });
+    const first = deliver(options);
+    const tip = gitIn(repo, "rev-parse", "hone/run_exact");
+    const again = deliver(options);
+    expect(again.ref).toBe("hone/run_exact");
+    expect(gitIn(repo, "rev-parse", "hone/run_exact")).toBe(tip);
+    expect(first.ref).toBe(again.ref);
+
+    // a user branch squatting the name is NEVER absorbed
+    gitIn(repo, "branch", "-f", "hone/run_exact", "main");
+    expect(() => deliver(options)).toThrow(/delivery verification failed/);
+  });
+  it("rejects a pre-forged merge tip that rides a valid candidate (tip tree must recompute)", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const baseline = gitIn(repo, "rev-parse", "HEAD");
+    writeFileSync(join(repo, "notes.txt"), "post-baseline work\n");
+    gitIn(repo, "add", "-A");
+    gitIn(repo, "commit", "-m", "post-baseline");
+    const head = gitIn(repo, "rev-parse", "HEAD");
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const options = opts(root, repo, hash, { baselineCommit: baseline });
+
+    // obtain a REAL verified candidate, then re-point the branch at a forged
+    // "merge" of (HEAD, candidate) whose tree is attacker-chosen
+    deliver(options);
+    const candidate = gitIn(repo, "rev-parse", "hone/run_exact^2");
+    const maliciousTree = gitIn(repo, "rev-parse", `${baseline}^{tree}`); // any tree ≠ the recomputed merge
+    const forged = gitIn(repo, "commit-tree", maliciousTree, "-p", head, "-p", candidate, "-m", "forged");
+    gitIn(repo, "branch", "-f", "hone/run_exact", forged);
+    expect(() => deliver(options)).toThrow(/merge tip tree does not recompute/);
+  });
+
+  it("refs/replace forgery cannot swap the baseline's object graph during delivery", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const baseline = gitIn(repo, "rev-parse", "HEAD");
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+
+    // Forge a commit whose tree is EXACTLY the artifact and graft it over
+    // the baseline via refs/replace: without GIT_NO_REPLACE_OBJECTS the
+    // no-op short-circuit would pick candidate = raw baseline (whose real
+    // tree is still the baseline content) and verification would pass
+    // against the replacement.
+    const forgedBlob = spawnSync("git", ["-C", repo, "hash-object", "-w", "--stdin"], { encoding: "utf8", input: "improved" });
+    const forgedTreeSpec = `100644 blob ${forgedBlob.stdout.trim()}\thello.txt\n`;
+    const forgedTree = spawnSync("git", ["-C", repo, "mktree"], { encoding: "utf8", input: forgedTreeSpec });
+    const forgedCommit = gitIn(repo, "commit-tree", forgedTree.stdout.trim(), "-m", "forged replacement");
+    gitIn(repo, "replace", baseline, forgedCommit);
+
+    const result = deliver(opts(root, repo, hash, { baselineCommit: baseline }));
+    expect(result.ref).toBe("hone/run_exact");
+    // read back with replacement DISABLED: the branch must carry the real
+    // artifact bytes, not the raw baseline content behind the graft
+    const show = spawnSync("git", ["--no-replace-objects", "-C", repo, "show", "hone/run_exact:hello.txt"], { encoding: "utf8" });
+    expect(show.stdout).toBe("improved\n");
   });
 });

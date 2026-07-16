@@ -16,7 +16,7 @@ const CAPSULES_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TASK_DIR = join(CAPSULES_DIR, "seeded-astar");
 const REPORT_REL = "diagnostics/ordering-report.json";
 const PINNED_IMAGE =
-  "hone-mutation@sha256:3d790d856bdf214c1e0d3ac60af139bd806bef67c13930950cc745bf8379b01d";
+  "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7";
 
 const temporaryDirs: string[] = [];
 afterEach(() => {

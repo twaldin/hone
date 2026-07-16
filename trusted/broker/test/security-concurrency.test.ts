@@ -19,6 +19,8 @@ import { buildTestCapsule, TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGES
 // ---------------------------------------------------------------------------
 
 const MAX_FRAME = 4096;
+/** Per-broker public bearer (>=32 bytes) — required on every public-socket request. */
+const PUBLIC_TOKEN = "concurrency-test-public-token-".padEnd(64, "c");
 
 interface LineSock {
   write(data: string | Buffer): void;
@@ -67,7 +69,7 @@ function connectLines(socketPath: string): Promise<LineSock> {
 }
 
 function execFrame(id: number): string {
-  return `${JSON.stringify({ jsonrpc: "2.0", id, method: "exec", params: { sandboxId: "sb", argv: ["true"] } })}\n`;
+  return `${JSON.stringify({ jsonrpc: "2.0", id, method: "exec", params: { sandboxId: "sb", argv: ["true"] }, token: PUBLIC_TOKEN })}\n`;
 }
 
 async function collectResponses(c: LineSock, n: number): Promise<Array<{ id: unknown; error?: { code: number } }>> {
@@ -170,12 +172,12 @@ describe("bounded JSON-RPC concurrency", () => {
   let sockN = 0;
 
   async function makeServer(
-    opts: Omit<BrokerServerOptions, "socketPath" | "adminSocketPath">,
+    opts: Omit<BrokerServerOptions, "socketPath" | "adminSocketPath" | "publicToken">,
   ): Promise<{ server: BrokerServer; socketPath: string }> {
     sockN++;
     const socketPath = path.join(base, "run", `s${sockN}.sock`);
     const adminSocketPath = path.join(base, "run", `s${sockN}a.sock`);
-    const server = new BrokerServer(broker, { socketPath, adminSocketPath, ...opts });
+    const server = new BrokerServer(broker, { socketPath, adminSocketPath, publicToken: PUBLIC_TOKEN, ...opts });
     await server.listen();
     servers.push(server);
     return { server, socketPath };
@@ -393,37 +395,120 @@ describe("bounded JSON-RPC concurrency", () => {
     c2.destroy();
   });
 
-  it("rejects excess connections deterministically and frees the slot on disconnect", async () => {
+  it("caps AUTHENTICATED connections at promotion, frees the slot on disconnect, and never counts pre-auth sockets against it", async () => {
     const { server, socketPath } = await makeServer({
       maxFrameBytes: MAX_FRAME,
       maxConnections: 2,
     });
+    const authFrame = (id: number): string => `${JSON.stringify({ jsonrpc: "2.0", id, method: "noSuchMethod", token: PUBLIC_TOKEN })}\n`;
+    // Two clients authenticate via their first valid-token frame (-32601 is a
+    // full request/response round trip) and fill the protected capacity.
     const c1 = await connectLines(socketPath);
     const c2 = await connectLines(socketPath);
-    await eventually(() => server.stats.connections === 2, "both connections registered");
+    c1.write(authFrame(1));
+    c2.write(authFrame(2));
+    expect(JSON.parse(await c1.nextLine()).error.code).toBe(-32601);
+    expect(JSON.parse(await c2.nextLine()).error.code).toBe(-32601);
+    expect(server.stats.authenticated).toBe(2);
 
-    // Third socket: one overload frame, then close — never registered.
+    // A third token-holder connects fine (pre-auth pool) but is rejected
+    // deterministically at PROMOTION: one overload frame, then close.
     const c3 = await connectLines(socketPath);
+    c3.write(authFrame(3));
     const rejected = JSON.parse(await c3.nextLine());
     expect(rejected.id).toBeNull();
     expect(rejected.error.code).toBe(-32050);
     expect(rejected.error.message).toMatch(/too many connections \(max 2\)/);
     await c3.closed;
-    expect(server.stats.connections).toBe(2);
+    expect(server.stats.authenticated).toBe(2);
 
-    // The two admitted connections still work (no mock needed: -32601 is a
-    // full request/response round trip).
-    c1.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "noSuchMethod" })}\n`);
+    // The two admitted connections still work.
+    c1.write(authFrame(4));
     expect(JSON.parse(await c1.nextLine()).error.code).toBe(-32601);
 
     // Disconnecting frees the slot for a new client.
     c2.destroy();
-    await eventually(() => server.stats.connections === 1, "slot freed on disconnect");
+    await eventually(() => server.stats.authenticated === 1, "slot freed on disconnect");
     const c4 = await connectLines(socketPath);
-    c4.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "noSuchMethod" })}\n`);
+    c4.write(authFrame(5));
     expect(JSON.parse(await c4.nextLine()).error.code).toBe(-32601);
     c1.destroy();
     c4.destroy();
+  });
+
+  it("held-idle flood: squatters churn the bounded pre-auth pool, a token-holder still gets in, and authenticated peers are never evicted", async () => {
+    const { server, socketPath } = await makeServer({
+      maxFrameBytes: MAX_FRAME,
+      maxConnections: 8,
+      maxUnauthenticatedConnections: 3,
+    });
+    const authFrame = (id: number): string => `${JSON.stringify({ jsonrpc: "2.0", id, method: "noSuchMethod", token: PUBLIC_TOKEN })}\n`;
+
+    // A legitimate client authenticates first — it must survive everything below.
+    const legit = await connectLines(socketPath);
+    legit.write(authFrame(1));
+    expect(JSON.parse(await legit.nextLine()).error.code).toBe(-32601);
+    expect(server.stats.authenticated).toBe(1);
+
+    // An unrelated-UID squatter opens idle sockets (never a byte) up to the
+    // pre-auth cap. They hold NO authenticated capacity.
+    const squatters: LineSock[] = [];
+    for (let i = 0; i < 3; i++) {
+      squatters.push(await connectLines(socketPath));
+      await eventually(() => server.stats.unauthenticated === i + 1, `squatter ${i + 1} pooled`);
+    }
+    expect(server.stats.authenticated).toBe(1);
+
+    // Sustained churn: each further connect displaces the OLDEST squatter
+    // with one -32060 eviction frame; total sockets stay bounded.
+    const churn: LineSock[] = [];
+    for (let i = 0; i < 3; i++) {
+      churn.push(await connectLines(socketPath));
+      const evicted = JSON.parse(await (squatters[i] as LineSock).nextLine());
+      expect(evicted.id).toBeNull();
+      expect(evicted.error.code).toBe(-32060);
+      expect(evicted.error.message).toMatch(/displaced by a newer connect/);
+      await (squatters[i] as LineSock).closed;
+      expect(server.stats.connections).toBeLessThanOrEqual(8 + 3); // FD bound: authed cap + pre-auth pool
+    }
+
+    // A correct-token client arriving mid-flood is admitted (evicting a
+    // squatter, never an authenticated peer) and authenticates first try.
+    const arriving = await connectLines(socketPath);
+    arriving.write(authFrame(2));
+    expect(JSON.parse(await arriving.nextLine()).error.code).toBe(-32601);
+    expect(server.stats.authenticated).toBe(2);
+
+    // The original authenticated connection survived the entire churn.
+    legit.write(authFrame(3));
+    expect(JSON.parse(await legit.nextLine()).error.code).toBe(-32601);
+
+    legit.destroy();
+    arriving.destroy();
+    for (const c of churn) c.destroy();
+  });
+
+  it("closes a public socket that does not authenticate within the deadline — wrong tokens do not extend it", async () => {
+    const { server, socketPath } = await makeServer({
+      maxFrameBytes: MAX_FRAME,
+      authWindowMs: 25,
+    });
+    // Idle squatter: evicted at the deadline with one -32060 frame.
+    const idle = await connectLines(socketPath);
+    const idleEvicted = JSON.parse(await idle.nextLine());
+    expect(idleEvicted.id).toBeNull();
+    expect(idleEvicted.error.code).toBe(-32060);
+    expect(idleEvicted.error.message).toMatch(/not authenticated within 25ms/);
+    await idle.closed;
+
+    // Wrong-token requester: each frame is answered -32060 but the deadline
+    // still fires — partial/wrong auth never holds the FD open.
+    const wrong = await connectLines(socketPath);
+    wrong.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBudget", token: "nope" })}\n`);
+    expect(JSON.parse(await wrong.nextLine()).error.code).toBe(-32060);
+    await wrong.closed; // deadline eviction, not client action
+    await eventually(() => server.stats.connections === 0, "all pre-auth sockets released");
+    expect(server.stats.unauthenticated).toBe(0);
   });
 
   it("evicts the largest holder when pre-newline fragments exceed the global byte budget", async () => {
@@ -436,7 +521,7 @@ describe("bounded JSON-RPC concurrency", () => {
     // fit the 10_000 budget, the 6000-byte holder pushes it to 11_000 and,
     // as the largest holder, is evicted; the smaller two are untouched.
     const frag = (id: number, size: number): string => {
-      const req = { jsonrpc: "2.0", id, method: "noSuchMethod", params: { pad: "" } };
+      const req = { jsonrpc: "2.0", id, method: "noSuchMethod", params: { pad: "" }, token: PUBLIC_TOKEN };
       req.params.pad = "p".repeat(size - JSON.stringify(req).length);
       return JSON.stringify(req); // exactly `size` bytes, NO trailing newline
     };

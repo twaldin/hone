@@ -1,12 +1,17 @@
 # hone-mutation — mutation-sandbox image: hone-task + Bun + the Pi-session
-# worker baked at /opt/hone-worker/mutate.ts with its own node_modules.
+# platform-native addon. The worker itself is NOT baked: its JS (mutate.ts +
+# the Pi SDK closure) lives in the digest-sealed optimizer snapshot, is built
+# into a self-contained worker.mjs inside this image with no network, and the
+# loop putFiles those exact bytes into every mutation sandbox before exec.
 #
-# The worker binary surface is deliberately frozen at image-build time; the
-# high-leverage mutable surface (prompts/context/policy) flows per-episode via
-# /scratch/episode.json, so optimizer-asset mutations need no rebuild.
+# Only platform binaries live here (like bun): the pinned Pi SDK's native
+# addon is baked next to bun, where the SDK loader's exec-dir candidate finds
+# it — a .node binary cannot ride inside a JS bundle. The addon version MUST
+# match the @oh-my-pi/pi-coding-agent version pinned in optimizer/package.json
+# (the loader enforces the version sentinel and fails closed on drift).
 #
 # Build:  docker build -t hone-mutation:latest -f optimizer/worker/Dockerfile.mutation optimizer/worker
-# Smoke:  docker run --rm hone-mutation:latest bun /opt/hone-worker/mutate.ts --selftest
+# Smoke:  docker run --rm hone-mutation:latest bun --version
 FROM hone-task:latest
 
 USER root
@@ -26,17 +31,18 @@ RUN apt-get update \
   && apt-get autoremove -y \
   && rm -rf /var/lib/apt/lists/*
 
-# Pi SDK pinned exact; pnpm resolves the platform natives (linux arm64/x64)
-# through @oh-my-pi/pi-natives optionalDependencies. Store pruned afterwards —
-# node_modules keeps the content via hardlinks.
-WORKDIR /opt/hone-worker
-RUN npm install -g pnpm@9 --no-fund --no-audit \
-  && pnpm add --save-exact @oh-my-pi/pi-coding-agent@16.5.2 \
-  && pnpm store prune \
-  && rm -rf /root/.cache /root/.npm
-
-# Worker source last: iterating on mutate.ts must not bust the dependency layer.
-COPY mutate.ts /opt/hone-worker/mutate.ts
+# Pi native addon, pinned to the SDK version sealed in the optimizer snapshot.
+# npm pack (not install): one tarball, no node_modules ever lands in the image.
+ARG PI_VERSION=16.5.2
+RUN arch="$(dpkg --print-architecture)" \
+  && case "$arch" in arm64) piArch=arm64 ;; amd64) piArch=x64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac \
+  && mkdir /tmp/pi-natives \
+  && cd /tmp/pi-natives \
+  && npm pack "@oh-my-pi/pi-natives-linux-${piArch}@${PI_VERSION}" --silent \
+  && tar -xzf oh-my-pi-pi-natives-linux-*.tgz \
+  && install -m 644 package/pi_natives.linux-*.node /usr/local/bin/ \
+  && cd / \
+  && rm -rf /tmp/pi-natives /root/.npm /root/.cache
 
 USER hone
 WORKDIR /work

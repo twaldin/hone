@@ -12,6 +12,7 @@ import {
   fakeHash,
   honeSpawn,
   initScratchRepo,
+  makeGitBaselineCapsule,
   killTree,
   makeCapsule,
   makeIo,
@@ -168,8 +169,7 @@ describe("optimizer process-group kill", () => {
 describe("automatic delivery order", () => {
   it("delivery.applied lands BEFORE run.finished; run.finished is the final event", { timeout: 30_000 }, async () => {
     const root = makeRoot();
-    initScratchRepo(root); // delivery target repo
-    makeCapsule(root);
+    makeGitBaselineCapsule(root); // the baseline repo doubles as the sealed delivery target
     const hash = tarToCas(root, { "hello.txt": "improved\n" });
     const backend = join(root, "delivering-backend.mjs");
     writeFileSync(
@@ -186,7 +186,7 @@ describe("automatic delivery order", () => {
       `,
     );
     const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1" });
-    const code = await cliRunCommand(["capsule", "--headless", "--backend", "./delivering-backend.mjs", "--apply", "branch"], io);
+    const code = await cliRunCommand(["capsule", "--headless", "--backend", "./delivering-backend.mjs", "--apply", "branch", "--repo", "capsule/baseline"], io);
     expect(code, err.join("\n")).toBe(0);
 
     const runId = soleRunId(root);
@@ -200,7 +200,7 @@ describe("automatic delivery order", () => {
 });
 
 describe("stop waits for real termination", () => {
-  it("returns only after run.finished AND supervisor process exit", { timeout: 60_000 }, async () => {
+  it("returns only after run.finished and the identity-bound lock release; the supervisor then exits", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     makeCapsule(root);
     const child = honeSpawn(["run", "capsule", "--headless", "--backend", "stub"], {
@@ -219,7 +219,9 @@ describe("stop waits for real termination", () => {
         if (candidate !== undefined) {
           runId = candidate;
           pid = readSupervisorPid(join(runs, candidate));
-          if (pid !== null && readLogLines(root, candidate).length >= 2) break;
+          // Boot order is unordered: the sentinel can land before
+          // events.ndjson exists — poll through the gap.
+          if (pid !== null && existsSync(join(runs, candidate, "events.ndjson")) && readLogLines(root, candidate).length >= 2) break;
         }
         await sleep(100);
       }
@@ -230,7 +232,11 @@ describe("stop waits for real termination", () => {
       const { io } = makeIo(root);
       const code = await stopCommand([], io);
       expect(code).toBe(0);
-      // Both terminal conditions hold the moment stop returns:
+      // Stop's completion signal is the identity-bound lock RELEASE (never a
+      // bare-PID wait — pids recycle); the released supervisor has nothing
+      // left but its exit report, so its process drains within moments.
+      const gone = Date.now() + 10_000;
+      while (pidAlive(pid) && Date.now() < gone) await sleep(50);
       expect(pidAlive(pid)).toBe(false);
       const state = replayRun(join(root, ".hone-runs", runId));
       expect(state.finished?.status).toBe("stopped");

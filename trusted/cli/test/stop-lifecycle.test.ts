@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { CapsuleManifest, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { createBackend } from "../src/backends/local.js";
+import { defaultApplyBranch } from "../src/commands/apply.js";
 import { stopCommand } from "../src/commands/stop.js";
 import { appendEvent, bestArtifact, readEvents, replayRun } from "../src/eventlog.js";
 import { sleep } from "../src/promise.js";
@@ -13,6 +14,7 @@ import { acquireRunLock, pidAlive, readSupervisorPid, runCommand as cliRunComman
 import type { RunnerBackendContext } from "../src/types.js";
 import {
   FIX_IMAGE,
+  scriptedCreateHelper,
   fakeHash,
   fakeOptimizerSpawn,
   fixtureEvents,
@@ -22,11 +24,14 @@ import {
   initScratchRepo,
   killTree,
   makeCapsule,
+  makeGitBaselineCapsule,
+  sealGitBaselineSnapshot,
   makeIo,
   makeRoot,
   manifestRaw,
   readLogLines,
   tarToCas,
+  writeAlignedDispatchJournal,
   writeEvents,
 } from "./helpers.js";
 
@@ -75,20 +80,25 @@ function incumbentBackendSrc(hash: string, extra = ""): string {
 describe("SIGTERM during synchronous delivery (P1: handlers must outlive the backend race)", () => {
   it("delivery completes atomically, run terminates stopped, run.finished is last", { timeout: 30_000 }, async () => {
     const root = makeRoot();
-    initScratchRepo(root);
-    makeCapsule(root);
+    const { baselineDir } = makeGitBaselineCapsule(root);
     const hash = tarToCas(root, { "hello.txt": "improved\n" });
     writeFileSync(join(root, "delivering-backend.mjs"), incumbentBackendSrc(hash));
 
-    // PATH shim: every git invocation inside the supervisor first TERMs its
-    // parent (the supervisor itself) — a real signal deterministically inside
-    // the synchronous delivery window — then delegates to the real git.
+    // PATH shim: the first delivery plumbing call (hash-object — used only
+    // inside deliver()) TERMs its parent (the supervisor itself) — a real
+    // signal deterministically inside the synchronous delivery window — then
+    // delegates to the real git. Creation-time target validation and the
+    // delivery's remaining git calls pass straight through.
     const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
     const shimDir = join(root, "shim");
     mkdirSync(shimDir);
-    writeFileSync(join(shimDir, "git"), `#!/bin/sh\nkill -TERM $PPID 2>/dev/null\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+    writeFileSync(
+      join(shimDir, "git"),
+      `#!/bin/sh\nfor a in "$@"; do if [ "$a" = "hash-object" ]; then kill -TERM $PPID 2>/dev/null; fi; done\nexec "${realGit}" "$@"\n`,
+      { mode: 0o755 },
+    );
 
-    const r = await hone(["run", "capsule", "--headless", "--backend", "./delivering-backend.mjs", "--apply", "branch"], {
+    const r = await hone(["run", "capsule", "--headless", "--backend", "./delivering-backend.mjs", "--apply", "branch", "--repo", "capsule/baseline"], {
       cwd: root,
       env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "200", PATH: `${shimDir}:${process.env["PATH"] ?? ""}` },
     });
@@ -105,32 +115,34 @@ describe("SIGTERM during synchronous delivery (P1: handlers must outlive the bac
     const deliveryIdx = types.indexOf("delivery.applied");
     expect(deliveryIdx, types.join(",")).toBeGreaterThanOrEqual(0);
     expect(deliveryIdx).toBeLessThan(types.indexOf("run.finished"));
-    expect(gitIn(root, "show", `hone/${runId}:hello.txt`)).toBe("improved");
+    expect(gitIn(baselineDir, "show", `hone/${runId}:hello.txt`)).toBe("improved");
   });
 });
 
 describe("external stop during blocked synchronous delivery (final gate: identity without holder event-loop progress)", () => {
   it("authenticates via lock metadata while the supervisor JS loop is blocked >5s; SIGTERM queues, delivery lands, run stops", { timeout: 60_000 }, async () => {
     const root = makeRoot();
-    initScratchRepo(root);
-    makeCapsule(root);
+    const { baselineDir } = makeGitBaselineCapsule(root);
     const hash = tarToCas(root, { "hello.txt": "improved\n" });
     writeFileSync(join(root, "delivering-backend.mjs"), incumbentBackendSrc(hash));
 
-    // PATH shim: the FIRST git invocation inside the supervisor (isGitRepo,
-    // the head of the synchronous delivery stretch) drops a marker and
-    // blocks >5s in spawnSync — for that whole window the supervisor's JS
-    // loop can run neither its lock accept handler nor its SIGTERM handler.
-    // Later git calls pass straight through to the real git.
+    // PATH shim: the FIRST hash-object invocation (delivery plumbing, used
+    // only inside deliver() — the head of the synchronous delivery stretch)
+    // drops a marker and blocks >5s in spawnSync — for that whole window the
+    // supervisor's JS loop can run neither its lock accept handler nor its
+    // SIGTERM handler. Creation-time target validation and all other git
+    // calls pass straight through to the real git.
     const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
     const marker = join(root, "blocked.marker");
     const shimDir = join(root, "shim");
     mkdirSync(shimDir);
-    writeFileSync(join(shimDir, "git"), `#!/bin/sh\nif [ ! -f "${marker}" ]; then : > "${marker}"; sleep 6; fi\nexec "${realGit}" "$@"\n`, {
-      mode: 0o755,
-    });
+    writeFileSync(
+      join(shimDir, "git"),
+      `#!/bin/sh\nfor a in "$@"; do if [ "$a" = "hash-object" ] && [ ! -f "${marker}" ]; then : > "${marker}"; sleep 6; fi; done\nexec "${realGit}" "$@"\n`,
+      { mode: 0o755 },
+    );
 
-    const child = honeSpawn(["run", "capsule", "--headless", "--backend", "./delivering-backend.mjs", "--apply", "branch"], {
+    const child = honeSpawn(["run", "capsule", "--headless", "--backend", "./delivering-backend.mjs", "--apply", "branch", "--repo", "capsule/baseline"], {
       cwd: root,
       env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "200", PATH: `${shimDir}:${process.env["PATH"] ?? ""}` },
     });
@@ -153,7 +165,10 @@ describe("external stop during blocked synchronous delivery (final gate: identit
       const { io, err } = makeIo(root);
       const code = await stopCommand([], io);
       expect(code, err.join("\n")).toBe(0);
-      // stop returning 0 already implies the supervisor exited (identity-bound wait)
+      // stop returning 0 means the identity-bound lock RELEASE completed —
+      // the supervisor has nothing left but its exit report and drains now.
+      const gone = Date.now() + 10_000;
+      while (pidAlive(supPid) && Date.now() < gone) await sleep(50);
       expect(pidAlive(supPid)).toBe(false);
 
       const events = runEvents(root, runId);
@@ -166,7 +181,7 @@ describe("external stop during blocked synchronous delivery (final gate: identit
       const deliveryIdx = types.indexOf("delivery.applied");
       expect(deliveryIdx, types.join(",")).toBeGreaterThanOrEqual(0);
       expect(deliveryIdx).toBeLessThan(types.indexOf("run.finished"));
-      expect(gitIn(root, "show", `hone/${runId}:hello.txt`)).toBe("improved");
+      expect(gitIn(baselineDir, "show", `hone/${runId}:hello.txt`)).toBe("improved");
 
       // The spawned process tree exits on its own after the stop.
       if (child.exitCode === null) {
@@ -184,8 +199,7 @@ describe("external stop during blocked synchronous delivery (final gate: identit
 describe("explicit stop before delivery (P1)", () => {
   it("skips automatic delivery entirely and terminates stopped", { timeout: 30_000 }, async () => {
     const root = makeRoot();
-    initScratchRepo(root);
-    makeCapsule(root);
+    const { baselineDir } = makeGitBaselineCapsule(root);
     const hash = tarToCas(root, { "hello.txt": "improved\n" });
     // The backend itself requests the stop, then yields so the handler runs
     // BEFORE it settles — stopRequested is true when the delivery gate runs.
@@ -193,7 +207,7 @@ describe("explicit stop before delivery (P1)", () => {
       join(root, "stopping-backend.mjs"),
       incumbentBackendSrc(hash, `process.kill(process.pid, "SIGTERM"); await new Promise((r) => setTimeout(r, 150));`),
     );
-    const r = await hone(["run", "capsule", "--headless", "--backend", "./stopping-backend.mjs", "--apply", "branch"], {
+    const r = await hone(["run", "capsule", "--headless", "--backend", "./stopping-backend.mjs", "--apply", "branch", "--repo", "capsule/baseline"], {
       cwd: root,
       env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "200" },
     });
@@ -206,7 +220,7 @@ describe("explicit stop before delivery (P1)", () => {
     const finished = runEvents(root, runId).at(-1);
     if (finished?.type === "run.finished") expect(finished.status).toBe("stopped");
     // no branch was minted
-    const ref = spawnSync("git", ["-C", root, "show-ref", "--verify", `refs/heads/hone/${runId}`], { encoding: "utf8" });
+    const ref = spawnSync("git", ["-C", baselineDir, "show-ref", "--verify", `refs/heads/hone/${runId}`], { encoding: "utf8" });
     expect(ref.status).not.toBe(0);
   });
 });
@@ -219,6 +233,10 @@ describe("identity-bound stop wait (P1: --take-best must not race a draining sup
     const runId = "run_drain1";
     const best = tarToCas(root, { "hello.txt": "improved\n" });
     const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: best, finished: true }));
+    writeAlignedDispatchJournal(root, runId);
+    // Manual take-best validates the --repo target against the run's sealed
+    // git-baseline snapshot — bind this fixture run to the scratch repo.
+    sealGitBaselineSnapshot(root, runId, repo);
     // A stand-in supervisor process that is still draining after run.finished.
     const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
     const helperPid = helper.pid;
@@ -239,8 +257,14 @@ describe("identity-bound stop wait (P1: --take-best must not race a draining sup
       helper.kill("SIGKILL"); // …then the supervisor process actually exits
       const code = await stopPromise;
       expect(code).toBe(0);
+      // Death is certain (SIGKILL above) but reaping is event-loop-async:
+      // yield until it is observable instead of depending on stop's own
+      // duration (release — not a PID wait — is stop's completion signal;
+      // a provably-never-contacted run now skips Docker and returns fast).
+      const gone = Date.now() + 5_000;
+      while (pidAlive(helperPid) && Date.now() < gone) await sleep(50);
       expect(pidAlive(helperPid)).toBe(false);
-      expect(gitIn(repo, "show", `hone/${runId}:hello.txt`)).toBe("improved");
+      expect(gitIn(repo, "show", `${defaultApplyBranch(runId, best)}:hello.txt`)).toBe("improved");
     } finally {
       try {
         helper.kill("SIGKILL");
@@ -257,6 +281,7 @@ describe("PID reuse (final gate: a bare live sentinel PID is not identity)", () 
     const runId = "run_reuse1";
     const best = tarToCas(root, { "hello.txt": "improved\n" });
     const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: best, finished: false }));
+    writeAlignedDispatchJournal(root, runId);
     writeFileSync(
       join(runDir, "broker-state.ndjson"),
       `${JSON.stringify({ t: "incumbent", hash: best, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 })}\n`,
@@ -387,9 +412,23 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
 
     const abort = new AbortController();
     abort.abort(new Error("stop requested")); // stop landed BEFORE startup
-    const run: RunCommand = () => Promise.resolve(res()); // every docker call succeeds
-    const backend = createBackend({ run, spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE) });
+    const run: RunCommand = (argv) => {
+      // Donor create must answer with a container id; the keeper's snapshot
+      // exec publishes exactly the minted per-attempt HONE_SCRATCH_SNAPSHOT_OUT
+      // basename into the bind-mounted dir — modeling the daemon, never
+      // weakening production's fail-closed teardown.
+      if (argv[1] === "info") return Promise.resolve(res({ stdout: Buffer.from("ENGINE-TEST\n") }));
+      if (argv[1] === "create") return Promise.resolve(res({ stdout: Buffer.from("d0n0r1d\n") }));
+      const outArg = argv.find((a) => typeof a === "string" && a.startsWith("HONE_SCRATCH_SNAPSHOT_OUT="));
+      if (argv[1] === "exec" && outArg !== undefined) {
+        mkdirSync(join(runDir, "scratch-snapshot"), { recursive: true });
+        writeFileSync(join(runDir, "scratch-snapshot", outArg.slice("HONE_SCRATCH_SNAPSHOT_OUT=".length)), "");
+      }
+      return Promise.resolve(res());
+    };
+    const backend = createBackend({ run, spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE), createHelper: scriptedCreateHelper(run) });
     let registeredBarrier: Promise<void> | null = null;
+    let cleanupBarrier: Promise<void> | null = null;
     const ctx: RunnerBackendContext = {
       runId: "run_seed",
       root,
@@ -420,15 +459,22 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
       registerAuthorityBarrier: (b) => {
         registeredBarrier = b;
       },
-      registerCleanupBarrier: () => {},
+      registerCleanupBarrier: (b) => {
+        cleanupBarrier = b;
+        void b.catch(() => {});
+      },
     };
 
     await backend.start(ctx);
 
     // The trusted-authority barrier was registered synchronously and settles
-    // resolved: the supervisor may fence/terminalize.
+    // resolved: the supervisor may fence/terminalize. The cleanup barrier
+    // settles resolved too — the full teardown (donor fence + strict sweep)
+    // completed; an unawaited rejection here would be a real teardown bug.
     expect(registeredBarrier).not.toBeNull();
     await expect(registeredBarrier).resolves.toBeUndefined();
+    expect(cleanupBarrier).not.toBeNull();
+    await expect(cleanupBarrier).resolves.toBeUndefined();
 
     // Abort was honored only AFTER reconciliation: the optimizer never ran…
     expect(existsSync(marker)).toBe(false);
@@ -490,8 +536,7 @@ describe("trusted authority barrier (P1: hard-stop must not fence a pending reco
 
   it("a rejected barrier fails the run with NO terminal event and no delivery — resumable", { timeout: 30_000 }, async () => {
     const root = makeRoot();
-    initScratchRepo(root);
-    makeCapsule(root);
+    makeGitBaselineCapsule(root);
     writeFileSync(
       join(root, "failing-recovery-backend.mjs"),
       `export function createBackend() {
@@ -510,7 +555,7 @@ describe("trusted authority barrier (P1: hard-stop must not fence a pending reco
       `,
     );
     const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "100" });
-    const code = await cliRunCommand(["capsule", "--headless", "--backend", "./failing-recovery-backend.mjs", "--apply", "branch"], io);
+    const code = await cliRunCommand(["capsule", "--headless", "--backend", "./failing-recovery-backend.mjs", "--apply", "branch", "--repo", "capsule/baseline"], io);
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/trusted authority recovery failed/);
 
@@ -529,6 +574,7 @@ describe("dead-supervisor seal guard (P1: stop must not finalize stale events)",
   function crashedRun(root: string, runId: string, journalLines: unknown[] | null): string {
     const best = tarToCas(root, { "hello.txt": "improved\n" });
     const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: baseline, bestHash: best, finished: false }));
+    writeAlignedDispatchJournal(root, runId);
     if (journalLines !== null) {
       writeFileSync(join(runDir, "broker-state.ndjson"), `${journalLines.map((l) => JSON.stringify(l)).join("\n")}\n`);
     }
@@ -549,6 +595,9 @@ describe("dead-supervisor seal guard (P1: stop must not finalize stale events)",
       alignedLine(best),
       { t: "incumbent", hash: durable, aggregate: 0.8, deltaVsBaseline: 0.3, episode: 1 }, // never reached events
     ]);
+    // A validated take-best target (stop now resolves it BEFORE any stop or
+    // finalization) — the journal seal guard must be the surfaced refusal.
+    sealGitBaselineSnapshot(root, runId, repo);
     const { io, err } = makeIo(root);
     const code = await stopCommand(["--take-best", "--repo", "repo"], io);
     expect(code).toBe(1);
@@ -585,6 +634,7 @@ describe("dead-supervisor seal guard (P1: stop must not finalize stale events)",
     const runId = "run_seal2";
     const best = tarToCas(root, { "hello.txt": "improved\n" });
     const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: baseline, bestHash: best, finished: false }));
+    writeAlignedDispatchJournal(root, runId);
     writeFileSync(join(runDir, "broker-state.ndjson"), `${JSON.stringify(alignedLine(best))}\n`);
     const { io } = makeIo(root);
     expect(await stopCommand([], io)).toBe(0);
@@ -622,6 +672,8 @@ describe("dead-stop vs concurrent resume (P1: crash finalization only under the 
     const best = tarToCas(root, { "hello.txt": "improved\n" });
     const finalBest = tarToCas(root, { "hello.txt": "final\n" });
     const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: best, finished: false }));
+    writeAlignedDispatchJournal(root, runId);
+    sealGitBaselineSnapshot(root, runId, repo);
     writeFileSync(
       join(runDir, "broker-state.ndjson"),
       `${JSON.stringify({ t: "incumbent", hash: best, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 })}\n`,
@@ -649,7 +701,7 @@ describe("dead-stop vs concurrent resume (P1: crash finalization only under the 
     expect(events.filter((e) => e.type === "run.finished").length).toBe(1);
     expect(events.at(-1)?.type).toBe("run.finished");
     // take-best applied the FINAL best, never the stale pre-resume one
-    expect(gitIn(repo, "show", `hone/${runId}:hello.txt`)).toBe("final");
+    expect(gitIn(repo, "show", `${defaultApplyBranch(runId, finalBest)}:hello.txt`)).toBe("final");
   });
 
   it("a stop that wins the lock finalizes exactly once; a following resume refuses", async () => {
@@ -658,6 +710,7 @@ describe("dead-stop vs concurrent resume (P1: crash finalization only under the 
     const runId = "run_race2";
     const best = tarToCas(root, { "hello.txt": "improved\n" });
     const runDir = writeEvents(root, runId, fixtureEvents({ runId, baselineHash: fakeHash("b"), bestHash: best, finished: false }));
+    writeAlignedDispatchJournal(root, runId);
     writeFileSync(
       join(runDir, "broker-state.ndjson"),
       `${JSON.stringify({ t: "incumbent", hash: best, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 })}\n`,
@@ -690,7 +743,10 @@ describe("durable supervisor sentinel (exit-hook ownership race)", () => {
         if (candidate !== undefined) {
           runDir = join(runs, candidate);
           pidA = readSupervisorPid(runDir);
-          if (pidA !== null && readLogLines(root, candidate).length >= 2) break;
+          // Boot order is unordered here: the sentinel can land before
+          // events.ndjson exists. Keep polling through the gap — only a
+          // sentinel + a started log means phase 1 is observable.
+          if (pidA !== null && existsSync(join(runDir, "events.ndjson")) && readLogLines(root, candidate).length >= 2) break;
         }
         await sleep(100);
       }

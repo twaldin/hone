@@ -2,7 +2,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { runCommand } from "../src/supervisor.js";
-import { hone, makeCapsule, makeIo, makeRoot } from "./helpers.js";
+import { hone, makeCapsule, makeGitBaselineCapsule, makeIo, makeRoot } from "./helpers.js";
 
 describe("autonomy-ladder lock: apply=auto on improver-seat runs", () => {
   it("refuses before writing any run state when HONE_LADDER_OK is unset", async () => {
@@ -30,10 +30,13 @@ describe("autonomy-ladder lock: apply=auto on improver-seat runs", () => {
 
   it("HONE_LADDER_OK=1 unlocks the run", { timeout: 20_000 }, async () => {
     const root = makeRoot();
-    makeCapsule(root);
+    // apply != none now requires a git-baseline capsule + an explicit sealed
+    // --repo; zero stub episodes keep the ladder the only thing under test
+    // (no incumbent → no delivery attempt against the stub's fake artifacts).
+    makeGitBaselineCapsule(root);
     writeFileSync(join(root, "cfg.json"), JSON.stringify({ improverSeat: true }));
-    const { io, out } = makeIo(root, { HONE_LADDER_OK: "1", HONE_STUB_EPISODES: "1" });
-    const code = await runCommand(["capsule", "--headless", "--backend", "stub", "--apply", "auto", "--config", "cfg.json"], io);
+    const { io, out } = makeIo(root, { HONE_LADDER_OK: "1", HONE_STUB_EPISODES: "0" });
+    const code = await runCommand(["capsule", "--headless", "--backend", "stub", "--apply", "auto", "--repo", "capsule/baseline", "--config", "cfg.json"], io);
     expect(code).toBe(0);
     const report = JSON.parse(out[out.length - 1] ?? "");
     expect(report.status).toBe("completed");
@@ -47,8 +50,8 @@ describe("autonomy-ladder lock: apply=auto on improver-seat runs", () => {
     expect(await runCommand(["capsule", "--headless", "--backend", "stub", "--apply", "none", "--config", "cfg.json"], seatOnly.io)).toBe(0);
 
     const root2 = makeRoot();
-    makeCapsule(root2);
-    const autoOnly = makeIo(root2, { HONE_LADDER_OK: undefined, HONE_STUB_EPISODES: "1" });
-    expect(await runCommand(["capsule", "--headless", "--backend", "stub", "--apply", "auto"], autoOnly.io)).toBe(0);
+    makeGitBaselineCapsule(root2);
+    const autoOnly = makeIo(root2, { HONE_LADDER_OK: undefined, HONE_STUB_EPISODES: "0" });
+    expect(await runCommand(["capsule", "--headless", "--backend", "stub", "--apply", "auto", "--repo", "capsule/baseline"], autoOnly.io)).toBe(0);
   });
 });

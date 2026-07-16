@@ -14,6 +14,9 @@ type MethodName = keyof typeof BrokerMethods;
 type ParamsOf<M extends MethodName> = z.infer<(typeof BrokerMethods)[M]["params"]>;
 type ResultOf<M extends MethodName> = z.infer<(typeof BrokerMethods)[M]["result"]>;
 
+/** Broker auth error code — the server rejects any public request without the exact bearer. */
+const UNAUTHORIZED = -32060;
+
 const RpcResponse = z.object({
   jsonrpc: z.literal("2.0"),
   id: z.union([z.string(), z.number(), z.null()]),
@@ -52,8 +55,11 @@ interface Pending {
 /**
  * Broker endpoint forms the trusted runner hands the optimizer:
  *   unix   a filesystem socket path (mounted into the container on Linux)
- *   tcp    `tcp://host:port` (the runner's authenticated public listener on
- *          macOS, where VirtioFS blocks mounted unix sockets)
+ *   tcp    `tcp://host:port` (the runner's public listener on macOS, where
+ *          VirtioFS blocks mounted unix sockets)
+ * BOTH are authenticated: every request must carry the runner's per-broker
+ * bearer (HONE_BROKER_TOKEN) or the broker answers UNAUTHORIZED before any
+ * method dispatch.
  */
 export type BrokerEndpoint = { kind: "unix"; path: string } | { kind: "tcp"; host: string; port: number };
 
@@ -76,7 +82,7 @@ export class BrokerClient {
 
   private constructor(
     private readonly sock: net.Socket,
-    /** Capability for the authenticated TCP listener; sent per request, never logged. */
+    /** Capability for the broker's public listeners (unix + TCP); sent per request, never logged. */
     private readonly token: string | undefined,
   ) {
     sock.setEncoding("utf8");
@@ -92,8 +98,9 @@ export class BrokerClient {
   static async connect(endpoint: string, opts: { token?: string | undefined } = {}): Promise<BrokerClient> {
     const parsed = parseBrokerEndpoint(endpoint);
     // The trusted runner injects HONE_BROKER_TOKEN into the container env for
-    // the authenticated TCP transport; the loop's connect call stays
-    // transport-agnostic. The token is attached per request and never logged.
+    // BOTH public transports (the 0666 unix socket and TCP); the loop's
+    // connect call stays transport-agnostic. The token is attached per
+    // request and never logged.
     const token = opts.token ?? process.env["HONE_BROKER_TOKEN"];
     const sock = parsed.kind === "tcp" ? net.connect(parsed.port, parsed.host) : net.connect(parsed.path);
     const ready = deferred<void>();
@@ -132,7 +139,13 @@ export class BrokerClient {
     this.pending.delete(parsed.data.id);
     const { result, error } = parsed.data;
     if (error !== undefined) {
-      entry.reject(new BrokerRpcError(error.code, error.message, error.data?.code, error.data?.detail));
+      // A missing token is a wiring bug, not a policy denial — say so instead
+      // of a bare "unauthorized" (the token itself is never echoed).
+      const message =
+        error.code === UNAUTHORIZED && this.token === undefined
+          ? `${error.message}: no broker token available — expected HONE_BROKER_TOKEN in the container env (or opts.token)`
+          : error.message;
+      entry.reject(new BrokerRpcError(error.code, message, error.data?.code, error.data?.detail));
     } else {
       entry.resolve(result);
     }

@@ -23,6 +23,12 @@
  *     overrides are rejected outright — size overrides would let the
  *     validator and a spec-honoring extractor walk DIFFERENT block
  *     sequences, hiding forbidden headers in the disputed bytes
+ *   - hard resource ceilings, enforced BEFORE the expensive per-entry work:
+ *     at most MAX_ARTIFACT_ENTRIES regular+directory entries, entry paths at
+ *     most MAX_ENTRY_PATH_BYTES UTF-8 bytes (matching what canonical ustar
+ *     repack can represent) and MAX_ENTRY_PATH_DEPTH components — hostile
+ *     million-entry or megabyte-path archives are refused in linear time,
+ *     before extraction can mint host inodes
  *
  * Deliberately dependency-free: this is trusted-kernel code and must be
  * auditable at a glance (same rule as glob.ts).
@@ -31,6 +37,24 @@
 const BLOCK = 512;
 /** Sanity cap on PAX / GNU-longname metadata payloads. */
 const MAX_META_BYTES = 1024 * 1024;
+/**
+ * Hard cap on regular+directory entries in one artifact archive. Matches the
+ * mutation-sandbox /workspace tmpfs nr_inodes exactly: any tree the kernel
+ * lets a sandbox mint (nr_inodes total, tmpfs root included) tars to at most
+ * this many entries (workspace root included), and nothing larger is ever
+ * admitted into CAS, extracted, or allowed to grow host inodes.
+ */
+export const MAX_ARTIFACT_ENTRIES = 131072;
+/**
+ * Hard cap on an entry path's UTF-8 BYTE length (not characters). Canonical
+ * ustar repack can represent at most 155 (prefix) + 1 ('/') + 100 (name)
+ * bytes, so longer paths could never survive canonicalization; enforcing the
+ * bound here keeps hostile PAX/GNU-longname megapaths from ever reaching
+ * normalization, the ancestor walk, or a tar binary.
+ */
+export const MAX_ENTRY_PATH_BYTES = 256;
+/** Hard cap on entry path depth (components, `workspace` root included). */
+export const MAX_ENTRY_PATH_DEPTH = 64;
 
 export type ArtifactEntryKind = "file" | "dir";
 
@@ -167,7 +191,13 @@ function normalizeEntryPath(raw: string, kind: ArtifactEntryKind): string {
     raw = raw.slice(0, -1);
   }
   if (raw === "") fail("empty entry name", original);
+  if (Buffer.byteLength(raw) > MAX_ENTRY_PATH_BYTES) {
+    fail(`entry path exceeds ${MAX_ENTRY_PATH_BYTES} UTF-8 bytes`, original);
+  }
   const segments = raw.split("/");
+  if (segments.length > MAX_ENTRY_PATH_DEPTH) {
+    fail(`entry path exceeds ${MAX_ENTRY_PATH_DEPTH} components`, original);
+  }
   for (const seg of segments) {
     if (seg === "") fail("empty path segment", original);
     if (seg === ".") fail("'.' path segment", original);
@@ -249,8 +279,20 @@ export function validateWorkspaceTar(bytes: Buffer): ArtifactTarEntry[] {
         for (const key of pendingPax.keys()) {
           if (key.startsWith("GNU.sparse")) fail("GNU sparse pax entries are not allowed");
         }
+        // Byte-bound the override path BEFORE it can reach normalization or
+        // the ancestor walk — a 1 MiB pax path must cost O(payload), never
+        // O(depth × length). Slack covers a benign "./" prefix and the
+        // trailing "/" on directory names, both normalized away later.
+        const paxPathOverride = pendingPax.get("path");
+        if (paxPathOverride !== undefined && Buffer.byteLength(paxPathOverride) > MAX_ENTRY_PATH_BYTES + 3) {
+          fail("pax path override exceeds the entry path byte limit");
+        }
       } else {
         if (pendingLongName !== null) fail("consecutive GNU longname headers");
+        // Same early byte bound as pax `path`, checked on the RAW size field
+        // in O(1) — the payload is never even UTF-8 decoded. Slack: "./",
+        // trailing "/", and the NUL terminator legitimate producers append.
+        if (size > MAX_ENTRY_PATH_BYTES + 4) fail("GNU longname exceeds the entry path byte limit");
         let end = content.length;
         while (end > 0 && content[end - 1] === 0) end--;
         pendingLongName = strictUtf8(content.subarray(0, end), "GNU longname");
@@ -260,6 +302,11 @@ export function validateWorkspaceTar(bytes: Buffer): ArtifactTarEntry[] {
 
     if (typeflag !== "0" && typeflag !== "5") fail(`unsupported entry type '${typeflag}'`, cString(header, 0, 100));
     const kind: ArtifactEntryKind = typeflag === "5" ? "dir" : "file";
+    // Entry-count ceiling, enforced BEFORE name resolution, normalization,
+    // the ancestor walk, or any extraction — a hostile million-entry archive
+    // is refused the moment it crosses the line, in work linear in the bytes
+    // already consumed.
+    if (entries.length >= MAX_ARTIFACT_ENTRIES) fail(`archive exceeds ${MAX_ARTIFACT_ENTRIES} entries`);
 
     // Resolve the entry name: header name (+ustar prefix), overridden by
     // exactly one of GNU longname or pax `path`.

@@ -14,13 +14,13 @@ import { runCommand } from "./supervisor.js";
 const USAGE = `hone — trusted run supervisor + anytime surface
 
 usage:
-  hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--resume]
-           [--backend stub|local|<module>] [--config <json>]
+  hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume]
+           [--backend stub|local] [--config <json>]
   hone status [--run ID]
   hone best [--run ID]
   hone diff [--stat] [--run ID]
-  hone apply --best [--branch NAME] [--run ID] [--repo DIR]
-  hone stop [--take-best] [--run ID] [--repo DIR]
+  hone apply --best --repo DIR [--branch NAME] [--run ID]
+  hone stop [--take-best --repo DIR] [--run ID]
 
 exit codes: 0 ok · 1 error/declined · 2 usage · 3 autonomy-ladder refusal`;
 

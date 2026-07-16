@@ -1,6 +1,11 @@
 export {
   Broker,
   RecordSpendParams,
+  SCRATCH_SNAPSHOT_SCRIPT,
+  SCRATCH_SNAPSHOT_TMP_PREFIX,
+  finalizeScratchSnapshot,
+  newScratchSnapshotAttemptName,
+  scratchSnapshotArchiveCapBytes,
   isBrokerAuthoredEvent,
   readBrokerJournalEvents,
   type BrokerConfig,

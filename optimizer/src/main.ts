@@ -7,13 +7,17 @@
  *   env  HONE_BROKER_SOCK   broker endpoint — a unix socket path (Linux
  *                           bind-mount) or `tcp://host:port` (macOS
  *                           authenticated public TCP listener)   (required)
- *   env  HONE_BROKER_TOKEN  capability for the TCP listener; attached to
+ *   env  HONE_BROKER_TOKEN  per-broker capability required by BOTH public
+ *                           transports (unix socket and TCP); attached to
  *                           every request by BrokerClient, never logged
  *   env  HONE_RUN_ID        run id stamped into every event       (required)
  *   env  HONE_SEED          base seed for the ε-restart draw      (default 0)
  *   env  HONE_MAX_EPISODES  positive-integer cap on outer episodes attempted
  *                           this invocation, counted from HONE_RESUME.nextEpisode;
  *                           unset = unbounded, anything else fails closed
+ *   env  HONE_ONE_SHOT_CANDIDATE
+ *                           `1` disables a second candidate evaluation after
+ *                           the M0 probe consumes its cache-safe authority
  *   env  HONE_RESUME        JSON {nextEpisode, incumbent}         (default fresh)
  *   stdout                  one RunEvent as JSON per line, NOTHING else
  *   stderr                  free-form diagnostics
@@ -55,6 +59,7 @@ async function main(): Promise<number> {
   if (!Number.isInteger(seed) || seed < 0) throw new Error("HONE_SEED must be a nonnegative integer");
   const resume = parseResume(process.env["HONE_RESUME"]);
   const maxEpisodes = parseMaxEpisodes(process.env["HONE_MAX_EPISODES"]);
+  const oneShotCandidate = process.env["HONE_ONE_SHOT_CANDIDATE"] === "1";
 
   const abort = new AbortController();
   const onSignal = (): void => abort.abort(new Error("runner requested stop"));
@@ -74,6 +79,7 @@ async function main(): Promise<number> {
       signal: abort.signal,
       seed,
       resume,
+      ...(oneShotCandidate ? { oneShotCandidate: true } : {}),
       ...(maxEpisodes !== undefined ? { maxEpisodes } : {}),
     });
     return 0;

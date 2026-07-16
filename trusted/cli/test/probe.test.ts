@@ -10,6 +10,7 @@ import { runCommand as cliRunCommand } from "../src/supervisor.js";
 import type { ProbeReport, RunnerBackendContext } from "../src/types.js";
 import {
   CAP_ID,
+  scriptedCreateHelper,
   FIX_IMAGE,
   at,
   fakeHash,
@@ -24,10 +25,12 @@ import {
 } from "./helpers.js";
 
 /**
- * VI.4 probe gate: the first optimizer invocation is bounded to one episode,
- * the paired report is derived from BROKER events, probe.completed seals the
- * verdict, decline requests a trusted stop, and an approved probe never
- * re-runs on resume.
+ * VI.4 probe gate under the M0 one-shot invariant: the run buys AT MOST one
+ * candidate-producing optimizer episode, and the probe candidate IS the run
+ * candidate. The paired report is derived from BROKER events, probe.completed
+ * seals the verdict, decline requests a trusted stop, and approval proceeds
+ * straight to finalization — it never launches a second (full) optimizer
+ * invocation, and an approved probe never re-runs the gate on resume.
  */
 
 const BUDGET: BudgetState = {
@@ -35,6 +38,7 @@ const BUDGET: BudgetState = {
   spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 },
 };
 
+/** A complete promoted probe episode: save, tagged eval, passed gate, and the matching incumbent.new the broker publishes on reportIncumbent. */
 function episodeEvents(runId: string, episode: number, parentHash: string, candidateHash: string): RunEvent[] {
   const base = { runId };
   return [
@@ -42,6 +46,7 @@ function episodeEvents(runId: string, episode: number, parentHash: string, candi
     { ...base, at: at(), type: "episode.candidate", episode, candidate: { hash: candidateHash }, sessionTrace: fakeHash("e") },
     { ...base, at: at(), type: "eval.completed", episode, artifact: { hash: candidateHash }, assetGroupId: "validation", seed: 3, aggregate: 0.62, cached: false },
     { ...base, at: at(), type: "gate.paired", episode, parentScore: 0.5, childScore: 0.62, passed: true },
+    { ...base, at: at(), type: "incumbent.new", artifact: { hash: candidateHash }, aggregate: 0.62, deltaVsBaseline: 0.12, episode },
   ];
 }
 
@@ -92,6 +97,176 @@ describe("deriveProbeReport (trusted paired measurement from broker events)", ()
     expect(report.baseline.artifact.hash).toBe(fakeHash("c"));
     expect(report.candidate?.artifact.hash).toBe(fakeHash("d"));
   });
+
+  it("derives an unchanged-workspace probe from the untagged memo-hit parent eval: candidate:null, not failure", () => {
+    const parent = fakeHash("b");
+    const events: RunEvent[] = [
+      { runId: "run_p", at: at(), type: "episode.started", episode: 0, parent: { hash: parent } },
+      // Memo-hit trusted measurement: NO episode tag on eval.completed.
+      { runId: "run_p", at: at(), type: "eval.completed", artifact: { hash: parent }, assetGroupId: "validation", seed: 7, aggregate: 0.5, cached: true },
+    ];
+    const report = deriveProbeReport(events, BUDGET);
+    expect(report.baseline).toEqual({ artifact: { hash: parent }, aggregate: 0.5 });
+    expect(report.candidate).toBeNull();
+    expect(report.assetGroupId).toBe("validation");
+    expect(report.seed).toBe(7);
+  });
+
+  it("memo-hit fallback trusts ONLY the parent's untagged eval inside the newest episode window", () => {
+    const parent = fakeHash("b");
+    // Untagged eval BEFORE the window (startup state, not this episode's measurement):
+    const beforeWindow: RunEvent[] = [
+      { runId: "run_p", at: at(), type: "eval.completed", artifact: { hash: parent }, assetGroupId: "validation", seed: 7, aggregate: 0.5, cached: true },
+      { runId: "run_p", at: at(), type: "episode.started", episode: 0, parent: { hash: parent } },
+    ];
+    expect(() => deriveProbeReport(beforeWindow, BUDGET)).toThrow(/no completed evaluation/);
+    // Untagged eval for a DIFFERENT artifact is never a baseline:
+    const wrongArtifact: RunEvent[] = [
+      { runId: "run_p", at: at(), type: "episode.started", episode: 0, parent: { hash: parent } },
+      { runId: "run_p", at: at(), type: "eval.completed", artifact: { hash: fakeHash("c") }, assetGroupId: "validation", seed: 7, aggregate: 0.9, cached: true },
+    ];
+    expect(() => deriveProbeReport(wrongArtifact, BUDGET)).toThrow(/no completed evaluation/);
+  });
+
+  it("a NEWER started episode with only a memo-hit eval wins over an older tagged pair (resume window)", () => {
+    const events: RunEvent[] = [
+      ...episodeEvents("run_p", 0, fakeHash("b"), fakeHash("c")),
+      { runId: "run_p", at: at(), type: "episode.started", episode: 1, parent: { hash: fakeHash("c") } },
+      { runId: "run_p", at: at(), type: "eval.completed", artifact: { hash: fakeHash("c") }, assetGroupId: "validation", seed: 9, aggregate: 0.62, cached: true },
+    ];
+    const report = deriveProbeReport(events, BUDGET);
+    expect(report.baseline.artifact.hash).toBe(fakeHash("c"));
+    expect(report.baseline.aggregate).toBe(0.62);
+    expect(report.candidate).toBeNull();
+    expect(report.seed).toBe(9);
+  });
+  // Reviewer exploit (cap-respecting, maxCandidateArtifacts=2): a failed-exec
+  // repair R is saved unevaluated; a distinct C is saved, trusted-evaluated,
+  // gated, and promoted; then R is reopened, a byte-identical no-op leaves
+  // bytes == R, and the re-save makes R the LAST episode.candidate without a
+  // new artifact reservation. The candidate must be the eval/gate-bound C —
+  // never the last save R with C's gate childScore transferred onto it.
+  function exploitEvents(runId: string, R: string, C: string): RunEvent[] {
+    const base = { runId };
+    return [
+      { ...base, at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } },
+      { ...base, at: at(), type: "episode.candidate", episode: 0, candidate: { hash: R }, sessionTrace: fakeHash("1") },
+      { ...base, at: at(), type: "episode.candidate", episode: 0, candidate: { hash: C }, sessionTrace: fakeHash("2") },
+      { ...base, at: at(), type: "eval.completed", episode: 0, artifact: { hash: C }, assetGroupId: "validation", seed: 3, aggregate: 0.62, cached: false },
+      { ...base, at: at(), type: "gate.paired", episode: 0, parentScore: 0.5, childScore: 0.62, passed: true },
+      { ...base, at: at(), type: "incumbent.new", artifact: { hash: C }, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 },
+      // Reopened R, byte-identical no-op save: R becomes the LAST save.
+      { ...base, at: at(), type: "episode.candidate", episode: 0, candidate: { hash: R }, sessionTrace: fakeHash("3") },
+    ];
+  }
+
+  it("EXPLOIT: a re-saved unevaluated repair after the gated pair never becomes the candidate — the eval/gate-bound artifact does", () => {
+    const R = fakeHash("a");
+    const C = fakeHash("c");
+    const report = deriveProbeReport(exploitEvents("run_p", R, C), BUDGET);
+    // The prompt candidate IS the promoted incumbent the one-shot run will
+    // finalize: exact hash, exact aggregate, delta vs the reported baseline.
+    expect(report.candidate).toEqual({ artifact: { hash: C }, aggregate: 0.62, delta: expect.closeTo(0.12) });
+    expect(report.candidate?.artifact.hash).not.toBe(R);
+    expect(report.baseline).toEqual({ artifact: { hash: fakeHash("b") }, aggregate: 0.5 });
+  });
+
+  it("never transfers a gate score to another hash: a childScore matching no evaluated saved candidate fails closed", () => {
+    const events: RunEvent[] = [
+      { runId: "run_p", at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } },
+      { runId: "run_p", at: at(), type: "episode.candidate", episode: 0, candidate: { hash: fakeHash("c") }, sessionTrace: fakeHash("e") },
+      { runId: "run_p", at: at(), type: "eval.completed", episode: 0, artifact: { hash: fakeHash("c") }, assetGroupId: "validation", seed: 3, aggregate: 0.62, cached: false },
+      { runId: "run_p", at: at(), type: "gate.paired", episode: 0, parentScore: 0.5, childScore: 0.7, passed: true },
+    ];
+    expect(() => deriveProbeReport(events, BUDGET)).toThrow(/binds 0 evaluated saved candidates/);
+  });
+
+  it("fails closed when the gate childScore binds MORE than one evaluated saved candidate (ambiguous)", () => {
+    const shared = (hash: string): RunEvent[] => [
+      { runId: "run_p", at: at(), type: "episode.candidate", episode: 0, candidate: { hash }, sessionTrace: `${fakeHash("e")}:${hash}` },
+      { runId: "run_p", at: at(), type: "eval.completed", episode: 0, artifact: { hash }, assetGroupId: "validation", seed: 3, aggregate: 0.62, cached: false },
+    ];
+    const events: RunEvent[] = [
+      { runId: "run_p", at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } },
+      ...shared(fakeHash("c")),
+      ...shared(fakeHash("d")),
+      { runId: "run_p", at: at(), type: "gate.paired", episode: 0, parentScore: 0.5, childScore: 0.62, passed: true },
+    ];
+    expect(() => deriveProbeReport(events, BUDGET)).toThrow(/binds 2 evaluated saved candidates/);
+  });
+
+  it("fails closed when the episode's promoted incumbent is not the gate-bound candidate", () => {
+    const unpromoted = episodeEvents("run_p", 0, fakeHash("b"), fakeHash("c")).filter((e) => e.type !== "incumbent.new");
+    const wrongHash: RunEvent[] = [
+      ...unpromoted,
+      { runId: "run_p", at: at(), type: "incumbent.new", artifact: { hash: fakeHash("f") }, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 },
+    ];
+    expect(() => deriveProbeReport(wrongHash, BUDGET)).toThrow(/not the gate-bound candidate/);
+    const wrongScore: RunEvent[] = [
+      ...unpromoted,
+      { runId: "run_p", at: at(), type: "incumbent.new", artifact: { hash: fakeHash("c") }, aggregate: 0.7, deltaVsBaseline: 0.2, episode: 0 },
+    ];
+    expect(() => deriveProbeReport(wrongScore, BUDGET)).toThrow(/not the gate-bound candidate/);
+  });
+
+  it("EXPLOIT: a passed gate whose optimizer withheld reportIncumbent fails closed — zero incumbents is never approvable", () => {
+    const withheld = episodeEvents("run_p", 0, fakeHash("b"), fakeHash("c")).filter((e) => e.type !== "incumbent.new");
+    expect(() => deriveProbeReport(withheld, BUDGET)).toThrow(/recorded 0 promoted incumbents/);
+  });
+
+  it("fails closed on MORE than one promoted incumbent for a passed gate", () => {
+    const doubled: RunEvent[] = [
+      ...episodeEvents("run_p", 0, fakeHash("b"), fakeHash("c")),
+      { runId: "run_p", at: at(), type: "incumbent.new", artifact: { hash: fakeHash("c") }, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 },
+    ];
+    expect(() => deriveProbeReport(doubled, BUDGET)).toThrow(/recorded 2 promoted incumbents/);
+  });
+
+  it("honest losing probe: a FAILED gate keeps the bound candidate visible with its negative delta and requires zero incumbents", () => {
+    const base = { runId: "run_p" };
+    const losing: RunEvent[] = [
+      { ...base, at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } },
+      { ...base, at: at(), type: "episode.candidate", episode: 0, candidate: { hash: fakeHash("c") }, sessionTrace: fakeHash("e") },
+      { ...base, at: at(), type: "eval.completed", episode: 0, artifact: { hash: fakeHash("c") }, assetGroupId: "validation", seed: 3, aggregate: 0.45, cached: false },
+      { ...base, at: at(), type: "gate.paired", episode: 0, parentScore: 0.5, childScore: 0.45, passed: false },
+    ];
+    const report = deriveProbeReport(losing, BUDGET);
+    expect(report.candidate).toEqual({ artifact: { hash: fakeHash("c") }, aggregate: 0.45, delta: expect.closeTo(-0.05) });
+    expect(report.baseline.aggregate).toBe(0.5);
+    // …and a promotion under a failed gate is a contradiction: fail closed.
+    const contradiction: RunEvent[] = [
+      ...losing,
+      { runId: "run_p", at: at(), type: "incumbent.new", artifact: { hash: fakeHash("c") }, aggregate: 0.45, deltaVsBaseline: -0.05, episode: 0 },
+    ];
+    expect(() => deriveProbeReport(contradiction, BUDGET)).toThrow(/without a gate-passing bound candidate/);
+  });
+
+  it("fails closed on an evaluated saved candidate with NO paired gate (unbindable score)", () => {
+    const events: RunEvent[] = [
+      { runId: "run_p", at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } },
+      { runId: "run_p", at: at(), type: "episode.candidate", episode: 0, candidate: { hash: fakeHash("c") }, sessionTrace: fakeHash("e") },
+      { runId: "run_p", at: at(), type: "eval.completed", episode: 0, artifact: { hash: fakeHash("c") }, assetGroupId: "validation", seed: 3, aggregate: 0.62, cached: false },
+    ];
+    expect(() => deriveProbeReport(events, BUDGET)).toThrow(/without a paired gate measurement/);
+  });
+
+  it("fails closed on multiple paired gates, conflicting evaluations of one hash, or a stray tagged eval", () => {
+    const dupGate: RunEvent[] = [
+      ...episodeEvents("run_p", 0, fakeHash("b"), fakeHash("c")),
+      { runId: "run_p", at: at(), type: "gate.paired", episode: 0, parentScore: 0.5, childScore: 0.6, passed: true },
+    ];
+    expect(() => deriveProbeReport(dupGate, BUDGET)).toThrow(/2 paired gate measurements/);
+    const conflictingEval: RunEvent[] = [
+      ...episodeEvents("run_p", 0, fakeHash("b"), fakeHash("c")),
+      { runId: "run_p", at: at(), type: "eval.completed", episode: 0, artifact: { hash: fakeHash("c") }, assetGroupId: "validation", seed: 3, aggregate: 0.6, cached: false },
+    ];
+    expect(() => deriveProbeReport(conflictingEval, BUDGET)).toThrow(/conflicting trusted evaluations/);
+    const strayEval: RunEvent[] = [
+      ...episodeEvents("run_p", 0, fakeHash("b"), fakeHash("c")),
+      { runId: "run_p", at: at(), type: "eval.completed", episode: 0, artifact: { hash: fakeHash("f") }, assetGroupId: "validation", seed: 3, aggregate: 0.9, cached: false },
+    ];
+    expect(() => deriveProbeReport(strayEval, BUDGET)).toThrow(/neither the parent nor a saved candidate/);
+  });
 });
 
 function res(overrides: Partial<CmdResult> = {}): CmdResult {
@@ -126,6 +301,17 @@ async function runProbeFlow(opts: { seed: RunEvent[]; verdict: boolean; abortOnG
   const root = makeRoot();
   const runId = "run_probe";
   const runDir = writeEvents(root, runId, opts.seed);
+  // A crashed run's broker journal holds the durable incumbent fact BEFORE
+  // the public event exists (journalFact ordering) — seed it alongside, or
+  // the resumed broker correctly refuses a public promotion it never made.
+  const incumbentFacts = opts.seed.flatMap((e) =>
+    e.type === "incumbent.new"
+      ? [{ t: "incumbent", hash: e.artifact.hash, aggregate: e.aggregate, deltaVsBaseline: e.deltaVsBaseline, episode: e.episode }]
+      : [],
+  );
+  if (incumbentFacts.length > 0) {
+    writeFileSync(join(runDir, "broker-state.ndjson"), `${incumbentFacts.map((f) => JSON.stringify(f)).join("\n")}\n`);
+  }
   mkdirSync(join(root, ".hone-cas"), { recursive: true });
   const { capsuleDir, manifest, digest } = probeCapsule(root);
 
@@ -158,10 +344,25 @@ async function runProbeFlow(opts: { seed: RunEvent[]; verdict: boolean; abortOnG
         : [],
   };
 
-  const run: RunCommand = () => Promise.resolve(res());
+  const run: RunCommand = (argv) => {
+    if (argv[0] === "docker" && argv[1] === "info") {
+      return Promise.resolve(res({ stdout: Buffer.from("ENGINE-TEST\n") }));
+    }
+    if (argv[0] === "docker" && argv[1] === "create") {
+      return Promise.resolve(res({ stdout: Buffer.from("lease-id\n") }));
+    }
+    if (argv[0] === "docker" && argv[1] === "exec" && argv.some((arg) => arg.includes("hone-scratch-keeper-"))) {
+      const out = argv.find((a) => typeof a === "string" && a.startsWith("HONE_SCRATCH_SNAPSHOT_OUT="));
+      const snapshotDir = join(runDir, "scratch-snapshot");
+      mkdirSync(snapshotDir, { recursive: true });
+      // Publish exactly the minted per-attempt basename (docker semantics).
+      writeFileSync(join(snapshotDir, out === undefined ? "scratch.tar.tmp" : out.slice("HONE_SCRATCH_SNAPSHOT_OUT=".length)), "snapshot");
+    }
+    return Promise.resolve(res());
+  };
   // In-container argv override + fake docker spawn: the backend believes it
   // launched the sealed container; lifecycle (env wiring, exit codes) is real.
-  const backend = createBackend({ run, spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE) });
+  const backend = createBackend({ run, spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE), createHelper: scriptedCreateHelper(run) });
   const abort = new AbortController();
   const ctx: RunnerBackendContext = {
     runId,
@@ -219,12 +420,11 @@ describe("probe gate flow (real local backend, scripted optimizer)", () => {
   it("resume with an unsealed completed pair re-gates it without buying another probe episode", { timeout: 30_000 }, async () => {
     const flow = await runProbeFlow({ seed: seededLog("run_probe"), verdict: true });
 
-    // The completed broker-authored pair is sufficient evidence: only the
-    // post-approval full invocation launches, from the existing cursor.
-    const invocations = flow.invocations();
-    expect(invocations.length).toBe(1);
-    expect(invocations[0]?.maxEpisodes).toBeNull();
-    expect(invocations[0]?.resume.nextEpisode).toBe(1);
+    // The completed broker-authored pair is sufficient evidence: it re-gates
+    // WITHOUT buying another probe episode, and — M0 one-shot — the approved
+    // probe candidate IS the run candidate, so approval finalizes without any
+    // optimizer invocation at all.
+    expect(flow.invocations().length).toBe(0);
 
     // The gate saw the TRUSTED paired measurement from the broker events.
     expect(flow.probeReports.length).toBe(1);
@@ -239,6 +439,36 @@ describe("probe gate flow (real local backend, scripted optimizer)", () => {
     expect(probes[0]?.baseline.aggregate).toBe(0.5);
     expect(probes[0]?.candidate?.delta).toBeCloseTo(0.12);
     expect(flow.stops).toBe(0);
+  });
+  it("EXPLOIT flow: the owner is prompted for the gate-bound artifact, never a later re-saved unevaluated repair", { timeout: 30_000 }, async () => {
+    const runId = "run_probe";
+    const R = fakeHash("a");
+    const C = fakeHash("c");
+    const seed: RunEvent[] = [
+      { runId, at: at(), type: "run.started", capsuleId: CAP_ID, contractHash: fakeHash("c"), optimizerDigest: fakeHash("0") },
+      { runId, at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } },
+      // Failed-exec repair R (artifact 1 of 2): saved, never evaluated.
+      { runId, at: at(), type: "episode.candidate", episode: 0, candidate: { hash: R }, sessionTrace: fakeHash("1") },
+      // Distinct C (artifact 2 of 2): saved, trusted-evaluated, gated.
+      { runId, at: at(), type: "episode.candidate", episode: 0, candidate: { hash: C }, sessionTrace: fakeHash("2") },
+      { runId, at: at(), type: "eval.completed", episode: 0, artifact: { hash: C }, assetGroupId: "validation", seed: 3, aggregate: 0.62, cached: false },
+      { runId, at: at(), type: "gate.paired", episode: 0, parentScore: 0.5, childScore: 0.62, passed: true },
+      { runId, at: at(), type: "incumbent.new", artifact: { hash: C }, aggregate: 0.62, deltaVsBaseline: 0.12, episode: 0 },
+      // Reopened R, byte-identical no-op save: R is the LAST episode.candidate.
+      { runId, at: at(), type: "episode.candidate", episode: 0, candidate: { hash: R }, sessionTrace: fakeHash("3") },
+    ];
+    const flow = await runProbeFlow({ seed, verdict: true });
+    expect(flow.invocations().length).toBe(0);
+    // The prompt candidate is the eval/gate-bound C — the incumbent the
+    // one-shot run finalizes — at C's own trusted score. Never R.
+    expect(flow.probeReports.length).toBe(1);
+    expect(flow.probeReports[0]?.candidate?.artifact.hash).toBe(C);
+    expect(flow.probeReports[0]?.candidate?.aggregate).toBe(0.62);
+    // The sealed durable approval names the same artifact.
+    const probes = flow.events().flatMap((e) => (e.type === "probe.completed" ? [e] : []));
+    expect(probes.length).toBe(1);
+    expect(probes[0]?.approved).toBe(true);
+    expect(probes[0]?.candidate?.artifact.hash).toBe(C);
   });
 
   it("decline: probe.completed approved=false is sealed, a trusted stop is requested, no full launch", { timeout: 30_000 }, async () => {
@@ -263,10 +493,10 @@ describe("probe gate flow (real local backend, scripted optimizer)", () => {
       budget: BUDGET,
     };
     const flow = await runProbeFlow({ seed: [...seededLog("run_probe"), approved], verdict: false });
-    // One UNBOUNDED invocation straight to the full run; the gate never ran.
-    const invocations = flow.invocations();
-    expect(invocations.length).toBe(1);
-    expect(invocations[0]?.maxEpisodes).toBeNull();
+    // M0 one-shot: the durable approval resumes straight to finalization —
+    // the gate never re-runs and NO optimizer invocation is bought (the
+    // approved probe candidate already is the run candidate).
+    expect(flow.invocations().length).toBe(0);
     expect(flow.probeReports.length).toBe(0);
     expect(flow.events().filter((e) => e.type === "probe.completed").length).toBe(1);
     expect(flow.stops).toBe(0);

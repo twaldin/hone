@@ -109,7 +109,27 @@ export const runCommand: RunCommand = (argv, opts = {}) => {
     // close handler still reports the real exit code.
   });
   if (opts.stdinFile !== undefined) {
-    createReadStream(opts.stdinFile).pipe(child.stdin);
+    const stdinFile = opts.stdinFile;
+    const source = createReadStream(stdinFile);
+    source.on("error", (err) => {
+      // A source failure (ENOENT/EACCES race, mid-stream I/O error) would
+      // otherwise be an unhandled 'error' event and crash the process. Fail
+      // the command instead: tear the child down (its stdin will never be
+      // complete, so any partial consumption must not be mistaken for
+      // success) and reject — a settled 'close' resolve wins harmlessly, but
+      // on the common early-open race this rejection settles first.
+      clearTimeout(timer);
+      source.destroy();
+      child.stdin.destroy();
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      reject(new Error(`runCommand: stdin file ${stdinFile}: ${err.message}`));
+    });
+    source.pipe(child.stdin);
   } else {
     if (opts.stdin !== undefined) child.stdin.write(opts.stdin);
     child.stdin.end();

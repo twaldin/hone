@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -14,20 +14,24 @@ import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
 import { createBackend as createLocalBackend } from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
 import { applyContractRevision, budgetEnvelopeError, contractHash, renderContract } from "./contract.js";
-import { LadderLockedError, deliver, isGitRepo, ladderLocked, LADDER_REFUSAL } from "./deliver.js";
-import { appendEvent, readEvents, replayRun } from "./eventlog.js";
+import { LadderLockedError, deliver, ladderLocked, LADDER_REFUSAL } from "./deliver.js";
+import { DELIVERY_TARGET_FILE, assertTargetIdentity, isEmbeddedBaselineTarget, readSealedDeliveryTarget, sealDeliveryTarget } from "./delivery-target.js";
+import type { DeliveryTarget } from "./delivery-target.js";
+import { appendEvent, readEvents, replayRun, writeFileDurable } from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
 import type { CmdIo } from "./io.js";
 import { resolveOptimizerDigest } from "./optimizer-digest.js";
 import { deferred, sleep } from "./promise.js";
 import { exitReport, formatDelta, formatHumanReport, formatSpend } from "./report.js";
 import { resumeSealError } from "./resume-seal.js";
+import { computeTrustedRuntimeDigest, verifiedBootRuntimeDigest } from "./runtime-digest.js";
 import {
   CONTRACT_FILE,
   SUPERVISOR_FILE,
   casRoot,
   findResumableRun,
   loadRunConfigFile,
+  mintRunDirDurable,
   mintRunId,
   runsRoot,
   writeRunConfigFile,
@@ -35,7 +39,7 @@ import {
 import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "./types.js";
 
 const RUN_USAGE =
-  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--resume] [--backend stub|local|<module>] [--config <json>]";
+  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume] [--backend stub|local] [--config <json>]";
 
 /** Optional per-run overrides (routing, seat, seed, budget dims, promotion rule) — the CLI flags cover the common ones. */
 const ConfigOverrides = z
@@ -162,21 +166,30 @@ function buildConfig(
  * revision that does not survive that pipeline fails closed: no run starts.
  * Returns the approved (possibly revised) config, or null when declined.
  */
-async function promptApproval(
+export async function promptApproval(
   contractPath: string,
-  seal: { runId: string; manifest: CapsuleManifest; capsuleDigest: string; optimizerDigest: string; orderingReport: DiagnosticOrderingReport },
+  seal: {
+    runId: string;
+    manifest: CapsuleManifest;
+    capsuleDigest: string;
+    optimizerDigest: string;
+    orderingReport: DiagnosticOrderingReport;
+    deliveryTarget: DeliveryTarget | null;
+  },
   initial: RunConfig,
   io: CmdIo,
+  streams: { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } = { input: process.stdin, output: process.stdout },
 ): Promise<RunConfig | null> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const rl = createInterface({ input: streams.input, output: streams.output });
   let config = initial;
   try {
     for (;;) {
       io.out("");
       io.out(readFileSync(contractPath, "utf8"));
       io.out(`(contract on disk: ${contractPath})`);
-      const answer = (await rl.question("approve run contract? [Y]es / [E]dit / [N]o: ")).trim().toLowerCase();
-      if (answer === "" || answer === "y" || answer === "yes") return config;
+      const answer = (await rl.question("approve run contract? [y]es / [e]dit / [n]o: ")).trim().toLowerCase();
+      // Explicit consent only: a bare Enter NEVER approves a run — reprompt.
+      if (answer === "y" || answer === "yes") return config;
       if (answer === "n" || answer === "no") return null;
       if (answer === "e" || answer === "edit") {
         const editor = io.env["EDITOR"] ?? io.env["VISUAL"] ?? "vi";
@@ -190,7 +203,7 @@ async function promptApproval(
           return null;
         }
         config = outcome.config;
-        writeFileSync(contractPath, renderContract({ ...seal, config }));
+        writeFileDurable(contractPath, renderContract({ ...seal, config }));
         io.out("contract re-rendered from the revised run config — re-review before approving:");
       }
     }
@@ -208,7 +221,7 @@ async function promptApproval(
  * delta is strictly positive; anything else declines and the run stops.
  */
 export function headlessProbeVerdict(report: ProbeReport): boolean {
-  return report.candidate !== null && report.candidate.delta > 0;
+  return report.promoted && report.candidate !== null && report.candidate.delta > 0;
 }
 
 /**
@@ -226,25 +239,31 @@ export async function promptProbe(
   streams: { input: NodeJS.ReadableStream; output: NodeJS.WritableStream } = { input: process.stdin, output: process.stdout },
 ): Promise<boolean> {
   if (signal.aborted) return false;
+  io.out("");
+  io.out("probe episode complete — trusted paired measurement (broker events, not optimizer claims):");
+  io.out(`  baseline  ${report.baseline.artifact.hash}  aggregate ${report.baseline.aggregate}`);
+  if (report.candidate !== null) {
+    io.out(`  candidate ${report.candidate.artifact.hash}  aggregate ${report.candidate.aggregate} (Δ ${formatDelta(report.candidate.delta)})`);
+  } else {
+    io.out("  candidate: none produced by the probe episode");
+  }
+  io.out(`  measured on ${report.assetGroupId} (seed ${report.seed}) | ${formatSpend(report.budget)}`);
+  if (!headlessProbeVerdict(report)) {
+    io.out("  probe did not promote a strictly positive candidate; approval and delivery are unavailable.");
+    return false;
+  }
+  io.out("  M0 policy: this is the only candidate; approval finalizes and delivers it (multi-episode search requires M1 cache isolation).");
   const rl = createInterface({ input: streams.input, output: streams.output });
   try {
-    io.out("");
-    io.out("probe episode complete — trusted paired measurement (broker events, not optimizer claims):");
-    io.out(`  baseline  ${report.baseline.artifact.hash}  aggregate ${report.baseline.aggregate}`);
-    if (report.candidate !== null) {
-      io.out(`  candidate ${report.candidate.artifact.hash}  aggregate ${report.candidate.aggregate} (Δ ${formatDelta(report.candidate.delta)})`);
-    } else {
-      io.out("  candidate: none produced by the probe episode");
-    }
-    io.out(`  measured on ${report.assetGroupId} (seed ${report.seed}) | ${formatSpend(report.budget)}`);
     for (;;) {
       let answer: string;
       try {
-        answer = (await rl.question("continue the full run? [Y]es / [N]o: ", { signal })).trim().toLowerCase();
+        answer = (await rl.question("accept and finalize this M0 candidate? [y]es / [n]o: ", { signal })).trim().toLowerCase();
       } catch {
         return false; // aborted mid-question — no verdict
       }
-      if (answer === "" || answer === "y" || answer === "yes") return true;
+      // Explicit consent only: a bare Enter NEVER approves — reprompt.
+      if (answer === "y" || answer === "yes") return true;
       if (answer === "n" || answer === "no") return false;
     }
   } finally {
@@ -252,18 +271,95 @@ export async function promptProbe(
   }
 }
 
+/** Run-dir pin of the trusted runtime source that started the run. */
+export const RUNTIME_PIN_FILE = ".hone-version";
+
+// The trusted-runtime digest lives in dependency-free plain JS
+// (runtime-digest.js) so bin/hone.js can SEAL the boot digest before tsx is
+// registered or any trusted TypeScript (or zod/esbuild byte) is loaded; the
+// supervisor recomputes through the very same module, so boot value and
+// every later recheck come from identical code. Re-exported here for the
+// existing test surface.
+export { collectTsconfigClosure } from "./runtime-digest.js";
+export type { TsconfigClosureFile } from "./runtime-digest.js";
+
+/**
+ * Deterministic digest of the trusted runtime closure as it sits on disk
+ * RIGHT NOW (workspace source + tsconfig closure + installed production
+ * dependency bytes). Kept as the historical export name; boot-bound checks
+ * go through assertRuntimePinFresh / verifiedBootRuntimeDigest instead.
+ */
+export const trustedRuntimeDigest = computeTrustedRuntimeDigest;
+
+/**
+ * Boot-bound pin gate: recompute the complete trusted closure, refuse any
+ * drift from the immutable boot seal, and require the run's durable
+ * .hone-version pin to equal the BOOT digest — the digest of the source
+ * that is actually executing, never a late disk state. Synchronous end to
+ * end: callers persist or emit immediately after, with no await between
+ * the comparison and the use of the returned value.
+ */
+function assertRuntimePinFresh(runDir: string, runId: string): string {
+  const digest = verifiedBootRuntimeDigest();
+  const pinPath = join(runDir, RUNTIME_PIN_FILE);
+  const pinned = existsSync(pinPath) ? readFileSync(pinPath, "utf8").trim() : null;
+  if (pinned !== digest) {
+    throw new UsageError(
+      pinned === null
+        ? `run ${runId} has no trusted-runtime pin (${RUNTIME_PIN_FILE}) — refusing to resume (start a fresh run)`
+        : `trusted-runtime drift since the run started: digest ${digest} != pinned ${pinned} — refusing to resume (start a fresh run)`,
+    );
+  }
+  return digest;
+}
+
+/**
+ * Durable optimizer-completion seal: written once the backend has settled
+ * successfully and every registered resource is torn down — from that point
+ * the event log is authoritative and only delivery/terminal work remains. A
+ * resume that finds it never reruns the optimizer and spawns no backend
+ * resource: it retries delivery exactly once from the sealed incumbent.
+ */
+export const OPTIMIZER_COMPLETE_FILE = "optimizer-complete.json";
+
+const OptimizerCompleteSchema = z.object({ runId: z.string().min(1) }).passthrough();
+
+/** True when the run carries a valid completion seal for THIS run id; throws (fail closed) on a corrupt or foreign seal. Shared with `hone stop`'s dead-stop gate. */
+export function optimizerCompleteForRun(runDir: string, runId: string): boolean {
+  const path = join(runDir, OPTIMIZER_COMPLETE_FILE);
+  if (!existsSync(path)) return false;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error(`${OPTIMIZER_COMPLETE_FILE} is unreadable — refusing to resume over a corrupt completion seal`);
+  }
+  const parsed = OptimizerCompleteSchema.safeParse(raw);
+  if (!parsed.success || parsed.data.runId !== runId) {
+    throw new Error(`${OPTIMIZER_COMPLETE_FILE} does not seal run ${runId} — refusing to resume over a foreign completion seal`);
+  }
+  return true;
+}
+
 export async function runCommand(args: string[], io: CmdIo): Promise<number> {
   const { positionals, flags } = parseFlags(args, {
     booleans: ["headless", "resume"],
-    // Deliberately NO --repo: automatic delivery always targets io.root; the
-    // operator-driven `hone apply/stop --repo` remains the explicit path.
-    strings: ["budget-usd", "apply", "backend", "config"],
+    // --repo is REQUIRED when apply != none: it seals the exact delivery
+    // target at run creation — automatic delivery never defaults to io.root.
+    strings: ["budget-usd", "apply", "backend", "config", "repo"],
   });
   const capsuleArg = positionals[0];
   if (capsuleArg === undefined) throw new UsageError(RUN_USAGE);
   const capsuleDir = resolve(io.root, capsuleArg);
 
+  const resumeRequested = boolFlag(flags, "resume");
   const configPath = strFlag(flags, "config");
+  // Every run parameter is sealed at creation; a resume never re-reads a
+  // --config file (its overrides were already merged and cannot be proven
+  // equal), so the flag refuses outright instead of being silently ignored.
+  if (resumeRequested && configPath !== undefined) {
+    throw new UsageError("--config is sealed at run creation and cannot be re-specified on resume — the stored runconfig.json is authoritative; start a fresh run to change configuration");
+  }
   const overrides: ConfigOverrides = configPath
     ? ConfigOverrides.parse(JSON.parse(readFileSync(resolve(io.root, configPath), "utf8")))
     : {};
@@ -293,19 +389,59 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
   const optimizerDigest = resolveOptimizerDigest(io.env, manifest.image);
 
   let plan: RunPlan;
-  if (boolFlag(flags, "resume")) {
+  if (resumeRequested) {
     const found = findResumableRun(io.root, manifest.id);
     if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${manifest.id} under ${runsRoot(io.root)}`);
     // The capsule must re-admit at the EXACT digest snapshotted when the run
     // was created, and the optimizer identity sealed into run.started must
     // still describe the optimizer that would relaunch.
     revalidateForResume(found.runDir, capsuleDir);
+    // The trusted runtime itself is sealed at run creation: a resume from
+    // drifted (or partially rebuilt) trusted source refuses BEFORE any event
+    // is appended or a backend launches — a run never mixes trusted source.
+    // The comparison is BOOT-BOUND: the recompute must equal the digest
+    // sealed before any trusted module was imported, and the pin must equal
+    // that boot value.
+    assertRuntimePinFresh(found.runDir, found.runId);
     if (found.state.optimizerDigest !== null && found.state.optimizerDigest !== optimizerDigest) {
       throw new UsageError(
         `optimizer drift since the run started: digest ${optimizerDigest} != sealed ${found.state.optimizerDigest} — refusing to resume (start a fresh run)`,
       );
     }
     const config = loadRunConfigFile(found.runDir);
+    // Autonomy-ladder re-check (IV.2): the gate is re-evaluated against THIS
+    // invocation's environment BEFORE any resume mutation, backend spawn, or
+    // event append — a sealed apply:auto improver-seat run may not resume
+    // without it. Refusal is nonterminal: the run stays resumable as-is.
+    if (ladderLocked(config.apply, config.improverSeat, io.env)) {
+      io.err(LADDER_REFUSAL);
+      return 3;
+    }
+    // The delivery target is sealed at run creation; a resume can neither
+    // change it nor proceed while it no longer validates exactly as sealed.
+    if (strFlag(flags, "repo") !== undefined) {
+      throw new UsageError("--repo is sealed at run creation and cannot change on resume — start a fresh run to deliver elsewhere");
+    }
+    // Sealed-config flags refuse on conflict instead of being silently
+    // ignored: an equal restatement is harmless, a different value is a
+    // contract change no resume may perform.
+    if (applyFlag !== undefined && applyFlag !== config.apply) {
+      throw new UsageError(`--apply ${applyFlag} conflicts with the run's sealed apply mode "${config.apply}" — resume without --apply, or start a fresh run`);
+    }
+    if (budgetUsd !== undefined && budgetUsd !== config.budget.maxUsd) {
+      throw new UsageError(`--budget-usd ${budgetUsd} conflicts with the run's sealed budget (maxUsd ${config.budget.maxUsd}) — resume without --budget-usd, or start a fresh run`);
+    }
+    if (config.apply !== "none") {
+      try {
+        if (readSealedDeliveryTarget(io.root, found.runDir, config.apply) === null) {
+          throw new Error(`run has no sealed ${DELIVERY_TARGET_FILE}`);
+        }
+      } catch (e) {
+        throw new UsageError(
+          `delivery target no longer validates: ${e instanceof Error ? e.message : String(e)} — refusing to resume`,
+        );
+      }
+    }
     // The backend is sealed at run creation: an absent flag reuses it; a
     // conflicting flag refuses. The stored spec still passes the trust gate
     // (a module spec needs HONE_UNSAFE_BACKEND=1 on THIS invocation too).
@@ -346,13 +482,56 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
       return 2;
     }
 
+    // Delivery-target refusals happen LOUDLY here, before any run state
+    // exists — a run that will deliver must bind its exact target now, and
+    // a CAS-baseline capsule binds no git target at all (no silent skip at
+    // delivery time, which nothing could ever cure).
+    const repoFlag = strFlag(flags, "repo");
+    if (config.apply !== "none" && repoFlag === undefined) {
+      throw new UsageError(`--apply ${config.apply} delivers into a repository — pass an explicit --repo DIR (delivery never defaults to the current root)`);
+    }
+    if (config.apply === "none" && repoFlag !== undefined) {
+      throw new UsageError("--repo binds a delivery target and requires --apply branch|pr|auto");
+    }
+    if (config.apply !== "none" && manifest.baseline.kind !== "git") {
+      throw new UsageError(`--apply ${config.apply} needs a git-baseline capsule — this capsule's baseline is a CAS artifact, which binds no delivery target`);
+    }
+    // Embedded capsule-baseline stores (.gitdir) carry no checkout for auto
+    // to merge into — deliver() would refuse at run END. Refuse HERE,
+    // during fresh preflight, before a runId is minted or any run state
+    // touches disk (branch/pr remain supported on embedded stores).
+    if (config.apply === "auto" && repoFlag !== undefined && isEmbeddedBaselineTarget(io.root, repoFlag)) {
+      throw new UsageError(
+        "--apply auto merges into a checked-out repository branch and cannot target an embedded capsule-baseline store (.gitdir) — use --apply branch or --apply pr, or target the real repository",
+      );
+    }
+
     const runId = mintRunId();
-    const runDir = join(runsRoot(io.root), runId);
-    mkdirSync(runDir, { recursive: true });
+    const runDir = mintRunDirDurable(io.root, runId);
     // Snapshot the ADMITTED manifest: resume proves capsule identity against it.
     writeCapsuleSnapshot(runDir, manifest);
-    const seal = { runId, manifest, capsuleDigest: admitted.digest, optimizerDigest, orderingReport: admitted.orderingReport };
-    writeFileSync(join(runDir, CONTRACT_FILE), renderContract({ ...seal, config }));
+    let deliveryTarget: DeliveryTarget | null = null;
+    if (config.apply !== "none" && repoFlag !== undefined) {
+      // Seal the validated delivery target beside the snapshot (it reads the
+      // snapshot's frozen baseline commit). A refused target unmints the run.
+      try {
+        deliveryTarget = sealDeliveryTarget(io.root, runDir, repoFlag, config.apply);
+      } catch (e) {
+        rmSync(runDir, { recursive: true, force: true });
+        if (e instanceof UsageError) throw e;
+        throw new UsageError(`delivery target refused: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    // Pin the trusted runtime that mints this run — resume recomputes and
+    // refuses on drift. The persisted value is the BOOT-SEALED digest
+    // (recomputed and compared right here, synchronously): what runs is
+    // what is pinned, never a late disk state.
+    writeFileDurable(join(runDir, RUNTIME_PIN_FILE), `${verifiedBootRuntimeDigest()}\n`);
+    // The sealed delivery target is RENDERED into the owner-approved
+    // contract, so the contract hash binds exactly where the run may
+    // deliver; the resume re-render re-binds it (resume-seal.ts).
+    const seal = { runId, manifest, capsuleDigest: admitted.digest, optimizerDigest, orderingReport: admitted.orderingReport, deliveryTarget };
+    writeFileDurable(join(runDir, CONTRACT_FILE), renderContract({ ...seal, config }));
     if (!config.headless) {
       const approved = await promptApproval(join(runDir, CONTRACT_FILE), seal, config, io);
       if (approved === null) {
@@ -435,9 +614,29 @@ const RunLockIdentitySchema = z.object({
   nonce: z.string().min(1),
 });
 
-function readLockMetadata(sockPath: string): RunLockIdentity | null {
+/**
+ * The on-disk metadata additionally pins the socket INCARNATION (dev:ino of
+ * the bound inode). A bind mints a fresh inode, so metadata published by
+ * holder A can never be vouched for by a successor B's socket at the same
+ * path — the A-release/B-bind-before-B-publish window reads as a mismatch
+ * instead of confirming a stale supervisor.
+ */
+const PublishedLockIdentitySchema = RunLockIdentitySchema.extend({ sock: z.string().min(1) });
+type PublishedLockIdentity = z.infer<typeof PublishedLockIdentitySchema>;
+
+/** dev:ino of the socket path right now, or null when absent/unstattable. */
+function socketIncarnation(sockPath: string): string | null {
   try {
-    const parsed = RunLockIdentitySchema.safeParse(JSON.parse(readFileSync(runLockMetaPath(sockPath), "utf8")));
+    const st = statSync(sockPath, { bigint: true });
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
+  }
+}
+
+function readLockMetadata(sockPath: string): PublishedLockIdentity | null {
+  try {
+    const parsed = PublishedLockIdentitySchema.safeParse(JSON.parse(readFileSync(runLockMetaPath(sockPath), "utf8")));
     return parsed.success ? parsed.data : null;
   } catch {
     return null;
@@ -445,7 +644,7 @@ function readLockMetadata(sockPath: string): RunLockIdentity | null {
 }
 
 /** Atomic (write + rename) so a probe never reads a torn identity. */
-function writeLockMetadata(sockPath: string, identity: RunLockIdentity): void {
+function writeLockMetadata(sockPath: string, identity: PublishedLockIdentity): void {
   const metaPath = runLockMetaPath(sockPath);
   const tmpPath = `${metaPath}.${process.pid}.tmp`;
   writeFileSync(tmpPath, `${JSON.stringify(identity)}\n`);
@@ -453,26 +652,158 @@ function writeLockMetadata(sockPath: string, identity: RunLockIdentity): void {
 }
 
 /**
- * Who holds the run lock? Identity proof deliberately requires NO event-loop
- * progress from the holder (FinalSecurityGate): a supervisor blocked >5s in
- * synchronous delivery must still be identifiable, or an external stop can
- * never signal it. Proof = durable metadata written by the bind holder PLUS
- * a kernel-level connect success on the socket. The metadata is read on BOTH
- * sides of the connect and must match exactly — a bind→metadata or
- * release→rebind race yields a mismatch, which resolves null (callers
- * re-observe; a null identity NEVER licenses signalling a sentinel PID).
- * Stale crash metadata is harmless: the connect fails. An identity-less
- * holder (e.g. `stop`'s transient lock) clears predecessor metadata at bind,
- * so its live socket can never vouch for a dead supervisor's identity.
+ * A held identification lease on the run lock: a live kernel connection to
+ * the EXACT lock incarnation whose metadata proved `identity`. The holder
+ * keeps accepted connections open and destroys them at release (a dead
+ * holder's sockets close with it), so while `isReleased()` is false the
+ * proven holder still owns the lock. The connection doubles as the STOP
+ * COMMAND CHANNEL: requestStop() writes a byte the holder consumes as a
+ * trusted stop request — no PID is ever signalled, so a recycled PID can
+ * never be reached by mistake, and the byte queues in the kernel even while
+ * the holder is blocked in a synchronous delivery. `released` resolves when
+ * the connection closes: lock released, holder dead, or this side's own
+ * close().
  */
-export async function probeRunLockIdentity(runDir: string): Promise<RunLockIdentity | null> {
+export interface RunLockLease {
+  readonly identity: RunLockIdentity;
+  readonly released: Promise<void>;
+  isReleased(): boolean;
+  /** Request a trusted stop through the lease. False = lease already gone (re-observe). */
+  requestStop(): boolean;
+  /** Deterministically drops the lease connection (idempotent). */
+  close(): void;
+}
+
+/**
+ * Lease the current run-lock holder's identity. Proof deliberately requires
+ * NO event-loop progress from the holder (FinalSecurityGate): a supervisor
+ * blocked >5s in synchronous delivery must still be identifiable, or an
+ * external stop could never reach it. Proof = durable metadata written by
+ * the bind holder PLUS a kernel-level connect success on the socket (the
+ * backlog completes it without an accept), with the metadata and the socket
+ * incarnation (dev:ino) read on BOTH sides of the connect. Because a
+ * filesystem may hand a fresh bind a just-freed inode number, inode
+ * equality alone is not incarnation proof: every bind+publish runs under
+ * the O_EXCL claim, and this probe resolves null whenever a LIVE claimant
+ * exists — the claim check after the connect PRECEDES the second metadata
+ * read, so any unlink/rebind that could have swapped the socket has either
+ * finished publishing (the second read then sees the successor's metadata →
+ * mismatch) or is still claimed (→ null). Callers re-observe on null; a
+ * null lease NEVER licenses trusting a sentinel PID. Stale crash metadata
+ * is harmless: the connect fails. An identity-less holder (stop's transient
+ * lock) clears predecessor metadata at bind, so its live socket can never
+ * vouch for a dead supervisor's identity.
+ */
+export async function leaseRunLockIdentity(runDir: string): Promise<RunLockLease | null> {
   const sockPath = runLockPath(runDir);
+  const claimPath = `${sockPath}.claim`;
+  if (liveClaimHolder(claimPath)) return null;
   const before = readLockMetadata(sockPath);
-  if (before === null) return null;
-  if (!(await connectProbe(sockPath, false))) return null;
+  if (before === null || before.sock !== socketIncarnation(sockPath)) return null;
+  const conn = net.connect(sockPath);
+  const connected = deferred<boolean>();
+  conn.once("connect", () => connected.resolve(true));
+  conn.on("error", () => connected.resolve(false)); // post-lease errors are release signals; 'close' follows
+  conn.setTimeout(1000, () => connected.resolve(false));
+  if (!(await connected.promise)) {
+    conn.destroy();
+    return null;
+  }
+  conn.setTimeout(0);
+  conn.resume(); // the holder writes nothing; discard any bytes unbuffered
+  if (liveClaimHolder(claimPath)) {
+    conn.destroy();
+    return null;
+  }
   const after = readLockMetadata(sockPath);
-  if (after === null || after.pid !== before.pid || after.nonce !== before.nonce || after.runId !== before.runId) return null;
-  return after;
+  if (
+    after === null ||
+    after.pid !== before.pid ||
+    after.nonce !== before.nonce ||
+    after.runId !== before.runId ||
+    after.sock !== before.sock ||
+    socketIncarnation(sockPath) !== before.sock
+  ) {
+    conn.destroy();
+    return null;
+  }
+  let closed = false;
+  const release = deferred<void>();
+  conn.once("close", () => {
+    closed = true;
+    release.resolve();
+  });
+  return {
+    identity: { pid: after.pid, runId: after.runId, nonce: after.nonce },
+    released: release.promise,
+    isReleased: () => closed,
+    requestStop: () => {
+      if (closed || conn.destroyed) return false;
+      try {
+        conn.write("stop\n");
+        return true;
+      } catch {
+        return false; // torn down under us — the close event follows
+      }
+    },
+    close: () => conn.destroy(),
+  };
+}
+
+/** One-shot identity read: a lease acquired and immediately closed. */
+export async function probeRunLockIdentity(runDir: string): Promise<RunLockIdentity | null> {
+  const lease = await leaseRunLockIdentity(runDir);
+  if (lease === null) return null;
+  lease.close();
+  return lease.identity;
+}
+
+const DARWIN_O_EXLOCK = 0x20;
+
+function darwinClaimHeld(claimPath: string): boolean {
+  try {
+    if (!lstatSync(claimPath).isFile()) return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+  try {
+    const fd = openSync(
+      claimPath,
+      fsConstants.O_RDWR | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW | DARWIN_O_EXLOCK,
+    );
+    closeSync(fd);
+    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "EAGAIN" || code === "EWOULDBLOCK" || code !== "ENOENT";
+  }
+}
+
+/**
+ * Is the bind/publication claim held by a LIVE process right now? Probers
+ * exclude live-claim windows (and fail CLOSED on anything unprovable):
+ * while a claimant is mid-(unlink/rebind/publish) no socket+metadata
+ * observation is coherent. A dead claimant's leftover never blocks probing.
+ */
+function liveClaimHolder(claimPath: string): boolean {
+  if (process.platform === "darwin") return darwinClaimHeld(claimPath);
+  let raw: string;
+  try {
+    raw = readlinkSync(claimPath);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT"; // absent = no claim; unreadable = fail closed
+  }
+  let owner: z.infer<typeof RunLockClaim> | null = null;
+  try {
+    const parsed = RunLockClaim.safeParse(JSON.parse(raw));
+    owner = parsed.success ? parsed.data : null;
+  } catch {
+    owner = null;
+  }
+  if (owner === null) return true; // unparseable claim: unprovable owner, fail closed
+  if (!pidAlive(owner.pid)) return false;
+  const birth = processBirthToken(owner.pid);
+  return birth === null || birth === owner.birth;
 }
 
 const RunLockClaim = z.object({
@@ -481,8 +812,8 @@ const RunLockClaim = z.object({
   nonce: z.string().uuid(),
 });
 
-/** Stable process identity: PID plus kernel/ps birth token defeats PID reuse. */
-function processBirthToken(pid: number): string | null {
+/** Linux/fallback process identity for the legacy non-Darwin claim path. */
+export function processBirthToken(pid: number): string | null {
   if (!pidAlive(pid)) return null;
   if (process.platform === "linux") {
     try {
@@ -508,6 +839,28 @@ function processBirthToken(pid: number): string | null {
  * pid+birth+nonce in one syscall. A live/SIGSTOP'd owner is never expired.
  */
 function tryAcquireRunLockClaim(claimPath: string): (() => void) | null {
+  if (process.platform === "darwin") {
+    try {
+      if (lstatSync(claimPath).isFile() === false) return null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") return null;
+    }
+    try {
+      const fd = openSync(
+        claimPath,
+        fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW | DARWIN_O_EXLOCK,
+        0o600,
+      );
+      // The pathname deliberately persists. The advisory lock is tied to
+      // this fd and released by the kernel on close/process death; unlinking
+      // would let a successor lock a different inode concurrently.
+      return () => closeSync(fd);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EAGAIN" || code === "EWOULDBLOCK") return null;
+      throw err;
+    }
+  }
   const birth = processBirthToken(process.pid);
   if (birth === null) throw new Error("cannot establish this process's run-lock claim identity");
   const payload = JSON.stringify({ pid: process.pid, birth, nonce: randomUUID() });
@@ -523,7 +876,7 @@ function tryAcquireRunLockClaim(claimPath: string): (() => void) | null {
       // A non-symlink claim may belong to an older live binary. Fail closed:
       // never age-expire an owner whose liveness cannot be proved.
       try {
-        if (!statSync(claimPath).isSymbolicLink()) return null;
+        if (!lstatSync(claimPath).isSymbolicLink()) return null;
       } catch {
         return null;
       }
@@ -548,61 +901,105 @@ function tryAcquireRunLockClaim(claimPath: string): (() => void) | null {
  * OS-enforced exclusive per-run lock (FinalSecurityGate finding 2): a bound
  * unix-domain socket. Liveness is the kernel accepting a connection — the
  * pid file is display metadata only (pids recycle). Bind is the atomic
- * arbiter; a stale leftover may be unlinked ONLY while holding an O_EXCL
- * claim file and ONLY after a re-probe under that claim. A socket can become
- * live only by binding an ABSENT path, and absence is only ever created by a
- * claim holder, so no contender can ever unlink a live lock — concurrent
- * stale contenders yield exactly one winner. An identity-bearing holder
- * publishes {pid,runId,nonce} in an adjacent metadata file at bind (see
- * probeRunLockIdentity). Returned closure releases and unlinks.
+ * arbiter, and EVERY bind + metadata publication runs under the O_EXCL
+ * claim so identity probes can exclude in-flight publication windows
+ * (dev:ino alone cannot prove incarnation — inode numbers may be reused).
+ * A stale leftover may be unlinked ONLY under the claim and ONLY after a
+ * re-probe under that claim; a socket can become live only by binding an
+ * ABSENT path, and absence is only ever created by a claim holder, so no
+ * contender can ever unlink a live lock. An identity-bearing holder
+ * publishes {pid,runId,nonce,sock} beside the socket (see
+ * probeRunLockIdentity) and treats any byte received on an accepted
+ * connection as a trusted stop request (`onStopRequest`). Returned closure
+ * releases and unlinks.
  */
-export async function acquireRunLock(runDir: string, runId: string, identity?: RunLockIdentity): Promise<() => Promise<void>> {
+export async function acquireRunLock(
+  runDir: string,
+  runId: string,
+  identity?: RunLockIdentity,
+  onStopRequest?: () => void,
+): Promise<() => Promise<void>> {
   const sockPath = runLockPath(runDir);
   const metaPath = runLockMetaPath(sockPath);
   const claimPath = `${sockPath}.claim`;
   const alreadySupervised = (): UsageError =>
     new UsageError(`run ${runId} is already being supervised by a live process — \`hone stop\` it first`);
   for (let attempt = 0; attempt < 10; attempt++) {
-    // Incoming probe connections carry no payload — identity lives in the
-    // metadata file, so a probe needs no accept-handler progress from us.
-    const server = net.createServer((sock) => sock.end());
-    server.unref(); // the lock must never keep a finished supervisor alive
-    const bound = deferred<boolean>();
-    server.once("error", (err) => {
-      if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") bound.resolve(false);
-      else bound.reject(err);
-    });
-    server.listen(sockPath, () => bound.resolve(true));
-    if (await bound.promise) {
-      // Under the bind, the metadata file is OURS alone: contenders cannot
-      // bind while the socket path exists, and reclaimers only touch it
-      // after a connect-probe proves the holder dead. An identity holder
-      // publishes atomically; an identity-less holder (stop's transient
-      // lock) clears any predecessor leftover IMMEDIATELY — otherwise stale
-      // crash metadata plus OUR live socket would falsely confirm a dead
-      // supervisor's (possibly recycled) PID.
-      if (identity !== undefined) writeLockMetadata(sockPath, identity);
-      else rmSync(metaPath, { force: true });
-      // Ownership token for the path-CAS at release: server.close stops the
-      // listener BEFORE its callback fires (it drains live connections), so
-      // a contender can connect-fail, reclaim, and rebind a successor socket
-      // while our callback is still pending — the callback may only ever
-      // unlink THIS bind's inode, never whatever the path holds by then.
+    const releaseClaim = tryAcquireRunLockClaim(claimPath);
+    if (releaseClaim === null) {
+      await sleep(25);
+      continue;
+    }
+    let acquired: (() => Promise<void>) | null = null;
+    try {
+      // Incoming probe/lease connections are HELD OPEN as leases: their
+      // close is the holder's release/death signal (see RunLockLease), and
+      // any byte received is a stop request — identification itself needs
+      // no accept-handler progress (the kernel backlog completes the
+      // connect). Every lease is destroyed at release and unref'd at
+      // accept, so it can neither outlive the lock nor keep a finished
+      // supervisor alive.
+      let releasing = false;
+      const leases = new Set<net.Socket>();
+      const server = net.createServer((sock) => {
+        if (releasing) {
+          sock.destroy();
+          return;
+        }
+        leases.add(sock);
+        sock.once("close", () => leases.delete(sock));
+        sock.on("error", () => {}); // a prober may reset mid-teardown
+        sock.unref();
+        // Stop command channel: consume (never buffer) incoming bytes; a
+        // payload from a prober carries the same local same-user authority
+        // a SIGTERM would — but reaches ONLY this holder, never a recycled
+        // PID. Queued bytes survive a blocked event loop.
+        sock.on("data", () => {
+          if (onStopRequest !== undefined) onStopRequest();
+        });
+      });
+      server.unref(); // the lock must never keep a finished supervisor alive
+      const bound = deferred<boolean>();
+      server.once("error", (err) => {
+        if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") bound.resolve(false);
+        else bound.reject(err);
+      });
+      server.listen(sockPath, () => bound.resolve(true));
+      if (!(await bound.promise)) {
+        // Occupied path, probed UNDER our claim: a live holder refuses; a
+        // dead leftover is cleared (metadata FIRST — while the stale socket
+        // path exists nobody can bind, so this can never delete a
+        // successor's metadata), then the next attempt re-claims and binds.
+        if (await connectProbe(sockPath, true)) throw alreadySupervised();
+        rmSync(metaPath, { force: true });
+        rmSync(sockPath, { force: true });
+        continue;
+      }
+      // Ownership token for the path-CAS at release (server.close stops the
+      // listener BEFORE its callback fires, so the callback may only ever
+      // unlink THIS bind's inode, never whatever the path holds by then).
       const sockStat = statSync(sockPath, { bigint: true });
-      return () => {
+      // Publication happens UNDER the claim: probers treat a live claim as
+      // "no coherent identity yet", which closes the bind-to-publish gap
+      // even when the filesystem reuses a just-freed socket inode. An
+      // identity-less holder (stop's transient lock) instead clears any
+      // predecessor leftover — stale crash metadata plus OUR live socket
+      // must never confirm a dead supervisor's (possibly recycled) PID.
+      if (identity !== undefined) writeLockMetadata(sockPath, { ...identity, sock: `${sockStat.dev}:${sockStat.ino}` });
+      else rmSync(metaPath, { force: true });
+      acquired = () => {
         const closed = deferred<void>();
+        releasing = true;
         server.close(() => {
-          // Post-close cleanup runs under the SAME O_EXCL claim as stale
-          // arbitration. No claim (a live claimant is mid-reclaim): remove
-          // NOTHING — the claimant owns clearing our now-dead leftovers.
-          // The claim serializes against claimants, but a fresh binder needs
-          // no claim once the path is free (node may unlink the path at
-          // close-initiation), so each removal is ownership-guarded on its
+          // Post-close cleanup runs under the SAME O_EXCL claim as
+          // publication and stale arbitration. No claim (a live claimant is
+          // mid-reclaim): remove NOTHING — the claimant owns clearing our
+          // now-dead leftovers. Each removal is ownership-guarded on its
           // own: the socket only by dev+ino equality with OUR bind, the
           // metadata only by exact identity match — a successor's socket or
           // metadata is never removed.
-          const releaseClaim = tryAcquireRunLockClaim(claimPath);
-          if (releaseClaim === null) {
+          const releaseCleanupClaim = tryAcquireRunLockClaim(claimPath);
+          if (releaseCleanupClaim === null) {
             closed.resolve();
             return;
           }
@@ -620,34 +1017,19 @@ export async function acquireRunLock(runDir: string, runId: string, identity?: R
               // already gone — a claimant cleared it before our claim
             }
           } finally {
-            releaseClaim();
+            releaseCleanupClaim();
           }
           closed.resolve();
         });
+        // Release/death signal for every held lease — server.close cannot
+        // complete while any accepted connection remains open.
+        for (const sock of leases) sock.destroy();
         return closed.promise;
       };
-    }
-    if (await connectProbe(sockPath, true)) throw alreadySupervised();
-
-    // Stale leftover. Claim the exclusive right to clear it.
-    const releaseClaim = tryAcquireRunLockClaim(claimPath);
-    if (releaseClaim === null) {
-      await sleep(25);
-      continue;
-    }
-    try {
-      // Re-probe UNDER the claim: the leftover may have gone live since ours.
-      if (await connectProbe(sockPath, true)) throw alreadySupervised();
-      // Dead holder confirmed. Its metadata goes FIRST — while the stale
-      // socket path still exists nobody can bind, so this can never delete
-      // a successor's metadata; removing the socket path then frees the
-      // kernel-arbitrated bind.
-      rmSync(metaPath, { force: true });
-      rmSync(sockPath, { force: true });
     } finally {
       releaseClaim();
     }
-    // Loop: the next bind is kernel-arbitrated among contenders.
+    if (acquired !== null) return acquired;
   }
   throw new Error(`run lock ${sockPath}: could not acquire after repeated stale-rebind attempts`);
 }
@@ -682,6 +1064,11 @@ export interface SuperviseExtra {
   orderingReport: DiagnosticOrderingReport;
 }
 
+/** Late-binding relay from the run lock's stop channel to the supervisor's signal handler. */
+interface SupervisorStopChannel {
+  bind(handler: () => void): void;
+}
+
 /** Exported for the late-contender lock regression only. */
 export async function superviseRun(
   plan: RunPlan,
@@ -690,10 +1077,28 @@ export async function superviseRun(
 ): Promise<number> {
   // The lock precedes ANY event append or docker sweep: a competing resume
   // must fail before it can touch the log or rm -f live containers. The
-  // lock publishes this supervisor's identity metadata; the sentinel repeats
-  // the nonce, so `stop` only ever trusts a PID the live lock holder vouches for.
+  // lock publishes this supervisor's identity metadata; the sentinel
+  // repeats the nonce, so `stop` only ever trusts a PID the live lock
+  // holder vouches for — and the lock's lease connections double as the
+  // trusted stop channel (`stop` never signals a PID at all).
   const identity: RunLockIdentity = { pid: process.pid, runId: plan.runId, nonce: randomUUID() };
-  const releaseLock = await acquireRunLock(plan.runDir, plan.runId, identity);
+  // A stop request arriving before superviseLocked installs its handlers is
+  // BUFFERED, never dropped: the relay replays a pending request at bind.
+  let stopPending = false;
+  let stopHandler: (() => void) | null = null;
+  const stopChannel: SupervisorStopChannel = {
+    bind: (handler) => {
+      stopHandler = handler;
+      if (stopPending) {
+        stopPending = false;
+        handler();
+      }
+    },
+  };
+  const releaseLock = await acquireRunLock(plan.runDir, plan.runId, identity, () => {
+    if (stopHandler !== null) stopHandler();
+    else stopPending = true;
+  });
   try {
     // The resume plan was chosen BEFORE the lock: a contender that planned
     // against an unfinished log can acquire only after the winner released —
@@ -702,7 +1107,7 @@ export async function superviseRun(
     if (plan.resumed && replayRun(plan.runDir).finished !== null) {
       throw new UsageError(`run ${plan.runId} already finished — nothing to resume`);
     }
-    return await superviseLocked(plan, extra, io, identity.nonce);
+    return await superviseLocked(plan, extra, io, identity.nonce, stopChannel);
   } finally {
     await releaseLock();
   }
@@ -713,6 +1118,7 @@ async function superviseLocked(
   extra: SuperviseExtra,
   io: CmdIo,
   nonce: string,
+  stopChannel: SupervisorStopChannel,
 ): Promise<number> {
   const { runId, runDir, config } = plan;
   const { manifest, capsuleDir, capsuleDigest, optimizerDigest } = extra;
@@ -727,11 +1133,12 @@ async function superviseLocked(
   // SIGKILL leftover); consumers gate on pidAlive AND the lock identity
   // probe (a bare PID is meaningless — PIDs recycle, nonces do not).
   writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId, nonce })}\n`);
+  const initialReplay = replayRun(runDir);
 
   // Terminal-status flags, declared BEFORE the emit closure (TDZ) so it can
   // normalize a broker-authored budget.exhausted into the terminal status.
-  let budgetDimension: string | null = null;
-  let budgetEventLogged = false;
+  let budgetDimension: string | null = initialReplay.budgetExhaustedDimension;
+  let budgetEventLogged = budgetDimension !== null;
   let stopRequested = false;
   // Bound after the AbortController/termination barrier exist. Broker events
   // cannot arrive before backend.start, so this placeholder is never the
@@ -740,7 +1147,7 @@ async function superviseLocked(
     budgetDimension ??= dimension;
   };
 
-  let liveBudget = replayRun(runDir).lastBudget;
+  let liveBudget = initialReplay.lastBudget;
   const emit = (event: RunEvent): RunEvent => {
     const parsed = appendEvent(runDir, event);
     if (parsed.type === "budget.snapshot") {
@@ -770,13 +1177,30 @@ async function superviseLocked(
     return parsed;
   };
 
+  // Set under lock while validating a resume: a durably sealed optimizer
+  // completion means this supervisor performs ONLY delivery/terminal work.
+  let optimizerAlreadyComplete = false;
   if (plan.resumed) {
-    // Under-lock seal verification (the plan was chosen from PRE-lock reads):
-    // runconfig.json, contract.md, the run.started contract hash, and the
-    // capsule/optimizer/backend/headless seals must all still hold before
-    // run.resumed is appended or any backend launches. Tamper refuses with
-    // NO event and NO terminal — the run stays resumable as-is.
+    // Under-lock seal verification (the plan was chosen from PRE-lock
+    // reads): runconfig.json, contract.md, the run.started contract hash,
+    // the sealed delivery target, and the capsule/optimizer/backend/headless
+    // seals must all still hold before run.resumed is appended or any
+    // backend launches. Tamper refuses with NO event and NO terminal — the
+    // run stays resumable as-is.
     const underLock = replayRun(runDir);
+    let sealedTarget: DeliveryTarget | null = null;
+    if (config.apply !== "none") {
+      try {
+        sealedTarget = readSealedDeliveryTarget(io.root, runDir, config.apply);
+      } catch (e) {
+        io.err(`resume seal violated: ${e instanceof Error ? e.message : String(e)}`);
+        return 1;
+      }
+      if (sealedTarget === null) {
+        io.err(`resume seal violated: run delivers (apply=${config.apply}) but has no sealed ${DELIVERY_TARGET_FILE}`);
+        return 1;
+      }
+    }
     const sealError = resumeSealError({
       runId,
       runDir,
@@ -785,6 +1209,7 @@ async function superviseLocked(
       capsuleDigest,
       optimizerDigest,
       orderingReport: extra.orderingReport,
+      deliveryTarget: sealedTarget,
       sealedContractHash: underLock.contractHash,
       sealedOptimizerDigest: underLock.optimizerDigest,
     });
@@ -792,8 +1217,23 @@ async function superviseLocked(
       io.err(`resume seal violated: ${sealError}`);
       return 1;
     }
+    try {
+      optimizerAlreadyComplete = optimizerCompleteForRun(runDir, runId);
+    } catch (e) {
+      io.err(`resume seal violated: ${e instanceof Error ? e.message : String(e)}`);
+      return 1;
+    }
+    // Boot-bound runtime recheck IMMEDIATELY before the durable run event:
+    // recompute the closure, compare against the boot seal and the run's
+    // pin, then append — no await between the comparison and the append.
+    assertRuntimePinFresh(runDir, runId);
     emit({ runId, at: new Date().toISOString(), type: "run.resumed", fromCursor: underLock.cursor });
   } else {
+    // Boot-bound runtime recheck immediately before the durable run.started
+    // append (the pin was written from the same boot seal in runCommand; a
+    // direct superviseRun caller may not have written one, so only drift
+    // from the boot seal refuses here). No await before the append.
+    verifiedBootRuntimeDigest();
     emit({
       runId,
       at: new Date().toISOString(),
@@ -805,8 +1245,10 @@ async function superviseLocked(
   }
 
   const replayed = replayRun(runDir);
-  // The backend is the SEALED one from the run config — never a flag.
-  const backend = await loadBackend(config.backend, io.root, io.env);
+  // The backend is the SEALED one from the run config — never a flag. A
+  // durably sealed optimizer completion skips the backend outright: no
+  // optimizer rerun, no container/broker/proxy resource is ever spawned.
+  const backend = optimizerAlreadyComplete ? null : await loadBackend(config.backend, io.root, io.env);
 
   const abort = new AbortController();
   const children = new Set<ChildLike>();
@@ -857,6 +1299,12 @@ async function superviseLocked(
     if (!abort.signal.aborted) abort.abort(new Error(`budget exhausted: ${dimension}`));
     void termThenKill();
   };
+  // A broker-authored exhaustion may have been public-log durable before a
+  // crash. Re-latch the abort before backend.start, and remember that the
+  // public event already exists so terminalization never emits a duplicate.
+  if (budgetDimension !== null && !abort.signal.aborted) {
+    abort.abort(new Error(`budget exhausted: ${budgetDimension}`));
+  }
 
   // Wall clock is run lifetime, not supervisor uptime: resume includes the
   // offline interval since the durable run.started timestamp.
@@ -872,6 +1320,9 @@ async function superviseLocked(
   };
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
+  // The lock's lease connections carry trusted stop requests (`hone stop`
+  // never signals a PID); a request buffered before this bind fires now.
+  stopChannel.bind(onSignal);
 
   // Terminal-order fence: once the backend settled or the hard-stop deadline
   // passed, a late ctx.emit from an abort-ignoring backend (or a straggler
@@ -918,28 +1369,30 @@ async function superviseLocked(
   let failure: Error | null = null;
   let authorityFailure: Error | null = null;
   try {
-    try {
-      const settled = backend
-        .start(ctx)
-        .then(() => undefined)
-        .catch((e: unknown) => {
-          failure = e instanceof Error ? e : new Error(String(e));
-        });
-      // If the backend ignores the abort, proceed after the kill grace anyway.
-      const hardStop = deferred<void>();
-      abort.signal.addEventListener("abort", () => armTimer(hardStop.resolve, graceMs + 1000), { once: true });
-      await Promise.race([settled, hardStop.promise]);
-    } finally {
-      // A hard-stopped backend may STILL be recovering durable authority
-      // (slow pre-reconcile docker setup): the fence must stay open until
-      // the barrier settles, or the recovered incumbent emit is dropped and
-      // the terminal best seals stale state.
+    if (backend !== null) {
       try {
-        if (authorityBarrier !== null) await authorityBarrier;
-      } catch (e) {
-        authorityFailure = e instanceof Error ? e : new Error(String(e));
+        const settled = backend
+          .start(ctx)
+          .then(() => undefined)
+          .catch((e: unknown) => {
+            failure = e instanceof Error ? e : new Error(String(e));
+          });
+        // If the backend ignores the abort, proceed after the kill grace anyway.
+        const hardStop = deferred<void>();
+        abort.signal.addEventListener("abort", () => armTimer(hardStop.resolve, graceMs + 1000), { once: true });
+        await Promise.race([settled, hardStop.promise]);
+      } finally {
+        // A hard-stopped backend may STILL be recovering durable authority
+        // (slow pre-reconcile docker setup): the fence must stay open until
+        // the barrier settles, or the recovered incumbent emit is dropped and
+        // the terminal best seals stale state.
+        try {
+          if (authorityBarrier !== null) await authorityBarrier;
+        } catch (e) {
+          authorityFailure = e instanceof Error ? e : new Error(String(e));
+        }
+        backendFenced = true;
       }
-      backendFenced = true;
     }
 
     // Termination is not only for aborts: a FAILED backend (or one whose
@@ -994,6 +1447,24 @@ async function superviseLocked(
     const preFinish = replayRun(runDir);
     const best = preFinish.incumbent?.artifact ?? null;
 
+    // Durable optimizer-completion seal: the backend settled successfully
+    // and every registered resource is torn down — from here only delivery
+    // and the terminal event remain. A later resume (delivery refused,
+    // ladder re-locked, target temporarily invalid) skips the optimizer
+    // entirely and retries delivery from the sealed incumbent.
+    if (failure === null && !stopRequested && budgetDimension === null && config.apply !== "none" && best !== null && !existsSync(join(runDir, OPTIMIZER_COMPLETE_FILE))) {
+      writeFileDurable(join(runDir, OPTIMIZER_COMPLETE_FILE), `${JSON.stringify({ runId, at: new Date().toISOString() })}\n`);
+    }
+
+    if (
+      preFinish.delivery !== null
+      && (preFinish.delivery.mode !== config.apply || best === null)
+    ) {
+      throw new Error(
+        `durable delivery outcome is inconsistent with sealed apply mode ${config.apply} and incumbent state`,
+      );
+    }
+
     // Delivery policy is per-run and immutable once started (contract 5).
     // Delivery runs BEFORE run.finished so the terminal event is always the
     // log's final line. An explicit stop that already landed skips automatic
@@ -1001,35 +1472,70 @@ async function superviseLocked(
     // SIGINT handlers are still installed here, so a stop arriving during
     // the synchronous delivery is queued and handled — never the OS default
     // that would kill the supervisor mid-delivery with no terminal event.
-    if (!stopRequested && failure === null && config.apply !== "none" && best !== null) {
-      // Automatic delivery ALWAYS targets io.root — per-run delivery has no
-      // --repo escape; `hone apply/stop --repo` is the deliberate operator path.
-      const repo = io.root;
-      if (isGitRepo(repo)) {
-        try {
-          const result = deliver({
-            mode: config.apply,
-            repo,
-            runId,
-            artifact: best.hash,
-            casDir,
-            improverSeat: config.improverSeat,
-            env: io.env,
-          });
-          emit({
-            runId,
-            at: new Date().toISOString(),
-            type: "delivery.applied",
-            mode: config.apply,
-            ...(result.ref !== null ? { ref: result.ref } : {}),
-          });
-          for (const note of result.notes) io.err(note);
-        } catch (e) {
-          if (e instanceof LadderLockedError) io.err(e.message);
-          else io.err(`delivery (${config.apply}) failed: ${e instanceof Error ? e.message : String(e)}`);
+    if (!stopRequested && failure === null && config.apply !== "none" && best !== null && preFinish.delivery === null) {
+      // Automatic delivery targets ONLY the repository sealed at run
+      // creation (`hone run --repo DIR`), re-validated fail-closed at use —
+      // never a default root, never a target guessed at delivery time.
+      let target: DeliveryTarget | null = null;
+      let targetFailure: string | null = null;
+      try {
+        target = readSealedDeliveryTarget(io.root, runDir, config.apply);
+        if (target === null) targetFailure = `run has no sealed ${DELIVERY_TARGET_FILE} — cannot deliver`;
+      } catch (e) {
+        targetFailure = e instanceof Error ? e.message : String(e);
+      }
+      if (target === null || targetFailure !== null) {
+        // Terminal state must imply delivery durably succeeded. A failed
+        // delivery therefore seals NO terminal: the run stays unfinished and
+        // resumable, and a resume (or `hone apply`) completes it later.
+        io.err(
+          `delivery (${config.apply}) failed: ${targetFailure ?? "unvalidated target"} — run left unfinished (resume with \`hone run --resume\`, or deliver via \`hone apply --repo\`)`,
+        );
+        return 1;
+      }
+      const sealedDelivery = target;
+      try {
+        const result = deliver({
+          mode: config.apply,
+          repo: sealedDelivery.repo,
+          ...(sealedDelivery.gitDir !== undefined ? { gitDir: sealedDelivery.gitDir } : {}),
+          ...(sealedDelivery.autoRef !== undefined ? { autoRef: sealedDelivery.autoRef } : {}),
+          baselineCommit: sealedDelivery.baselineCommit,
+          runId,
+          runDir,
+          artifact: best.hash,
+          casDir,
+          improverSeat: config.improverSeat,
+          env: io.env,
+          // Immediately before every ref update the target must STILL be
+          // the sealed filesystem incarnation (dev:ino + in-store marker).
+          verifyTarget: () => assertTargetIdentity(sealedDelivery),
+        });
+        emit({
+          runId,
+          at: new Date().toISOString(),
+          type: "delivery.applied",
+          mode: config.apply,
+          ...(result.ref !== null ? { ref: result.ref } : {}),
+        });
+        for (const note of result.notes) io.err(note);
+      } catch (e) {
+        if (e instanceof LadderLockedError) {
+          // The autonomy gate vanished between run approval and delivery:
+          // refuse NONTERMINALLY — no ref moved, no terminal event. Restore
+          // the gate and resume; delivery retries from the sealed incumbent
+          // without rerunning the optimizer.
+          io.err(
+            `delivery (${config.apply}) refused: ${e.message} — run left unfinished (restore the autonomy gate and resume with \`hone run --resume\`)`,
+          );
+          return 3;
+        } else {
+          // Same rule as an unvalidatable target: no terminal on failure.
+          io.err(
+            `delivery (${config.apply}) failed: ${e instanceof Error ? e.message : String(e)} — run left unfinished (resume with \`hone run --resume\`, or deliver via \`hone apply --repo\`)`,
+          );
+          return 1;
         }
-      } else {
-        io.err(`apply ${config.apply}: ${repo} is not a git repository — skipping delivery (use \`hone apply --repo <dir>\`)`);
       }
     }
 
@@ -1077,6 +1583,7 @@ async function superviseLocked(
     for (const t of timers) clearTimeout(t);
     process.removeListener("SIGTERM", onSignal);
     process.removeListener("SIGINT", onSignal);
+    stopChannel.bind(() => {}); // late stop bytes after the terminal are inert
   }
 }
 

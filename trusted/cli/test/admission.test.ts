@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 import { CapsuleManifest, DiagnosticOrderingReport, RunConfig, capsuleDigest } from "@hone/schema";
 import { admitCapsule, readCapsuleSnapshot, revalidateForResume, writeCapsuleSnapshot } from "../src/admission.js";
 import { computeOptimizerDigest, resolveOptimizerDigest } from "../src/optimizer-digest.js";
-import { runCommand as cliRunCommand } from "../src/supervisor.js";
+import {
+  RUNTIME_PIN_FILE,
+  runCommand as cliRunCommand,
+  trustedRuntimeDigest,
+} from "../src/supervisor.js";
 import { writeRunConfigFile } from "../src/runs.js";
 import {
   CAP_ID,
@@ -259,6 +263,7 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
     const runDir = writeEvents(root, "run_rd", fixtureEvents({ runId: "run_rd", baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false }));
     writeCapsuleSnapshot(runDir, manifestObject());
     writeRunConfigFile(runDir, runConfigFixture());
+    writeFileSync(join(runDir, RUNTIME_PIN_FILE), `${trustedRuntimeDigest()}\n`);
     // An overridden optimizer command with a pinned digest that differs from the sealed one.
     const { io } = makeIo(root, {
       HONE_STUB_EPISODES: "1",

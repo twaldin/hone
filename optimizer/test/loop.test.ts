@@ -1,7 +1,16 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { RunEvent } from "@hone/schema";
 import { EpisodeContext } from "../src/episode.js";
-import { parseMaxEpisodes, runEpisodeLoop, WORKER_PATH } from "../src/loop.js";
+import {
+  parseMaxEpisodes,
+  runEpisodeLoop,
+  SANDBOX_WORKER_PATH,
+  WORKER_CHUNK_BYTES,
+  WORKER_PART_DIR,
+} from "../src/loop.js";
 import { okStdout, StubBroker, stubHash } from "./stub-broker.js";
 
 /**
@@ -13,6 +22,23 @@ import { okStdout, StubBroker, stubHash } from "./stub-broker.js";
  */
 
 const BASELINE = stubHash(9999);
+
+/** Deterministic binary fixture standing in for a sealed worker bundle. */
+function fixtureBundle(size: number): Buffer {
+  const bytes = Buffer.alloc(size);
+  for (let i = 0; i < size; i++) bytes[i] = (i * 31 + 7) & 0xff;
+  return bytes;
+}
+
+function writeWorkerFixture(bytes: Buffer): string {
+  const path = join(mkdtempSync(join(tmpdir(), "hone-worker-fixture-")), "worker.mjs");
+  writeFileSync(path, bytes);
+  return path;
+}
+
+/** Small shared fixture for tests that only need SOME sealed worker. */
+const WORKER_BUNDLE = Buffer.from("// sealed hone worker bundle fixture\n", "utf8");
+const WORKER_BUNDLE_PATH = writeWorkerFixture(WORKER_BUNDLE);
 
 function collectEmit(events: RunEvent[]): (event: RunEvent) => RunEvent {
   return (event) => {
@@ -54,6 +80,7 @@ describe("runEpisodeLoop", () => {
       await runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
         emit: collectEmit(events),
         seed: 0,
         // ε-draw seam: greedy on episodes 0-1, restart on episode 2.
@@ -108,11 +135,11 @@ describe("runEpisodeLoop", () => {
     // Candidate events carry a session trace reference per attempt (3 valid attempts).
     expect(eventsOf(events, "episode.candidate")).toHaveLength(3);
 
-    // Every mutation session was launched through the baked worker with a deadline.
+    // Every mutation session execs the SANDBOX-LOCAL sealed worker with a deadline.
     for (const argv of stub.execArgvs) {
       expect(argv.slice(0, 1)).toEqual(["env"]);
       expect(argv[1]).toMatch(/^HONE_DEADLINE_MS=\d+$/);
-      expect(argv.slice(2)).toEqual(["bun", WORKER_PATH]);
+      expect(argv.slice(2)).toEqual(["bun", SANDBOX_WORKER_PATH]);
     }
 
     // Every episode file put into a sandbox is a valid EpisodeContext; the repair
@@ -145,6 +172,7 @@ describe("runEpisodeLoop", () => {
       await runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
         emit: collectEmit(events),
         rand: () => 0.99,
       });
@@ -160,6 +188,41 @@ describe("runEpisodeLoop", () => {
     expect(eventsOf(events, "incumbent.new")).toHaveLength(0);
     expect(stub.reportedIncumbents).toEqual([]);
     // With no incumbent, finish falls back to the baseline.
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
+  it("one-shot mode consumes an eval-invalid candidate without launching a repair", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      invalidSaveIndices: [1],
+      execPlan: [{ exitCode: 0, stdout: okStdout("bad-idea") }],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 2 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-one-shot-invalid",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        maxEpisodes: 1,
+        oneShotCandidate: true,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.putFiles).toHaveLength(1);
+    expect(stub.evaluated).toEqual([BASELINE, stubHash(1)]);
+    expect(eventsOf(events, "episode.invalid")).toEqual([
+      expect.objectContaining({ episode: 0, repaired: false, reason: "evaluator rejected the candidate as invalid" }),
+    ]);
+    expect(eventsOf(events, "incumbent.new")).toHaveLength(0);
     expect(stub.finished).toEqual([BASELINE]);
   });
 
@@ -180,6 +243,7 @@ describe("runEpisodeLoop", () => {
       await runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
         emit: (event) => {
           // Stop after the first full episode has been logged.
           const parsed = emit(event);
@@ -221,6 +285,7 @@ describe("runEpisodeLoop paired comparator evidence", () => {
       await runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
         emit: collectEmit(events),
         rand: () => 0.99, // always greedy
         maxEpisodes: 2,
@@ -277,6 +342,7 @@ describe("runEpisodeLoop paired comparator evidence", () => {
       await runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
         emit: collectEmit(events),
         rand: (episode) => (episode === 1 ? 0.0 : 0.99), // restart on episode 1
         maxEpisodes: 2,
@@ -328,6 +394,7 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
       await runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
         emit: collectEmit(events),
         rand: () => 0.99,
         maxEpisodes: 1,
@@ -362,6 +429,7 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
       await runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
         emit: collectEmit(events),
         rand: () => 0.99,
         maxEpisodes: 1,
@@ -397,6 +465,7 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
       await runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
         emit: collectEmit(events),
         rand: () => 0.99,
         maxEpisodes: 1,
@@ -429,6 +498,7 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
       await runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
         emit: collectEmit(events),
         rand: () => 0.99,
         // Crash-after-start replay: the probe episode was journaled as started
@@ -473,5 +543,146 @@ describe("parseMaxEpisodes", () => {
     for (const raw of ["0", "-3", "1.5", "abc", "", "  ", "Infinity", "1e999"]) {
       expect(() => parseMaxEpisodes(raw)).toThrow(/HONE_MAX_EPISODES/);
     }
+  });
+});
+
+describe("runEpisodeLoop sealed worker transfer", () => {
+  /** Two full chunks + a binary tail: exercises chunking, ordering, and byte exactness. */
+  const BIG_BUNDLE = fixtureBundle(WORKER_CHUNK_BYTES * 2 + 1234);
+
+  function transferScript(): StubBroker {
+    return new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: { 1: { score: 0.6 }, 2: { score: 0.7 } },
+      execPlan: [
+        { exitCode: 0, stdout: okStdout("first") },
+        { exitCode: 0, stdout: okStdout("second") },
+      ],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+  }
+
+  async function runEpisodes(stub: StubBroker, maxEpisodes: number): Promise<void> {
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        workerBundlePath: writeWorkerFixture(BIG_BUNDLE),
+        emit: (event) => RunEvent.parse(event),
+        rand: () => 0.99,
+        maxEpisodes,
+      });
+    } finally {
+      await stub.close();
+    }
+  }
+
+  it("putFiles the exact sealed bytes in frame-sized chunks, assembles, and execs the sandbox-local file", async () => {
+    const stub = transferScript();
+    await stub.listen();
+    await runEpisodes(stub, 1);
+
+    // Chunking: every part under the frame-safe cap, in order, and the
+    // concatenation is byte-identical to the sealed bundle.
+    expect(stub.workerParts.length).toBe(3);
+    expect(stub.workerParts.every((p) => p.bytes.length <= WORKER_CHUNK_BYTES)).toBe(true);
+    expect(stub.workerParts.map((p) => p.path)).toEqual([...stub.workerParts.map((p) => p.path)].sort());
+    expect(Buffer.concat(stub.workerParts.map((p) => p.bytes)).equals(BIG_BUNDLE)).toBe(true);
+
+    // One assembly, exact bytes, before the episode context and the session exec.
+    expect(stub.workerTransfers.length).toBe(1);
+    expect(stub.workerTransfers[0]?.bytes.equals(BIG_BUNDLE)).toBe(true);
+    expect(stub.scratch.get(SANDBOX_WORKER_PATH)?.equals(BIG_BUNDLE)).toBe(true);
+
+    const sb = stub.workerTransfers[0]?.sandboxId ?? "";
+    const assembleAt = stub.ops.findIndex((op) => op.startsWith(`exec:${sb}:sh -c cat ${WORKER_PART_DIR}/`));
+    const lastPartAt = stub.ops.lastIndexOf(`putFile:${sb}:${stub.workerParts[2]?.path ?? ""}`);
+    const episodeJsonAt = stub.ops.indexOf(`putFile:${sb}:/scratch/episode.json`);
+    const sessionAt = stub.ops.findIndex((op) => op.startsWith(`exec:${sb}:env HONE_DEADLINE_MS=`));
+    expect(lastPartAt).toBeGreaterThan(-1);
+    expect(assembleAt).toBeGreaterThan(lastPartAt);
+    expect(episodeJsonAt).toBeGreaterThan(assembleAt);
+    expect(sessionAt).toBeGreaterThan(episodeJsonAt);
+    // The session runs the sandbox-local sealed file — no image-baked path.
+    expect(stub.execArgvs).toEqual([["env", expect.stringMatching(/^HONE_DEADLINE_MS=\d+$/), "bun", SANDBOX_WORKER_PATH]]);
+    expect(stub.ops.join("\n")).not.toContain("/opt/hone-worker");
+  });
+
+  it("skips re-transfer for a later sandbox only after the shared /scratch copy hash-verifies", async () => {
+    const stub = transferScript();
+    await stub.listen();
+    await runEpisodes(stub, 2);
+
+    // Two sandboxes, one transfer: the second probe verified the shared copy.
+    expect(stub.workerTransfers.length).toBe(1);
+    const probes = stub.ops.filter((op) => op.endsWith(`:sha256sum ${SANDBOX_WORKER_PATH}`));
+    expect(probes.length).toBe(2);
+    expect(stub.scratch.get(SANDBOX_WORKER_PATH)?.equals(BIG_BUNDLE)).toBe(true);
+  });
+
+  it("re-ships the sealed bytes when the sandbox-local copy does not match the sealed hash", async () => {
+    const stub = transferScript();
+    // A previous session (or a hostile mutation) left different bytes behind.
+    stub.scratch.set(SANDBOX_WORKER_PATH, Buffer.from("tampered worker", "utf8"));
+    await stub.listen();
+    await runEpisodes(stub, 1);
+
+    expect(stub.workerTransfers.length).toBe(1);
+    expect(stub.workerTransfers[0]?.bytes.equals(BIG_BUNDLE)).toBe(true);
+    expect(stub.scratch.get(SANDBOX_WORKER_PATH)?.equals(BIG_BUNDLE)).toBe(true);
+  });
+
+  it("fails the episode loop closed when the sealed worker bundle is unreadable", async () => {
+    await expect(
+      runEpisodeLoop({
+        brokerSocket: "/nonexistent/broker.sock",
+        runId: "run-test",
+        workerBundlePath: "/nonexistent/worker.mjs",
+        emit: (event) => RunEvent.parse(event),
+      }),
+    ).rejects.toThrow(/worker\.mjs/);
+  });
+
+  it("creates the episode sandbox BEFORE the parent evaluation so both evals share the pairing epoch", async () => {
+    const stub = transferScript();
+    await stub.listen();
+    await runEpisodes(stub, 2);
+
+    for (const episode of [0, 1]) {
+      const sandboxId = `sb_${String(episode + 1).padStart(12, "0")}`;
+      const createAt = stub.ops.indexOf(`createSandbox:${sandboxId}`);
+      const parentEvalAt = stub.ops.findIndex((op) => op.startsWith("evaluate:") && op.endsWith(`@${episode}`));
+      expect(createAt).toBeGreaterThan(-1);
+      expect(parentEvalAt).toBeGreaterThan(createAt);
+      // ...and the episode's session exec follows the parent evaluation in the same epoch.
+      const sessionAt = stub.ops.findIndex((op) => op.startsWith(`exec:${sandboxId}:env HONE_DEADLINE_MS=`));
+      expect(sessionAt).toBeGreaterThan(parentEvalAt);
+    }
+  });
+
+  it("never places worker bytes under /workspace — the saved candidate artifact cannot contain the bundle", async () => {
+    const stub = transferScript();
+    await stub.listen();
+    await runEpisodes(stub, 2);
+
+    // saveArtifact archives /workspace ONLY; every loop-written path (worker
+    // chunks, assembled bundle, episode context) lives under /scratch.
+    expect(SANDBOX_WORKER_PATH.startsWith("/scratch/")).toBe(true);
+    expect(WORKER_PART_DIR.startsWith("/scratch/")).toBe(true);
+    const written = [...stub.workerParts.map((p) => p.path), ...stub.putFiles.map((p) => p.path)];
+    expect(written.length).toBeGreaterThan(0);
+    expect(written.every((p) => p.startsWith("/scratch/"))).toBe(true);
+    expect(written.some((p) => p.startsWith("/workspace"))).toBe(false);
+    // No exec touches a /workspace-resident worker either — only the /scratch path.
+    for (const op of stub.ops.filter((o) => o.includes("hone-worker"))) {
+      expect(op).not.toContain("/workspace");
+    }
+    // No stage residue: assembly atomically installed the bundle and removed
+    // the chunk dir, so shared /scratch holds ONLY the installed worker (plus
+    // the episode context) — nothing for later snapshots to drag along.
+    const residue = [...stub.scratch.keys()].filter((p) => p.startsWith(`${WORKER_PART_DIR}/`));
+    expect(residue).toEqual([]);
+    expect([...stub.scratch.keys()].sort()).toEqual(["/scratch/episode.json", SANDBOX_WORKER_PATH]);
   });
 });

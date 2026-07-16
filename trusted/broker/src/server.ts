@@ -1,6 +1,6 @@
 import net from "node:net";
-import { createHash, timingSafeEqual } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { chmod, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { z, ZodError } from "zod";
 import { BrokerMethods } from "@hone/schema";
@@ -18,8 +18,12 @@ import { deferred } from "./deferred.js";
  *                       optimizer process finds no privileged endpoint on
  *                       disk to escalate through.
  * Same protocol on both; privilege is a property of the CONNECTION, decided by
- * which socket file the peer could reach — filesystem permissions are the
- * authn boundary.
+ * which socket file the peer could reach. The ADMIN socket's authn boundary is
+ * filesystem ownership (0600). The PUBLIC socket is deliberately 0666 so the
+ * uid-2000 optimizer container can connect across the bind mount — which means
+ * ANY host UID can connect too, so reachability is not authority there: every
+ * public request (unix or TCP) must present the per-broker bearer token or it
+ * is rejected before method lookup.
  */
 
 const RpcRequest = z.object({
@@ -27,7 +31,7 @@ const RpcRequest = z.object({
   id: z.union([z.string(), z.number(), z.null()]).optional(),
   method: z.string(),
   params: z.unknown().optional(),
-  /** Bearer for the opt-in public TCP listener; ignored on unix sockets. */
+  /** Per-broker bearer REQUIRED on both public transports (unix + TCP); ignored on the admin socket. */
   token: z.string().optional(),
 });
 
@@ -35,7 +39,7 @@ const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
-/** Server-defined JSON-RPC error: missing/wrong TCP auth token. */
+/** Server-defined JSON-RPC error: missing/wrong public bearer token. */
 const UNAUTHORIZED = -32060;
 
 interface RpcErrorShape {
@@ -156,8 +160,18 @@ export const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_CONCURRENT_PER_CONNECTION = 8;
 export const DEFAULT_MAX_CONCURRENT_GLOBAL = 64;
 export const DEFAULT_MAX_QUEUED_BYTES_PER_CONNECTION = 256 * 1024;
-/** Hard cap on simultaneous connections across BOTH sockets. */
+/** Hard cap on simultaneous AUTHENTICATED connections across both sockets
+ * (admin connects are authenticated by filesystem ownership; public connects
+ * by their first valid-token frame). Pre-auth sockets never consume it. */
 export const DEFAULT_MAX_CONNECTIONS = 64;
+/** Bounded pool for public sockets that have not yet presented the bearer.
+ * The 0666 socket accepts any host UID's connect, so pre-auth capacity is
+ * kept SEPARATE from authenticated capacity and evicts oldest-first: a
+ * squatter can never starve a token-holder out of admission. */
+export const DEFAULT_MAX_UNAUTHENTICATED_CONNECTIONS = 8;
+/** How long a public connection may exist without authenticating before it
+ * is closed (idle/partial/wrong-token squatters release their FD). */
+export const DEFAULT_AUTH_WINDOW_MS = 10_000;
 /** Global budget for RETAINED bytes — pending pre-newline fragments plus
  * queued complete frames, summed across all connections. Bounds broker
  * memory even when many connections each stay under their own caps. */
@@ -165,6 +179,64 @@ export const DEFAULT_MAX_BUFFERED_BYTES_GLOBAL = 8 * 1024 * 1024;
 /** One serialized JSON response and all queued outbound socket bytes. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 96 * 1024 * 1024;
 export const DEFAULT_MAX_OUTBOUND_BYTES_GLOBAL = 128 * 1024 * 1024;
+
+/**
+ * Incremental newline-delimited frame decoder — O(total bytes) even under a
+ * one-byte-per-chunk drip. Each arriving chunk is scanned exactly once for
+ * newlines; buffered fragments are kept as SEGMENTS (no per-chunk
+ * re-concatenation) and copied at most once, when their frame completes.
+ * Max-frame semantics match the historical parser exactly: a completed line
+ * longer than `maxFrameBytes` and a pending fragment that outgrows
+ * `maxFrameBytes` without a newline both fail; a line of exactly
+ * `maxFrameBytes` is accepted.
+ */
+export class FrameDecoder {
+  private segments: Buffer[] = [];
+  private pendingBytes = 0;
+  /** Total bytes copied while reassembling multi-chunk frames — test instrumentation proving linear cost. */
+  copiedBytes = 0;
+  constructor(private readonly maxFrameBytes: number) {}
+
+  /**
+   * Feed one chunk. Returns every completed frame in wire order — `bytes` is
+   * the raw wire cost of the frame (line + newline, including previously
+   * buffered fragment bytes) — plus `error` when a frame cap was violated;
+   * frames completed before the violation are still returned. After an
+   * error the decoder must be discarded.
+   */
+  push(chunk: Buffer): { frames: Array<{ line: string; bytes: number }>; error?: string } {
+    const frames: Array<{ line: string; bytes: number }> = [];
+    let start = 0;
+    let nl: number;
+    while ((nl = chunk.indexOf(0x0a, start)) >= 0) {
+      const lineLength = this.pendingBytes + (nl - start);
+      if (lineLength > this.maxFrameBytes) {
+        return { frames, error: `frame exceeds ${this.maxFrameBytes} bytes` };
+      }
+      let lineBuf: Buffer;
+      if (this.pendingBytes === 0) {
+        lineBuf = chunk.subarray(start, nl);
+      } else {
+        this.segments.push(chunk.subarray(start, nl));
+        lineBuf = Buffer.concat(this.segments, lineLength);
+        this.copiedBytes += lineLength;
+        this.segments.length = 0;
+        this.pendingBytes = 0;
+      }
+      frames.push({ line: lineBuf.toString("utf8"), bytes: lineLength + 1 });
+      start = nl + 1;
+    }
+    if (start < chunk.length) {
+      const rest = chunk.subarray(start);
+      this.segments.push(rest);
+      this.pendingBytes += rest.length;
+      if (this.pendingBytes > this.maxFrameBytes) {
+        return { frames, error: `frame exceeds ${this.maxFrameBytes} bytes` };
+      }
+    }
+    return { frames };
+  }
+}
 
 /** Server-defined JSON-RPC error for backlog overflow — distinct from every
  * BROKER_ERROR_NUMBER code (-32000..-32006). */
@@ -175,14 +247,21 @@ export interface BrokerServerOptions {
   /** Opt-in privileged socket; omitted = no admin endpoint exists at all. */
   adminSocketPath?: string | undefined;
   /**
-   * Opt-in authenticated PUBLIC (unprivileged) TCP listener for containerized
-   * optimizer clients that cannot reach the unix socket. `port: 0` binds an
-   * ephemeral port — read the resolved address from `publicTcpAddress` after
-   * listen(). Every JSON-RPC request on this listener must carry the exact
-   * `token` (constant-time compare); anything else is rejected BEFORE method
-   * dispatch. Unix-socket behavior is unchanged and never requires a token.
+   * Per-broker bearer REQUIRED on every request over BOTH public transports:
+   * the always-present 0666 unix socket and the opt-in TCP listener. The
+   * public unix socket is world-connectable so the uid-2000 container can
+   * reach it — any other-UID host process can too, so a request without the
+   * exact token (constant-time compare) is rejected BEFORE method lookup and
+   * has zero method authority. Must carry >=256 bits (>=32 bytes).
    */
-  publicTcp?: { host: string; port: number; token: string } | undefined;
+  publicToken: string;
+  /**
+   * Opt-in PUBLIC (unprivileged) TCP listener for containerized optimizer
+   * clients that cannot reach the unix socket. `port: 0` binds an ephemeral
+   * port — read the resolved address from `publicTcpAddress` after listen().
+   * Same bearer requirement as the public unix socket.
+   */
+  publicTcp?: { host: string; port: number } | undefined;
   /** Max bytes per frame before the connection is rejected; default 1 MiB. */
   maxFrameBytes?: number | undefined;
   /** Max handlers in flight per connection; default 8. */
@@ -192,8 +271,14 @@ export interface BrokerServerOptions {
   /** Max bytes of complete frames queued behind the concurrency caps before
    * the connection is rejected; default 256 KiB. */
   maxQueuedBytesPerConnection?: number | undefined;
-  /** Max simultaneous connections across both sockets; default 64. */
+  /** Max simultaneous AUTHENTICATED connections across both sockets; default 64. */
   maxConnections?: number | undefined;
+  /** Max public sockets awaiting their first valid-token frame; the oldest is
+   * evicted when a newer connect needs the slot. Default 8. */
+  maxUnauthenticatedConnections?: number | undefined;
+  /** Deadline (ms) for a public socket to authenticate before it is closed;
+   * default 10_000. */
+  authWindowMs?: number | undefined;
   /** Global budget for retained bytes (fragments + queued frames) across all
    * connections; the largest holder is evicted on overflow. Default 8 MiB. */
   maxBufferedBytesGlobal?: number | undefined;
@@ -207,7 +292,7 @@ export interface BrokerServerOptions {
 interface ConnState {
   sock: net.Socket;
   privileged: boolean;
-  /** True on the public TCP listener: every request must present the exact token. */
+  /** True on both PUBLIC listeners (unix + TCP): every request must present the exact per-broker token. */
   tokenRequired: boolean;
   inFlight: number;
   queue: Array<{ line: string; bytes: number }>;
@@ -215,6 +300,11 @@ interface ConnState {
   queuedBytes: number;
   /** Raw bytes RETAINED for this connection: pending fragment + queued frames. */
   bufferedBytes: number;
+  /** True once this connection consumes authenticated capacity: at connect
+   * for the admin socket, at the first valid-token frame for public ones. */
+  authenticated: boolean;
+  /** Pre-auth deadline; cleared on promotion, rejection, or close. */
+  authTimer: NodeJS.Timeout | undefined;
   /** Per-connection write serialization; socket backpressure is awaited. */
   writeTail: Promise<void>;
 }
@@ -236,12 +326,19 @@ export class BrokerServer {
   private readonly maxConcurrentGlobal: number;
   private readonly maxQueuedBytesPerConnection: number;
   private readonly maxConnections: number;
+  private readonly maxUnauthenticatedConnections: number;
+  private readonly authWindowMs: number;
   private readonly maxBufferedBytesGlobal: number;
   private readonly maxResponseBytes: number;
   private readonly maxOutboundBytesGlobal: number;
   private globalInFlight = 0;
   private globalBufferedBytes = 0;
   private globalOutboundBytes = 0;
+  /** Authenticated connections currently consuming protected capacity. */
+  private authedCount = 0;
+  /** Public connections awaiting their first valid-token frame — insertion
+   * order IS eviction order (oldest first). */
+  private readonly unauth = new Set<ConnState>();
   /** Connections with a non-empty backlog, FIFO by first queued frame. */
   private readonly waiting = new Set<ConnState>();
   /** Resolved address of the opt-in public TCP listener (after listen()). */
@@ -261,22 +358,24 @@ export class BrokerServer {
     this.maxConcurrentGlobal = opts.maxConcurrentGlobal ?? DEFAULT_MAX_CONCURRENT_GLOBAL;
     this.maxQueuedBytesPerConnection = opts.maxQueuedBytesPerConnection ?? DEFAULT_MAX_QUEUED_BYTES_PER_CONNECTION;
     this.maxConnections = opts.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+    this.maxUnauthenticatedConnections = opts.maxUnauthenticatedConnections ?? DEFAULT_MAX_UNAUTHENTICATED_CONNECTIONS;
+    this.authWindowMs = opts.authWindowMs ?? DEFAULT_AUTH_WINDOW_MS;
     this.maxBufferedBytesGlobal = opts.maxBufferedBytesGlobal ?? DEFAULT_MAX_BUFFERED_BYTES_GLOBAL;
     this.maxResponseBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     this.maxOutboundBytesGlobal = opts.maxOutboundBytesGlobal ?? DEFAULT_MAX_OUTBOUND_BYTES_GLOBAL;
   }
 
   async listen(): Promise<void> {
+    // Capability floor: the bearer must carry >=256 bits — refuse to listen
+    // at all behind a guessable token (generate with randomBytes(32).toString("hex")).
+    if (Buffer.byteLength(this.opts.publicToken, "utf8") < 32) {
+      throw new Error("publicToken must be at least 32 bytes (a >=256-bit capability)");
+    }
     await mkdir(path.dirname(this.opts.socketPath), { recursive: true });
     await this.listenOne(this.opts.socketPath, false);
     if (this.opts.adminSocketPath !== undefined) await this.listenOne(this.opts.adminSocketPath, true);
     const tcp = this.opts.publicTcp;
     if (tcp !== undefined) {
-      // Capability floor: the bearer must carry >=256 bits — refuse to listen
-      // behind a guessable token (generate with randomBytes(32).toString("hex")).
-      if (Buffer.byteLength(tcp.token, "utf8") < 32) {
-        throw new Error("publicTcp.token must be at least 32 bytes (a >=256-bit capability)");
-      }
       const server = net.createServer((sock) => this.onConnection(sock, false, true));
       const { promise, resolve, reject } = deferred<void>();
       server.once("error", reject);
@@ -296,11 +395,20 @@ export class BrokerServer {
 
   private async listenOne(socketPath: string, privileged: boolean): Promise<void> {
     await rm(socketPath, { force: true });
-    const server = net.createServer((sock) => this.onConnection(sock, privileged, false));
+    // The public unix socket requires the bearer exactly like the TCP listener; the admin socket never does.
+    const server = net.createServer((sock) => this.onConnection(sock, privileged, !privileged));
     const { promise, resolve, reject } = deferred<void>();
     server.once("error", reject);
     server.listen(socketPath, resolve);
     await promise;
+    // Cross-uid reachability vs. privilege: the PUBLIC socket must accept the
+    // unprivileged (uid/gid 2000) optimizer container across the bind mount —
+    // default bind modes deny non-owner connect on Linux, so open it to 0666.
+    // Reachability is NOT authority: every request on this socket must present
+    // the per-broker bearer (rejected before method lookup), and no admin
+    // method exists on it at all. The ADMIN socket is the trusted supervisor's
+    // capability: owner-only 0600, filesystem-authenticated, no token.
+    await chmod(socketPath, privileged ? 0o600 : 0o666);
     this.servers.push(server);
   }
 
@@ -341,11 +449,21 @@ export class BrokerServer {
   }
 
   /** Live dispatch counters — observability for callers and adversarial tests. */
-  get stats(): { connections: number; inFlight: number; queuedBytes: number; bufferedBytes: number; outboundBytes: number } {
+  get stats(): {
+    connections: number;
+    authenticated: number;
+    unauthenticated: number;
+    inFlight: number;
+    queuedBytes: number;
+    bufferedBytes: number;
+    outboundBytes: number;
+  } {
     let queuedBytes = 0;
     for (const conn of this.waiting) queuedBytes += conn.queuedBytes;
     return {
       connections: this.conns.size,
+      authenticated: this.authedCount,
+      unauthenticated: this.unauth.size,
       inFlight: this.globalInFlight,
       queuedBytes,
       bufferedBytes: this.globalBufferedBytes,
@@ -368,6 +486,16 @@ export class BrokerServer {
    * GLOBAL budget so many connections cannot multiply the per-connection
    * caps into host memory exhaustion. A client that exceeds any cap gets
    * ONE error response, then the connection is torn down deterministically.
+   *
+   * Admission is split by trust: ADMIN sockets (filesystem-authenticated)
+   * consume protected authenticated capacity at connect. PUBLIC sockets
+   * (any host UID can reach the 0666 file) enter a small pre-auth pool with
+   * an authentication deadline; they consume authenticated capacity only at
+   * their first valid-token frame. A full pre-auth pool evicts its OLDEST
+   * member for each new arrival — an idle-socket flood can churn the pool
+   * but can neither exhaust host FDs (total sockets <= maxConnections +
+   * maxUnauthenticatedConnections) nor deny a token-holder admission, and
+   * authenticated connections are NEVER evicted.
    */
   private onConnection(sock: net.Socket, privileged: boolean, tokenRequired: boolean): void {
     if (this.closing) {
@@ -376,8 +504,8 @@ export class BrokerServer {
       sock.write(`${JSON.stringify(resp)}\n`, () => sock.destroy());
       return;
     }
-    if (this.conns.size >= this.maxConnections) {
-      // Deterministic rejection of the excess socket: one error frame, close.
+    if (!tokenRequired && this.authedCount >= this.maxConnections) {
+      // Deterministic rejection of the excess admin socket: one error frame, close.
       sock.on("error", () => sock.destroy());
       const resp: RpcResponse = {
         jsonrpc: "2.0",
@@ -387,6 +515,14 @@ export class BrokerServer {
       sock.write(`${JSON.stringify(resp)}\n`, () => sock.destroy());
       return;
     }
+    if (tokenRequired && this.unauth.size >= this.maxUnauthenticatedConnections) {
+      // Oldest-first eviction: a squatter cannot hold a pre-auth slot against
+      // a newcomer, so a legitimate token sender always gets admitted.
+      const oldest = this.unauth.values().next().value;
+      if (oldest !== undefined) {
+        this.rejectConnection(oldest, UNAUTHORIZED, "evicted: unauthenticated connection displaced by a newer connect");
+      }
+    }
     const conn: ConnState = {
       sock,
       privileged,
@@ -395,11 +531,27 @@ export class BrokerServer {
       queue: [],
       queuedBytes: 0,
       bufferedBytes: 0,
+      authenticated: false,
+      authTimer: undefined,
       writeTail: Promise.resolve(),
     };
     this.conns.add(conn);
+    if (tokenRequired) {
+      this.unauth.add(conn);
+      // Idle/partial/wrong-token squatters release their FD at the deadline.
+      const timer = setTimeout(
+        () => this.rejectConnection(conn, UNAUTHORIZED, `evicted: not authenticated within ${this.authWindowMs}ms`),
+        this.authWindowMs,
+      );
+      timer.unref();
+      conn.authTimer = timer;
+    } else {
+      conn.authenticated = true;
+      this.authedCount++;
+    }
     sock.on("close", () => {
       this.conns.delete(conn);
+      this.dropAuthState(conn);
       // Drop the dead client's backlog and return its retained bytes;
       // in-flight handlers release their permits in run()'s finally and
       // their writes are skipped.
@@ -409,29 +561,22 @@ export class BrokerServer {
       this.release(conn, conn.bufferedBytes);
     });
     sock.on("error", () => sock.destroy());
-    let buf: Buffer = Buffer.alloc(0);
+    const decoder = new FrameDecoder(this.maxFrameBytes);
     sock.on("data", (chunk: Buffer) => {
       // Closing: reject instead of admitting new work behind the drain.
       if (this.closing) return this.rejectConnection(conn, OVERLOADED, "server closing");
-      buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
       conn.bufferedBytes += chunk.length;
       this.globalBufferedBytes += chunk.length;
-      let nl: number;
-      while ((nl = buf.indexOf(0x0a)) >= 0) {
-        if (nl > this.maxFrameBytes) {
-          return this.rejectConnection(conn, PARSE_ERROR, `frame exceeds ${this.maxFrameBytes} bytes`);
-        }
-        const consumed = nl + 1; // line + newline, raw wire bytes
-        const line = buf.subarray(0, nl).toString("utf8");
-        buf = buf.subarray(consumed);
-        if (line.trim().length === 0) {
-          this.release(conn, consumed);
+      const { frames, error } = decoder.push(chunk);
+      for (const frame of frames) {
+        if (frame.line.trim().length === 0) {
+          this.release(conn, frame.bytes);
           continue;
         }
-        if (!this.admit(conn, line, consumed)) return; // backlog overflow — torn down
+        if (!this.admit(conn, frame.line, frame.bytes)) return; // backlog overflow — torn down
       }
-      if (buf.length > this.maxFrameBytes) {
-        return this.rejectConnection(conn, PARSE_ERROR, `frame exceeds ${this.maxFrameBytes} bytes`);
+      if (error !== undefined) {
+        return this.rejectConnection(conn, PARSE_ERROR, error);
       }
       // Retained bytes settled for this chunk; if the global budget is now
       // exceeded, evict holders (largest first) until it fits again.
@@ -572,9 +717,47 @@ export class BrokerServer {
     }
   }
 
+  /**
+   * Move a public connection out of the pre-auth pool the moment it presents
+   * the exact bearer. Authenticated capacity is checked HERE, not at connect:
+   * a full house of authenticated peers rejects the newcomer with the same
+   * deterministic overload frame, and pre-auth squatters can never occupy
+   * those protected slots. Idempotent; returns false when rejected.
+   */
+  private promote(conn: ConnState): boolean {
+    if (conn.authenticated) return true;
+    if (this.authedCount >= this.maxConnections) {
+      this.rejectConnection(conn, OVERLOADED, `too many connections (max ${this.maxConnections})`);
+      return false;
+    }
+    if (conn.authTimer !== undefined) {
+      clearTimeout(conn.authTimer);
+      conn.authTimer = undefined;
+    }
+    this.unauth.delete(conn);
+    conn.authenticated = true;
+    this.authedCount++;
+    return true;
+  }
+
+  /** Release a connection's auth accounting (close/reject). Idempotent. */
+  private dropAuthState(conn: ConnState): void {
+    if (conn.authTimer !== undefined) {
+      clearTimeout(conn.authTimer);
+      conn.authTimer = undefined;
+    }
+    if (conn.authenticated) {
+      conn.authenticated = false;
+      this.authedCount--;
+    } else {
+      this.unauth.delete(conn);
+    }
+  }
+
   /** One safe error frame, then close — deterministic teardown for cap abuse.
    * Returns the connection's whole retained budget (fragment + backlog). */
   private rejectConnection(conn: ConnState, code: number, message: string): void {
+    this.dropAuthState(conn);
     this.waiting.delete(conn);
     conn.queue.length = 0;
     conn.queuedBytes = 0;
@@ -586,7 +769,7 @@ export class BrokerServer {
     sock.write(`${JSON.stringify(resp)}\n`, () => sock.destroy());
   }
 
-  private async handleLine(line: string, conn: { privileged: boolean; tokenRequired: boolean }): Promise<RpcResponse | undefined> {
+  private async handleLine(line: string, conn: ConnState): Promise<RpcResponse | undefined> {
     let raw: unknown;
     try {
       raw = JSON.parse(line);
@@ -602,10 +785,18 @@ export class BrokerServer {
     const respond = (resp: Omit<RpcResponse, "jsonrpc" | "id">): RpcResponse | undefined =>
       isNotification ? undefined : { jsonrpc: "2.0", id: id ?? null, ...resp };
 
-    // TCP auth precedes EVERYTHING method-shaped: a wrong or missing token
-    // learns nothing about the method table, not even method-not-found.
-    if (conn.tokenRequired && !tokenMatches(this.opts.publicTcp?.token ?? "", req.data.token)) {
-      return respond({ error: { code: UNAUTHORIZED, message: "unauthorized" } });
+    // Public-transport auth precedes EVERYTHING method-shaped: a wrong or
+    // missing token learns nothing about the method table (not even
+    // method-not-found) and reaches no handler. Identical on the 0666 unix
+    // socket and the TCP listener; the admin socket authenticates by
+    // filesystem ownership instead and never carries a token.
+    if (conn.tokenRequired) {
+      if (!tokenMatches(this.opts.publicToken, req.data.token)) {
+        return respond({ error: { code: UNAUTHORIZED, message: "unauthorized" } });
+      }
+      // Valid bearer: leave the pre-auth pool for protected capacity (or be
+      // rejected deterministically when authenticated peers fill the house).
+      if (!this.promote(conn)) return undefined;
     }
 
     const entry = this.table.get(method);
@@ -647,6 +838,13 @@ export interface RunningBroker {
   server: BrokerServer;
   socketPath: string;
   adminSocketPath: string | undefined;
+  /**
+   * Per-broker public-transport bearer — trusted IN-MEMORY state only. The
+   * runner hands it to the optimizer container via the docker CREATE client's
+   * env (value-less `-e HONE_BROKER_TOKEN`); it must never appear in argv,
+   * logs, events, or on disk.
+   */
+  publicToken: string;
   /** Resolved host+port of the opt-in authenticated public TCP listener. */
   publicTcpAddress: { host: string; port: number } | undefined;
   close(): Promise<void>;
@@ -663,12 +861,18 @@ export interface StartBrokerOptions {
    */
   adminSocketPath?: string | undefined;
   /**
+   * Public-transport bearer override (tests only). Omitted = production
+   * behavior: a fresh randomBytes(32) hex capability is generated for this
+   * broker. Anything under 32 bytes refuses to listen.
+   */
+  publicToken?: string | undefined;
+  /**
    * Authenticated PUBLIC (unprivileged) TCP listener for a containerized
    * optimizer. `port: 0` binds an ephemeral port; the resolved address is
-   * returned as `publicTcpAddress`. Every request must carry the exact
-   * `token` or it is rejected before method dispatch.
+   * returned as `publicTcpAddress`. Every request must carry the broker's
+   * `publicToken` — exactly like the public unix socket.
    */
-  publicTcp?: { host: string; port: number; token: string } | undefined;
+  publicTcp?: { host: string; port: number } | undefined;
 }
 
 export async function startBroker(config: BrokerConfig): Promise<RunningBroker & { adminSocketPath: undefined; publicTcpAddress: undefined }>;
@@ -678,17 +882,21 @@ export async function startBroker(
 ): Promise<RunningBroker & { adminSocketPath: string }>;
 export async function startBroker(
   config: BrokerConfig,
-  opts: StartBrokerOptions & { publicTcp: { host: string; port: number; token: string } },
+  opts: StartBrokerOptions & { publicTcp: { host: string; port: number } },
 ): Promise<RunningBroker & { publicTcpAddress: { host: string; port: number } }>;
 export async function startBroker(config: BrokerConfig, opts: StartBrokerOptions = {}): Promise<RunningBroker> {
   const broker = new Broker(config);
   const socketPath = path.join(config.runDir, "broker.sock");
   const adminSocketPath = opts.adminSocketPath;
+  // One fresh >=256-bit capability per broker, shared by BOTH public
+  // transports; it lives only in trusted memory (RunningBroker.publicToken).
+  const publicToken = opts.publicToken ?? randomBytes(32).toString("hex");
   let server: BrokerServer | undefined;
   try {
     await broker.init();
     server = new BrokerServer(broker, {
       socketPath,
+      publicToken,
       ...(adminSocketPath !== undefined ? { adminSocketPath } : {}),
       ...(opts.publicTcp !== undefined ? { publicTcp: opts.publicTcp } : {}),
     });
@@ -712,6 +920,7 @@ export async function startBroker(config: BrokerConfig, opts: StartBrokerOptions
     server,
     socketPath,
     adminSocketPath,
+    publicToken,
     publicTcpAddress: server.publicTcpAddress,
     close: async () => {
       // Stop admission first, then settle BOTH teardown paths even when one
