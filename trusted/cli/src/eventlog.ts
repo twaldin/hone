@@ -1,7 +1,7 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, renameSync, writeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { RunEvent } from "@hone/schema";
-import type { ArtifactRef, BudgetState } from "@hone/schema";
+import type { ApplyMode, ArtifactRef, BudgetState } from "@hone/schema";
 
 /**
  * Append-only NDJSON event log — the ONLY run-state store (contract 4).
@@ -14,6 +14,60 @@ export function eventsPath(runDir: string): string {
   return join(runDir, EVENTS_FILE);
 }
 
+/** fsync a directory so a just-created or just-renamed entry survives power loss. */
+export function syncDir(dir: string): void {
+  const fd = openSync(dir, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Write the WHOLE buffer: writeSync may write short, and a short seal that
+ * gets fsync+renamed anyway would publish a truncated file as durable. A
+ * zero-progress write fails rather than spinning. `write` is a test seam
+ * for injected short writes.
+ */
+export function writeAllSync(
+  fd: number,
+  data: Buffer,
+  write: (fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number) => number = writeSync,
+): void {
+  let offset = 0;
+  while (offset < data.length) {
+    const wrote = write(fd, data, offset, data.length - offset);
+    if (wrote <= 0) throw new Error(`short write stalled at ${offset}/${data.length} bytes`);
+    offset += wrote;
+  }
+}
+
+/**
+ * Durable sidecar publication (write-all → fsync tmp → rename → fsync parent
+ * — the same discipline as this event log and the broker journal): a
+ * resume-required file (runtime pin, capsule snapshot, run config, contract,
+ * delivery target) must never be lost or torn by power loss once
+ * run.started is durable, or the run would be unresumable while its
+ * terminal authority survives.
+ */
+export function writeFileDurable(
+  path: string,
+  content: string,
+  write?: (fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number) => number,
+): void {
+  const tmp = `${path}.${process.pid}.tmp`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeAllSync(fd, Buffer.from(content, "utf8"), write ?? writeSync);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
+  syncDir(dirname(path));
+}
+
 /**
  * Durable append (review finding 11 + FinalSecurityGate finding 3): broker
  * authority is journaled+fsynced before it reaches this sink, so the sink
@@ -21,20 +75,26 @@ export function eventsPath(runDir: string): string {
  * writer's torn tail, and must survive short writes. An acknowledged event
  * is a complete, newline-terminated, fsynced line.
  */
-export function appendEvent(runDir: string, event: RunEvent): RunEvent {
+export function appendEvent(runDir: string, event: RunEvent, sync: (dir: string) => void = syncDir): RunEvent {
   const parsed = RunEvent.parse(event);
-  const fd = openSync(eventsPath(runDir), "a+");
+  const path = eventsPath(runDir);
+  const fd = openSync(path, "a+");
   try {
     repairTornTail(fd);
-    const data = Buffer.from(`${JSON.stringify(parsed)}\n`, "utf8");
-    let written = 0;
-    while (written < data.length) {
-      written += writeSync(fd, data, written, data.length - written);
-    }
+    writeAllSync(fd, Buffer.from(`${JSON.stringify(parsed)}\n`, "utf8"));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
+  // EVERY acknowledged append also pins the log's directory entry — not just
+  // the append that observed itself creating the file. This process may be
+  // RECOVERING a log a killed creator opened but never made durable: a
+  // power loss after the fd fsync would otherwise acknowledge an event into
+  // a file whose dirent never reached disk. One fsync of the run dir per
+  // append is the simplest policy that is safe for every crash interleaving
+  // (creator killed pre-syncDir, concurrent creators, rename recovery).
+  // `sync` is a test seam.
+  sync(runDir);
   return parsed;
 }
 
@@ -130,6 +190,10 @@ export interface RunState {
   baselineArtifact: ArtifactRef | null;
   incumbent: IncumbentState | null;
   lastBudget: BudgetState | null;
+  /** Durable broker-authored exhaustion latch, even before run.finished. */
+  budgetExhaustedDimension: string | null;
+  /** Trusted delivery outcome already made durable before run.finished. */
+  delivery: { mode: ApplyMode; ref: string | null } | null;
   finished: FinishedState | null;
   resumeCount: number;
   evalCount: number;
@@ -149,6 +213,8 @@ export function replay(events: RunEvent[]): RunState {
     baselineArtifact: null,
     incumbent: null,
     lastBudget: null,
+    budgetExhaustedDimension: null,
+    delivery: null,
     finished: null,
     resumeCount: 0,
     evalCount: 0,
@@ -192,6 +258,28 @@ export function replay(events: RunEvent[]): RunState {
       case "budget.snapshot":
         state.lastBudget = event.budget;
         break;
+      case "budget.exhausted":
+        if (
+          state.budgetExhaustedDimension !== null
+          && state.budgetExhaustedDimension !== event.dimension
+        ) {
+          throw new Error(
+            `contradictory budget exhaustion dimensions ${state.budgetExhaustedDimension} and ${event.dimension}`,
+          );
+        }
+        state.budgetExhaustedDimension = event.dimension;
+        break;
+      case "delivery.applied": {
+        const delivery = { mode: event.mode, ref: event.ref ?? null };
+        if (
+          state.delivery !== null
+          && (state.delivery.mode !== delivery.mode || state.delivery.ref !== delivery.ref)
+        ) {
+          throw new Error("contradictory durable delivery outcomes in one run");
+        }
+        state.delivery = delivery;
+        break;
+      }
       case "run.finished":
         state.finished = { status: event.status, best: event.best ?? null, at: event.at };
         state.status = event.status;

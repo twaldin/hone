@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -5,6 +6,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { BrokerMethods, EvaluationRecord, type BudgetEnvelope, type BudgetState } from "@hone/schema";
 import { deferred } from "../src/deferred.js";
+import { SANDBOX_WORKER_PATH, WORKER_PART_DIR } from "../src/loop.js";
 
 /**
  * In-process scripted broker: a real net.Server speaking the newline JSON-RPC
@@ -59,6 +61,7 @@ interface PutFileRecord {
 
 export class StubBroker {
   readonly socketPath: string;
+  /** Episode-context putFiles only; worker-bundle chunks land in workerParts. */
   readonly putFiles: PutFileRecord[] = [];
   readonly savedArtifacts: string[] = [];
   /** Artifact hashes evaluated fresh (memo misses), in order. */
@@ -67,7 +70,16 @@ export class StubBroker {
   readonly evaluateAsks: string[] = [];
   readonly reportedIncumbents: string[] = [];
   readonly finished: string[] = [];
+  /** Mutation-session execs only; worker probe/assembly execs are emulated structurally. */
   readonly execArgvs: string[][] = [];
+  /** Every call in arrival order — `createSandbox:<id>`, `putFile:<sbId>:<path>`, `exec:<sbId>:<argv0>`, `evaluate:<hash>@<seed>`, ... */
+  readonly ops: string[] = [];
+  /** Worker-bundle chunk putFiles in arrival order (raw bytes preserved). */
+  readonly workerParts: { sandboxId: string; path: string; bytes: Buffer }[] = [];
+  /** One entry per successful in-sandbox assembly: the exact assembled bytes. */
+  readonly workerTransfers: { sandboxId: string; bytes: Buffer }[] = [];
+  /** The run's shared /scratch state: path -> bytes. Persists across sandboxes like the real volume. */
+  readonly scratch = new Map<string, Buffer>();
 
   private readonly server: net.Server;
   private evalInvocations = 0;
@@ -145,19 +157,26 @@ export class StubBroker {
         const params = BrokerMethods.createSandbox.params.parse(rawParams);
         const sandboxId = `sb_${String(++this.sandboxSeq).padStart(12, "0")}`;
         this.sandboxParent.set(sandboxId, params.artifact.hash);
+        this.ops.push(`createSandbox:${sandboxId}`);
         return { sandboxId };
       }
       case "putFile": {
         const params = BrokerMethods.putFile.params.parse(rawParams);
-        this.putFiles.push({
-          sandboxId: params.sandboxId,
-          path: params.path,
-          content: Buffer.from(params.contentBase64, "base64").toString("utf8"),
-        });
+        this.ops.push(`putFile:${params.sandboxId}:${params.path}`);
+        const bytes = Buffer.from(params.contentBase64, "base64");
+        if (params.path.startsWith("/scratch/")) this.scratch.set(params.path, bytes);
+        if (params.path.startsWith(`${WORKER_PART_DIR}/`)) {
+          this.workerParts.push({ sandboxId: params.sandboxId, path: params.path, bytes });
+          return {};
+        }
+        this.putFiles.push({ sandboxId: params.sandboxId, path: params.path, content: bytes.toString("utf8") });
         return {};
       }
       case "exec": {
         const params = BrokerMethods.exec.params.parse(rawParams);
+        this.ops.push(`exec:${params.sandboxId}:${params.argv.join(" ")}`);
+        const emulated = this.workerProtocolExec(params.sandboxId, params.argv);
+        if (emulated !== null) return BrokerMethods.exec.result.parse(emulated);
         this.execArgvs.push(params.argv);
         const step = this.script.execPlan[this.execIndex++];
         if (step === undefined) throw new Error(`unscripted exec call #${this.execIndex}`);
@@ -180,6 +199,7 @@ export class StubBroker {
         const params = BrokerMethods.evaluate.params.parse(rawParams);
         const key = `${params.artifact.hash}|${params.assetGroupId}|${params.seed}`;
         this.evaluateAsks.push(`${params.artifact.hash}@${params.seed}`);
+        this.ops.push(`evaluate:${params.artifact.hash}@${params.seed}`);
         const memoized = this.memo.get(key);
         if (memoized !== undefined) return { ...memoized, cached: true };
         this.evalInvocations++;
@@ -215,6 +235,46 @@ export class StubBroker {
       default:
         throw new Error(`unexpected method: ${method}`);
     }
+  }
+
+  /**
+   * Emulate the loop's worker-transfer protocol against the shared /scratch
+   * state: the sha256sum probe and the explicit-part-list assembly. Returns
+   * null for anything else (a real mutation-session exec, scripted by
+   * execPlan). Keeps existing tests' exec/putFile ledgers session-only.
+   */
+  private workerProtocolExec(
+    sandboxId: string,
+    argv: string[],
+  ): { exitCode: number; stdout: string; stderr: string; truncated: false } | null {
+    const shaLine = (bytes: Buffer): string =>
+      `${createHash("sha256").update(bytes).digest("hex")}  ${SANDBOX_WORKER_PATH}\n`;
+    if (argv.length === 2 && argv[0] === "sha256sum" && argv[1] === SANDBOX_WORKER_PATH) {
+      const bytes = this.scratch.get(SANDBOX_WORKER_PATH);
+      if (bytes === undefined) {
+        return { exitCode: 1, stdout: "", stderr: `sha256sum: ${SANDBOX_WORKER_PATH}: No such file or directory`, truncated: false };
+      }
+      return { exitCode: 0, stdout: shaLine(bytes), stderr: "", truncated: false };
+    }
+    if (argv[0] === "sh" && argv[1] === "-c" && argv[2] !== undefined && argv[2].includes(`> ${SANDBOX_WORKER_PATH}`)) {
+      const catList = (argv[2].split(" > ")[0] ?? "").split(/\s+/).slice(1);
+      const chunks: Buffer[] = [];
+      for (const part of catList) {
+        const bytes = this.scratch.get(part);
+        if (bytes === undefined) {
+          return { exitCode: 1, stdout: "", stderr: `cat: ${part}: No such file or directory`, truncated: false };
+        }
+        chunks.push(bytes);
+      }
+      const assembled = Buffer.concat(chunks);
+      this.scratch.set(SANDBOX_WORKER_PATH, assembled);
+      for (const path of [...this.scratch.keys()]) {
+        if (path.startsWith(`${WORKER_PART_DIR}/`)) this.scratch.delete(path);
+      }
+      this.workerTransfers.push({ sandboxId, bytes: assembled });
+      return { exitCode: 0, stdout: shaLine(assembled), stderr: "", truncated: false };
+    }
+    return null;
   }
 
   private outputFor(hash: string, seed: number): Record<string, unknown> {

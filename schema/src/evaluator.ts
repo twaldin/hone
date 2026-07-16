@@ -39,7 +39,7 @@ export const EvaluationRecord = z.object({
   output: EvaluatorOutput,
   costUsd: z.number().nonnegative(),
   durationMs: z.number().nonnegative(),
-  /** True when served from the memo cache (keyed artifactHash x capsuleId x assetGroupId x seed). */
+  /** True when served from the trusted memo cache; the runtime key also binds the full run, evaluator, optimizer, and measurement-epoch identity. */
   cached: z.boolean(),
   evaluatedAt: z.string().datetime(),
 });

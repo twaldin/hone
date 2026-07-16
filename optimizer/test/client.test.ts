@@ -9,9 +9,10 @@ import { deferred } from "../src/deferred.js";
 /**
  * Broker endpoint plumbing for the containerized optimizer: unix socket paths
  * stay unix, tcp://host:port dials TCP, and the runner-injected capability is
- * attached to EVERY request as the top-level "token" field — resolved from
- * HONE_BROKER_TOKEN when not passed explicitly, and never emitted anywhere
- * else.
+ * attached to EVERY request on BOTH transports as the top-level "token" field
+ * — resolved from HONE_BROKER_TOKEN when not passed explicitly, and never
+ * emitted anywhere else. A missing token cannot be invented client-side; the
+ * broker's UNAUTHORIZED then fails with a message naming the absent env var.
  */
 
 describe("parseBrokerEndpoint", () => {
@@ -102,7 +103,7 @@ describe("BrokerClient transport + auth", () => {
     expect((await first).token).toBe("env-token-".padEnd(64, "y"));
   });
 
-  it("unix endpoint: connects to the socket path and sends NO token field by default", async () => {
+  it("unix endpoint: attaches the env token to every request — the 0666 public socket demands the same bearer as TCP", async () => {
     const sockPath = join(mkdtempSync(join(tmpdir(), "hone-clt-")), "b.sock");
     const { server, first } = captureServer();
     const ready = deferred<void>();
@@ -110,11 +111,69 @@ describe("BrokerClient transport + auth", () => {
     server.listen(sockPath, () => ready.resolve());
     await ready.promise;
     cleanups.push(() => server.close());
+    process.env["HONE_BROKER_TOKEN"] = "unix-token-".padEnd(64, "z");
     const client = await BrokerClient.connect(sockPath);
     cleanups.push(() => client.close());
     await client.getBudget();
     const req = await first;
-    expect("token" in req).toBe(false);
+    expect(req.token).toBe("unix-token-".padEnd(64, "z"));
     expect(req.method).toBe("getBudget");
+  });
+
+  it("missing token: sends none (never invents one) and surfaces UNAUTHORIZED as a clear wiring error naming HONE_BROKER_TOKEN", async () => {
+    const sockPath = join(mkdtempSync(join(tmpdir(), "hone-clt-")), "d.sock");
+    // Deny-all broker: every request is answered with the auth error the real
+    // server emits before method lookup.
+    const first = deferred<CapturedRequest>();
+    const server = net.createServer((sock) => {
+      let buf = "";
+      sock.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf8");
+        const nl = buf.indexOf("\n");
+        if (nl < 0) return;
+        const req = JSON.parse(buf.slice(0, nl)) as CapturedRequest;
+        first.resolve(req);
+        sock.write(`${JSON.stringify({ jsonrpc: "2.0", id: req.id, error: { code: -32060, message: "unauthorized" } })}\n`);
+      });
+    });
+    const ready = deferred<void>();
+    server.once("error", ready.reject);
+    server.listen(sockPath, () => ready.resolve());
+    await ready.promise;
+    cleanups.push(() => server.close());
+    const client = await BrokerClient.connect(sockPath); // no opts.token, no env
+    cleanups.push(() => client.close());
+    await expect(client.getBudget()).rejects.toThrow(/unauthorized: no broker token available — expected HONE_BROKER_TOKEN/);
+    expect("token" in (await first)).toBe(false);
+  });
+
+  it("wrong token: UNAUTHORIZED stays a plain policy denial (no missing-env hint, token never echoed)", async () => {
+    const sockPath = join(mkdtempSync(join(tmpdir(), "hone-clt-")), "w.sock");
+    const server = net.createServer((sock) => {
+      let buf = "";
+      sock.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf8");
+        const nl = buf.indexOf("\n");
+        if (nl < 0) return;
+        const req = JSON.parse(buf.slice(0, nl)) as CapturedRequest;
+        sock.write(`${JSON.stringify({ jsonrpc: "2.0", id: req.id, error: { code: -32060, message: "unauthorized" } })}\n`);
+      });
+    });
+    const ready = deferred<void>();
+    server.once("error", ready.reject);
+    server.listen(sockPath, () => ready.resolve());
+    await ready.promise;
+    cleanups.push(() => server.close());
+    const wrongToken = "wrong-".padEnd(64, "w");
+    const client = await BrokerClient.connect(sockPath, { token: wrongToken });
+    cleanups.push(() => client.close());
+    const failure = await client.getBudget().then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (err: Error) => err,
+    );
+    expect(failure.message).toBe("unauthorized");
+    expect(failure.message).not.toContain(wrongToken);
   });
 });

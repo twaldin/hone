@@ -3,9 +3,9 @@ import { z } from "zod";
 /**
  * The episode file handed to the in-sandbox worker at /scratch/episode.json.
  * Prompts are rendered HOST-SIDE by assets/context.ts so the worker stays a
- * single self-contained file; worker/mutate.ts validates this shape with
- * hand-rolled checks (kept dependency-free in the image) — keep the two in
- * sync.
+ * single self-contained bundle; worker/mutate.ts validates this shape with
+ * hand-rolled checks (the bundled worker never imports this module) — keep
+ * the two in sync.
  */
 
 export const EPISODE_CONTEXT_VERSION = 1;

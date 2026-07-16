@@ -20,6 +20,34 @@ describe("event log replay", () => {
     expect(bestArtifact(st)?.hash).toBe(fakeHash("d"));
   });
 
+  it("replays a durable pre-terminal budget exhaustion latch", () => {
+    const events = fixtureEvents({ runId: "run_budget_replay", baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false });
+    events.push({
+      runId: "run_budget_replay",
+      at: new Date().toISOString(),
+      type: "budget.exhausted",
+      dimension: "tokens",
+    });
+    const st = replay(events);
+    expect(st.budgetExhaustedDimension).toBe("tokens");
+    expect(st.finished).toBeNull();
+  });
+
+  it("replays the one durable delivery outcome before terminalization", () => {
+    const events = fixtureEvents({ runId: "run_delivery_replay", baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false });
+    events.push({
+      runId: "run_delivery_replay",
+      at: new Date().toISOString(),
+      type: "delivery.applied",
+      mode: "auto",
+      ref: "hone/run_delivery_replay",
+    });
+    expect(replay(events).delivery).toEqual({
+      mode: "auto",
+      ref: "hone/run_delivery_replay",
+    });
+  });
+
   it("run.finished settles status and best", () => {
     const events = fixtureEvents({ runId: "run_r2", baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: true });
     const st = replay(events);

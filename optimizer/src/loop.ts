@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ArtifactRef, BudgetState, EvaluationRecord, RunEvent } from "@hone/schema";
 import { buildEpisodeContext, type FailureEvidence, type LineageEntry } from "../assets/context.js";
 import { epsilonRestart, mutationTimeoutSec, oneRepair, trainAssetGroupId } from "../assets/policy.js";
@@ -13,8 +15,20 @@ import { EPISODE_JSON_PATH, parseMutateStdout, type EpisodeContext, type MutateR
  * prompt surface in assets/prompts.ts + assets/context.ts.
  */
 
-/** argv exec'd inside the mutation sandbox; the image bakes the worker at this path. */
-export const WORKER_PATH = "/opt/hone-worker/mutate.ts";
+/**
+ * Sandbox-local worker path: /scratch is the run's shared writable mount, so
+ * the sealed bundle never touches /workspace (the artifact) and survives for
+ * later sandboxes of the same run — each sandbox still hash-verifies before
+ * exec and re-transfers on any mismatch.
+ */
+export const SANDBOX_WORKER_PATH = "/scratch/hone-worker.mjs";
+/** Chunk staging dir inside the sandbox; removed by the assembly step. */
+export const WORKER_PART_DIR = "/scratch/.hone-worker-parts";
+/**
+ * Raw bytes per putFile chunk: base64 (4/3 expansion) plus the JSON-RPC
+ * envelope stays comfortably under the broker's 1 MiB frame cap.
+ */
+export const WORKER_CHUNK_BYTES = 512 * 1024;
 
 /** Margin subtracted from the exec timeout so the session yields before the broker kills it. */
 const DEADLINE_MARGIN_SEC = 120;
@@ -41,8 +55,17 @@ export interface EpisodeLoopOptions {
    * Must be a positive integer when present; anything else fails closed.
    */
   maxEpisodes?: number;
+  /** M0 cache-safe mode: after one candidate evaluator admission, never repair/evaluate another candidate. */
+  oneShotCandidate?: boolean;
   /** Test seam: uniform [0,1) draw per episode for the ε-restart decision. */
   rand?: (episode: number) => number;
+  /**
+   * Path of the sealed self-contained worker bundle. Defaults to worker.mjs
+   * next to THIS module — inside the run container that is the sibling of
+   * /hone/bundle/optimizer.mjs, i.e. the exact bytes the sealed build
+   * emitted. Test seam only; nothing trusted ever picks a different worker.
+   */
+  workerBundlePath?: string;
 }
 
 /** Mean of objective values — the same default scalarization as trusted/scoring. */
@@ -85,6 +108,11 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
   if (maxEpisodes !== undefined && (!Number.isSafeInteger(maxEpisodes) || maxEpisodes <= 0)) {
     throw new Error(`maxEpisodes must be a positive integer, got ${String(maxEpisodes)}`);
   }
+  // The sealed built worker bytes, shipped from THIS invocation's bundle dir
+  // into every mutation sandbox. Read before anything touches the broker —
+  // a missing bundle fails the invocation closed.
+  const workerBundle = readFileSync(opts.workerBundlePath ?? fileURLToPath(new URL("worker.mjs", import.meta.url)));
+  const workerSha256 = createHash("sha256").update(workerBundle).digest("hex");
   const broker = await BrokerClient.connect(opts.brokerSocket);
   const baseSeed = opts.seed ?? 0;
   const rand = opts.rand ?? ((episode: number) => episodeRand(baseSeed, episode));
@@ -121,9 +149,58 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       return record;
     };
 
-    /** One mutation (or repair) session inside a fresh sandbox created from `from`. */
-    const mutateOnce = async (from: ArtifactRef, context: EpisodeContext, episode: number): Promise<MutateAttempt> => {
-      const { sandboxId } = await broker.createSandbox({ artifact: from, role: "mutation" });
+    /**
+     * Guarantee the sandbox holds the EXACT sealed worker bytes at
+     * SANDBOX_WORKER_PATH before exec. /scratch is shared across the run's
+     * sandboxes, so a hash-verified hit skips the transfer; any miss or
+     * mismatch re-ships the bundle in frame-sized putFile chunks and
+     * re-verifies the assembled file.
+     */
+    const ensureWorker = async (sandboxId: string): Promise<void> => {
+      const probe = await broker.exec({ sandboxId, argv: ["sha256sum", SANDBOX_WORKER_PATH], timeoutSec: 120 });
+      if (probe.exitCode === 0 && probe.stdout.trimStart().startsWith(workerSha256)) return;
+      const parts: string[] = [];
+      for (let offset = 0, i = 0; offset < workerBundle.length; offset += WORKER_CHUNK_BYTES, i++) {
+        const part = `${WORKER_PART_DIR}/${String(i).padStart(8, "0")}`;
+        parts.push(part);
+        await broker.putFile({
+          sandboxId,
+          path: part,
+          contentBase64: workerBundle.subarray(offset, offset + WORKER_CHUNK_BYTES).toString("base64"),
+        });
+      }
+      // Explicit part list (not a glob): stale parts from an interrupted
+      // transfer can never leak into the assembled file.
+      const assemble = await broker.exec({
+        sandboxId,
+        argv: ["sh", "-c", `cat ${parts.join(" ")} > ${SANDBOX_WORKER_PATH} && rm -rf ${WORKER_PART_DIR} && sha256sum ${SANDBOX_WORKER_PATH}`],
+        timeoutSec: 300,
+      });
+      if (assemble.exitCode !== 0 || !assemble.stdout.trimStart().startsWith(workerSha256)) {
+        throw new Error(
+          `worker bundle transfer to sandbox ${sandboxId} failed (exit ${assemble.exitCode}): expected sha256 ${workerSha256}`,
+        );
+      }
+    };
+
+    /**
+     * One mutation (or repair) session. The episode's FIRST attempt runs in
+     * the pre-created sandbox (created BEFORE the parent evaluation — the
+     * broker's pairing epoch increments on create, so the parent and child
+     * evaluations share the episode's exact epoch). The repair attempt
+     * creates its own sandbox from the failed snapshot; the broker maps that
+     * snapshot back to the SAME episode.
+     */
+    const mutateOnce = async (
+      sandbox: { sandboxId: string } | { from: ArtifactRef },
+      context: EpisodeContext,
+      episode: number,
+    ): Promise<MutateAttempt> => {
+      const sandboxId =
+        "sandboxId" in sandbox
+          ? sandbox.sandboxId
+          : (await broker.createSandbox({ artifact: sandbox.from, role: "mutation" })).sandboxId;
+      await ensureWorker(sandboxId);
       await broker.putFile({
         sandboxId,
         path: EPISODE_JSON_PATH,
@@ -132,7 +209,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       const deadlineMs = Math.max(60, mutationTimeoutSec - DEADLINE_MARGIN_SEC) * 1000;
       const exec = await broker.exec({
         sandboxId,
-        argv: ["env", `HONE_DEADLINE_MS=${deadlineMs}`, "bun", WORKER_PATH],
+        argv: ["env", `HONE_DEADLINE_MS=${deadlineMs}`, "bun", SANDBOX_WORKER_PATH],
         cwd: "/workspace",
         timeoutSec: mutationTimeoutSec,
       });
@@ -194,6 +271,11 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       const parent = restart || incumbent === null ? baseline : incumbent.artifact;
       emit({ ...base, at: now(), type: "episode.started", episode, parent });
 
+      // The episode's mutation sandbox is created BEFORE any of the episode's
+      // evaluations: sandbox creation advances the broker's pairing epoch, so
+      // creating first puts the parent and child evals on the same epoch.
+      const { sandboxId } = await broker.createSandbox({ artifact: parent, role: "mutation" });
+
       const parentRecord = await evaluate(parent, episode, episode);
       const parentAggregate = aggregateOf(parentRecord);
       if (parent.hash === baseline.hash) baselineAggregate = parentAggregate;
@@ -206,12 +288,14 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         budget,
       });
 
-      let attempt = await mutateOnce(parent, context, episode);
+      let attempt = await mutateOnce({ sandboxId }, context, episode);
       let candidate = attempt.artifact;
       let record: EvaluationRecord | null = null;
+      let candidateEvaluationConsumed = false;
 
       if (candidate !== null && attempt.failure === null) {
         emit({ ...base, at: now(), type: "episode.candidate", episode, candidate, sessionTrace: attempt.stdoutHash });
+        candidateEvaluationConsumed = true;
         record = await evaluate(candidate, episode, episode);
         if (!record.output.valid) {
           attempt = {
@@ -234,7 +318,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         const reason = attempt.failure.reason;
         const repairFrom = candidate ?? parent;
         let repaired = false;
-        if (oneRepair) {
+        if (oneRepair && !(opts.oneShotCandidate === true && candidateEvaluationConsumed)) {
           const repairContext = buildEpisodeContext({
             episode,
             objective: task.objective,
@@ -243,7 +327,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
             budget,
             failure: attempt.failure,
           });
-          const repair = await mutateOnce(repairFrom, repairContext, episode);
+          const repair = await mutateOnce({ from: repairFrom }, repairContext, episode);
           if (repair.artifact !== null && repair.failure === null) {
             emit({
               ...base,
@@ -377,6 +461,7 @@ export function createBackend(): OptimizerRunnerBackend {
   return {
     async start(ctx: OptimizerBackendContext): Promise<void> {
       const maxEpisodes = parseMaxEpisodes(ctx.env["HONE_MAX_EPISODES"]);
+      const oneShotCandidate = ctx.env["HONE_ONE_SHOT_CANDIDATE"] === "1";
       await runEpisodeLoop({
         brokerSocket: join(ctx.runDir, "broker.sock"),
         runId: ctx.runId,
@@ -387,6 +472,7 @@ export function createBackend(): OptimizerRunnerBackend {
           nextEpisode: ctx.replayed.nextEpisode,
           incumbent: ctx.replayed.incumbent,
         },
+        ...(oneShotCandidate ? { oneShotCandidate: true } : {}),
         ...(maxEpisodes !== undefined ? { maxEpisodes } : {}),
       });
     },

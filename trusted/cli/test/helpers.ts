@@ -1,13 +1,16 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { PassThrough } from "node:stream";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CapsuleManifest, RunEvent, deriveCapsuleId } from "@hone/schema";
+import { CapsuleManifest, RunEvent, capsuleDigest, deriveCapsuleId } from "@hone/schema";
 import type { RunCommand } from "@hone/broker";
-import type { OptimizerRuntime, OptimizerSpawn, OptimizerTransport } from "../src/backends/optimizer-container.js";
+import type { OptimizerChildLike, OptimizerRuntime, OptimizerSpawn, OptimizerTransport } from "../src/backends/optimizer-container.js";
+import { openDockerCreateGate, type DockerCreateGate, type DockerCreateHelper } from "../src/docker-create-gate.js";
 import { writeCas } from "../src/cas.js";
+import { contractHash } from "../src/contract.js";
 import { computeOptimizerDigest } from "../src/optimizer-digest.js";
 import { deferred } from "../src/promise.js";
 import type { CmdIo } from "../src/io.js";
@@ -233,6 +236,114 @@ export function writeEvents(root: string, runId: string, events: unknown[]): str
   return dir;
 }
 
+/**
+ * A settled, traced proxy dispatch journal whose cumulative charge matches
+ * fixtureEvents' budget.snapshot spend (4200 tokens / $1.25 by default).
+ * Stop's dispatch-authority gate requires the journal for any run whose
+ * trusted budget authority recorded proxy spend.
+ */
+export function writeAlignedDispatchJournal(
+  root: string,
+  runId: string,
+  opts: { tokens?: number; usd?: number } = {},
+): string {
+  const dir = join(root, ".hone-runs", runId);
+  mkdirSync(dir, { recursive: true });
+  const tokens = opts.tokens ?? 4200;
+  const usd = opts.usd ?? 1.25;
+  const intent = {
+    v: 1,
+    kind: "intent",
+    id: "d_fixture",
+    runId,
+    role: "mutation",
+    model: "m",
+    requestAt: at(),
+    requestSha256: "0".repeat(64),
+    promptTokens: Math.max(tokens - 1, 0),
+    completionTokens: 1,
+    ceilTokens: tokens,
+    ceilUsd: usd,
+  };
+  const settle = { v: 1, kind: "settle", id: "d_fixture", tokens, usd, outcome: "usage", traced: true };
+  const path = join(dir, "proxy-dispatch.ndjson");
+  writeFileSync(path, `${JSON.stringify(intent)}\n${JSON.stringify(settle)}\n`);
+  return path;
+}
+
+/**
+ * Minimal contract binding a snapshot manifest's identity — exactly the
+ * lines authenticateCapsuleSnapshot requires the approved text to carry.
+ */
+export function fixtureContractFor(manifest: Record<string, unknown>): string {
+  const parsed = CapsuleManifest.parse(manifest);
+  const baseline =
+    parsed.baseline.kind === "git" ? `- git commit \`${parsed.baseline.commit}\`` : `- cas artifact \`${parsed.baseline.hash}\``;
+  return ["# Hone Run Contract (fixture)", `- capsule: \`${parsed.id}\``, `- capsule digest: \`${capsuleDigest(parsed)}\``, baseline, ""].join("\n");
+}
+
+/**
+ * Seal `manifest` as the run's capsule snapshot and BIND it the way a real
+ * run is bound: a contract.md carrying the snapshot identity, and the
+ * run.started line (if already written) patched to seal that contract hash
+ * + capsule id. Delivery authenticates the snapshot against exactly these
+ * seals.
+ */
+export function bindSnapshotFixture(root: string, runId: string, manifest: Record<string, unknown>): void {
+  const dir = join(root, ".hone-runs", runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "capsule-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  const contract = fixtureContractFor(manifest);
+  writeFileSync(join(dir, "contract.md"), contract);
+  const eventsFile = join(dir, "events.ndjson");
+  if (existsSync(eventsFile)) {
+    const patched = readFileSync(eventsFile, "utf8")
+      .split("\n")
+      .map((line) => {
+        if (line.trim() === "") return line;
+        const raw = JSON.parse(line) as Record<string, unknown>;
+        if (raw["type"] !== "run.started") return line;
+        return JSON.stringify({ ...raw, capsuleId: manifest["id"], contractHash: contractHash(contract) });
+      })
+      .join("\n");
+    writeFileSync(eventsFile, patched);
+  }
+}
+
+/** Seal a git-baseline capsule snapshot into the run dir with an explicit frozen baseline commit (bound; see bindSnapshotFixture). */
+export function sealBaselineCommitSnapshot(root: string, runId: string, commit: string): void {
+  bindSnapshotFixture(root, runId, manifestRaw({ baseline: { kind: "git", commit } }));
+}
+
+/**
+ * Git-baseline capsule + delivery target in one: a clean nested worktree at
+ * capsule/baseline whose HEAD is the frozen manifest baseline commit. The
+ * baseline dir doubles as a valid `--repo` target (its repo root contains
+ * the sealed commit), which `hone run --apply …` now REQUIRES at creation.
+ */
+export function makeGitBaselineCapsule(
+  root: string,
+  overrides: Record<string, unknown> = {},
+): { capsuleDir: string; baselineDir: string; commit: string } {
+  const baselineDir = join(root, "capsule", "baseline");
+  initScratchRepo(baselineDir);
+  const commit = git(baselineDir, "rev-parse", "HEAD");
+  const capsuleDir = makeCapsule(root, { baseline: { kind: "git", commit }, ...overrides });
+  return { capsuleDir, baselineDir, commit };
+}
+
+/**
+ * Seal a git-baseline capsule snapshot into the run dir, binding `repo`'s
+ * HEAD as the frozen manifest baseline commit — what a real admission
+ * writes, and what manual delivery validates the --repo target against.
+ * Returns the sealed commit.
+ */
+export function sealGitBaselineSnapshot(root: string, runId: string, repo: string): string {
+  const commit = git(repo, "rev-parse", "HEAD");
+  sealBaselineCommitSnapshot(root, runId, commit);
+  return commit;
+}
+
 export function readLogLines(root: string, runId: string): string[] {
   return readFileSync(join(root, ".hone-runs", runId, "events.ndjson"), "utf8")
     .split("\n")
@@ -321,58 +432,126 @@ export function okRun(): RunCommand {
 }
 
 /**
- * Fake optimizer spawn: asserts the production code launched `docker run`,
- * then executes the CONTAINER argv as a host process with ONLY the env the
- * container would have seen (-e K=V pairs, plus value-less -e resolved from
- * the docker client env — exactly docker's semantics). Lifecycle (stdout
- * piping, process-group kill, exit codes) stays real.
+ * In-process stand-in for the DETACHED docker-create helper, driven by the
+ * same scripted RunCommand a test injects. Mirrors the real helper's Dekker
+ * protocol exactly: publish `started`, check `abort`, invoke docker joined,
+ * publish `outcome`. A scripted timedOut result is normalized to the
+ * ambiguous signaled-client shape (the real helper never times out).
+ */
+export function scriptedCreateHelper(run: RunCommand): DockerCreateHelper {
+  return async (task) => {
+    writeFileSync(task.startedPath, "");
+    if (existsSync(task.abortPath)) {
+      writeFileSync(task.outcomePath, JSON.stringify({ aborted: true, exitCode: -1, stdout: "", stderr: "" }));
+      return;
+    }
+    let outcome: Record<string, unknown>;
+    try {
+      const r = await run(task.argv, {});
+      outcome = {
+        exitCode: r.timedOut ? -1 : r.exitCode,
+        stdout: r.stdout.toString("base64"),
+        stderr: r.stderr.toString("base64"),
+      };
+    } catch (err) {
+      // A throwing RunCommand models a GENUINE pre-spawn failure: record the
+      // explicit never-spawned witness the real helper persists (pid 0).
+      outcome = { exitCode: 127, stdout: "", stderr: "", spawnError: String(err), spawnErrorCode: "ENOENT", spawned: false, pid: 0 };
+    }
+    writeFileSync(task.outcomePath, JSON.stringify(outcome));
+  };
+}
+
+/**
+ * Fake optimizer spawn modelling the production TWO-PHASE launch: a
+ * `docker create` of the manifest image (recorded; a scripted client emits a
+ * fake id and exits 0) followed by `docker start -a <name>`, which executes
+ * the CONTAINER argv recorded at create time as a host process with ONLY the
+ * env the container would have seen (-e K=V pairs, plus value-less -e
+ * resolved from the docker CREATE client env — exactly docker's semantics:
+ * container env is baked at create). Lifecycle (stdout piping, process-group
+ * kill, exit codes) stays real on the start child.
  */
 export function fakeOptimizerSpawn(image: string, seen?: { argvs: string[][]; envs: NodeJS.ProcessEnv[] }): OptimizerSpawn {
+  const created = new Map<string, { env: Record<string, string>; containerArgv: string[] }>();
   return (cmd, args, opts) => {
     const argv = [cmd, ...args];
     seen?.argvs.push(argv);
     seen?.envs.push(opts.env);
-    const imageIdx = argv.indexOf(image);
-    if (cmd !== "docker" || argv[1] !== "run" || imageIdx < 0) {
-      throw new Error(`optimizer launch is not a docker run of the manifest image: ${argv.join(" ")}`);
-    }
-    const env: Record<string, string> = {};
-    const mounts: [container: string, host: string][] = [];
-    for (let i = 2; i < imageIdx; i++) {
-      if (argv[i] === "-e") {
-        const kv = argv[i + 1] ?? "";
-        const eq = kv.indexOf("=");
-        if (eq >= 0) env[kv.slice(0, eq)] = kv.slice(eq + 1);
-        else {
-          const passthrough = opts.env[kv];
-          if (passthrough !== undefined) env[kv] = passthrough;
+    if (cmd === "docker" && argv[1] === "create") {
+      const imageIdx = argv.indexOf(image);
+      if (imageIdx < 0) throw new Error(`optimizer create is not of the manifest image: ${argv.join(" ")}`);
+      const env: Record<string, string> = {};
+      const mounts: [container: string, host: string][] = [];
+      for (let i = 2; i < imageIdx; i++) {
+        if (argv[i] === "-e") {
+          const kv = argv[i + 1] ?? "";
+          const eq = kv.indexOf("=");
+          if (eq >= 0) env[kv.slice(0, eq)] = kv.slice(eq + 1);
+          else {
+            const passthrough = opts.env[kv];
+            if (passthrough !== undefined) env[kv] = passthrough;
+          }
+        } else if (argv[i] === "-v") {
+          const spec = (argv[i + 1] ?? "").split(":");
+          if (spec[0] !== undefined && spec[1] !== undefined) mounts.push([spec[1], spec[0]]);
         }
-      } else if (argv[i] === "-v") {
-        const spec = (argv[i + 1] ?? "").split(":");
-        if (spec[0] !== undefined && spec[1] !== undefined) mounts.push([spec[1], spec[0]]);
       }
+      // Translate mounted container paths back to their host sources (what
+      // the container would see) at CREATE time, like docker does.
+      const mapPath = (arg: string): string => {
+        for (const [container, host] of mounts) {
+          if (arg === container) return host;
+          if (arg.startsWith(`${container}/`)) return host + arg.slice(container.length);
+        }
+        return arg;
+      };
+      const name = argv[argv.indexOf("--name") + 1] ?? "";
+      created.set(name, { env, containerArgv: argv.slice(imageIdx + 1).map(mapPath) });
+      return scriptedClientChild(`${name.replace(/[^a-zA-Z0-9]/g, "")}cid\n`);
     }
-    // Execute the container argv on the host, translating mounted container
-    // paths back to their host sources (what the container would see).
-    const mapPath = (arg: string): string => {
-      for (const [container, host] of mounts) {
-        if (arg === container) return host;
-        if (arg.startsWith(`${container}/`)) return host + arg.slice(container.length);
-      }
-      return arg;
-    };
-    const containerArgv = argv.slice(imageIdx + 1).map(mapPath);
-    const [prog, ...progArgs] = containerArgv;
-    if (prog === undefined) throw new Error("optimizer container argv is empty");
-    return spawn(prog, progArgs, {
-      env: { ...env, PATH: process.env["PATH"] ?? "" },
-      stdio: opts.stdio,
-      detached: opts.detached,
-    });
+    if (cmd === "docker" && argv[1] === "start") {
+      const name = argv[argv.length - 1] ?? "";
+      const rec = created.get(name);
+      if (rec === undefined) throw new Error(`docker start of a never-created container: ${argv.join(" ")}`);
+      const [prog, ...progArgs] = rec.containerArgv;
+      if (prog === undefined) throw new Error("optimizer container argv is empty");
+      return spawn(prog, progArgs, {
+        env: { ...rec.env, PATH: process.env["PATH"] ?? "" },
+        stdio: opts.stdio,
+        detached: opts.detached,
+      });
+    }
+    throw new Error(`optimizer launch is not a two-phase docker create/start of the manifest image: ${argv.join(" ")}`);
   };
 }
 
-/** A ready OptimizerRuntime for direct runOptimizer tests (no build; scripted argv). */
+/** Scripted docker CLIENT child (create phase): emits stdout/stderr, then closes with the given code. */
+export function scriptedClientChild(stdout: string, code = 0, stderr = ""): OptimizerChildLike {
+  const out = new PassThrough();
+  const errStream = new PassThrough();
+  const closeListeners: ((code: number | null, signal: NodeJS.Signals | null) => void)[] = [];
+  const child: OptimizerChildLike = {
+    pid: undefined,
+    stdout: out,
+    stderr: errStream,
+    kill: () => false,
+    on(event: "error" | "close", cb: unknown): unknown {
+      if (event === "close") closeListeners.push(cb as (code: number | null, signal: NodeJS.Signals | null) => void);
+      return child;
+    },
+  };
+  setImmediate(() => {
+    out.end(stdout);
+    errStream.end(stderr);
+    setImmediate(() => {
+      for (const cb of closeListeners) cb(code, null);
+    });
+  });
+  return child;
+}
+
+/** A ready OptimizerRuntime for direct runOptimizer tests (no build; scripted argv; real WAL gate over a temp dir). */
 export function testOptimizerRuntime(opts: {
   runId: string;
   argv: string[];
@@ -380,19 +559,27 @@ export function testOptimizerRuntime(opts: {
   transport?: OptimizerTransport;
   run?: RunCommand;
   spawnImpl?: OptimizerSpawn;
+  containerLease?: string;
+  clientEnv?: NodeJS.ProcessEnv;
+  gate?: DockerCreateGate;
 }): OptimizerRuntime {
   const image = opts.image ?? FIX_IMAGE;
+  const safeRunId = opts.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
   const runtime: OptimizerRuntime = {
     image,
     runId: opts.runId,
-    safeRunId: opts.runId.replace(/[^a-zA-Z0-9_.-]/g, "-"),
-    transport: opts.transport ?? { kind: "unix", hostSocketPath: "/dev/null" },
+    safeRunId,
+    transport: opts.transport ?? { kind: "unix", hostSocketPath: "/dev/null", token: "a".repeat(64) },
     bundleDir: null,
+    bundleSeal: null,
     runArgv: opts.argv,
     spawnImpl: opts.spawnImpl ?? fakeOptimizerSpawn(image),
     run: opts.run ?? okRun(),
     spawnedNames: [],
     invocation: 0,
+    containerLease: opts.containerLease ?? `hone-lease-${safeRunId}-e1`,
+    gate: opts.gate ?? openDockerCreateGate(mkdtempSync(join(tmpdir(), "hone-gate-")), opts.runId),
+    clientEnv: opts.clientEnv ?? { PATH: process.env["PATH"] ?? "" },
     cleanup: () => Promise.resolve(),
   };
   return runtime;

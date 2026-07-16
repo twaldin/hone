@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -134,7 +134,7 @@ beforeAll(async () => {
     reaperIntervalMs: 300,
     now: testClock,
   });
-  client = await RpcClient.connect(main.socketPath);
+  client = await RpcClient.connect(main.socketPath, main.publicToken);
   admin = await RpcClient.connect(main.adminSocketPath);
 });
 
@@ -234,16 +234,40 @@ describe("wire protocol round-trip (every method)", () => {
     expect(budget.envelope).toEqual(GENEROUS_BUDGET);
   });
 
-  it("reportIncumbent promotes on paired trusted evidence; claimed metrics stay display-only", async () => {
-    // Promotion authority needs a same-group/same-seed PAIR: measure the
-    // parent (baseline) at the seed the candidate was measured at.
+  it("reportIncumbent refuses a tainted candidate and the one-shot gate blocks every retry or replacement", async () => {
+    // The candidate was measured at seed 0 BEFORE the parent (above): that
+    // child-first run GLOBALLY taints the artifact. Measuring the parent now
+    // cannot manufacture authority retroactively.
     await client.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 });
-    const res = await client.call("reportIncumbent", { artifact: { hash: candidateHash }, claimed: { score: 999 } });
-    expect(res).toEqual({});
-    const promoted = mainEvents.filter((e) => e.type === "incumbent.new");
-    expect(promoted).toHaveLength(1);
-    // Aggregate is the broker's own measurement (2), never the claimed 999.
-    expect(promoted[0]).toMatchObject({ artifact: { hash: candidateHash }, aggregate: 2, deltaVsBaseline: 1 });
+    const refused = await client.callRaw("reportIncumbent", { artifact: { hash: candidateHash }, claimed: { score: 999 } });
+    expect(refused.error?.message).toMatch(/insufficient authority/);
+
+    // M0 admits exactly one public non-baseline evaluator invocation for the
+    // whole run. Neither the same artifact at a new coordinate nor a fresh
+    // candidate can shop for a second outcome.
+    const retry = await client.callRaw("evaluate", {
+      artifact: { hash: candidateHash },
+      assetGroupId: "train",
+      seed: 1,
+    });
+    expect(retry.error?.data?.code).toBe("QUOTA_EXCEEDED");
+
+    const ref = (await client.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })) as SandboxRef;
+    const ok = ExecShape.parse(await client.call("exec", { sandboxId: ref.sandboxId, argv: ["true"] }));
+    expect(ok.exitCode).toBe(0);
+    await client.call("putFile", {
+      sandboxId: ref.sandboxId,
+      path: "answer.txt",
+      contentBase64: Buffer.from("3").toString("base64"),
+    });
+    const fresh = (await client.call("saveArtifact", { sandboxId: ref.sandboxId })) as ArtifactRef;
+    const replacement = await client.callRaw("evaluate", {
+      artifact: { hash: fresh.hash },
+      assetGroupId: "train",
+      seed: 2,
+    });
+    expect(replacement.error?.data?.code).toBe("QUOTA_EXCEEDED");
+    expect(mainEvents.filter((e) => e.type === "incumbent.new")).toHaveLength(0);
   });
 
   it("reserved methods return NOT_IMPLEMENTED", async () => {
@@ -316,14 +340,14 @@ describe("mutation sandbox isolation", () => {
 describe("evaluate memoization", () => {
   it("second identical evaluate is served from cache without spawning a container", async () => {
     const first = EvaluationRecord.parse(
-      await client.call("evaluate", { artifact: { hash: candidateHash }, assetGroupId: "train", seed: 42 }),
+      await admin.call("evaluate", { artifact: { hash: candidateHash }, assetGroupId: "train", seed: 42 }),
     );
     expect(first.cached).toBe(false);
     const before = dockerRunCount;
     const budgetBefore = BudgetState.parse(await client.call("getBudget"));
 
     const second = EvaluationRecord.parse(
-      await client.call("evaluate", { artifact: { hash: candidateHash }, assetGroupId: "train", seed: 42 }),
+      await admin.call("evaluate", { artifact: { hash: candidateHash }, assetGroupId: "train", seed: 42 }),
     );
     expect(second.cached).toBe(true);
     expect(second.output).toEqual(first.output);
@@ -349,7 +373,7 @@ describe("protected path enforcement", () => {
     expect(write.exitCode).toBe(0);
     const tampered = (await client.call("saveArtifact", { sandboxId: ref.sandboxId })) as ArtifactRef;
 
-    const resp = await client.callRaw("evaluate", { artifact: { hash: tampered.hash }, assetGroupId: "train", seed: 0 });
+    const resp = await admin.callRaw("evaluate", { artifact: { hash: tampered.hash }, assetGroupId: "train", seed: 0 });
     expect(resp.error?.data?.code).toBe("PROTECTED_PATH_VIOLATION");
   });
 });
@@ -381,7 +405,7 @@ describe("budget enforcement", () => {
   it("rejects evaluations (and other methods) once evaluatorInvocations is exhausted", async () => {
     const events: RunEvent[] = [];
     const b = await bootBroker("evalcap", { ...GENEROUS_BUDGET, maxEvaluatorInvocations: 1 }, { events });
-    const c = await RpcClient.connect(b.socketPath);
+    const c = await RpcClient.connect(b.socketPath, b.publicToken);
     try {
       const first = EvaluationRecord.parse(
         await c.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 100 }),
@@ -409,7 +433,7 @@ describe("budget enforcement", () => {
 
   it("recordSpend on the admin socket exhausts usd and blocks further evals", async () => {
     const b = await bootBroker("spendcap", { ...GENEROUS_BUDGET, maxUsd: 5 });
-    const c = await RpcClient.connect(b.socketPath);
+    const c = await RpcClient.connect(b.socketPath, b.publicToken);
     const a = await RpcClient.connect(b.adminSocketPath);
     try {
       expect(await a.call("recordSpend", { tokens: 1234, usd: 5 })).toEqual({});
@@ -441,7 +465,7 @@ describe("sandbox lifecycle", () => {
 
   it("enforces the scratch quota", async () => {
     const b = await bootBroker("quota", GENEROUS_BUDGET, { scratchQuotaBytes: 4_096 });
-    const c = await RpcClient.connect(b.socketPath);
+    const c = await RpcClient.connect(b.socketPath, b.publicToken);
     try {
       const ref = (await c.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })) as SandboxRef;
       const fill = ExecShape.parse(
@@ -463,7 +487,7 @@ describe("sandbox lifecycle", () => {
     const { config, runDir } = await makeBrokerConfig("scratch-resume", GENEROUS_BUDGET, { scratchVolume: true });
     const socketPath = path.join(runDir, "broker.sock");
     const first = await startBroker(config);
-    const c1 = await RpcClient.connect(socketPath);
+    const c1 = await RpcClient.connect(socketPath, first.publicToken);
     try {
       const ref = (await c1.call("createSandbox", {
         artifact: { hash: baselineHash },
@@ -481,7 +505,7 @@ describe("sandbox lifecycle", () => {
     }
 
     const second = await startBroker(config);
-    const c2 = await RpcClient.connect(socketPath);
+    const c2 = await RpcClient.connect(socketPath, second.publicToken);
     try {
       const ref = (await c2.call("createSandbox", {
         artifact: { hash: baselineHash },
@@ -504,7 +528,7 @@ describe("sandbox lifecycle", () => {
       scratchQuotaBytes: 4_096,
     });
     const running = await startBroker(config);
-    const client = await RpcClient.connect(running.socketPath);
+    const client = await RpcClient.connect(running.socketPath, running.publicToken);
     try {
       const ref = (await client.call("createSandbox", {
         artifact: { hash: baselineHash },
@@ -550,7 +574,7 @@ describe("sandbox lifecycle", () => {
       sandboxNetwork: { mode: "internal", network: netName },
       runCommand: capturingRun,
     });
-    const c = await RpcClient.connect(b.socketPath);
+    const c = await RpcClient.connect(b.socketPath, b.publicToken);
     try {
       const ref = (await c.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })) as SandboxRef;
       const attached = await runCommand([
@@ -588,8 +612,8 @@ describe("production default surface (no admin endpoint exists at all)", () => {
       const entries = await readdir(runDir);
       expect(entries).toContain("broker.sock");
       expect(entries.some((e) => e.includes("admin"))).toBe(false);
-      // Privileged methods are not even name-visible on the public socket.
-      const c = await RpcClient.connect(b.socketPath);
+      // Privileged methods are not even name-visible on the public socket (authenticated).
+      const c = await RpcClient.connect(b.socketPath, b.publicToken);
       const resp = await c.callRaw("recordSpend", { tokens: 1, usd: 0 });
       expect(resp.error?.code).toBe(-32601);
       c.close();
@@ -599,11 +623,59 @@ describe("production default surface (no admin endpoint exists at all)", () => {
   });
 });
 
+describe("public unix socket bearer auth (cross-UID reachability is not authority)", () => {
+  it("accepts anyone's connect but grants zero method authority without the exact per-broker bearer", async () => {
+    // The public socket is 0666 precisely so the uid-2000 container can
+    // connect — which means any OTHER host UID can connect too. These
+    // token-free/wrong-token clients stand in for such a different-UID peer:
+    // the connect succeeds, and that is ALL it buys.
+    const runsBefore = dockerRunCount;
+    const eventsBefore = mainEvents.length;
+    const bare = await RpcClient.connect(main.socketPath);
+    // Real public method, side-effecting method, admin method, unknown
+    // method: all the SAME -32060 before method lookup — no method-existence
+    // leak, no handler reached.
+    for (const [method, params] of [
+      ["getTask", {}],
+      ["createSandbox", { artifact: { hash: baselineHash }, role: "mutation" }],
+      ["recordSpend", { tokens: 1, usd: 0 }],
+      ["noSuchMethod", {}],
+    ] as const) {
+      const resp = await bare.callRaw(method, params);
+      expect(resp.error?.code).toBe(-32060);
+      expect(resp.error?.message).toBe("unauthorized");
+    }
+    bare.close();
+
+    const flipped = `${main.publicToken.slice(0, -1)}${main.publicToken.endsWith("0") ? "1" : "0"}`;
+    const wrong = await RpcClient.connect(main.socketPath, flipped);
+    expect((await wrong.callRaw("getTask")).error?.code).toBe(-32060);
+    expect((await wrong.callRaw("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })).error?.code).toBe(-32060);
+    expect((await wrong.callRaw("noSuchMethod")).error?.code).toBe(-32060);
+    wrong.close();
+
+    // Zero side effects: no sandbox container was launched, no broker-authored event.
+    expect(dockerRunCount).toBe(runsBefore);
+    expect(mainEvents.length).toBe(eventsBefore);
+
+    // The exact bearer has full PUBLIC authority under existing policy.
+    const authed = await RpcClient.connect(main.socketPath, main.publicToken);
+    GetTaskShape.parse(await authed.call("getTask"));
+    const ref = (await authed.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })) as SandboxRef;
+    expect(ref.sandboxId).toBeTruthy();
+    authed.close();
+
+    // The ADMIN socket authenticates by filesystem ownership (0600), never by
+    // token: the token-free admin client keeps serving privileged methods.
+    const budget = await admin.callRaw("getBudget");
+    expect(budget.error).toBeUndefined();
+  });
+});
+
 describe("opt-in authenticated public TCP listener", () => {
-  it("binds {host,port:0}, returns the resolved address, and gates every request on the exact token before method lookup", async () => {
-    const token = randomBytes(32).toString("hex");
+  it("binds {host,port:0}, returns the resolved address, and gates every request on the exact per-broker token before method lookup", async () => {
     const { config } = await makeBrokerConfig("tcp", GENEROUS_BUDGET);
-    const b = await startBroker(config, { publicTcp: { host: "127.0.0.1", port: 0, token } });
+    const b = await startBroker(config, { publicTcp: { host: "127.0.0.1", port: 0 } });
     try {
       expect(b.adminSocketPath).toBeUndefined();
       const addr = b.publicTcpAddress;
@@ -611,13 +683,13 @@ describe("opt-in authenticated public TCP listener", () => {
       expect(addr.host).toBe("127.0.0.1");
       expect(addr.port).toBeGreaterThan(0);
 
-      const good = await RpcClient.connectTcp(addr.host, addr.port, token);
+      const good = await RpcClient.connectTcp(addr.host, addr.port, b.publicToken);
       const task = GetTaskShape.parse(await good.call("getTask"));
       expect(task.baselineArtifact.hash).toBe(baselineHash);
 
       // Wrong token: refused with -32060 BEFORE any method lookup — an
       // unknown method probes the same -32060, never -32601.
-      const wrong = await RpcClient.connectTcp(addr.host, addr.port, `${token.slice(0, 63)}${token.endsWith("0") ? "1" : "0"}`);
+      const wrong = await RpcClient.connectTcp(addr.host, addr.port, `${b.publicToken.slice(0, 63)}${b.publicToken.endsWith("0") ? "1" : "0"}`);
       const denied = await wrong.callRaw("getTask");
       expect(denied.error?.code).toBe(-32060);
       expect(denied.error?.message).toBe("unauthorized");
@@ -629,8 +701,9 @@ describe("opt-in authenticated public TCP listener", () => {
       // TCP is PUBLIC privilege only — admin methods stay invisible even authenticated.
       expect((await good.callRaw("recordSpend", { tokens: 1, usd: 0 })).error?.code).toBe(-32601);
 
-      // The unix public socket is untouched: token-free requests still served.
-      const unix = await RpcClient.connect(b.socketPath);
+      // ONE capability for BOTH public transports: the token that
+      // authenticates TCP is the same bearer the 0666 unix socket requires.
+      const unix = await RpcClient.connect(b.socketPath, b.publicToken);
       GetTaskShape.parse(await unix.call("getTask"));
 
       good.close();
@@ -642,10 +715,10 @@ describe("opt-in authenticated public TCP listener", () => {
     }
   });
 
-  it("refuses a sub-256-bit token and tears the partial listeners back down", async () => {
+  it("refuses a sub-256-bit token and never exposes an unauthenticated listener", async () => {
     const { config, runDir } = await makeBrokerConfig("tcpshort", GENEROUS_BUDGET);
-    await expect(startBroker(config, { publicTcp: { host: "127.0.0.1", port: 0, token: "short" } })).rejects.toThrow(/32 bytes/);
-    // The public unix listener bound before the token check must not leak.
+    await expect(startBroker(config, { publicToken: "short", publicTcp: { host: "127.0.0.1", port: 0 } })).rejects.toThrow(/32 bytes/);
+    // Nothing bound before the token floor check: no public listener leaks.
     await expect(RpcClient.connect(path.join(runDir, "broker.sock"))).rejects.toThrow();
   });
 });
@@ -673,7 +746,7 @@ describe("eval asset confidentiality (live docker uid boundary)", () => {
       image: SANDBOX_USER_IMAGE,
       evalEntrypoint: ["sh", "-c", UID_PROBE_SCRIPT],
     });
-    const c = await RpcClient.connect(b.socketPath);
+    const c = await RpcClient.connect(b.socketPath, b.publicToken);
     try {
       // Suite-unique seed: the memo index lives in the SHARED test CAS and is
       // keyed by digests+artifact+group+seed, not by the eval entrypoint.
@@ -695,7 +768,7 @@ describe("eval asset confidentiality (live docker uid boundary)", () => {
 describe("quiescent close under live in-flight work", () => {
   it("close() aborts a sleeping exec's container, drains the handler, and refuses the socket afterwards", async () => {
     const b = await bootBroker("quiesce", GENEROUS_BUDGET);
-    const c = await RpcClient.connect(b.socketPath);
+    const c = await RpcClient.connect(b.socketPath, b.publicToken);
     const ref = (await c.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })) as SandboxRef;
 
     const slow = c.callRaw("exec", { sandboxId: ref.sandboxId, argv: ["sleep", "600"], timeoutSec: 590 });
@@ -717,4 +790,220 @@ describe("quiescent close under live in-flight work", () => {
     await expect(RpcClient.connect(b.socketPath)).rejects.toThrow();
     c.close();
   }, 120_000);
+});
+
+/** Per-test docker-run counter scoped to eval containers (`docker run --rm`). */
+function countingEvalRuns(): { runs: () => number; run: RunCommand } {
+  let n = 0;
+  return {
+    runs: () => n,
+    run: (argv, opts) => {
+      if (argv[0] === "docker" && argv[1] === "run" && argv.includes("--rm")) n += 1;
+      return runCommand(argv, opts);
+    },
+  };
+}
+
+describe("evaluation memo identity (run + boot generation + episode epoch)", () => {
+  it("a different run never reuses another run's cached measurement for the same artifact/seed", async () => {
+    const a = countingEvalRuns();
+    const b = countingEvalRuns();
+    const brokerA = await bootBroker("mra", GENEROUS_BUDGET, { runCommand: a.run });
+    const brokerB = await bootBroker("mrb", GENEROUS_BUDGET, { runCommand: b.run });
+    const ca = await RpcClient.connect(brokerA.socketPath, brokerA.publicToken);
+    const cb = await RpcClient.connect(brokerB.socketPath, brokerB.publicToken);
+    try {
+      const first = EvaluationRecord.parse(
+        await ca.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 777001 }),
+      );
+      expect(first.cached).toBe(false);
+      expect(a.runs()).toBe(1);
+      // Same shared CAS, same digests, same coordinate — DIFFERENT run: a
+      // prior-day cached baseline must never stand in for this run.
+      const second = EvaluationRecord.parse(
+        await cb.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 777001 }),
+      );
+      expect(second.cached).toBe(false);
+      expect(b.runs()).toBe(1);
+    } finally {
+      ca.close();
+      cb.close();
+      await brokerA.close();
+      await brokerB.close();
+    }
+  }, 300_000);
+
+  it("a resumed run (new Broker, same runId/journal) re-measures instead of reusing the pre-kill memo", async () => {
+    const counter = countingEvalRuns();
+    const { config } = await makeBrokerConfig("mres", GENEROUS_BUDGET, { runCommand: counter.run });
+    const first = await startBroker(config);
+    const c1 = await RpcClient.connect(first.socketPath, first.publicToken);
+    try {
+      const miss = EvaluationRecord.parse(
+        await c1.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 777002 }),
+      );
+      expect(miss.cached).toBe(false);
+      const retry = EvaluationRecord.parse(
+        await c1.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 777002 }),
+      );
+      expect(retry.cached).toBe(true); // same boot: memoized
+      expect(counter.runs()).toBe(1);
+    } finally {
+      c1.close();
+      await first.close();
+    }
+
+    const second = await startBroker(config);
+    const c2 = await RpcClient.connect(second.socketPath, second.publicToken);
+    try {
+      const fresh = EvaluationRecord.parse(
+        await c2.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 777002 }),
+      );
+      expect(fresh.cached).toBe(false); // new boot generation: fresh comparator
+      expect(counter.runs()).toBe(2);
+    } finally {
+      c2.close();
+      await second.close();
+    }
+  }, 300_000);
+
+  it("a new mutation episode freshly measures the parent once; retries within the episode still memoize", async () => {
+    const counter = countingEvalRuns();
+    const b = await bootBroker("mepo", GENEROUS_BUDGET, { runCommand: counter.run });
+    const c = await RpcClient.connect(b.socketPath, b.publicToken);
+    try {
+      const coord = { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 777003 };
+      expect(EvaluationRecord.parse(await c.call("evaluate", coord)).cached).toBe(false);
+      expect(EvaluationRecord.parse(await c.call("evaluate", coord)).cached).toBe(true);
+      expect(counter.runs()).toBe(1);
+
+      // createSandbox begins a new episode → the parent must re-measure once.
+      await c.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" });
+      expect(EvaluationRecord.parse(await c.call("evaluate", coord)).cached).toBe(false);
+      expect(counter.runs()).toBe(2);
+      // Same-epoch retry memoizes again.
+      expect(EvaluationRecord.parse(await c.call("evaluate", coord)).cached).toBe(true);
+      expect(counter.runs()).toBe(2);
+    } finally {
+      c.close();
+      await b.close();
+    }
+  }, 300_000);
+});
+
+describe("holdout ledger charges per admitted privileged request", () => {
+  it("N concurrent identical holdout evaluates burn N lifetime slots while coalescing to one evaluator", async () => {
+    const counter = countingEvalRuns();
+    const events: RunEvent[] = [];
+    const b = await bootBroker("hconc", GENEROUS_BUDGET, { runCommand: counter.run, events });
+    const admin = await RpcClient.connect(b.adminSocketPath);
+    try {
+      const results = await Promise.all(
+        [0, 1, 2].map(() =>
+          admin.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 777004 }),
+        ),
+      );
+      for (const raw of results) expect(EvaluationRecord.parse(raw).output.valid).toBe(true);
+      // Information-query budget: every ADMITTED privileged request consumed
+      // one lifetime slot — concurrency must not discount the ledger.
+      const charges = events.filter(
+        (e): e is Extract<RunEvent, { type: "holdout.accessed" }> => e.type === "holdout.accessed",
+      );
+      expect(charges).toHaveLength(3);
+      expect(charges.map((e) => e.ledgerCount).sort()).toEqual([1, 2, 3]);
+      // Unique computation still coalesces: one evaluator container total.
+      expect(counter.runs()).toBe(1);
+    } finally {
+      admin.close();
+      await b.close();
+    }
+  }, 300_000);
+});
+
+describe("createSandbox admission recompute (queued-save repair race)", () => {
+  it("a createSandbox queued behind a repair-minting save resumes the episode instead of minting a new one", async () => {
+    // Predictor run derives the deterministic repair hash for this mutation.
+    const seedBroker = await bootBroker("rseed", GENEROUS_BUDGET);
+    const cs = await RpcClient.connect(seedBroker.socketPath, seedBroker.publicToken);
+    let repairHash = "";
+    try {
+      const sb = (await cs.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })) as SandboxRef;
+      const failed = ExecShape.parse(
+        await cs.call("exec", { sandboxId: sb.sandboxId, argv: ["sh", "-c", "echo mutated > /workspace/m.txt; false"] }),
+      );
+      expect(failed.exitCode).toBe(1);
+      repairHash = ((await cs.call("saveArtifact", { sandboxId: sb.sandboxId })) as ArtifactRef).hash;
+    } finally {
+      cs.close();
+      await seedBroker.close();
+    }
+    expect(repairHash).not.toBe(baselineHash);
+
+    const events: RunEvent[] = [];
+    const b = await bootBroker("rrace", GENEROUS_BUDGET, { events });
+    const c = await RpcClient.connect(b.socketPath, b.publicToken);
+    try {
+      const sb1 = (await c.call("createSandbox", { artifact: { hash: baselineHash }, role: "mutation" })) as SandboxRef;
+      const failed = ExecShape.parse(
+        await c.call("exec", { sandboxId: sb1.sandboxId, argv: ["sh", "-c", "echo mutated > /workspace/m.txt; false"] }),
+      );
+      expect(failed.exitCode).toBe(1);
+      // Pipeline the save and the create WITHOUT awaiting the save: the
+      // create's repair/episode admission must be recomputed INSIDE the
+      // mutation critical section, AFTER the queued save registers the
+      // repair — a stale pre-queue decision would mint episode 1.
+      const savePromise = c.call("saveArtifact", { sandboxId: sb1.sandboxId });
+      const createPromise = c.call("createSandbox", { artifact: { hash: repairHash }, role: "mutation" });
+      const [saved, created] = await Promise.all([savePromise, createPromise]);
+      expect((saved as ArtifactRef).hash).toBe(repairHash);
+      expect((created as SandboxRef).sandboxId).toBeTruthy();
+      expect(events.filter((e) => e.type === "episode.started")).toHaveLength(1); // resumed, not re-minted
+      expect(events.filter((e) => e.type === "episode.candidate")).toHaveLength(0);
+    } finally {
+      c.close();
+      await b.close();
+    }
+  }, 300_000);
+});
+
+describe("asset staging modes (argv + host modes)", () => {
+  it("stages dirs 0755/files 0644 under the 0700 host-only tmp parent, mounted under the 0700 tmpfs, pull-never", async () => {
+    let captured: { argv: string[]; parentMode: number; rootMode: number; dirMode: number; fileMode: number } | undefined;
+    const inspecting: RunCommand = async (argv, opts) => {
+      const mount = argv.find((arg) => arg.endsWith(":/capsule/assets:ro"));
+      if (argv[0] === "docker" && argv[1] === "run" && mount !== undefined && captured === undefined) {
+        const stageDir = mount.slice(0, mount.length - ":/capsule/assets:ro".length);
+        captured = {
+          argv: [...argv],
+          parentMode: (await stat(path.dirname(stageDir))).mode & 0o777,
+          rootMode: (await stat(stageDir)).mode & 0o777,
+          dirMode: (await stat(path.join(stageDir, "train"))).mode & 0o777,
+          fileMode: (await stat(path.join(stageDir, "train", "data.txt"))).mode & 0o777,
+        };
+      }
+      return runCommand(argv, opts);
+    };
+    const b = await bootBroker("smode", GENEROUS_BUDGET, { runCommand: inspecting });
+    const c = await RpcClient.connect(b.socketPath, b.publicToken);
+    try {
+      const rec = EvaluationRecord.parse(
+        await c.call("evaluate", { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 777005 }),
+      );
+      expect(rec.output.valid).toBe(true);
+      expect(captured).toBeDefined();
+      // Host boundary: 0700 host-only parent; world-readable staged content
+      // so the cap-dropped (no CAP_DAC_OVERRIDE) evaluator can traverse it.
+      expect(captured?.parentMode).toBe(0o700);
+      expect(captured?.rootMode).toBe(0o755);
+      expect(captured?.dirMode).toBe(0o755);
+      expect(captured?.fileMode).toBe(0o644);
+      // In-container boundary against the uid-2000 candidate + pull fence.
+      const argv = captured?.argv ?? [];
+      expect(argv.some((a, i) => a === "--tmpfs" && argv[i + 1] === "/capsule:mode=0700,size=1m")).toBe(true);
+      expect(argv.some((a, i) => a === "--pull" && argv[i + 1] === "never")).toBe(true);
+    } finally {
+      c.close();
+      await b.close();
+    }
+  }, 300_000);
 });

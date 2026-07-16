@@ -66,10 +66,11 @@ export class RpcClient {
     return this.closedSignal.promise;
   }
 
-  static connect(socketPath: string): Promise<RpcClient> {
+  /** Connect to a unix socket; `token` = per-broker public bearer (omit for the admin socket or negative auth tests). */
+  static connect(socketPath: string, token?: string): Promise<RpcClient> {
     const { promise, resolve, reject } = deferred<RpcClient>();
     const sock = net.connect(socketPath);
-    sock.once("connect", () => resolve(new RpcClient(sock)));
+    sock.once("connect", () => resolve(new RpcClient(sock, token)));
     sock.once("error", reject);
     return promise;
   }

@@ -3,6 +3,13 @@ export interface Resolvers<T> {
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
 }
+interface PromiseConstructorWithResolvers extends PromiseConstructor {
+  withResolvers<T>(): Resolvers<T>;
+}
+
+function hasWithResolvers(value: PromiseConstructor): value is PromiseConstructorWithResolvers {
+  return typeof Reflect.get(value, "withResolvers") === "function";
+}
 
 /**
  * `Promise.withResolvers()` shim: the workspace pins Node >= 18 and the native
@@ -10,9 +17,7 @@ export interface Resolvers<T> {
  * executor form. Everything else in the package uses this.
  */
 export function withResolvers<T>(): Resolvers<T> {
-  if (typeof (Promise as { withResolvers?: () => Resolvers<T> }).withResolvers === "function") {
-    return (Promise as unknown as { withResolvers: () => Resolvers<T> }).withResolvers();
-  }
+  if (hasWithResolvers(Promise)) return Promise.withResolvers<T>();
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
   const promise = new Promise<T>((res, rej) => {

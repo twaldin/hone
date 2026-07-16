@@ -117,8 +117,10 @@ def find_path(grid, start, goal):
     expect(stdout).not.toContain("FORGED_EVALUATOR_OUTPUT");
     const output = parseOnlyEvaluatorResult(stdout);
 
+    expect(output.valid).toBe(false);
     expect(output.objectives["score"]).toBe(0);
     expect(output.constraints["tests_pass"]).toBe(false);
+    expect(output.constraints["paths_optimal"]).toBe(false);
     expect(output.perExample["tiny"]?.score).toBe(0);
     expect(output.diagnostics?.["quality"]).toBe(0);
   });
@@ -142,8 +144,10 @@ def find_path(grid, start, goal):
       }),
     );
 
+    expect(output.valid).toBe(false);
     expect(output.objectives["score"]).toBe(0);
     expect(output.constraints["tests_pass"]).toBe(false);
+    expect(output.constraints["paths_optimal"]).toBe(false);
     expect(output.perExample["tiny"]?.score).toBe(0);
   });
 
@@ -157,9 +161,12 @@ def find_path(grid, start, goal):
       runEvaluator(fixture, { CAPSULE_CALL_TIMEOUT_SEC: "0.075" }),
     );
 
-    expect(output.valid).toBe(true);
+    // The hard optimality gate makes a hung candidate promotion-ineligible
+    // outright: no optimal asset path was produced, so valid is false.
+    expect(output.valid).toBe(false);
     expect(output.objectives["score"]).toBe(0);
     expect(output.constraints["tests_pass"]).toBe(false);
+    expect(output.constraints["paths_optimal"]).toBe(false);
     expect(output.perExample["tiny"]?.score).toBe(0);
-  }, 3_000);
+  }, 10_000);
 });

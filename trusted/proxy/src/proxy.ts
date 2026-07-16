@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { appendFile, mkdir, rm } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { rm } from "node:fs/promises";
 import {
   createServer,
   type IncomingMessage,
@@ -14,9 +14,15 @@ import {
   type ModelRouting,
 } from "@hone/schema";
 import { casWrite } from "./cas.js";
+import { DispatchJournal, DISPATCH_JOURNAL_FILE, type DispatchRecoveryReport, type DispatchSettleOutcome } from "./dispatch-journal.js";
+import { type DurableIo } from "./durable-io.js";
+import { DurableLineLog } from "./tracelog.js";
 import { extractSseUsage, isJsonObject, normalizeUsage, ZERO_USAGE, type Usage } from "./sse.js";
 
 export const DEFAULT_UPSTREAM = "http://127.0.0.1:8317";
+
+/** Per-run trace log file name, appended under `runDir`. */
+export const PROXY_TRACE_FILE = "proxy-trace.ndjson";
 
 /** Per-run bearer identity handed to a sandbox. Never contains upstream credentials. */
 export interface ProxyAuthToken {
@@ -117,6 +123,21 @@ export interface ProxyConfig {
    * exhausted boundary so an unbounded optimizer cannot retry 402 forever.
    */
   recordBudgetExhaustion?: (dimension: BudgetDimension) => void | Promise<void>;
+  /**
+   * TEST-ONLY fault injection for the durable trace log (short writes,
+   * fsync failures). Production wiring must leave this unset.
+   */
+  traceIo?: Partial<DurableIo>;
+  /**
+   * TEST-ONLY fault injection for CAS publication. Production wiring must
+   * leave this unset.
+   */
+  casIo?: Partial<DurableIo>;
+  /**
+   * TEST-ONLY fault injection for the durable dispatch journal. Production
+   * wiring must leave this unset.
+   */
+  journalIo?: Partial<DurableIo>;
 }
 
 export interface ProxyHandle {
@@ -129,11 +150,22 @@ export interface ProxyHandle {
   /** Bind 127.0.0.1 TCP (tests); returns the bound port. */
   listenTcp(port: number, host?: string): Promise<number>;
   /**
+   * Startup dispatch-journal reconciliation (kicked off at construction).
+   * Resolves — never rejects — with the recovery report: recovered ceiling
+   * charges (already delivered through `recordSpend`) and the terminal
+   * poison reason, if the run may never forward again.
+   */
+  dispatchRecovery(): Promise<DispatchRecoveryReport>;
+  /**
    * True handler-quiescence barrier: stops accepting, aborts every in-flight
    * upstream exchange, destroys client connections, and resolves only after
    * every admitted handler has settled its reservation, recorded spend, and
-   * appended its CAS/trace records. No recordSpend call, reservation change,
-   * CAS write, or trace append can occur after resolution. Idempotent.
+   * appended its journal/CAS/trace records. No recordSpend call, reservation
+   * change, journal append, CAS write, or trace append can occur after
+   * resolution. If the trace log or the dispatch journal was ever poisoned
+   * (this process or a prior one), close REJECTS (idempotently, after full
+   * quiescence) with that failure — a run whose corpus/dispatch authority
+   * failed never reports a clean shutdown. Idempotent.
    */
   close(): Promise<void>;
 }
@@ -446,11 +478,72 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     };
   }
 
+
+  const traceLog = new DurableLineLog(join(config.runDir, PROXY_TRACE_FILE), config.traceIo);
+
+  // -------------------------------------------------------------------------
+  // Durable dispatch authority.
+  //
+  // INVARIANT: no upstream fetch is attempted before an intent record —
+  // request identity plus the admitted worst-case token/USD ceiling — is
+  // written AND fsynced to the dispatch journal. Settlement durably records
+  // the actual charge (and whether the trace obligation was met) after
+  // `recordSpend`. A SIGKILL at ANY point therefore leaves one of:
+  //   - no intent  → the upstream was provably never contacted; nothing owed;
+  //   - unmatched intent → recovery charges the FULL reserved ceiling exactly
+  //     once (replay-safe) and durably poisons the run (its trace is missing);
+  //   - matched intent → the recorded charge stands; a `traced: false`
+  //     settlement re-poisons every restart (CAS/trace failure is permanent).
+  // Recovery runs eagerly at construction and is awaited before ANY
+  // completion is admitted, so recovered charges are in the broker before
+  // new headroom is computed and a poisoned journal can never silently
+  // restart as a healthy log.
+  // -------------------------------------------------------------------------
+  const journal = new DispatchJournal(join(config.runDir, DISPATCH_JOURNAL_FILE), config.journalIo);
+  let dispatchPoison: string | undefined;
+  // Durable intents whose terminal journal record is not yet durable. Any
+  // id still here after handler quiescence is a settlement that failed
+  // part-way — close() must reject rather than report a clean shutdown.
+  const openDispatches = new Set<string>();
+  const recoveryPromise: Promise<DispatchRecoveryReport> = (async () => {
+    try {
+      const report = await journal.recover(config.recordSpend);
+      if (report.poisoned !== undefined) dispatchPoison = report.poisoned;
+      return report;
+    } catch (err) {
+      // Recovery could not establish (or repair) the journal's history —
+      // fail closed: nothing may be forwarded over an unknown ledger.
+      const failure = err instanceof Error ? err : new Error(String(err));
+      const reason = `dispatch journal recovery failed: ${failure.message}`;
+      dispatchPoison = reason;
+      journal.fail(failure);
+      return { poisoned: reason, recovered: [], chargedTotals: { tokens: 0, usd: 0 } };
+    }
+  })();
+
   async function trace(t: TraceInput): Promise<void> {
-    const [requestBody, responseBody] = await Promise.all([
-      casWrite(config.casDir, t.requestText),
-      casWrite(config.casDir, t.responseText),
-    ]);
+    // A poisoned authority never publishes MORE content: fail before CAS.
+    const already = traceLog.poisoned;
+    if (already !== undefined) {
+      throw new Error(`trace authority poisoned: ${already.message}`, { cause: already });
+    }
+    // CAS bodies MUST be durable before the line referencing them exists:
+    // both writes resolve before the record is even constructed. A CAS
+    // publication failure is a corpus-authority failure exactly like a log
+    // write failure — poison the log (first error wins) so later requests
+    // fail closed and close() rejects, then fail this request.
+    let requestBody: string;
+    let responseBody: string;
+    try {
+      [requestBody, responseBody] = await Promise.all([
+        casWrite(config.casDir, t.requestText, config.casIo),
+        casWrite(config.casDir, t.responseText, config.casIo),
+      ]);
+    } catch (err) {
+      const failure = err instanceof Error ? err : new Error(String(err));
+      traceLog.fail(failure);
+      throw failure;
+    }
     const record = ProxyTraceRecord.parse({
       version: PROXY_TRACE_VERSION,
       runId: config.runId,
@@ -464,8 +557,10 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       requestBody,
       responseBody,
     });
-    await mkdir(config.runDir, { recursive: true });
-    await appendFile(join(config.runDir, "proxy-trace.ndjson"), `${JSON.stringify(record)}\n`);
+    // Resolution = the complete line is on disk and fsynced, ordered after
+    // every earlier trace. Failure poisons the log: this and every later
+    // request fails closed rather than continuing with an unrecorded corpus.
+    await traceLog.append(JSON.stringify(record));
   }
 
   function upstreamHeaders(): Record<string, string> {
@@ -522,6 +617,47 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
   ): Promise<void> {
     const requestAt = new Date().toISOString();
     const startedAt = Date.now();
+
+    // Corpus-authority gate: once the trace log (or a CAS publication) has
+    // failed, NOTHING more may be forwarded — the request is refused before
+    // any body buffering, budget check, reservation, or upstream dispatch.
+    const poison = traceLog.poisoned;
+    if (poison !== undefined) {
+      if (!res.destroyed) {
+        res.writeHead(503, { "content-type": "application/json", connection: "close" });
+        res.end(
+          JSON.stringify({
+            error: {
+              type: "hone_trace_authority_failed",
+              message: `trace authority poisoned: ${poison.message}`,
+            },
+          }),
+        );
+      }
+      return;
+    }
+
+    // Dispatch-authority gate: startup recovery must have reconciled every
+    // prior intent before ANY new dispatch, and a poisoned journal — a crash
+    // orphaned an intent, a prior CAS/trace publication failed durably, the
+    // file is corrupt, or a live append failed — refuses everything. A run
+    // whose ledger authority failed can never silently restart healthy.
+    await recoveryPromise;
+    const journalPoison = dispatchPoison ?? journal.poisoned?.message;
+    if (journalPoison !== undefined) {
+      if (!res.destroyed) {
+        res.writeHead(503, { "content-type": "application/json", connection: "close" });
+        res.end(
+          JSON.stringify({
+            error: {
+              type: "hone_dispatch_authority_failed",
+              message: `dispatch authority poisoned: ${journalPoison}`,
+            },
+          }),
+        );
+      }
+      return;
+    }
 
     const route = config.routing[identity.role];
     if (route === undefined) {
@@ -597,7 +733,11 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         },
       };
       const errText = JSON.stringify(errBody);
-      sendJson(res, 402, errText);
+      // A concurrent in-flight reservation is temporary: 429 lets the
+      // mutation worker back off and retry after settlement. Only a request
+      // that cannot fit even with zero in-flight reservations is a terminal
+      // 402 and burns the trusted exhaustion latch above.
+      sendJson(res, admission.terminal ? 402 : 429, errText);
       return;
     }
     const reservation = admission.reservation;
@@ -614,18 +754,112 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       totalTokens: reservation.tokens,
     };
 
-    // Settlement runs EXACTLY ONCE per admitted request. Charge first, then
-    // release the reservation — if recordSpend throws, the reservation is
-    // retained forever (fail closed) rather than silently refunded.
-    let settled = false;
-    const settle = async (charge: SpendRecord): Promise<void> => {
-      if (settled) return;
-      settled = true;
-      // A proven-unaccepted transport failure settles at zero: nothing to
-      // record, just release. Everything else records BEFORE releasing.
-      if (charge.tokens > 0 || charge.usd > 0) await config.recordSpend(charge);
-      reservedTokens -= reservation.tokens;
-      reservedUsd -= reservation.usd;
+    // Settlement is an explicit idempotent state machine driven to completion
+    // exactly once per admitted request, phases strictly in this order:
+    //   1. `recordSpend` — the broker charge. Crashing after it but before
+    //      the journal settle lands means restart recovery re-charges the
+    //      ceiling: an over-count in an irreducible window, never an
+    //      under-count.
+    //   2. the trace obligation (CAS bodies + trace line), when one exists;
+    //   3. the durable journal `settle` record matching the intent, carrying
+    //      the actual charge and whether the trace obligation was met — a
+    //      `traced: false` settlement is a terminal poison fact that
+    //      survives restart;
+    //   4. release of the in-memory reservation, ONLY when the settlement
+    //      left the dispatch authority clean.
+    // "Settled" means phase 3's terminal record is DURABLE (or no durable
+    // intent exists to match) — never that settlement merely began. The
+    // first settle() call fixes ONE immutable plan (charge, outcome, trace
+    // input); a later call — the handler's finally — resumes that SAME plan
+    // from the first incomplete phase, so a throw mid-settlement can neither
+    // be silently skipped nor substitute a different charge. A phase that
+    // fails permanently poisons the dispatch authority (the gate refuses new
+    // requests, close() rejects) and the reservation is retained forever
+    // (fail closed) rather than silently refunded.
+    const dispatchId = `d_${randomBytes(9).toString("hex")}`;
+    let intentDurable = false;
+    let plan: { charge: SpendRecord; outcome: DispatchSettleOutcome; traceInput: TraceInput | undefined } | undefined;
+    // Phase 1 state. A throw inside `recordSpend` leaves the broker state
+    // UNKNOWN: `spendFailure` latches and the phase is never retried — a
+    // retry could deliberately double-charge. The durable intent then stays
+    // unmatched, so restart recovery charges the full ceiling (over-count,
+    // never under-count).
+    let spendRecorded = false;
+    let spendFailure: Error | undefined;
+    // Phase 2 state. The trace obligation gets ONE attempt: a failure
+    // permanently poisons the trace log, so a retry would only fail at its
+    // poison gate.
+    let traceAttempted = false;
+    let traceFailure: Error | undefined;
+    // Phase 3 state — THIS is "settled".
+    let journalSettled = false;
+    const settle = async (
+      charge: SpendRecord,
+      outcome: DispatchSettleOutcome,
+      traceInput?: TraceInput,
+    ): Promise<void> => {
+      if (journalSettled) return;
+      // One immutable settlement plan per request: the first call fixes it;
+      // retries resume it and their own arguments are ignored.
+      plan ??= { charge, outcome, traceInput };
+      const p = plan;
+      if (!spendRecorded) {
+        if (spendFailure !== undefined) throw spendFailure;
+        // A proven-unaccepted transport failure settles at zero: nothing to
+        // record, just release. Everything else records BEFORE releasing.
+        if (p.charge.tokens > 0 || p.charge.usd > 0) {
+          try {
+            await config.recordSpend(p.charge);
+          } catch (err) {
+            spendFailure = err instanceof Error ? err : new Error(String(err));
+            dispatchPoison ??= `broker charge for dispatch ${dispatchId} did not settle (broker state unknown): ${spendFailure.message}`;
+            throw spendFailure;
+          }
+        }
+        spendRecorded = true;
+      }
+      if (p.traceInput !== undefined && !traceAttempted) {
+        traceAttempted = true;
+        try {
+          await trace(p.traceInput);
+        } catch (err) {
+          traceFailure = err instanceof Error ? err : new Error(String(err));
+        }
+      }
+      // `traced` is true only when the trace obligation was met, or none
+      // existed (`no-upstream`: the upstream provably never saw the
+      // request, so there is no exchange to record).
+      const traced = p.outcome === "no-upstream" || (p.traceInput !== undefined && traceFailure === undefined);
+      if (intentDurable) {
+        // Resolution = the terminal record is on disk and fsynced. A throw
+        // here leaves `journalSettled` false: the journal is poisoned by the
+        // failed append, the finally resumes (and fails closed again), and
+        // close() rejects over the unsettled intent.
+        await journal.settle({
+          id: dispatchId,
+          tokens: p.charge.tokens,
+          usd: p.charge.usd,
+          outcome: p.outcome,
+          traced,
+          ...(traceFailure !== undefined ? { traceError: traceFailure.message } : {}),
+        });
+        if (!traced) {
+          dispatchPoison ??=
+            traceFailure !== undefined
+              ? `trace/CAS publication failed for dispatch ${dispatchId}: ${traceFailure.message}`
+              : `dispatch ${dispatchId} settled without a trace record`;
+        }
+      }
+      journalSettled = true;
+      openDispatches.delete(dispatchId);
+      // Fail closed: a settlement that poisoned the dispatch authority keeps
+      // its reservation forever — retention only ever OVER-constrains later
+      // admissions, and the poison gate refuses them anyway.
+      if (traced || !intentDurable) {
+        reservedTokens -= reservation.tokens;
+        reservedUsd -= reservation.usd;
+      }
+      if (traceFailure !== undefined) throw traceFailure;
     };
 
     const controller = new AbortController();
@@ -635,11 +869,75 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         // Admitted after shutdown began but before any upstream dispatch:
         // the upstream is provably untouched, so release the reservation
         // without charge and record the deterministic refusal.
-        await settle({ tokens: 0, usd: 0 });
+        await settle({ tokens: 0, usd: 0 }, "no-upstream");
         const errText = JSON.stringify({
           error: { type: "hone_shutting_down", message: "proxy is shutting down" },
         });
         sendJson(res, 503, errText);
+        return;
+      }
+      // DISPATCH INVARIANT: the intent — request identity plus the admitted
+      // worst-case ceiling — is written AND fsynced before any upstream byte
+      // is sent. A crash beyond this point can never yield an unaccounted
+      // upstream request: restart recovery charges the full ceiling and
+      // durably poisons the run.
+      try {
+        await journal.intent({
+          id: dispatchId,
+          runId: config.runId,
+          role: identity.role,
+          model: route.model,
+          requestAt,
+          requestSha256: createHash("sha256").update(forwardText).digest("hex"),
+          promptTokens: reservation.promptTokens,
+          completionTokens: reservation.completionTokens,
+          ceilTokens: reservation.tokens,
+          ceilUsd: reservation.usd,
+        });
+        intentDurable = true;
+        openDispatches.add(dispatchId);
+      } catch (err) {
+        // The append failed BEFORE any fetch attempt, so the upstream is
+        // provably untouched and the reservation is released without charge.
+        // The journal is now poisoned (fail closed): every later request is
+        // refused at the gate. If the line did reach disk despite the
+        // failure, restart recovery charges the ceiling — over-count, never
+        // under-count.
+        await settle({ tokens: 0, usd: 0 }, "no-upstream");
+        sendClientError(
+          res,
+          503,
+          "hone_dispatch_authority_failed",
+          `dispatch intent not durable: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+      // POISON FENCE (post-intent, pre-fetch): the gate checks at the top of
+      // this handler ran before body buffering and admission — a concurrent
+      // request may have poisoned the trace or dispatch authority while this
+      // one stalled (slow body upload, admission queue). Re-check AFTER the
+      // intent fsync resolved; there is NO await between a passing check and
+      // the fetch invocation below, so a poison observed by any other
+      // request strictly-before this segment can never be followed by an
+      // untraceable billable dispatch from this one. A latched poison
+      // durably settles this intent at zero (`no-upstream`: the fetch below
+      // was provably never invoked) and refuses the request.
+      const latePoison = traceLog.poisoned?.message ?? dispatchPoison ?? journal.poisoned?.message;
+      if (latePoison !== undefined) {
+        try {
+          await settle({ tokens: 0, usd: 0 }, "no-upstream");
+        } catch {
+          // The zero settle could not become durable over the failed
+          // authority: the intent stays unmatched (restart recovery charges
+          // its ceiling — over-count, never under-count) and the handler
+          // finally resumes the plan and latches the dispatch poison.
+        }
+        sendClientError(
+          res,
+          503,
+          traceLog.poisoned !== undefined ? "hone_trace_authority_failed" : "hone_dispatch_authority_failed",
+          `authority poisoned before dispatch: ${latePoison}`,
+        );
         return;
       }
       const base = route.upstreamBaseUrl ?? config.upstreamBaseUrl ?? DEFAULT_UPSTREAM;
@@ -655,25 +953,33 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         // Transport failure. Only a PROVEN never-connected error releases the
         // reservation without charge; anything ambiguous charges the ceiling.
         const noAccept = provenNoUpstreamAccept(err);
-        await settle(noAccept ? { tokens: 0, usd: 0 } : ceilingCharge);
         const errText = JSON.stringify({
           error: {
             type: "hone_upstream_unreachable",
             message: err instanceof Error ? err.message : String(err),
           },
         });
-        if (!noAccept) {
-          await trace({
-            role: identity.role,
-            model: route.model,
-            requestAt,
-            startedAt,
-            status: 502,
-            usage: ceilingUsage,
-            estimatedUsd: ceilingCharge.usd,
-            requestText: forwardText,
-            responseText: errText,
-          });
+        if (noAccept) {
+          await settle({ tokens: 0, usd: 0 }, "no-upstream");
+        } else {
+          try {
+            await settle(ceilingCharge, "ceiling", {
+              role: identity.role,
+              model: route.model,
+              requestAt,
+              startedAt,
+              status: 502,
+              usage: ceilingUsage,
+              estimatedUsd: ceilingCharge.usd,
+              requestText: forwardText,
+              responseText: errText,
+            });
+          } catch (settleErr) {
+            // Charged and journaled, but the trace obligation failed: the
+            // client must fail closed rather than observe a clean 502.
+            res.destroy();
+            throw settleErr;
+          }
         }
         sendJson(res, 502, errText);
         return;
@@ -734,6 +1040,7 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       // spend the same headroom repeatedly by provoking usage suppression.
       let charge: SpendRecord;
       let tracedUsage: Usage;
+      let outcome: DispatchSettleOutcome;
       if (usage !== undefined && usage.totalTokens > 0) {
         const actualUsd =
           pricing === undefined
@@ -742,25 +1049,34 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
               (usage.completionTokens / 1e6) * pricing.outputUsdPerMTok;
         charge = { tokens: usage.totalTokens, usd: actualUsd };
         tracedUsage = usage;
+        outcome = "usage";
       } else {
         charge = ceilingCharge;
         tracedUsage = ceilingUsage;
+        outcome = "ceiling";
       }
 
-      // Account + trace BEFORE ending the client response, so a client that
-      // has consumed the full body observes fully-recorded spend.
-      await settle(charge);
-      await trace({
-        role: identity.role,
-        model: route.model,
-        requestAt,
-        startedAt,
-        status: upstream.status,
-        usage: tracedUsage,
-        estimatedUsd: charge.usd,
-        requestText: forwardText,
-        responseText,
-      });
+      // Account (charge → trace → durable journal settle) BEFORE ending the
+      // client response, so a client that has consumed the full body observes
+      // fully-recorded spend AND a durably-indexed trace. A trace or journal
+      // failure must not let the response complete cleanly: destroy the
+      // socket so the client fails closed.
+      try {
+        await settle(charge, outcome, {
+          role: identity.role,
+          model: route.model,
+          requestAt,
+          startedAt,
+          status: upstream.status,
+          usage: tracedUsage,
+          estimatedUsd: charge.usd,
+          requestText: forwardText,
+          responseText,
+        });
+      } catch (err) {
+        res.destroy();
+        throw err;
+      }
       if (truncated || streamFailed) {
         // Deterministic client-side failure: the response is incomplete by
         // construction; never pretend it ended cleanly.
@@ -770,11 +1086,22 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       }
     } finally {
       upstreamControllers.delete(controller);
-      if (!settled) {
-        // Unexpected error path after admission: fail closed on the full
-        // ceiling. Swallow secondary settle failures — the reservation is
-        // then retained, which only ever OVER-constrains future admissions.
-        await settle(ceilingCharge).catch(() => undefined);
+      if (!journalSettled) {
+        // Unexpected error path after admission, or a settlement that threw
+        // part-way: resume the state machine. A FIRST call here plans the
+        // full ceiling with no trace to publish — the `traced: false`
+        // settlement is a terminal poison fact; a resumed plan keeps its
+        // exact original charge and never re-runs a completed (or failed)
+        // spend phase. Failures are swallowed, never silently skipped: every
+        // failing phase has already poisoned the dispatch authority (the
+        // gate refuses new requests and close() rejects) and the reservation
+        // is retained, which only ever OVER-constrains future admissions
+        // (and an unmatched intent re-charges the ceiling on restart:
+        // over-count, never under-count).
+        await settle(ceilingCharge, "error").catch(() => undefined);
+        if (!journalSettled) {
+          dispatchPoison ??= `dispatch ${dispatchId} has no durable terminal record (settlement incomplete)`;
+        }
       }
     }
   }
@@ -1002,6 +1329,9 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       if (found === undefined) throw new Error(`no token minted for role "${role}"`);
       return found.token;
     },
+    dispatchRecovery(): Promise<DispatchRecoveryReport> {
+      return recoveryPromise;
+    },
     async listenUnix(socketPath: string): Promise<void> {
       await rm(socketPath, { force: true });
       await bound(() => server.listen(socketPath));
@@ -1041,7 +1371,41 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         while (inflightHandlers.size > 0) {
           await Promise.allSettled([...inflightHandlers]);
         }
+        // Every handler has drained, so any dispatch id still open reached a
+        // durable intent but never a durable terminal record — its
+        // settlement failed part-way. The shutdown must never look clean.
+        if (openDispatches.size > 0) {
+          dispatchPoison ??= `${openDispatches.size} dispatch intent(s) have no durable terminal record: ${[...openDispatches].join(", ")}`;
+        }
+        // Dispatch-journal quiescence: recovery (which may still be
+        // delivering recovered ceiling charges) completes, every queued
+        // append is drained, and the handle is closed. A poisoned journal —
+        // live append failure, crash-recovered intents, or a durable poison
+        // fact from a prior process — makes close reject: a run whose
+        // dispatch authority failed never reports a clean shutdown.
+        let journalErr: Error | undefined;
+        try {
+          await recoveryPromise;
+          await journal.close();
+        } catch (err) {
+          journalErr = err instanceof Error ? err : new Error(String(err));
+        }
+        if (journalErr === undefined && dispatchPoison !== undefined) {
+          journalErr = new Error(`dispatch authority poisoned: ${dispatchPoison}`);
+        }
+        // Trace-log quiescence: every queued line is drained and the handle
+        // is closed; any later append attempt rejects. A poisoned log makes
+        // this reject — surface that AFTER the server is fully down so the
+        // shutdown is still complete, but never reported clean.
+        let traceErr: Error | undefined;
+        try {
+          await traceLog.close();
+        } catch (err) {
+          traceErr = err instanceof Error ? err : new Error(String(err));
+        }
         await serverClosed;
+        if (traceErr !== undefined) throw traceErr;
+        if (journalErr !== undefined) throw journalErr;
         if (closeErr !== undefined) throw closeErr;
       })();
       return closePromise;

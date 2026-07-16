@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CapsuleManifest, DiagnosticOrderingReport, capsuleDigest, deriveCapsuleId, validateDiagnosticOrdering } from "@hone/schema";
 import { UsageError } from "./args.js";
 import { loadCapsule } from "./capsule.js";
+import { contractHash } from "./contract.js";
+import { replayRun, writeFileDurable } from "./eventlog.js";
 import { assertBaselineMatchesGitCommit } from "./git-baseline.js";
+import { CONTRACT_FILE } from "./runs.js";
 
 /**
  * Frozen capsule admission (VI.4 / M0 conformance): every check here runs
@@ -125,9 +128,9 @@ export function admitCapsule(capsuleDir: string): AdmittedCapsule {
   return { manifest, digest: capsuleDigest(manifest), orderingReport };
 }
 
-/** Snapshot the admitted manifest into the run dir (written once, at run creation). */
+/** Snapshot the admitted manifest into the run dir (written once, at run creation; durable — resume identity depends on it). */
 export function writeCapsuleSnapshot(runDir: string, manifest: CapsuleManifest): void {
-  writeFileSync(join(runDir, CAPSULE_SNAPSHOT_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
+  writeFileDurable(join(runDir, CAPSULE_SNAPSHOT_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 export function readCapsuleSnapshot(runDir: string): CapsuleManifest {
@@ -136,6 +139,65 @@ export function readCapsuleSnapshot(runDir: string): CapsuleManifest {
   const parsed = CapsuleManifest.safeParse(JSON.parse(readFileSync(path, "utf8")));
   if (!parsed.success) throw new UsageError(`run snapshot ${path} does not parse as a capsule manifest — refusing to resume`);
   return parsed.data;
+}
+
+/**
+ * Delivery-time authentication of the run's capsule snapshot. The snapshot
+ * names the frozen baseline commit that every delivery validates its target
+ * against, so a swapped capsule-manifest.json could silently re-point
+ * delivery at a different repository/commit. Before ANY manual or automatic
+ * delivery the snapshot must prove it is the one the owner approved:
+ *  - its content-addressed id recomputes exactly (deriveCapsuleId);
+ *  - that id equals the capsuleId sealed by run.started;
+ *  - contract.md hashes to the run.started contractHash (the exact approved
+ *    text — the event log line is the root of trust); and
+ *  - the approved text literally binds this snapshot's identity: the capsule
+ *    id line, the recomputed canonical digest line, and the baseline line.
+ * Any mismatch refuses before a single object is written.
+ */
+export function authenticateCapsuleSnapshot(runDir: string): CapsuleManifest {
+  if (!existsSync(join(runDir, CAPSULE_SNAPSHOT_FILE))) {
+    throw new Error(
+      `run has no sealed ${CAPSULE_SNAPSHOT_FILE} — it does not durably bind a delivery baseline; refusing to deliver`,
+    );
+  }
+  const manifest = readCapsuleSnapshot(runDir);
+  const derived = deriveCapsuleId({ ...manifest });
+  if (derived !== manifest.id) {
+    throw new Error(
+      `capsule snapshot id ${manifest.id} does not recompute (${derived}) — the snapshot content was altered; refusing to deliver`,
+    );
+  }
+  const state = replayRun(runDir);
+  if (state.capsuleId === null) {
+    throw new Error("run has no acknowledged run.started — cannot authenticate the capsule snapshot; refusing to deliver");
+  }
+  if (state.capsuleId !== manifest.id) {
+    throw new Error(
+      `capsule snapshot id ${manifest.id} != run.started capsuleId ${state.capsuleId} — the snapshot is not this run's frozen capsule; refusing to deliver`,
+    );
+  }
+  const contractPath = join(runDir, CONTRACT_FILE);
+  if (!existsSync(contractPath)) {
+    throw new Error(`run is missing ${CONTRACT_FILE} — cannot authenticate the capsule snapshot against the approved contract; refusing to deliver`);
+  }
+  const text = readFileSync(contractPath, "utf8");
+  if (state.contractHash === null || contractHash(text) !== state.contractHash) {
+    throw new Error(`${CONTRACT_FILE} does not hash to the run.started contract seal — the approved contract was altered; refusing to deliver`);
+  }
+  const bindings = [
+    `- capsule: \`${manifest.id}\``,
+    `- capsule digest: \`${capsuleDigest(manifest)}\``,
+    manifest.baseline.kind === "git" ? `- git commit \`${manifest.baseline.commit}\`` : `- cas artifact \`${manifest.baseline.hash}\``,
+  ];
+  for (const line of bindings) {
+    if (!text.includes(line)) {
+      throw new Error(
+        `the approved contract does not bind the capsule snapshot (missing ${JSON.stringify(line)}) — snapshot/contract identity mismatch; refusing to deliver`,
+      );
+    }
+  }
+  return manifest;
 }
 
 /**

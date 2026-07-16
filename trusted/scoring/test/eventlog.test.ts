@@ -42,8 +42,9 @@ describe("event log: append", () => {
 
   it("zod-rejects garbage before anything hits disk", async () => {
     const log = new EventLog(join(tmp(), "events.ndjson"));
-    // biome-ignore format: intentionally malformed
-    await expect(log.append({ runId: "r1", at, type: "nonsense" } as unknown as RunEvent)).rejects.toThrow();
+    const malformed: RunEvent = { ...started };
+    Reflect.set(malformed, "type", "nonsense");
+    await expect(log.append(malformed)).rejects.toThrow();
     expect(await log.read()).toHaveLength(0);
     await log.close();
   });

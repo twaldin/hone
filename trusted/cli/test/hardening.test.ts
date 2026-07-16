@@ -9,7 +9,7 @@ import { runOptimizer } from "../src/backends/local.js";
 import { writeCas } from "../src/cas.js";
 import { assertTreeMatchesStage } from "../src/deliver.js";
 import { replay } from "../src/eventlog.js";
-import { applyCommand } from "../src/commands/apply.js";
+import { applyCommand, defaultApplyBranch } from "../src/commands/apply.js";
 import { runCommand } from "../src/supervisor.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
@@ -22,6 +22,7 @@ import {
   makeIo,
   makeRoot,
   manifestObject,
+  sealGitBaselineSnapshot,
   tarToCas,
   testOptimizerRuntime,
   writeEvents,
@@ -33,6 +34,7 @@ const H = (c: string): string => `sha256:${c.repeat(64)}`;
 function stageArtifact(root: string, runId: string, blob: Buffer): string {
   const hash = writeCas(join(root, ".hone-cas"), blob);
   writeEvents(root, runId, fixtureEvents({ runId, baselineHash: H("b"), bestHash: hash, finished: true }));
+  sealGitBaselineSnapshot(root, runId, join(root, "repo"));
   return hash;
 }
 
@@ -42,9 +44,9 @@ async function applyExpectingRejection(root: string, runId: string, pattern: Reg
   const code = await applyCommand(["--best", "--repo", "repo", "--run", runId], io);
   expect(code).not.toBe(0);
   expect(err.join("\n")).toMatch(pattern);
-  // nothing landed, nothing touched
-  const branches = gitIn(repo, "branch", "--list", `hone/${runId}`);
-  expect(branches).toBe("");
+  // nothing landed, nothing touched — no hone-minted ref of ANY name
+  const refs = spawnSync("git", ["-C", repo, "for-each-ref", "refs/heads/hone"], { encoding: "utf8" });
+  expect((refs.stdout ?? "").trim()).toBe("");
   expect(gitIn(repo, "status", "--porcelain")).toBe("");
 }
 
@@ -54,12 +56,14 @@ describe("delivery artifact contract — workspace/-rooted tars only", () => {
     initScratchRepo(join(root, "repo"));
     const hash = tarToCas(root, { "hello.txt": "improved\n", "src/lib.ts": "export const speed = 9;\n" });
     writeEvents(root, "run_ws", fixtureEvents({ runId: "run_ws", baselineHash: H("b"), bestHash: hash, finished: true }));
+    sealGitBaselineSnapshot(root, "run_ws", join(root, "repo"));
     const { io } = makeIo(root);
     expect(await applyCommand(["--best", "--repo", "repo", "--run", "run_ws"], io)).toBe(0);
+    const branch = defaultApplyBranch("run_ws", hash);
     // at root, NOT under workspace/
-    expect(gitIn(join(root, "repo"), "show", "hone/run_ws:hello.txt")).toBe("improved");
-    expect(gitIn(join(root, "repo"), "show", "hone/run_ws:src/lib.ts")).toBe("export const speed = 9;");
-    const tree = gitIn(join(root, "repo"), "ls-tree", "--name-only", "hone/run_ws");
+    expect(gitIn(join(root, "repo"), "show", `${branch}:hello.txt`)).toBe("improved");
+    expect(gitIn(join(root, "repo"), "show", `${branch}:src/lib.ts`)).toBe("export const speed = 9;");
+    const tree = gitIn(join(root, "repo"), "ls-tree", "--name-only", branch);
     expect(tree).not.toContain("workspace");
   });
 
@@ -251,10 +255,11 @@ describe("delivery commit safety — repo hooks cannot run on candidate content"
 
     const hash = tarToCas(root, { "hello.txt": "improved\n" });
     writeEvents(root, "run_hook", fixtureEvents({ runId: "run_hook", baselineHash: H("b"), bestHash: hash, finished: true }));
+    sealGitBaselineSnapshot(root, "run_hook", repo);
     const { io } = makeIo(root);
     expect(await applyCommand(["--best", "--repo", "repo", "--run", "run_hook"], io)).toBe(0);
     // commit landed despite the exit-1 hook, and the hook never ran
-    expect(gitIn(repo, "show", "hone/run_hook:hello.txt")).toBe("improved");
+    expect(gitIn(repo, "show", `${defaultApplyBranch("run_hook", hash)}:hello.txt`)).toBe("improved");
     expect(existsSync(marker)).toBe(false);
   });
 });
@@ -388,9 +393,10 @@ describe("regression: git identity still comes from the repo", () => {
     initScratchRepo(repo);
     const hash = tarToCas(root, { "hello.txt": "improved\n" });
     writeEvents(root, "run_id", fixtureEvents({ runId: "run_id", baselineHash: H("b"), bestHash: hash, finished: true }));
+    sealGitBaselineSnapshot(root, "run_id", repo);
     const { io } = makeIo(root);
     expect(await applyCommand(["--best", "--repo", "repo", "--run", "run_id"], io)).toBe(0);
-    const r = spawnSync("git", ["-C", repo, "log", "-1", "--format=%an <%ae>", "hone/run_id"], { encoding: "utf8" });
+    const r = spawnSync("git", ["-C", repo, "log", "-1", "--format=%an <%ae>", defaultApplyBranch("run_id", hash)], { encoding: "utf8" });
     expect(r.stdout.trim()).toBe("hone-test <hone-test@localhost>");
   });
 });

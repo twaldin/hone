@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { RunConfig } from "@hone/schema";
 import { UsageError } from "./args.js";
-import { EVENTS_FILE, replayRun } from "./eventlog.js";
+import { EVENTS_FILE, replayRun, syncDir, writeFileDurable } from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
 
 export const RUNS_DIR = ".hone-runs";
@@ -22,6 +22,17 @@ export function casRoot(root: string): string {
 
 export function mintRunId(): string {
   return `run_${Date.now().toString(36)}${randomBytes(3).toString("hex")}`;
+}
+
+/** Durably mint a run dir: the new directory AND its runsRoot entry (and a first-run runsRoot entry in root) are fsynced. */
+export function mintRunDirDurable(root: string, runId: string): string {
+  const base = runsRoot(root);
+  const runDir = join(base, runId);
+  mkdirSync(runDir, { recursive: true });
+  syncDir(runDir);
+  syncDir(base);
+  syncDir(root);
+  return runDir;
 }
 
 /** Run dirs that have an event log, oldest → newest by log mtime. */
@@ -62,7 +73,7 @@ export function findResumableRun(root: string, capsuleId: string): { runDir: str
 }
 
 export function writeRunConfigFile(runDir: string, config: RunConfig): void {
-  writeFileSync(join(runDir, RUN_CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`);
+  writeFileDurable(join(runDir, RUN_CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`);
 }
 
 export function loadRunConfigFile(runDir: string): RunConfig {

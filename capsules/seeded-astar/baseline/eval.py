@@ -32,10 +32,17 @@ Scoring (per example):
   score       = correctness / (1 + slowest_of_5_ms)
 
 Timing isolation: each of the 5 timed repetitions runs in a FRESH worker
-process (spawned and handshaken before the clock starts), with a fresh Linux
-network and SysV/POSIX IPC namespace. Before and after each repetition the
-trusted parent kills every candidate-uid process and clears candidate-writable
-files. A hard one-process uid limit blocks fork/thread daemons. The slowest
+process (spawned and handshaken before the clock starts) inside fresh Linux
+PID, network, UTS and SysV/POSIX IPC namespaces. The worker is pid 1 (init)
+of its private PID namespace, so killing it at the repetition boundary makes
+the kernel SIGKILL every descendant it forked — fork/setsid daemons cannot
+outlive their repetition or touch the next one. Deliberately NO RLIMIT_NPROC
+is imposed: that limit is counted per REAL uid across every container that
+shares the kernel, so a quota on the fixed candidate uid would couple
+unrelated concurrent evaluator containers (spurious EAGAIN on fork/setuid);
+total process pressure is bounded by the container's Docker --pids-limit
+instead. Before and after each repetition the trusted parent kills every
+candidate-uid process and clears candidate-writable files. The slowest
 repetition has scoring authority, so shared host page-cache residency cannot
 turn one real computation plus four cache hits into an artificial win. The
 per-request nonce authenticates each response.
@@ -99,6 +106,8 @@ CANDIDATE_WRITABLE_ROOTS = (Path("/tmp"), Path("/dev/shm"), Path("/dev/mqueue"))
 PR_SET_CHILD_SUBREAPER = 36
 IPC_RMID = 0
 CLONE_NEWIPC = 0x08000000
+CLONE_NEWUTS = 0x04000000
+CLONE_NEWPID = 0x20000000
 CLONE_NEWNET = 0x40000000
 STATE_RESET_TIMEOUT_SEC = 1.0
 _LIBC = ctypes.CDLL(None, use_errno=True)
@@ -291,23 +300,47 @@ def _worker_preexec() -> None:
         except (OSError, ValueError):
             pass  # best-effort (e.g. RLIMIT_AS is unsupported on macOS)
     if os.geteuid() == 0:
-        # Each timed repetition owns fresh kernel communication namespaces.
-        # Otherwise a worker can encode a result in loopback TCP TIME_WAIT or
+        # Each timed repetition owns fresh kernel namespaces. NET + IPC:
+        # otherwise a worker can encode a result in loopback TCP TIME_WAIT or
         # abstract Unix sockets and make four later repetitions look cached.
-        # This is mandatory: the evaluator container grants SYS_ADMIN only to
-        # this trusted root parent, before the candidate uid/capability drop.
-        if _LIBC.unshare(CLONE_NEWNET | CLONE_NEWIPC) != 0:
+        # PID + UTS: the exec'd worker below is pid 1 (init) of a private PID
+        # namespace, so SIGKILLing it (Worker.kill / repetition teardown, or
+        # its own exit) makes the kernel tear down every descendant it forked
+        # in one operation — fork/setsid daemons cannot outlive their
+        # repetition. This is mandatory: the evaluator container grants
+        # SYS_ADMIN only to this trusted root parent, before the candidate
+        # uid/capability drop.
+        #
+        # Deliberately NO RLIMIT_NPROC here: that quota is counted per REAL
+        # uid across every container sharing the kernel, so limiting the
+        # fixed candidate uid would couple unrelated concurrent evaluator
+        # containers (spurious EAGAIN on fork/setuid in a sibling). Fork
+        # bursts are bounded by the container's Docker --pids-limit instead.
+        if _LIBC.unshare(CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWPID | CLONE_NEWUTS) != 0:
             code = ctypes.get_errno()
             raise RuntimeError(
-                f"cannot isolate candidate network/IPC namespaces: {os.strerror(code)}"
+                f"cannot isolate candidate kernel namespaces: {os.strerror(code)}"
             )
-        # One candidate process, no threads/forks. This is mandatory in the
-        # production root-side evaluator; cleanup is defense in depth rather
-        # than a race against a daemon that can keep reproducing.
-        resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
-        # Privilege separation: scorer stays root-side, candidate drops to an
-        # unprivileged uid that cannot signal/ptrace the parent. MUST succeed
-        # when we are root — a failure aborts the spawn (fail closed).
+        # unshare(CLONE_NEWPID) moves only future CHILDREN into the new
+        # namespace, so fork once more: the child becomes the namespace's
+        # init and goes on to exec worker.py. This process stays behind as a
+        # trusted root shim (no candidate code ever runs in it) that closes
+        # every inherited fd — worker death must surface to the scorer as
+        # protocol-pipe EOF, and a held errpipe would stall Popen — then
+        # mirrors init's exit status. Both stay in the session/process group
+        # created for the worker, so killpg reaps shim and namespace alike.
+        init_pid = os.fork()
+        if init_pid > 0:
+            try:
+                os.close_range(0, 2**30)  # Python >= 3.10 (production image)
+            except AttributeError:
+                os.closerange(0, 1 << 16)
+            _, status = os.waitpid(init_pid, 0)
+            code = os.waitstatus_to_exitcode(status)
+            os._exit(code if code >= 0 else 128 - code)
+        # Privilege separation: scorer stays root-side, candidate init drops
+        # to an unprivileged uid that cannot signal/ptrace the parent. MUST
+        # succeed when we are root — a failure aborts the spawn (fail closed).
         os.setgroups([])
         os.setgid(WORKER_UID)
         os.setuid(WORKER_UID)
@@ -506,7 +539,8 @@ def run_trusted_suite(worker: Worker) -> tuple[bool, str]:
 def evaluate_example(workspace: Path, maze: dict) -> tuple[float, float, bool, dict]:
     """Returns (slowest_ms, correctness, optimal_ok, perExample entry).
 
-    Every repetition gets its own worker process and a clean writable/IPC
+    Every repetition gets its own worker process (pid-namespace init in the
+    production container), fresh kernel namespaces, and a clean writable
     namespace. Worker.call() completes the spawn + import handshake BEFORE
     starting the request clock, so process startup never pollutes the
     measurement. The slowest repetition defeats cross-process page-cache

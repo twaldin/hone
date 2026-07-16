@@ -35,6 +35,7 @@ function inputs(cfg: RunConfig = config()): ContractInputs {
     capsuleDigest: capsuleDigest(manifest),
     optimizerDigest: FIX_OPTIMIZER_DIGEST,
     orderingReport: DiagnosticOrderingReport.parse(orderingReportRaw()),
+    deliveryTarget: null,
   };
 }
 
@@ -105,6 +106,8 @@ describe("promotion rule in the contract (campaign-start freeze)", () => {
     expect(text).toContain("sign consistency: at least **0.8**");
     expect(text).toContain("replicates per arm per task: **3**");
     expect(text).toContain("negative controls required: **yes**");
+    expect(text).toContain("M0 is one cache-safe candidate");
+    expect(text).toContain("Multi-episode inner search requires M1 fresh evaluator cache domains");
     const block = extractRunConfigBlock(text);
     if ("error" in block) throw new Error(block.error);
     expect(JSON.parse(block.body).promotion).toEqual({ minDeltaOverSe: 2, minSignConsistency: 0.8, replicates: 3, requireNegativeControls: true });
@@ -239,13 +242,29 @@ describe("contract revision (interactive E — parse back, fail closed)", () => 
     if (!outcome.ok) expect(outcome.error).toMatch(/outside the executable/);
   });
 
-  it("re-runs the autonomy ladder on the revised config", () => {
+  it("apply mode is frozen mid-approval (none→auto can never bypass the sealed delivery target)", () => {
     const preEdit = renderContract(inputs(config({ improverSeat: true, apply: "none" })));
     const revised = config({ improverSeat: true, apply: "auto" });
     const outcome = applyContractRevision({
       preEdit,
       edited: withBlock(preEdit, JSON.stringify(revised, null, 2)),
       original: config({ improverSeat: true, apply: "none" }),
+      manifest: manifestObject(),
+      env: { HONE_LADDER_OK: "1" }, // even an unlocked ladder cannot license an apply flip
+    });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error).toMatch(/apply mode is frozen/);
+  });
+
+  it("re-runs the autonomy ladder on the revised config", () => {
+    // apply/improverSeat are frozen, so the ladder re-check is defense in
+    // depth: an unchanged auto+seat config still refuses without the env ack.
+    const locked = config({ improverSeat: true, apply: "auto" });
+    const preEdit = renderContract(inputs(locked));
+    const outcome = applyContractRevision({
+      preEdit,
+      edited: withBlock(preEdit, JSON.stringify(locked, null, 2)),
+      original: locked,
       manifest: manifestObject(),
       env: {}, // HONE_LADDER_OK unset -> locked
     });
@@ -265,5 +284,55 @@ describe("contract revision (interactive E — parse back, fail closed)", () => 
     });
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.error).toMatch(/headless/);
+  });
+});
+
+describe("contract binds duration and the sealed delivery target", () => {
+  it("renders a deterministic heuristic duration RANGE plus a separately labeled hard stop", () => {
+    const text = renderContract(inputs());
+    // 3600s envelope → deterministic heuristic range 10–80%: 6m–48m, plus a
+    // separately labeled hard stop (the cap is a bound, never the estimate).
+    expect(text).toContain("- estimated duration: 6m–48m (heuristic: 10–80% of the wall envelope");
+    expect(text).toContain("- hard stop: 3600s wall clock");
+    const manifest = manifestObject();
+    const custom = renderContract(inputs(config({ budget: { ...manifest.budget, maxWallClockSec: 5400 } })));
+    expect(custom).toContain("- estimated duration: 9m–1h 12m (heuristic: 10–80% of the wall envelope");
+    expect(custom).toContain("- hard stop: 5400s wall clock");
+  });
+
+  it("renders the sealed delivery target (repo, gitDir, baseline commit, filesystem identity, marker) into the hashed text", () => {
+    const commit = "0123456789abcdef0123456789abcdef01234567";
+    const identity = { repoIdentity: { dev: "16777231", ino: "424242" }, storeIdentity: { dev: "16777231", ino: "424243" } };
+    const marker = { file: "hone-delivery-marker.run_x", nonce: "0f".repeat(16) };
+    const seal = {
+      ...inputs(),
+      deliveryTarget: { repo: "/work/target-repo", gitDir: "/work/target-repo/.gitdir", baselineCommit: commit, ...identity, marker },
+    };
+    const text = renderContract(seal);
+    expect(text).toContain("- delivery target (sealed at creation; re-validated on resume and before delivery): `/work/target-repo`");
+    expect(text).toContain("- delivery git store (embedded baseline, explicitly bound): `/work/target-repo/.gitdir`");
+    expect(text).toContain(`- delivery baseline commit (frozen manifest baseline): \`${commit}\``);
+    // The immutable filesystem identity and the in-store marker are part of
+    // the approved bytes — the hash binds WHICH filesystem object may
+    // receive the run, not just its path.
+    expect(text).toContain("- delivery repo identity (dev:ino, sealed at creation): `16777231:424242`");
+    expect(text).toContain("- delivery store identity (dev:ino, sealed at creation): `16777231:424243`");
+    expect(text).toContain("- delivery incarnation marker (in-store, per-run): `hone-delivery-marker.run_x`");
+    expect(text).not.toContain(marker.nonce); // the nonce itself is never disclosed — only its sha256
+    // The target is part of the approved bytes: the hash binds it.
+    expect(contractHash(text)).not.toBe(contractHash(renderContract(inputs())));
+    expect(contractHash(text)).not.toBe(
+      contractHash(renderContract({ ...seal, deliveryTarget: { repo: "/work/other-repo", baselineCommit: commit, ...identity, marker } })),
+    );
+    expect(contractHash(text)).not.toBe(
+      contractHash(
+        renderContract({
+          ...seal,
+          deliveryTarget: { ...seal.deliveryTarget, repoIdentity: { dev: "16777231", ino: "999999" } },
+        }),
+      ),
+    );
+    // apply=none renders an explicit no-target line.
+    expect(renderContract(inputs())).toContain("- delivery target: none (apply=none");
   });
 });

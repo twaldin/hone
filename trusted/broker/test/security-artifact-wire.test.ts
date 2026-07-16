@@ -7,7 +7,13 @@ import { Broker } from "../src/broker.js";
 import { BrokerServer } from "../src/server.js";
 import { CasStore } from "../src/cas.js";
 import { canonicalizeWorkspaceTar, diffProtectedPaths, packDirAsArtifact, unpackArtifact } from "../src/artifact.js";
-import { ArtifactValidationError, validateWorkspaceTar } from "../src/tarcheck.js";
+import {
+  ArtifactValidationError,
+  MAX_ARTIFACT_ENTRIES,
+  MAX_ENTRY_PATH_BYTES,
+  MAX_ENTRY_PATH_DEPTH,
+  validateWorkspaceTar,
+} from "../src/tarcheck.js";
 import { deferred } from "../src/deferred.js";
 import { runCommand, type RunCommand } from "../src/command.js";
 import { buildTestCapsule, TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST } from "./helpers.js";
@@ -283,6 +289,125 @@ describe("validateWorkspaceTar", () => {
   });
 });
 
+describe("resource-exhaustion limits", () => {
+  const rejects = (specs: TarEntrySpec[], reason: RegExp, opts: { end?: boolean } = {}) => {
+    expect(() => validateWorkspaceTar(makeTar(specs, opts))).toThrowError(reason);
+    try {
+      validateWorkspaceTar(makeTar(specs, opts));
+    } catch (err) {
+      expect(err).toBeInstanceOf(ArtifactValidationError);
+    }
+  };
+
+  /** Root dir + (n-1) zero-byte files: exactly n regular+dir entries. */
+  function countSpecs(n: number): TarEntrySpec[] {
+    const specs: TarEntrySpec[] = [{ name: "workspace/", type: "5" }];
+    for (let i = 1; i < n; i++) specs.push({ name: `workspace/f${i}` });
+    return specs;
+  }
+
+  it("accepts an archive with exactly MAX_ARTIFACT_ENTRIES entries", () => {
+    const entries = validateWorkspaceTar(makeTar(countSpecs(MAX_ARTIFACT_ENTRIES)));
+    expect(entries).toHaveLength(MAX_ARTIFACT_ENTRIES);
+  });
+
+  it("rejects entry MAX+1 the moment it appears, before parsing the remainder", () => {
+    // The tail after the (MAX+1)th header is GARBAGE (bad magic, bad
+    // checksum) and there is no end-of-archive marker: only an EARLY stop at
+    // the count ceiling can produce the entry-limit error. Reaching either
+    // the garbage or the end of the buffer would fail differently.
+    const over = makeTar(countSpecs(MAX_ARTIFACT_ENTRIES + 1), { end: false });
+    const garbage = Buffer.alloc(BLOCK, 0xff);
+    expect(() => validateWorkspaceTar(Buffer.concat([over, garbage]))).toThrowError(
+      new RegExp(`exceeds ${MAX_ARTIFACT_ENTRIES} entries`),
+    );
+  });
+
+  it("rejects a 1 MiB GNU longname path on the raw size field", () => {
+    // A megapath must die in O(1) at the metadata header — long before UTF-8
+    // decoding, normalization, or the per-ancestor walk could turn one entry
+    // into gigabytes of string slicing.
+    const mega = `workspace/${"a".repeat(1024 * 1024 - 16)}`;
+    rejects(
+      [...validSpecs(), { name: "././@LongLink", type: "L", content: `${mega}\0` }, { name: "trunc", content: "x" }],
+      /GNU longname exceeds the entry path byte limit/,
+    );
+  });
+
+  it("rejects a 1 MiB pax path override before it reaches normalization", () => {
+    const mega = paxRecord("path", `workspace/${"b".repeat(1024 * 1024 - 32)}`);
+    rejects(
+      [...validSpecs(), { name: "PaxHeader", type: "x", content: mega }, { name: "ignored", content: "x" }],
+      /pax path override exceeds the entry path byte limit/,
+    );
+  });
+
+  it("accepts a path at exactly MAX_ENTRY_PATH_BYTES and rejects one byte more", () => {
+    const exact = `workspace/${"a".repeat(MAX_ENTRY_PATH_BYTES - 10)}`; // 256 bytes
+    const entries = validateWorkspaceTar(
+      makeTar([...validSpecs(), { name: "PaxHeader", type: "x", content: paxRecord("path", exact) }, { name: "ignored", content: "x" }]),
+    );
+    expect(entries.map((e) => e.path)).toContain(exact);
+    const over = `workspace/${"a".repeat(MAX_ENTRY_PATH_BYTES - 9)}`; // 257 bytes
+    rejects(
+      [...validSpecs(), { name: "PaxHeader", type: "x", content: paxRecord("path", over) }, { name: "ignored", content: "x" }],
+      new RegExp(`entry path exceeds ${MAX_ENTRY_PATH_BYTES} UTF-8 bytes`),
+    );
+  });
+
+  it("measures the path limit in UTF-8 bytes, not characters", () => {
+    // 124 two-byte é: 134 characters but 258 bytes — over the BYTE limit.
+    const multibyte = `workspace/${"é".repeat(124)}`;
+    expect(multibyte.length).toBeLessThan(MAX_ENTRY_PATH_BYTES);
+    expect(Buffer.byteLength(multibyte)).toBeGreaterThan(MAX_ENTRY_PATH_BYTES);
+    rejects(
+      [...validSpecs(), { name: "PaxHeader", type: "x", content: paxRecord("path", multibyte) }, { name: "ignored", content: "x" }],
+      new RegExp(`entry path exceeds ${MAX_ENTRY_PATH_BYTES} UTF-8 bytes`),
+    );
+    // The SAME character count in ASCII is fine — the limit is on bytes.
+    const ascii = `workspace/${"e".repeat(124)}`;
+    expect(ascii.length).toBe(multibyte.length);
+    const entries = validateWorkspaceTar(
+      makeTar([...validSpecs(), { name: "PaxHeader", type: "x", content: paxRecord("path", ascii) }, { name: "ignored", content: "x" }]),
+    );
+    expect(entries.map((e) => e.path)).toContain(ascii);
+  });
+
+  it("bounds component depth at MAX_ENTRY_PATH_DEPTH", () => {
+    // workspace + 62 dirs + leaf = exactly 64 components: accepted.
+    const atLimit = `workspace/${"a/".repeat(MAX_ENTRY_PATH_DEPTH - 2)}z`;
+    const entries = validateWorkspaceTar(
+      makeTar([...validSpecs(), { name: "PaxHeader", type: "x", content: paxRecord("path", atLimit) }, { name: "ignored", content: "x" }]),
+    );
+    expect(entries.map((e) => e.path)).toContain(atLimit);
+    // One more component: rejected BEFORE the per-ancestor walk.
+    const over = `workspace/${"a/".repeat(MAX_ENTRY_PATH_DEPTH - 1)}z`;
+    rejects(
+      [...validSpecs(), { name: "PaxHeader", type: "x", content: paxRecord("path", over) }, { name: "ignored", content: "x" }],
+      new RegExp(`entry path exceeds ${MAX_ENTRY_PATH_DEPTH} components`),
+    );
+  });
+
+  it("canonicalizeWorkspaceTar rejects an over-limit archive with zero CAS or extraction growth", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-canon-lim-"));
+    try {
+      const over = Buffer.concat([makeTar(countSpecs(MAX_ARTIFACT_ENTRIES + 1), { end: false }), Buffer.alloc(BLOCK, 0xff)]);
+      const casDir = path.join(base, "cas");
+      const cas = new CasStore(casDir);
+      const spawned: string[][] = [];
+      const run: RunCommand = async (argv) => {
+        spawned.push([...argv]);
+        return runCommand(argv);
+      };
+      await expect(canonicalizeWorkspaceTar(over, cas, run)).rejects.toThrowError(ArtifactValidationError);
+      expect(spawned).toEqual([]); // validation failed CLOSED before any tar binary ran
+      await expect(readdir(casDir)).rejects.toThrowError(); // nothing entered CAS
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("artifact pack/unpack through the validator", () => {
   it("accepts what packDirAsArtifact produces and round-trips it", async () => {
     const base = await mkdtemp(path.join(os.tmpdir(), "hone-secart-"));
@@ -313,6 +438,118 @@ describe("artifact pack/unpack through the validator", () => {
       ]);
       const hash = await cas.putBuffer(evil);
       await expect(unpackArtifact(cas, hash, path.join(base, "unpack"))).rejects.toThrowError(/symlink/);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("unpackArtifact temp hygiene", () => {
+  async function packedFixture(base: string): Promise<{ cas: CasStore; hash: string }> {
+    const src = path.join(base, "src");
+    await mkdir(path.join(src, "sub"), { recursive: true });
+    await writeFile(path.join(src, "a.txt"), "alpha");
+    await writeFile(path.join(src, "sub", "b.txt"), "beta");
+    const cas = new CasStore(path.join(base, "cas"));
+    return { cas, hash: await packDirAsArtifact(src, cas) };
+  }
+
+  async function tmpEntries(destRoot: string): Promise<string[]> {
+    try {
+      return (await readdir(destRoot)).filter((name) => name.includes(".tmp-"));
+    } catch {
+      return []; // destRoot never materialized — trivially leak-free
+    }
+  }
+
+  it("removes the temp tree when the host tar spawn itself throws, repeatedly", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-unpack-t1-"));
+    try {
+      const { cas, hash } = await packedFixture(base);
+      const destRoot = path.join(base, "unpack");
+      const failingRun: RunCommand = async () => {
+        throw new Error("spawn EAGAIN (injected)");
+      };
+      // A REJECTED run() (host spawn failure) used to leak `<final>.tmp-*`
+      // on every attempt — repeated failures must never accumulate trees.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(unpackArtifact(cas, hash, destRoot, failingRun)).rejects.toThrowError(/EAGAIN/);
+        expect(await tmpEntries(destRoot)).toEqual([]);
+      }
+      // Recovery: the same unpack succeeds once the host cooperates.
+      const ws = await unpackArtifact(cas, hash, destRoot);
+      expect(await readFile(path.join(ws, "a.txt"), "utf8")).toBe("alpha");
+      expect(await tmpEntries(destRoot)).toEqual([]);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("removes the temp tree on a nonzero tar exit, repeatedly", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-unpack-t2-"));
+    try {
+      const { cas, hash } = await packedFixture(base);
+      const destRoot = path.join(base, "unpack");
+      const exitOne: RunCommand = async () => ({
+        exitCode: 1,
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.from("boom (injected)"),
+        truncated: false,
+        timedOut: false,
+      });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(unpackArtifact(cas, hash, destRoot, exitOne)).rejects.toThrowError(/tar unpack failed/);
+        expect(await tmpEntries(destRoot)).toEqual([]);
+      }
+      const ws = await unpackArtifact(cas, hash, destRoot);
+      expect(await readFile(path.join(ws, "sub", "b.txt"), "utf8")).toBe("beta");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans a hostile-mode partial tree when extraction is declared failed", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-unpack-t3-"));
+    try {
+      // Validated-but-hostile modes: a 000 directory hiding a file. Modes are
+      // only normalized AFTER a successful extraction, so failure-path cleanup
+      // must make the partial tree owner-accessible before removing it.
+      const hostile = makeTar([
+        { name: "workspace/", type: "5" },
+        { name: "workspace/dark/", type: "5", mode: "0000000" },
+        { name: "workspace/dark/pin.txt", content: "x" },
+      ]);
+      const cas = new CasStore(path.join(base, "cas"));
+      const hash = await cas.putBuffer(hostile);
+      const destRoot = path.join(base, "unpack");
+      // REAL extraction (temp tree fully materialized), then a declared
+      // failure — the worst case for cleanup.
+      const sabotage: RunCommand = async (argv) => {
+        const res = await runCommand(argv);
+        return { ...res, exitCode: 1 };
+      };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(unpackArtifact(cas, hash, destRoot, sabotage)).rejects.toThrowError(/tar unpack failed/);
+        expect(await tmpEntries(destRoot)).toEqual([]);
+      }
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans the temp tree when publish (rename) is blocked, repeatedly", async () => {
+    const base = await mkdtemp(path.join(os.tmpdir(), "hone-unpack-t4-"));
+    try {
+      const { cas, hash } = await packedFixture(base);
+      const destRoot = path.join(base, "unpack");
+      const finalDir = path.join(destRoot, hash.replace(":", "-"));
+      await mkdir(destRoot, { recursive: true });
+      await writeFile(finalDir, "squatter"); // a FILE where the dir must land
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(unpackArtifact(cas, hash, destRoot)).rejects.toThrow();
+        expect(await tmpEntries(destRoot)).toEqual([]);
+      }
+      expect(await readFile(finalDir, "utf8")).toBe("squatter"); // never clobbered
     } finally {
       await rm(base, { recursive: true, force: true });
     }
@@ -758,6 +995,8 @@ describe("protected namespaces", () => {
 // ---------------------------------------------------------------------------
 
 const MAX_FRAME = 4096;
+/** Per-broker public bearer (>=32 bytes) — required on every public-socket request. */
+const PUBLIC_TOKEN = "wire-test-public-token-".padEnd(64, "w");
 
 interface LineSock {
   write(data: string | Buffer): void;
@@ -835,7 +1074,7 @@ describe("broker wire hardening", () => {
     });
     socketPath = path.join(base, "run", "broker.sock");
     adminSocketPath = path.join(base, "run", "broker-admin.sock");
-    server = new BrokerServer(broker, { socketPath, adminSocketPath, maxFrameBytes: MAX_FRAME });
+    server = new BrokerServer(broker, { socketPath, adminSocketPath, publicToken: PUBLIC_TOKEN, maxFrameBytes: MAX_FRAME });
     await server.listen();
   });
 
@@ -873,7 +1112,7 @@ describe("broker wire hardening", () => {
     const bad = JSON.parse(await c.nextLine());
     expect(bad.error.code).toBe(-32700);
     // Same connection still works afterwards.
-    c.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "noSuchMethod" })}\n`);
+    c.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "noSuchMethod", token: PUBLIC_TOKEN })}\n`);
     const next = JSON.parse(await c.nextLine());
     expect(next.id).toBe(2);
     expect(next.error.code).toBe(-32601);
@@ -890,7 +1129,7 @@ describe("broker wire hardening", () => {
 
   it("keeps admin-only methods invisible (-32601) on the client socket", async () => {
     const c = await connectLines(socketPath);
-    c.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "recordSpend", params: { tokens: 1, usd: 0 } })}\n`);
+    c.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "recordSpend", params: { tokens: 1, usd: 0 }, token: PUBLIC_TOKEN })}\n`);
     const resp = JSON.parse(await c.nextLine());
     expect(resp.error.code).toBe(-32601);
     expect(resp.error.message).toBe("method not found: recordSpend");
@@ -908,7 +1147,7 @@ describe("broker wire hardening", () => {
 
   it("accepts frames right up to the cap", async () => {
     const c = await connectLines(socketPath);
-    const req = { jsonrpc: "2.0", id: 6, method: "noSuchMethod", params: { pad: "" } };
+    const req = { jsonrpc: "2.0", id: 6, method: "noSuchMethod", params: { pad: "" }, token: PUBLIC_TOKEN };
     const overhead = JSON.stringify(req).length;
     req.params.pad = "p".repeat(MAX_FRAME - overhead);
     const frame = JSON.stringify(req);

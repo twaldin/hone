@@ -1,6 +1,6 @@
 {
   "objective": "Make the grid A* pathfinder in astar.py substantially faster while preserving correctness: the trusted correctness suite must keep passing and returned paths must remain optimal shortest paths. Only the pathfinder implementation may change; eval.py, worker.py, and test_astar.py are protected.",
-  "image": "hone-mutation@sha256:3d790d856bdf214c1e0d3ac60af139bd806bef67c13930950cc745bf8379b01d",
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
   "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
   "protectedPaths": ["eval.py", "worker.py", "test_astar.py"],
   "assetGroups": [

@@ -6,7 +6,7 @@ import { writeCapsuleSnapshot } from "../src/admission.js";
 import { contractHash, renderContract } from "../src/contract.js";
 import { readEvents, replayRun } from "../src/eventlog.js";
 import { loadRunConfigFile, writeRunConfigFile } from "../src/runs.js";
-import { runCommand as cliRunCommand, superviseRun } from "../src/supervisor.js";
+import { RUNTIME_PIN_FILE, runCommand as cliRunCommand, superviseRun, trustedRuntimeDigest } from "../src/supervisor.js";
 import type { SuperviseExtra } from "../src/supervisor.js";
 import {
   CAP_ID,
@@ -56,6 +56,7 @@ function sealedRun(root: string, runId: string, configOverrides: Record<string, 
     capsuleDigest: capsuleDigest(manifest),
     optimizerDigest: FIX_OPTIMIZER_DIGEST,
     orderingReport,
+    deliveryTarget: null,
   });
   const runDir = writeEvents(
     root,
@@ -65,6 +66,8 @@ function sealedRun(root: string, runId: string, configOverrides: Record<string, 
   writeFileSync(join(runDir, "contract.md"), contract);
   writeCapsuleSnapshot(runDir, manifest);
   writeRunConfigFile(runDir, config);
+  // The trusted-runtime pin is a resume prerequisite (drift refuses first).
+  writeFileSync(join(runDir, RUNTIME_PIN_FILE), `${trustedRuntimeDigest()}\n`);
   return {
     runDir,
     runId,
@@ -142,6 +145,7 @@ describe("under-lock seal verification (tamper => refuse, no event, no terminal)
         capsuleDigest: sealed.extra.capsuleDigest,
         optimizerDigest: sealed.extra.optimizerDigest,
         orderingReport: sealed.extra.orderingReport,
+        deliveryTarget: null,
       }),
     );
     const { code, err } = await resumeWith(root, { ...sealed, config: forged });
@@ -152,11 +156,48 @@ describe("under-lock seal verification (tamper => refuse, no event, no terminal)
 });
 
 describe("hone run identity flags", () => {
-  it("--repo is gone from `hone run` entirely", async () => {
+  it("--repo binds a delivery target: refused without a delivering --apply", async () => {
     const root = makeRoot();
     makeCapsule(root);
     const { io } = makeIo(root);
-    await expect(cliRunCommand(["capsule", "--headless", "--backend", "stub", "--repo", "elsewhere"], io)).rejects.toThrow(/repo/);
+    await expect(cliRunCommand(["capsule", "--headless", "--backend", "stub", "--repo", "elsewhere"], io)).rejects.toThrow(/--repo binds a delivery target/);
+  });
+
+  it("--apply on resume: a conflicting value refuses (no event); an equal restatement resumes", async () => {
+    const root = makeRoot();
+    const sealed = sealedRun(root, "run_apfl"); // sealed apply: "none"
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    await expect(cliRunCommand(["capsule", "--headless", "--resume", "--apply", "branch"], io)).rejects.toThrow(
+      /--apply branch conflicts with the run's sealed apply mode "none"/,
+    );
+    expect(readEvents(sealed.runDir).some((e) => e.type === "run.resumed")).toBe(false);
+    const retry = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    expect(await cliRunCommand(["capsule", "--headless", "--resume", "--apply", "none"], retry.io)).toBe(0);
+    expect(readEvents(sealed.runDir).some((e) => e.type === "run.resumed")).toBe(true);
+  });
+
+  it("--budget-usd on resume: a conflicting value refuses (no event); the sealed value restated resumes", async () => {
+    const root = makeRoot();
+    const sealed = sealedRun(root, "run_bufl"); // sealed maxUsd: 25
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    await expect(cliRunCommand(["capsule", "--headless", "--resume", "--budget-usd", "9999"], io)).rejects.toThrow(
+      /--budget-usd 9999 conflicts with the run's sealed budget \(maxUsd 25\)/,
+    );
+    expect(readEvents(sealed.runDir).some((e) => e.type === "run.resumed")).toBe(false);
+    const retry = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    expect(await cliRunCommand(["capsule", "--headless", "--resume", "--budget-usd", "25"], retry.io)).toBe(0);
+    expect(readEvents(sealed.runDir).some((e) => e.type === "run.resumed")).toBe(true);
+  });
+
+  it("--config on resume refuses outright — even a byte-identical file cannot be proven equal to the merged seal", async () => {
+    const root = makeRoot();
+    const sealed = sealedRun(root, "run_cffl");
+    writeFileSync(join(root, "cfg.json"), JSON.stringify({}));
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    await expect(cliRunCommand(["capsule", "--headless", "--resume", "--config", "cfg.json"], io)).rejects.toThrow(
+      /--config is sealed at run creation/,
+    );
+    expect(readEvents(sealed.runDir).some((e) => e.type === "run.resumed")).toBe(false);
   });
 
   it("a fresh run seals the selected backend into runconfig and the contract", async () => {

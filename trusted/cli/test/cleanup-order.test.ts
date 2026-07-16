@@ -26,10 +26,11 @@ const BUDGET: BudgetState = {
   spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 },
 };
 
-function report(delta: number | null): ProbeReport {
+function report(delta: number | null, promoted = delta !== null && delta > 0): ProbeReport {
   return {
     baseline: { artifact: { hash: fakeHash("b") }, aggregate: 0.5 },
     candidate: delta === null ? null : { artifact: { hash: fakeHash("c") }, aggregate: 0.5 + delta, delta },
+    promoted,
     assetGroupId: "validation",
     seed: 3,
     budget: BUDGET,
@@ -71,6 +72,20 @@ describe("promptProbe is AbortSignal-aware", () => {
     const pending = promptProbe(report(0.12), io, new AbortController().signal, { input, output });
     input.write("y\n");
     await expect(pending).resolves.toBe(true);
+  });
+
+  it.each([
+    ["no candidate", null, false],
+    ["a tied candidate", 0, false],
+    ["a losing candidate", -0.05, false],
+    ["an unpromoted positive candidate", 0.05, false],
+  ] as const)("cannot approve %s even when the owner answers yes", async (_label, delta, promoted) => {
+    const input = new PassThrough();
+    input.end("yes\n");
+    const output = new PassThrough();
+    output.resume();
+    const { io } = makeIo(makeRoot());
+    await expect(promptProbe(report(delta, promoted), io, new AbortController().signal, { input, output })).resolves.toBe(false);
   });
 });
 

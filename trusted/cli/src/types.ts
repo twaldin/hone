@@ -14,6 +14,8 @@ export interface ChildLike {
 export interface ProbeReport {
   baseline: { artifact: ArtifactRef; aggregate: number };
   candidate: { artifact: ArtifactRef; aggregate: number; delta: number } | null;
+  /** True only when the broker journal records this exact candidate as the episode's sole promoted incumbent. */
+  promoted: boolean;
   assetGroupId: string;
   seed: number;
   budget: BudgetState;

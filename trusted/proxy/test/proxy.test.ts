@@ -646,7 +646,7 @@ async function until(cond: () => boolean, ms = 5000): Promise<void> {
 }
 
 describe("admission reservations", () => {
-  it("two parallel requests cannot both spend the same remaining headroom", async () => {
+  it("transient reservation pressure returns retryable 429 without exhausting the run", async () => {
     const spends: SpendRecord[] = [];
     const exhausted: string[] = [];
     const ctx = await setup({
@@ -668,8 +668,8 @@ describe("admission reservations", () => {
       postCompletions(ctx, token, body),
     ]);
     const statuses = [a.status, b.status].sort((x, y) => x - y);
-    expect(statuses).toEqual([200, 402]);
-    const denied = a.status === 402 ? a : b;
+    expect(statuses).toEqual([200, 429]);
+    const denied = a.status === 429 ? a : b;
     expect(BudgetExceededError.parse(await denied.json()).error.dimension).toBe("tokens");
     // exactly one request reached upstream, exactly one settlement
     expect(ctx.upstream.calls.filter((c) => c.url === "/v1/chat/completions")).toHaveLength(1);

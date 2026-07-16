@@ -5,7 +5,7 @@ import path from "node:path";
 import { CasStore } from "./cas.js";
 import { runCommand, type RunCommand } from "./command.js";
 import { globToRegExp } from "./glob.js";
-import { ArtifactValidationError, validateWorkspaceTar, type ArtifactEntryKind, type ArtifactTarEntry } from "./tarcheck.js";
+import { ArtifactValidationError, MAX_ARTIFACT_ENTRIES, validateWorkspaceTar, type ArtifactEntryKind, type ArtifactTarEntry } from "./tarcheck.js";
 
 /**
  * Artifact layout contract (broker-local): an artifact is a tar whose entries
@@ -80,6 +80,12 @@ interface SourceEntry {
  */
 async function collectTree(root: string, rel: string, out: SourceEntry[]): Promise<void> {
   const dirents = await readdir(rel === "" ? root : path.join(root, rel), { withFileTypes: true });
+  // Fail-closed BEFORE the tree balloons in memory: with the workspace root
+  // added by the packer, more than MAX_ARTIFACT_ENTRIES total could never
+  // validate anyway.
+  if (out.length + dirents.length + 1 > MAX_ARTIFACT_ENTRIES) {
+    throw new Error(`artifact tree exceeds ${MAX_ARTIFACT_ENTRIES} entries`);
+  }
   for (const d of dirents) {
     if (DETRITUS_NAMES[d.name] === true || DETRITUS_SUFFIXES.some((s) => d.name.endsWith(s))) continue;
     const entryRel = rel === "" ? d.name : `${rel}/${d.name}`;
@@ -107,7 +113,7 @@ export async function packDirAsArtifact(
   dir: string,
   cas: CasStore,
   maxBytes: number = MAX_ARTIFACT_BYTES,
-  beforeStore?: (hash: string, bytes: number) => Promise<void> | void,
+  beforeStore?: (hash: string, bytes: number, entries: number) => Promise<void> | void,
 ): Promise<string> {
   const entries: SourceEntry[] = [];
   await collectTree(dir, "", entries);
@@ -140,10 +146,11 @@ export async function packDirAsArtifact(
   parts.push(Buffer.alloc(2 * BLOCK));
   const bytes = Buffer.concat(parts);
   // Self-check: only validator-clean bytes ever enter CAS, so the unpack
-  // gate can never reject an artifact this function produced.
-  validateWorkspaceTar(bytes);
+  // gate can never reject an artifact this function produced. The accepted
+  // entry count feeds the caller's admission quota (host-inode accounting).
+  const accepted = validateWorkspaceTar(bytes);
   const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-  await beforeStore?.(hash, bytes.length);
+  await beforeStore?.(hash, bytes.length, accepted.length);
   return await cas.putBuffer(bytes);
 }
 
@@ -324,10 +331,11 @@ export async function canonicalizeWorkspaceTar(
   tarBytes: Buffer,
   cas: CasStore,
   run: RunCommand = runCommand,
-  beforeStore?: (hash: string, bytes: number) => Promise<void> | void,
+  beforeStore?: (hash: string, bytes: number, entries: number) => Promise<void> | void,
+  tempRoot: string = os.tmpdir(),
 ): Promise<string> {
   const accepted = validateWorkspaceTar(tarBytes);
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "hone-canon-"));
+  const tmp = await mkdtemp(path.join(tempRoot, "hone-canon-"));
   await chmod(tmp, 0o700); // mkdtemp honors the process umask; 0177 would make tmp unusable
   try {
     const tarPath = path.join(tmp, "incoming.tar");
@@ -390,32 +398,45 @@ export async function unpackArtifact(
   const accepted = validateWorkspaceTar(await cas.readBuffer(hash));
   const tmp = `${finalDir}.tmp-${randomUUID()}`;
   await mkdir(tmp, { recursive: true });
-  await chmod(tmp, 0o700); // mkdir masks with the process umask
-  const expected = expectedTreeOf(accepted);
-  await precreateDirSkeleton(path.join(tmp, "workspace"), expected);
-  const res = await run(["tar", ...EXTRACT_FLAGS, "-xf", cas.blobPath(hash), "-C", tmp]);
-  if (res.exitCode !== 0) {
-    await rm(tmp, { recursive: true, force: true });
-    throw new Error(`tar unpack failed for ${hash}: ${res.stderr.toString()}`);
-  }
-  // Unpacked trees feed eval RO-mounts and protected-path diffs: restore the
-  // modes the artifact DECLARES (world-readable 0644/0755 exactly as the
-  // canonical tar states) so a restrictive broker umask can neither strip
-  // owner-x nor make historical artifacts unreadable. SUID/SGID never return.
-  await restoreValidatedModes(path.join(tmp, "workspace"), expected, {
-    dir: 0o755,
-    plainFile: 0o644,
-    execBits: 0o111,
-  });
+  // EVERY failure past this point must tear the temp tree down, or repeated
+  // failing unpacks accumulate quota-sized trees beside finalDir. `published`
+  // flips only once rename() has atomically exposed the tree under finalDir.
+  let published = false;
   try {
-    await rename(tmp, finalDir);
-  } catch (error) {
-    await rm(tmp, { recursive: true, force: true });
+    await chmod(tmp, 0o700); // mkdir masks with the process umask
+    const expected = expectedTreeOf(accepted);
+    await precreateDirSkeleton(path.join(tmp, "workspace"), expected);
+    const res = await run(["tar", ...EXTRACT_FLAGS, "-xf", cas.blobPath(hash), "-C", tmp]);
+    if (res.exitCode !== 0) throw new Error(`tar unpack failed for ${hash}: ${res.stderr.toString()}`);
+    // Unpacked trees feed eval RO-mounts and protected-path diffs: restore the
+    // modes the artifact DECLARES (world-readable 0644/0755 exactly as the
+    // canonical tar states) so a restrictive broker umask can neither strip
+    // owner-x nor make historical artifacts unreadable. SUID/SGID never return.
+    await restoreValidatedModes(path.join(tmp, "workspace"), expected, {
+      dir: 0o755,
+      plainFile: 0o644,
+      execBits: 0o111,
+    });
     try {
-      const entries = await readdir(finalDir);
+      await rename(tmp, finalDir);
+      published = true;
+    } catch (error) {
+      // Lost a concurrent-unpack race? The winner's tree is authoritative;
+      // anything else rethrows (the finally still removes this attempt).
+      let entries: string[];
+      try {
+        entries = await readdir(finalDir);
+      } catch {
+        throw error;
+      }
       if (!entries.includes("workspace")) throw error;
-    } catch {
-      throw error;
+    }
+  } finally {
+    if (!published) {
+      // Extraction may have restored unwalkable hostile modes mid-failure —
+      // normalize owner access first so rm can always traverse.
+      await makeTreeOwnerAccessible(tmp);
+      await rm(tmp, { recursive: true, force: true });
     }
   }
   return workspaceDir;
