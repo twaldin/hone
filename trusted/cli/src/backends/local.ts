@@ -1,17 +1,18 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import type { ArtifactRef, BudgetState, CapsuleManifest, RunEvent } from "@hone/schema";
-import { CasStore, packDirAsArtifact, runCommand, startBroker } from "@hone/broker";
+import { RunEvent, type ArtifactRef, type BudgetState, type CapsuleManifest } from "@hone/schema";
+import { CasStore, isBrokerAuthoredEvent, packDirAsArtifact, readBrokerJournalEvents, runCommand, startBroker } from "@hone/broker";
 import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from "@hone/broker";
 import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
 import type { BudgetDecision, ProxyHandle } from "@hone/proxy";
 import { admitCapsule } from "../admission.js";
 import { readEvents, replayRun } from "../eventlog.js";
 import { deferred } from "../promise.js";
+import { materializeGitCommit } from "../git-baseline.js";
 import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "../types.js";
 import {
   optimizerRunArgs,
@@ -62,6 +63,18 @@ import type { OptimizerChildLike, OptimizerRuntime, OptimizerSpawn, OptimizerTra
 const BASELINE_SKIP: Record<string, true> = { ".git": true, ".gitdir": true, __pycache__: true, ".pytest_cache": true };
 
 const RELAY_PORT = 8080;
+const RELAY_RESOURCE_ARGS = [
+  "--read-only",
+  "--cap-drop", "ALL",
+  "--security-opt", "no-new-privileges",
+  "--pids-limit", "32",
+  "--memory", "64m",
+  "--memory-swap", "64m",
+  "--cpus", "0.25",
+  "--ulimit", "nofile=128:128",
+  "--user", "1000:1000",
+  "--log-driver", "none",
+] as const;
 /** TCP relay run inside the hone-task image: 0.0.0.0:8080 -> host.docker.internal:$HONE_RELAY_PORT. */
 const RELAY_JS = [
   "const net=require('net');",
@@ -102,35 +115,18 @@ export async function measureBaseline(capsuleDir: string, manifest: CapsuleManif
   const staging = mkdtempSync(join(tmpdir(), "hone-baseline-"));
   try {
     if (manifest.baseline.kind === "git") {
-      const gitDir = existsSync(join(baselineDir, ".gitdir")) ? join(baselineDir, ".gitdir") : join(baselineDir, ".git");
-      const worktree = join(staging, "wt");
-      try {
-        try {
-          execFileSync("git", ["--git-dir", gitDir, "worktree", "add", "--detach", worktree, manifest.baseline.commit], { stdio: "pipe" });
-        } catch (e) {
-          throw new Error(`baseline worktree materialization failed for commit ${manifest.baseline.commit}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-        // The worktree's .git link is checkout plumbing, never baseline content.
-        rmSync(join(worktree, ".git"), { recursive: true, force: true });
-        return await packDirAsArtifact(worktree, cas);
-      } finally {
-        // Deregister on every path: remove the temp tree first, then prune
-        // the (now dangling) registration — including any left by a crashed
-        // predecessor. Best-effort; a locked gitdir leaves only inert
-        // metadata behind, never baseline bytes.
-        rmSync(staging, { recursive: true, force: true });
-        try {
-          execFileSync("git", ["--git-dir", gitDir, "worktree", "prune", "--expire", "now"], { stdio: "pipe" });
-        } catch {
-          // gitdir gone or locked — nothing left to deregister
-        }
-      }
+      materializeGitCommit(baselineDir, manifest.baseline.commit, staging);
+      return await packDirAsArtifact(staging, cas);
     }
     for (const entry of readdirSync(baselineDir)) {
       if (BASELINE_SKIP[entry] === true) continue;
       cpSync(join(baselineDir, entry), join(staging, entry), { recursive: true });
     }
-    return await packDirAsArtifact(staging, cas);
+    const packed = await packDirAsArtifact(staging, cas);
+    if (packed !== manifest.baseline.hash) {
+      throw new Error(`measured CAS baseline ${packed} != manifest baseline ${manifest.baseline.hash}`);
+    }
+    return packed;
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
@@ -143,40 +139,116 @@ async function mustRun(run: RunCommand, argv: string[], what: string): Promise<s
 }
 
 /** Docker's name alphabet is narrower than a run id's; label filters use the RAW id, names the sanitized one. */
-function dockerNames(runId: string): { network: string; relay: string; brokerRelay: string } {
+function dockerNames(runId: string): {
+  network: string;
+  relay: string;
+  brokerRelay: string;
+  scratchVolume: string;
+  scratchKeeper: string;
+} {
   const safe = runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
   return {
     network: `hone-${safe}`,
     relay: `hone-proxy-${safe}`,
     brokerRelay: `hone-broker-${safe}`,
+    scratchVolume: `hone-scratch-${safe}`,
+    scratchKeeper: `hone-scratch-keeper-${safe}`,
   };
 }
 
-/**
- * Crash-recovery sweep (review finding 10): a SIGKILLed supervisor leaves the
- * run's labeled sandbox/eval/relay containers and the deterministic
- * --internal network behind, and the next `--resume` would die at
- * `docker network create` before any cleanup handler exists. Best-effort
- * teardown of every per-run docker resource plus stale socket files; durable
- * run data (events.ndjson, broker-state.ndjson, CAS, the labeled scratch
- * VOLUME) is deliberately untouched.
- */
-export async function sweepStaleRunResources(runId: string, runDir: string, run: RunCommand = runCommand): Promise<void> {
-  const { network, relay, brokerRelay } = dockerNames(runId);
-  // Every container this run ever labeled (mutation/eval sandboxes + relay).
-  const ls = await run(["docker", "ps", "-aq", "--filter", `label=hone.runId=${runId}`], { timeoutMs: 30_000 });
-  if (ls.exitCode === 0) {
-    const ids = ls.stdout.toString("utf8").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
-    if (ids.length > 0) await run(["docker", "rm", "-f", ...ids], { timeoutMs: 120_000 });
+const MISSING_DOCKER_RESOURCE = /no such container|no such network|no such volume|no such object|not found/i;
+const SCRATCH_SNAPSHOT_SCRIPT =
+  "set -eu; total=$(find /scratch -type f -exec stat -c %s {} + | awk '{s+=$1} END{print s+0}'); " +
+  "[ \"$total\" -le \"${HONE_SCRATCH_QUOTA_BYTES:?}\" ] || { echo 'scratch apparent size exceeds quota' >&2; exit 1; }; " +
+  "tar -cf /snapshot/scratch.tar.tmp -C /scratch .; mv -f /snapshot/scratch.tar.tmp /snapshot/scratch.tar";
+
+async function dockerRemovalFailure(run: RunCommand, argv: string[], what: string): Promise<string | undefined> {
+  try {
+    const res = await run(argv, { timeoutMs: 120_000 });
+    if (res.exitCode === 0 || MISSING_DOCKER_RESOURCE.test(res.stderr.toString("utf8"))) return undefined;
+    return `${what}: ${res.stderr.toString("utf8").slice(0, 2000) || `exit ${res.exitCode}`}`;
+  } catch (err) {
+    return `${what}: ${err instanceof Error ? err.message : String(err)}`;
   }
-  // Deterministic names, in case the label listing failed or was incomplete.
-  await run(["docker", "rm", "-f", relay], { timeoutMs: 30_000 });
-  await run(["docker", "rm", "-f", brokerRelay], { timeoutMs: 30_000 });
-  await run(["docker", "network", "rm", network], { timeoutMs: 30_000 });
-  // Half-dead endpoints: every listener also unlinks defensively, but a swept
-  // run dir must not present a crashed process's sockets to other tooling.
+}
+
+/**
+ * Crash-recovery sweep: remove every labeled/deterministically named
+ * per-run Docker resource plus stale sockets. Default mode remains
+ * best-effort for diagnostics; startup and dead-run finalization pass
+ * `strict=true` and refuse to proceed while any resource may remain.
+ */
+export async function sweepStaleRunResources(
+  runId: string,
+  runDir: string,
+  run: RunCommand = runCommand,
+  strict = false,
+): Promise<void> {
+  const { network, relay, brokerRelay, scratchVolume, scratchKeeper } = dockerNames(runId);
+  const failures: string[] = [];
+  // A killed supervisor leaves the keeper mounted, so the tmpfs still has its
+  // last mutable state. Snapshot it before removing ANY labeled container.
+  const keeper = await run(["docker", "inspect", "-f", "{{.State.Running}}", scratchKeeper], { timeoutMs: 30_000 });
+  if (keeper.exitCode === 0 && keeper.stdout.toString("utf8").trim() === "true") {
+    mkdirSync(join(runDir, "scratch-snapshot"), { recursive: true });
+    const snapshot = await run(
+      ["docker", "exec", "-u", "root", scratchKeeper, "/bin/sh", "-c", SCRATCH_SNAPSHOT_SCRIPT],
+      { timeoutMs: 300_000 },
+    );
+    if (snapshot.exitCode !== 0 || snapshot.timedOut) {
+      const failure = `scratch snapshot: ${snapshot.stderr.toString("utf8").slice(0, 2000) || `exit ${snapshot.exitCode}`}`;
+      if (strict) throw new Error(`stale run cleanup incomplete: ${failure}`);
+      return;
+    }
+  } else if (
+    keeper.exitCode !== 0 &&
+    strict &&
+    !MISSING_DOCKER_RESOURCE.test(keeper.stderr.toString("utf8"))
+  ) {
+    throw new Error(
+      `stale run cleanup incomplete: scratch keeper discovery: ${
+        keeper.stderr.toString("utf8").slice(0, 2000) || `exit ${keeper.exitCode}`
+      }`,
+    );
+  }
+
+  const containers = await run(["docker", "ps", "-aq", "--filter", `label=hone.runId=${runId}`], { timeoutMs: 30_000 });
+  if (containers.exitCode === 0) {
+    const ids = containers.stdout.toString("utf8").split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+    if (ids.length > 0) {
+      const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", ...ids], "labeled containers");
+      if (failure !== undefined) failures.push(failure);
+    }
+  } else if (strict) {
+    failures.push(`container discovery: ${containers.stderr.toString("utf8").slice(0, 2000) || `exit ${containers.exitCode}`}`);
+  }
+
+  for (const name of [relay, brokerRelay]) {
+    const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", name], `container ${name}`);
+    if (failure !== undefined) failures.push(failure);
+  }
+
+  const volumes = await run(["docker", "volume", "ls", "-q", "--filter", `label=hone.runId=${runId}`], { timeoutMs: 30_000 });
+  const volumeNames = new Set([scratchVolume]);
+  if (volumes.exitCode === 0) {
+    for (const name of volumes.stdout.toString("utf8").split("\n").map((line) => line.trim()).filter((line) => line.length > 0)) {
+      volumeNames.add(name);
+    }
+  } else if (strict) {
+    failures.push(`volume discovery: ${volumes.stderr.toString("utf8").slice(0, 2000) || `exit ${volumes.exitCode}`}`);
+  }
+  for (const name of volumeNames) {
+    const failure = await dockerRemovalFailure(run, ["docker", "volume", "rm", "-f", name], `volume ${name}`);
+    if (failure !== undefined) failures.push(failure);
+  }
+
+  const networkFailure = await dockerRemovalFailure(run, ["docker", "network", "rm", network], `network ${network}`);
+  if (networkFailure !== undefined) failures.push(networkFailure);
   for (const sock of ["proxy.sock", "broker.sock", "broker-admin.sock"]) {
     rmSync(join(runDir, sock), { force: true });
+  }
+  if (strict && failures.length > 0) {
+    throw new Error(`stale run cleanup incomplete: ${failures.join("; ")}`);
   }
 }
 
@@ -226,14 +298,22 @@ export async function setupEgress(
   }
   let brokerRelayStarted = false;
   const cleanup = async (): Promise<void> => {
-    await run(["docker", "rm", "-f", brokerRelay]);
-    await run(["docker", "rm", "-f", relay]);
-    await run(["docker", "network", "rm", network]);
+    const failures: string[] = [];
+    for (const [argv, what] of [
+      [["docker", "rm", "-f", brokerRelay], `container ${brokerRelay}`],
+      [["docker", "rm", "-f", relay], `container ${relay}`],
+      [["docker", "network", "rm", network], `network ${network}`],
+    ] as const) {
+      const failure = await dockerRemovalFailure(run, [...argv], what);
+      if (failure !== undefined) failures.push(failure);
+    }
+    if (failures.length > 0) throw new Error(`egress cleanup incomplete: ${failures.join("; ")}`);
   };
   try {
     await mustRun(run,
       [
         "docker", "run", "-d",
+        ...RELAY_RESOURCE_ARGS,
         "--name", relay,
         "--network", network,
         "--label", `hone.runId=${ctx.runId}`,
@@ -260,6 +340,7 @@ export async function setupEgress(
         run,
         [
           "docker", "run", "-d",
+          ...RELAY_RESOURCE_ARGS,
           "--name", brokerRelay,
           "--network", network,
           "--label", `hone.runId=${ctx.runId}`,
@@ -274,7 +355,10 @@ export async function setupEgress(
       brokerRelayStarted = true;
       return `tcp://${brokerRelay}:${RELAY_PORT}`;
     } catch (err) {
-      await run(["docker", "rm", "-f", brokerRelay], { timeoutMs: 30_000 });
+      const cleanupFailure = await dockerRemovalFailure(run, ["docker", "rm", "-f", brokerRelay], `container ${brokerRelay}`);
+      if (cleanupFailure !== undefined) {
+        throw new Error(`${err instanceof Error ? err.message : String(err)}; ${cleanupFailure}`);
+      }
       throw err;
     }
   };
@@ -326,6 +410,43 @@ function containerKillHandle(child: OptimizerChildLike, name: string, run: RunCo
   };
 }
 
+const DEFAULT_OPTIMIZER_LOG_LIMIT_BYTES = 4 * 1024 * 1024;
+
+function optimizerLogLimit(env: NodeJS.ProcessEnv): number {
+  const raw = env["HONE_OPTIMIZER_LOG_LIMIT_BYTES"];
+  const value = raw === undefined ? DEFAULT_OPTIMIZER_LOG_LIMIT_BYTES : Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("HONE_OPTIMIZER_LOG_LIMIT_BYTES must be a positive safe integer");
+  }
+  return value;
+}
+
+function cappedDiagnosticAppender(
+  stream: NodeJS.WritableStream,
+  limit: number,
+  existingBytes: number,
+): (chunk: unknown) => void {
+  let remaining = Math.max(0, limit - existingBytes);
+  let sealed = remaining === 0;
+  const marker = Buffer.from(`\n[optimizer.log truncated at ${limit} bytes]\n`, "utf8");
+  return (chunk: unknown): void => {
+    if (sealed) return;
+    if (typeof chunk !== "string" && !(chunk instanceof Uint8Array)) return;
+    const bytes = Buffer.from(chunk);
+    const markerBytes = Math.min(marker.length, remaining);
+    const contentCapacity = Math.max(0, remaining - markerBytes);
+    if (bytes.length <= contentCapacity) {
+      stream.write(bytes);
+      remaining -= bytes.length;
+      return;
+    }
+    if (contentCapacity > 0) stream.write(bytes.subarray(0, contentCapacity));
+    if (markerBytes > 0) stream.write(marker.subarray(0, markerBytes));
+    remaining = 0;
+    sealed = true;
+  };
+}
+
 /**
  * Launch ONE invocation of the sealed optimizer container. Exported for the
  * trusted-boundary tests: optimizer stdout must never become events.
@@ -337,9 +458,14 @@ export function runOptimizer(ctx: RunnerBackendContext, runtime: OptimizerRuntim
   const name = optimizerRunName(runtime.safeRunId, ++runtime.invocation);
   runtime.spawnedNames.push(name);
 
-  // Opaque diagnostics sink — NEVER parsed, NEVER an event source.
-  const optLog = createWriteStream(join(ctx.runDir, "optimizer.log"), { flags: "a" });
-
+  // Opaque diagnostics sink — NEVER parsed, NEVER an event source. Both
+  // streams and every invocation/resume share one hard byte ceiling.
+  const optLogPath = join(ctx.runDir, "optimizer.log");
+  const logLimit = optimizerLogLimit(ctx.env);
+  if (existsSync(optLogPath) && statSync(optLogPath).size > logLimit) truncateSync(optLogPath, logLimit);
+  const existingLogBytes = existsSync(optLogPath) ? statSync(optLogPath).size : 0;
+  const optLog = createWriteStream(optLogPath, { flags: "a" });
+  const appendDiagnostic = cappedDiagnosticAppender(optLog, logLimit, existingLogBytes);
   const argv = optimizerRunArgs({
     name,
     runId: ctx.runId,
@@ -382,55 +508,54 @@ export function runOptimizer(ctx: RunnerBackendContext, runtime: OptimizerRuntim
   });
   const handle = containerKillHandle(child, name, runtime.run);
   const unregister = ctx.registerChild(handle);
-  child.stdout?.pipe(optLog, { end: false });
-  child.stderr?.pipe(optLog, { end: false });
+  child.stdout?.on("data", appendDiagnostic);
+  child.stderr?.on("data", appendDiagnostic);
 
   const done = deferred<void>();
+  let childSettled = false;
+  const settleAfterLog = (settle: () => void): void => {
+    if (childSettled) return;
+    childSettled = true;
+    optLog.end(settle);
+  };
   const reap = (): void => {
     // --rm removes the container on exit; force the name free for the next
     // invocation even when the daemon's async removal lags or wedges.
     void runtime.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 }).catch(() => {});
   };
   child.on("error", (err) => {
+    // A spawn error has no live child to reap. Drop the supervisor handle
+    // before the daemon-name cleanup; never retain a nonexistent PID.
+    unregister();
     reap();
-    done.reject(err);
+    settleAfterLog(() => done.reject(err));
   });
   child.on("close", (code, signal) => {
-    optLog.end();
-    if (ctx.signal.aborted) {
-      reap();
-      return done.resolve(); // supervisor wind-down owns the TERM→KILL barrier
-    }
-    if (code === 0) {
-      // Positively reaped, normal exit: remove any container residue NOW,
-      // then unregister — the supervisor must never signal this (soon
-      // recycled) PID/PGID or container name during a much-later stop.
-      handle.kill("SIGKILL");
-      unregister();
-      return done.resolve();
-    }
+    // `close` means Node has reaped the process. Its PID/PGID is now reusable:
+    // unregister BEFORE any await/callback, and only clean Docker by name.
+    unregister();
     reap();
-    done.reject(new Error(`optimizer exited ${code ?? `signal ${signal ?? "?"}`} — see ${join(ctx.runDir, "optimizer.log")}`));
+    settleAfterLog(() => {
+      if (ctx.signal.aborted) return done.resolve();
+      if (code === 0) return done.resolve();
+      done.reject(new Error(`optimizer exited ${code ?? `signal ${signal ?? "?"}`} — see ${join(ctx.runDir, "optimizer.log")}`));
+    });
   });
   return done.promise;
 }
 
 /** The slice of the broker's runner API that resume reconciliation needs (DI seam for the recovery tests). */
 export interface AuthorityRecoverySource {
+  replayJournalEvents?(alreadyLogged: readonly RunEvent[]): number;
   replayIncumbentEvents(alreadyLogged: number): number;
   getBudget(ctx: CallContext): BudgetState;
 }
 
 /**
- * Review finding 11: promotions are fsynced into broker-state.ndjson BEFORE
- * their incumbent.new event reaches events.ndjson, so a crash in that window
- * leaves the event log behind the journal — replay would then finish or
- * deliver an older/null "best" while the broker idempotently swallows the
- * re-report. Count alignment over the two append-only ordered logs re-emits
- * exactly the missing promotions through the normal event sink, then one
- * budget snapshot so budget authority reconverges too. Idempotent across
- * repeated resumes; throws (fail closed) when the event log claims MORE
- * promotions than the durable journal.
+ * Current journals fsync each broker-authored event with the authority fact
+ * that produced it, then recover an exact missing suffix before optimizer
+ * resume. Legacy journals fall back to incumbent count alignment and one
+ * current budget snapshot. A non-prefix gap fails closed in the broker.
  */
 export function reconcileBrokerAuthority(
   runDir: string,
@@ -438,12 +563,23 @@ export function reconcileBrokerAuthority(
   emit: (event: RunEvent) => RunEvent,
   runId: string,
 ): number {
-  const alreadyLogged = readEvents(runDir).filter((e) => e.type === "incumbent.new").length;
-  const recovered = broker.replayIncumbentEvents(alreadyLogged);
-  if (recovered > 0) {
-    emit({ runId, at: new Date().toISOString(), type: "budget.snapshot", budget: broker.getBudget({ privileged: true }) });
+  const logged = readEvents(runDir);
+  const journalRecovered = broker.replayJournalEvents?.(logged) ?? 0;
+  const afterJournal = journalRecovered > 0 ? readEvents(runDir) : logged;
+  const alreadyLogged = afterJournal.filter((event) => event.type === "incumbent.new").length;
+  const legacyRecovered = broker.replayIncumbentEvents(alreadyLogged);
+  if (legacyRecovered > 0) {
+    emit({
+      runId,
+      at: new Date().toISOString(),
+      type: "budget.snapshot",
+      budget: broker.getBudget({ privileged: true }),
+    });
   }
-  return recovered;
+  // Legacy journals have no complete event transactions. Replayed incumbents
+  // remain visible for manual recovery, but strict terminal sealing rejects
+  // them until a fresh broker-authored journal exists.
+  return journalRecovered + legacyRecovered;
 }
 
 /** Journal filename — mirrors the broker's internal STATE_FILE (not exported; format owned by @hone/broker RunStateLog). */
@@ -460,6 +596,8 @@ const JournalIncumbentLine = z.object({
 export type JournalIncumbent = z.infer<typeof JournalIncumbentLine>;
 
 const JournalLinePeek = z.object({ t: z.string() }).passthrough();
+
+
 
 /**
  * Dead-supervisor seal guard (final-gate finding): the broker journal's full
@@ -490,6 +628,29 @@ export function readJournalIncumbents(runDir: string): JournalIncumbent[] | null
     incumbents.push(inc.data);
   }
   return incumbents;
+}
+
+/** Complete, schema-validated broker-authored event history for dead-run sealing. */
+export function readJournalEvents(runDir: string): RunEvent[] | null {
+  return readBrokerJournalEvents(runDir);
+}
+
+/** Exclusive broker types align exactly; all journal records occur in full order. */
+export function journalEventsAligned(journal: readonly RunEvent[], events: readonly RunEvent[]): boolean {
+  const publicExclusive = events.filter(isBrokerAuthoredEvent);
+  const journalExclusive = journal.filter(isBrokerAuthoredEvent);
+  if (
+    publicExclusive.length !== journalExclusive.length
+    || !journalExclusive.every((event, index) => JSON.stringify(event) === JSON.stringify(publicExclusive[index]))
+  ) return false;
+  const publicLines = events.map((event) => JSON.stringify(event));
+  let cursor = 0;
+  for (const event of journal) {
+    const found = publicLines.indexOf(JSON.stringify(event), cursor);
+    if (found < 0) return false;
+    cursor = found + 1;
+  }
+  return true;
 }
 
 /**
@@ -565,7 +726,7 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
   const spawnImpl: OptimizerSpawn = deps.spawnOptimizer ?? ((cmd, args, opts) => spawn(cmd, args, opts));
   const startWithAuthority = async (
     ctx: RunnerBackendContext,
-    authority: { resolve(): void },
+    authority: { resolve(): void; reject(err: Error): void },
     cleanup: { resolve(): void; reject(err: Error): void },
   ): Promise<void> => {
     // NO abort check anywhere in setup: even a stop landing at startup
@@ -588,6 +749,8 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
       let running: RunningBroker | null = null;
       const checkBudget = (): BudgetDecision => {
         if (running === null) return { allowed: false, dimension: "wallClockSec", message: "broker not started" };
+        const latched = running.broker.getBudgetExhaustion({ privileged: true });
+        if (latched !== undefined) return { allowed: false, dimension: latched };
         const { envelope, spent } = running.broker.getBudget({ privileged: true });
         if (spent.tokens >= envelope.maxTokens) return { allowed: false, dimension: "tokens" };
         if (spent.usd >= envelope.maxUsd) return { allowed: false, dimension: "usd" };
@@ -612,6 +775,9 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
         recordSpend: (spend) => {
           running?.broker.recordSpend({ tokens: spend.tokens, usd: spend.usd }, { privileged: true });
         },
+        recordBudgetExhaustion: (dimension) => {
+          running?.broker.recordBudgetExhaustion(dimension, { privileged: true });
+        },
       });
 
       // The frozen manifest's immutable image is THE image — mutation
@@ -625,7 +791,7 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
         // Finding 10: a crashed prior supervisor's labeled containers (incl.
         // optimizer build/run), the deterministic relay/network, and dead
         // sockets must be gone before this run mints the same names again.
-        await sweepStaleRunResources(ctx.runId, ctx.runDir, run);
+        await sweepStaleRunResources(ctx.runId, ctx.runDir, run, true);
         egress = await setupEgress(ctx, proxy, image, run);
 
         // Broker transport for the containerized optimizer follows the
@@ -633,6 +799,12 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
         // authenticated public TCP listener with a fresh ≥256-bit capability;
         // unix egress (linux default) bind-mounts ONLY public broker.sock.
         const tcpToken = egress.sandboxNetwork.mode === "internal" ? randomBytes(32).toString("hex") : null;
+
+        const rawMaxEpisodes = ctx.env["HONE_MAX_EPISODES"];
+        const maxMutationEpisodes = rawMaxEpisodes === undefined ? 64 : Number(rawMaxEpisodes);
+        if (!Number.isSafeInteger(maxMutationEpisodes) || maxMutationEpisodes <= 0) {
+          throw new Error(`HONE_MAX_EPISODES must be a positive integer, got ${JSON.stringify(rawMaxEpisodes)}`);
+        }
 
         const brokerConfig = {
           runId: ctx.runId,
@@ -669,6 +841,8 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
             HONE_MODEL_ID: route.model,
           },
           episodeOrigin: ctx.replayed.nextEpisode,
+          maxMutationEpisodes,
+          maxCandidateArtifacts: Math.min(Number.MAX_SAFE_INTEGER, maxMutationEpisodes * 2),
         };
         running =
           tcpToken !== null
@@ -680,7 +854,6 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
         // best/status/delivery and the resume hint all see the durable
         // incumbent exactly once — even when a stop aborted mid-startup.
         reconcileBrokerAuthority(ctx.runDir, running.broker, ctx.emit, ctx.runId);
-        authority.resolve();
 
         // Only AFTER durable authority is reconciled may a stop short-circuit:
         // the optimizer never launches; the finally unwinds proxy/broker/egress.
@@ -756,13 +929,9 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
 
         await runOptimizer(ctx, optimizer);
 
-        // Final trusted budget line so the exit report reflects total spend.
-        ctx.emit({
-          runId: ctx.runId,
-          at: new Date().toISOString(),
-          type: "budget.snapshot",
-          budget: running.broker.getBudget({ privileged: true }),
-        });
+        // Final budget is authority too: journal before public delivery so a
+        // transient append failure is repaired by the final reconcile below.
+        running.broker.snapshotBudget({ privileged: true });
       } finally {
         // Full-teardown barrier: every failure is COLLECTED — a half-closed
         // proxy must not skip broker/egress/container teardown. Any failure
@@ -771,6 +940,19 @@ export function createBackend(deps: { run?: RunCommand; spawnOptimizer?: Optimiz
         const failures: string[] = [];
         const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
         await proxy.close().catch((e: unknown) => failures.push(`proxy: ${message(e)}`));
+        if (running !== null) {
+          try {
+            // Last authority barrier: proxy draining may have journaled spend
+            // after startup. Repair its exact suffix before broker close and
+            // before the supervisor is ever allowed to terminalize/deliver.
+            reconcileBrokerAuthority(ctx.runDir, running.broker, ctx.emit, ctx.runId);
+            authority.resolve();
+          } catch (e) {
+            const failure = e instanceof Error ? e : new Error(String(e));
+            authority.reject(failure);
+            failures.push(`authority reconciliation: ${failure.message}`);
+          }
+        }
         if (running !== null) await running.close().catch((e: unknown) => failures.push(`broker: ${message(e)}`));
         if (optimizer !== null) await optimizer.cleanup().catch((e: unknown) => failures.push(`optimizer containers: ${message(e)}`));
         if (egress !== null) await egress.cleanup().catch((e: unknown) => failures.push(`egress: ${message(e)}`));

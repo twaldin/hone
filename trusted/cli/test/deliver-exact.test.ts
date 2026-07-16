@@ -141,6 +141,20 @@ describe("delivery is hook-proof — zero hook processes run, including ref-tran
     expect(readFileSync(join(repo, "hello.txt"), "utf8")).toBe("baseline\n");
     expect(existsSync(marker)).toBe(false);
   });
+
+  it("auto mode resumes after refs moved but delivery event was not recorded", () => {
+    const root = makeRoot();
+    const repo = join(root, "repo");
+    initScratchRepo(repo);
+    const hash = tarToCas(root, { "hello.txt": "improved\n" });
+    const options = opts(root, repo, hash, { mode: "auto" });
+    expect(deliver(options).ref).toBe("main");
+    const applied = gitIn(repo, "rev-parse", "main");
+    const recovered = deliver(options);
+    expect(recovered.ref).toBe("main");
+    expect(recovered.notes.join("\n")).toMatch(/already present/);
+    expect(gitIn(repo, "rev-parse", "main")).toBe(applied);
+  });
 });
 
 describe("delivery is filter-proof — clean/smudge/eol machinery never touches artifact bytes", () => {

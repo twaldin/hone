@@ -69,13 +69,16 @@ function repairTornTail(fd: number): void {
 }
 
 /**
- * Strict on interior lines (a corrupt trusted log is an error), tolerant of a
- * single torn trailing line (crash mid-append is the resume contract's normal case).
+ * Strict on every acknowledged line. Bytes after the last newline were never
+ * fsynced as a complete record—even valid JSON there is a torn tail.
  */
 export function readEvents(runDir: string): RunEvent[] {
   const p = eventsPath(runDir);
   if (!existsSync(p)) return [];
-  const lines = readFileSync(p, "utf8").split("\n");
+  const rawLog = readFileSync(p, "utf8");
+  const acknowledgedEnd = rawLog.lastIndexOf("\n");
+  if (acknowledgedEnd < 0) return [];
+  const lines = rawLog.slice(0, acknowledgedEnd).split("\n");
   const events: RunEvent[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -84,8 +87,6 @@ export function readEvents(runDir: string): RunEvent[] {
     try {
       raw = JSON.parse(line);
     } catch {
-      const isTail = lines.slice(i + 1).every((l) => l.trim() === "");
-      if (isTail) break; // torn tail write — ignore, cursor stops before it
       throw new Error(`corrupt event log ${p} at line ${i + 1}: unparseable JSON`);
     }
     const result = RunEvent.safeParse(raw);

@@ -3,8 +3,8 @@ import { appendFileSync, closeSync, existsSync, openSync, readFileSync, rmSync, 
 import net from "node:net";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DiagnosticOrderingReport, RunConfig, capsuleDigest } from "@hone/schema";
-import type { BudgetState, RunEvent } from "@hone/schema";
+import { DiagnosticOrderingReport, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
+import type { BudgetState } from "@hone/schema";
 import { runCommand } from "@hone/broker";
 import type { CallContext, CmdResult, RunCommand } from "@hone/broker";
 import type { ProxyHandle } from "@hone/proxy";
@@ -108,10 +108,38 @@ describe("sweepStaleRunResources (finding 10 — crashed prior process)", () => 
     expect(findCall(calls, "docker", "rm", "-f", "aaa111")).toBe(-1);
   });
 
-  it("never touches docker volumes (durable scratch is preserved)", async () => {
-    const { calls, run } = fakeRunner(() => undefined);
+  it("removes labeled and deterministic per-run scratch volumes", async () => {
+    const { calls, run } = fakeRunner((argv) =>
+      argv[1] === "volume" && argv[2] === "ls"
+        ? res({ stdout: Buffer.from("hone-extra-run_x\n") })
+        : undefined,
+    );
     await sweepStaleRunResources("run_x", makeRoot(), run);
-    expect(calls.some((c) => c.includes("volume"))).toBe(false);
+    expect(findCall(calls, "docker", "volume", "rm", "-f", "hone-scratch-run_x")).toBeGreaterThanOrEqual(0);
+    expect(findCall(calls, "docker", "volume", "rm", "-f", "hone-extra-run_x")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("snapshots a live scratch keeper before removing any stale container", async () => {
+    const runDir = makeRoot();
+    const { calls, run } = fakeRunner((argv) => {
+      if (argv[1] === "inspect") return res({ stdout: Buffer.from("true\n") });
+      if (argv[1] === "ps") return res({ stdout: Buffer.from("stale-mutation\n") });
+      return undefined;
+    });
+
+    await sweepStaleRunResources("run_x", runDir, run, true);
+    const snapshot = findCall(calls, "docker", "exec", "-u", "root", "hone-scratch-keeper-run_x");
+    const remove = findCall(calls, "docker", "rm", "-f", "stale-mutation");
+    expect(snapshot).toBeGreaterThanOrEqual(0);
+    expect(snapshot).toBeLessThan(remove);
+    expect(existsSync(join(runDir, "scratch-snapshot"))).toBe(true);
+  });
+
+  it("strict mode rejects when resource discovery cannot prove cleanup", async () => {
+    const { run } = fakeRunner((argv) =>
+      argv[1] === "ps" ? res({ exitCode: 1, stderr: Buffer.from("daemon down") }) : undefined,
+    );
+    await expect(sweepStaleRunResources("run_x", makeRoot(), run, true)).rejects.toThrow(/container discovery: daemon down/);
   });
 });
 
@@ -182,6 +210,15 @@ describe("setupEgress network create (finding 10 — idempotent after cleanup)",
       return undefined;
     });
     await expect(setupEgress(ctx(makeRoot()), fakeProxy(43210), "img:latest", run)).rejects.toThrow(/permission denied/);
+  });
+  it("rejects cleanup when a relay network may still be live", async () => {
+    const { run } = fakeRunner((argv) =>
+      argv[1] === "network" && argv[2] === "rm"
+        ? res({ exitCode: 1, stderr: Buffer.from("network has active endpoints") })
+        : undefined,
+    );
+    const egress = await setupEgress(ctx(makeRoot()), fakeProxy(43210), "img:latest", run);
+    await expect(egress.cleanup()).rejects.toThrow(/egress cleanup incomplete.*active endpoints/);
   });
 });
 
@@ -299,6 +336,32 @@ describe("reconcileBrokerAuthority (finding 11 — split-journal crash window)",
     const broker = fakeBrokerJournal(runDir, runId, []);
     const emit = (e: RunEvent): RunEvent => appendEvent(runDir, e);
     expect(() => reconcileBrokerAuthority(runDir, broker, emit, runId)).toThrow(/journal has 0/);
+  });
+  it("prefers complete event-journal replay and re-reads before the legacy incumbent fallback", () => {
+    const runDir = crashWindowRunDir();
+    const durableEvent = RunEvent.parse({
+      runId,
+      at: at(),
+      type: "incumbent.new",
+      artifact: { hash: durable },
+      aggregate: 0.7,
+      deltaVsBaseline: 0.2,
+      episode: 0,
+    });
+    const broker: AuthorityRecoverySource = {
+      replayJournalEvents(alreadyLogged) {
+        expect(alreadyLogged.some((event) => event.type === "incumbent.new")).toBe(false);
+        appendEvent(runDir, durableEvent);
+        return 1;
+      },
+      replayIncumbentEvents(alreadyLogged) {
+        expect(alreadyLogged).toBe(1);
+        return 0;
+      },
+      getBudget: () => FIX_BUDGET,
+    };
+    expect(reconcileBrokerAuthority(runDir, broker, (event) => appendEvent(runDir, event), runId)).toBe(1);
+    expect(bestArtifact(replayRun(runDir))?.hash).toBe(durable);
   });
 });
 

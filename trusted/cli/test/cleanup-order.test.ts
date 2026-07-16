@@ -6,6 +6,7 @@ import type { BudgetState } from "@hone/schema";
 import { readEvents, replayRun } from "../src/eventlog.js";
 import { headlessProbeVerdict, pidAlive, promptProbe, runCommand as cliRunCommand } from "../src/supervisor.js";
 import type { ProbeReport } from "../src/types.js";
+import { deferred } from "../src/promise.js";
 import { fakeHash, makeCapsule, makeIo, makeRoot } from "./helpers.js";
 
 /**
@@ -14,6 +15,11 @@ import { fakeHash, makeCapsule, makeIo, makeRoot } from "./helpers.js";
  * backend's cleanup barrier settles; a failed or timed-out cleanup leaves the
  * run unterminalized and resumable; the probe gate is abort-aware.
  */
+
+declare global {
+  var honeCleanupBarrier: Promise<void> | undefined;
+  var honeCleanupEntered: (() => void) | undefined;
+}
 
 const BUDGET: BudgetState = {
   envelope: { maxTokens: 1_000_000, maxUsd: 25, maxWallClockSec: 3600, maxEvaluatorInvocations: 100 },
@@ -192,7 +198,7 @@ describe("cleanup barrier gates delivery/terminal/return", () => {
     expect(replayRun(runDir).finished).toBeNull();
   });
 
-  it("a HUNG cleanup barrier times out into the same unterminalized refusal", { timeout: 30_000 }, async () => {
+  it("holds the run open until a hung cleanup barrier actually settles", { timeout: 30_000 }, async () => {
     const root = makeRoot();
     makeCapsule(root);
     writeFileSync(
@@ -200,17 +206,32 @@ describe("cleanup barrier gates delivery/terminal/return", () => {
       `export function createBackend() {
         return {
           async start(ctx) {
-            ctx.registerCleanupBarrier(new Promise(() => {})); // never settles
+            ctx.registerCleanupBarrier(globalThis.honeCleanupBarrier);
+            globalThis.honeCleanupEntered();
           },
         };
       }
       `,
     );
-    const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "50", HONE_CLEANUP_TIMEOUT_MS: "200" });
-    const code = await cliRunCommand(["capsule", "--headless", "--backend", "./hung-cleanup-backend.mjs"], io);
-    expect(code).toBe(1);
-    expect(err.join("\n")).toMatch(/did not complete within 200ms/);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    globalThis.honeCleanupBarrier = release.promise;
+    globalThis.honeCleanupEntered = entered.resolve;
+    const { io } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "50" });
+    const running = cliRunCommand(["capsule", "--headless", "--backend", "./hung-cleanup-backend.mjs"], io);
+    await entered.promise;
+    let settled = false;
+    void running.finally(() => {
+      settled = true;
+    });
+    expect(settled).toBe(false);
     const runId = readdirSync(join(root, ".hone-runs"))[0] ?? "";
     expect(readEvents(join(root, ".hone-runs", runId)).some((e) => e.type === "run.finished")).toBe(false);
+
+    release.resolve();
+    expect(await running).toBe(0);
+    expect(readEvents(join(root, ".hone-runs", runId)).at(-1)?.type).toBe("run.finished");
+    globalThis.honeCleanupBarrier = undefined;
+    globalThis.honeCleanupEntered = undefined;
   });
 });

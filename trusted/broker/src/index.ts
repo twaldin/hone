@@ -1,4 +1,13 @@
-export { Broker, RecordSpendParams, type BrokerConfig, type CallContext, type SandboxNetworkMode } from "./broker.js";
+export {
+  Broker,
+  RecordSpendParams,
+  isBrokerAuthoredEvent,
+  readBrokerJournalEvents,
+  type BrokerConfig,
+  type BudgetDimension,
+  type CallContext,
+  type SandboxNetworkMode,
+} from "./broker.js";
 export { BrokerServer, startBroker, type BrokerServerOptions, type RunningBroker, type StartBrokerOptions } from "./server.js";
 export { BrokerError, BROKER_ERROR_NUMBER } from "./errors.js";
 export { CasStore } from "./cas.js";

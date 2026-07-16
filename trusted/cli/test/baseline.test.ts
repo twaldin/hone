@@ -3,16 +3,16 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CapsuleManifest } from "@hone/schema";
-import { CasStore } from "@hone/broker";
+import { CasStore, packDirAsArtifact } from "@hone/broker";
 import { measureBaseline } from "../src/backends/local.js";
 import { gitIn, initScratchRepo, makeCapsule, makeRoot, manifestRaw } from "./helpers.js";
 
 /**
  * Baseline exactness (anti-sandbagging closure): a git baseline artifact is
- * the DECLARED COMMIT's tree — materialized through a temporary detached
- * worktree — never the on-disk worktree bytes. Ignored/untracked injections
- * (a poisoned Python module, __pycache__) have zero effect on the canonical
- * artifact, and dirty tracked content never enters it.
+ * the DECLARED COMMIT's tree — materialized from validated Git blobs in a
+ * private directory — never the on-disk worktree bytes. Ignored/untracked
+ * injections have zero effect on the canonical artifact; dirty tracked
+ * content never enters it.
  */
 
 function gitCapsule(root: string): { capsuleDir: string; manifest: CapsuleManifest; baselineDir: string } {
@@ -89,7 +89,7 @@ describe("git baseline: exact declared-commit materialization", () => {
     const { capsuleDir, baselineDir } = gitCapsule(root);
     const manifest = CapsuleManifest.parse(manifestRaw({ baseline: { kind: "git", commit: "0".repeat(40) } }));
     const cas = new CasStore(join(root, ".hone-cas"));
-    await expect(measureBaseline(capsuleDir, manifest, cas)).rejects.toThrow(/materialization failed/);
+    await expect(measureBaseline(capsuleDir, manifest, cas)).rejects.toThrow(/hardened git .* failed/);
     const registered = execFileSync("git", ["--git-dir", join(baselineDir, ".git"), "worktree", "list", "--porcelain"], { encoding: "utf8" });
     expect(registered).not.toContain("hone-baseline-");
   });
@@ -104,16 +104,21 @@ describe("cas baseline: unchanged directory pack (no commit to materialize)", ()
     writeFileSync(join(baselineDir, "hello.txt"), "baseline\n");
     mkdirSync(join(baselineDir, "__pycache__"), { recursive: true });
     writeFileSync(join(baselineDir, "__pycache__", "junk.pyc"), "junk");
-    const manifest = CapsuleManifest.parse(JSON.parse(readFileSync(join(capsuleDir, "manifest.json"), "utf8")));
-    const cas = new CasStore(join(root, ".hone-cas"));
-    const withNoise = await measureBaseline(capsuleDir, manifest, cas);
-    // Noise-free pack of the same content hashes identically.
+
     const root2 = makeRoot();
     const capsuleDir2 = makeCapsule(root2);
-    mkdirSync(join(capsuleDir2, "baseline"), { recursive: true });
-    writeFileSync(join(capsuleDir2, "baseline", "hello.txt"), "baseline\n");
-    const manifest2 = CapsuleManifest.parse(JSON.parse(readFileSync(join(capsuleDir2, "manifest.json"), "utf8")));
-    expect(await measureBaseline(capsuleDir2, manifest2, new CasStore(join(root2, ".hone-cas")))).toBe(withNoise);
+    const baselineDir2 = join(capsuleDir2, "baseline");
+    mkdirSync(baselineDir2, { recursive: true });
+    writeFileSync(join(baselineDir2, "hello.txt"), "baseline\n");
+    const cas2 = new CasStore(join(root2, ".hone-cas"));
+    const expected = await packDirAsArtifact(baselineDir2, cas2);
+
+    const raw = JSON.parse(readFileSync(join(capsuleDir, "manifest.json"), "utf8")) as Record<string, unknown>;
+    const raw2 = JSON.parse(readFileSync(join(capsuleDir2, "manifest.json"), "utf8")) as Record<string, unknown>;
+    const manifest = CapsuleManifest.parse({ ...raw, baseline: { kind: "cas", hash: expected } });
+    const manifest2 = CapsuleManifest.parse({ ...raw2, baseline: { kind: "cas", hash: expected } });
+    const withNoise = await measureBaseline(capsuleDir, manifest, new CasStore(join(root, ".hone-cas")));
+    expect(await measureBaseline(capsuleDir2, manifest2, cas2)).toBe(withNoise);
   });
 
   it("a capsule without baseline/ fails closed", async () => {

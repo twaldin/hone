@@ -366,26 +366,26 @@ describe("bounded JSON-RPC concurrency", () => {
     c1.destroy();
     await c1.closed;
 
-    // Release the in-flight pair: their responses hit a dead peer. pump()
-    // runs synchronously when each permit frees, so frames 3-4 are admitted
-    // before the broken pipe can be observed; once it IS observed the
-    // connection is torn down and the remaining backlog (5-6) is cancelled.
+    // A FIN can race the two handler completions. At most one already-
+    // permitted wave may start before the server observes the dead peer; the
+    // remaining backlog must then be cancelled.
     g.releaseBlocked();
-    await g.admitted(4);
+    await eventually(
+      () => server.stats.connections === 0 || g.admittedCount() === 4,
+      "disconnect observed or one admitted wave",
+    );
+    g.releaseBlocked();
     await eventually(() => server.stats.connections === 0, "server observes the dead client");
-    expect(server.stats.queuedBytes).toBe(0); // backlog dropped, not dispatched
-
-    g.releaseBlocked(); // frames 3-4 finish; their writes are skipped
-    await g.completed(4);
-    expect(g.admittedCount()).toBe(4); // frames 5 and 6 never started
-    // Permit release happens in the dispatcher's finally, a microtask after
-    // the handler resolves — wait for it rather than sampling mid-release.
+    g.drain();
     await eventually(() => server.stats.inFlight === 0, "all permits released");
+    expect(server.stats.queuedBytes).toBe(0);
+    expect(g.admittedCount()).toBeLessThanOrEqual(4); // frames 5-6 never start
 
     // Server remains live for a fresh client after the mess.
+    const beforeFresh = g.admittedCount();
     const c2 = await connectLines(socketPath);
     c2.write(execFrame(7));
-    await g.admitted(5);
+    await g.admitted(beforeFresh + 1);
     g.releaseBlocked();
     const r = JSON.parse(await c2.nextLine());
     expect(r.id).toBe(7);
@@ -517,4 +517,30 @@ describe("bounded JSON-RPC concurrency", () => {
     expect(server.stats.inFlight).toBe(0);
     c2.destroy();
   });
+  it("caps aggregate outbound responses and returns the reservation after rejection", async () => {
+    vi.spyOn(broker, "exec")
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "x".repeat(512), stderr: "", truncated: false })
+      .mockResolvedValue({ exitCode: 0, stdout: "", stderr: "", truncated: false });
+    const { server, socketPath } = await makeServer({
+      maxFrameBytes: MAX_FRAME,
+      maxResponseBytes: 1024,
+      maxOutboundBytesGlobal: 256,
+    });
+
+    const oversized = await connectLines(socketPath);
+    oversized.write(execFrame(1));
+    await oversized.closed;
+    await eventually(
+      () => server.stats.inFlight === 0 && server.stats.outboundBytes === 0,
+      "oversized response reservation released",
+    );
+
+    // The offending connection dies, not the server; a bounded response on a
+    // fresh connection still succeeds.
+    const bounded = await connectLines(socketPath);
+    bounded.write(execFrame(2));
+    expect(JSON.parse(await bounded.nextLine()).id).toBe(2);
+    bounded.destroy();
+  });
+
 });

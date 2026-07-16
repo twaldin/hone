@@ -62,6 +62,7 @@ interface BootExtras {
   events?: RunEvent[];
   runCommand?: RunCommand;
   scratchQuotaBytes?: number;
+  scratchVolume?: boolean;
   reaperIntervalMs?: number;
   now?: () => number;
   sandboxNetwork?: SandboxNetworkMode;
@@ -98,6 +99,7 @@ async function makeBrokerConfig(
     },
     ...(extras.runCommand ? { runCommand: extras.runCommand } : {}),
     ...(extras.scratchQuotaBytes !== undefined ? { scratchQuotaBytes: extras.scratchQuotaBytes } : {}),
+    ...(extras.scratchVolume !== undefined ? { scratchVolume: extras.scratchVolume } : {}),
     ...(extras.reaperIntervalMs !== undefined ? { reaperIntervalMs: extras.reaperIntervalMs } : {}),
     ...(extras.now ? { now: extras.now } : {}),
     ...(extras.sandboxNetwork ? { sandboxNetwork: extras.sandboxNetwork } : {}),
@@ -456,6 +458,81 @@ describe("sandbox lifecycle", () => {
       await b.close();
     }
   });
+
+  it("keeps capped tmpfs scratch across sandboxes and broker restart", async () => {
+    const { config, runDir } = await makeBrokerConfig("scratch-resume", GENEROUS_BUDGET, { scratchVolume: true });
+    const socketPath = path.join(runDir, "broker.sock");
+    const first = await startBroker(config);
+    const c1 = await RpcClient.connect(socketPath);
+    try {
+      const ref = (await c1.call("createSandbox", {
+        artifact: { hash: baselineHash },
+        role: "mutation",
+      })) as SandboxRef;
+      const wrote = ExecShape.parse(await c1.call("exec", {
+        sandboxId: ref.sandboxId,
+        argv: ["sh", "-c", "printf durable >/scratch/note.txt && chmod 000 /scratch/note.txt"],
+      }));
+      expect(wrote.exitCode).toBe(0);
+      await c1.call("saveArtifact", { sandboxId: ref.sandboxId });
+    } finally {
+      c1.close();
+      await first.close();
+    }
+
+    const second = await startBroker(config);
+    const c2 = await RpcClient.connect(socketPath);
+    try {
+      const ref = (await c2.call("createSandbox", {
+        artifact: { hash: baselineHash },
+        role: "mutation",
+      })) as SandboxRef;
+      const read = ExecShape.parse(await c2.call("exec", {
+        sandboxId: ref.sandboxId,
+        argv: ["sh", "-c", "chmod 600 /scratch/note.txt && cat /scratch/note.txt"],
+      }));
+      expect(read.exitCode).toBe(0);
+      expect(read.stdout).toBe("durable");
+    } finally {
+      c2.close();
+      await second.close();
+    }
+  });
+  it("rejects sparse scratch snapshots whose apparent bytes exceed the quota", async () => {
+    const { config } = await makeBrokerConfig("scratch-sparse", GENEROUS_BUDGET, {
+      scratchVolume: true,
+      scratchQuotaBytes: 4_096,
+    });
+    const running = await startBroker(config);
+    const client = await RpcClient.connect(running.socketPath);
+    try {
+      const ref = (await client.call("createSandbox", {
+        artifact: { hash: baselineHash },
+        role: "mutation",
+      })) as SandboxRef;
+      const wrote = ExecShape.parse(await client.call("exec", {
+        sandboxId: ref.sandboxId,
+        argv: ["sh", "-c", "dd if=/dev/null of=/scratch/sparse bs=1 seek=1048576"],
+      }));
+      expect(wrote.exitCode).toBe(0);
+      await expect(client.call("saveArtifact", { sandboxId: ref.sandboxId }))
+        .rejects.toThrow(/scratch apparent size exceeds quota/);
+
+      const cleanup = (await client.call("createSandbox", {
+        artifact: { hash: baselineHash },
+        role: "mutation",
+      })) as SandboxRef;
+      const removed = ExecShape.parse(await client.call("exec", {
+        sandboxId: cleanup.sandboxId,
+        argv: ["rm", "-f", "/scratch/sparse"],
+      }));
+      expect(removed.exitCode).toBe(0);
+    } finally {
+      client.close();
+      await running.close();
+    }
+  });
+
 
   it("sandboxNetwork: internal attaches mutation sandboxes to the named network; evals stay --network none", async () => {
     const netName = `hone-test-internal-${randomBytes(4).toString("hex")}`;

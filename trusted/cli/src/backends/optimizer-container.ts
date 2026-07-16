@@ -31,6 +31,7 @@ const OUT_MOUNT = "/hone/out";
 const BUNDLE_MOUNT = "/hone/bundle";
 /** Linux transport: the public broker socket's in-container path. */
 export const CONTAINER_BROKER_SOCK = "/run/hone/broker.sock";
+const MISSING_CONTAINER_RE = /no such container|is not running|no such object/i;
 
 /** Shared hard caps for both optimizer containers (build + run). */
 const RESOURCE_ARGS = [
@@ -108,6 +109,7 @@ export function optimizerRunName(safeRunId: string, invocation: number): string 
 export function optimizerBuildArgs(opts: { runId: string; safeRunId: string; image: string; stagingDir: string; outDir: string }): string[] {
   return [
     "docker", "run", "--rm",
+    "--log-driver", "none",
     "--name", optimizerBuildName(opts.safeRunId),
     "--label", `hone.runId=${opts.runId}`,
     "--network", "none",
@@ -138,6 +140,7 @@ export function optimizerRunArgs(opts: {
 }): string[] {
   const argv = [
     "docker", "run", "--rm",
+    "--log-driver", "none",
     "--name", opts.name,
     "--label", `hone.runId=${opts.runId}`,
     "--network", opts.transport.kind === "tcp" ? opts.transport.network : "none",
@@ -177,6 +180,30 @@ export async function prepareOptimizerRuntime(
 ): Promise<OptimizerRuntime> {
   const safeRunId = ctx.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
   const tempDirs: string[] = [];
+  const cleanupRuntime = async (): Promise<void> => {
+    const failures: string[] = [];
+    for (const name of [optimizerBuildName(safeRunId), ...runtime.spawnedNames]) {
+      try {
+        const result = await opts.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 });
+        if (result.exitCode !== 0 && !MISSING_CONTAINER_RE.test(result.stderr.toString("utf8"))) {
+          failures.push(`container ${name}: ${result.stderr.toString("utf8").trim() || `exit ${result.exitCode}`}`);
+        }
+      } catch (err) {
+        failures.push(`container ${name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    for (const dir of tempDirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch (err) {
+        failures.push(`temporary directory ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (failures.length > 0) throw new Error(`optimizer cleanup incomplete: ${failures.join("; ")}`);
+    runtime.spawnedNames.length = 0;
+    tempDirs.length = 0;
+  };
+
   const runtime: OptimizerRuntime = {
     image: opts.image,
     runId: ctx.runId,
@@ -188,14 +215,7 @@ export async function prepareOptimizerRuntime(
     run: opts.run,
     spawnedNames: [],
     invocation: 0,
-    cleanup: async (): Promise<void> => {
-      for (const name of [optimizerBuildName(safeRunId), ...runtime.spawnedNames]) {
-        await opts.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 }).catch(() => {});
-      }
-      runtime.spawnedNames.length = 0;
-      for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
-      tempDirs.length = 0;
-    },
+    cleanup: cleanupRuntime,
   };
 
   if (optimizerOverridden(ctx.env)) {

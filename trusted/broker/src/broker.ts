@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
@@ -32,8 +32,8 @@ import {
   ReportIncumbentParams,
   SandboxRef,
   SaveArtifactParams,
+  RunEvent,
   type ArtifactRef,
-  type RunEvent,
 } from "@hone/schema";
 import { HoldoutBudgetExceededError, HoldoutLedger } from "@hone/scoring";
 import { MAX_ARTIFACT_BYTES, canonicalizeWorkspaceTar, diffProtectedPaths, dirSizeBytes, unpackArtifact } from "./artifact.js";
@@ -42,6 +42,8 @@ import { runCommand, type CmdResult, type RunCommand } from "./command.js";
 import { deferred } from "./deferred.js";
 import { BrokerError } from "./errors.js";
 import { ArtifactValidationError, validateWorkspaceTar } from "./tarcheck.js";
+
+export type BudgetDimension = "tokens" | "usd" | "wallClockSec" | "evaluatorInvocations";
 
 /** Internal method (admin socket only): the proxy reports LLM spend. */
 export const RecordSpendParams = z.object({
@@ -83,10 +85,14 @@ export interface BrokerConfig {
   /** Event sink — the runner appends these to events.ndjson. The broker never touches the log itself. */
   onEvent: (event: RunEvent) => void;
   scratchQuotaBytes?: number | undefined;
+  /** Per-mutation-sandbox writable /workspace tmpfs cap. Default 1 GiB. */
+  workspaceQuotaBytes?: number | undefined;
   defaultTtlSec?: number | undefined;
   reaperIntervalMs?: number | undefined;
   evalTimeoutSec?: number | undefined;
   execOutputLimitBytes?: number | undefined;
+  /** Aggregate unique session-trace bytes admitted to CAS for this run. Default 64 MiB. */
+  sessionTraceQuotaBytes?: number | undefined;
   /** Lifetime holdout-access ledger budget (immutable once the ledger file exists); defaults to maxEvaluatorInvocations. */
   holdoutBudget?: number | undefined;
   /**
@@ -113,6 +119,14 @@ export interface BrokerConfig {
   episodeOrigin?: number | undefined;
   /** Hard cap on simultaneously-live mutation sandboxes. Default 8. */
   maxActiveSandboxes?: number | undefined;
+  /** Hard cap on concurrent evaluator containers. Default 4. */
+  maxConcurrentEvaluations?: number | undefined;
+  /** Hard cap on new mutation episode boundaries across the run. Default 64. */
+  maxMutationEpisodes?: number | undefined;
+  /** Hard cap on distinct candidate/repair artifacts admitted across the run. Default 128. */
+  maxCandidateArtifacts?: number | undefined;
+  /** Aggregate canonical candidate/repair artifact bytes admitted to CAS. Default 2 GiB. */
+  maxCandidateArtifactBytes?: number | undefined;
   /** docker --pids-limit for every container this broker spawns. Default 512. */
   sandboxPidsLimit?: number | undefined;
   /** docker --memory (bytes) for every container this broker spawns. Default 2 GiB. */
@@ -145,8 +159,8 @@ interface SandboxEntry {
   episode: number;
   /** Artifact the sandbox was unpacked from — trusted lineage parent for candidates it saves. */
   parentHash: string;
-  /** sha256 of the most recent exec stdout — trusted session-trace provenance. */
-  lastExecStdoutHash: string | null;
+  /** Exact bytes from the most recent exec, retained only until candidate admission. */
+  lastExecStdout: Buffer | null;
   /** Exit code of the most recent exec; a candidate save requires 0. */
   lastExecExitCode: number | null;
   /** Whether the most recent exec's captured output hit the size cap — a candidate requires a COMPLETE trace. */
@@ -154,7 +168,15 @@ interface SandboxEntry {
 }
 
 const MISSING_CONTAINER_RE = /no such container|is not running|no such object/i;
+const containerGone = (res: CmdResult): boolean =>
+  res.exitCode === 0 || MISSING_CONTAINER_RE.test(res.stderr.toString("utf8"));
 const STATE_FILE = "broker-state.ndjson";
+const SCRATCH_SNAPSHOT_DIR = "scratch-snapshot";
+const SCRATCH_SNAPSHOT_FILE = "scratch.tar";
+const SCRATCH_SNAPSHOT_SCRIPT =
+  "set -eu; total=$(find /scratch -type f -exec stat -c %s {} + | awk '{s+=$1} END{print s+0}'); " +
+  "[ \"$total\" -le \"${HONE_SCRATCH_QUOTA_BYTES:?}\" ] || { echo 'scratch apparent size exceeds quota' >&2; exit 1; }; " +
+  "tar -cf /snapshot/scratch.tar.tmp -C /scratch .; mv -f /snapshot/scratch.tar.tmp /snapshot/scratch.tar";
 
 type CreateSandboxP = z.infer<typeof CreateSandboxParams>;
 type ExecP = z.infer<typeof ExecParams>;
@@ -184,6 +206,19 @@ type EmittableEvent =
   | { type: "gate.paired"; episode: number; parentScore: number; childScore: number; passed: boolean }
   | { type: "incumbent.new"; artifact: ArtifactRef; aggregate: number; deltaVsBaseline: number; episode: number }
   | { type: "budget.snapshot"; budget: BudgetState };
+const BROKER_EVENT_TYPES = new Set<RunEvent["type"]>([
+  "holdout.accessed",
+  "episode.started",
+  "episode.candidate",
+  "eval.completed",
+  "gate.paired",
+  "incumbent.new",
+]);
+
+/** Whether an event type is emitted exclusively by the broker (budgets are shared with the supervisor). */
+export function isBrokerAuthoredEvent(event: RunEvent): boolean {
+  return BROKER_EVENT_TYPES.has(event.type);
+}
 
 /**
  * Durable run-state journal, one JSON line per authority-bearing fact. Every
@@ -193,24 +228,32 @@ type EmittableEvent =
  * are SYNCHRONOUS: single-threaded JS makes every check-then-append atomic,
  * which is what serializes concurrent holdout charges.
  */
+const JournalEvents = z.array(RunEvent).optional();
+
 const StateLine = z.discriminatedUnion("t", [
-  z.object({ t: z.literal("start"), atMs: z.number() }),
-  z.object({ t: z.literal("spend"), tokens: z.number().int().nonnegative(), usd: z.number().nonnegative() }),
-  z.object({ t: z.literal("inv") }),
-  z.object({ t: z.literal("holdout"), seq: z.number().int().positive() }),
-  z.object({ t: z.literal("eval"), record: EvaluationRecord }),
-  z.object({ t: z.literal("episode"), episode: z.number().int().nonnegative() }),
-  z.object({ t: z.literal("lineage"), candidate: z.string(), parent: z.string(), episode: z.number().int().nonnegative() }),
-  z.object({ t: z.literal("repair"), hash: z.string(), parent: z.string(), episode: z.number().int().nonnegative() }),
+  z.object({ t: z.literal("start"), atMs: z.number(), events: JournalEvents }),
+  z.object({ t: z.literal("spend"), tokens: z.number().int().nonnegative(), usd: z.number().nonnegative(), events: JournalEvents }),
+  z.object({ t: z.literal("inv"), events: JournalEvents }),
+  z.object({ t: z.literal("holdout"), seq: z.number().int().positive(), events: JournalEvents }),
+  z.object({ t: z.literal("eval"), record: EvaluationRecord, events: JournalEvents }),
+  z.object({ t: z.literal("episode"), episode: z.number().int().nonnegative(), events: JournalEvents }),
+  z.object({ t: z.literal("lineage"), candidate: z.string(), parent: z.string(), episode: z.number().int().nonnegative(), events: JournalEvents }),
+  z.object({ t: z.literal("repair"), hash: z.string(), parent: z.string(), episode: z.number().int().nonnegative(), events: JournalEvents }),
+  z.object({ t: z.literal("trace"), hash: z.string().regex(/^sha256:[0-9a-f]{64}$/), bytes: z.number().int().nonnegative(), events: JournalEvents }),
+  z.object({ t: z.literal("artifact"), hash: z.string().regex(/^sha256:[0-9a-f]{64}$/), bytes: z.number().int().nonnegative(), events: JournalEvents }),
   z.object({
     t: z.literal("incumbent"),
     hash: z.string(),
     aggregate: z.number(),
     deltaVsBaseline: z.number(),
     episode: z.number().int().nonnegative(),
+    events: JournalEvents,
   }),
+  z.object({ t: z.literal("migration"), events: z.array(RunEvent) }),
+  z.object({ t: z.literal("event"), event: RunEvent }),
 ]);
 type StateLine = z.infer<typeof StateLine>;
+type StateFact = Exclude<StateLine, { t: "event" | "migration" }>;
 
 class RunStateLog {
   private constructor(
@@ -262,6 +305,37 @@ class RunStateLog {
     closeSync(this.fd);
   }
 }
+/**
+ * Read-only, torn-tail-aware authority-journal validation for dead-run
+ * sealing. Every complete fact is parsed, not merely lines carrying events.
+ */
+export function readBrokerJournalEvents(runDir: string): RunEvent[] | null {
+  const filePath = path.join(runDir, STATE_FILE);
+  let content: Buffer;
+  try {
+    content = readFileSync(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  const keep = content.lastIndexOf(0x0a) + 1;
+  const rawLines = content.subarray(0, keep).toString("utf8").split("\n");
+  rawLines.pop();
+  const events: RunEvent[] = [];
+  let hasEventFormat = false;
+  for (const [index, raw] of rawLines.entries()) {
+    let line: StateLine;
+    try {
+      line = StateLine.parse(JSON.parse(raw));
+    } catch {
+      throw new BrokerError("INTERNAL", `run state log corrupt at line ${index + 1}: ${filePath}`);
+    }
+    if (line.t === "event" || line.t === "migration" || line.events !== undefined) hasEventFormat = true;
+    if (line.t === "event") events.push(line.event);
+    else if (line.events !== undefined) events.push(...line.events);
+  }
+  return hasEventFormat ? events : null;
+}
 
 /**
  * Trusted scalarization gate: a record grants promotion authority only when
@@ -295,12 +369,21 @@ export class Broker {
   private readonly proxySockPath: string;
   private readonly unpackRoot: string;
   private readonly tmpDir: string;
+  private readonly scratchSnapshotDir: string;
+  private readonly scratchSnapshotPath: string;
+  private readonly scratchKeeperName: string;
   private readonly scratchQuotaBytes: number;
+  private readonly workspaceQuotaBytes: number;
   private readonly defaultTtlSec: number;
   private readonly evalTimeoutSec: number;
   private readonly execOutputLimitBytes: number;
+  private readonly sessionTraceQuotaBytes: number;
   private readonly holdoutBudget: number;
   private readonly maxActiveSandboxes: number;
+  private readonly maxConcurrentEvaluations: number;
+  private readonly maxMutationEpisodes: number;
+  private readonly maxCandidateArtifacts: number;
+  private readonly maxCandidateArtifactBytes: number;
   private readonly sandboxPidsLimit: number;
   private readonly sandboxMemoryBytes: number;
   private readonly sandboxCpus: number;
@@ -313,6 +396,15 @@ export class Broker {
   /** Synchronous admission reservation: real evaluations in flight but not yet charged. */
   private pendingEvaluations = 0;
   private readonly exhaustedAnnounced = new Set<string>();
+  /** Durable unique session traces already charged to this run. */
+  private readonly sessionTraceHashes = new Set<string>();
+  private sessionTraceBytes = 0;
+  /** Identical concurrent traces share one paid CAS write. */
+  private readonly pendingSessionTraces = new Map<string, Promise<string>>();
+  /** Same-provenance concurrent evaluations share one trusted invocation. */
+  private readonly inFlightEvaluations = new Map<string, Promise<EvaluationRecord>>();
+  private readonly candidateArtifactHashes = new Set<string>();
+  private candidateArtifactBytes = 0;
   /** Per-run journal ordinal for holdout charges (observability only — the persistent ledger is authority). */
   private holdoutCount = 0;
   /** Repo-lifetime holdout ledger — the ONLY holdout-access authority; opened in init(), never reset per run. */
@@ -322,6 +414,8 @@ export class Broker {
   private reaper: NodeJS.Timeout | undefined;
   /** Next trusted episode ordinal (one per mutation sandbox created). */
   private episodeOrdinal: number;
+  /** Synchronous reservations for concurrent new-episode sandbox creates. */
+  private pendingNewEpisodes = 0;
   /** True once any episode of this RUN (including replayed ones) started — gates eval.completed emission. */
   private anyEpisodeStarted = false;
   /**
@@ -337,6 +431,10 @@ export class Broker {
   private currentIncumbent: IncumbentState | undefined;
   /** Full ordered promotion history (replayed + live) — crash-resume event recovery. */
   private readonly incumbentHistory: IncumbentState[] = [];
+  /** Full ordered broker-authored event journal, replayed before optimizer resume. */
+  private readonly journalEvents: RunEvent[] = [];
+  /** False only for pre-transaction journals; first reconciliation migrates them once. */
+  private eventJournalFormat = false;
   private stateLog: RunStateLog | undefined;
   /** Set when /scratch is a quota-enforcing docker tmpfs volume (else host bind + polling quota). */
   private scratchVolumeName: string | undefined;
@@ -346,8 +444,11 @@ export class Broker {
   private inFlightOps = 0;
   /** close() callers awaiting the in-flight operation count to reach zero. */
   private readonly opDrainWaiters: Array<() => void> = [];
-  /** Names of live eval containers — close() aborts them so drains are prompt. */
-  private readonly activeEvalContainers = new Set<string>();
+  /** Every spawned Docker container stays here until removal is positively confirmed. */
+  private readonly trackedContainers = new Set<string>();
+  /** One FIFO tail per sandbox; mutable Docker operations never interleave. */
+  private readonly sandboxQueues = new Map<string, Promise<void>>();
+  private scratchReady = false;
 
   constructor(private readonly config: BrokerConfig) {
     this.manifest = CapsuleManifest.parse(config.manifest);
@@ -361,12 +462,38 @@ export class Broker {
     this.proxySockPath = path.join(config.runDir, "proxy.sock");
     this.unpackRoot = path.join(config.runDir, "unpacked");
     this.tmpDir = path.join(config.runDir, "tmp");
+    this.scratchSnapshotDir = path.join(config.runDir, SCRATCH_SNAPSHOT_DIR);
+    this.scratchSnapshotPath = path.join(this.scratchSnapshotDir, SCRATCH_SNAPSHOT_FILE);
+    this.scratchKeeperName = `hone-scratch-keeper-${this.safeRunId}`;
     this.scratchQuotaBytes = config.scratchQuotaBytes ?? 1024 * 1024 * 1024;
+    this.workspaceQuotaBytes = config.workspaceQuotaBytes ?? 1024 * 1024 * 1024;
+    if (!Number.isSafeInteger(this.workspaceQuotaBytes) || this.workspaceQuotaBytes <= 0) {
+      throw new BrokerError("INTERNAL", "workspaceQuotaBytes must be a positive safe integer");
+    }
     this.defaultTtlSec = config.defaultTtlSec ?? 3_600;
     this.evalTimeoutSec = config.evalTimeoutSec ?? 600;
     this.execOutputLimitBytes = config.execOutputLimitBytes ?? 1024 * 1024;
+    this.sessionTraceQuotaBytes = config.sessionTraceQuotaBytes ?? 64 * 1024 * 1024;
+    if (!Number.isSafeInteger(this.sessionTraceQuotaBytes) || this.sessionTraceQuotaBytes <= 0) {
+      throw new BrokerError("INTERNAL", "sessionTraceQuotaBytes must be a positive safe integer");
+    }
     this.holdoutBudget = config.holdoutBudget ?? this.manifest.budget.maxEvaluatorInvocations;
     this.maxActiveSandboxes = config.maxActiveSandboxes ?? 8;
+    this.maxConcurrentEvaluations = config.maxConcurrentEvaluations ?? 4;
+    this.maxMutationEpisodes = config.maxMutationEpisodes ?? 64;
+    this.maxCandidateArtifacts = config.maxCandidateArtifacts ?? 128;
+    this.maxCandidateArtifactBytes = config.maxCandidateArtifactBytes ?? 2 * 1024 * 1024 * 1024;
+    for (const [name, value] of [
+      ["maxActiveSandboxes", this.maxActiveSandboxes],
+      ["maxConcurrentEvaluations", this.maxConcurrentEvaluations],
+      ["maxMutationEpisodes", this.maxMutationEpisodes],
+      ["maxCandidateArtifacts", this.maxCandidateArtifacts],
+      ["maxCandidateArtifactBytes", this.maxCandidateArtifactBytes],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new BrokerError("INTERNAL", `${name} must be a positive safe integer`);
+      }
+    }
     this.sandboxPidsLimit = config.sandboxPidsLimit ?? 512;
     this.sandboxMemoryBytes = config.sandboxMemoryBytes ?? 2 * 1024 * 1024 * 1024;
     this.sandboxCpus = config.sandboxCpus ?? 2;
@@ -376,11 +503,20 @@ export class Broker {
     // broker NEVER exists without its journal, so no method can act before
     // replay and no acknowledged fact can be lost to ordering.
     mkdirSync(config.runDir, { recursive: true });
-    this.replayState(RunStateLog.open(path.join(config.runDir, STATE_FILE)));
+    const stateLog = RunStateLog.open(path.join(config.runDir, STATE_FILE));
+    try {
+      this.validateReplay(stateLog);
+      this.replayState(stateLog);
+    } catch (error) {
+      stateLog.close();
+      throw error;
+    }
   }
 
   async init(): Promise<void> {
     await mkdir(this.scratchDir, { recursive: true });
+    await mkdir(this.scratchSnapshotDir, { recursive: true });
+    await chmod(this.scratchSnapshotDir, 0o700);
     await mkdir(this.unpackRoot, { recursive: true });
     await mkdir(this.tmpDir, { recursive: true });
     // Repo-lifetime holdout authority: the ledger file outlives this run. A
@@ -389,7 +525,11 @@ export class Broker {
     // fails closed inside HoldoutLedger.open).
     await mkdir(path.dirname(this.config.holdoutLedgerPath), { recursive: true });
     this.ledger = await HoldoutLedger.open(this.config.holdoutLedgerPath, { budget: this.holdoutBudget });
-    if (this.config.scratchVolume) await this.provisionScratchVolume();
+    if (this.config.scratchVolume) {
+      await this.provisionScratchVolume();
+      await this.restoreScratchSnapshot();
+      this.scratchReady = true;
+    }
     const interval = this.config.reaperIntervalMs ?? 30_000;
     this.reaper = setInterval(() => {
       void this.reapExpired();
@@ -398,38 +538,84 @@ export class Broker {
   }
 
   /**
-   * Graceful close (final-gate finding): new operations are rejected, every
-   * ACTIVE container — eval containers by name and mutation sandboxes — is
-   * force-removed first (in-flight docker CLIs die with their container, so
-   * the drain is prompt), then every in-flight operation promise is awaited
-   * before the ledger and the run journal are closed. After close() returns,
-   * nothing can emit, spend, or write: methods reject at entry and the
-   * journal is gone.
+   * Graceful close: new operations are rejected; active evaluator/mutation
+   * containers are force-removed to unblock their Docker CLIs, then every
+   * in-flight operation is awaited. The dedicated scratch keeper survives
+   * that drain long enough to atomically snapshot the size-capped tmpfs
+   * before the keeper and volume are removed. After return, no handler can
+   * emit, spend, write, or mutate persistent scratch state.
    */
   async close(): Promise<void> {
     this.closing = true;
     clearInterval(this.reaper);
-    const evalNames = [...this.activeEvalContainers];
-    const ids = [...this.sandboxes.values()].map((s) => s.containerId);
+    const failures: string[] = [];
+    const sweepWorkContainers = async (): Promise<void> => {
+      const work = [...this.trackedContainers].filter((ref) => ref !== this.scratchKeeperName);
+      await Promise.allSettled(work.map((ref) => this.removeTrackedContainer(ref)));
+    };
     this.sandboxes.clear();
-    await Promise.all([
-      ...ids.map((id) => this.run(["docker", "rm", "-f", id])),
-      ...evalNames.map((name) => this.run(["docker", "rm", "-f", name])),
-    ]);
+
+    // First pass interrupts active work; the second catches containers that
+    // an in-flight create registered after the first snapshot.
+    await sweepWorkContainers();
     if (this.inFlightOps > 0) {
       const drained = deferred<void>();
       this.opDrainWaiters.push(drained.resolve);
       await drained.promise;
     }
-    if (this.scratchVolumeName !== undefined) {
-      await this.run(["docker", "volume", "rm", "-f", this.scratchVolumeName]);
-      this.scratchVolumeName = undefined;
+    await sweepWorkContainers();
+    const workStillLive = [...this.trackedContainers].filter((ref) => ref !== this.scratchKeeperName);
+    if (workStillLive.length > 0) failures.push(`containers still live: ${workStillLive.join(", ")}`);
+
+    let scratchRemovable = true;
+    if (this.scratchVolumeName !== undefined && this.scratchReady) {
+      try {
+        await this.snapshotScratchVolume();
+      } catch (error) {
+        scratchRemovable = false;
+        failures.push(`scratch snapshot: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
+    if (scratchRemovable && this.trackedContainers.has(this.scratchKeeperName)) {
+      const removed = await this.removeTrackedContainer(this.scratchKeeperName);
+      if (!containerGone(removed)) {
+        scratchRemovable = false;
+        failures.push(`container ${this.scratchKeeperName}: ${stderrText(removed)}`);
+      }
+    }
+    if (scratchRemovable && this.scratchVolumeName !== undefined) {
+      const volumeName = this.scratchVolumeName;
+      try {
+        const removed = await this.run(["docker", "volume", "rm", "-f", volumeName], { timeoutMs: 30_000 });
+        if (removed.exitCode === 0 || /no such volume|not found/i.test(removed.stderr.toString("utf8"))) {
+          this.scratchVolumeName = undefined;
+        } else {
+          failures.push(`volume ${volumeName}: ${stderrText(removed)}`);
+        }
+      } catch (err) {
+        failures.push(`volume ${volumeName}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (this.trackedContainers.size > 0) {
+      failures.push(`containers still live: ${[...this.trackedContainers].join(", ")}`);
+    }
+
     const ledger = this.ledger;
     this.ledger = undefined;
-    await ledger?.close();
-    this.stateLog?.close();
+    try {
+      await ledger?.close();
+    } catch (err) {
+      failures.push(`holdout ledger: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      this.stateLog?.close();
+    } catch (err) {
+      failures.push(`run journal: ${err instanceof Error ? err.message : String(err)}`);
+    }
     this.stateLog = undefined;
+    if (failures.length > 0) {
+      throw new BrokerError("INTERNAL", `broker cleanup incomplete: ${failures.join("; ")}`);
+    }
   }
 
   /** Admission for async operations: rejected once close() has begun. */
@@ -445,6 +631,20 @@ export class Broker {
     }
   }
 
+  private async serializeSandbox<T>(sandboxId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.sandboxQueues.get(sandboxId) ?? Promise.resolve();
+    const turn = deferred<void>();
+    const tail = previous.then(() => turn.promise);
+    this.sandboxQueues.set(sandboxId, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      turn.resolve();
+      if (this.sandboxQueues.get(sandboxId) === tail) this.sandboxQueues.delete(sandboxId);
+    }
+  }
+
   // ---------- durable run state ----------
 
   private state(): RunStateLog {
@@ -452,12 +652,56 @@ export class Broker {
     return this.stateLog;
   }
 
+  /** Full semantic preflight: a corrupt journal changes no in-memory authority. */
+  private validateReplay(log: RunStateLog): void {
+    let holdoutSeq = 0;
+    let traceBytes = 0;
+    const traces = new Set<string>();
+    let artifactBytes = 0;
+    const artifacts = new Set<string>();
+    for (const line of log.replayed) {
+      if (line.t === "holdout") {
+        holdoutSeq += 1;
+        if (line.seq !== holdoutSeq) {
+          throw new BrokerError("INTERNAL", `run state log corrupt: holdout seq ${line.seq}, expected ${holdoutSeq}`);
+        }
+      } else if (line.t === "trace" && !traces.has(line.hash)) {
+        traces.add(line.hash);
+        traceBytes += line.bytes;
+        if (traceBytes > this.sessionTraceQuotaBytes) {
+          throw new BrokerError("INTERNAL", "run state log exceeds the configured session trace quota");
+        }
+      } else if (line.t === "artifact" && !artifacts.has(line.hash)) {
+        artifacts.add(line.hash);
+        artifactBytes += line.bytes;
+        if (artifacts.size > this.maxCandidateArtifacts || artifactBytes > this.maxCandidateArtifactBytes) {
+          throw new BrokerError("INTERNAL", "run state log exceeds the configured candidate artifact quota");
+        }
+      }
+    }
+  }
+
   /** Replays the journal into in-memory authority/budget state. Never emits events. */
   private replayState(log: RunStateLog): void {
     this.stateLog = log;
     let firstStartMs: number | undefined;
     for (const line of log.replayed) {
+      if (line.t === "event") {
+        this.eventJournalFormat = true;
+        this.journalEvents.push(line.event);
+        if (line.event.type === "budget.exhausted") this.exhaustedAnnounced.add(line.event.dimension);
+        continue;
+      }
+      if (line.events !== undefined) {
+        this.eventJournalFormat = true;
+        this.journalEvents.push(...line.events);
+        for (const event of line.events) {
+          if (event.type === "budget.exhausted") this.exhaustedAnnounced.add(event.dimension);
+        }
+      }
       switch (line.t) {
+        case "migration":
+          break;
         case "start":
           firstStartMs ??= line.atMs;
           break;
@@ -473,6 +717,12 @@ export class Broker {
             throw new BrokerError("INTERNAL", `run state log corrupt: holdout seq ${line.seq}, expected ${this.holdoutCount + 1}`);
           }
           this.holdoutCount = line.seq;
+          break;
+        case "artifact":
+          if (!this.candidateArtifactHashes.has(line.hash)) {
+            this.candidateArtifactHashes.add(line.hash);
+            this.candidateArtifactBytes += line.bytes;
+          }
           break;
         case "eval":
           this.acceptRecord(line.record);
@@ -490,6 +740,15 @@ export class Broker {
         case "repair":
           this.repairs.set(line.hash, { parent: line.parent, episode: line.episode });
           break;
+        case "trace":
+          if (!this.sessionTraceHashes.has(line.hash)) {
+            this.sessionTraceHashes.add(line.hash);
+            this.sessionTraceBytes += line.bytes;
+            if (this.sessionTraceBytes > this.sessionTraceQuotaBytes) {
+              throw new BrokerError("INTERNAL", "run state log exceeds the configured session trace quota");
+            }
+          }
+          break;
         case "incumbent": {
           const inc = { hash: line.hash, aggregate: line.aggregate, deltaVsBaseline: line.deltaVsBaseline, episode: line.episode };
           this.incumbentHistory.push(inc);
@@ -504,6 +763,52 @@ export class Broker {
       log.append({ t: "start", atMs: this.startedAtMs });
     } else {
       this.startedAtMs = Math.min(firstStartMs, this.startedAtMs);
+    }
+  }
+
+  private reserveCandidateArtifact(hash: string, bytes: number): void {
+    if (hash === this.config.baselineArtifactHash || this.candidateArtifactHashes.has(hash)) return;
+    if (this.candidateArtifactHashes.size >= this.maxCandidateArtifacts) {
+      throw new BrokerError("QUOTA_EXCEEDED", `candidate artifact count cap reached (${this.maxCandidateArtifacts})`);
+    }
+    if (this.candidateArtifactBytes + bytes > this.maxCandidateArtifactBytes) {
+      throw new BrokerError("QUOTA_EXCEEDED", `candidate artifact byte cap reached (${this.maxCandidateArtifactBytes})`);
+    }
+    this.state().append({ t: "artifact", hash, bytes });
+    this.candidateArtifactHashes.add(hash);
+    this.candidateArtifactBytes += bytes;
+  }
+
+  private async persistSessionTrace(bytes: Buffer): Promise<string> {
+    const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const inFlight = this.pendingSessionTraces.get(hash);
+    if (inFlight !== undefined) return inFlight;
+
+    // Charge unique bytes durably BEFORE touching CAS. A crash or disk error
+    // may leave paid-but-missing content, never uncharged content. A retry
+    // repairs that same hash without charging twice.
+    if (!this.sessionTraceHashes.has(hash)) {
+      if (this.sessionTraceBytes + bytes.length > this.sessionTraceQuotaBytes) {
+        throw new BrokerError(
+          "QUOTA_EXCEEDED",
+          `session trace quota exceeded (${this.sessionTraceBytes + bytes.length} > ${this.sessionTraceQuotaBytes})`,
+        );
+      }
+      this.state().append({ t: "trace", hash, bytes: bytes.length });
+      this.sessionTraceHashes.add(hash);
+      this.sessionTraceBytes += bytes.length;
+    }
+
+    const write = (async (): Promise<string> => {
+      const stored = await this.cas.putBuffer(bytes);
+      if (stored !== hash) throw new BrokerError("INTERNAL", "CAS returned the wrong session trace hash");
+      return hash;
+    })();
+    this.pendingSessionTraces.set(hash, write);
+    try {
+      return await write;
+    } finally {
+      this.pendingSessionTraces.delete(hash);
     }
   }
 
@@ -524,38 +829,61 @@ export class Broker {
 
   // ---------- events + budget ----------
 
+  private journalFact(fact: StateFact, events: readonly EmittableEvent[]): RunEvent[] {
+    const at = new Date(this.now()).toISOString();
+    const full = events.map((event) => RunEvent.parse({ runId: this.config.runId, at, ...event }));
+    this.state().append(StateLine.parse({ ...fact, events: full }));
+    this.eventJournalFormat = true;
+    this.journalEvents.push(...full);
+    for (const event of full) {
+      if (event.type === "budget.exhausted") this.exhaustedAnnounced.add(event.dimension);
+    }
+    return full;
+  }
+
+  private publish(events: readonly RunEvent[]): void {
+    for (const event of events) this.config.onEvent(event);
+  }
+
   private emit(event: EmittableEvent): void {
     // A fully closed broker (journal gone) has no event authority left.
     if (this.stateLog === undefined) return;
-    const full: RunEvent = {
+    const full = RunEvent.parse({
       runId: this.config.runId,
       at: new Date(this.now()).toISOString(),
       ...event,
-    };
+    });
+    this.state().append({ t: "event", event: full });
+    this.eventJournalFormat = true;
+    this.journalEvents.push(full);
+    if (full.type === "budget.exhausted") this.exhaustedAnnounced.add(full.dimension);
     this.config.onEvent(full);
   }
 
-  private budgetStateNow(): BudgetState {
+  private budgetStateNow(tokensDelta = 0, usdDelta = 0, evaluatorInvocationDelta = 0): BudgetState {
     return BudgetState.parse({
       envelope: this.manifest.budget,
       spent: {
-        tokens: this.spent.tokens,
-        usd: this.spent.usd,
+        tokens: this.spent.tokens + tokensDelta,
+        usd: this.spent.usd + usdDelta,
         wallClockSec: (this.now() - this.startedAtMs) / 1000,
-        evaluatorInvocations: this.spent.evaluatorInvocations,
+        evaluatorInvocations: this.spent.evaluatorInvocations + evaluatorInvocationDelta,
       },
     });
   }
 
-  private announceExhaustion(): string | undefined {
+  private exhaustedDimension(tokensDelta = 0, usdDelta = 0, evaluatorInvocationDelta = 0): BudgetDimension | undefined {
     const e = this.manifest.budget;
-    let dim: string | undefined;
-    if (this.spent.tokens >= e.maxTokens) dim = "tokens";
-    else if (this.spent.usd >= e.maxUsd) dim = "usd";
-    else if ((this.now() - this.startedAtMs) / 1000 >= e.maxWallClockSec) dim = "wallClockSec";
-    else if (this.spent.evaluatorInvocations >= e.maxEvaluatorInvocations) dim = "evaluatorInvocations";
+    if (this.spent.tokens + tokensDelta >= e.maxTokens) return "tokens";
+    if (this.spent.usd + usdDelta >= e.maxUsd) return "usd";
+    if ((this.now() - this.startedAtMs) / 1000 >= e.maxWallClockSec) return "wallClockSec";
+    if (this.spent.evaluatorInvocations + evaluatorInvocationDelta >= e.maxEvaluatorInvocations) return "evaluatorInvocations";
+    return undefined;
+  }
+
+  private announceExhaustion(): BudgetDimension | undefined {
+    const dim = this.exhaustedDimension();
     if (dim !== undefined && !this.exhaustedAnnounced.has(dim)) {
-      this.exhaustedAnnounced.add(dim);
       this.emit({ type: "budget.exhausted", dimension: dim });
     }
     return dim;
@@ -563,7 +891,8 @@ export class Broker {
 
   /** Every metered method calls this; getBudget/finish/recordSpend stay reachable for observability + teardown. */
   private budgetGate(): void {
-    const dim = this.announceExhaustion();
+    const persisted = this.exhaustedAnnounced.values().next().value;
+    const dim = persisted ?? this.announceExhaustion();
     if (dim !== undefined) throw new BrokerError("BUDGET_EXCEEDED", `budget dimension exhausted: ${dim}`);
   }
 
@@ -600,20 +929,45 @@ export class Broker {
     const entry = this.sandboxes.get(sandboxId);
     if (!entry) throw new BrokerError("SANDBOX_NOT_FOUND", `unknown sandbox: ${sandboxId}`);
     if (this.now() >= entry.expiresAtMs) {
+      const removed = await this.removeTrackedContainer(entry.containerId);
+      if (!containerGone(removed)) {
+        throw new BrokerError("INTERNAL", `expired sandbox cleanup failed: ${stderrText(removed)}`);
+      }
       this.sandboxes.delete(sandboxId);
-      await this.run(["docker", "rm", "-f", entry.containerId]);
       throw new BrokerError("SANDBOX_NOT_FOUND", `sandbox expired: ${sandboxId}`);
     }
     return entry;
   }
 
+  private async removeTrackedContainer(ref: string): Promise<CmdResult> {
+    const res = await this.run(["docker", "rm", "-f", ref], { timeoutMs: 30_000 });
+    if (containerGone(res)) {
+      this.trackedContainers.delete(ref);
+    }
+    return res;
+  }
+
   private async reapExpired(): Promise<void> {
-    const nowMs = this.now();
-    for (const [id, entry] of [...this.sandboxes]) {
-      if (nowMs >= entry.expiresAtMs) {
-        this.sandboxes.delete(id);
-        await this.run(["docker", "rm", "-f", entry.containerId]);
+    if (this.closing) return;
+    this.enterOp();
+    try {
+      const nowMs = this.now();
+      for (const [id, entry] of [...this.sandboxes]) {
+        if (nowMs < entry.expiresAtMs) continue;
+        await this.serializeSandbox(id, async () => {
+          const current = this.sandboxes.get(id);
+          if (current === undefined || this.now() < current.expiresAtMs) return;
+          try {
+            const removed = await this.removeTrackedContainer(current.containerId);
+            if (containerGone(removed)) this.sandboxes.delete(id);
+          } catch {
+            // Keep the expired entry tracked: close() retries and fails terminal
+            // cleanup if Docker still cannot remove it.
+          }
+        });
       }
+    } finally {
+      this.exitOp();
     }
   }
 
@@ -634,22 +988,80 @@ export class Broker {
    */
   private async provisionScratchVolume(): Promise<void> {
     const name = `hone-scratch-${this.safeRunId}`;
-    const res = await this.run(
+    // The daemon may create either resource but lose/timeout the CLI response.
+    // Register deterministic names first so init unwind always reaps them.
+    this.scratchVolumeName = name;
+    const created = await this.run(
       [
         "docker", "volume", "create",
         "--driver", "local",
         "--opt", "type=tmpfs",
         "--opt", "device=tmpfs",
-        "--opt", `o=size=${this.scratchQuotaBytes}`,
+        "--opt", `o=size=${this.scratchQuotaBytes},nr_inodes=131072`,
         "--label", `hone.runId=${this.config.runId}`,
         name,
       ],
       { timeoutMs: 30_000 },
     );
-    if (res.exitCode !== 0) {
-      throw new BrokerError("INTERNAL", `scratch volume provisioning failed (refusing unquota'd fallback): ${stderrText(res)}`);
+    if (created.exitCode !== 0) {
+      throw new BrokerError("INTERNAL", `scratch volume provisioning failed (refusing unquota'd fallback): ${stderrText(created)}`);
     }
-    this.scratchVolumeName = name;
+
+    this.trackedContainers.add(this.scratchKeeperName);
+    const keeper = await this.run(
+      [
+        "docker", "run", "-d",
+        "--name", this.scratchKeeperName,
+        "--label", `hone.runId=${this.config.runId}`,
+        "--network", "none",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--cap-add", "DAC_READ_SEARCH",
+        "--cap-add", "CHOWN",
+        "--security-opt", "no-new-privileges",
+        "-e", `HONE_SCRATCH_QUOTA_BYTES=${this.scratchQuotaBytes}`,
+        "--pids-limit", "16",
+        "--memory", "32m",
+        "--memory-swap", "32m",
+        "--cpus", "0.1",
+        "--log-driver", "none",
+        "-v", `${name}:/scratch`,
+        "-v", `${this.scratchSnapshotDir}:/snapshot`,
+        this.config.image,
+        "sleep", "2147483647",
+      ],
+      { timeoutMs: 120_000 },
+    );
+    if (keeper.exitCode !== 0) {
+      throw new BrokerError("INTERNAL", `scratch keeper failed: ${stderrText(keeper)}`);
+    }
+  }
+
+  private async restoreScratchSnapshot(): Promise<void> {
+    try {
+      await stat(this.scratchSnapshotPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const restored = await this.run(
+      ["docker", "exec", "-i", "-u", "root", this.scratchKeeperName, "/bin/tar", "-x", "-C", "/scratch"],
+      { stdinFile: this.scratchSnapshotPath, timeoutMs: 300_000 },
+    );
+    if (restored.exitCode !== 0 || restored.timedOut) {
+      throw new BrokerError("INTERNAL", `scratch snapshot restore failed: ${stderrText(restored)}`);
+    }
+  }
+
+  private async snapshotScratchVolume(): Promise<void> {
+    if (this.scratchVolumeName === undefined) return;
+    const snapshotted = await this.run(
+      ["docker", "exec", "-u", "root", this.scratchKeeperName, "/bin/sh", "-c", SCRATCH_SNAPSHOT_SCRIPT],
+      { timeoutMs: 300_000 },
+    );
+    if (snapshotted.exitCode !== 0 || snapshotted.timedOut) {
+      throw new BrokerError("INTERNAL", `scratch snapshot failed: ${stderrText(snapshotted)}`);
+    }
   }
 
   private missingContainer(res: CmdResult, sandboxId: string): BrokerError | undefined {
@@ -658,6 +1070,19 @@ export class Broker {
       return new BrokerError("SANDBOX_NOT_FOUND", `sandbox container gone: ${sandboxId}`);
     }
     return undefined;
+  }
+
+  private async rejectTimedOutSandbox(
+    sandboxId: string,
+    entry: SandboxEntry,
+    result: CmdResult,
+    operation: string,
+  ): Promise<void> {
+    if (!result.timedOut) return;
+    entry.expiresAtMs = 0;
+    const retired = await this.removeTrackedContainer(entry.containerId);
+    if (containerGone(retired)) this.sandboxes.delete(sandboxId);
+    throw new BrokerError("INTERNAL", `${operation} timed out; sandbox retired`);
   }
 
   /** Absolute in-container path; relative paths resolve against /workspace. */
@@ -752,15 +1177,21 @@ export class Broker {
     if (!st.isFile()) {
       throw new BrokerError("INTERNAL", `asset group ${groupId}: refusing non-regular asset source: ${rel}`);
     }
-    // O_NOFOLLOW pins the lstat verdict: the EXACT admitted bytes are copied
-    // through the opened handle, or the evaluation fails closed — a symlink
-    // (pre-existing or raced in) can never be dereferenced into the stage.
+    // O_NOFOLLOW pins the lstat verdict. Hash the bytes read from that exact
+    // handle against the frozen manifest immediately before staging; edits
+    // after admission cannot poison memoized scores under the old digest.
     const fh = await open(src, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     try {
       if (!(await fh.stat()).isFile()) {
         throw new BrokerError("INTERNAL", `asset group ${groupId}: refusing non-regular asset source: ${rel}`);
       }
-      await writeFile(dst, await fh.readFile(), { mode: 0o600, flag: "wx" });
+      const bytes = await fh.readFile();
+      const expected = this.manifest.contentHashes[rel];
+      const actual = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      if (expected === undefined || actual !== expected) {
+        throw new BrokerError("INTERNAL", `asset group ${groupId}: frozen content hash mismatch at ${rel}`);
+      }
+      await writeFile(dst, bytes, { mode: 0o600, flag: "wx" });
     } finally {
       await fh.close();
     }
@@ -775,10 +1206,12 @@ export class Broker {
   /** Shared per-container resource ceilings (mutation AND eval containers). */
   private resourceArgs(): string[] {
     return [
+      "--log-driver", "none",
       "--pids-limit", String(this.sandboxPidsLimit),
       "--memory", String(this.sandboxMemoryBytes),
       "--cpus", String(this.sandboxCpus),
       "--security-opt", "no-new-privileges",
+      "--cap-drop", "ALL",
     ];
   }
 
@@ -805,18 +1238,28 @@ export class Broker {
       if (this.sandboxes.size + this.pendingSandboxes >= this.maxActiveSandboxes) {
         throw new BrokerError("QUOTA_EXCEEDED", `active sandbox cap reached (${this.maxActiveSandboxes})`);
       }
+      const repair = this.lineage.has(params.artifact.hash) ? undefined : this.repairs.get(params.artifact.hash);
+      const reservesNewEpisode = repair === undefined;
+      if (reservesNewEpisode && this.episodeOrdinal + this.pendingNewEpisodes >= this.maxMutationEpisodes) {
+        throw new BrokerError("BUDGET_EXCEEDED", `mutation episode cap reached (${this.maxMutationEpisodes})`);
+      }
+      if (reservesNewEpisode) this.pendingNewEpisodes += 1;
       this.pendingSandboxes += 1;
       try {
-        return await this.createSandboxReserved(params);
+        return await this.createSandboxReserved(params, repair);
       } finally {
         this.pendingSandboxes -= 1;
+        if (reservesNewEpisode) this.pendingNewEpisodes -= 1;
       }
     } finally {
       this.exitOp();
     }
   }
 
-  private async createSandboxReserved(params: CreateSandboxP): Promise<SandboxRef> {
+  private async createSandboxReserved(
+    params: CreateSandboxP,
+    repair: { parent: string; episode: number } | undefined,
+  ): Promise<SandboxRef> {
     await this.checkScratchQuota();
     // A CAS hash is not trusted layout — validate the archive before any
     // container extracts it.
@@ -851,6 +1294,14 @@ export class Broker {
       "--label",
       `hone.runId=${this.config.runId}`,
       ...this.resourceArgs(),
+      "--user", "1000:1000",
+      "--read-only",
+      "--tmpfs",
+      `/workspace:rw,exec,nosuid,nodev,size=${this.workspaceQuotaBytes},mode=1777`,
+      "--tmpfs",
+      "/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777",
+      "--tmpfs",
+      "/home/hone:rw,exec,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000",
       "-w",
       "/workspace",
     ];
@@ -864,60 +1315,78 @@ export class Broker {
     for (const m of mounts) argv.push("-v", `${m.host}:${m.container}:${m.mode}`);
     argv.push(this.config.image, "sleep", "2147483647");
 
-    // Last-instant closing check: this read and the spawn are one synchronous
-    // block, so close() can never interleave between them.
+    // Pre-register the deterministic name BEFORE the daemon call. A timeout
+    // can mean “created, response lost”; every uncertain outcome is removed
+    // by name and remains tracked if removal cannot be proved.
     if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
-    const res = await this.run(argv, { timeoutMs: 120_000 });
-    if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `docker run failed: ${stderrText(res)}`);
+    const containerName = `hone-${this.safeRunId}-${sandboxId}`;
+    this.trackedContainers.add(containerName);
+    let res: CmdResult;
+    try {
+      res = await this.run(argv, { timeoutMs: 120_000 });
+    } catch (error) {
+      const removed = await this.removeTrackedContainer(containerName);
+      if (!containerGone(removed)) {
+        throw new BrokerError("INTERNAL", `uncertain docker run and cleanup failed: ${stderrText(removed)}`);
+      }
+      throw error;
+    }
+    if (res.exitCode !== 0 || res.timedOut) {
+      const removed = await this.removeTrackedContainer(containerName);
+      if (!containerGone(removed)) {
+        throw new BrokerError("INTERNAL", `docker run failed and cleanup was not confirmed: ${stderrText(res)}; ${stderrText(removed)}`);
+      }
+      throw new BrokerError("INTERNAL", `docker run failed: ${stderrText(res)}`);
+    }
     const containerId = res.stdout.toString("utf8").trim();
+    if (containerId.length === 0) {
+      const removed = await this.removeTrackedContainer(containerName);
+      if (!containerGone(removed)) {
+        throw new BrokerError("INTERNAL", `docker run returned no container id and cleanup failed: ${stderrText(removed)}`);
+      }
+      throw new BrokerError("INTERNAL", "docker run returned no container id");
+    }
+    // The uncertain-create name becomes the daemon-confirmed id atomically.
+    this.trackedContainers.delete(containerName);
+    this.trackedContainers.add(containerId);
 
-    const unpack = await this.run(["docker", "cp", "-", `${containerId}:/`], {
+    // Extract AS the fixed unprivileged mutation identity. No root-side chown
+    // (or CAP_CHOWN) is needed, and the long-lived sandbox retains zero caps.
+    const unpack = await this.run([
+      "docker", "exec", "-i", "-u", "1000:1000", containerId,
+      "/bin/tar", "-o", "--no-same-permissions", "-x", "-C", "/",
+    ], {
       stdin: artifactBytes,
       timeoutMs: 300_000,
     });
     if (unpack.exitCode !== 0) {
-      await this.run(["docker", "rm", "-f", containerId]);
+      await this.removeTrackedContainer(containerId);
       throw new BrokerError("INTERNAL", `artifact unpack failed: ${stderrText(unpack)}`);
-    }
-
-    // `docker cp` preserves the tar's host uid; the image may run as a
-    // different unprivileged user — hand the workspace to whoever execs run as.
-    const whoami = await this.run(["docker", "exec", containerId, "sh", "-c", "echo \"$(id -u):$(id -g)\""]);
-    const owner = whoami.stdout.toString("utf8").trim();
-    const chown =
-      whoami.exitCode === 0 && /^\d+:\d+$/.test(owner)
-        ? await this.run(["docker", "exec", "-u", "root", containerId, "chown", "-R", owner, "/workspace"])
-        : whoami;
-    if (chown.exitCode !== 0) {
-      await this.run(["docker", "rm", "-f", containerId]);
-      throw new BrokerError("INTERNAL", `workspace ownership fixup failed: ${stderrText(chown)}`);
     }
 
     // close() snapshots the sandbox map — a container spawned in flight but
     // not yet registered would leak past it. Reap it here instead.
     if (this.closing) {
-      await this.run(["docker", "rm", "-f", containerId]);
+      await this.removeTrackedContainer(containerId);
       throw new BrokerError("INTERNAL", "broker is closed");
     }
 
     const ttlSec = params.ttlSec ?? this.defaultTtlSec;
-    // Trusted episode boundary: one ordinal per mutation sandbox — EXCEPT a
-    // sandbox resumed from a failed-exec repair snapshot, which safely
-    // continues the snapshot's original episode (the snapshot was never a
-    // candidate, so no episode boundary passed). A repair that later
-    // GRADUATED to a candidate (lineage exists) is a normal parent again.
-    const repair = this.lineage.has(params.artifact.hash) ? undefined : this.repairs.get(params.artifact.hash);
     let episode: number;
     let parentHash: string;
+    let startedEvents: RunEvent[] = [];
     if (repair !== undefined) {
       episode = repair.episode;
       parentHash = repair.parent;
     } else {
       episode = this.episodeOrdinal;
       parentHash = params.artifact.hash;
-      // Durable BEFORE the ordinal is observable anywhere — a restart can
-      // never hand out the same episode twice.
-      this.state().append({ t: "episode", episode });
+      // One fsynced fact owns both the ordinal and the public boundary: a
+      // crash can strand neither side of the split journal.
+      startedEvents = this.journalFact(
+        { t: "episode", episode },
+        [{ type: "episode.started", episode, parent: { hash: parentHash } }],
+      );
       this.episodeOrdinal = episode + 1;
       this.anyEpisodeStarted = true;
     }
@@ -926,18 +1395,18 @@ export class Broker {
       expiresAtMs: this.now() + ttlSec * 1000,
       episode,
       parentHash,
-      lastExecStdoutHash: null,
+      lastExecStdout: null,
       lastExecExitCode: null,
       lastExecTruncated: null,
     });
-    if (repair === undefined) this.emit({ type: "episode.started", episode, parent: { hash: parentHash } });
+    this.publish(startedEvents);
     return { sandboxId };
   }
 
   async exec(params: ExecP, ctx: CallContext): Promise<ExecR> {
     this.enterOp();
     try {
-      return await this.execOp(params, ctx);
+      return await this.serializeSandbox(params.sandboxId, () => this.execOp(params, ctx));
     } finally {
       this.exitOp();
     }
@@ -951,7 +1420,7 @@ export class Broker {
     // exec (or observes a timed-out one) can never reuse stale prior-success
     // provenance — it degrades to a repair snapshot instead.
     sb.lastExecExitCode = null;
-    sb.lastExecStdoutHash = null;
+    sb.lastExecStdout = null;
     sb.lastExecTruncated = null;
     const argv = ["docker", "exec", "-i"];
     if (params.cwd !== undefined) argv.push("-w", params.cwd);
@@ -967,23 +1436,21 @@ export class Broker {
       // Killing the local docker CLI does NOT kill in-container work — the
       // sandbox may still be running arbitrary code. Invalidate and remove it
       // so the orphan cannot keep computing against the run.
-      this.sandboxes.delete(params.sandboxId);
-      await this.run(["docker", "rm", "-f", sb.containerId]);
-      // Record the timeout outcome (exit 124) with its CAS-backed partial
-      // stdout — anyone still holding the entry sees a failed exec, never the
-      // previous success.
+      sb.expiresAtMs = 0;
+      const retired = await this.removeTrackedContainer(sb.containerId);
+      if (containerGone(retired)) this.sandboxes.delete(params.sandboxId);
+      // Keep the capped partial bytes only in this bounded sandbox entry.
+      // Failed/truncated executions can never become candidate provenance.
       sb.lastExecExitCode = 124;
       sb.lastExecTruncated = res.truncated;
-      sb.lastExecStdoutHash = await this.cas.putBuffer(res.stdout);
+      sb.lastExecStdout = res.stdout;
       return { exitCode: 124, stdout: res.stdout.toString("utf8"), stderr: res.stderr.toString("utf8"), truncated: res.truncated };
     }
     sb.lastExecExitCode = res.exitCode;
     sb.lastExecTruncated = res.truncated;
-    // Session-trace provenance: the EXACT stdout bytes are persisted to CAS
-    // and the returned hash recorded BEFORE this exec is acknowledged — so an
-    // episode.candidate.sessionTrace always dereferences to the real bytes,
-    // never a naked digest with no blob behind it.
-    sb.lastExecStdoutHash = await this.cas.putBuffer(res.stdout);
+    // Hold the capped bytes in memory until saveArtifact proves this exec
+    // actually minted a candidate. Repeated diagnostic execs never grow CAS.
+    sb.lastExecStdout = res.stdout;
     return {
       exitCode: res.exitCode,
       stdout: res.stdout.toString("utf8"),
@@ -995,7 +1462,7 @@ export class Broker {
   async putFile(params: PutFileP, ctx: CallContext): Promise<Record<string, never>> {
     this.enterOp();
     try {
-      return await this.putFileOp(params, ctx);
+      return await this.serializeSandbox(params.sandboxId, () => this.putFileOp(params, ctx));
     } finally {
       this.exitOp();
     }
@@ -1005,28 +1472,30 @@ export class Broker {
     this.budgetGate();
     const sb = await this.requireSandbox(params.sandboxId);
     const target = this.containerPath(params.path);
-    const mkdirRes = await this.run(["docker", "exec", sb.containerId, "mkdir", "-p", path.posix.dirname(target)]);
+    const mkdirRes = await this.run(
+      ["docker", "exec", sb.containerId, "mkdir", "-p", path.posix.dirname(target)],
+      { timeoutMs: 120_000 },
+    );
     const goneMkdir = this.missingContainer(mkdirRes, params.sandboxId);
+    await this.rejectTimedOutSandbox(params.sandboxId, sb, mkdirRes, "mkdir");
     if (goneMkdir) throw goneMkdir;
     if (mkdirRes.exitCode !== 0) throw new BrokerError("INTERNAL", `mkdir failed: ${stderrText(mkdirRes)}`);
 
-    const tmp = path.join(this.tmpDir, `put-${randomUUID()}`);
-    await writeFile(tmp, Buffer.from(params.contentBase64, "base64"));
-    try {
-      const cp = await this.run(["docker", "cp", tmp, `${sb.containerId}:${target}`]);
-      const gone = this.missingContainer(cp, params.sandboxId);
-      if (gone) throw gone;
-      if (cp.exitCode !== 0) throw new BrokerError("INTERNAL", `docker cp failed: ${stderrText(cp)}`);
-    } finally {
-      await rm(tmp, { force: true });
-    }
+    const write = await this.run(
+      ["docker", "exec", "-i", sb.containerId, "sh", "-c", "cat > \"$1\"", "sh", target],
+      { stdin: Buffer.from(params.contentBase64, "base64"), timeoutMs: 120_000 },
+    );
+    const gone = this.missingContainer(write, params.sandboxId);
+    await this.rejectTimedOutSandbox(params.sandboxId, sb, write, "write");
+    if (gone) throw gone;
+    if (write.exitCode !== 0) throw new BrokerError("INTERNAL", `write failed: ${stderrText(write)}`);
     return {};
   }
 
   async getFile(params: GetFileP, ctx: CallContext): Promise<GetFileR> {
     this.enterOp();
     try {
-      return await this.getFileOp(params, ctx);
+      return await this.serializeSandbox(params.sandboxId, () => this.getFileOp(params, ctx));
     } finally {
       this.exitOp();
     }
@@ -1038,8 +1507,10 @@ export class Broker {
     const target = this.containerPath(params.path);
     const res = await this.run(["docker", "exec", sb.containerId, "cat", target], {
       maxOutputBytes: 64 * 1024 * 1024,
+      timeoutMs: 120_000,
     });
     const gone = this.missingContainer(res, params.sandboxId);
+    await this.rejectTimedOutSandbox(params.sandboxId, sb, res, "read");
     if (gone) throw gone;
     if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `read failed: ${stderrText(res)}`);
     if (res.truncated) throw new BrokerError("QUOTA_EXCEEDED", `file too large: ${target}`);
@@ -1049,7 +1520,7 @@ export class Broker {
   async saveArtifact(params: SaveArtifactP, ctx: CallContext): Promise<ArtifactRef> {
     this.enterOp();
     try {
-      return await this.saveArtifactOp(params, ctx);
+      return await this.serializeSandbox(params.sandboxId, () => this.saveArtifactOp(params, ctx));
     } finally {
       this.exitOp();
     }
@@ -1059,13 +1530,13 @@ export class Broker {
     this.budgetGate();
     const sb = await this.requireSandbox(params.sandboxId);
     await this.checkScratchQuota();
-    const res = await this.run(["docker", "cp", `${sb.containerId}:/workspace`, "-"], {
+    const res = await this.run(["docker", "exec", sb.containerId, "/bin/tar", "-c", "-C", "/", "workspace"], {
       maxOutputBytes: MAX_ARTIFACT_BYTES,
       timeoutMs: 300_000,
     });
     const gone = this.missingContainer(res, params.sandboxId);
     if (gone) throw gone;
-    if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `docker cp out failed: ${stderrText(res)}`);
+    if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `workspace archive failed: ${stderrText(res)}`);
     if (res.truncated) throw new BrokerError("QUOTA_EXCEEDED", "artifact exceeds size cap");
     // The sandbox ran adversarial code — its tar is untrusted until the
     // archive validator accepts it; validation runs BEFORE anything is
@@ -1075,7 +1546,12 @@ export class Broker {
     // lineage, events, and evaluation all key off the canonical hash.
     let hash: string;
     try {
-      hash = await canonicalizeWorkspaceTar(res.stdout, this.cas, this.run);
+      hash = await canonicalizeWorkspaceTar(
+        res.stdout,
+        this.cas,
+        this.run,
+        (candidateHash, bytes) => this.reserveCandidateArtifact(candidateHash, bytes),
+      );
     } catch (err) {
       if (err instanceof ArtifactValidationError) {
         throw new BrokerError("INTERNAL", `saved artifact rejected: ${err.message}`, {
@@ -1086,26 +1562,33 @@ export class Broker {
       throw err;
     }
 
+    // The candidate/repair event is acknowledged only after mutable scratch
+    // has an atomic host snapshot. A crash can replay this episode from the
+    // previous boundary, never observe an event whose scratch state vanished.
+    await this.snapshotScratchVolume();
+
     // Candidate admission requires a COMPLETE successful exec record: exit 0
     // AND an untruncated capture — a capped trace is stored in CAS for
     // diagnostics but can never be cited as candidate provenance.
     if (sb.lastExecExitCode === 0 && sb.lastExecTruncated === false) {
-      // Durable lineage BEFORE the candidate event — promotion authority
-      // survives restarts.
+      // Lineage and its public candidate record share one fsynced journal
+      // line, including the exact CAS-backed session-trace reference.
       if (!this.lineage.has(hash) && hash !== sb.parentHash) {
-        // exec() CAS-writes stdout before recording the hash, so a zero exit
-        // implies a dereferenceable trace; a bare digest here is a bug.
-        const sessionTrace = sb.lastExecStdoutHash;
-        if (sessionTrace === null) {
-          throw new BrokerError("INTERNAL", "candidate save without a CAS-backed exec trace");
+        const stdout = sb.lastExecStdout;
+        if (stdout === null) {
+          throw new BrokerError("INTERNAL", "candidate save without a completed exec trace");
         }
-        this.state().append({ t: "lineage", candidate: hash, parent: sb.parentHash, episode: sb.episode });
+        const sessionTrace = await this.persistSessionTrace(stdout);
+        const events = this.journalFact(
+          { t: "lineage", candidate: hash, parent: sb.parentHash, episode: sb.episode },
+          [{ type: "episode.candidate", episode: sb.episode, candidate: { hash }, sessionTrace }],
+        );
         this.lineage.set(hash, { parent: sb.parentHash, episode: sb.episode });
         // Graduation: the hash may have been journaled as a repair snapshot
         // earlier; lineage supersedes it (replay treats the lineage line as
         // the tombstone), so descendants pair against THIS artifact.
         this.repairs.delete(hash);
-        this.emit({ type: "episode.candidate", episode: sb.episode, candidate: { hash }, sessionTrace });
+        this.publish(events);
       }
     } else if (hash !== sb.parentHash && !this.lineage.has(hash) && !this.repairs.has(hash)) {
       // Repair snapshot (no exec, or last exec failed): NOT a candidate, no
@@ -1123,8 +1606,8 @@ export class Broker {
     // snapshots both resume from the saved CAS artifact in a fresh sandbox.
     // Fail closed — if docker cannot remove it, the entry stays registered
     // (the TTL reaper remains the backup) and the save is not acknowledged.
-    const retired = await this.run(["docker", "rm", "-f", sb.containerId]);
-    if (retired.exitCode !== 0 && !MISSING_CONTAINER_RE.test(retired.stderr.toString("utf8"))) {
+    const retired = await this.removeTrackedContainer(sb.containerId);
+    if (!containerGone(retired)) {
       throw new BrokerError("INTERNAL", `sandbox retirement failed after save: ${stderrText(retired)}`);
     }
     this.sandboxes.delete(params.sandboxId);
@@ -1144,19 +1627,23 @@ export class Broker {
     this.budgetGate();
     const group = this.manifest.assetGroups.find((g) => g.id === params.assetGroupId);
     if (!group) throw new BrokerError("INTERNAL", `unknown asset group: ${params.assetGroupId}`);
-
-    // Atomic admission: check + reservation is one synchronous step, so
-    // parallel cache misses cannot all pass the gate and overrun
-    // maxEvaluatorInvocations while awaiting memo/unpack/diff. Cache hits
-    // release without charging (cached evals stay free).
+    const memoKey = `${params.artifact.hash}|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}`;
+    const existing = this.inFlightEvaluations.get(memoKey);
+    if (existing !== undefined) return existing;
+    if (this.pendingEvaluations >= this.maxConcurrentEvaluations) {
+      throw new BrokerError("QUOTA_EXCEEDED", `concurrent evaluator cap reached (${this.maxConcurrentEvaluations})`);
+    }
     if (this.spent.evaluatorInvocations + this.pendingEvaluations >= this.manifest.budget.maxEvaluatorInvocations) {
       throw new BrokerError("BUDGET_EXCEEDED", "budget dimension exhausted: evaluatorInvocations");
     }
     this.pendingEvaluations += 1;
+    const evaluation = this.evaluateReserved(params, group, ctx, memoKey);
+    this.inFlightEvaluations.set(memoKey, evaluation);
     try {
-      return await this.evaluateReserved(params, group, ctx);
+      return await evaluation;
     } finally {
       this.pendingEvaluations -= 1;
+      this.inFlightEvaluations.delete(memoKey);
     }
   }
 
@@ -1164,6 +1651,7 @@ export class Broker {
     params: EvaluateP,
     group: CapsuleManifest["assetGroups"][number],
     ctx: CallContext,
+    memoKey: string,
   ): Promise<EvaluationRecord> {
     if (group.visibility === "holdout") {
       if (!ctx.privileged) {
@@ -1180,7 +1668,6 @@ export class Broker {
     // timing-sensitive result measured under one cap must never be served to
     // a run with a different cap. A different capsule or optimizer build can
     // likewise never alias onto a cached record.
-    const memoKey = `${params.artifact.hash}|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}`;
     const memoHash = await this.cas.indexGet("eval", memoKey);
     if (memoHash !== undefined && (await this.cas.has(memoHash))) {
       const record = EvaluationRecord.parse(JSON.parse((await this.cas.readBuffer(memoHash)).toString("utf8")));
@@ -1207,6 +1694,7 @@ export class Broker {
     // attempted evaluation.
     const stageDir = await this.stageAssets(group);
 
+    let invocationEvents: RunEvent[] = [];
     let res: CmdResult;
     const startedMs = Date.now();
     const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
@@ -1215,12 +1703,20 @@ export class Broker {
       // spawn below): close() either sees this eval container in the active
       // set and reaps it by name, or this op throws before spawning.
       if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
-      this.activeEvalContainers.add(evalName);
+      this.trackedContainers.add(evalName);
 
-      // Burn the invocation DURABLY before the spawn so a crashed evaluator (or
-      // a crashed broker) still counts — candidates cannot farm free retries,
-      // and a restart replays the charge.
-      this.state().append({ t: "inv" });
+      // Burn the invocation DURABLY before the spawn so a crashed evaluator
+      // cannot farm free retries. The projected snapshot/exhaustion are part
+      // of that same fact, but publish only after this admitted evaluation
+      // returns so the exact-cap invocation itself is allowed to finish.
+      const budgetEvents: EmittableEvent[] = [
+        { type: "budget.snapshot", budget: this.budgetStateNow(0, 0, 1) },
+      ];
+      const exhausted = this.exhaustedDimension(0, 0, 1);
+      if (exhausted !== undefined && !this.exhaustedAnnounced.has(exhausted)) {
+        budgetEvents.push({ type: "budget.exhausted", dimension: exhausted });
+      }
+      invocationEvents = this.journalFact({ t: "inv" }, budgetEvents);
       this.spent.evaluatorInvocations += 1;
 
       const argv = [
@@ -1234,6 +1730,12 @@ export class Broker {
         "--label",
         `hone.runId=${this.config.runId}`,
         ...this.resourceArgs(),
+        "--cap-add",
+        "SETUID",
+        "--cap-add",
+        "SETGID",
+        "--cap-add",
+        "KILL",
         "--read-only",
         "--tmpfs",
         "/tmp",
@@ -1272,15 +1774,18 @@ export class Broker {
         // A timed-out `docker run` kills only the local CLI; the container (and
         // the adversarial code inside it) keeps running. Always reap by name —
         // a no-op for containers --rm already removed.
-        await this.run(["docker", "rm", "-f", evalName]);
+        const retired = await this.removeTrackedContainer(evalName);
+        if (!containerGone(retired)) {
+          throw new BrokerError("INTERNAL", `evaluator cleanup failed: ${stderrText(retired)}`);
+        }
       }
     } finally {
-      this.activeEvalContainers.delete(evalName);
       // Confidentiality teardown on EVERY path (success, error, timeout):
       // the staged copies never outlive the evaluation.
       await rm(stageDir, { recursive: true, force: true });
     }
     const durationMs = Date.now() - startedMs;
+    this.publish(invocationEvents);
     if (res.timedOut) throw new BrokerError("INTERNAL", `evaluator timed out after ${this.evalTimeoutSec}s`);
     if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `evaluator exited ${res.exitCode}: ${stderrText(res)}`);
 
@@ -1305,7 +1810,6 @@ export class Broker {
     const recordHash = await this.cas.putBuffer(Buffer.from(JSON.stringify(record)));
     await this.cas.indexPut("eval", memoKey, recordHash);
     this.recordEvaluation(record, group.visibility);
-    this.emit({ type: "budget.snapshot", budget: this.budgetStateNow() });
     return this.redactRecord(record, group.visibility, ctx);
   }
 
@@ -1330,14 +1834,17 @@ export class Broker {
       throw err;
     }
     const seq = this.holdoutCount + 1;
-    this.state().append({ t: "holdout", seq });
+    const events = this.journalFact(
+      { t: "holdout", seq },
+      [{
+        type: "holdout.accessed",
+        capsuleId: this.manifest.id,
+        ledgerCount: charged.count,
+        ledgerBudget: charged.budget,
+      }],
+    );
     this.holdoutCount = seq;
-    this.emit({
-      type: "holdout.accessed",
-      capsuleId: this.manifest.id,
-      ledgerCount: charged.count,
-      ledgerBudget: charged.budget,
-    });
+    this.publish(events);
   }
 
   /**
@@ -1362,35 +1869,46 @@ export class Broker {
    */
   private recordEvaluation(record: EvaluationRecord, visibility: string): void {
     if (visibility === "holdout") return;
-    // Computed BEFORE acceptRecord mutates the trusted table.
-    const hadTrusted = (this.trusted.get(record.artifactHash)?.size ?? 0) > 0;
-    const aggregate = this.acceptRecord(record);
+    const aggregate = eligibleAggregate(record);
     if (aggregate === undefined) return;
-    // Durable BEFORE the event: replayed authority is exactly what was announced.
-    this.state().append({ t: "eval", record });
-    if (!this.anyEpisodeStarted) return;
-    const lin = hadTrusted ? undefined : this.lineage.get(record.artifactHash);
-    this.emit({
-      type: "eval.completed",
-      ...(lin !== undefined ? { episode: lin.episode } : {}),
-      artifact: { hash: record.artifactHash },
-      assetGroupId: record.assetGroupId,
-      seed: record.seed,
-      aggregate,
-      cached: record.cached,
-    });
-    if (lin !== undefined) {
-      const parentScore = this.trusted.get(lin.parent)?.get(`${record.assetGroupId}|${record.seed}`);
-      if (parentScore !== undefined) {
-        this.emit({
-          type: "gate.paired",
-          episode: lin.episode,
-          parentScore,
-          childScore: aggregate,
-          passed: aggregate > parentScore,
-        });
+    const pairKey = `${record.assetGroupId}|${record.seed}`;
+    let perArtifact = this.trusted.get(record.artifactHash);
+    if (perArtifact?.has(pairKey) === true) return;
+
+    const hadTrusted = (perArtifact?.size ?? 0) > 0;
+    const lin = this.anyEpisodeStarted && !hadTrusted ? this.lineage.get(record.artifactHash) : undefined;
+    const events: EmittableEvent[] = [];
+    if (this.anyEpisodeStarted) {
+      events.push({
+        type: "eval.completed",
+        ...(lin !== undefined ? { episode: lin.episode } : {}),
+        artifact: { hash: record.artifactHash },
+        assetGroupId: record.assetGroupId,
+        seed: record.seed,
+        aggregate,
+        cached: record.cached,
+      });
+      if (lin !== undefined) {
+        const parentScore = this.trusted.get(lin.parent)?.get(pairKey);
+        if (parentScore !== undefined) {
+          events.push({
+            type: "gate.paired",
+            episode: lin.episode,
+            parentScore,
+            childScore: aggregate,
+            passed: aggregate > parentScore,
+          });
+        }
       }
     }
+
+    const journaled = this.journalFact({ t: "eval", record }, events);
+    if (perArtifact === undefined) {
+      perArtifact = new Map();
+      this.trusted.set(record.artifactHash, perArtifact);
+    }
+    perArtifact.set(pairKey, aggregate);
+    this.publish(journaled);
   }
 
   /**
@@ -1476,25 +1994,43 @@ export class Broker {
     const deltaVsBaseline = meanOver(cand, pairedBaseline) - meanOver(baselineScores, pairedBaseline);
 
     // Durable BEFORE the ack and the event — a restart replays exactly the
-    // promotions that were announced.
-    this.state().append({ t: "incumbent", hash, aggregate, deltaVsBaseline, episode: lin.episode });
+    const events = this.journalFact(
+      { t: "incumbent", hash, aggregate, deltaVsBaseline, episode: lin.episode },
+      [
+        {
+          type: "incumbent.new",
+          artifact: { hash },
+          aggregate,
+          deltaVsBaseline,
+          episode: lin.episode,
+        },
+        { type: "budget.snapshot", budget: this.budgetStateNow() },
+      ],
+    );
     const promoted = { hash, aggregate, deltaVsBaseline, episode: lin.episode };
     this.incumbentHistory.push(promoted);
     this.currentIncumbent = promoted;
     this.lastIncumbent = params;
-    this.emit({
-      type: "incumbent.new",
-      artifact: { hash },
-      aggregate,
-      deltaVsBaseline,
-      episode: lin.episode,
-    });
+    this.publish(events);
+    return {};
+  }
+
+  /** Durable trusted-side terminal snapshot; never exposed on the public RPC table. */
+  snapshotBudget(_ctx: CallContext): Record<string, never> {
     this.emit({ type: "budget.snapshot", budget: this.budgetStateNow() });
     return {};
   }
 
   getBudget(_ctx: CallContext): BudgetState {
     return this.budgetStateNow();
+  }
+  /** Trusted admission view: includes a projected-refusal latch, not only numeric spend. */
+  getBudgetExhaustion(ctx: CallContext): BudgetDimension | undefined {
+    if (!ctx.privileged) throw new BrokerError("INTERNAL", "getBudgetExhaustion requires the admin socket");
+    const persisted = this.exhaustedAnnounced.values().next().value;
+    return persisted === "tokens" || persisted === "usd" || persisted === "wallClockSec" || persisted === "evaluatorInvocations"
+      ? persisted
+      : this.exhaustedDimension();
   }
 
   finish(params: FinishP, _ctx: CallContext): Record<string, never> {
@@ -1507,13 +2043,35 @@ export class Broker {
     throw new BrokerError("NOT_IMPLEMENTED", "reserved method — not available in the seed");
   }
 
+  /**
+   * Trusted proxy admission refusal: the next requested unit of work cannot
+   * fit in the remaining envelope. Persist the boundary before replying 402;
+   * budgetGate then prevents an unbounded mutable loop from retrying forever,
+   * including after crash/resume.
+   */
+  recordBudgetExhaustion(dimension: BudgetDimension, ctx: CallContext): Record<string, never> {
+    if (!ctx.privileged) throw new BrokerError("INTERNAL", "recordBudgetExhaustion requires the admin socket");
+    if (!this.exhaustedAnnounced.has(dimension)) this.emit({ type: "budget.exhausted", dimension });
+    return {};
+  }
+
   recordSpend(params: RecordSpendP, ctx: CallContext): Record<string, never> {
     if (!ctx.privileged) throw new BrokerError("INTERNAL", "recordSpend requires the admin socket");
-    // Durable BEFORE the counters move — an acked spend survives restart.
-    this.state().append({ t: "spend", tokens: params.tokens, usd: params.usd });
+    // Spend and the projected public budget state are one durable fact.
+    const budgetEvents: EmittableEvent[] = [
+      { type: "budget.snapshot", budget: this.budgetStateNow(params.tokens, params.usd) },
+    ];
+    const exhausted = this.exhaustedDimension(params.tokens, params.usd);
+    if (exhausted !== undefined && !this.exhaustedAnnounced.has(exhausted)) {
+      budgetEvents.push({ type: "budget.exhausted", dimension: exhausted });
+    }
+    const events = this.journalFact(
+      { t: "spend", tokens: params.tokens, usd: params.usd },
+      budgetEvents,
+    );
     this.spent.tokens += params.tokens;
     this.spent.usd += params.usd;
-    this.announceExhaustion();
+    this.publish(events);
     return {};
   }
 
@@ -1527,13 +2085,94 @@ export class Broker {
   }
 
   /**
-   * Crash-resume event recovery (runner API): promotions are journaled+fsynced
-   * BEFORE their incumbent.new event reaches the runner's (non-durable) event
-   * log, so a crash in that window leaves authority the log never saw. The
-   * runner passes how many incumbent.new events its log already has for this
-   * run; every journaled promotion after that index is re-emitted through the
-   * normal event sink, in order, with the original payload. Returns the count
-   * re-emitted (0 when the logs already align — fresh runs included).
+   * Reconciles the complete broker-authored event journal against the
+   * runner's public log. Only a missing suffix is recoverable: finding a later
+   * public event after an earlier journal event is absent means the public log
+   * has a non-prefix hole and must fail closed.
+   */
+  replayJournalEvents(alreadyLogged: readonly RunEvent[]): number {
+    if (!this.eventJournalFormat) {
+      // One-time legacy migration. Validate the authority-bearing promotion
+      // subsequence, then durably seed existing public events AND every
+      // recoverable missing incumbent in one newline/fsync transaction.
+      const publicEvents = alreadyLogged.filter(isBrokerAuthoredEvent);
+      const publicIncumbents = publicEvents.filter((event) => event.type === "incumbent.new");
+      if (publicIncumbents.length > this.incumbentHistory.length) {
+        throw new BrokerError("INTERNAL", "legacy event log claims more incumbents than the authority journal");
+      }
+      for (let index = 0; index < publicIncumbents.length; index += 1) {
+        const event = publicIncumbents[index];
+        const incumbent = this.incumbentHistory[index];
+        if (
+          event === undefined
+          || event.type !== "incumbent.new"
+          || incumbent === undefined
+          || event.artifact.hash !== incumbent.hash
+          || event.aggregate !== incumbent.aggregate
+          || event.deltaVsBaseline !== incumbent.deltaVsBaseline
+          || event.episode !== incumbent.episode
+        ) {
+          throw new BrokerError("INTERNAL", "legacy public incumbent sequence diverges from the authority journal");
+        }
+      }
+      const at = new Date(this.now()).toISOString();
+      const missing = this.incumbentHistory.slice(publicIncumbents.length).map((incumbent) =>
+        RunEvent.parse({
+          runId: this.config.runId,
+          at,
+          type: "incumbent.new",
+          artifact: { hash: incumbent.hash },
+          aggregate: incumbent.aggregate,
+          deltaVsBaseline: incumbent.deltaVsBaseline,
+          episode: incumbent.episode,
+        })
+      );
+      const migrated = [...publicEvents, ...missing];
+      this.state().append({ t: "migration", events: migrated });
+      this.journalEvents.push(...migrated);
+      this.eventJournalFormat = true;
+      for (const event of missing) this.config.onEvent(event);
+      return missing.length;
+    }
+    // Exclusive broker events must be an exact prefix; no runner path emits
+    // these types, so an extra or altered public record is corruption.
+    const publicExclusive = alreadyLogged.filter(isBrokerAuthoredEvent);
+    const journalExclusive = this.journalEvents.filter(isBrokerAuthoredEvent);
+    if (publicExclusive.length > journalExclusive.length) {
+      throw new BrokerError("INTERNAL", "broker event log is ahead of the authority journal");
+    }
+    for (let index = 0; index < publicExclusive.length; index += 1) {
+      if (JSON.stringify(publicExclusive[index]) !== JSON.stringify(journalExclusive[index])) {
+        throw new BrokerError("INTERNAL", "broker event log has a non-prefix gap relative to the authority journal");
+      }
+    }
+
+    // Shared budget types may also be supervisor-authored. Match every exact
+    // journal record against the full public stream and permit only a missing
+    // suffix; validate the whole shape before appending anything.
+    const publicLines = alreadyLogged.map((event) => JSON.stringify(event));
+    let cursor = 0;
+    let missingAt: number | null = null;
+    for (let index = 0; index < this.journalEvents.length; index += 1) {
+      const found = publicLines.indexOf(JSON.stringify(this.journalEvents[index]), cursor);
+      if (found >= 0) {
+        if (missingAt !== null) {
+          throw new BrokerError("INTERNAL", "broker event log has a non-prefix gap relative to the authority journal");
+        }
+        cursor = found + 1;
+      } else {
+        missingAt ??= index;
+      }
+    }
+    const missing = missingAt === null ? [] : this.journalEvents.slice(missingAt);
+    for (const event of missing) this.config.onEvent(event);
+    return missing.length;
+  }
+
+  /**
+   * Legacy crash-resume recovery for journals created before complete event
+   * transactions were introduced. New journals recover through
+   * replayJournalEvents; this count-alignment fallback preserves old runs.
    */
   replayIncumbentEvents(alreadyLogged: number): number {
     if (!Number.isInteger(alreadyLogged) || alreadyLogged < 0 || alreadyLogged > this.incumbentHistory.length) {
@@ -1541,13 +2180,15 @@ export class Broker {
     }
     const missing = this.incumbentHistory.slice(alreadyLogged);
     for (const inc of missing) {
-      this.emit({
+      this.config.onEvent(RunEvent.parse({
+        runId: this.config.runId,
+        at: new Date(this.now()).toISOString(),
         type: "incumbent.new",
         artifact: { hash: inc.hash },
         aggregate: inc.aggregate,
         deltaVsBaseline: inc.deltaVsBaseline,
         episode: inc.episode,
-      });
+      }));
     }
     return missing.length;
   }

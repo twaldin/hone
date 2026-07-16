@@ -53,15 +53,23 @@ describe("hone apply --best — branch delivery", () => {
     expect(gitIn(repo, "show", "custom/spot:hello.txt")).toBe("improved");
   });
 
-  it("refuses to clobber an existing branch", async () => {
+  it("idempotently accepts an existing run branch with the exact artifact", async () => {
     const { root, repo } = setup();
     const { io } = makeIo(root);
     expect(await applyCommand(["--best", "--repo", "repo", "--run", "run_fix1"], io)).toBe(0);
+    const before = gitIn(repo, "rev-parse", "hone/run_fix1");
     const again = makeIo(root);
-    const code = await applyCommand(["--best", "--repo", "repo", "--run", "run_fix1"], again.io);
-    expect(code).not.toBe(0);
-    expect(again.err.join("\n")).toMatch(/exists/i);
-    // still clean
+    expect(await applyCommand(["--best", "--repo", "repo", "--run", "run_fix1"], again.io)).toBe(0);
+    expect(gitIn(repo, "rev-parse", "hone/run_fix1")).toBe(before);
+    expect(gitIn(repo, "status", "--porcelain")).toBe("");
+  });
+
+  it("refuses an existing run branch whose tree differs", async () => {
+    const { root, repo } = setup();
+    gitIn(repo, "branch", "hone/run_fix1", "main");
+    const attempt = makeIo(root);
+    expect(await applyCommand(["--best", "--repo", "repo", "--run", "run_fix1"], attempt.io)).not.toBe(0);
+    expect(attempt.err.join("\n")).toMatch(/delivery verification failed/i);
     expect(gitIn(repo, "status", "--porcelain")).toBe("");
   });
 

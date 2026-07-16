@@ -188,13 +188,13 @@ describe("frozen capsule admission", () => {
 
     // dirty tracked file
     writeFileSync(join(baseline, "hello.txt"), "dirty\n");
-    expect(() => admitCapsule(dir)).toThrow(/not clean/);
+    expect(() => admitCapsule(dir)).toThrow(/differs from declared commit/);
     writeFileSync(join(baseline, "hello.txt"), "baseline\n");
     expect(() => admitCapsule(dir)).not.toThrow();
 
     // untracked file counts as dirty too
     writeFileSync(join(baseline, "stray.txt"), "stray\n");
-    expect(() => admitCapsule(dir)).toThrow(/not clean/);
+    expect(() => admitCapsule(dir)).toThrow(/path count|differs from declared commit/);
   });
 
   it("refuses a baseline HEAD that differs from the declared commit", () => {
@@ -202,7 +202,7 @@ describe("frozen capsule admission", () => {
     const baseline = join(root, "capsule", "baseline");
     initScratchRepo(baseline);
     const dir = makeCapsule(root, { baseline: { kind: "git", commit: "0123456789abcdef0123456789abcdef01234567" } });
-    expect(() => admitCapsule(dir)).toThrow(/baseline HEAD/);
+    expect(() => admitCapsule(dir)).toThrow(/hardened git .* failed/);
   });
 });
 
