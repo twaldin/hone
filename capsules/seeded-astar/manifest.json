@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "id": "cap_6ef8d50f155c",
+  "id": "cap_0588ff00ef4c",
   "objective": "Make the grid A* pathfinder in astar.py substantially faster while preserving correctness: the trusted correctness suite must keep passing and returned paths must remain optimal shortest paths. Only the pathfinder implementation may change; eval.py, worker.py, and test_astar.py are protected.",
   "baseline": {
     "kind": "git",
@@ -53,9 +53,9 @@
     }
   ],
   "budget": {
-    "maxTokens": 4000000,
-    "maxUsd": 20,
-    "maxWallClockSec": 3600,
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
     "maxEvaluatorInvocations": 200
   },
   "diagnosticOrdering": {

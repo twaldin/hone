@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "id": "cap_7bf3c9f2f515",
+  "id": "cap_25cf14225449",
   "objective": "Improve only core/scoring.js so Agentelo classifies no-diff attempts versus infrastructure junk, applies scoring precedence, and deduplicates submissions correctly across the sealed case bank. The trusted evaluator, worker, owner tests, assets, provenance, and toolchain lock are protected. The sole objective q is passed sealed cases divided by declared sealed cases; malformed or nonfinite outputs and failed reward-hacking gates score zero.",
   "baseline": {
     "kind": "git",
@@ -40,9 +40,9 @@
     }
   ],
   "budget": {
-    "maxTokens": 4000000,
-    "maxUsd": 20,
-    "maxWallClockSec": 3600,
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
     "maxEvaluatorInvocations": 200
   },
   "diagnosticOrdering": {

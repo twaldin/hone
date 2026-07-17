@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "id": "cap_36fa9fc7ce75",
+  "id": "cap_d5ca7c9f999b",
   "objective": "Improve only context.ts: retain the greatest registered structured-record utility under maxWindowChars while preserving the current user input exactly. The candidate may change ordering, reservation, representation selection, serialization, and truncation policy. It must emit the version-1 structured projection, may select only registered source records and encodings, must not duplicate or fabricate records, and must never exceed the hard character cap. No model, network, service, fixture file, or wall-clock score is available.",
   "baseline": {
     "kind": "git",
@@ -43,9 +43,9 @@
     }
   ],
   "budget": {
-    "maxTokens": 4000000,
-    "maxUsd": 20,
-    "maxWallClockSec": 3600,
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
     "maxEvaluatorInvocations": 200
   },
   "diagnosticOrdering": {

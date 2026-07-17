@@ -16,9 +16,9 @@
     { "id": "holdout", "visibility": "holdout", "paths": ["assets/holdout"] }
   ],
   "budget": {
-    "maxTokens": 4000000,
-    "maxUsd": 20,
-    "maxWallClockSec": 3600,
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
     "maxEvaluatorInvocations": 200
   },
   "diagnosticOrdering": { "path": "diagnostics/ordering-report.json" },
