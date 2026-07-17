@@ -232,6 +232,24 @@ describe("setupEgress network create (finding 10 — idempotent after cleanup)",
     expect(findCall(calls, "docker", "network", "connect", "bridge", "hone-broker-run_y")).toBeGreaterThanOrEqual(0);
   });
 
+  it("compacts long run ids into resolvable Docker DNS labels", async () => {
+    const { run } = fakeRunner(() => undefined);
+    const runId = `run_meta_outer_${"a".repeat(64)}`;
+    const egress = await setupEgress(
+      { runId, runDir: makeRoot(), env: { HONE_EGRESS: "network" } },
+      fakeProxy(43210),
+      "img:latest",
+      run,
+    );
+    expect(egress.sandboxNetwork.mode).toBe("internal");
+    if (egress.sandboxNetwork.mode !== "internal") throw new Error("expected internal network");
+    expect(egress.sandboxNetwork.network.length).toBeLessThanOrEqual(63);
+    expect(new URL(egress.proxyBaseUrl ?? "").hostname.length).toBeLessThanOrEqual(63);
+    const brokerEndpoint = await egress.exposeBroker(54321);
+    expect(new URL(brokerEndpoint).hostname.length).toBeLessThanOrEqual(63);
+    await egress.cleanup();
+  });
+
   it("refuses to attach sandboxes to a pre-existing NON-internal network of the same name", async () => {
     const { run } = fakeRunner((argv) => {
       if (argv[1] === "network" && argv[2] === "create") {
