@@ -915,7 +915,7 @@ async function prepareControl(
   };
 }
 
-function createSyntheticCapsule(
+export function createSyntheticCapsule(
   campaignDir: string,
   config: MetaCampaignConfig,
   baselineArtifactHash: Sha256Digest,
@@ -961,7 +961,7 @@ function createSyntheticCapsule(
     meta: { evaluatorSource: "meta" as const, provenance: "trusted synthetic M1 meta task" },
   };
   const manifest = CapsuleManifest.parse({ ...draft, id: deriveCapsuleId(draft) });
-  writeFileSync(join(capsuleDir, "capsule.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(join(capsuleDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   admitCapsule(capsuleDir);
   return capsuleDir;
 }
