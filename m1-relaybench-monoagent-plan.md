@@ -541,12 +541,12 @@ Any failure means no seat. Publish the failure and preserve the seed optimizer.
 ## 9. Resource plan and cost gate
 
 Run official performance measurements on one provisioned, pinned Linux host. macOS remains valid for integration smoke, but Docker Desktop VM variance is not part of the M1 performance oracle.
-Use M0’s final inner envelope as the initial pilot envelope, subject to the cost pilot:
+The macOS cost pilot rejected M0’s final inner envelope: both observed children hit the token gate before eight episodes and therefore settled as incomplete. The frozen post-pilot envelope is:
 
 ```text
-maxTokens:                1,500,000 per child run
+maxTokens:                4,000,000 per child run
 maxUsd:                   5 per child run
-maxWallClockSec:          2,400 per child run
+maxWallClockSec:          3,600 per child run
 maxEvaluatorInvocations:  63 per child run
 maxEpisodes:              8
 child concurrency:        2
@@ -556,14 +556,14 @@ Nominal child-run counts:
 
 | Stage | Calculation | Runs | Token-cap sum |
 | --- | ---: | ---: | ---: |
-| Search | 20 unique artifacts (seed included) × 5 train × 1 | 100 | 150M |
-| Confirmation | 4 arms × 5 train × 3 | 60  | 90M |
-| Holdout | 2 arms × 2 holdout × 3 | 12  | 18M |
-| **Total** |     | **172** | **258M** |
+| Search | 20 unique artifacts (seed included) × 5 train × 1 | 100 | 400M |
+| Confirmation | 4 arms × 5 train × 3 | 60  | 240M |
+| Holdout | 2 arms × 2 holdout × 3 | 12  | 48M |
+| **Total** |     | **172** | **688M** |
 
-The 172 child runs depend on admitted unique artifacts, not generation attempts. They exclude the separately budgeted outer mutation calls, whose official synthetic config cap is 40 non-seed attempts, as well as conformance/cost pilots. At concurrency two, the child wall-clock caps imply a worst-case 57.3 hours; caps are not forecasts.
+The 172 child runs depend on admitted unique artifacts, not generation attempts. They exclude the separately budgeted outer mutation calls, whose official synthetic config cap is 40 non-seed attempts, as well as conformance/cost pilots. The registered componentwise campaign cap is 693M tokens (688M child + 5M outer). At concurrency two, the child wall-clock caps imply a worst-case 86 hours; caps are not forecasts.
 
-The hardened M0 campaign observed 281,375 tokens and 173.602 seconds for a one-episode run. Linear extrapolation is not credible because context, repairs, early stops, caching, and provider throttling differ. The seed cost pilot must therefore record observed median and upper-tail resources before the final campaign cap is signed.
+The 2026-07-17 seed cost pilot measured `seeded-astar` at 1,393,089 tokens / 1,589.993 seconds after four complete episodes plus a fifth start, and `monoagent-context-retention` at 1,429,906 tokens / 1,184.352 seconds after three complete episodes plus a fourth start. Both correctly settled `status: budget`, so neither yielded a meta measurement. The 4M-token / 3,600-second envelope provides margin over the observed per-episode rates while retaining a hard cap; the official smoke must complete all eight episodes before search proceeds.
 
 `maxUsd` is not an economic measurement until the `gpt-5.6-sol` route has a pinned pricing table; the current proxy probe established availability, not price. M1 reports tokens, wall clock, evaluator invocations, model requests, and optional USD only if pricing freezes before launch.
 
