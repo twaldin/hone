@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CapsuleManifest, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
+import { CapsuleManifest, EvaluationRecord, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
 import type { BudgetState } from "@hone/schema";
-import type { CmdResult, RunCommand } from "@hone/broker";
+import { readBrokerJournalEvaluations, type CmdResult, type RunCommand } from "@hone/broker";
 import { createBackend, deriveProbeReport } from "../src/backends/local.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
 import { runCommand as cliRunCommand } from "../src/supervisor.js";
@@ -297,7 +297,12 @@ interface ProbeFlow {
  * Run the REAL local backend (stubbed docker, unix egress, scripted optimizer
  * that records each invocation's env and exits 0) over a pre-seeded event log.
  */
-async function runProbeFlow(opts: { seed: RunEvent[]; verdict: boolean; abortOnGate?: boolean }): Promise<ProbeFlow> {
+async function runProbeFlow(opts: {
+  seed: RunEvent[];
+  verdict: boolean;
+  abortOnGate?: boolean;
+  m1?: { episodes: number; strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> };
+}): Promise<ProbeFlow> {
   const root = makeRoot();
   const runId = "run_probe";
   const runDir = writeEvents(root, runId, opts.seed);
@@ -398,6 +403,14 @@ async function runProbeFlow(opts: { seed: RunEvent[]; verdict: boolean; abortOnG
       if (opts.abortOnGate === true) abort.abort(new Error("stop requested"));
       return Promise.resolve(opts.verdict);
     },
+    ...(opts.m1 === undefined
+      ? {}
+      : {
+          measurementEpoch: "m1:test-epoch",
+          evaluationStrategy: opts.m1.strategy,
+          optimizerEpisodesMax: opts.m1.episodes,
+          maxPublicCandidateEvaluations: Math.max(1, opts.m1.episodes),
+        }),
     requestStop: () => {
       flow.stops++;
     },
@@ -408,6 +421,55 @@ async function runProbeFlow(opts: { seed: RunEvent[]; verdict: boolean; abortOnG
   await backend.start(ctx);
   return flow;
 }
+
+describe("trusted M1 fixed-work local branch", () => {
+  it("skips the M0 probe, honors the episode cap, and records a terminal trusted evaluation", { timeout: 30_000 }, async () => {
+    let calls = 0;
+    let seenEpoch: string | undefined;
+    const strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> = async (input) => {
+      calls++;
+      seenEpoch = input.measurementEpoch;
+      return EvaluationRecord.parse({
+        runId: input.runId,
+        capsuleId: input.capsuleId,
+        artifactHash: input.artifact.hash,
+        assetGroupId: input.assetGroupId,
+        seed: input.seed,
+        output: {
+          valid: true,
+          aggregate: 0.5,
+          objectives: { meta: 0.5 },
+          constraints: {},
+          perExample: {},
+          diagnostics: { summary: "trusted M1 terminal measurement" },
+        },
+        costUsd: 0,
+        durationMs: 1,
+        cached: false,
+        evaluatedAt: new Date().toISOString(),
+      });
+    };
+    const flow = await runProbeFlow({
+      seed: [{
+        runId: "run_probe",
+        at: at(),
+        type: "run.started",
+        capsuleId: CAP_ID,
+        contractHash: fakeHash("c"),
+        optimizerDigest: fakeHash("0"),
+      }],
+      verdict: false,
+      m1: { episodes: 3, strategy },
+    });
+
+    expect(flow.invocations()).toEqual([{ maxEpisodes: "3", resume: expect.objectContaining({ nextEpisode: 0 }) }]);
+    expect(flow.probeReports).toHaveLength(0);
+    expect(flow.events().some((event) => event.type === "probe.completed")).toBe(false);
+    expect(calls).toBe(1);
+    expect(seenEpoch).toBe("m1:test-epoch");
+    expect(readBrokerJournalEvaluations(flow.runDir).records).toHaveLength(1);
+  });
+});
 
 function seededLog(runId: string): RunEvent[] {
   return [

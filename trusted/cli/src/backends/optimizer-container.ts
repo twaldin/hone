@@ -195,7 +195,7 @@ export function optimizerBuildArgs(opts: {
  * resolved from the docker CREATE client's process env (container env is
  * baked at create time), so it never appears in argv (host ps) or any log.
  */
-export function optimizerCreateArgs(opts: {
+export interface OptimizerCreateOptions {
   name: string;
   runId: string;
   image: string;
@@ -205,7 +205,9 @@ export function optimizerCreateArgs(opts: {
   env: Record<string, string>;
   /** Docker-run lease (stopped per-epoch donor) name; attaches `--volumes-from <lease>:ro` before the image. */
   containerLease: string;
-}): string[] {
+}
+
+function optimizerCreateArgsWithToken(opts: OptimizerCreateOptions, tokenEnv: string): string[] {
   const argv = [
     "docker", "create",
     // Digest-pinned manifest image MUST already be present: never let a
@@ -225,10 +227,26 @@ export function optimizerCreateArgs(opts: {
   if (opts.bundleDir !== null) argv.push("-v", `${opts.bundleDir}:${BUNDLE_MOUNT}:ro`);
   if (opts.transport.kind === "unix") argv.push("-v", `${opts.transport.hostSocketPath}:${CONTAINER_BROKER_SOCK}`);
   for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
-  argv.push("-e", "HONE_BROKER_TOKEN"); // value-less on EVERY transport: resolved from the CREATE client env, never argv
+  argv.push("-e", tokenEnv);
   argv.push("--volumes-from", `${opts.containerLease}:ro`);
   argv.push(opts.image, ...opts.runArgv);
   return argv;
+}
+
+export function optimizerCreateArgs(opts: OptimizerCreateOptions): string[] {
+  // Production token remains value-less: Docker resolves it from the CREATE
+  // client's frozen env, so the capability never reaches argv or logs.
+  return optimizerCreateArgsWithToken(opts, "HONE_BROKER_TOKEN");
+}
+
+/**
+ * Conformance runs use a random capability scoped to a trusted stub on an
+ * isolated --internal network. Inline delivery avoids mutating ambient env
+ * while reusing every production runtime flag and mount primitive.
+ */
+export function optimizerConformanceCreateArgs(opts: OptimizerCreateOptions, brokerToken: string): string[] {
+  if (!/^[0-9a-f]{64}$/.test(brokerToken)) throw new Error("candidate conformance broker token must be 64 lowercase hex characters");
+  return optimizerCreateArgsWithToken(opts, `HONE_BROKER_TOKEN=${brokerToken}`);
 }
 
 /** Phase two: bounded, killable attach-start of the already-registered container. */
@@ -278,7 +296,7 @@ function mustLstat(abs: string, what: string): Stats {
  * outright; the seal additionally pins inode identities and hashes so even a
  * same-uid path swap refuses at verify time.
  */
-function sealBundleDir(root: string, dir: string, uid: number): OptimizerBundleSeal {
+export function sealOptimizerBundleDir(root: string, dir: string, uid: number): OptimizerBundleSeal {
   const files: SealedBundleFile[] = [];
   for (const name of OPTIMIZER_BUNDLE_FILES) {
     const abs = join(dir, name);
@@ -352,7 +370,7 @@ export function verifyOptimizerBundleSeal(runtime: Pick<OptimizerRuntime, "bundl
  * returned runtime is reused by every invocation of this run.
  */
 export async function prepareOptimizerRuntime(
-  ctx: Pick<RunnerBackendContext, "runId" | "env" | "optimizerDigest">,
+  ctx: Pick<RunnerBackendContext, "runId" | "env" | "optimizerDigest" | "optimizerSnapshot" | "optimizerBaseSnapshot">,
   opts: { image: string; transport: OptimizerTransport; run: RunCommand; spawnImpl: OptimizerSpawn; containerLease: string; gate: DockerCreateGate; clientEnv: NodeJS.ProcessEnv },
 ): Promise<OptimizerRuntime> {
   const safeRunId = ctx.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
@@ -411,15 +429,20 @@ export async function prepareOptimizerRuntime(
   };
 
   if (optimizerOverridden(ctx.env)) {
+    if (ctx.optimizerSnapshot !== undefined || ctx.optimizerBaseSnapshot !== undefined) {
+      throw new Error("a captured optimizer snapshot cannot be combined with HONE_OPTIMIZER_CMD");
+    }
     // In-container argv override (dev/test seam): the sealed digest is the
     // operator's explicit pin (enforced at resolveOptimizerDigest); there is
     // no snapshot to rebuild — and no host execution, ever.
     return runtime;
   }
 
-  // Exact-execution proof: what runs is what was sealed. Recollect the
-  // allowlisted graph and require the digest to reproduce run.started's seal.
-  const snapshot = collectOptimizerSnapshot();
+  // Exact-execution proof: candidate runs stage the supervisor's captured
+  // merged snapshot; default and campaign-seed runs stage the base captured
+  // during admission. A direct backend caller alone retains the legacy
+  // launch-time collection fallback.
+  const snapshot = ctx.optimizerSnapshot ?? ctx.optimizerBaseSnapshot ?? collectOptimizerSnapshot();
   const digest = snapshotDigest(opts.image, snapshot);
   if (digest !== ctx.optimizerDigest) {
     throw new Error(
@@ -464,7 +487,7 @@ export async function prepareOptimizerRuntime(
     }
     // Seal the handoff: capture exact bytes + hashes, pin inode identities,
     // and strip all write permission before anything may mount the dir.
-    runtime.bundleSeal = sealBundleDir(outRoot, outDir, uid);
+    runtime.bundleSeal = sealOptimizerBundleDir(outRoot, outDir, uid);
   } catch (err) {
     await runtime.cleanup();
     throw err;

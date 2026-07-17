@@ -27,22 +27,40 @@
  *      with quality 1.0
  *
  * Isolation contract of the check itself:
- *   - fresh throwaway CAS, run dir, and holdout ledger under <repo>/tmp
- *     (gitignored, Docker-Desktop-shareable), removed on every exit path;
- *   - the provisional manifest declares ONLY the non-holdout asset groups, so
- *     the broker never stats, reads, stages, or mounts a holdout file;
- *   - no proxy, no model, no credentials — eval sandboxes only;
+ *   - fresh throwaway CAS, run dir, and diagnostic-only holdout ledger under
+ *     <repo>/tmp (gitignored, Docker-Desktop-shareable), removed on every exit;
+ *   - default mode declares ONLY non-holdout groups, preserving the frozen
+ *     seeded/public ordering path byte-for-byte;
+ *   - trusted terminal-holdout mode is admitted only when BOTH
+ *     --holdout-diagnostic and HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1 are present,
+ *     and selects only holdout train+validation groups;
+ *   - no proxy, no model, no optimizer, no credentials — eval sandboxes only;
  *   - every measurement must be a fresh container run (memo hits are
  *     rejected) and the container/volume/temp footprint must be zero after
  *     the run, on success AND on failure.
  *
  * Usage: npx tsx capsules/tools/ordering-check.ts [--report [path]]
- *   --report writes the schema-validated compact JSON summary (default path:
- *   capsules/seeded-astar/diagnostics/ordering-report.json) on success.
+ *   --report writes the schema-validated compact aggregate JSON summary
+ *   (default path: <capsule>/diagnostics/ordering-report.json) on success.
+ *
+ * Capsule selection: the check targets capsules/seeded-astar by default. Set
+ * HONE_CAPSULE_DIR to the absolute path of another capsule directory (with
+ * capsule.config.json, baseline/, diagnostics/{broken,naive,shortcut,improved})
+ * to run the identical trusted check against it:
+ *
+ *   HONE_CAPSULE_DIR=/abs/path/to/capsule npx tsx capsules/tools/ordering-check.ts --report
+ *
+ * Owner-only pre-freeze terminal-holdout admission diagnostic:
+ *
+ *   HONE_CAPSULE_DIR=/abs/path/to/capsule \
+ *   HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1 \
+ *   npx tsx capsules/tools/ordering-check.ts --holdout-diagnostic --report
  */
 
 import { createHash, randomBytes } from "node:crypto";
 import {
+  accessSync,
+  constants as fsConstants,
   cpSync,
   existsSync,
   lstatSync,
@@ -54,7 +72,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, posix, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   Broker,
@@ -75,15 +93,116 @@ import {
   type EvaluatorOutput,
 } from "@hone/schema";
 
-const CAPSULE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "seeded-astar");
+const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
+/** Frozen default target: the seeded-astar capsule this tool was originally built around (WP6). */
+const DEFAULT_CAPSULE_DIR = resolve(TOOL_DIR, "..", "seeded-astar");
 /** Throwaway roots live under <repo>/tmp: gitignored AND under /Users, so Docker Desktop file sharing covers every bind-mount source. */
-const TMP_ROOT = resolve(CAPSULE_DIR, "..", "..", "tmp");
+const TMP_ROOT = resolve(TOOL_DIR, "..", "..", "tmp");
 const SPLITS = ["train", "validation"] as const;
 const DIAGNOSTICS = ["broken", "naive", "shortcut", "improved"] as const;
 const STABILITY_RUNS = 3;
 const STABILITY_BAND = 0.15;
 /** Every ordering datapoint is a fresh container eval: (baseline + 4 diagnostics + 2 extra stability passes) x 2 splits. */
 const EXPECTED_EVALS = (1 + DIAGNOSTICS.length + (STABILITY_RUNS - 1)) * SPLITS.length;
+
+/** Environment override consumed by {@link resolveCapsuleDir}. */
+export const CAPSULE_DIR_ENV_VAR = "HONE_CAPSULE_DIR";
+/** Second half of the owner/trusted terminal-holdout diagnostic admission gate. */
+export const TERMINAL_HOLDOUT_DIAGNOSTIC_ENV_VAR =
+  "HONE_TERMINAL_HOLDOUT_DIAGNOSTIC";
+/** First half of the owner/trusted terminal-holdout diagnostic admission gate. */
+export const TERMINAL_HOLDOUT_DIAGNOSTIC_FLAG = "--holdout-diagnostic";
+
+/**
+ * The terminal-holdout diagnostic is deliberately impossible to enable with
+ * ambient environment OR a stray command-line flag alone. This is a
+ * pre-freeze owner admission path, never an optimizer-facing mode.
+ */
+export function resolveTerminalHoldoutDiagnosticMode(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): boolean {
+  const hasFlag = args.includes(TERMINAL_HOLDOUT_DIAGNOSTIC_FLAG);
+  const rawEnv = env[TERMINAL_HOLDOUT_DIAGNOSTIC_ENV_VAR];
+  if (rawEnv !== undefined && rawEnv !== "1") {
+    throw new Error(
+      `${TERMINAL_HOLDOUT_DIAGNOSTIC_ENV_VAR} must be exactly "1" when set`,
+    );
+  }
+  const hasEnv = rawEnv === "1";
+  if (hasFlag !== hasEnv) {
+    throw new Error(
+      `terminal holdout diagnostic requires both ${TERMINAL_HOLDOUT_DIAGNOSTIC_FLAG} and ${TERMINAL_HOLDOUT_DIAGNOSTIC_ENV_VAR}=1`,
+    );
+  }
+  return hasFlag;
+}
+
+/**
+ * Resolve the capsule directory this check targets. Deterministic in its
+ * argument — it never reads ambient process state: pass a NodeJS env object
+ * (or the raw override string directly) and get back either the frozen
+ * seeded-astar default (override unset) or the canonical absolute path of
+ * the override capsule.
+ *
+ * An override is validated up front, before any CAS/Docker setup exists:
+ *   - it must already be absolute, with no ".." traversal segments;
+ *   - it must exist and be a real directory (not a symlink);
+ *   - it must contain a readable regular capsule.config.json, a baseline/
+ *     directory, and diagnostics/{broken,naive,shortcut,improved} directories.
+ * Violations throw an error naming the offending path — never file contents.
+ */
+export function resolveCapsuleDir(source: NodeJS.ProcessEnv | string): string {
+  const raw = typeof source === "string" ? source : source[CAPSULE_DIR_ENV_VAR];
+  if (raw === undefined) return DEFAULT_CAPSULE_DIR;
+
+  const fail = (problem: string): never => {
+    throw new Error(`${CAPSULE_DIR_ENV_VAR} ${problem}`);
+  };
+  if (raw.length === 0) {
+    return fail("is set but empty; unset it for the default capsule or provide an absolute capsule directory");
+  }
+  if (!isAbsolute(raw)) return fail(`must be an absolute path, got relative path: ${raw}`);
+  if (raw.split(sep).includes("..")) {
+    return fail(`must not contain ".." traversal segments: ${raw}`);
+  }
+  const dir = resolve(raw);
+
+  const statNoFollow = (path: string) => {
+    try {
+      return lstatSync(path);
+    } catch {
+      return undefined;
+    }
+  };
+  const requireRealDir = (path: string): void => {
+    const st = statNoFollow(path);
+    if (st === undefined) fail(`requires a directory that does not exist: ${path}`);
+    else if (st.isSymbolicLink()) fail(`requires a real directory, but found a symlink: ${path}`);
+    else if (!st.isDirectory()) fail(`requires a directory, but the path is not one: ${path}`);
+  };
+
+  requireRealDir(dir);
+  const configPath = join(dir, "capsule.config.json");
+  const configStat = statNoFollow(configPath);
+  if (configStat === undefined) fail(`capsule is missing required file: ${configPath}`);
+  else if (configStat.isSymbolicLink() || !configStat.isFile()) {
+    fail(`capsule config must be a regular file (not a symlink): ${configPath}`);
+  }
+  try {
+    accessSync(configPath, fsConstants.R_OK);
+  } catch {
+    fail(`capsule config is not readable: ${configPath}`);
+  }
+  requireRealDir(join(dir, "baseline"));
+  for (const diagnostic of DIAGNOSTICS) {
+    requireRealDir(join(dir, "diagnostics", diagnostic));
+  }
+  return dir;
+}
+
+/** Resolved once at module load: an invalid override fails right here, before any CAS/Docker setup can exist. */
+const CAPSULE_DIR = resolveCapsuleDir(process.env);
 
 type Split = (typeof SPLITS)[number];
 type Variant = "baseline" | (typeof DIAGNOSTICS)[number];
@@ -201,6 +320,45 @@ function loadCapsuleConfig(): CapsuleConfig {
     diagnosticOrdering: { path: diagnosticOrdering.path },
   };
 }
+type ExpandedAssetGroup = CapsuleConfig["assetGroups"][number];
+
+/**
+ * Select and expand asset groups before any CAS or Docker setup. The default
+ * branch is the original non-holdout selection verbatim. Terminal mode
+ * instead admits exactly the selected train+validation groups, and refuses
+ * missing, public, protected, or mixed visibility without reading asset bytes.
+ */
+function selectAssetGroups(
+  config: CapsuleConfig,
+  terminalHoldoutDiagnostic: boolean,
+): ExpandedAssetGroup[] {
+  if (!terminalHoldoutDiagnostic) {
+    return config.assetGroups
+      .filter((g) => g.visibility !== "holdout")
+      .map((g) => ({ ...g, paths: g.paths.flatMap((p) => expandPaths(p)) }));
+  }
+
+  const selected = config.assetGroups.filter((group) =>
+    SPLITS.some((split) => split === group.id),
+  );
+  for (const split of SPLITS) {
+    const splitGroups = selected.filter((group) => group.id === split);
+    if (splitGroups.length === 0) {
+      throw new Error(
+        `capsule.config.json: missing holdout asset group "${split}" required by the terminal holdout diagnostic`,
+      );
+    }
+    if (splitGroups.some((group) => group.visibility !== "holdout")) {
+      throw new Error(
+        `capsule.config.json: terminal holdout diagnostic rejects public/mixed visibility for selected asset group "${split}"; every selected group must be holdout`,
+      );
+    }
+  }
+  return selected.map((group) => ({
+    ...group,
+    paths: group.paths.flatMap((path) => expandPaths(path)),
+  }));
+}
 
 /** Expand a capsule-relative path (file or directory) to sorted file rel paths. Never follows symlinks. */
 function expandPaths(rel: string): string[] {
@@ -219,15 +377,15 @@ function expandPaths(rel: string): string[] {
 
 /**
  * Provisional, schema-valid manifest identity for the admission measurement.
- * It declares ONLY the non-holdout asset groups — the broker therefore never
- * stats, hashes, stages, or mounts a single holdout file (its constructor
- * preflight and stageAssets walk exactly the declared paths). Both ordering
- * splits must exist: public "train" and protected "validation".
+ * Asset selection and directory expansion already completed before CAS/Docker
+ * setup. Default mode supplies only non-holdout groups; the explicit trusted
+ * terminal mode supplies only all-holdout train+validation groups.
  */
-function provisionalManifest(config: CapsuleConfig, baselineHash: string): CapsuleManifest {
-  const assetGroups = config.assetGroups
-    .filter((g) => g.visibility !== "holdout")
-    .map((g) => ({ ...g, paths: g.paths.flatMap((p) => expandPaths(p)) }));
+function provisionalManifest(
+  config: CapsuleConfig,
+  baselineHash: string,
+  assetGroups: ExpandedAssetGroup[],
+): CapsuleManifest {
   for (const split of SPLITS) {
     if (!assetGroups.some((g) => g.id === split)) {
       throw new Error(`capsule.config.json: missing non-holdout asset group "${split}" required by the ordering check`);
@@ -383,7 +541,12 @@ export interface OrderingReport {
 
 export async function runOrderingCheck(): Promise<OrderingReport> {
   const startedMs = Date.now();
+  const terminalHoldoutDiagnostic = resolveTerminalHoldoutDiagnosticMode(
+    process.argv.slice(2),
+    process.env,
+  );
   const config = loadCapsuleConfig();
+  const assetGroups = selectAssetGroups(config, terminalHoldoutDiagnostic);
   mkdirSync(TMP_ROOT, { recursive: true });
   const tempRoot = mkdtempSync(join(TMP_ROOT, "ordering-check-"));
   const runId = `ordering-${randomBytes(4).toString("hex")}`;
@@ -409,7 +572,7 @@ export async function runOrderingCheck(): Promise<OrderingReport> {
     const casDir = join(tempRoot, "cas");
     const cas = new CasStore(casDir);
     const baselineHash = await packDirAsArtifact(join(CAPSULE_DIR, "baseline"), cas);
-    const manifest = provisionalManifest(config, baselineHash);
+    const manifest = provisionalManifest(config, baselineHash, assetGroups);
 
     broker = new Broker({
       runId,
@@ -419,6 +582,7 @@ export async function runOrderingCheck(): Promise<OrderingReport> {
       capsuleDigest: capsuleDigest(manifest),
       optimizerDigest: ORDERING_TOOL_DIGEST,
       holdoutLedgerPath: join(tempRoot, "holdout-ledger.ndjson"),
+      ...(terminalHoldoutDiagnostic ? { holdoutBudget: EXPECTED_EVALS } : {}),
       image: manifest.image,
       runDir: join(tempRoot, "run"),
       casDir,
@@ -603,10 +767,13 @@ const invokedDirectly =
 if (invokedDirectly) {
   const args = process.argv.slice(2);
   const flagIndex = args.indexOf("--report");
+  const reportArg = flagIndex === -1 ? undefined : args[flagIndex + 1];
   const reportPath =
     flagIndex === -1
       ? undefined
-      : (args[flagIndex + 1] ?? join(CAPSULE_DIR, "diagnostics", "ordering-report.json"));
+      : (reportArg === undefined || reportArg.startsWith("--")
+        ? join(CAPSULE_DIR, "diagnostics", "ordering-report.json")
+        : reportArg);
 
   const report = await runOrderingCheck();
   console.log(formatReport(report));

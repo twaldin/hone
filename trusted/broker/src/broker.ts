@@ -56,6 +56,18 @@ export interface CallContext {
   privileged: boolean;
 }
 
+/** Trusted host-only evaluator seam. It is never reachable through broker RPC or sandbox environment. */
+export interface TrustedEvaluationStrategyInput {
+  runId: string;
+  capsuleId: string;
+  artifact: ArtifactRef;
+  assetGroupId: string;
+  seed: number;
+  measurementEpoch?: string | undefined;
+}
+
+export type TrustedEvaluationStrategy = (input: TrustedEvaluationStrategyInput) => Promise<EvaluationRecord>;
+
 /** Mutation-sandbox network: fully isolated, or attached to a broker-managed internal network. */
 export type SandboxNetworkMode = { mode: "none" } | { mode: "internal"; network: string };
 
@@ -70,6 +82,26 @@ export interface BrokerConfig {
   capsuleDigest: string;
   /** Digest of the optimizer artifact driving this run ("sha256:<64 hex>") — also memo-key material. */
   optimizerDigest: string;
+  /**
+   * Trusted M1 replicate identity. Omitted for M0, preserving the exact
+   * legacy memo key and `eval` cache namespace. This value is process config,
+   * never a sandbox RPC or environment input.
+   */
+  measurementEpoch?: string | undefined;
+  /** Optional host-only evaluator strategy used by the trusted M1 outer broker. */
+  evaluationStrategy?: TrustedEvaluationStrategy | undefined;
+  /**
+   * Number of distinct public candidate artifacts that may enter evaluation.
+   * Default 1 preserves M0's one-candidate authority exactly.
+   */
+  maxPublicCandidateEvaluations?: number | undefined;
+  /**
+   * Trusted outer-campaign graceful fence: the number of distinct non-baseline
+   * artifacts whose trusted strategy returned an eligible result. Invalid and
+   * duplicate attempts do not count. Public getBudget reports evaluator
+   * exhaustion at the target; internal spend and privileged views stay exact.
+   */
+  trustedValidPublicCandidateTarget?: number | undefined;
   /**
    * Repo-lifetime holdout ledger file (shared across runs of this capsule).
    * The broker creates it on first init(); the lifetime access count NEVER
@@ -95,6 +127,12 @@ export interface BrokerConfig {
   sessionTraceQuotaBytes?: number | undefined;
   /** Lifetime holdout-access ledger budget (immutable once the ledger file exists); defaults to maxEvaluatorInvocations. */
   holdoutBudget?: number | undefined;
+  /**
+   * Narrow terminal-phase release: holdout groups listed here become reachable
+   * on the public mutation socket for this broker instance only. Trusted
+   * orchestration sets this only after the campaign's terminal holdout latch.
+   */
+  terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
   /**
    * Network mode for MUTATION sandboxes only (WP7 macOS decision: proxy runs
    * as a container on a shared --internal network; sandboxes attach to it as
@@ -376,6 +414,8 @@ const StateLine = z.discriminatedUnion("t", [
     record: EvaluationRecord,
     /** Measurement generation (`${bootNonce}:{startup|ep<N>}`); legacy lines lack it and grant no gate authority. */
     epoch: z.string().optional(),
+    /** Trusted M1 replicate identity; absent on M0 and legacy journal facts. */
+    measurementEpoch: z.string().optional(),
     /** Monotone trusted mint ordinal of `epoch` (see mintEpochSeq); pre-ordinal lines rank by first appearance in the journal. */
     epochSeq: z.number().int().nonnegative().optional(),
     /** Persisted parent-first same-epoch gate identity (see recordEvaluation). */
@@ -559,6 +599,38 @@ export function readBrokerJournalEvents(runDir: string): RunEvent[] | null {
   return hasEventFormat ? events : null;
 }
 
+export interface BrokerJournalEvaluationSnapshot {
+  records: readonly EvaluationRecord[];
+  journalHash: `sha256:${string}`;
+  lineCount: number;
+}
+
+/** Strict completed-child evidence reader: unlike recovery, a torn tail is never publishable evidence. */
+export function readBrokerJournalEvaluations(runDir: string): BrokerJournalEvaluationSnapshot {
+  const filePath = path.join(runDir, STATE_FILE);
+  const content = readFileSync(filePath);
+  if (content.length === 0 || content[content.length - 1] !== 0x0a) {
+    throw new BrokerError("INTERNAL", `run state log has a torn tail: ${filePath}`);
+  }
+  const rawLines = content.toString("utf8").split("\n");
+  rawLines.pop();
+  const records: EvaluationRecord[] = [];
+  for (const [index, raw] of rawLines.entries()) {
+    let line: StateLine;
+    try {
+      line = StateLine.parse(JSON.parse(raw));
+    } catch {
+      throw new BrokerError("INTERNAL", `run state log corrupt at line ${index + 1}: ${filePath}`);
+    }
+    if (line.t === "eval") records.push(line.record);
+  }
+  return {
+    records,
+    journalHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+    lineCount: rawLines.length,
+  };
+}
+
 /**
  * Trusted scalarization gate: a record grants promotion authority only when
  * the evaluator declared it valid, produced at least one finite objective,
@@ -601,17 +673,25 @@ export class Broker {
   private readonly execOutputLimitBytes: number;
   private readonly sessionTraceQuotaBytes: number;
   private readonly holdoutBudget: number;
+  private readonly terminalHoldoutAssetGroupIds: ReadonlySet<string>;
   private readonly maxActiveSandboxes: number;
   private readonly maxConcurrentEvaluations: number;
   private readonly maxMutationEpisodes: number;
   private readonly maxCandidateArtifacts: number;
   private readonly maxCandidateArtifactBytes: number;
   private readonly maxCandidateArtifactEntries: number;
+  private readonly maxPublicCandidateEvaluations: number;
+  private readonly trustedValidPublicCandidateTarget: number | undefined;
   private readonly sandboxPidsLimit: number;
   private readonly sandboxMemoryBytes: number;
   private readonly sandboxCpus: number;
   /** `--volumes-from <lease>:ro` when a docker-run lease fences creates; empty otherwise. */
   private readonly leaseArgs: readonly string[];
+  /** Optional trusted M1 replicate identity, independent of the broker's boot/episode gate epoch. */
+  private readonly trustedMeasurementEpoch: string | undefined;
+  /** M0 remains `eval`; M1 receives a disjoint hash-derived cache namespace. */
+  private readonly evaluationCacheNamespace: string;
+  private readonly evaluationStrategy: TrustedEvaluationStrategy | undefined;
   /**
    * Fresh per-Broker-instance measurement generation. Part of the eval memo
    * key: after a kill/resume the new broker must re-measure comparators
@@ -698,21 +778,12 @@ export class Broker {
    */
   private readonly gates = new Map<string, { epoch: string; pairKey: string; gate: GateFact }>();
   /**
-   * M0 promotion attempt (cross-artifact evaluator cache channel): evaluator
-   * containers share host image/page-cache state, so any earlier candidate
-   * invocation can warm a later one. The FIRST public, non-baseline
-   * candidate admitted to evaluate is therefore the run's ONLY such
-   * invocation. Its successful-exec lineage and the admission are journaled
-   * before the evaluator can spawn; failure, timeout, invalid output, crash,
-   * and child-first evaluation all consume the attempt permanently. Every
-   * later public non-baseline request — including a retry of the same hash —
-   * is rejected before memo lookup or Docker. Privileged trusted
-   * measurements are outside this mutable-client authority boundary.
-   *
-   * This deliberately limits M0 to one candidate attempt and one promotion
-   * per run. Fresh cache domains are required before M1 enables more.
+   * Public candidate evaluation admissions. M0's default cap is one. A trusted
+   * M1 constructor may raise the cap only while giving every child a fresh
+   * measurement epoch; each distinct hash is WAL-admitted before evaluation.
    */
-  private promotionSlot: string | undefined;
+  private readonly promotionSlots = new Set<string>();
+  private readonly trustedAcceptedCandidates = new Set<string>();
   /** Candidate artifact -> trusted lineage (parent it was mutated from + episode). */
   private readonly lineage = new Map<string, { parent: string; episode: number }>();
   /** Failed-exec repair snapshots: NOT candidates; sandboxes resumed from one reuse its episode. */
@@ -761,6 +832,20 @@ export class Broker {
     this.cas = new CasStore(config.casDir);
     this.run = config.runCommand ?? runCommand;
     this.now = config.now ?? Date.now;
+    if (
+      config.measurementEpoch !== undefined &&
+      (config.measurementEpoch.length === 0 ||
+        config.measurementEpoch.length > 256 ||
+        /[\u0000-\u001f\u007f]/.test(config.measurementEpoch))
+    ) {
+      throw new BrokerError("INTERNAL", "measurementEpoch must be 1-256 characters without control characters");
+    }
+    this.trustedMeasurementEpoch = config.measurementEpoch;
+    this.evaluationCacheNamespace =
+      config.measurementEpoch === undefined
+        ? "eval"
+        : `eval-${createHash("sha256").update(config.measurementEpoch).digest("hex")}`;
+    this.evaluationStrategy = config.evaluationStrategy;
     this.safeRunId = config.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
     this.scratchDir = path.join(config.runDir, "scratch");
     this.proxySockPath = path.join(config.runDir, "proxy.sock");
@@ -782,10 +867,33 @@ export class Broker {
       throw new BrokerError("INTERNAL", "sessionTraceQuotaBytes must be a positive safe integer");
     }
     this.holdoutBudget = config.holdoutBudget ?? this.manifest.budget.maxEvaluatorInvocations;
+    const terminalHoldoutAssetGroupIds = new Set(config.terminalHoldoutAssetGroupIds ?? []);
+    if (terminalHoldoutAssetGroupIds.size !== (config.terminalHoldoutAssetGroupIds?.length ?? 0)) {
+      throw new BrokerError("INTERNAL", "terminal holdout asset group ids must be unique");
+    }
+    for (const assetGroupId of terminalHoldoutAssetGroupIds) {
+      const group = this.manifest.assetGroups.find((candidate) => candidate.id === assetGroupId);
+      if (group?.visibility !== "holdout") {
+        throw new BrokerError("INTERNAL", `terminal holdout asset group ${assetGroupId} is not visibility=holdout`);
+      }
+    }
+    this.terminalHoldoutAssetGroupIds = terminalHoldoutAssetGroupIds;
     this.maxActiveSandboxes = config.maxActiveSandboxes ?? 8;
     this.maxConcurrentEvaluations = config.maxConcurrentEvaluations ?? 4;
     this.maxMutationEpisodes = config.maxMutationEpisodes ?? 64;
     this.maxCandidateArtifacts = config.maxCandidateArtifacts ?? 128;
+    this.maxPublicCandidateEvaluations = config.maxPublicCandidateEvaluations ?? 1;
+    this.trustedValidPublicCandidateTarget = config.trustedValidPublicCandidateTarget;
+    if (this.trustedValidPublicCandidateTarget !== undefined) {
+      if (
+        this.evaluationStrategy === undefined ||
+        !Number.isSafeInteger(this.trustedValidPublicCandidateTarget) ||
+        this.trustedValidPublicCandidateTarget <= 0 ||
+        this.trustedValidPublicCandidateTarget > this.maxPublicCandidateEvaluations
+      ) {
+        throw new BrokerError("INTERNAL", "trusted valid-candidate target requires a trusted strategy and must fit the public candidate cap");
+      }
+    }
     this.maxCandidateArtifactBytes = config.maxCandidateArtifactBytes ?? 2 * 1024 * 1024 * 1024;
     this.maxCandidateArtifactEntries = config.maxCandidateArtifactEntries ?? 2 * MAX_ARTIFACT_ENTRIES;
     for (const [name, value] of [
@@ -795,6 +903,7 @@ export class Broker {
       ["maxCandidateArtifacts", this.maxCandidateArtifacts],
       ["maxCandidateArtifactBytes", this.maxCandidateArtifactBytes],
       ["maxCandidateArtifactEntries", this.maxCandidateArtifactEntries],
+      ["maxPublicCandidateEvaluations", this.maxPublicCandidateEvaluations],
     ] as const) {
       if (!Number.isSafeInteger(value) || value <= 0) {
         throw new BrokerError("INTERNAL", `${name} must be a positive safe integer`);
@@ -1143,6 +1252,12 @@ export class Broker {
     let artifactEntries = 0;
     const artifacts = new Set<string>();
     for (const line of log.replayed) {
+      if (line.t === "eval" && line.measurementEpoch !== this.trustedMeasurementEpoch) {
+        throw new BrokerError(
+          "INTERNAL",
+          "run state log measurementEpoch does not match trusted broker configuration",
+        );
+      }
       if (line.t === "holdout") {
         holdoutSeq += 1;
         if (line.seq !== holdoutSeq) {
@@ -1244,20 +1359,18 @@ export class Broker {
           this.repairs.set(line.hash, { parent: line.parent, episode: line.episode });
           break;
         case "slot":
-          // Live code writes exactly one admission fact. A duplicate is
-          // corruption even when it repeats the same hash: accepting it
-          // would make a forged/replayed journal indistinguishable from the
-          // one-attempt authority this fact represents.
-          if (this.promotionSlot !== undefined) {
-            throw new BrokerError(
-              "INTERNAL",
-              `run state log corrupt: duplicate promotion slot: ${this.promotionSlot} then ${line.hash}`,
-            );
+          // Every slot hash is unique and bounded by the trusted constructor.
+          // Repeating a fact is corruption even if it names the same hash.
+          if (this.promotionSlots.has(line.hash)) {
+            throw new BrokerError("INTERNAL", `run state log corrupt: duplicate promotion slot: ${line.hash}`);
+          }
+          if (this.promotionSlots.size >= this.maxPublicCandidateEvaluations) {
+            throw new BrokerError("INTERNAL", `run state log exceeds public candidate evaluation cap ${this.maxPublicCandidateEvaluations}`);
           }
           if (!this.lineage.has(line.hash)) {
             throw new BrokerError("INTERNAL", `run state log corrupt: promotion slot has no prior lineage: ${line.hash}`);
           }
-          this.promotionSlot = line.hash;
+          this.promotionSlots.add(line.hash);
           break;
         case "trace":
           if (!this.sessionTraceHashes.has(line.hash)) {
@@ -1389,6 +1502,12 @@ export class Broker {
   private applyJournaledEval(line: { record: EvaluationRecord; epoch?: string | undefined; epochSeq?: number | undefined; gate?: GateFact | undefined }): void {
     const aggregate = eligibleAggregate(line.record);
     if (aggregate === undefined) return;
+    if (
+      line.record.artifactHash !== this.config.baselineArtifactHash &&
+      this.promotionSlots.has(line.record.artifactHash)
+    ) {
+      this.trustedAcceptedCandidates.add(line.record.artifactHash);
+    }
     const epoch = line.epoch ?? "legacy";
     // Restore epoch ordinal bookkeeping so this boot's fresh mints stay
     // strictly above every replayed generation (pre-ordinal journals rank by
@@ -1404,10 +1523,9 @@ export class Broker {
     // nothing (fail closed).
     const tainted = (this.lifetimeCoords.get(line.record.artifactHash)?.size ?? 0) > 0;
     this.insertMeasurement(epoch, line.record.artifactHash, pairKey, aggregate);
-    // The M0 promotion slot replays from its own fact, journaled BEFORE the
-    // slot holder's first eval fact — a persisted gate on any other artifact
-    // (old journal, forgery) replays as a measurement only.
-    if (line.gate !== undefined && !tainted && line.record.artifactHash === this.promotionSlot) {
+    // Slot admissions are journaled before each candidate's first eval fact.
+    // A persisted gate on an unadmitted artifact replays as measurement only.
+    if (line.gate !== undefined && !tainted && this.promotionSlots.has(line.record.artifactHash)) {
       this.registerGate(line.record.artifactHash, epoch, pairKey, line.gate);
     }
   }
@@ -1900,7 +2018,9 @@ export class Broker {
       capsuleId: this.manifest.id,
       objective: this.manifest.objective,
       baselineArtifact: { hash: this.config.baselineArtifactHash },
-      visibleAssetGroups: this.manifest.assetGroups.filter((g) => g.visibility !== "holdout").map((g) => g.id),
+      visibleAssetGroups: this.manifest.assetGroups
+        .filter((group) => group.visibility !== "holdout" || this.terminalHoldoutAssetGroupIds.has(group.id))
+        .map((group) => group.id),
       budget: this.budgetStateNow(),
     };
   }
@@ -2354,13 +2474,16 @@ export class Broker {
     if (!group) throw new BrokerError("INTERNAL", `unknown asset group: ${params.assetGroupId}`);
     // Authorization is caller-specific and MUST precede in-flight dedup:
     // otherwise a public caller can attach to an admin holdout promise.
-    if (group.visibility === "holdout" && !ctx.privileged) {
-      throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout asset groups are only reachable on the admin socket");
+    if (
+      group.visibility === "holdout"
+      && !ctx.privileged
+      && !this.terminalHoldoutAssetGroupIds.has(group.id)
+    ) {
+      throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout asset groups are only reachable on the admin socket or through a terminal holdout capability");
     }
-    // Cross-artifact evaluator cache channel (M0, see promotionSlot): only
-    // public mutation authority is constrained. Trusted privileged harnesses
-    // may measure arbitrary CAS artifacts; they cannot be reached with the
-    // optimizer's public capability.
+    // Cross-artifact evaluator cache channel: public mutation authority is
+    // bounded by a trusted constructor cap. M0 defaults to exactly one;
+    // M1 admits distinct hashes only after assigning fresh measurement domains.
     if (!ctx.privileged && params.artifact.hash !== this.config.baselineArtifactHash) {
       if (!this.lineage.has(params.artifact.hash)) {
         throw new BrokerError(
@@ -2368,16 +2491,27 @@ export class Broker {
           `evaluate: ${params.artifact.hash} is neither the baseline nor a saved candidate of this run — repairs and arbitrary CAS content never reach a public evaluator`,
         );
       }
-      if (this.promotionSlot !== undefined) {
-        throw new BrokerError(
-          "QUOTA_EXCEEDED",
-          `candidate evaluation attempt already consumed by ${this.promotionSlot}; M0 admits one public non-baseline evaluator invocation per run`,
-        );
+      if (this.promotionSlots.has(params.artifact.hash)) {
+        if (this.maxPublicCandidateEvaluations === 1) {
+          throw new BrokerError(
+            "QUOTA_EXCEEDED",
+            `candidate evaluation attempt already consumed by ${params.artifact.hash}; M0 admits one public non-baseline evaluator invocation per run`,
+          );
+        }
+      } else {
+        if (this.promotionSlots.size >= this.maxPublicCandidateEvaluations) {
+          const first = this.promotionSlots.values().next().value as string | undefined;
+          throw new BrokerError(
+            "QUOTA_EXCEEDED",
+            this.maxPublicCandidateEvaluations === 1
+              ? `candidate evaluation attempt already consumed by ${first ?? "unknown"}; M0 admits one public non-baseline evaluator invocation per run`
+              : `public candidate evaluation cap reached (${this.maxPublicCandidateEvaluations})`,
+          );
+        }
+        // Synchronous durable admission before ANY await/spawn.
+        this.state().append({ t: "slot", hash: params.artifact.hash });
+        this.promotionSlots.add(params.artifact.hash);
       }
-      // Synchronous durable admission before ANY await/spawn. JavaScript's
-      // run-to-completion semantics serialize racing A/B calls here.
-      this.state().append({ t: "slot", hash: params.artifact.hash });
-      this.promotionSlot = params.artifact.hash;
     }
     // Every ADMITTED privileged holdout request consumes one lifetime ledger
     // slot — this is information-query budget, not unique-computation budget,
@@ -2390,7 +2524,10 @@ export class Broker {
     if (group.visibility === "holdout") await this.chargeHoldout();
     const memoKey =
       `run:${this.config.runId}|gen:${evalEpoch}|${params.artifact.hash}` +
-      `|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}`;
+      `|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}` +
+      (this.trustedMeasurementEpoch === undefined
+        ? ""
+        : `|measurementEpoch:${encodeURIComponent(this.trustedMeasurementEpoch)}`);
     const existing = this.inFlightEvaluations.get(memoKey);
     if (existing !== undefined) {
       return this.redactRecord(await existing, group.visibility, ctx);
@@ -2434,12 +2571,16 @@ export class Broker {
     // conditions); the episode number makes every new mutation episode
     // re-measure parent AND candidate freshly. Retries within one
     // boot+episode still memoize.
-    const memoHash = await this.cas.indexGet("eval", memoKey);
+    const memoHash = await this.cas.indexGet(this.evaluationCacheNamespace, memoKey);
     if (memoHash !== undefined && (await this.cas.has(memoHash))) {
       const record = EvaluationRecord.parse(JSON.parse((await this.cas.readBuffer(memoHash)).toString("utf8")));
       const cached = { ...record, cached: true };
       this.recordEvaluation(cached, group.visibility, epoch);
       return cached;
+    }
+
+    if (this.evaluationStrategy !== undefined) {
+      return await this.evaluateWithTrustedStrategy(params, group, memoKey, epoch);
     }
 
     const workspaceDir = await this.ensureUnpacked(params.artifact.hash);
@@ -2603,9 +2744,63 @@ export class Broker {
       evaluatedAt: new Date().toISOString(),
     });
     const recordHash = await this.cas.putBuffer(Buffer.from(JSON.stringify(record)));
-    await this.cas.indexPut("eval", memoKey, recordHash);
+    await this.cas.indexPut(this.evaluationCacheNamespace, memoKey, recordHash);
     this.recordEvaluation(record, group.visibility, epoch);
     return record;
+    } finally {
+      await releaseEvaluation();
+    }
+  }
+
+  private async evaluateWithTrustedStrategy(
+    params: EvaluateP,
+    group: CapsuleManifest["assetGroups"][number],
+    memoKey: string,
+    epoch: string,
+  ): Promise<EvaluationRecord> {
+    const strategy = this.evaluationStrategy;
+    if (strategy === undefined) throw new BrokerError("INTERNAL", "trusted evaluation strategy is not configured");
+    const releaseEvaluation = await this.enterEvaluationQuiescence();
+    try {
+      if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
+      const budgetEvents: EmittableEvent[] = [
+        { type: "budget.snapshot", budget: this.budgetStateNow(0, 0, 1) },
+      ];
+      const exhausted = this.exhaustedDimension(0, 0, 1);
+      if (exhausted !== undefined && !this.exhaustedAnnounced.has(exhausted)) {
+        budgetEvents.push({ type: "budget.exhausted", dimension: exhausted });
+      }
+      const invocationEvents = this.journalFact({ t: "inv" }, budgetEvents);
+      this.spent.evaluatorInvocations += 1;
+
+      let supplied: EvaluationRecord;
+      try {
+        supplied = EvaluationRecord.parse(await strategy({
+          runId: this.config.runId,
+          capsuleId: this.manifest.id,
+          artifact: params.artifact,
+          assetGroupId: params.assetGroupId,
+          seed: params.seed,
+          ...(this.trustedMeasurementEpoch !== undefined
+            ? { measurementEpoch: this.trustedMeasurementEpoch }
+            : {}),
+        }));
+      } finally {
+        this.publish(invocationEvents);
+      }
+      if (
+        supplied.capsuleId !== this.manifest.id ||
+        supplied.artifactHash !== params.artifact.hash ||
+        supplied.assetGroupId !== params.assetGroupId ||
+        supplied.seed !== params.seed
+      ) {
+        throw new BrokerError("INTERNAL", "trusted evaluation strategy returned a record for a different request identity");
+      }
+      const record = EvaluationRecord.parse({ ...supplied, cached: false });
+      const recordHash = await this.cas.putBuffer(Buffer.from(JSON.stringify(record)));
+      await this.cas.indexPut(this.evaluationCacheNamespace, memoKey, recordHash);
+      this.recordEvaluation(record, group.visibility, epoch);
+      return record;
     } finally {
       await releaseEvaluation();
     }
@@ -2675,9 +2870,15 @@ export class Broker {
    * authority (see registerGate: the first pair is frozen).
    */
   private recordEvaluation(record: EvaluationRecord, visibility: string, epoch: string): void {
-    if (visibility === "holdout") return;
+    if (visibility === "holdout" && !this.terminalHoldoutAssetGroupIds.has(record.assetGroupId)) return;
     const aggregate = eligibleAggregate(record);
     if (aggregate === undefined) return;
+    if (
+      record.artifactHash !== this.config.baselineArtifactHash &&
+      this.promotionSlots.has(record.artifactHash)
+    ) {
+      this.trustedAcceptedCandidates.add(record.artifactHash);
+    }
     const pairKey = `${record.assetGroupId}|${record.seed}`;
     if (this.trusted.get(`${epoch}|${record.artifactHash}`)?.has(pairKey) === true) return;
     const epochSeq = this.epochSeqByName.get(epoch);
@@ -2694,7 +2895,7 @@ export class Broker {
     const hadTrusted = (lifetime?.size ?? 0) > 0;
     const lifetimeFirst = lifetime?.has(pairKey) !== true;
     const parentScore =
-      lin === undefined || hadTrusted || record.artifactHash !== this.promotionSlot
+      lin === undefined || hadTrusted || !this.promotionSlots.has(record.artifactHash)
         ? undefined
         : this.trusted.get(`${epoch}|${lin.parent}`)?.get(pairKey);
     const gate: GateFact | undefined =
@@ -2725,7 +2926,14 @@ export class Broker {
       }
     }
 
-    const journaled = this.journalFact({ t: "eval", record, epoch, epochSeq, ...(gate !== undefined ? { gate } : {}) }, events);
+    const journaled = this.journalFact({
+      t: "eval",
+      record,
+      epoch,
+      epochSeq,
+      ...(this.trustedMeasurementEpoch !== undefined ? { measurementEpoch: this.trustedMeasurementEpoch } : {}),
+      ...(gate !== undefined ? { gate } : {}),
+    }, events);
     // Tables AFTER the durable fact, via the same helpers replay uses — a
     // crash rebuilds the exact same measurements and persisted gates.
     this.insertMeasurement(epoch, record.artifactHash, pairKey, aggregate);
@@ -2782,11 +2990,10 @@ export class Broker {
     if ((this.lifetimeCoords.get(hash)?.size ?? 0) === 0) {
       throw new BrokerError("INTERNAL", `reportIncumbent: no trusted evaluation for artifact ${hash}`);
     }
-    if (hash !== this.promotionSlot) {
+    if (!this.promotionSlots.has(hash)) {
       throw new BrokerError(
         "INTERNAL",
-        "reportIncumbent: insufficient authority — the run's promotion slot " +
-          `is held by ${this.promotionSlot ?? "no artifact"} (M0: the first evaluated candidate is the only promotion-eligible artifact)`,
+        `reportIncumbent: insufficient authority — artifact has no public candidate evaluation admission (cap ${this.maxPublicCandidateEvaluations})`,
       );
     }
     const gateEntry = this.gates.get(hash);
@@ -2869,8 +3076,19 @@ export class Broker {
     return {};
   }
 
-  getBudget(_ctx: CallContext): BudgetState {
-    return this.budgetStateNow();
+  getBudget(ctx: CallContext): BudgetState {
+    const budget = this.budgetStateNow();
+    if (
+      !ctx.privileged &&
+      this.trustedValidPublicCandidateTarget !== undefined &&
+      this.trustedAcceptedCandidates.size >= this.trustedValidPublicCandidateTarget
+    ) {
+      return BudgetState.parse({
+        envelope: budget.envelope,
+        spent: { ...budget.spent, evaluatorInvocations: budget.envelope.maxEvaluatorInvocations },
+      });
+    }
+    return budget;
   }
   /** Trusted admission view: includes a projected-refusal latch, not only numeric spend. */
   getBudgetExhaustion(ctx: CallContext): BudgetDimension | undefined {
