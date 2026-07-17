@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import {
   type BrokerConfig,
   type TrustedEvaluationStrategyInput,
 } from "../src/broker.js";
+import { startBroker } from "../src/server.js";
 import { TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST, buildTestCapsule } from "./helpers.js";
 
 const BUDGET = { maxTokens: 1_000, maxUsd: 10, maxWallClockSec: 60, maxEvaluatorInvocations: 10 };
@@ -116,5 +118,18 @@ describe("trusted broker evaluation strategy", () => {
     const config = await configFor("invalid-terminal-holdout", async (input) => recordFor(input));
     config.terminalHoldoutAssetGroupIds = ["train"];
     expect(() => new Broker(config)).toThrow(/terminal holdout asset group train is not visibility=holdout/);
+  });
+
+  test("places the public Unix listener at an explicit short path for long TCP campaign runs", async () => {
+    const config = await configFor("short-public-socket", async (input) => recordFor(input));
+    const socketPath = path.join(path.dirname(config.runDir), "broker.sock");
+    const running = await startBroker(config, {
+      publicTcp: { host: "127.0.0.1", port: 0 },
+      socketPath,
+    });
+    expect(running.socketPath).toBe(socketPath);
+    expect(existsSync(socketPath)).toBe(true);
+    await running.close();
+    expect(existsSync(socketPath)).toBe(false);
   });
 });
