@@ -1,0 +1,83 @@
+{
+  "schema": "hone-m1-admission-v1",
+  "admission": "PASS",
+  "capsule": {
+    "id": "cap_30edce7a19b1",
+    "capsuleDigest": "sha256:78aa6564695ca228b090d1f46c357f8b1696965cec9f3d8e2aec0a04e5d21b3c",
+    "manifestSha256": "sha256:a3efeb82c330b4d80460798e5cf8fbf13a80c096b0329c5414210a840a532a18",
+    "configSha256": "sha256:e983d8e134c539924d01c18a53f985589e6b24deba1b85504319b43bd8a5fff5",
+    "orderingReport": {
+      "path": "diagnostics/ordering-report.json",
+      "sha256": "sha256:157520d2176df2025e436df6f8ceaa60b220042a9ada5d7b193de19fc05782f8"
+    }
+  },
+  "broker": {
+    "api": "@hone/broker Broker.evaluate",
+    "invocationCount": 14,
+    "network": "none",
+    "trustedHoldoutDiagnostic": true,
+    "dualKey": {
+      "flag": "--holdout-diagnostic",
+      "environment": "HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1"
+    },
+    "optimizerPilot": false
+  },
+  "assets": {
+    "train": "holdout",
+    "validation": "holdout",
+    "publicAssetGroups": 0,
+    "temporaryProjections": 0,
+    "temporaryLedgers": 0
+  },
+  "source": {
+    "repository": "https://github.com/twaldin/flt",
+    "commit": "fe05463a921b9c4d808a338ea07d33abe45b6487",
+    "tree": "6b5de048d6531b5d8f120f7f7b6fbb0540aef9cc",
+    "baselineParserCommit": "a160f018fa74c987a95bbffee60fee6278874795",
+    "referenceParserCommit": "fe05463a921b9c4d808a338ea07d33abe45b6487",
+    "provenance": "owner FLT workflow parser, presets, types, tests, and workflow templates at the registered source commit; MIT"
+  },
+  "normalization": {
+    "domain": "MetaCapsuleEntry",
+    "method": "Y = (q - qBase) / scale, unclipped",
+    "qFail": 0,
+    "qBase": 0.5,
+    "qReference": 1,
+    "scale": 0.5,
+    "scaleEqualsReferenceMinusBase": true,
+    "invalidOrBrokenMapsTo": 0
+  },
+  "diagnosticContentHashes": {
+    "diagnostics/broken/src/workflow/parser.mjs": "sha256:4c66a1d7c1aff1fac49f2a2c4f78525b491dd5719ab23af9914ecbad4bc98a05",
+    "diagnostics/improved/src/workflow/parser.mjs": "sha256:1299861eaafbe0ddde28c093e537574396beb877c0c91d28028cfdfca82b7766",
+    "diagnostics/naive/src/workflow/parser.mjs": "sha256:d41eb4bad608e07509bc0e7986e6c9fb567a6ef4058a36eabe707211414d9909",
+    "diagnostics/shortcut/src/workflow/parser.mjs": "sha256:d9850580ce470c5fcdbfad5a43c4550ff9c4f879ad7f0dbe0003873a6afc43af"
+  },
+  "measurement": {
+    "reportScores": {
+      "broken": 0,
+      "naive": 0.07692307692307693,
+      "shortcut": 0.46153846153846156,
+      "baseline": 0.5,
+      "improved": 1
+    },
+    "strictOrdering": "broken < naive < shortcut < baseline < improved",
+    "stabilityBand": 0.15,
+    "stabilitySpread": 0,
+    "failures": []
+  },
+  "scaffold": {
+    "passes": 2,
+    "ids": ["cap_30edce7a19b1", "cap_30edce7a19b1"],
+    "manifestSha256": [
+      "sha256:a3efeb82c330b4d80460798e5cf8fbf13a80c096b0329c5414210a840a532a18",
+      "sha256:a3efeb82c330b4d80460798e5cf8fbf13a80c096b0329c5414210a840a532a18"
+    ],
+    "identical": true
+  },
+  "commands": [
+    "HONE_CAPSULE_DIR=\"$PWD/capsules/flt-workflow-parser\" HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1 ./capsules/node_modules/.bin/tsx capsules/tools/ordering-check.ts --holdout-diagnostic --report",
+    "./capsules/node_modules/.bin/tsx capsules/tools/scaffold.ts capsules/flt-workflow-parser",
+    "./capsules/node_modules/.bin/tsx capsules/tools/scaffold.ts capsules/flt-workflow-parser"
+  ]
+}

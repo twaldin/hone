@@ -1,0 +1,98 @@
+{
+  "schema": "hone.agentelo-scoring.m1-admission/v1",
+  "capsule": {
+    "id": "cap_6ec552e65b70",
+    "digest": "sha256:a634fb72c0500afc2aa9b5d3282592b7fc21dbaa5432cb6a7a287403c450f122",
+    "manifestSha256": "sha256:ecb058673bd1d54f8bfc5529cc5ddeb209ea2a49e6bea205269f6dd9225cc7b2",
+    "baselineCommit": "3892d99c0e8986f9c3c7deb2f31eec616b4aef8b",
+    "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7"
+  },
+  "ordering": {
+    "expression": "broken < naive < baseline < improved",
+    "reportPath": "diagnostics/ordering-report.json",
+    "reportSha256": "sha256:baa4b3c17a4866cb91fc55587fe70be90dbf719ff78e6c07b97e91797ab1a071",
+    "variants": {
+      "broken": 0,
+      "naive": 0.4,
+      "baseline": 0.7,
+      "shortcut": 0.5,
+      "improved": 1
+    },
+    "stability": {
+      "aggregates": [0.7, 0.7, 0.7],
+      "band": 0.15,
+      "spread": 0
+    },
+    "failures": []
+  },
+  "diagnosticOverlaySha256": {
+    "broken": "sha256:3d6ae4842c3c0c53a82aa4f04ad88e1cc4e3508a3d8a8b9addf4bbe5c4f16351",
+    "naive": "sha256:5f91121d48cedb70e84376f6a31d0dbb57036a0eee6c44b75d93f2ec11bfafa2",
+    "shortcut": "sha256:0770d1012ee5e769c5e0e11ae936fbb5311fe08fae5d87cd59f3caec9a2d5b46",
+    "improved": "sha256:5ac4839f645c0a54e7ca945e8e9ba2fdd282d8f74e00a3e71db47244444892c4"
+  },
+  "realBroker": {
+    "runner": "capsules/tools/ordering-check.ts",
+    "containerEvaluations": 14,
+    "network": "none",
+    "hostEvaluatorExecution": false,
+    "optimizerPilots": 0
+  },
+  "sourceIdentity": {
+    "repository": "https://github.com/twaldin/agentelo.git",
+    "readOnly": true,
+    "commit": "456a2b37a9357f0c829188bbd932ad937da2cfb0",
+    "tree": "e77c8cd72a0f48c51de474b0fe111b9420613829",
+    "seedPolicyCommit": "88c8093ed8ba60cd4e3be08f3ce77740286a8e02",
+    "referencePolicyCommit": "4a873a85f830114ce7d943389936a0d3f035677c",
+    "paths": [
+      "core/scoring.js",
+      "test/scoring.test.js"
+    ]
+  },
+  "normalizationIdentity": {
+    "orientation": "higher-is-better",
+    "scalar": "passed sealed cases / declared sealed cases",
+    "qFail": 0,
+    "qBaseline": 0.7,
+    "qReference": 1,
+    "scale": 0.3,
+    "unclipped": true,
+    "declaredCases": 60,
+    "behaviorGroups": [
+      "no-diff",
+      "infra",
+      "precedence",
+      "dedup"
+    ]
+  },
+  "assetSha256": {
+    "assets/train/cases.json": "sha256:768ba66971779665b891e46d4f0fbc004624caaa358415d7314859e8e6f26c62",
+    "assets/validation/cases.json": "sha256:a967b7bfcefd04c344643bc604d6392a058a6209c1a14902a69cdc7565ab5618"
+  },
+  "scaffold": {
+    "runs": 2,
+    "capsuleIds": [
+      "cap_6ec552e65b70",
+      "cap_6ec552e65b70"
+    ],
+    "manifestSha256": [
+      "sha256:ecb058673bd1d54f8bfc5529cc5ddeb209ea2a49e6bea205269f6dd9225cc7b2",
+      "sha256:ecb058673bd1d54f8bfc5529cc5ddeb209ea2a49e6bea205269f6dd9225cc7b2"
+    ],
+    "byteIdentical": true
+  },
+  "checks": {
+    "minimumSealedCases": true,
+    "minimumBehaviorGroups": true,
+    "seedAtMost0_70": true,
+    "naiveAtMost0_85": true,
+    "referenceEquals1": true,
+    "referenceMinusSeedAtLeast0_30": true,
+    "referenceMinusNaiveAtLeast0_15": true,
+    "strictOrdering": true,
+    "brokerReportHasNoFailures": true,
+    "brokerStability": true,
+    "networkDisabled": true
+  }
+}

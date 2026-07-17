@@ -19,7 +19,7 @@ import {
 import type { OptimizerBundleSeal, OptimizerRuntime } from "../src/backends/optimizer-container.js";
 import { openDockerCreateGate } from "../src/docker-create-gate.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
-import { computeOptimizerDigest } from "../src/optimizer-digest.js";
+import { collectOptimizerSnapshot, computeOptimizerDigest, snapshotDigest } from "../src/optimizer-digest.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
   scriptedCreateHelper,
@@ -294,6 +294,73 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
     await runtime.cleanup();
   });
 
+  it("builds a supplied candidate snapshot's captured bytes without recollecting mutable repo source", async () => {
+    const base = collectOptimizerSnapshot();
+    const files = new Map(base.files);
+    const main = files.get("optimizer/src/main.ts");
+    if (main === undefined) throw new Error("test fixture is missing optimizer/src/main.ts");
+    files.set("optimizer/src/main.ts", { bytes: Buffer.from("export const capturedCandidate = true;\n"), mode: main.mode });
+    const optimizerSnapshot = { files };
+    const optimizerDigest = snapshotDigest(FIX_IMAGE, optimizerSnapshot);
+    const run: RunCommand = (argv) => {
+      if (isBuild(argv)) {
+        const src = mountsOf(argv)[0]?.split(":")[0] ?? "";
+        const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
+        expect(readFileSync(join(src, "optimizer", "src", "main.ts"), "utf8")).toBe("export const capturedCandidate = true;\n");
+        writeFileSync(join(out, "optimizer.mjs"), "// candidate bundle\n");
+        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+      }
+      return Promise.resolve(res());
+    };
+    const runtime = await prepareOptimizerRuntime(
+      { runId: "run_candidate", env: {}, optimizerDigest, optimizerSnapshot },
+      {
+        image: FIX_IMAGE,
+        transport: { kind: "unix", hostSocketPath: "/dev/null", token: "a".repeat(64) },
+        run,
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE),
+        containerLease: "hone-lease-run_candidate-e1",
+        gate: testGate("run_candidate"),
+        clientEnv: { PATH: process.env["PATH"] ?? "" },
+      },
+    );
+    expect(runtime.runArgv).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
+    await runtime.cleanup();
+  });
+
+  it("builds an admission-captured base snapshot without a launch-time repo recollection", async () => {
+    const collected = collectOptimizerSnapshot();
+    const files = new Map(collected.files);
+    const main = files.get("optimizer/src/main.ts");
+    if (main === undefined) throw new Error("test fixture is missing optimizer/src/main.ts");
+    files.set("optimizer/src/main.ts", { ...main, bytes: Buffer.from("export const campaignCapturedBase = true;\n") });
+    const optimizerBaseSnapshot = { files };
+    const optimizerDigest = snapshotDigest(FIX_IMAGE, optimizerBaseSnapshot);
+    const run: RunCommand = (argv) => {
+      if (isBuild(argv)) {
+        const src = mountsOf(argv)[0]?.split(":")[0] ?? "";
+        const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
+        expect(readFileSync(join(src, "optimizer", "src", "main.ts"), "utf8")).toBe("export const campaignCapturedBase = true;\n");
+        writeFileSync(join(out, "optimizer.mjs"), "// campaign base bundle\n");
+        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+      }
+      return Promise.resolve(res());
+    };
+    const runtime = await prepareOptimizerRuntime(
+      { runId: "run_campaign_base", env: {}, optimizerDigest, optimizerBaseSnapshot },
+      {
+        image: FIX_IMAGE,
+        transport: { kind: "unix", hostSocketPath: "/dev/null", token: "a".repeat(64) },
+        run,
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE),
+        containerLease: "hone-lease-run_campaign_base-e1",
+        gate: testGate("run_campaign_base"),
+        clientEnv: { PATH: process.env["PATH"] ?? "" },
+      },
+    );
+    await runtime.cleanup();
+  });
+
   it("refuses to execute when the recollected digest differs from the seal", async () => {
     await expect(
       prepareOptimizerRuntime(ctxSlice(fakeHash("0")), {
@@ -329,6 +396,27 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
     expect(argvs.filter((a) => a[1] === "run").length).toBe(0); // never built
     expect(runtime.bundleDir).toBeNull();
     expect(runtime.runArgv).toEqual(["python3", "/evil.py"]);
+  });
+  it("refuses an argv override when a candidate snapshot was selected", async () => {
+    await expect(
+      prepareOptimizerRuntime(
+        {
+          runId: "run_candidate_override",
+          env: { HONE_OPTIMIZER_CMD: "python3 /evil.py" },
+          optimizerDigest: fakeHash("9"),
+          optimizerSnapshot: collectOptimizerSnapshot(),
+        },
+        {
+          image: FIX_IMAGE,
+          transport: { kind: "unix", hostSocketPath: "/dev/null", token: "a".repeat(64) },
+          run: okRun(),
+          spawnImpl: fakeOptimizerSpawn(FIX_IMAGE),
+          containerLease: "hone-lease-run_candidate_override-e1",
+          gate: testGate("run_candidate_override"),
+          clientEnv: { PATH: process.env["PATH"] ?? "" },
+        },
+      ),
+    ).rejects.toThrow(/cannot be combined with HONE_OPTIMIZER_CMD/);
   });
   it("rejects cleanup when an optimizer container cannot be removed", async () => {
     const runtime = await prepareOptimizerRuntime(

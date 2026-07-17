@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "capsuleId": "cap_1e60e3008291",
+  "scalar": {
+    "name": "score",
+    "definition": "passed sealed cases / declared sealed cases",
+    "objectivesDeclared": 1
+  },
+  "cases": {
+    "train": 41,
+    "validation": 20,
+    "total": 61,
+    "ownerExisting": 41,
+    "hiddenVariants": 20,
+    "behaviorGroups": {
+      "train": [
+        "completion",
+        "cursor",
+        "deletion",
+        "escape",
+        "helpers",
+        "history",
+        "integration",
+        "multiline",
+        "render"
+      ],
+      "validation": [
+        "escape",
+        "helpers",
+        "render",
+        "state",
+        "unicode"
+      ]
+    }
+  },
+  "scores": {
+    "baseline": {
+      "combined": 0.4262295081967213,
+      "train": 0.34146341463414637,
+      "validation": 0.6
+    },
+    "broken": {
+      "combined": 0.03278688524590164,
+      "train": 0.024390243902439025,
+      "validation": 0.05
+    },
+    "improved": {
+      "combined": 1,
+      "train": 1,
+      "validation": 1
+    },
+    "naive": {
+      "combined": 0.2786885245901639,
+      "train": 0.2682926829268293,
+      "validation": 0.3
+    },
+    "shortcut": {
+      "combined": 0.6885245901639344,
+      "train": 1,
+      "validation": 0.05
+    }
+  },
+  "functionalGates": {
+    "seedAtMost0_70": {
+      "actual": 0.4262295081967213,
+      "passed": true
+    },
+    "naiveAtMost0_85": {
+      "actual": 0.2786885245901639,
+      "passed": true
+    },
+    "referenceEquals1": {
+      "actual": 1,
+      "passed": true
+    },
+    "referenceMinusSeedAtLeast0_30": {
+      "actual": 0.5737704918032787,
+      "passed": true
+    },
+    "referenceMinusNaiveAtLeast0_15": {
+      "actual": 0.7213114754098361,
+      "passed": true
+    },
+    "strictOrdering": {
+      "expression": "broken < naive < baseline < improved",
+      "passed": true
+    },
+    "shortcutSplitInversion": {
+      "trainPassed": true,
+      "validationPassed": true
+    }
+  },
+  "stability": {
+    "aggregates": [
+      0.4262295081967213,
+      0.4262295081967213,
+      0.4262295081967213
+    ],
+    "band": 0.15,
+    "spread": 0
+  },
+  "brokerSmoke": {
+    "sharedRunner": "capsules/tools/ordering-check.ts",
+    "realBroker": true,
+    "evalInvocations": 14,
+    "network": "none",
+    "hostExecution": "docker-and-canonical-tar-only",
+    "failures": []
+  },
+  "scaffold": {
+    "runs": 2,
+    "capsuleIds": [
+      "cap_1e60e3008291",
+      "cap_1e60e3008291"
+    ],
+    "manifestHashes": [
+      "sha256:5d49002484f68a1385b56915e8bff03cb72d06a33a6ff6b8f19df616c6b0a798",
+      "sha256:5d49002484f68a1385b56915e8bff03cb72d06a33a6ff6b8f19df616c6b0a798"
+    ],
+    "byteIdentical": true
+  }
+}

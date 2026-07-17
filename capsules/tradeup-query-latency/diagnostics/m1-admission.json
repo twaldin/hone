@@ -1,0 +1,106 @@
+{
+  "schema": "hone-m1-admission-v1",
+  "admission": "PASS",
+  "capsule": {
+    "id": "cap_cf5f1bd3e20a",
+    "capsuleDigest": "sha256:de137176ef44ae285f3ee0324c7f1b69b52c17fcd317323f0d59d1de8c60b97a",
+    "manifestSha256": "sha256:ba428660f4b938994a057641b3b84a34a32f1a02d3e2a6c5eab48fd3a70386ff",
+    "configSha256": "sha256:bef994bca3933d5f2ca07319e72ab80b8bce7916801ed50844d5a37885a28aab",
+    "orderingReport": {
+      "path": "diagnostics/ordering-report.json",
+      "sha256": "sha256:de9fb886d688a7aa2a7839f0b10cf1a8e2225c43fea5bfe4e7b171295299f246"
+    }
+  },
+  "broker": {
+    "api": "@hone/broker Broker.evaluate",
+    "invocationCount": 14,
+    "network": "none",
+    "trustedHoldoutDiagnostic": true,
+    "dualKey": {
+      "flag": "--holdout-diagnostic",
+      "environment": "HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1"
+    },
+    "optimizerPilot": false
+  },
+  "assets": {
+    "train": "holdout",
+    "validation": "holdout",
+    "publicAssetGroups": 0,
+    "temporaryProjections": 0,
+    "temporaryLedgers": 0
+  },
+  "source": {
+    "repository": "trade-up-bot",
+    "commit": "2a37202187912bedfbe5b4d65498feef09797935",
+    "paths": {
+      "server/routes/data.ts": "sha256:73dbab6fe8b0e149077828985ec2b54ca29d7559ea40a0e4daa81f96871c9a9e",
+      "server/db.ts": "sha256:74b1199b6b8db2a3176179f1e88218e171f9e8056f9b61f28ae86b3cd09e864c"
+    },
+    "provenance": "read-only owner source; deterministic synthetic scaling of table cardinality and query shapes; no owner records"
+  },
+  "normalization": {
+    "domain": "MetaCapsuleEntry",
+    "method": "Y = (q - qBase) / scale, unclipped",
+    "qFail": 0,
+    "qBase": 0.00030146691673015795,
+    "qReference": 0.0017501767746974616,
+    "scale": 0.0014487098579673036,
+    "scaleEqualsReferenceMinusBase": true,
+    "invalidOrBrokenMapsTo": 0
+  },
+  "diagnosticContentHashes": {
+    "diagnostics/alternate/query.py": "sha256:007f5288dbb4f0a05539f1a27f0e9b70b532ad5e62df9f71441f8b88869befa1",
+    "diagnostics/broken/query.py": "sha256:22f2a249838d4fd9fafeb19657f4f0ad3665eba0a77748e8deb9ef16f9dd6d16",
+    "diagnostics/improved/query.py": "sha256:3639dd00ca9d6c913217c2dd5423c2c04efdd75c4ea9c8494bf1f1d299212dbb",
+    "diagnostics/naive/query.py": "sha256:bd611bcbd58d7bc2232f5a782dcb6773a8786dd392d963e5e4c69af930e4597c",
+    "diagnostics/shortcut/query.py": "sha256:a8825696644a58581ef11aa8996a2bd61bd06d6eaab6b0fb6e9b5749bc3d95c0"
+  },
+  "independentAlternate": {
+    "path": "diagnostics/alternate-ordering-report.json",
+    "sha256": "sha256:141a907cfc5bd0ef9490c9c397ea6d0f7014450ce19f6564f1b91f3a88a08f0d",
+    "baselineScore": 0.00034567471992259915,
+    "alternateScore": 0.001903065314796578,
+    "aboveBaseline": true
+  },
+  "performanceGates": {
+    "maxMadOverMedian": 0.020351524839745144,
+    "stabilityAtMostFivePercent": false,
+    "referenceMedianFractionFaster": 0.8294461725756422,
+    "referenceMedianAtLeastFifteenPercentFaster": true,
+    "referenceP95OverSeedP95": 0.17258129557139681,
+    "referenceP95AtMostFivePercentWorse": true,
+    "effectOverMeasuredNoise": 40.755971805895854,
+    "effectAtLeastThreeTimesNoise": true,
+    "identicalResponseQualityHash": true,
+    "strictOrdering": true,
+    "secondIndependentAboveBaseline": true,
+    "unchanged": true
+  },
+  "measurement": {
+    "reportScores": {
+      "broken": 0,
+      "naive": 0.00025772446480482026,
+      "baseline": 0.00031175079995746763,
+      "improved": 0.0017431320339987085,
+      "shortcut": 0.01793988827727851
+    },
+    "strictOrdering": "broken < naive < baseline < improved",
+    "stabilityBand": 0.15,
+    "stabilitySpread": 0.05246367126965878,
+    "failures": []
+  },
+  "scaffold": {
+    "passes": 2,
+    "ids": ["cap_cf5f1bd3e20a", "cap_cf5f1bd3e20a"],
+    "manifestSha256": [
+      "sha256:ba428660f4b938994a057641b3b84a34a32f1a02d3e2a6c5eab48fd3a70386ff",
+      "sha256:ba428660f4b938994a057641b3b84a34a32f1a02d3e2a6c5eab48fd3a70386ff"
+    ],
+    "identical": true
+  },
+  "commands": [
+    "HONE_CAPSULE_DIR=\"$PWD/capsules/tradeup-query-latency\" HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1 ./capsules/node_modules/.bin/tsx capsules/tools/ordering-check.ts --holdout-diagnostic --report",
+    "./capsules/node_modules/.bin/tsx capsules/tools/scaffold.ts capsules/tradeup-query-latency",
+    "./capsules/node_modules/.bin/tsx capsules/tools/scaffold.ts capsules/tradeup-query-latency"
+  ]
+}

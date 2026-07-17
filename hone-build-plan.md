@@ -14,13 +14,13 @@
 
 **M1 exit — dogfood loop closed:**
 
-- One bounded `hone "hone"` campaign (20–30 candidates × 3 train capsules × 8–12 inner episodes) completes headless.
+- One bounded `hone "hone"` campaign (20–30 total unique optimizer source artifacts, including the seed arm, each measured across 5 train capsules × 8–12 inner episodes; outer non-seed mutation attempts separately bounded from `candidates - 1` through `4 × candidates`; fixed `gpt-5.6-sol` route for outer and inner mutation) completes headless.
   
-- Injected broken + degraded hone candidates rank below seed (meta-evaluator discrimination).
+- Injected broken + degraded Hone controls, each registered as an exact canonical source-artifact digest + image-bound bundle digest pair, rank below seed (meta-evaluator discrimination).
   
-- ≥1 candidate beats seed, sign-consistent on ≥4/5 train capsules; winner diff is an interpretable strategy change (human read); non-regression on 2 frozen holdout capsules; measured cost/candidate makes a 10× campaign conceivable.
+- ≥1 non-seed unique artifact beats seed, sign-consistent on ≥4/5 train capsules; winner diff is an interpretable strategy change (human read); non-regression on the 2 frozen holdout capsules in one terminal access phase; measured cost/admitted candidate makes a 10× campaign conceivable.
   
-- Winner seated as improver via champion/challenger with one-command rollback (`apply: none` — owner applies the promotion).
+- Winner seated as improver via champion/challenger with one-command rollback (`apply: none` — owner applies the promotion). The M1 result supports only a **directional, reversible operational promotion** — never a powered corpus-wide causal effect, model-improvement, general-transfer, or recursive-acceleration claim.
   
 
 Any M1 criterion fails → stop, write up which §20 risk fired, revise. No Phase 1–7 investment before the bar passes.
@@ -76,9 +76,9 @@ Cross-WP rule: everyone codes against `schema/` fixtures, nobody blocks on a sib
 ### Wave 2 — integration _(me + targeted spawns)_
 - **WP7 — integration + M0** _(me)_: wire runner → broker/proxy/scoring/optimizer; run `seeded-astar` end-to-end; k=3–5 replicate noise floor; A-A null through the full stack; fix seams. A **reviewer** subagent does a security pass on `trusted/` before M0 is called (boundary walk: can mutation reach holdout/credentials/socket? does budget survive process-tree games?).
   
-- **WP8 — remaining capsules** _(parallel batch, needs your repos)_: 3–4 workers author capsules from `trade-up-bot` (profit-finder with protected knn module; search-cycle latency; `/trade-ups` uncached query latency) and `tim.waldin.net` (container cold start). Each: evaluator + splits + adversarial validation + ordering check, you approve objectives + freeze. 2 capsules → `holdout/`, frozen, ledger-gated.
+- **WP8 — remaining capsules** _(parallel batch, needs your repos)_: 6 workers author the remaining M1 corpus — from `trade-up-bot` (offline profit-finder with protected knn module → train; `/trade-ups` uncached query latency → holdout), Monoagent context retention (train), FLT TextInput (train), expanded Agentelo scoring (train), and FLT workflow parser (holdout). Each: evaluator + splits + adversarial validation + ordering check, you approve objectives + freeze. 2 capsules → `holdout/`, frozen, ledger-gated. (`tradeup-search-latency` and `site-cold-start` are deferred, not relabelled — no frozen search-latency oracle, no site build entrypoint.)
   
-- **WP9 — meta-runner + campaign** _(me)_: `trusted/meta` implements RFC §12.2 (reset → run candidate hone headless via broker with fixed inner budget → score on validation → per_example[capsule]); meta-capsule; inject one broken + one degraded hone candidate as negative controls; then launch the M1 campaign under `launch` (long-running, detached), monitor via NDJSON cursor, analyze with the WP3 harness.
+- **WP9 — meta-runner + campaign** _(me)_: `trusted/meta` implements RFC §12.2 (reset → admit a unique canonical candidate source artifact → run its image-bound optimizer bundle headless via broker with fixed inner budget → score on validation → per_example[capsule]); meta-capsule; inject one broken + one degraded Hone control as exact source-artifact + bundle-digest pairs; then launch the M1 campaign under `launch` (long-running, detached), monitor via NDJSON cursor, analyze with the WP3 harness.
   
 ### Dependency graph
 ```mermaid
@@ -117,13 +117,19 @@ flowchart TD
 
 * * *
 ## 5. Bootstrap capsules
+M1 corpus — **5 public train + 2 frozen holdout** (resolves the earlier 3-train vs 4/5 sign-gate contradiction):
+
 | # | Capsule | Objective | Evaluator (mechanical) | Split | Notes |
 |---|---|---|---|---|---|
-| 1 | `seeded-astar` | make pathfinder fast, keep correctness | runtime median-of-k × test pass | train | tier-1, first smoke + noise-floor target |
-| 2 | `tradeup-profit` | find more profitable tradeups; **knn-pricing module protected** | profit found on fixed market fixtures | train | protected-path probe = free exploit-resistance signal |
-| 3 | `tradeup-search-latency` | faster search cycles | cycle wall-clock, CPU-quota-pinned | train | |
-| 4 | `site-cold-start` | faster container cold start (tim.waldin.net) | cold-start ms, median-of-k | holdout | frozen pre-campaign |
-| 5 | `tradeup-query-latency` | faster `/trade-ups` uncached search | p50/p95 query ms on fixture DB | holdout | frozen pre-campaign |
+| 1 | `seeded-astar` | make pathfinder fast, keep correctness | trusted correctness/performance aggregate (runtime median-of-k × test pass) | train | tier-1, first smoke + noise-floor target |
+| 2 | `tradeup-profit` | find more profitable tradeups; **knn-pricing module protected** | top-K distinct valid-signature net profit on sealed market snapshots | train | protected-path probe = free exploit-resistance signal |
+| 3 | `monoagent-context-retention` | retain more registered record utility under `maxWindowChars` | weighted recall of valid unique structured records at the char cap | train | open structured-utility search; no model call |
+| 4 | `flt-textinput` | pass the sealed TextInput case bank | passed / declared sealed cases (41+ plus hidden Unicode/escape/state variants) | train | bounded state-machine calibration |
+| 5 | `agentelo-scoring` | classify no-diff / infrastructure / precedence / dedup correctly | passed / declared sealed cases over a sealed log/precedence bank | train | bounded classification calibration |
+| 6 | `tradeup-query-latency` | faster `/trade-ups` uncached search | p50/p95 query ms on fixture DB under an identical response hash | holdout | frozen pre-campaign, withheld from all outer feedback |
+| 7 | `flt-workflow-parser` | parse legacy/DAG/gate/reference/preset structural variants | passed / declared sealed structural cases | holdout | frozen pre-campaign, withheld from all outer feedback |
+
+`tradeup-search-latency` and `site-cold-start` are deferred, not relabelled.
 
 {==All perf metrics: pinned CPU quotas + median-of-k (macOS VM noise; campaign box should be Linux if available — decide at WP7). You approve each objective/contract; agents author everything else; holdouts freeze before the first outer candidate is generated.==}{>>my mac is a decently strong machine so do not fear + we can provison cloud resources for money, no problem. budget should not be too much of your concern at all, same with time<<}{id="c3" by="user" at="2026-07-15T05:40:16.314Z"}
 
@@ -131,7 +137,7 @@ Compute and budget are not binding constraints (owner: cloud provisioning availa
 
 * * *
 ## 6. Models, routing, cost
-- **Routing (per-role, in run config, trivially changeable):** inner mutation = `gpt-5.6-terra`; outer/meta + evaluator-author = `gpt-5.6-sol`; adversarial validator = cross-family where accessible (error independence per review IV.3), else `luna`. Grounding: Sol leads Terminal-Bench 2.1 (88.8) and AA Coding Agent Index (80) with lower output-token burn; Terra close behind (87.4) at the balanced tier — long-horizon terminal work is the nearest proxy to a mutation episode. {==First routing ablation (Terra vs cheap alt on inner) is an early dogfood objective, not a debate.==}{>>yes good maybe something like glm 5.2 or 5.1 or even gpt 5.5/4/3-codex/etc could be good;<<}{id="c4" by="user" at="2026-07-15T05:41:09.447Z"}
+- **Routing (per-role, in run config; frozen for the M1 campaign):** M1 fixed route = `gpt-5.6-sol` for **both** outer and inner mutation roles (route verified live: HTTP 200, response model `gpt-5.6-sol`; seed and candidates re-baselined under it — M0's GLM scores are not pooled); evaluator-author = `gpt-5.6-sol`; adversarial validator = cross-family where accessible (error independence per review IV.3), else `luna`. Grounding: Sol leads Terminal-Bench 2.1 (88.8) and AA Coding Agent Index (80) with lower output-token burn; Terra close behind (87.4) at the balanced tier — long-horizon terminal work is the nearest proxy to a mutation episode. {==First routing ablation (Terra vs cheap alt on inner) is an early dogfood objective, not a debate.==}{>>yes good maybe something like glm 5.2 or 5.1 or even gpt 5.5/4/3-codex/etc could be good;<<}{id="c4" by="user" at="2026-07-15T05:41:09.447Z"}
   
   - Inner-model ablation candidates (in priority order, subscription/openweight-cheap first): `gpt-5.6-luna`, GPT-5.5, GLM-5.2 (statistically tied with Opus 4.8 on some quality benchmarks at lower cost/task), GLM-5.1, GPT-5.4/codex-class. The ablation is a capsule: same train tasks, same budget, routing as the only variable — the loop scores it like anything else.
     

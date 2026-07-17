@@ -6,3 +6,4 @@ export * from "./broker.js";
 export * from "./proxy.js";
 export * from "./events.js";
 export * from "./runconfig.js";
+export * from "./meta.js";

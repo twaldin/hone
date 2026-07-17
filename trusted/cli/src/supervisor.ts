@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { ApplyMode, BudgetEnvelope, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
 import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
+import type { TrustedEvaluationStrategy } from "@hone/broker";
 import { admitCapsule, revalidateForResume, writeCapsuleSnapshot } from "./admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
 import { createBackend as createLocalBackend } from "./backends/local.js";
@@ -20,7 +21,22 @@ import type { DeliveryTarget } from "./delivery-target.js";
 import { appendEvent, readEvents, replayRun, writeFileDurable } from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
 import type { CmdIo } from "./io.js";
-import { resolveOptimizerDigest } from "./optimizer-digest.js";
+import {
+  assertOptimizerArtifactSeal,
+  readOptimizerArtifactSeal,
+  resolveCandidateOptimizer,
+  resolveSealedCandidateOptimizer,
+  writeOptimizerArtifactSeal,
+} from "./optimizer-artifact.js";
+import type { OptimizerArtifactSeal, ResolvedCandidateOptimizer } from "./optimizer-artifact.js";
+import {
+  OPTIMIZER_DIGEST_RE,
+  collectOptimizerSnapshot,
+  optimizerOverridden,
+  resolveOptimizerDigest,
+  resolveOptimizerSnapshotDigest,
+} from "./optimizer-digest.js";
+import type { OptimizerSnapshot } from "./optimizer-digest.js";
 import { deferred, sleep } from "./promise.js";
 import { exitReport, formatDelta, formatHumanReport, formatSpend } from "./report.js";
 import { resumeSealError } from "./resume-seal.js";
@@ -39,7 +55,7 @@ import {
 import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "./types.js";
 
 const RUN_USAGE =
-  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume] [--backend stub|local] [--config <json>]";
+  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume] [--backend stub|local] [--config <json>] [--optimizer-artifact sha256:<64hex>]";
 
 /** Optional per-run overrides (routing, seat, seed, budget dims, promotion rule) — the CLI flags cover the common ones. */
 const ConfigOverrides = z
@@ -341,12 +357,41 @@ export function optimizerCompleteForRun(runDir: string, runId: string): boolean 
   return true;
 }
 
-export async function runCommand(args: string[], io: CmdIo): Promise<number> {
+/** Artifact-selected optimizers cannot coexist with either optimizer escape hatch. */
+function assertCandidateOptimizerEnvironment(env: NodeJS.ProcessEnv, mergedDigest?: string): void {
+  if (env["HONE_OPTIMIZER_ENTRY"] !== undefined) {
+    throw new UsageError("HONE_OPTIMIZER_ENTRY is no longer supported: candidate optimizers execute only from a sealed containerized snapshot");
+  }
+  if (optimizerOverridden(env)) {
+    throw new UsageError("--optimizer-artifact cannot be combined with HONE_OPTIMIZER_CMD — the selected captured snapshot must be the optimizer that executes");
+  }
+  const explicit = env["HONE_OPTIMIZER_DIGEST"];
+  if (mergedDigest !== undefined && explicit !== undefined && explicit !== mergedDigest) {
+    throw new UsageError(`HONE_OPTIMIZER_DIGEST ${explicit} does not match the selected merged optimizer digest ${mergedDigest} — refusing a misleading pin`);
+  }
+}
+
+export interface TrustedRunOptions {
+  /** Deterministic child/outer id from a durable meta receipt. */
+  runId?: string | undefined;
+  measurementEpoch?: string | undefined;
+  evaluationStrategy?: TrustedEvaluationStrategy | undefined;
+  optimizerEpisodesMax?: number | undefined;
+  maxPublicCandidateEvaluations?: number | undefined;
+  /** Trusted outer-only target of distinct valid non-baseline strategy results. */
+  trustedValidPublicCandidateTarget?: number | undefined;
+  /** Narrow holdout capability released only by terminal-latched meta orchestration. */
+  terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
+  /** Internal campaign seed closure; never serialized or re-collected from repoRoot. */
+  optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+}
+
+export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunOptions = {}): Promise<number> {
   const { positionals, flags } = parseFlags(args, {
     booleans: ["headless", "resume"],
     // --repo is REQUIRED when apply != none: it seals the exact delivery
     // target at run creation — automatic delivery never defaults to io.root.
-    strings: ["budget-usd", "apply", "backend", "config", "repo"],
+    strings: ["budget-usd", "apply", "backend", "config", "repo", "optimizer-artifact"],
   });
   const capsuleArg = positionals[0];
   if (capsuleArg === undefined) throw new UsageError(RUN_USAGE);
@@ -379,18 +424,45 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
     io.err(UNSAFE_BACKEND_REFUSAL);
     return 2;
   }
+  const optimizerArtifactFlag = strFlag(flags, "optimizer-artifact");
+  if (optimizerArtifactFlag !== undefined && !OPTIMIZER_DIGEST_RE.test(optimizerArtifactFlag)) {
+    throw new UsageError("--optimizer-artifact must be sha256:<64 lowercase hex>");
+  }
 
   // Frozen admission (M0 conformance): id recompute, exact asset-hash set,
-  // hashed+schema-validated ordering report, clean baseline worktree — all
-  // BEFORE any run state exists. The optimizer identity resolves here too, so
-  // a refused digest never mints a run.
+  // hashed+schema-validated ordering report and clean baseline worktree all
+  // resolve before run creation. Candidate intake also completes here, so a
+  // refused CAS artifact never mints a run.
   const admitted = admitCapsule(capsuleDir);
   const manifest = admitted.manifest;
-  const optimizerDigest = resolveOptimizerDigest(io.env, manifest.image);
+  let optimizerDigest: string;
+  let optimizerSnapshot: OptimizerSnapshot | undefined;
+  let optimizerBaseSnapshot: OptimizerSnapshot | undefined = trusted.optimizerBaseSnapshot;
+  let optimizerArtifactSeal: OptimizerArtifactSeal | null = null;
+
+  const resolveDefaultOptimizerIdentity = (): string => {
+    if (optimizerOverridden(io.env)) {
+      if (trusted.optimizerBaseSnapshot !== undefined) {
+        throw new UsageError("an internal optimizer base snapshot cannot be combined with HONE_OPTIMIZER_CMD");
+      }
+      return resolveOptimizerDigest(io.env, manifest.image);
+    }
+    optimizerBaseSnapshot = trusted.optimizerBaseSnapshot ?? collectOptimizerSnapshot();
+    return resolveOptimizerSnapshotDigest(io.env, manifest.image, optimizerBaseSnapshot);
+  };
 
   let plan: RunPlan;
   if (resumeRequested) {
-    const found = findResumableRun(io.root, manifest.id);
+    const found = trusted.runId === undefined
+      ? findResumableRun(io.root, manifest.id)
+      : (() => {
+          if (!/^run_[a-zA-Z0-9_.-]+$/.test(trusted.runId)) throw new UsageError("trusted run id is invalid");
+          const runDir = join(runsRoot(io.root), trusted.runId);
+          if (!existsSync(runDir)) return null;
+          const state = replayRun(runDir);
+          if (state.runId !== trusted.runId || state.capsuleId !== manifest.id || state.finished !== null) return null;
+          return { runDir, runId: trusted.runId, state };
+        })();
     if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${manifest.id} under ${runsRoot(io.root)}`);
     // The capsule must re-admit at the EXACT digest snapshotted when the run
     // was created, and the optimizer identity sealed into run.started must
@@ -403,6 +475,24 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
     // sealed before any trusted module was imported, and the pin must equal
     // that boot value.
     assertRuntimePinFresh(found.runDir, found.runId);
+    const resumesArtifact = readOptimizerArtifactSeal(found.runDir) !== null;
+    if (resumesArtifact || optimizerArtifactFlag !== undefined) assertCandidateOptimizerEnvironment(io.env);
+    const selected = await resolveSealedCandidateOptimizer({
+      runDir: found.runDir,
+      runId: found.runId,
+      ...(optimizerArtifactFlag !== undefined ? { artifactHash: optimizerArtifactFlag } : {}),
+      casDir: casRoot(io.root),
+      image: manifest.image,
+      ...(trusted.optimizerBaseSnapshot !== undefined ? { baseSnapshot: trusted.optimizerBaseSnapshot } : {}),
+    });
+    if (selected === null) {
+      optimizerDigest = resolveDefaultOptimizerIdentity();
+    } else {
+      assertCandidateOptimizerEnvironment(io.env, selected.mergedDigest);
+      optimizerDigest = selected.mergedDigest;
+      optimizerSnapshot = selected.snapshot;
+      optimizerArtifactSeal = selected.seal;
+    }
     if (found.state.optimizerDigest !== null && found.state.optimizerDigest !== optimizerDigest) {
       throw new UsageError(
         `optimizer drift since the run started: digest ${optimizerDigest} != sealed ${found.state.optimizerDigest} — refusing to resume (start a fresh run)`,
@@ -506,10 +596,36 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
       );
     }
 
-    const runId = mintRunId();
+    let selectedCandidate: ResolvedCandidateOptimizer | null = null;
+    if (optimizerArtifactFlag === undefined) {
+      optimizerDigest = resolveDefaultOptimizerIdentity();
+    } else {
+      assertCandidateOptimizerEnvironment(io.env);
+      selectedCandidate = await resolveCandidateOptimizer({
+        casDir: casRoot(io.root),
+        artifactHash: optimizerArtifactFlag,
+        image: manifest.image,
+        ...(trusted.optimizerBaseSnapshot !== undefined ? { baseSnapshot: trusted.optimizerBaseSnapshot } : {}),
+      });
+      assertCandidateOptimizerEnvironment(io.env, selectedCandidate.mergedDigest);
+      optimizerDigest = selectedCandidate.mergedDigest;
+      optimizerSnapshot = selectedCandidate.snapshot;
+    }
+
+    const runId = trusted.runId ?? mintRunId();
+    if (!/^run_[a-zA-Z0-9_.-]+$/.test(runId)) throw new UsageError("trusted run id is invalid");
+    if (existsSync(join(runsRoot(io.root), runId))) throw new UsageError(`run ${runId} already exists`);
     const runDir = mintRunDirDurable(io.root, runId);
     // Snapshot the ADMITTED manifest: resume proves capsule identity against it.
     writeCapsuleSnapshot(runDir, manifest);
+    if (selectedCandidate !== null) {
+      try {
+        optimizerArtifactSeal = writeOptimizerArtifactSeal(runDir, runId, selectedCandidate);
+      } catch (error) {
+        rmSync(runDir, { recursive: true, force: true });
+        throw error;
+      }
+    }
     let deliveryTarget: DeliveryTarget | null = null;
     if (config.apply !== "none" && repoFlag !== undefined) {
       // Seal the validated delivery target beside the snapshot (it reads the
@@ -554,6 +670,21 @@ export async function runCommand(args: string[], io: CmdIo): Promise<number> {
       capsuleDigest: admitted.digest,
       optimizerDigest,
       orderingReport: admitted.orderingReport,
+      ...(optimizerSnapshot !== undefined ? { optimizerSnapshot } : {}),
+      ...(optimizerBaseSnapshot !== undefined ? { optimizerBaseSnapshot } : {}),
+      optimizerArtifactSeal,
+      ...(trusted.measurementEpoch !== undefined ? { measurementEpoch: trusted.measurementEpoch } : {}),
+      ...(trusted.evaluationStrategy !== undefined ? { evaluationStrategy: trusted.evaluationStrategy } : {}),
+      ...(trusted.optimizerEpisodesMax !== undefined ? { optimizerEpisodesMax: trusted.optimizerEpisodesMax } : {}),
+      ...(trusted.maxPublicCandidateEvaluations !== undefined
+        ? { maxPublicCandidateEvaluations: trusted.maxPublicCandidateEvaluations }
+        : {}),
+      ...(trusted.trustedValidPublicCandidateTarget !== undefined
+        ? { trustedValidPublicCandidateTarget: trusted.trustedValidPublicCandidateTarget }
+        : {}),
+      ...(trusted.terminalHoldoutAssetGroupIds !== undefined
+        ? { terminalHoldoutAssetGroupIds: trusted.terminalHoldoutAssetGroupIds }
+        : {}),
     },
     io,
   );
@@ -1062,6 +1193,18 @@ export interface SuperviseExtra {
   capsuleDigest: string;
   optimizerDigest: string;
   orderingReport: DiagnosticOrderingReport;
+  /** Candidate-selected merged captured closure. */
+  optimizerSnapshot?: OptimizerSnapshot | undefined;
+  /** Exact default/campaign seed closure captured during admission. */
+  optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+  /** Exact durable selection receipt, or null/absent for the M0 default optimizer. */
+  optimizerArtifactSeal?: OptimizerArtifactSeal | null | undefined;
+  measurementEpoch?: string | undefined;
+  evaluationStrategy?: TrustedEvaluationStrategy | undefined;
+  optimizerEpisodesMax?: number | undefined;
+  maxPublicCandidateEvaluations?: number | undefined;
+  trustedValidPublicCandidateTarget?: number | undefined;
+  terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
 }
 
 /** Late-binding relay from the run lock's stop channel to the supervisor's signal handler. */
@@ -1180,6 +1323,12 @@ async function superviseLocked(
   // Set under lock while validating a resume: a durably sealed optimizer
   // completion means this supervisor performs ONLY delivery/terminal work.
   let optimizerAlreadyComplete = false;
+  try {
+    assertOptimizerArtifactSeal(runDir, extra.optimizerArtifactSeal ?? null);
+  } catch (error) {
+    io.err(`${plan.resumed ? "resume seal" : "optimizer artifact seal"} violated: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
   if (plan.resumed) {
     // Under-lock seal verification (the plan was chosen from PRE-lock
     // reads): runconfig.json, contract.md, the run.started contract hash,
@@ -1344,6 +1493,20 @@ async function superviseLocked(
     env: io.env,
     capsuleDigest,
     optimizerDigest,
+    ...(extra.optimizerSnapshot !== undefined ? { optimizerSnapshot: extra.optimizerSnapshot } : {}),
+    ...(extra.optimizerBaseSnapshot !== undefined ? { optimizerBaseSnapshot: extra.optimizerBaseSnapshot } : {}),
+    ...(extra.measurementEpoch !== undefined ? { measurementEpoch: extra.measurementEpoch } : {}),
+    ...(extra.evaluationStrategy !== undefined ? { evaluationStrategy: extra.evaluationStrategy } : {}),
+    ...(extra.optimizerEpisodesMax !== undefined ? { optimizerEpisodesMax: extra.optimizerEpisodesMax } : {}),
+    ...(extra.maxPublicCandidateEvaluations !== undefined
+      ? { maxPublicCandidateEvaluations: extra.maxPublicCandidateEvaluations }
+      : {}),
+    ...(extra.trustedValidPublicCandidateTarget !== undefined
+      ? { trustedValidPublicCandidateTarget: extra.trustedValidPublicCandidateTarget }
+      : {}),
+    ...(extra.terminalHoldoutAssetGroupIds !== undefined
+      ? { terminalHoldoutAssetGroupIds: extra.terminalHoldoutAssetGroupIds }
+      : {}),
     replayed,
     signal: abort.signal,
     emit: (event) => (backendFenced ? RunEvent.parse(event) : emit(event)),

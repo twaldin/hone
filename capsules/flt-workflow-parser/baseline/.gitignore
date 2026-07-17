@@ -1,0 +1,4 @@
+__pycache__/
+.gitdir/
+*.py[cod]
+.pytest_cache/

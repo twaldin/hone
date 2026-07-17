@@ -1,0 +1,8 @@
+{
+  "name": "agentelo-scoring-capsule",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test test/scoring.test.js"
+  }
+}

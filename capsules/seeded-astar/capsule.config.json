@@ -17,7 +17,41 @@
   "diagnosticOrdering": { "path": "diagnostics/ordering-report.json" },
   "meta": {
     "evaluatorSource": "user",
-    "provenance": "hone seed WP6: agent-authored tier-1 bootstrap capsule",
-    "tags": ["tier-1", "performance", "python"]
+    "provenance": "hone seed WP6 tier-1 bootstrap capsule; M1 improved reference frozen byte-for-byte from the M0 delivery winner",
+    "tags": ["tier-1", "performance", "python", "m1-public-train"],
+    "m0Delivery": {
+      "runId": "run_mrnta7aq34f9c0",
+      "artifact": "sha256:cd9cc018ec8fd5a60cff0af202839c6e799da35ead358b445d1405f5df65bb9e",
+      "assetGroupId": "train",
+      "score": 0.2453954508867987,
+      "sourcePath": "diagnostics/improved/astar.py",
+      "sourceSha256": "sha256:c7aabbbd4132b7180e44f5a06b3d386ec1d6c3c81f9a5e450ef910b3360c48c8"
+    },
+    "independentDiagnosticOrdering": {
+      "candidatePath": "diagnostics/alternate/astar.py",
+      "candidateSha256": "sha256:b4ed2b82a6c4a0b541168905dfa86007bae85bf115b77f9825ba21878c924f2f",
+      "reportPath": "diagnostics/alternate-ordering-report.json",
+      "reportSha256": "sha256:80b5fdb6484d00d32b7a0be9e7e1cd1b51f40f0195dc686d777a42faa260a5db"
+    },
+    "m1Normalization": {
+      "qFail": 0,
+      "qBase": 0.023772025789093716,
+      "qReference": 0.21622805389884087,
+      "scale": 0.19245602810974716
+    },
+    "diagnosticContentHashes": {
+      "diagnostics/alternate/astar.py": "sha256:b4ed2b82a6c4a0b541168905dfa86007bae85bf115b77f9825ba21878c924f2f",
+      "diagnostics/broken/astar.py": "sha256:b1ab62e80fb899477b2a6cf81660c66615deca7bc09651b156f7d9301ea33a98",
+      "diagnostics/improved/astar.py": "sha256:c7aabbbd4132b7180e44f5a06b3d386ec1d6c3c81f9a5e450ef910b3360c48c8",
+      "diagnostics/naive/astar.py": "sha256:68fcf4288c324f339fa123efe12344fb07f80230bc8c5d9be44046e8ef11721c",
+      "diagnostics/shortcut/astar.py": "sha256:40e59f8f062c582d0381a1bc3a97a4f48337dda4f918d08de1885fb47494d0b5"
+    },
+    "performanceAdmission": {
+      "schema": "hone-seeded-astar-performance-admission-v1",
+      "path": "diagnostics/performance-admission.json",
+      "sha256": "sha256:e3ec8f1fcc6184f012e43e27a7f5730a200748a16735fb5f069fbec65246a935",
+      "harnessPath": "tools/performance-admission.ts",
+      "harnessSha256": "sha256:5097766621b10aa1f4eaf7bc622b94707abb51cc53a370d4fbf8b6fb99d3f5fd"
+    }
   }
 }

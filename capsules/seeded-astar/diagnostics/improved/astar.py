@@ -1,17 +1,18 @@
-"""Diagnostic candidate: `improved` — the reference win.
+"""Grid A* pathfinder.
 
-Same A* as the baseline but with a heapq open set and O(1) membership,
-removing the deliberate linear scans. Correct AND fast; must rank above the
-baseline in the ordering check.
+find_path(grid, start, goal) -> list[(r, c)] | None
+
+  grid  : list of strings; '#' is a wall, anything else is walkable
+  start : (row, col)
+  goal  : (row, col)
+
+Returns a shortest 4-connected path as a list of (row, col) tuples including
+both endpoints, or None when no path exists.
 """
 
 from __future__ import annotations
 
 import heapq
-
-
-def _heuristic(a: tuple[int, int], b: tuple[int, int]) -> int:
-    return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
 def find_path(
@@ -22,49 +23,96 @@ def find_path(
     height = len(grid)
     width = len(grid[0])
 
-    if grid[start[0]][start[1]] == "#" or grid[goal[0]][goal[1]] == "#":
+    sr, sc = start
+    gr, gc = goal
+    if grid[sr][sc] == "#" or grid[gr][gc] == "#":
         return None
 
-    counter = 0  # tie-breaker so the heap never compares tuples of positions
-    open_heap: list[tuple[int, int, tuple[int, int]]] = [
-        (_heuristic(start, goal), counter, start)
-    ]
-    came_from: dict[tuple[int, int], tuple[int, int]] = {}
-    g_score: dict[tuple[int, int], int] = {start: 0}
-    closed: set[tuple[int, int]] = set()
+    # Fast path: start is goal.
+    if sr == gr and sc == gc:
+        return [(sr, sc)]
+
+    INF = 1 << 30
+    # Flat g-score array; index = r * width + c. 0 means "unseen".
+    g_score = [0] * (height * width)
+    came_from = [-1] * (height * width)  # predecessor cell index, -1 = none
+
+    goal_idx = gr * width + gc
+    goal_h = abs(sr - gr) + abs(sc - gc)
+
+    start_idx = sr * width + sc
+    g_score[start_idx] = 1  # store g + 1 so 0 can encode "unseen"
+
+    # Heap entries: (f, node_idx). f = g + h. g is looked up from g_score.
+    open_heap: list[tuple[int, int]] = [(goal_h, start_idx)]
+
+    deltas = (-width, width, -1, 1)
 
     while open_heap:
-        _, _, current = heapq.heappop(open_heap)
-        if current == goal:
-            path = [current]
-            while current in came_from:
-                current = came_from[current]
-                path.append(current)
+        f, current = heapq.heappop(open_heap)
+        cur_g = g_score[current]
+        if cur_g == 0:
+            # Stale lazy-deleted entry.
+            continue
+        if current == goal_idx:
+            # Reconstruct path.
+            path = [(gr, gc)]
+            node = current
+            while node != start_idx:
+                prev = came_from[node]
+                path.append((prev // width, prev % width))
+                node = prev
             path.reverse()
             return path
-        if current in closed:
-            continue
-        closed.add(current)
+        # Recompute f for the popped node to validate laziness: if the stored
+        # g produces an f strictly greater than the heap key we popped, this
+        # entry is stale and a better one is/was in the heap.
+        cr = current // width
+        cc = current % width
+        h_cur = abs(cr - gr) + abs(cc - gc)
+        if f != cur_g + h_cur:
+            # f is the value stored at push time; if it's larger than the
+            # current best g+h, this is a stale entry — re-push with the
+            # up-to-date value only if needed. Simpler: skip if the current
+            # g implies a smaller f (we already processed the better one).
+            if f > cur_g + h_cur:
+                continue
 
-        g = g_score[current]
-        r, c = current
-        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            nr, nc = r + dr, c + dc
-            if not (0 <= nr < height and 0 <= nc < width):
-                continue
-            if grid[nr][nc] == "#":
-                continue
-            neighbor = (nr, nc)
-            if neighbor in closed:
-                continue
-            tentative = g + 1
-            if tentative < g_score.get(neighbor, 1 << 30):
-                g_score[neighbor] = tentative
-                came_from[neighbor] = current
-                counter += 1
-                heapq.heappush(
-                    open_heap,
-                    (tentative + _heuristic(neighbor, goal), counter, neighbor),
-                )
+        new_g = cur_g + 1
+        r0 = current // width
+        c0 = current % width
+
+        # Up
+        if r0 > 0:
+            nb = current - width
+            if grid[r0 - 1][c0] != "#" and (g_score[nb] == 0 or new_g < g_score[nb]):
+                g_score[nb] = new_g
+                came_from[nb] = current
+                nr = r0 - 1
+                heapq.heappush(open_heap, (new_g + abs(nr - gr) + abs(cc - gc), nb))
+        # Down
+        if r0 < height - 1:
+            nb = current + width
+            if grid[r0 + 1][c0] != "#" and (g_score[nb] == 0 or new_g < g_score[nb]):
+                g_score[nb] = new_g
+                came_from[nb] = current
+                nr = r0 + 1
+                heapq.heappush(open_heap, (new_g + abs(nr - gr) + abs(cc - gc), nb))
+        # Left
+        if c0 > 0:
+            nb = current - 1
+            if grid[r0][c0 - 1] != "#" and (g_score[nb] == 0 or new_g < g_score[nb]):
+                g_score[nb] = new_g
+                came_from[nb] = current
+                nc = c0 - 1
+                heapq.heappush(open_heap, (new_g + abs(cr - gr) + abs(nc - gc), nb))
+        # Right
+        if c0 < width - 1:
+            nb = current + 1
+            if grid[r0][c0 + 1] != "#" and (g_score[nb] == 0 or new_g < g_score[nb]):
+                g_score[nb] = new_g
+                came_from[nb] = current
+                nc = c0 + 1
+                heapq.heappush(open_heap, (new_g + abs(cr - gr) + abs(nc - gc), nb))
 
     return None

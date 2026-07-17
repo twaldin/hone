@@ -1,5 +1,7 @@
+import type { TrustedEvaluationStrategy } from "@hone/broker";
 import type { ArtifactRef, BudgetState, CapsuleManifest, RunConfig, RunEvent } from "@hone/schema";
 import type { RunState } from "./eventlog.js";
+import type { OptimizerSnapshot } from "./optimizer-digest.js";
 
 /** Minimal duck-typed child handle so the supervisor can SIGTERM-then-SIGKILL real backends. */
 export interface ChildLike {
@@ -39,6 +41,22 @@ export interface RunnerBackendContext {
   capsuleDigest: string;
   /** Sealed optimizer digest (sha256:<64 hex>) — computed or explicitly pinned. */
   optimizerDigest: string;
+  /** Candidate-selected merged closure; takes precedence over the captured base at execution. */
+  optimizerSnapshot?: OptimizerSnapshot | undefined;
+  /** Exact campaign/default base closure captured once during trusted admission. */
+  optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+  /** Trusted M1 full-run replicate identity, absent on M0. */
+  measurementEpoch?: string | undefined;
+  /** Trusted outer-broker evaluator; never serialized or exposed to a sandbox. */
+  evaluationStrategy?: TrustedEvaluationStrategy | undefined;
+  /** Total optimizer episodes for this trusted run. M0 leaves this absent. */
+  optimizerEpisodesMax?: number | undefined;
+  /** Distinct public candidate admissions. M0 leaves this absent (broker default 1). */
+  maxPublicCandidateEvaluations?: number | undefined;
+  /** Trusted outer-only target of distinct valid non-baseline strategy results. */
+  trustedValidPublicCandidateTarget?: number | undefined;
+  /** Holdout groups released only inside a terminal-latched child run. */
+  terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
   /** State replayed from the event log — resume dedupe starts here (nextEpisode, incumbent, budget). */
   replayed: RunState;
   /** Aborted on stop request or budget exhaustion; backends must wind down. */

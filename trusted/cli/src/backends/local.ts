@@ -1232,6 +1232,11 @@ export function createBackend(
           image,
           capsuleDigest: ctx.capsuleDigest,
           optimizerDigest: ctx.optimizerDigest,
+          ...(ctx.measurementEpoch !== undefined ? { measurementEpoch: ctx.measurementEpoch } : {}),
+          ...(ctx.evaluationStrategy !== undefined ? { evaluationStrategy: ctx.evaluationStrategy } : {}),
+          ...(ctx.terminalHoldoutAssetGroupIds !== undefined
+            ? { terminalHoldoutAssetGroupIds: ctx.terminalHoldoutAssetGroupIds }
+            : {}),
           // Repo-lifetime holdout ledger, keyed by capsule digest so every
           // run of this exact capsule draws from ONE budget. Lives under the
           // CAS root (broker creates the file and parents).
@@ -1257,8 +1262,25 @@ export function createBackend(
           // M0's evaluator cache domain is shared across containers. One
           // probe candidate is therefore the whole campaign; M1 must provide
           // fresh cache domains before this trusted cap can rise.
-          maxMutationEpisodes: 1,
-          maxCandidateArtifacts: 2,
+          ...(ctx.optimizerEpisodesMax !== undefined
+            ? {
+                maxMutationEpisodes: ctx.optimizerEpisodesMax,
+                maxCandidateArtifacts: Math.max(2, ctx.optimizerEpisodesMax + 1),
+                maxPublicCandidateEvaluations:
+                  ctx.maxPublicCandidateEvaluations ?? ctx.optimizerEpisodesMax,
+              }
+            : {}),
+          ...(ctx.trustedValidPublicCandidateTarget !== undefined
+            ? { trustedValidPublicCandidateTarget: ctx.trustedValidPublicCandidateTarget }
+            : {}),
+          ...(ctx.optimizerEpisodesMax === undefined
+            ? {
+                // M0's evaluator cache domain is shared across containers.
+                // One probe candidate is therefore the whole campaign.
+                maxMutationEpisodes: 1,
+                maxCandidateArtifacts: 2,
+              }
+            : {}),
         };
         running = wantPublicTcp
           ? await startBroker(brokerConfig, { publicTcp: { host: "127.0.0.1", port: 0 } })
@@ -1328,53 +1350,71 @@ export function createBackend(
         });
         if (ctx.signal.aborted) return;
 
-        // VI.4 probe gate: a fresh run gets one optimizer episode; a resume
-        // that crashed while the owner was answering reuses the already
-        // completed broker-authored pair instead of buying another episode.
-        // The verdict is sealed as probe.completed. A durable approval skips
-        // this gate forever; a durable decline requests a trusted stop.
-        const probe = replayRun(ctx.runDir).probe;
-        if (probe !== null && !probe.approved) {
-          // Durable decline that never terminalized (crash window): honor it.
-          ctx.requestStop();
-          return;
-        }
-        if (probe === null) {
-          let report: ProbeReport | undefined;
-          try {
-            const recovered = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
-            // A lone parent measurement is startup state, not a completed
-            // candidate pair. Only recover evidence that can support approval.
-            if (recovered.candidate !== null) report = recovered;
-          } catch {
-            // No complete pair exists yet: run the one-episode probe now.
-          }
-          if (report === undefined) {
-            await runOptimizer(ctx, optimizer, { maxEpisodes: 1 });
+        if (ctx.optimizerEpisodesMax !== undefined) {
+          // Trusted M1 children are fixed-work full runs, not M0 owner probes.
+          // Resume continues from the durable episode cursor under the same
+          // child receipt and measurement epoch.
+          const nextEpisode = replayRun(ctx.runDir).nextEpisode;
+          const remaining = ctx.optimizerEpisodesMax - nextEpisode;
+          if (remaining > 0) {
+            await runOptimizer(ctx, optimizer, { maxEpisodes: remaining });
             if (ctx.signal.aborted) return;
-            report = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
           }
-          const approved = await ctx.probeGate(report);
-          // An abort that landed DURING the gate must not seal a durable
-          // verdict — the owner never answered; the run stays resumable and
-          // the probe re-gates on the next resume.
-          if (ctx.signal.aborted) return;
-          ctx.emit({
-            runId: ctx.runId,
-            at: new Date().toISOString(),
-            type: "probe.completed",
-            approved,
-            baseline: report.baseline,
-            candidate: report.candidate,
-            assetGroupId: report.assetGroupId,
-            seed: report.seed,
-            budget: report.budget,
-          });
-          if (!approved) {
+
+          // Measure the terminal trusted artifact explicitly. This also makes
+          // a runnable negative control that proposes no candidate a valid
+          // baseline-scored child rather than an infrastructure failure.
+          const finalGroup =
+            ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout" && group.id === "train")
+            ?? ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout");
+          if (finalGroup === undefined) throw new Error("M1 child has no registered non-holdout evaluation coordinate");
+          const finalArtifact = {
+            hash: running.broker.trustedIncumbent?.hash ?? baselineArtifactHash,
+          };
+          await running.broker.evaluate(
+            { artifact: finalArtifact, assetGroupId: finalGroup.id, seed: ctx.config.seed },
+            { privileged: true },
+          );
+        } else {
+          // VI.4 probe gate: a fresh M0 run gets one optimizer episode; a
+          // resume reuses the durable broker-authored pair.
+          const probe = replayRun(ctx.runDir).probe;
+          if (probe !== null && !probe.approved) {
             ctx.requestStop();
             return;
           }
-          if (ctx.signal.aborted) return;
+          if (probe === null) {
+            let report: ProbeReport | undefined;
+            try {
+              const recovered = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
+              if (recovered.candidate !== null) report = recovered;
+            } catch {
+              // No complete pair exists yet: run the one-episode probe now.
+            }
+            if (report === undefined) {
+              await runOptimizer(ctx, optimizer, { maxEpisodes: 1 });
+              if (ctx.signal.aborted) return;
+              report = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
+            }
+            const approved = await ctx.probeGate(report);
+            if (ctx.signal.aborted) return;
+            ctx.emit({
+              runId: ctx.runId,
+              at: new Date().toISOString(),
+              type: "probe.completed",
+              approved,
+              baseline: report.baseline,
+              candidate: report.candidate,
+              assetGroupId: report.assetGroupId,
+              seed: report.seed,
+              budget: report.budget,
+            });
+            if (!approved) {
+              ctx.requestStop();
+              return;
+            }
+            if (ctx.signal.aborted) return;
+          }
         }
 
 

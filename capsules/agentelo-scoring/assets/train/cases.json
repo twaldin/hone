@@ -1,0 +1,258 @@
+{
+  "schemaVersion": 1,
+  "partition": "train",
+  "cases": [
+    {
+      "id": "train-nd-empty",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "train-nd-empty", "diff_lines": 0, "agent_time_seconds": 2}},
+      "expected": {"excluded": true, "reason": "no-attempt-evidence", "hasAttemptEvidence": false, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+    {
+      "id": "train-nd-token-attempt",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "train-nd-token-attempt", "diff_lines": 0, "tokens_in": 8000, "tokens_out": 2400}},
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+    {
+      "id": "train-nd-test-attempt",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "train-nd-test-attempt", "diff_lines": 0, "tests_total": 41, "tests_ok": 0}},
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+    {
+      "id": "train-nd-tool-volume-no-result",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {
+        "submission": {"run_id": "train-nd-tool-volume-no-result", "diff_lines": 0, "agent_time_seconds": 480},
+        "log": "service=llm providerID=openai\nRead(core/a.js)\nGrep(pattern)\nGlob(**/*.js)\nEdit(core/a.js)\nWrite(core/a.js)\nRead(core/a.js)\nEdit(core/a.js)\nWrite(core/a.js)\nApplied edit\n"
+      },
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": true
+    },
+    {
+      "id": "train-nd-trajectory-volume-no-result",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {
+        "submission": {"run_id": "train-nd-trajectory-volume-no-result", "diff_lines": 0, "agent_time_seconds": 250},
+        "trajectory": "{\"role\":\"assistant\",\"tool_calls\":[{\"name\":\"Read\"},{\"name\":\"Edit\"},{\"name\":\"Write\"}]}"
+      },
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": true
+    },
+    {
+      "id": "train-nd-api-call-evidence",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {
+        "submission": {"run_id": "train-nd-api-call-evidence", "diff_lines": 0},
+        "log": "run summary: {\"api_calls\": 7, \"result\": null}"
+      },
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+
+    {
+      "id": "train-infra-rate-limit",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "train-infra-rate-limit", "diff_lines": 0}, "log": "provider error: rate limit reached"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": false, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+    {
+      "id": "train-infra-peer-close",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "train-infra-peer-close", "diff_lines": 0}, "log": "litellm.APIConnectionError: peer closed connection without sending complete message body"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": false, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+    {
+      "id": "train-infra-exhausted-after-tokens",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "train-infra-exhausted-after-tokens", "diff_lines": 0, "tokens_in": 400}, "log": "RESOURCE_EXHAUSTED while opening stream"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": true, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+    {
+      "id": "train-infra-permission-after-tools",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "train-infra-permission-after-tools", "diff_lines": 0}, "log": "Read(core/a.js)\npermission requested: external_directory\nauto-rejecting"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": true, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+    {
+      "id": "train-infra-challenge-429-not-provider",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "train-infra-challenge-429-not-provider", "diff_lines": 0}, "log": "{\"role\":\"assistant\",\"content\":\"inspect error handling\"}\nexpected application reply - code: 429"},
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+    {
+      "id": "train-infra-invalid-key-after-assistant",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "train-infra-invalid-key-after-assistant", "diff_lines": 0}, "trajectory": "{\"role\":\"assistant\",\"content\":\"starting\"}\nAuthenticationError: invalid api key"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": true, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+
+    {
+      "id": "train-precedence-no-cost-fast-a",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-no-cost-fast-a", "diff_lines": 4, "tests_ok": 8, "agent_time_seconds": 5}, "b": {"run_id": "train-precedence-no-cost-fast-a-b", "diff_lines": 9, "tests_ok": 8, "agent_time_seconds": 50}, "options": {"baseline_passing": 3}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-no-cost-fast-b",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-no-cost-fast-b", "diff_lines": 7, "tests_ok": 2, "agent_time_seconds": 80}, "b": {"run_id": "train-precedence-no-cost-fast-b-peer", "diff_lines": 2, "tests_ok": 2, "agent_time_seconds": 10}, "options": {"baseline_passing": 5}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-equal-cost-fast-a",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-equal-cost-fast-a", "diff_lines": 2, "tests_ok": 11, "cost_usd": 0.4, "agent_time_seconds": 9}, "b": {"run_id": "train-precedence-equal-cost-fast-a-peer", "diff_lines": 20, "tests_ok": 11, "cost_usd": 0.4, "agent_time_seconds": 90}, "options": {"baseline_passing": 6}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-one-cost-fast-a",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-one-cost-fast-a", "diff_lines": 1, "tests_ok": 6, "cost_usd": 0.1, "agent_time_seconds": 7}, "b": {"run_id": "train-precedence-one-cost-fast-a-peer", "diff_lines": 1, "tests_ok": 6, "cost_usd": 0, "agent_time_seconds": 70}, "options": {"baseline_passing": 0}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-one-cost-fast-b",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-one-cost-fast-b", "diff_lines": 3, "tests_ok": 4, "cost_usd": 0, "agent_time_seconds": 100}, "b": {"run_id": "train-precedence-one-cost-fast-b-peer", "diff_lines": 6, "tests_ok": 4, "cost_usd": 0.2, "agent_time_seconds": 1}, "options": {"baseline_passing": 2}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-equal-high-cost",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-equal-high-cost", "diff_lines": 8, "tests_ok": 15, "cost_usd": 1.2, "agent_time_seconds": 60}, "b": {"run_id": "train-precedence-equal-high-cost-peer", "diff_lines": 9, "tests_ok": 15, "cost_usd": 1.2, "agent_time_seconds": 61}, "options": {"baseline_passing": 8}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-subsecond-no-cost",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-subsecond-no-cost", "diff_lines": 2, "tests_ok": 1, "agent_time_seconds": 0.1}, "b": {"run_id": "train-precedence-subsecond-no-cost-peer", "diff_lines": 2, "tests_ok": 1, "agent_time_seconds": 0.2}, "options": {"baseline_passing": 0}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-missing-vs-small-cost",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-missing-vs-small-cost", "diff_lines": 5, "tests_ok": 9, "agent_time_seconds": 300}, "b": {"run_id": "train-precedence-missing-vs-small-cost-peer", "diff_lines": 5, "tests_ok": 9, "cost_usd": 0.01, "agent_time_seconds": 2}, "options": {"baseline_passing": 9}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-equal-tiny-cost",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-equal-tiny-cost", "diff_lines": 12, "tests_ok": 3, "cost_usd": 0.0001, "agent_time_seconds": 1}, "b": {"run_id": "train-precedence-equal-tiny-cost-peer", "diff_lines": 1, "tests_ok": 3, "cost_usd": 0.0001, "agent_time_seconds": 999}, "options": {"baseline_passing": 1}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-more-tests-dominates",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-more-tests-dominates", "diff_lines": 4, "tests_ok": 9, "cost_usd": 50, "agent_time_seconds": 500}, "b": {"run_id": "train-precedence-more-tests-dominates-peer", "diff_lines": 4, "tests_ok": 8, "cost_usd": 0.001, "agent_time_seconds": 1}, "options": {"baseline_passing": 3}},
+      "expected": 1,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-no-diff-loses",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-no-diff-loses", "diff_lines": 0, "tests_ok": 100, "agent_time_seconds": 1}, "b": {"run_id": "train-precedence-no-diff-loses-peer", "diff_lines": 1, "tests_ok": 1, "agent_time_seconds": 100}, "options": {"baseline_passing": 0}},
+      "expected": 0,
+      "hardGate": false
+    },
+    {
+      "id": "train-precedence-cost-before-time",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "train-precedence-cost-before-time", "diff_lines": 3, "tests_ok": 7, "cost_usd": 0.02, "agent_time_seconds": 400}, "b": {"run_id": "train-precedence-cost-before-time-peer", "diff_lines": 9, "tests_ok": 7, "cost_usd": 1.5, "agent_time_seconds": 2}, "options": {"baseline_passing": 4}},
+      "expected": 1,
+      "hardGate": false
+    },
+
+    {
+      "id": "train-dedup-empty-current",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": null, "candidate": {"run_id": "train-dedup-empty-current", "diff_lines": 2, "tests_ok": 1}},
+      "expected": "candidate",
+      "hardGate": false
+    },
+    {
+      "id": "train-dedup-empty-candidate",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "train-dedup-empty-candidate", "diff_lines": 2, "tests_ok": 1}, "candidate": null},
+      "expected": "current",
+      "hardGate": false
+    },
+    {
+      "id": "train-dedup-eligible-over-excluded",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "train-dedup-eligible-over-excluded", "diff_lines": 0, "tests_ok": 99}, "candidate": {"run_id": "train-dedup-eligible-over-excluded-peer", "diff_lines": 0, "tests_ok": 50, "tokens_in": 12}},
+      "expected": "candidate",
+      "hardGate": false
+    },
+    {
+      "id": "train-dedup-diff-over-no-diff",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "train-dedup-diff-over-no-diff", "diff_lines": 0, "tests_ok": 100, "tokens_out": 5}, "candidate": {"run_id": "train-dedup-diff-over-no-diff-peer", "diff_lines": 1, "tests_ok": 1}},
+      "expected": "candidate",
+      "hardGate": false
+    },
+    {
+      "id": "train-dedup-tests-before-time",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "train-dedup-tests-before-time", "diff_lines": 2, "tests_ok": 3, "agent_time_seconds": 1}, "candidate": {"run_id": "train-dedup-tests-before-time-peer", "diff_lines": 2, "tests_ok": 4, "agent_time_seconds": 900}},
+      "expected": "candidate",
+      "hardGate": false
+    },
+    {
+      "id": "train-dedup-time-last",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "train-dedup-time-last", "diff_lines": 2, "tests_ok": 5, "agent_time_seconds": 50}, "candidate": {"run_id": "train-dedup-time-last-peer", "diff_lines": 2, "tests_ok": 5, "agent_time_seconds": 5}},
+      "expected": "candidate",
+      "hardGate": false
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -179,6 +179,7 @@ async function boot(
     volumeCreateFails?: boolean;
     evalTimeoutSec?: number;
     runId?: string;
+    measurementEpoch?: string;
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
   } = {},
@@ -316,6 +317,7 @@ async function boot(
     ...(opts.scratchVolume !== undefined ? { scratchVolume: opts.scratchVolume } : {}),
     ...(opts.sessionTraceQuotaBytes !== undefined ? { sessionTraceQuotaBytes: opts.sessionTraceQuotaBytes } : {}),
     ...(opts.evalTimeoutSec !== undefined ? { evalTimeoutSec: opts.evalTimeoutSec } : {}),
+    ...(opts.measurementEpoch !== undefined ? { measurementEpoch: opts.measurementEpoch } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
   const broker = new Broker(config);
@@ -1193,6 +1195,106 @@ describe("evaluation memo provenance (digests key the cache)", () => {
     same.ctl.evalOutputs.set(baselineHash, score(1));
     expect((await same.broker.evaluate(coord, CLIENT)).cached).toBe(false);
     expect(evalRuns(same)).toBe(1);
+  });
+  it("keys trusted M1 measurement epochs through memo, in-flight, cache namespace, and journal replay identities", async () => {
+    const casDir = path.join(tmpBase, "cas", "measurement-epoch");
+    const evalRuns = (b: Booted): number => b.log.filter((argv) => argv[1] === "run" && !argv.includes("-d")).length;
+    const coord = { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 23 };
+    const epochA = "m1-official-2026-07:candidate-a:train:0";
+    const epochB = "m1-official-2026-07:candidate-a:train:1";
+
+    const a = await boot({ casDir, measurementEpoch: epochA });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    const indexA = vi.spyOn(a.broker.cas, "indexGet");
+    expect((await a.broker.evaluate(coord, CLIENT)).cached).toBe(false);
+    expect((await a.broker.evaluate(coord, CLIENT)).cached).toBe(true);
+    expect(evalRuns(a)).toBe(1);
+    const namespaceA = `eval-${createHash("sha256").update(epochA).digest("hex")}`;
+    expect(indexA.mock.calls[0]?.[0]).toBe(namespaceA);
+    expect(indexA.mock.calls[0]?.[1]).toContain(`|measurementEpoch:${encodeURIComponent(epochA)}`);
+
+    const b = await boot({ casDir, measurementEpoch: epochB });
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const indexB = vi.spyOn(b.broker.cas, "indexGet");
+    expect((await b.broker.evaluate(coord, CLIENT)).cached).toBe(false);
+    expect(evalRuns(b)).toBe(1);
+    expect(indexB.mock.calls[0]?.[0]).toBe(`eval-${createHash("sha256").update(epochB).digest("hex")}`);
+    expect(indexB.mock.calls[0]?.[0]).not.toBe(namespaceA);
+
+    const journal = await readFile(path.join(a.runDir, "broker-state.ndjson"), "utf8");
+    expect(journal).toContain(`"measurementEpoch":"${epochA}"`);
+    await a.broker.close();
+    const replayed = await boot({
+      casDir,
+      runDir: a.runDir,
+      runId: a.runId,
+      measurementEpoch: epochA,
+    });
+    await replayed.broker.close();
+    await expect(
+      boot({
+        casDir,
+        runDir: a.runDir,
+        runId: a.runId,
+        measurementEpoch: epochB,
+      }),
+    ).rejects.toThrow(/measurementEpoch does not match trusted broker configuration/);
+  });
+
+  it("deduplicates same-epoch in-flight requests, ignores sandbox epoch fields, and separates cross-epoch evaluators", async () => {
+    const coord = { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 24 };
+    const same = await boot({ measurementEpoch: "m1:same-inflight" });
+    same.ctl.evalOutputs.set(baselineHash, score(1));
+    const started = deferred<void>();
+    const release = deferred<void>();
+    same.ctl.evalInspect = async () => {
+      started.resolve();
+      await release.promise;
+    };
+    const firstParams = { ...coord, measurementEpoch: "sandbox-chosen-a" };
+    const secondParams = { ...coord, measurementEpoch: "sandbox-chosen-b" };
+    const first = same.broker.evaluate(firstParams, CLIENT);
+    await started.promise;
+    const second = same.broker.evaluate(secondParams, CLIENT);
+    release.resolve();
+    await Promise.all([first, second]);
+    expect(same.log.filter((argv) => argv[1] === "run" && !argv.includes("-d"))).toHaveLength(1);
+
+    const sharedCas = path.join(tmpBase, "cas", "cross-epoch-inflight");
+    const epochA = await boot({ casDir: sharedCas, measurementEpoch: "m1:cross-a" });
+    const epochB = await boot({ casDir: sharedCas, measurementEpoch: "m1:cross-b" });
+    epochA.ctl.evalOutputs.set(baselineHash, score(1));
+    epochB.ctl.evalOutputs.set(baselineHash, score(1));
+    await Promise.all([
+      epochA.broker.evaluate({ ...coord, seed: 25 }, CLIENT),
+      epochB.broker.evaluate({ ...coord, seed: 25 }, CLIENT),
+    ]);
+    expect(epochA.log.filter((argv) => argv[1] === "run" && !argv.includes("-d"))).toHaveLength(1);
+    expect(epochB.log.filter((argv) => argv[1] === "run" && !argv.includes("-d"))).toHaveLength(1);
+  });
+
+  it("preserves the exact M0 memo key and eval namespace when measurementEpoch is omitted", async () => {
+    const broker = await boot();
+    broker.ctl.evalOutputs.set(baselineHash, score(1));
+    const lookup = vi.spyOn(broker.broker.cas, "indexGet");
+    await broker.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 26 }, CLIENT);
+    expect(lookup.mock.calls[0]?.[0]).toBe("eval");
+    expect(lookup.mock.calls[0]?.[1]).toMatch(
+      new RegExp(
+        `^run:${broker.runId}\\|gen:[^|]+\\|${baselineHash}\\|${TEST_CAPSULE_DIGEST}\\|${TEST_OPTIMIZER_DIGEST}\\|train\\|26\\|wall:600$`,
+      ),
+    );
+    expect(lookup.mock.calls[0]?.[1]).not.toContain("measurementEpoch");
+    const journal = await readFile(path.join(broker.runDir, "broker-state.ndjson"), "utf8");
+    expect(journal).not.toContain('"measurementEpoch"');
+  });
+
+  it("rejects empty, oversized, and control-character trusted epochs before evaluation", async () => {
+    for (const measurementEpoch of ["", "x".repeat(257), `m1${String.fromCharCode(10)}evil`]) {
+      await expect(boot({ measurementEpoch })).rejects.toThrow(
+        /measurementEpoch must be 1-256 characters without control characters/,
+      );
+    }
   });
 });
 

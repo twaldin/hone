@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "https://github.com/twaldin/agentelo.git",
+    "commit": "456a2b37a9357f0c829188bbd932ad937da2cfb0",
+    "tree": "e77c8cd72a0f48c51de474b0fe111b9420613829",
+    "referencePolicyCommit": "4a873a85f830114ce7d943389936a0d3f035677c",
+    "seedPolicyCommit": "88c8093ed8ba60cd4e3be08f3ce77740286a8e02",
+    "paths": [
+      "core/scoring.js",
+      "test/scoring.test.js",
+      "LICENSE"
+    ],
+    "readOnly": true
+  },
+  "license": {
+    "spdx": "MIT",
+    "file": "LICENSE",
+    "copyright": "Copyright (c) 2026 Tim Waldin"
+  },
+  "capsuleAdditions": [
+    "eval.py",
+    "package.json",
+    "worker.mjs",
+    "provenance.json",
+    "toolchain.lock.json"
+  ]
+}

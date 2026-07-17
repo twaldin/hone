@@ -1,0 +1,56 @@
+{
+  "objective": "Reduce the fixed Linux latency of query.py for the sealed skin-data workload while preserving the exact registered response+quality hash. The evaluator starts every measurement in a fresh process with empty SQLite connection state and verified page-cache eviction. Only query/indexing/batching/cache strategy may change; eval.py, worker.py, and toolchain.lock.json are protected.",
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": ["eval.py", "worker.py", "toolchain.lock.json", ".gitignore"],
+  "assetGroups": [
+    { "id": "train", "visibility": "holdout", "paths": ["assets/train"] },
+    { "id": "validation", "visibility": "holdout", "paths": ["assets/validation"] }
+  ],
+  "budget": {
+    "maxTokens": 2000000,
+    "maxUsd": 20,
+    "maxWallClockSec": 3600,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": { "path": "diagnostics/ordering-report.json" },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "terminal-holdout-1",
+    "license": "internal-use-only",
+    "provenance": "read-only owner repository trade-up-bot at 2a37202187912bedfbe5b4d65498feef09797935; synthetic scaling of server/routes/data.ts and server/db.ts shapes; no owner records",
+    "sourceDetails": {
+      "ownerRepository": "trade-up-bot",
+      "commit": "2a37202187912bedfbe5b4d65498feef09797935",
+      "paths": {
+        "server/routes/data.ts": "sha256:73dbab6fe8b0e149077828985ec2b54ca29d7559ea40a0e4daa81f96871c9a9e",
+        "server/db.ts": "sha256:74b1199b6b8db2a3176179f1e88218e171f9e8056f9b61f28ae86b3cd09e864c"
+      },
+      "derivation": "scaled deterministic synthetic tables and workload derived from owner schema/query shapes; no owner records"
+    },
+    "measurement": {
+      "platform": "linux",
+      "cpuQuota": 2,
+      "samples": 9,
+      "interleaved": true,
+      "freshProcess": true,
+      "cacheContract": "immutable read-only DB; POSIX_FADV_DONTNEED plus mincore resident-fraction <= 0.01 before every process",
+      "q": "positive reciprocal latency score emitted by the trusted evaluator; invalid, broken, malformed, crashed, or timed-out output maps to qFail",
+      "qFail": 0
+    },
+    "normalization": {
+      "qFail": 0,
+      "qBase": 0.00030146691673015795,
+      "qReference": 0.0017501767746974616,
+      "scale": 0.0014487098579673036
+    },
+    "diagnosticContentHashes": {
+      "diagnostics/alternate/query.py": "sha256:007f5288dbb4f0a05539f1a27f0e9b70b532ad5e62df9f71441f8b88869befa1",
+      "diagnostics/broken/query.py": "sha256:22f2a249838d4fd9fafeb19657f4f0ad3665eba0a77748e8deb9ef16f9dd6d16",
+      "diagnostics/improved/query.py": "sha256:3639dd00ca9d6c913217c2dd5423c2c04efdd75c4ea9c8494bf1f1d299212dbb",
+      "diagnostics/naive/query.py": "sha256:bd611bcbd58d7bc2232f5a782dcb6773a8786dd392d963e5e4c69af930e4597c",
+      "diagnostics/shortcut/query.py": "sha256:a8825696644a58581ef11aa8996a2bd61bd06d6eaab6b0fb6e9b5749bc3d95c0"
+    },
+    "tags": ["terminal-holdout", "performance", "sqlite", "query-ranking"]
+  }
+}

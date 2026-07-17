@@ -1,0 +1,53 @@
+{
+  "objective": "Improve FLT TextInput editing-state correctness in text_input.mjs across the sealed owner and hidden Unicode/escape/state case bank while preserving the exported contract and a hard limit of 32 onChange emissions per operation. Only text_input.mjs may change; every other baseline path and all assets are protected. The sole objective q is passed sealed cases / declared sealed cases.",
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    ".gitignore",
+    "eval.py",
+    "worker.mjs"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 2000000,
+    "maxUsd": 20,
+    "maxWallClockSec": 3600,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "FLT fe05463a921b9c4d808a338ea07d33abe45b6487: src/tui/widgets/text-input.ts and tests/unit/tui/text-input.test.ts; historical partial seed derives from parent a5b07aa0 appendCommandText/backspaceCommand behavior; current owner implementation is the improved reference.",
+    "license": "MIT",
+    "tags": [
+      "m1",
+      "public-train",
+      "functional",
+      "typescript",
+      "text-input",
+      "bounded-state-machine"
+    ]
+  }
+}

@@ -43,7 +43,7 @@ import { trustedRepoRoot } from "./runtime-digest.js";
 export const OPTIMIZER_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
 /** Entries under the optimizer trees that never affect the executed loop. */
-const OPTIMIZER_SKIP: Record<string, true> = {
+export const OPTIMIZER_SKIP: Record<string, true> = {
   test: true,
   node_modules: true,
   dist: true,
@@ -452,6 +452,27 @@ export function optimizerOverridden(env: NodeJS.ProcessEnv): boolean {
   return cmd !== undefined && cmd.trim().length > 0;
 }
 
+/**
+ * Resolve the default optimizer identity from an already captured closure.
+ * This never reads repoRoot; callers can hash and later stage the exact same
+ * buffers while preserving the explicit-digest drift gate.
+ */
+export function resolveOptimizerSnapshotDigest(env: NodeJS.ProcessEnv, image: string, snapshot: OptimizerSnapshot): string {
+  if (env["HONE_OPTIMIZER_ENTRY"] !== undefined) {
+    throw new UsageError(
+      "HONE_OPTIMIZER_ENTRY is no longer supported: the optimizer executes only from the sealed containerized snapshot (use HONE_OPTIMIZER_CMD with an explicit HONE_OPTIMIZER_DIGEST for an in-container argv override)",
+    );
+  }
+  if (optimizerOverridden(env)) {
+    throw new UsageError("an already-captured optimizer snapshot cannot be combined with HONE_OPTIMIZER_CMD");
+  }
+  const computed = snapshotDigest(image, snapshot);
+  const explicit = env["HONE_OPTIMIZER_DIGEST"];
+  if (explicit !== undefined && explicit !== computed) {
+    throw new UsageError(`HONE_OPTIMIZER_DIGEST ${explicit} does not match the computed default-optimizer digest ${computed} — refusing a misleading pin`);
+  }
+  return computed;
+}
 /**
  * The digest sealed into the run. Default optimizer → computed from the real
  * inputs (an explicit HONE_OPTIMIZER_DIGEST must then MATCH — a stale pin is

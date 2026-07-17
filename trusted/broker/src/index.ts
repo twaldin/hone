@@ -8,10 +8,14 @@ export {
   scratchSnapshotArchiveCapBytes,
   isBrokerAuthoredEvent,
   readBrokerJournalEvents,
+  readBrokerJournalEvaluations,
   type BrokerConfig,
   type BudgetDimension,
   type CallContext,
   type SandboxNetworkMode,
+  type BrokerJournalEvaluationSnapshot,
+  type TrustedEvaluationStrategy,
+  type TrustedEvaluationStrategyInput,
 } from "./broker.js";
 export { BrokerServer, startBroker, type BrokerServerOptions, type RunningBroker, type StartBrokerOptions } from "./server.js";
 export { BrokerError, BROKER_ERROR_NUMBER } from "./errors.js";

@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_26057194c86f",
+  "objective": "Maximize sealed-case fixed-capital top-3 expected net profit by changing the genuine candidate generation, pruning, ranking, and portfolio-selection policy. Each case admits exactly 72 distinct mechanically valid proposals; protected KNN observations, owner-derived profit math, liquidity/capital checks, and exhaustive case oracle remain trusted. Invalid protocol or protected edits fail closed; duplicate, liquidity-overlapping, or over-capital selections score zero for that case.",
+  "baseline": {
+    "kind": "git",
+    "commit": "156de2c8eab18ae2b97a074c3744be62077325a5"
+  },
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.mjs",
+    "trusted_oracle.py",
+    "runtime.lock.json",
+    "provenance.json"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/cases.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/cases.json"
+      ]
+    },
+    {
+      "id": "holdout",
+      "visibility": "holdout",
+      "paths": [
+        "assets/holdout/cases.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 2000000,
+    "maxUsd": 20,
+    "maxWallClockSec": 3600,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:96bf5346705ff6f7e51bedb853970aae18e7bb237f1021a97f655aa25790bead"
+  },
+  "contentHashes": {
+    "assets/train/cases.json": "sha256:a445b46717f3932803f12d1f494b4c26fece359562b0151c5fcb185127ba3b13",
+    "assets/validation/cases.json": "sha256:3721f1da058b6a7933785dedda205441e83bfab0dce78aff62e118c02cf58ba4",
+    "assets/holdout/cases.json": "sha256:f4355c3a33b8efcd404e31e282ecef43e16e932e75773519ec4c6a85a73577bf"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "private trade-up-bot commit 2a37202187912bedfbe5b4d65498feef09797935 tree b21b7674241491f68dfdf21b91761c324a06ed7a; exact paths and source hashes in protected provenance.json",
+    "license": "NOASSERTION-private-owner-source",
+    "tags": [
+      "m1-train",
+      "trade-up",
+      "profit",
+      "selection",
+      "knn-protected",
+      "offline",
+      "linux",
+      "fixed-work"
+    ],
+    "internalUseOnly": true,
+    "publicationProhibited": true,
+    "taskClass": "open-quality",
+    "fixedCapitalCents": 30000,
+    "fixedTopK": 3,
+    "fixedProposalEvaluationsPerCase": 72,
+    "caseCount": 36
+  }
+}

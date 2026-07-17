@@ -1,0 +1,3 @@
+.gitdir/
+__pycache__/
+*.pyc

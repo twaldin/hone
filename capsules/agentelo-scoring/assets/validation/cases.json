@@ -1,0 +1,255 @@
+{
+  "schemaVersion": 1,
+  "partition": "validation",
+  "cases": [
+    {
+      "id": "validation-nd-empty",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-nd-empty", "diff_lines": 0, "agent_time_seconds": 44}},
+      "expected": {"excluded": true, "reason": "no-attempt-evidence", "hasAttemptEvidence": false, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+    {
+      "id": "validation-nd-output-tokens",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-nd-output-tokens", "diff_lines": 0, "tokens_in": 0, "tokens_out": 1}},
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+    {
+      "id": "validation-nd-tests-ran",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-nd-tests-ran", "diff_lines": 0, "tests_total": 1, "tests_ok": 0}},
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+    {
+      "id": "validation-nd-tool-volume-no-result",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {
+        "submission": {"run_id": "validation-nd-tool-volume-no-result", "diff_lines": 0, "agent_time_seconds": 720},
+        "log": "Glob(src/**)\nGrep(TODO)\nRead(src/a.js)\nRead(src/b.js)\nEdit(src/a.js)\nSEARCH/REPLACE\nWrite(src/a.js)\nApplied edit\nRead(src/a.js)\n"
+      },
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": true
+    },
+    {
+      "id": "validation-nd-trajectory-volume-no-result",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {
+        "submission": {"run_id": "validation-nd-trajectory-volume-no-result", "diff_lines": 0},
+        "trajectory": "{\"role\":\"tool\",\"name\":\"Read\"}\n{\"role\":\"assistant\",\"tool_calls\":[1,2,3,4]}"
+      },
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": true
+    },
+    {
+      "id": "validation-nd-file-time-evidence",
+      "group": "no-diff",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-nd-file-time-evidence", "diff_lines": 0}, "log": "service=file.time path=src/index.js elapsed=2"},
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+
+    {
+      "id": "validation-infra-http-429",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-infra-http-429", "diff_lines": 0}, "log": "HTTP/1.1 429\nretry-after: 60"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": false, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+    {
+      "id": "validation-infra-connection-refused",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-infra-connection-refused", "diff_lines": 0}, "log": "upstream connection refused"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": false, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+    {
+      "id": "validation-infra-chunk-after-llm",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-infra-chunk-after-llm", "diff_lines": 0}, "log": "service=llm providerID=anthropic\nincomplete chunked read"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": true, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+    {
+      "id": "validation-infra-auto-reject-after-api",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-infra-auto-reject-after-api", "diff_lines": 0}, "log": "{\"api_calls\": 3}\nThe user rejected permission\nauto-rejecting"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": true, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+    {
+      "id": "validation-infra-application-429-not-provider",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-infra-application-429-not-provider", "diff_lines": 0}, "log": "{\"role\":\"tool\",\"content\":\"fixture says 429 retries configured\"}"},
+      "expected": {"excluded": false, "reason": "real-attempt", "hasAttemptEvidence": true, "hasInfraEvidence": false},
+      "hardGate": false
+    },
+    {
+      "id": "validation-infra-runtime-after-tests",
+      "group": "infra",
+      "operation": "analyze",
+      "input": {"submission": {"run_id": "validation-infra-runtime-after-tests", "diff_lines": 0, "tests_total": 3}, "log": "ReferenceError: crypto is not defined"},
+      "expected": {"excluded": true, "reason": "infra-junk", "hasAttemptEvidence": true, "hasInfraEvidence": true},
+      "hardGate": false
+    },
+
+    {
+      "id": "validation-precedence-no-cost-fast-a",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-no-cost-fast-a", "diff_lines": 14, "tests_ok": 18, "agent_time_seconds": 3}, "b": {"run_id": "validation-precedence-no-cost-fast-a-peer", "diff_lines": 1, "tests_ok": 18, "agent_time_seconds": 88}, "options": {"baseline_passing": 10}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-no-cost-fast-b",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-no-cost-fast-b", "diff_lines": 3, "tests_ok": 5, "agent_time_seconds": 75}, "b": {"run_id": "validation-precedence-no-cost-fast-b-peer", "diff_lines": 30, "tests_ok": 5, "agent_time_seconds": 6}, "options": {"baseline_passing": 1}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-equal-cost-fast-a",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-equal-cost-fast-a", "diff_lines": 6, "tests_ok": 12, "cost_usd": 2.75, "agent_time_seconds": 12}, "b": {"run_id": "validation-precedence-equal-cost-fast-a-peer", "diff_lines": 7, "tests_ok": 12, "cost_usd": 2.75, "agent_time_seconds": 120}, "options": {"baseline_passing": 4}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-one-cost-fast-a",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-one-cost-fast-a", "diff_lines": 4, "tests_ok": 6, "cost_usd": 0.03, "agent_time_seconds": 4}, "b": {"run_id": "validation-precedence-one-cost-fast-a-peer", "diff_lines": 5, "tests_ok": 6, "agent_time_seconds": 44}, "options": {"baseline_passing": 6}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-one-cost-fast-b",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-one-cost-fast-b", "diff_lines": 2, "tests_ok": 20, "agent_time_seconds": 640}, "b": {"run_id": "validation-precedence-one-cost-fast-b-peer", "diff_lines": 2, "tests_ok": 20, "cost_usd": 9.0, "agent_time_seconds": 9}, "options": {"baseline_passing": 11}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-equal-high-cost",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-equal-high-cost", "diff_lines": 10, "tests_ok": 2, "cost_usd": 99, "agent_time_seconds": 30}, "b": {"run_id": "validation-precedence-equal-high-cost-peer", "diff_lines": 11, "tests_ok": 2, "cost_usd": 99, "agent_time_seconds": 31}, "options": {"baseline_passing": 0}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-subsecond-no-cost",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-subsecond-no-cost", "diff_lines": 1, "tests_ok": 4, "agent_time_seconds": 0.004}, "b": {"run_id": "validation-precedence-subsecond-no-cost-peer", "diff_lines": 4, "tests_ok": 4, "agent_time_seconds": 0.009}, "options": {"baseline_passing": 2}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-missing-vs-small-cost",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-missing-vs-small-cost", "diff_lines": 8, "tests_ok": 13, "agent_time_seconds": 250}, "b": {"run_id": "validation-precedence-missing-vs-small-cost-peer", "diff_lines": 8, "tests_ok": 13, "cost_usd": 0.0002, "agent_time_seconds": 2.5}, "options": {"baseline_passing": 7}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-equal-tiny-cost",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-equal-tiny-cost", "diff_lines": 2, "tests_ok": 7, "cost_usd": 0.000001, "agent_time_seconds": 0.5}, "b": {"run_id": "validation-precedence-equal-tiny-cost-peer", "diff_lines": 12, "tests_ok": 7, "cost_usd": 0.000001, "agent_time_seconds": 500}, "options": {"baseline_passing": 5}},
+      "expected": 0.5,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-more-tests-dominates",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-more-tests-dominates", "diff_lines": 1, "tests_ok": 31, "cost_usd": 1000, "agent_time_seconds": 1000}, "b": {"run_id": "validation-precedence-more-tests-dominates-peer", "diff_lines": 20, "tests_ok": 30, "cost_usd": 0.0001, "agent_time_seconds": 0.1}, "options": {"baseline_passing": 25}},
+      "expected": 1,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-no-diff-loses",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-no-diff-loses", "diff_lines": 0, "tests_ok": 999, "agent_time_seconds": 0.1}, "b": {"run_id": "validation-precedence-no-diff-loses-peer", "diff_lines": 2, "tests_ok": 0, "agent_time_seconds": 999}, "options": {"baseline_passing": 0}},
+      "expected": 0,
+      "hardGate": false
+    },
+    {
+      "id": "validation-precedence-cost-before-time",
+      "group": "precedence",
+      "operation": "score",
+      "input": {"a": {"run_id": "validation-precedence-cost-before-time", "diff_lines": 5, "tests_ok": 17, "cost_usd": 0.15, "agent_time_seconds": 720}, "b": {"run_id": "validation-precedence-cost-before-time-peer", "diff_lines": 2, "tests_ok": 17, "cost_usd": 7.5, "agent_time_seconds": 1}, "options": {"baseline_passing": 12}},
+      "expected": 1,
+      "hardGate": false
+    },
+
+    {
+      "id": "validation-dedup-empty-current",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": null, "candidate": {"run_id": "validation-dedup-empty-current", "diff_lines": 7, "tests_ok": 2}},
+      "expected": "candidate",
+      "hardGate": false
+    },
+    {
+      "id": "validation-dedup-empty-candidate",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "validation-dedup-empty-candidate", "diff_lines": 3, "tests_ok": 8}, "candidate": null},
+      "expected": "current",
+      "hardGate": false
+    },
+    {
+      "id": "validation-dedup-eligible-over-excluded",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "validation-dedup-eligible-over-excluded", "diff_lines": 0, "tests_ok": 400}, "candidate": {"run_id": "validation-dedup-eligible-over-excluded-peer", "diff_lines": 0, "tests_ok": 3, "tokens_out": 1}},
+      "expected": "candidate",
+      "hardGate": false
+    },
+    {
+      "id": "validation-dedup-diff-over-no-diff",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "validation-dedup-diff-over-no-diff", "diff_lines": 0, "tests_ok": 800, "tests_total": 1}, "candidate": {"run_id": "validation-dedup-diff-over-no-diff-peer", "diff_lines": 1, "tests_ok": 0}},
+      "expected": "candidate",
+      "hardGate": false
+    },
+    {
+      "id": "validation-dedup-tests-before-time",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "validation-dedup-tests-before-time", "diff_lines": 4, "tests_ok": 40, "agent_time_seconds": 1}, "candidate": {"run_id": "validation-dedup-tests-before-time-peer", "diff_lines": 4, "tests_ok": 41, "agent_time_seconds": 600}},
+      "expected": "candidate",
+      "hardGate": false
+    },
+    {
+      "id": "validation-dedup-time-last",
+      "group": "dedup",
+      "operation": "dedup",
+      "input": {"current": {"run_id": "validation-dedup-time-last", "diff_lines": 9, "tests_ok": 14, "agent_time_seconds": 14}, "candidate": {"run_id": "validation-dedup-time-last-peer", "diff_lines": 1, "tests_ok": 14, "agent_time_seconds": 13}},
+      "expected": "candidate",
+      "hardGate": false
+    }
+  ]
+}
