@@ -29,7 +29,7 @@
     }
   ],
   "budget": {
-    "maxTokens": 2000000,
+    "maxTokens": 4000000,
     "maxUsd": 20,
     "maxWallClockSec": 3600,
     "maxEvaluatorInvocations": 200

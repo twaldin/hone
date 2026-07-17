@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "id": "cap_cf5f1bd3e20a",
+  "id": "cap_c62f711089e0",
   "objective": "Reduce the fixed Linux latency of query.py for the sealed skin-data workload while preserving the exact registered response+quality hash. The evaluator starts every measurement in a fresh process with empty SQLite connection state and verified page-cache eviction. Only query/indexing/batching/cache strategy may change; eval.py, worker.py, and toolchain.lock.json are protected.",
   "baseline": {
     "kind": "git",
@@ -44,7 +44,7 @@
     }
   ],
   "budget": {
-    "maxTokens": 2000000,
+    "maxTokens": 4000000,
     "maxUsd": 20,
     "maxWallClockSec": 3600,
     "maxEvaluatorInvocations": 200

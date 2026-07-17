@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "capsuleId": "cap_1e60e3008291",
+  "capsuleId": "cap_ba2072620110",
   "scalar": {
     "name": "score",
     "definition": "passed sealed cases / declared sealed cases",
@@ -110,12 +110,12 @@
   "scaffold": {
     "runs": 2,
     "capsuleIds": [
-      "cap_1e60e3008291",
-      "cap_1e60e3008291"
+      "cap_ba2072620110",
+      "cap_ba2072620110"
     ],
     "manifestHashes": [
-      "sha256:5d49002484f68a1385b56915e8bff03cb72d06a33a6ff6b8f19df616c6b0a798",
-      "sha256:5d49002484f68a1385b56915e8bff03cb72d06a33a6ff6b8f19df616c6b0a798"
+      "sha256:4faed083c98d105c4f1140fcb3c20aa57f780045bba1d9f6093c9f4b9072f4d0",
+      "sha256:4faed083c98d105c4f1140fcb3c20aa57f780045bba1d9f6093c9f4b9072f4d0"
     ],
     "byteIdentical": true
   }

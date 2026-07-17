@@ -19,9 +19,9 @@
     { "id": "validation", "visibility": "holdout", "paths": ["assets/validation"] }
   ],
   "budget": {
-    "maxTokens": 1500000,
+    "maxTokens": 4000000,
     "maxUsd": 5,
-    "maxWallClockSec": 2400,
+    "maxWallClockSec": 3600,
     "maxEvaluatorInvocations": 198
   },
   "diagnosticOrdering": { "path": "diagnostics/ordering-report.json" },
