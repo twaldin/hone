@@ -47,6 +47,7 @@ import {
   type MetaCapsuleEntry,
   type MetaCampaignConfigV1 as MetaCampaignConfig,
 } from "@hone/schema";
+import { extractWorkspaceArtifact } from "../artifact.js";
 import { admitCapsule, type AdmittedCapsule } from "../admission.js";
 import {
   finalizeMetaHoldout,
@@ -919,10 +920,13 @@ export function createSyntheticCapsule(
   campaignDir: string,
   config: MetaCampaignConfig,
   baselineArtifactHash: Sha256Digest,
+  casDir: string,
 ): string {
   const capsuleDir = join(campaignDir, "outer-capsule");
   mkdirSync(capsuleDir, { recursive: true, mode: 0o700 });
   chmodSync(capsuleDir, 0o700);
+  const baselineDir = join(capsuleDir, "baseline");
+  if (!existsSync(baselineDir)) extractWorkspaceArtifact(casDir, baselineArtifactHash, baselineDir);
   const asset = Buffer.from("trusted meta task; protected corpus coordinates are not present\n");
   writeFileSync(join(capsuleDir, "meta-task.txt"), asset, { mode: 0o600 });
   const summary = (value: number, passes: boolean) => ({
@@ -1263,7 +1267,7 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     chmodSync(registeredConfigPath, 0o600);
   }
 
-  const syntheticCapsule = createSyntheticCapsule(campaignDir, config, seed.artifactHash);
+  const syntheticCapsule = createSyntheticCapsule(campaignDir, config, seed.artifactHash, casDir);
   const journal = MetaJournalV1.open(join(campaignDir, "meta-journal.ndjson"), config);
   const gate = new CliCandidateGate({
     casDir,

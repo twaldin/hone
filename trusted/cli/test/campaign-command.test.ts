@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { CasStore, packDirAsArtifact } from "@hone/broker";
 import { MetaCampaignConfigV1 } from "@hone/schema";
 import { createSyntheticCapsule } from "../src/commands/hone.js";
 import { hone, makeRoot } from "./helpers.js";
@@ -33,14 +34,20 @@ describe("hone hone campaign command", () => {
     expect(existsSync(join(root, ".hone-runs"))).toBe(false);
   });
 
-  test("materializes the synthetic outer task under the canonical manifest filename", () => {
+  test("materializes the synthetic outer task and its sealed CAS baseline", async () => {
     const root = makeRoot();
     const config = MetaCampaignConfigV1.parse(JSON.parse(
       readFileSync(new URL("../../../schema/fixtures/meta-campaign.m1.json", import.meta.url), "utf8"),
     ));
-    const capsuleDir = createSyntheticCapsule(root, config, `sha256:${"a".repeat(64)}`);
+    const seedDir = join(root, "seed");
+    const casDir = join(root, "cas");
+    mkdirSync(seedDir);
+    writeFileSync(join(seedDir, "package.json"), "{}\n");
+    const baseline = await packDirAsArtifact(seedDir, new CasStore(casDir));
+    const capsuleDir = createSyntheticCapsule(root, config, baseline as `sha256:${string}`, casDir);
     expect(existsSync(join(capsuleDir, "manifest.json"))).toBe(true);
     expect(existsSync(join(capsuleDir, "capsule.json"))).toBe(false);
+    expect(readFileSync(join(capsuleDir, "baseline", "package.json"), "utf8")).toBe("{}\n");
   });
 
   test("help publishes the production campaign route", async () => {
