@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { MetaCampaignConfigV1 } from "@hone/schema";
+import { createSyntheticCapsule } from "../src/commands/hone.js";
 import { hone, makeRoot } from "./helpers.js";
 
 describe("hone hone campaign command", () => {
@@ -29,6 +31,16 @@ describe("hone hone campaign command", () => {
     expect(result.code).toBe(2);
     expect(result.stderr).toContain("outer maxEvaluatorInvocations 1 cannot cover");
     expect(existsSync(join(root, ".hone-runs"))).toBe(false);
+  });
+
+  test("materializes the synthetic outer task under the canonical manifest filename", () => {
+    const root = makeRoot();
+    const config = MetaCampaignConfigV1.parse(JSON.parse(
+      readFileSync(new URL("../../../schema/fixtures/meta-campaign.m1.json", import.meta.url), "utf8"),
+    ));
+    const capsuleDir = createSyntheticCapsule(root, config, `sha256:${"a".repeat(64)}`);
+    expect(existsSync(join(capsuleDir, "manifest.json"))).toBe(true);
+    expect(existsSync(join(capsuleDir, "capsule.json"))).toBe(false);
   });
 
   test("help publishes the production campaign route", async () => {
