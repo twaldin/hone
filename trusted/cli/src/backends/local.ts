@@ -161,7 +161,7 @@ async function mustRun(run: RunCommand, argv: string[], what: string): Promise<s
   return res.stdout.toString("utf8").trim();
 }
 
-/** Docker's name alphabet is narrower than a run id's; label filters use the RAW id, names the sanitized one. */
+/** Docker DNS labels are capped at 63 bytes; keep every derived name below that. */
 function dockerNames(runId: string): {
   network: string;
   relay: string;
@@ -169,7 +169,10 @@ function dockerNames(runId: string): {
   scratchVolume: string;
   scratchKeeper: string;
 } {
-  const safe = runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
+  const normalized = runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
+  const safe = normalized.length <= 40
+    ? normalized
+    : `${normalized.slice(0, 23)}-${createHash("sha256").update(runId).digest("hex").slice(0, 16)}`;
   return {
     network: `hone-${safe}`,
     relay: `hone-proxy-${safe}`,
