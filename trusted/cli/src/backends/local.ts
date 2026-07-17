@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1216,6 +1217,9 @@ export function createBackend(
         // authenticated public TCP listener with a fresh ≥256-bit capability;
         // unix egress (linux default) bind-mounts ONLY public broker.sock.
         const wantPublicTcp = egress.sandboxNetwork.mode === "internal";
+        const publicSocketPath = wantPublicTcp
+          ? join(tmpdir(), `hone-broker-${createHash("sha256").update(ctx.runId).digest("hex").slice(0, 24)}.sock`)
+          : undefined;
 
 
         const brokerConfig = {
@@ -1283,7 +1287,10 @@ export function createBackend(
             : {}),
         };
         running = wantPublicTcp
-          ? await startBroker(brokerConfig, { publicTcp: { host: "127.0.0.1", port: 0 } })
+          ? await startBroker(brokerConfig, {
+              publicTcp: { host: "127.0.0.1", port: 0 },
+              socketPath: publicSocketPath,
+            })
           : await startBroker(brokerConfig);
 
         // Finding 11: replay journaled-but-unlogged promotions into

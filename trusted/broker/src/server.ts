@@ -861,6 +861,12 @@ export interface StartBrokerOptions {
    */
   adminSocketPath?: string | undefined;
   /**
+   * Public Unix socket location override. The macOS TCP runner uses a short
+   * temp path because sockaddr_un cannot represent long campaign run paths;
+   * the socket remains bearer-authenticated and is never mounted there.
+   */
+  socketPath?: string | undefined;
+  /**
    * Public-transport bearer override (tests only). Omitted = production
    * behavior: a fresh randomBytes(32) hex capability is generated for this
    * broker. Anything under 32 bytes refuses to listen.
@@ -886,7 +892,7 @@ export async function startBroker(
 ): Promise<RunningBroker & { publicTcpAddress: { host: string; port: number } }>;
 export async function startBroker(config: BrokerConfig, opts: StartBrokerOptions = {}): Promise<RunningBroker> {
   const broker = new Broker(config);
-  const socketPath = path.join(config.runDir, "broker.sock");
+  const socketPath = opts.socketPath ?? path.join(config.runDir, "broker.sock");
   const adminSocketPath = opts.adminSocketPath;
   // One fresh >=256-bit capability per broker, shared by BOTH public
   // transports; it lives only in trusted memory (RunningBroker.publicToken).
