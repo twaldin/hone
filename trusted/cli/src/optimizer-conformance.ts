@@ -221,7 +221,7 @@ function parseTranscript(stdout: string): StubTranscript | null {
 
 function runtimeIdentity(image: string, optimizerDigest: string, seal: OptimizerBundleSeal): CandidateConformanceRuntimeIdentity {
   const bundleFiles: Record<string, { sha256: string; size: number }> = {};
-  for (const file of seal.files) bundleFiles[file.name] = { sha256: file.sha256, size: file.size };
+  for (const file of seal.files) bundleFiles[file.name] = { sha256: `sha256:${file.sha256}`, size: file.size };
   const buildContractDigest = sha256(canonicalJson(OPTIMIZER_BUILD_CONTRACT));
   const bundleDigest = sha256(canonicalJson(bundleFiles));
   const body = {
