@@ -99,8 +99,8 @@ describe("cheap candidate optimizer conformance", () => {
     expect(receipt.runtime.optimizerDigest).toBe(selected.mergedDigest);
     expect(receipt.runtime.runtimeArgv).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
     expect(receipt.runtime.bundleFiles).toEqual({
-      "optimizer.mjs": expect.objectContaining({ sha256: expect.stringMatching(/^[0-9a-f]{64}$/) }),
-      "worker.mjs": expect.objectContaining({ sha256: expect.stringMatching(/^[0-9a-f]{64}$/) }),
+      "optimizer.mjs": expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
+      "worker.mjs": expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
     });
     expect(receipt.protocol).toEqual({
       version: "jsonrpc-2.0",
