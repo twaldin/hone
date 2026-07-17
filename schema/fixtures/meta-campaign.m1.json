@@ -130,9 +130,9 @@
   },
   "budgets": {
     "campaign": {
-      "maxTokens": 263000000,
+      "maxTokens": 693000000,
       "maxUsd": 885,
-      "maxWallClockSec": 499200,
+      "maxWallClockSec": 705600,
       "maxEvaluatorInvocations": 10837
     },
     "outer": {
@@ -142,9 +142,9 @@
       "maxEvaluatorInvocations": 1
     },
     "child": {
-      "maxTokens": 1500000,
+      "maxTokens": 4000000,
       "maxUsd": 5,
-      "maxWallClockSec": 2400,
+      "maxWallClockSec": 3600,
       "maxEvaluatorInvocations": 63
     }
   },
