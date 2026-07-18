@@ -112,6 +112,25 @@ function registeredMutablePath(config: MetaCampaignConfig, candidatePath: string
   });
 }
 
+/** Freeze-time guard: every configured mutable path must select at least one sealed optimizer file. */
+export function assertMutablePathsResolve(
+  mutablePaths: readonly string[],
+  snapshot: OptimizerSnapshot,
+): void {
+  const optimizerPaths = [...snapshot.files.keys()]
+    .filter((candidatePath) =>
+      candidatePath.startsWith("optimizer/src/") || candidatePath.startsWith("optimizer/assets/"))
+    .map((candidatePath) => candidatePath.slice("optimizer/".length));
+  const unresolved = mutablePaths.filter((configured) => {
+    const normalized = configured.replace(/^\.\//, "").replace(/^optimizer\//, "").replace(/\/+$/, "");
+    return !optimizerPaths.some((candidatePath) =>
+      candidatePath === normalized || candidatePath.startsWith(`${normalized}/`));
+  });
+  if (unresolved.length > 0) {
+    throw new UsageError(`mutable paths do not select a sealed optimizer file: ${unresolved.join(", ")}`);
+  }
+}
+
 const ConformanceReceiptSchema = z.object({
   version: z.literal(1),
   sourceArtifact: z.string().regex(SHA256_PATTERN),
@@ -1196,6 +1215,7 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
   const casDir = casRoot(io.root);
   const cas = new CasStore(casDir);
   const seedSnapshot = collectOptimizerSnapshot(io.root);
+  assertMutablePathsResolve(config.mutablePaths, seedSnapshot);
   const seed = await captureSeedCandidate(io.root, cas);
   const comparisonImage = config.train[0]!.image;
   const sealedSeedDigest = snapshotDigest(comparisonImage, seedSnapshot) as Sha256Digest;
