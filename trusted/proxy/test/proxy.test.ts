@@ -550,6 +550,7 @@ describe("unix socket", () => {
       },
     });
     await proxy.listenUnix(socketPath);
+    expect((await stat(socketPath)).mode & 0o777).toBe(0o666);
     cleanups.push(() => proxy.close());
 
     const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
