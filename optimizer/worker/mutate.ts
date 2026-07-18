@@ -53,6 +53,23 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T | PromiseLike<
   });
   return { promise, resolve, reject };
 }
+const MAX_BRIDGE_REQUEST_BYTES = 4 * 1024 * 1024;
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+interface UnixFetchInit extends RequestInit {
+  unix: string;
+}
+
+class BridgeRequestTooLarge extends Error {}
 const TOOLS = ["read", "bash", "write", "edit"];
 
 const OUTPUT_SCHEMA = {
@@ -105,24 +122,131 @@ function parseEpisode(raw: string): EpisodeFile {
 }
 
 /**
- * The broker mounts the trusted proxy as a unix socket (/run/hone/proxy.sock;
- * sandbox network is otherwise none). The Pi SDK speaks HTTP to a baseUrl, so
- * when no HTTP HONE_PROXY_BASE_URL is provided we bridge loopback -> unix.
+ * The broker mounts the trusted proxy as a Unix socket (/run/hone/proxy.sock;
+ * sandbox network is otherwise none). Pi speaks HTTP to a baseUrl, so when no
+ * HTTP HONE_PROXY_BASE_URL is provided we bridge loopback -> Unix.
+ *
+ * Bun's node:http client does not implement socketPath on Linux arm64. Use
+ * Bun's fetch `unix` transport for the outbound leg; the node:http server is
+ * only the loopback listener Pi talks to.
  */
+function readBridgeRequestBody(req: http.IncomingMessage): Promise<Buffer> {
+  const result = deferred<Buffer>();
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  let settled = false;
+  const reject = (reason: unknown): void => {
+    if (settled) return;
+    settled = true;
+    result.reject(reason);
+  };
+  req.on("data", (chunk: Buffer) => {
+    if (settled) return;
+    bytes += chunk.byteLength;
+    if (bytes > MAX_BRIDGE_REQUEST_BYTES) {
+      req.pause();
+      reject(new BridgeRequestTooLarge(`bridge request exceeds ${MAX_BRIDGE_REQUEST_BYTES} bytes`));
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.once("end", () => {
+    if (settled) return;
+    settled = true;
+    result.resolve(Buffer.concat(chunks, bytes));
+  });
+  req.once("aborted", () => reject(new Error("bridge client aborted request")));
+  req.once("error", reject);
+  return result.promise;
+}
+
+async function waitForDrain(res: http.ServerResponse): Promise<void> {
+  const drained = deferred<void>();
+  const onDrain = (): void => {
+    res.off("close", onClose);
+    drained.resolve();
+  };
+  const onClose = (): void => {
+    res.off("drain", onDrain);
+    drained.reject(new Error("bridge client closed during response"));
+  };
+  res.once("drain", onDrain);
+  res.once("close", onClose);
+  await drained.promise;
+}
+
+async function forwardUnixRequest(socketPath: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const body = await readBridgeRequestBody(req);
+  const method = req.method ?? "GET";
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(name, item);
+    } else {
+      headers.set(name, value);
+    }
+  }
+  headers.delete("host");
+  for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
+
+  const abort = new AbortController();
+  const abortUpstream = (): void => abort.abort();
+  res.once("close", abortUpstream);
+  try {
+    const init: UnixFetchInit = {
+      unix: socketPath,
+      method,
+      headers,
+      redirect: "manual",
+      signal: abort.signal,
+    };
+    if (method !== "GET" && method !== "HEAD") {
+      const payload = new ArrayBuffer(body.byteLength);
+      new Uint8Array(payload).set(body);
+      init.body = payload;
+    }
+    const upstream = await fetch(`http://localhost${req.url ?? "/"}`, init);
+    const responseHeaders: Record<string, string> = {};
+    upstream.headers.forEach((value, name) => {
+      if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) responseHeaders[name] = value;
+    });
+    res.writeHead(upstream.status, responseHeaders);
+    if (upstream.body !== null) {
+      const reader = upstream.body.getReader();
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        if (res.destroyed) {
+          await reader.cancel();
+          return;
+        }
+        if (!res.write(next.value)) await waitForDrain(res);
+      }
+    }
+    res.end();
+  } finally {
+    res.off("close", abortUpstream);
+  }
+}
+
 async function startUnixBridge(socketPath: string): Promise<string> {
   const server = http.createServer((req, res) => {
-    const upstream = http.request(
-      { socketPath, path: req.url ?? "/", method: req.method, headers: req.headers },
-      (upRes) => {
-        res.writeHead(upRes.statusCode ?? 502, upRes.headers);
-        upRes.pipe(res);
-      },
-    );
-    upstream.on("error", (err) => {
-      res.writeHead(502, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: { type: "hone_bridge_error", message: err.message } }));
+    void forwardUnixRequest(socketPath, req, res).catch((err: unknown) => {
+      if (res.destroyed) return;
+      if (err instanceof BridgeRequestTooLarge) {
+        res.writeHead(413, { "content-type": "application/json", connection: "close" });
+        res.end(JSON.stringify({ error: { type: "hone_bridge_request_too_large", message: err.message } }), () => req.destroy());
+        return;
+      }
+      const failure = err instanceof Error ? err : new Error(String(err));
+      if (res.headersSent) {
+        res.destroy(failure);
+        return;
+      }
+      res.writeHead(502, { "content-type": "application/json", connection: "close" });
+      res.end(JSON.stringify({ error: { type: "hone_bridge_error", message: failure.message } }));
     });
-    req.pipe(upstream);
   });
   const listening = deferred<void>();
   server.once("error", listening.reject);
@@ -209,6 +333,33 @@ async function selftest(): Promise<void> {
     JSON.stringify({ version: 1, episode: 0, mode: "mutation", systemPrompt: "s", userPrompt: "u" }),
   );
   if (sample.episode !== 0 || sample.mode !== "mutation") throw new Error("selftest: episode parse mismatch");
+
+  const targetSocket = join(agentDir, "proxy.sock");
+  const target = http.createServer((req, res) => {
+    void readBridgeRequestBody(req).then(
+      (body) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(`${req.method ?? "GET"} ${req.url ?? "/"} ${body.toString("utf8")}`);
+      },
+      (err: unknown) => res.destroy(err instanceof Error ? err : new Error(String(err))),
+    );
+  });
+  const targetListening = deferred<void>();
+  target.once("error", targetListening.reject);
+  target.listen(targetSocket, targetListening.resolve);
+  await targetListening.promise;
+  try {
+    const bridge = await startUnixBridge(targetSocket);
+    const response = await fetch(`${bridge}/selftest`, { method: "POST", body: "ping" });
+    const echoed = await response.text();
+    if (response.status !== 200 || echoed !== "POST /v1/selftest ping") {
+      throw new Error(`selftest: Unix bridge mismatch (${response.status} ${echoed})`);
+    }
+  } finally {
+    const closed = deferred<void>();
+    target.close((err) => (err === undefined ? closed.resolve() : closed.reject(err)));
+    await closed.promise;
+  }
   console.log("hone-mutation selftest ok");
 }
 
