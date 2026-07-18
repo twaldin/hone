@@ -884,6 +884,10 @@ export interface StartBrokerOptions {
 export async function startBroker(config: BrokerConfig): Promise<RunningBroker & { adminSocketPath: undefined; publicTcpAddress: undefined }>;
 export async function startBroker(
   config: BrokerConfig,
+  opts: StartBrokerOptions & { socketPath: string; adminSocketPath?: undefined; publicTcp?: undefined },
+): Promise<RunningBroker & { adminSocketPath: undefined; publicTcpAddress: undefined }>;
+export async function startBroker(
+  config: BrokerConfig,
   opts: StartBrokerOptions & { adminSocketPath: string },
 ): Promise<RunningBroker & { adminSocketPath: string }>;
 export async function startBroker(

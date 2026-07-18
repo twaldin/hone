@@ -1275,14 +1275,15 @@ export function createBackend(
         await gate.proveInheritedIntents(grun, { runId: ctx.runId, image, donorName: containerLease.name });
         egress = await setupEgress(ctx, proxy, image, grun, containerLease.name);
 
-        // Broker transport for the containerized optimizer follows the
-        // egress topology: internal-network egress (darwin default) gets the
-        // authenticated public TCP listener with a fresh ≥256-bit capability;
-        // unix egress (linux default) bind-mounts ONLY public broker.sock.
+        // Both transports need a short public Unix socket. sockaddr_un cannot
+        // represent deep campaign run paths on either Darwin or Linux; Linux
+        // bind-mounts this socket into the optimizer container, while Darwin
+        // also exposes the authenticated TCP listener through its relay.
         const wantPublicTcp = egress.sandboxNetwork.mode === "internal";
-        const publicSocketPath = wantPublicTcp
-          ? join(tmpdir(), `hone-broker-${createHash("sha256").update(ctx.runId).digest("hex").slice(0, 24)}.sock`)
-          : undefined;
+        const publicSocketPath = join(
+          tmpdir(),
+          `hone-broker-${createHash("sha256").update(ctx.runId).digest("hex").slice(0, 24)}.sock`,
+        );
 
 
         const brokerConfig = {
@@ -1355,7 +1356,7 @@ export function createBackend(
               publicTcp: { host: "127.0.0.1", port: 0 },
               socketPath: publicSocketPath,
             })
-          : await startBroker(brokerConfig);
+          : await startBroker(brokerConfig, { socketPath: publicSocketPath });
 
         // Finding 11: replay journaled-but-unlogged promotions into
         // events.ndjson BEFORE anything can terminalize the run, so

@@ -120,14 +120,13 @@ describe("trusted broker evaluation strategy", () => {
     expect(() => new Broker(config)).toThrow(/terminal holdout asset group train is not visibility=holdout/);
   });
 
-  test("places the public Unix listener at an explicit short path for long TCP campaign runs", async () => {
+  test("places the public Unix listener at an explicit short path without opening TCP", async () => {
     const config = await configFor("short-public-socket", async (input) => recordFor(input));
     const socketPath = path.join(path.dirname(config.runDir), "broker.sock");
-    const running = await startBroker(config, {
-      publicTcp: { host: "127.0.0.1", port: 0 },
-      socketPath,
-    });
+    const running = await startBroker(config, { socketPath });
     expect(running.socketPath).toBe(socketPath);
+    expect(running.publicTcpAddress).toBeUndefined();
+    expect(running.adminSocketPath).toBeUndefined();
     expect(existsSync(socketPath)).toBe(true);
     await running.close();
     expect(existsSync(socketPath)).toBe(false);
