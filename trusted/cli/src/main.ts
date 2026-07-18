@@ -4,7 +4,7 @@ import { UsageError } from "./args.js";
 import { applyCommand } from "./commands/apply.js";
 import { bestCommand } from "./commands/best.js";
 import { diffCommand } from "./commands/diff.js";
-import { honeCommand } from "./commands/hone.js";
+import { honeCommand, recursiveCommand } from "./commands/hone.js";
 import { statusCommand } from "./commands/status.js";
 import { stopCommand } from "./commands/stop.js";
 import { LadderLockedError } from "./deliver.js";
@@ -18,6 +18,7 @@ usage:
   hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume]
            [--backend stub|local] [--config <json>]
   hone hone --campaign <path> --headless
+  hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal]
   hone status [--run ID]
   hone best [--run ID]
   hone diff [--stat] [--run ID]
@@ -34,6 +35,8 @@ export async function main(argv: string[], io: CmdIo): Promise<number> {
         return await runCommand(rest, io);
       case "hone":
         return await honeCommand(rest, io);
+      case "recursive":
+        return await recursiveCommand(rest, io);
       case "status":
         return await statusCommand(rest, io);
       case "best":
