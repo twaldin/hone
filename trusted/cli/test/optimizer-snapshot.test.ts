@@ -133,6 +133,16 @@ describe("digest inputs: bytes, paths, modes, image, build contract", () => {
     expect(computeOptimizerDigest("img@sha256:aa", root)).not.toBe(before);
   });
 
+  it("ignores ambient group-write bits while preserving executable identity", () => {
+    const root = syntheticRepo();
+    const source = join(root, "optimizer", "src", "main.ts");
+    chmodSync(source, 0o644);
+    const before = computeOptimizerDigest("img@sha256:aa", root);
+    chmodSync(source, 0o664);
+    expect(computeOptimizerDigest("img@sha256:aa", root)).toBe(before);
+    expect(collectOptimizerSnapshot(root).files.get("optimizer/src/main.ts")?.mode).toBe(0o644);
+  });
+
   it("changes when the WORKER source changes (the sealed mutation strategy)", () => {
     const root = syntheticRepo();
     const before = computeOptimizerDigest("img@sha256:aa", root);

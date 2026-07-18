@@ -55,7 +55,7 @@ export const OPTIMIZER_SKIP: Record<string, true> = {
 /** One captured snapshot entry: the exact bytes and permission bits sealed by the digest. */
 export interface SnapshotFile {
   bytes: Buffer;
-  /** lstat mode & 0o777 at collection time. */
+  /** Canonical source mode: 0o755 when any executable bit is set, otherwise 0o644. */
   mode: number;
 }
 
@@ -123,6 +123,11 @@ function lstatGuard(abs: string, rel: string): Stats {
   return st;
 }
 
+/** Git tracks only executable-vs-non-executable; ambient umask write bits are not source identity. */
+function canonicalFileMode(mode: number): number {
+  return (mode & 0o111) === 0 ? 0o644 : 0o755;
+}
+
 function collectTree(absDir: string, relDir: string, into: Map<string, SnapshotFile>, skip: Record<string, true> | null): void {
   lstatGuard(absDir, relDir);
   for (const entry of readdirSync(absDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -131,14 +136,14 @@ function collectTree(absDir: string, relDir: string, into: Map<string, SnapshotF
     const rel = `${relDir}/${entry.name}`;
     const st = lstatGuard(abs, rel);
     if (st.isDirectory()) collectTree(abs, rel, into, skip);
-    else into.set(rel, { bytes: readFileSync(abs), mode: st.mode & 0o777 });
+    else into.set(rel, { bytes: readFileSync(abs), mode: canonicalFileMode(st.mode) });
   }
 }
 
 function collectFile(abs: string, rel: string, into: Map<string, SnapshotFile>): void {
   const st = lstatGuard(abs, rel);
   if (!st.isFile()) throw new UsageError(`optimizer snapshot input is not a regular file: ${rel} (${abs})`);
-  into.set(rel, { bytes: readFileSync(abs), mode: st.mode & 0o777 });
+  into.set(rel, { bytes: readFileSync(abs), mode: canonicalFileMode(st.mode) });
 }
 
 /** The optimizer package's installed zod directory. Resolve the workspace
@@ -312,7 +317,7 @@ function capturePiPackage(absDir: string, relDir: string, into: Map<string, Snap
     } else {
       const lower = entry.name.toLowerCase();
       if (PI_DENY_SUFFIXES.some((s) => lower.endsWith(s)) || PI_DENY_VERSIONED_SO.test(lower)) continue;
-      into.set(rel, { bytes: readFileSync(abs), mode: st.mode & 0o777 });
+      into.set(rel, { bytes: readFileSync(abs), mode: canonicalFileMode(st.mode) });
     }
   }
 }
