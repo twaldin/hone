@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { chmod, rm } from "node:fs/promises";
 import {
   createServer,
   type IncomingMessage,
@@ -1335,6 +1335,10 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     async listenUnix(socketPath: string): Promise<void> {
       await rm(socketPath, { force: true });
       await bound(() => server.listen(socketPath));
+      // The mutation sandbox runs under a different uid/gid. Reachability is
+      // bearer-authenticated, so the public proxy socket must be connectable
+      // across the bind mount; the token, not host ownership, grants access.
+      await chmod(socketPath, 0o666);
     },
     async listenTcp(port: number, host = "127.0.0.1"): Promise<number> {
       await bound(() => server.listen(port, host));
