@@ -192,6 +192,34 @@ function fakeProxy(port: number): ProxyHandle {
   };
 }
 
+describe("setupEgress Unix socket path", () => {
+  it("binds a short deterministic host path for deep meta-run directories and removes it on cleanup", async () => {
+    const runDir = join(makeRoot(), "nested", "campaign", "directory");
+    const runId = `run_meta_outer_${"a".repeat(64)}`;
+    let listenedPath: string | null = null;
+    const proxy: ProxyHandle = {
+      ...fakeProxy(0),
+      listenUnix: async (socketPath) => {
+        listenedPath = socketPath;
+        writeFileSync(socketPath, "");
+      },
+    };
+    const { run } = fakeRunner(() => undefined);
+
+    const egress = await setupEgress({ runId, runDir, env: { HONE_EGRESS: "socket" } }, proxy, "img:latest", run);
+    const boundPath = egress.proxySocketHostPath;
+    expect(boundPath).not.toBeNull();
+    if (boundPath === null) throw new Error("expected Unix proxy socket path");
+    expect(Buffer.byteLength(boundPath, "utf8")).toBeLessThan(108);
+    expect(boundPath.startsWith(runDir)).toBe(false);
+    expect(boundPath).toBe(listenedPath);
+    expect(existsSync(boundPath)).toBe(true);
+
+    await egress.cleanup();
+    expect(existsSync(boundPath)).toBe(false);
+  });
+});
+
 describe("setupEgress network create (finding 10 — idempotent after cleanup)", () => {
   const ctx = (runDir: string): { runId: string; runDir: string; env: NodeJS.ProcessEnv } => ({
     runId: "run_y",

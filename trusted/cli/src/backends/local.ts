@@ -49,9 +49,9 @@ import type { OptimizerChildLike, OptimizerRuntime, OptimizerSpawn, OptimizerTra
  * containerized optimizer behind the same seam the stub implements.
  *
  * Egress topology (mutation sandboxes -> LLM):
- *   linux   proxy binds runDir/proxy.sock; the broker mounts it at
- *           /run/hone/proxy.sock and the in-sandbox worker bridges
- *           loopback -> unix itself. Sandboxes stay --network none.
+ *   linux   proxy binds a deterministic short /tmp socket; the broker mounts
+ *           that exact path at /run/hone/proxy.sock and the in-sandbox worker
+ *           bridges loopback -> unix itself. Sandboxes stay --network none.
  *   darwin  VirtioFS-mounted host unix sockets cannot accept container
  *           connections, so the proxy binds 127.0.0.1:<random> TCP and a
  *           relay container (hone-task image, node one-liner) joins BOTH a
@@ -467,6 +467,8 @@ interface Egress {
   sandboxNetwork: SandboxNetworkMode;
   /** HONE_PROXY_BASE_URL for sandboxes; null on the unix-socket path (the worker bridges the mounted socket). */
   proxyBaseUrl: string | null;
+  /** Host Unix socket mounted at /run/hone/proxy.sock; null on the TCP relay path. */
+  proxySocketHostPath: string | null;
   /** Expose a host-loopback broker listener through a token-authenticated relay on the internal network. */
   exposeBroker(hostPort: number): Promise<string>;
   cleanup(): Promise<void>;
@@ -483,14 +485,25 @@ export async function setupEgress(
 ): Promise<Egress> {
   const mode = ctx.env["HONE_EGRESS"] ?? (process.platform === "darwin" ? "network" : "socket");
   if (mode === "socket") {
-    await proxy.listenUnix(join(ctx.runDir, "proxy.sock"));
+    // sockaddr_un is at most 108 bytes on Linux. Meta-run directories include
+    // a 64-hex campaign digest and cannot safely host the listener themselves.
+    // The deterministic short path is also crash-resumable: listenUnix removes
+    // a stale prior inode before binding, and cleanup removes the terminal one.
+    const proxySocketHostPath = join(
+      tmpdir(),
+      `hone-proxy-${createHash("sha256").update(ctx.runId).digest("hex").slice(0, 24)}.sock`,
+    );
+    await proxy.listenUnix(proxySocketHostPath);
     return {
       sandboxNetwork: { mode: "none" },
       proxyBaseUrl: null,
+      proxySocketHostPath,
       exposeBroker: async () => {
         throw new Error("broker TCP relay is unavailable on socket egress");
       },
-      cleanup: async () => {},
+      cleanup: async () => {
+        rmSync(proxySocketHostPath, { force: true });
+      },
     };
   }
   if (mode !== "network") throw new Error(`HONE_EGRESS must be "socket" or "network", got "${mode}"`);
@@ -581,6 +594,7 @@ export async function setupEgress(
     sandboxNetwork: { mode: "internal", network },
     proxyBaseUrl: `http://${relay}:${RELAY_PORT}/v1`,
     exposeBroker,
+    proxySocketHostPath: null,
     cleanup,
   };
 }
@@ -1327,6 +1341,7 @@ export function createBackend(
             HONE_PROXY_TOKEN: proxy.tokenFor("mutation"),
             HONE_MODEL_ID: route.model,
           },
+          ...(egress.proxySocketHostPath !== null ? { proxySocketHostPath: egress.proxySocketHostPath } : {}),
           episodeOrigin: ctx.replayed.nextEpisode,
           // M0's evaluator cache domain is shared across containers. One
           // probe candidate is therefore the whole campaign; M1 must provide
