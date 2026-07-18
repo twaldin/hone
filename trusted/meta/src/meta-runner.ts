@@ -15,9 +15,9 @@ import path from "node:path";
 import {
   BudgetEnvelope,
   EvaluationRecord,
-  MetaCampaignConfigV1,
+  MetaCampaignConfig as MetaCampaignConfigSchema,
   canonicalJson,
-  type MetaCampaignConfigV1 as MetaCampaignConfig,
+  type MetaCampaignConfig,
 } from "@hone/schema";
 import { z } from "zod";
 
@@ -35,7 +35,16 @@ const ResourceUsage = z.object({
 }).strict();
 
 export type MetaPhase = "search" | "confirmation" | "holdout";
-export type MetaArm = "candidate" | "seed" | "winner" | "broken-control" | "degraded-control";
+export type MetaArm =
+  | "candidate"
+  | "seed"
+  | "winner"
+  | "broken-control"
+  | "degraded-control"
+  | "controller-control-winner"
+  | "generation-0"
+  | "generation-1"
+  | "generation-2";
 
 export interface MetaArtifactIdentity {
   readonly sourceArtifact: Sha256Digest;
@@ -271,7 +280,17 @@ interface StoredFailure {
 
 const WorkIdentity = z.object({
   phase: z.enum(["search", "confirmation", "holdout"]),
-  arm: z.enum(["candidate", "seed", "winner", "broken-control", "degraded-control"]),
+  arm: z.enum([
+    "candidate",
+    "seed",
+    "winner",
+    "broken-control",
+    "degraded-control",
+    "controller-control-winner",
+    "generation-0",
+    "generation-1",
+    "generation-2",
+  ]),
   sourceArtifact: DIGEST,
   bundleDigest: DIGEST,
   capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
@@ -709,6 +728,20 @@ export interface MetaTerminalHoldoutArtifacts {
   winner: MetaArtifactIdentity;
 }
 
+export interface MetaRecursiveConfirmationArtifacts {
+  target: MetaArtifactIdentity;
+  controlControllerWinner: MetaArtifactIdentity;
+  generation2: MetaArtifactIdentity;
+  brokenControl: MetaTrustedControlArtifact;
+  degradedControl: MetaTrustedControlArtifact;
+}
+
+export interface MetaRecursiveTerminalArtifacts {
+  generation0: MetaArtifactIdentity;
+  generation1: MetaArtifactIdentity;
+  generation2: MetaArtifactIdentity;
+}
+
 export interface MetaPhaseResult {
   phase: "confirmation" | "holdout";
   measurements: readonly MetaMeasurement[];
@@ -750,7 +783,7 @@ export class MetaCampaignRunner {
   private readonly searchInFlight = new Map<string, Promise<ChildResult[]>>();
 
   constructor(private readonly opts: MetaCampaignRunnerOptions) {
-    this.config = MetaCampaignConfigV1.parse(opts.config);
+    this.config = MetaCampaignConfigSchema.parse(opts.config);
     if (opts.journal.configHash !== metaCampaignConfigHash(this.config)) {
       throw new Error(`meta journal config hash ${opts.journal.configHash} does not match campaign`);
     }
@@ -904,6 +937,77 @@ export class MetaCampaignRunner {
     const arms: readonly TrustedPhaseArm[] = [
       { arm: "seed", artifact: artifacts.seed, gateRequest: { mode: "public-mutable", sourceArtifact: artifacts.seed.sourceArtifact } },
       { arm: "winner", artifact: artifacts.winner, gateRequest: { mode: "public-mutable", sourceArtifact: artifacts.winner.sourceArtifact } },
+    ];
+    return {
+      phase: "holdout",
+      measurements: await this.runTrustedPhase("holdout", this.config.holdout, this.config.counts.holdoutReplicates, arms),
+    };
+  }
+
+  async runRecursiveConfirmation(artifacts: MetaRecursiveConfirmationArtifacts): Promise<MetaPhaseResult> {
+    if (this.config.version !== 2 || this.config.generation.stage !== "B") {
+      throw new Error("recursive confirmation requires a stage-B M2 campaign");
+    }
+    this.assertRegisteredPair("recursive confirmation target", artifacts.target, {
+      sourceArtifact: this.config.seedOptimizer.sourceArtifact as Sha256Digest,
+      bundleDigest: this.config.seedOptimizer.bundleDigest as Sha256Digest,
+    });
+    this.assertRegisteredPair("recursive confirmation broken control", artifacts.brokenControl, {
+      sourceArtifact: this.config.controls.brokenSourceArtifact as Sha256Digest,
+      bundleDigest: this.config.controls.brokenBundleDigest as Sha256Digest,
+    });
+    this.assertRegisteredPair("recursive confirmation degraded control", artifacts.degradedControl, {
+      sourceArtifact: this.config.controls.degradedSourceArtifact as Sha256Digest,
+      bundleDigest: this.config.controls.degradedBundleDigest as Sha256Digest,
+    });
+    this.validateControlReceipt("broken", artifacts.brokenControl);
+    this.validateControlReceipt("degraded", artifacts.degradedControl);
+    const arms: readonly TrustedPhaseArm[] = [
+      { arm: "seed", artifact: artifacts.target, gateRequest: { mode: "public-mutable", sourceArtifact: artifacts.target.sourceArtifact } },
+      {
+        arm: "controller-control-winner",
+        artifact: artifacts.controlControllerWinner,
+        gateRequest: { mode: "public-mutable", sourceArtifact: artifacts.controlControllerWinner.sourceArtifact },
+      },
+      { arm: "generation-2", artifact: artifacts.generation2, gateRequest: { mode: "public-mutable", sourceArtifact: artifacts.generation2.sourceArtifact } },
+      {
+        arm: "broken-control",
+        artifact: artifacts.brokenControl,
+        gateRequest: {
+          mode: "trusted-control",
+          sourceArtifact: artifacts.brokenControl.sourceArtifact,
+          bundleDigest: artifacts.brokenControl.bundleDigest,
+          transformationReceipt: artifacts.brokenControl.transformationReceipt,
+        },
+      },
+      {
+        arm: "degraded-control",
+        artifact: artifacts.degradedControl,
+        gateRequest: {
+          mode: "trusted-control",
+          sourceArtifact: artifacts.degradedControl.sourceArtifact,
+          bundleDigest: artifacts.degradedControl.bundleDigest,
+          transformationReceipt: artifacts.degradedControl.transformationReceipt,
+        },
+      },
+    ];
+    return {
+      phase: "confirmation",
+      measurements: await this.runTrustedPhase("confirmation", this.config.train, this.config.counts.confirmationReplicates, arms),
+    };
+  }
+
+  async runRecursiveTerminal(artifacts: MetaRecursiveTerminalArtifacts): Promise<MetaPhaseResult> {
+    if (this.config.version !== 2) throw new Error("recursive terminal requires an M2 campaign");
+    this.assertRegisteredPair("recursive terminal G1", artifacts.generation1, {
+      sourceArtifact: this.config.seedOptimizer.sourceArtifact as Sha256Digest,
+      bundleDigest: this.config.seedOptimizer.bundleDigest as Sha256Digest,
+    });
+    this.opts.journal.latchTerminalHoldout();
+    const arms: readonly TrustedPhaseArm[] = [
+      { arm: "generation-0", artifact: artifacts.generation0, gateRequest: { mode: "public-mutable", sourceArtifact: artifacts.generation0.sourceArtifact } },
+      { arm: "generation-1", artifact: artifacts.generation1, gateRequest: { mode: "public-mutable", sourceArtifact: artifacts.generation1.sourceArtifact } },
+      { arm: "generation-2", artifact: artifacts.generation2, gateRequest: { mode: "public-mutable", sourceArtifact: artifacts.generation2.sourceArtifact } },
     ];
     return {
       phase: "holdout",
@@ -1378,7 +1482,7 @@ export function trustedPhaseMeasurementEpoch(
 }
 
 export function metaCampaignConfigHash(configInput: MetaCampaignConfig): Sha256Digest {
-  const config = MetaCampaignConfigV1.parse(configInput);
+  const config = MetaCampaignConfigSchema.parse(configInput);
   return sha256(canonicalJson(config));
 }
 

@@ -13,10 +13,10 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import {
-  MetaCampaignConfigV1,
+  MetaCampaignConfig as MetaCampaignConfigSchema,
   canonicalJson,
   type BudgetEnvelope,
-  type MetaCampaignConfigV1 as MetaCampaignConfig,
+  type MetaCampaignConfig,
 } from "@hone/schema";
 import { z } from "zod";
 
@@ -42,7 +42,17 @@ const Usage = z.object({
 
 export const MetaPhaseV1 = z.enum(["search", "confirmation", "holdout"]);
 export type MetaPhaseV1 = z.infer<typeof MetaPhaseV1>;
-export const MetaArmV1 = z.enum(["candidate", "seed", "winner", "broken-control", "degraded-control"]);
+export const MetaArmV1 = z.enum([
+  "candidate",
+  "seed",
+  "winner",
+  "broken-control",
+  "degraded-control",
+  "controller-control-winner",
+  "generation-0",
+  "generation-1",
+  "generation-2",
+]);
 export type MetaArmV1 = z.infer<typeof MetaArmV1>;
 
 export const MetaWorkIdentityV1 = z.object({
@@ -221,7 +231,7 @@ export const metaJournalIo = {
 };
 
 export function metaCampaignConfigHash(config: MetaCampaignConfig): MetaSha256DigestV1 {
-  const parsed = MetaCampaignConfigV1.parse(config);
+  const parsed = MetaCampaignConfigSchema.parse(config);
   return `sha256:${createHash("sha256").update(canonicalJson(parsed)).digest("hex")}`;
 }
 
@@ -338,7 +348,7 @@ export class MetaJournalV1 {
   }
 
   static open(path: string, configInput: MetaCampaignConfig): MetaJournalV1 {
-    const config = MetaCampaignConfigV1.parse(configInput);
+    const config = MetaCampaignConfigSchema.parse(configInput);
     const configHash = metaCampaignConfigHash(config);
     try {
       lstatSync(path);

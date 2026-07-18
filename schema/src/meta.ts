@@ -375,3 +375,147 @@ export const MetaCampaignConfigV1 = MetaCampaignConfigShape.superRefine(
   },
 );
 export type MetaCampaignConfigV1 = z.infer<typeof MetaCampaignConfigV1>;
+
+/** Contract 8 — one frozen trajectory cell in the recursive M2 campaign. */
+export const META_CAMPAIGN_CONFIG_V2 = 2;
+export const M2_PANEL_CAPSULE_COUNT = 8;
+export const M2_TERMINAL_CAPSULE_COUNT = 12;
+export const M2_CANDIDATE_COUNT = 12;
+export const M2_CANDIDATE_ATTEMPTS_MAX = 24;
+export const M2_INNER_EPISODES_MAX = 4;
+export const M2_ALLOWED_CLAIM = "recursive-transfer-frozen-corpus";
+
+const RecursiveOptimizerIdentity = z.object({
+  sourceCommit: GIT_COMMIT,
+  sourceArtifact: SHA256,
+  bundleDigest: SHA256,
+}).strict();
+
+export const RecursiveGenerationCell = z.union([
+  z.object({
+    stage: z.literal("A"),
+    panel: z.literal("A"),
+    targetGeneration: z.literal(0),
+    controllerGeneration: z.literal(0),
+    outerReplicate: z.literal(0),
+  }).strict(),
+  z.object({
+    stage: z.literal("B"),
+    panel: z.literal("B"),
+    targetGeneration: z.literal(1),
+    controllerGeneration: z.union([z.literal(0), z.literal(1)]),
+    outerReplicate: z.number().int().min(0).max(2),
+  }).strict(),
+]);
+export type RecursiveGenerationCell = z.infer<typeof RecursiveGenerationCell>;
+
+export const RecursiveCampaignCounts = z.object({
+  candidates: z.literal(M2_CANDIDATE_COUNT),
+  candidateAttemptsMax: z.literal(M2_CANDIDATE_ATTEMPTS_MAX),
+  innerEpisodesMax: z.literal(M2_INNER_EPISODES_MAX),
+  searchReplicates: z.literal(1),
+  confirmationReplicates: z.literal(3),
+  holdoutReplicates: z.literal(3),
+  childConcurrency: z.number().int().positive(),
+}).strict();
+export type RecursiveCampaignCounts = z.infer<typeof RecursiveCampaignCounts>;
+
+const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
+  version: z.literal(META_CAMPAIGN_CONFIG_V2),
+  seedOptimizer: RecursiveOptimizerIdentity,
+  controllerOptimizer: RecursiveOptimizerIdentity,
+  generation: RecursiveGenerationCell,
+  train: z.array(MetaCapsuleEntry),
+  holdout: z.array(MetaCapsuleEntry),
+  counts: RecursiveCampaignCounts,
+  allowedClaim: z.literal(M2_ALLOWED_CLAIM),
+}).strict();
+
+export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, ctx) => {
+  if (cfg.train.length !== M2_PANEL_CAPSULE_COUNT) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["train"],
+      message: `M2 requires exactly ${M2_PANEL_CAPSULE_COUNT} panel capsules, got ${cfg.train.length}`,
+    });
+  }
+  if (cfg.holdout.length !== M2_TERMINAL_CAPSULE_COUNT) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["holdout"],
+      message: `M2 requires exactly ${M2_TERMINAL_CAPSULE_COUNT} terminal capsules, got ${cfg.holdout.length}`,
+    });
+  }
+
+  const seenDigests = new Set<string>();
+  const seenIds = new Set<string>();
+  for (const [partition, entries] of [["train", cfg.train], ["holdout", cfg.holdout]] as const) {
+    entries.forEach((entry, index) => {
+      if (seenDigests.has(entry.capsuleDigest)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [partition, index, "capsuleDigest"], message: "capsule digest is duplicated across the M2 corpus" });
+      }
+      if (seenIds.has(entry.capsuleId)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [partition, index, "capsuleId"], message: "capsule id is duplicated across the M2 corpus" });
+      }
+      seenDigests.add(entry.capsuleDigest);
+      seenIds.add(entry.capsuleId);
+      if (Math.abs(entry.scale - (entry.qReference - entry.qBase)) > 1e-9 * Math.max(1, Math.abs(entry.scale))) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [partition, index, "scale"], message: "scale must equal qReference - qBase" });
+      }
+    });
+  }
+
+  const protectedNorm = cfg.protectedPaths.map(normalizePath);
+  cfg.mutablePaths.forEach((mutable, index) => {
+    const hit = protectedNorm.find((candidate) => pathsOverlap(normalizePath(mutable), candidate));
+    if (hit !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["mutablePaths", index], message: `mutable path "${mutable}" overlaps protected path "${hit}"` });
+    }
+  });
+  for (const role of ["outerMutation", "innerMutation"] as const) {
+    if (cfg.routing[role] !== cfg.modelObservation.requestedRoute) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["routing", role], message: "routing must match the frozen model observation route" });
+    }
+  }
+
+  const target = canonicalIdentity(cfg.seedOptimizer);
+  const controller = canonicalIdentity(cfg.controllerOptimizer);
+  if (cfg.generation.stage === "A" && controller !== target) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["controllerOptimizer"], message: "stage A controller and target must both be exact G0" });
+  }
+  if (cfg.generation.stage === "B" && cfg.generation.controllerGeneration === 1 && controller !== target) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["controllerOptimizer"], message: "the stage-B G1 controller must equal the exact G1 target" });
+  }
+  if (cfg.generation.stage === "B" && cfg.generation.controllerGeneration === 0 && controller === target) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["controllerOptimizer"], message: "the stage-B G0 control controller must differ from the G1 target" });
+  }
+  for (const key of ["brokenSourceArtifact", "degradedSourceArtifact"] as const) {
+    if (cfg.controls[key] === cfg.seedOptimizer.sourceArtifact) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["controls", key], message: "a control source artifact must differ from the target optimizer" });
+    }
+  }
+
+  const confirmationArms = cfg.generation.stage === "A" ? 4 : 5;
+  const childRuns =
+    cfg.counts.candidates * cfg.train.length +
+    confirmationArms * cfg.train.length * cfg.counts.confirmationReplicates +
+    3 * cfg.holdout.length * cfg.counts.holdoutReplicates;
+  for (const dimension of BUDGET_DIMENSIONS) {
+    const required = cfg.budgets.child[dimension] * childRuns + cfg.budgets.outer[dimension];
+    if (cfg.budgets.campaign[dimension] < required) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["budgets", "campaign", dimension],
+        message: `M2 campaign ${dimension} ${cfg.budgets.campaign[dimension]} under-reserves ${required}`,
+      });
+    }
+  }
+});
+export type MetaCampaignConfigV2 = z.infer<typeof MetaCampaignConfigV2>;
+
+export const MetaCampaignConfig = z.union([MetaCampaignConfigV1, MetaCampaignConfigV2]);
+export type MetaCampaignConfig = z.infer<typeof MetaCampaignConfig>;
+
+function canonicalIdentity(identity: z.infer<typeof RecursiveOptimizerIdentity>): string {
+  return `${identity.sourceCommit}\n${identity.sourceArtifact}\n${identity.bundleDigest}`;
+}
