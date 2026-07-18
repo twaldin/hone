@@ -224,31 +224,28 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       }
 
       if (exec.exitCode !== 0) {
-        return {
-          artifact,
-          result: null,
-          stdoutHash,
-          failure: {
-            reason: `mutation session failed (exit ${exec.exitCode}, episode ${episode})`,
-            exitCode: exec.exitCode,
-            stdoutTail: tail(exec.stdout),
-            stderrTail: tail(exec.stderr),
-          },
+        const failure: FailureEvidence = {
+          reason: `mutation session failed (exit ${exec.exitCode}, episode ${episode})`,
+          exitCode: exec.exitCode,
+          stdoutTail: tail(exec.stdout),
+          stderrTail: tail(exec.stderr),
         };
+        // stderr is the optimizer's trusted-side diagnostic channel; stdout
+        // remains schema-only RunEvent NDJSON. Preserve worker evidence here
+        // so a failed remote campaign is diagnosable after sandboxes are reaped.
+        console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
+        return { artifact, result: null, stdoutHash, failure };
       }
       const result = parseMutateStdout(exec.stdout);
       if (result === null) {
-        return {
-          artifact,
-          result: null,
-          stdoutHash,
-          failure: {
-            reason: "mutation session produced no parsable result",
-            exitCode: exec.exitCode,
-            stdoutTail: tail(exec.stdout),
-            stderrTail: tail(exec.stderr),
-          },
+        const failure: FailureEvidence = {
+          reason: "mutation session produced no parsable result",
+          exitCode: exec.exitCode,
+          stdoutTail: tail(exec.stdout),
+          stderrTail: tail(exec.stderr),
         };
+        console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
+        return { artifact, result: null, stdoutHash, failure };
       }
       return { artifact, result, stdoutHash, failure: null };
     };
