@@ -1,6 +1,21 @@
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { CapsuleManifest, DiagnosticOrderingReport, capsuleDigest, deriveCapsuleId, validateDiagnosticOrdering } from "@hone/schema";
 import { UsageError } from "./args.js";
 import { loadCapsule } from "./capsule.js";
@@ -28,6 +43,8 @@ import { CONTRACT_FILE } from "./runs.js";
 
 /** Validated-manifest snapshot written into each run dir at admission. */
 export const CAPSULE_SNAPSHOT_FILE = "capsule-manifest.json";
+/** Run-local, immutable copy of every manifest-pinned evaluator asset. */
+export const FROZEN_CAPSULE_ASSETS_DIR = "capsule-assets";
 
 
 export interface AdmittedCapsule {
@@ -52,6 +69,147 @@ function insideCapsule(capsuleDir: string, rel: string): string {
     refuse(capsuleDir, `path escapes the capsule root: ${rel}`);
   }
   return abs;
+}
+
+function sha256Bytes(bytes: Buffer): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function readRegularFileNoFollow(root: string, rel: string, why: string): Buffer {
+  const abs = insideCapsule(root, rel);
+  const realRoot = realpathSync.native(root);
+  let canonical: string;
+  try {
+    canonical = realpathSync.native(abs);
+  } catch (error) {
+    refuse(root, `${why} missing on disk: ${rel} (${error instanceof Error ? error.message : String(error)})`);
+  }
+  if (canonical !== realRoot && !canonical.startsWith(`${realRoot}${sep}`)) {
+    refuse(root, `${why} escapes the admitted root after resolution: ${rel}`);
+  }
+  const lst = lstatSync(abs);
+  if (!lst.isFile()) refuse(root, `${why} is not a regular file: ${rel}`);
+  const fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile()) refuse(root, `${why} is not a regular file: ${rel}`);
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd);
+    if (
+      before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs
+      || bytes.length !== after.size
+    ) {
+      refuse(root, `${why} changed while it was being frozen: ${rel}`);
+    }
+    return bytes;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export function frozenCapsuleAssetsRoot(runDir: string): string {
+  return join(runDir, FROZEN_CAPSULE_ASSETS_DIR);
+}
+
+function expectedAssetDirectories(manifest: CapsuleManifest): Set<string> {
+  const directories = new Set<string>([""]);
+  for (const rel of Object.keys(manifest.contentHashes)) {
+    let parent = dirname(rel);
+    while (parent !== "." && !directories.has(parent)) {
+      directories.add(parent);
+      parent = dirname(parent);
+    }
+  }
+  return directories;
+}
+
+function collectFrozenEntries(root: string, rel: string, files: Set<string>, directories: Set<string>): void {
+  const abs = rel === "" ? root : join(root, rel);
+  const st = lstatSync(abs);
+  if (st.isSymbolicLink()) refuse(root, `frozen asset snapshot contains a symlink: ${rel || "."}`);
+  if (st.isFile()) {
+    files.add(rel);
+    return;
+  }
+  if (!st.isDirectory()) refuse(root, `frozen asset snapshot contains a special file: ${rel || "."}`);
+  directories.add(rel);
+  for (const name of readdirSync(abs)) {
+    collectFrozenEntries(root, rel === "" ? name : `${rel}/${name}`, files, directories);
+  }
+}
+
+function makeOwnerWritableTree(root: string): void {
+  if (!existsSync(root)) return;
+  const st = lstatSync(root);
+  if (!st.isDirectory()) {
+    chmodSync(root, 0o600);
+    return;
+  }
+  chmodSync(root, 0o700);
+  for (const name of readdirSync(root)) makeOwnerWritableTree(join(root, name));
+}
+
+/**
+ * Copy the admitted asset bytes into the run before any optimizer starts.
+ * Broker evaluation uses only this owner-readable tree, never the live
+ * capsule source, so mid-run source drift cannot change a measurement.
+ */
+export function freezeCapsuleAssets(runDir: string, capsuleDir: string, manifest: CapsuleManifest): string {
+  const destination = frozenCapsuleAssetsRoot(runDir);
+  if (existsSync(destination)) throw new UsageError(`run already has ${FROZEN_CAPSULE_ASSETS_DIR}; refusing to replace its frozen assets`);
+  const temporary = join(runDir, `.${FROZEN_CAPSULE_ASSETS_DIR}-${randomUUID()}`);
+  mkdirSync(temporary, { recursive: false, mode: 0o700 });
+  try {
+    for (const [rel, expected] of Object.entries(manifest.contentHashes)) {
+      const bytes = readRegularFileNoFollow(capsuleDir, rel, "asset");
+      const actual = sha256Bytes(bytes);
+      if (actual !== expected) refuse(capsuleDir, `asset drift while freezing: ${rel} hashes ${actual}, manifest pins ${expected}`);
+      const target = insideCapsule(temporary, rel);
+      mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+      writeFileSync(target, bytes, { flag: "wx", mode: 0o600 });
+      chmodSync(target, 0o400);
+    }
+    const directories = [...expectedAssetDirectories(manifest)]
+      .filter((rel) => rel !== "")
+      .sort((a, b) => b.length - a.length);
+    for (const rel of directories) chmodSync(join(temporary, rel), 0o700);
+    renameSync(temporary, destination);
+    chmodSync(destination, 0o700);
+    return destination;
+  } catch (error) {
+    makeOwnerWritableTree(temporary);
+    rmSync(temporary, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/** Authenticate the exact frozen file set and every pinned byte on resume. */
+export function authenticateFrozenCapsuleAssets(runDir: string, manifest: CapsuleManifest): string {
+  const root = frozenCapsuleAssetsRoot(runDir);
+  if (!existsSync(root)) {
+    throw new UsageError(`run is missing ${FROZEN_CAPSULE_ASSETS_DIR} — cannot prove frozen evaluator assets; refusing to resume`);
+  }
+  const files = new Set<string>();
+  const directories = new Set<string>();
+  collectFrozenEntries(root, "", files, directories);
+  const expectedFiles = new Set(Object.keys(manifest.contentHashes));
+  const expectedDirectories = expectedAssetDirectories(manifest);
+  for (const rel of files) {
+    if (!expectedFiles.has(rel)) refuse(root, `frozen asset snapshot contains an unregistered file: ${rel}`);
+  }
+  for (const rel of expectedFiles) {
+    if (!files.has(rel)) refuse(root, `frozen asset snapshot is missing: ${rel}`);
+    const actual = sha256Bytes(readRegularFileNoFollow(root, rel, "frozen asset"));
+    const expected = manifest.contentHashes[rel];
+    if (actual !== expected) refuse(root, `frozen asset drift: ${rel} hashes ${actual}, manifest pins ${expected}`);
+  }
+  for (const rel of directories) {
+    if (!expectedDirectories.has(rel)) refuse(root, `frozen asset snapshot contains an unregistered directory: ${rel}`);
+  }
+  return root;
 }
 
 function checkAssetHashes(capsuleDir: string, manifest: CapsuleManifest): void {

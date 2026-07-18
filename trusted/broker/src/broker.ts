@@ -36,7 +36,7 @@ import {
   type ArtifactRef,
 } from "@hone/schema";
 import { HoldoutBudgetExceededError, HoldoutLedger } from "@hone/scoring";
-import { MAX_ARTIFACT_BYTES, canonicalizeWorkspaceTar, diffProtectedPaths, dirSizeBytes, unpackArtifact } from "./artifact.js";
+import { MAX_ARTIFACT_BYTES, canonicalizeWorkspaceTar, diffProtectedPaths, dirSizeBytes, findProtectedPaths, unpackArtifact } from "./artifact.js";
 import { CasStore, durability } from "./cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "./command.js";
 import { deferred } from "./deferred.js";
@@ -78,6 +78,12 @@ export interface BrokerConfig {
   capsuleRootDir: string;
   /** CAS hash of the trusted-measured baseline artifact. */
   baselineArtifactHash: string;
+  /**
+   * Full frozen baseline used only as the trusted evaluator's code mount.
+   * When present, baselineArtifactHash is the protected-path-free mutation
+   * lineage root and this hash is never exposed through broker RPC.
+   */
+  evaluatorBaselineArtifactHash?: string | undefined;
   /** Full canonical capsule digest ("sha256:<64 hex>") — pins the frozen capsule in the eval memo key. */
   capsuleDigest: string;
   /** Digest of the optimizer artifact driving this run ("sha256:<64 hex>") — also memo-key material. */
@@ -2586,13 +2592,23 @@ export class Broker {
     const workspaceDir = await this.ensureUnpacked(params.artifact.hash);
     // The evaluator ALWAYS runs from the frozen baseline tree — candidate
     // code cannot substitute its own copy of the evaluator (scoring attack).
-    const baselineDir = await this.ensureUnpacked(this.config.baselineArtifactHash);
-    if (params.artifact.hash !== this.config.baselineArtifactHash && this.manifest.protectedPaths.length > 0) {
-      const violations = await diffProtectedPaths(baselineDir, workspaceDir, this.manifest.protectedPaths);
-      if (violations.length > 0) {
-        throw new BrokerError("PROTECTED_PATH_VIOLATION", `protected paths modified: ${violations.join(", ")}`, {
-          paths: violations,
-        });
+    const evaluatorBaselineHash = this.config.evaluatorBaselineArtifactHash ?? this.config.baselineArtifactHash;
+    const baselineDir = await this.ensureUnpacked(evaluatorBaselineHash);
+    if (this.manifest.protectedPaths.length > 0) {
+      if (this.config.evaluatorBaselineArtifactHash !== undefined) {
+        const violations = await findProtectedPaths(workspaceDir, this.manifest.protectedPaths);
+        if (violations.length > 0) {
+          throw new BrokerError("PROTECTED_PATH_VIOLATION", `protected paths reintroduced into hidden-evaluator workspace: ${violations.join(", ")}`, {
+            paths: violations,
+          });
+        }
+      } else if (params.artifact.hash !== this.config.baselineArtifactHash) {
+        const violations = await diffProtectedPaths(baselineDir, workspaceDir, this.manifest.protectedPaths);
+        if (violations.length > 0) {
+          throw new BrokerError("PROTECTED_PATH_VIOLATION", `protected paths modified: ${violations.join(", ")}`, {
+            paths: violations,
+          });
+        }
       }
     }
 

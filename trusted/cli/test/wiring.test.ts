@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CapsuleManifest, DEFAULT_PROMOTION_RULE, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
 import type { CmdResult, RunCommand } from "@hone/broker";
+import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend } from "../src/backends/local.js";
 import { deliver } from "../src/deliver.js";
 import { appendEvent, replayRun } from "../src/eventlog.js";
@@ -116,6 +117,7 @@ describe("image wiring: manifest.image is THE image, no environment override", (
     const commit = gitIn(baseline, "rev-parse", "HEAD");
     const capsuleDir = makeCapsule(root, { baseline: { kind: "git", commit } });
     const manifest = CapsuleManifest.parse(JSON.parse(readFileSync(join(capsuleDir, "manifest.json"), "utf8")));
+    freezeCapsuleAssets(runDir, capsuleDir, manifest);
     appendEvent(runDir, { runId, at: at(), type: "run.started", capsuleId: manifest.id, contractHash: fakeHash("c"), optimizerDigest: fakeHash("0") });
 
     const argvs: (readonly string[])[] = [];

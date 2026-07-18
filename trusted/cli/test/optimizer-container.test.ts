@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CapsuleManifest, RunConfig, capsuleDigest } from "@hone/schema";
 import { runCommand } from "@hone/broker";
 import type { CmdResult, RunCommand } from "@hone/broker";
+import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend, runOptimizer } from "../src/backends/local.js";
 import {
   optimizerBuildArgs,
@@ -613,6 +614,7 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
     const commit = gitIn(baseline, "rev-parse", "HEAD");
     const capsuleDir = makeCapsule(root, { baseline: { kind: "git", commit } });
     const manifest = CapsuleManifest.parse(JSON.parse(readFileSync(join(capsuleDir, "manifest.json"), "utf8")));
+    freezeCapsuleAssets(runDir, capsuleDir, manifest);
     const digest = capsuleDigest(manifest);
     writeEvents(root, runId, [
       { runId, at: new Date().toISOString(), type: "run.started", capsuleId: manifest.id, contractHash: fakeHash("c"), optimizerDigest: computeOptimizerDigest(FIX_IMAGE) },

@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DiagnosticOrderingReport, RunConfig, capsuleDigest } from "@hone/schema";
-import { writeCapsuleSnapshot } from "../src/admission.js";
+import { freezeCapsuleAssets, writeCapsuleSnapshot } from "../src/admission.js";
 import { contractHash, renderContract } from "../src/contract.js";
 import { readEvents, replayRun } from "../src/eventlog.js";
 import { loadRunConfigFile, writeRunConfigFile } from "../src/runs.js";
@@ -65,6 +65,7 @@ function sealedRun(root: string, runId: string, configOverrides: Record<string, 
   );
   writeFileSync(join(runDir, "contract.md"), contract);
   writeCapsuleSnapshot(runDir, manifest);
+  freezeCapsuleAssets(runDir, join(root, "capsule"), manifest);
   writeRunConfigFile(runDir, config);
   // The trusted-runtime pin is a resume prerequisite (drift refuses first).
   writeFileSync(join(runDir, RUNTIME_PIN_FILE), `${trustedRuntimeDigest()}\n`);

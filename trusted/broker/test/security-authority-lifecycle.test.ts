@@ -171,6 +171,7 @@ async function boot(
     holdoutBudget?: number;
     capsuleDigest?: string;
     optimizerDigest?: string;
+    evaluatorBaselineArtifactHash?: string;
     holdoutLedgerPath?: string;
     maxActiveSandboxes?: number;
     scratchQuotaBytes?: number;
@@ -305,6 +306,9 @@ async function boot(
     baselineArtifactHash: baselineHash,
     capsuleDigest: opts.capsuleDigest ?? TEST_CAPSULE_DIGEST,
     optimizerDigest: opts.optimizerDigest ?? TEST_OPTIMIZER_DIGEST,
+    ...(opts.evaluatorBaselineArtifactHash === undefined
+      ? {}
+      : { evaluatorBaselineArtifactHash: opts.evaluatorBaselineArtifactHash }),
     holdoutLedgerPath: opts.holdoutLedgerPath ?? path.join(runDir, "holdout-ledger.ndjson"),
     image: TEST_IMAGE,
     runDir,
@@ -1445,6 +1449,29 @@ describe("evaluator containment", () => {
     expect(argv[tmpfsIdx - 1]).toBe("--tmpfs");
     expect(argv.every((a) => !a.includes("holdout"))).toBe(true);
     expect(argv.every((a) => !a.includes("protected"))).toBe(true);
+  });
+
+  it("terminal holdout mounts the full evaluator artifact separately and rejects protected-path reintroduction", async () => {
+    const manifest = makeManifest({ protectedPaths: ["secret.py"] });
+    const b = await boot({ manifest, evaluatorBaselineArtifactHash: candidate2Hash });
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    const evalArgv = b.log.find((a) => a[1] === "run" && a.includes("--rm")) ?? [];
+    const evaluatorMount = evalArgv.find((a) => a.endsWith(":/trusted/baseline:ro")) ?? "";
+    const workspaceMount = evalArgv.find((a) => a.endsWith(":/workspace:ro")) ?? "";
+    expect(evaluatorMount).toContain(candidate2Hash.replace(":", "-"));
+    expect(workspaceMount).toContain(baselineHash.replace(":", "-"));
+
+    const leakedDir = path.join(tmpBase, `leaked-${randomBytes(4).toString("hex")}`);
+    await mkdir(leakedDir, { recursive: true });
+    await writeFile(path.join(leakedDir, "answer.txt"), "4");
+    await writeFile(path.join(leakedDir, "secret.py"), "trusted evaluator source");
+    const leakedHash = await packDirAsArtifact(leakedDir, b.broker.cas);
+    const leakedTar = await b.broker.cas.readBuffer(leakedHash);
+    const leakedCandidate = await saveCandidate(b, leakedTar);
+    await expect(
+      b.broker.evaluate({ artifact: { hash: leakedCandidate }, assetGroupId: "train", seed: 1 }, CLIENT),
+    ).rejects.toThrow(/protected paths reintroduced/);
   });
 
   it("pauses every exact run-labeled container around the evaluator and releases them only after reap", async () => {

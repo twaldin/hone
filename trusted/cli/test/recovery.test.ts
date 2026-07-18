@@ -8,7 +8,7 @@ import type { BudgetState } from "@hone/schema";
 import { runCommand } from "@hone/broker";
 import type { CallContext, CmdResult, RunCommand } from "@hone/broker";
 import type { ProxyHandle } from "@hone/proxy";
-import { writeCapsuleSnapshot } from "../src/admission.js";
+import { freezeCapsuleAssets, writeCapsuleSnapshot } from "../src/admission.js";
 import { contractHash, renderContract } from "../src/contract.js";
 import { reconcileBrokerAuthority, setupEgress, sweepStaleRunResources } from "../src/backends/local.js";
 import type { AuthorityRecoverySource } from "../src/backends/local.js";
@@ -502,6 +502,7 @@ function resumableFixture(root: string, runId: string): string {
   writeFileSync(join(runDir, "contract.md"), contract);
   // Frozen-admission resume gate: the run dir must carry the capsule snapshot.
   writeCapsuleSnapshot(runDir, manifest);
+  freezeCapsuleAssets(runDir, join(root, "capsule"), manifest);
   writeRunConfigFile(runDir, config);
   // The trusted-runtime pin is a resume prerequisite (drift refuses first).
   writeFileSync(join(runDir, RUNTIME_PIN_FILE), `${trustedRuntimeDigest()}\n`);

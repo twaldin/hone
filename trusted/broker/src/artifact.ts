@@ -512,6 +512,16 @@ export async function diffProtectedPaths(
   return [...violations].sort();
 }
 
+/** Returns protected namespaces present in one tree (used by hidden-evaluator holdout baselines). */
+export async function findProtectedPaths(
+  root: string,
+  protectedGlobs: readonly string[],
+): Promise<string[]> {
+  if (protectedGlobs.length === 0) return [];
+  const tree = await walkTree(root);
+  return [...tree.keys()].filter((rel) => matchesProtected(rel, protectedGlobs)).sort();
+}
+
 /** Recursive on-disk size in bytes — scratch quota accounting. */
 export async function dirSizeBytes(root: string): Promise<number> {
   let total = 0;

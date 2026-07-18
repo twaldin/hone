@@ -1,8 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CapsuleManifest, RunConfig, capsuleDigest } from "@hone/schema";
 import type { CmdResult, RunCommand } from "@hone/broker";
+import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend } from "../src/backends/local.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
 import type { RunnerBackendContext } from "../src/types.js";
@@ -58,6 +59,7 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
   const commit = gitIn(baseline, "rev-parse", "HEAD");
   const capsuleDir = makeCapsule(root, { baseline: { kind: "git", commit } });
   const manifest = CapsuleManifest.parse(JSON.parse(readFileSync(join(capsuleDir, "manifest.json"), "utf8")));
+  if (!existsSync(join(runDir, "capsule-assets"))) freezeCapsuleAssets(runDir, capsuleDir, manifest);
   appendEvent(runDir, { runId: RUN_ID, at: at(), type: "run.started", capsuleId: manifest.id, contractHash: fakeHash("c"), optimizerDigest: fakeHash("0") });
   const abort = new AbortController();
   abort.abort(new Error("stop requested")); // setup-only: the reconcile must land BEFORE the abort short-circuit
