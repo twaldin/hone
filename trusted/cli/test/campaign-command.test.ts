@@ -3,7 +3,11 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { CasStore, packDirAsArtifact } from "@hone/broker";
 import { MetaCampaignConfigV1 } from "@hone/schema";
-import { assertMutablePathsResolve, createSyntheticCapsule } from "../src/commands/hone.js";
+import {
+  assertMutablePathsResolve,
+  assertOptimizerProtectedPathsResolve,
+  createSyntheticCapsule,
+} from "../src/commands/hone.js";
 import { hone, makeRoot } from "./helpers.js";
 
 describe("hone hone campaign command", () => {
@@ -25,6 +29,19 @@ describe("hone hone campaign command", () => {
       .toThrow("mutable paths do not select a sealed optimizer file: optimizer/assets/prompts");
     expect(() => assertMutablePathsResolve(["optimizer/assets"], snapshot)).not.toThrow();
     expect(() => assertMutablePathsResolve(["optimizer/assets/prompts.ts"], snapshot)).not.toThrow();
+  });
+
+  test("refuses stale optimizer-local protected paths", () => {
+    const snapshot = {
+      files: new Map([
+        ["optimizer/src/loop.ts", { bytes: Buffer.from("loop"), mode: 0o644 }],
+        ["optimizer/worker/mutate.ts", { bytes: Buffer.from("worker"), mode: 0o644 }],
+      ]),
+    };
+    expect(() => assertOptimizerProtectedPathsResolve(["optimizer/src/mutate.ts"], snapshot))
+      .toThrow("protected paths do not select a sealed optimizer file: optimizer/src/mutate.ts");
+    expect(() => assertOptimizerProtectedPathsResolve(["optimizer/src", "optimizer/worker"], snapshot)).not.toThrow();
+    expect(() => assertOptimizerProtectedPathsResolve(["trusted", "schema"], snapshot)).not.toThrow();
   });
 
   test("the official path refuses HONE_OPTIMIZER_CMD before campaign state is created", async () => {
