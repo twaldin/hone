@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CapsuleManifest, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
 import type { CmdResult, RunCommand } from "@hone/broker";
+import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend } from "../src/backends/local.js";
 import { defaultApplyBranch } from "../src/commands/apply.js";
 import { stopCommand } from "../src/commands/stop.js";
@@ -389,6 +390,7 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
     mkdirSync(runDir, { recursive: true });
     mkdirSync(join(root, ".hone-cas"), { recursive: true });
     const { capsuleDir, manifest, digest } = validCapsule(root);
+    freezeCapsuleAssets(runDir, capsuleDir, manifest);
 
     // Crash-window fixture: the broker journal is one promotion AHEAD of the
     // event log. (Journal line format owned by @hone/broker RunStateLog.)

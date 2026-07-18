@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { CapsuleManifest, EvaluationRecord, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
 import type { BudgetState } from "@hone/schema";
 import { readBrokerJournalEvaluations, type CmdResult, type RunCommand } from "@hone/broker";
+import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend, deriveProbeReport } from "../src/backends/local.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
 import { runCommand as cliRunCommand } from "../src/supervisor.js";
@@ -319,6 +320,7 @@ async function runProbeFlow(opts: {
   }
   mkdirSync(join(root, ".hone-cas"), { recursive: true });
   const { capsuleDir, manifest, digest } = probeCapsule(root);
+  freezeCapsuleAssets(runDir, capsuleDir, manifest);
 
   const invocationsPath = join(root, "invocations.ndjson");
   const optimizerEntry = join(root, "opt.mjs");

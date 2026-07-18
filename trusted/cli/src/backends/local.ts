@@ -11,7 +11,9 @@ import {
   finalizeScratchSnapshot,
   newScratchSnapshotAttemptName,
   isBrokerAuthoredEvent,
+  diffProtectedPaths,
   packDirAsArtifact,
+  unpackArtifact,
   readBrokerJournalEvents,
   runCommand,
   startBroker,
@@ -19,7 +21,7 @@ import {
 import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from "@hone/broker";
 import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
 import type { BudgetDecision, BudgetDimension, ProxyHandle } from "@hone/proxy";
-import { admitCapsule } from "../admission.js";
+import { admitCapsule, authenticateFrozenCapsuleAssets } from "../admission.js";
 import { readEvents, replayRun } from "../eventlog.js";
 import { makeDockerRunLease, type DockerRunLease } from "../docker-lease.js";
 import {
@@ -150,6 +152,53 @@ export async function measureBaseline(capsuleDir: string, manifest: CapsuleManif
       throw new Error(`measured CAS baseline ${packed} != manifest baseline ${manifest.baseline.hash}`);
     }
     return packed;
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+export interface TerminalHoldoutBaseline {
+  /** Sanitized lineage root visible to mutation sandboxes and the optimizer. */
+  mutationArtifactHash: string;
+  /** Full declared baseline used only for the trusted evaluator mount. */
+  evaluatorArtifactHash: string;
+}
+
+/**
+ * Terminal holdout uses two baseline identities: the optimizer receives a
+ * copy with every protected namespace removed, while the trusted evaluator
+ * executes from the full declared commit. The latter hash stays host-only.
+ */
+export async function measureTerminalHoldoutBaseline(
+  capsuleDir: string,
+  manifest: CapsuleManifest,
+  cas: CasStore,
+): Promise<TerminalHoldoutBaseline> {
+  if (manifest.protectedPaths.length === 0) {
+    throw new Error("terminal holdout requires protected evaluator paths");
+  }
+  const evaluatorArtifactHash = await measureBaseline(capsuleDir, manifest, cas);
+  const staging = mkdtempSync(join(tmpdir(), "hone-holdout-baseline-"));
+  try {
+    const workspace = await unpackArtifact(cas, evaluatorArtifactHash, join(staging, "full"));
+    const empty = join(staging, "empty");
+    mkdirSync(empty, { mode: 0o700 });
+    const hidden = await diffProtectedPaths(empty, workspace, manifest.protectedPaths);
+    if (hidden.length === 0) {
+      throw new Error("terminal holdout protected paths matched no evaluator source");
+    }
+    for (const rel of [...hidden].sort((a, b) => b.split("/").length - a.split("/").length)) {
+      rmSync(join(workspace, rel), { recursive: true, force: true });
+    }
+    const leaked = await diffProtectedPaths(empty, workspace, manifest.protectedPaths);
+    if (leaked.length > 0) {
+      throw new Error(`terminal holdout evaluator source remained visible: ${leaked.join(", ")}`);
+    }
+    const mutationArtifactHash = await packDirAsArtifact(workspace, cas);
+    if (mutationArtifactHash === evaluatorArtifactHash) {
+      throw new Error("terminal holdout baseline sanitization removed no bytes");
+    }
+    return { mutationArtifactHash, evaluatorArtifactHash };
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
@@ -1096,8 +1145,19 @@ export function createBackend(
       }
 
       const cas = new CasStore(ctx.casDir);
-      const baselineArtifactHash = await measureBaseline(ctx.capsuleDir, ctx.manifest, cas);
-
+      let baselineArtifactHash: string;
+      let evaluatorBaselineArtifactHash: string | undefined;
+      if (ctx.terminalHoldoutAssetGroupIds === undefined) {
+        baselineArtifactHash = await measureBaseline(ctx.capsuleDir, ctx.manifest, cas);
+      } else {
+        if (ctx.config.apply !== "none") {
+          throw new Error("terminal holdout evaluator isolation requires apply:none");
+        }
+        const measured = await measureTerminalHoldoutBaseline(ctx.capsuleDir, ctx.manifest, cas);
+        baselineArtifactHash = measured.mutationArtifactHash;
+        evaluatorBaselineArtifactHash = measured.evaluatorArtifactHash;
+      }
+      const frozenAssetRoot = authenticateFrozenCapsuleAssets(ctx.runDir, ctx.manifest);
       // Broker + proxy are mutually referential (proxy meters INTO the broker,
       // broker env points sandboxes AT the proxy); the late-bound ref breaks the cycle.
       let running: RunningBroker | null = null;
@@ -1234,9 +1294,10 @@ export function createBackend(
           // capsule's original identity; the contract hash seals this run's
           // overrides.
           manifest: { ...ctx.manifest, objective: ctx.config.objective, budget: ctx.config.budget },
-          capsuleRootDir: ctx.capsuleDir,
+          capsuleRootDir: frozenAssetRoot,
           baselineArtifactHash,
           image,
+          ...(evaluatorBaselineArtifactHash === undefined ? {} : { evaluatorBaselineArtifactHash }),
           capsuleDigest: ctx.capsuleDigest,
           optimizerDigest: ctx.optimizerDigest,
           ...(ctx.measurementEpoch !== undefined ? { measurementEpoch: ctx.measurementEpoch } : {}),

@@ -10,7 +10,13 @@ import { z } from "zod";
 import { ApplyMode, BudgetEnvelope, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
 import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
 import type { TrustedEvaluationStrategy } from "@hone/broker";
-import { admitCapsule, revalidateForResume, writeCapsuleSnapshot } from "./admission.js";
+import {
+  admitCapsule,
+  authenticateFrozenCapsuleAssets,
+  freezeCapsuleAssets,
+  revalidateForResume,
+  writeCapsuleSnapshot,
+} from "./admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
 import { createBackend as createLocalBackend } from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
@@ -618,6 +624,12 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     const runDir = mintRunDirDurable(io.root, runId);
     // Snapshot the ADMITTED manifest: resume proves capsule identity against it.
     writeCapsuleSnapshot(runDir, manifest);
+    try {
+      freezeCapsuleAssets(runDir, capsuleDir, manifest);
+    } catch (error) {
+      rmSync(runDir, { recursive: true, force: true });
+      throw error;
+    }
     if (selectedCandidate !== null) {
       try {
         optimizerArtifactSeal = writeOptimizerArtifactSeal(runDir, runId, selectedCandidate);
@@ -1372,6 +1384,10 @@ async function superviseLocked(
       io.err(`resume seal violated: ${e instanceof Error ? e.message : String(e)}`);
       return 1;
     }
+    // The run-local asset tree is the only capsule asset authority accepted
+    // after admission. Authenticate it while holding the run lock, after all
+    // flag/config seals but before run.resumed or any backend work.
+    authenticateFrozenCapsuleAssets(runDir, manifest);
     // Boot-bound runtime recheck IMMEDIATELY before the durable run event:
     // recompute the closure, compare against the boot seal and the run's
     // pin, then append — no await between the comparison and the append.

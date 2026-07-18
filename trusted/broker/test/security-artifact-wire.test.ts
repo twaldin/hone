@@ -6,7 +6,7 @@ import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes
 import { Broker } from "../src/broker.js";
 import { BrokerServer } from "../src/server.js";
 import { CasStore } from "../src/cas.js";
-import { canonicalizeWorkspaceTar, diffProtectedPaths, packDirAsArtifact, unpackArtifact } from "../src/artifact.js";
+import { canonicalizeWorkspaceTar, diffProtectedPaths, findProtectedPaths, packDirAsArtifact, unpackArtifact } from "../src/artifact.js";
 import {
   ArtifactValidationError,
   MAX_ARTIFACT_ENTRIES,
@@ -968,6 +968,23 @@ describe("protected namespaces", () => {
     const linkCand = await tree({ "protected/other": "o" });
     await symlink("/etc/passwd", path.join(linkCand, "protected", "thing"));
     expect(await diffProtectedPaths(base, linkCand, ["protected"])).toEqual(["protected/thing"]);
+  });
+
+  it("finds every protected entry in a hidden-evaluator candidate without a comparison baseline", async () => {
+    const cand = await tree(
+      {
+        "eval.py": "forged",
+        "evaluator/deep/helper.py": "forged",
+        "src/allowed.ts": "ok",
+      },
+      ["evaluator/empty"],
+    );
+    expect(await findProtectedPaths(cand, ["eval.py", "evaluator/**"])).toEqual([
+      "eval.py",
+      "evaluator/deep",
+      "evaluator/deep/helper.py",
+      "evaluator/empty",
+    ]);
   });
 
   it("flags an empty protected directory being deleted", async () => {

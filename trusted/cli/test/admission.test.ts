@@ -1,9 +1,17 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CapsuleManifest, DiagnosticOrderingReport, RunConfig, capsuleDigest } from "@hone/schema";
-import { admitCapsule, readCapsuleSnapshot, revalidateForResume, writeCapsuleSnapshot } from "../src/admission.js";
+import {
+  admitCapsule,
+  authenticateFrozenCapsuleAssets,
+  freezeCapsuleAssets,
+  frozenCapsuleAssetsRoot,
+  readCapsuleSnapshot,
+  revalidateForResume,
+  writeCapsuleSnapshot,
+} from "../src/admission.js";
 import { computeOptimizerDigest, resolveOptimizerDigest } from "../src/optimizer-digest.js";
 import {
   RUNTIME_PIN_FILE,
@@ -211,15 +219,33 @@ describe("frozen capsule admission", () => {
 });
 
 describe("run-dir capsule snapshot + resume revalidation", () => {
-  it("snapshots round-trip and revalidate against the identical capsule", () => {
+  it("snapshots manifest and assets, then isolates evaluations from live source drift", () => {
     const root = makeRoot();
     const dir = makeCapsule(root);
     const runDir = makeRoot();
     writeCapsuleSnapshot(runDir, manifestObject());
     expect(readCapsuleSnapshot(runDir)).toEqual(manifestObject());
     expect(revalidateForResume(runDir, dir).digest).toBe(capsuleDigest(manifestObject()));
+
+    const frozen = freezeCapsuleAssets(runDir, dir, manifestObject());
+    expect(frozen).toBe(frozenCapsuleAssetsRoot(runDir));
+    expect(readFileSync(join(frozen, "assets", "train", "data.txt"), "utf8")).toBe("train\n");
+    writeFileSync(join(dir, "assets", "train", "data.txt"), "live source drift\n");
+    expect(authenticateFrozenCapsuleAssets(runDir, manifestObject())).toBe(frozen);
+    expect(readFileSync(join(frozen, "assets", "train", "data.txt"), "utf8")).toBe("train\n");
   });
 
+  it("refuses a drifted run-local frozen asset snapshot", () => {
+    const root = makeRoot();
+    const dir = makeCapsule(root);
+    const runDir = makeRoot();
+    writeCapsuleSnapshot(runDir, manifestObject());
+    const frozen = freezeCapsuleAssets(runDir, dir, manifestObject());
+    const target = join(frozen, "assets", "validation", "data.txt");
+    chmodSync(target, 0o600);
+    writeFileSync(target, "tampered\n");
+    expect(() => authenticateFrozenCapsuleAssets(runDir, manifestObject())).toThrow(/frozen asset drift/);
+  });
   it("refuses resume when the capsule re-admits at a DIFFERENT digest than the snapshot", () => {
     const root = makeRoot();
     const runDir = makeRoot();
@@ -243,6 +269,10 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
     const runsDir = join(root, ".hone-runs");
     const snapshot = CapsuleManifest.parse(JSON.parse(readFileSync(join(runsDir, readdirOnly(runsDir), "capsule-manifest.json"), "utf8")));
     expect(snapshot.id).toBe(CAP_ID);
+    expect(readFileSync(
+      join(runsDir, readdirOnly(runsDir), "capsule-assets", "assets", "train", "data.txt"),
+      "utf8",
+    )).toBe("train\n");
   });
 
   it("hone run --resume refuses a capsule that drifted since the run started", async () => {
@@ -259,9 +289,10 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
 
   it("hone run --resume refuses when the optimizer digest no longer matches the sealed one", async () => {
     const root = makeRoot();
-    makeCapsule(root);
+    const capsuleDir = makeCapsule(root);
     const runDir = writeEvents(root, "run_rd", fixtureEvents({ runId: "run_rd", baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false }));
     writeCapsuleSnapshot(runDir, manifestObject());
+    freezeCapsuleAssets(runDir, capsuleDir, manifestObject());
     writeRunConfigFile(runDir, runConfigFixture());
     writeFileSync(join(runDir, RUNTIME_PIN_FILE), `${trustedRuntimeDigest()}\n`);
     // An overridden optimizer command with a pinned digest that differs from the sealed one.

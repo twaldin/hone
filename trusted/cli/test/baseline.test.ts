@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CapsuleManifest } from "@hone/schema";
-import { CasStore, packDirAsArtifact } from "@hone/broker";
-import { measureBaseline } from "../src/backends/local.js";
+import { CasStore, packDirAsArtifact, unpackArtifact } from "@hone/broker";
+import { measureBaseline, measureTerminalHoldoutBaseline } from "../src/backends/local.js";
 import { gitIn, initScratchRepo, makeCapsule, makeRoot, manifestRaw } from "./helpers.js";
 
 /**
@@ -22,6 +22,8 @@ function gitCapsule(root: string): { capsuleDir: string; manifest: CapsuleManife
   // porcelain check — exactly the hole the exact materialization closes.
   writeFileSync(join(baselineDir, ".gitignore"), "evil.py\n__pycache__/\n");
   writeFileSync(join(baselineDir, "solver.py"), "def solve():\n    return 1\n");
+  mkdirSync(join(baselineDir, "evaluator"), { recursive: true });
+  writeFileSync(join(baselineDir, "evaluator", "helper.py"), "SECRET = 1\n");
   gitIn(baselineDir, "add", "-A");
   gitIn(baselineDir, "commit", "-m", "solver");
   const commit = gitIn(baselineDir, "rev-parse", "HEAD");
@@ -93,6 +95,24 @@ describe("git baseline: exact declared-commit materialization", () => {
     const registered = execFileSync("git", ["--git-dir", join(baselineDir, ".git"), "worktree", "list", "--porcelain"], { encoding: "utf8" });
     expect(registered).not.toContain("hone-baseline-");
   });
+  it("terminal holdout gives optimizer a protected-path-free baseline while retaining the trusted evaluator tree", async () => {
+    const root = makeRoot();
+    const { capsuleDir, manifest } = gitCapsule(root);
+    const holdoutManifest = CapsuleManifest.parse({ ...manifest, protectedPaths: ["solver.py", "evaluator/**"] });
+    const cas = new CasStore(join(root, ".hone-cas"));
+    const measured = await measureTerminalHoldoutBaseline(capsuleDir, holdoutManifest, cas);
+    expect(measured.mutationArtifactHash).not.toBe(measured.evaluatorArtifactHash);
+
+    const unpacked = join(root, "unpacked");
+    const mutation = await unpackArtifact(cas, measured.mutationArtifactHash, join(unpacked, "mutation"));
+    const evaluator = await unpackArtifact(cas, measured.evaluatorArtifactHash, join(unpacked, "evaluator"));
+    expect(existsSync(join(mutation, "solver.py"))).toBe(false);
+    expect(readFileSync(join(evaluator, "solver.py"), "utf8")).toContain("return 1");
+    expect(existsSync(join(mutation, "evaluator", "helper.py"))).toBe(false);
+    expect(readdirSync(join(mutation, "evaluator"))).toEqual([]);
+    expect(readFileSync(join(evaluator, "evaluator", "helper.py"), "utf8")).toBe("SECRET = 1\n");
+  });
+
 });
 
 describe("cas baseline: unchanged directory pack (no commit to materialize)", () => {
