@@ -118,6 +118,8 @@ export interface BrokerConfig {
   image: string;
   /** Per-run dir: sockets, scratch, unpack cache, durable run state live here. */
   runDir: string;
+  /** Trusted host Unix socket mounted at /run/hone/proxy.sock; defaults to runDir/proxy.sock. */
+  proxySocketHostPath?: string | undefined;
   /** Repo-wide CAS root (.hone-cas). */
   casDir: string;
   /** Event sink — the runner appends these to events.ndjson. The broker never touches the log itself. */
@@ -854,7 +856,7 @@ export class Broker {
     this.evaluationStrategy = config.evaluationStrategy;
     this.safeRunId = config.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
     this.scratchDir = path.join(config.runDir, "scratch");
-    this.proxySockPath = path.join(config.runDir, "proxy.sock");
+    this.proxySockPath = config.proxySocketHostPath ?? path.join(config.runDir, "proxy.sock");
     this.unpackRoot = path.join(config.runDir, "unpacked");
     this.tmpDir = path.join(config.runDir, "tmp");
     this.scratchSnapshotDir = path.join(config.runDir, SCRATCH_SNAPSHOT_DIR);
