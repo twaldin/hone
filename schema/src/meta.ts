@@ -511,7 +511,7 @@ export const M2PanelAggregation = M2PanelAggregationShape.superRefine((aggregati
     return;
   }
   const expected = scores.reduce<number>((sum, score) => sum + (score ?? 0), 0) / M2_PANEL_CAPSULE_COUNT;
-  if (aggregation.panelMean === null || !nearlyEqual(aggregation.panelMean, expected)) {
+  if (aggregation.panelMean === null || aggregation.panelMean !== expected) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["panelMean"], message: `panel mean must equal ${expected}` });
   }
 });
@@ -762,6 +762,3 @@ export function m2CalibratedPanelCandidateBudget(
   );
 }
 
-function nearlyEqual(left: number, right: number): boolean {
-  return Math.abs(left - right) <= 1e-9 * Math.max(1, Math.abs(left), Math.abs(right));
-}

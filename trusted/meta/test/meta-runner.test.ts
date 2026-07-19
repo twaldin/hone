@@ -478,250 +478,33 @@ describe("trusted meta runner identity and scoring", () => {
   });
 });
 
-describe("recursive M2 optimizer-authored allocation", () => {
-  test("executes the artifact schedule under the trusted envelope without using configured candidate cardinalities", async () => {
-    const config = recursiveFixture();
-    const recursiveBudgets = config.recursiveBudgets;
-    if (recursiveBudgets === undefined) throw new Error("recursive fixture omitted budgets");
-    const records = new RunnerEnvelopeRecords();
-    const envelopeLedger = new MetaResourceEnvelopeLedger(recursiveBudgets, records);
-    const calls: MetaChildRunRequest[] = [];
-    const sourceArtifact = digest("recursive-scheduled-source");
-    const bundleDigest = digest("recursive-scheduled-bundle");
-    const { runner } = harness(async (request) => {
-      calls.push(request);
-      const index = config.train.findIndex((capsule) => capsule.capsuleId === request.capsule.capsuleId);
-      return childOutcome(request, index + 1);
-    }, {
-      config,
-      envelopeLedger,
-      bundleBySource: new Map([[sourceArtifact, bundleDigest]]),
-    });
-    const allocations = [...config.train].reverse().map((capsule, index) => ({
-      allocationOrdinal: index,
-      capsuleId: capsule.capsuleId,
-      replicate: 0,
-      innerEpisodesMax: index + 1,
-      reserved: {
-        maxTokens: config.budgets.child.maxTokens - index * 1_000,
-        maxUsd: config.budgets.child.maxUsd - index * 0.25,
-        maxWallClockSec: config.budgets.child.maxWallClockSec - index * 10,
-        maxEvaluatorInvocations: config.budgets.child.maxEvaluatorInvocations - index,
-      },
-    }));
-    const input = { ...searchInput(sourceArtifact), candidateOrdinal: 41, allocations };
-
-    const record = await runner.evaluateSearchCandidate(input);
-    expect(record.output.valid).toBe(true);
-    expect(record.output.objectives.normalizedGain).toBeCloseTo(4.5, 12);
-    expect(calls).toHaveLength(8);
-    expect(calls.map((request) => request.innerEpisodesMax)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
-    expect(calls.map((request) => request.reservation.reserved)).toEqual(
-      allocations.map((allocation) => allocation.reserved),
-    );
-    expect(records.rows).toHaveLength(16);
-    expect(envelopeLedger.remainingSearch()).toEqual({
-      maxTokens: recursiveBudgets.search.outerTrajectory.maxTokens - 80,
-      maxUsd: recursiveBudgets.search.outerTrajectory.maxUsd - 2,
-      maxWallClockSec: recursiveBudgets.search.outerTrajectory.maxWallClockSec - 16,
-      maxEvaluatorInvocations:
-        recursiveBudgets.search.outerTrajectory.maxEvaluatorInvocations - 24,
-    });
-
-    expect((await runner.evaluateSearchCandidate(input)).output.valid).toBe(true);
-    expect(calls).toHaveLength(8);
-    expect(records.rows).toHaveLength(16);
-    runner.close();
-  });
-
-  test("keeps a partial optimizer schedule as invalid paid evidence instead of filling a hardcoded panel schedule", async () => {
-    const config = recursiveFixture();
-    const recursiveBudgets = config.recursiveBudgets;
-    if (recursiveBudgets === undefined) throw new Error("recursive fixture omitted budgets");
-    const records = new RunnerEnvelopeRecords();
-    const envelopeLedger = new MetaResourceEnvelopeLedger(recursiveBudgets, records);
-    let calls = 0;
-    const { runner } = harness(async (request) => {
-      calls += 1;
-      return childOutcome(request, 2);
-    }, { config, envelopeLedger });
-
-    const record = await runner.evaluateSearchCandidate({
-      ...searchInput(digest("recursive-partial")),
-      candidateOrdinal: 9,
-      allocations: [{
-        allocationOrdinal: 0,
-        capsuleId: config.train[3]!.capsuleId,
-        replicate: 7,
-        innerEpisodesMax: 2,
-        reserved: { ...config.budgets.child },
-      }],
-    });
-    expect(record.output.valid).toBe(false);
-    expect(record.output.diagnostics?.summary).toMatch(/incomplete panel/);
-    expect(calls).toBe(1);
-    expect(records.rows).toHaveLength(2);
-    runner.close();
-  });
-  test("requires the configured durable ledger and rejects a foreign envelope identity before launch", async () => {
-    const config = recursiveFixture();
-    expect(() => harness(async (request) => childOutcome(request, 1), { config })).toThrow(
-      /durable componentwise envelope ledger/,
-    );
-
-    const foreignBudgets = structuredClone(config.recursiveBudgets);
-    foreignBudgets.search.identity.envelopeId = digest("foreign-search-envelope");
-    const envelopeLedger = new MetaResourceEnvelopeLedger(
-      foreignBudgets,
-      new RunnerEnvelopeRecords(),
-    );
-    let calls = 0;
-    const { runner } = harness(async (request) => {
-      calls += 1;
-      return childOutcome(request, 1);
-    }, { config, envelopeLedger });
-    await expect(runner.evaluateSearchCandidate({
-      ...searchInput(digest("foreign-envelope-candidate")),
-      candidateOrdinal: 1,
-      allocations: [{
-        allocationOrdinal: 0,
-        capsuleId: config.train[0]!.capsuleId,
-        replicate: 0,
-        innerEpisodesMax: 1,
-        reserved: { ...config.budgets.child },
-      }],
-    })).rejects.toThrow(/mismatched batch reservation/);
-    expect(calls).toBe(0);
-    runner.close();
-  });
-
-  test("binds the complete allocation to durable child identity", async () => {
-    const config = recursiveFixture();
-    const envelopeLedger = new MetaResourceEnvelopeLedger(
-      config.recursiveBudgets,
-      new RunnerEnvelopeRecords(),
-    );
-    const identities: MetaWorkIdentity[] = [];
-    const sourceArtifact = digest("allocation-identity-source");
-    const { runner, journal } = harness(async (request) => {
-      identities.push(request.identity);
-      return childOutcome(request, 1);
-    }, {
-      config,
-      envelopeLedger,
-      bundleBySource: new Map([[sourceArtifact, digest("allocation-identity-bundle")]]),
-    });
-    const allocation = {
-      allocationOrdinal: 0,
-      capsuleId: config.train[0]!.capsuleId,
-      replicate: 0,
-      reserved: { ...config.budgets.child },
-    };
-    await Promise.all([
-      runner.evaluateSearchCandidate({
-        ...searchInput(sourceArtifact),
-        candidateOrdinal: 3,
-        allocations: [{ ...allocation, innerEpisodesMax: 1 }],
-      }),
-      runner.evaluateSearchCandidate({
-        ...searchInput(sourceArtifact),
-        candidateOrdinal: 3,
-        allocations: [{ ...allocation, innerEpisodesMax: 2 }],
-      }),
-    ]);
-    expect(identities).toHaveLength(2);
-    expect(new Set(identities.map((identity) => identity.measurementEpoch)).size).toBe(2);
-    expect(journal.reservations.size).toBe(2);
-    runner.close();
-  });
-
-  test("batch-validates all sibling slices before any child can launch", async () => {
+describe("recursive M2 search topology", () => {
+  test("fails closed before gate or child launch because M2 search uses one-at-a-time spawnRun", async () => {
     const config = recursiveFixture();
     const records = new RunnerEnvelopeRecords();
     const envelopeLedger = new MetaResourceEnvelopeLedger(config.recursiveBudgets, records);
-    let calls = 0;
+    let gateCalls = 0;
+    let childCalls = 0;
     const { runner } = harness(async (request) => {
-      calls += 1;
-      return childOutcome(request, 1);
-    }, { config, envelopeLedger });
-    const allocations = Array.from({ length: 97 }, (_, allocationOrdinal) => ({
-      allocationOrdinal,
-      capsuleId: config.train[0]!.capsuleId,
-      replicate: 0,
-      innerEpisodesMax: 1,
-      reserved: { ...config.budgets.child },
-    }));
-    await expect(runner.evaluateSearchCandidate({
-      ...searchInput(digest("overcommitted-siblings")),
-      candidateOrdinal: 4,
-      allocations,
-    })).rejects.toThrow(/search envelope batch maxTokens exceeded/);
-    expect(calls).toBe(0);
-    expect(records.rows).toHaveLength(0);
-    runner.close();
-  });
-
-  test("joins one durable child shared by overlapping optimizer schedules", async () => {
-    const config = recursiveFixture();
-    const envelopeLedger = new MetaResourceEnvelopeLedger(
-      config.recursiveBudgets,
-      new RunnerEnvelopeRecords(),
-    );
-    let releaseCommon: (() => void) | undefined;
-    let commonStartedResolve: (() => void) | undefined;
-    const commonStarted = new Promise<void>((resolve) => {
-      commonStartedResolve = resolve;
-    });
-    const commonRelease = new Promise<void>((resolve) => {
-      releaseCommon = resolve;
-    });
-    const calls: string[] = [];
-    const sourceArtifact = digest("overlapping-schedules");
-    const commonCapsuleId = config.train[0]!.capsuleId;
-    const { runner } = harness(async (request) => {
-      calls.push(request.capsule.capsuleId);
-      if (request.capsule.capsuleId === commonCapsuleId) {
-        commonStartedResolve?.();
-        await commonRelease;
-      }
+      childCalls += 1;
       return childOutcome(request, 1);
     }, {
       config,
       envelopeLedger,
-      bundleBySource: new Map([[sourceArtifact, digest("overlapping-schedules-bundle")]]),
+      gate: async (request) => {
+        gateCalls += 1;
+        return gateResult(request, new Map());
+      },
     });
-    const common = {
-      allocationOrdinal: 0,
-      capsuleId: commonCapsuleId,
-      replicate: 0,
-      innerEpisodesMax: 1,
-      reserved: { ...config.budgets.child },
-    };
-    const first = runner.evaluateSearchCandidate({
-      ...searchInput(sourceArtifact),
-      candidateOrdinal: 5,
-      allocations: [common],
-    });
-    await commonStarted;
-    const second = runner.evaluateSearchCandidate({
-      ...searchInput(sourceArtifact),
-      candidateOrdinal: 5,
-      allocations: [
-        common,
-        {
-          ...common,
-          allocationOrdinal: 1,
-          capsuleId: config.train[1]!.capsuleId,
-        },
-      ],
-    });
-    releaseCommon?.();
-    await Promise.all([first, second]);
-    expect(calls.filter((capsuleId) => capsuleId === commonCapsuleId)).toHaveLength(1);
-    expect(calls).toHaveLength(2);
+
+    await expect(runner.evaluateSearchCandidate(searchInput(digest("m2-spawn-run-only")))).rejects.toThrow(
+      /one child at a time through spawnRun; evaluateSearchCandidate is M1-only/,
+    );
+    expect(gateCalls).toBe(0);
+    expect(childCalls).toBe(0);
+    expect(records.rows).toHaveLength(0);
     runner.close();
   });
-
 });
 
 describe("trusted controls and registered pairs", () => {

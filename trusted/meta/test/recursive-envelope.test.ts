@@ -181,15 +181,6 @@ describe("trusted componentwise envelope ledger", () => {
     }
   });
 
-  test("rejects an overcommitted sibling batch before appending any reservation", () => {
-    const records = new MemoryRecords();
-    const ledger = new MetaResourceEnvelopeLedger(budgets(), records);
-    expect(() => ledger.reserveSearchDescendants([
-      reservation("batch-a", reserved(70)),
-      reservation("batch-b", reserved(51)),
-    ])).toThrow(/search envelope batch maxTokens exceeded/);
-    expect(records.rows).toHaveLength(0);
-  });
 
   test("does not let exhausted search borrow confirmation or terminal resources", () => {
     const ledger = new MetaResourceEnvelopeLedger(budgets(), new MemoryRecords());

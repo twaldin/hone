@@ -229,42 +229,6 @@ export class MetaResourceEnvelopeLedger {
     return this.reserve("search", input);
   }
 
-  /**
-   * Atomically validates a top-level optimizer schedule before appending any
-   * new slice. Durable appends may stop partway on I/O failure, but no caller
-   * receives the batch (and therefore no child may launch); replay completes
-   * the same reservation identities without minting capacity.
-   */
-  reserveSearchDescendants(
-    inputs: readonly MetaEnvelopeReservationRequest[],
-  ): MetaEnvelopeReservation[] {
-    const parsed = inputs.map((input) => ReservationRequest.parse(input));
-    const seen = new Set<string>();
-    const total: BudgetEnvelope = {
-      maxTokens: 0,
-      maxUsd: 0,
-      maxWallClockSec: 0,
-      maxEvaluatorInvocations: 0,
-    };
-    for (const input of parsed) {
-      if (input.parentReservationId !== null) {
-        throw new Error("batched search reservations must be top-level descendants");
-      }
-      if (seen.has(input.reservationId)) {
-        throw new Error(`duplicate durable identity ${input.reservationId} in search reservation batch`);
-      }
-      seen.add(input.reservationId);
-      if (this.reservations.has(input.reservationId)) {
-        this.reserve("search", input);
-        continue;
-      }
-      for (const dimension of BUDGET_DIMENSIONS) {
-        total[dimension] += input.reserved[dimension];
-      }
-    }
-    this.assertFits(total, this.remainingSearch(), "search envelope batch");
-    return parsed.map((input) => this.reserve("search", input));
-  }
 
   reserveConfirmationDescendant(input: MetaEnvelopeReservationRequest): MetaEnvelopeReservation {
     return this.reserve("confirmation", input);
