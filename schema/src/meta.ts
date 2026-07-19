@@ -415,11 +415,29 @@ const M2_TASK_IDS = [...M2_PANEL_A_TASK_IDS, ...M2_PANEL_B_TASK_IDS] as const;
 export const M2PanelTaskId = z.enum(M2_TASK_IDS);
 export type M2PanelTaskId = z.infer<typeof M2PanelTaskId>;
 
+/** Finite, safely representable M2 resource vector. */
+export const M2ResourceEnvelope = z.object({
+  maxTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  maxUsd: z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  maxWallClockSec: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  maxEvaluatorInvocations: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export type M2ResourceEnvelope = z.infer<typeof M2ResourceEnvelope>;
+
+const MAX_CALIBRATED_CAPSULE_COMPONENT = Number.MAX_SAFE_INTEGER /
+  (M2_PANEL_CAPSULE_COUNT * M2_SEARCH_CANDIDATE_EQUIVALENTS);
+const M2CalibratedCapsuleEnvelope = z.object({
+  maxTokens: z.number().int().positive().max(Math.floor(MAX_CALIBRATED_CAPSULE_COMPONENT)),
+  maxUsd: z.number().finite().nonnegative().max(MAX_CALIBRATED_CAPSULE_COMPONENT),
+  maxWallClockSec: z.number().int().positive().max(Math.floor(MAX_CALIBRATED_CAPSULE_COMPONENT)),
+  maxEvaluatorInvocations: z.number().int().positive().max(Math.floor(MAX_CALIBRATED_CAPSULE_COMPONENT)),
+}).strict();
+
 export const M2PanelMember = z.object({
   taskId: M2PanelTaskId,
   capsule: MetaCapsuleEntry,
   /** Complete-run resource vector for this capsule at the frozen calibrated inner ceiling. */
-  calibratedInnerCeiling: BudgetEnvelope,
+  calibratedInnerCeiling: M2CalibratedCapsuleEnvelope,
 }).strict();
 export type M2PanelMember = z.infer<typeof M2PanelMember>;
 
@@ -507,12 +525,13 @@ export type M2EnvelopeIdentity = z.infer<typeof M2EnvelopeIdentity>;
 
 const M2SearchEnvelope = z.object({
   identity: M2EnvelopeIdentity.extend({ purpose: z.literal("search") }).strict(),
-  calibratedPanelCandidate: BudgetEnvelope,
-  outerTrajectory: BudgetEnvelope,
+  calibratedPanelCandidate: M2ResourceEnvelope,
+  outerTrajectory: M2ResourceEnvelope,
 }).strict().superRefine((search, ctx) => {
   for (const dimension of BUDGET_DIMENSIONS) {
-    const expected = search.calibratedPanelCandidate[dimension] * M2_SEARCH_CANDIDATE_EQUIVALENTS;
-    if (!nearlyEqual(search.outerTrajectory[dimension], expected)) {
+    const candidate = search.calibratedPanelCandidate[dimension];
+    const expected = candidate * M2_SEARCH_CANDIDATE_EQUIVALENTS;
+    if (!Number.isFinite(expected) || expected > Number.MAX_SAFE_INTEGER || search.outerTrajectory[dimension] !== expected) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["outerTrajectory", dimension],
@@ -524,7 +543,7 @@ const M2SearchEnvelope = z.object({
 
 const M2JudgingEnvelope = z.object({
   identity: M2EnvelopeIdentity,
-  budget: BudgetEnvelope,
+  budget: M2ResourceEnvelope,
 }).strict();
 
 /** Search and fixed judging are three separately identified, non-transferable pools. */
@@ -604,9 +623,8 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   train: z.array(MetaCapsuleEntry),
   holdout: z.array(MetaCapsuleEntry),
   counts: RecursiveCampaignCounts,
-  /** Additive M2 cutover fields; legacy V2 fixtures omit both together. */
-  developmentPanel: M2DevelopmentPanel.optional(),
-  recursiveBudgets: M2RecursiveBudgets.optional(),
+  developmentPanel: M2DevelopmentPanel,
+  recursiveBudgets: M2RecursiveBudgets,
   allowedClaim: z.literal(M2_ALLOWED_CLAIM),
 }).strict();
 
@@ -644,15 +662,7 @@ export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, 
     });
   }
 
-  if ((cfg.developmentPanel === undefined) !== (cfg.recursiveBudgets === undefined)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: cfg.developmentPanel === undefined ? ["developmentPanel"] : ["recursiveBudgets"],
-      message: "M2 development panel membership and recursive envelopes must be frozen together",
-    });
-  }
-  if (cfg.developmentPanel !== undefined && cfg.recursiveBudgets !== undefined) {
-    if (cfg.developmentPanel.panel !== cfg.generation.panel) {
+  if (cfg.developmentPanel.panel !== cfg.generation.panel) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["developmentPanel", "panel"], message: "development panel must match the trajectory generation cell" });
     }
     const trainById = new Map(cfg.train.map((capsule) => [capsule.capsuleId, capsule]));
@@ -668,7 +678,7 @@ export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, 
     });
     const calibrated = m2CalibratedPanelCandidateBudget(cfg.developmentPanel);
     for (const dimension of BUDGET_DIMENSIONS) {
-      if (!nearlyEqual(cfg.recursiveBudgets.search.calibratedPanelCandidate[dimension], calibrated[dimension])) {
+      if (cfg.recursiveBudgets.search.calibratedPanelCandidate[dimension] !== calibrated[dimension]) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["recursiveBudgets", "search", "calibratedPanelCandidate", dimension],
@@ -696,7 +706,6 @@ export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, 
         }
       }
     }
-  }
 
   const protectedNorm = cfg.protectedPaths.map(normalizePath);
   cfg.mutablePaths.forEach((mutable, index) => {
@@ -728,25 +737,6 @@ export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, 
     }
   }
 
-  if (cfg.recursiveBudgets === undefined) {
-    // Compatibility validation for pre-cutover V2 fixtures only. New M2
-    // configurations use non-transferable recursive envelope identities.
-    const confirmationArms = cfg.generation.stage === "A" ? 4 : 5;
-    const childRuns =
-      cfg.counts.candidates * cfg.train.length +
-      confirmationArms * cfg.train.length * cfg.counts.confirmationReplicates +
-      3 * cfg.holdout.length * cfg.counts.holdoutReplicates;
-    for (const dimension of BUDGET_DIMENSIONS) {
-      const required = cfg.budgets.child[dimension] * childRuns + cfg.budgets.outer[dimension];
-      if (cfg.budgets.campaign[dimension] < required) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["budgets", "campaign", dimension],
-          message: `legacy M2 campaign ${dimension} ${cfg.budgets.campaign[dimension]} under-reserves ${required}`,
-        });
-      }
-    }
-  }
 });
 export type MetaCampaignConfigV2 = z.infer<typeof MetaCampaignConfigV2>;
 

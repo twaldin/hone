@@ -25,6 +25,7 @@ import {
   type MetaCandidateGateRequest,
   type MetaChildRunOutcome,
   type MetaChildRunRequest,
+  type MetaChildEnvelopeRequest,
   type MetaControlTransformationReceipt,
   type MetaFailureSettlement,
   type MetaEnvelopeAllocationRecord,
@@ -154,18 +155,29 @@ class MemoryJournal implements MetaJournalPort {
     this.configHash = metaCampaignConfigHash(config);
   }
 
-  reserveChild(identity: MetaWorkIdentity): MetaReservation {
+  reserveChild(identity: MetaWorkIdentity, envelope?: MetaChildEnvelopeRequest): MetaReservation {
     if (identity.phase === "holdout" && !this.terminal) throw new Error("holdout not latched");
     if (identity.phase !== "holdout" && this.terminal) throw new Error("train work closed");
     const key = workKey(this.configHash, identity);
+    const requested = envelope?.reserved ?? this.config.budgets.child;
+    const requestedEnvelope = envelope ?? null;
     const existing = this.reservations.get(key);
-    if (existing !== undefined) return structuredClone(existing);
+    if (existing !== undefined) {
+      if (
+        canonicalJson(existing.reserved) !== canonicalJson(requested) ||
+        canonicalJson(existing.envelope) !== canonicalJson(requestedEnvelope)
+      ) {
+        throw new Error("conflicting reservation slice");
+      }
+      return structuredClone(existing);
+    }
     const reservation: MetaReservation = {
       configHash: this.configHash,
       workKey: key,
       childRunId: `run_meta_${key.slice("sha256:".length)}`,
       identity: structuredClone(identity),
-      reserved: { ...this.config.budgets.child },
+      reserved: { ...requested },
+      envelope: structuredClone(requestedEnvelope),
     };
     this.reservations.set(key, reservation);
     return structuredClone(reservation);
@@ -490,7 +502,12 @@ describe("recursive M2 optimizer-authored allocation", () => {
       capsuleId: capsule.capsuleId,
       replicate: 0,
       innerEpisodesMax: index + 1,
-      reserved: { ...config.budgets.child },
+      reserved: {
+        maxTokens: config.budgets.child.maxTokens - index * 1_000,
+        maxUsd: config.budgets.child.maxUsd - index * 0.25,
+        maxWallClockSec: config.budgets.child.maxWallClockSec - index * 10,
+        maxEvaluatorInvocations: config.budgets.child.maxEvaluatorInvocations - index,
+      },
     }));
     const input = { ...searchInput(sourceArtifact), candidateOrdinal: 41, allocations };
 
@@ -499,6 +516,9 @@ describe("recursive M2 optimizer-authored allocation", () => {
     expect(record.output.objectives.normalizedGain).toBeCloseTo(4.5, 12);
     expect(calls).toHaveLength(8);
     expect(calls.map((request) => request.innerEpisodesMax)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(calls.map((request) => request.reservation.reserved)).toEqual(
+      allocations.map((allocation) => allocation.reserved),
+    );
     expect(records.rows).toHaveLength(16);
     expect(envelopeLedger.remainingSearch()).toEqual({
       maxTokens: recursiveBudgets.search.outerTrajectory.maxTokens - 80,
@@ -543,6 +563,165 @@ describe("recursive M2 optimizer-authored allocation", () => {
     expect(records.rows).toHaveLength(2);
     runner.close();
   });
+  test("requires the configured durable ledger and rejects a foreign envelope identity before launch", async () => {
+    const config = recursiveFixture();
+    expect(() => harness(async (request) => childOutcome(request, 1), { config })).toThrow(
+      /durable componentwise envelope ledger/,
+    );
+
+    const foreignBudgets = structuredClone(config.recursiveBudgets);
+    foreignBudgets.search.identity.envelopeId = digest("foreign-search-envelope");
+    const envelopeLedger = new MetaResourceEnvelopeLedger(
+      foreignBudgets,
+      new RunnerEnvelopeRecords(),
+    );
+    let calls = 0;
+    const { runner } = harness(async (request) => {
+      calls += 1;
+      return childOutcome(request, 1);
+    }, { config, envelopeLedger });
+    await expect(runner.evaluateSearchCandidate({
+      ...searchInput(digest("foreign-envelope-candidate")),
+      candidateOrdinal: 1,
+      allocations: [{
+        allocationOrdinal: 0,
+        capsuleId: config.train[0]!.capsuleId,
+        replicate: 0,
+        innerEpisodesMax: 1,
+        reserved: { ...config.budgets.child },
+      }],
+    })).rejects.toThrow(/mismatched batch reservation/);
+    expect(calls).toBe(0);
+    runner.close();
+  });
+
+  test("binds the complete allocation to durable child identity", async () => {
+    const config = recursiveFixture();
+    const envelopeLedger = new MetaResourceEnvelopeLedger(
+      config.recursiveBudgets,
+      new RunnerEnvelopeRecords(),
+    );
+    const identities: MetaWorkIdentity[] = [];
+    const sourceArtifact = digest("allocation-identity-source");
+    const { runner, journal } = harness(async (request) => {
+      identities.push(request.identity);
+      return childOutcome(request, 1);
+    }, {
+      config,
+      envelopeLedger,
+      bundleBySource: new Map([[sourceArtifact, digest("allocation-identity-bundle")]]),
+    });
+    const allocation = {
+      allocationOrdinal: 0,
+      capsuleId: config.train[0]!.capsuleId,
+      replicate: 0,
+      reserved: { ...config.budgets.child },
+    };
+    await Promise.all([
+      runner.evaluateSearchCandidate({
+        ...searchInput(sourceArtifact),
+        candidateOrdinal: 3,
+        allocations: [{ ...allocation, innerEpisodesMax: 1 }],
+      }),
+      runner.evaluateSearchCandidate({
+        ...searchInput(sourceArtifact),
+        candidateOrdinal: 3,
+        allocations: [{ ...allocation, innerEpisodesMax: 2 }],
+      }),
+    ]);
+    expect(identities).toHaveLength(2);
+    expect(new Set(identities.map((identity) => identity.measurementEpoch)).size).toBe(2);
+    expect(journal.reservations.size).toBe(2);
+    runner.close();
+  });
+
+  test("batch-validates all sibling slices before any child can launch", async () => {
+    const config = recursiveFixture();
+    const records = new RunnerEnvelopeRecords();
+    const envelopeLedger = new MetaResourceEnvelopeLedger(config.recursiveBudgets, records);
+    let calls = 0;
+    const { runner } = harness(async (request) => {
+      calls += 1;
+      return childOutcome(request, 1);
+    }, { config, envelopeLedger });
+    const allocations = Array.from({ length: 97 }, (_, allocationOrdinal) => ({
+      allocationOrdinal,
+      capsuleId: config.train[0]!.capsuleId,
+      replicate: 0,
+      innerEpisodesMax: 1,
+      reserved: { ...config.budgets.child },
+    }));
+    await expect(runner.evaluateSearchCandidate({
+      ...searchInput(digest("overcommitted-siblings")),
+      candidateOrdinal: 4,
+      allocations,
+    })).rejects.toThrow(/search envelope batch maxTokens exceeded/);
+    expect(calls).toBe(0);
+    expect(records.rows).toHaveLength(0);
+    runner.close();
+  });
+
+  test("joins one durable child shared by overlapping optimizer schedules", async () => {
+    const config = recursiveFixture();
+    const envelopeLedger = new MetaResourceEnvelopeLedger(
+      config.recursiveBudgets,
+      new RunnerEnvelopeRecords(),
+    );
+    let releaseCommon: (() => void) | undefined;
+    let commonStartedResolve: (() => void) | undefined;
+    const commonStarted = new Promise<void>((resolve) => {
+      commonStartedResolve = resolve;
+    });
+    const commonRelease = new Promise<void>((resolve) => {
+      releaseCommon = resolve;
+    });
+    const calls: string[] = [];
+    const sourceArtifact = digest("overlapping-schedules");
+    const commonCapsuleId = config.train[0]!.capsuleId;
+    const { runner } = harness(async (request) => {
+      calls.push(request.capsule.capsuleId);
+      if (request.capsule.capsuleId === commonCapsuleId) {
+        commonStartedResolve?.();
+        await commonRelease;
+      }
+      return childOutcome(request, 1);
+    }, {
+      config,
+      envelopeLedger,
+      bundleBySource: new Map([[sourceArtifact, digest("overlapping-schedules-bundle")]]),
+    });
+    const common = {
+      allocationOrdinal: 0,
+      capsuleId: commonCapsuleId,
+      replicate: 0,
+      innerEpisodesMax: 1,
+      reserved: { ...config.budgets.child },
+    };
+    const first = runner.evaluateSearchCandidate({
+      ...searchInput(sourceArtifact),
+      candidateOrdinal: 5,
+      allocations: [common],
+    });
+    await commonStarted;
+    const second = runner.evaluateSearchCandidate({
+      ...searchInput(sourceArtifact),
+      candidateOrdinal: 5,
+      allocations: [
+        common,
+        {
+          ...common,
+          allocationOrdinal: 1,
+          capsuleId: config.train[1]!.capsuleId,
+        },
+      ],
+    });
+    releaseCommon?.();
+    await Promise.all([first, second]);
+    expect(calls.filter((capsuleId) => capsuleId === commonCapsuleId)).toHaveLength(1);
+    expect(calls).toHaveLength(2);
+    runner.close();
+  });
+
 });
 
 describe("trusted controls and registered pairs", () => {
