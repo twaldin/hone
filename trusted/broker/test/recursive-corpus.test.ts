@@ -152,8 +152,9 @@ async function writeChildEvidence(
       at: "1970-01-01T00:00:00.000Z",
       type: "run.started",
       capsuleId: request.child.capsuleId,
-      contractHash: admission.campaignConfigHash,
+      contractHash: contentHash("child-run-contract"),
       optimizerDigest: request.child.optimizerArtifact.hash,
+      campaignConfigHash: admission.campaignConfigHash,
     },
     {
       runId: request.child.runId,
@@ -250,6 +251,57 @@ describe("recursive spawnRun authority", () => {
       reservations: 1,
       openReservations: 1,
       remaining: { maxTokens: 160, maxUsd: 160, maxWallClockSec: 160, maxEvaluatorInvocations: 160 },
+    });
+  });
+
+  it("requires sealed campaignConfigHash instead of treating the per-run contractHash as campaign identity", async () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "campaign-identity-ledger.ndjson"));
+    ledgers.push(ledger);
+    const reservation = { ...LARGE, maxTokens: 30, maxUsd: 30, maxWallClockSec: 30, maxEvaluatorInvocations: 30 };
+    const request = childRequest("campaign-unbound-child", 1, reservation, "capsule");
+    const launcher: ChildRunLauncher = async ({ request: launchedRequest, admission }) => {
+      const evidence = await writeChildEvidence(launchedRequest, admission, "campaign-unbound");
+      const eventsWithoutCampaign: RunEvent[] = [
+        {
+          runId: launchedRequest.child.runId,
+          at: "1970-01-01T00:00:00.000Z",
+          type: "run.started",
+          capsuleId: launchedRequest.child.capsuleId,
+          contractHash: admission.campaignConfigHash,
+          optimizerDigest: launchedRequest.child.optimizerArtifact.hash,
+        },
+        {
+          runId: launchedRequest.child.runId,
+          at: "1970-01-01T00:00:01.000Z",
+          type: "run.finished",
+          status: "completed",
+        },
+      ];
+      await writeFile(
+        evidence.terminalEventPath,
+        `${eventsWithoutCampaign.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      );
+      return {
+        ...evidence,
+        usage: { tokens: 1, usd: 1, wallClockSec: 1, evaluatorInvocations: 1 },
+      };
+    };
+    const broker = makeBroker({
+      runId: "root",
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: launcher,
+      },
+    });
+
+    await expect(broker.spawnRun(request, CLIENT)).rejects.toThrow(/not bound to its launch receipt/);
+    expect(ledger.budgetState("root")).toMatchObject({
+      openReservations: 1,
+      remaining: { maxTokens: 170, maxUsd: 170, maxWallClockSec: 170, maxEvaluatorInvocations: 170 },
     });
   });
   it("refuses spawnRun at depth 2 before invoking the trusted launcher", async () => {

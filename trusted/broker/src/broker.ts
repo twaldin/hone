@@ -3668,7 +3668,7 @@ export class Broker {
       started?.type !== "run.started" ||
       started.runId !== expectedRunId ||
       started.capsuleId !== request.child.capsuleId ||
-      started.contractHash !== admission.campaignConfigHash ||
+      started.campaignConfigHash !== admission.campaignConfigHash ||
       started.optimizerDigest !== request.child.optimizerArtifact.hash ||
       events.some((event) => event.runId !== expectedRunId)
     ) {
