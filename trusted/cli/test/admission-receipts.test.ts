@@ -44,6 +44,32 @@ function makeReceipt(
     recordHash: admissionReceiptRecordHash(body),
   });
 }
+function approvalHistory(
+  overrides: Partial<AdmissionReceiptRecordBody> = {},
+): readonly [AdmissionReceiptRecord, AdmissionReceiptRecord] {
+  const gate1 = makeReceipt(0, null, "gate1-accept", {
+    ...(overrides.capsuleDigest !== undefined ? { capsuleDigest: overrides.capsuleDigest } : {}),
+    ...(overrides.identities !== undefined ? { identities: overrides.identities } : {}),
+  });
+  return [
+    gate1,
+    makeReceipt(1, gate1.recordHash, "gate2-approve", overrides),
+  ];
+}
+
+function receiptChain(
+  actions: readonly AdmissionReceiptRecordBody["action"][],
+): AdmissionReceiptRecord[] {
+  const receipts: AdmissionReceiptRecord[] = [];
+  let previousReceiptHash: string | null = null;
+  for (const [sequence, action] of actions.entries()) {
+    const receipt = makeReceipt(sequence, previousReceiptHash, action);
+    receipts.push(receipt);
+    previousReceiptHash = receipt.recordHash;
+  }
+  return receipts;
+}
+
 
 function ledgerPath(casRoot: string, digest = DIGEST): string {
   return join(casRoot, "admission-receipts", `${digest.slice("sha256:".length)}.ndjson`);
@@ -61,8 +87,9 @@ describe("admission receipt ledger", () => {
   it("appends and verifies an owner approval in an owner-only hash-chained ledger", () => {
     const root = makeRoot();
     const casRoot = join(root, ".hone-cas");
-    const receipt = makeReceipt();
+    const [gate1, receipt] = approvalHistory();
 
+    appendAdmissionReceipt(casRoot, gate1);
     expect(appendAdmissionReceipt(casRoot, receipt)).toEqual(receipt);
     expect(verifyAdmissionApproval(casRoot, DIGEST)).toEqual({
       approved: true,
@@ -81,22 +108,26 @@ describe("admission receipt ledger", () => {
       "final-reviewer": { identity: "independent-reviewer", kind: "agent" },
     };
 
-    appendAdmissionReceipt(casRoot, makeReceipt(0, null, "gate2-approve", {
+    const [gate1, undelegated] = approvalHistory({
       identities,
       provisional: false,
-    }));
+    });
+    appendAdmissionReceipt(casRoot, gate1);
+    appendAdmissionReceipt(casRoot, undelegated);
     expect(() => verifyAdmissionApproval(casRoot, DIGEST)).toThrow(/delegation/);
 
     const delegatedRoot = join(root, "delegated-cas");
-    const receipt = makeReceipt(0, null, "gate2-approve", {
+    const [delegatedGate1, receipt] = approvalHistory({
       identities,
       delegation: {
         delegator: { identity: "repository-owner", kind: "owner" },
+        delegate: { identity: "independent-reviewer", kind: "agent" },
         scope: "provisional-private-apply-none",
         budgetUsd: 8.5,
       },
       provisional: true,
     });
+    appendAdmissionReceipt(delegatedRoot, delegatedGate1);
     appendAdmissionReceipt(delegatedRoot, receipt);
     expect(verifyAdmissionApproval(delegatedRoot, DIGEST)).toEqual({
       approved: true,
@@ -108,7 +139,9 @@ describe("admission receipt ledger", () => {
 
   it("fails closed on a tampered recordHash", () => {
     const casRoot = join(makeRoot(), ".hone-cas");
-    appendAdmissionReceipt(casRoot, makeReceipt());
+    const [gate1, approval] = approvalHistory();
+    appendAdmissionReceipt(casRoot, gate1);
+    appendAdmissionReceipt(casRoot, approval);
     const path = ledgerPath(casRoot);
     const tampered = readFileSync(path, "utf8").replace(
       /"recordHash":"sha256:[0-9a-f]{64}"/,
@@ -120,8 +153,8 @@ describe("admission receipt ledger", () => {
 
   it("fails closed on a sequence gap", () => {
     const casRoot = join(makeRoot(), ".hone-cas");
-    const first = makeReceipt(0);
-    const gap = makeReceipt(2, first.recordHash);
+    const first = makeReceipt(0, null, "gate1-accept");
+    const gap = makeReceipt(2, first.recordHash, "gate2-approve");
     writeLedger(casRoot, [first, gap]);
     expect(() => verifyAdmissionApproval(casRoot, DIGEST)).toThrow(/sequence/);
   });
@@ -136,7 +169,7 @@ describe("admission receipt ledger", () => {
 
   it("fails closed when a ledger file contains a record for another capsule digest", () => {
     const casRoot = join(makeRoot(), ".hone-cas");
-    const wrong = makeReceipt(0, null, "gate2-approve", { capsuleDigest: OTHER_DIGEST });
+    const wrong = makeReceipt(0, null, "gate1-accept", { capsuleDigest: OTHER_DIGEST });
     writeLedger(casRoot, [wrong], DIGEST);
     expect(() => verifyAdmissionApproval(casRoot, DIGEST)).toThrow(/capsule digest/);
   });
@@ -145,16 +178,18 @@ describe("admission receipt ledger", () => {
     "uses the latest terminal state and rejects a post-approval %s",
     (action) => {
       const casRoot = join(makeRoot(), ".hone-cas");
-      const approval = makeReceipt();
+      const [gate1, approval] = approvalHistory();
+      appendAdmissionReceipt(casRoot, gate1);
       appendAdmissionReceipt(casRoot, approval);
-      appendAdmissionReceipt(casRoot, makeReceipt(1, approval.recordHash, action));
+      appendAdmissionReceipt(casRoot, makeReceipt(2, approval.recordHash, action));
       expect(() => verifyAdmissionApproval(casRoot, DIGEST)).toThrow(/revoke|gate2-reject|not approved/);
     },
   );
 
   it("ignores and repairs an unacknowledged torn trailing line", () => {
     const casRoot = join(makeRoot(), ".hone-cas");
-    const receipt = makeReceipt();
+    const [gate1, receipt] = approvalHistory();
+    appendAdmissionReceipt(casRoot, gate1);
     appendAdmissionReceipt(casRoot, receipt);
     const path = ledgerPath(casRoot);
     appendFileSync(path, '{"v":1');
@@ -162,6 +197,45 @@ describe("admission receipt ledger", () => {
     expect(verifyAdmissionApproval(casRoot, DIGEST).receipt).toEqual(receipt);
     expect(readFileSync(path, "utf8").endsWith("\n")).toBe(true);
   });
+  it.each([
+    ["a lone gate2 approval", ["gate2-approve"]],
+    ["reject then direct approval", ["gate1-accept", "gate2-reject", "gate2-approve"]],
+    ["revoke then direct approval", ["gate1-accept", "gate2-approve", "revoke", "gate2-approve"]],
+    ["duplicate approval", ["gate1-accept", "gate2-approve", "gate2-approve"]],
+  ] as const)("fails closed on the invalid two-gate transition: %s", (_name, actions) => {
+    const casRoot = join(makeRoot(), ".hone-cas");
+    writeLedger(casRoot, receiptChain(actions));
+    expect(() => verifyAdmissionApproval(casRoot, DIGEST)).toThrow(/transition|gate1/i);
+  });
+
+  it("allows an explicit gate1 reopen after a revocation", () => {
+    const casRoot = join(makeRoot(), ".hone-cas");
+    const records = receiptChain([
+      "gate1-accept",
+      "gate2-approve",
+      "revoke",
+      "gate1-accept",
+      "gate2-approve",
+    ]);
+    writeLedger(casRoot, records);
+    expect(verifyAdmissionApproval(casRoot, DIGEST).receipt).toEqual(records[4]);
+  });
+
+  it("fails verification while an append failure has poisoned the ledger", () => {
+    const casRoot = join(makeRoot(), ".hone-cas");
+    const [gate1, approval] = approvalHistory();
+    appendAdmissionReceipt(casRoot, gate1);
+    appendAdmissionReceipt(casRoot, approval);
+    const path = ledgerPath(casRoot);
+    chmodSync(path, 0o400);
+    expect(() => appendAdmissionReceipt(
+      casRoot,
+      makeReceipt(2, approval.recordHash, "revoke"),
+    )).toThrow();
+    chmodSync(path, 0o600);
+    expect(() => verifyAdmissionApproval(casRoot, DIGEST)).toThrow(/poison|unusable/);
+  });
+
 });
 
 describe("admitCapsule review gate", () => {
@@ -182,16 +256,19 @@ describe("admitCapsule review gate", () => {
     };
     expect(() => admitCapsule(capsuleDir, { review: "required" })).toThrow(/admission receipt|approval/);
 
-    appendAdmissionReceipt(join(root, ".hone-cas"), makeReceipt(0, null, "gate2-approve", {
+    const [gate1, approval] = approvalHistory({
       capsuleDigest: digest,
       identities,
       delegation: {
         delegator: { identity: "repository-owner", kind: "owner" },
+        delegate: { identity: "independent-reviewer", kind: "agent" },
         scope: "provisional-private-apply-none",
         budgetUsd: 10,
       },
       provisional: true,
-    }));
+    });
+    appendAdmissionReceipt(join(root, ".hone-cas"), gate1);
+    appendAdmissionReceipt(join(root, ".hone-cas"), approval);
     expect(admitCapsule(capsuleDir, { review: "required" }).provisional).toBe(true);
   });
 });

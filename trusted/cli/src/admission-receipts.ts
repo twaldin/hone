@@ -16,7 +16,7 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   AdmissionReceiptRecord as AdmissionReceiptRecordSchema,
   type AdmissionReceiptRecord,
@@ -57,7 +57,7 @@ function assertDigest(digest: string): void {
 }
 
 function ledgerDirectory(casRoot: string): string {
-  return join(casRoot, ADMISSION_RECEIPTS_DIR);
+  return resolve(casRoot, ADMISSION_RECEIPTS_DIR);
 }
 
 export function admissionReceiptLedgerPath(casRoot: string, capsuleDigest: string): string {
@@ -214,33 +214,80 @@ function acquireLedgerLock(directory: string, digest: string): () => void {
 function repairTornTail(ledgerPath: string): void {
   if (!existsSync(ledgerPath)) return;
   assertOwnedPath(ledgerPath, "file", true);
-  const fd = openSync(ledgerPath, "r+");
+  const readFd = openSync(ledgerPath, "r");
+  let keep: number | undefined;
   try {
-    const size = fstatSync(fd).size;
+    const size = fstatSync(readFd).size;
     if (size > MAX_LEDGER_BYTES) throw new Error("admission receipt ledger exceeds size limit");
     if (size === 0) return;
     const finalByte = Buffer.alloc(1);
-    readSync(fd, finalByte, 0, 1, size - 1);
+    readSync(readFd, finalByte, 0, 1, size - 1);
     if (finalByte[0] === 0x0a) return;
     const content = Buffer.alloc(size);
-    readSync(fd, content, 0, size, 0);
-    const lastNewline = content.lastIndexOf(0x0a);
-    ftruncateSync(fd, lastNewline + 1);
-    fsyncSync(fd);
+    readSync(readFd, content, 0, size, 0);
+    keep = content.lastIndexOf(0x0a) + 1;
   } finally {
-    closeSync(fd);
+    closeSync(readFd);
+  }
+  const writeFd = openSync(ledgerPath, "r+");
+  try {
+    ftruncateSync(writeFd, keep);
+    fsyncSync(writeFd);
+  } finally {
+    closeSync(writeFd);
   }
   syncDirectory(dirname(ledgerPath));
 }
 
-function replayLedger(ledgerPath: string, capsuleDigest: string): AdmissionReceiptRecord[] {
+type AdmissionWorkflowState =
+  | "awaiting-gate1"
+  | "revision-required"
+  | "gate1-accepted"
+  | "approved"
+  | "gate2-rejected"
+  | "revoked";
+
+interface ReplayedAdmissionLedger {
+  receipts: AdmissionReceiptRecord[];
+  state: AdmissionWorkflowState;
+}
+
+function advanceAdmissionWorkflow(
+  state: AdmissionWorkflowState,
+  action: AdmissionReceiptRecord["action"],
+  sequence: number,
+): AdmissionWorkflowState {
+  if (state === "awaiting-gate1" || state === "revision-required") {
+    if (action === "gate1-revise") return "revision-required";
+    if (action === "gate1-accept") return "gate1-accepted";
+  } else if (state === "gate1-accepted") {
+    if (action === "gate1-revise") return "revision-required";
+    if (action === "gate2-approve") return "approved";
+    if (action === "gate2-reject") return "gate2-rejected";
+  } else if (state === "approved") {
+    if (action === "revoke") return "revoked";
+    if (action === "gate2-reject") return "gate2-rejected";
+  } else if (state === "gate2-rejected" || state === "revoked") {
+    if (action === "gate1-revise") return "revision-required";
+    if (action === "gate1-accept") return "gate1-accepted";
+  }
+  throw new Error(
+    `invalid admission workflow transition at sequence ${sequence}: ${state} -> ${action}`,
+  );
+}
+
+function replayLedger(
+  ledgerPath: string,
+  capsuleDigest: string,
+): ReplayedAdmissionLedger {
   repairTornTail(ledgerPath);
-  if (!existsSync(ledgerPath)) return [];
+  if (!existsSync(ledgerPath)) return { receipts: [], state: "awaiting-gate1" };
   const content = readFileSync(ledgerPath, "utf8");
   if (Buffer.byteLength(content) > MAX_LEDGER_BYTES) throw new Error("admission receipt ledger exceeds size limit");
   const lines = content.length === 0 ? [] : content.slice(0, -1).split("\n");
   const receipts: AdmissionReceiptRecord[] = [];
   let previousReceiptHash: string | null = null;
+  let state: AdmissionWorkflowState = "awaiting-gate1";
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -268,10 +315,11 @@ function replayLedger(ledgerPath: string, capsuleDigest: string): AdmissionRecei
     if (receipt.capsuleDigest !== capsuleDigest) {
       throw new Error(`admission receipt capsule digest mismatch at sequence ${receipt.sequence}`);
     }
+    state = advanceAdmissionWorkflow(state, receipt.action, receipt.sequence);
     receipts.push(receipt);
     previousReceiptHash = receipt.recordHash;
   }
-  return receipts;
+  return { receipts, state };
 }
 
 function appendRecord(ledgerPath: string, receipt: AdmissionReceiptRecord): void {
@@ -326,15 +374,16 @@ export function appendAdmissionReceipt(
   let release: (() => void) | undefined;
   try {
     release = acquireLedgerLock(directory, receipt.capsuleDigest);
-    const receipts = replayLedger(ledgerPath, receipt.capsuleDigest);
-    const previous = receipts[receipts.length - 1];
-    const expectedSequence = receipts.length;
+    const replayed = replayLedger(ledgerPath, receipt.capsuleDigest);
+    const previous = replayed.receipts[replayed.receipts.length - 1];
+    const expectedSequence = replayed.receipts.length;
     if (receipt.sequence !== expectedSequence) {
       throw new Error(`append sequence mismatch: expected ${expectedSequence}, received ${receipt.sequence}`);
     }
     if (receipt.previousReceiptHash !== (previous?.recordHash ?? null)) {
       throw new Error("append previousReceiptHash does not match the durable chain head");
     }
+    advanceAdmissionWorkflow(replayed.state, receipt.action, receipt.sequence);
     appendRecord(ledgerPath, receipt);
     return receipt;
   } catch (error) {
@@ -355,14 +404,19 @@ export function verifyAdmissionApproval(
   capsuleDigest: string,
 ): VerifiedAdmissionApproval {
   assertDigest(capsuleDigest);
+  const ledgerPath = admissionReceiptLedgerPath(casRoot, capsuleDigest);
+  const priorPoison = appendPoison.get(ledgerPath);
+  if (priorPoison !== undefined) {
+    throw receiptError(`ledger is unusable after append failure: ${priorPoison}`);
+  }
   let release: (() => void) | undefined;
   try {
     const directory = existingLedgerDirectory(casRoot);
     release = acquireLedgerLock(directory, capsuleDigest);
-    const receipts = replayLedger(admissionReceiptLedgerPath(casRoot, capsuleDigest), capsuleDigest);
-    const receipt = receipts[receipts.length - 1];
+    const replayed = replayLedger(ledgerPath, capsuleDigest);
+    const receipt = replayed.receipts[replayed.receipts.length - 1];
     if (receipt === undefined) throw new Error("no admission approval exists for this capsule");
-    if (receipt.action !== "gate2-approve") {
+    if (replayed.state !== "approved" || receipt.action !== "gate2-approve") {
       throw new Error(`capsule is not approved: latest receipt action is ${receipt.action}`);
     }
 

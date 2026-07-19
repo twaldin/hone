@@ -41,13 +41,38 @@ describe("AdmissionReceiptRecord", () => {
       "final-reviewer": { identity: "repository-owner", kind: "owner" as const },
     },
     {
-      author: { identity: " Review Agent ", kind: "agent" as const },
-      "adversarial-validator": { identity: "review agent", kind: "agent" as const },
+      author: { identity: " Review.Agent ", kind: "agent" as const },
+      "adversarial-validator": { identity: "review.agent", kind: "agent" as const },
+      "final-reviewer": { identity: "repository-owner", kind: "owner" as const },
+    },
+    {
+      author: { identity: "Ａlice", kind: "agent" as const },
+      "adversarial-validator": { identity: "alice", kind: "agent" as const },
       "final-reviewer": { identity: "repository-owner", kind: "owner" as const },
     },
   ])("rejects role identity collisions after trim and case-fold", (identities) => {
     expect(() => AdmissionReceiptRecord.parse(ownerApproval(identities))).toThrow(/pairwise distinct/);
   });
+  it("normalizes authorization identities and rejects non-ASCII confusables and format characters", () => {
+    const parsed = AdmissionReceiptRecord.parse(ownerApproval({
+      author: { identity: " Ｃapsule-Author ", kind: "agent" },
+      "adversarial-validator": { identity: "red-team", kind: "agent" },
+      "final-reviewer": { identity: "repository-owner", kind: "owner" },
+    }));
+    expect(parsed.identities.author.identity).toBe("capsule-author");
+
+    for (const identity of ["Аlice", "café", "cafe\u0301", "ali\u200bce"]) {
+      expect(AdmissionReceiptRecord.safeParse({
+        ...ownerApproval(),
+        identities: {
+          author: { identity, kind: "agent" },
+          "adversarial-validator": { identity: "red-team", kind: "agent" },
+          "final-reviewer": { identity: "repository-owner", kind: "owner" },
+        },
+      }).success).toBe(false);
+    }
+  });
+
 
   it("requires delegated approvals to be provisional and validates delegation scope and budget", () => {
     const base = ownerApproval({
@@ -60,6 +85,7 @@ describe("AdmissionReceiptRecord", () => {
       ...body,
       delegation: {
         delegator: { identity: "repository-owner", kind: "owner" as const },
+        delegate: { identity: "independent-reviewer", kind: "agent" as const },
         scope: "provisional-private-apply-none" as const,
         budgetUsd: 12.5,
       },
@@ -86,7 +112,32 @@ describe("AdmissionReceiptRecord", () => {
       const paths = incomplete.error.issues.map((issue) => issue.path.join("."));
       expect(paths).toContain("delegation.scope");
       expect(paths).toContain("delegation.budgetUsd");
+      expect(paths).toContain("delegation.delegate");
     }
+
+    const wrongDelegate = {
+      ...delegated,
+      delegation: {
+        ...delegated.delegation,
+        delegate: { identity: "some-other-agent", kind: "agent" as const },
+      },
+    };
+    expect(() => AdmissionReceiptRecord.parse({
+      ...wrongDelegate,
+      recordHash: admissionReceiptRecordHash(wrongDelegate),
+    })).toThrow(/delegate/);
+
+    const selfDelegated = {
+      ...delegated,
+      delegation: {
+        ...delegated.delegation,
+        delegator: { identity: "independent-reviewer", kind: "owner" as const },
+      },
+    };
+    expect(() => AdmissionReceiptRecord.parse({
+      ...selfDelegated,
+      recordHash: admissionReceiptRecordHash(selfDelegated),
+    })).toThrow(/delegator.*differ|differ.*delegator/);
 
     const badBudget = { ...delegated, delegation: { ...delegated.delegation, budgetUsd: 0 } };
     expect(() => AdmissionReceiptRecord.parse({
