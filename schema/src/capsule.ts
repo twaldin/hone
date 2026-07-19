@@ -71,6 +71,20 @@ export const CapsuleManifest = z.object({
   assetGroups: z.array(AssetGroup).min(1),
   budget: BudgetEnvelope,
   /**
+   * Optional per-capsule sandbox resource requirements. Trusted runtime
+   * passes these to the broker's container limits (default 2 GiB / 2 cpus).
+   * Core (inside the digest): a capsule that needs 6 GiB to link is a
+   * different task than one that fits the default — admission gate 9
+   * (bounded build with 30% headroom) is judged against THIS cap.
+   */
+  sandbox: z
+    .object({
+      memoryBytes: z.number().int().positive(),
+      cpus: z.number().positive().optional(),
+    })
+    .strict()
+    .optional(),
+  /**
    * Reference to the persisted diagnostic-ordering report proving the
    * evaluator discriminates (broken < naive < baseline < improved, split
    * integrity, stability). `path` is capsule-root-relative; `hash` covers the
