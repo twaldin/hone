@@ -27,7 +27,7 @@ export interface SaturationCeilingOptions {
   bootstrapSamples?: number;
 }
 
-export type SaturationStatistic = number | "negative-infinity" | "positive-infinity";
+export type SaturationStatistic = number | "negative-infinity";
 
 export interface SaturationDelta {
   capsuleId: string;
@@ -60,7 +60,7 @@ export interface SaturationCeilingReport {
     quantileMethod: "nearest-rank";
     confidenceMethod: "bootstrap-percentile-upper-bound";
     invalidDeeperConvention: "negative-infinity";
-    invalidShallowerConvention: "positive-infinity";
+    invalidShallowerConvention: "negative-infinity";
   };
   cells: SaturationCell[];
   deltas: SaturationDelta[];
@@ -182,7 +182,6 @@ function indexCells(
 
 function encodeStatistic(value: number): SaturationStatistic {
   if (value === Number.NEGATIVE_INFINITY) return "negative-infinity";
-  if (value === Number.POSITIVE_INFINITY) return "positive-infinity";
   return Object.is(value, -0) ? 0 : value;
 }
 
@@ -228,8 +227,13 @@ function pairedDelta(
     numericValue = Number.NEGATIVE_INFINITY;
     source = "invalid-deeper";
   } else if (lower.status !== "valid") {
-    // A missing shallower result cannot establish saturation; mirror the conservative rule with +Infinity.
-    numericValue = Number.POSITIVE_INFINITY;
+    /*
+     * The same failed cell was the deeper endpoint of the preceding pair.
+     * Reusing it as +Infinity here could reverse its penalty and increase the
+     * selected ceiling. Keep the unpaired contrast at -Infinity so a failure
+     * can never become evidence for deeper execution through the next pair.
+     */
+    numericValue = Number.NEGATIVE_INFINITY;
     source = "invalid-shallower";
   } else {
     numericValue = upper.normalizedGain - lower.normalizedGain;
@@ -337,7 +341,7 @@ export function selectSaturationCeiling(
       quantileMethod: "nearest-rank",
       confidenceMethod: "bootstrap-percentile-upper-bound",
       invalidDeeperConvention: "negative-infinity",
-      invalidShallowerConvention: "positive-infinity",
+      invalidShallowerConvention: "negative-infinity",
     },
     cells: cells
       .map<SaturationCell>((cell) =>
