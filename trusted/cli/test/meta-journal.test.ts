@@ -305,6 +305,7 @@ describe("MetaJournalV1 durable identity and idempotency", () => {
       reserved: { ...cfg.budgets.child },
     };
     const journal = MetaJournalV1.open(path, cfg);
+    expect(() => journal.reserveChild(work)).toThrow(/requires a durable resource-envelope binding/);
     const reservation = journal.reserveChild(work, envelope);
     expect(reservation.reserved).toEqual(envelope.reserved);
     expect(reservation.envelope).toEqual(envelope);
@@ -322,6 +323,18 @@ describe("MetaJournalV1 durable identity and idempotency", () => {
     const replayed = MetaJournalV1.open(path, cfg);
     expect(replayed.reserveChild(work, envelope)).toEqual(reservation);
     replayed.close();
+
+    const legacyPath = await journalPath("recursive-legacy-reservation");
+    const legacyJournal = MetaJournalV1.open(legacyPath, cfg);
+    legacyJournal.reserveChild(work, envelope);
+    legacyJournal.close();
+    const legacyLines = lines(legacyPath).map((line) => JSON.parse(line));
+    legacyLines[1].v = 1;
+    delete legacyLines[1].reservation.envelope;
+    writeFileSync(legacyPath, `${legacyLines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    expect(() => MetaJournalV1.open(legacyPath, cfg)).toThrow(
+      /recursive meta journals require every reservation to carry its durable envelope binding/,
+    );
   });
 });
 

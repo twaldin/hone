@@ -2,10 +2,19 @@ import { parseFlags, strFlag } from "../args.js";
 import { alignedAuthoritySnapshot } from "../authority.js";
 import type { CmdIo } from "../io.js";
 import { formatDelta, formatSpend } from "../report.js";
-import { resolveRun } from "../runs.js";
+import { listRunDirs, resolveRun } from "../runs.js";
+import { activeCampaignPauses } from "./resume.js";
 
 export async function statusCommand(args: string[], io: CmdIo): Promise<number> {
   const { flags } = parseFlags(args, { strings: ["run"] });
+  const pauses = activeCampaignPauses(io.root);
+  for (const { campaignDir, pause } of pauses) {
+    io.out(`campaign pause: ${pause.pauseId}`);
+    io.out(`pause reason: ${pause.reason}`);
+    io.out(`paused run: ${pause.runId}`);
+    io.out(`campaign state: ${campaignDir}`);
+  }
+  if (strFlag(flags, "run") === undefined && listRunDirs(io.root).length === 0 && pauses.length > 0) return 0;
   const runDir = resolveRun(io.root, strFlag(flags, "run"));
   // The broker journal is the durable authority; render ONLY the replay the
   // journal was proven against — a separate pre-gate replay could be a stale

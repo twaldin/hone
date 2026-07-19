@@ -216,6 +216,10 @@ async function setup(overrides: Partial<ProxyConfig> = {}): Promise<Ctx> {
     ...overrides,
     recordCampaignPause: overrides.recordCampaignPause ?? (() => undefined),
     recordCampaignResume: overrides.recordCampaignResume ?? (() => undefined),
+    captureCampaignDispatchFence:
+      overrides.captureCampaignDispatchFence ?? (() => ({ epoch: "0", paused: false })),
+    validateCampaignDispatchFence:
+      overrides.validateCampaignDispatchFence ?? (() => true),
   });
   const port = await proxy.listenTcp(0);
   cleanups.push(async () => {
@@ -552,6 +556,8 @@ describe("unix socket", () => {
       runDir: join(base, "run"),
       casDir: join(base, "cas"),
       upstreamBaseUrl: `http://127.0.0.1:${upstream.port}`,
+      captureCampaignDispatchFence: () => ({ epoch: "0", paused: false }),
+      validateCampaignDispatchFence: () => true,
       checkBudget: () => ({ allowed: true, remaining: GENEROUS_REMAINING }),
       recordSpend: (s) => {
         spends.push(s);
@@ -612,6 +618,8 @@ describe("live smoke (skip-if-unreachable)", () => {
       runDir: join(base, "run"),
       casDir: join(base, "cas"),
       upstreamBaseUrl: "http://127.0.0.1:8317",
+      captureCampaignDispatchFence: () => ({ epoch: "0", paused: false }),
+      validateCampaignDispatchFence: () => true,
       checkBudget: () => ({ allowed: true, remaining: GENEROUS_REMAINING }),
       recordSpend: (s) => {
         spends.push(s);

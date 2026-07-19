@@ -72,6 +72,12 @@ export interface SpendRecord {
   usd: number;
 }
 
+/** Opaque monotonic campaign-authority revision captured across admission. */
+export interface CampaignDispatchFence {
+  epoch: string;
+  paused: boolean;
+}
+
 /** Hard resource bounds. Every field has a safe default (DEFAULT_LIMITS). */
 export interface ProxyLimits {
   /** Inbound request bodies above this many bytes are rejected 413; buffering stops at the cap. */
@@ -150,6 +156,17 @@ export interface ProxyConfig {
    * It runs only after durable preflight attempts prove both frozen routes.
    */
   recordCampaignResume: (signal: CampaignResumeSignal) => void | Promise<void>;
+  /** Capture shared campaign state before budget admission. */
+  captureCampaignDispatchFence: () =>
+    CampaignDispatchFence | Promise<CampaignDispatchFence>;
+  /**
+   * Final shared-authority fence, called after the durable intent and
+   * immediately before fetch. False means the epoch changed or is disallowed.
+   */
+  validateCampaignDispatchFence: (
+    epoch: string,
+    options: { allowPaused: boolean },
+  ) => boolean | Promise<boolean>;
   /** TEST-ONLY deterministic entropy source; values are clamped inside the trusted jitter bound. */
   retryRandom?: () => number;
   /**
@@ -747,6 +764,14 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
 
   async function dispatchProviderAttempt(input: ProviderDispatchInput): Promise<ProviderDispatchResult> {
     await recoveryPromise;
+    const campaignFence = await config.captureCampaignDispatchFence();
+    if (
+      typeof campaignFence.epoch !== "string" ||
+      campaignFence.epoch.length === 0 ||
+      typeof campaignFence.paused !== "boolean"
+    ) {
+      throw new Error("campaign dispatch fence returned malformed state");
+    }
     const authorityTraceFailure = traceLog.poisoned?.message;
     const authorityFailure = authorityTraceFailure ?? dispatchPoison ?? journal.poisoned?.message;
     if (authorityFailure !== undefined) {
@@ -760,6 +785,18 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
                 ? "hone_trace_authority_failed"
                 : "hone_dispatch_authority_failed",
             message: `dispatch authority poisoned: ${authorityFailure}`,
+          },
+        }),
+      };
+    }
+    if (campaignFence.paused && !input.allowPaused) {
+      return {
+        kind: "sealed",
+        status: 503,
+        body: JSON.stringify({
+          error: {
+            type: "hone_campaign_paused",
+            message: "shared campaign authority is durably paused",
           },
         }),
       };
@@ -964,10 +1001,23 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
         };
       }
 
+      let campaignFenceValid = false;
+      try {
+        campaignFenceValid = await config.validateCampaignDispatchFence(
+          campaignFence.epoch,
+          { allowPaused: input.allowPaused },
+        );
+      } catch {
+        campaignFenceValid = false;
+      }
       const lateTraceFailure = traceLog.poisoned?.message;
       const lateAuthorityFailure =
         lateTraceFailure ?? dispatchPoison ?? journal.poisoned?.message;
-      if (lateAuthorityFailure !== undefined || (!input.allowPaused && pausePending)) {
+      if (
+        lateAuthorityFailure !== undefined ||
+        (!input.allowPaused && pausePending) ||
+        !campaignFenceValid
+      ) {
         await settle(
           { tokens: 0, usd: 0 },
           "no-upstream",
@@ -987,7 +1037,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
                     : "hone_dispatch_authority_failed",
               message:
                 lateAuthorityFailure === undefined
-                  ? "campaign model egress is durably paused pending frozen-route preflight"
+                  ? "campaign dispatch fence changed or paused before upstream dispatch"
                   : `authority poisoned before dispatch: ${lateAuthorityFailure}`,
             },
           }),
@@ -1651,7 +1701,12 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
     }
     if (isModels) {
       await recoveryPromise;
-      if (pausePending) {
+      const campaignFence = await config.captureCampaignDispatchFence();
+      const campaignFenceValid = await config.validateCampaignDispatchFence(
+        campaignFence.epoch,
+        { allowPaused: false },
+      );
+      if (pausePending || campaignFence.paused || !campaignFenceValid) {
         sendClientError(
           res,
           503,

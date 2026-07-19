@@ -1214,14 +1214,39 @@ export function createBackend(
       const queuedSpend: { tokens: number; usd: number }[] = [];
       const queuedExhaustion: BudgetDimension[] = [];
       const localPauseIds = new Set<string>();
+      let localPauseEpoch = 0;
       const campaignPauseAuthority = ctx.campaignPauseAuthority ?? {
         isCampaignPaused: (): boolean => localPauseIds.size > 0,
+        captureCampaignDispatchFence: (): { epoch: string; paused: boolean } => ({
+          epoch: String(localPauseEpoch),
+          paused: localPauseIds.size > 0,
+        }),
+        validateCampaignDispatchFence: (epoch: string, validation: { allowPaused: boolean }): boolean =>
+          epoch === String(localPauseEpoch) && (validation.allowPaused || localPauseIds.size === 0),
         recordCampaignPause: (signal: { pauseId: string }): void => {
+          if (!localPauseIds.has(signal.pauseId)) localPauseEpoch += 1;
           localPauseIds.add(signal.pauseId);
         },
         recordCampaignResume: (signal: { pauseId: string }): void => {
-          localPauseIds.delete(signal.pauseId);
+          if (localPauseIds.delete(signal.pauseId)) localPauseEpoch += 1;
         },
+      };
+      const captureCampaignDispatchFence = (): { epoch: string; paused: boolean } => {
+        if (campaignPauseAuthority.captureCampaignDispatchFence !== undefined) {
+          return campaignPauseAuthority.captureCampaignDispatchFence();
+        }
+        const paused = campaignPauseAuthority.isCampaignPaused();
+        return { epoch: paused ? "paused" : "running", paused };
+      };
+      const validateCampaignDispatchFence = (
+        epoch: string,
+        validation: { allowPaused: boolean },
+      ): boolean => {
+        if (campaignPauseAuthority.validateCampaignDispatchFence !== undefined) {
+          return campaignPauseAuthority.validateCampaignDispatchFence(epoch, validation);
+        }
+        const paused = campaignPauseAuthority.isCampaignPaused();
+        return epoch === (paused ? "paused" : "running") && (validation.allowPaused || !paused);
       };
       let trustedResumePreflight = false;
       let campaignPauseBudgetDenials = 0;
@@ -1260,6 +1285,8 @@ export function createBackend(
         checkBudget,
         recordCampaignPause: (signal) => campaignPauseAuthority.recordCampaignPause(signal),
         recordCampaignResume: (signal) => campaignPauseAuthority.recordCampaignResume(signal),
+        captureCampaignDispatchFence,
+        validateCampaignDispatchFence,
         recordSpend: (spend) => {
           if (!spendDirect || running === null) {
             queuedSpend.push({ tokens: spend.tokens, usd: spend.usd });

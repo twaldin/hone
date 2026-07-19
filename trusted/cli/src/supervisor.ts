@@ -7,8 +7,8 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { ApplyMode, BudgetEnvelope, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
-import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole } from "@hone/schema";
+import { ApplyMode, BudgetEnvelope, M2ProxyRole, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
+import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue } from "@hone/schema";
 import type { BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
 import {
   admitCapsule,
@@ -62,6 +62,60 @@ import type { CampaignPauseAuthority, ChildLike, ProbeReport, RunnerBackend, Run
 
 const RUN_USAGE =
   "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume] [--backend stub|local] [--config <json>] [--optimizer-artifact sha256:<64hex>]";
+const CAMPAIGN_SESSION_FILE = "campaign-session.v1.json";
+const CampaignSessionSealV1 = z.object({
+  version: z.literal(1),
+  campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  authorityPath: z.string().min(1),
+  proxyRole: M2ProxyRole,
+}).strict();
+type CampaignSessionSealV1 = z.infer<typeof CampaignSessionSealV1>;
+
+function assertCampaignAuthority(
+  campaignConfigHash: `sha256:${string}`,
+  proxyRole: M2ProxyRoleValue | undefined,
+  authority: CampaignPauseAuthority | undefined,
+): asserts authority is CampaignPauseAuthority {
+  if (proxyRole === undefined || authority === undefined) {
+    throw new UsageError("campaign-sealed runs require their trusted proxy role and campaign pause authority");
+  }
+  if (authority.configHash !== campaignConfigHash || authority.path === undefined) {
+    throw new UsageError("trusted campaign pause authority does not match the run's sealed campaign config");
+  }
+}
+
+function readCampaignSessionSeal(runDir: string): CampaignSessionSealV1 {
+  const path = join(runDir, CAMPAIGN_SESSION_FILE);
+  if (!existsSync(path)) throw new UsageError(`campaign-sealed run is missing ${CAMPAIGN_SESSION_FILE}`);
+  return CampaignSessionSealV1.parse(JSON.parse(readFileSync(path, "utf8")));
+}
+function campaignSessionFenceError(
+  runDir: string,
+  campaignConfigHash: `sha256:${string}` | undefined,
+  proxyRole: M2ProxyRoleValue | undefined,
+  authority: CampaignPauseAuthority | undefined,
+): string | null {
+  if (campaignConfigHash === undefined) {
+    return proxyRole === undefined && authority === undefined
+      ? null
+      : "legacy run acquired campaign authority or an M2 proxy role";
+  }
+  try {
+    assertCampaignAuthority(campaignConfigHash, proxyRole, authority);
+    const seal = readCampaignSessionSeal(runDir);
+    if (
+      seal.campaignConfigHash !== campaignConfigHash
+      || seal.proxyRole !== proxyRole
+      || seal.authorityPath !== authority.path
+    ) {
+      return "campaign session role/config/authority seal changed";
+    }
+    if (authority.isCampaignPaused()) return "campaign is durably paused";
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
 
 /** Optional per-run overrides (routing, seat, seed, budget dims, promotion rule) — the CLI flags cover the common ones. */
 const ConfigOverrides = z
@@ -492,6 +546,33 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
           return { runDir, runId: trusted.runId, state };
         })();
     if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${manifest.id} under ${runsRoot(io.root)}`);
+    const started = readEvents(found.runDir)[0];
+    const sealedCampaignHash = started?.type === "run.started" ? started.campaignConfigHash : undefined;
+    if (sealedCampaignHash === undefined) {
+      if (
+        trusted.campaignConfigHash !== undefined
+        || trusted.proxyRole !== undefined
+        || trusted.campaignPauseAuthority !== undefined
+      ) {
+        throw new UsageError("legacy run cannot acquire campaign authority or an M2 proxy role on resume");
+      }
+    } else {
+      if (trusted.campaignConfigHash !== sealedCampaignHash) {
+        throw new UsageError("campaign-sealed run requires the exact trusted campaign config hash on resume");
+      }
+      assertCampaignAuthority(sealedCampaignHash, trusted.proxyRole, trusted.campaignPauseAuthority);
+      const campaignSeal = readCampaignSessionSeal(found.runDir);
+      if (
+        campaignSeal.campaignConfigHash !== sealedCampaignHash
+        || campaignSeal.proxyRole !== trusted.proxyRole
+        || campaignSeal.authorityPath !== trusted.campaignPauseAuthority.path
+      ) {
+        throw new UsageError("campaign session role/config/authority seal changed since the run started");
+      }
+      if (trusted.campaignPauseAuthority.isCampaignPaused()) {
+        throw new UsageError("campaign is durably paused; only the trusted campaign resume coordinator may reopen admission");
+      }
+    }
     // Resume replays Gate 2 again: revocation or a delegation change refuses
     // before the run lock, event append, backend spawn, or delivery.
     revalidateForResume(found.runDir, capsuleDir, { review: admissionReview });
@@ -583,6 +664,20 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     }
     plan = { runId: found.runId, runDir: found.runDir, config, resumed: true };
   } else {
+    if (trusted.campaignConfigHash === undefined) {
+      if (trusted.proxyRole !== undefined || trusted.campaignPauseAuthority !== undefined) {
+        throw new UsageError("M2 proxy roles and campaign pause authority require a trusted campaign config seal");
+      }
+    } else {
+      assertCampaignAuthority(
+        trusted.campaignConfigHash,
+        trusted.proxyRole,
+        trusted.campaignPauseAuthority,
+      );
+      if (trusted.campaignPauseAuthority.isCampaignPaused()) {
+        throw new UsageError("campaign is durably paused; child/outer run admission remains closed");
+      }
+    }
     let config = buildConfig(
       manifest,
       overrides,
@@ -663,6 +758,14 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     if (!/^run_[a-zA-Z0-9_.-]+$/.test(runId)) throw new UsageError("trusted run id is invalid");
     if (existsSync(join(runsRoot(io.root), runId))) throw new UsageError(`run ${runId} already exists`);
     const runDir = mintRunDirDurable(io.root, runId);
+    if (trusted.campaignConfigHash !== undefined) {
+      writeFileDurable(join(runDir, CAMPAIGN_SESSION_FILE), `${JSON.stringify(CampaignSessionSealV1.parse({
+        version: 1,
+        campaignConfigHash: trusted.campaignConfigHash,
+        authorityPath: trusted.campaignPauseAuthority?.path,
+        proxyRole: trusted.proxyRole,
+      }))}\n`);
+    }
     // Snapshot the ADMITTED manifest: resume proves capsule identity against it.
     writeCapsuleSnapshot(runDir, manifest);
     try {
@@ -1444,6 +1547,16 @@ async function superviseLocked(
     // Boot-bound runtime recheck IMMEDIATELY before the durable run event:
     // recompute the closure, compare against the boot seal and the run's
     // pin, then append — no await between the comparison and the append.
+    const campaignFenceError = campaignSessionFenceError(
+      runDir,
+      extra.campaignConfigHash,
+      extra.proxyRole,
+      extra.campaignPauseAuthority,
+    );
+    if (campaignFenceError !== null) {
+      io.err(`resume campaign seal violated: ${campaignFenceError}`);
+      return 1;
+    }
     assertRuntimePinFresh(runDir, runId);
     emit({ runId, at: new Date().toISOString(), type: "run.resumed", fromCursor: underLock.cursor });
   } else {
@@ -1451,6 +1564,16 @@ async function superviseLocked(
     // append (the pin was written from the same boot seal in runCommand; a
     // direct superviseRun caller may not have written one, so only drift
     // from the boot seal refuses here). No await before the append.
+    const campaignFenceError = campaignSessionFenceError(
+      runDir,
+      extra.campaignConfigHash,
+      extra.proxyRole,
+      extra.campaignPauseAuthority,
+    );
+    if (campaignFenceError !== null) {
+      io.err(`campaign admission refused: ${campaignFenceError}`);
+      return 1;
+    }
     verifiedBootRuntimeDigest();
     emit({
       runId,
@@ -1789,6 +1912,10 @@ async function superviseLocked(
     // idempotent barrier guarantees children are reaped before the terminal.
     if (abort.signal.aborted) await termThenKill();
 
+    if (extra.campaignPauseAuthority?.isCampaignPaused() === true) {
+      io.err("campaign remains durably paused after backend teardown — run left unfinished for trusted resume");
+      return 1;
+    }
     let status: "completed" | "stopped" | "failed" | "budget";
     if (stopRequested) status = "stopped";
     else if (budgetDimension !== null) status = "budget";

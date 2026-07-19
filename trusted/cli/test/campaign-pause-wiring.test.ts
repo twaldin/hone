@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProxy } from "@hone/proxy";
@@ -37,6 +37,9 @@ describe("campaign-wide proxy pause wiring", () => {
       recordSpend: () => {},
       recordCampaignPause: (signal) => authority.recordCampaignPause(signal),
       recordCampaignResume: (signal) => authority.recordCampaignResume(signal),
+      captureCampaignDispatchFence: () => authority.captureCampaignDispatchFence(),
+      validateCampaignDispatchFence: (epoch, validation) =>
+        authority.validateCampaignDispatchFence(epoch, validation),
     });
     const port = await proxy.listenTcp(0);
     try {
@@ -65,5 +68,78 @@ describe("campaign-wide proxy pause wiring", () => {
         upstream.close((error) => error === undefined ? resolve() : reject(error));
       });
     }
+  });
+  it("does not clear the live fence when durable resume persistence fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-campaign-resume-failure-"));
+    const path = join(root, "campaign-pause.v1.json");
+    const authority = DurableCampaignPauseAuthorityV1.open(path, CONFIG_HASH);
+    authority.recordCampaignPause({
+      version: 1,
+      pauseId: "pause-failure",
+      runId: "run-child",
+      reason: "provider-5xx",
+      at: "2026-07-18T00:00:00.000Z",
+      role: "inner-capsule-improvement",
+      requestedRoute: "gpt-5.2",
+      returnedModel: null,
+      status: 503,
+      attempt: 1,
+    });
+    chmodSync(root, 0o500);
+    try {
+      expect(() => authority.recordCampaignResume({
+        version: 1,
+        pauseId: "pause-failure",
+        runId: "run-child",
+        at: "2026-07-18T00:01:00.000Z",
+        observations: [
+          {
+            role: "outer-optimizer",
+            dispatchId: "dispatch-outer",
+            requestedRoute: "gpt-5.6-sol",
+            returnedModel: "gpt-5.6-sol",
+            status: 200,
+            passed: true,
+          },
+          {
+            role: "inner-capsule-improvement",
+            dispatchId: "dispatch-inner",
+            requestedRoute: "gpt-5.2",
+            returnedModel: "gpt-5.2",
+            status: 200,
+            passed: true,
+          },
+        ],
+      })).toThrow();
+      expect(authority.isCampaignPaused()).toBe(true);
+    } finally {
+      chmodSync(root, 0o700);
+    }
+  });
+  it("fails closed on an orphaned mutation lock instead of racing stale reclamation", () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-campaign-stale-lock-"));
+    const path = join(root, "campaign-pause.v1.json");
+    const authority = DurableCampaignPauseAuthorityV1.open(path, CONFIG_HASH);
+    const lockPath = `${path}.lock`;
+    mkdirSync(lockPath, { mode: 0o700 });
+    writeFileSync(join(lockPath, "owner.json"), `${JSON.stringify({
+      pid: 999_999_999,
+      createdAtMs: Date.now(),
+      nonce: "00000000-0000-4000-8000-000000000001",
+    })}\n`);
+    expect(() => authority.recordCampaignPause({
+      version: 1,
+      pauseId: "pause-stale-lock",
+      runId: "run-child",
+      reason: "provider-5xx",
+      at: "2026-07-18T00:00:00.000Z",
+      role: "inner-capsule-improvement",
+      requestedRoute: "gpt-5.2",
+      returnedModel: null,
+      status: 503,
+      attempt: 1,
+    })).toThrow(/stale mutation lock/);
+    expect(existsSync(lockPath)).toBe(true);
+    expect(authority.isCampaignPaused()).toBe(false);
   });
 });

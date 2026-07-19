@@ -17,6 +17,7 @@ import {
   type DispatchIntentRecord,
   type DispatchSettleRecord,
   type DurablePauseProxyHandle,
+  type ProxyConfig,
   type SpendRecord,
 } from "../src/index.js";
 
@@ -131,9 +132,18 @@ afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
 });
 
+type HarnessOptions = { maxResponseBytes?: number } & Partial<
+  Pick<
+    ProxyConfig,
+    "captureCampaignDispatchFence" |
+    "validateCampaignDispatchFence" |
+    "checkBudget"
+  >
+>;
+
 async function setup(
   responder: (request: UpstreamRequest, index: number) => UpstreamReply,
-  options: { maxResponseBytes?: number } = {},
+  options: HarnessOptions = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "hone-provider-policy-"));
   const runDir = join(root, "run");
@@ -150,7 +160,9 @@ async function setup(
     runDir,
     casDir: join(root, "cas"),
     upstreamBaseUrl: `http://127.0.0.1:${upstream.port}`,
-    checkBudget: () => ({ allowed: true, remaining: { tokens: 1_000_000_000, usd: 1_000_000 } }),
+    checkBudget:
+      options.checkBudget ??
+      (() => ({ allowed: true, remaining: { tokens: 1_000_000_000, usd: 1_000_000 } })),
     recordSpend(spend) {
       spends.push(spend);
     },
@@ -160,6 +172,10 @@ async function setup(
     recordCampaignResume: (signal) => {
       resumes.push(signal);
     },
+    captureCampaignDispatchFence:
+      options.captureCampaignDispatchFence ?? (() => ({ epoch: "0", paused: false })),
+    validateCampaignDispatchFence:
+      options.validateCampaignDispatchFence ?? (() => true),
     ...(options.maxResponseBytes === undefined
       ? {}
       : { limits: { maxResponseBytes: options.maxResponseBytes } }),
@@ -329,6 +345,38 @@ describe("frozen provider failure policy", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("x-hone-attempt-classification")).toBe("candidate-invalidity");
     expect(await harness.proxy.campaignPause()).toBeUndefined();
+  });
+
+  it("rechecks the shared pause epoch after intent durability and before fetch", async () => {
+    const sharedFence = { epoch: "0", paused: false };
+    const harness = await setup(
+      () => ({ status: 200 }),
+      {
+        captureCampaignDispatchFence: () => ({ ...sharedFence }),
+        validateCampaignDispatchFence: (epoch, options) =>
+          epoch === sharedFence.epoch && (options.allowPaused || !sharedFence.paused),
+        checkBudget: () => {
+          queueMicrotask(() => {
+            sharedFence.epoch = "1";
+            sharedFence.paused = true;
+          });
+          return {
+            allowed: true,
+            remaining: { tokens: 1_000_000_000, usd: 1_000_000 },
+          };
+        },
+      },
+    );
+
+    const response = await completion(harness);
+    expect(response.status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(0);
+    expect(harness.spends).toHaveLength(0);
+    const state = await readDispatchJournalState(
+      join(harness.runDir, DISPATCH_JOURNAL_FILE),
+    );
+    expect(state.records.map((record) => record.kind)).toEqual(["intent", "settle"]);
+    expect(state.unmatched).toHaveLength(0);
   });
 });
 

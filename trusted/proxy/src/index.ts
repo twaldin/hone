@@ -41,6 +41,7 @@ export {
   promptTokenUpperBound,
   PROXY_TRACE_FILE,
   type BudgetDecision,
+  type CampaignDispatchFence,
   type BudgetDimension,
   type DurablePauseProxyHandle,
   type PricingEntry,
