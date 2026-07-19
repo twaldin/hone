@@ -16,7 +16,17 @@ const base = {
 } as const;
 
 export const RunEvent = z.discriminatedUnion("type", [
-  z.object({ ...base, type: z.literal("run.started"), capsuleId: z.string(), contractHash: z.string(), optimizerDigest: z.string() }),
+  z.object({
+    ...base,
+    type: z.literal("run.started"),
+    capsuleId: z.string(),
+    contractHash: z.string(),
+    optimizerDigest: z.string(),
+    /** Campaign identity a spawned child was admitted under. Broker settlement
+     * verification REQUIRES it to match ChildRunAdmission.campaignConfigHash
+     * for recursive children; absent for plain standalone runs. */
+    campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+  }),
   z.object({ ...base, type: z.literal("run.resumed"), fromCursor: z.number().int().nonnegative() }),
   z.object({ ...base, type: z.literal("episode.started"), episode: z.number().int().nonnegative(), parent: ArtifactRef }),
   z.object({ ...base, type: z.literal("episode.candidate"), episode: z.number().int().nonnegative(), candidate: ArtifactRef, sessionTrace: z.string() }),
