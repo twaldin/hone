@@ -23,6 +23,9 @@ function draft() {
     version: 2,
     seedOptimizer: target,
     controllerOptimizer: target,
+    optimizerRuntime: {
+      image: "hone-mutation@sha256:" + "7".repeat(64),
+    },
     generation: { stage: "A", panel: "A", targetGeneration: 0, controllerGeneration: 0, outerReplicate: 0 },
     train: Array.from({ length: 8 }, (_, index) => capsule(index + 1)),
     holdout: Array.from({ length: 12 }, (_, index) => capsule(index + 101)),
@@ -51,10 +54,15 @@ function draft() {
 }
 
 describe("MetaCampaignConfigV2 recursive cells", () => {
-  it("accepts the exact stage-A 8/12, 12-candidate, four-inner-episode design", () => {
-    const parsed = MetaCampaignConfigV2.parse(draft());
+  it("accepts heterogeneous capsule images with a separate optimizer runtime", () => {
+    const value = draft();
+    value.train = value.train.map((entry, index) => ({ ...entry, image: `hone-task-${index}@${digest(400 + index)}` }));
+    value.holdout = value.holdout.map((entry, index) => ({ ...entry, image: `hone-holdout-${index}@${digest(500 + index)}` }));
+    const parsed = MetaCampaignConfigV2.parse(value);
     expect(parsed.train).toHaveLength(8);
     expect(parsed.holdout).toHaveLength(12);
+    expect(new Set([...parsed.train, ...parsed.holdout].map((entry) => entry.image)).size).toBe(20);
+    expect(parsed.optimizerRuntime.image).toMatch(/^hone-mutation@sha256:/);
     expect(parsed.counts).toMatchObject({ candidates: 12, candidateAttemptsMax: 24, innerEpisodesMax: 4 });
   });
 
