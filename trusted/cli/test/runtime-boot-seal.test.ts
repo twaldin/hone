@@ -10,7 +10,7 @@ import {
   verifiedBootRuntimeDigest,
 } from "../src/runtime-digest.js";
 import { deferred } from "../src/promise.js";
-import { makeCapsule, makeRoot, pkgRoot, sleep } from "./helpers.js";
+import { approveFixtureCapsule, makeCapsule, makeRoot, pkgRoot, sleep } from "./helpers.js";
 
 /**
  * Boot-bound trusted-runtime seal (release gate P1):
@@ -144,6 +144,7 @@ describe("boot race: the real bin pins the digest of the source that LOADED, nev
     async () => {
       const root = makeRoot();
       makeCapsule(root);
+      approveFixtureCapsule(root);
       // --config names a FIFO: the real bin boots (seals the digest), starts
       // runCommand, and BLOCKS inside readFileSync(config) — a deterministic
       // pause strictly AFTER the boot seal and strictly BEFORE any run state

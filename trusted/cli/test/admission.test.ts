@@ -225,7 +225,7 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
     const runDir = makeRoot();
     writeCapsuleSnapshot(runDir, manifestObject());
     expect(readCapsuleSnapshot(runDir)).toEqual(manifestObject());
-    expect(revalidateForResume(runDir, dir).digest).toBe(capsuleDigest(manifestObject()));
+    expect(revalidateForResume(runDir, dir, { review: "off" }).digest).toBe(capsuleDigest(manifestObject()));
 
     const frozen = freezeCapsuleAssets(runDir, dir, manifestObject());
     expect(frozen).toBe(frozenCapsuleAssetsRoot(runDir));
@@ -252,7 +252,7 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
     writeCapsuleSnapshot(runDir, manifestObject());
     // A validly re-scaffolded but different capsule (new objective -> new id/digest).
     const dir = makeCapsule(root, { objective: "A different task entirely." });
-    expect(() => revalidateForResume(runDir, dir)).toThrow(/capsule drift since the run started/);
+    expect(() => revalidateForResume(runDir, dir, { review: "off" })).toThrow(/capsule drift since the run started/);
   });
 
   it("refuses resume when the snapshot is missing (identity cannot be proven)", () => {

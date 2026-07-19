@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   AdmissionReceiptRecord,
@@ -8,11 +8,14 @@ import {
 } from "@hone/schema";
 import { describe, expect, it } from "vitest";
 import { admitCapsule } from "../src/admission.js";
+import { discoverCapsules } from "../src/commands/hone.js";
+import { loadRunConfigFile } from "../src/runs.js";
+import { runCommand } from "../src/supervisor.js";
 import {
   appendAdmissionReceipt,
   verifyAdmissionApproval,
 } from "../src/admission-receipts.js";
-import { makeCapsule, makeRoot, manifestObject } from "./helpers.js";
+import { makeCapsule, makeIo, makeRoot, manifestObject } from "./helpers.js";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const OTHER_DIGEST = `sha256:${"b".repeat(64)}`;
@@ -312,5 +315,88 @@ describe("admitCapsule review gate", () => {
     appendAdmissionReceipt(join(root, ".hone-cas"), gate1);
     appendAdmissionReceipt(join(root, ".hone-cas"), approval);
     expect(admitCapsule(capsuleDir, { review: "required" }).provisional).toBe(true);
+  });
+});
+describe("production receipt enforcement", () => {
+  it("refuses an unreceipted capsule before run creation", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const captured = makeIo(root, { HONE_STUB_EPISODES: "0" });
+    rmSync(join(root, ".hone-cas"), { recursive: true, force: true });
+    await expect(runCommand(["capsule", "--headless", "--backend", "stub"], captured.io)).rejects.toThrow(
+      /admission receipt/,
+    );
+    expect(() => readdirSync(join(root, ".hone-runs"))).toThrow();
+  });
+
+  it("forces provisional runs to apply:none and caps maxUsd at the delegation", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const digest = capsuleDigest(manifestObject());
+    const identities: AdmissionReceiptRecordBody["identities"] = {
+      author: { identity: "capsule-author", kind: "agent" },
+      "adversarial-validator": { identity: "red-team", kind: "agent" },
+      "final-reviewer": { identity: "delegated-reviewer", kind: "agent" },
+    };
+    const [gate1, approval] = approvalHistory({
+      capsuleDigest: digest,
+      identities,
+      delegation: {
+        delegator: { identity: "repository-owner", kind: "owner" },
+        delegate: { identity: "delegated-reviewer", kind: "agent" },
+        scope: "provisional-private-apply-none",
+        budgetUsd: 10,
+      },
+      provisional: true,
+    });
+    appendAdmissionReceipt(join(root, ".hone-cas"), gate1);
+    appendAdmissionReceipt(join(root, ".hone-cas"), approval);
+    writeFileSync(join(root, "provisional.json"), JSON.stringify({
+      apply: "branch",
+      budget: { maxUsd: 20 },
+    }));
+    const captured = makeIo(root, { HONE_STUB_EPISODES: "0" });
+    expect(await runCommand(
+      ["capsule", "--headless", "--backend", "stub", "--config", "provisional.json"],
+      captured.io,
+    )).toBe(0);
+    const runId = readdirSync(join(root, ".hone-runs"))[0];
+    expect(runId).toBeDefined();
+    const config = loadRunConfigFile(join(root, ".hone-runs", runId!));
+    expect(config.apply).toBe("none");
+    expect(config.budget.maxUsd).toBe(10);
+  });
+
+  it("refuses unreceipted corpus capsules and quarantines provisional ones", () => {
+    const unreceiptedRoot = makeRoot();
+    const unreceipted = makeCapsule(unreceiptedRoot);
+    mkdirSync(join(unreceiptedRoot, "capsules"));
+    renameSync(unreceipted, join(unreceiptedRoot, "capsules", "unreceipted"));
+    expect(() => discoverCapsules(unreceiptedRoot)).toThrow(/admission receipt/);
+
+    const provisionalRoot = makeRoot();
+    const provisional = makeCapsule(provisionalRoot);
+    const digest = capsuleDigest(manifestObject());
+    const identities: AdmissionReceiptRecordBody["identities"] = {
+      author: { identity: "capsule-author", kind: "agent" },
+      "adversarial-validator": { identity: "red-team", kind: "agent" },
+      "final-reviewer": { identity: "delegated-reviewer", kind: "agent" },
+    };
+    const [gate1, approval] = approvalHistory({
+      capsuleDigest: digest,
+      identities,
+      delegation: {
+        delegator: { identity: "repository-owner", kind: "owner" },
+        delegate: { identity: "delegated-reviewer", kind: "agent" },
+        scope: "provisional-private-apply-none",
+        budgetUsd: 10,
+      },
+      provisional: true,
+    });
+    appendAdmissionReceipt(join(provisionalRoot, ".hone-cas"), gate1);
+    appendAdmissionReceipt(join(provisionalRoot, ".hone-cas"), approval);
+    mkdirSync(join(provisionalRoot, "capsules"));
+    renameSync(provisional, join(provisionalRoot, "capsules", "provisional"));
+    expect(discoverCapsules(provisionalRoot).size).toBe(0);
   });
 });

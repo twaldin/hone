@@ -679,6 +679,8 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
       }),
       env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network" },
       capsuleDigest: digest,
+      // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
+      admissionReview: "off",
       optimizerDigest: computeOptimizerDigest(FIX_IMAGE),
       replayed: replayRun(runDir),
       signal: new AbortController().signal,
@@ -983,6 +985,8 @@ function optCtx(root: string, runDir: string, runId: string): RunnerBackendConte
     }),
     env: { PATH: process.env["PATH"] ?? "" },
     capsuleDigest: fakeHash("f"),
+    // Direct backend fixture used after frozen setup; no production admission boundary is exercised.
+    admissionReview: "off",
     optimizerDigest: fakeHash("0"),
     replayed: replayRun(runDir),
     signal: new AbortController().signal,

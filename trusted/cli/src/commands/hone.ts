@@ -14,13 +14,21 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import {
   CasStore,
+  RecursiveResourceLedger,
+  hashChildRunLaunchReceipt,
   packDirAsArtifact,
   readBrokerJournalEvaluations,
   type BrokerJournalEvaluationSnapshot,
+  type BrokerRecursiveConfig,
+  type ChildRunLaunchInput,
+  type ChildRunLaunchOutcome,
+  type TrustedChildAdmissionInput,
   type TrustedEvaluationStrategy,
 } from "@hone/broker";
 import {
   MetaCampaignRunner,
+  MetaEnvelopeFileRecordPortV1,
+  MetaResourceEnvelopeLedger,
   metaCampaignConfigHash,
   selectDeterministicBest,
   trustedPhaseMeasurementEpoch,
@@ -28,28 +36,41 @@ import {
   type MetaArtifactIdentity,
   type MetaCandidateGate,
   type MetaCandidateGateRequest,
+  type MetaChildEnvelopeRequest,
   type MetaChildRunOutcome,
   type MetaChildRunRequest,
   type MetaChildSupervisor,
   type MetaControlTransformationReceipt,
   type MetaMeasurement,
+  type MetaReservation,
   type MetaResourceUsage,
+  type MetaWorkIdentity,
   type Sha256Digest,
 } from "@hone/meta";
 import {
+  BudgetEnvelope as BudgetEnvelopeSchema,
+  CampaignPauseSignal,
+  CampaignResumeSignal,
+  ChildRunAdmission,
+  ChildRunLaunchReceipt,
   CapsuleManifest,
   DiagnosticOrderingReport,
   EvaluationRecord,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
   ProxyTraceRecord,
+  SpawnRunParams,
   canonicalJson,
   deriveCapsuleId,
   type BudgetEnvelope,
+  type ChildRunAdmission as ChildRunAdmissionRecord,
+  type CampaignPauseSignal as CampaignPauseSignalRecord,
+  type CampaignResumeSignal as CampaignResumeSignalRecord,
   type MetaCapsuleEntry,
   type MetaCampaignConfigV1 as MetaCampaignConfig,
   type MetaCampaignConfig as AnyMetaCampaignConfig,
   type MetaCampaignConfigV2 as RecursiveMetaCampaignConfig,
+  type SpawnRunParams as SpawnRunRequest,
 } from "@hone/schema";
 import { extractWorkspaceArtifact } from "../artifact.js";
 import { admitCapsule, type AdmittedCapsule } from "../admission.js";
@@ -67,7 +88,7 @@ import {
 import { UsageError, boolFlag, parseFlags, strFlag } from "../args.js";
 import { EVENTS_FILE, bestArtifact, readEvents, replayRun, writeFileDurable } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
-import { MetaJournalV1 } from "../meta-journal.js";
+import { MetaJournalV1, metaWorkKey } from "../meta-journal.js";
 import { persistMetaSearchTrajectory } from "../meta-trajectory.js";
 import {
   buildBrokenMetaControl,
@@ -91,11 +112,106 @@ import { casRoot, runsRoot } from "../runs.js";
 import { verifiedBootRuntimeDigest } from "../runtime-digest.js";
 import { runCommand } from "../supervisor.js";
 import { z } from "zod";
+import type { CampaignPauseAuthority } from "../types.js";
 
 const HONE_USAGE = "usage: hone hone --campaign <path> --headless [--phase freeze|search|confirmation|holdout] [--out <gitignored-path>]";
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const PROXY_TRACE_FILE = "proxy-trace.ndjson";
+const CampaignPauseAuthorityFileV1 = z.object({
+  version: z.literal(1),
+  configHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  active: z.array(CampaignPauseSignal),
+  resumed: z.array(CampaignResumeSignal),
+}).strict();
 
+/** Durable campaign-wide pause set shared by every recursive runner/proxy. */
+export class DurableCampaignPauseAuthorityV1 implements CampaignPauseAuthority {
+  private readonly active = new Map<string, CampaignPauseSignalRecord>();
+  private readonly resumed = new Map<string, CampaignResumeSignalRecord>();
+
+  private constructor(
+    readonly path: string,
+    readonly configHash: Sha256Digest,
+  ) {}
+
+  static open(path: string, configHash: Sha256Digest): DurableCampaignPauseAuthorityV1 {
+    const authority = new DurableCampaignPauseAuthorityV1(path, configHash);
+    if (!existsSync(path)) {
+      authority.persist();
+      return authority;
+    }
+    const state = CampaignPauseAuthorityFileV1.parse(JSON.parse(readFileSync(path, "utf8")));
+    if (state.configHash !== configHash) {
+      throw new UsageError(`campaign pause authority belongs to foreign config ${state.configHash}`);
+    }
+    for (const signal of state.active) {
+      if (authority.active.has(signal.pauseId)) throw new Error(`duplicate active campaign pause ${signal.pauseId}`);
+      authority.active.set(signal.pauseId, signal);
+    }
+    for (const signal of state.resumed) {
+      if (authority.resumed.has(signal.pauseId) || authority.active.has(signal.pauseId)) {
+        throw new Error(`campaign pause ${signal.pauseId} has conflicting durable states`);
+      }
+      authority.resumed.set(signal.pauseId, signal);
+    }
+    return authority;
+  }
+
+  isCampaignPaused(): boolean {
+    return this.active.size > 0;
+  }
+
+  recordCampaignPause(signalInput: CampaignPauseSignalRecord): void {
+    const signal = CampaignPauseSignal.parse(signalInput);
+    const active = this.active.get(signal.pauseId);
+    if (active !== undefined) {
+      if (canonicalJson(active) !== canonicalJson(signal)) {
+        throw new Error(`campaign pause ${signal.pauseId} changed identity`);
+      }
+      return;
+    }
+    if (this.resumed.has(signal.pauseId)) {
+      throw new Error(`campaign pause ${signal.pauseId} was already durably resumed`);
+    }
+    this.active.set(signal.pauseId, signal);
+    this.persist();
+  }
+
+  recordCampaignResume(signalInput: CampaignResumeSignalRecord): void {
+    const signal = CampaignResumeSignal.parse(signalInput);
+    const prior = this.resumed.get(signal.pauseId);
+    if (prior !== undefined) {
+      if (canonicalJson(prior) !== canonicalJson(signal)) {
+        throw new Error(`campaign resume ${signal.pauseId} changed identity`);
+      }
+      return;
+    }
+    const paused = this.active.get(signal.pauseId);
+    if (paused === undefined || paused.runId !== signal.runId) {
+      throw new Error(`campaign resume ${signal.pauseId} has no matching active pause`);
+    }
+    this.active.delete(signal.pauseId);
+    this.resumed.set(signal.pauseId, signal);
+    this.persist();
+  }
+
+  private persist(): void {
+    const byPauseId = <T extends { pauseId: string }>(left: T, right: T): number =>
+      left.pauseId.localeCompare(right.pauseId);
+    writeFileDurable(this.path, `${canonicalJson({
+      version: 1,
+      configHash: this.configHash,
+      active: [...this.active.values()].sort(byPauseId),
+      resumed: [...this.resumed.values()].sort(byPauseId),
+    })}\n`);
+    chmodSync(this.path, 0o600);
+  }
+}
+
+/** Synchronous fence consulted before any recursive child reservation or launch. */
+export function campaignChildAdmissionAllowed(authority: CampaignPauseAuthority): boolean {
+  return !authority.isCampaignPaused();
+}
 interface CapsuleLocation {
   dir: string;
   digest: string;
@@ -403,7 +519,7 @@ function addUsage(left: MetaResourceUsage, right: MetaResourceUsage): MetaResour
   };
 }
 
-class CliChildSupervisor implements MetaChildSupervisor {
+export class CliChildSupervisor implements MetaChildSupervisor {
   constructor(
     private readonly io: CmdIo,
     private readonly config: AnyMetaCampaignConfig,
@@ -411,9 +527,20 @@ class CliChildSupervisor implements MetaChildSupervisor {
     private readonly capsules: ReadonlyMap<string, CapsuleLocation>,
     private readonly baseSnapshot: OptimizerSnapshot,
     private readonly modelRegistry: CampaignModelRegistry,
+    private readonly campaignPauseAuthority?: CampaignPauseAuthority,
   ) {}
 
   async run(request: MetaChildRunRequest): Promise<MetaChildRunOutcome> {
+    return await this.runLaunched(request);
+  }
+
+  async runLaunched(
+    request: MetaChildRunRequest,
+    campaignConfigHash?: Sha256Digest,
+  ): Promise<MetaChildRunOutcome> {
+    if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
+      return this.notRun(request, "campaign child admission is durably paused pending trusted frozen-route preflight");
+    }
     const location = this.capsules.get(request.capsule.capsuleDigest);
     if (location === undefined) {
       return this.notRun(request, `registered capsule ${request.capsule.capsuleDigest} is not installed`);
@@ -446,6 +573,11 @@ class CliChildSupervisor implements MetaChildSupervisor {
             ? { terminalHoldoutAssetGroupIds: location.terminalHoldoutAssetGroupIds }
             : {}),
           optimizerBaseSnapshot: this.baseSnapshot,
+          ...(this.config.version === 2 ? { proxyRole: "inner-capsule-improvement" as const } : {}),
+          ...(this.campaignPauseAuthority === undefined
+            ? {}
+            : { campaignPauseAuthority: this.campaignPauseAuthority }),
+          ...(campaignConfigHash === undefined ? {} : { campaignConfigHash }),
         },
       );
       if (code !== 0 && !existsSync(join(runDir, EVENTS_FILE))) {
@@ -471,6 +603,11 @@ class CliChildSupervisor implements MetaChildSupervisor {
               ? { terminalHoldoutAssetGroupIds: location.terminalHoldoutAssetGroupIds }
               : {}),
             optimizerBaseSnapshot: this.baseSnapshot,
+            ...(this.config.version === 2 ? { proxyRole: "inner-capsule-improvement" as const } : {}),
+            ...(this.campaignPauseAuthority === undefined
+              ? {}
+              : { campaignPauseAuthority: this.campaignPauseAuthority }),
+            ...(campaignConfigHash === undefined ? {} : { campaignConfigHash }),
           },
         );
         if (code !== 0) {
@@ -657,6 +794,233 @@ class CliChildSupervisor implements MetaChildSupervisor {
     };
   }
 }
+const SCHEDULED_BUDGET_DIMENSIONS = [
+  "maxTokens",
+  "maxUsd",
+  "maxWallClockSec",
+  "maxEvaluatorInvocations",
+] as const;
+
+/**
+ * Per-spawn M2 bridge. Search allocation is admitted and measured one child
+ * at a time; panel completeness is derived later from the durable trajectory.
+ */
+export class RecursiveSearchChildLauncher {
+  constructor(
+    private readonly root: string,
+    private readonly campaignDir: string,
+    private readonly config: RecursiveMetaCampaignConfig,
+    private readonly configHash: Sha256Digest,
+    private readonly journal: MetaJournalV1,
+    private readonly gate: MetaCandidateGate,
+    private readonly childSupervisor: CliChildSupervisor,
+    private readonly envelopeLedger: MetaResourceEnvelopeLedger,
+    private readonly campaignPauseAuthority: CampaignPauseAuthority,
+  ) {}
+
+  brokerConfig(
+    ledger: BrokerRecursiveConfig["ledger"],
+    depth: BrokerRecursiveConfig["depth"] = 0,
+    ancestors: readonly string[] = [],
+  ): BrokerRecursiveConfig {
+    return {
+      depth,
+      ancestors,
+      ledger,
+      admitChildRun: (input) => this.admitChildRun(input),
+      launchChildRun: (input) => this.launchChildRun(input),
+    };
+  }
+
+  admitChildRun(input: TrustedChildAdmissionInput): ChildRunAdmissionRecord | undefined {
+    if (!campaignChildAdmissionAllowed(this.campaignPauseAuthority)) return undefined;
+    const request = SpawnRunParams.parse(input.request);
+    if (input.parentDepth !== 0 || request.depth !== 1 || request.child.purpose !== "capsule") return undefined;
+    const identity = this.scheduledIdentity(request);
+    if (identity === null) return undefined;
+    const expectedRunId = `run_meta_${metaWorkKey(this.configHash, identity).slice("sha256:".length)}`;
+    if (request.child.runId !== expectedRunId) return undefined;
+    const member = this.config.developmentPanel.members.find(
+      (candidate) => candidate.capsule.capsuleId === request.child.capsuleId,
+    );
+    if (member === undefined) return undefined;
+    for (const dimension of SCHEDULED_BUDGET_DIMENSIONS) {
+      if (request.reservation[dimension] > member.calibratedInnerCeiling[dimension]) return undefined;
+    }
+    return ChildRunAdmission.parse({
+      campaignConfigHash: this.configHash,
+      cohort: this.config.generation.stage === "A" ? "panel-a" : "panel-b",
+      capsuleProvenanceHash: member.capsule.capsuleDigest,
+      sourceProvenanceHash: request.child.sourceArtifact.hash,
+      optimizerProvenanceHash: request.child.optimizerArtifact.hash,
+    });
+  }
+
+  async launchChildRun(input: ChildRunLaunchInput): Promise<ChildRunLaunchOutcome> {
+    const request = SpawnRunParams.parse(input.request);
+    const admission = ChildRunAdmission.parse(input.admission);
+    const schedule = request.child.schedule;
+    if (schedule === undefined) throw new Error("recursive search child has no valid schedule identity");
+    const admitted = this.admitChildRun({
+      parentRunId: request.child.runId,
+      parentDepth: 0,
+      request,
+    });
+    if (admitted === undefined || canonicalJson(admitted) !== canonicalJson(admission)) {
+      throw new Error("recursive child launch no longer reproduces trusted admission");
+    }
+    const identity = this.scheduledIdentity(request);
+    if (identity === null) throw new Error("recursive search child has no valid schedule identity");
+    const gate = await this.gate.check({
+      mode: "public-mutable",
+      sourceArtifact: identity.sourceArtifact,
+    });
+    if (!gate.ok || gate.bundleDigest !== identity.bundleDigest) {
+      throw new Error(`recursive child optimizer conformance refused: ${gate.feedback}`);
+    }
+
+    const envelopeRequest: MetaChildEnvelopeRequest = {
+      purpose: "search",
+      envelope: this.config.recursiveBudgets.search.identity,
+      reservationId: sha256(canonicalJson({
+        domain: "hone-m2-search-envelope-reservation-v1",
+        configHash: this.configHash,
+        identity,
+      })),
+      parentReservationId: null,
+      reserved: BudgetEnvelopeSchema.parse(request.reservation),
+    };
+    const sliced = this.envelopeLedger.reserveSearchDescendant({
+      reservationId: envelopeRequest.reservationId,
+      parentReservationId: null,
+      reserved: envelopeRequest.reserved,
+    });
+    if (
+      canonicalJson(sliced.envelope) !== canonicalJson(envelopeRequest.envelope)
+      || canonicalJson(sliced.reserved) !== canonicalJson(envelopeRequest.reserved)
+    ) {
+      throw new Error("recursive envelope ledger returned a foreign search slice");
+    }
+    const reservation: MetaReservation = this.journal.reserveChild(identity, envelopeRequest);
+    if (reservation.childRunId !== request.child.runId) {
+      throw new Error(`recursive child run id ${request.child.runId} does not match ${reservation.childRunId}`);
+    }
+
+    const receiptPath = join(this.campaignDir, `child-launch-${request.child.runId}.json`);
+    if (!existsSync(receiptPath)) {
+      const body = {
+        child: request.child,
+        depth: request.depth,
+        admission,
+        launchedAt: new Date().toISOString(),
+      };
+      const receipt = ChildRunLaunchReceipt.parse({
+        ...body,
+        receiptDigest: hashChildRunLaunchReceipt(body),
+      });
+      writeFileDurable(receiptPath, `${canonicalJson(receipt)}\n`);
+      chmodSync(receiptPath, 0o600);
+    }
+
+    const capsule = this.config.developmentPanel.members.find(
+      (member) => member.capsule.capsuleId === request.child.capsuleId,
+    )?.capsule;
+    if (capsule === undefined) throw new Error("recursive launch capsule left the frozen panel");
+    const outcome = await this.childSupervisor.runLaunched({
+      identity,
+      reservation,
+      sourceArtifact: identity.sourceArtifact,
+      bundleDigest: identity.bundleDigest,
+      capsule,
+      innerEpisodesMax: schedule.innerEpisodesMax,
+      requestedModel: this.config.routing.innerMutation,
+      remainingBudget: envelopeRequest.reserved,
+      attempt: 0,
+      resume: input.replay,
+    }, admission.campaignConfigHash as Sha256Digest);
+    if (
+      outcome.childRunId !== reservation.childRunId
+      || outcome.measurementEpoch !== identity.measurementEpoch
+      || outcome.capsuleId !== identity.capsuleId
+      || outcome.sourceArtifact !== identity.sourceArtifact
+      || outcome.bundleDigest !== identity.bundleDigest
+    ) {
+      throw new Error("recursive child outcome does not match its durable launch identity");
+    }
+
+    const evidenceHash = sha256(canonicalJson({
+      domain: "hone-m2-search-child-evidence-v1",
+      identity,
+      reservation,
+      outcome,
+    }));
+    if (outcome.status === "completed" && outcome.finalEvaluation !== null) {
+      const finalEvaluation = EvaluationRecord.parse(outcome.finalEvaluation);
+      const objectives = Object.values(finalEvaluation.output.objectives);
+      const qRaw = objectives[0];
+      const constraintsPass = Object.values(finalEvaluation.output.constraints).every((value) => value);
+      if (
+        !finalEvaluation.output.valid
+        || !constraintsPass
+        || objectives.length !== 1
+        || typeof qRaw !== "number"
+        || !Number.isFinite(qRaw)
+      ) {
+        throw new Error("recursive child final evaluation is not a finite scalar");
+      }
+      if (outcome.responseModel === null || outcome.modelDriftSentinel === null) {
+        throw new Error("recursive child completion has no authenticated model observation");
+      }
+      this.journal.settleChild(identity, {
+        evidenceHash,
+        observed: outcome.spend,
+        qRaw,
+        responseModel: outcome.responseModel,
+        providerFingerprint: outcome.providerFingerprint,
+        modelDriftSentinel: outcome.modelDriftSentinel,
+      });
+    } else {
+      this.journal.settleChildFailure(identity, {
+        evidenceHash,
+        observed: outcome.spend,
+        status: outcome.status === "budget"
+          ? "budget"
+          : outcome.status === "infrastructure_not_run"
+            ? "infrastructure_not_run"
+            : "candidate_failed",
+      });
+    }
+    this.envelopeLedger.settleDescendant(envelopeRequest.reservationId, outcome.spend);
+    return {
+      launchReceiptPath: receiptPath,
+      terminalEventPath: join(runsRoot(this.root), request.child.runId, EVENTS_FILE),
+      usage: { ...outcome.spend },
+    };
+  }
+
+  private scheduledIdentity(request: SpawnRunRequest): MetaWorkIdentity | null {
+    const schedule = request.child.schedule;
+    if (schedule === undefined || schedule.innerEpisodesMax > this.config.counts.innerEpisodesMax) return null;
+    const member = this.config.developmentPanel.members.find(
+      (candidate) => candidate.capsule.capsuleId === request.child.capsuleId,
+    );
+    if (member === undefined) return null;
+    return {
+      phase: "search",
+      arm: "candidate",
+      sourceArtifact: request.child.sourceArtifact.hash as Sha256Digest,
+      bundleDigest: request.child.optimizerArtifact.hash as Sha256Digest,
+      capsuleId: member.capsule.capsuleId,
+      replicate: 0,
+      measurementEpoch: `m2:${sha256(canonicalJson({
+        candidateOrdinal: schedule.candidateOrdinal,
+        allocationOrdinal: schedule.allocationOrdinal,
+        innerEpisodesMax: schedule.innerEpisodesMax,
+        reserved: request.reservation,
+      })).slice("sha256:".length)}`,
+    };
+  }
+}
 
 interface ModelObservation {
   responseModel: string;
@@ -813,20 +1177,28 @@ function capsuleScalarizerDigest(admitted: AdmittedCapsule): Sha256Digest {
   }));
 }
 
-function discoverCapsules(root: string): Map<string, DiscoveredCapsule> {
+export function discoverCapsules(root: string): Map<string, DiscoveredCapsule> {
   const found = new Map<string, DiscoveredCapsule>();
   const capsuleRoot = join(root, "capsules");
   for (const entry of readdirSync(capsuleRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const dir = join(capsuleRoot, entry.name);
     try {
-      const admitted = admitCapsule(dir);
+      const admitted = admitCapsule(dir, { review: "required" });
+      // Delegated Gate-2 approvals are private quarantine only: they cannot
+      // contribute corpus statistics, optimizer promotion, or terminal work.
+      if (admitted.provisional) continue;
       if (found.has(admitted.manifest.id)) {
         throw new UsageError(`duplicate admitted capsule id ${admitted.manifest.id}`);
       }
       found.set(admitted.manifest.id, { dir, admitted });
     } catch (error) {
-      if (error instanceof UsageError && error.message.startsWith("duplicate admitted capsule id")) throw error;
+      if (error instanceof UsageError && (
+        error.message.startsWith("duplicate admitted capsule id")
+        || existsSync(join(dir, "manifest.json"))
+      )) {
+        throw error;
+      }
       // Non-capsule tool/test directories are outside the registered corpus.
     }
   }
@@ -1063,7 +1435,10 @@ export function createSyntheticCapsule(
   };
   const manifest = CapsuleManifest.parse({ ...draft, id: deriveCapsuleId(draft) });
   writeFileSync(join(capsuleDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
-  admitCapsule(capsuleDir);
+  // This validates the just-authored trusted synthetic task before its
+  // campaign/config seal exists, so it genuinely precedes Gate 2. Its later
+  // run-boundary byte recheck uses the same explicit trusted bypass.
+  admitCapsule(capsuleDir, { review: "off" });
   return capsuleDir;
 }
 
@@ -1297,6 +1672,7 @@ async function selectedSearchWinner(
 }
 
 function assertExactSearchCardinality(journal: MetaJournalV1, config: AnyMetaCampaignConfig): void {
+  if (config.version === 2) return;
   const sourceArtifacts = new Set(
     journal.queryTrainMeasurements()
       .filter((measurement) => measurement.phase === "search")
@@ -1561,6 +1937,8 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
         maxPublicCandidateEvaluations: config.counts.candidateAttemptsMax,
         trustedValidPublicCandidateTarget: config.counts.candidates - 1,
         optimizerBaseSnapshot: seedSnapshot,
+        // Trusted synthetic meta task; see createSyntheticCapsule.
+        admissionReview: "off",
       },
     );
     if (
@@ -1773,6 +2151,15 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     writeFileDurable(registeredConfigPath, `${JSON.stringify(config, null, 2)}\n`);
     chmodSync(registeredConfigPath, 0o600);
   }
+  const campaignPauseAuthority = DurableCampaignPauseAuthorityV1.open(
+    join(campaignDir, "campaign-pause.v1.json"),
+    configHash,
+  );
+  const envelopeRecordPort = MetaEnvelopeFileRecordPortV1.open(
+    join(campaignDir, "resource-envelope.v1.ndjson"),
+    configHash,
+  );
+  const envelopeLedger = new MetaResourceEnvelopeLedger(config.recursiveBudgets, envelopeRecordPort);
 
   const syntheticCapsule = createSyntheticCapsule(campaignDir, config, target.sourceArtifact as Sha256Digest, casDir);
   const journal = MetaJournalV1.open(join(campaignDir, "meta-journal.ndjson"), config);
@@ -1785,18 +2172,37 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     controls: [controls.broken, controls.degraded],
   });
   const modelRegistry = new CampaignModelRegistry(campaignDir, configHash, io.root);
+  const childSupervisor = new CliChildSupervisor(
+    io,
+    config,
+    campaignDir,
+    capsules,
+    target.snapshot,
+    modelRegistry,
+    campaignPauseAuthority,
+  );
+  const recursiveResourceLedger = RecursiveResourceLedger.open(
+    join(campaignDir, "recursive-resource.v1.ndjson"),
+  );
+  const recursiveLauncher = new RecursiveSearchChildLauncher(
+    io.root,
+    campaignDir,
+    config,
+    configHash,
+    journal,
+    gate,
+    childSupervisor,
+    envelopeLedger,
+    campaignPauseAuthority,
+  );
+  const recursiveBroker = recursiveLauncher.brokerConfig(recursiveResourceLedger);
   const runner = new MetaCampaignRunner({
     config,
     journal,
     joinPath: join(campaignDir, "candidate-child-joins.ndjson"),
     candidateGate: gate,
-    childSupervisor: new CliChildSupervisor(io, config, campaignDir, capsules, target.snapshot, modelRegistry),
-  });
-  const strategy: TrustedEvaluationStrategy = async (request) => await runner.evaluateSearchCandidate({
-    sourceArtifact: request.artifact.hash as Sha256Digest,
-    outerCapsuleId: request.capsuleId,
-    assetGroupId: request.assetGroupId,
-    seed: request.seed,
+    childSupervisor,
+    envelopeLedger,
   });
   const outerRunId = `run_recursive_outer_${hashBody}`;
   const outerRunDir = join(runsRoot(io.root), outerRunId);
@@ -1907,11 +2313,15 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       : [syntheticCapsule, "--headless", "--config", outerConfigPath, "--optimizer-artifact", controller.sourceArtifact];
     const code = await runCommand(commandArgs, io, {
       runId: outerRunId,
-      evaluationStrategy: strategy,
+      recursiveBroker,
       optimizerEpisodesMax: config.counts.candidateAttemptsMax,
       maxPublicCandidateEvaluations: config.counts.candidateAttemptsMax,
-      trustedValidPublicCandidateTarget: config.counts.candidates - 1,
       optimizerBaseSnapshot: rootSnapshot,
+      proxyRole: "outer-optimizer",
+      campaignPauseAuthority,
+      // The synthetic outer task is trusted campaign machinery rather than a
+      // corpus capsule; its manifest bytes were validated before campaign seal.
+      admissionReview: "off",
     });
     if (
       existsSync(join(outerRunDir, EVENTS_FILE))
@@ -1936,6 +2346,8 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     return 0;
   } finally {
     runner.close();
+    recursiveResourceLedger.close();
+    envelopeRecordPort.close();
     journal.close();
   }
 }

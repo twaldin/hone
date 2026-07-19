@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { CapsuleManifest, DEFAULT_PROMOTION_RULE, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
-import { createBackend } from "../src/backends/local.js";
+import { createBackend, issueProxySessionCapability } from "../src/backends/local.js";
 import { deliver } from "../src/deliver.js";
 import { appendEvent, replayRun } from "../src/eventlog.js";
 import { loadRunConfigFile } from "../src/runs.js";
@@ -101,6 +101,45 @@ describe("promotion rule: frozen into runconfig persistence at campaign start", 
   });
 });
 
+describe("trusted proxy role capabilities", () => {
+  it("issues frozen outer/author/inner roles while retaining mutation only for legacy sessions", () => {
+    const issued: string[] = [];
+    const proxy = {
+      tokenFor: (role: string): string => {
+        issued.push(role);
+        return `token-${role}`;
+      },
+    };
+    const routing = { mutation: { model: "legacy-mutable-model" } };
+    expect(issueProxySessionCapability(proxy, routing)).toEqual({
+      role: "mutation",
+      model: "legacy-mutable-model",
+      token: "token-mutation",
+    });
+    expect(issueProxySessionCapability(proxy, routing, "outer-optimizer")).toEqual({
+      role: "outer-optimizer",
+      model: "gpt-5.6-sol",
+      token: "token-outer-optimizer",
+    });
+    expect(issueProxySessionCapability(proxy, routing, "capsule-author")).toEqual({
+      role: "capsule-author",
+      model: "gpt-5.6-sol",
+      token: "token-capsule-author",
+    });
+    expect(issueProxySessionCapability(proxy, routing, "inner-capsule-improvement")).toEqual({
+      role: "inner-capsule-improvement",
+      model: "gpt-5.6-terra",
+      token: "token-inner-capsule-improvement",
+    });
+    expect(issued).toEqual([
+      "mutation",
+      "outer-optimizer",
+      "capsule-author",
+      "inner-capsule-improvement",
+    ]);
+  });
+});
+
 function res(overrides: Partial<CmdResult> = {}): CmdResult {
   return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false, ...overrides };
 }
@@ -161,6 +200,8 @@ describe("image wiring: manifest.image is THE image, no environment override", (
         HONE_MUTATION_IMAGE: "evil:latest", // MUST be ignored
       },
       capsuleDigest: capsuleDigest(manifest),
+      // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
+      admissionReview: "off",
       optimizerDigest: fakeHash("0"),
       replayed: replayRun(runDir),
       signal: abort.signal,

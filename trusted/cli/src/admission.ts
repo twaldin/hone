@@ -18,7 +18,7 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { CapsuleManifest, DiagnosticOrderingReport, capsuleDigest, deriveCapsuleId, validateDiagnosticOrdering } from "@hone/schema";
 import { UsageError } from "./args.js";
-import { verifyAdmissionApproval } from "./admission-receipts.js";
+import { verifyAdmissionApproval, type VerifiedAdmissionApproval } from "./admission-receipts.js";
 import { loadCapsule } from "./capsule.js";
 import { contractHash } from "./contract.js";
 import { replayRun, writeFileDurable } from "./eventlog.js";
@@ -56,6 +56,8 @@ export interface AdmittedCapsule {
   /** Canonical full-manifest digest (sha256:<64 hex>) — the frozen identity runs and ledgers key on. */
   digest: string;
   orderingReport: DiagnosticOrderingReport;
+  /** Verified Gate-2 authority. Null only for an explicitly review-free authoring/byte-validation path. */
+  approval: VerifiedAdmissionApproval | null;
   /** True only for a delegated private apply:none approval. */
   provisional: boolean;
 }
@@ -293,13 +295,13 @@ export function admitCapsule(
   const orderingReport = checkOrderingReport(capsuleDir, manifest);
   if (manifest.baseline.kind === "git") checkGitBaseline(capsuleDir, manifest.baseline.commit);
   const digest = capsuleDigest(manifest);
-  let provisional = false;
+  let approval: VerifiedAdmissionApproval | null = null;
   if ((options.review ?? "off") === "required") {
     const capsuleParent = dirname(resolve(capsuleDir));
     const root = capsuleParent.endsWith(`${sep}capsules`) ? dirname(capsuleParent) : capsuleParent;
-    provisional = verifyAdmissionApproval(join(root, ".hone-cas"), digest).provisional;
+    approval = verifyAdmissionApproval(join(root, ".hone-cas"), digest);
   }
-  return { manifest, digest, orderingReport, provisional };
+  return { manifest, digest, orderingReport, approval, provisional: approval?.provisional ?? false };
 }
 
 /** Snapshot the admitted manifest into the run dir (written once, at run creation; durable — resume identity depends on it). */
@@ -379,9 +381,13 @@ export function authenticateCapsuleSnapshot(runDir: string): CapsuleManifest {
  * digest of the manifest snapshotted when the run was created. Any drift —
  * edited assets, changed budget, swapped image — refuses the resume.
  */
-export function revalidateForResume(runDir: string, capsuleDir: string): AdmittedCapsule {
+export function revalidateForResume(
+  runDir: string,
+  capsuleDir: string,
+  options: AdmitCapsuleOptions = { review: "required" },
+): AdmittedCapsule {
   const snapshot = readCapsuleSnapshot(runDir);
-  const admitted = admitCapsule(capsuleDir);
+  const admitted = admitCapsule(capsuleDir, options);
   const frozen = capsuleDigest(snapshot);
   if (admitted.digest !== frozen) {
     throw new UsageError(
