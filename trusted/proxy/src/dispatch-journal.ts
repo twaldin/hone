@@ -2,6 +2,14 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { type DurableIo } from "./durable-io.js";
 import { DurableLineLog } from "./tracelog.js";
+import {
+  M2_INNER_MODEL_ROUTE,
+  M2_OUTER_MODEL_ROUTE,
+  type CampaignPauseReason,
+  type CampaignPauseSignal,
+  type ProviderAttemptClassification,
+  type ProxyPreflightObservation,
+} from "@hone/schema";
 
 /**
  * Versioned durable dispatch journal — the proxy's crash-safe budget/trace
@@ -50,8 +58,13 @@ export interface DispatchIntentRecord {
   id: string;
   runId: string;
   role: string;
+  /** Legacy requested-route alias retained for version-1 journal readers. */
   model: string;
-  /** ISO timestamp the request arrived. */
+  /** Frozen route requested from the provider. */
+  requestedRoute: string;
+  /** One-based provider attempt within the client request or trusted preflight. */
+  attempt: number;
+  /** ISO timestamp the attempt arrived at the proxy. */
   requestAt: string;
   /** sha256 (hex) of the exact forwarded request body — reconciliation identity. */
   requestSha256: string;
@@ -82,6 +95,9 @@ export interface DispatchSettleRecord {
   id: string;
   tokens: number;
   usd: number;
+  /** Returned provider identity, null when no response identity was available. */
+  returnedModel: string | null;
+  classification: ProviderAttemptClassification;
   outcome: DispatchSettleOutcome;
   /**
    * True iff the dispatch's trace obligation was met: its CAS bodies and
@@ -110,11 +126,28 @@ export interface DispatchPoisonRecord {
   at: string;
 }
 
+/** Durable, resumable campaign seal. Unlike poison, a successful frozen-route preflight may clear it. */
+export interface DispatchPauseRecord extends CampaignPauseSignal {
+  v: number;
+  kind: "pause";
+}
+
+/** Durable proof that the active pause was cleared only after both frozen routes passed preflight. */
+export interface DispatchResumeRecord {
+  v: number;
+  kind: "resume";
+  pauseId: string;
+  at: string;
+  observations: [ProxyPreflightObservation, ProxyPreflightObservation];
+}
+
 export type DispatchRecord =
   | DispatchIntentRecord
   | DispatchSettleRecord
   | DispatchRecoveredRecord
-  | DispatchPoisonRecord;
+  | DispatchPoisonRecord
+  | DispatchPauseRecord
+  | DispatchResumeRecord;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -132,7 +165,56 @@ function nonNegNum(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+function positiveInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+const M2_PREFLIGHT_ROLES: Record<ProxyPreflightObservation["role"], true> = {
+  "outer-optimizer": true,
+  "capsule-author": true,
+  "inner-capsule-improvement": true,
+};
+
+function parsePreflightObservation(value: unknown): ProxyPreflightObservation | undefined {
+  if (!isRecord(value)) return undefined;
+  const role = value["role"];
+  if (
+    typeof role !== "string" ||
+    M2_PREFLIGHT_ROLES[role as ProxyPreflightObservation["role"]] !== true ||
+    !nonEmptyString(value["requestedRoute"]) ||
+    !(value["returnedModel"] === null || nonEmptyString(value["returnedModel"])) ||
+    !(value["status"] === null || (typeof value["status"] === "number" && Number.isInteger(value["status"]))) ||
+    typeof value["passed"] !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    role: role as ProxyPreflightObservation["role"],
+    requestedRoute: value["requestedRoute"],
+    returnedModel: value["returnedModel"],
+    status: value["status"],
+    passed: value["passed"],
+  };
+}
+
 const SETTLE_OUTCOMES: Record<string, true> = { usage: true, ceiling: true, "no-upstream": true, error: true };
+const ATTEMPT_CLASSIFICATIONS: Record<ProviderAttemptClassification, true> = {
+  success: true,
+  "candidate-invalidity": true,
+  "client-invalidity": true,
+  retry: true,
+  "campaign-pause": true,
+};
+
+const PAUSE_REASONS: Record<CampaignPauseReason, true> = {
+  "proxy-failover": true,
+  "provider-auth": true,
+  "provider-payment": true,
+  "provider-rate-limit": true,
+  "provider-transport": true,
+  "provider-5xx": true,
+  "returned-model-drift": true,
+};
 
 /**
  * Strict parse of one terminated journal line. Throws with a reason on ANY
@@ -157,11 +239,15 @@ export function parseDispatchRecord(line: string): DispatchRecord {
   const kind = raw["kind"];
   switch (kind) {
     case "intent": {
+      const requestedRoute = raw["requestedRoute"] ?? raw["model"];
+      const attempt = raw["attempt"] ?? 1;
       if (
         !nonEmptyString(raw["id"]) ||
         !nonEmptyString(raw["runId"]) ||
         !nonEmptyString(raw["role"]) ||
         !nonEmptyString(raw["model"]) ||
+        !nonEmptyString(requestedRoute) ||
+        !positiveInt(attempt) ||
         !nonEmptyString(raw["requestAt"]) ||
         !nonEmptyString(raw["requestSha256"]) ||
         !nonNegInt(raw["promptTokens"]) ||
@@ -178,6 +264,8 @@ export function parseDispatchRecord(line: string): DispatchRecord {
         runId: raw["runId"],
         role: raw["role"],
         model: raw["model"],
+        requestedRoute,
+        attempt,
         requestAt: raw["requestAt"],
         requestSha256: raw["requestSha256"],
         promptTokens: raw["promptTokens"],
@@ -188,10 +276,15 @@ export function parseDispatchRecord(line: string): DispatchRecord {
     }
     case "settle": {
       const outcome = raw["outcome"];
+      const returnedModel = raw["returnedModel"] ?? null;
+      const classification = raw["classification"] ?? "success";
       if (
         !nonEmptyString(raw["id"]) ||
         !nonNegInt(raw["tokens"]) ||
         !nonNegNum(raw["usd"]) ||
+        !(returnedModel === null || nonEmptyString(returnedModel)) ||
+        typeof classification !== "string" ||
+        ATTEMPT_CLASSIFICATIONS[classification as ProviderAttemptClassification] !== true ||
         typeof outcome !== "string" ||
         SETTLE_OUTCOMES[outcome] !== true ||
         typeof raw["traced"] !== "boolean" ||
@@ -205,6 +298,8 @@ export function parseDispatchRecord(line: string): DispatchRecord {
         id: raw["id"],
         tokens: raw["tokens"],
         usd: raw["usd"],
+        returnedModel,
+        classification: classification as ProviderAttemptClassification,
         outcome: outcome as DispatchSettleOutcome,
         traced: raw["traced"],
         ...(typeof raw["traceError"] === "string" ? { traceError: raw["traceError"] } : {}),
@@ -234,6 +329,59 @@ export function parseDispatchRecord(line: string): DispatchRecord {
       }
       return { v: DISPATCH_JOURNAL_VERSION, kind: "poison", reason: raw["reason"], at: raw["at"] };
     }
+    case "pause": {
+      const reason = raw["reason"];
+      if (
+        !nonEmptyString(raw["pauseId"]) ||
+        !nonEmptyString(raw["runId"]) ||
+        typeof reason !== "string" ||
+        PAUSE_REASONS[reason as CampaignPauseReason] !== true ||
+        !nonEmptyString(raw["at"]) ||
+        !nonEmptyString(raw["role"]) ||
+        !nonEmptyString(raw["requestedRoute"]) ||
+        !(raw["returnedModel"] === null || nonEmptyString(raw["returnedModel"])) ||
+        !(raw["status"] === null || (typeof raw["status"] === "number" && Number.isInteger(raw["status"]))) ||
+        !positiveInt(raw["attempt"])
+      ) {
+        throw new Error("malformed pause record");
+      }
+      return {
+        v: DISPATCH_JOURNAL_VERSION,
+        kind: "pause",
+        version: 1,
+        pauseId: raw["pauseId"],
+        runId: raw["runId"],
+        reason: reason as CampaignPauseReason,
+        at: raw["at"],
+        role: raw["role"],
+        requestedRoute: raw["requestedRoute"],
+        returnedModel: raw["returnedModel"],
+        status: raw["status"],
+        attempt: raw["attempt"],
+      };
+    }
+    case "resume": {
+      if (
+        !nonEmptyString(raw["pauseId"]) ||
+        !nonEmptyString(raw["at"]) ||
+        !Array.isArray(raw["observations"]) ||
+        raw["observations"].length !== 2
+      ) {
+        throw new Error("malformed resume record");
+      }
+      const first = parsePreflightObservation(raw["observations"][0]);
+      const second = parsePreflightObservation(raw["observations"][1]);
+      if (first === undefined || second === undefined || !first.passed || !second.passed) {
+        throw new Error("malformed resume observations");
+      }
+      return {
+        v: DISPATCH_JOURNAL_VERSION,
+        kind: "resume",
+        pauseId: raw["pauseId"],
+        at: raw["at"],
+        observations: [first, second],
+      };
+    }
     default:
       throw new Error(`unknown record kind ${JSON.stringify(kind)}`);
   }
@@ -249,6 +397,8 @@ export interface DispatchJournalState {
   unmatched: DispatchIntentRecord[];
   /** Sum of every settled + recovered charge in the journal. */
   chargedTotals: { tokens: number; usd: number };
+  /** Active durable provider pause, if the latest pause has no valid resume. */
+  pause: CampaignPauseSignal | undefined;
 }
 
 /**
@@ -279,6 +429,7 @@ export async function readDispatchJournalState(filePath: string): Promise<Dispat
   const intents = new Map<string, DispatchIntentRecord>();
   const settlements = new Map<string, DispatchSettleRecord | DispatchRecoveredRecord>();
   let poisoned: string | undefined;
+  let activePause: CampaignPauseSignal | undefined;
   const poison = (reason: string): void => {
     poisoned ??= reason;
   };
@@ -321,6 +472,43 @@ export async function readDispatchJournalState(filePath: string): Promise<Dispat
       case "poison":
         poison(record.reason);
         break;
+      case "pause":
+        activePause = {
+          version: record.version,
+          pauseId: record.pauseId,
+          runId: record.runId,
+          reason: record.reason,
+          at: record.at,
+          role: record.role,
+          requestedRoute: record.requestedRoute,
+          returnedModel: record.returnedModel,
+          status: record.status,
+          attempt: record.attempt,
+        };
+        break;
+      case "resume": {
+        const outer = record.observations.find((observation) => observation.role === "outer-optimizer");
+        const inner = record.observations.find(
+          (observation) => observation.role === "inner-capsule-improvement",
+        );
+        if (activePause === undefined) {
+          poison(`resume without active pause ${record.pauseId}`);
+        } else if (record.pauseId !== activePause.pauseId) {
+          poison(`resume ${record.pauseId} does not match active pause ${activePause.pauseId}`);
+        } else if (
+          outer?.requestedRoute !== M2_OUTER_MODEL_ROUTE ||
+          outer.returnedModel !== M2_OUTER_MODEL_ROUTE ||
+          !outer.passed ||
+          inner?.requestedRoute !== M2_INNER_MODEL_ROUTE ||
+          inner.returnedModel !== M2_INNER_MODEL_ROUTE ||
+          !inner.passed
+        ) {
+          poison(`resume ${record.pauseId} lacks both frozen-route identity proofs`);
+        } else {
+          activePause = undefined;
+        }
+        break;
+      }
     }
   }
   let tokens = 0;
@@ -333,6 +521,7 @@ export async function readDispatchJournalState(filePath: string): Promise<Dispat
     records,
     poisoned,
     unmatched: [...intents.values()].filter((i) => !settlements.has(i.id)),
+    pause: activePause,
     chargedTotals: { tokens, usd },
   };
 }
@@ -354,6 +543,8 @@ export interface DispatchRecoveryReport {
   recovered: RecoveredCharge[];
   /** Sum of every settled + recovered charge, including this pass. */
   chargedTotals: { tokens: number; usd: number };
+  /** Active durable provider pause. It seals dispatch but is resumable after trusted preflight. */
+  pause?: CampaignPauseSignal | undefined;
 }
 
 /**
@@ -391,6 +582,16 @@ export class DispatchJournal {
   /** Durably record the terminal settlement for an intent. */
   settle(fields: Omit<DispatchSettleRecord, "v" | "kind">): Promise<void> {
     return this.append({ v: DISPATCH_JOURNAL_VERSION, kind: "settle", ...fields });
+  }
+
+  /** Durably seal all new model dispatches. Resolution means the pause survives restart. */
+  pause(fields: Omit<DispatchPauseRecord, "v" | "kind">): Promise<void> {
+    return this.append({ v: DISPATCH_JOURNAL_VERSION, kind: "pause", ...fields });
+  }
+
+  /** Durably clear exactly the active pause after both frozen routes passed trusted preflight. */
+  resume(fields: Omit<DispatchResumeRecord, "v" | "kind">): Promise<void> {
+    return this.append({ v: DISPATCH_JOURNAL_VERSION, kind: "resume", ...fields });
   }
 
   /**
@@ -449,7 +650,7 @@ export class DispatchJournal {
         usd += intent.ceilUsd;
       }
     }
-    return { poisoned, recovered, chargedTotals: { tokens, usd } };
+    return { poisoned, pause: state.pause, recovered, chargedTotals: { tokens, usd } };
   }
 
   /** Drain queued appends and close; rejects if the journal was ever poisoned. */

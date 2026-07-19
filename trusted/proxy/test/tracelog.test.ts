@@ -283,6 +283,7 @@ async function startUpstream(): Promise<{
         JSON.stringify({
           id: "c1",
           object: "chat.completion",
+          model: "routed-model",
           choices: [{ index: 0, message: { role: "assistant", content: "hello" }, finish_reason: "stop" }],
           usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
         }),

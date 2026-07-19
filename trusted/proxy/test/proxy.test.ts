@@ -942,7 +942,7 @@ describe("body and response caps", () => {
 });
 
 describe("transport failure reconciliation", () => {
-  it("connection-refused releases the reservation without charge", async () => {
+  it("connection-refused retries are zero-charged, then durably pause new dispatch", async () => {
     const spends: SpendRecord[] = [];
     const ctx = await setup({
       checkBudget: (): BudgetDecision => ({ allowed: true, remaining: { tokens: 1300, usd: 1000 } }),
@@ -950,35 +950,35 @@ describe("transport failure reconciliation", () => {
         spends.push(s);
       },
     });
-    await ctx.upstream.close(); // refuse all connections from now on
+    await ctx.upstream.close();
     const token = ctx.proxy.tokenFor("mutation");
     const first = await postCompletions(ctx, token, { messages: [], max_tokens: 1000 });
-    expect(first.status).toBe(502);
-    expect(spends).toHaveLength(0); // provably never accepted upstream: no charge
-    // reservation must be gone: an identical request re-admits (502 again, NOT 402)
+    expect(first.status).toBe(503);
+    expect(spends).toHaveLength(0);
+    expect((await ctx.proxy.campaignPause())?.reason).toBe("provider-transport");
     const second = await postCompletions(ctx, token, { messages: [], max_tokens: 1000 });
-    expect(second.status).toBe(502);
+    expect(second.status).toBe(503);
     expect(await readTrace(ctx.runDir)).toHaveLength(0);
     expect(await walkFiles(ctx.casDir)).toHaveLength(0);
   });
 
-  it("a mid-flight connection reset charges the full reservation ceiling", async () => {
+  it("four ambiguous connection resets are each ceiling-charged before pause", async () => {
     const ctx = await setup();
     const res = await postCompletions(ctx, ctx.proxy.tokenFor("mutation"), {
       messages: [{ role: "user", content: "reset" }],
       max_tokens: 100,
     });
-    expect(res.status).toBe(200); // headers were sent before the reset
-    try {
-      await res.text();
-    } catch {
-      // body is broken by construction
+    expect(res.status).toBe(503);
+    await res.text();
+    await until(() => ctx.spends.length === 4);
+    const traces = await readTrace(ctx.runDir);
+    expect(traces).toHaveLength(4);
+    for (const [index, trace] of traces.entries()) {
+      expect(trace.usage.completionTokens).toBe(100);
+      expect(ctx.spends[index]?.tokens).toBe(trace.usage.totalTokens);
+      expect(ctx.spends[index]?.tokens).toBeGreaterThanOrEqual(101);
     }
-    await until(() => ctx.spends.length === 1);
-    const trace = await readTrace(ctx.runDir);
-    expect(trace[0]?.usage.completionTokens).toBe(100);
-    expect(ctx.spends[0]?.tokens).toBe(trace[0]?.usage.totalTokens);
-    expect(ctx.spends[0]?.tokens).toBeGreaterThanOrEqual(101);
+    expect((await ctx.proxy.campaignPause())?.reason).toBe("provider-transport");
   });
 });
 
@@ -1113,21 +1113,17 @@ describe("active request slots", () => {
     await heldRes.text();
   });
 
-  it("slot releases after a mid-flight upstream reset", async () => {
+  it("slot releases after retried transport resets and durable resume", async () => {
     const ctx = await setup({ limits: { maxActiveRequests: 1 } });
     const token = ctx.proxy.tokenFor("mutation");
     const res = await postCompletions(ctx, token, {
       messages: [{ role: "user", content: "reset" }],
       max_tokens: 5,
     });
-    expect(res.status).toBe(200);
-    try {
-      await res.text();
-    } catch {
-      // truncated by construction
-    }
-    await until(() => ctx.spends.length === 1);
-    // the only slot must be free again
+    expect(res.status).toBe(503);
+    await res.text();
+    await until(() => ctx.spends.length === 4);
+    expect((await ctx.proxy.resume()).passed).toBe(true);
     const next = await postCompletions(ctx, token, { messages: [] });
     expect(next.status).toBe(200);
     await next.text();

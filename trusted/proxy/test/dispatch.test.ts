@@ -325,27 +325,45 @@ describe("dispatch journal — intent barrier", () => {
     expect(b.spends).toEqual([{ tokens: settle.tokens, usd: settle.usd }]);
   });
 
-  it("a proven never-accepted transport failure settles the intent at zero and the journal restarts healthy", async () => {
+  it("four proven transport failures settle at zero, durably pause, and require preflight after restart", async () => {
     const dirs = await freshDirs();
     const pathRef = { path: join(dirs.runDir, DISPATCH_JOURNAL_FILE) };
     const dead = await startUpstream(pathRef);
-    await dead.close(); // refuse all connections from now on
+    await dead.close();
     const a = await boot(dirs, dead.port);
     const res = await postCompletions(a, { messages: [], max_tokens: 5 });
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(503);
     expect(a.spends).toHaveLength(0);
     const records = await readJournal(a.runDir);
-    expect(records.map((r) => r.kind)).toEqual(["intent", "settle"]);
-    const settle = records[1] as DispatchSettleRecord;
-    expect(settle).toMatchObject({ tokens: 0, usd: 0, outcome: "no-upstream", traced: true });
-    await a.proxy.close(); // zero-settled is a CLEAN shutdown
+    expect(records.filter((record) => record.kind === "intent")).toHaveLength(4);
+    const settlements = records.filter(
+      (record): record is DispatchSettleRecord => record.kind === "settle",
+    );
+    expect(settlements).toHaveLength(4);
+    for (const settlement of settlements) {
+      expect(settlement).toMatchObject({
+        tokens: 0,
+        usd: 0,
+        outcome: "no-upstream",
+        traced: true,
+      });
+    }
+    expect(records.some((record) => record.kind === "pause")).toBe(true);
+    await a.proxy.close();
 
-    // Restart over the settled journal: healthy — no poison, no charge.
     const upstream = await startUpstream(pathRef);
     cleanups.push(() => upstream.close());
     const b = await boot(dirs, upstream.port);
-    expect((await b.proxy.dispatchRecovery()).poisoned).toBeUndefined();
+    const recovery = await b.proxy.dispatchRecovery();
+    expect(recovery.poisoned).toBeUndefined();
+    expect(recovery.pause?.reason).toBe("provider-transport");
     expect(b.spends).toHaveLength(0);
+    const blocked = await postCompletions(b, { messages: [], max_tokens: 5 });
+    expect(blocked.status).toBe(503);
+    expect(upstream.calls).toHaveLength(0);
+
+    const preflight = await b.proxy.resume();
+    expect(preflight.passed).toBe(true);
     const ok = await postCompletions(b, { messages: [], max_tokens: 5 });
     expect(ok.status).toBe(200);
     await ok.text();
@@ -881,7 +899,7 @@ describe("settlement state machine — broker charge failures", () => {
 // ---------------------------------------------------------------------------
 
 describe("dispatch journal — poison latch race", () => {
-  it("a request that passed the gates BEFORE a concurrent poison never dispatches: intent settled zero/no-upstream, journal complete", async () => {
+  it("a body-buffering request observes a concurrent poison before admission and never dispatches", async () => {
     const dirs = await freshDirs();
     const pathRef = { path: join(dirs.runDir, DISPATCH_JOURNAL_FILE) };
     const upstream = await startUpstream(pathRef);
@@ -930,8 +948,8 @@ describe("dispatch journal — poison latch race", () => {
     expect(b.spends).toHaveLength(1);
     expect(upstream.calls).toHaveLength(1);
 
-    // Release B: it admits and appends its durable intent — the post-intent
-    // fence must observe the latched poison BEFORE any fetch.
+    // Release B: the dispatch helper rechecks authority before admission and
+    // refuses it without minting an intent or reaching upstream.
     reqB.write(bodyB.slice(half));
     reqB.end();
     const got = await responseB;
@@ -942,15 +960,10 @@ describe("dispatch journal — poison latch race", () => {
     expect(upstream.calls).toHaveLength(1);
     expect(b.spends).toHaveLength(1);
 
-    // B's durable intent is matched by a zero/no-upstream settlement: the
-    // journal is COMPLETE — nothing unmatched for restart recovery to
-    // ceiling-charge — even though the run is terminally poisoned by A.
+    // B never reaches admission, so A's failed trace obligation is the only
+    // journaled dispatch and restart sees no unmatched accounting identity.
     const records = await readJournal(b.runDir);
-    expect(records.map((r) => r.kind)).toEqual(["intent", "settle", "intent", "settle"]);
-    const intentB = records[2] as DispatchIntentRecord;
-    const settleB = records[3] as DispatchSettleRecord;
-    expect(settleB.id).toBe(intentB.id);
-    expect(settleB).toMatchObject({ tokens: 0, usd: 0, outcome: "no-upstream", traced: true });
+    expect(records.map((record) => record.kind)).toEqual(["intent", "settle"]);
     const state = await readDispatchJournalState(pathRef.path);
     expect(state.unmatched).toHaveLength(0);
     expect(state.poisoned).toMatch(/trace\/CAS publication failed/);

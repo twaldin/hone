@@ -8,16 +8,32 @@ import {
 } from "node:http";
 import { join } from "node:path";
 import {
+  CampaignPauseSignal,
+  M2_INNER_MODEL_ROUTE,
+  M2_MODEL_ROUTING,
+  M2_OUTER_MODEL_ROUTE,
   PROXY_TRACE_VERSION,
+  ProxyPreflightResult,
   ProxyTraceRecord,
   type BudgetExceededError,
+  type CampaignPauseReason,
   type ModelRouting,
+  type ProviderAttemptClassification,
+  type ProxyPreflightObservation,
 } from "@hone/schema";
 import { casWrite } from "./cas.js";
 import { DispatchJournal, DISPATCH_JOURNAL_FILE, type DispatchRecoveryReport, type DispatchSettleOutcome } from "./dispatch-journal.js";
 import { type DurableIo } from "./durable-io.js";
 import { DurableLineLog } from "./tracelog.js";
 import { extractSseUsage, isJsonObject, normalizeUsage, ZERO_USAGE, type Usage } from "./sse.js";
+import {
+  classifyProviderAttempt,
+  isMalformedSuccessfulAgentResponse,
+  isProxyFailover,
+  MAX_PROVIDER_ATTEMPTS,
+  providerRetryDelayMs,
+  responseModelIdentities,
+} from "./provider-policy.js";
 
 export const DEFAULT_UPSTREAM = "http://127.0.0.1:8317";
 
@@ -124,6 +140,13 @@ export interface ProxyConfig {
    */
   recordBudgetExhaustion?: (dimension: BudgetDimension) => void | Promise<void>;
   /**
+   * Trusted global signal sink. The local journal pause is fsynced before
+   * this callback runs, so a callback failure can never reopen model egress.
+   */
+  recordCampaignPause?: (signal: CampaignPauseSignal) => void | Promise<void>;
+  /** TEST-ONLY deterministic entropy source; values are clamped inside the trusted jitter bound. */
+  retryRandom?: () => number;
+  /**
    * TEST-ONLY fault injection for the durable trace log (short writes,
    * fsync failures). Production wiring must leave this unset.
    */
@@ -156,6 +179,12 @@ export interface ProxyHandle {
    * poison reason, if the run may never forward again.
    */
   dispatchRecovery(): Promise<DispatchRecoveryReport>;
+  /** Active durable provider pause, after startup replay. */
+  campaignPause?(): Promise<CampaignPauseSignal | undefined>;
+  /** Exercise both frozen M2 routes without changing pause state. */
+  preflight?(): Promise<ProxyPreflightResult>;
+  /** Preflight both routes and durably resume only when both identities match. */
+  resume?(): Promise<ProxyPreflightResult>;
   /**
    * True handler-quiescence barrier: stops accepting, aborts every in-flight
    * upstream exchange, destroys client connections, and resolves only after
@@ -170,9 +199,20 @@ export interface ProxyHandle {
   close(): Promise<void>;
 }
 
+/** Concrete handle returned by this proxy version; pause APIs are always present. */
+export interface DurablePauseProxyHandle extends ProxyHandle {
+  campaignPause(): Promise<CampaignPauseSignal | undefined>;
+  preflight(): Promise<ProxyPreflightResult>;
+  resume(): Promise<ProxyPreflightResult>;
+}
+
 interface TraceInput {
   role: string;
   model: string;
+  requestedRoute: string;
+  returnedModel: string | null;
+  classification: ProviderAttemptClassification;
+  attempt: number;
   requestAt: string;
   startedAt: number;
   status: number;
@@ -365,8 +405,11 @@ function readRequestBody(req: IncomingMessage, maxBytes: number): Promise<BodyRe
   });
 }
 
-export function createProxy(config: ProxyConfig): ProxyHandle {
+export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
   const limits: ProxyLimits = { ...DEFAULT_LIMITS, ...config.limits };
+  // Frozen M2 authorities always win over mutable/general run routing. The
+  // optimizer never supplies a route for these bearer capabilities.
+  const routing: ModelRouting = { ...config.routing, ...M2_MODEL_ROUTING };
 
   const tokens: ProxyAuthToken[] = Object.keys(config.routing).map((role) => ({
     token: `hone_${randomBytes(24).toString("hex")}`,
@@ -501,6 +544,9 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
   // -------------------------------------------------------------------------
   const journal = new DispatchJournal(join(config.runDir, DISPATCH_JOURNAL_FILE), config.journalIo);
   let dispatchPoison: string | undefined;
+  let activeCampaignPause: CampaignPauseSignal | undefined;
+  let pausePending = false;
+  let pauseAppend: Promise<CampaignPauseSignal> | undefined;
   // Durable intents whose terminal journal record is not yet durable. Any
   // id still here after handler quiescence is a settlement that failed
   // part-way — close() must reject rather than report a clean shutdown.
@@ -509,6 +555,8 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     try {
       const report = await journal.recover(config.recordSpend);
       if (report.poisoned !== undefined) dispatchPoison = report.poisoned;
+      activeCampaignPause = report.pause;
+      pausePending = report.pause !== undefined;
       return report;
     } catch (err) {
       // Recovery could not establish (or repair) the journal's history —
@@ -517,9 +565,49 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       const reason = `dispatch journal recovery failed: ${failure.message}`;
       dispatchPoison = reason;
       journal.fail(failure);
-      return { poisoned: reason, recovered: [], chargedTotals: { tokens: 0, usd: 0 } };
+      return { poisoned: reason, pause: undefined, recovered: [], chargedTotals: { tokens: 0, usd: 0 } };
     }
   })();
+
+  function sealCampaignPause(fields: {
+    reason: CampaignPauseReason;
+    role: string;
+    requestedRoute: string;
+    returnedModel: string | null;
+    status: number | null;
+    attempt: number;
+  }): Promise<CampaignPauseSignal> {
+    if (activeCampaignPause !== undefined) return Promise.resolve(activeCampaignPause);
+    if (pauseAppend !== undefined) return pauseAppend;
+    // Seal synchronously before the fsync: no concurrently arriving request
+    // may cross the dispatch fence while the durable record is in flight.
+    pausePending = true;
+    const signal = CampaignPauseSignal.parse({
+      version: 1,
+      pauseId: `pause_${randomBytes(12).toString("hex")}`,
+      runId: config.runId,
+      reason: fields.reason,
+      at: new Date().toISOString(),
+      role: fields.role,
+      requestedRoute: fields.requestedRoute,
+      returnedModel: fields.returnedModel,
+      status: fields.status,
+      attempt: fields.attempt,
+    });
+    pauseAppend = (async () => {
+      await recoveryPromise;
+      await journal.pause(signal);
+      activeCampaignPause = signal;
+      await config.recordCampaignPause?.(signal);
+      return signal;
+    })().catch((err: unknown) => {
+      const failure = err instanceof Error ? err : new Error(String(err));
+      dispatchPoison ??= `campaign pause could not become durable: ${failure.message}`;
+      journal.fail(failure);
+      throw failure;
+    });
+    return pauseAppend;
+  }
 
   async function trace(t: TraceInput): Promise<void> {
     // A poisoned authority never publishes MORE content: fail before CAS.
@@ -549,6 +637,10 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       runId: config.runId,
       role: t.role,
       model: t.model,
+      requestedRoute: t.requestedRoute,
+      returnedModel: t.returnedModel,
+      classification: t.classification,
+      attempt: t.attempt,
       requestAt: t.requestAt,
       durationMs: Date.now() - t.startedAt,
       status: t.status,
@@ -563,11 +655,13 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     await traceLog.append(JSON.stringify(record));
   }
 
-  function upstreamHeaders(): Record<string, string> {
+  function upstreamHeaders(role?: string, requestedRoute?: string): Record<string, string> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (config.upstreamApiKey !== undefined) {
       headers["authorization"] = `Bearer ${config.upstreamApiKey}`;
     }
+    if (role !== undefined) headers["x-hone-requested-role"] = role;
+    if (requestedRoute !== undefined) headers["x-hone-requested-route"] = requestedRoute;
     return headers;
   }
 
@@ -610,66 +704,547 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     sendJson(res, status, JSON.stringify({ error: { type, message } }));
   }
 
+  interface ProviderDispatchInput {
+    role: string;
+    route: { model: string; upstreamBaseUrl?: string | undefined };
+    forward: Record<string, unknown>;
+    completionField: "max_tokens" | "max_completion_tokens";
+    requestedCompletion: number | undefined;
+    promptTokens: number;
+    pricing: PricingEntry | undefined;
+    attempt: number;
+    allowPaused: boolean;
+    onResponseReady?: (
+      status: number,
+      contentType: string,
+      classification: ProviderAttemptClassification,
+    ) => void;
+  }
+
+  type ProviderDispatchResult =
+    | { kind: "budget"; status: 402 | 429; body: string }
+    | { kind: "sealed"; status: 503; body: string }
+    | {
+        kind: "attempt";
+        status: number;
+        providerStatus: number | null;
+        contentType: string;
+        body: string;
+        classification: ProviderAttemptClassification;
+        returnedModel: string | null;
+        completionTokens: number;
+      };
+
+  async function dispatchProviderAttempt(input: ProviderDispatchInput): Promise<ProviderDispatchResult> {
+    await recoveryPromise;
+    const authorityTraceFailure = traceLog.poisoned?.message;
+    const authorityFailure = authorityTraceFailure ?? dispatchPoison ?? journal.poisoned?.message;
+    if (authorityFailure !== undefined) {
+      return {
+        kind: "sealed",
+        status: 503,
+        body: JSON.stringify({
+          error: {
+            type:
+              authorityTraceFailure !== undefined
+                ? "hone_trace_authority_failed"
+                : "hone_dispatch_authority_failed",
+            message: `dispatch authority poisoned: ${authorityFailure}`,
+          },
+        }),
+      };
+    }
+    if (!input.allowPaused && pausePending) {
+      return {
+        kind: "sealed",
+        status: 503,
+        body: JSON.stringify({
+          error: {
+            type: "hone_campaign_paused",
+            message: "campaign model egress is durably paused pending frozen-route preflight",
+          },
+        }),
+      };
+    }
+
+    const admission = await admitSerialized(input.promptTokens, input.requestedCompletion, input.pricing);
+    if (!admission.ok) {
+      if (admission.terminal) await config.recordBudgetExhaustion?.(admission.dimension);
+      const errBody: BudgetExceededError = {
+        error: {
+          type: "hone_budget_exceeded",
+          message: admission.message,
+          dimension: admission.dimension,
+        },
+      };
+      return {
+        kind: "budget",
+        status: admission.terminal ? 402 : 429,
+        body: JSON.stringify(errBody),
+      };
+    }
+    const reservation = admission.reservation;
+    const releaseUnsentReservation = (): void => {
+      reservedTokens -= reservation.tokens;
+      reservedUsd -= reservation.usd;
+    };
+
+    // A pause may have latched while admission awaited the broker. Refuse
+    // before minting an intent; no upstream work exists and the reservation
+    // can be returned directly.
+    if (!input.allowPaused && pausePending) {
+      releaseUnsentReservation();
+      return {
+        kind: "sealed",
+        status: 503,
+        body: JSON.stringify({
+          error: {
+            type: "hone_campaign_paused",
+            message: "campaign model egress is durably paused pending frozen-route preflight",
+          },
+        }),
+      };
+    }
+
+    const forward = {
+      ...input.forward,
+      [input.completionField]: reservation.completionTokens,
+    };
+    const forwardText = JSON.stringify(forward);
+    const requestAt = new Date().toISOString();
+    const startedAt = Date.now();
+    const ceilingCharge: SpendRecord = { tokens: reservation.tokens, usd: reservation.usd };
+    const ceilingUsage: Usage = {
+      promptTokens: reservation.promptTokens,
+      completionTokens: reservation.completionTokens,
+      totalTokens: reservation.tokens,
+    };
+    const dispatchId = `d_${randomBytes(9).toString("hex")}`;
+    let intentDurable = false;
+    let plan:
+      | {
+          charge: SpendRecord;
+          outcome: DispatchSettleOutcome;
+          returnedModel: string | null;
+          classification: ProviderAttemptClassification;
+          traceInput: TraceInput | undefined;
+        }
+      | undefined;
+    let spendRecorded = false;
+    let spendFailure: Error | undefined;
+    let traceAttempted = false;
+    let traceFailure: Error | undefined;
+    let journalSettled = false;
+
+    const settle = async (
+      charge: SpendRecord,
+      outcome: DispatchSettleOutcome,
+      returnedModel: string | null,
+      classification: ProviderAttemptClassification,
+      traceInput?: TraceInput,
+    ): Promise<void> => {
+      if (journalSettled) return;
+      plan ??= { charge, outcome, returnedModel, classification, traceInput };
+      const fixed = plan;
+      if (!spendRecorded) {
+        if (spendFailure !== undefined) throw spendFailure;
+        if (fixed.charge.tokens > 0 || fixed.charge.usd > 0) {
+          try {
+            await config.recordSpend(fixed.charge);
+          } catch (err) {
+            spendFailure = err instanceof Error ? err : new Error(String(err));
+            dispatchPoison ??=
+              `broker charge for dispatch ${dispatchId} did not settle (broker state unknown): ${spendFailure.message}`;
+            throw spendFailure;
+          }
+        }
+        spendRecorded = true;
+      }
+      if (fixed.traceInput !== undefined && !traceAttempted) {
+        traceAttempted = true;
+        try {
+          await trace(fixed.traceInput);
+        } catch (err) {
+          traceFailure = err instanceof Error ? err : new Error(String(err));
+        }
+      }
+      const traced =
+        fixed.outcome === "no-upstream" ||
+        (fixed.traceInput !== undefined && traceFailure === undefined);
+      if (intentDurable) {
+        await journal.settle({
+          id: dispatchId,
+          tokens: fixed.charge.tokens,
+          usd: fixed.charge.usd,
+          returnedModel: fixed.returnedModel,
+          classification: fixed.classification,
+          outcome: fixed.outcome,
+          traced,
+          ...(traceFailure !== undefined ? { traceError: traceFailure.message } : {}),
+        });
+        if (!traced) {
+          dispatchPoison ??=
+            traceFailure !== undefined
+              ? `trace/CAS publication failed for dispatch ${dispatchId}: ${traceFailure.message}`
+              : `dispatch ${dispatchId} settled without a trace record`;
+        }
+      }
+      journalSettled = true;
+      openDispatches.delete(dispatchId);
+      if (traced || !intentDurable) {
+        reservedTokens -= reservation.tokens;
+        reservedUsd -= reservation.usd;
+      }
+      if (traceFailure !== undefined) throw traceFailure;
+    };
+
+    const controller = new AbortController();
+    upstreamControllers.add(controller);
+    try {
+      if (closing) {
+        await settle(
+          { tokens: 0, usd: 0 },
+          "no-upstream",
+          null,
+          "client-invalidity",
+        );
+        return {
+          kind: "sealed",
+          status: 503,
+          body: JSON.stringify({
+            error: { type: "hone_shutting_down", message: "proxy is shutting down" },
+          }),
+        };
+      }
+      try {
+        await journal.intent({
+          id: dispatchId,
+          runId: config.runId,
+          role: input.role,
+          model: input.route.model,
+          requestedRoute: input.route.model,
+          attempt: input.attempt,
+          requestAt,
+          requestSha256: createHash("sha256").update(forwardText).digest("hex"),
+          promptTokens: reservation.promptTokens,
+          completionTokens: reservation.completionTokens,
+          ceilTokens: reservation.tokens,
+          ceilUsd: reservation.usd,
+        });
+        intentDurable = true;
+        openDispatches.add(dispatchId);
+      } catch (err) {
+        await settle(
+          { tokens: 0, usd: 0 },
+          "no-upstream",
+          null,
+          "client-invalidity",
+        );
+        return {
+          kind: "sealed",
+          status: 503,
+          body: JSON.stringify({
+            error: {
+              type: "hone_dispatch_authority_failed",
+              message: `dispatch intent not durable: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          }),
+        };
+      }
+
+      const lateTraceFailure = traceLog.poisoned?.message;
+      const lateAuthorityFailure =
+        lateTraceFailure ?? dispatchPoison ?? journal.poisoned?.message;
+      if (lateAuthorityFailure !== undefined || (!input.allowPaused && pausePending)) {
+        await settle(
+          { tokens: 0, usd: 0 },
+          "no-upstream",
+          null,
+          "client-invalidity",
+        );
+        return {
+          kind: "sealed",
+          status: 503,
+          body: JSON.stringify({
+            error: {
+              type:
+                lateAuthorityFailure === undefined
+                  ? "hone_campaign_paused"
+                  : lateTraceFailure !== undefined
+                    ? "hone_trace_authority_failed"
+                    : "hone_dispatch_authority_failed",
+              message:
+                lateAuthorityFailure === undefined
+                  ? "campaign model egress is durably paused pending frozen-route preflight"
+                  : `authority poisoned before dispatch: ${lateAuthorityFailure}`,
+            },
+          }),
+        };
+      }
+
+      const base =
+        input.route.upstreamBaseUrl ?? config.upstreamBaseUrl ?? DEFAULT_UPSTREAM;
+      let upstream: Response;
+      try {
+        upstream = await fetch(new URL("/v1/chat/completions", base), {
+          method: "POST",
+          headers: upstreamHeaders(input.role, input.route.model),
+          body: forwardText,
+          signal: controller.signal,
+        });
+      } catch (err) {
+        const noAccept = provenNoUpstreamAccept(err);
+        const errText = JSON.stringify({
+          error: {
+            type: "hone_upstream_unreachable",
+            message: err instanceof Error ? err.message : String(err),
+          },
+        });
+        const decision = closing
+          ? { classification: "client-invalidity" as const }
+          : classifyProviderAttempt({
+              attempt: input.attempt,
+              status: null,
+              transportError: true,
+              proxyFailover: false,
+              requestedRoute: input.route.model,
+              returnedModels: [],
+              malformedSuccessfulOutput: false,
+            });
+        if (decision.pauseReason !== undefined) {
+          await sealCampaignPause({
+            reason: decision.pauseReason,
+            role: input.role,
+            requestedRoute: input.route.model,
+            returnedModel: null,
+            status: null,
+            attempt: input.attempt,
+          });
+        }
+        if (noAccept) {
+          await settle(
+            { tokens: 0, usd: 0 },
+            "no-upstream",
+            null,
+            decision.classification,
+          );
+        } else {
+          await settle(
+            ceilingCharge,
+            "ceiling",
+            null,
+            decision.classification,
+            {
+              role: input.role,
+              model: input.route.model,
+              requestedRoute: input.route.model,
+              returnedModel: null,
+              classification: decision.classification,
+              attempt: input.attempt,
+              requestAt,
+              startedAt,
+              status: 502,
+              usage: ceilingUsage,
+              estimatedUsd: ceilingCharge.usd,
+              requestText: forwardText,
+              responseText: errText,
+            },
+          );
+        }
+        return {
+          kind: "attempt",
+          status: 502,
+          providerStatus: null,
+          contentType: "application/json",
+          body: errText,
+          classification: decision.classification,
+          returnedModel: null,
+          completionTokens: reservation.completionTokens,
+        };
+      }
+
+      const contentType = upstream.headers.get("content-type") ?? "application/json";
+      const chunks: Buffer[] = [];
+      let received = 0;
+      let responseIncomplete = false;
+      let responseTooLarge = false;
+      try {
+        if (upstream.body !== null) {
+          for await (const chunk of upstream.body) {
+            const buf = Buffer.from(chunk);
+            if (received + buf.length > limits.maxResponseBytes) {
+              responseIncomplete = true;
+              responseTooLarge = true;
+              controller.abort();
+              break;
+            }
+            received += buf.length;
+            chunks.push(buf);
+          }
+        }
+      } catch {
+        controller.abort();
+        responseIncomplete = true;
+      }
+      const responseText = Buffer.concat(chunks).toString("utf8");
+      const returnedModels = responseModelIdentities(responseText, contentType);
+      const returnedModel = returnedModels[0] ?? null;
+      const decision = responseTooLarge
+        ? { classification: "candidate-invalidity" as const }
+        : closing && responseIncomplete
+          ? { classification: "client-invalidity" as const }
+          : classifyProviderAttempt({
+              attempt: input.attempt,
+              status: upstream.status,
+              transportError: responseIncomplete,
+              proxyFailover: isProxyFailover(upstream.headers, responseText),
+              requestedRoute: input.route.model,
+              returnedModels,
+              malformedSuccessfulOutput:
+                upstream.status >= 200 &&
+                upstream.status <= 299 &&
+                isMalformedSuccessfulAgentResponse(responseText, contentType),
+            });
+
+      let usage: Usage | undefined;
+      if (contentType.includes("text/event-stream")) {
+        usage = extractSseUsage(responseText);
+      } else {
+        try {
+          const responseJson: unknown = JSON.parse(responseText);
+          if (isJsonObject(responseJson)) usage = normalizeUsage(responseJson["usage"]);
+        } catch {
+          usage = undefined;
+        }
+      }
+      let charge: SpendRecord;
+      let tracedUsage: Usage;
+      let outcome: DispatchSettleOutcome;
+      if (usage !== undefined && usage.totalTokens > 0) {
+        const actualUsd =
+          input.pricing === undefined
+            ? 0
+            : (usage.promptTokens / 1e6) * input.pricing.inputUsdPerMTok +
+              (usage.completionTokens / 1e6) * input.pricing.outputUsdPerMTok;
+        charge = { tokens: usage.totalTokens, usd: actualUsd };
+        tracedUsage = usage;
+        outcome = "usage";
+      } else {
+        charge = ceilingCharge;
+        tracedUsage = ceilingUsage;
+        outcome = "ceiling";
+      }
+      if (decision.pauseReason !== undefined) {
+        await sealCampaignPause({
+          reason: decision.pauseReason,
+          role: input.role,
+          requestedRoute: input.route.model,
+          returnedModel,
+          status: upstream.status,
+          attempt: input.attempt,
+        });
+      }
+      if (
+        decision.classification !== "retry" &&
+        decision.classification !== "campaign-pause"
+      ) {
+        input.onResponseReady?.(
+          upstream.status,
+          contentType,
+          decision.classification,
+        );
+      }
+      await settle(
+        charge,
+        outcome,
+        returnedModel,
+        decision.classification,
+        {
+          role: input.role,
+          model: input.route.model,
+          requestedRoute: input.route.model,
+          returnedModel,
+          classification: decision.classification,
+          attempt: input.attempt,
+          requestAt,
+          startedAt,
+          status: upstream.status,
+          usage: tracedUsage,
+          estimatedUsd: charge.usd,
+          requestText: forwardText,
+          responseText,
+        },
+      );
+      return {
+        kind: "attempt",
+        status: upstream.status,
+        providerStatus: upstream.status,
+        contentType,
+        body: responseText,
+        classification: decision.classification,
+        returnedModel,
+        completionTokens: reservation.completionTokens,
+      };
+    } finally {
+      upstreamControllers.delete(controller);
+      if (!journalSettled) {
+        await settle(
+          ceilingCharge,
+          "error",
+          null,
+          "client-invalidity",
+        ).catch(() => undefined);
+        if (!journalSettled) {
+          dispatchPoison ??=
+            `dispatch ${dispatchId} has no durable terminal record (settlement incomplete)`;
+        }
+      }
+    }
+  }
+
   async function handleCompletions(
     req: IncomingMessage,
     res: ServerResponse,
     identity: ProxyAuthToken,
   ): Promise<void> {
-    const requestAt = new Date().toISOString();
-    const startedAt = Date.now();
-
-    // Corpus-authority gate: once the trace log (or a CAS publication) has
-    // failed, NOTHING more may be forwarded — the request is refused before
-    // any body buffering, budget check, reservation, or upstream dispatch.
-    const poison = traceLog.poisoned;
-    if (poison !== undefined) {
-      if (!res.destroyed) {
-        res.writeHead(503, { "content-type": "application/json", connection: "close" });
-        res.end(
-          JSON.stringify({
-            error: {
-              type: "hone_trace_authority_failed",
-              message: `trace authority poisoned: ${poison.message}`,
-            },
-          }),
-        );
-      }
+    const tracePoison = traceLog.poisoned;
+    if (tracePoison !== undefined) {
+      sendClientError(
+        res,
+        503,
+        "hone_trace_authority_failed",
+        `trace authority poisoned: ${tracePoison.message}`,
+      );
       return;
     }
-
-    // Dispatch-authority gate: startup recovery must have reconciled every
-    // prior intent before ANY new dispatch, and a poisoned journal — a crash
-    // orphaned an intent, a prior CAS/trace publication failed durably, the
-    // file is corrupt, or a live append failed — refuses everything. A run
-    // whose ledger authority failed can never silently restart healthy.
     await recoveryPromise;
     const journalPoison = dispatchPoison ?? journal.poisoned?.message;
     if (journalPoison !== undefined) {
-      if (!res.destroyed) {
-        res.writeHead(503, { "content-type": "application/json", connection: "close" });
-        res.end(
-          JSON.stringify({
-            error: {
-              type: "hone_dispatch_authority_failed",
-              message: `dispatch authority poisoned: ${journalPoison}`,
-            },
-          }),
-        );
-      }
+      sendClientError(
+        res,
+        503,
+        "hone_dispatch_authority_failed",
+        `dispatch authority poisoned: ${journalPoison}`,
+      );
+      return;
+    }
+    if (pausePending) {
+      sendClientError(
+        res,
+        503,
+        "hone_campaign_paused",
+        "campaign model egress is durably paused pending frozen-route preflight",
+      );
       return;
     }
 
-    const route = config.routing[identity.role];
+    const route = routing[identity.role];
     if (route === undefined) {
       sendClientError(res, 403, "hone_no_route", `no routing for role "${identity.role}"`);
       return;
     }
-
     const body = await readRequestBody(req, limits.maxRequestBytes);
     if (body.tooLarge) {
-      // Reject, then tear the connection down only after the 413 has been
-      // flushed — the client must observe a deterministic error, and the
-      // socket must not keep draining an unbounded upload.
       res.writeHead(413, { "content-type": "application/json", connection: "close" });
       res.end(
         JSON.stringify({
@@ -693,14 +1268,12 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       sendClientError(res, 400, "hone_bad_request", "request body must be a JSON object");
       return;
     }
-
     const bounds = completionBounds(parsed, limits.maxCompletionTokens);
     if (!bounds.ok) {
       sendClientError(res, 400, "hone_bad_request", bounds.message);
       return;
     }
 
-    // The mutable side cannot choose its own model: overwrite with the role's route.
     const forward: Record<string, unknown> = { ...parsed, model: route.model };
     delete forward["max_tokens"];
     delete forward["max_completion_tokens"];
@@ -711,7 +1284,6 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         include_usage: true,
       };
     }
-
     const pricing = config.pricing?.[route.model];
     const messagesRaw = parsed["messages"];
     const promptTokens = promptTokenUpperBound(
@@ -720,390 +1292,153 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
       Array.isArray(messagesRaw) ? messagesRaw.length : 0,
     );
 
-    // Recursion guard + double-spend guard: atomic worst-case reservation
-    // BEFORE any upstream call. Nothing fits → 402, upstream never sees it.
-    const admission = await admitSerialized(promptTokens, bounds.requested, pricing);
-    if (!admission.ok) {
-      if (admission.terminal) await config.recordBudgetExhaustion?.(admission.dimension);
-      const errBody: BudgetExceededError = {
-        error: {
-          type: "hone_budget_exceeded",
-          message: admission.message,
-          dimension: admission.dimension,
-        },
-      };
-      const errText = JSON.stringify(errBody);
-      // A concurrent in-flight reservation is temporary: 429 lets the
-      // mutation worker back off and retry after settlement. Only a request
-      // that cannot fit even with zero in-flight reservations is a terminal
-      // 402 and burns the trusted exhaustion latch above.
-      sendJson(res, admission.terminal ? 402 : 429, errText);
-      return;
-    }
-    const reservation = admission.reservation;
-
-    // The forwarded payload carries the ADMITTED ceiling — the upstream is
-    // contractually bound to the same bound the reservation was priced at.
-    forward[bounds.field] = reservation.completionTokens;
-    const forwardText = JSON.stringify(forward);
-
-    const ceilingCharge: SpendRecord = { tokens: reservation.tokens, usd: reservation.usd };
-    const ceilingUsage: Usage = {
-      promptTokens: reservation.promptTokens,
-      completionTokens: reservation.completionTokens,
-      totalTokens: reservation.tokens,
-    };
-
-    // Settlement is an explicit idempotent state machine driven to completion
-    // exactly once per admitted request, phases strictly in this order:
-    //   1. `recordSpend` — the broker charge. Crashing after it but before
-    //      the journal settle lands means restart recovery re-charges the
-    //      ceiling: an over-count in an irreducible window, never an
-    //      under-count.
-    //   2. the trace obligation (CAS bodies + trace line), when one exists;
-    //   3. the durable journal `settle` record matching the intent, carrying
-    //      the actual charge and whether the trace obligation was met — a
-    //      `traced: false` settlement is a terminal poison fact that
-    //      survives restart;
-    //   4. release of the in-memory reservation, ONLY when the settlement
-    //      left the dispatch authority clean.
-    // "Settled" means phase 3's terminal record is DURABLE (or no durable
-    // intent exists to match) — never that settlement merely began. The
-    // first settle() call fixes ONE immutable plan (charge, outcome, trace
-    // input); a later call — the handler's finally — resumes that SAME plan
-    // from the first incomplete phase, so a throw mid-settlement can neither
-    // be silently skipped nor substitute a different charge. A phase that
-    // fails permanently poisons the dispatch authority (the gate refuses new
-    // requests, close() rejects) and the reservation is retained forever
-    // (fail closed) rather than silently refunded.
-    const dispatchId = `d_${randomBytes(9).toString("hex")}`;
-    let intentDurable = false;
-    let plan: { charge: SpendRecord; outcome: DispatchSettleOutcome; traceInput: TraceInput | undefined } | undefined;
-    // Phase 1 state. A throw inside `recordSpend` leaves the broker state
-    // UNKNOWN: `spendFailure` latches and the phase is never retried — a
-    // retry could deliberately double-charge. The durable intent then stays
-    // unmatched, so restart recovery charges the full ceiling (over-count,
-    // never under-count).
-    let spendRecorded = false;
-    let spendFailure: Error | undefined;
-    // Phase 2 state. The trace obligation gets ONE attempt: a failure
-    // permanently poisons the trace log, so a retry would only fail at its
-    // poison gate.
-    let traceAttempted = false;
-    let traceFailure: Error | undefined;
-    // Phase 3 state — THIS is "settled".
-    let journalSettled = false;
-    const settle = async (
-      charge: SpendRecord,
-      outcome: DispatchSettleOutcome,
-      traceInput?: TraceInput,
-    ): Promise<void> => {
-      if (journalSettled) return;
-      // One immutable settlement plan per request: the first call fixes it;
-      // retries resume it and their own arguments are ignored.
-      plan ??= { charge, outcome, traceInput };
-      const p = plan;
-      if (!spendRecorded) {
-        if (spendFailure !== undefined) throw spendFailure;
-        // A proven-unaccepted transport failure settles at zero: nothing to
-        // record, just release. Everything else records BEFORE releasing.
-        if (p.charge.tokens > 0 || p.charge.usd > 0) {
-          try {
-            await config.recordSpend(p.charge);
-          } catch (err) {
-            spendFailure = err instanceof Error ? err : new Error(String(err));
-            dispatchPoison ??= `broker charge for dispatch ${dispatchId} did not settle (broker state unknown): ${spendFailure.message}`;
-            throw spendFailure;
-          }
-        }
-        spendRecorded = true;
-      }
-      if (p.traceInput !== undefined && !traceAttempted) {
-        traceAttempted = true;
-        try {
-          await trace(p.traceInput);
-        } catch (err) {
-          traceFailure = err instanceof Error ? err : new Error(String(err));
-        }
-      }
-      // `traced` is true only when the trace obligation was met, or none
-      // existed (`no-upstream`: the upstream provably never saw the
-      // request, so there is no exchange to record).
-      const traced = p.outcome === "no-upstream" || (p.traceInput !== undefined && traceFailure === undefined);
-      if (intentDurable) {
-        // Resolution = the terminal record is on disk and fsynced. A throw
-        // here leaves `journalSettled` false: the journal is poisoned by the
-        // failed append, the finally resumes (and fails closed again), and
-        // close() rejects over the unsettled intent.
-        await journal.settle({
-          id: dispatchId,
-          tokens: p.charge.tokens,
-          usd: p.charge.usd,
-          outcome: p.outcome,
-          traced,
-          ...(traceFailure !== undefined ? { traceError: traceFailure.message } : {}),
-        });
-        if (!traced) {
-          dispatchPoison ??=
-            traceFailure !== undefined
-              ? `trace/CAS publication failed for dispatch ${dispatchId}: ${traceFailure.message}`
-              : `dispatch ${dispatchId} settled without a trace record`;
-        }
-      }
-      journalSettled = true;
-      openDispatches.delete(dispatchId);
-      // Fail closed: a settlement that poisoned the dispatch authority keeps
-      // its reservation forever — retention only ever OVER-constrains later
-      // admissions, and the poison gate refuses them anyway.
-      if (traced || !intentDurable) {
-        reservedTokens -= reservation.tokens;
-        reservedUsd -= reservation.usd;
-      }
-      if (traceFailure !== undefined) throw traceFailure;
-    };
-
-    const controller = new AbortController();
-    upstreamControllers.add(controller);
-    try {
-      if (closing) {
-        // Admitted after shutdown began but before any upstream dispatch:
-        // the upstream is provably untouched, so release the reservation
-        // without charge and record the deterministic refusal.
-        await settle({ tokens: 0, usd: 0 }, "no-upstream");
-        const errText = JSON.stringify({
-          error: { type: "hone_shutting_down", message: "proxy is shutting down" },
-        });
-        sendJson(res, 503, errText);
-        return;
-      }
-      // DISPATCH INVARIANT: the intent — request identity plus the admitted
-      // worst-case ceiling — is written AND fsynced before any upstream byte
-      // is sent. A crash beyond this point can never yield an unaccounted
-      // upstream request: restart recovery charges the full ceiling and
-      // durably poisons the run.
+    let requestedCompletion = bounds.requested;
+    let final: ProviderDispatchResult | undefined;
+    for (let attempt = 1; attempt <= MAX_PROVIDER_ATTEMPTS; attempt += 1) {
+      let result: ProviderDispatchResult;
       try {
-        await journal.intent({
-          id: dispatchId,
-          runId: config.runId,
+        result = await dispatchProviderAttempt({
           role: identity.role,
-          model: route.model,
-          requestAt,
-          requestSha256: createHash("sha256").update(forwardText).digest("hex"),
-          promptTokens: reservation.promptTokens,
-          completionTokens: reservation.completionTokens,
-          ceilTokens: reservation.tokens,
-          ceilUsd: reservation.usd,
-        });
-        intentDurable = true;
-        openDispatches.add(dispatchId);
-      } catch (err) {
-        // The append failed BEFORE any fetch attempt, so the upstream is
-        // provably untouched and the reservation is released without charge.
-        // The journal is now poisoned (fail closed): every later request is
-        // refused at the gate. If the line did reach disk despite the
-        // failure, restart recovery charges the ceiling — over-count, never
-        // under-count.
-        await settle({ tokens: 0, usd: 0 }, "no-upstream");
-        sendClientError(
-          res,
-          503,
-          "hone_dispatch_authority_failed",
-          `dispatch intent not durable: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        return;
-      }
-      // POISON FENCE (post-intent, pre-fetch): the gate checks at the top of
-      // this handler ran before body buffering and admission — a concurrent
-      // request may have poisoned the trace or dispatch authority while this
-      // one stalled (slow body upload, admission queue). Re-check AFTER the
-      // intent fsync resolved; there is NO await between a passing check and
-      // the fetch invocation below, so a poison observed by any other
-      // request strictly-before this segment can never be followed by an
-      // untraceable billable dispatch from this one. A latched poison
-      // durably settles this intent at zero (`no-upstream`: the fetch below
-      // was provably never invoked) and refuses the request.
-      const latePoison = traceLog.poisoned?.message ?? dispatchPoison ?? journal.poisoned?.message;
-      if (latePoison !== undefined) {
-        try {
-          await settle({ tokens: 0, usd: 0 }, "no-upstream");
-        } catch {
-          // The zero settle could not become durable over the failed
-          // authority: the intent stays unmatched (restart recovery charges
-          // its ceiling — over-count, never under-count) and the handler
-          // finally resumes the plan and latches the dispatch poison.
-        }
-        sendClientError(
-          res,
-          503,
-          traceLog.poisoned !== undefined ? "hone_trace_authority_failed" : "hone_dispatch_authority_failed",
-          `authority poisoned before dispatch: ${latePoison}`,
-        );
-        return;
-      }
-      const base = route.upstreamBaseUrl ?? config.upstreamBaseUrl ?? DEFAULT_UPSTREAM;
-      let upstream: Response;
-      try {
-        upstream = await fetch(new URL("/v1/chat/completions", base), {
-          method: "POST",
-          headers: upstreamHeaders(),
-          body: forwardText,
-          signal: controller.signal,
-        });
-      } catch (err) {
-        // Transport failure. Only a PROVEN never-connected error releases the
-        // reservation without charge; anything ambiguous charges the ceiling.
-        const noAccept = provenNoUpstreamAccept(err);
-        const errText = JSON.stringify({
-          error: {
-            type: "hone_upstream_unreachable",
-            message: err instanceof Error ? err.message : String(err),
-          },
-        });
-        if (noAccept) {
-          await settle({ tokens: 0, usd: 0 }, "no-upstream");
-        } else {
-          try {
-            await settle(ceilingCharge, "ceiling", {
-              role: identity.role,
-              model: route.model,
-              requestAt,
-              startedAt,
-              status: 502,
-              usage: ceilingUsage,
-              estimatedUsd: ceilingCharge.usd,
-              requestText: forwardText,
-              responseText: errText,
+          route,
+          forward,
+          completionField: bounds.field,
+          requestedCompletion,
+          promptTokens,
+          pricing,
+          attempt,
+          allowPaused: false,
+          onResponseReady(status, contentType, classification): void {
+            if (res.destroyed || res.headersSent) return;
+            res.writeHead(status, {
+              "content-type": contentType,
+              "x-hone-attempt-classification": classification,
             });
-          } catch (settleErr) {
-            // Charged and journaled, but the trace obligation failed: the
-            // client must fail closed rather than observe a clean 502.
-            res.destroy();
-            throw settleErr;
-          }
-        }
-        sendJson(res, 502, errText);
-        return;
-      }
-
-      // Pass the body through (SSE chunks flush as they arrive) while
-      // accumulating the concatenated stream for usage capture + trace.
-      // Streams and non-streams share the same accumulation cap; crossing it
-      // aborts the upstream connection instead of buffering without bound.
-      if (!res.destroyed) {
-        res.writeHead(upstream.status, {
-          "content-type": upstream.headers.get("content-type") ?? "application/json",
-        });
-      }
-      const chunks: Buffer[] = [];
-      let received = 0;
-      let truncated = false;
-      let streamFailed = false;
-      try {
-        if (upstream.body !== null) {
-          for await (const chunk of upstream.body) {
-            const buf = Buffer.from(chunk);
-            if (received + buf.length > limits.maxResponseBytes) {
-              truncated = true;
-              controller.abort();
-              break;
-            }
-            received += buf.length;
-            chunks.push(buf);
-            await writeResponseChunk(res, buf);
-          }
-        }
-      } catch {
-        // Upstream failure or downstream backpressure/abort. Terminate the
-        // other half immediately; never keep consuming work nobody can read.
-        controller.abort();
-        streamFailed = true;
-      }
-      const responseText = Buffer.concat(chunks).toString("utf8");
-
-      let usage: Usage | undefined;
-      if ((upstream.headers.get("content-type") ?? "").includes("text/event-stream")) {
-        usage = extractSseUsage(responseText);
-      } else {
-        try {
-          const responseJson: unknown = JSON.parse(responseText);
-          if (isJsonObject(responseJson)) {
-            usage = normalizeUsage(responseJson["usage"]);
-          }
-        } catch {
-          usage = undefined;
-        }
-      }
-
-      // Fail closed: missing, malformed, or all-zero usage charges the FULL
-      // reservation ceiling. Zero is not a believable cost for a request the
-      // upstream accepted, and a refund-to-zero would let the mutable side
-      // spend the same headroom repeatedly by provoking usage suppression.
-      let charge: SpendRecord;
-      let tracedUsage: Usage;
-      let outcome: DispatchSettleOutcome;
-      if (usage !== undefined && usage.totalTokens > 0) {
-        const actualUsd =
-          pricing === undefined
-            ? 0
-            : (usage.promptTokens / 1e6) * pricing.inputUsdPerMTok +
-              (usage.completionTokens / 1e6) * pricing.outputUsdPerMTok;
-        charge = { tokens: usage.totalTokens, usd: actualUsd };
-        tracedUsage = usage;
-        outcome = "usage";
-      } else {
-        charge = ceilingCharge;
-        tracedUsage = ceilingUsage;
-        outcome = "ceiling";
-      }
-
-      // Account (charge → trace → durable journal settle) BEFORE ending the
-      // client response, so a client that has consumed the full body observes
-      // fully-recorded spend AND a durably-indexed trace. A trace or journal
-      // failure must not let the response complete cleanly: destroy the
-      // socket so the client fails closed.
-      try {
-        await settle(charge, outcome, {
-          role: identity.role,
-          model: route.model,
-          requestAt,
-          startedAt,
-          status: upstream.status,
-          usage: tracedUsage,
-          estimatedUsd: charge.usd,
-          requestText: forwardText,
-          responseText,
+            res.flushHeaders();
+          },
         });
       } catch (err) {
         res.destroy();
         throw err;
       }
-      if (truncated || streamFailed) {
-        // Deterministic client-side failure: the response is incomplete by
-        // construction; never pretend it ended cleanly.
-        res.destroy();
-      } else if (!res.destroyed) {
-        res.end();
+      final = result;
+      if (result.kind !== "attempt" || result.classification !== "retry") break;
+      requestedCompletion = result.completionTokens;
+      if (closing) {
+        final = {
+          kind: "sealed",
+          status: 503,
+          body: JSON.stringify({
+            error: { type: "hone_shutting_down", message: "proxy is shutting down" },
+          }),
+        };
+        break;
       }
-    } finally {
-      upstreamControllers.delete(controller);
-      if (!journalSettled) {
-        // Unexpected error path after admission, or a settlement that threw
-        // part-way: resume the state machine. A FIRST call here plans the
-        // full ceiling with no trace to publish — the `traced: false`
-        // settlement is a terminal poison fact; a resumed plan keeps its
-        // exact original charge and never re-runs a completed (or failed)
-        // spend phase. Failures are swallowed, never silently skipped: every
-        // failing phase has already poisoned the dispatch authority (the
-        // gate refuses new requests and close() rejects) and the reservation
-        // is retained, which only ever OVER-constrains future admissions
-        // (and an unmatched intent re-charges the ceiling on restart:
-        // over-count, never under-count).
-        await settle(ceilingCharge, "error").catch(() => undefined);
-        if (!journalSettled) {
-          dispatchPoison ??= `dispatch ${dispatchId} has no durable terminal record (settlement incomplete)`;
-        }
-      }
+      const delay = providerRetryDelayMs(
+        attempt,
+        config.retryRandom?.() ?? Math.random(),
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
     }
+    if (final === undefined) throw new Error("provider attempt loop produced no result");
+    if (final.kind !== "attempt") {
+      sendJson(res, final.status, final.body);
+      return;
+    }
+    if (final.classification === "campaign-pause") {
+      sendClientError(
+        res,
+        503,
+        "hone_campaign_paused",
+        `provider failure sealed campaign model egress (${activeCampaignPause?.reason ?? "unknown"})`,
+      );
+      return;
+    }
+    if (res.destroyed) return;
+    if (!res.headersSent) {
+      res.writeHead(final.status, {
+        "content-type": final.contentType,
+        "x-hone-attempt-classification": final.classification,
+      });
+    }
+    await writeResponseChunk(res, Buffer.from(final.body));
+    res.end();
+  }
+
+  async function preflightFrozenRoutes(): Promise<ProxyPreflightResult> {
+    const targets = [
+      { role: "outer-optimizer", model: M2_OUTER_MODEL_ROUTE },
+      { role: "inner-capsule-improvement", model: M2_INNER_MODEL_ROUTE },
+    ] as const;
+    const observations: ProxyPreflightObservation[] = [];
+    for (const target of targets) {
+      const forward: Record<string, unknown> = {
+        model: target.model,
+        messages: [{ role: "user", content: "Reply with exactly: HONE_PREFLIGHT_OK" }],
+        temperature: 0,
+      };
+      const forwardBytes = Buffer.byteLength(JSON.stringify(forward), "utf8");
+      const promptTokens = promptTokenUpperBound(forwardBytes, forwardBytes, 1);
+      let final: ProviderDispatchResult | undefined;
+      for (let attempt = 1; attempt <= MAX_PROVIDER_ATTEMPTS; attempt += 1) {
+        const result = await dispatchProviderAttempt({
+          role: target.role,
+          route: { model: target.model },
+          forward,
+          completionField: "max_completion_tokens",
+          requestedCompletion: 8,
+          promptTokens,
+          pricing: config.pricing?.[target.model],
+          attempt,
+          allowPaused: true,
+        });
+        final = result;
+        if (result.kind !== "attempt" || result.classification !== "retry") break;
+        const delay = providerRetryDelayMs(
+          attempt,
+          config.retryRandom?.() ?? Math.random(),
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      }
+      observations.push({
+        role: target.role,
+        requestedRoute: target.model,
+        returnedModel: final?.kind === "attempt" ? final.returnedModel : null,
+        status: final?.kind === "attempt" ? final.providerStatus : null,
+        passed:
+          final?.kind === "attempt" &&
+          final.classification === "success" &&
+          final.providerStatus !== null &&
+          final.providerStatus >= 200 &&
+          final.providerStatus <= 299 &&
+          final.returnedModel === target.model,
+      });
+    }
+    return ProxyPreflightResult.parse({
+      passed: observations.every((observation) => observation.passed),
+      observations,
+    });
+  }
+
+  async function resumeAfterPreflight(): Promise<ProxyPreflightResult> {
+    await recoveryPromise;
+    if (pauseAppend !== undefined) await pauseAppend;
+    const result = await preflightFrozenRoutes();
+    const paused = activeCampaignPause;
+    if (!result.passed || paused === undefined) return result;
+    const first = result.observations[0];
+    const second = result.observations[1];
+    if (first === undefined || second === undefined) {
+      throw new Error("frozen-route preflight did not produce exactly two observations");
+    }
+    await journal.resume({
+      pauseId: paused.pauseId,
+      at: new Date().toISOString(),
+      observations: [first, second],
+    });
+    activeCampaignPause = undefined;
+    pausePending = false;
+    pauseAppend = undefined;
+    return result;
   }
 
   type CachedModelsResponse = { status: number; contentType: string; body: Buffer };
@@ -1233,6 +1568,7 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
   let closing = false;
   let closePromise: Promise<void> | undefined;
   const inflightHandlers = new Set<Promise<void>>();
+  const inflightTrustedOperations = new Set<Promise<unknown>>();
   const upstreamControllers = new Set<AbortController>();
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1264,6 +1600,18 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     if (!isCompletions && !isModels) {
       sendClientError(res, 404, "hone_not_found", `no route: ${req.method} ${path}`);
       return;
+    }
+    if (isModels) {
+      await recoveryPromise;
+      if (pausePending) {
+        sendClientError(
+          res,
+          503,
+          "hone_campaign_paused",
+          "campaign model egress is durably paused pending frozen-route preflight",
+        );
+        return;
+      }
     }
 
     if (activeRequests >= limits.maxActiveRequests) {
@@ -1332,6 +1680,23 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
     dispatchRecovery(): Promise<DispatchRecoveryReport> {
       return recoveryPromise;
     },
+    async campaignPause(): Promise<CampaignPauseSignal | undefined> {
+      await recoveryPromise;
+      if (pauseAppend !== undefined) await pauseAppend;
+      return activeCampaignPause;
+    },
+    preflight(): Promise<ProxyPreflightResult> {
+      const operation = preflightFrozenRoutes();
+      inflightTrustedOperations.add(operation);
+      void operation.finally(() => inflightTrustedOperations.delete(operation));
+      return operation;
+    },
+    resume(): Promise<ProxyPreflightResult> {
+      const operation = resumeAfterPreflight();
+      inflightTrustedOperations.add(operation);
+      void operation.finally(() => inflightTrustedOperations.delete(operation));
+      return operation;
+    },
     async listenUnix(socketPath: string): Promise<void> {
       await rm(socketPath, { force: true });
       await bound(() => server.listen(socketPath));
@@ -1372,8 +1737,8 @@ export function createProxy(config: ProxyConfig): ProxyHandle {
         // reservation, recorded its spend, and appended its trace. Loop
         // because requests already inside Node's parser may register after
         // the snapshot; `closing` guarantees those do no accounting.
-        while (inflightHandlers.size > 0) {
-          await Promise.allSettled([...inflightHandlers]);
+        while (inflightHandlers.size > 0 || inflightTrustedOperations.size > 0) {
+          await Promise.allSettled([...inflightHandlers, ...inflightTrustedOperations]);
         }
         // Every handler has drained, so any dispatch id still open reached a
         // durable intent but never a durable terminal record — its
