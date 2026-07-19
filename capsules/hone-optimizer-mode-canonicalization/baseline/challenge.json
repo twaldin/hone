@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "innerReps": 3,
+  "timeoutSec": 10,
+  "publicCases": [
+    {
+      "id": "public-normal",
+      "input": [
+        {
+          "path": "package.json",
+          "mode": 420
+        },
+        {
+          "path": "bin/run",
+          "mode": 493
+        }
+      ],
+      "expected": [
+        {
+          "path": "bin/run",
+          "mode": 493
+        },
+        {
+          "path": "package.json",
+          "mode": 420
+        }
+      ]
+    }
+  ]
+}

@@ -391,6 +391,14 @@ const RecursiveOptimizerIdentity = z.object({
   bundleDigest: SHA256,
 }).strict();
 
+/**
+ * The optimizer/controller runs in this image. Capsule entries carry their
+ * own evaluation images independently; recursive campaigns are heterogeneous.
+ */
+const RecursiveOptimizerRuntime = z.object({
+  image: z.string().regex(IMAGE_DIGEST_REF),
+}).strict();
+
 export const RecursiveGenerationCell = z.union([
   z.object({
     stage: z.literal("A"),
@@ -424,6 +432,7 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   version: z.literal(META_CAMPAIGN_CONFIG_V2),
   seedOptimizer: RecursiveOptimizerIdentity,
   controllerOptimizer: RecursiveOptimizerIdentity,
+  optimizerRuntime: RecursiveOptimizerRuntime,
   generation: RecursiveGenerationCell,
   train: z.array(MetaCapsuleEntry),
   holdout: z.array(MetaCapsuleEntry),

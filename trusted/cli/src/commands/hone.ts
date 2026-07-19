@@ -1052,7 +1052,7 @@ export function createSyntheticCapsule(
     id: "cap_000000000000",
     objective: config.objective,
     baseline: { kind: "cas" as const, hash: baselineArtifactHash },
-    image: config.train[0]!.image,
+    image: config.version === 2 ? config.optimizerRuntime.image : config.train[0]!.image,
     evalEntrypoint: ["/bin/false"],
     protectedPaths: config.protectedPaths.map((candidatePath) => candidatePath.replace(/^optimizer\//, "")),
     assetGroups: [{ id: "meta-train", visibility: "public" as const, paths: ["meta-task.txt"] }],
@@ -1600,12 +1600,8 @@ function digestFlag(value: string | undefined, label: string): Sha256Digest | un
   return value as Sha256Digest;
 }
 
-function oneComparisonImage(config: AnyMetaCampaignConfig): string {
-  const images = new Set([...config.train, ...config.holdout].map((entry) => entry.image));
-  if (images.size !== 1) throw new UsageError("recursive campaign requires one image-bound optimizer runtime across the corpus");
-  const image = config.train[0]?.image;
-  if (image === undefined) throw new UsageError("recursive campaign has no development panel");
-  return image;
+function recursiveOptimizerImage(config: RecursiveMetaCampaignConfig): string {
+  return config.optimizerRuntime.image;
 }
 
 async function prepareRecursiveControls(
@@ -1706,7 +1702,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   if (phase === "freeze") {
     const corpus = freezeCorpusEntries(io.root, config);
     config = MetaCampaignConfigV2.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
-    const comparisonImage = oneComparisonImage(config);
+    const comparisonImage = recursiveOptimizerImage(config);
     const explicitTarget = digestFlag(strFlag(flags, "target-artifact"), "--target-artifact");
     const targetSource = explicitTarget
       ?? (config.generation.stage === "A" ? localSeed.artifactHash : config.seedOptimizer.sourceArtifact as Sha256Digest);
@@ -1751,7 +1747,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   if (config.trustedRuntime.sourceCommit !== commit || config.trustedRuntime.digest !== runtimeDigest) {
     throw new UsageError("recursive campaign trusted runtime identity drift");
   }
-  const comparisonImage = oneComparisonImage(config);
+  const comparisonImage = recursiveOptimizerImage(config);
   const target = await resolveRegisteredOptimizer(config.seedOptimizer, commit, rootSnapshot, casDir, comparisonImage);
   const controller = await resolveRegisteredOptimizer(config.controllerOptimizer, commit, rootSnapshot, casDir, comparisonImage);
   const controls = await prepareRecursiveControls(target.snapshot, cas, casDir, comparisonImage);

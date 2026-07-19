@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_ac92044c7b66",
+  "objective": "Repair plan-reread orphan retirement and parallel spawn-failure stalls. Maximize sealed transition correctness and then minimize trusted execution time; only solution.py is mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "e842c268606653c6412ee8d5a4843b0e67886195"
+  },
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train/cases.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation/cases.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:24c81ef555dbe37cb93f1ace7bdc603a94e65329157e40c9d442b8aa9da3c45a"
+  },
+  "contentHashes": {
+    "assets/train/cases.json": "sha256:6ff63b5dd65a245486142bcbf6e017fce0d923bdfff1672a476f0079335a745e",
+    "assets/validation/cases.json": "sha256:d9d8c94d448980943bcab9c1bbe87116e812d9a74d6d76fdc5e79e4aac0dd214"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "bounded workflow-engine state-transition extraction from FLT baseline 2f3c9e2f10ef8d93a61233766f3796a576d9f497 and reference 031ac46be6aaab11e96cd722b5369e4376fe68b2",
+    "license": "MIT",
+    "tags": [
+      "m2",
+      "owner",
+      "state-machine",
+      "recovery"
+    ],
+    "partition": "m2-frozen-corpus",
+    "sourceDetails": {
+      "repository": "flt",
+      "commit": "2f3c9e2f10ef8d93a61233766f3796a576d9f497",
+      "referenceCommit": "031ac46be6aaab11e96cd722b5369e4376fe68b2",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 3,
+      "freshProcess": true,
+      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
+      "qFail": 0
+    }
+  }
+}

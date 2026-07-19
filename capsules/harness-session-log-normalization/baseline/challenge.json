@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "innerReps": 3,
+  "timeoutSec": 10,
+  "publicCases": [
+    {
+      "id": "public-crush",
+      "input": {
+        "adapter": "crush",
+        "events": [
+          {
+            "model": "gpt-5",
+            "usage": {
+              "input": 10,
+              "output": 4
+            },
+            "cost": 0.02
+          },
+          {
+            "type": "done"
+          }
+        ]
+      },
+      "expected": {
+        "model": "gpt-5",
+        "inputTokens": 10,
+        "outputTokens": 4,
+        "cost": 0.02,
+        "completed": true
+      }
+    },
+    {
+      "id": "public-basic",
+      "input": {
+        "adapter": "gemini",
+        "events": [
+          {
+            "model": "gemini-2.5",
+            "type": "completed"
+          }
+        ]
+      },
+      "expected": {
+        "model": "gemini-2.5",
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cost": 0,
+        "completed": true
+      }
+    }
+  ]
+}

@@ -641,19 +641,35 @@ export async function runOrderingCheck(): Promise<OrderingReport> {
       stabilitySpread < STABILITY_BAND,
     );
 
-    // 4. Sanity: the correct candidates actually satisfy the constraint gates.
-    for (const variant of ["baseline", "improved"] as const) {
-      for (const split of SPLITS) {
-        const out = results[variant].bySplit[split];
-        check(
-          `${variant}/${split} tests_pass`,
-          out.constraints["tests_pass"] === true,
-        );
-        check(
-          `${variant}/${split} quality == 1`,
-          out.diagnostics?.["quality"] === 1.0,
-        );
-      }
+    // 4. Sanity: baseline must clear its public/mechanical gates and retain
+    //    non-zero hidden-case quality; the improved control must solve every
+    //    selected case. Requiring baseline quality == 1 made this admission
+    //    tool incapable of representing repair capsules whose entire purpose
+    //    is to recover sealed failing transitions.
+    for (const split of SPLITS) {
+      const baseline = results.baseline.bySplit[split];
+      const baselineQuality = baseline.diagnostics?.["quality"];
+      check(
+        `baseline/${split} tests_pass`,
+        baseline.constraints["tests_pass"] === true,
+      );
+      check(
+        `baseline/${split} quality is finite and in (0, 1]`,
+        typeof baselineQuality === "number" &&
+          Number.isFinite(baselineQuality) &&
+          baselineQuality > 0 &&
+          baselineQuality <= 1,
+      );
+
+      const improved = results.improved.bySplit[split];
+      check(
+        `improved/${split} tests_pass`,
+        improved.constraints["tests_pass"] === true,
+      );
+      check(
+        `improved/${split} quality == 1`,
+        improved.diagnostics?.["quality"] === 1.0,
+      );
     }
 
     // Measurement-integrity assertions (tool bugs, not ordering failures —

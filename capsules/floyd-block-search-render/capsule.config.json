@@ -1,0 +1,66 @@
+{
+  "objective": "Minimize Block Search render cost on frozen scenes while preserving the exact selected block command stream. Correctness is a hard gate; only solution.py is mutable.",
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "internal-use-only",
+    "provenance": "bounded scene/render-command extraction from Floyd Addons baseline f5e048d4a8254646306cbf596379416be6401700 and reference 315036de64256dac3e64f5319d40ff1e481bb3df",
+    "sourceDetails": {
+      "repository": "new-floyd-addons",
+      "commit": "f5e048d4a8254646306cbf596379416be6401700",
+      "referenceCommit": "315036de64256dac3e64f5319d40ff1e481bb3df",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 3,
+      "freshProcess": true,
+      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
+      "qFail": 0
+    },
+    "tags": [
+      "m2",
+      "owner",
+      "rendering",
+      "performance"
+    ]
+  }
+}

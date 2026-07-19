@@ -1,0 +1,128 @@
+[
+  {
+    "id": "public-complete",
+    "input": {
+      "nodes": [
+        {
+          "id": "a",
+          "status": "completed"
+        }
+      ],
+      "removed": [],
+      "spawns": []
+    },
+    "expected": {
+      "statuses": {
+        "a": "completed"
+      },
+      "active": [],
+      "terminal": true
+    }
+  },
+  {
+    "id": "public-spawn",
+    "input": {
+      "nodes": [
+        {
+          "id": "a",
+          "status": "pending"
+        }
+      ],
+      "removed": [],
+      "spawns": [
+        {
+          "id": "a",
+          "ok": true
+        }
+      ]
+    },
+    "expected": {
+      "statuses": {
+        "a": "running"
+      },
+      "active": [
+        "a"
+      ],
+      "terminal": false
+    }
+  },
+  {
+    "id": "pending-orphan",
+    "input": {
+      "nodes": [
+        {
+          "id": "a",
+          "status": "pending"
+        },
+        {
+          "id": "b",
+          "status": "completed"
+        }
+      ],
+      "removed": [
+        "a"
+      ],
+      "spawns": []
+    },
+    "expected": {
+      "statuses": {
+        "a": "retired",
+        "b": "completed"
+      },
+      "active": [],
+      "terminal": true
+    }
+  },
+  {
+    "id": "running-orphan",
+    "input": {
+      "nodes": [
+        {
+          "id": "a",
+          "status": "running"
+        },
+        {
+          "id": "b",
+          "status": "completed"
+        }
+      ],
+      "removed": [
+        "a"
+      ],
+      "spawns": []
+    },
+    "expected": {
+      "statuses": {
+        "a": "retired",
+        "b": "completed"
+      },
+      "active": [],
+      "terminal": true
+    }
+  },
+  {
+    "id": "spawn-failure",
+    "input": {
+      "nodes": [
+        {
+          "id": "a",
+          "status": "pending"
+        }
+      ],
+      "removed": [],
+      "spawns": [
+        {
+          "id": "a",
+          "ok": false
+        }
+      ]
+    },
+    "expected": {
+      "statuses": {
+        "a": "failed"
+      },
+      "active": [],
+      "terminal": true
+    }
+  }
+]

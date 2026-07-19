@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "innerReps": 3,
+  "timeoutSec": 10,
+  "publicCases": [
+    {
+      "id": "public-complete",
+      "input": {
+        "nodes": [
+          {
+            "id": "a",
+            "status": "completed"
+          }
+        ],
+        "removed": [],
+        "spawns": []
+      },
+      "expected": {
+        "statuses": {
+          "a": "completed"
+        },
+        "active": [],
+        "terminal": true
+      }
+    },
+    {
+      "id": "public-spawn",
+      "input": {
+        "nodes": [
+          {
+            "id": "a",
+            "status": "pending"
+          }
+        ],
+        "removed": [],
+        "spawns": [
+          {
+            "id": "a",
+            "ok": true
+          }
+        ]
+      },
+      "expected": {
+        "statuses": {
+          "a": "running"
+        },
+        "active": [
+          "a"
+        ],
+        "terminal": false
+      }
+    }
+  ]
+}

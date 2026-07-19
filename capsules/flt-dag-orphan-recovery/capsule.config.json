@@ -1,0 +1,66 @@
+{
+  "objective": "Repair plan-reread orphan retirement and parallel spawn-failure stalls. Maximize sealed transition correctness and then minimize trusted execution time; only solution.py is mutable.",
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "MIT",
+    "provenance": "bounded workflow-engine state-transition extraction from FLT baseline 2f3c9e2f10ef8d93a61233766f3796a576d9f497 and reference 031ac46be6aaab11e96cd722b5369e4376fe68b2",
+    "sourceDetails": {
+      "repository": "flt",
+      "commit": "2f3c9e2f10ef8d93a61233766f3796a576d9f497",
+      "referenceCommit": "031ac46be6aaab11e96cd722b5369e4376fe68b2",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 3,
+      "freshProcess": true,
+      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
+      "qFail": 0
+    },
+    "tags": [
+      "m2",
+      "owner",
+      "state-machine",
+      "recovery"
+    ]
+  }
+}
