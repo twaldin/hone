@@ -4,7 +4,15 @@ import { cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { RunEvent, type ArtifactRef, type BudgetState, type CapsuleManifest } from "@hone/schema";
+import {
+  M2_MODEL_ROUTING,
+  RunEvent,
+  type ArtifactRef,
+  type BudgetState,
+  type CapsuleManifest,
+  type M2ProxyRole,
+  type ModelRouting,
+} from "@hone/schema";
 import {
   CasStore,
   SCRATCH_SNAPSHOT_SCRIPT,
@@ -118,12 +126,36 @@ const RELAY_JS = [
  * hashed ordering report, clean baseline worktree — and reproduce the exact
  * digest the supervisor sealed for this run.
  */
-export function validateCapsule(capsuleDir: string, expectedDigest: string): void {
-  const admitted = admitCapsule(capsuleDir);
+export function validateCapsule(
+  capsuleDir: string,
+  expectedDigest: string,
+  review: "required" | "off" = "required",
+): void {
+  const admitted = admitCapsule(capsuleDir, { review });
   if (admitted.digest !== expectedDigest) {
     throw new Error(`capsule drift: digest ${admitted.digest} != sealed ${expectedDigest} — start a fresh run (or re-run capsules/tools/scaffold.ts)`);
   }
 }
+export interface ProxySessionCapability {
+  readonly role: M2ProxyRole | "mutation";
+  readonly model: string;
+  readonly token: string;
+}
+
+/** Issue exactly one trusted session bearer against the frozen role table. */
+export function issueProxySessionCapability(
+  proxy: Pick<ProxyHandle, "tokenFor">,
+  routing: ModelRouting,
+  roleInput?: M2ProxyRole,
+): ProxySessionCapability {
+  const role = roleInput ?? "mutation";
+  const route = role === "mutation" ? routing["mutation"] : M2_MODEL_ROUTING[role];
+  if (route === undefined) {
+    throw new Error('legacy run config has no "mutation" model route — pass --config with {"routing":{"mutation":{"model":"…"}}}');
+  }
+  return { role, model: route.model, token: proxy.tokenFor(role) };
+}
+
 
 
 /**
@@ -1151,12 +1183,8 @@ export function createBackend(
     // supervisor would terminalize a STALE event-log best while the
     // journal holds a newer durable incumbent (permanently, since a
     // finished run never resumes). Abort is honored only after reconcile.
-    validateCapsule(ctx.capsuleDir, ctx.capsuleDigest);
+    validateCapsule(ctx.capsuleDir, ctx.capsuleDigest, ctx.admissionReview ?? "required");
 
-      const route = ctx.config.routing["mutation"];
-      if (route === undefined) {
-        throw new Error('run config has no "mutation" model route — pass --config with {"routing":{"mutation":{"model":"…"}}}');
-      }
 
       const cas = new CasStore(ctx.casDir);
       let baselineArtifactHash: string;
@@ -1185,7 +1213,27 @@ export function createBackend(
       let spendDirect = false;
       const queuedSpend: { tokens: number; usd: number }[] = [];
       const queuedExhaustion: BudgetDimension[] = [];
+      const localPauseIds = new Set<string>();
+      const campaignPauseAuthority = ctx.campaignPauseAuthority ?? {
+        isCampaignPaused: (): boolean => localPauseIds.size > 0,
+        recordCampaignPause: (signal: { pauseId: string }): void => {
+          localPauseIds.add(signal.pauseId);
+        },
+        recordCampaignResume: (signal: { pauseId: string }): void => {
+          localPauseIds.delete(signal.pauseId);
+        },
+      };
+      let trustedResumePreflight = false;
+      let campaignPauseBudgetDenials = 0;
       const checkBudget = (): BudgetDecision => {
+        if (campaignPauseAuthority.isCampaignPaused() && !trustedResumePreflight) {
+          campaignPauseBudgetDenials += 1;
+          return {
+            allowed: false,
+            dimension: "wallClockSec",
+            message: "campaign model egress is durably paused pending trusted frozen-route preflight",
+          };
+        }
         if (running === null || !spendDirect) return { allowed: false, dimension: "wallClockSec", message: "broker not started" };
         const latched = running.broker.getBudgetExhaustion({ privileged: true });
         if (latched !== undefined) return { allowed: false, dimension: latched };
@@ -1210,6 +1258,8 @@ export function createBackend(
         upstreamBaseUrl: ctx.env["HONE_UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM,
         ...(ctx.env["HONE_UPSTREAM_API_KEY"] !== undefined ? { upstreamApiKey: ctx.env["HONE_UPSTREAM_API_KEY"] } : {}),
         checkBudget,
+        recordCampaignPause: (signal) => campaignPauseAuthority.recordCampaignPause(signal),
+        recordCampaignResume: (signal) => campaignPauseAuthority.recordCampaignResume(signal),
         recordSpend: (spend) => {
           if (!spendDirect || running === null) {
             queuedSpend.push({ tokens: spend.tokens, usd: spend.usd });
@@ -1218,6 +1268,10 @@ export function createBackend(
           running.broker.recordSpend({ tokens: spend.tokens, usd: spend.usd }, { privileged: true });
         },
         recordBudgetExhaustion: (dimension) => {
+          if (campaignPauseBudgetDenials > 0) {
+            campaignPauseBudgetDenials -= 1;
+            return;
+          }
           if (!spendDirect || running === null) {
             queuedExhaustion.push(dimension);
             return;
@@ -1225,6 +1279,7 @@ export function createBackend(
           running.broker.recordBudgetExhaustion(dimension, { privileged: true });
         },
       });
+      const proxySession = issueProxySessionCapability(proxy, ctx.config.routing, ctx.proxyRole);
 
       // The frozen manifest's immutable image is THE image — mutation
       // sandboxes, eval sandboxes, the macOS relay, AND both optimizer
@@ -1317,6 +1372,7 @@ export function createBackend(
           optimizerDigest: ctx.optimizerDigest,
           ...(ctx.measurementEpoch !== undefined ? { measurementEpoch: ctx.measurementEpoch } : {}),
           ...(ctx.evaluationStrategy !== undefined ? { evaluationStrategy: ctx.evaluationStrategy } : {}),
+          ...(ctx.recursiveBroker !== undefined ? { recursive: ctx.recursiveBroker } : {}),
           ...(ctx.terminalHoldoutAssetGroupIds !== undefined
             ? { terminalHoldoutAssetGroupIds: ctx.terminalHoldoutAssetGroupIds }
             : {}),
@@ -1338,8 +1394,8 @@ export function createBackend(
           sandboxNetwork: egress.sandboxNetwork,
           mutationEnv: {
             ...(egress.proxyBaseUrl !== null ? { HONE_PROXY_BASE_URL: egress.proxyBaseUrl } : {}),
-            HONE_PROXY_TOKEN: proxy.tokenFor("mutation"),
-            HONE_MODEL_ID: route.model,
+            HONE_PROXY_TOKEN: proxySession.token,
+            HONE_MODEL_ID: proxySession.model,
           },
           ...(egress.proxySocketHostPath !== null ? { proxySocketHostPath: egress.proxySocketHostPath } : {}),
           episodeOrigin: ctx.replayed.nextEpisode,
@@ -1401,6 +1457,17 @@ export function createBackend(
           // A poisoned dispatch journal is handled at teardown: proxy.close()
           // rejects, the cleanup barrier rejects, the run stays non-terminal.
         });
+        if (await proxy.campaignPause() !== undefined) {
+          trustedResumePreflight = true;
+          try {
+            const preflight = await proxy.resume();
+            if (!preflight.passed) {
+              throw new Error("campaign remains paused because frozen-route preflight did not pass");
+            }
+          } finally {
+            trustedResumePreflight = false;
+          }
+        }
 
         // Only AFTER durable authority is reconciled may a stop short-circuit:
         // the optimizer never launches; the finally unwinds proxy/broker/egress.
@@ -1448,20 +1515,22 @@ export function createBackend(
             if (ctx.signal.aborted) return;
           }
 
-          // Measure the terminal trusted artifact explicitly. This also makes
-          // a runnable negative control that proposes no candidate a valid
-          // baseline-scored child rather than an infrastructure failure.
-          const finalGroup =
-            ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout" && group.id === "train")
-            ?? ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout");
-          if (finalGroup === undefined) throw new Error("M1 child has no registered non-holdout evaluation coordinate");
-          const finalArtifact = {
-            hash: running.broker.trustedIncumbent?.hash ?? baselineArtifactHash,
-          };
-          await running.broker.evaluate(
-            { artifact: finalArtifact, assetGroupId: finalGroup.id, seed: ctx.config.seed },
-            { privileged: true },
-          );
+          if (ctx.recursiveBroker === undefined) {
+            // Fixed-work M1 children need a final trusted evaluator record.
+            // M2 outer sessions instead settle each optimizer-authored
+            // spawnRun allocation through the recursive launcher.
+            const finalGroup =
+              ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout" && group.id === "train")
+              ?? ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout");
+            if (finalGroup === undefined) throw new Error("M1 child has no registered non-holdout evaluation coordinate");
+            const finalArtifact = {
+              hash: running.broker.trustedIncumbent?.hash ?? baselineArtifactHash,
+            };
+            await running.broker.evaluate(
+              { artifact: finalArtifact, assetGroupId: finalGroup.id, seed: ctx.config.seed },
+              { privileged: true },
+            );
+          }
         } else {
           // VI.4 probe gate: a fresh M0 run gets one optimizer episode; a
           // resume reuses the durable broker-authored pair.

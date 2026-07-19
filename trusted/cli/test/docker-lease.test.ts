@@ -159,6 +159,8 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
       HONE_EGRESS: "network", // exercise the relay-container path
     },
     capsuleDigest: capsuleDigest(manifest),
+    // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
+    admissionReview: "off",
     optimizerDigest: fakeHash("0"),
     replayed: replayRun(runDir),
     signal: abort.signal,

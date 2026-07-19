@@ -1,5 +1,14 @@
-import type { TrustedEvaluationStrategy } from "@hone/broker";
-import type { ArtifactRef, BudgetState, CapsuleManifest, RunConfig, RunEvent } from "@hone/schema";
+import type { BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
+import type {
+  ArtifactRef,
+  BudgetState,
+  CampaignPauseSignal,
+  CampaignResumeSignal,
+  CapsuleManifest,
+  M2ProxyRole,
+  RunConfig,
+  RunEvent,
+} from "@hone/schema";
 import type { RunState } from "./eventlog.js";
 import type { OptimizerSnapshot } from "./optimizer-digest.js";
 
@@ -21,6 +30,13 @@ export interface ProbeReport {
   assetGroupId: string;
   seed: number;
   budget: BudgetState;
+}
+
+/** Campaign-wide authority shared by outer and descendant trusted runners. */
+export interface CampaignPauseAuthority {
+  isCampaignPaused(): boolean;
+  recordCampaignPause(signal: CampaignPauseSignal): void | Promise<void>;
+  recordCampaignResume(signal: CampaignResumeSignal): void | Promise<void>;
 }
 
 /**
@@ -57,6 +73,14 @@ export interface RunnerBackendContext {
   trustedValidPublicCandidateTarget?: number | undefined;
   /** Holdout groups released only inside a terminal-latched child run. */
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
+  /** Frozen M2 proxy bearer role. Absent only for legacy M0/M1 mutation routing. */
+  proxyRole?: M2ProxyRole | undefined;
+  /** Shared durable M2 provider-pause authority. */
+  campaignPauseAuthority?: CampaignPauseAuthority | undefined;
+  /** Explicitly off only for a trusted synthetic capsule's post-seal byte validation. */
+  admissionReview?: "required" | "off" | undefined;
+  /** Trusted spawnRun authority for M2 outer/descendant brokers. */
+  recursiveBroker?: BrokerRecursiveConfig | undefined;
   /** State replayed from the event log — resume dedupe starts here (nextEpisode, incumbent, budget). */
   replayed: RunState;
   /** Aborted on stop request or budget exhaustion; backends must wind down. */

@@ -80,6 +80,8 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
     }),
     env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network" },
     capsuleDigest: capsuleDigest(manifest),
+    // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
+    admissionReview: "off",
     optimizerDigest: fakeHash("0"),
     replayed: replayRun(runDir),
     signal: abort.signal,

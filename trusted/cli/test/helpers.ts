@@ -5,11 +5,20 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CapsuleManifest, RunEvent, capsuleDigest, deriveCapsuleId } from "@hone/schema";
+import {
+  AdmissionReceiptRecord,
+  CapsuleManifest,
+  RunEvent,
+  admissionReceiptRecordHash,
+  capsuleDigest,
+  deriveCapsuleId,
+  type AdmissionReceiptRecordBody,
+} from "@hone/schema";
 import type { RunCommand } from "@hone/broker";
 import type { OptimizerChildLike, OptimizerRuntime, OptimizerSpawn, OptimizerTransport } from "../src/backends/optimizer-container.js";
 import { openDockerCreateGate, type DockerCreateGate, type DockerCreateHelper } from "../src/docker-create-gate.js";
 import { writeCas } from "../src/cas.js";
+import { admissionReceiptLedgerPath, appendAdmissionReceipt } from "../src/admission-receipts.js";
 import { contractHash } from "../src/contract.js";
 import { computeOptimizerDigest } from "../src/optimizer-digest.js";
 import { deferred } from "../src/promise.js";
@@ -116,6 +125,52 @@ export function makeCapsule(root: string, overrides: Record<string, unknown> = {
 export function fakeHash(seed: string): string {
   return `sha256:${seed.repeat(64).slice(0, 64)}`;
 }
+/** Production boundaries require Gate-2 receipts; ordinary fixtures get a full owner-approved chain. */
+export function approveFixtureCapsule(root: string): void {
+  const manifestPath = join(root, "capsule", "manifest.json");
+  if (!existsSync(manifestPath)) return;
+  let manifest: CapsuleManifest;
+  try {
+    manifest = CapsuleManifest.parse(JSON.parse(readFileSync(manifestPath, "utf8")));
+  } catch {
+    return;
+  }
+  const digest = capsuleDigest(manifest);
+  const casDir = join(root, ".hone-cas");
+  if (existsSync(admissionReceiptLedgerPath(casDir, digest))) return;
+  const identities = {
+    author: { identity: "fixture-author", kind: "agent" },
+    "adversarial-validator": { identity: "fixture-adversary", kind: "agent" },
+    "final-reviewer": { identity: "fixture-owner", kind: "owner" },
+  } as const;
+  const gate1Body: AdmissionReceiptRecordBody = {
+    v: 1,
+    sequence: 0,
+    previousReceiptHash: null,
+    capsuleDigest: digest,
+    action: "gate1-accept",
+    identities,
+    provisional: false,
+    timestamp: "2026-07-18T00:00:00.000Z",
+  };
+  const gate1 = AdmissionReceiptRecord.parse({
+    ...gate1Body,
+    recordHash: admissionReceiptRecordHash(gate1Body),
+  });
+  const gate2Body: AdmissionReceiptRecordBody = {
+    ...gate1Body,
+    sequence: 1,
+    previousReceiptHash: gate1.recordHash,
+    action: "gate2-approve",
+    timestamp: "2026-07-18T00:00:01.000Z",
+  };
+  appendAdmissionReceipt(casDir, gate1);
+  appendAdmissionReceipt(casDir, AdmissionReceiptRecord.parse({
+    ...gate2Body,
+    recordHash: admissionReceiptRecordHash(gate2Body),
+  }));
+}
+
 
 export interface CliResult {
   code: number | null;
@@ -124,6 +179,7 @@ export interface CliResult {
 }
 
 export function hone(args: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<CliResult> {
+  approveFixtureCapsule(opts.cwd);
   const { promise, resolve, reject } = deferred<CliResult>();
   const child = spawn(tsxBin, [mainTs, ...args], {
     cwd: opts.cwd,
@@ -141,6 +197,7 @@ export function hone(args: string[], opts: { cwd: string; env?: Record<string, s
 
 /** Spawn without waiting — caller drives lifecycle (kill tests). Detached so the whole tree can be nuked. */
 export function honeSpawn(args: string[], opts: { cwd: string; env?: Record<string, string> }): ChildProcess {
+  approveFixtureCapsule(opts.cwd);
   return spawn(tsxBin, [mainTs, ...args], {
     cwd: opts.cwd,
     env: { ...process.env, ...opts.env },
@@ -388,6 +445,7 @@ export interface CapturedIo {
 }
 
 export function makeIo(root: string, env: Record<string, string | undefined> = {}): CapturedIo {
+  approveFixtureCapsule(root);
   const out: string[] = [];
   const err: string[] = [];
   const mergedEnv: NodeJS.ProcessEnv = { ...process.env, ...env };

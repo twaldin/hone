@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
+  ChildRunLaunchReceipt,
   MetaSearchTrajectoryV1,
+  MetaSearchTrajectoryV2,
   canonicalJson,
   type AnytimeSearchPointV1,
   type MetaCampaignConfig,
@@ -10,10 +12,12 @@ import {
   type MetaOuterTrajectoryPointV1,
 } from "@hone/schema";
 import {
+  buildMetaCandidateTrajectoryPoints,
   type MetaFailureSettlement,
   type MetaMeasurement,
   type MetaResourceUsage,
   type Sha256Digest,
+  type TrustedMetaCandidateEvent,
 } from "@hone/meta";
 import type { MetaJournalV1 } from "./meta-journal.js";
 import { EVENTS_FILE, readEvents, writeFileDurable } from "./eventlog.js";
@@ -192,6 +196,97 @@ function childTrajectory(root: string, settlement: SearchSettlement): MetaChildT
     points: extractAnytimePoints(events),
   };
 }
+function persistRecursiveTrajectory(
+  opts: PersistMetaSearchTrajectoryOptions,
+  started: Extract<ReturnType<typeof readEvents>[number], { type: "run.started" }>,
+  outerEventBytes: Buffer,
+  outerEvents: ReturnType<typeof readEvents>,
+  children: readonly MetaChildTrajectoryV1[],
+): string {
+  if (opts.config.version !== 2) throw new Error("recursive trajectory requires a V2 config");
+  const grouped = new Map<number, { artifact: Sha256Digest; childRunIds: string[] }>();
+  for (const entry of readdirSync(opts.campaignDir)) {
+    if (!entry.startsWith("child-launch-") || !entry.endsWith(".json")) continue;
+    const receipt = ChildRunLaunchReceipt.parse(JSON.parse(readFileSync(join(opts.campaignDir, entry), "utf8")));
+    const schedule = receipt.child.schedule;
+    if (schedule === undefined || receipt.child.purpose !== "capsule") continue;
+    const sourceArtifact = receipt.child.sourceArtifact.hash as Sha256Digest;
+    const current = grouped.get(schedule.candidateOrdinal);
+    if (current !== undefined && current.artifact !== sourceArtifact) {
+      throw new Error(`candidate ordinal ${schedule.candidateOrdinal} maps to multiple source artifacts`);
+    }
+    const group = current ?? { artifact: sourceArtifact, childRunIds: [] };
+    if (group.childRunIds.includes(receipt.child.runId)) {
+      throw new Error(`candidate ordinal ${schedule.candidateOrdinal} duplicates child ${receipt.child.runId}`);
+    }
+    group.childRunIds.push(receipt.child.runId);
+    grouped.set(schedule.candidateOrdinal, group);
+  }
+  if (grouped.size === 0) throw new Error("recursive trajectory has no durable spawnRun candidate admissions");
+  const terminalCandidateOrdinal = Math.max(...grouped.keys());
+  const outerPoints = extractAnytimePoints(outerEvents);
+  const events: TrustedMetaCandidateEvent[] = [];
+  let priorCursor = -1;
+  let priorControllerSpent: MetaResourceUsage = { ...ZERO_USAGE };
+  for (let candidateOrdinal = 0; candidateOrdinal <= terminalCandidateOrdinal; candidateOrdinal += 1) {
+    const group = grouped.get(candidateOrdinal);
+    if (group === undefined) {
+      throw new Error(`recursive trajectory is missing candidate ordinal ${candidateOrdinal}`);
+    }
+    const outerPoint = outerPoints.find(
+      (point) => point.eventCursor > priorCursor && point.candidateArtifact === group.artifact,
+    );
+    if (outerPoint === undefined) {
+      throw new Error(`candidate ordinal ${candidateOrdinal} has no matching trusted outer event`);
+    }
+    const controllerSpent: MetaResourceUsage = {
+      tokens: outerPoint.spent.tokens - priorControllerSpent.tokens,
+      usd: outerPoint.spent.usd - priorControllerSpent.usd,
+      wallClockSec: outerPoint.spent.wallClockSec - priorControllerSpent.wallClockSec,
+      evaluatorInvocations:
+        outerPoint.spent.evaluatorInvocations - priorControllerSpent.evaluatorInvocations,
+    };
+    if (Object.values(controllerSpent).some((value) => value < 0)) {
+      throw new Error(`candidate ordinal ${candidateOrdinal} regresses trusted controller spend`);
+    }
+    priorCursor = outerPoint.eventCursor;
+    priorControllerSpent = { ...outerPoint.spent };
+    events.push({
+      candidateOrdinal,
+      eventCursor: outerPoint.eventCursor,
+      candidateArtifact: group.artifact,
+      childRunIds: group.childRunIds.sort(),
+      controllerSpent,
+    });
+  }
+  const points = buildMetaCandidateTrajectoryPoints(
+    opts.config.developmentPanel.members.map((member) => member.capsule.capsuleId),
+    events,
+    children,
+    terminalCandidateOrdinal,
+  );
+  const lastEvent = outerEvents[outerEvents.length - 1];
+  if (lastEvent === undefined) throw new Error("outer event log is empty");
+  const trajectory = MetaSearchTrajectoryV2.parse({
+    version: 2,
+    configHash: opts.configHash,
+    outerRunId: opts.outerRunId,
+    searchEnvelope: opts.config.recursiveBudgets.search.identity,
+    panel: opts.config.developmentPanel,
+    controllerBundleDigest: started.optimizerDigest,
+    targetSourceArtifact: opts.config.seedOptimizer.sourceArtifact,
+    targetBundleDigest: opts.config.seedOptimizer.bundleDigest,
+    createdAt: lastEvent.at,
+    outerEventLogHash: sha256(outerEventBytes),
+    points,
+    children,
+  });
+  const outputPath = join(opts.campaignDir, "search-trajectory.v2.json");
+  writeFileDurable(outputPath, `${canonicalJson(trajectory)}\n`);
+  chmodSync(outputPath, 0o600);
+  return outputPath;
+}
+
 
 /** Materialize one deterministic, replay-derived outer+inner trajectory evidence file. */
 export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOptions): string {
@@ -215,6 +310,9 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
     || left.replicate - right.replicate,
   );
   const children = settlements.map((settlement) => childTrajectory(opts.root, settlement));
+  if (opts.config.version === 2) {
+    return persistRecursiveTrajectory(opts, started, outerEventBytes, outerEvents, children);
+  }
   const childrenByArtifact = new Map<string, MetaChildTrajectoryV1[]>();
   for (const child of children) {
     const rows = childrenByArtifact.get(child.sourceArtifact) ?? [];

@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import {
+  M2EnvelopeIdentity,
   MetaCampaignConfig as MetaCampaignConfigSchema,
   canonicalJson,
   type BudgetEnvelope,
@@ -39,6 +40,14 @@ const Usage = z.object({
   wallClockSec: z.number().finite().nonnegative(),
   evaluatorInvocations: z.number().int().nonnegative(),
 }).strict();
+const EnvelopeRequestV1 = z.object({
+  purpose: z.enum(["search", "confirmation", "terminal"]),
+  envelope: M2EnvelopeIdentity,
+  reservationId: SAFE_ID,
+  parentReservationId: SAFE_ID.nullable(),
+  reserved: Envelope,
+}).strict();
+export type MetaEnvelopeRequestV1 = z.infer<typeof EnvelopeRequestV1>;
 
 export const MetaPhaseV1 = z.enum(["search", "confirmation", "holdout"]);
 export type MetaPhaseV1 = z.infer<typeof MetaPhaseV1>;
@@ -69,12 +78,15 @@ export type MetaWorkIdentityV1 = z.infer<typeof MetaWorkIdentityV1>;
 export const MetaResourceUsageV1 = Usage;
 export type MetaResourceUsageV1 = z.infer<typeof MetaResourceUsageV1>;
 
-export const MetaReservationV1 = z.object({
+const LegacyMetaReservationV1 = z.object({
   configHash: HASH,
   workKey: HASH,
   childRunId: z.string().regex(/^run_meta_[0-9a-f]{64}$/),
   identity: MetaWorkIdentityV1,
   reserved: Envelope,
+}).strict();
+export const MetaReservationV1 = LegacyMetaReservationV1.extend({
+  envelope: EnvelopeRequestV1.nullable(),
 }).strict();
 export type MetaReservationV1 = z.infer<typeof MetaReservationV1>;
 
@@ -135,8 +147,14 @@ const HeaderLine = z.object({
   t: z.literal("header"),
   configHash: HASH,
 }).strict();
-const ReservationLine = z.object({
+const LegacyReservationLine = z.object({
   v: z.literal(1),
+  t: z.literal("reservation"),
+  seq: z.number().int().positive(),
+  reservation: LegacyMetaReservationV1,
+}).strict();
+const ReservationLine = z.object({
+  v: z.literal(2),
   t: z.literal("reservation"),
   seq: z.number().int().positive(),
   reservation: MetaReservationV1,
@@ -164,13 +182,13 @@ const TerminalLine = z.object({
   t: z.literal("terminal-holdout"),
   seq: z.number().int().positive(),
 }).strict();
-const JournalLine = z.discriminatedUnion("t", [
-  ReservationLine,
+const NonReservationJournalLine = z.discriminatedUnion("t", [
   SettlementLine,
   FailureSettlementLine,
   MeasurementLine,
   TerminalLine,
 ]);
+const JournalLine = z.union([ReservationLine, LegacyReservationLine, NonReservationJournalLine]);
 type JournalLine = z.infer<typeof JournalLine>;
 
 const DIMS = ["maxTokens", "maxUsd", "maxWallClockSec", "maxEvaluatorInvocations"] as const;
@@ -311,7 +329,18 @@ function copyIdentity(identity: MetaWorkIdentityV1): MetaWorkIdentityV1 {
 }
 
 function copyReservation(reservation: MetaReservationV1): MetaReservationV1 {
-  return { ...reservation, identity: copyIdentity(reservation.identity), reserved: copyEnvelope(reservation.reserved) };
+  return {
+    ...reservation,
+    identity: copyIdentity(reservation.identity),
+    reserved: copyEnvelope(reservation.reserved),
+    envelope: reservation.envelope === null
+      ? null
+      : {
+          ...reservation.envelope,
+          envelope: { ...reservation.envelope.envelope },
+          reserved: copyEnvelope(reservation.envelope.reserved),
+        },
+  };
 }
 
 function copyMeasurement(measurement: MetaMeasurementV1): MetaMeasurementV1 {
@@ -400,20 +429,31 @@ export class MetaJournalV1 {
     return this.configHashValue;
   }
 
-  reserveChild(identityInput: MetaWorkIdentityV1): MetaReservationV1 {
+  reserveChild(identityInput: MetaWorkIdentityV1, envelopeInput?: MetaEnvelopeRequestV1): MetaReservationV1 {
     this.assertUsable();
     const identity = MetaWorkIdentityV1.parse(identityInput);
     this.validateIdentity(identity);
+    const envelope = envelopeInput === undefined ? null : EnvelopeRequestV1.parse(envelopeInput);
+    if (envelope !== null) this.validateEnvelopeBinding(identity, envelope);
     const workKey = metaWorkKey(this.configHashValue, identity);
     const duplicate = this.reservationsByKey.get(workKey);
-    if (duplicate !== undefined) return copyReservation(duplicate);
+    if (duplicate !== undefined) {
+      if (!sameJson(duplicate.envelope, envelope)) {
+        throw new Error(`durable child identity ${workKey} was reserved under a different envelope binding`);
+      }
+      return copyReservation(duplicate);
+    }
     if (identity.phase === "holdout" && !this.terminalHoldout) {
       throw new Error("holdout child reservation requires the explicit terminal holdout latch");
     }
     if (identity.phase !== "holdout" && this.terminalHoldout) {
       throw new Error("terminal holdout is latched; train/search work is closed");
     }
-    const reserved = copyEnvelope(this.config.budgets.child);
+    // The trusted envelope ledger already sliced a variable-fidelity vector
+    // from its purpose pool; the journal persists and returns EXACTLY that
+    // slice (meta-runner fails closed on any mismatch). Without a recursive
+    // envelope the legacy fixed child vector applies.
+    const reserved = envelope === null ? copyEnvelope(this.config.budgets.child) : copyEnvelope(envelope.reserved);
     const committed = this.computeCommitted();
     for (const dimension of DIMS) {
       if (committed[dimension] + reserved[dimension] > this.config.budgets.campaign[dimension]) {
@@ -426,8 +466,9 @@ export class MetaJournalV1 {
       childRunId: childRunId(workKey),
       identity,
       reserved,
+      envelope,
     });
-    this.append({ v: 1, t: "reservation", seq: this.nextSeq, reservation });
+    this.append({ v: 2, t: "reservation", seq: this.nextSeq, reservation });
     this.nextSeq += 1;
     this.reservationsByKey.set(workKey, reservation);
     return copyReservation(reservation);
@@ -625,6 +666,23 @@ export class MetaJournalV1 {
     }
     this.registeredCapsule(identity);
   }
+  private validateEnvelopeBinding(identity: MetaWorkIdentityV1, envelope: MetaEnvelopeRequestV1): void {
+    if (this.config.version !== 2) {
+      throw new Error("recursive envelope binding is invalid for a non-M2 campaign");
+    }
+    const expectedPurpose = identity.phase === "search"
+      ? "search"
+      : identity.phase === "confirmation"
+        ? "confirmation"
+        : "terminal";
+    if (envelope.purpose !== expectedPurpose) {
+      throw new Error(`envelope purpose ${envelope.purpose} is invalid for ${identity.phase}`);
+    }
+    const expectedIdentity = this.config.recursiveBudgets[expectedPurpose].identity;
+    if (!sameJson(envelope.envelope, expectedIdentity)) {
+      throw new Error(`envelope identity does not match the configured ${expectedPurpose} authority`);
+    }
+  }
 
   private registeredCapsule(identity: MetaWorkIdentityV1) {
     const corpus = identity.phase === "holdout" ? this.config.holdout : this.config.train;
@@ -643,13 +701,25 @@ export class MetaJournalV1 {
       return;
     }
     if (line.t === "reservation") {
-      const reservation = line.reservation;
+      const reservation = MetaReservationV1.parse({
+        ...line.reservation,
+        envelope: line.v === 1 ? null : line.reservation.envelope,
+      });
       this.validateIdentity(reservation.identity);
       const expectedKey = metaWorkKey(this.configHashValue, reservation.identity);
       if (reservation.configHash !== this.configHashValue || reservation.workKey !== expectedKey || reservation.childRunId !== childRunId(expectedKey)) {
         throw new Error("meta journal reservation identity is corrupt");
       }
-      if (!sameJson(reservation.reserved, this.config.budgets.child)) throw new Error("meta journal reservation is not the full registered child envelope");
+      if (reservation.envelope === null) {
+        if (!sameJson(reservation.reserved, this.config.budgets.child)) {
+          throw new Error("legacy meta journal reservation is not the full registered child envelope");
+        }
+      } else {
+        this.validateEnvelopeBinding(reservation.identity, reservation.envelope);
+        if (!sameJson(reservation.reserved, reservation.envelope.reserved)) {
+          throw new Error("meta journal reservation does not match its durable envelope slice");
+        }
+      }
       if (this.reservationsByKey.has(expectedKey)) throw new Error(`duplicate reservation line for ${expectedKey}`);
       if (reservation.identity.phase === "holdout" ? !this.terminalHoldout : this.terminalHoldout) {
         throw new Error("meta journal reservation violates terminal holdout ordering");

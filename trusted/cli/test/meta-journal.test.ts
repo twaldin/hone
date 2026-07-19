@@ -4,7 +4,14 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MetaCampaignConfigV1, type MetaCampaignConfigV1 as MetaCampaignConfig } from "@hone/schema";
+import {
+  M2_PANEL_A_TASK_IDS,
+  MetaCampaignConfigV1,
+  MetaCampaignConfigV2,
+  type BudgetEnvelope,
+  type MetaCampaignConfigV1 as MetaCampaignConfig,
+  type MetaCampaignConfigV2 as RecursiveConfig,
+} from "@hone/schema";
 import { describe, expect, it } from "vitest";
 import {
   MetaJournalV1,
@@ -20,6 +27,82 @@ const fixturePath = fileURLToPath(new URL("../../../schema/fixtures/meta-campaig
 function config(): MetaCampaignConfig {
   return MetaCampaignConfigV1.parse(JSON.parse(readFileSync(fixturePath, "utf8")));
 }
+function recursiveConfig(): RecursiveConfig {
+  const legacy = config();
+  const capsule = (index: number) => ({
+    ...legacy.train[0]!,
+    capsuleId: `cap_${index.toString(16).padStart(12, "0")}`,
+    capsuleDigest: digest(`recursive:capsule:${index}`),
+    image: `hone-task-${index}@${digest(`recursive:image:${index}`)}`,
+    oracleDigest: digest(`recursive:oracle:${index}`),
+    scalarizerDigest: digest(`recursive:scalarizer:${index}`),
+  });
+  const train = Array.from({ length: 8 }, (_, index) => capsule(index + 1));
+  const holdout = Array.from({ length: 12 }, (_, index) => capsule(index + 101));
+  const child = { ...legacy.budgets.child };
+  const multiply = (budget: BudgetEnvelope, factor: number): BudgetEnvelope => ({
+    maxTokens: budget.maxTokens * factor,
+    maxUsd: budget.maxUsd * factor,
+    maxWallClockSec: budget.maxWallClockSec * factor,
+    maxEvaluatorInvocations: budget.maxEvaluatorInvocations * factor,
+  });
+  const calibratedPanelCandidate = multiply(child, 8);
+  const optimizer = {
+    sourceCommit: "1".repeat(40),
+    sourceArtifact: digest("recursive:target-source"),
+    bundleDigest: digest("recursive:target-bundle"),
+  };
+  return MetaCampaignConfigV2.parse({
+    ...legacy,
+    version: 2,
+    seedOptimizer: optimizer,
+    controllerOptimizer: optimizer,
+    optimizerRuntime: { image: `hone-optimizer@${digest("recursive:optimizer-image")}` },
+    generation: {
+      stage: "A",
+      panel: "A",
+      targetGeneration: 0,
+      controllerGeneration: 0,
+      outerReplicate: 0,
+    },
+    train,
+    holdout,
+    counts: {
+      candidates: 37,
+      candidateAttemptsMax: 91,
+      innerEpisodesMax: 8,
+      searchReplicates: 5,
+      confirmationReplicates: 3,
+      holdoutReplicates: 3,
+      childConcurrency: 2,
+    },
+    developmentPanel: {
+      panel: "A",
+      members: train.map((entry, index) => ({
+        taskId: M2_PANEL_A_TASK_IDS[index],
+        capsule: entry,
+        calibratedInnerCeiling: child,
+      })),
+    },
+    recursiveBudgets: {
+      search: {
+        identity: { envelopeId: digest("recursive:search-envelope"), purpose: "search" },
+        calibratedPanelCandidate,
+        outerTrajectory: multiply(calibratedPanelCandidate, 12),
+      },
+      confirmation: {
+        identity: { envelopeId: digest("recursive:confirmation-envelope"), purpose: "confirmation" },
+        budget: multiply(child, 4 * 8 * 3),
+      },
+      terminal: {
+        identity: { envelopeId: digest("recursive:terminal-envelope"), purpose: "terminal" },
+        budget: multiply(child, 3 * 12 * 3),
+      },
+    },
+    allowedClaim: "recursive-transfer-frozen-corpus",
+  });
+}
+
 
 async function journalPath(name: string): Promise<string> {
   return join(await mkdtemp(join(tmpdir(), `hone-meta-${name}-`)), "private", "meta-journal.v1.ndjson");
@@ -206,6 +289,39 @@ describe("MetaJournalV1 durable identity and idempotency", () => {
       expect(() => journal.settleChild(work, settlement(0.5, { observed: { ...ZERO_USAGE, [dimension]: value } }))).toThrow(message);
       journal.close();
     }
+  });
+  it("persists and replays the exact recursive envelope slice and binding", async () => {
+    const path = await journalPath("recursive-envelope");
+    const cfg = recursiveConfig();
+    const work = identity("recursive-allocation", {
+      capsuleId: cfg.developmentPanel.members[0]!.capsule.capsuleId,
+      measurementEpoch: "m2:allocation-bound",
+    });
+    const envelope = {
+      purpose: "search" as const,
+      envelope: cfg.recursiveBudgets.search.identity,
+      reservationId: "candidate-0-allocation-0",
+      parentReservationId: null,
+      reserved: { ...cfg.budgets.child },
+    };
+    const journal = MetaJournalV1.open(path, cfg);
+    const reservation = journal.reserveChild(work, envelope);
+    expect(reservation.reserved).toEqual(envelope.reserved);
+    expect(reservation.envelope).toEqual(envelope);
+    expect(JSON.parse(lines(path)[1] ?? "{}")).toMatchObject({
+      v: 2,
+      t: "reservation",
+      reservation: { envelope },
+    });
+    expect(() => journal.reserveChild(work, {
+      ...envelope,
+      reservationId: "candidate-0-allocation-conflict",
+    })).toThrow(/different envelope binding/);
+    journal.close();
+
+    const replayed = MetaJournalV1.open(path, cfg);
+    expect(replayed.reserveChild(work, envelope)).toEqual(reservation);
+    replayed.close();
   });
 });
 

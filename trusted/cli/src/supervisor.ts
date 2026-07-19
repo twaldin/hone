@@ -8,8 +8,8 @@ import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { ApplyMode, BudgetEnvelope, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
-import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
-import type { TrustedEvaluationStrategy } from "@hone/broker";
+import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole } from "@hone/schema";
+import type { BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
 import {
   admitCapsule,
   authenticateFrozenCapsuleAssets,
@@ -58,7 +58,7 @@ import {
   runsRoot,
   writeRunConfigFile,
 } from "./runs.js";
-import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "./types.js";
+import type { CampaignPauseAuthority, ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "./types.js";
 
 const RUN_USAGE =
   "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume] [--backend stub|local] [--config <json>] [--optimizer-artifact sha256:<64hex>]";
@@ -390,6 +390,19 @@ export interface TrustedRunOptions {
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
   /** Internal campaign seed closure; never serialized or re-collected from repoRoot. */
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+  /** Frozen model capability for this trusted session. Omit only on legacy M0/M1 runs. */
+  proxyRole?: M2ProxyRole | undefined;
+  /** Shared recursive-campaign provider pause authority. */
+  campaignPauseAuthority?: CampaignPauseAuthority | undefined;
+  /**
+   * Review bypass for the trusted synthetic meta capsule only: its authoring
+   * validation and later frozen-byte recheck precede/replace Gate 2.
+   */
+  admissionReview?: "required" | "off" | undefined;
+  /** Trusted recursive launch receipt seal; never accepted from CLI flags/config. */
+  campaignConfigHash?: `sha256:${string}` | undefined;
+  /** Trusted recursive broker authority; optimizer/config values cannot supply it. */
+  recursiveBroker?: BrokerRecursiveConfig | undefined;
 }
 
 export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunOptions = {}): Promise<number> {
@@ -435,12 +448,21 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     throw new UsageError("--optimizer-artifact must be sha256:<64 lowercase hex>");
   }
 
-  // Frozen admission (M0 conformance): id recompute, exact asset-hash set,
-  // hashed+schema-validated ordering report and clean baseline worktree all
-  // resolve before run creation. Candidate intake also completes here, so a
-  // refused CAS artifact never mints a run.
-  const admitted = admitCapsule(capsuleDir);
+  // Production intake always requires the exact Gate-2 receipt chain. The
+  // sole bypass is an explicit trusted synthetic-meta authoring/recheck path.
+  const admissionReview = trusted.admissionReview ?? "required";
+  const admitted = admitCapsule(capsuleDir, { review: admissionReview });
   const manifest = admitted.manifest;
+  if (
+    admitted.provisional
+    && (
+      trusted.evaluationStrategy !== undefined
+      || trusted.trustedValidPublicCandidateTarget !== undefined
+      || trusted.terminalHoldoutAssetGroupIds !== undefined
+    )
+  ) {
+    throw new UsageError("provisional capsule quarantine forbids corpus evaluation, optimizer promotion, and terminal holdout workflows");
+  }
   let optimizerDigest: string;
   let optimizerSnapshot: OptimizerSnapshot | undefined;
   let optimizerBaseSnapshot: OptimizerSnapshot | undefined = trusted.optimizerBaseSnapshot;
@@ -470,10 +492,9 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
           return { runDir, runId: trusted.runId, state };
         })();
     if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${manifest.id} under ${runsRoot(io.root)}`);
-    // The capsule must re-admit at the EXACT digest snapshotted when the run
-    // was created, and the optimizer identity sealed into run.started must
-    // still describe the optimizer that would relaunch.
-    revalidateForResume(found.runDir, capsuleDir);
+    // Resume replays Gate 2 again: revocation or a delegation change refuses
+    // before the run lock, event append, backend spawn, or delivery.
+    revalidateForResume(found.runDir, capsuleDir, { review: admissionReview });
     // The trusted runtime itself is sealed at run creation: a resume from
     // drifted (or partially rebuilt) trusted source refuses BEFORE any event
     // is appended or a backend launches — a run never mixes trusted source.
@@ -505,6 +526,12 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       );
     }
     const config = loadRunConfigFile(found.runDir);
+    if (admitted.provisional) {
+      const delegationBudget = admitted.approval?.receipt.delegation?.budgetUsd;
+      if (delegationBudget === undefined || config.apply !== "none" || config.budget.maxUsd > delegationBudget) {
+        throw new UsageError("provisional capsule resume violates its apply:none delegation budget quarantine");
+      }
+    }
     // Autonomy-ladder re-check (IV.2): the gate is re-evaluated against THIS
     // invocation's environment BEFORE any resume mutation, backend spawn, or
     // event append — a sealed apply:auto improver-seat run may not resume
@@ -567,6 +594,20 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       },
       io.env,
     );
+    if (admitted.provisional) {
+      const delegationBudget = admitted.approval?.receipt.delegation?.budgetUsd;
+      if (delegationBudget === undefined) {
+        throw new UsageError("provisional capsule approval is missing its verified delegation budget");
+      }
+      config = RunConfig.parse({
+        ...config,
+        apply: "none",
+        budget: {
+          ...config.budget,
+          maxUsd: Math.min(config.budget.maxUsd, delegationBudget),
+        },
+      });
+    }
 
     // Autonomy-ladder lock (review IV.2): trusted-side, checked before ANY run state exists.
     if (ladderLocked(config.apply, config.improverSeat, io.env)) {
@@ -697,6 +738,13 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ...(trusted.terminalHoldoutAssetGroupIds !== undefined
         ? { terminalHoldoutAssetGroupIds: trusted.terminalHoldoutAssetGroupIds }
         : {}),
+      ...(trusted.proxyRole !== undefined ? { proxyRole: trusted.proxyRole } : {}),
+      ...(trusted.campaignPauseAuthority !== undefined
+        ? { campaignPauseAuthority: trusted.campaignPauseAuthority }
+        : {}),
+      ...(trusted.admissionReview !== undefined ? { admissionReview: trusted.admissionReview } : {}),
+      ...(trusted.campaignConfigHash !== undefined ? { campaignConfigHash: trusted.campaignConfigHash } : {}),
+      ...(trusted.recursiveBroker !== undefined ? { recursiveBroker: trusted.recursiveBroker } : {}),
     },
     io,
   );
@@ -1215,8 +1263,13 @@ export interface SuperviseExtra {
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   optimizerEpisodesMax?: number | undefined;
   maxPublicCandidateEvaluations?: number | undefined;
+  campaignConfigHash?: `sha256:${string}` | undefined;
   trustedValidPublicCandidateTarget?: number | undefined;
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
+  recursiveBroker?: BrokerRecursiveConfig | undefined;
+  proxyRole?: M2ProxyRole | undefined;
+  campaignPauseAuthority?: CampaignPauseAuthority | undefined;
+  admissionReview?: "required" | "off" | undefined;
 }
 
 /** Late-binding relay from the run lock's stop channel to the supervisor's signal handler. */
@@ -1405,6 +1458,7 @@ async function superviseLocked(
       type: "run.started",
       capsuleId: manifest.id,
       contractHash: contractHash(readFileSync(join(runDir, CONTRACT_FILE), "utf8")),
+      ...(extra.campaignConfigHash !== undefined ? { campaignConfigHash: extra.campaignConfigHash } : {}),
       optimizerDigest,
     });
   }
@@ -1523,6 +1577,10 @@ async function superviseLocked(
     ...(extra.terminalHoldoutAssetGroupIds !== undefined
       ? { terminalHoldoutAssetGroupIds: extra.terminalHoldoutAssetGroupIds }
       : {}),
+    ...(extra.proxyRole !== undefined ? { proxyRole: extra.proxyRole } : {}),
+    ...(extra.campaignPauseAuthority !== undefined ? { campaignPauseAuthority: extra.campaignPauseAuthority } : {}),
+    ...(extra.admissionReview !== undefined ? { admissionReview: extra.admissionReview } : {}),
+    ...(extra.recursiveBroker !== undefined ? { recursiveBroker: extra.recursiveBroker } : {}),
     replayed,
     signal: abort.signal,
     emit: (event) => (backendFenced ? RunEvent.parse(event) : emit(event)),
