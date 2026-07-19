@@ -1,0 +1,100 @@
+{
+  "objective": "Improve geometric-mean level-1/3 compression and decompression throughput over deterministic text, JSON, binary, and repetitive corpora. Exact round trip, the pinned upstream library fuzzer subset, and compressed size no worse than baseline by more than 0.25% are hard gates. Only lib/common, lib/compress, and lib/decompress are mutable.",
+  "image": "hone-zstd-codec@sha256:007f66f4cb558b5f196023aac4d3384e4f022e627c99c40ba4e944763faf0cbb",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": [
+    ".*",
+    "*.md",
+    "CHANGELOG",
+    "COPYING",
+    "CMakeLists.txt",
+    "LICENSE",
+    "Makefile",
+    "Package.swift",
+    "bench.c",
+    "eval.py",
+    "toolchain.lock.json",
+    "worker.py",
+    "build/**",
+    "contrib/**",
+    "doc/**",
+    "examples/**",
+    "programs/**",
+    "tests/**",
+    "zlibWrapper/**",
+    "lib/BUCK",
+    "lib/Makefile",
+    "lib/README.md",
+    "lib/deprecated/**",
+    "lib/dictBuilder/**",
+    "lib/dll/**",
+    "lib/install_oses.mk",
+    "lib/legacy/**",
+    "lib/libzstd.mk",
+    "lib/libzstd.pc.in",
+    "lib/module.modulemap",
+    "lib/zdict.h",
+    "lib/zstd.h",
+    "lib/zstd_errors.h"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": ["assets/train"]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": ["assets/validation"]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "BSD-3-Clause OR GPL-2.0-only (upstream dual license; LICENSE and COPYING preserved)",
+    "provenance": "facebook/zstd at exact revision 5c7b7bad26808e6b40ac3b3d0075466e27738a9d; deterministic xorshift64-v1 corpora contain no third-party text or binary data; interleaved fresh-process A-A samples [2333.0470641344764,2561.0194602658503,2559.7402423891913] give qBase=2484.602255596506 and sample sigma=131.25220433925418; qReference=2484.602255596506+max(5*131.25220433925418,0.05*abs(2484.602255596506-0))=3140.8632772927767; the independently authored GCC O3/unroll source perturbation passes every gate and moves q without being present in the mutation sandbox",
+    "sourceDetails": {
+      "repository": "facebook/zstd",
+      "revision": "5c7b7bad26808e6b40ac3b3d0075466e27738a9d",
+      "upstreamUrl": "https://github.com/facebook/zstd/commit/5c7b7bad26808e6b40ac3b3d0075466e27738a9d",
+      "mutableEnvelope": ["lib/common/**", "lib/compress/**", "lib/decompress/**"],
+      "upstreamTests": ["make -C tests -j2 fuzzer ZSTDMT_OBJECTS=../lib/libzstd.a ZDICT_FILES=", "tests/fuzzer -i100 -s1337"]
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+      "freshProcess": true,
+      "q": "geometric mean MiB/s across level 1 and 3 compression and decompression for four sealed corpus categories",
+      "qFail": 0,
+      "qBase": 2484.602255596506,
+      "sigma": 131.25220433925418,
+      "qReference": 3140.8632772927767,
+      "qReferenceConstruction": "2484.602255596506 + max(5*131.25220433925418, 0.05*abs(2484.602255596506-0)) = 3140.8632772927767",
+      "aaSamples": [2333.0470641344764, 2561.0194602658503, 2559.7402423891913],
+      "normalizationScale": 656.2610216962709,
+      "noiseFractionOfScale": 0.2,
+      "benchmarkTargetMsPerSample": 125,
+      "benchmarkSamplesPerCell": 3,
+      "compressedSizeTolerance": 0.0025
+    },
+    "exploitReview": {
+      "protectedPathEscape": "broker diff-protects all build, evaluator, harness, test, fixture, and metadata paths; evaluator rejects newly introduced files outside lib/common, lib/compress, and lib/decompress",
+      "benchmarkSpecialCasing": "separate protected validation corpus; size-threshold overfit diagnostic wins train and is gated on validation",
+      "fixtureFingerprinting": "sealed assets remain under root-only /capsule; compilation runs as uid 2000 before corpus bytes are piped to the protected harness",
+      "outputFabrication": "trusted harness performs real ZSTD_compress2/ZSTD_decompressDCtx calls and byte-exact comparison; evaluator independently enforces compressed-size limits",
+      "timerTampering": "protected harness uses CLOCK_MONOTONIC_RAW under unprivileged uid 2000 with no network and no-new-privileges",
+      "buildScriptMutation": "Makefiles, worker, compiler flags, test code, and toolchain lock are protected; every evaluation performs a clean source rebuild",
+      "deadCodeBenchmarkBypass": "benchmarked symbols are the same public library entry points exercised by the upstream fuzzer subset"
+    },
+    "tags": ["m2", "oss", "zstd", "compression", "performance"]
+  }
+}

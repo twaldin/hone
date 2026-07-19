@@ -1,0 +1,74 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 11,
+    "incrementalRebuildSec": 5,
+    "evalSec": 28
+  },
+  "aa": {
+    "samples": [2333.0470641344764, 2561.0194602658503, 2559.7402423891913],
+    "sigma": 131.25220433925418,
+    "noiseFractionOfScale": 0.2
+  },
+  "qBase": 2484.602255596506,
+  "qFail": 0,
+  "qReference": 3140.8632772927767,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "compression entry point returns an error"
+    },
+    {
+      "id": "naive",
+      "q": 1658.2436649954857,
+      "hardGatesPass": true,
+      "role": "deliberately slower but correct volatile work in compression and decompression entry points"
+    },
+    {
+      "id": "baseline",
+      "q": 2333.0470641344764,
+      "hardGatesPass": true,
+      "role": "exact pinned upstream source"
+    },
+    {
+      "id": "improved",
+      "q": 2608.14577066385,
+      "hardGatesPass": true,
+      "role": "independently authored source optimization control"
+    },
+    {
+      "id": "shortcut",
+      "q": 1339.2912166053998,
+      "trainQ": 2628.120248429,
+      "validationQ": 50.46218478179916,
+      "hardGatesPass": true,
+      "shortcutGated": true,
+      "role": "input-size overfit that wins train and loses validation"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "description": "GCC O3 and loop-unrolling pragmas on codec hot translation units",
+    "independentlyAuthored": true,
+    "valid": true,
+    "q": 2608.14577066385,
+    "deltaFromQBase": 123.54351506734383,
+    "deltaFromOrderingBaseline": 275.09870652937343,
+    "reachesReference": false
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstReportHash": "sha256:e8c090d337075f9bf852bf3aceb6610aff41b8127561478c42aeb028dcbb1e3d",
+    "secondReportHash": "sha256:9f36f9b1d97aab856cd76e57924f8d0e045049156feaca5196cb55e07f530dac"
+  },
+  "measurement": {
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "globalLockHeld": true,
+    "benchmarkBatchWallSec": 464,
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "normalizationScale": 656.2610216962709,
+    "freshProcess": true,
+    "finalGceRecalibrationRequired": true
+  }
+}
