@@ -9,7 +9,7 @@
   "objective": "Improve DOM and On-Demand parsing over mixed corpora using the upstream benchmark harness.",
   "scalarAndGates": "Geometric mean GB/s; exact parse/event hashes, malformed-input behavior, full relevant tests, peak RSS \u2264 baseline +2%.",
   "source": {
-    "repository": "simdjson",
+    "repository": "simdjson/simdjson",
     "revision": "8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
     "url": "https://github.com/simdjson/simdjson/commit/8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
     "visibility": "public",
