@@ -111,6 +111,15 @@ export const ChildRunSpec = z.object({
   sourceArtifact: ArtifactRef,
   optimizerArtifact: ArtifactRef,
   purpose: z.enum(["capsule", "delegated", "self-ab"]),
+  /** Optimizer-authored schedule identity; trusted meta decides when it is required. */
+  schedule: z
+    .object({
+      candidateOrdinal: z.number().int().nonnegative(),
+      allocationOrdinal: z.number().int().nonnegative(),
+      innerEpisodesMax: z.number().int().positive(),
+    })
+    .strict()
+    .optional(),
 });
 export type ChildRunSpec = z.infer<typeof ChildRunSpec>;
 
@@ -123,10 +132,29 @@ export const SpawnRunParams = z.object({
 });
 export type SpawnRunParams = z.infer<typeof SpawnRunParams>;
 
+export const ChildRunAdmission = z.object({
+  campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  cohort: z.enum(["panel-a", "panel-b", "delegated-development"]),
+  capsuleProvenanceHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  sourceProvenanceHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  optimizerProvenanceHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+});
+export type ChildRunAdmission = z.infer<typeof ChildRunAdmission>;
+
+export const ChildRunLaunchReceipt = z.object({
+  child: ChildRunSpec,
+  depth: z.union([z.literal(1), z.literal(2)]),
+  admission: ChildRunAdmission,
+  launchedAt: z.string().datetime(),
+  receiptDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+});
+export type ChildRunLaunchReceipt = z.infer<typeof ChildRunLaunchReceipt>;
+
 export const ChildRunTerminal = z.object({
   runId: z.string().min(1),
   cursor: z.number().int().nonnegative(),
   eventDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  launchReceiptDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   status: z.enum(["completed", "stopped", "failed", "budget"]),
 });
 export type ChildRunTerminal = z.infer<typeof ChildRunTerminal>;
@@ -144,7 +172,7 @@ export type SpawnRunResult = z.infer<typeof SpawnRunResult>;
 export const CorpusSource = z.enum(["public-snapshot", "panel-evidence"]);
 export type CorpusSource = z.infer<typeof CorpusSource>;
 
-export const CorpusCursor = z.string().regex(/^corpus_[0-9a-f]{64}_[0-9]+$/);
+export const CorpusCursor = z.string().regex(/^corpus_[0-9a-f]{64}_[0-9a-f]{64}_[0-9]+$/);
 export type CorpusCursor = z.infer<typeof CorpusCursor>;
 
 export const CorpusQuery = z.object({
@@ -160,8 +188,22 @@ export const QueryCorpusParams = z.object({
 });
 export type QueryCorpusParams = z.infer<typeof QueryCorpusParams>;
 
+export const CorpusPublicProvenance = z.object({
+  campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  cohort: z.literal("public-history"),
+});
+export type CorpusPublicProvenance = z.infer<typeof CorpusPublicProvenance>;
+
+export const CorpusPanelProvenance = z.object({
+  campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  cohort: z.enum(["panel-a", "panel-b"]),
+  capsuleId: z.string().min(1),
+});
+export type CorpusPanelProvenance = z.infer<typeof CorpusPanelProvenance>;
+
 export const CorpusPublicDocument = z.object({
   source: z.literal("public-snapshot"),
+  provenance: CorpusPublicProvenance,
   id: z.string().min(1),
   contentHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   content: z.string(),
@@ -170,6 +212,7 @@ export type CorpusPublicDocument = z.infer<typeof CorpusPublicDocument>;
 
 export const CorpusPanelEvidence = z.object({
   source: z.literal("panel-evidence"),
+  provenance: CorpusPanelProvenance,
   id: z.string().min(1),
   contentHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   content: z.string(),
@@ -183,6 +226,7 @@ export type CorpusDocument = z.infer<typeof CorpusDocument>;
 
 export const QueryCorpusResult = z.object({
   snapshotHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  corpusVersionHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   cursor: CorpusCursor,
   nextCursor: CorpusCursor.nullable(),
   documents: z.array(CorpusDocument),
@@ -212,6 +256,7 @@ export type BrokerMethodName = keyof typeof BrokerMethods;
 export const BrokerErrorCode = z.enum([
   "BUDGET_EXCEEDED",
   "SANDBOX_NOT_FOUND",
+  "CHILD_ADMISSION_DENIED",
   "PROTECTED_PATH_VIOLATION",
   "HOLDOUT_ACCESS_DENIED",
   "DEPTH_EXCEEDED",

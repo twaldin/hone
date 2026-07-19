@@ -4,6 +4,7 @@ import type { BrokerErrorCode } from "@hone/schema";
 export const BROKER_ERROR_NUMBER: Record<BrokerErrorCode, number> = {
   BUDGET_EXCEEDED: -32000,
   SANDBOX_NOT_FOUND: -32001,
+  CHILD_ADMISSION_DENIED: -32011,
   PROTECTED_PATH_VIOLATION: -32002,
   HOLDOUT_ACCESS_DENIED: -32003,
   DEPTH_EXCEEDED: -32007,
