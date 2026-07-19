@@ -4,3 +4,4 @@ dist/
 .hone-cas/
 .hone-runs/
 /tmp/
+.hone-sources/
