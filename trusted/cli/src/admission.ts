@@ -18,6 +18,7 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { CapsuleManifest, DiagnosticOrderingReport, capsuleDigest, deriveCapsuleId, validateDiagnosticOrdering } from "@hone/schema";
 import { UsageError } from "./args.js";
+import { verifyAdmissionApproval } from "./admission-receipts.js";
 import { loadCapsule } from "./capsule.js";
 import { contractHash } from "./contract.js";
 import { replayRun, writeFileDurable } from "./eventlog.js";
@@ -45,6 +46,9 @@ import { CONTRACT_FILE } from "./runs.js";
 export const CAPSULE_SNAPSHOT_FILE = "capsule-manifest.json";
 /** Run-local, immutable copy of every manifest-pinned evaluator asset. */
 export const FROZEN_CAPSULE_ASSETS_DIR = "capsule-assets";
+export interface AdmitCapsuleOptions {
+  review?: "required" | "off";
+}
 
 
 export interface AdmittedCapsule {
@@ -52,6 +56,8 @@ export interface AdmittedCapsule {
   /** Canonical full-manifest digest (sha256:<64 hex>) — the frozen identity runs and ledgers key on. */
   digest: string;
   orderingReport: DiagnosticOrderingReport;
+  /** True only for a delegated private apply:none approval. */
+  provisional: boolean;
 }
 
 function sha256File(path: string): string {
@@ -274,7 +280,10 @@ function checkGitBaseline(capsuleDir: string, commit: string): void {
 }
 
 /** Full frozen admission. Throws UsageError on any refusal; never touches run state. */
-export function admitCapsule(capsuleDir: string): AdmittedCapsule {
+export function admitCapsule(
+  capsuleDir: string,
+  options: AdmitCapsuleOptions = {},
+): AdmittedCapsule {
   const manifest = loadCapsule(capsuleDir);
   const derived = deriveCapsuleId({ ...manifest });
   if (derived !== manifest.id) {
@@ -283,7 +292,14 @@ export function admitCapsule(capsuleDir: string): AdmittedCapsule {
   checkAssetHashes(capsuleDir, manifest);
   const orderingReport = checkOrderingReport(capsuleDir, manifest);
   if (manifest.baseline.kind === "git") checkGitBaseline(capsuleDir, manifest.baseline.commit);
-  return { manifest, digest: capsuleDigest(manifest), orderingReport };
+  const digest = capsuleDigest(manifest);
+  let provisional = false;
+  if ((options.review ?? "off") === "required") {
+    const capsuleParent = dirname(resolve(capsuleDir));
+    const root = capsuleParent.endsWith(`${sep}capsules`) ? dirname(capsuleParent) : capsuleParent;
+    provisional = verifyAdmissionApproval(join(root, ".hone-cas"), digest).provisional;
+  }
+  return { manifest, digest, orderingReport, provisional };
 }
 
 /** Snapshot the admitted manifest into the run dir (written once, at run creation; durable — resume identity depends on it). */
