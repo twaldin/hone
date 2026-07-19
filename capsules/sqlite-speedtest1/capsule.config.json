@@ -1,0 +1,96 @@
+{
+  "objective": "Improve selected test/speedtest1.c read, indexed aggregate, four-way join, and integer/text index lookup workloads on deterministic frozen SQLite databases. The oriented scalar is reciprocal geometric-mean time. Exact result and database hashes, the pinned select/index/join/where Tcl test slice, stripped benchmark-binary size, and peak RSS are hard gates. Only core implementation files under src/ are mutable; test-harness sources remain protected.",
+  "image": "hone-sqlite-speedtest1@sha256:b4c82080a113d183def64d406fb554394f1ec86594617e72ecc71cc7c1955612",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": [
+    ".*",
+    "*.md",
+    "VERSION",
+    "Makefile*",
+    "auto.def",
+    "configure",
+    "bench.c",
+    "eval.py",
+    "worker.py",
+    "toolchain.lock.json",
+    "main.mk",
+    "make.bat",
+    "magic.txt",
+    "manifest",
+    "manifest.tags",
+    "manifest.uuid",
+    "sqlite*.in",
+    "art/**",
+    "autoconf/**",
+    "autosetup/**",
+    "contrib/**",
+    "doc/**",
+    "ext/**",
+    "mptest/**",
+    "test/**",
+    "tool/**",
+    "src/shell.c.in",
+    "src/sqlite.h.in",
+    "src/tcl*.c",
+    "src/test*.c"
+  ],
+  "assetGroups": [
+    {"id": "train", "visibility": "holdout", "paths": ["assets/train"]},
+    {"id": "validation", "visibility": "holdout", "paths": ["assets/validation"]}
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "sandbox": {"memoryBytes": 2147483648, "cpus": 2},
+  "diagnosticOrdering": {"path": "diagnostics/ordering-report.json"},
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-terminal-holdout",
+    "license": "SQLite public domain; bundled build tooling carries upstream BSD-style notices; LICENSE.md preserved",
+    "provenance": "sqlite/sqlite GitHub mirror at exact commit 21fb3ccb37648b93433c592f3f6f7d5ef37de56c (Fossil manifest b14c3f8fec5123b1faa6d88dee2740ee4acb10dd522207531567d46f4714e227); databases generated deterministically by pinned test/speedtest1.c main testset and frozen by byte length, SHA-256, and upstream verification hash; no reference patch exists",
+    "tags": ["m2", "terminal-holdout", "oss", "sqlite", "database", "performance"],
+    "sourceDetails": {
+      "repository": "sqlite/sqlite",
+      "revision": "21fb3ccb37648b93433c592f3f6f7d5ef37de56c",
+      "fossilManifestUuid": "b14c3f8fec5123b1faa6d88dee2740ee4acb10dd522207531567d46f4714e227",
+      "upstreamUrl": "https://github.com/sqlite/sqlite/commit/21fb3ccb37648b93433c592f3f6f7d5ef37de56c",
+      "mutableEnvelope": ["src/** except src/test*.c, src/tcl*.c, src/shell.c.in, and src/sqlite.h.in"],
+      "upstreamTests": [
+        "testfixture test/select1.test",
+        "testfixture test/index.test",
+        "testfixture test/join.test",
+        "testfixture test/where.test"
+      ]
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+      "freshProcess": true,
+      "q": "reciprocal geometric mean seconds across speedtest1 main tests 160, 310, 410, and 510-derived workloads",
+      "qFail": 0,
+      "databaseGate": "byte-exact SHA-256 before and after read-only benchmark",
+      "binarySizeGate": "stripped benchmark binary bytes no greater than the frozen baseline",
+      "rssGate": "fresh benchmark-process peak RSS no greater than 102% of the frozen baseline observation"
+    },
+    "terminalSeal": {
+      "taskId": "OSS-H05",
+      "cohort": "terminal",
+      "optimizerPilots": 0,
+      "mutationHeadroomRuns": 0,
+      "seedOptimizerSessions": 0,
+      "trustedActivitiesOnly": ["correctness", "determinism", "interleaved A-A noise", "hand-authored sensitivity", "exploit-resistance review"],
+      "corpusBoundary": "identity, fixtures, scores, and feedback confined to capsule and admission evidence; never optimizer-queryable"
+    },
+    "exploitReview": {
+      "protectedPathEscape": "broker protects all non-core source, build, evaluator, harness, fixture, and test paths; evaluator rejects symlinks and new files outside src/",
+      "benchmarkSpecialCasing": "separate sealed train and validation databases; a page-count fingerprint diagnostic wins the smaller train split and is deliberately slowed on validation",
+      "fixtureFingerprinting": "holdout assets are staged below a root-only parent; only after compilation and tests does the evaluator copy one database into a root-owned non-writable directory for the candidate process",
+      "outputFabrication": "protected C harness performs real sqlite3_prepare_v2/sqlite3_step calls and computes a protected type-and-byte-sensitive SHA-256 result digest checked by the evaluator",
+      "timerTampering": "the protected root evaluator measures each unprivileged workload process externally with Python monotonic_ns; candidate-linked code never supplies elapsed time",
+      "buildScriptMutation": "configure inputs, makefiles, evaluator, worker, compiler flags, tests, and toolchain lock are protected; every evaluation starts with a clean amalgamation build",
+      "deadCodeBenchmarkBypass": "the protected harness calls the same public SQLite prepare/step/reset APIs and SQL shapes exercised by the protected upstream tests"
+    }
+  }
+}

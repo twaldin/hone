@@ -1,0 +1,99 @@
+{
+  "status": "failed-admission",
+  "failure": {
+    "gate": "sensitivity-ordering",
+    "reason": "After the single owner-authorized focused B-tree/VDBE control-repair round, the shortcut train score remained below baseline by less than the measured noise floor. Per admission policy, authoring stopped without further control iteration.",
+    "latestCheck": {
+      "baselineTrain": 7.797,
+      "shortcutTrain": 7.729,
+      "delta": -0.068,
+      "improvedCombined": 7.786,
+      "baselineCombined": 7.784,
+      "stabilitySpread": 0.0264,
+      "stabilityBand": 0.15,
+      "allCorrectnessAndResourceGatesPassed": true,
+      "wallSec": 368.08
+    }
+  },
+  "feasibility": {
+    "cleanBuildSec": 66,
+    "incrementalRebuildSec": 59,
+    "evalSec": 29
+  },
+  "aa": {
+    "samples": [7.784, 7.99, 7.993],
+    "sigma": 0.11980957112573852,
+    "noiseFractionOfScale": 0.2
+  },
+  "qBase": 7.9223333333333334,
+  "qFail": 0,
+  "qReference": 8.521381188962026,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "intentional compile failure"
+    },
+    {
+      "id": "naive",
+      "q": 3.239,
+      "hardGatesPass": true,
+      "role": "deliberately slower but correct volatile work in sqlite3_step"
+    },
+    {
+      "id": "baseline",
+      "q": 7.784,
+      "hardGatesPass": true,
+      "role": "exact pinned upstream source"
+    },
+    {
+      "id": "improved",
+      "q": 7.786,
+      "hardGatesPass": true,
+      "role": "independently authored same-size GCC O3 hot-unit and single-thread fast-path perturbation"
+    },
+    {
+      "id": "shortcut",
+      "q": 4.823,
+      "trainQ": 7.729,
+      "validationQ": 1.916,
+      "hardGatesPass": true,
+      "shortcutGated": true,
+      "role": "database-page-count fingerprint with validation-only delay"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "description": "GCC O3 on the VDBE and focused B-tree hot functions, plus NOMUTEX and single-thread core-mutex fast paths; stripped binary size remains exactly 1129848 bytes",
+    "independentlyAuthored": true,
+    "valid": true,
+    "q": 7.786,
+    "deltaFromQBase": -0.13633333333333342,
+    "deltaFromOrderingBaseline": 0.002,
+    "reachesReference": false,
+    "sensitivityMarginCleared": false
+  },
+  "orderingChecks": {
+    "consecutivePasses": 0,
+    "latestFailure": "shortcut/train 7.729 was not greater than baseline/train 7.797",
+    "stalePassingReportRemoved": true
+  },
+  "measurement": {
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "globalTokenLockHeld": true,
+    "latestBenchmarkBatchWallSec": 368.08,
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "normalizationScale": 0.5990478556286926,
+    "freshProcess": true,
+    "finalGceRecalibrationRequired": true
+  },
+  "terminalSeal": {
+    "taskId": "OSS-H05",
+    "optimizerPilots": 0,
+    "mutationHeadroomRuns": 0,
+    "seedOptimizerSessions": 0,
+    "trustedActivitiesOnly": true,
+    "optimizerCorpusExposure": false
+  }
+}
