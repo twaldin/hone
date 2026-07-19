@@ -1,0 +1,90 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 5.749776,
+    "incrementalRebuildSec": 0.664334,
+    "evalSec": 15.17694
+  },
+  "aa": {
+    "samples": [323.57208976999243, 329.9391761915163, 328.3354322077437],
+    "sigma": 3.311626373951895,
+    "noiseFractionOfScale": 0.2
+  },
+  "qBase": 327.2822327230842,
+  "qFail": 0,
+  "qReference": 343.8403645928436,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "one-shot encoder returns failure"
+    },
+    {
+      "id": "naive",
+      "q": 215.10519755331825,
+      "hardGatesPass": true,
+      "role": "deliberately slower but correct volatile work in the compression entry point"
+    },
+    {
+      "id": "baseline",
+      "q": 323.57208976999243,
+      "hardGatesPass": true,
+      "role": "exact pinned upstream source with its sole symlink materialized byte-for-byte"
+    },
+    {
+      "id": "improved",
+      "q": 351.26302677416095,
+      "hardGatesPass": true,
+      "role": "independently authored bounded thread-local arena for one-shot encoder allocations"
+    },
+    {
+      "id": "shortcut",
+      "q": 500506.5277739672,
+      "trainQ": 1000841.1036715661,
+      "validationQ": 171.95187636828763,
+      "hardGatesPass": true,
+      "shortcutGated": true,
+      "role": "repeated-2-MiB memoization that wins train plus a size-triggered validation delay"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "description": "A bounded thread-local arena replaces repeated one-shot encoder heap allocation while preserving fallback allocation and exact output",
+    "independentlyAuthored": true,
+    "valid": true,
+    "q": 351.26302677416095,
+    "deltaFromQBase": 23.98079405107675,
+    "deltaFromOrderingBaseline": 27.69093700416852,
+    "reachesReference": true
+  },
+  "determinism": {
+    "freshProcessRunsPerSplit": 6,
+    "identicalResultHashesWithinSplit": true,
+    "resultHashes": {
+      "train": "sha256:ab4ab6879dc4e20a5c8bae6b4da1044d038b75fa6a3804d55e801a9c48a3347e",
+      "validation": "sha256:0c83c599afbbc176f3a4a019f13c57f2d67d012bc4cbc8cd01496325effb37a0"
+    }
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstReportHash": "sha256:7a0bebd59f75ecc257bae89bfef8bce6da99509461ef052db17b10b7e3b94397",
+    "secondReportHash": "sha256:a44473a2b42010b8f96930351743d7f169ab2c8a257c80a9725fff6eb232223a"
+  },
+  "measurement": {
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "globalLockHeld": true,
+    "tokenCheckedLock": "/tmp/hone-bench-lock.sh",
+    "orderingWallSecs": [201.5, 203.4],
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "normalizationScale": 16.558131869759475,
+    "freshProcess": true,
+    "finalGceRecalibrationRequired": true
+  },
+  "terminalSeal": {
+    "taskId": "OSS-H08",
+    "contract": "capsules/contracts/OSS-H08.json",
+    "optimizerPilots": 0,
+    "optimizerCorpusExposure": false,
+    "attestation": "No optimizer pilot, mutation/headroom run, seed-optimizer session, queryable optimizer corpus write, panel evidence write, or search-visible state was used; terminal identities, fixtures, scores, and feedback stayed inside capsules/brotli-codec and trusted admission evidence."
+  }
+}

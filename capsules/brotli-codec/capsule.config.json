@@ -1,0 +1,116 @@
+{
+  "objective": "Improve geometric-mean quality-4/9 compression and decompression throughput over deterministic web, text, and binary corpora. Exact round trip, all 28 pinned upstream CTest cases, and compressed size no worse than baseline by more than 0.25% are hard gates. Only c/common, c/enc, and c/dec are mutable.",
+  "image": "hone-brotli-codec@sha256:432ce8dbe85174d10ea0de3562874e7996dfbd2537d8d6148bc5f5a29fff5adc",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": [
+    ".*",
+    "*.md",
+    "BUILD.bazel",
+    "CMakeLists.txt",
+    "LICENSE",
+    "MANIFEST.in",
+    "MODULE.bazel",
+    "MODULE.bazel.lock",
+    "README",
+    "bench.c",
+    "eval.py",
+    "pyproject.toml",
+    "sbom.cdx.json",
+    "setup.cfg",
+    "setup.py",
+    "toolchain.lock.json",
+    "worker.py",
+    "build/**",
+    "c/fuzz/**",
+    "c/include/**",
+    "c/tools/**",
+    "csharp/**",
+    "docs/**",
+    "fetch-spec/**",
+    "go/**",
+    "java/**",
+    "js/**",
+    "python/**",
+    "research/**",
+    "scripts/**",
+    "tests/**"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": ["assets/train"]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": ["assets/validation"]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "sandbox": {
+    "memoryBytes": 1073741824,
+    "cpus": 2
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "MIT (upstream LICENSE preserved)",
+    "provenance": "google/brotli at exact revision 037b70e2ad03b20480e6407ed5851e0f114b67a7; the upstream research/dictionary.bin symlink is materialized byte-for-byte because the broker rejects symlink artifact entries; deterministic xorshift64-v1 corpora contain no third-party text or binary data; interleaved fresh-process A-A samples [323.57208976999243,329.9391761915163,328.3354322077437] give qBase=327.2822327230842 and sample sigma=3.311626373951895; qReference=327.2822327230842+max(5*3.311626373951895,0.05*abs(327.2822327230842-0))=343.8403645928436; the independently authored thread-local bounded encoder arena perturbation passes every hard gate and is absent from the mutation sandbox",
+    "sourceDetails": {
+      "repository": "google/brotli",
+      "revision": "037b70e2ad03b20480e6407ed5851e0f114b67a7",
+      "upstreamUrl": "https://github.com/google/brotli/commit/037b70e2ad03b20480e6407ed5851e0f114b67a7",
+      "mutableEnvelope": ["c/common/**", "c/enc/**", "c/dec/**"],
+      "artifactNormalization": "research/dictionary.bin is the sole upstream symlink; its target c/common/dictionary.bin is materialized with identical bytes because trusted broker artifacts forbid symlinks",
+      "upstreamTests": [
+        "cmake -S . -B build -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release",
+        "cmake --build build --parallel 2",
+        "ctest --test-dir build --output-on-failure -j2 (28 tests)"
+      ]
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+      "freshProcess": true,
+      "q": "geometric mean MiB/s across quality 4 and 9 compression and decompression for three sealed corpus categories",
+      "qFail": 0,
+      "qBase": 327.2822327230842,
+      "sigma": 3.311626373951895,
+      "qReference": 343.8403645928436,
+      "qReferenceConstruction": "327.2822327230842 + max(5*3.311626373951895, 0.05*abs(327.2822327230842-0)) = 343.8403645928436",
+      "aaSamples": [323.57208976999243, 329.9391761915163, 328.3354322077437],
+      "normalizationScale": 16.558131869759475,
+      "noiseFractionOfScale": 0.2,
+      "benchmarkTargetMsPerSample": 125,
+      "benchmarkSamplesPerCell": 3,
+      "compressedSizeTolerance": 0.0025
+    },
+    "terminalSeal": {
+      "taskId": "OSS-H08",
+      "contract": "capsules/contracts/OSS-H08.json",
+      "cohort": "terminal",
+      "optimizerPilots": 0,
+      "optimizerCorpusExposure": false,
+      "allowedAuthoringWork": ["correctness", "determinism", "A-A/noise", "sensitivity", "exploit-resistance"],
+      "attestation": "No optimizer pilot, mutation/headroom run, seed-optimizer session, queryable optimizer corpus write, panel evidence write, or search-visible state was used. All terminal fixtures, identities, scores, and feedback remain confined to this capsule and its trusted admission evidence."
+    },
+    "exploitReview": {
+      "protectedPathEscape": "the broker diff-protects all build, evaluator, harness, test, fixture, and metadata paths; the evaluator also byte-compares every protected baseline file, rejects non-regular paths, and rejects new files outside c/common, c/enc, and c/dec",
+      "benchmarkSpecialCasing": "separate root-only holdout train and validation corpora; the shortcut control memoizes only repeated 2 MiB train inputs and adds a size-triggered validation delay, so it wins train and is rejected by validation",
+      "fixtureFingerprinting": "both deterministic corpora are visibility=holdout; compilation runs as uid 2000 before corpus bytes are piped by the trusted evaluator to the protected harness",
+      "outputFabrication": "the trusted harness calls BrotliEncoderCompress and BrotliDecoderDecompress, requires byte-exact decoded output, and the evaluator independently enforces baseline compressed-size limits",
+      "timerTampering": "the protected harness uses CLOCK_MONOTONIC_RAW under uid 2000 with no network, no-new-privileges, and fixed broker resource limits",
+      "buildScriptMutation": "CMake files, worker, compiler flags, test code, toolchain lock, and benchmark are protected; every evaluation copies into a fresh tmpfs and performs a clean build",
+      "deadCodeBenchmarkBypass": "benchmarked public one-shot encoder and decoder entry points are also exercised by the complete pinned upstream CTest round-trip suite"
+    },
+    "tags": ["m2", "oss", "terminal", "brotli", "compression", "performance"]
+  }
+}
