@@ -1,0 +1,8 @@
+baseline/.gitdir
+baseline/target
+baseline/.pytest_cache
+baseline/**/__pycache__
+diagnostics
+assets
+manifest.json
+capsule.config.json

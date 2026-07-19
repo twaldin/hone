@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "taskId": "OSS-T08",
+  "repository": "ijl/orjson",
+  "revision": "705515d77b28429d0b7c30c3d781abe52e8a1e5a",
+  "mutablePaths": [
+    "src/lib.rs",
+    "src/serialize",
+    "src/deserialize"
+  ],
+  "build": {
+    "command": [
+      "maturin",
+      "build",
+      "--release",
+      "--offline",
+      "--out",
+      "/tmp/wheels"
+    ],
+    "timeoutSec": 120
+  },
+  "tests": {
+    "command": [
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "/workspace/test"
+    ],
+    "timeoutSec": 90,
+    "passed": 1612,
+    "skipped": 24
+  },
+  "benchmarkTimeoutSec": 120,
+  "baselinePeakRssObservedKiB": 63776,
+  "baselinePeakRssEnvelopeKiB": 68608,
+  "peakRssLimitKiB": 69980,
+  "qFail": 0,
+  "toolchain": {
+    "python": "3.12.11",
+    "rust": "1.95.0",
+    "maturin": "1.9.4",
+    "pyo3Ffi": "0.28.3",
+    "numpy": "2.3.3",
+    "pytest": "9.0.2",
+    "cargoMode": "vendored-offline"
+  }
+}

@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_d8e9098551bf",
+  "objective": "Improve orjson dumps+loads throughput across frozen dataclass, datetime, NumPy, Unicode, and nested corpora. Maximize the geometric mean throughput after byte-exact dumps, semantic loads, full upstream pytest, and peak-RSS gates; only src/lib.rs, src/serialize/, and src/deserialize/ are mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "705515d77b28429d0b7c30c3d781abe52e8a1e5a"
+  },
+  "image": "hone-orjson-serialization@sha256:493e9c3c3b52759e423344a4b361de158b0132578342be56e03cdf1ebb576af2",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    ".gitattributes",
+    ".github",
+    ".gitignore",
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "LICENSE-MPL-2.0",
+    "README.md",
+    "bench",
+    "benchmark_worker.py",
+    "build.rs",
+    "challenge.json",
+    "ci",
+    "data",
+    "doc",
+    "eval.py",
+    "include",
+    "integration",
+    "pyproject.toml",
+    "pysrc",
+    "requirements-lint.txt",
+    "requirements.txt",
+    "script",
+    "src/alloc.rs",
+    "src/exception.rs",
+    "src/ffi",
+    "src/opt.rs",
+    "src/typeref.rs",
+    "src/util.rs",
+    "test"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/twitter.json.xz",
+        "assets/train/workloads.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/canada.json.xz",
+        "assets/validation/workloads.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:3e1b4546ed5ede0e02180f8f1b18f586a5e12725413110b1f24d960a55dc363f"
+  },
+  "contentHashes": {
+    "assets/train/twitter.json.xz": "sha256:73e96118c9db8cf5af4f160e21767803842247bf2400282d0ec74f63ac561c3d",
+    "assets/train/workloads.json": "sha256:6ab288f40d908765e7d0b3fa45813961a946585fda4b4afc35e523f4381f582a",
+    "assets/validation/canada.json.xz": "sha256:8b8347813288822d1839cba94bdbec370d6d29515447dec3ec8129ed2b950e77",
+    "assets/validation/workloads.json": "sha256:9fe240fe862d9d1a19a93440347af59f910c1d9b71fcd3a257df87e350836481"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "Current-head OSS-T08 at ijl/orjson 705515d77b28429d0b7c30c3d781abe52e8a1e5a; no reference artifact or known winning patch. Local interleaved A-A calibration set qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail)) = 21443.693837140683 + max(3168.149003303005, 1072.1846918570342) = 24611.84284044369. Numbers are provisional pending frozen-GCE recalibration.",
+    "license": "MPL-2.0 AND (Apache-2.0 OR MIT)",
+    "tags": [
+      "m2",
+      "oss",
+      "serialization",
+      "rust",
+      "python",
+      "throughput",
+      "current-head"
+    ],
+    "partition": "m2-frozen-corpus",
+    "sourceDetails": {
+      "repository": "https://github.com/ijl/orjson",
+      "commit": "705515d77b28429d0b7c30c3d781abe52e8a1e5a",
+      "version": "3.11.9",
+      "licenseFiles": [
+        "LICENSE-MPL-2.0",
+        "LICENSE-APACHE",
+        "LICENSE-MIT"
+      ],
+      "mutablePaths": [
+        "src/lib.rs",
+        "src/serialize",
+        "src/deserialize"
+      ],
+      "currentHead": true,
+      "referenceArtifact": false
+    },
+    "toolchain": {
+      "pythonBase": "python:3.12.11-bookworm@sha256:13c9584604a99ca134c4f41800f74ffc64ee6ac8cf555cf1e704a6087fc84f12",
+      "rustBase": "rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1",
+      "rust": "1.95.0",
+      "python": "3.12.11",
+      "maturin": "1.9.4",
+      "pyo3Ffi": "0.28.3",
+      "numpy": "2.3.3",
+      "pytest": "9.0.2",
+      "cargo": "vendored Cargo.lock sources, offline",
+      "pip": "frozen wheels, --no-index",
+      "networkDuringMutationAndEvaluation": false
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+      "targetPlatform": "frozen GCE Linux profile (recalibration required)",
+      "freshProcess": true,
+      "q": "geometric mean operations/second across ten frozen dumps+loads workloads per split; train+validation aggregate is their arithmetic mean",
+      "qFail": 0,
+      "qBase": 21443.693837140683,
+      "sigma": 633.629800660601,
+      "qReference": 24611.84284044369,
+      "referenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+      "aaSamples": [
+        20250.695858599727,
+        21464.835225341685,
+        21481.639744478114,
+        21520.995279338586,
+        22067.17076864686,
+        21876.826146439118
+      ],
+      "noiseFractionOfScale": 0.029548537927880134,
+      "correctnessResultHashes": {
+        "train": "eea12554a2b934636ee36d8291b474b97a247fd98df937fe37d3b4ebf605b686",
+        "validation": "8a9c59a91d1cf6bf2bf9e20dadc5422be6b53a6e5220fe4955adfeec591c38ff"
+      },
+      "rss": {
+        "baselineObservedMaxKiB": 63776,
+        "baselineEnvelopeKiB": 68608,
+        "envelopeConstruction": "67 MiB frozen baseline high-water envelope covering allocator and 5 ms sampler jitter",
+        "limitKiB": 69980,
+        "limitConstruction": "floor(68608 * 1.02)"
+      },
+      "feasibility": {
+        "cleanBuildSec": 12.918980922000173,
+        "incrementalRebuildSec": 7.52029671199989,
+        "passingEvalSec": 27.45906809600092
+      }
+    }
+  }
+}

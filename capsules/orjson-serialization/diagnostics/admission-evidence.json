@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "taskId": "OSS-T08",
+  "capsule": "orjson-serialization",
+  "sourceRevision": "705515d77b28429d0b7c30c3d781abe52e8a1e5a",
+  "image": "hone-orjson-serialization@sha256:493e9c3c3b52759e423344a4b361de158b0132578342be56e03cdf1ebb576af2",
+  "provisionalPlatform": "linux/arm64 Docker Desktop on Apple M3 Max",
+  "feasibility": {
+    "cleanBuildSec": 12.918980922000173,
+    "incrementalRebuildSec": 7.52029671199989,
+    "evalSec": 27.45906809600092,
+    "rebuildPlusEvalSec": 34.97936480800081,
+    "cleanBuildPlusEvalSec": 40.37804901800109,
+    "budgetSec": 10800,
+    "headroomFraction": 0.9962612917575925
+  },
+  "aa": {
+    "method": "three interleaved A-A pairs; each sample is the mean of train and validation geometric-mean throughput",
+    "samples": [
+      20250.695858599727,
+      21464.835225341685,
+      21481.639744478114,
+      21520.995279338586,
+      22067.17076864686,
+      21876.826146439118
+    ],
+    "sigma": 633.629800660601,
+    "noiseFractionOfScale": 0.029548537927880134,
+    "freshProcess": true,
+    "measurementLock": "/tmp/hone-bench.lock"
+  },
+  "qBase": 21443.693837140683,
+  "qFail": 0,
+  "qReference": 24611.84284044369,
+  "qReferenceConstruction": {
+    "formula": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "fiveSigma": 3168.149003303005,
+    "fivePercentScale": 1072.1846918570342,
+    "selectedMargin": 3168.149003303005
+  },
+  "rss": {
+    "observedBaselineMaxKiB": 63776,
+    "baselineEnvelopeKiB": 68608,
+    "limitKiB": 69980,
+    "limitFormula": "floor(68608 * 1.02)"
+  },
+  "correctness": {
+    "upstreamPytest": "1612 passed, 24 skipped",
+    "trainResultHash": "eea12554a2b934636ee36d8291b474b97a247fd98df937fe37d3b4ebf605b686",
+    "validationResultHash": "8a9c59a91d1cf6bf2bf9e20dadc5422be6b53a6e5220fe4955adfeec591c38ff",
+    "dumpGate": "byte-exact SHA-256",
+    "loadsGate": "canonical semantic SHA-256"
+  },
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "description": "loads returns a null result without an exception; upstream pytest gates it"
+    },
+    {
+      "id": "naive",
+      "q": 19244.648381721134,
+      "hardGatesPass": true,
+      "description": "deliberately slower but correct entrypoint loops"
+    },
+    {
+      "id": "baseline",
+      "q": 21127.977708755916,
+      "hardGatesPass": true,
+      "description": "pinned current-head source"
+    },
+    {
+      "id": "improved",
+      "q": 25219.466873058376,
+      "hardGatesPass": true,
+      "description": "independently authored AArch64 NEON escaped-string fast path"
+    },
+    {
+      "id": "shortcut",
+      "q": 23213.03495397399,
+      "trainQ": 38729.69842877505,
+      "validationQ": 7696.371479172931,
+      "hardGatesPass": true,
+      "description": "fixture-length fingerprint control beats train but is split-gated on validation"
+    }
+  ],
+  "perturbation": {
+    "id": "aarch64-neon-escaped-string",
+    "sourcePaths": [
+      "src/serialize/writer/format_str.rs",
+      "src/serialize/writer/str/mod.rs",
+      "src/serialize/writer/str/neon.rs"
+    ],
+    "q": 25219.466873058376,
+    "deltaFromDiagnosticBaseline": 4091.48916430246,
+    "fullPytestPass": true,
+    "dumpBytesExact": true,
+    "loadsSemanticHashesMatch": true,
+    "rssGatePass": true
+  },
+  "frozenHostRecalibrationRequired": true
+}
