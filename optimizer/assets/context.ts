@@ -1,5 +1,9 @@
 import type { BudgetState, EvaluationRecord } from "@hone/schema";
-import { EPISODE_CONTEXT_VERSION, type EpisodeContext } from "../src/episode.js";
+import {
+  DEFAULT_MUTATE_OUTPUT_SCHEMA,
+  EPISODE_CONTEXT_VERSION,
+  type EpisodeContext,
+} from "../src/episode.js";
 import { maxFeedbackChars } from "./policy.js";
 import { MUTATION_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT } from "./prompts.js";
 
@@ -117,7 +121,10 @@ export function buildEpisodeContext(input: BuildContextInput): EpisodeContext {
     version: EPISODE_CONTEXT_VERSION,
     episode: input.episode,
     mode,
+    role: mode === "repair" ? "repair" : "inner-improver",
     systemPrompt: mode === "repair" ? REPAIR_SYSTEM_PROMPT : MUTATION_SYSTEM_PROMPT,
     userPrompt: sections.join("\n\n"),
+    tools: ["read", "bash", "write", "edit"],
+    outputSchema: DEFAULT_MUTATE_OUTPUT_SCHEMA,
   };
 }
