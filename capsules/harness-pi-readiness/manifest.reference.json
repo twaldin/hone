@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_b9804082df41",
+  "objective": "Recover correct Pi readiness verdicts and project-instructions backup/restore actions across sealed process traces and filesystem states. Maximize weighted exact recovery; only solution.py is mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "d9eeae7453b86d293a07cd88bdb1822e5dcdc5a5"
+  },
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train/cases.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation/cases.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:aaa37d7fac9a0088157a3e8387c1861f86d03f4bb16ea13cb2135cab1f3fc3d4"
+  },
+  "contentHashes": {
+    "assets/train/cases.json": "sha256:65c67c12a51cd190b5bcd53702c653c89180a1935f8f1574391e45a8b584c78a",
+    "assets/validation/cases.json": "sha256:3b91398e35bc322df01a8f293134d1559e857087e476c4e76d8fde35e8ff7844"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "terminal-only bounded readiness and instructions-projection extraction from Harness baseline 1815353f85f8f052fea30812aaca3be485c51d30; reference 39ff71f informed diagnostic direction only",
+    "license": "MIT",
+    "tags": [
+      "m2",
+      "owner",
+      "terminal",
+      "pi",
+      "readiness",
+      "instructions-backup"
+    ],
+    "partition": "m2-terminal-holdout",
+    "sourceDetails": {
+      "repository": "harness",
+      "commit": "1815353f85f8f052fea30812aaca3be485c51d30",
+      "referenceCommit": "39ff71f",
+      "contract": "OWN-H04",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic terminal evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 3,
+      "freshProcess": true,
+      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
+      "qFail": 0
+    },
+    "terminalSeal": {
+      "holdout": true,
+      "optimizerPilot": false,
+      "mutationOrHeadroomRun": false,
+      "seedOptimizerSession": false,
+      "optimizerCorpusRegistration": false,
+      "panelEvidenceRegistration": false,
+      "searchVisibleState": false,
+      "orderingCheckTool": "capsules/tools/ordering-check.ts",
+      "consecutiveOrderingPasses": 2,
+      "benchLock": "hone-bench.lock",
+      "allowedAdmissionWork": [
+        "trusted-correctness",
+        "A-A",
+        "sensitivity-ordering",
+        "exploit-diagnostics"
+      ]
+    }
+  }
+}
