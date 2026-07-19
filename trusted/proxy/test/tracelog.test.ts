@@ -325,6 +325,8 @@ async function setup(traceIo?: Partial<DurableIo>, casIo?: Partial<DurableIo>): 
     },
     recordCampaignPause: () => undefined,
     recordCampaignResume: () => undefined,
+    captureCampaignDispatchFence: () => ({ epoch: "0", paused: false }),
+    validateCampaignDispatchFence: () => true,
     ...(traceIo === undefined ? {} : { traceIo }),
     ...(casIo === undefined ? {} : { casIo }),
   });

@@ -32,8 +32,28 @@ export interface ProbeReport {
   budget: BudgetState;
 }
 
+export interface CampaignDispatchFence {
+  readonly epoch: string;
+  readonly paused: boolean;
+}
+
+export interface CampaignDispatchFenceValidation {
+  readonly allowPaused: boolean;
+}
+
 /** Campaign-wide authority shared by outer and descendant trusted runners. */
 export interface CampaignPauseAuthority {
+  /** Durable campaign identity, required for M2 run/resume sealing. */
+  readonly configHash?: string | undefined;
+  /** Exact durable authority file identity for campaign session sealing. */
+  readonly path?: string | undefined;
+  /** Snapshot used to reject a pause transition racing an admitted provider call. */
+  captureCampaignDispatchFence?(): CampaignDispatchFence;
+  /** Final synchronous pre-dispatch comparison; implementations refresh durable state. */
+  validateCampaignDispatchFence?(
+    epoch: string,
+    validation: CampaignDispatchFenceValidation,
+  ): boolean;
   isCampaignPaused(): boolean;
   recordCampaignPause(signal: CampaignPauseSignal): void | Promise<void>;
   recordCampaignResume(signal: CampaignResumeSignal): void | Promise<void>;

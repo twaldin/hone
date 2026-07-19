@@ -158,6 +158,10 @@ async function boot(
     ...overrides,
     recordCampaignPause: overrides.recordCampaignPause ?? (() => undefined),
     recordCampaignResume: overrides.recordCampaignResume ?? (() => undefined),
+    captureCampaignDispatchFence:
+      overrides.captureCampaignDispatchFence ?? (() => ({ epoch: "0", paused: false })),
+    validateCampaignDispatchFence:
+      overrides.validateCampaignDispatchFence ?? (() => true),
   });
   const port = await proxy.listenTcp(0);
   cleanups.push(async () => {

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -7,6 +7,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -25,6 +26,12 @@ import {
   type TrustedChildAdmissionInput,
   type TrustedEvaluationStrategy,
 } from "@hone/broker";
+import {
+  createProxy,
+  DEFAULT_UPSTREAM,
+  type DispatchRecoveryReport,
+  type ProxyConfig,
+} from "@hone/proxy";
 import {
   MetaCampaignRunner,
   MetaEnvelopeFileRecordPortV1,
@@ -66,6 +73,7 @@ import {
   type ChildRunAdmission as ChildRunAdmissionRecord,
   type CampaignPauseSignal as CampaignPauseSignalRecord,
   type CampaignResumeSignal as CampaignResumeSignalRecord,
+  type ProxyPreflightResult,
   type MetaCapsuleEntry,
   type MetaCampaignConfigV1 as MetaCampaignConfig,
   type MetaCampaignConfig as AnyMetaCampaignConfig,
@@ -108,7 +116,7 @@ import {
   conformCandidateOptimizer,
   type CandidateConformanceReceipt,
 } from "../optimizer-conformance.js";
-import { casRoot, runsRoot } from "../runs.js";
+import { casRoot, loadRunConfigFile, runsRoot } from "../runs.js";
 import { verifiedBootRuntimeDigest } from "../runtime-digest.js";
 import { runCommand } from "../supervisor.js";
 import { z } from "zod";
@@ -119,19 +127,150 @@ const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const PROXY_TRACE_FILE = "proxy-trace.ndjson";
 const CampaignPauseAuthorityFileV1 = z.object({
   version: z.literal(1),
+  revision: z.number().int().nonnegative().default(0),
   configHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   active: z.array(CampaignPauseSignal),
   resumed: z.array(CampaignResumeSignal),
 }).strict();
+type CampaignPauseAuthorityStateV1 = z.infer<typeof CampaignPauseAuthorityFileV1>;
+const CampaignPauseLockOwner = z.object({
+  pid: z.number().int().positive(),
+  createdAtMs: z.number().int().nonnegative(),
+  nonce: z.string().uuid(),
+}).strict();
+type CampaignPauseLockOwner = z.infer<typeof CampaignPauseLockOwner>;
+const CAMPAIGN_PAUSE_LOCK_WAIT_MS = 5_000;
 
+function systemErrorCode(error: unknown): string | undefined {
+  if (error === null || typeof error !== "object" || !("code" in error)) return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return systemErrorCode(error) === "EPERM";
+  }
+}
+
+
+export interface CampaignResumeProxy {
+  campaignPause(): Promise<CampaignPauseSignalRecord | undefined>;
+  dispatchRecovery(): Promise<DispatchRecoveryReport>;
+  resume(): Promise<ProxyPreflightResult>;
+  close(): Promise<void>;
+}
+
+export interface CampaignResumeCoordinatorRequest {
+  /** Exact durable authority file selected by the trusted command surface. */
+  readonly authorityPath: string;
+  readonly pauseId: string;
+  readonly root: string;
+  readonly env: NodeJS.ProcessEnv;
+}
+
+export interface CampaignResumeCoordinatorOptions {
+  readonly createProxy?: (config: ProxyConfig) => CampaignResumeProxy;
+}
+
+export interface CampaignResumeCoordinatorResult {
+  readonly pause: CampaignPauseSignalRecord;
+  readonly preflight: ProxyPreflightResult;
+}
+
+/**
+ * The sole campaign resume transition: reconstruct the originating run's
+ * frozen proxy routes, preflight both M2 routes while admission stays closed,
+ * and durably clear exactly the selected pause only after that proof passes.
+ */
+export async function coordinateCampaignResume(
+  request: CampaignResumeCoordinatorRequest,
+  options: CampaignResumeCoordinatorOptions = {},
+): Promise<CampaignResumeCoordinatorResult> {
+  const authority = DurableCampaignPauseAuthorityV1.openExisting(request.authorityPath);
+  const pause = authority.activePauses().find((candidate) => candidate.pauseId === request.pauseId);
+  if (pause === undefined) throw new UsageError(`campaign pause ${request.pauseId} is no longer active`);
+  const runDir = join(runsRoot(request.root), pause.runId);
+  const state = replayRun(runDir);
+  if (state.runId !== pause.runId || state.finished !== null) {
+    throw new UsageError(`campaign pause belongs to unavailable run ${pause.runId}`);
+  }
+  const config = loadRunConfigFile(runDir);
+  const budget = state.lastBudget ?? {
+    envelope: config.budget,
+    spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 },
+  };
+  const baseRemaining = {
+    tokens: Math.max(0, budget.envelope.maxTokens - budget.spent.tokens),
+    usd: Math.max(0, budget.envelope.maxUsd - budget.spent.usd),
+  };
+  let recoveryComplete = false;
+  let journalDeficit = { tokens: 0, usd: 0 };
+  const preflightSpend = { tokens: 0, usd: 0 };
+  const proxy = (options.createProxy ?? createProxy)({
+    runId: pause.runId,
+    routing: config.routing,
+    runDir,
+    casDir: casRoot(request.root),
+    upstreamBaseUrl: request.env["HONE_UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM,
+    ...(request.env["HONE_UPSTREAM_API_KEY"] === undefined
+      ? {}
+      : { upstreamApiKey: request.env["HONE_UPSTREAM_API_KEY"] }),
+    checkBudget: () => ({
+      allowed: true,
+      remaining: {
+        tokens: Math.max(0, baseRemaining.tokens - journalDeficit.tokens - preflightSpend.tokens),
+        usd: Math.max(0, baseRemaining.usd - journalDeficit.usd - preflightSpend.usd),
+      },
+    }),
+    // Recovery totals establish the durable journal floor. Settlements after
+    // recovery are accumulated so route 2 observes route 1's exact charge.
+    // The next trusted run resume reconciles the journal's absolute total.
+    recordSpend: (spend) => {
+      if (!recoveryComplete) return;
+      preflightSpend.tokens += spend.tokens;
+      preflightSpend.usd += spend.usd;
+    },
+    captureCampaignDispatchFence: () => authority.captureCampaignDispatchFence(),
+    validateCampaignDispatchFence: (epoch, validation) =>
+      authority.validateCampaignDispatchFence(epoch, validation),
+    recordCampaignPause: (signal) => authority.recordCampaignPause(signal),
+    recordCampaignResume: (signal) => authority.recordCampaignResume(signal),
+  });
+  try {
+    const recovery = await proxy.dispatchRecovery();
+    if (recovery.poisoned !== undefined) {
+      throw new UsageError(`campaign proxy dispatch journal is poisoned: ${recovery.poisoned}`);
+    }
+    journalDeficit = {
+      tokens: Math.max(0, recovery.chargedTotals.tokens - budget.spent.tokens),
+      usd: Math.max(0, recovery.chargedTotals.usd - budget.spent.usd),
+    };
+    recoveryComplete = true;
+    const localPause = await proxy.campaignPause();
+    if (localPause === undefined || localPause.pauseId !== pause.pauseId) {
+      throw new UsageError("run-local proxy pause does not match the campaign authority");
+    }
+    const preflight = await proxy.resume();
+    if (preflight.passed && authority.isCampaignPaused()) {
+      throw new UsageError("frozen-route preflight passed without durably resuming campaign authority");
+    }
+    return { pause, preflight };
+  } finally {
+    await proxy.close();
+  }
+}
 /** Durable campaign-wide pause set shared by every recursive runner/proxy. */
 export class DurableCampaignPauseAuthorityV1 implements CampaignPauseAuthority {
   private readonly active = new Map<string, CampaignPauseSignalRecord>();
   private readonly resumed = new Map<string, CampaignResumeSignalRecord>();
+  private revision = 0;
 
   private constructor(
     readonly path: string,
-    readonly configHash: Sha256Digest,
+    readonly configHash: string,
   ) {}
 
   static open(path: string, configHash: Sha256Digest): DurableCampaignPauseAuthorityV1 {
@@ -144,65 +283,181 @@ export class DurableCampaignPauseAuthorityV1 implements CampaignPauseAuthority {
     if (state.configHash !== configHash) {
       throw new UsageError(`campaign pause authority belongs to foreign config ${state.configHash}`);
     }
-    for (const signal of state.active) {
-      if (authority.active.has(signal.pauseId)) throw new Error(`duplicate active campaign pause ${signal.pauseId}`);
-      authority.active.set(signal.pauseId, signal);
-    }
-    for (const signal of state.resumed) {
-      if (authority.resumed.has(signal.pauseId) || authority.active.has(signal.pauseId)) {
-        throw new Error(`campaign pause ${signal.pauseId} has conflicting durable states`);
-      }
-      authority.resumed.set(signal.pauseId, signal);
-    }
+    authority.hydrate(state);
     return authority;
   }
 
+  static openExisting(path: string): DurableCampaignPauseAuthorityV1 {
+    if (!existsSync(path)) throw new UsageError(`campaign pause authority does not exist: ${path}`);
+    const state = CampaignPauseAuthorityFileV1.parse(JSON.parse(readFileSync(path, "utf8")));
+    const authority = new DurableCampaignPauseAuthorityV1(path, state.configHash);
+    authority.hydrate(state);
+    return authority;
+  }
+
+  private hydrate(state: CampaignPauseAuthorityStateV1): void {
+    this.active.clear();
+    this.resumed.clear();
+    this.revision = state.revision;
+    for (const signal of state.active) {
+      if (this.active.has(signal.pauseId)) throw new Error(`duplicate active campaign pause ${signal.pauseId}`);
+      this.active.set(signal.pauseId, signal);
+    }
+    for (const signal of state.resumed) {
+      if (this.resumed.has(signal.pauseId) || this.active.has(signal.pauseId)) {
+        throw new Error(`campaign pause ${signal.pauseId} has conflicting durable states`);
+      }
+      this.resumed.set(signal.pauseId, signal);
+    }
+  }
+
+  private refresh(): void {
+    const state = CampaignPauseAuthorityFileV1.parse(JSON.parse(readFileSync(this.path, "utf8")));
+    if (state.configHash !== this.configHash) {
+      throw new UsageError(`campaign pause authority belongs to foreign config ${state.configHash}`);
+    }
+    this.hydrate(state);
+  }
+
   isCampaignPaused(): boolean {
+    this.refresh();
     return this.active.size > 0;
+  }
+
+  activePauses(): readonly CampaignPauseSignalRecord[] {
+    this.refresh();
+    return [...this.active.values()].sort((left, right) => left.pauseId.localeCompare(right.pauseId));
+  }
+
+  captureCampaignDispatchFence(): { epoch: string; paused: boolean } {
+    this.refresh();
+    return { epoch: String(this.revision), paused: this.active.size > 0 };
+  }
+
+  validateCampaignDispatchFence(epoch: string, validation: { allowPaused: boolean }): boolean {
+    this.refresh();
+    return String(this.revision) === epoch && (validation.allowPaused || this.active.size === 0);
+  }
+
+
+  private withMutationLock<T>(operation: () => T): T {
+    const lockPath = `${this.path}.lock`;
+    const ownerPath = join(lockPath, "owner.json");
+    const deadline = Date.now() + CAMPAIGN_PAUSE_LOCK_WAIT_MS;
+    const waitCell = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+    while (true) {
+      let created = false;
+      try {
+        mkdirSync(lockPath, { mode: 0o700 });
+        created = true;
+        writeFileSync(ownerPath, `${canonicalJson({
+          pid: process.pid,
+          createdAtMs: Date.now(),
+          nonce: randomUUID(),
+        })}\n`, { mode: 0o600 });
+        break;
+      } catch (error) {
+        if (created) {
+          rmSync(lockPath, { recursive: true, force: true });
+          throw error;
+        }
+        if (systemErrorCode(error) !== "EEXIST") throw error;
+        let stale = false;
+        let observedOwner: CampaignPauseLockOwner | null = null;
+        try {
+          observedOwner = CampaignPauseLockOwner.parse(JSON.parse(readFileSync(ownerPath, "utf8")));
+          stale = !pidIsAlive(observedOwner.pid);
+        } catch {
+          try {
+            stale = Date.now() - statSync(lockPath).mtimeMs >= CAMPAIGN_PAUSE_LOCK_WAIT_MS;
+          } catch {
+            continue;
+          }
+        }
+        if (stale) {
+          throw new Error(
+            `campaign pause authority has a stale mutation lock; verify no campaign process is live, then remove ${lockPath}`,
+          );
+        }
+        if (Date.now() >= deadline) {
+          throw new Error(`campaign pause authority mutation lock is busy: ${lockPath}`);
+        }
+        Atomics.wait(waitCell, 0, 0, 10);
+      }
+    }
+    try {
+      this.refresh();
+      return operation();
+    } finally {
+      rmSync(lockPath, { recursive: true, force: true });
+    }
   }
 
   recordCampaignPause(signalInput: CampaignPauseSignalRecord): void {
     const signal = CampaignPauseSignal.parse(signalInput);
-    const active = this.active.get(signal.pauseId);
-    if (active !== undefined) {
-      if (canonicalJson(active) !== canonicalJson(signal)) {
-        throw new Error(`campaign pause ${signal.pauseId} changed identity`);
+    this.withMutationLock(() => {
+      const active = this.active.get(signal.pauseId);
+      if (active !== undefined) {
+        if (canonicalJson(active) !== canonicalJson(signal)) {
+          throw new Error(`campaign pause ${signal.pauseId} changed identity`);
+        }
+        return;
       }
-      return;
-    }
-    if (this.resumed.has(signal.pauseId)) {
-      throw new Error(`campaign pause ${signal.pauseId} was already durably resumed`);
-    }
-    this.active.set(signal.pauseId, signal);
-    this.persist();
+      if (this.resumed.has(signal.pauseId)) {
+        throw new Error(`campaign pause ${signal.pauseId} was already durably resumed`);
+      }
+      const nextActive = new Map(this.active);
+      nextActive.set(signal.pauseId, signal);
+      const nextRevision = this.revision + 1;
+      this.persistState(nextActive, this.resumed, nextRevision);
+      this.active.set(signal.pauseId, signal);
+      this.revision = nextRevision;
+    });
   }
 
   recordCampaignResume(signalInput: CampaignResumeSignalRecord): void {
     const signal = CampaignResumeSignal.parse(signalInput);
-    const prior = this.resumed.get(signal.pauseId);
-    if (prior !== undefined) {
-      if (canonicalJson(prior) !== canonicalJson(signal)) {
-        throw new Error(`campaign resume ${signal.pauseId} changed identity`);
+    this.withMutationLock(() => {
+      const prior = this.resumed.get(signal.pauseId);
+      if (prior !== undefined) {
+        if (canonicalJson(prior) !== canonicalJson(signal)) {
+          throw new Error(`campaign resume ${signal.pauseId} changed identity`);
+        }
+        return;
       }
-      return;
-    }
-    const paused = this.active.get(signal.pauseId);
-    if (paused === undefined || paused.runId !== signal.runId) {
-      throw new Error(`campaign resume ${signal.pauseId} has no matching active pause`);
-    }
-    this.active.delete(signal.pauseId);
-    this.resumed.set(signal.pauseId, signal);
-    this.persist();
+      const paused = this.active.get(signal.pauseId);
+      if (paused === undefined || paused.runId !== signal.runId) {
+        throw new Error(`campaign resume ${signal.pauseId} has no matching active pause`);
+      }
+      const nextActive = new Map(this.active);
+      const nextResumed = new Map(this.resumed);
+      nextActive.delete(signal.pauseId);
+      nextResumed.set(signal.pauseId, signal);
+      const nextRevision = this.revision + 1;
+      this.persistState(nextActive, nextResumed, nextRevision);
+      this.active.delete(signal.pauseId);
+      this.resumed.set(signal.pauseId, signal);
+      this.revision = nextRevision;
+    });
   }
 
   private persist(): void {
+    this.persistState(this.active, this.resumed, this.revision);
+  }
+
+  private persistState(
+    active: ReadonlyMap<string, CampaignPauseSignalRecord>,
+    resumed: ReadonlyMap<string, CampaignResumeSignalRecord>,
+    revision: number,
+  ): void {
     const byPauseId = <T extends { pauseId: string }>(left: T, right: T): number =>
       left.pauseId.localeCompare(right.pauseId);
     writeFileDurable(this.path, `${canonicalJson({
       version: 1,
+      revision,
       configHash: this.configHash,
-      active: [...this.active.values()].sort(byPauseId),
-      resumed: [...this.resumed.values()].sort(byPauseId),
+      active: [...active.values()].sort(byPauseId),
+      resumed: [...resumed.values()].sort(byPauseId),
     })}\n`);
     chmodSync(this.path, 0o600);
   }
@@ -531,7 +786,10 @@ export class CliChildSupervisor implements MetaChildSupervisor {
   ) {}
 
   async run(request: MetaChildRunRequest): Promise<MetaChildRunOutcome> {
-    return await this.runLaunched(request);
+    return await this.runLaunched(
+      request,
+      this.config.version === 2 ? metaCampaignConfigHash(this.config) : undefined,
+    );
   }
 
   async runLaunched(
@@ -561,6 +819,9 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         promotion: this.config.promotion,
       }, null, 2)}\n`);
       chmodSync(configPath, 0o600);
+      if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
+        return this.notRun(request, "campaign child admission paused before durable run start", runDir);
+      }
       const code = await runCommand(
         [location.dir, "--headless", "--config", configPath, "--optimizer-artifact", request.sourceArtifact],
         this.childIo(),
@@ -591,6 +852,9 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         return this.notRun(request, "child durable state cannot be replayed", runDir);
       }
       if (!terminal) {
+        if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
+          return this.notRun(request, "campaign child admission paused before durable run resume", runDir);
+        }
         const code = await runCommand(
           [location.dir, "--headless", "--resume", "--optimizer-artifact", request.sourceArtifact],
           this.childIo(),
@@ -2319,6 +2583,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       optimizerBaseSnapshot: rootSnapshot,
       proxyRole: "outer-optimizer",
       campaignPauseAuthority,
+      campaignConfigHash: configHash,
       // The synthetic outer task is trusted campaign machinery rather than a
       // corpus capsule; its manifest bytes were validated before campaign seal.
       admissionReview: "off",

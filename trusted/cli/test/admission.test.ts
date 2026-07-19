@@ -18,6 +18,7 @@ import {
   runCommand as cliRunCommand,
   trustedRuntimeDigest,
 } from "../src/supervisor.js";
+import type { CampaignPauseAuthority } from "../src/types.js";
 import { writeRunConfigFile } from "../src/runs.js";
 import {
   CAP_ID,
@@ -273,6 +274,64 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
       join(runsDir, readdirOnly(runsDir), "capsule-assets", "assets", "train", "data.txt"),
       "utf8",
     )).toBe("train\n");
+  });
+
+  it("leaves a campaign run nonterminal when a pause lands before finalization", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const configHash = `sha256:${"c".repeat(64)}` as const;
+    let pauseChecks = 0;
+    const authority: CampaignPauseAuthority = {
+      path: join(root, "campaign-pause.v1.json"),
+      configHash,
+      isCampaignPaused: () => {
+        pauseChecks += 1;
+        return pauseChecks >= 3;
+      },
+      recordCampaignPause: () => undefined,
+      recordCampaignResume: () => undefined,
+    };
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    expect(await cliRunCommand(
+      ["capsule", "--headless", "--backend", "stub"],
+      io,
+      {
+        campaignConfigHash: configHash,
+        campaignPauseAuthority: authority,
+        proxyRole: "inner-capsule-improvement",
+      },
+    )).toBe(1);
+    const runsDir = join(root, ".hone-runs");
+    const runDir = join(runsDir, readdirOnly(runsDir));
+    const eventTypes = readFileSync(join(runDir, "events.ndjson"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line)["type"]);
+    expect(eventTypes).toContain("run.started");
+    expect(eventTypes).not.toContain("run.finished");
+  });
+
+  it("refuses a generic resume of a campaign-sealed child before appending any event", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const events = fixtureEvents({
+      runId: "run_campaign_child",
+      baselineHash: fakeHash("b"),
+      bestHash: fakeHash("d"),
+      finished: false,
+    });
+    const started = events[0];
+    if (started?.type !== "run.started") throw new Error("fixture is missing run.started");
+    events[0] = { ...started, campaignConfigHash: fakeHash("c") };
+    const runDir = writeEvents(root, "run_campaign_child", events);
+    writeCapsuleSnapshot(runDir, manifestObject());
+    writeRunConfigFile(runDir, runConfigFixture());
+    const before = readFileSync(join(runDir, "events.ndjson"), "utf8");
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    await expect(
+      cliRunCommand(["capsule", "--headless", "--backend", "stub", "--resume"], io),
+    ).rejects.toThrow(/exact trusted campaign config hash/);
+    expect(readFileSync(join(runDir, "events.ndjson"), "utf8")).toBe(before);
   });
 
   it("hone run --resume refuses a capsule that drifted since the run started", async () => {

@@ -434,6 +434,9 @@ export class MetaJournalV1 {
     const identity = MetaWorkIdentityV1.parse(identityInput);
     this.validateIdentity(identity);
     const envelope = envelopeInput === undefined ? null : EnvelopeRequestV1.parse(envelopeInput);
+    if (this.config.version === 2 && envelope === null) {
+      throw new Error("recursive child reservation requires a durable resource-envelope binding");
+    }
     if (envelope !== null) this.validateEnvelopeBinding(identity, envelope);
     const workKey = metaWorkKey(this.configHashValue, identity);
     const duplicate = this.reservationsByKey.get(workKey);
@@ -711,6 +714,9 @@ export class MetaJournalV1 {
         throw new Error("meta journal reservation identity is corrupt");
       }
       if (reservation.envelope === null) {
+        if (this.config.version === 2) {
+          throw new Error("recursive meta journals require every reservation to carry its durable envelope binding");
+        }
         if (!sameJson(reservation.reserved, this.config.budgets.child)) {
           throw new Error("legacy meta journal reservation is not the full registered child envelope");
         }
