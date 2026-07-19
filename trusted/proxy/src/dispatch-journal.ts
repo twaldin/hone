@@ -7,6 +7,7 @@ import {
   M2_OUTER_MODEL_ROUTE,
   type CampaignPauseReason,
   type CampaignPauseSignal,
+  type CampaignResumeSignal,
   type ProviderAttemptClassification,
   type ProxyPreflightObservation,
 } from "@hone/schema";
@@ -50,6 +51,8 @@ import {
 export const DISPATCH_JOURNAL_VERSION = 1;
 export const DISPATCH_JOURNAL_FILE = "proxy-dispatch.ndjson";
 
+export type DispatchPurpose = "request" | "preflight";
+
 /** Pre-dispatch reservation fact: identity + admitted worst-case ceiling. */
 export interface DispatchIntentRecord {
   v: number;
@@ -64,6 +67,8 @@ export interface DispatchIntentRecord {
   requestedRoute: string;
   /** One-based provider attempt within the client request or trusted preflight. */
   attempt: number;
+  /** Trusted call class; resume receipts may bind only to `preflight` attempts. */
+  purpose: DispatchPurpose;
   /** ISO timestamp the attempt arrived at the proxy. */
   requestAt: string;
   /** sha256 (hex) of the exact forwarded request body — reconciliation identity. */
@@ -98,6 +103,8 @@ export interface DispatchSettleRecord {
   /** Returned provider identity, null when no response identity was available. */
   returnedModel: string | null;
   classification: ProviderAttemptClassification;
+  /** Upstream HTTP status, null when no response headers were accepted. */
+  status: number | null;
   outcome: DispatchSettleOutcome;
   /**
    * True iff the dispatch's trace obligation was met: its CAS bodies and
@@ -133,12 +140,9 @@ export interface DispatchPauseRecord extends CampaignPauseSignal {
 }
 
 /** Durable proof that the active pause was cleared only after both frozen routes passed preflight. */
-export interface DispatchResumeRecord {
+export interface DispatchResumeRecord extends CampaignResumeSignal {
   v: number;
   kind: "resume";
-  pauseId: string;
-  at: string;
-  observations: [ProxyPreflightObservation, ProxyPreflightObservation];
 }
 
 export type DispatchRecord =
@@ -181,6 +185,7 @@ function parsePreflightObservation(value: unknown): ProxyPreflightObservation | 
   if (
     typeof role !== "string" ||
     M2_PREFLIGHT_ROLES[role as ProxyPreflightObservation["role"]] !== true ||
+    !(value["dispatchId"] === null || nonEmptyString(value["dispatchId"])) ||
     !nonEmptyString(value["requestedRoute"]) ||
     !(value["returnedModel"] === null || nonEmptyString(value["returnedModel"])) ||
     !(value["status"] === null || (typeof value["status"] === "number" && Number.isInteger(value["status"]))) ||
@@ -189,6 +194,7 @@ function parsePreflightObservation(value: unknown): ProxyPreflightObservation | 
     return undefined;
   }
   return {
+    dispatchId: value["dispatchId"],
     role: role as ProxyPreflightObservation["role"],
     requestedRoute: value["requestedRoute"],
     returnedModel: value["returnedModel"],
@@ -216,6 +222,11 @@ const PAUSE_REASONS: Record<CampaignPauseReason, true> = {
   "returned-model-drift": true,
 };
 
+const DISPATCH_PURPOSES: Record<DispatchPurpose, true> = {
+  request: true,
+  preflight: true,
+};
+
 /**
  * Strict parse of one terminated journal line. Throws with a reason on ANY
  * deviation — an unreadable record means the journal's history is unknown,
@@ -241,6 +252,7 @@ export function parseDispatchRecord(line: string): DispatchRecord {
     case "intent": {
       const requestedRoute = raw["requestedRoute"] ?? raw["model"];
       const attempt = raw["attempt"] ?? 1;
+      const purpose = raw["purpose"] ?? "request";
       if (
         !nonEmptyString(raw["id"]) ||
         !nonEmptyString(raw["runId"]) ||
@@ -248,6 +260,8 @@ export function parseDispatchRecord(line: string): DispatchRecord {
         !nonEmptyString(raw["model"]) ||
         !nonEmptyString(requestedRoute) ||
         !positiveInt(attempt) ||
+        typeof purpose !== "string" ||
+        DISPATCH_PURPOSES[purpose as DispatchPurpose] !== true ||
         !nonEmptyString(raw["requestAt"]) ||
         !nonEmptyString(raw["requestSha256"]) ||
         !nonNegInt(raw["promptTokens"]) ||
@@ -266,6 +280,7 @@ export function parseDispatchRecord(line: string): DispatchRecord {
         model: raw["model"],
         requestedRoute,
         attempt,
+        purpose: purpose as DispatchPurpose,
         requestAt: raw["requestAt"],
         requestSha256: raw["requestSha256"],
         promptTokens: raw["promptTokens"],
@@ -278,11 +293,13 @@ export function parseDispatchRecord(line: string): DispatchRecord {
       const outcome = raw["outcome"];
       const returnedModel = raw["returnedModel"] ?? null;
       const classification = raw["classification"] ?? "success";
+      const status = raw["status"] ?? null;
       if (
         !nonEmptyString(raw["id"]) ||
         !nonNegInt(raw["tokens"]) ||
         !nonNegNum(raw["usd"]) ||
         !(returnedModel === null || nonEmptyString(returnedModel)) ||
+        !(status === null || (typeof status === "number" && Number.isInteger(status))) ||
         typeof classification !== "string" ||
         ATTEMPT_CLASSIFICATIONS[classification as ProviderAttemptClassification] !== true ||
         typeof outcome !== "string" ||
@@ -300,6 +317,7 @@ export function parseDispatchRecord(line: string): DispatchRecord {
         usd: raw["usd"],
         returnedModel,
         classification: classification as ProviderAttemptClassification,
+        status,
         outcome: outcome as DispatchSettleOutcome,
         traced: raw["traced"],
         ...(typeof raw["traceError"] === "string" ? { traceError: raw["traceError"] } : {}),
@@ -362,7 +380,9 @@ export function parseDispatchRecord(line: string): DispatchRecord {
     }
     case "resume": {
       if (
+        raw["version"] !== 1 ||
         !nonEmptyString(raw["pauseId"]) ||
+        !nonEmptyString(raw["runId"]) ||
         !nonEmptyString(raw["at"]) ||
         !Array.isArray(raw["observations"]) ||
         raw["observations"].length !== 2
@@ -377,7 +397,9 @@ export function parseDispatchRecord(line: string): DispatchRecord {
       return {
         v: DISPATCH_JOURNAL_VERSION,
         kind: "resume",
+        version: 1,
         pauseId: raw["pauseId"],
+        runId: raw["runId"],
         at: raw["at"],
         observations: [first, second],
       };
@@ -491,19 +513,50 @@ export async function readDispatchJournalState(filePath: string): Promise<Dispat
         const inner = record.observations.find(
           (observation) => observation.role === "inner-capsule-improvement",
         );
+        const hasDurablePreflightProof = (
+          observation: ProxyPreflightObservation | undefined,
+          expectedRole: ProxyPreflightObservation["role"],
+          expectedRoute: string,
+        ): boolean => {
+          if (
+            observation === undefined ||
+            observation.dispatchId === null ||
+            observation.role !== expectedRole ||
+            observation.requestedRoute !== expectedRoute ||
+            observation.returnedModel !== expectedRoute ||
+            observation.status === null ||
+            observation.status < 200 ||
+            observation.status > 299 ||
+            !observation.passed
+          ) {
+            return false;
+          }
+          const intent = intents.get(observation.dispatchId);
+          const settlement = settlements.get(observation.dispatchId);
+          return (
+            intent?.purpose === "preflight" &&
+            intent.runId === record.runId &&
+            intent.role === expectedRole &&
+            intent.requestedRoute === expectedRoute &&
+            settlement?.kind === "settle" &&
+            settlement.status === observation.status &&
+            settlement.returnedModel === expectedRoute &&
+            settlement.classification === "success" &&
+            settlement.traced
+          );
+        };
         if (activePause === undefined) {
           poison(`resume without active pause ${record.pauseId}`);
-        } else if (record.pauseId !== activePause.pauseId) {
+        } else if (
+          record.pauseId !== activePause.pauseId ||
+          record.runId !== activePause.runId
+        ) {
           poison(`resume ${record.pauseId} does not match active pause ${activePause.pauseId}`);
         } else if (
-          outer?.requestedRoute !== M2_OUTER_MODEL_ROUTE ||
-          outer.returnedModel !== M2_OUTER_MODEL_ROUTE ||
-          !outer.passed ||
-          inner?.requestedRoute !== M2_INNER_MODEL_ROUTE ||
-          inner.returnedModel !== M2_INNER_MODEL_ROUTE ||
-          !inner.passed
+          !hasDurablePreflightProof(outer, "outer-optimizer", M2_OUTER_MODEL_ROUTE) ||
+          !hasDurablePreflightProof(inner, "inner-capsule-improvement", M2_INNER_MODEL_ROUTE)
         ) {
-          poison(`resume ${record.pauseId} lacks both frozen-route identity proofs`);
+          poison(`resume ${record.pauseId} lacks both durable frozen-route preflight proofs`);
         } else {
           activePause = undefined;
         }

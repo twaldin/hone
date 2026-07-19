@@ -11,7 +11,7 @@ import {
   promptTokenUpperBound,
   type BudgetDecision,
   type ProxyConfig,
-  type ProxyHandle,
+  type DurablePauseProxyHandle,
   type SpendRecord,
 } from "../src/index.js";
 
@@ -179,7 +179,7 @@ async function startMockUpstream(): Promise<MockUpstream> {
 // ---------------------------------------------------------------------------
 
 interface Ctx {
-  proxy: ProxyHandle;
+  proxy: DurablePauseProxyHandle;
   port: number;
   runDir: string;
   casDir: string;
@@ -214,6 +214,8 @@ async function setup(overrides: Partial<ProxyConfig> = {}): Promise<Ctx> {
       spends.push(s);
     },
     ...overrides,
+    recordCampaignPause: overrides.recordCampaignPause ?? (() => undefined),
+    recordCampaignResume: overrides.recordCampaignResume ?? (() => undefined),
   });
   const port = await proxy.listenTcp(0);
   cleanups.push(async () => {
@@ -294,10 +296,16 @@ describe("auth", () => {
     expect(ctx.upstream.calls).toHaveLength(0);
   });
 
-  it("mints one token per configured role", async () => {
+  it("mints configured roles plus every frozen M2 capability", async () => {
     const ctx = await setup();
     const roles = ctx.proxy.tokens.map((t) => t.role).sort();
-    expect(roles).toEqual(["evaluator", "mutation"]);
+    expect(roles).toEqual([
+      "capsule-author",
+      "evaluator",
+      "inner-capsule-improvement",
+      "mutation",
+      "outer-optimizer",
+    ]);
     for (const t of ctx.proxy.tokens) {
       expect(t.runId).toBe("run_test");
       expect(t.token.length).toBeGreaterThanOrEqual(32);
@@ -548,6 +556,8 @@ describe("unix socket", () => {
       recordSpend: (s) => {
         spends.push(s);
       },
+      recordCampaignPause: () => undefined,
+      recordCampaignResume: () => undefined,
     });
     await proxy.listenUnix(socketPath);
     expect((await stat(socketPath)).mode & 0o777).toBe(0o666);
@@ -606,6 +616,8 @@ describe("live smoke (skip-if-unreachable)", () => {
       recordSpend: (s) => {
         spends.push(s);
       },
+      recordCampaignPause: () => undefined,
+      recordCampaignResume: () => undefined,
     });
     const port = await proxy.listenTcp(0);
     cleanups.push(() => proxy.close());

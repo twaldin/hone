@@ -18,7 +18,7 @@ import {
   type DispatchSettleRecord,
   type DurableIo,
   type ProxyConfig,
-  type ProxyHandle,
+  type DurablePauseProxyHandle,
   type SpendRecord,
 } from "../src/index.js";
 
@@ -116,7 +116,7 @@ async function startUpstream(journalPathRef: { path: string }): Promise<MockUpst
 // ---------------------------------------------------------------------------
 
 interface Boot {
-  proxy: ProxyHandle;
+  proxy: DurablePauseProxyHandle;
   port: number;
   runDir: string;
   casDir: string;
@@ -156,6 +156,8 @@ async function boot(
       spends.push(s);
     },
     ...overrides,
+    recordCampaignPause: overrides.recordCampaignPause ?? (() => undefined),
+    recordCampaignResume: overrides.recordCampaignResume ?? (() => undefined),
   });
   const port = await proxy.listenTcp(0);
   cleanups.push(async () => {
@@ -353,10 +355,20 @@ describe("dispatch journal — intent barrier", () => {
 
     const upstream = await startUpstream(pathRef);
     cleanups.push(() => upstream.close());
-    const b = await boot(dirs, upstream.port);
+    const replayedPauseIds: string[] = [];
+    const resumedPauseIds: string[] = [];
+    const b = await boot(dirs, upstream.port, {
+      recordCampaignPause: (signal) => {
+        replayedPauseIds.push(signal.pauseId);
+      },
+      recordCampaignResume: (signal) => {
+        resumedPauseIds.push(signal.pauseId);
+      },
+    });
     const recovery = await b.proxy.dispatchRecovery();
     expect(recovery.poisoned).toBeUndefined();
     expect(recovery.pause?.reason).toBe("provider-transport");
+    expect(replayedPauseIds).toEqual([recovery.pause?.pauseId]);
     expect(b.spends).toHaveLength(0);
     const blocked = await postCompletions(b, { messages: [], max_tokens: 5 });
     expect(blocked.status).toBe(503);
@@ -364,6 +376,7 @@ describe("dispatch journal — intent barrier", () => {
 
     const preflight = await b.proxy.resume();
     expect(preflight.passed).toBe(true);
+    expect(resumedPauseIds).toEqual([recovery.pause?.pauseId]);
     const ok = await postCompletions(b, { messages: [], max_tokens: 5 });
     expect(ok.status).toBe(200);
     await ok.text();
@@ -773,6 +786,63 @@ describe("dispatch journal — torn tails and corruption", () => {
     expect((await postCompletions(b, { messages: [], max_tokens: 5 })).status).toBe(503);
     expect(upstream.calls).toHaveLength(0);
     await expect(b.proxy.close()).rejects.toThrow(/dispatch authority poisoned/);
+  });
+
+  it("rejects a forged resume receipt with no durable preflight dispatch proofs", async () => {
+    const dirs = await freshDirs();
+    await mkdir(dirs.runDir, { recursive: true });
+    const at = new Date().toISOString();
+    const pauseId = "pause_forged_resume";
+    const pause = {
+      v: DISPATCH_JOURNAL_VERSION,
+      kind: "pause",
+      version: 1,
+      pauseId,
+      runId: "run_dispatch",
+      reason: "provider-rate-limit",
+      at,
+      role: "outer-optimizer",
+      requestedRoute: "gpt-5.6-sol",
+      returnedModel: null,
+      status: 429,
+      attempt: 1,
+    };
+    const resume = {
+      v: DISPATCH_JOURNAL_VERSION,
+      kind: "resume",
+      version: 1,
+      pauseId,
+      runId: "run_dispatch",
+      at,
+      observations: [
+        {
+          role: "outer-optimizer",
+          dispatchId: "missing_outer_preflight",
+          requestedRoute: "gpt-5.6-sol",
+          returnedModel: "gpt-5.6-sol",
+          status: 200,
+          passed: true,
+        },
+        {
+          role: "inner-capsule-improvement",
+          dispatchId: "missing_inner_preflight",
+          requestedRoute: "gpt-5.6-terra",
+          returnedModel: "gpt-5.6-terra",
+          status: 200,
+          passed: true,
+        },
+      ],
+    };
+    const journalPath = join(dirs.runDir, DISPATCH_JOURNAL_FILE);
+    await writeFile(
+      journalPath,
+      `${JSON.stringify(pause)}\n${JSON.stringify(resume)}\n`,
+      "utf8",
+    );
+
+    const state = await readDispatchJournalState(journalPath);
+    expect(state.poisoned).toMatch(/lacks both durable frozen-route preflight proofs/);
+    expect(state.pause?.pauseId).toBe(pauseId);
   });
 });
 

@@ -6,6 +6,8 @@ import {
   M2_INNER_MODEL_ROUTE,
   M2_OUTER_MODEL_ROUTE,
   ProxyTraceRecord,
+  type CampaignPauseSignal,
+  type CampaignResumeSignal,
 } from "@hone/schema";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -14,7 +16,7 @@ import {
   readDispatchJournalState,
   type DispatchIntentRecord,
   type DispatchSettleRecord,
-  type ProxyHandle,
+  type DurablePauseProxyHandle,
   type SpendRecord,
 } from "../src/index.js";
 
@@ -30,6 +32,11 @@ interface UpstreamReply {
   totalTokens?: number;
   malformed?: boolean;
   failover?: boolean;
+  emptyChoices?: boolean;
+  nullChoice?: boolean;
+  location?: string;
+  paddingBytes?: number;
+  sseDriftReset?: boolean;
 }
 
 interface ScriptedUpstream {
@@ -60,9 +67,21 @@ async function startUpstream(
       };
       calls.push(request);
       const reply = responder(request, calls.length - 1);
+      if (reply.sseDriftReset) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(
+          `data: ${JSON.stringify({
+            model: reply.model ?? "drifted-model",
+            choices: [{ index: 0, delta: { content: "partial" } }],
+          })}\n\n`,
+          () => res.destroy(),
+        );
+        return;
+      }
       res.writeHead(reply.status, {
         "content-type": "application/json",
         ...(reply.failover ? { "x-vibeproxy-failover": "true" } : {}),
+        ...(reply.location !== undefined ? { location: reply.location } : {}),
       });
       const total = reply.totalTokens ?? 10;
       res.end(JSON.stringify({
@@ -71,8 +90,13 @@ async function startUpstream(
         model: reply.model ?? request.model,
         choices: reply.malformed
           ? { invalid: true }
-          : [{ index: 0, message: { role: "assistant", content: "HONE_PREFLIGHT_OK" }, finish_reason: "stop" }],
+          : reply.emptyChoices
+            ? []
+            : reply.nullChoice
+              ? [null]
+              : [{ index: 0, message: { role: "assistant", content: "HONE_PREFLIGHT_OK" }, finish_reason: "stop" }],
         usage: { prompt_tokens: Math.max(1, total - 1), completion_tokens: 1, total_tokens: total },
+        ...(reply.paddingBytes === undefined ? {} : { padding: "x".repeat(reply.paddingBytes) }),
       }));
     });
   });
@@ -93,11 +117,13 @@ async function startUpstream(
 }
 
 interface Harness {
-  proxy: ProxyHandle;
+  proxy: DurablePauseProxyHandle;
   port: number;
   runDir: string;
   spends: SpendRecord[];
   upstream: ScriptedUpstream;
+  pauses: CampaignPauseSignal[];
+  resumes: CampaignResumeSignal[];
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -107,11 +133,14 @@ afterEach(async () => {
 
 async function setup(
   responder: (request: UpstreamRequest, index: number) => UpstreamReply,
+  options: { maxResponseBytes?: number } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "hone-provider-policy-"));
   const runDir = join(root, "run");
   const upstream = await startUpstream(responder);
   const spends: SpendRecord[] = [];
+  const pauses: CampaignPauseSignal[] = [];
+  const resumes: CampaignResumeSignal[] = [];
   const proxy = createProxy({
     runId: "run_provider_policy",
     routing: {
@@ -125,6 +154,15 @@ async function setup(
     recordSpend(spend) {
       spends.push(spend);
     },
+    recordCampaignPause: (signal) => {
+      pauses.push(signal);
+    },
+    recordCampaignResume: (signal) => {
+      resumes.push(signal);
+    },
+    ...(options.maxResponseBytes === undefined
+      ? {}
+      : { limits: { maxResponseBytes: options.maxResponseBytes } }),
     retryRandom: () => 0,
   });
   const port = await proxy.listenTcp(0);
@@ -132,7 +170,7 @@ async function setup(
     await proxy.close().catch(() => undefined);
     await upstream.close();
   });
-  return { proxy, port, runDir, spends, upstream };
+  return { proxy, port, runDir, spends, upstream, pauses, resumes };
 }
 
 function completion(harness: Harness, role = "outer-optimizer"): Promise<Response> {
@@ -164,6 +202,8 @@ describe("frozen provider failure policy", () => {
     expect(harness.upstream.calls).toHaveLength(1);
     expect((await harness.proxy.campaignPause())?.reason).toBe(reason);
     expect(harness.spends).toEqual([{ tokens: 10, usd: 0 }]);
+    expect(harness.pauses).toHaveLength(1);
+    expect(harness.pauses[0]?.reason).toBe(reason);
   });
 
   it("an explicit proxy failover sentinel pauses immediately", async () => {
@@ -171,6 +211,52 @@ describe("frozen provider failure policy", () => {
     expect((await completion(harness)).status).toBe(503);
     expect(harness.upstream.calls).toHaveLength(1);
     expect((await harness.proxy.campaignPause())?.reason).toBe("proxy-failover");
+  });
+
+  it("never follows a provider-directed redirect", async () => {
+    const fallbackCalls = { count: 0 };
+    const fallback = http.createServer((req, res) => {
+      fallbackCalls.count += 1;
+      req.resume();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => fallback.listen(0, "127.0.0.1", resolve));
+    const address = fallback.address();
+    const fallbackPort = typeof address === "object" && address !== null ? address.port : 0;
+    cleanups.push(() => new Promise<void>((resolve) => {
+      fallback.close(() => resolve());
+      fallback.closeAllConnections();
+    }));
+    const harness = await setup(() => ({
+      status: 307,
+      location: `http://127.0.0.1:${fallbackPort}/paid-fallback`,
+    }));
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect(fallbackCalls.count).toBe(0);
+    expect((await harness.proxy.campaignPause())?.reason).toBe("proxy-failover");
+  });
+
+  it("observed SSE model drift pauses immediately even when the stream resets", async () => {
+    const harness = await setup((_request, index) =>
+      index === 0
+        ? { status: 200, model: M2_INNER_MODEL_ROUTE, sseDriftReset: true }
+        : { status: 200 },
+    );
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect((await harness.proxy.campaignPause())?.reason).toBe("returned-model-drift");
+  });
+
+  it("an oversized 429 retains status-based pause classification", async () => {
+    const harness = await setup(
+      () => ({ status: 429, paddingBytes: 4096 }),
+      { maxResponseBytes: 128 },
+    );
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect((await harness.proxy.campaignPause())?.reason).toBe("provider-rate-limit");
   });
 
   it("one 5xx is retried, both attempt usages are charged and journaled, then success returns", async () => {
@@ -233,6 +319,17 @@ describe("frozen provider failure policy", () => {
     expect(await harness.proxy.campaignPause()).toBeUndefined();
     expect(harness.spends).toEqual([{ tokens: 10, usd: 0 }]);
   });
+
+  it.each([
+    ["empty", { emptyChoices: true }],
+    ["null", { nullChoice: true }],
+  ] as const)("a successful response with %s choices is candidate invalidity", async (_label, shape) => {
+    const harness = await setup(() => ({ status: 200, ...shape }));
+    const response = await completion(harness);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-hone-attempt-classification")).toBe("candidate-invalidity");
+    expect(await harness.proxy.campaignPause()).toBeUndefined();
+  });
 });
 
 describe("M2 route preflight and frozen role routing", () => {
@@ -244,8 +341,14 @@ describe("M2 route preflight and frozen role routing", () => {
       role: "outer-optimizer",
       route: M2_OUTER_MODEL_ROUTE,
     });
+    expect((await completion(harness, "capsule-author")).status).toBe(200);
+    expect(harness.upstream.calls[1]).toMatchObject({
+      model: M2_OUTER_MODEL_ROUTE,
+      role: "capsule-author",
+      route: M2_OUTER_MODEL_ROUTE,
+    });
     expect((await completion(harness, "inner-capsule-improvement")).status).toBe(200);
-    expect(harness.upstream.calls[1]?.model).toBe(M2_INNER_MODEL_ROUTE);
+    expect(harness.upstream.calls[2]?.model).toBe(M2_INNER_MODEL_ROUTE);
   });
 
   it("preflight passes only when both frozen routes return their exact identities", async () => {
@@ -266,5 +369,49 @@ describe("M2 route preflight and frozen role routing", () => {
     expect(failed.observations[0]?.passed).toBe(true);
     expect(failed.observations[1]?.passed).toBe(false);
     expect((await harness.proxy.campaignPause())?.reason).toBe("returned-model-drift");
+  });
+
+  it("stops preflight immediately when the first frozen route confirms a pause", async () => {
+    const harness = await setup(() => ({ status: 429 }));
+    const result = await harness.proxy.preflight();
+    expect(result.passed).toBe(false);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect(result.observations[0]).toMatchObject({
+      role: "outer-optimizer",
+      passed: false,
+    });
+    expect(result.observations[1]).toEqual({
+      role: "inner-capsule-improvement",
+      dispatchId: null,
+      requestedRoute: M2_INNER_MODEL_ROUTE,
+      returnedModel: null,
+      status: null,
+      passed: false,
+    });
+  });
+
+  it("single-flights concurrent resume and binds its receipt to both preflight dispatches", async () => {
+    const harness = await setup(() => ({ status: 429 }));
+    expect((await completion(harness)).status).toBe(503);
+    harness.upstream.setResponder(() => ({ status: 200 }));
+
+    const [first, second] = await Promise.all([
+      harness.proxy.resume(),
+      harness.proxy.resume(),
+    ]);
+    expect(first.passed).toBe(true);
+    expect(second).toEqual(first);
+    expect(harness.upstream.calls).toHaveLength(3);
+    expect(harness.resumes).toHaveLength(1);
+    expect(harness.resumes[0]?.observations.every(
+      (observation) => observation.dispatchId !== null,
+    )).toBe(true);
+
+    const state = await readDispatchJournalState(
+      join(harness.runDir, DISPATCH_JOURNAL_FILE),
+    );
+    expect(state.poisoned).toBeUndefined();
+    expect(state.pause).toBeUndefined();
+    expect(state.records.filter((record) => record.kind === "resume")).toHaveLength(1);
   });
 });
