@@ -1,6 +1,7 @@
 export * from "./capsule.js";
 export * from "./canonical.js";
 export * from "./ordering.js";
+export * from "./admission.js";
 export * from "./evaluator.js";
 export * from "./broker.js";
 export * from "./proxy.js";
