@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-H08",
+  "capsule": "brotli-codec",
+  "cohort": "terminal",
+  "stratum": "oss",
+  "panel": null,
+  "status": "pending-authoring",
+  "objective": "Improve compression+decompression throughput on frozen web/text/binary corpora.",
+  "scalarAndGates": "Geometric mean throughput; exact round trip, upstream tests, compressed size no worse than baseline by >0.25%.",
+  "source": {
+    "repository": "google/brotli",
+    "revision": "037b70e2ad03b20480e6407ed5851e0f114b67a7",
+    "url": "https://github.com/google/brotli/commit/037b70e2ad03b20480e6407ed5851e0f114b67a7",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

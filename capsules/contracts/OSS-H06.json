@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-H06",
+  "capsule": "tree-sitter-parse",
+  "cohort": "terminal",
+  "stratum": "oss",
+  "panel": null,
+  "status": "pending-authoring",
+  "objective": "Improve full and incremental JS/Rust/Python parsing using crates/cli/benches/benchmark.rs.",
+  "scalarAndGates": "Geometric mean bytes/sec; exact trees/edit results, parser tests, peak RSS \u2264 baseline +2%.",
+  "source": {
+    "repository": "tree-sitter/tree-sitter",
+    "revision": "1ffd612be56259938c47507bbe953af739c7f640",
+    "url": "https://github.com/tree-sitter/tree-sitter/commit/1ffd612be56259938c47507bbe953af739c7f640",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

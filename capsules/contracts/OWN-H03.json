@@ -1,0 +1,23 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-H03",
+  "capsule": "floyd-custom-scoreboard-render",
+  "cohort": "terminal",
+  "stratum": "owner",
+  "panel": null,
+  "status": "pending-authoring",
+  "objective": "Minimize Custom Scoreboard p99 frame cost and allocations while preserving exact layout and draw commands.",
+  "source": {
+    "visibility": "private",
+    "repository": "Floyd Addons",
+    "revision": "7c7360d4f68bf4505be64abc258ecf3067bb8dcf",
+    "referenceCommit": "ad9358c8"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "private-redacted"
+}

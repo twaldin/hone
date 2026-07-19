@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-T04",
+  "capsule": "zstd-codec",
+  "cohort": "train",
+  "stratum": "oss",
+  "panel": "B",
+  "status": "pending-authoring",
+  "objective": "Improve level-1/3 compression and decompression throughput over text, JSON, binary, and repetitive corpora.",
+  "scalarAndGates": "Geometric mean throughput; exact round trip, upstream tests, compressed size no worse than baseline by >0.25%.",
+  "source": {
+    "repository": "facebook/zstd",
+    "revision": "5c7b7bad26808e6b40ac3b3d0075466e27738a9d",
+    "url": "https://github.com/facebook/zstd/commit/5c7b7bad26808e6b40ac3b3d0075466e27738a9d",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

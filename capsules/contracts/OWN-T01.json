@@ -1,0 +1,23 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-T01",
+  "capsule": "tradeup-profit",
+  "cohort": "train",
+  "stratum": "owner",
+  "panel": "A",
+  "status": "existing-admitted",
+  "objective": "Maximize fixed-capital top-3 expected net profit over sealed cases; invalid/duplicate/over-capital selections fail closed.",
+  "character": "Current product, open quality, private.",
+  "source": {
+    "visibility": "private",
+    "existingCapsuleId": "cap_5c967d0f3b0d",
+    "existingCapsuleDigest": "sha256:fd36f7f50dcedd6a38d1f6751a6135f26d29c3e71235c59875e6c2cdcd84f932"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
+    "workloadHashes": "see capsule manifest contentHashes"
+  },
+  "publication": "private-redacted"
+}

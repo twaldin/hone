@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-T07",
+  "capsule": "hone-optimizer-mode-canonicalization",
+  "cohort": "train",
+  "stratum": "owner",
+  "panel": "B",
+  "status": "existing-admitted",
+  "objective": "Make optimizer source snapshots byte-identical across executable-bit/umask differences while retaining real executable identity. q = passed cross-host identity cases / declared cases; tests and canonical oracle protected.",
+  "character": "Cross-platform artifact correctness, owner source.",
+  "source": {
+    "visibility": "owner-licensed",
+    "repository": "Hone",
+    "revision": "ca768494ecff546d1ff37c116e36e4e362d052e1",
+    "referenceCommit": "2649981",
+    "existingCapsuleId": "cap_17b8ba66993d"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
+    "workloadHashes": "see capsule manifest contentHashes"
+  },
+  "publication": "license-dependent"
+}

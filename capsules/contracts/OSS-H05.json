@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-H05",
+  "capsule": "sqlite-speedtest1",
+  "cohort": "terminal",
+  "stratum": "oss",
+  "panel": null,
+  "status": "pending-authoring",
+  "objective": "Improve selected test/speedtest1.c read, join, aggregate, and index workloads on frozen databases.",
+  "scalarAndGates": "Reciprocal geometric mean time; exact result/database hashes, SQLite quick tests, file size/RSS non-regression.",
+  "source": {
+    "repository": "sqlite/sqlite",
+    "revision": "21fb3ccb37648b93433c592f3f6f7d5ef37de56c",
+    "url": "https://github.com/sqlite/sqlite/commit/21fb3ccb37648b93433c592f3f6f7d5ef37de56c",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}
