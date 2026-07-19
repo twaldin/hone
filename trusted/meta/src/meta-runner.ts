@@ -40,13 +40,6 @@ const ResourceUsage = z.object({
   wallClockSec: z.number().finite().nonnegative(),
   evaluatorInvocations: z.number().int().nonnegative(),
 }).strict();
-const SearchAllocation = z.object({
-  allocationOrdinal: z.number().int().nonnegative(),
-  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
-  replicate: z.number().int().nonnegative(),
-  innerEpisodesMax: z.number().int().positive(),
-  reserved: BudgetEnvelope,
-}).strict();
 const ChildEnvelopeRequest = z.object({
   purpose: z.enum(["search", "confirmation", "terminal"]),
   envelope: M2EnvelopeIdentitySchema,
@@ -748,24 +741,12 @@ interface ChildResult {
   valid: boolean;
 }
 
-export interface MetaSearchDescendantAllocation {
-  /** Optimizer-owned ordering within candidate j; trusted identity binds it durably. */
-  readonly allocationOrdinal: number;
-  readonly capsuleId: string;
-  readonly replicate: number;
-  readonly innerEpisodesMax: number;
-  readonly reserved: BudgetEnvelope;
-}
 
 export interface MetaSearchEvaluationInput {
   sourceArtifact: Sha256Digest;
   outerCapsuleId: string;
   assetGroupId: string;
   seed: number;
-  /** Required by the recursive M2 path; no cardinality is imposed on j. */
-  candidateOrdinal?: number;
-  /** Optimizer-authored schedule, validated only against capsule and envelope ceilings. */
-  allocations?: readonly MetaSearchDescendantAllocation[];
 }
 
 export interface MetaConfirmationArtifacts {
@@ -801,7 +782,6 @@ export interface MetaPhaseResult {
 
 export interface MetaEnvelopePort {
   reserveSearchDescendant(input: MetaEnvelopeReservationRequest): MetaEnvelopeReservation;
-  reserveSearchDescendants(inputs: readonly MetaEnvelopeReservationRequest[]): readonly MetaEnvelopeReservation[];
   reserveConfirmationDescendant(input: MetaEnvelopeReservationRequest): MetaEnvelopeReservation;
   reserveTerminalDescendant(input: MetaEnvelopeReservationRequest): MetaEnvelopeReservation;
   settleDescendant(reservationId: string, observed: MetaEnvelopeResourceUsage): MetaEnvelopeReservation;
@@ -865,6 +845,12 @@ export class MetaCampaignRunner {
   }
 
   async evaluateSearchCandidate(input: MetaSearchEvaluationInput): Promise<EvaluationRecord> {
+    const config = this.config;
+    if (config.version === 2) {
+      throw new Error(
+        "M2 search must dispatch one child at a time through spawnRun; evaluateSearchCandidate is M1-only",
+      );
+    }
     const sourceArtifact = DIGEST.parse(input.sourceArtifact);
     const started = this.now().getTime();
     let gate: CandidateGateResult;
@@ -877,100 +863,21 @@ export class MetaCampaignRunner {
     this.validateGateResult({ mode: "public-mutable", sourceArtifact }, gate);
     const artifact: MetaArtifactIdentity = { sourceArtifact, bundleDigest: gate.bundleDigest };
     const candidateEpoch = this.joins.ensureCandidate(artifact, gate.transformationReceiptHash, this.mintMeasurementEpoch);
-    const developmentPanel = this.config.version === 2 ? this.config.developmentPanel : undefined;
-    const recursiveM2 =
-      developmentPanel !== undefined &&
-      this.config.version === 2 &&
-      this.config.recursiveBudgets !== undefined;
-    let work: ChildWorkItem[];
-    if (recursiveM2) {
-      const ordinal = z.number().int().nonnegative().safeParse(input.candidateOrdinal);
-      const allocations = z.array(SearchAllocation).safeParse(input.allocations);
-      if (!ordinal.success || !allocations.success || allocations.data.length === 0) {
-        const detail = !ordinal.success
-          ? "candidate ordinal j is required"
-          : !allocations.success
-            ? allocations.error.message
-            : "optimizer schedule reserved no descendants";
-        return this.invalidRecord(input, `invalid recursive search schedule: ${bounded(detail)}`, started);
-      }
-      const seenAllocationOrdinals = new Set<number>();
-      const memberByCapsule = new Map(
-        developmentPanel.members.map((member) => [member.capsule.capsuleId, member]),
-      );
-      for (const allocation of allocations.data) {
-        if (seenAllocationOrdinals.has(allocation.allocationOrdinal)) {
-          return this.invalidRecord(
-            input,
-            `invalid recursive search schedule: duplicate allocation ordinal ${allocation.allocationOrdinal}`,
-            started,
-          );
-        }
-        seenAllocationOrdinals.add(allocation.allocationOrdinal);
-        const member = memberByCapsule.get(allocation.capsuleId);
-        if (member === undefined) {
-          return this.invalidRecord(
-            input,
-            `invalid recursive search schedule: capsule ${allocation.capsuleId} is outside Panel ${developmentPanel.panel}`,
-            started,
-          );
-        }
-        if (allocation.innerEpisodesMax > this.config.counts.innerEpisodesMax) {
-          return this.invalidRecord(
-            input,
-            `invalid recursive search schedule: allocation ${allocation.allocationOrdinal} exceeds calibrated inner ceiling ${this.config.counts.innerEpisodesMax}`,
-            started,
-          );
-        }
-        const exceeded = budgetDimensionExceeded(allocation.reserved, member.calibratedInnerCeiling);
-        if (exceeded !== null) {
-          return this.invalidRecord(
-            input,
-            `invalid recursive search schedule: allocation ${allocation.allocationOrdinal} exceeds capsule ${exceeded}`,
-            started,
-          );
-        }
-      }
-      work = allocations.data.map((allocation): ChildWorkItem => {
-        const member = memberByCapsule.get(allocation.capsuleId);
-        if (member === undefined) throw new Error(`missing validated panel capsule ${allocation.capsuleId}`);
-        return {
-          phase: "search",
-          arm: "candidate",
-          ...artifact,
-          transformationReceiptHash: gate.transformationReceiptHash,
-          capsule: member.capsule,
-          replicate: allocation.replicate,
-          measurementEpoch: SAFE_ID.parse(
-            `m2:${sha256(canonicalJson({
-              candidateEpoch,
-              candidateOrdinal: ordinal.data,
-              allocation,
-            }))}`,
-          ),
-          innerEpisodesMax: allocation.innerEpisodesMax,
-          envelopePurpose: "search",
-          reservedBudget: allocation.reserved,
-        };
-      });
-    } else {
-      work = this.config.train.flatMap((capsule) =>
-        Array.from({ length: this.config.counts.searchReplicates }, (_, replicate): ChildWorkItem => ({
-          phase: "search",
-          arm: "candidate",
-          ...artifact,
-          transformationReceiptHash: gate.transformationReceiptHash,
-          capsule,
-          replicate,
-          measurementEpoch: childMeasurementEpoch(candidateEpoch, "search", "candidate", capsule.capsuleId, replicate),
-          innerEpisodesMax: this.config.counts.innerEpisodesMax,
-          envelopePurpose: null,
-          reservedBudget: null,
-        })),
-      );
-    }
-    if (recursiveM2) this.reserveSearchEnvelopeBatch(work);
-    const inFlightKey = canonicalJson({ artifact, candidateOrdinal: input.candidateOrdinal ?? null, allocations: input.allocations ?? null });
+    const work = config.train.flatMap((capsule) =>
+      Array.from({ length: config.counts.searchReplicates }, (_, replicate): ChildWorkItem => ({
+        phase: "search",
+        arm: "candidate",
+        ...artifact,
+        transformationReceiptHash: gate.transformationReceiptHash,
+        capsule,
+        replicate,
+        measurementEpoch: childMeasurementEpoch(candidateEpoch, "search", "candidate", capsule.capsuleId, replicate),
+        innerEpisodesMax: config.counts.innerEpisodesMax,
+        envelopePurpose: null,
+        reservedBudget: null,
+      })),
+    );
+    const inFlightKey = canonicalJson(artifact);
     const existing = this.searchInFlight.get(inFlightKey);
     const pending = existing ?? mapBounded(work, this.childConcurrency, (item) => this.executeChild(item));
     if (existing === undefined) this.searchInFlight.set(inFlightKey, pending);
@@ -978,9 +885,11 @@ export class MetaCampaignRunner {
     try {
       results = await pending;
     } finally {
-      if (existing === undefined && this.searchInFlight.get(inFlightKey) === pending) this.searchInFlight.delete(inFlightKey);
+      if (existing === undefined && this.searchInFlight.get(inFlightKey) === pending) {
+        this.searchInFlight.delete(inFlightKey);
+      }
     }
-    if (results.length !== work.length) {
+    if (results.length !== config.train.length * config.counts.searchReplicates) {
       throw new Error("meta runner internal cardinality error");
     }
     const failures = results.filter(
@@ -1001,26 +910,15 @@ export class MetaCampaignRunner {
 
     const perExample: Record<string, { score: number; feedback: string }> = {};
     const capsuleMeans: number[] = [];
-    const incompleteCapsules = this.config.train.filter(
-      (capsule) => !results.some((result) => result.capsuleId === capsule.capsuleId),
-    );
-    if (incompleteCapsules.length > 0) {
-      return this.invalidRecord(
-        input,
-        `candidate invalid; incomplete panel missing ${incompleteCapsules.map((capsule) => capsule.capsuleId).join(", ")}`,
-        started,
-        results,
-      );
-    }
-    for (const capsule of this.config.train) {
+    for (const capsule of config.train) {
       const rows = results.filter((result) => result.capsuleId === capsule.capsuleId);
+      if (rows.length !== config.counts.searchReplicates) {
+        throw new Error(`missing search replicate for ${capsule.capsuleId}`);
+      }
       const scores = rows.map((row) => {
         if (row.measurement === null) throw new Error(`missing completed measurement for ${row.capsuleId}`);
         return row.measurement.qNormalized;
       });
-      if (!recursiveM2 && rows.length !== this.config.counts.searchReplicates) {
-        throw new Error(`missing search replicate for ${capsule.capsuleId}`);
-      }
       const score = mean(scores);
       capsuleMeans.push(score);
       perExample[capsule.capsuleId] = {
@@ -1230,41 +1128,6 @@ export class MetaCampaignRunner {
     });
   }
 
-  private reserveSearchEnvelopeBatch(work: readonly ChildWorkItem[]): void {
-    if (this.opts.envelopeLedger === undefined) {
-      throw new Error("recursive search is missing its trusted envelope authority");
-    }
-    const requests = work.map((item): MetaEnvelopeReservationRequest => {
-      if (item.envelopePurpose !== "search" || item.reservedBudget === null) {
-        throw new Error("recursive search work is missing its trusted search slice");
-      }
-      const identity = this.childIdentity(item);
-      return {
-        reservationId: recursiveEnvelopeReservationId(
-          this.opts.journal.configHash,
-          "search",
-          identity,
-        ),
-        parentReservationId: null,
-        reserved: item.reservedBudget,
-      };
-    });
-    const reservations = this.opts.envelopeLedger.reserveSearchDescendants(requests);
-    if (reservations.length !== requests.length) {
-      throw new Error("envelope ledger returned an incomplete search reservation batch");
-    }
-    reservations.forEach((reservation, index) => {
-      const expected = requests[index]!;
-      if (
-        reservation.reservationId !== expected.reservationId ||
-        reservation.parentReservationId !== null ||
-        canonicalJson(reservation.envelope) !== canonicalJson(this.configuredEnvelopeIdentity("search")) ||
-        canonicalJson(reservation.reserved) !== canonicalJson(expected.reserved)
-      ) {
-        throw new Error(`envelope ledger returned a mismatched batch reservation at index ${index}`);
-      }
-    });
-  }
 
   private childIdentity(item: ChildWorkItem): MetaWorkIdentity {
     return {
@@ -1805,20 +1668,6 @@ export function recursiveEnvelopeReservationId(
   return sha256(canonicalJson({ version: 1, configHash, purpose, identity }));
 }
 
-function budgetDimensionExceeded(
-  requested: BudgetEnvelope,
-  ceiling: BudgetEnvelope,
-): keyof BudgetEnvelope | null {
-  for (const dimension of [
-    "maxTokens",
-    "maxUsd",
-    "maxWallClockSec",
-    "maxEvaluatorInvocations",
-  ] as const) {
-    if (requested[dimension] > ceiling[dimension] + Number.EPSILON) return dimension;
-  }
-  return null;
-}
 
 export function metaCampaignConfigHash(configInput: MetaCampaignConfig): Sha256Digest {
   const config = MetaCampaignConfigSchema.parse(configInput);
