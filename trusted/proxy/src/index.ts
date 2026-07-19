@@ -6,10 +6,12 @@ export {
   readDispatchJournalState,
   type DispatchIntentRecord,
   type DispatchJournalState,
+  type DispatchPauseRecord,
   type DispatchPoisonRecord,
   type DispatchRecord,
   type DispatchRecoveredRecord,
   type DispatchRecoveryReport,
+  type DispatchResumeRecord,
   type DispatchSettleOutcome,
   type DispatchSettleRecord,
   type RecoveredCharge,
@@ -18,6 +20,17 @@ export { casWrite } from "./cas.js";
 export { extractSseUsage, isJsonObject, normalizeUsage, ZERO_USAGE, type Usage } from "./sse.js";
 export { DEFAULT_DURABLE_IO, dirSyncTargets, writeAll, type DurableIo } from "./durable-io.js";
 export { DurableLineLog } from "./tracelog.js";
+export {
+  classifyProviderAttempt,
+  isMalformedSuccessfulAgentResponse,
+  isProxyFailover,
+  MAX_PROVIDER_ATTEMPTS,
+  MAX_PROVIDER_RETRIES,
+  providerRetryDelayMs,
+  responseModelIdentities,
+  type ProviderAttemptDecision,
+  type ProviderAttemptFacts,
+} from "./provider-policy.js";
 export {
   createProxy,
   DEFAULT_LIMITS,
@@ -28,6 +41,7 @@ export {
   PROXY_TRACE_FILE,
   type BudgetDecision,
   type BudgetDimension,
+  type DurablePauseProxyHandle,
   type PricingEntry,
   type PricingTable,
   type ProxyAuthToken,

@@ -181,11 +181,15 @@ describe("sweepStaleRunResources (finding 10 — crashed prior process)", () => 
 });
 
 function fakeProxy(port: number): ProxyHandle {
+  const preflight = { passed: true, observations: [] };
   return {
     tokens: [],
     tokenFor: () => "tok",
     dispatchRecovery: () =>
       Promise.resolve({ poisoned: undefined, recovered: [], chargedTotals: { tokens: 0, usd: 0 } }),
+    campaignPause: () => Promise.resolve(undefined),
+    preflight: () => Promise.resolve(preflight),
+    resume: () => Promise.resolve(preflight),
     listenUnix: () => Promise.resolve(),
     listenTcp: () => Promise.resolve(port),
     close: () => Promise.resolve(),
