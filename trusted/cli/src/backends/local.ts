@@ -1403,6 +1403,14 @@ export function createBackend(
           ...(ctx.terminalHoldoutAssetGroupIds !== undefined
             ? { terminalHoldoutAssetGroupIds: ctx.terminalHoldoutAssetGroupIds }
             : {}),
+          // Per-capsule sandbox resource requirements (manifest-core, sealed
+          // in the digest). Absent => broker defaults (2 GiB / 2 cpus).
+          ...(ctx.manifest.sandbox === undefined
+            ? {}
+            : {
+                sandboxMemoryBytes: ctx.manifest.sandbox.memoryBytes,
+                ...(ctx.manifest.sandbox.cpus === undefined ? {} : { sandboxCpus: ctx.manifest.sandbox.cpus }),
+              }),
           // Repo-lifetime holdout ledger, keyed by capsule digest so every
           // run of this exact capsule draws from ONE budget. Lives under the
           // CAS root (broker creates the file and parents).
