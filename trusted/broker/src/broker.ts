@@ -19,6 +19,8 @@ import {
   BudgetState,
   canonicalJson,
   CapsuleManifest,
+  ChildRunAdmission,
+  ChildRunLaunchReceipt,
   ChildRunTerminal,
   CreateSandboxParams,
   EvaluateParams,
@@ -83,6 +85,7 @@ export type TrustedEvaluationStrategy = (input: TrustedEvaluationStrategyInput) 
 export type SandboxNetworkMode = { mode: "none" } | { mode: "internal"; network: string };
 
 export interface ChildRunLaunchInput {
+  admission: z.infer<typeof ChildRunAdmission>;
   request: z.infer<typeof SpawnRunParams>;
   /** True when the durable reservation predates this broker call/boot. */
   replay: boolean;
@@ -90,10 +93,22 @@ export interface ChildRunLaunchInput {
 
 export interface ChildRunLaunchOutcome {
   /** Trusted path to the child's newline-terminated event stream. */
+  /** Trusted durable receipt binding launch/config/provenance to the reserved child. */
+  launchReceiptPath: string;
   terminalEventPath: string;
   /** Trusted direct usage for this run; descendant usage is already charged to every ancestor by its own settlement. */
   usage: z.infer<typeof ResourceUsage>;
 }
+
+export interface TrustedChildAdmissionInput {
+  parentRunId: string;
+  parentDepth: RunDepth;
+  request: z.infer<typeof SpawnRunParams>;
+}
+
+export type TrustedChildRunAdmission = (
+  input: TrustedChildAdmissionInput,
+) => z.infer<typeof ChildRunAdmission> | undefined;
 
 export type ChildRunLauncher = (input: ChildRunLaunchInput) => Promise<ChildRunLaunchOutcome>;
 
@@ -103,10 +118,21 @@ export interface BrokerRecursiveConfig {
   ancestors: readonly string[];
   /** Shared authority instance for the entire recursive run tree. */
   ledger: RecursiveResourceLedger;
+  /** Frozen trusted membership/provenance gate, evaluated before any reservation is written. */
+  admitChildRun: TrustedChildRunAdmission;
   launchChildRun: ChildRunLauncher;
 }
 
+export const MAX_CORPUS_PAGE_BYTES = 1024 * 1024;
+export const MAX_CORPUS_JOURNAL_BYTES = 256 * 1024 * 1024;
+
 export interface BrokerCorpusConfig {
+  provenance: {
+    campaignConfigHash: string;
+    developmentCapsuleIds: readonly string[];
+    terminalCapsuleIds: readonly string[];
+    terminalContentHashes: readonly string[];
+  };
   /** Hash of canonical publicSnapshot.documents; verified at broker construction. */
   publicSnapshot: {
     hash: string;
@@ -114,6 +140,10 @@ export interface BrokerCorpusConfig {
   };
   /** Development-panel evidence only. The wire schema has no terminal variant. */
   panelEvidence: readonly z.infer<typeof CorpusPanelEvidence>[];
+  /** UTF-8 JSON response-page cap, enforced before journaling. Default/hard maximum 1 MiB. */
+  maxPageBytes?: number | undefined;
+  /** Exact broker-journal + public-event byte charge. Default 64 MiB; hard maximum 256 MiB. */
+  maxJournalBytes?: number | undefined;
 }
 
 /** Canonical content address frozen into every corpus cursor and response. */
@@ -124,6 +154,12 @@ export function hashCorpusSnapshot(documents: readonly z.infer<typeof CorpusPubl
       left.id < right.id ? -1 : left.id > right.id ? 1 : left.contentHash < right.contentHash ? -1 : left.contentHash > right.contentHash ? 1 : 0,
     );
   return `sha256:${createHash("sha256").update(canonicalJson(ordered)).digest("hex")}`;
+}
+
+export function hashChildRunLaunchReceipt(
+  receipt: Omit<z.infer<typeof ChildRunLaunchReceipt>, "receiptDigest">,
+): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(canonicalJson(receipt)).digest("hex")}`;
 }
 
 export interface BrokerConfig {
@@ -418,10 +454,80 @@ type ReportIncumbentP = z.infer<typeof ReportIncumbentParams>;
 type FinishP = z.infer<typeof FinishParams>;
 type GetTaskR = z.infer<typeof GetTaskResult>;
 type CorpusDocument = z.infer<typeof CorpusPublicDocument> | z.infer<typeof CorpusPanelEvidence>;
+interface FrozenCorpusVersion {
+  versionHash: `sha256:${string}`;
+  documents: readonly CorpusDocument[];
+}
 interface FrozenCorpus {
   snapshotHash: `sha256:${string}`;
-  documents: readonly CorpusDocument[];
-  cursorSeed: string;
+  campaignConfigHash: string;
+  developmentCapsuleIds: ReadonlySet<string>;
+  terminalCapsuleIds: ReadonlySet<string>;
+  terminalContentHashes: ReadonlySet<string>;
+  versions: Map<string, FrozenCorpusVersion>;
+  latestVersionHash: `sha256:${string}`;
+  maxPageBytes: number;
+  maxJournalBytes: number;
+}
+
+function corpusVersion(
+  snapshotHash: `sha256:${string}`,
+  documentsInput: readonly CorpusDocument[],
+): FrozenCorpusVersion {
+  const documents = [...documentsInput].sort((left, right) =>
+    left.id < right.id
+      ? -1
+      : left.id > right.id
+        ? 1
+        : left.source < right.source
+          ? -1
+          : left.source > right.source
+            ? 1
+            : left.contentHash < right.contentHash
+              ? -1
+              : left.contentHash > right.contentHash
+                ? 1
+                : 0,
+  );
+  const versionHash = `sha256:${createHash("sha256")
+    .update(canonicalJson({ snapshotHash, documents }))
+    .digest("hex")}` as const;
+  return {
+    versionHash,
+    documents: Object.freeze(documents.map((document) => Object.freeze(document))),
+  };
+}
+
+function validateCorpusProvenance(
+  documents: readonly CorpusDocument[],
+  policy: Pick<
+    FrozenCorpus,
+    "campaignConfigHash" | "developmentCapsuleIds" | "terminalCapsuleIds" | "terminalContentHashes"
+  >,
+): void {
+  const documentIds = new Set<string>();
+  for (const document of documents) {
+    if (documentIds.has(document.id)) throw new BrokerError("INTERNAL", "duplicate corpus document identity");
+    documentIds.add(document.id);
+    const actualHash = `sha256:${createHash("sha256").update(document.content).digest("hex")}`;
+    const normalizedIdentitySurface = `${document.id}\n${document.content}`.normalize("NFC");
+    const terminalIdentityPresent = [...policy.terminalCapsuleIds].some((identity) =>
+      normalizedIdentitySurface.includes(identity.normalize("NFC")),
+    );
+    const provenanceAllowed =
+      document.provenance.campaignConfigHash === policy.campaignConfigHash &&
+      (document.source === "public-snapshot" ||
+        (policy.developmentCapsuleIds.has(document.provenance.capsuleId) &&
+          !policy.terminalCapsuleIds.has(document.provenance.capsuleId)));
+    if (
+      actualHash !== document.contentHash ||
+      policy.terminalContentHashes.has(document.contentHash) ||
+      terminalIdentityPresent ||
+      !provenanceAllowed
+    ) {
+      throw new BrokerError("INTERNAL", "corpus document violates frozen development provenance");
+    }
+  }
 }
 type RecordSpendP = z.infer<typeof RecordSpendParams>;
 type SpawnRunP = z.infer<typeof SpawnRunParams>;
@@ -527,9 +633,18 @@ const StateLine = z.discriminatedUnion("t", [
     events: JournalEvents,
   }),
   z.object({
+    t: z.literal("corpusVersion"),
+    previousVersionHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    versionHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    added: z.array(CorpusPanelEvidence).min(1),
+    chargedBytes: z.number().int().positive(),
+    events: JournalEvents,
+  }),
+  z.object({
     t: z.literal("corpus"),
     request: QueryCorpusParams,
     response: QueryCorpusResult,
+    chargedBytes: z.number().int().positive(),
     events: JournalEvents,
   }),
   z.object({ t: z.literal("migration"), events: z.array(RunEvent) }),
@@ -785,6 +900,7 @@ export class Broker {
   private readonly evaluationStrategy: TrustedEvaluationStrategy | undefined;
   private readonly recursive: BrokerRecursiveConfig | undefined;
   private readonly corpus: FrozenCorpus | undefined;
+  private corpusJournalBytes = 0;
   /**
    * Fresh per-Broker-instance measurement generation. Part of the eval memo
    * key: after a kill/resume the new broker must re-measure comparators
@@ -896,7 +1012,7 @@ export class Broker {
   private scratchVolumeName: string | undefined;
   /** Set once close() begins: no new operation is admitted. */
   private closing = false;
-  /** Async operations (createSandbox/exec/putFile/getFile/saveArtifact/evaluate) in flight. */
+  /** Async operations in flight. */
   private inFlightOps = 0;
   /** close() callers awaiting the in-flight operation count to reach zero. */
   private readonly opDrainWaiters: Array<() => void> = [];
@@ -954,48 +1070,58 @@ export class Broker {
     if (config.corpus === undefined) {
       this.corpus = undefined;
     } else {
-      const publicDocuments = config.corpus.publicSnapshot.documents
-        .map((document) => CorpusPublicDocument.parse(document))
-        .sort((left, right) =>
-          left.id < right.id ? -1 : left.id > right.id ? 1 : left.contentHash < right.contentHash ? -1 : left.contentHash > right.contentHash ? 1 : 0,
-        );
-      const panelEvidence = config.corpus.panelEvidence
-        .map((document) => CorpusPanelEvidence.parse(document))
-        .sort((left, right) =>
-          left.id < right.id ? -1 : left.id > right.id ? 1 : left.contentHash < right.contentHash ? -1 : left.contentHash > right.contentHash ? 1 : 0,
-        );
-      const documentIds = new Set<string>();
-      for (const document of [...publicDocuments, ...panelEvidence]) {
-        if (documentIds.has(document.id)) throw new BrokerError("INTERNAL", `duplicate corpus document id: ${document.id}`);
-        documentIds.add(document.id);
-        const actualHash = `sha256:${createHash("sha256").update(document.content).digest("hex")}`;
-        if (actualHash !== document.contentHash) {
-          throw new BrokerError("INTERNAL", `corpus document content hash mismatch: ${document.id}`);
-        }
+      const campaignConfigHash = config.corpus.provenance.campaignConfigHash;
+      if (!/^sha256:[0-9a-f]{64}$/.test(campaignConfigHash)) {
+        throw new BrokerError("INTERNAL", "corpus campaign config hash is invalid");
       }
+      const developmentCapsuleIds = new Set(config.corpus.provenance.developmentCapsuleIds);
+      const terminalCapsuleIds = new Set(config.corpus.provenance.terminalCapsuleIds);
+      const terminalContentHashes = new Set(config.corpus.provenance.terminalContentHashes);
+      if (
+        developmentCapsuleIds.size !== config.corpus.provenance.developmentCapsuleIds.length ||
+        terminalCapsuleIds.size !== config.corpus.provenance.terminalCapsuleIds.length ||
+        terminalContentHashes.size !== config.corpus.provenance.terminalContentHashes.length ||
+        [...developmentCapsuleIds].some((identity) => terminalCapsuleIds.has(identity)) ||
+        [...terminalContentHashes].some((hash) => !/^sha256:[0-9a-f]{64}$/.test(hash))
+      ) {
+        throw new BrokerError("INTERNAL", "corpus provenance policy is invalid");
+      }
+      const maxPageBytes = config.corpus.maxPageBytes ?? 1024 * 1024;
+      const maxJournalBytes = config.corpus.maxJournalBytes ?? 64 * 1024 * 1024;
+      if (
+        !Number.isSafeInteger(maxPageBytes) ||
+        maxPageBytes <= 0 ||
+        maxPageBytes > MAX_CORPUS_PAGE_BYTES ||
+        !Number.isSafeInteger(maxJournalBytes) ||
+        maxJournalBytes <= 0 ||
+        maxJournalBytes > MAX_CORPUS_JOURNAL_BYTES
+      ) {
+        throw new BrokerError("INTERNAL", "corpus byte caps exceed trusted hard limits");
+      }
+      const publicDocuments = config.corpus.publicSnapshot.documents.map((document) =>
+        CorpusPublicDocument.parse(document),
+      );
+      const panelEvidence = config.corpus.panelEvidence.map((document) => CorpusPanelEvidence.parse(document));
+      const provenancePolicy = {
+        campaignConfigHash,
+        developmentCapsuleIds,
+        terminalCapsuleIds,
+        terminalContentHashes,
+      };
+      validateCorpusProvenance([...publicDocuments, ...panelEvidence], provenancePolicy);
       const snapshotHash = hashCorpusSnapshot(publicDocuments);
       if (config.corpus.publicSnapshot.hash !== snapshotHash) {
         throw new BrokerError("INTERNAL", "public corpus snapshot hash does not match its canonical documents");
       }
-      const documents: CorpusDocument[] = [...publicDocuments, ...panelEvidence];
-      documents.sort((left, right) =>
-        left.id < right.id
-          ? -1
-          : left.id > right.id
-            ? 1
-            : left.source < right.source
-              ? -1
-              : left.source > right.source
-                ? 1
-                : 0,
-      );
-      this.corpus = Object.freeze({
+      const initialVersion = corpusVersion(snapshotHash, [...publicDocuments, ...panelEvidence]);
+      this.corpus = {
         snapshotHash,
-        documents: Object.freeze(documents.map((document) => Object.freeze(document))),
-        cursorSeed: createHash("sha256")
-          .update(canonicalJson({ snapshotHash, documents }))
-          .digest("hex"),
-      });
+        ...provenancePolicy,
+        versions: new Map([[initialVersion.versionHash, initialVersion]]),
+        latestVersionHash: initialVersion.versionHash,
+        maxPageBytes,
+        maxJournalBytes,
+      };
     }
     this.safeRunId = config.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
     this.scratchDir = path.join(config.runDir, "scratch");
@@ -1403,6 +1529,14 @@ export class Broker {
     let artifactBytes = 0;
     let artifactEntries = 0;
     const artifacts = new Set<string>();
+    const replayCorpus =
+      this.corpus === undefined
+        ? undefined
+        : {
+            ...this.corpus,
+            versions: new Map(this.corpus.versions),
+          };
+    let replayCorpusBytes = 0;
     for (const line of log.replayed) {
       if (line.t === "eval" && line.measurementEpoch !== this.trustedMeasurementEpoch) {
         throw new BrokerError(
@@ -1432,15 +1566,39 @@ export class Broker {
         ) {
           throw new BrokerError("INTERNAL", "run state log exceeds the configured candidate artifact quota");
         }
+      } else if (line.t === "corpusVersion") {
+        if (replayCorpus === undefined) {
+          throw new BrokerError("INTERNAL", "run state log contains corpus versions but no frozen corpus is configured");
+        }
+        let next: FrozenCorpusVersion;
+        try {
+          next = this.deriveCorpusVersion(replayCorpus, line.previousVersionHash, line.added);
+        } catch {
+          throw new BrokerError("INTERNAL", "run state log corpus version violates the frozen provenance chain");
+        }
+        const exactCharge = Buffer.byteLength(`${JSON.stringify(line)}\n`, "utf8");
+        if (
+          next.versionHash !== line.versionHash ||
+          (line.events?.length ?? 0) !== 0 ||
+          line.chargedBytes !== exactCharge
+        ) {
+          throw new BrokerError("INTERNAL", "run state log corpus version charge or digest is inconsistent");
+        }
+        replayCorpus.versions.set(next.versionHash, next);
+        replayCorpus.latestVersionHash = next.versionHash;
+        replayCorpusBytes += line.chargedBytes;
+        if (replayCorpusBytes > replayCorpus.maxJournalBytes) {
+          throw new BrokerError("INTERNAL", "run state log exceeds the configured corpus journal byte budget");
+        }
       } else if (line.t === "corpus") {
-        if (this.corpus === undefined) {
+        if (replayCorpus === undefined) {
           throw new BrokerError("INTERNAL", "run state log contains corpus facts but no frozen corpus is configured");
         }
         let expected: QueryCorpusR;
         try {
-          expected = this.corpusResponse(line.request, this.corpus);
+          expected = this.corpusResponse(line.request, replayCorpus);
         } catch {
-          throw new BrokerError("INTERNAL", "run state log corpus request does not address the configured frozen corpus");
+          throw new BrokerError("INTERNAL", "run state log corpus request does not address a retained corpus version");
         }
         const [queryEvent, responseEvent, ...extraEvents] = line.events ?? [];
         if (
@@ -1452,9 +1610,19 @@ export class Broker {
           responseEvent.runId !== this.config.runId ||
           queryEvent.at !== responseEvent.at ||
           !sameCanonical(queryEvent.request, line.request) ||
-          !sameCanonical(responseEvent.response, line.response)
+          !sameCanonical(responseEvent.response, line.response) ||
+          line.chargedBytes !==
+            Buffer.byteLength(`${JSON.stringify(line)}\n`, "utf8") +
+              (line.events ?? []).reduce(
+                (sum, event) => sum + Buffer.byteLength(`${JSON.stringify(event)}\n`, "utf8"),
+                0,
+              )
         ) {
           throw new BrokerError("INTERNAL", "run state log corpus query/response transaction is inconsistent");
+        }
+        replayCorpusBytes += line.chargedBytes;
+        if (replayCorpusBytes > replayCorpus.maxJournalBytes) {
+          throw new BrokerError("INTERNAL", "run state log exceeds the configured corpus journal byte budget");
         }
       }
     }
@@ -1557,7 +1725,17 @@ export class Broker {
             }
           }
           break;
+        case "corpusVersion": {
+          const corpus = this.corpus;
+          if (corpus === undefined) throw new BrokerError("INTERNAL", "corpus version replay has no corpus configuration");
+          const next = this.deriveCorpusVersion(corpus, line.previousVersionHash, line.added);
+          corpus.versions.set(next.versionHash, next);
+          corpus.latestVersionHash = next.versionHash;
+          this.corpusJournalBytes += line.chargedBytes;
+          break;
+        }
         case "corpus":
+          this.corpusJournalBytes += line.chargedBytes;
           break;
         case "incumbent": {
           const inc = { hash: line.hash, aggregate: line.aggregate, deltaVsBaseline: line.deltaVsBaseline, episode: line.episode };
@@ -3354,15 +3532,39 @@ export class Broker {
         throw new BrokerError("DEPTH_EXCEEDED", `depth-${recursive.depth} runs may spawn only depth-${recursive.depth + 1} children`);
       }
 
+      let childAdmission: z.infer<typeof ChildRunAdmission>;
+      try {
+        const admitted = recursive.admitChildRun({
+          parentRunId: this.config.runId,
+          parentDepth: recursive.depth,
+          request: params,
+        });
+        if (admitted === undefined) {
+          throw new BrokerError("CHILD_ADMISSION_DENIED", "child run is outside the frozen development authority");
+        }
+        childAdmission = ChildRunAdmission.parse(admitted);
+      } catch (error) {
+        if (error instanceof BrokerError) throw error;
+        throw new BrokerError("INTERNAL", `trusted child admission failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
       const wasReserved = recursive.ledger.hasChild(params.child.runId);
       if (!wasReserved) this.budgetGate();
       else this.state().assertUsable();
-      const admission = recursive.ledger.reserveChild(params, [...recursive.ancestors, this.config.runId]);
-      if (admission.settled !== undefined) return admission.settled;
+      const reservation = recursive.ledger.reserveChild(
+        params,
+        [...recursive.ancestors, this.config.runId],
+        childAdmission,
+      );
+      if (reservation.settled !== undefined) return reservation.settled;
 
       const inFlight = this.inFlightChildRuns.get(params.child.runId);
       if (inFlight !== undefined) return await inFlight;
-      const operation = this.launchAndSettleChild(admission.request, admission.replay);
+      const operation = this.launchAndSettleChild(
+        reservation.request,
+        reservation.admission,
+        reservation.replay,
+      );
       this.inFlightChildRuns.set(params.child.runId, operation);
       try {
         return await operation;
@@ -3376,16 +3578,70 @@ export class Broker {
     }
   }
 
-  private async launchAndSettleChild(request: SpawnRunP, replay: boolean): Promise<SpawnRunR> {
+  private async launchAndSettleChild(
+    request: SpawnRunP,
+    admission: z.infer<typeof ChildRunAdmission>,
+    replay: boolean,
+  ): Promise<SpawnRunR> {
     const recursive = this.recursive;
     if (recursive === undefined) throw new BrokerError("INTERNAL", "recursive launcher disappeared");
-    const outcome = await recursive.launchChildRun({ request, replay });
-    const terminal = this.readDurableChildTerminal(outcome.terminalEventPath, request.child.runId);
+    const outcome = await recursive.launchChildRun({ request, admission, replay });
+    const launchReceipt = this.readDurableLaunchReceipt(outcome.launchReceiptPath, request, admission);
+    const terminal = this.readDurableChildTerminal(
+      outcome.terminalEventPath,
+      request,
+      admission,
+      launchReceipt.receiptDigest,
+    );
     recursive.ledger.syncRunUsage(request.child.runId, outcome.usage);
     return recursive.ledger.settleChild(request.child.runId, outcome.usage, terminal);
   }
 
-  private readDurableChildTerminal(eventPath: string, expectedRunId: string): z.infer<typeof ChildRunTerminal> {
+  private readDurableLaunchReceipt(
+    receiptPath: string,
+    request: SpawnRunP,
+    admission: z.infer<typeof ChildRunAdmission>,
+  ): z.infer<typeof ChildRunLaunchReceipt> {
+    let bytes: Buffer;
+    const fd = openSync(receiptPath, "r");
+    try {
+      fsyncSync(fd);
+      bytes = readFileSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    journalIo.syncDir(path.dirname(receiptPath));
+    if (bytes.length === 0 || bytes[bytes.length - 1] !== 0x0a) {
+      throw new BrokerError("INTERNAL", "child launch receipt is not durably newline-terminated");
+    }
+    const lines = bytes.toString("utf8").split("\n");
+    lines.pop();
+    if (lines.length !== 1) throw new BrokerError("INTERNAL", "child launch receipt file must contain exactly one record");
+    let receipt: z.infer<typeof ChildRunLaunchReceipt>;
+    try {
+      receipt = ChildRunLaunchReceipt.parse(JSON.parse(lines[0] ?? ""));
+    } catch {
+      throw new BrokerError("INTERNAL", "child launch receipt is malformed");
+    }
+    const { receiptDigest, ...body } = receipt;
+    if (
+      receiptDigest !== hashChildRunLaunchReceipt(body) ||
+      !sameCanonical(receipt.child, request.child) ||
+      receipt.depth !== request.depth ||
+      !sameCanonical(receipt.admission, admission)
+    ) {
+      throw new BrokerError("INTERNAL", "child launch receipt does not match the durable reservation");
+    }
+    return receipt;
+  }
+
+  private readDurableChildTerminal(
+    eventPath: string,
+    request: SpawnRunP,
+    admission: z.infer<typeof ChildRunAdmission>,
+    launchReceiptDigest: string,
+  ): z.infer<typeof ChildRunTerminal> {
+    const expectedRunId = request.child.runId;
     let bytes: Buffer;
     const fd = openSync(eventPath, "r");
     try {
@@ -3407,18 +3663,80 @@ export class Broker {
         throw new BrokerError("INTERNAL", `child ${expectedRunId} event stream is corrupt at cursor ${index}`);
       }
     });
+    const started = events[0];
+    if (
+      started?.type !== "run.started" ||
+      started.runId !== expectedRunId ||
+      started.capsuleId !== request.child.capsuleId ||
+      started.contractHash !== admission.campaignConfigHash ||
+      started.optimizerDigest !== request.child.optimizerArtifact.hash ||
+      events.some((event) => event.runId !== expectedRunId)
+    ) {
+      throw new BrokerError("INTERNAL", `child ${expectedRunId} event stream is not bound to its launch receipt`);
+    }
     const cursor = events.length - 1;
     const event = events[cursor];
     const rawTerminal = rawLines[cursor];
-    if (event === undefined || rawTerminal === undefined || event.type !== "run.finished" || event.runId !== expectedRunId) {
+    if (event === undefined || rawTerminal === undefined || event.type !== "run.finished") {
       throw new BrokerError("INTERNAL", `child ${expectedRunId} has no durable terminal event`);
     }
     return ChildRunTerminal.parse({
       runId: expectedRunId,
       cursor,
       eventDigest: `sha256:${createHash("sha256").update(rawTerminal).digest("hex")}`,
+      launchReceiptDigest,
       status: event.status,
     });
+  }
+  appendCorpusPanelEvidence(
+    documentsInput: readonly z.infer<typeof CorpusPanelEvidence>[],
+    ctx: CallContext,
+  ): { corpusVersionHash: string } {
+    if (!ctx.privileged) throw new BrokerError("INTERNAL", "appendCorpusPanelEvidence requires trusted authority");
+    this.state().assertUsable();
+    const corpus = this.corpus;
+    if (corpus === undefined) throw new BrokerError("CORPUS_UNAVAILABLE", "no frozen corpus is configured");
+    const latest = corpus.versions.get(corpus.latestVersionHash);
+    if (latest === undefined) throw new BrokerError("INTERNAL", "latest corpus version is missing");
+    const byId = new Map(latest.documents.map((document) => [document.id, document]));
+    const added: z.infer<typeof CorpusPanelEvidence>[] = [];
+    for (const documentInput of documentsInput) {
+      const document = CorpusPanelEvidence.parse(documentInput);
+      const existing = byId.get(document.id);
+      if (existing !== undefined) {
+        if (!sameCanonical(existing, document)) {
+          throw new BrokerError("INTERNAL", "corpus evidence identity collision");
+        }
+        continue;
+      }
+      byId.set(document.id, document);
+      added.push(document);
+    }
+    if (added.length === 0) return { corpusVersionHash: latest.versionHash };
+
+    const next = this.deriveCorpusVersion(corpus, corpus.latestVersionHash, added);
+    let chargedBytes = 1;
+    let line: StateLine;
+    for (;;) {
+      line = StateLine.parse({
+        t: "corpusVersion",
+        previousVersionHash: corpus.latestVersionHash,
+        versionHash: next.versionHash,
+        added,
+        chargedBytes,
+      });
+      const exact = Buffer.byteLength(`${JSON.stringify(line)}\n`, "utf8");
+      if (exact === chargedBytes) break;
+      chargedBytes = exact;
+    }
+    if (this.corpusJournalBytes + chargedBytes > corpus.maxJournalBytes) {
+      throw new BrokerError("QUOTA_EXCEEDED", "corpus journal byte budget exhausted");
+    }
+    this.state().append(line);
+    corpus.versions.set(next.versionHash, next);
+    corpus.latestVersionHash = next.versionHash;
+    this.corpusJournalBytes += chargedBytes;
+    return { corpusVersionHash: next.versionHash };
   }
 
   queryCorpus(params: QueryCorpusP, _ctx: CallContext): QueryCorpusR {
@@ -3428,50 +3746,99 @@ export class Broker {
       throw new BrokerError("CORPUS_UNAVAILABLE", "queryCorpus is unavailable without a frozen trusted corpus");
     }
     const response = this.corpusResponse(params, corpus);
-    const events = this.journalFact(
-      { t: "corpus", request: params, response },
-      [
-        { type: "corpus.query", request: params },
-        { type: "corpus.response", response },
-      ],
-    );
-    this.publish(events);
+    const transaction = this.corpusQueryTransaction(params, response);
+    if (this.corpusJournalBytes + transaction.chargedBytes > corpus.maxJournalBytes) {
+      throw new BrokerError("QUOTA_EXCEEDED", "corpus journal byte budget exhausted");
+    }
+    this.state().append(transaction.line);
+    this.eventJournalFormat = true;
+    this.journalEvents.push(...transaction.events);
+    this.corpusJournalBytes += transaction.chargedBytes;
+    this.publish(transaction.events);
     return response;
+  }
+
+  private deriveCorpusVersion(
+    corpus: FrozenCorpus,
+    previousVersionHash: string,
+    added: readonly z.infer<typeof CorpusPanelEvidence>[],
+  ): FrozenCorpusVersion {
+    if (corpus.latestVersionHash !== previousVersionHash) {
+      throw new BrokerError("INTERNAL", "corpus version chain is not contiguous");
+    }
+    const previous = corpus.versions.get(previousVersionHash);
+    if (previous === undefined) throw new BrokerError("INTERNAL", "previous corpus version is missing");
+    const documents = [...previous.documents, ...added];
+    validateCorpusProvenance(documents, corpus);
+    return corpusVersion(corpus.snapshotHash, documents);
   }
 
   private corpusResponse(params: QueryCorpusP, corpus: FrozenCorpus): QueryCorpusR {
     const text = params.query.text.normalize("NFC").toLowerCase();
     const sources = [...new Set(params.query.sources)].sort();
     const queryDigest = createHash("sha256")
-      .update(corpus.cursorSeed)
       .update(canonicalJson({ text, sources, pageSize: params.pageSize }))
       .digest("hex");
+    let versionHash = corpus.latestVersionHash;
     let offset = 0;
     if (params.cursor !== null) {
-      const prefix = `corpus_${queryDigest}_`;
-      if (!params.cursor.startsWith(prefix)) {
+      const parts = params.cursor.split("_");
+      if (parts.length !== 4 || parts[0] !== "corpus" || parts[2] !== queryDigest) {
         throw new BrokerError("CURSOR_INVALID", "corpus cursor does not address this frozen query");
       }
-      offset = Number(params.cursor.slice(prefix.length));
+      versionHash = `sha256:${parts[1] ?? ""}`;
+      offset = Number(parts[3]);
       if (!Number.isSafeInteger(offset) || offset < 0) {
         throw new BrokerError("CURSOR_INVALID", "corpus cursor offset is invalid");
       }
     }
+    const version = corpus.versions.get(versionHash);
+    if (version === undefined) throw new BrokerError("CURSOR_INVALID", "corpus cursor version is unavailable");
     const sourceSet = new Set(sources);
-    const matching = corpus.documents.filter(
+    const matching = version.documents.filter(
       (document) =>
         sourceSet.has(document.source) &&
         (text.length === 0 || `${document.id}\n${document.content}`.normalize("NFC").toLowerCase().includes(text)),
     );
     if (offset > matching.length) throw new BrokerError("CURSOR_INVALID", "corpus cursor is beyond the deterministic result set");
-    const cursor = `corpus_${queryDigest}_${offset}`;
-    const end = Math.min(offset + params.pageSize, matching.length);
-    return QueryCorpusResult.parse({
-      snapshotHash: corpus.snapshotHash,
-      cursor,
-      nextCursor: end < matching.length ? `corpus_${queryDigest}_${end}` : null,
-      documents: matching.slice(offset, end),
-    });
+    const cursorPrefix = `corpus_${version.versionHash.slice("sha256:".length)}_${queryDigest}_`;
+    let end = Math.min(offset + params.pageSize, matching.length);
+    let response: QueryCorpusR;
+    for (;;) {
+      response = QueryCorpusResult.parse({
+        snapshotHash: corpus.snapshotHash,
+        corpusVersionHash: version.versionHash,
+        cursor: `${cursorPrefix}${offset}`,
+        nextCursor: end < matching.length ? `${cursorPrefix}${end}` : null,
+        documents: matching.slice(offset, end),
+      });
+      if (Buffer.byteLength(JSON.stringify(response), "utf8") <= corpus.maxPageBytes) break;
+      if (end === offset) throw new BrokerError("QUOTA_EXCEEDED", "corpus response exceeds the page byte cap");
+      end -= 1;
+    }
+    return response;
+  }
+
+  private corpusQueryTransaction(
+    request: QueryCorpusP,
+    response: QueryCorpusR,
+  ): { line: StateLine; events: RunEvent[]; chargedBytes: number } {
+    const at = new Date(this.now()).toISOString();
+    const events = [
+      RunEvent.parse({ runId: this.config.runId, at, type: "corpus.query", request }),
+      RunEvent.parse({ runId: this.config.runId, at, type: "corpus.response", response }),
+    ];
+    let chargedBytes = 1;
+    let line: StateLine;
+    for (;;) {
+      line = StateLine.parse({ t: "corpus", request, response, chargedBytes, events });
+      const exact =
+        Buffer.byteLength(`${JSON.stringify(line)}\n`, "utf8") +
+        events.reduce((sum, event) => sum + Buffer.byteLength(`${JSON.stringify(event)}\n`, "utf8"), 0);
+      if (exact === chargedBytes) break;
+      chargedBytes = exact;
+    }
+    return { line, events, chargedBytes };
   }
 
   /**

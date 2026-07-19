@@ -1,6 +1,8 @@
 export {
   Broker,
   RecordSpendParams,
+  MAX_CORPUS_JOURNAL_BYTES,
+  MAX_CORPUS_PAGE_BYTES,
   SCRATCH_SNAPSHOT_SCRIPT,
   SCRATCH_SNAPSHOT_TMP_PREFIX,
   finalizeScratchSnapshot,
@@ -8,6 +10,7 @@ export {
   scratchSnapshotArchiveCapBytes,
   isBrokerAuthoredEvent,
   hashCorpusSnapshot,
+  hashChildRunLaunchReceipt,
   readBrokerJournalEvents,
   readBrokerJournalEvaluations,
   type BrokerConfig,
@@ -22,6 +25,8 @@ export {
   type ChildRunLauncher,
   type ChildRunLaunchInput,
   type ChildRunLaunchOutcome,
+  type TrustedChildAdmissionInput,
+  type TrustedChildRunAdmission,
 } from "./broker.js";
 export { BrokerServer, startBroker, type BrokerServerOptions, type RunningBroker, type StartBrokerOptions } from "./server.js";
 export {

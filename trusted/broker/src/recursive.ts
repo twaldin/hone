@@ -12,6 +12,7 @@ import path from "node:path";
 import { z } from "zod";
 import {
   BudgetEnvelope,
+  ChildRunAdmission,
   ChildRunTerminal,
   ResourceUsage,
   SpawnRunParams,
@@ -20,6 +21,7 @@ import {
   type RunDepth,
   type SpawnRunParams as SpawnRunRequest,
   type SpawnRunResult as SpawnRunResponse,
+  type ChildRunAdmission as ChildRunAdmissionRecord,
 } from "@hone/schema";
 import { BrokerError } from "./errors.js";
 
@@ -44,6 +46,7 @@ const ReservationLine = z.object({
   t: z.literal("reservation"),
   ancestors: z.array(z.string().min(1)).min(1),
   request: SpawnRunParams,
+  admission: ChildRunAdmission,
 });
 
 const UsageLine = z.object({
@@ -79,6 +82,7 @@ interface AccountState {
 interface ReservationState {
   ancestors: string[];
   request: SpawnRunRequest;
+  admission: ChildRunAdmissionRecord;
   usage?: Usage;
   terminal?: Terminal;
 }
@@ -96,6 +100,7 @@ export interface RecursiveBudgetState {
 
 export interface RecursiveReservationAdmission {
   request: SpawnRunRequest;
+  admission: ChildRunAdmissionRecord;
   replay: boolean;
   settled: SpawnRunResponse | undefined;
 }
@@ -224,20 +229,26 @@ export class RecursiveResourceLedger {
     return this.reservations.has(childRunId);
   }
 
-  reserveChild(requestInput: SpawnRunRequest, ancestorsInput: readonly string[]): RecursiveReservationAdmission {
+  reserveChild(
+    requestInput: SpawnRunRequest,
+    ancestorsInput: readonly string[],
+    admissionInput: ChildRunAdmissionRecord,
+  ): RecursiveReservationAdmission {
     this.assertUsable();
     const request = SpawnRunParams.parse(requestInput);
+    const admission = ChildRunAdmission.parse(admissionInput);
     const ancestors = [...ancestorsInput];
     const childRunId = request.child.runId;
     this.validateChain(childRunId, request.depth, ancestors);
 
     const duplicate = this.reservations.get(childRunId);
     if (duplicate !== undefined) {
-      if (!same(duplicate.request, request) || !same(duplicate.ancestors, ancestors)) {
+      if (!same(duplicate.request, request) || !same(duplicate.ancestors, ancestors) || !same(duplicate.admission, admission)) {
         throw new BrokerError("INTERNAL", `durable child identity collision: ${childRunId}`);
       }
       return {
         request: SpawnRunParams.parse(duplicate.request),
+        admission: ChildRunAdmission.parse(duplicate.admission),
         replay: true,
         settled: this.resultFor(duplicate),
       };
@@ -245,12 +256,17 @@ export class RecursiveResourceLedger {
 
     this.assertReservationFits(request, ancestors);
 
-    const line = ReservationLine.parse({ v: 1, t: "reservation", ancestors, request });
+    const line = ReservationLine.parse({ v: 1, t: "reservation", ancestors, request, admission });
     this.append(line);
     this.apply(line);
     const stored = this.reservations.get(childRunId);
     if (stored === undefined) throw new BrokerError("INTERNAL", "recursive reservation was not applied");
-    return { request: SpawnRunParams.parse(stored.request), replay: false, settled: undefined };
+    return {
+      request: SpawnRunParams.parse(stored.request),
+      admission: ChildRunAdmission.parse(stored.admission),
+      replay: false,
+      settled: undefined,
+    };
   }
 
   settleChild(childRunId: string, usageInput: Usage, terminalInput: Terminal): SpawnRunResponse {
@@ -346,7 +362,11 @@ export class RecursiveResourceLedger {
             account.remaining[envelopeKey] -= line.request.reservation[envelopeKey];
           }
         }
-        this.reservations.set(childRunId, { ancestors: [...line.ancestors], request: SpawnRunParams.parse(line.request) });
+        this.reservations.set(childRunId, {
+          ancestors: [...line.ancestors],
+          request: SpawnRunParams.parse(line.request),
+          admission: ChildRunAdmission.parse(line.admission),
+        });
         this.accounts.set(childRunId, {
           depth: line.request.depth,
           ancestors: [...line.ancestors],
