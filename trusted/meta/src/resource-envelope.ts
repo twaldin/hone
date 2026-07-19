@@ -1,4 +1,16 @@
 import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeSync,
+} from "node:fs";
+import path from "node:path";
+import {
   BudgetEnvelope as BudgetEnvelopeSchema,
   M2EnvelopeIdentity as M2EnvelopeIdentitySchema,
   M2RecursiveBudgets as M2RecursiveBudgetsSchema,
@@ -8,6 +20,8 @@ import {
   type M2RecursiveBudgets,
 } from "@hone/schema";
 import { z } from "zod";
+
+const DIGEST = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 
 const SAFE_ID = z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/);
 const ResourceUsage = z.object({
@@ -37,6 +51,12 @@ const SettlementRecord = z.object({
   observed: ResourceUsage,
 }).strict();
 
+
+const RecordFileHeader = z.object({
+  version: z.literal(1),
+  type: z.literal("header"),
+  ledgerId: DIGEST,
+}).strict();
 const AllocationRecord = z.discriminatedUnion("type", [ReservationRecord, SettlementRecord]);
 
 export interface MetaEnvelopeReservationRequest {
@@ -96,6 +116,98 @@ const USAGE_BY_BUDGET: Record<BudgetDimension, keyof MetaEnvelopeResourceUsage> 
   maxEvaluatorInvocations: "evaluatorInvocations",
 };
 
+/** Owner-only append/fsync record port suitable for production campaign wiring. */
+export class MetaEnvelopeFileRecordPortV1 implements MetaEnvelopeRecordPort {
+  private closed = false;
+
+  private constructor(
+    readonly file: string,
+    readonly ledgerId: string,
+    private readonly fd: number,
+    private readonly rows: MetaEnvelopeAllocationRecord[],
+  ) {}
+
+  static open(fileInput: string, ledgerIdInput: string): MetaEnvelopeFileRecordPortV1 {
+    const file = path.resolve(fileInput);
+    const ledgerId = DIGEST.parse(ledgerIdInput);
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    let createdFd: number | null = null;
+    try {
+      createdFd = openSync(
+        file,
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+        0o600,
+      );
+      writeBytes(createdFd, Buffer.from(`${canonicalJson({ version: 1, type: "header", ledgerId })}\n`));
+      fsyncSync(createdFd);
+      closeSync(createdFd);
+      createdFd = null;
+    } catch (error) {
+      if (createdFd !== null) closeSync(createdFd);
+      const code =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof error.code === "string"
+          ? error.code
+          : null;
+      if (code !== "EEXIST") throw error;
+    }
+
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`meta envelope record path is not a regular owner file: ${file}`);
+    }
+    const owner = process.getuid?.();
+    if (owner !== undefined && stat.uid !== owner) {
+      throw new Error(`meta envelope record file is not owned by the current uid: ${file}`);
+    }
+    if ((stat.mode & 0o077) !== 0) {
+      chmodSync(file, 0o600);
+    }
+    const content = readFileSync(file, "utf8");
+    if (!content.endsWith("\n")) {
+      throw new Error(`meta envelope record file has a torn final line: ${file}`);
+    }
+    const lines = content.slice(0, -1).split("\n");
+    const header = RecordFileHeader.parse(JSON.parse(lines[0] ?? ""));
+    if (header.ledgerId !== ledgerId) {
+      throw new Error(`meta envelope ledger ${header.ledgerId} does not match ${ledgerId}`);
+    }
+    const rows = lines.slice(1).map((line, index) => {
+      try {
+        return AllocationRecord.parse(JSON.parse(line));
+      } catch (error) {
+        throw new Error(
+          `meta envelope record is corrupt at line ${index + 2}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+    const fd = openSync(file, fsConstants.O_WRONLY | fsConstants.O_APPEND);
+    return new MetaEnvelopeFileRecordPortV1(file, ledgerId, fd, rows);
+  }
+
+  readAll(): readonly MetaEnvelopeAllocationRecord[] {
+    if (this.closed) throw new Error("meta envelope record port is closed");
+    return structuredClone(this.rows);
+  }
+
+  append(recordInput: MetaEnvelopeAllocationRecord): void {
+    if (this.closed) throw new Error("meta envelope record port is closed");
+    const record = AllocationRecord.parse(recordInput);
+    writeBytes(this.fd, Buffer.from(`${canonicalJson(record)}\n`));
+    fsyncSync(this.fd);
+    this.rows.push(record);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    fsyncSync(this.fd);
+    closeSync(this.fd);
+    this.closed = true;
+  }
+}
+
 /**
  * Trusted, replayable componentwise allocator for one campaign cell.
  * Search, confirmation, and terminal methods select their authority envelope;
@@ -115,6 +227,43 @@ export class MetaResourceEnvelopeLedger {
 
   reserveSearchDescendant(input: MetaEnvelopeReservationRequest): MetaEnvelopeReservation {
     return this.reserve("search", input);
+  }
+
+  /**
+   * Atomically validates a top-level optimizer schedule before appending any
+   * new slice. Durable appends may stop partway on I/O failure, but no caller
+   * receives the batch (and therefore no child may launch); replay completes
+   * the same reservation identities without minting capacity.
+   */
+  reserveSearchDescendants(
+    inputs: readonly MetaEnvelopeReservationRequest[],
+  ): MetaEnvelopeReservation[] {
+    const parsed = inputs.map((input) => ReservationRequest.parse(input));
+    const seen = new Set<string>();
+    const total: BudgetEnvelope = {
+      maxTokens: 0,
+      maxUsd: 0,
+      maxWallClockSec: 0,
+      maxEvaluatorInvocations: 0,
+    };
+    for (const input of parsed) {
+      if (input.parentReservationId !== null) {
+        throw new Error("batched search reservations must be top-level descendants");
+      }
+      if (seen.has(input.reservationId)) {
+        throw new Error(`duplicate durable identity ${input.reservationId} in search reservation batch`);
+      }
+      seen.add(input.reservationId);
+      if (this.reservations.has(input.reservationId)) {
+        this.reserve("search", input);
+        continue;
+      }
+      for (const dimension of BUDGET_DIMENSIONS) {
+        total[dimension] += input.reserved[dimension];
+      }
+    }
+    this.assertFits(total, this.remainingSearch(), "search envelope batch");
+    return parsed.map((input) => this.reserve("search", input));
   }
 
   reserveConfirmationDescendant(input: MetaEnvelopeReservationRequest): MetaEnvelopeReservation {
@@ -396,6 +545,15 @@ export class MetaResourceEnvelopeLedger {
         );
       }
     }
+  }
+}
+
+function writeBytes(fd: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new Error("failed to append meta envelope record");
+    offset += written;
   }
 }
 
