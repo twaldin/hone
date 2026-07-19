@@ -1,0 +1,4 @@
+use_field_init_shorthand = true
+imports_granularity="Crate"
+wrap_comments = true
+format_strings = true

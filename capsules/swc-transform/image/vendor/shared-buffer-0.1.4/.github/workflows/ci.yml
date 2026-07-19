@@ -1,0 +1,118 @@
+name: Continuous Integration
+
+on:
+  pull_request:
+  push:
+    branches:
+    - main
+
+env:
+  DEFAULT_CRATE_NAME: shared_buffer
+  MSRV: 1.64.0
+
+jobs:
+  check:
+    name: Compile and Test (${{ matrix.os }})
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.MSRV }}
+          override: true
+      - name: Install Nextest
+        uses: taiki-e/install-action@nextest
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Type Checking
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --workspace --verbose --locked
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --workspace --verbose --locked
+      - name: Test
+        uses: actions-rs/cargo@v1
+        with:
+          command: nextest
+          args: run --workspace --verbose --locked
+
+  lints:
+    name: Linting and Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+          components: rustfmt, clippy
+      - name: Check Formatting
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all --verbose --check
+      - name: Clippy
+        uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --workspace --verbose
+
+  api-docs:
+    name: Publish API Docs to GitHub Pages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: doc
+          args: --workspace --verbose --locked
+      - name: Redirect top-level GitHub Pages
+        run: 'echo ''<meta http-equiv="refresh" content="0; url=${{ env.DEFAULT_CRATE_NAME }}/index.html" />'' > target/doc/index.html'
+        shell: bash
+      - name: Upload API Docs
+        uses: JamesIves/github-pages-deploy-action@v4.4.0
+        if: github.ref == 'refs/heads/main'
+        with:
+          branch: gh-pages
+          folder: target/doc
+          single-commit: true
+
+  workflow-times:
+    name: Workflow Timings
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - name: Time Reporter
+        uses: Michael-F-Bryan/workflow-timer@v0.2.3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          jobs: |
+            Compile and Test (ubuntu-latest)
+            Compile and Test (macos-latest)
+            Compile and Test (windows-latest)
+          message: |
+            Make sure you keep an eye on build times!
+
+            The goal is to keep CI times under 5 minutes so developers can maintain a fast edit-compile-test cycle.

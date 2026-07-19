@@ -1,0 +1,12 @@
+[package]
+name = "more-asserts"
+version = "0.2.2"
+authors = ["Thom Chiovoloni <chiovolonit@gmail.com>"]
+description = "Small library providing additional assert_* and debug_assert_* macros."
+keywords = ["assert", "debug_assert", "debug", "assertions", "testing"]
+homepage = "https://github.com/thomcc/rust-more-asserts"
+documentation = "https://docs.rs/more-asserts"
+repository = "https://github.com/thomcc/rust-more-asserts"
+license = "CC0-1.0"
+
+[dependencies]

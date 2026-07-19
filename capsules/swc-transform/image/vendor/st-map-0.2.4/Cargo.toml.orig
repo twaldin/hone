@@ -1,0 +1,14 @@
+[package]
+authors     = ["강동윤 <kdy1997.dev@gmail.com>"]
+description = "Runtime for a stack-alocated map"
+edition     = "2018"
+license     = { workspace = true }
+name        = "st-map"
+repository  = { workspace = true }
+version     = "0.2.4"
+
+[lib]
+
+[dependencies]
+arrayvec         = { workspace = true }
+static-map-macro = { path = "../static-map-macro", version = "0.3.2" }

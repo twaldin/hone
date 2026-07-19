@@ -1,0 +1,17 @@
+[package]
+name = "waker-fn"
+# When publishing a new version:
+# - Update CHANGELOG.md
+# - Create "v1.x.y" git tag
+version = "1.1.1"
+authors = ["Stjepan Glavina <stjepang@gmail.com>"]
+edition = "2018"
+rust-version = "1.51"
+description = "Convert closures into wakers"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/smol-rs/waker-fn"
+homepage = "https://github.com/smol-rs/waker-fn"
+documentation = "https://docs.rs/waker-fn"
+keywords = ["async", "waker", "wake", "closure", "callback"]
+categories = ["concurrency"]
+exclude = ["/.*"]

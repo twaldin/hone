@@ -1,0 +1,24 @@
+[package]
+name = "forked_react_compiler_ast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+react_compiler_utils = { workspace = true }
+rustc-hash = "2"
+react_compiler_diagnostics = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value", "unbounded_depth"] }
+serde-transcode = "1"
+indexmap = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+walkdir = "2"
+similar = "3"
+
+[lib]
+name = "react_compiler_ast"

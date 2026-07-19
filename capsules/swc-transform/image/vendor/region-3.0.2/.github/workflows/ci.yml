@@ -1,0 +1,158 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TEST_THREADS: 1
+
+jobs:
+  test:
+    name: Test (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - target: i686-unknown-linux-gnu
+            os: ubuntu-20.04
+          - target: i686-unknown-linux-musl
+            os: ubuntu-20.04
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-20.04
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-20.04
+
+          # Cross
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-20.04
+            use-cross: true
+          - target: aarch64-linux-android
+            toolchain: '1.52.0' # See: https://github.com/rust-lang/rust/issues/110786
+            os: ubuntu-20.04
+            use-cross: true
+          - target: mips-unknown-linux-gnu
+            toolchain: '1.52.0' # See: https://github.com/rust-lang/compiler-team/issues/648
+            os: ubuntu-20.04
+            use-cross: true
+
+          # Windows
+          - target: i686-pc-windows-gnu
+            os: windows-2019
+          - target: i686-pc-windows-msvc
+            os: windows-2019
+          - target: x86_64-pc-windows-gnu
+            os: windows-2019
+          - target: x86_64-pc-windows-msvc
+            os: windows-2019
+
+          # macOS
+          - target: x86_64-apple-darwin
+            os: macos-13
+      fail-fast: false
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: ${{ matrix.toolchain || 'stable' }}
+        profile: minimal
+        target: ${{ matrix.target }}
+        override: true
+
+    - name: Run tests (cross)
+      if: ${{ matrix.use-cross }}
+      uses: actions-rs/cargo@v1
+      with:
+        use-cross: true
+        command: test
+        args: --target ${{ matrix.target }}
+
+    - name: Run tests (cargo)
+      if: ${{ !matrix.use-cross }}
+      run: cargo test
+
+  test-qemu:
+    name: Test (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-freebsd
+            os: freebsd
+            os-version: '14.0'
+          - target: x86_64-unknown-openbsd
+            os: openbsd
+            os-version: '7.4'
+            install: sudo pkg_add rust
+          - target: x86_64-unknown-netbsd
+            os: netbsd
+            os-version: '9.3'
+            prepare:
+              sudo pkgin -y install mozilla-rootcerts-openssl
+      fail-fast: false
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Run tests (cargo)
+      uses: cross-platform-actions/action@v0.23.0
+      with:
+        operating_system: ${{ matrix.os }}
+        architecture: ${{ matrix.architecture || 'x86-64' }}
+        version: ${{ matrix.os-version }}
+        run: |
+          ${{ matrix.prepare }}
+          ${{ matrix.install || format('
+            curl https://sh.rustup.rs -sSf | sh -s -- -q -y --profile minimal --target {0}
+            export PATH="$HOME/.cargo/bin:$PATH"
+          ', matrix.target)}}
+          cargo test
+
+  check:
+    name: Check (${{ matrix.target }})
+    runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-illumos
+      fail-fast: false
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Install toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        target: ${{ matrix.target }}
+        override: true
+
+    - name: Run check
+      run: cargo check --target ${{ matrix.target }}
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Install toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+
+    - name: Run rustfmt
+      run: cargo fmt -- --check
+
+    - name: Run clippy
+      run: cargo clippy --all-targets

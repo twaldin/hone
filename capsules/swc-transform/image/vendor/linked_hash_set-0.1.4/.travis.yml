@@ -1,0 +1,17 @@
+sudo: false
+language: rust
+cache:
+  cargo: true
+rust:
+- stable
+- nightly
+env:
+- RUST_BACKTRACE=full
+matrix:
+  allow_failures:
+  - rust: nightly
+  fast_finish: true
+os:
+- linux
+script:
+- cargo test --features "serde"

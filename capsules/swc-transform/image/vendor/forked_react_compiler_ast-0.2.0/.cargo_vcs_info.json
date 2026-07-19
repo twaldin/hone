@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "8d20e134fedca85ad8fa798d94cc60e3b000d25e"
+  },
+  "path_in_vcs": "react-compiler/crates/react_compiler_ast"
+}

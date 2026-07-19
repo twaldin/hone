@@ -1,0 +1,724 @@
+---
+source: crates/webc/tests/compatibility.rs
+expression: container.manifest()
+---
+package:
+  wapm:
+    license: MIT
+    repository: "https://github.com/john-sharratt/coreutils"
+  fs:
+    - from: ~
+      volume_name: /usr
+      mount_path: /usr
+atoms:
+  coreutils:
+    kind: "https://webc.org/kind/wasm"
+    signature: "sha256:Pl3O4MDLLuN27WmfC7CSdO7zKpa7562B+aYe+NsANpw="
+commands:
+  arch:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  base32:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  base64:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  baseenc:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  basename:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  cat:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  chcon:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  chgrp:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  chmod:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  chown:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  chroot:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  cksum:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  comm:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  cp:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  csplit:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  cut:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  date:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  dd:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  df:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  dircolors:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  dirname:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  du:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  echo:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  env:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  expand:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  expr:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  factor:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  "false":
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  fmt:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  fold:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  groups:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  hashsum:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  head:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  hostid:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  hostname:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  id:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  install:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  join:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  kill:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  link:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  ln:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  logname:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  ls:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  mkdir:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  mkfifo:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  mknod:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  mktemp:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  more:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  mv:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  nice:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  nl:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  nohup:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  nproc:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  numfmt:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  od:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  paste:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  pathchk:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  pinky:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  pr:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  printenv:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  printf:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  ptx:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  pwd:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  readlink:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  realpath:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  relpath:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  rm:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  rmdir:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  runcon:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  seq:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  sh:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  shred:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  shuf:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  sleep:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  sort:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  split:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  stat:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  stdbuf:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  sum:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  sync:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  tac:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  tail:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  tee:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  test:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  timeout:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  touch:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  tr:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  "true":
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  truncate:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  tsort:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  tty:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  uname:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  unexpand:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  uniq:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  unlink:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  uptime:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  users:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  wc:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  who:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  whoami:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils
+  "yes":
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: coreutils
+      wasi:
+        atom: coreutils

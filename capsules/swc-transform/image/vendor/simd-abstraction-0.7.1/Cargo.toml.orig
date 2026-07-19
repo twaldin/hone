@@ -1,0 +1,24 @@
+[package]
+name = "simd-abstraction"
+version = "0.7.1"
+edition = "2021"
+description = "Abstract SIMD instruction sets"
+license = "MIT"
+repository = "https://github.com/Nugine/simd"
+keywords = ["simd"]
+categories = ["no-std"]
+readme = "../../README.md"
+rust-version = "1.61"
+
+[features]
+alloc = []
+std = ["alloc"]
+detect = ["std"]
+unstable = []
+
+[dependencies]
+outref = "0.1.0"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

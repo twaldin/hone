@@ -1,0 +1,61 @@
+[package]
+name = "anstream"
+version = "0.6.9"
+description = "A simple cross platform library for writing colored text to a terminal."
+repository = "https://github.com/rust-cli/anstyle.git"
+homepage = "https://github.com/rust-cli/anstyle"
+categories = ["command-line-interface"]
+keywords = ["ansi", "terminal", "color", "strip", "wincon"]
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
+
+[package.metadata.release]
+pre-release-replacements = [
+  {file="CHANGELOG.md", search="Unreleased", replace="{{version}}", min=1},
+  {file="CHANGELOG.md", search="\\.\\.\\.HEAD", replace="...{{tag_name}}", exactly=1},
+  {file="CHANGELOG.md", search="ReleaseDate", replace="{{date}}", min=1},
+  {file="CHANGELOG.md", search="<!-- next-header -->", replace="<!-- next-header -->\n## [Unreleased] - ReleaseDate\n", exactly=1},
+  {file="CHANGELOG.md", search="<!-- next-url -->", replace="<!-- next-url -->\n[Unreleased]: https://github.com/rust-cli/anstyle/compare/{{tag_name}}...HEAD", exactly=1},
+]
+
+[features]
+default = ["auto", "wincon"]
+auto = ["dep:anstyle-query", "dep:colorchoice"]
+wincon = ["dep:anstyle-wincon"]
+# Enable in `dev-dependencies` to make sure output is captured for tests
+test = []
+
+[dependencies]
+anstyle = { version = "1.0.0", path = "../anstyle" }
+anstyle-parse = { version = "0.2.0", path = "../anstyle-parse" }
+colorchoice = { version = "1.0.0", path = "../colorchoice", optional = true }
+anstyle-query = { version = "1.0.0", path = "../anstyle-query", optional = true }
+utf8parse = "0.2.1"
+
+[target.'cfg(windows)'.dependencies]
+anstyle-wincon = { version = "3.0.1", path = "../anstyle-wincon", optional = true }
+
+[dev-dependencies]
+criterion = "0.5.1"
+lexopt = "0.3.0"
+owo-colors = "4.0.0"
+proptest = "1.4.0"
+strip-ansi-escapes = "0.2.0"
+
+[[bench]]
+name = "strip"
+harness = false
+
+[[bench]]
+name = "wincon"
+harness = false
+
+[[bench]]
+name = "stream"
+harness = false

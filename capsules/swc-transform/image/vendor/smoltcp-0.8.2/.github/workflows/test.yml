@@ -1,0 +1,87 @@
+on:
+  push:
+    branches: [staging, trying]
+  pull_request:
+
+name: Test
+
+jobs:
+  tests:
+    runs-on: ubuntu-20.04
+    needs: [test, check]
+    steps:
+      - name: Done
+        run: exit 0
+  test:
+    runs-on: ubuntu-20.04
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
+    strategy:
+      matrix:
+        # Test on stable, MSRV, and nightly.
+        # Failure is permitted on nightly.
+        rust:
+          - stable
+          - 1.56.0
+          - nightly
+
+        features:
+          # Test default features.
+          - default
+
+          # Test minimal featureset
+          - std proto-ipv4
+
+          # Test features chosen to be as orthogonal as possible.
+          - std medium-ethernet phy-raw_socket proto-ipv6 socket-udp
+          - std medium-ethernet phy-tuntap_interface proto-ipv6 socket-udp
+          - std medium-ethernet proto-ipv4 proto-igmp socket-raw
+          - std medium-ethernet proto-ipv4 socket-udp socket-tcp
+          - std medium-ethernet proto-ipv4 proto-dhcpv4 socket-udp
+          - std medium-ethernet medium-ip medium-ieee802154 proto-ipv6 socket-udp
+          - std medium-ethernet proto-ipv6 socket-tcp
+          - std medium-ethernet medium-ip proto-ipv4 socket-icmp socket-tcp
+          - std medium-ip proto-ipv6 socket-icmp socket-tcp
+
+          # Test features chosen to be as aggressive as possible.
+          - std medium-ethernet medium-ip medium-ieee802154 proto-ipv4 proto-ipv6 socket-raw socket-udp socket-tcp socket-icmp async
+
+        include:
+          # Test alloc feature which requires nightly.
+          - rust: nightly
+            features: alloc medium-ethernet proto-ipv4 proto-ipv6 socket-raw socket-udp socket-tcp socket-icmp
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+          override: true
+      - name: Run Tests
+        run: cargo test --no-default-features --features "${{ matrix.features }}"
+
+  check:
+    runs-on: ubuntu-20.04
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
+    strategy:
+      matrix:
+        # Test on stable, MSRV, and nightly.
+        # Failure is permitted on nightly.
+        rust:
+          - stable
+          - 1.56.0
+          - nightly
+
+        features:
+          # These feature sets cannot run tests, so we only check they build.
+          - medium-ip medium-ethernet medium-ieee802154 proto-ipv6 proto-ipv6 proto-igmp proto-dhcpv4 socket-raw socket-udp socket-tcp socket-icmp async
+          - defmt medium-ip medium-ethernet proto-ipv6 proto-ipv6 proto-igmp proto-dhcpv4 socket-raw socket-udp socket-tcp socket-icmp async
+
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+          override: true
+      - name: Check
+        run: cargo check --no-default-features --features "${{ matrix.features }}"

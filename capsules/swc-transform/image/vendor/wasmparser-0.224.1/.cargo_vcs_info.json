@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "0155f1a43c5029f410a248cd58fdb7ba50866de6"
+  },
+  "path_in_vcs": "crates/wasmparser"
+}

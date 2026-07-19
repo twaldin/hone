@@ -1,0 +1,24 @@
+{
+  "taskId": "OSS-H03",
+  "repository": "swc-project/swc",
+  "revision": "d5fd89520be380493479d232b88c532e94e1df94",
+  "license": "Apache-2.0",
+  "objective": "Improve reciprocal geometric-mean parse and transform time across frozen JavaScript, TypeScript, and React TSX corpora.",
+  "mutableSurface": [
+    "crates/swc_ecma_parser/src/**",
+    "crates/swc_ecma_transforms_base/src/**",
+    "crates/swc_ecma_transforms_typescript/src/**",
+    "crates/swc_ecma_transforms_react/src/**"
+  ],
+  "hardGates": [
+    "frozen upstream library test inventories pass exactly: parser 177 passed/1 ignored; base transform 205/1; TypeScript transform 4/0; React transform 289/45",
+    "transformed AST semantic hashes match",
+    "emitted-output semantic hashes match",
+    "each emitted output is no larger than baseline plus 1%",
+    "peak benchmark RSS is no larger than baseline plus 2%"
+  ],
+  "build": "cargo test/build --locked --offline --jobs 2 --profile hone",
+  "benchmark": "protected fresh-process hone-swc-bench transformations over one primary split while the opposite split is a mandatory semantic/output/RSS gate",
+  "q": "1000000000 / geometric_mean(trusted-parent wall nanoseconds per fresh parse+transform operation)",
+  "qFail": 0
+}

@@ -1,0 +1,3 @@
+ 7421f82105232274626207ff23f9ee03e6a7421c vendor/caniuse (heads/main)
+ 8d1374fd7b352bede11ec2bfc8982af1f791e39e vendor/electron-to-chromium (8d1374f)
+ 6e005d771bb1f1ed9326e1f22c5d25421386eb30 vendor/node-releases (6e005d7)

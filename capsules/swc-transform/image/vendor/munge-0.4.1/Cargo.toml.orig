@@ -1,0 +1,21 @@
+[package]
+name = "munge"
+description = "Macro for custom destructuring"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/munge"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+munge_macro.workspace = true
+
+[dev-dependencies]
+rustversion.workspace = true
+trybuild.workspace = true

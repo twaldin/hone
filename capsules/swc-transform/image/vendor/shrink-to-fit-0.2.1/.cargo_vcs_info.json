@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "767df0a49be582ddc23c223e961c23d077135ab2"
+  },
+  "path_in_vcs": "crates/shrink-to-fit"
+}

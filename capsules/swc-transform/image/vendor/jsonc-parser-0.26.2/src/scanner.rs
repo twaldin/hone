@@ -1,0 +1,594 @@
+use crate::string::CharProvider;
+
+use super::common::Range;
+use super::errors::*;
+use super::tokens::Token;
+use std::str::Chars;
+
+/// Converts text into a stream of tokens.
+pub struct Scanner<'a> {
+  byte_index: usize,
+  token_start: usize,
+  char_iter: Chars<'a>,
+  // todo(dsherret): why isn't this a VecDeque?
+  char_buffer: Vec<char>,
+  current_token: Option<Token<'a>>,
+  file_text: &'a str,
+}
+
+const CHAR_BUFFER_MAX_SIZE: usize = 6;
+
+impl<'a> Scanner<'a> {
+  /// Creates a new scanner based on the provided text.
+  pub fn new(file_text: &'a str) -> Scanner<'a> {
+    let mut char_iter = file_text.chars();
+    let mut char_buffer = Vec::with_capacity(CHAR_BUFFER_MAX_SIZE);
+    let current_char = char_iter.next();
+    if let Some(current_char) = current_char {
+      char_buffer.push(current_char);
+    }
+
+    Scanner {
+      byte_index: 0,
+      token_start: 0,
+      char_iter,
+      char_buffer,
+      current_token: None,
+      file_text,
+    }
+  }
+
+  pub fn file_text(&self) -> &str {
+    self.file_text
+  }
+
+  /// Moves to and returns the next token.
+  pub fn scan(&mut self) -> Result<Option<Token<'a>>, ParseError> {
+    self.skip_whitespace();
+    self.token_start = self.byte_index;
+    if let Some(current_char) = self.current_char() {
+      let token_result = match current_char {
+        '{' => {
+          self.move_next_char();
+          Ok(Token::OpenBrace)
+        }
+        '}' => {
+          self.move_next_char();
+          Ok(Token::CloseBrace)
+        }
+        '[' => {
+          self.move_next_char();
+          Ok(Token::OpenBracket)
+        }
+        ']' => {
+          self.move_next_char();
+          Ok(Token::CloseBracket)
+        }
+        ',' => {
+          self.move_next_char();
+          Ok(Token::Comma)
+        }
+        ':' => {
+          self.move_next_char();
+          Ok(Token::Colon)
+        }
+        '\'' | '"' => self.parse_string(),
+        '/' => match self.peek_char() {
+          Some('/') => Ok(self.parse_comment_line()),
+          Some('*') => self.parse_comment_block(),
+          _ => Err(self.create_error_for_current_token(ParseErrorKind::UnexpectedToken)),
+        },
+        _ => {
+          if current_char == '-' || self.is_digit() {
+            self.parse_number()
+          } else if self.try_move_word("true") {
+            Ok(Token::Boolean(true))
+          } else if self.try_move_word("false") {
+            Ok(Token::Boolean(false))
+          } else if self.try_move_word("null") {
+            Ok(Token::Null)
+          } else {
+            self.parse_word()
+          }
+        }
+      };
+      match token_result {
+        Ok(token) => {
+          self.current_token = Some(token.clone());
+          Ok(Some(token))
+        }
+        Err(err) => Err(err),
+      }
+    } else {
+      self.current_token = None;
+      Ok(None)
+    }
+  }
+
+  /// Gets the start position of the token.
+  pub fn token_start(&self) -> usize {
+    self.token_start
+  }
+
+  /// Gets the end position of the token.
+  pub fn token_end(&self) -> usize {
+    self.byte_index
+  }
+
+  /// Gets the current token.
+  pub fn token(&self) -> Option<Token<'a>> {
+    self.current_token.as_ref().map(|x| x.to_owned())
+  }
+
+  pub(super) fn create_error_for_current_token(&self, kind: ParseErrorKind) -> ParseError {
+    self.create_error_for_start(self.token_start, kind)
+  }
+
+  pub(super) fn create_error_for_current_char(&self, kind: ParseErrorKind) -> ParseError {
+    self.create_error_for_start(self.byte_index, kind)
+  }
+
+  pub(super) fn create_error_for_start(&self, start: usize, kind: ParseErrorKind) -> ParseError {
+    let range = Range {
+      start,
+      end: if let Some(c) = self.file_text[self.byte_index..].chars().next() {
+        self.byte_index + c.len_utf8()
+      } else {
+        self.file_text.len()
+      },
+    };
+    self.create_error_for_range(range, kind)
+  }
+
+  pub(super) fn create_error_for_range(&self, range: Range, kind: ParseErrorKind) -> ParseError {
+    ParseError::new(range, kind, self.file_text)
+  }
+
+  fn parse_string(&mut self) -> Result<Token<'a>, ParseError> {
+    crate::string::parse_string_with_char_provider(self)
+      .map(Token::String)
+      // todo(dsherret): don't convert the error kind to a string here
+      .map_err(|err| self.create_error_for_start(err.byte_index, ParseErrorKind::String(err.kind)))
+  }
+
+  fn parse_number(&mut self) -> Result<Token<'a>, ParseError> {
+    let start_byte_index = self.byte_index;
+
+    if self.is_negative_sign() {
+      self.move_next_char();
+    }
+
+    if self.is_zero() {
+      self.move_next_char();
+    } else if self.is_one_nine() {
+      self.move_next_char();
+      while self.is_digit() {
+        self.move_next_char();
+      }
+    } else {
+      return Err(self.create_error_for_current_char(ParseErrorKind::ExpectedDigitFollowingNegativeSign));
+    }
+
+    if self.is_decimal_point() {
+      self.move_next_char();
+
+      if !self.is_digit() {
+        return Err(self.create_error_for_current_char(ParseErrorKind::ExpectedDigit));
+      }
+
+      while self.is_digit() {
+        self.move_next_char();
+      }
+    }
+
+    match self.current_char() {
+      Some('e') | Some('E') => {
+        match self.move_next_char() {
+          Some('-') | Some('+') => {
+            self.move_next_char();
+            if !self.is_digit() {
+              return Err(self.create_error_for_current_char(ParseErrorKind::ExpectedDigit));
+            }
+          }
+          _ => {
+            if !self.is_digit() {
+              return Err(self.create_error_for_current_char(ParseErrorKind::ExpectedPlusMinusOrDigitInNumberLiteral));
+            }
+          }
+        }
+
+        while self.is_digit() {
+          self.move_next_char();
+        }
+      }
+      _ => {}
+    }
+
+    let end_byte_index = self.byte_index;
+    Ok(Token::Number(&self.file_text[start_byte_index..end_byte_index]))
+  }
+
+  fn parse_comment_line(&mut self) -> Token<'a> {
+    self.assert_then_move_char('/');
+    #[cfg(debug_assertions)]
+    self.assert_char('/');
+
+    let start_byte_index = self.byte_index + 1;
+    while self.move_next_char().is_some() {
+      if self.is_new_line() {
+        break;
+      }
+    }
+
+    Token::CommentLine(&self.file_text[start_byte_index..self.byte_index])
+  }
+
+  fn parse_comment_block(&mut self) -> Result<Token<'a>, ParseError> {
+    self.assert_then_move_char('/');
+    #[cfg(debug_assertions)]
+    self.assert_char('*');
+    let mut found_end = false;
+
+    let start_byte_index = self.byte_index + 1;
+    while let Some(current_char) = self.move_next_char() {
+      if current_char == '*' && self.peek_char() == Some('/') {
+        found_end = true;
+        break;
+      }
+    }
+
+    if found_end {
+      let end_byte_index = self.byte_index;
+      self.assert_then_move_char('*');
+      self.assert_then_move_char('/');
+      Ok(Token::CommentBlock(&self.file_text[start_byte_index..end_byte_index]))
+    } else {
+      Err(self.create_error_for_current_token(ParseErrorKind::UnterminatedCommentBlock))
+    }
+  }
+
+  fn skip_whitespace(&mut self) {
+    while let Some(current_char) = self.current_char() {
+      if current_char.is_whitespace() {
+        self.move_next_char();
+      } else {
+        break;
+      }
+    }
+  }
+
+  fn try_move_word(&mut self, text: &str) -> bool {
+    let mut char_index = 0;
+    for c in text.chars() {
+      if let Some(current_char) = self.peek_char_offset(char_index) {
+        if current_char != c {
+          return false;
+        }
+
+        char_index += 1;
+      } else {
+        return false;
+      }
+    }
+
+    if let Some(next_char) = self.peek_char_offset(char_index) {
+      if next_char.is_alphanumeric() {
+        return false;
+      }
+    }
+
+    for _ in 0..char_index {
+      self.move_next_char();
+    }
+
+    true
+  }
+
+  fn parse_word(&mut self) -> Result<Token<'a>, ParseError> {
+    let start_byte_index = self.byte_index;
+
+    while let Some(current_char) = self.current_char() {
+      if current_char.is_whitespace() || current_char == '\r' || current_char == '\n' || current_char == ':' {
+        break;
+      }
+      if !current_char.is_alphanumeric() && current_char != '-' {
+        return Err(self.create_error_for_current_token(ParseErrorKind::UnexpectedToken));
+      }
+
+      self.move_next_char();
+    }
+
+    let end_byte_index = self.byte_index;
+
+    if end_byte_index - start_byte_index == 0 {
+      return Err(self.create_error_for_current_token(ParseErrorKind::UnexpectedToken));
+    }
+
+    Ok(Token::Word(&self.file_text[start_byte_index..end_byte_index]))
+  }
+
+  fn assert_then_move_char(&mut self, _character: char) {
+    #[cfg(debug_assertions)]
+    self.assert_char(_character);
+
+    self.move_next_char();
+  }
+
+  #[cfg(debug_assertions)]
+  fn assert_char(&mut self, character: char) {
+    let current_char = self.current_char();
+    debug_assert!(
+      current_char == Some(character),
+      "Expected {:?}, was {:?}",
+      character,
+      current_char
+    );
+  }
+
+  fn move_next_char(&mut self) -> Option<char> {
+    if let Some(&current_char) = self.char_buffer.first() {
+      // shift the entire array to the left then pop the last item
+      for i in 1..self.char_buffer.len() {
+        self.char_buffer[i - 1] = self.char_buffer[i];
+      }
+      self.char_buffer.pop();
+
+      if self.char_buffer.is_empty() {
+        if let Some(new_char) = self.char_iter.next() {
+          self.char_buffer.push(new_char);
+        }
+      }
+
+      self.byte_index += current_char.len_utf8();
+    }
+
+    self.current_char()
+  }
+
+  fn peek_char(&mut self) -> Option<char> {
+    self.peek_char_offset(1)
+  }
+
+  fn peek_char_offset(&mut self, offset: usize) -> Option<char> {
+    // fill the char buffer
+    for _ in self.char_buffer.len()..offset + 1 {
+      if let Some(next_char) = self.char_iter.next() {
+        self.char_buffer.push(next_char);
+      } else {
+        // end of string
+        return None;
+      }
+    }
+
+    // should not exceed this
+    debug_assert!(self.char_buffer.len() <= CHAR_BUFFER_MAX_SIZE);
+
+    self.char_buffer.get(offset).copied()
+  }
+
+  fn current_char(&self) -> Option<char> {
+    self.char_buffer.first().copied()
+  }
+
+  fn is_new_line(&mut self) -> bool {
+    match self.current_char() {
+      Some('\n') => true,
+      Some('\r') => self.peek_char() == Some('\n'),
+      _ => false,
+    }
+  }
+
+  fn is_digit(&self) -> bool {
+    self.is_one_nine() || self.is_zero()
+  }
+
+  fn is_zero(&self) -> bool {
+    self.current_char() == Some('0')
+  }
+
+  fn is_one_nine(&self) -> bool {
+    match self.current_char() {
+      Some(current_char) => ('1'..='9').contains(&current_char),
+      _ => false,
+    }
+  }
+
+  fn is_negative_sign(&self) -> bool {
+    self.current_char() == Some('-')
+  }
+
+  fn is_decimal_point(&self) -> bool {
+    self.current_char() == Some('.')
+  }
+}
+
+impl<'a> CharProvider<'a> for Scanner<'a> {
+  fn current_char(&mut self) -> Option<char> {
+    Scanner::current_char(self)
+  }
+
+  fn move_next_char(&mut self) -> Option<char> {
+    Scanner::move_next_char(self)
+  }
+
+  fn byte_index(&self) -> usize {
+    self.byte_index
+  }
+
+  fn text(&self) -> &'a str {
+    self.file_text
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::borrow::Cow;
+
+  use super::super::tokens::Token;
+  use super::*;
+  use pretty_assertions::assert_eq;
+
+  #[test]
+  fn it_tokenizes_string() {
+    assert_has_tokens(
+      r#""t\"est", "\t\r\n\n\u0020 test\n other","#,
+      vec![
+        Token::String(Cow::Borrowed(r#"t"est"#)),
+        Token::Comma,
+        Token::String(Cow::Borrowed("\t\r\n\n  test\n other")),
+        Token::Comma,
+      ],
+    );
+  }
+
+  #[test]
+  fn it_errors_escaping_single_quote_in_double_quote() {
+    assert_has_error(
+      r#""t\'est""#,
+      "Invalid escape in double quote string on line 1 column 3",
+    );
+  }
+
+  #[test]
+  fn it_tokenizes_single_quote_string() {
+    assert_has_tokens(
+      r#"'t\'est','a',"#,
+      vec![
+        Token::String(Cow::Borrowed(r#"t'est"#)),
+        Token::Comma,
+        Token::String(Cow::Borrowed("a")),
+        Token::Comma,
+      ],
+    );
+  }
+
+  #[test]
+  fn it_errors_escaping_double_quote_in_single_quote() {
+    assert_has_error(
+      r#"'t\"est'"#,
+      "Invalid escape in single quote string on line 1 column 3",
+    );
+  }
+
+  #[test]
+  fn it_errors_for_word_starting_with_invalid_token() {
+    assert_has_error(r#"{ &test }"#, "Unexpected token on line 1 column 3");
+  }
+
+  #[test]
+  fn it_tokenizes_numbers() {
+    assert_has_tokens(
+      "0, 0.123, -198, 0e-345, 0.3e+025, 1e1,",
+      vec![
+        Token::Number("0"),
+        Token::Comma,
+        Token::Number("0.123"),
+        Token::Comma,
+        Token::Number("-198"),
+        Token::Comma,
+        Token::Number("0e-345"),
+        Token::Comma,
+        Token::Number("0.3e+025"),
+        Token::Comma,
+        Token::Number("1e1"),
+        Token::Comma,
+      ],
+    );
+  }
+
+  #[test]
+  fn it_errors_invalid_exponent() {
+    assert_has_error(
+      r#"1ea"#,
+      "Expected plus, minus, or digit in number literal on line 1 column 3",
+    );
+    assert_has_error(r#"1e-a"#, "Expected digit on line 1 column 4");
+  }
+
+  #[test]
+  fn it_tokenizes_simple_tokens() {
+    assert_has_tokens(
+      "{}[],:true,false,null,",
+      vec![
+        Token::OpenBrace,
+        Token::CloseBrace,
+        Token::OpenBracket,
+        Token::CloseBracket,
+        Token::Comma,
+        Token::Colon,
+        Token::Boolean(true),
+        Token::Comma,
+        Token::Boolean(false),
+        Token::Comma,
+        Token::Null,
+        Token::Comma,
+      ],
+    );
+  }
+
+  #[test]
+  fn it_tokenizes_comment_line() {
+    assert_has_tokens(
+      "//test\n//t\r\n// test\n,",
+      vec![
+        Token::CommentLine("test"),
+        Token::CommentLine("t"),
+        Token::CommentLine(" test"),
+        Token::Comma,
+      ],
+    );
+  }
+
+  #[test]
+  fn it_tokenizes_comment_blocks() {
+    assert_has_tokens(
+      "/*test\n *//* test*/,",
+      vec![
+        Token::CommentBlock("test\n "),
+        Token::CommentBlock(" test"),
+        Token::Comma,
+      ],
+    );
+  }
+
+  #[test]
+  fn it_errors_on_invalid_utf8_char_for_issue_6() {
+    assert_has_error(
+      "\"\\uDF06\"",
+      "Invalid unicode escape sequence. 'DF06' is not a valid UTF8 character on line 1 column 2",
+    );
+  }
+
+  fn assert_has_tokens(text: &str, tokens: Vec<Token>) {
+    let mut scanner = Scanner::new(text);
+    let mut scanned_tokens = Vec::new();
+
+    loop {
+      match scanner.scan() {
+        Ok(Some(token)) => scanned_tokens.push(token),
+        Ok(None) => break,
+        Err(err) => panic!("Error parsing: {:?}", err),
+      }
+    }
+
+    assert_eq!(scanned_tokens, tokens);
+  }
+
+  fn assert_has_error(text: &str, message: &str) {
+    let mut scanner = Scanner::new(text);
+    let mut error_message = String::new();
+
+    loop {
+      match scanner.scan() {
+        Ok(Some(_)) => {}
+        Ok(None) => break,
+        Err(err) => {
+          error_message = err.to_string();
+          break;
+        }
+      }
+    }
+
+    assert_eq!(error_message, message);
+  }
+}

@@ -1,0 +1,28 @@
+[package]
+name = "forked_react_compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+react_compiler_utils = { workspace = true }
+rustc-hash = "2"
+react_compiler_ast = { workspace = true }
+react_compiler_diagnostics = { workspace = true }
+react_compiler_hir = { workspace = true }
+react_compiler_inference = { workspace = true }
+react_compiler_lowering = { workspace = true }
+react_compiler_optimization = { workspace = true }
+react_compiler_reactive_scopes = { workspace = true }
+react_compiler_ssa = { workspace = true }
+react_compiler_typeinference = { workspace = true }
+react_compiler_validation = { workspace = true }
+indexmap = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+[lib]
+name = "react_compiler"

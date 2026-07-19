@@ -1,0 +1,21 @@
+[package]
+name = "serde-content"
+version = "0.1.2"
+edition = "2021"
+description = "Rust data structures for the Serde data model"
+license = "MIT/Apache-2.0"
+repository = "https://github.com/rushmorem/serde-content"
+readme = "README.md"
+keywords = ["serde", "data-structures"]
+authors = ["rushmorem <rushmore@surrealdb.com>"]
+
+[features]
+default = ["std", "derive"]
+std = []
+derive = ["serde/derive"]
+
+[dependencies.serde]
+version = "1.0.204"
+default-features = false
+features = ["alloc"]
+optional = true

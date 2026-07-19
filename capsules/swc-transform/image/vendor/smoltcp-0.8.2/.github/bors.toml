@@ -1,0 +1,6 @@
+status = [
+    "tests",
+    "fuzz",
+    "clippy",
+    "fmt",
+]

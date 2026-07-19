@@ -1,0 +1,56 @@
+[package]
+name = "codspeed-criterion-compat"
+version = "3.0.4"
+rust-version = "1.74" # MSRV
+edition = "2021"
+description = "Criterion.rs compatibility layer for CodSpeed"
+authors = ["Arthur Pastel <arthur@codspeed.io>"]
+documentation = "https://codspeed.io/docs/reference/codspeed-rust/criterion"
+readme = "README.md"
+repository = "https://github.com/CodSpeedHQ/codspeed-rust"
+homepage = "https://codspeed.io"
+license = "MIT OR Apache-2.0"
+categories = [
+  "development-tools",
+  "development-tools::profiling",
+  "development-tools::testing",
+]
+keywords = ["codspeed", "benchmark", "criterion"]
+[dependencies]
+criterion = { package = "codspeed-criterion-compat-walltime", path = "./criterion_fork", version = "=3.0.4", default-features = false }
+codspeed = { path = "../codspeed", version = "=3.0.4" }
+colored = "2.1.0"
+
+futures = { version = "0.3", default-features = false, optional = true }
+smol = { version = "2.0", default-features = false, optional = true }
+tokio = { version = "1.39", default-features = false, features = [
+  "rt",
+], optional = true }
+async-std = { version = "1.12", optional = true }
+
+[features]
+default = ["rayon", "plotters", "cargo_bench_support"]
+# Criterion.rs features
+async = ["futures", "criterion/async"]
+async_futures = ["criterion/async_futures", "futures/executor", "async"]
+async_smol = ["criterion/async_smol", "smol", "async"]
+async_tokio = ["criterion/async_tokio", "tokio", "async"]
+async_std = ["criterion/async_std", "async-std", "async"]
+
+html_reports = ["criterion/html_reports"]
+cargo_bench_support = ["criterion/cargo_bench_support"]
+csv_output = ["criterion/csv_output"]
+rayon = ["criterion/rayon"]
+plotters = ["criterion/plotters"]
+
+[[bench]]
+name = "criterion_example"
+harness = false
+
+[[bench]]
+name = "criterion_integration_main"
+harness = false
+
+[[bench]]
+name = "test_benches"
+harness = false

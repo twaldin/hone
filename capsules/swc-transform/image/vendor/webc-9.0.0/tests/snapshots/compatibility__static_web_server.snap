@@ -1,0 +1,28 @@
+---
+source: crates/webc/tests/compatibility.rs
+expression: pkg.manifest()
+---
+package:
+  wapm:
+    name: sharrattj/static-web-server
+    readme:
+      path: /README.md
+      volume: metadata
+    license: MIT
+    version: 1.0.96
+    repository: "https://github.com/john-sharratt/static-web-server"
+    description: Serves static files in response to HTTP GET and HEAD requests.
+atoms:
+  webserver:
+    kind: "https://webc.org/kind/wasm"
+    signature: "sha256:FFBNh3HY+tQVXer3POS1SrzL+hm+g0UkavufLmQGP9Y="
+commands:
+  webserver:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      atom:
+        name: webserver
+      wasi:
+        atom: webserver
+entrypoint: webserver
+

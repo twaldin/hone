@@ -1,0 +1,17 @@
+[package]
+name = "forked_react_compiler_typeinference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+rustc-hash = "2"
+react_compiler_diagnostics = { workspace = true }
+react_compiler_hir = { workspace = true }
+react_compiler_ssa = { workspace = true }
+
+[lib]
+name = "react_compiler_typeinference"

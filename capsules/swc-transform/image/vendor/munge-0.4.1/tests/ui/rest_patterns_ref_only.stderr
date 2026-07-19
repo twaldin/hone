@@ -1,0 +1,33 @@
+error[E0271]: type mismatch resolving `<MaybeUninit<Struct> as Destructure>::Destructuring == Borrow`
+  --> tests/ui/rest_patterns_ref_only.rs:12:28
+   |
+12 |     munge!(let Struct { a, .. } = mu);
+   |     -----------------------^^--------
+   |     |                      |
+   |     |                      expected `Borrow`, found `Move`
+   |     required by a bound introduced by this call
+   |
+note: required by a bound in `only_borrow_destructuring_may_use_rest_patterns`
+  --> src/__macro.rs
+   |
+   | pub fn only_borrow_destructuring_may_use_rest_patterns<
+   |        ----------------------------------------------- required by a bound in this function
+   |     T: Destructure<Destructuring = Borrow>,
+   |                    ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `only_borrow_destructuring_may_use_rest_patterns`
+
+error[E0271]: type mismatch resolving `<MaybeUninit<Tuple> as Destructure>::Destructuring == Borrow`
+  --> tests/ui/rest_patterns_ref_only.rs:18:25
+   |
+18 |     munge!(let Tuple(a, ..) = mu);
+   |     --------------------^^-------
+   |     |                   |
+   |     |                   expected `Borrow`, found `Move`
+   |     required by a bound introduced by this call
+   |
+note: required by a bound in `only_borrow_destructuring_may_use_rest_patterns`
+  --> src/__macro.rs
+   |
+   | pub fn only_borrow_destructuring_may_use_rest_patterns<
+   |        ----------------------------------------------- required by a bound in this function
+   |     T: Destructure<Destructuring = Borrow>,
+   |                    ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `only_borrow_destructuring_may_use_rest_patterns`

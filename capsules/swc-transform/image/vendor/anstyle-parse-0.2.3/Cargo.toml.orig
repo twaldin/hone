@@ -1,0 +1,41 @@
+[package]
+name = "anstyle-parse"
+version = "0.2.3"
+description = "Parse ANSI Style Escapes"
+repository = "https://github.com/rust-cli/anstyle.git"
+homepage = "https://github.com/rust-cli/anstyle"
+categories = ["command-line-interface"]
+keywords = ["ansi", "terminal", "color", "vte"]
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata.release]
+pre-release-replacements = [
+  {file="CHANGELOG.md", search="Unreleased", replace="{{version}}", min=1},
+  {file="CHANGELOG.md", search="\\.\\.\\.HEAD", replace="...{{tag_name}}", exactly=1},
+  {file="CHANGELOG.md", search="ReleaseDate", replace="{{date}}", min=1},
+  {file="CHANGELOG.md", search="<!-- next-header -->", replace="<!-- next-header -->\n## [Unreleased] - ReleaseDate\n", exactly=1},
+  {file="CHANGELOG.md", search="<!-- next-url -->", replace="<!-- next-url -->\n[Unreleased]: https://github.com/rust-cli/anstyle/compare/{{tag_name}}...HEAD", exactly=1},
+]
+
+[dependencies]
+arrayvec = { version = "0.7.2", default-features = false, optional = true }
+utf8parse = { version = "0.2.1", optional = true }
+
+[features]
+default = ["utf8"]
+core = ["dep:arrayvec"]
+utf8 = ["dep:utf8parse"]
+
+[dev-dependencies]
+codegenrs = { version = "3.0.1", default-features = false }
+criterion = "0.5.1"
+proptest = "1.4.0"
+snapbox = { version = "0.4.14", features = ["path"] }
+vte_generate_state_changes = { version = "0.1.1" }
+
+[[bench]]
+name = "parse"
+harness = false

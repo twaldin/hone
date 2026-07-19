@@ -1,0 +1,11 @@
+[package]
+name = "cooked-waker"
+version = "5.0.0"
+authors = ["Nathan West <Lucretiel@gmail.com>"]
+edition = "2018"
+readme = "README.md"
+license = "MPL-2.0"
+description = "A safe interface for creating async Wakers"
+repository = "https://github.com/Lucretiel/cooked-waker"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

@@ -1,0 +1,18 @@
+[package]
+name = "iprange"
+version = "0.6.7"
+authors = ["Yilin Chen <sticnarf@gmail.com>"]
+description = "A library to manage IP ranges"
+repository = "https://github.com/sticnarf/iprange-rs"
+readme = "README.md"
+documentation = "https://docs.rs/iprange/"
+categories = ["network-programming"]
+license = "MIT"
+
+[dependencies]
+ipnet = "2.0.0"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+rand = "0.3.17"
+bincode = "1"

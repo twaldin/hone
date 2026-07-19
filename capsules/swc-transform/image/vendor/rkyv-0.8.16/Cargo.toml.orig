@@ -1,0 +1,89 @@
+[package]
+name = "rkyv"
+description = "Zero-copy deserialization framework for Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+readme = "../README.md"
+repository.workspace = true
+keywords = ["archive", "rkyv", "serialization", "zero-copy", "no_std"]
+categories = ["encoding", "no-std", "no-std::no-alloc"]
+documentation = "https://docs.rs/rkyv"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bytecheck = { workspace = true, optional = true }
+hashbrown = { workspace = true, optional = true }
+munge.workspace = true
+ptr_meta.workspace = true
+rancor.workspace = true
+rend.workspace = true
+rkyv_derive.workspace = true
+
+# Support for various common crates. These are primarily to get users off the
+# ground and build some momentum.
+
+# These are NOT PLANNED to remain in rkyv for the 1.0 release. Much like serde,
+# these implementations should be moved into their respective crates over time.
+# Before adding support for another crate, please consider getting rkyv support
+# in the crate instead.
+
+arrayvec-0_7 = { package = "arrayvec", version = "0.7", optional = true, default-features = false }
+bytes-1 = { package = "bytes", version = "1", optional = true, default-features = false }
+hashbrown-0_14 = { package = "hashbrown", version = "0.14", optional = true, default-features = false }
+hashbrown-0_15 = { package = "hashbrown", version = "0.15", optional = true, default-features = false }
+hashbrown-0_16 = { package = "hashbrown", version = "0.16", optional = true, default-features = false }
+# rkyv already depends on hashbrown 0.17, so we can't duplicate this, but we can expose it as a feature below
+# hashbrown-0_17 = { package = "hashbrown", version = "0.17", optional = true, default-features = false }
+indexmap-2 = { package = "indexmap", version = "2", optional = true, default-features = false }
+smallvec-1 = { package = "smallvec", version = "1", optional = true, default-features = false }
+smol_str-0_2 = { package = "smol_str", version = "0.2", optional = true, default-features = false }
+smol_str-0_3 = { package = "smol_str", version = "0.3", optional = true, default-features = false }
+thin-vec-0_2 = { package = "thin-vec", version = "0.2.12", optional = true, default-features = false }
+tinyvec-1 = { package = "tinyvec", version = "1", optional = true, default-features = false }
+triomphe-0_1 = { package = "triomphe", version = "0.1", optional = true, default-features = false }
+uuid-1 = { package = "uuid", version = "1", optional = true, default-features = false }
+
+[features]
+default = ["std", "bytecheck"]
+little_endian = []
+big_endian = []
+aligned = []
+unaligned = []
+pointer_width_16 = []
+pointer_width_32 = []
+pointer_width_64 = []
+alloc = ["dep:hashbrown", "tinyvec-1?/alloc", "rancor/alloc"]
+std = ["alloc", "bytes-1?/std", "indexmap-2?/std", "ptr_meta/std", "uuid-1?/std"]
+bytecheck = ["dep:bytecheck", "rend/bytecheck", "rkyv_derive/bytecheck"]
+
+# External crate support
+hashbrown-0_17 = ["dep:hashbrown"]
+indexmap-2 = ["dep:indexmap-2", "alloc"]
+triomphe-0_1 = ["dep:triomphe-0_1", "alloc"]
+uuid-1 = ["dep:uuid-1", "bytecheck?/uuid-1"]
+
+[package.metadata.docs.rs]
+features = ["bytecheck"]
+
+[dev-dependencies]
+ahash = "0.8"
+benchlib = { path = "../benchlib" }
+divan.workspace = true
+rustversion.workspace = true
+trybuild.workspace = true
+
+[[bench]]
+name = "log"
+harness = false
+
+[[bench]]
+name = "mesh"
+harness = false
+
+[[bench]]
+name = "minecraft_savedata"
+harness = false

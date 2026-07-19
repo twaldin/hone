@@ -1,0 +1,22 @@
+[package]
+name = "wai-bindgen-rust-impl"
+description = "Generate WAI glue for a Rust guest"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+proc-macro = true
+doctest = false
+test = false
+
+[dependencies]
+proc-macro2 = "1.0"
+syn = "1.0"
+wai-bindgen-gen-core = { path = "../gen-core", version = "0.2.3" }
+wai-bindgen-gen-rust-wasm = { path = "../gen-rust-wasm", version = "0.2.3" }

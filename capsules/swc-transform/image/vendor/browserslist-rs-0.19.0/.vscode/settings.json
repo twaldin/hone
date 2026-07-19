@@ -1,0 +1,12 @@
+{
+  "editor.formatOnSave": true,
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/bower_components": true,
+    "**/*.code-search": true,
+    "vendor/**": true
+  },
+  "rust-analyzer.files.excludeDirs": [
+    "src/generated"
+  ]
+}

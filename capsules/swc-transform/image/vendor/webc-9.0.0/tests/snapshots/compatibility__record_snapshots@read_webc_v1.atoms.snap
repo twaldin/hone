@@ -1,0 +1,6 @@
+---
+source: crates/webc/tests/compatibility.rs
+expression: atoms
+---
+entry: 56
+

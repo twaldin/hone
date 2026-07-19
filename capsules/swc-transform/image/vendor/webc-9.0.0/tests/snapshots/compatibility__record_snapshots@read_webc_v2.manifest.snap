@@ -1,0 +1,33 @@
+---
+source: crates/webc/tests/compatibility.rs
+expression: container.manifest()
+---
+package:
+  wapm:
+    name: wiqar/cowsay
+    readme:
+      path: README.md
+      volume: metadata
+    version: 0.3.0
+    repository: "https://github.com/wapm-packages/cowsay"
+    description: cowsay is a program that generates ASCII pictures of a cow with a message
+atoms:
+  cowsay:
+    kind: "https://webc.org/kind/wasm"
+    signature: "sha256:DPmhiSNXCg5261eTUi3BIvAc/aJttGj+nD+bGhQkVQo="
+commands:
+  cowsay:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      wasi:
+        atom: cowsay
+        package: ~
+        main_args: ~
+  cowthink:
+    runner: "https://webc.org/runner/wasi"
+    annotations:
+      wasi:
+        atom: cowsay
+        package: ~
+        main_args: ~
+

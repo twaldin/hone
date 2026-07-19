@@ -1,0 +1,24 @@
+{
+  "format": "hone-swc-toolchain-v1",
+  "rustToolchain": "nightly-2026-04-10",
+  "rustc": "1.96.0-nightly (f5eca4fcf 2026-04-09)",
+  "baseImage": "rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+  "image": "hone-swc-transform@sha256:c6b37aa36586ae253e2e502c1f260adce8cd7eb20567dc79046926948363f7e5",
+  "cargoLockSha256": "0ee41aff50f332fba6034f013307d3e1d772d9441ab5e1720029cedb76850f2f",
+  "cargoVendor": {
+    "command": "cargo vendor --locked --versioned-dirs image/vendor",
+    "crateCount": 764,
+    "checksumManifestSha256": "cb53717ef31584b52b0206b10be1cdd9061353db4185e32f89de2202a061062d"
+  },
+  "profile": {
+    "name": "hone",
+    "optLevel": 3,
+    "lto": false,
+    "codegenUnits": 16,
+    "incremental": true,
+    "debug": 0
+  },
+  "build": "cargo build --locked --offline --jobs 2 --profile hone -p hone-swc-bench",
+  "tests": "cargo test --locked --offline --jobs 2 --profile hone --lib --no-run -p swc_ecma_parser -p swc_ecma_transforms_base -p swc_ecma_transforms_typescript -p swc_ecma_transforms_react; evaluator executes frozen test binaries",
+  "network": "none"
+}

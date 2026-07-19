@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+edition = "2021"
+rust-version = "1.70.0"  # MSRV
+include = [
+  "build.rs",
+  "src/**/*",
+  "Cargo.toml",
+  "Cargo.lock",
+  "LICENSE*",
+  "README.md",
+  "benches/**/*",
+  "examples/**/*"
+]
+
+[package]
+name = "assert_fs"
+version = "1.1.1"
+authors = ["Ed Page <eopage@gmail.com>"]
+description = "Filesystem fixtures and assertions for testing."
+repository = "https://github.com/assert-rs/assert_fs.git"
+homepage = "https://github.com/assert-rs/assert_fs"
+documentation = "http://docs.rs/assert_fs/"
+readme = "README.md"
+categories = ["development-tools::testing"]
+keywords = ["filesystem", "test", "assert", "fixture"]
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+include.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[package.metadata.release]
+pre-release-replacements = [
+  {file="CHANGELOG.md", search="Unreleased", replace="{{version}}", min=1},
+  {file="CHANGELOG.md", search="\\.\\.\\.HEAD", replace="...{{tag_name}}", exactly=1},
+  {file="CHANGELOG.md", search="ReleaseDate", replace="{{date}}", min=1},
+  {file="CHANGELOG.md", search="<!-- next-header -->", replace="<!-- next-header -->\n## [Unreleased] - ReleaseDate\n", exactly=1},
+  {file="CHANGELOG.md", search="<!-- next-url -->", replace="<!-- next-url -->\n[Unreleased]: https://github.com/assert-rs/assert_fs/compare/{{tag_name}}...HEAD", exactly=1},
+]
+
+[features]
+color = ["dep:anstream", "predicates/color"]
+color-auto = ["color"]
+
+[dependencies]
+tempfile = "3.0"
+globwalk = "0.9"
+predicates = { version = "3.0.1", default-features = false, features = ["diff"] }
+predicates-core = "1.0.6"
+predicates-tree = "1.0.1"
+doc-comment = "0.3"
+anstyle = "1.0.0"
+anstream = { version = "0.6.7", optional = true }

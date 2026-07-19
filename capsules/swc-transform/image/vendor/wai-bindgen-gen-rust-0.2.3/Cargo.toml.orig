@@ -1,0 +1,19 @@
+[package]
+name = "wai-bindgen-gen-rust"
+description = "Abstractions for generating Rust glue code for WAI"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[dependencies]
+wai-bindgen-gen-core = { path = "../gen-core", version = "0.2.3" }
+heck = "0.3"

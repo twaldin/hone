@@ -1,0 +1,21 @@
+[package]
+name = "bus"
+version = "2.4.1"
+authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+
+readme = "README.md"
+description = "A lock-free, bounded, single-producer, multi-consumer, broadcast channel."
+repository = "https://github.com/jonhoo/bus.git"
+
+keywords = ["channel","broadcast","lock-free"]
+categories = ["concurrency"]
+
+[dependencies]
+num_cpus = "1.6.2"
+parking_lot_core = "0.9"
+crossbeam-channel = "0.5"
+
+[profile.release]
+debug = true

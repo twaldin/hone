@@ -1,0 +1,175 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 283.2,
+    "incrementalRebuildSec": 92.17,
+    "evalSec": 2.920161,
+    "envelopeLimitSec": 900,
+    "sandboxMemoryBytes": 6442450944,
+    "sandboxCpus": 2,
+    "basis": "clean capsule-image build compiled the benchmark and four relevant test crates under the pinned offline profile; the independently authored parser overlay rebuilt and linked incrementally in 92.17 seconds; the final broker-like evaluator receipt measured 2.920161 seconds"
+  },
+  "aa": {
+    "samples": [
+      15.654800363989956,
+      16.2759967428984,
+      17.37072383889655,
+      16.9510618511218,
+      16.11700786509535,
+      16.850934802506313
+    ],
+    "sigma": 0.630537809385501,
+    "noiseFractionOfScale": 0.19999999999999998
+  },
+  "qBase": 16.53675424408473,
+  "qFail": 0,
+  "qReference": 19.689443291012235,
+  "normalization": {
+    "scale": 3.152689046927505,
+    "construction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "interleavedBaselineReplicates": 6,
+    "finalGceRecalibrationRequired": true
+  },
+  "controls": [
+    {
+      "id": "broken",
+      "firstQ": 0,
+      "secondQ": 0,
+      "trainTestsPass": false,
+      "validationTestsPass": false,
+      "purpose": "a hand-authored parser compile error maps fail-closed to qFail on both splits"
+    },
+    {
+      "id": "naive",
+      "firstQ": 12.302941617038494,
+      "secondQ": 11.44260699716098,
+      "firstTrainQ": 12.754509993520035,
+      "firstValidationQ": 11.851373240556953,
+      "secondTrainQ": 11.68094921680509,
+      "secondValidationQ": 11.204264777516869,
+      "trainTestsPass": true,
+      "validationTestsPass": true,
+      "purpose": "bounded parser-entry CPU work is deliberately slower while preserving all semantic, output-size, RSS, source-hash, and upstream-test gates"
+    },
+    {
+      "id": "shortcut",
+      "firstQ": 12.044880428477075,
+      "secondQ": 11.73630466910712,
+      "firstTrainQ": 18.5278076814185,
+      "firstValidationQ": 5.56195317553565,
+      "secondTrainQ": 18.45898701445157,
+      "secondValidationQ": 5.013622323762673,
+      "trainTestsPass": true,
+      "validationTestsPass": true,
+      "purpose": "the otherwise-valid parser allocation perturbation adds delay only in the validation corpus number-sign lexer path, proving split-specific gaming loses the opposite-split ordering gate"
+    },
+    {
+      "id": "baseline",
+      "firstQ": 15.654800363989956,
+      "secondQ": 16.9510618511218,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "independentlyAuthored": true,
+    "valid": true,
+    "movesMetric": true,
+    "firstQ": 16.955901696256547,
+    "secondQ": 17.181565157176053,
+    "firstTrainQ": 17.879121374098762,
+    "firstValidationQ": 16.03268201841433,
+    "secondTrainQ": 17.990301125739077,
+    "secondValidationQ": 16.372829188613032,
+    "trainTestsPass": true,
+    "validationTestsPass": true,
+    "description": "trusted hand-authored frozen-workload allocation tuning: realistic capacities for top-level statements, classes, formal parameters, arrays, object properties, JSX attributes/children, and TypeScript lists",
+    "mutableFiles": [
+      "crates/swc_ecma_parser/src/parser/class_and_fn.rs",
+      "crates/swc_ecma_parser/src/parser/expr.rs",
+      "crates/swc_ecma_parser/src/parser/jsx.rs",
+      "crates/swc_ecma_parser/src/parser/object.rs",
+      "crates/swc_ecma_parser/src/parser/pat.rs",
+      "crates/swc_ecma_parser/src/parser/stmt.rs",
+      "crates/swc_ecma_parser/src/parser/typescript.rs"
+    ]
+  },
+  "determinism": {
+    "freshProcess": true,
+    "freshProcessRunsPerPrimaryWorkload": 3,
+    "oppositeSplitGateRunsPerWorkload": 1,
+    "finalSmokeResultHash": "38e5ca730d272fcfc2b525721209e79004df9aeefb2f664b6f56a213474ef329",
+    "exactSourceHashesFrozen": true,
+    "exactAstSemanticHashesFrozen": true,
+    "independentEmittedOutputOracle": true,
+    "outputSizeTolerance": 0.01,
+    "rssTolerance": 0.02
+  },
+  "rss": {
+    "baselinePeakKb": {
+      "javascript-control-flow": 51776,
+      "typescript-domain-models": 23068,
+      "react-dashboard": 44728,
+      "javascript-async-classes": 49428,
+      "typescript-mapped-types": 22444,
+      "react-generic-forms": 57488
+    },
+    "limitConstruction": "floor(baselinePeakKb * 1.02)",
+    "finalSmokePeakKb": 57496,
+    "finalSmokePass": true
+  },
+  "finalSmoke": {
+    "valid": true,
+    "q": 18.17081660631819,
+    "buildSec": 0.019277,
+    "runtimeSec": 2.920161,
+    "constraints": {
+      "testsPass": true,
+      "astSemanticHashPass": true,
+      "outputSemanticHashPass": true,
+      "outputSizePass": true,
+      "rssPass": true
+    }
+  },
+  "orderingChecks": {
+    "mode": "terminal-holdout",
+    "consecutivePasses": 2,
+    "brokerContainerEvalsPerPass": 14,
+    "firstStabilitySpread": 0.10441402873514985,
+    "secondStabilitySpread": 0.05012443621829135,
+    "band": 0.15,
+    "firstReportHash": "sha256:678ee462e669e13b06921e87f97e979f2bd613f12b553180df41d2832d0eb534",
+    "secondReportHash": "sha256:f64b3ffb5562d1b6cc820ddf2afd82aeeb7b34ec50cd13c3838d3f3bd1e95b84"
+  },
+  "robustnessReview": {
+    "verdict": "PASS",
+    "reviewedBaselineCommit": "6c856fe0705ec3ac18f7cff17caff5335d52b215",
+    "admissionBlockers": [],
+    "confirmed": [
+      "protected dedicated tests are restored from the trusted image and mixed-file active test regions are sealed",
+      "source, target, executable, and containing build tmpfs are kernel-remounted read-only before candidate code executes",
+      "runtime assets and oracle metadata are hidden during compilation and only stripped source bytes are materialized afterward",
+      "trusted parent timing, output byte counts, independent output reparsing, semantic hashes, source hashes, RSS, and exact test inventories are hard gates",
+      "each coordinate gates both corpora and timed children clear state, unshare network and IPC, run at uid 2000 with one-process measurement limits, and are reaped"
+    ],
+    "residualNonBlockingRisks": [
+      "process cleanup uses one PID scan before its bounded wait rather than a second fail-closed scan",
+      "Cargo compiler output capture has no explicit byte ceiling",
+      "mixed-file Rust test integrity is enforced by a custom lexical and delimiter recognizer",
+      "OCI runtime is digest-pinned but Dockerfile reconstruction still consults live apt and rustup endpoints"
+    ]
+  },
+  "terminalSeal": {
+    "taskId": "OSS-H03",
+    "cohort": "terminal",
+    "sourceRevision": "d5fd89520be380493479d232b88c532e94e1df94",
+    "sealedBaselineCommit": "6c856fe0705ec3ac18f7cff17caff5335d52b215",
+    "image": "hone-swc-transform@sha256:c6b37aa36586ae253e2e502c1f260adce8cd7eb20567dc79046926948363f7e5",
+    "holdoutModeRequired": true,
+    "optimizerPilot": false,
+    "mutationRuns": false,
+    "headroomRuns": false,
+    "seedOptimizerSessions": false,
+    "trustedWorkOnly": true
+  }
+}

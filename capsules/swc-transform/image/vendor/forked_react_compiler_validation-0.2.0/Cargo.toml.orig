@@ -1,0 +1,18 @@
+[package]
+name = "forked_react_compiler_validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+react_compiler_utils = { workspace = true }
+rustc-hash = "2"
+indexmap = "2"
+react_compiler_diagnostics = { workspace = true }
+react_compiler_hir = { workspace = true }
+
+[lib]
+name = "react_compiler_validation"

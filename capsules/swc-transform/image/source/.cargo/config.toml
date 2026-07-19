@@ -1,0 +1,14 @@
+[env]
+CARGO_WORKSPACE_DIR = { value = "", relative = true }
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "/opt/swc-vendor"
+
+[net]
+offline = true
+
+[build]
+rustflags = ["-Zshare-generics=y", "-C", "link-arg=-fuse-ld=lld"]
