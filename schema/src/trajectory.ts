@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  M2DevelopmentPanel,
+  M2EnvelopeIdentity,
+  M2PanelAggregation,
+  M2PanelAggregationShape,
+} from "./meta.js";
 
 const SHA256 = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 const ResourceUsage = z.object({
@@ -69,3 +75,104 @@ export const MetaSearchTrajectoryV1 = z.object({
   children: z.array(MetaChildTrajectoryV1),
 }).strict();
 export type MetaSearchTrajectoryV1 = z.infer<typeof MetaSearchTrajectoryV1>;
+
+const MetaOuterTrajectoryPointV2Shape = M2PanelAggregationShape.extend({
+  /** Optimizer-declared candidate ordinal j; trusted evidence is ordered by this coordinate. */
+  candidateOrdinal: z.number().int().nonnegative(),
+  eventCursor: z.number().int().nonnegative(),
+  candidateArtifact: SHA256.nullable(),
+  /** Incremental total controller + descendant spend attributable to this candidate event. */
+  spent: ResourceUsage,
+  cumulativeSpent: ResourceUsage,
+  bestSoFarPanelMean: z.number().finite().nullable(),
+}).strict();
+
+export const MetaOuterTrajectoryPointV2 = MetaOuterTrajectoryPointV2Shape.superRefine(
+  (point, ctx) => {
+    const aggregation = M2PanelAggregation.safeParse({
+      valid: point.valid,
+      perCapsule: point.perCapsule,
+      panelMean: point.panelMean,
+    });
+    if (!aggregation.success) {
+      for (const issue of aggregation.error.issues) {
+        ctx.addIssue({ ...issue, path: issue.path });
+      }
+    }
+  },
+);
+export type MetaOuterTrajectoryPointV2 = z.infer<typeof MetaOuterTrajectoryPointV2>;
+
+const MetaSearchTrajectoryV2Shape = z.object({
+  version: z.literal(2),
+  configHash: SHA256,
+  outerRunId: z.string().min(1),
+  searchEnvelope: M2EnvelopeIdentity.extend({ purpose: z.literal("search") }).strict(),
+  panel: M2DevelopmentPanel,
+  controllerBundleDigest: SHA256,
+  targetSourceArtifact: SHA256,
+  targetBundleDigest: SHA256,
+  createdAt: z.string().datetime(),
+  outerEventLogHash: SHA256,
+  points: z.array(MetaOuterTrajectoryPointV2).min(1),
+  children: z.array(MetaChildTrajectoryV1),
+}).strict();
+
+/**
+ * Complete M2 outer evidence. Points are canonicalized by candidate ordinal;
+ * cumulative spend and incumbent means are checked rather than trusted.
+ */
+export const MetaSearchTrajectoryV2 = MetaSearchTrajectoryV2Shape.superRefine((trajectory, ctx) => {
+  let best: number | null = null;
+  let cumulative = { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 };
+  const panelIds = new Set(trajectory.panel.members.map((member) => member.capsule.capsuleId));
+  trajectory.points.forEach((point, index) => {
+    if (index > 0 && point.candidateOrdinal <= trajectory.points[index - 1]!.candidateOrdinal) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["points", index, "candidateOrdinal"],
+        message: "candidate ordinals must be strictly increasing",
+      });
+    }
+    const pointIds = new Set(point.perCapsule.map((row) => row.capsuleId));
+    if (pointIds.size !== panelIds.size || [...panelIds].some((capsuleId) => !pointIds.has(capsuleId))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["points", index, "perCapsule"],
+        message: "candidate scores must use the exact frozen development panel",
+      });
+    }
+    cumulative = {
+      tokens: cumulative.tokens + point.spent.tokens,
+      usd: cumulative.usd + point.spent.usd,
+      wallClockSec: cumulative.wallClockSec + point.spent.wallClockSec,
+      evaluatorInvocations: cumulative.evaluatorInvocations + point.spent.evaluatorInvocations,
+    };
+    for (const dimension of ["tokens", "usd", "wallClockSec", "evaluatorInvocations"] as const) {
+      const tolerance = 1e-9 * Math.max(1, cumulative[dimension], point.cumulativeSpent[dimension]);
+      if (Math.abs(point.cumulativeSpent[dimension] - cumulative[dimension]) > tolerance) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["points", index, "cumulativeSpent", dimension],
+          message: `cumulative ${dimension} does not equal trusted event sum ${cumulative[dimension]}`,
+        });
+      }
+    }
+    if (point.valid && point.panelMean !== null) {
+      best = best === null ? point.panelMean : Math.max(best, point.panelMean);
+    }
+    if (
+      (best === null && point.bestSoFarPanelMean !== null) ||
+      (best !== null &&
+        (point.bestSoFarPanelMean === null ||
+          Math.abs(point.bestSoFarPanelMean - best) > 1e-12 * Math.max(1, Math.abs(best))))
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["points", index, "bestSoFarPanelMean"],
+        message: `best-so-far panel mean must equal ${best === null ? "null" : best}`,
+      });
+    }
+  });
+});
+export type MetaSearchTrajectoryV2 = z.infer<typeof MetaSearchTrajectoryV2>;

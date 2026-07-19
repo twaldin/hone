@@ -3,9 +3,20 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { EvaluationRecord, MetaCampaignConfigV1, canonicalJson, type MetaCampaignConfigV1 as MetaCampaignConfig } from "@hone/schema";
+import {
+  EvaluationRecord,
+  M2_PANEL_A_TASK_IDS,
+  MetaCampaignConfigV1,
+  MetaCampaignConfigV2,
+  canonicalJson,
+  type BudgetEnvelope,
+  type MetaCampaignConfig,
+  type MetaCampaignConfigV1 as LegacyMetaCampaignConfig,
+  type MetaCampaignConfigV2 as RecursiveMetaCampaignConfig,
+} from "@hone/schema";
 import {
   MetaCampaignRunner,
+  MetaResourceEnvelopeLedger,
   metaCampaignConfigHash,
   metaEvidenceHash,
   selectDeterministicBest,
@@ -16,6 +27,9 @@ import {
   type MetaChildRunRequest,
   type MetaControlTransformationReceipt,
   type MetaFailureSettlement,
+  type MetaEnvelopeAllocationRecord,
+  type MetaEnvelopePort,
+  type MetaEnvelopeRecordPort,
   type MetaFailureStatus,
   type MetaJournalPort,
   type MetaMeasurement,
@@ -32,9 +46,97 @@ function digest(value: string): Sha256Digest {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
-function fixture(): MetaCampaignConfig {
+function fixture(): LegacyMetaCampaignConfig {
   const file = new URL("../../../schema/fixtures/meta-campaign.m1.json", import.meta.url);
   return MetaCampaignConfigV1.parse(JSON.parse(readFileSync(file, "utf8")));
+}
+
+function recursiveFixture(): RecursiveMetaCampaignConfig {
+  const legacy = fixture();
+  const capsule = (index: number) => ({
+    ...legacy.train[0]!,
+    capsuleId: `cap_${index.toString(16).padStart(12, "0")}`,
+    capsuleDigest: digest(`recursive:capsule:${index}`),
+    image: `hone-task-${index}@${digest(`recursive:image:${index}`)}`,
+    oracleDigest: digest(`recursive:oracle:${index}`),
+    scalarizerDigest: digest(`recursive:scalarizer:${index}`),
+  });
+  const train = Array.from({ length: 8 }, (_, index) => capsule(index + 1));
+  const holdout = Array.from({ length: 12 }, (_, index) => capsule(index + 101));
+  const child = { ...legacy.budgets.child };
+  const multiply = (budget: BudgetEnvelope, factor: number): BudgetEnvelope => ({
+    maxTokens: budget.maxTokens * factor,
+    maxUsd: budget.maxUsd * factor,
+    maxWallClockSec: budget.maxWallClockSec * factor,
+    maxEvaluatorInvocations: budget.maxEvaluatorInvocations * factor,
+  });
+  const calibratedPanelCandidate = multiply(child, 8);
+  const target = {
+    sourceCommit: "1".repeat(40),
+    sourceArtifact: digest("recursive:target-source"),
+    bundleDigest: digest("recursive:target-bundle"),
+  };
+  return MetaCampaignConfigV2.parse({
+    ...legacy,
+    version: 2,
+    seedOptimizer: target,
+    controllerOptimizer: target,
+    optimizerRuntime: { image: `hone-optimizer@${digest("recursive:optimizer-image")}` },
+    generation: {
+      stage: "A",
+      panel: "A",
+      targetGeneration: 0,
+      controllerGeneration: 0,
+      outerReplicate: 0,
+    },
+    train,
+    holdout,
+    counts: {
+      candidates: 37,
+      candidateAttemptsMax: 91,
+      innerEpisodesMax: 8,
+      searchReplicates: 5,
+      confirmationReplicates: 3,
+      holdoutReplicates: 3,
+      childConcurrency: 2,
+    },
+    developmentPanel: {
+      panel: "A",
+      members: train.map((entry, index) => ({
+        taskId: M2_PANEL_A_TASK_IDS[index],
+        capsule: entry,
+        calibratedInnerCeiling: child,
+      })),
+    },
+    recursiveBudgets: {
+      search: {
+        identity: { envelopeId: digest("recursive:search-envelope"), purpose: "search" },
+        calibratedPanelCandidate,
+        outerTrajectory: multiply(calibratedPanelCandidate, 12),
+      },
+      confirmation: {
+        identity: { envelopeId: digest("recursive:confirmation-envelope"), purpose: "confirmation" },
+        budget: multiply(child, 4 * 8 * 3),
+      },
+      terminal: {
+        identity: { envelopeId: digest("recursive:terminal-envelope"), purpose: "terminal" },
+        budget: multiply(child, 3 * 12 * 3),
+      },
+    },
+    allowedClaim: "recursive-transfer-frozen-corpus",
+  });
+}
+
+class RunnerEnvelopeRecords implements MetaEnvelopeRecordPort {
+  readonly rows: MetaEnvelopeAllocationRecord[] = [];
+
+  readAll(): readonly unknown[] {
+    return structuredClone(this.rows);
+  }
+
+  append(record: MetaEnvelopeAllocationRecord): void {
+    this.rows.push(structuredClone(record));
+  }
 }
 
 function workKey(configHash: Sha256Digest, identity: MetaWorkIdentity): Sha256Digest {
@@ -261,6 +363,7 @@ function harness(
     joinPath?: string;
     gate?: (request: MetaCandidateGateRequest) => Promise<CandidateGateResult>;
     bundleBySource?: ReadonlyMap<string, Sha256Digest>;
+    envelopeLedger?: MetaEnvelopePort;
   } = {},
 ): { runner: MetaCampaignRunner; journal: MemoryJournal; joinPath: string } {
   const config = options.config ?? fixture();
@@ -276,6 +379,7 @@ function harness(
       joinPath,
       candidateGate: { check: options.gate ?? (async (request) => gateResult(request, bundleBySource)) },
       childSupervisor: { run: runChild },
+      ...(options.envelopeLedger === undefined ? {} : { envelopeLedger: options.envelopeLedger }),
       now: () => fixedNow,
       mintMeasurementEpoch: () => "epoch-test",
       childConcurrency: 2,
@@ -358,6 +462,85 @@ describe("trusted meta runner identity and scoring", () => {
       runner.evaluateSearchCandidate(searchInput(sourceArtifact)),
     ]);
     expect(calls).toBe(5);
+    runner.close();
+  });
+});
+
+describe("recursive M2 optimizer-authored allocation", () => {
+  test("executes the artifact schedule under the trusted envelope without using configured candidate cardinalities", async () => {
+    const config = recursiveFixture();
+    const recursiveBudgets = config.recursiveBudgets;
+    if (recursiveBudgets === undefined) throw new Error("recursive fixture omitted budgets");
+    const records = new RunnerEnvelopeRecords();
+    const envelopeLedger = new MetaResourceEnvelopeLedger(recursiveBudgets, records);
+    const calls: MetaChildRunRequest[] = [];
+    const sourceArtifact = digest("recursive-scheduled-source");
+    const bundleDigest = digest("recursive-scheduled-bundle");
+    const { runner } = harness(async (request) => {
+      calls.push(request);
+      const index = config.train.findIndex((capsule) => capsule.capsuleId === request.capsule.capsuleId);
+      return childOutcome(request, index + 1);
+    }, {
+      config,
+      envelopeLedger,
+      bundleBySource: new Map([[sourceArtifact, bundleDigest]]),
+    });
+    const allocations = [...config.train].reverse().map((capsule, index) => ({
+      allocationOrdinal: index,
+      capsuleId: capsule.capsuleId,
+      replicate: 0,
+      innerEpisodesMax: index + 1,
+      reserved: { ...config.budgets.child },
+    }));
+    const input = { ...searchInput(sourceArtifact), candidateOrdinal: 41, allocations };
+
+    const record = await runner.evaluateSearchCandidate(input);
+    expect(record.output.valid).toBe(true);
+    expect(record.output.objectives.normalizedGain).toBeCloseTo(4.5, 12);
+    expect(calls).toHaveLength(8);
+    expect(calls.map((request) => request.innerEpisodesMax)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(records.rows).toHaveLength(16);
+    expect(envelopeLedger.remainingSearch()).toEqual({
+      maxTokens: recursiveBudgets.search.outerTrajectory.maxTokens - 80,
+      maxUsd: recursiveBudgets.search.outerTrajectory.maxUsd - 2,
+      maxWallClockSec: recursiveBudgets.search.outerTrajectory.maxWallClockSec - 16,
+      maxEvaluatorInvocations:
+        recursiveBudgets.search.outerTrajectory.maxEvaluatorInvocations - 24,
+    });
+
+    expect((await runner.evaluateSearchCandidate(input)).output.valid).toBe(true);
+    expect(calls).toHaveLength(8);
+    expect(records.rows).toHaveLength(16);
+    runner.close();
+  });
+
+  test("keeps a partial optimizer schedule as invalid paid evidence instead of filling a hardcoded panel schedule", async () => {
+    const config = recursiveFixture();
+    const recursiveBudgets = config.recursiveBudgets;
+    if (recursiveBudgets === undefined) throw new Error("recursive fixture omitted budgets");
+    const records = new RunnerEnvelopeRecords();
+    const envelopeLedger = new MetaResourceEnvelopeLedger(recursiveBudgets, records);
+    let calls = 0;
+    const { runner } = harness(async (request) => {
+      calls += 1;
+      return childOutcome(request, 2);
+    }, { config, envelopeLedger });
+
+    const record = await runner.evaluateSearchCandidate({
+      ...searchInput(digest("recursive-partial")),
+      candidateOrdinal: 9,
+      allocations: [{
+        allocationOrdinal: 0,
+        capsuleId: config.train[3]!.capsuleId,
+        replicate: 7,
+        innerEpisodesMax: 2,
+        reserved: { ...config.budgets.child },
+      }],
+    });
+    expect(record.output.valid).toBe(false);
+    expect(record.output.diagnostics?.summary).toMatch(/incomplete panel/);
+    expect(calls).toBe(1);
+    expect(records.rows).toHaveLength(2);
     runner.close();
   });
 });

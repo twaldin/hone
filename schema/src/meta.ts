@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { BudgetEnvelope, IMAGE_DIGEST_REF } from "./capsule.js";
+import { canonicalJson } from "./canonical.js";
 import { PromotionRule } from "./runconfig.js";
 
 /**
@@ -380,10 +381,170 @@ export type MetaCampaignConfigV1 = z.infer<typeof MetaCampaignConfigV1>;
 export const META_CAMPAIGN_CONFIG_V2 = 2;
 export const M2_PANEL_CAPSULE_COUNT = 8;
 export const M2_TERMINAL_CAPSULE_COUNT = 12;
-export const M2_CANDIDATE_COUNT = 12;
+/** Search capacity is twelve complete-panel candidate equivalents, not twelve candidates. */
+export const M2_SEARCH_CANDIDATE_EQUIVALENTS = 12;
+/** Retained for legacy configuration readers; it is not an M2 scheduling constraint. */
+export const M2_CANDIDATE_COUNT = M2_SEARCH_CANDIDATE_EQUIVALENTS;
 export const M2_CANDIDATE_ATTEMPTS_MAX = 24;
 export const M2_INNER_EPISODES_MAX = 4;
 export const M2_ALLOWED_CLAIM = "recursive-transfer-frozen-corpus";
+
+export const M2_PANEL_A_TASK_IDS = [
+  "OWN-T01",
+  "OWN-T03",
+  "OWN-T06",
+  "OWN-T08",
+  "OSS-T01",
+  "OSS-T03",
+  "OSS-T05",
+  "OSS-T07",
+] as const;
+
+export const M2_PANEL_B_TASK_IDS = [
+  "OWN-T02",
+  "OWN-T04",
+  "OWN-T05",
+  "OWN-T07",
+  "OSS-T02",
+  "OSS-T04",
+  "OSS-T06",
+  "OSS-T08",
+] as const;
+
+const M2_TASK_IDS = [...M2_PANEL_A_TASK_IDS, ...M2_PANEL_B_TASK_IDS] as const;
+export const M2PanelTaskId = z.enum(M2_TASK_IDS);
+export type M2PanelTaskId = z.infer<typeof M2PanelTaskId>;
+
+export const M2PanelMember = z.object({
+  taskId: M2PanelTaskId,
+  capsule: MetaCapsuleEntry,
+  /** Complete-run resource vector for this capsule at the frozen calibrated inner ceiling. */
+  calibratedInnerCeiling: BudgetEnvelope,
+}).strict();
+export type M2PanelMember = z.infer<typeof M2PanelMember>;
+
+const M2DevelopmentPanelShape = z.object({
+  panel: z.enum(["A", "B"]),
+  members: z.array(M2PanelMember).length(M2_PANEL_CAPSULE_COUNT),
+}).strict();
+
+/** Exact frozen Panel-A/Panel-B membership, bound to eight distinct capsule identities. */
+export const M2DevelopmentPanel = M2DevelopmentPanelShape.superRefine((panel, ctx) => {
+  const expected = panel.panel === "A" ? M2_PANEL_A_TASK_IDS : M2_PANEL_B_TASK_IDS;
+  const expectedTasks = new Set<string>(expected);
+  const seenTasks = new Set<string>();
+  const seenIds = new Set<string>();
+  const seenDigests = new Set<string>();
+  panel.members.forEach((member, index) => {
+    if (!expectedTasks.has(member.taskId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["members", index, "taskId"],
+        message: `${member.taskId} is not a frozen Panel-${panel.panel} task`,
+      });
+    }
+    if (seenTasks.has(member.taskId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["members", index, "taskId"], message: "panel task is duplicated" });
+    }
+    if (seenIds.has(member.capsule.capsuleId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["members", index, "capsule", "capsuleId"], message: "panel capsule id is duplicated" });
+    }
+    if (seenDigests.has(member.capsule.capsuleDigest)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["members", index, "capsule", "capsuleDigest"], message: "panel capsule digest is duplicated" });
+    }
+    seenTasks.add(member.taskId);
+    seenIds.add(member.capsule.capsuleId);
+    seenDigests.add(member.capsule.capsuleDigest);
+  });
+  for (const taskId of expected) {
+    if (!seenTasks.has(taskId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["members"], message: `frozen panel task ${taskId} is missing` });
+    }
+  }
+});
+export type M2DevelopmentPanel = z.infer<typeof M2DevelopmentPanel>;
+
+export const M2CapsuleNormalizedScore = z.object({
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  normalizedScore: z.number().finite().nullable(),
+}).strict();
+export type M2CapsuleNormalizedScore = z.infer<typeof M2CapsuleNormalizedScore>;
+
+export const M2PanelAggregationShape = z.object({
+  valid: z.boolean(),
+  perCapsule: z.array(M2CapsuleNormalizedScore).length(M2_PANEL_CAPSULE_COUNT),
+  panelMean: z.number().finite().nullable(),
+}).strict();
+
+export const M2PanelAggregation = M2PanelAggregationShape.superRefine((aggregation, ctx) => {
+  const ids = new Set(aggregation.perCapsule.map((row) => row.capsuleId));
+  if (ids.size !== M2_PANEL_CAPSULE_COUNT) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "panel scores must contain eight distinct capsule identities" });
+  }
+  const scores = aggregation.perCapsule.map((row) => row.normalizedScore);
+  if (!aggregation.valid) {
+    if (aggregation.panelMean !== null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["panelMean"], message: "an invalid panel cannot publish a panel mean" });
+    }
+    return;
+  }
+  if (scores.some((score) => score === null)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "a valid panel requires all eight normalized scores" });
+    return;
+  }
+  const expected = scores.reduce<number>((sum, score) => sum + (score ?? 0), 0) / M2_PANEL_CAPSULE_COUNT;
+  if (aggregation.panelMean === null || !nearlyEqual(aggregation.panelMean, expected)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["panelMean"], message: `panel mean must equal ${expected}` });
+  }
+});
+export type M2PanelAggregation = z.infer<typeof M2PanelAggregation>;
+
+export const M2EnvelopeIdentity = z.object({
+  envelopeId: SHA256,
+  purpose: z.enum(["search", "confirmation", "terminal"]),
+}).strict();
+export type M2EnvelopeIdentity = z.infer<typeof M2EnvelopeIdentity>;
+
+const M2SearchEnvelope = z.object({
+  identity: M2EnvelopeIdentity.extend({ purpose: z.literal("search") }).strict(),
+  calibratedPanelCandidate: BudgetEnvelope,
+  outerTrajectory: BudgetEnvelope,
+}).strict().superRefine((search, ctx) => {
+  for (const dimension of BUDGET_DIMENSIONS) {
+    const expected = search.calibratedPanelCandidate[dimension] * M2_SEARCH_CANDIDATE_EQUIVALENTS;
+    if (!nearlyEqual(search.outerTrajectory[dimension], expected)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["outerTrajectory", dimension],
+        message: `search trajectory ${dimension} must equal ${M2_SEARCH_CANDIDATE_EQUIVALENTS} complete-panel candidate equivalents (${expected})`,
+      });
+    }
+  }
+});
+
+const M2JudgingEnvelope = z.object({
+  identity: M2EnvelopeIdentity,
+  budget: BudgetEnvelope,
+}).strict();
+
+/** Search and fixed judging are three separately identified, non-transferable pools. */
+export const M2RecursiveBudgets = z.object({
+  search: M2SearchEnvelope,
+  confirmation: M2JudgingEnvelope,
+  terminal: M2JudgingEnvelope,
+}).strict().superRefine((budgets, ctx) => {
+  if (budgets.confirmation.identity.purpose !== "confirmation") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["confirmation", "identity", "purpose"], message: "confirmation resources require a confirmation envelope identity" });
+  }
+  if (budgets.terminal.identity.purpose !== "terminal") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["terminal", "identity", "purpose"], message: "terminal resources require a terminal envelope identity" });
+  }
+  const ids = [budgets.search.identity.envelopeId, budgets.confirmation.identity.envelopeId, budgets.terminal.identity.envelopeId];
+  if (new Set(ids).size !== ids.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: "search, confirmation, and terminal envelopes require distinct identities" });
+  }
+});
+export type M2RecursiveBudgets = z.infer<typeof M2RecursiveBudgets>;
 
 const RecursiveOptimizerIdentity = z.object({
   sourceCommit: GIT_COMMIT,
@@ -418,10 +579,16 @@ export const RecursiveGenerationCell = z.union([
 export type RecursiveGenerationCell = z.infer<typeof RecursiveGenerationCell>;
 
 export const RecursiveCampaignCounts = z.object({
-  candidates: z.literal(M2_CANDIDATE_COUNT),
-  candidateAttemptsMax: z.literal(M2_CANDIDATE_ATTEMPTS_MAX),
-  innerEpisodesMax: z.literal(M2_INNER_EPISODES_MAX),
-  searchReplicates: z.literal(1),
+  /**
+   * Optimizer-declared schedule metadata. These are validated values, not a
+   * trusted requirement to emit this many candidates or attempts.
+   */
+  candidates: z.number().int().positive(),
+  candidateAttemptsMax: z.number().int().nonnegative(),
+  /** Frozen trusted safety ceiling; an optimizer may allocate fewer episodes. */
+  innerEpisodesMax: z.union([z.literal(4), z.literal(8), z.literal(12)]),
+  searchReplicates: z.number().int().positive(),
+  /** Fixed scientific-shell judging replication. */
   confirmationReplicates: z.literal(3),
   holdoutReplicates: z.literal(3),
   childConcurrency: z.number().int().positive(),
@@ -437,6 +604,9 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   train: z.array(MetaCapsuleEntry),
   holdout: z.array(MetaCapsuleEntry),
   counts: RecursiveCampaignCounts,
+  /** Additive M2 cutover fields; legacy V2 fixtures omit both together. */
+  developmentPanel: M2DevelopmentPanel.optional(),
+  recursiveBudgets: M2RecursiveBudgets.optional(),
   allowedClaim: z.literal(M2_ALLOWED_CLAIM),
 }).strict();
 
@@ -474,6 +644,60 @@ export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, 
     });
   }
 
+  if ((cfg.developmentPanel === undefined) !== (cfg.recursiveBudgets === undefined)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: cfg.developmentPanel === undefined ? ["developmentPanel"] : ["recursiveBudgets"],
+      message: "M2 development panel membership and recursive envelopes must be frozen together",
+    });
+  }
+  if (cfg.developmentPanel !== undefined && cfg.recursiveBudgets !== undefined) {
+    if (cfg.developmentPanel.panel !== cfg.generation.panel) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["developmentPanel", "panel"], message: "development panel must match the trajectory generation cell" });
+    }
+    const trainById = new Map(cfg.train.map((capsule) => [capsule.capsuleId, capsule]));
+    cfg.developmentPanel.members.forEach((member, index) => {
+      const registered = trainById.get(member.capsule.capsuleId);
+      if (registered === undefined || canonicalJson(registered) !== canonicalJson(member.capsule)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["developmentPanel", "members", index, "capsule"],
+          message: "panel member must equal its exact registered train capsule identity",
+        });
+      }
+    });
+    const calibrated = m2CalibratedPanelCandidateBudget(cfg.developmentPanel);
+    for (const dimension of BUDGET_DIMENSIONS) {
+      if (!nearlyEqual(cfg.recursiveBudgets.search.calibratedPanelCandidate[dimension], calibrated[dimension])) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["recursiveBudgets", "search", "calibratedPanelCandidate", dimension],
+          message: `calibrated panel candidate ${dimension} must equal the componentwise sum ${calibrated[dimension]}`,
+        });
+      }
+    }
+    const confirmationRuns =
+      (cfg.generation.stage === "A" ? 4 : 5) *
+      cfg.train.length *
+      cfg.counts.confirmationReplicates;
+    const terminalRuns = 3 * cfg.holdout.length * cfg.counts.holdoutReplicates;
+    for (const [purpose, envelope, runs] of [
+      ["confirmation", cfg.recursiveBudgets.confirmation.budget, confirmationRuns],
+      ["terminal", cfg.recursiveBudgets.terminal.budget, terminalRuns],
+    ] as const) {
+      for (const dimension of BUDGET_DIMENSIONS) {
+        const required = cfg.budgets.child[dimension] * runs;
+        if (envelope[dimension] < required) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["recursiveBudgets", purpose, "budget", dimension],
+            message: `${purpose} ${dimension} cannot fund the fixed judging shell (${required})`,
+          });
+        }
+      }
+    }
+  }
+
   const protectedNorm = cfg.protectedPaths.map(normalizePath);
   cfg.mutablePaths.forEach((mutable, index) => {
     const hit = protectedNorm.find((candidate) => pathsOverlap(normalizePath(mutable), candidate));
@@ -504,19 +728,23 @@ export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, 
     }
   }
 
-  const confirmationArms = cfg.generation.stage === "A" ? 4 : 5;
-  const childRuns =
-    cfg.counts.candidates * cfg.train.length +
-    confirmationArms * cfg.train.length * cfg.counts.confirmationReplicates +
-    3 * cfg.holdout.length * cfg.counts.holdoutReplicates;
-  for (const dimension of BUDGET_DIMENSIONS) {
-    const required = cfg.budgets.child[dimension] * childRuns + cfg.budgets.outer[dimension];
-    if (cfg.budgets.campaign[dimension] < required) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["budgets", "campaign", dimension],
-        message: `M2 campaign ${dimension} ${cfg.budgets.campaign[dimension]} under-reserves ${required}`,
-      });
+  if (cfg.recursiveBudgets === undefined) {
+    // Compatibility validation for pre-cutover V2 fixtures only. New M2
+    // configurations use non-transferable recursive envelope identities.
+    const confirmationArms = cfg.generation.stage === "A" ? 4 : 5;
+    const childRuns =
+      cfg.counts.candidates * cfg.train.length +
+      confirmationArms * cfg.train.length * cfg.counts.confirmationReplicates +
+      3 * cfg.holdout.length * cfg.counts.holdoutReplicates;
+    for (const dimension of BUDGET_DIMENSIONS) {
+      const required = cfg.budgets.child[dimension] * childRuns + cfg.budgets.outer[dimension];
+      if (cfg.budgets.campaign[dimension] < required) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["budgets", "campaign", dimension],
+          message: `legacy M2 campaign ${dimension} ${cfg.budgets.campaign[dimension]} under-reserves ${required}`,
+        });
+      }
     }
   }
 });
@@ -527,4 +755,23 @@ export type MetaCampaignConfig = z.infer<typeof MetaCampaignConfig>;
 
 function canonicalIdentity(identity: z.infer<typeof RecursiveOptimizerIdentity>): string {
   return `${identity.sourceCommit}\n${identity.sourceArtifact}\n${identity.bundleDigest}`;
+}
+
+export function m2CalibratedPanelCandidateBudget(
+  panel: M2DevelopmentPanel,
+): z.infer<typeof BudgetEnvelope> {
+  return panel.members.reduce<z.infer<typeof BudgetEnvelope>>(
+    (total, member) => ({
+      maxTokens: total.maxTokens + member.calibratedInnerCeiling.maxTokens,
+      maxUsd: total.maxUsd + member.calibratedInnerCeiling.maxUsd,
+      maxWallClockSec: total.maxWallClockSec + member.calibratedInnerCeiling.maxWallClockSec,
+      maxEvaluatorInvocations:
+        total.maxEvaluatorInvocations + member.calibratedInnerCeiling.maxEvaluatorInvocations,
+    }),
+    { maxTokens: 0, maxUsd: 0, maxWallClockSec: 0, maxEvaluatorInvocations: 0 },
+  );
+}
+
+function nearlyEqual(left: number, right: number): boolean {
+  return Math.abs(left - right) <= 1e-9 * Math.max(1, Math.abs(left), Math.abs(right));
 }

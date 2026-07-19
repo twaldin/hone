@@ -20,6 +20,11 @@ import {
   type MetaCampaignConfig,
 } from "@hone/schema";
 import { z } from "zod";
+import type {
+  MetaEnvelopeReservation,
+  MetaEnvelopeReservationRequest,
+  MetaEnvelopeResourceUsage,
+} from "./resource-envelope.js";
 
 export type Sha256Digest = `sha256:${string}`;
 const DIGEST = z.custom<Sha256Digest>(
@@ -32,6 +37,13 @@ const ResourceUsage = z.object({
   usd: z.number().finite().nonnegative(),
   wallClockSec: z.number().finite().nonnegative(),
   evaluatorInvocations: z.number().int().nonnegative(),
+}).strict();
+const SearchAllocation = z.object({
+  allocationOrdinal: z.number().int().nonnegative(),
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  replicate: z.number().int().nonnegative(),
+  innerEpisodesMax: z.number().int().positive(),
+  reserved: BudgetEnvelope,
 }).strict();
 
 export type MetaPhase = "search" | "confirmation" | "holdout";
@@ -95,6 +107,13 @@ export interface MetaWorkIdentity extends MetaArtifactIdentity {
   measurementEpoch: string;
 }
 
+export interface MetaChildEnvelopeRequest {
+  readonly purpose: "search" | "confirmation" | "terminal";
+  readonly reservationId: string;
+  readonly parentReservationId: string | null;
+  readonly reserved: BudgetEnvelope;
+}
+
 export interface MetaReservation {
   configHash: Sha256Digest;
   workKey: Sha256Digest;
@@ -147,7 +166,7 @@ export interface MetaFailureSettlement extends MetaWorkIdentity {
 
 export interface MetaJournalPort {
   readonly configHash: Sha256Digest;
-  reserveChild(identity: MetaWorkIdentity): MetaReservation;
+  reserveChild(identity: MetaWorkIdentity, envelope?: MetaChildEnvelopeRequest): MetaReservation;
   settleChild(
     identity: MetaWorkIdentity,
     input: {
@@ -709,11 +728,24 @@ interface ChildResult {
   valid: boolean;
 }
 
+export interface MetaSearchDescendantAllocation {
+  /** Optimizer-owned ordering within candidate j; trusted identity binds it durably. */
+  readonly allocationOrdinal: number;
+  readonly capsuleId: string;
+  readonly replicate: number;
+  readonly innerEpisodesMax: number;
+  readonly reserved: BudgetEnvelope;
+}
+
 export interface MetaSearchEvaluationInput {
   sourceArtifact: Sha256Digest;
   outerCapsuleId: string;
   assetGroupId: string;
   seed: number;
+  /** Required by the recursive M2 path; no cardinality is imposed on j. */
+  candidateOrdinal?: number;
+  /** Optimizer-authored schedule, validated only against capsule and envelope ceilings. */
+  allocations?: readonly MetaSearchDescendantAllocation[];
 }
 
 export interface MetaConfirmationArtifacts {
@@ -747,12 +779,20 @@ export interface MetaPhaseResult {
   measurements: readonly MetaMeasurement[];
 }
 
+export interface MetaEnvelopePort {
+  reserveSearchDescendant(input: MetaEnvelopeReservationRequest): MetaEnvelopeReservation;
+  reserveConfirmationDescendant(input: MetaEnvelopeReservationRequest): MetaEnvelopeReservation;
+  reserveTerminalDescendant(input: MetaEnvelopeReservationRequest): MetaEnvelopeReservation;
+  settleDescendant(reservationId: string, observed: MetaEnvelopeResourceUsage): MetaEnvelopeReservation;
+}
+
 export interface MetaCampaignRunnerOptions {
   config: MetaCampaignConfig;
   journal: MetaJournalPort;
   joinPath: string;
   candidateGate: MetaCandidateGate;
   childSupervisor: MetaChildSupervisor;
+  envelopeLedger?: MetaEnvelopePort;
   now?: () => Date;
   mintMeasurementEpoch?: () => string;
   childConcurrency?: number;
@@ -765,6 +805,9 @@ interface ChildWorkItem extends MetaArtifactIdentity {
   replicate: number;
   measurementEpoch: string;
   transformationReceiptHash: Sha256Digest | null;
+  innerEpisodesMax: number;
+  envelopePurpose: "search" | "confirmation" | "terminal" | null;
+  reservedBudget: BudgetEnvelope | null;
 }
 
 interface TrustedPhaseArm {
@@ -786,6 +829,9 @@ export class MetaCampaignRunner {
     this.config = MetaCampaignConfigSchema.parse(opts.config);
     if (opts.journal.configHash !== metaCampaignConfigHash(this.config)) {
       throw new Error(`meta journal config hash ${opts.journal.configHash} does not match campaign`);
+    }
+    if (this.config.version === 2 && this.config.recursiveBudgets !== undefined && opts.envelopeLedger === undefined) {
+      throw new Error("recursive M2 campaigns require a durable componentwise envelope ledger");
     }
     this.joins = MetaJoinStoreV1.open(opts.joinPath, opts.journal.configHash);
     this.now = opts.now ?? (() => new Date());
@@ -809,18 +855,95 @@ export class MetaCampaignRunner {
     this.validateGateResult({ mode: "public-mutable", sourceArtifact }, gate);
     const artifact: MetaArtifactIdentity = { sourceArtifact, bundleDigest: gate.bundleDigest };
     const candidateEpoch = this.joins.ensureCandidate(artifact, gate.transformationReceiptHash, this.mintMeasurementEpoch);
-    const work = this.config.train.flatMap((capsule) =>
-      Array.from({ length: this.config.counts.searchReplicates }, (_, replicate): ChildWorkItem => ({
-        phase: "search",
-        arm: "candidate",
-        ...artifact,
-        transformationReceiptHash: gate.transformationReceiptHash,
-        capsule,
-        replicate,
-        measurementEpoch: childMeasurementEpoch(candidateEpoch, "search", "candidate", capsule.capsuleId, replicate),
-      })),
-    );
-    const inFlightKey = canonicalJson(artifact);
+    const developmentPanel = this.config.version === 2 ? this.config.developmentPanel : undefined;
+    const recursiveM2 =
+      developmentPanel !== undefined &&
+      this.config.version === 2 &&
+      this.config.recursiveBudgets !== undefined;
+    let work: ChildWorkItem[];
+    if (recursiveM2) {
+      const ordinal = z.number().int().nonnegative().safeParse(input.candidateOrdinal);
+      const allocations = z.array(SearchAllocation).safeParse(input.allocations);
+      if (!ordinal.success || !allocations.success || allocations.data.length === 0) {
+        const detail = !ordinal.success
+          ? "candidate ordinal j is required"
+          : !allocations.success
+            ? allocations.error.message
+            : "optimizer schedule reserved no descendants";
+        return this.invalidRecord(input, `invalid recursive search schedule: ${bounded(detail)}`, started);
+      }
+      const seenAllocationOrdinals = new Set<number>();
+      const memberByCapsule = new Map(
+        developmentPanel.members.map((member) => [member.capsule.capsuleId, member]),
+      );
+      for (const allocation of allocations.data) {
+        if (seenAllocationOrdinals.has(allocation.allocationOrdinal)) {
+          return this.invalidRecord(
+            input,
+            `invalid recursive search schedule: duplicate allocation ordinal ${allocation.allocationOrdinal}`,
+            started,
+          );
+        }
+        seenAllocationOrdinals.add(allocation.allocationOrdinal);
+        const member = memberByCapsule.get(allocation.capsuleId);
+        if (member === undefined) {
+          return this.invalidRecord(
+            input,
+            `invalid recursive search schedule: capsule ${allocation.capsuleId} is outside Panel ${developmentPanel.panel}`,
+            started,
+          );
+        }
+        if (allocation.innerEpisodesMax > this.config.counts.innerEpisodesMax) {
+          return this.invalidRecord(
+            input,
+            `invalid recursive search schedule: allocation ${allocation.allocationOrdinal} exceeds calibrated inner ceiling ${this.config.counts.innerEpisodesMax}`,
+            started,
+          );
+        }
+        const exceeded = budgetDimensionExceeded(allocation.reserved, member.calibratedInnerCeiling);
+        if (exceeded !== null) {
+          return this.invalidRecord(
+            input,
+            `invalid recursive search schedule: allocation ${allocation.allocationOrdinal} exceeds capsule ${exceeded}`,
+            started,
+          );
+        }
+      }
+      work = allocations.data.map((allocation): ChildWorkItem => {
+        const member = memberByCapsule.get(allocation.capsuleId);
+        if (member === undefined) throw new Error(`missing validated panel capsule ${allocation.capsuleId}`);
+        return {
+          phase: "search",
+          arm: "candidate",
+          ...artifact,
+          transformationReceiptHash: gate.transformationReceiptHash,
+          capsule: member.capsule,
+          replicate: allocation.replicate,
+          measurementEpoch:
+            `${childMeasurementEpoch(candidateEpoch, "search", "candidate", allocation.capsuleId, allocation.replicate)}` +
+            `:j:${ordinal.data}:allocation:${allocation.allocationOrdinal}`,
+          innerEpisodesMax: allocation.innerEpisodesMax,
+          envelopePurpose: "search",
+          reservedBudget: allocation.reserved,
+        };
+      });
+    } else {
+      work = this.config.train.flatMap((capsule) =>
+        Array.from({ length: this.config.counts.searchReplicates }, (_, replicate): ChildWorkItem => ({
+          phase: "search",
+          arm: "candidate",
+          ...artifact,
+          transformationReceiptHash: gate.transformationReceiptHash,
+          capsule,
+          replicate,
+          measurementEpoch: childMeasurementEpoch(candidateEpoch, "search", "candidate", capsule.capsuleId, replicate),
+          innerEpisodesMax: this.config.counts.innerEpisodesMax,
+          envelopePurpose: null,
+          reservedBudget: null,
+        })),
+      );
+    }
+    const inFlightKey = canonicalJson({ artifact, candidateOrdinal: input.candidateOrdinal ?? null, allocations: input.allocations ?? null });
     const existing = this.searchInFlight.get(inFlightKey);
     const pending = existing ?? mapBounded(work, this.childConcurrency, (item) => this.executeChild(item));
     if (existing === undefined) this.searchInFlight.set(inFlightKey, pending);
@@ -830,10 +953,12 @@ export class MetaCampaignRunner {
     } finally {
       if (existing === undefined && this.searchInFlight.get(inFlightKey) === pending) this.searchInFlight.delete(inFlightKey);
     }
-    if (results.length !== this.config.train.length * this.config.counts.searchReplicates) {
+    if (results.length !== work.length) {
       throw new Error("meta runner internal cardinality error");
     }
-    const failures = results.filter((result) => result.status !== "completed" || !result.valid || result.measurement === null);
+    const failures = results.filter(
+      (result) => result.status !== "completed" || !result.valid || result.measurement === null,
+    );
     if (failures.length > 0) {
       const infrastructure = failures.some((failure) => failure.status === "infrastructure_not_run");
       const summary = failures
@@ -849,13 +974,26 @@ export class MetaCampaignRunner {
 
     const perExample: Record<string, { score: number; feedback: string }> = {};
     const capsuleMeans: number[] = [];
+    const incompleteCapsules = this.config.train.filter(
+      (capsule) => !results.some((result) => result.capsuleId === capsule.capsuleId),
+    );
+    if (incompleteCapsules.length > 0) {
+      return this.invalidRecord(
+        input,
+        `candidate invalid; incomplete panel missing ${incompleteCapsules.map((capsule) => capsule.capsuleId).join(", ")}`,
+        started,
+        results,
+      );
+    }
     for (const capsule of this.config.train) {
       const rows = results.filter((result) => result.capsuleId === capsule.capsuleId);
-      if (rows.length !== this.config.counts.searchReplicates) throw new Error(`missing search replicate for ${capsule.capsuleId}`);
       const scores = rows.map((row) => {
         if (row.measurement === null) throw new Error(`missing completed measurement for ${row.capsuleId}`);
         return row.measurement.qNormalized;
       });
+      if (!recursiveM2 && rows.length !== this.config.counts.searchReplicates) {
+        throw new Error(`missing search replicate for ${capsule.capsuleId}`);
+      }
       const score = mean(scores);
       capsuleMeans.push(score);
       perExample[capsule.capsuleId] = {
@@ -1043,6 +1181,15 @@ export class MetaCampaignRunner {
         capsule,
         replicate,
         measurementEpoch: trustedPhaseMeasurementEpoch(this.opts.journal.configHash, phase, capsule.capsuleId, replicate),
+        innerEpisodesMax: this.config.counts.innerEpisodesMax,
+        envelopePurpose:
+          this.config.version === 2 && this.config.recursiveBudgets !== undefined
+            ? phase === "confirmation" ? "confirmation" : "terminal"
+            : null,
+        reservedBudget:
+          this.config.version === 2 && this.config.recursiveBudgets !== undefined
+            ? this.config.budgets.child
+            : null,
       })),
     ));
     const results = await mapBounded(work, this.childConcurrency, (item) => this.executeChild(item));
@@ -1066,12 +1213,16 @@ export class MetaCampaignRunner {
       replicate: item.replicate,
       measurementEpoch: item.measurementEpoch,
     };
-    const reservation = this.opts.journal.reserveChild(identity);
+    const envelopeRequest = this.reserveEnvelope(item, identity);
+    const reservation = this.opts.journal.reserveChild(identity, envelopeRequest);
+    if (envelopeRequest !== undefined && canonicalJson(reservation.reserved) !== canonicalJson(envelopeRequest.reserved)) {
+      throw new Error(`meta journal reservation ${reservation.workKey} does not preserve its trusted envelope slice`);
+    }
     const receiptExisted = this.joins.receipt(reservation);
     const stored = this.joins.completion(reservation.workKey);
-    if (stored !== undefined) return this.settleStored(identity, stored);
+    if (stored !== undefined) return this.settleStored(identity, stored, item);
     const priorFailure = this.joins.failure(reservation.workKey);
-    if (priorFailure?.terminal === true) return this.settleFailureStored(identity, priorFailure);
+    if (priorFailure?.terminal === true) return this.settleFailureStored(identity, priorFailure, item);
 
     const attempt: 0 | 1 = priorFailure === undefined ? 0 : 1;
     const priorObserved = priorFailure?.evidence.spend ?? ZERO_USAGE;
@@ -1088,7 +1239,7 @@ export class MetaCampaignRunner {
         sourceArtifact: item.sourceArtifact,
         bundleDigest: item.bundleDigest,
         capsule: item.capsule,
-        innerEpisodesMax: this.config.counts.innerEpisodesMax,
+        innerEpisodesMax: item.innerEpisodesMax,
         requestedModel: this.config.routing.innerMutation,
         remainingBudget,
         attempt,
@@ -1133,7 +1284,7 @@ export class MetaCampaignRunner {
       return this.recordFailure(identity, item, reservation, failedOutcome, attempt, true, failureReason);
     }
     this.joins.recordCompletion(reservation.workKey, completion);
-    return this.settleStored(identity, completion);
+    return this.settleStored(identity, completion, item);
   }
 
   private recordFailure(
@@ -1153,7 +1304,7 @@ export class MetaCampaignRunner {
       reason,
     };
     this.joins.recordFailure(reservation.workKey, failure);
-    if (terminal) return this.settleFailureStored(identity, failure);
+    if (terminal) return this.settleFailureStored(identity, failure, item);
     return {
       capsuleId: identity.capsuleId,
       replicate: identity.replicate,
@@ -1166,7 +1317,7 @@ export class MetaCampaignRunner {
     };
   }
 
-  private settleStored(identity: MetaWorkIdentity, stored: StoredCompletion): ChildResult {
+  private settleStored(identity: MetaWorkIdentity, stored: StoredCompletion, item: ChildWorkItem): ChildResult {
     const outcome = stored.outcome;
     const measurement = this.opts.journal.settleChild(identity, {
       evidenceHash: metaEvidenceHash(stored.evidence),
@@ -1176,6 +1327,7 @@ export class MetaCampaignRunner {
       providerFingerprint: outcome.providerFingerprint,
       modelDriftSentinel: requireString(outcome.modelDriftSentinel, "model drift sentinel"),
     });
+    this.settleEnvelope(item, identity, stored.evidence.spend);
     const expected = (stored.qRaw - measurement.qBase) / measurement.scale;
     if (!Number.isFinite(measurement.qNormalized) || Math.abs(measurement.qNormalized - expected) > 1e-12 * Math.max(1, Math.abs(expected))) {
       throw new Error(`journal normalization mismatch for ${measurement.workKey}`);
@@ -1192,7 +1344,7 @@ export class MetaCampaignRunner {
     };
   }
 
-  private settleFailureStored(identity: MetaWorkIdentity, stored: StoredFailure): ChildResult {
+  private settleFailureStored(identity: MetaWorkIdentity, stored: StoredFailure, item: ChildWorkItem): ChildResult {
     if (!stored.terminal || stored.outcome.status === "completed") throw new Error("cannot settle a nonterminal or completed failure");
     const status = stored.outcome.status;
     const settlement = this.opts.journal.settleChildFailure(identity, {
@@ -1200,6 +1352,7 @@ export class MetaCampaignRunner {
       observed: stored.evidence.spend,
       status,
     });
+    this.settleEnvelope(item, identity, stored.evidence.spend);
     return {
       capsuleId: identity.capsuleId,
       replicate: identity.replicate,
@@ -1211,6 +1364,65 @@ export class MetaCampaignRunner {
       valid: false,
     };
   }
+  private reserveEnvelope(
+    item: ChildWorkItem,
+    identity: MetaWorkIdentity,
+  ): MetaChildEnvelopeRequest | undefined {
+    if (item.envelopePurpose === null) return undefined;
+    if (item.reservedBudget === null || this.opts.envelopeLedger === undefined) {
+      throw new Error("recursive child is missing its trusted envelope authority");
+    }
+    const reservationId = recursiveEnvelopeReservationId(
+      this.opts.journal.configHash,
+      item.envelopePurpose,
+      identity,
+    );
+    const input: MetaEnvelopeReservationRequest = {
+      reservationId,
+      parentReservationId: null,
+      reserved: item.reservedBudget,
+    };
+    const reserved = item.envelopePurpose === "search"
+      ? this.opts.envelopeLedger.reserveSearchDescendant(input)
+      : item.envelopePurpose === "confirmation"
+        ? this.opts.envelopeLedger.reserveConfirmationDescendant(input)
+        : this.opts.envelopeLedger.reserveTerminalDescendant(input);
+    if (
+      reserved.reservationId !== reservationId ||
+      reserved.parentReservationId !== null ||
+      reserved.envelope.purpose !== item.envelopePurpose ||
+      canonicalJson(reserved.reserved) !== canonicalJson(item.reservedBudget)
+    ) {
+      throw new Error(`envelope ledger returned a mismatched reservation for ${reservationId}`);
+    }
+    return {
+      purpose: item.envelopePurpose,
+      reservationId,
+      parentReservationId: null,
+      reserved: item.reservedBudget,
+    };
+  }
+
+  private settleEnvelope(
+    item: ChildWorkItem,
+    identity: MetaWorkIdentity,
+    observed: MetaResourceUsage,
+  ): void {
+    if (item.envelopePurpose === null) return;
+    if (this.opts.envelopeLedger === undefined) {
+      throw new Error("recursive child is missing its trusted envelope authority");
+    }
+    const reservationId = recursiveEnvelopeReservationId(
+      this.opts.journal.configHash,
+      item.envelopePurpose,
+      identity,
+    );
+    const settled = this.opts.envelopeLedger.settleDescendant(reservationId, observed);
+    if (!settled.settled || settled.reservationId !== reservationId) {
+      throw new Error(`envelope ledger failed to settle ${reservationId}`);
+    }
+  }
+
 
   private validateGateResult(request: MetaCandidateGateRequest, gate: CandidateGateAccepted): void {
     if (gate.sourceArtifact !== request.sourceArtifact) {
@@ -1479,6 +1691,29 @@ export function trustedPhaseMeasurementEpoch(
 ): string {
   if (!Number.isSafeInteger(replicate) || replicate < 0) throw new Error("replicate must be a nonnegative safe integer");
   return `${phase}:${sha256(canonicalJson({ configHash, phase, capsuleId, replicate })).slice("sha256:".length)}`;
+}
+
+export function recursiveEnvelopeReservationId(
+  configHash: Sha256Digest,
+  purpose: MetaChildEnvelopeRequest["purpose"],
+  identity: MetaWorkIdentity,
+): Sha256Digest {
+  return sha256(canonicalJson({ version: 1, configHash, purpose, identity }));
+}
+
+function budgetDimensionExceeded(
+  requested: BudgetEnvelope,
+  ceiling: BudgetEnvelope,
+): keyof BudgetEnvelope | null {
+  for (const dimension of [
+    "maxTokens",
+    "maxUsd",
+    "maxWallClockSec",
+    "maxEvaluatorInvocations",
+  ] as const) {
+    if (requested[dimension] > ceiling[dimension] + Number.EPSILON) return dimension;
+  }
+  return null;
 }
 
 export function metaCampaignConfigHash(configInput: MetaCampaignConfig): Sha256Digest {
