@@ -271,6 +271,7 @@ interface CapsuleConfig {
   assetGroups: { id: string; visibility: string; paths: string[] }[];
   budget: Record<string, number>;
   diagnosticOrdering: { path: string };
+  sandbox?: { memoryBytes: number; cpus?: number };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -287,7 +288,7 @@ function loadCapsuleConfig(): CapsuleConfig {
   };
   const raw: unknown = JSON.parse(readFileSync(join(CAPSULE_DIR, "capsule.config.json"), "utf8"));
   if (!isRecord(raw)) return fail("<root>");
-  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering } = raw;
+  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, sandbox } = raw;
   if (typeof objective !== "string" || objective.length === 0) return fail("objective");
   if (typeof image !== "string" || image.length === 0) return fail("image");
   if (!isStringArray(evalEntrypoint) || evalEntrypoint.length === 0) return fail("evalEntrypoint");
@@ -310,6 +311,12 @@ function loadCapsuleConfig(): CapsuleConfig {
   if (!isRecord(diagnosticOrdering) || typeof diagnosticOrdering.path !== "string" || diagnosticOrdering.path.length === 0) {
     return fail("diagnosticOrdering.path");
   }
+  let sandboxParsed: { memoryBytes: number; cpus?: number } | undefined;
+  if (sandbox !== undefined) {
+    if (!isRecord(sandbox) || typeof sandbox.memoryBytes !== "number" || sandbox.memoryBytes <= 0) return fail("sandbox.memoryBytes");
+    if (sandbox.cpus !== undefined && (typeof sandbox.cpus !== "number" || sandbox.cpus <= 0)) return fail("sandbox.cpus");
+    sandboxParsed = { memoryBytes: sandbox.memoryBytes, ...(sandbox.cpus === undefined ? {} : { cpus: sandbox.cpus }) };
+  }
   return {
     objective,
     image,
@@ -318,6 +325,7 @@ function loadCapsuleConfig(): CapsuleConfig {
     assetGroups: groups,
     budget: budgetNumbers,
     diagnosticOrdering: { path: diagnosticOrdering.path },
+    ...(sandboxParsed === undefined ? {} : { sandbox: sandboxParsed }),
   };
 }
 type ExpandedAssetGroup = CapsuleConfig["assetGroups"][number];
@@ -406,6 +414,7 @@ function provisionalManifest(
     protectedPaths: config.protectedPaths,
     assetGroups,
     budget: config.budget,
+    ...(config.sandbox === undefined ? {} : { sandbox: config.sandbox }),
     diagnosticOrdering: { path: config.diagnosticOrdering.path, hash: PROVISIONAL_ORDERING_HASH },
     contentHashes,
   };
@@ -583,6 +592,12 @@ export async function runOrderingCheck(): Promise<OrderingReport> {
       optimizerDigest: ORDERING_TOOL_DIGEST,
       holdoutLedgerPath: join(tempRoot, "holdout-ledger.ndjson"),
       ...(terminalHoldoutDiagnostic ? { holdoutBudget: EXPECTED_EVALS } : {}),
+      ...(config.sandbox === undefined
+        ? {}
+        : {
+            sandboxMemoryBytes: config.sandbox.memoryBytes,
+            ...(config.sandbox.cpus === undefined ? {} : { sandboxCpus: config.sandbox.cpus }),
+          }),
       image: manifest.image,
       runDir: join(tempRoot, "run"),
       casDir,
