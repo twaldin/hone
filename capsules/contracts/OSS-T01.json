@@ -10,13 +10,21 @@
   "scalarAndGates": "Reciprocal geometric mean wall time across graph shapes; exact exports/side effects, relevant Bun tests, peak RSS \u2264 baseline +2%.",
   "source": {
     "repository": "oven-sh/bun",
-    "revision": "a227ad991b62fc4e9b9ee5e998ad6c2e6508fe88",
-    "url": "https://github.com/oven-sh/bun/commit/a227ad991b62fc4e9b9ee5e998ad6c2e6508fe88",
+    "revision": "5187e27669440a72ab1b082f92b7f1b5ca94cfc1",
+    "url": "https://github.com/oven-sh/bun/commit/5187e27669440a72ab1b082f92b7f1b5ca94cfc1",
     "visibility": "public",
-    "license": "per-upstream-license-file"
+    "license": "per-upstream-license-file",
+    "revisionHistory": [
+      {
+        "previous": "a227ad991b62fc4e9b9ee5e998ad6c2e6508fe88",
+        "revisedAt": "2026-07-18",
+        "approvedBy": "owner",
+        "reason": "a227ad99 not self-buildable: pinned WebKit prebuilt regenerates stream bindings removed by the 2026-07-04 stream rewrite"
+      }
+    ]
   },
   "authoring": {
-    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "mutableSurface": "src/resolver/** only",
     "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
     "buildTestEvalCommands": null,
     "workloadHashes": null
