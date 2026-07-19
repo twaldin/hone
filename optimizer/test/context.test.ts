@@ -52,6 +52,13 @@ describe("buildEpisodeContext", () => {
     expect(ctx.mode).toBe("mutation");
     expect(ctx.episode).toBe(4);
     expect(ctx.systemPrompt).toBe(MUTATION_SYSTEM_PROMPT);
+    // Version-2 coding-session request: the inner improvement role, its safe
+    // tool subset, and the yield schema all ride in the request itself — the
+    // worker enforces exactly these, so the builder must emit them.
+    expect(ctx.role).toBe("inner-improver");
+    expect(ctx.tools).toEqual(["read", "bash", "write", "edit"]);
+    expect(ctx.outputSchema.additionalProperties).toBe(false);
+    expect(ctx.outputSchema.required).toEqual(["summary", "approach", "filesChanged"]);
 
     expect(ctx.userPrompt).toContain("make the pathfinder fast, keep correctness");
     // Behavioral invariants, not rendering format (context.ts is a mutable
@@ -105,6 +112,8 @@ describe("buildEpisodeContext", () => {
     });
     expect(ctx.mode).toBe("repair");
     expect(ctx.systemPrompt).toBe(REPAIR_SYSTEM_PROMPT);
+    expect(ctx.role).toBe("repair");
+    expect(EpisodeContext.parse(ctx)).toEqual(ctx);
     expect(ctx.userPrompt).toContain("mutation session failed (exit 1, episode 2)");
     expect(ctx.userPrompt).toContain("TypeError: boom in astar.js:42");
     expect(ctx.userPrompt).toContain("harness crashed before scoring");

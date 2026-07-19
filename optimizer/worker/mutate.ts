@@ -70,25 +70,67 @@ interface UnixFetchInit extends RequestInit {
 }
 
 class BridgeRequestTooLarge extends Error {}
-const TOOLS = ["read", "bash", "write", "edit"];
 
-const OUTPUT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["summary", "approach", "filesChanged"],
-  properties: {
-    summary: { type: "string", description: "What you changed and why, one paragraph." },
-    approach: { type: "string", description: "Short strategy label for the lineage record." },
-    filesChanged: { type: "array", items: { type: "string" }, description: "Paths you touched." },
-  },
-} as const;
+const SAFE_TOOLS = new Set(["read", "bash", "write", "edit"]);
+const SESSION_ROLES = new Set([
+  "capsule-author",
+  "evaluator-author",
+  "adversarial-validator",
+  "inner-improver",
+  "outer-improver",
+  "repair",
+]);
+
+interface YieldSchema {
+  type: "object";
+  additionalProperties: boolean;
+  required?: string[];
+  properties: Record<string, unknown>;
+}
 
 interface EpisodeFile {
-  version: 1;
+  version: 2;
   episode: number;
   mode: "mutation" | "repair";
+  role:
+    | "capsule-author"
+    | "evaluator-author"
+    | "adversarial-validator"
+    | "inner-improver"
+    | "outer-improver"
+    | "repair";
   systemPrompt: string;
   userPrompt: string;
+  tools: string[];
+  outputSchema: YieldSchema;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function parseOutputSchema(value: unknown): YieldSchema {
+  const rec = objectRecord(value);
+  if (rec === null || rec.type !== "object" || typeof rec.additionalProperties !== "boolean") {
+    throw new Error("episode.json: outputSchema must describe an object");
+  }
+  const properties = objectRecord(rec.properties);
+  if (properties === null) throw new Error("episode.json: outputSchema.properties must be an object");
+  const required = rec.required;
+  if (
+    required !== undefined
+    && (!Array.isArray(required) || required.some((item) => typeof item !== "string"))
+  ) {
+    throw new Error("episode.json: outputSchema.required must contain strings");
+  }
+  return {
+    type: "object",
+    additionalProperties: rec.additionalProperties,
+    ...(required === undefined ? {} : { required: required as string[] }),
+    properties,
+  };
 }
 
 /** Hand-rolled validation — keep in sync with optimizer/src/episode.ts (no zod in the image). */
@@ -99,25 +141,38 @@ function parseEpisode(raw: string): EpisodeFile {
   } catch (err) {
     throw new Error(`episode.json is not JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (typeof value !== "object" || value === null) throw new Error("episode.json: not an object");
-  const rec = value as Record<string, unknown>;
-  if (rec.version !== 1) throw new Error(`episode.json: unsupported version ${String(rec.version)}`);
+  const rec = objectRecord(value);
+  if (rec === null) throw new Error("episode.json: not an object");
+  if (rec.version !== 2) throw new Error(`episode.json: unsupported version ${String(rec.version)}`);
   if (typeof rec.episode !== "number" || !Number.isInteger(rec.episode) || rec.episode < 0) {
     throw new Error("episode.json: episode must be a nonnegative integer");
   }
   if (rec.mode !== "mutation" && rec.mode !== "repair") throw new Error("episode.json: mode must be mutation|repair");
+  if (typeof rec.role !== "string" || !SESSION_ROLES.has(rec.role)) {
+    throw new Error("episode.json: unsupported coding-session role");
+  }
   if (typeof rec.systemPrompt !== "string" || rec.systemPrompt.length === 0) {
     throw new Error("episode.json: systemPrompt must be a non-empty string");
   }
   if (typeof rec.userPrompt !== "string" || rec.userPrompt.length === 0) {
     throw new Error("episode.json: userPrompt must be a non-empty string");
   }
+  if (
+    !Array.isArray(rec.tools)
+    || rec.tools.length === 0
+    || rec.tools.some((tool) => typeof tool !== "string" || !SAFE_TOOLS.has(tool))
+  ) {
+    throw new Error("episode.json: tools must be a non-empty safe-tool subset");
+  }
   return {
-    version: 1,
+    version: 2,
     episode: rec.episode,
     mode: rec.mode,
+    role: rec.role as EpisodeFile["role"],
     systemPrompt: rec.systemPrompt,
     userPrompt: rec.userPrompt,
+    tools: rec.tools as string[],
+    outputSchema: parseOutputSchema(rec.outputSchema),
   };
 }
 
@@ -330,9 +385,25 @@ async function selftest(): Promise<void> {
   if (model === undefined) throw new Error("selftest: registered model not found in registry");
   isolatedSettings();
   const sample = parseEpisode(
-    JSON.stringify({ version: 1, episode: 0, mode: "mutation", systemPrompt: "s", userPrompt: "u" }),
+    JSON.stringify({
+      version: 2,
+      episode: 0,
+      mode: "mutation",
+      role: "capsule-author",
+      systemPrompt: "s",
+      userPrompt: "u",
+      tools: ["read"],
+      outputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["summary"],
+        properties: { summary: { type: "string" } },
+      },
+    }),
   );
-  if (sample.episode !== 0 || sample.mode !== "mutation") throw new Error("selftest: episode parse mismatch");
+  if (sample.episode !== 0 || sample.role !== "capsule-author" || sample.tools[0] !== "read") {
+    throw new Error("selftest: coding-session request parse mismatch");
+  }
 
   const targetSocket = join(agentDir, "proxy.sock");
   const target = http.createServer((req, res) => {
@@ -386,9 +457,9 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     deadline: env.deadline,
     sessionManager: SessionManager.inMemory(env.cwd),
     settings: isolatedSettings(),
-    toolNames: TOOLS,
+    toolNames: episode.tools,
     requireYieldTool: true,
-    outputSchema: OUTPUT_SCHEMA,
+    outputSchema: episode.outputSchema,
     disableExtensionDiscovery: true,
     preloadedCustomToolPaths: [],
     enableMCP: false,
@@ -402,7 +473,7 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
   });
 
   try {
-    const expected = [...TOOLS, "yield"];
+    const expected = [...episode.tools, "yield"];
     await session.setActiveToolsByName(expected);
     const active = new Set(session.getActiveToolNames());
     for (const tool of expected) {
