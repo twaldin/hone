@@ -49,6 +49,7 @@ const AdmissionReceiptRecordBodySchema = z.object({
   action: z.enum([
     "gate1-accept",
     "gate1-revise",
+    "gate1-reject",
     "gate2-approve",
     "gate2-reject",
     "revoke",

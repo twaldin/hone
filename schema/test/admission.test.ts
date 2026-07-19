@@ -146,6 +146,15 @@ describe("AdmissionReceiptRecord", () => {
     })).toThrow();
   });
 
+  it("accepts an explicit terminal gate1 rejection action", () => {
+    const { recordHash: _recordHash, ...body } = ownerApproval();
+    const rejected = { ...body, action: "gate1-reject" as const };
+    expect(AdmissionReceiptRecord.parse({
+      ...rejected,
+      recordHash: admissionReceiptRecordHash(rejected),
+    }).action).toBe("gate1-reject");
+  });
+
   it("rejects a record whose canonical record hash does not match", () => {
     expect(() => AdmissionReceiptRecord.parse({
       ...ownerApproval(),
