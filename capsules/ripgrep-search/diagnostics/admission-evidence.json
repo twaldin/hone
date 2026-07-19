@@ -1,0 +1,51 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 22.834,
+    "incrementalRebuildSec": 6.977,
+    "evalSec": 44.16
+  },
+  "aa": {
+    "samples": [
+      0.02777020495383072,
+      0.0281499940070603,
+      0.027528105989719734,
+      0.027071650248604896,
+      0.02824651330469477,
+      0.02852922176316179
+    ],
+    "sigma": 0.0005325392568811868,
+    "noiseFractionOfScale": 0.2
+  },
+  "qBase": 0.027882615044512036,
+  "qFail": 0,
+  "qReference": 0.03054531132891797,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "testsPass": false,
+      "purpose": "compile failure maps closed to qFail"
+    },
+    {
+      "id": "naive",
+      "q": 0.007024921640668062,
+      "testsPass": true,
+      "purpose": "deliberately slower but exact-output-correct large-file search"
+    },
+    {
+      "id": "shortcut",
+      "trainQ": 0.029800292196073542,
+      "validationQ": 0.006049913757023487,
+      "testsPass": true,
+      "purpose": "train-path shortcut is rejected by validation split"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "description": "independently authored read-only large-text mmap heuristic plus removal of disabled trace checks",
+    "q": 0.03201438526817894,
+    "testsPass": true,
+    "exactOutputsPass": true,
+    "peakRssPass": true
+  }
+}
