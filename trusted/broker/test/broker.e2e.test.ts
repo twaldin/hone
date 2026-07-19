@@ -270,15 +270,25 @@ describe("wire protocol round-trip (every method)", () => {
     expect(mainEvents.filter((e) => e.type === "incumbent.new")).toHaveLength(0);
   });
 
-  it("reserved methods return NOT_IMPLEMENTED", async () => {
+  it("production capabilities fail closed when trusted recursion/corpus configuration is absent", async () => {
     const spawn = await client.callRaw("spawnRun", {
-      subCapsuleId: "cap_ffffffffffff",
-      budgetSlice: GENEROUS_BUDGET,
-      maxDepth: 1,
+      child: {
+        runId: "child-unconfigured",
+        capsuleId: "cap_ffffffffffff",
+        sourceArtifact: { hash: baselineHash },
+        optimizerArtifact: { hash: baselineHash },
+        purpose: "capsule",
+      },
+      depth: 1,
+      reservation: GENEROUS_BUDGET,
     });
-    expect(spawn.error?.data?.code).toBe("NOT_IMPLEMENTED");
-    const corpus = await client.callRaw("queryCorpus", { query: "anything" });
-    expect(corpus.error?.data?.code).toBe("NOT_IMPLEMENTED");
+    expect(spawn.error?.data?.code).toBe("DEPTH_EXCEEDED");
+    const corpus = await client.callRaw("queryCorpus", {
+      query: { text: "anything", sources: ["public-snapshot"] },
+      cursor: null,
+      pageSize: 10,
+    });
+    expect(corpus.error?.data?.code).toBe("CORPUS_UNAVAILABLE");
   });
 
   it("rejects malformed json with -32700 and unknown methods with -32601", async () => {
