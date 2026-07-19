@@ -60,9 +60,11 @@ describe("M2 task contracts", () => {
     const sources = all.map((c) => c.source.existingCapsuleId ?? `${c.source.repository}@${c.source.revision}`);
     expect(new Set(sources).size).toBe(28);
     // OSS terminal repositories never appear in any train source (repository-level holdout).
-    const trainRepos = new Set(train.map((c) => c.source.repository).filter((r) => r !== undefined));
+    const trainRepos = new Set(train.map((c) => c.source.repository).filter((r): r is string => r !== undefined));
     for (const c of terminal.filter((t) => t.stratum === "oss")) {
-      expect(trainRepos.has(c.source.repository)).toBe(false);
+      const repo = c.source.repository;
+      expect(repo).toBeDefined();
+      expect(repo !== undefined && trainRepos.has(repo)).toBe(false);
     }
   });
 
