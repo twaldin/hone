@@ -1,0 +1,67 @@
+{
+  "objective": "Minimize Custom Scoreboard p99 render cost and allocations on frozen sidebar scenes while preserving the exact baseline layout and draw-command stream. Correctness is a hard gate; only solution.py is mutable.",
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "internal-use-only",
+    "provenance": "bounded exact layout/render-command extraction from Floyd Addons baseline 7c7360d4f68bf4505be64abc258ecf3067bb8dcf and reference ad9358c8",
+    "sourceDetails": {
+      "repository": "new-floyd-addons",
+      "commit": "7c7360d4f68bf4505be64abc258ecf3067bb8dcf",
+      "referenceCommit": "ad9358c8",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 3,
+      "freshProcess": true,
+      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
+      "qFail": 0
+    },
+    "tags": [
+      "m2",
+      "owner",
+      "terminal",
+      "rendering",
+      "performance"
+    ]
+  }
+}
