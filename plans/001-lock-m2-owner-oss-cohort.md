@@ -227,6 +227,34 @@ For each OSS performance capsule:
   
 
 This preserves the existing normalized-gain shape while keeping the task genuinely open-ended.
+## Product workflow and constitutional boundary
+### One human and agent entrypoint
+`hone "<objective>"` is the primary interface for a human or an external coding agent. Explicit commands such as `hone run`, `hone author`, `hone best`, `hone diff`, `hone apply`, `hone status`, `hone stop`, and `hone off` compile to the same durable intent and run state machine; they are not separate orchestration systems.
+
+Every task starts from a fresh offline checkout of the exact local `HEAD` commit. Staged, unstaged, ignored, and untracked files are not copied. Interactive use must acknowledge a dirty ambient tree; headless use fails unless the caller supplies the explicit dirty-tree acknowledgement. `.env` and other secret-bearing ambient files never enter the source snapshot, capsule, image layer, evaluator, or mutation workspace. Runtime credentials are injected only through trusted ephemeral mounts or the metering proxy and are never persisted.
+
+The same sealed Pi coding-session worker serves capsule authoring, evaluator authoring, adversarial validation, inner task improvement, outer optimizer improvement, and authoring repair. Roles differ only by trusted context, mutable workspace, model route, and capability envelope. An external Codex/Claude agent pilots the same headless CLI and NDJSON protocol; it does not bypass Hone's internal coding agents or admission state machine.
+
+### Two-gate capsule authoring
+Capsule creation is a durable workflow:
+
+1. a capsule-author session inspects the fresh checkout and proposes the objective, source identity/license, mutable and protected surfaces, capsule-specific toolchain image, evaluator/split design, scalar and hard gates, and resource range;
+2. Gate 1 accepts, rejects, or returns natural-language revisions to that same author;
+3. evaluator and adversarial-author sessions build the capsule and produce broken, naive, shortcut, and improved/reference diagnostics;
+4. trusted admission executes ordering, A-A/noise, exploit, reproducibility, and bounded-build checks;
+5. Gate 2 reviews exact source/image/oracle/scalarizer/manifest hashes plus calibration and provenance before minting an immutable capsule identity.
+
+A delegated headless agent may approve a provisional private `apply:none` capsule under a hard budget. Provisional evidence cannot enter corpus statistics, optimizer promotion, or terminal workflows. M2 admission requires owner approval or a named independent reviewer with a durable delegation receipt. Author, adversarial validator, and final reviewer identities are recorded; one identity cannot satisfy all three roles.
+
+### Constitution and search freedom
+Trusted code freezes and enforces the game: source and artifact identity, capsule/evaluator/holdout integrity, model observation, credential custody, componentwise resource accounting, event and trace completeness, promotion authority, and predecessor-controlled succession.
+
+The optimizer owns all strategy: search and selection algorithms, prompts and context, agent topology, parent/repair/restart policy, candidate and episode allocation, capsule sampling and fidelity, stopping, branching, successive halving, self-A/B, compiler and dependency choices inside the frozen build contract, and eventually proposals to replace the complete optimization process. Present named constants are mutable defaults or campaign factors, never constitutional truths.
+
+The optimizer artifact being judged cannot modify the capsule source, protected evaluator assets, comparison corpus, trusted event record, or judging rule for that same campaign. It may propose replacements for any of them as future game artifacts. The currently seated trusted kernel and an independent cross-family review test such a proposal on fresh tasks; explicit external authority seats it. A proposed kernel never evaluates or installs itself, and every succession retains the previous sealed kernel and one-command rollback.
+
+The north star is not a permanently hand-designed search algorithm. Frontier coding agents should eventually rewrite every strategic component and propose better games. Fresh capsules plus predecessor-held measurement authority decide whether those proposals are actually better.
+
 ## Capsule admission gates
 Every task must pass all gates before the M2 config freezes.
 
@@ -253,36 +281,75 @@ Every task must pass all gates before the M2 config freezes.
 
 If a listed task fails, stop. A task can move to `reserve` only in a new reviewed revision of this plan before any optimizer search begins.
 ## M2 recursive campaign contract
-Freeze these cardinalities after admission measurements size the resource vectors:
+### Fixed scientific shell
+Freeze these judging identities after admission:
 
 - development panel A: exactly 8 capsules;
-- fresh development panel B: exactly 8 capsules;
-- terminal cohort: exactly 12 capsules;
-- artifacts per outer trajectory: 12 unique artifacts including its target baseline;
-- outer non-seed mutation attempts per trajectory: at most 24;
-- inner episode cap: 4 per capsule full run;
-- stage-A outer trajectories: 1, with controller `G0` and target `G0`;
-- stage-A confirmation arms: `G0`, selected `G1`, broken control, degraded control;
-- stage-B outer trajectories: 3 paired replicates for each controller arm;
-- stage-B common target: exact selected `G1`;
-- stage-B controller arms: control `G0`, treatment `G1`;
-- stage-B confirmation arms: `G1` target, best `G0`-controller result, selected `G2`, broken control, degraded control;
+- fresh development panel B: exactly 8 different capsules;
+- unopened terminal cohort: exactly 12 capsules;
+- stage A: controller `G0` starts from target `G0` and produces selected `G1`;
+- stage-A confirmation arms: `G0`, selected `G1`, broken control, and degraded control;
+- stage B: three paired replicates of `G0`-controller and `G1`-controller, all starting from the exact selected `G1` target on the same fresh Panel B;
+- stage-B confirmation arms: `G1`, best `G0`-controller result, selected `G2`, broken control, and degraded control;
 - confirmation replicates: 3 per arm/capsule;
-- terminal arms: `G0`, `G1`, and `G2`;
+- terminal arms: exact `G0`, `G1`, and `G2`;
 - terminal replicates: 3 per arm/capsule;
-- model route: one frozen observed route for every outer and inner role;
-- application: `none`; selected source is branch-only after human review.
+- application: `none`; any selected source is branch-only after human review.
 
-Expected child-run cardinality if all arms execute:
+After `G1` confirmation, pause for owner diff/evidence review. After `G2` confirmation, pause again. Terminal identities and bytes become reachable only after both development gates close successfully.
 
-- stage-A search: `12 * 8 = 96`;
-- stage-A confirmation: `4 * 8 * 3 = 96`;
-- stage-B paired controller search: `2 * 3 * 12 * 8 = 576`;
-- stage-B confirmation: `5 * 8 * 3 = 120`;
-- terminal generations: `3 * 12 * 3 = 108`;
-- total: `996` full child runs, plus authoring/admission/A-A work and separately metered outer calls.
+### Mutable search under equal resources
+The treatment is the complete optimizer artifact, not a hand-authored candidate schedule and not the execution model. Every outer trajectory receives the same componentwise search envelope:
 
-Do not enlarge the candidate or generation count until this 996-run design completes once. More independent capsules and paired controller replicates are more valuable than an unbounded outer lineage.
+`12 * (resource vector for one complete eight-capsule candidate at the calibrated inner ceiling)`.
+
+This is twelve full-panel candidate **equivalents**, not a requirement to emit twelve candidates. Inside the envelope the optimizer controls candidate count, inner episode count below the ceiling, capsule allocation/fidelity, stopping, branching, restarts, repair, successive halving, concurrency, and nested self-A/B. Search comparisons use complete best-so-far curves at matched cumulative tokens, active wall clock, evaluator calls, and other frozen resource dimensions. A stopped trajectory carries its incumbent forward; invalid, duplicate, failed, and censored work remains in the evidence.
+
+Fixed confirmation and terminal judging resources are separate from search and cannot be borrowed. Unused search resources do not transfer between paired controller arms or replicates.
+
+### Calibrated inner safety ceiling
+Before campaign freeze, run four excluded calibration-only capsules at episode caps `2`, `4`, `8`, and `12`, with five matched seeds per capsule/cap cell: 80 independent full runs. For each capsule and adjacent cap, bootstrap the 20 paired capsule-seed final normalized-gain deltas, stratified by capsule. Select the smallest ceiling among `4`, `8`, and `12` whose next-depth 75th-percentile marginal gain has a 90% upper confidence bound below `0.02`. Use the 75th percentile so easy saturated tasks cannot hide continued gains on harder tasks. Invalid or incomplete deeper cells count against the deeper cap. If no comparison satisfies the rule, select `12`.
+
+This value is only a trusted safety ceiling for M2. Optimizers may stop earlier and allocate episodes unevenly. The rule, cells, seeds, images, resource vectors, and practical-gain threshold freeze before official Panel-A search.
+
+### Recursive capabilities and corpus
+`spawnRun` and `queryCorpus` are production M2 capabilities, not deferred stubs.
+
+- mutable controller depth 0 may spawn capsule runs at depth 1;
+- a depth-1 optimizer may reserve one further delegated sub-run/self-A-B at depth 2;
+- depth 2 cannot call `spawnRun`;
+- every descendant slice is reserved componentwise from all ancestors before launch;
+- retry, replay, and crash recovery cannot mint a second slice;
+- unused reservations return only after durable child settlement.
+
+At campaign start, trust freezes one content-addressed public history/evidence snapshot shared by all arms. Stage A may query it plus metered Panel-A evidence. Once `G1` is durably selected, the same closed Panel-A evidence is added to both Stage-B controller contexts. Panel-B feedback is available only through each controller's metered calls. Terminal repositories, identities, assets, and evidence are absent until the terminal gate opens. Every corpus response is deterministic, cursor-addressed, and logged.
+
+### Models, provider, and durable pause
+Freeze role routes for M2:
+
+- outer optimizer/capsule-author reasoning: observed `gpt-5.6-sol`;
+- inner capsule improvement: observed `gpt-5.6-terra`.
+
+The same optimizer artifact crosses both roles. Requested role/route and returned model identity are recorded for every request; route drift fails closed. Later RelayBench campaigns may vary optimizer-generator and executor model as explicit factors.
+
+All model calls pass through a metered, fixed provider route. Record requested and returned model identity. [Historical private deployment and account topology omitted.]
+
+After proxy failover, `401`, `402`, `403`, `429`, or returned-model drift immediately causes a durable global campaign pause. Transport errors and `5xx` receive at most three trusted bounded-jitter retries, then the same pause. Malformed successful agent output is candidate/session invalidity, not provider outage. Reported usage for every attempt remains charged. Pause stops new model calls and child admission, seals cursors/artifacts/traces/ledgers, excludes only verified provider-outage time from active wall budgets, and preserves the same campaign/config hash. Resume is explicit after both frozen routes preflight successfully.
+
+### Expected evidence volume
+Search has no exact child-run cardinality. Its resource envelopes equal the former `96` Stage-A plus `576` Stage-B full-child design at the calibrated ceiling, but an optimizer may realize those resources through a different number and topology of sessions.
+
+Fixed judging remains:
+
+- stage-A confirmation: `4 * 8 * 3 = 96` full runs;
+- stage-B confirmation: `5 * 8 * 3 = 120` full runs;
+- terminal generations: `3 * 12 * 3 = 108` full runs;
+- total fixed judging: `324` full runs, plus mutable search, authoring/admission/A-A work, and separately metered outer calls.
+
+The previous `996` value is retained only as the resource-equivalent reference design, never as an exact success criterion.
+
+### Conditional scaled M2b
+Pre-register a roughly 5,000-full-child-equivalent M2b, but do not launch it solely because compute is available. M2b requires complete M2 replay/integrity, successful `G1` and `G2` development gates, terminal adjacent-generation transfer not contradicted, material unsaturated best-so-far gain near the M2 envelope boundary, acceptable valid-candidate yield and provider reliability, and a newly frozen development/terminal corpus. Evaluator, trust-boundary, model-identity, or transfer failure triggers diagnosis and a new reviewed design rather than brute-force scaling. Freeze M2b's fresh cohort, shell, trigger calculation, and analysis before any M2b authoring evidence is opened.
 
 ## Frozen recursive promotion and reporting gates
 Panel A selects `G1` only if:
@@ -400,18 +467,19 @@ A credible recursive claim requires at least:
 
 **Gate:** all 16 OSS capsules have signed admission reports and reproducible baseline measurements. No task substitution.
 ### Phase D — Pre-register and run recursive M2
-1. Freeze source/capsule/image/oracle/scalarizer/config/analysis digests.
-2. Run global A-A and randomized-label checks.
-3. Execute the 96-run panel-A search and persist the complete outer/inner anytime curves.
-4. Close panel-A ranking, execute 96 confirmation runs, and human-review selected `G1`.
-5. Use exact `G1` as the common target for three paired panel-B `G0`-controller and `G1`-controller outer replicates.
-6. Persist all 576 panel-B search cells and evaluate the frozen recursive controller-transfer metrics.
-7. Close panel-B ranking, execute 120 confirmation runs, and human-review selected `G2`.
-8. If and only if both development gates pass, open the 108-run `G0`/`G1`/`G2` terminal phase once.
-9. Reproduce every OSS patch outside Hone and prepare upstream-ready diffs.
-10. Ingest all evidence into RelayBench and publish success or failure without threshold changes.
+1. Complete the four-capsule, five-seed `2/4/8/12` saturation calibration and freeze the selected inner ceiling.
+2. Freeze source, capsule, image, oracle, scalarizer, optimizer, model-route, corpus, resource-envelope, pause-policy, config, and analysis digests.
+3. Run global A-A and randomized-label checks.
+4. Execute Stage-A mutable search under its 12-full-panel-equivalent envelope and persist every outer/inner anytime event.
+5. Close Panel-A ranking, execute 96 fixed confirmation runs, and pause for owner review of selected `G1`.
+6. Use exact `G1` as the common target for three paired Panel-B `G0`-controller and `G1`-controller trajectories under matched envelopes.
+7. Persist every Panel-B search attempt and evaluate frozen recursive controller-transfer metrics.
+8. Close Panel-B ranking, execute 120 fixed confirmation runs, and pause for owner review of selected `G2`.
+9. If and only if both development gates pass, open the 108-run `G0`/`G1`/`G2` terminal phase once.
+10. Reproduce every OSS patch outside Hone, ingest all evidence into RelayBench, and publish success or failure without threshold changes.
+11. Evaluate the pre-registered conditional M2b trigger from the sealed M2 evidence.
 
-**Gate:** exact expected run cardinality or explicit terminal `invalid/not_run` records for every cell; no missing candidate, trajectory, or child evidence is silently dropped.
+**Gate:** exact fixed judging cells plus complete resource-ledger settlement and explicit terminal `invalid/not_run` records for every planned cell; no missing candidate, trajectory, request, child, pause, or corpus response is silently dropped.
 ## Stop conditions
 Stop and report before search if:
 
