@@ -208,6 +208,48 @@ describe("admission receipt ledger", () => {
     expect(() => verifyAdmissionApproval(casRoot, DIGEST)).toThrow(/transition|gate1/i);
   });
 
+  it("requires revision and a fresh gate1 acceptance after a terminal gate1 rejection", () => {
+    const rejectedRoot = join(makeRoot(), ".hone-cas");
+    writeLedger(rejectedRoot, receiptChain(["gate1-reject"]));
+    expect(() => verifyAdmissionApproval(rejectedRoot, DIGEST)).toThrow(/not approved|gate1/i);
+
+    const bypassRoot = join(makeRoot(), ".hone-cas");
+    writeLedger(bypassRoot, receiptChain(["gate1-reject", "gate2-approve"]));
+    expect(() => verifyAdmissionApproval(bypassRoot, DIGEST)).toThrow(/transition|gate1/i);
+
+    const reopenedRoot = join(makeRoot(), ".hone-cas");
+    const reopened = receiptChain([
+      "gate1-reject",
+      "gate1-revise",
+      "gate1-accept",
+      "gate2-approve",
+    ]);
+    writeLedger(reopenedRoot, reopened);
+    expect(verifyAdmissionApproval(reopenedRoot, DIGEST).receipt).toEqual(reopened[3]);
+  });
+
+  it.each(["author", "adversarial-validator", "final-reviewer"] as const)(
+    "fails closed when the %s identity changes within a chain",
+    (role) => {
+      const casRoot = join(makeRoot(), ".hone-cas");
+      const gate1 = makeReceipt(0, null, "gate1-accept");
+      const identities: AdmissionReceiptRecordBody["identities"] = {
+        author: role === "author"
+          ? { identity: "replacement-author", kind: "agent" }
+          : gate1.identities.author,
+        "adversarial-validator": role === "adversarial-validator"
+          ? { identity: "replacement-validator", kind: "agent" }
+          : gate1.identities["adversarial-validator"],
+        "final-reviewer": role === "final-reviewer"
+          ? { identity: "replacement-owner", kind: "owner" }
+          : gate1.identities["final-reviewer"],
+      };
+      const approval = makeReceipt(1, gate1.recordHash, "gate2-approve", { identities });
+      writeLedger(casRoot, [gate1, approval]);
+      expect(() => verifyAdmissionApproval(casRoot, DIGEST)).toThrow(/identity.*change|continuity/i);
+    },
+  );
+
   it("allows an explicit gate1 reopen after a revocation", () => {
     const casRoot = join(makeRoot(), ".hone-cas");
     const records = receiptChain([

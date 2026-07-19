@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
+  AdmissionReviewRole,
   AdmissionReceiptRecord as AdmissionReceiptRecordSchema,
   type AdmissionReceiptRecord,
 } from "@hone/schema";
@@ -242,6 +243,7 @@ function repairTornTail(ledgerPath: string): void {
 type AdmissionWorkflowState =
   | "awaiting-gate1"
   | "revision-required"
+  | "gate1-rejected"
   | "gate1-accepted"
   | "approved"
   | "gate2-rejected"
@@ -250,6 +252,24 @@ type AdmissionWorkflowState =
 interface ReplayedAdmissionLedger {
   receipts: AdmissionReceiptRecord[];
   state: AdmissionWorkflowState;
+  identities: AdmissionReceiptRecord["identities"] | null;
+}
+
+function establishIdentityContinuity(
+  established: AdmissionReceiptRecord["identities"] | null,
+  receipt: AdmissionReceiptRecord,
+): AdmissionReceiptRecord["identities"] {
+  if (established === null) return receipt.identities;
+  for (const role of AdmissionReviewRole.options) {
+    const expected = established[role];
+    const actual = receipt.identities[role];
+    if (actual.identity !== expected.identity || actual.kind !== expected.kind) {
+      throw new Error(
+        `admission receipt identity continuity violation at sequence ${receipt.sequence}: ${role} identity changed`,
+      );
+    }
+  }
+  return established;
 }
 
 function advanceAdmissionWorkflow(
@@ -260,6 +280,9 @@ function advanceAdmissionWorkflow(
   if (state === "awaiting-gate1" || state === "revision-required") {
     if (action === "gate1-revise") return "revision-required";
     if (action === "gate1-accept") return "gate1-accepted";
+    if (action === "gate1-reject") return "gate1-rejected";
+  } else if (state === "gate1-rejected") {
+    if (action === "gate1-revise") return "revision-required";
   } else if (state === "gate1-accepted") {
     if (action === "gate1-revise") return "revision-required";
     if (action === "gate2-approve") return "approved";
@@ -281,13 +304,16 @@ function replayLedger(
   capsuleDigest: string,
 ): ReplayedAdmissionLedger {
   repairTornTail(ledgerPath);
-  if (!existsSync(ledgerPath)) return { receipts: [], state: "awaiting-gate1" };
+  if (!existsSync(ledgerPath)) {
+    return { receipts: [], state: "awaiting-gate1", identities: null };
+  }
   const content = readFileSync(ledgerPath, "utf8");
   if (Buffer.byteLength(content) > MAX_LEDGER_BYTES) throw new Error("admission receipt ledger exceeds size limit");
   const lines = content.length === 0 ? [] : content.slice(0, -1).split("\n");
   const receipts: AdmissionReceiptRecord[] = [];
   let previousReceiptHash: string | null = null;
   let state: AdmissionWorkflowState = "awaiting-gate1";
+  let identities: AdmissionReceiptRecord["identities"] | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -315,11 +341,12 @@ function replayLedger(
     if (receipt.capsuleDigest !== capsuleDigest) {
       throw new Error(`admission receipt capsule digest mismatch at sequence ${receipt.sequence}`);
     }
+    identities = establishIdentityContinuity(identities, receipt);
     state = advanceAdmissionWorkflow(state, receipt.action, receipt.sequence);
     receipts.push(receipt);
     previousReceiptHash = receipt.recordHash;
   }
-  return { receipts, state };
+  return { receipts, state, identities };
 }
 
 function appendRecord(ledgerPath: string, receipt: AdmissionReceiptRecord): void {
@@ -383,6 +410,7 @@ export function appendAdmissionReceipt(
     if (receipt.previousReceiptHash !== (previous?.recordHash ?? null)) {
       throw new Error("append previousReceiptHash does not match the durable chain head");
     }
+    establishIdentityContinuity(replayed.identities, receipt);
     advanceAdmissionWorkflow(replayed.state, receipt.action, receipt.sequence);
     appendRecord(ledgerPath, receipt);
     return receipt;
