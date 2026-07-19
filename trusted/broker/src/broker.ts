@@ -17,9 +17,13 @@ import path from "node:path";
 import { z } from "zod";
 import {
   BudgetState,
+  canonicalJson,
   CapsuleManifest,
+  ChildRunTerminal,
   CreateSandboxParams,
   EvaluateParams,
+  CorpusPanelEvidence,
+  CorpusPublicDocument,
   EvaluationRecord,
   EvaluatorOutput,
   ExecParams,
@@ -27,13 +31,19 @@ import {
   FinishParams,
   GetFileParams,
   GetFileResult,
+  QueryCorpusParams,
+  QueryCorpusResult,
   GetTaskResult,
   PutFileParams,
   ReportIncumbentParams,
+  ResourceUsage,
   SandboxRef,
   SaveArtifactParams,
+  SpawnRunParams,
+  SpawnRunResult,
   RunEvent,
   type ArtifactRef,
+  type RunDepth,
 } from "@hone/schema";
 import { HoldoutBudgetExceededError, HoldoutLedger } from "@hone/scoring";
 import { MAX_ARTIFACT_BYTES, canonicalizeWorkspaceTar, diffProtectedPaths, dirSizeBytes, findProtectedPaths, unpackArtifact } from "./artifact.js";
@@ -41,6 +51,7 @@ import { CasStore, durability } from "./cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "./command.js";
 import { deferred } from "./deferred.js";
 import { BrokerError } from "./errors.js";
+import { RecursiveResourceLedger } from "./recursive.js";
 import { ArtifactValidationError, MAX_ARTIFACT_ENTRIES, validateWorkspaceTar } from "./tarcheck.js";
 
 export type BudgetDimension = "tokens" | "usd" | "wallClockSec" | "evaluatorInvocations";
@@ -70,6 +81,50 @@ export type TrustedEvaluationStrategy = (input: TrustedEvaluationStrategyInput) 
 
 /** Mutation-sandbox network: fully isolated, or attached to a broker-managed internal network. */
 export type SandboxNetworkMode = { mode: "none" } | { mode: "internal"; network: string };
+
+export interface ChildRunLaunchInput {
+  request: z.infer<typeof SpawnRunParams>;
+  /** True when the durable reservation predates this broker call/boot. */
+  replay: boolean;
+}
+
+export interface ChildRunLaunchOutcome {
+  /** Trusted path to the child's newline-terminated event stream. */
+  terminalEventPath: string;
+  /** Trusted direct usage for this run; descendant usage is already charged to every ancestor by its own settlement. */
+  usage: z.infer<typeof ResourceUsage>;
+}
+
+export type ChildRunLauncher = (input: ChildRunLaunchInput) => Promise<ChildRunLaunchOutcome>;
+
+export interface BrokerRecursiveConfig {
+  depth: RunDepth;
+  /** Root-first durable ancestor identities; its length must equal depth. */
+  ancestors: readonly string[];
+  /** Shared authority instance for the entire recursive run tree. */
+  ledger: RecursiveResourceLedger;
+  launchChildRun: ChildRunLauncher;
+}
+
+export interface BrokerCorpusConfig {
+  /** Hash of canonical publicSnapshot.documents; verified at broker construction. */
+  publicSnapshot: {
+    hash: string;
+    documents: readonly z.infer<typeof CorpusPublicDocument>[];
+  };
+  /** Development-panel evidence only. The wire schema has no terminal variant. */
+  panelEvidence: readonly z.infer<typeof CorpusPanelEvidence>[];
+}
+
+/** Canonical content address frozen into every corpus cursor and response. */
+export function hashCorpusSnapshot(documents: readonly z.infer<typeof CorpusPublicDocument>[]): `sha256:${string}` {
+  const ordered = documents
+    .map((document) => CorpusPublicDocument.parse(document))
+    .sort((left, right) =>
+      left.id < right.id ? -1 : left.id > right.id ? 1 : left.contentHash < right.contentHash ? -1 : left.contentHash > right.contentHash ? 1 : 0,
+    );
+  return `sha256:${createHash("sha256").update(canonicalJson(ordered)).digest("hex")}`;
+}
 
 export interface BrokerConfig {
   runId: string;
@@ -204,6 +259,10 @@ export interface BrokerConfig {
    * host bind + polling quota for tests/dev only.
    */
   scratchVolume?: boolean | undefined;
+  /** Production recursive child authority. Omit to fail closed on spawnRun. */
+  recursive?: BrokerRecursiveConfig | undefined;
+  /** Frozen public snapshot plus development-only metered evidence. Omit to fail closed on queryCorpus. */
+  corpus?: BrokerCorpusConfig | undefined;
 }
 
 /** A journaled promotion — the unit of trusted incumbent authority. */
@@ -358,7 +417,17 @@ type EvaluateP = z.infer<typeof EvaluateParams>;
 type ReportIncumbentP = z.infer<typeof ReportIncumbentParams>;
 type FinishP = z.infer<typeof FinishParams>;
 type GetTaskR = z.infer<typeof GetTaskResult>;
+type CorpusDocument = z.infer<typeof CorpusPublicDocument> | z.infer<typeof CorpusPanelEvidence>;
+interface FrozenCorpus {
+  snapshotHash: `sha256:${string}`;
+  documents: readonly CorpusDocument[];
+  cursorSeed: string;
+}
 type RecordSpendP = z.infer<typeof RecordSpendParams>;
+type SpawnRunP = z.infer<typeof SpawnRunParams>;
+type SpawnRunR = z.infer<typeof SpawnRunResult>;
+type QueryCorpusP = z.infer<typeof QueryCorpusParams>;
+type QueryCorpusR = z.infer<typeof QueryCorpusResult>;
 
 /**
  * Trusted-side event derivation (WP7 boundary ruling): the mutable optimizer
@@ -374,6 +443,8 @@ type EmittableEvent =
   | { type: "eval.completed"; episode?: number; artifact: ArtifactRef; assetGroupId: string; seed: number; aggregate: number; cached: boolean }
   | { type: "gate.paired"; episode: number; parentScore: number; childScore: number; passed: boolean }
   | { type: "incumbent.new"; artifact: ArtifactRef; aggregate: number; deltaVsBaseline: number; episode: number }
+  | { type: "corpus.query"; request: QueryCorpusP }
+  | { type: "corpus.response"; response: QueryCorpusR }
   | { type: "budget.snapshot"; budget: BudgetState };
 const BROKER_EVENT_TYPES = new Set<RunEvent["type"]>([
   "holdout.accessed",
@@ -382,6 +453,8 @@ const BROKER_EVENT_TYPES = new Set<RunEvent["type"]>([
   "eval.completed",
   "gate.paired",
   "incumbent.new",
+  "corpus.query",
+  "corpus.response",
 ]);
 
 /** Whether an event type is emitted exclusively by the broker (budgets are shared with the supervisor). */
@@ -451,6 +524,12 @@ const StateLine = z.discriminatedUnion("t", [
     aggregate: z.number(),
     deltaVsBaseline: z.number(),
     episode: z.number().int().nonnegative(),
+    events: JournalEvents,
+  }),
+  z.object({
+    t: z.literal("corpus"),
+    request: QueryCorpusParams,
+    response: QueryCorpusResult,
     events: JournalEvents,
   }),
   z.object({ t: z.literal("migration"), events: z.array(RunEvent) }),
@@ -655,6 +734,10 @@ function eligibleAggregate(record: EvaluationRecord): number | undefined {
   return Number.isFinite(aggregate) ? aggregate : undefined;
 }
 
+function sameCanonical(left: unknown, right: unknown): boolean {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
 /**
  * Sandbox broker (review IV.1): the optimizer is an unprivileged CLIENT; all
  * containers are SIBLINGS spawned by this trusted daemon via the docker CLI.
@@ -700,6 +783,8 @@ export class Broker {
   /** M0 remains `eval`; M1 receives a disjoint hash-derived cache namespace. */
   private readonly evaluationCacheNamespace: string;
   private readonly evaluationStrategy: TrustedEvaluationStrategy | undefined;
+  private readonly recursive: BrokerRecursiveConfig | undefined;
+  private readonly corpus: FrozenCorpus | undefined;
   /**
    * Fresh per-Broker-instance measurement generation. Part of the eval memo
    * key: after a kill/resume the new broker must re-measure comparators
@@ -740,6 +825,8 @@ export class Broker {
   private readonly pendingSessionTraces = new Map<string, Promise<string>>();
   /** Same-provenance concurrent evaluations share one trusted invocation. */
   private readonly inFlightEvaluations = new Map<string, Promise<EvaluationRecord>>();
+  /** Identical live/replayed child requests share one trusted recovery/launch operation. */
+  private readonly inFlightChildRuns = new Map<string, Promise<SpawnRunR>>();
   private readonly candidateArtifactHashes = new Set<string>();
   private candidateArtifactBytes = 0;
   private candidateArtifactEntries = 0;
@@ -854,6 +941,62 @@ export class Broker {
         ? "eval"
         : `eval-${createHash("sha256").update(config.measurementEpoch).digest("hex")}`;
     this.evaluationStrategy = config.evaluationStrategy;
+    this.recursive = config.recursive;
+    if (this.recursive !== undefined) {
+      this.recursive.ledger.registerRun(
+        config.runId,
+        this.recursive.depth,
+        this.recursive.ancestors,
+        this.manifest.budget,
+      );
+    }
+
+    if (config.corpus === undefined) {
+      this.corpus = undefined;
+    } else {
+      const publicDocuments = config.corpus.publicSnapshot.documents
+        .map((document) => CorpusPublicDocument.parse(document))
+        .sort((left, right) =>
+          left.id < right.id ? -1 : left.id > right.id ? 1 : left.contentHash < right.contentHash ? -1 : left.contentHash > right.contentHash ? 1 : 0,
+        );
+      const panelEvidence = config.corpus.panelEvidence
+        .map((document) => CorpusPanelEvidence.parse(document))
+        .sort((left, right) =>
+          left.id < right.id ? -1 : left.id > right.id ? 1 : left.contentHash < right.contentHash ? -1 : left.contentHash > right.contentHash ? 1 : 0,
+        );
+      const documentIds = new Set<string>();
+      for (const document of [...publicDocuments, ...panelEvidence]) {
+        if (documentIds.has(document.id)) throw new BrokerError("INTERNAL", `duplicate corpus document id: ${document.id}`);
+        documentIds.add(document.id);
+        const actualHash = `sha256:${createHash("sha256").update(document.content).digest("hex")}`;
+        if (actualHash !== document.contentHash) {
+          throw new BrokerError("INTERNAL", `corpus document content hash mismatch: ${document.id}`);
+        }
+      }
+      const snapshotHash = hashCorpusSnapshot(publicDocuments);
+      if (config.corpus.publicSnapshot.hash !== snapshotHash) {
+        throw new BrokerError("INTERNAL", "public corpus snapshot hash does not match its canonical documents");
+      }
+      const documents: CorpusDocument[] = [...publicDocuments, ...panelEvidence];
+      documents.sort((left, right) =>
+        left.id < right.id
+          ? -1
+          : left.id > right.id
+            ? 1
+            : left.source < right.source
+              ? -1
+              : left.source > right.source
+                ? 1
+                : 0,
+      );
+      this.corpus = Object.freeze({
+        snapshotHash,
+        documents: Object.freeze(documents.map((document) => Object.freeze(document))),
+        cursorSeed: createHash("sha256")
+          .update(canonicalJson({ snapshotHash, documents }))
+          .digest("hex"),
+      });
+    }
     this.safeRunId = config.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
     this.scratchDir = path.join(config.runDir, "scratch");
     this.proxySockPath = config.proxySocketHostPath ?? path.join(config.runDir, "proxy.sock");
@@ -932,6 +1075,7 @@ export class Broker {
     try {
       this.validateReplay(stateLog);
       this.replayState(stateLog);
+      this.syncRecursiveUsage();
       // This boot's startup generation is minted ABOVE every replayed epoch:
       // fresh re-measurements are today's authority; replayed ones are not.
       this.mintEpochSeq(this.measurementEpoch);
@@ -1288,6 +1432,30 @@ export class Broker {
         ) {
           throw new BrokerError("INTERNAL", "run state log exceeds the configured candidate artifact quota");
         }
+      } else if (line.t === "corpus") {
+        if (this.corpus === undefined) {
+          throw new BrokerError("INTERNAL", "run state log contains corpus facts but no frozen corpus is configured");
+        }
+        let expected: QueryCorpusR;
+        try {
+          expected = this.corpusResponse(line.request, this.corpus);
+        } catch {
+          throw new BrokerError("INTERNAL", "run state log corpus request does not address the configured frozen corpus");
+        }
+        const [queryEvent, responseEvent, ...extraEvents] = line.events ?? [];
+        if (
+          !sameCanonical(expected, line.response) ||
+          queryEvent?.type !== "corpus.query" ||
+          responseEvent?.type !== "corpus.response" ||
+          extraEvents.length !== 0 ||
+          queryEvent.runId !== this.config.runId ||
+          responseEvent.runId !== this.config.runId ||
+          queryEvent.at !== responseEvent.at ||
+          !sameCanonical(queryEvent.request, line.request) ||
+          !sameCanonical(responseEvent.response, line.response)
+        ) {
+          throw new BrokerError("INTERNAL", "run state log corpus query/response transaction is inconsistent");
+        }
       }
     }
   }
@@ -1388,6 +1556,8 @@ export class Broker {
               throw new BrokerError("INTERNAL", "run state log exceeds the configured session trace quota");
             }
           }
+          break;
+        case "corpus":
           break;
         case "incumbent": {
           const inc = { hash: line.hash, aggregate: line.aggregate, deltaVsBaseline: line.deltaVsBaseline, episode: line.episode };
@@ -1571,24 +1741,69 @@ export class Broker {
     this.config.onEvent(full);
   }
 
+  private directUsageNow(): z.infer<typeof ResourceUsage> {
+    return {
+      tokens: this.spent.tokens,
+      usd: this.spent.usd,
+      wallClockSec: (this.now() - this.startedAtMs) / 1000,
+      evaluatorInvocations: this.spent.evaluatorInvocations,
+    };
+  }
+
+  private syncRecursiveUsage(): void {
+    if (this.recursive !== undefined) {
+      this.recursive.ledger.syncRunUsage(this.config.runId, this.directUsageNow());
+    }
+  }
+
   private budgetStateNow(tokensDelta = 0, usdDelta = 0, evaluatorInvocationDelta = 0): BudgetState {
+    const envelope = this.manifest.budget;
+    if (this.recursive === undefined) {
+      return BudgetState.parse({
+        envelope,
+        spent: {
+          tokens: this.spent.tokens + tokensDelta,
+          usd: this.spent.usd + usdDelta,
+          wallClockSec: (this.now() - this.startedAtMs) / 1000,
+          evaluatorInvocations: this.spent.evaluatorInvocations + evaluatorInvocationDelta,
+        },
+      });
+    }
+
+    const recursiveState = this.recursive.ledger.budgetState(this.config.runId);
+    const current = this.directUsageNow();
     return BudgetState.parse({
-      envelope: this.manifest.budget,
+      envelope,
       spent: {
-        tokens: this.spent.tokens + tokensDelta,
-        usd: this.spent.usd + usdDelta,
-        wallClockSec: (this.now() - this.startedAtMs) / 1000,
-        evaluatorInvocations: this.spent.evaluatorInvocations + evaluatorInvocationDelta,
+        tokens:
+          envelope.maxTokens -
+          recursiveState.remaining.maxTokens +
+          (current.tokens - recursiveState.directUsage.tokens) +
+          tokensDelta,
+        usd:
+          envelope.maxUsd -
+          recursiveState.remaining.maxUsd +
+          (current.usd - recursiveState.directUsage.usd) +
+          usdDelta,
+        wallClockSec:
+          envelope.maxWallClockSec -
+          recursiveState.remaining.maxWallClockSec +
+          (current.wallClockSec - recursiveState.directUsage.wallClockSec),
+        evaluatorInvocations:
+          envelope.maxEvaluatorInvocations -
+          recursiveState.remaining.maxEvaluatorInvocations +
+          (current.evaluatorInvocations - recursiveState.directUsage.evaluatorInvocations) +
+          evaluatorInvocationDelta,
       },
     });
   }
 
   private exhaustedDimension(tokensDelta = 0, usdDelta = 0, evaluatorInvocationDelta = 0): BudgetDimension | undefined {
-    const e = this.manifest.budget;
-    if (this.spent.tokens + tokensDelta >= e.maxTokens) return "tokens";
-    if (this.spent.usd + usdDelta >= e.maxUsd) return "usd";
-    if ((this.now() - this.startedAtMs) / 1000 >= e.maxWallClockSec) return "wallClockSec";
-    if (this.spent.evaluatorInvocations + evaluatorInvocationDelta >= e.maxEvaluatorInvocations) return "evaluatorInvocations";
+    const budget = this.budgetStateNow(tokensDelta, usdDelta, evaluatorInvocationDelta);
+    if (budget.spent.tokens >= budget.envelope.maxTokens) return "tokens";
+    if (budget.spent.usd >= budget.envelope.maxUsd) return "usd";
+    if (budget.spent.wallClockSec >= budget.envelope.maxWallClockSec) return "wallClockSec";
+    if (budget.spent.evaluatorInvocations >= budget.envelope.maxEvaluatorInvocations) return "evaluatorInvocations";
     return undefined;
   }
 
@@ -1608,6 +1823,7 @@ export class Broker {
     const persisted = this.exhaustedAnnounced.values().next().value;
     const dim = persisted ?? this.announceExhaustion();
     if (dim !== undefined) throw new BrokerError("BUDGET_EXCEEDED", `budget dimension exhausted: ${dim}`);
+    this.syncRecursiveUsage();
   }
 
   // ---------- helpers ----------
@@ -2643,6 +2859,7 @@ export class Broker {
       }
       invocationEvents = this.journalFact({ t: "inv" }, budgetEvents);
       this.spent.evaluatorInvocations += 1;
+      this.syncRecursiveUsage();
 
       const argv = [
         "docker",
@@ -2790,6 +3007,7 @@ export class Broker {
       }
       const invocationEvents = this.journalFact({ t: "inv" }, budgetEvents);
       this.spent.evaluatorInvocations += 1;
+      this.syncRecursiveUsage();
 
       let supplied: EvaluationRecord;
       try {
@@ -3122,9 +3340,138 @@ export class Broker {
     return {};
   }
 
-  notImplemented(): never {
+  async spawnRun(params: SpawnRunP, _ctx: CallContext): Promise<SpawnRunR> {
+    this.enterOp();
+    try {
+      const recursive = this.recursive;
+      if (recursive === undefined) {
+        throw new BrokerError("DEPTH_EXCEEDED", "spawnRun is unavailable without trusted recursive run configuration");
+      }
+      if (recursive.depth === 2) {
+        throw new BrokerError("DEPTH_EXCEEDED", "depth-2 runs cannot call spawnRun");
+      }
+      if (params.depth !== recursive.depth + 1) {
+        throw new BrokerError("DEPTH_EXCEEDED", `depth-${recursive.depth} runs may spawn only depth-${recursive.depth + 1} children`);
+      }
+
+      const wasReserved = recursive.ledger.hasChild(params.child.runId);
+      if (!wasReserved) this.budgetGate();
+      else this.state().assertUsable();
+      const admission = recursive.ledger.reserveChild(params, [...recursive.ancestors, this.config.runId]);
+      if (admission.settled !== undefined) return admission.settled;
+
+      const inFlight = this.inFlightChildRuns.get(params.child.runId);
+      if (inFlight !== undefined) return await inFlight;
+      const operation = this.launchAndSettleChild(admission.request, admission.replay);
+      this.inFlightChildRuns.set(params.child.runId, operation);
+      try {
+        return await operation;
+      } finally {
+        if (this.inFlightChildRuns.get(params.child.runId) === operation) {
+          this.inFlightChildRuns.delete(params.child.runId);
+        }
+      }
+    } finally {
+      this.exitOp();
+    }
+  }
+
+  private async launchAndSettleChild(request: SpawnRunP, replay: boolean): Promise<SpawnRunR> {
+    const recursive = this.recursive;
+    if (recursive === undefined) throw new BrokerError("INTERNAL", "recursive launcher disappeared");
+    const outcome = await recursive.launchChildRun({ request, replay });
+    const terminal = this.readDurableChildTerminal(outcome.terminalEventPath, request.child.runId);
+    recursive.ledger.syncRunUsage(request.child.runId, outcome.usage);
+    return recursive.ledger.settleChild(request.child.runId, outcome.usage, terminal);
+  }
+
+  private readDurableChildTerminal(eventPath: string, expectedRunId: string): z.infer<typeof ChildRunTerminal> {
+    let bytes: Buffer;
+    const fd = openSync(eventPath, "r");
+    try {
+      fsyncSync(fd);
+      bytes = readFileSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    journalIo.syncDir(path.dirname(eventPath));
+    if (bytes.length === 0 || bytes[bytes.length - 1] !== 0x0a) {
+      throw new BrokerError("INTERNAL", `child ${expectedRunId} terminal event is not durably newline-terminated`);
+    }
+    const rawLines = bytes.toString("utf8").split("\n");
+    rawLines.pop();
+    const events = rawLines.map((line, index) => {
+      try {
+        return RunEvent.parse(JSON.parse(line));
+      } catch {
+        throw new BrokerError("INTERNAL", `child ${expectedRunId} event stream is corrupt at cursor ${index}`);
+      }
+    });
+    const cursor = events.length - 1;
+    const event = events[cursor];
+    const rawTerminal = rawLines[cursor];
+    if (event === undefined || rawTerminal === undefined || event.type !== "run.finished" || event.runId !== expectedRunId) {
+      throw new BrokerError("INTERNAL", `child ${expectedRunId} has no durable terminal event`);
+    }
+    return ChildRunTerminal.parse({
+      runId: expectedRunId,
+      cursor,
+      eventDigest: `sha256:${createHash("sha256").update(rawTerminal).digest("hex")}`,
+      status: event.status,
+    });
+  }
+
+  queryCorpus(params: QueryCorpusP, _ctx: CallContext): QueryCorpusR {
     this.budgetGate();
-    throw new BrokerError("NOT_IMPLEMENTED", "reserved method — not available in the seed");
+    const corpus = this.corpus;
+    if (corpus === undefined) {
+      throw new BrokerError("CORPUS_UNAVAILABLE", "queryCorpus is unavailable without a frozen trusted corpus");
+    }
+    const response = this.corpusResponse(params, corpus);
+    const events = this.journalFact(
+      { t: "corpus", request: params, response },
+      [
+        { type: "corpus.query", request: params },
+        { type: "corpus.response", response },
+      ],
+    );
+    this.publish(events);
+    return response;
+  }
+
+  private corpusResponse(params: QueryCorpusP, corpus: FrozenCorpus): QueryCorpusR {
+    const text = params.query.text.normalize("NFC").toLowerCase();
+    const sources = [...new Set(params.query.sources)].sort();
+    const queryDigest = createHash("sha256")
+      .update(corpus.cursorSeed)
+      .update(canonicalJson({ text, sources, pageSize: params.pageSize }))
+      .digest("hex");
+    let offset = 0;
+    if (params.cursor !== null) {
+      const prefix = `corpus_${queryDigest}_`;
+      if (!params.cursor.startsWith(prefix)) {
+        throw new BrokerError("CURSOR_INVALID", "corpus cursor does not address this frozen query");
+      }
+      offset = Number(params.cursor.slice(prefix.length));
+      if (!Number.isSafeInteger(offset) || offset < 0) {
+        throw new BrokerError("CURSOR_INVALID", "corpus cursor offset is invalid");
+      }
+    }
+    const sourceSet = new Set(sources);
+    const matching = corpus.documents.filter(
+      (document) =>
+        sourceSet.has(document.source) &&
+        (text.length === 0 || `${document.id}\n${document.content}`.normalize("NFC").toLowerCase().includes(text)),
+    );
+    if (offset > matching.length) throw new BrokerError("CURSOR_INVALID", "corpus cursor is beyond the deterministic result set");
+    const cursor = `corpus_${queryDigest}_${offset}`;
+    const end = Math.min(offset + params.pageSize, matching.length);
+    return QueryCorpusResult.parse({
+      snapshotHash: corpus.snapshotHash,
+      cursor,
+      nextCursor: end < matching.length ? `corpus_${queryDigest}_${end}` : null,
+      documents: matching.slice(offset, end),
+    });
   }
 
   /**
@@ -3155,6 +3502,7 @@ export class Broker {
     );
     this.spent.tokens += params.tokens;
     this.spent.usd += params.usd;
+    this.syncRecursiveUsage();
     this.publish(events);
     return {};
   }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ArtifactRef, BudgetState } from "./broker.js";
+import { ArtifactRef, BudgetState, QueryCorpusParams, QueryCorpusResult } from "./broker.js";
 
 /**
  * Contract 4 — Event log. Append-only NDJSON, one file per run.
@@ -43,6 +43,8 @@ export const RunEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("budget.snapshot"), budget: BudgetState }),
   z.object({ ...base, type: z.literal("budget.exhausted"), dimension: z.string() }),
   z.object({ ...base, type: z.literal("holdout.accessed"), capsuleId: z.string(), ledgerCount: z.number().int().positive(), ledgerBudget: z.number().int().positive() }),
+  z.object({ ...base, type: z.literal("corpus.query"), request: QueryCorpusParams }),
+  z.object({ ...base, type: z.literal("corpus.response"), response: QueryCorpusResult }),
   z.object({ ...base, type: z.literal("delivery.applied"), mode: z.enum(["none", "branch", "pr", "auto"]), ref: z.string().optional() }),
   z.object({ ...base, type: z.literal("run.finished"), best: ArtifactRef.optional(), status: z.enum(["completed", "stopped", "failed", "budget"]) }),
 ]);

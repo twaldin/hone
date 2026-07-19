@@ -134,17 +134,13 @@ function buildMethodTable(broker: Broker): Map<string, MethodEntry> {
   });
   table.set("spawnRun", {
     adminOnly: false,
-    handler: async (raw, _ctx) => {
-      parseParams(m.spawnRun.params, raw);
-      return broker.notImplemented();
-    },
+    handler: async (raw, ctx) =>
+      m.spawnRun.result.parse(await broker.spawnRun(parseParams(m.spawnRun.params, raw), ctx)),
   });
   table.set("queryCorpus", {
     adminOnly: false,
-    handler: async (raw, _ctx) => {
-      parseParams(m.queryCorpus.params, raw);
-      return broker.notImplemented();
-    },
+    handler: async (raw, ctx) =>
+      m.queryCorpus.result.parse(broker.queryCorpus(parseParams(m.queryCorpus.params, raw), ctx)),
   });
   table.set("recordSpend", {
     adminOnly: true,
