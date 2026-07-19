@@ -108,6 +108,7 @@ interface CapsuleConfig {
   assetGroups: { id: string; visibility: string; paths: string[] }[];
   budget: Record<string, number>;
   diagnosticOrdering: { path: string };
+  sandbox?: { memoryBytes: number; cpus?: number };
   meta?: Record<string, unknown>;
 }
 
@@ -130,7 +131,7 @@ function parseCapsuleConfig(raw: unknown): CapsuleConfig {
     throw new Error(`capsule.config.json: invalid or missing "${field}"`);
   };
   if (!isRecord(raw)) return fail("<root>");
-  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, meta } = raw;
+  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, meta, sandbox } = raw;
   if (typeof objective !== "string" || objective.length === 0) return fail("objective");
   if (typeof image !== "string" || image.length === 0) return fail("image");
   if (!isStringArray(evalEntrypoint) || evalEntrypoint.length === 0) return fail("evalEntrypoint");
@@ -162,6 +163,14 @@ function parseCapsuleConfig(raw: unknown): CapsuleConfig {
     assetGroups: groups,
     budget: budgetNumbers,
     diagnosticOrdering: { path: diagnosticOrdering.path },
+    ...(isRecord(sandbox) && typeof sandbox.memoryBytes === "number"
+      ? {
+          sandbox: {
+            memoryBytes: sandbox.memoryBytes,
+            ...(typeof sandbox.cpus === "number" ? { cpus: sandbox.cpus } : {}),
+          },
+        }
+      : {}),
     ...(meta !== undefined ? { meta } : {}),
   };
 }
@@ -192,6 +201,7 @@ export function scaffold(taskDirArg: string): CapsuleManifest {
     protectedPaths: config.protectedPaths ?? [],
     assetGroups,
     budget: config.budget,
+    ...(config.sandbox === undefined ? {} : { sandbox: config.sandbox }),
     diagnosticOrdering: loadDiagnosticOrdering(taskDir, config.diagnosticOrdering.path),
     contentHashes,
     ...(config.meta !== undefined ? { meta: config.meta } : {}),
