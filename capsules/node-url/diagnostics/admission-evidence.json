@@ -1,0 +1,79 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 8144.85722,
+    "incrementalRebuildSec": 33.67,
+    "evalSec": 35.112071
+  },
+  "aa": {
+    "samples": [
+      3033080.8615360023,
+      3048513.748301425,
+      3039970.3553504916
+    ],
+    "sigma": 7731.199584026476,
+    "noiseFractionOfScale": 0.05085442868761414
+  },
+  "qBase": 3040521.6550626396,
+  "qFail": 0.0,
+  "qReference": 3192547.7378157717,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "URLSearchParams parser throws deterministically"
+    },
+    {
+      "id": "naive",
+      "q": 1558509.9760291104,
+      "hardGatesPass": true,
+      "role": "deliberately slower but correct repeated parser work"
+    },
+    {
+      "id": "baseline",
+      "q": 3033080.8615360023,
+      "hardGatesPass": true,
+      "role": "exact pinned upstream source"
+    },
+    {
+      "id": "improved",
+      "q": 9236376.287897512,
+      "hardGatesPass": true,
+      "role": "independently authored serialization cache with complete mutation invalidation"
+    },
+    {
+      "id": "shortcut",
+      "q": 4468232.801978769,
+      "trainQ": 7578268.344410374,
+      "validationQ": 1358197.2595471633,
+      "hardGatesPass": true,
+      "shortcutGated": true,
+      "role": "fixture-fingerprinting cache that wins train and loses validation"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "description": "cache URLSearchParams serialization and invalidate on every list mutation or associated-URL refresh",
+    "independentlyAuthored": true,
+    "valid": true,
+    "q": 9236376.287897512,
+    "deltaFromQBase": 6195854.632834872,
+    "deltaFromOrderingBaseline": 6203295.4263615105,
+    "reachesReference": true
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstReportHash": "sha256:1a14a104a7f35bcfb870941b5def43d3e04706770454611e6c66edf9c163e67f",
+    "secondReportHash": "sha256:ba88d3a43eed29d14460f65f8a4369235848b32cffad8f12d70a504d71e564eb"
+  },
+  "measurement": {
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "globalLockHeld": true,
+    "benchmarkBatchWallSec": 220.3,
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "normalizationScale": 152026.08275313198,
+    "freshProcess": true,
+    "finalGceRecalibrationRequired": true,
+    "holdoutSeal": "no optimizer pilot, mutation run, headroom run, or seed-optimizer session was performed"
+  }
+}

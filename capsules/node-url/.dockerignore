@@ -1,0 +1,5 @@
+image-source/.git
+image-source/.gitdir
+image-source/.hone-pin-ok
+image-source/__pycache__
+baseline/__pycache__

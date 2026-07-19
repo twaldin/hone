@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_2b91498b26c9",
+  "objective": "Improve geometric-mean WHATWG URL parse, href serialize/update, and URLSearchParams parse/serialize throughput using the pinned upstream benchmark/url harness. All parallel/test-url* and parallel/test-whatwg-url* tests, byte-exact serialized outputs, and peak heap/RSS no greater than the measured baseline plus 2% are hard gates. Only src/node_url.cc, src/node_url.h, lib/internal/url.js, deps/ada/ada.cpp, deps/ada/ada.h, and deps/ada/ada_c.h are mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b"
+  },
+  "image": "hone-node-url@sha256:e316c3e9fc3623e9d817c1a05233dc8ce54310facc635be2343bd684541df168",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    ".*",
+    "*.md",
+    "LICENSE",
+    "Makefile",
+    "BSDmakefile",
+    "BUILD.gn",
+    "configure",
+    "configure.py",
+    "common.gypi",
+    "node.gyp",
+    "node.gypi",
+    "node.gni",
+    "unofficial.gni",
+    "pyproject.toml",
+    "tsconfig.json",
+    "vcbuild.bat",
+    "eval.py",
+    "worker.py",
+    "memory_probe.js",
+    "exact_output.js",
+    "toolchain.lock.json",
+    "benchmark/**",
+    "test/**",
+    "tools/**",
+    "doc/**",
+    "typings/**",
+    "android-patches/**",
+    ".configurations/**",
+    ".devcontainer/**",
+    ".github/**",
+    "out/**",
+    "build/**",
+    "src/tracing/**",
+    "src/node_url_pattern.cc",
+    "src/node_url_pattern.h",
+    "lib/zlib/**",
+    "lib/util/**",
+    "deps/LIEF/**",
+    "deps/acorn/**",
+    "deps/amaro/**",
+    "deps/brotli/**",
+    "deps/cares/**",
+    "deps/corepack/**",
+    "deps/crates/**",
+    "deps/googletest/**",
+    "deps/histogram/**",
+    "deps/icu-small/**",
+    "deps/inspector_protocol/**",
+    "deps/libffi/**",
+    "deps/llhttp/**",
+    "deps/merve/**",
+    "deps/minimatch/**",
+    "deps/nbytes/**",
+    "deps/ncrypto/**",
+    "deps/nghttp2/**",
+    "deps/ngtcp2/**",
+    "deps/npm/**",
+    "deps/openssl/**",
+    "deps/perfetto/**",
+    "deps/postject/**",
+    "deps/simdjson/**",
+    "deps/sqlite/**",
+    "deps/undici/**",
+    "deps/uv/**",
+    "deps/uvwasi/**",
+    "deps/v8/**",
+    "deps/zlib/**",
+    "deps/zstd/**",
+    "deps/ada/BUILD.gn",
+    "deps/ada/LICENSE-MIT",
+    "deps/ada/README.md",
+    "deps/ada/ada.gyp",
+    "deps/ada/unofficial.gni"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train/workload.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation/workload.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 14400,
+    "maxEvaluatorInvocations": 160
+  },
+  "sandbox": {
+    "memoryBytes": 17179869184,
+    "cpus": 4
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:ba88d3a43eed29d14460f65f8a4369235848b32cffad8f12d70a504d71e564eb"
+  },
+  "contentHashes": {
+    "assets/train/workload.json": "sha256:b06dc704a3a80fbe5417c44df305510ef26e6fc82f26c9752083b1c1b66bcb34",
+    "assets/validation/workload.json": "sha256:6dccb83af26a46f0943de79e9f356e985006d1d08caa87c51580cdaba0bc74e6"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-terminal-holdout",
+    "license": "MIT with bundled third-party notices and licenses preserved in the upstream LICENSE and deps trees",
+    "provenance": "nodejs/node at exact revision 9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b; current-head terminal capsule with no reference patch; terminal holdout assets and all diagnostic measurements remain capsule-local and were never exposed to an optimizer; interleaved fresh-process A-A samples [3033080.8615360023, 3048513.748301425, 3039970.3553504916] give qBase=3040521.6550626396 and sample sigma=7731.199584026476; qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=3192547.7378157717; independently authored URLSearchParams serialization caching passes all gates and moves q",
+    "sourceDetails": {
+      "repository": "nodejs/node",
+      "revision": "9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b",
+      "sourceTree": "91fb3fe11fe8e0075ba1f19d90dbedb47d7bd731",
+      "upstreamUrl": "https://github.com/nodejs/node/commit/9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b",
+      "mutableEnvelope": [
+        "src/node_url.cc",
+        "src/node_url.h",
+        "lib/internal/url.js",
+        "deps/ada/ada.cpp",
+        "deps/ada/ada.h",
+        "deps/ada/ada_c.h"
+      ],
+      "upstreamTests": [
+        "python3 tools/test.py --mode=release parallel/test-url* parallel/test-whatwg-url*"
+      ],
+      "upstreamBenchmarks": [
+        "benchmark/url/whatwg-url-parse.js",
+        "benchmark/url/whatwg-url-properties.js prop=href",
+        "benchmark/url/legacy-vs-whatwg-url-searchparams-parse.js method=whatwg",
+        "benchmark/url/legacy-vs-whatwg-url-searchparams-serialize.js method=whatwg"
+      ]
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on the frozen GCE Linux host",
+      "freshProcess": true,
+      "q": "geometric mean ops/sec across 16 frozen upstream benchmark/url cells per split",
+      "qFail": 0.0,
+      "memoryTolerance": 0.02,
+      "cleanBuildSec": 8144.85722,
+      "worstSurfaceIncrementalRebuildSec": 33.67,
+      "feasibilityEvalSec": 6.09,
+      "qBase": 3040521.6550626396,
+      "sigma": 7731.199584026476,
+      "qReference": 3192547.7378157717,
+      "qReferenceConstruction": "3040521.6550626396 + max(5*7731.199584026476, 0.05*abs(3040521.6550626396-0)) = 3192547.7378157717",
+      "aaSamples": [
+        3033080.8615360023,
+        3048513.748301425,
+        3039970.3553504916
+      ],
+      "normalizationScale": 152026.08275313198,
+      "noiseFractionOfScale": 0.05085442868761414,
+      "benchmarkCellsPerSplit": 16
+    },
+    "exploitReview": {
+      "protectedPathEscape": "the broker protects evaluator, build, benchmark, test, fixture, and toolchain paths; the evaluator byte-hashes every non-mutable candidate file against the trusted baseline and rejects additions, deletions, symlinks, and repository metadata",
+      "benchmarkSpecialCasing": "train and validation choose disjoint holdout benchmark/common URL and SearchParams identities; the shortcut diagnostic accelerates recognized train inputs but is slowed and rejected in ordering on unseen validation inputs",
+      "fixtureFingerprinting": "both terminal splits are holdout-visible only to the trusted terminal diagnostic path; workload JSON is staged root-only and only validated benchmark arguments are passed to unprivileged processes",
+      "outputFabrication": "a protected exact-output worker independently constructs real URL and URLSearchParams objects and byte-compares href and form serialization against sealed expected outputs before scoring",
+      "timerTampering": "the protected NODE_OPTIONS memory probe makes process.hrtime non-writable and non-configurable before the protected upstream benchmark harness loads candidate URL code",
+      "buildScriptMutation": "configuration, Ninja graph, evaluator, worker, benchmark sources, tests, and toolchain lock are protected; only six implementation files are copied into a fresh image-backed build volume",
+      "deadCodeBenchmarkBypass": "the protected upstream scripts retain live result values and benchmark the same URL and URLSearchParams entry points covered by the exact-output gate and upstream parallel tests"
+    },
+    "tags": [
+      "m2",
+      "terminal",
+      "oss",
+      "nodejs",
+      "whatwg-url",
+      "performance"
+    ]
+  }
+}
