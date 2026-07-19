@@ -1,0 +1,125 @@
+{
+  "objective": "Improve geometric-mean full and incremental JavaScript, Rust, and Python parsing throughput using the operation and bytes/sec semantics of crates/cli/benches/benchmark.rs. Exact full and edited trees, exact changed ranges, incremental/full equivalence, parser tests, and per-workload peak RSS no greater than the frozen baseline plus 2% are hard gates. Only lib/src is mutable.",
+  "image": "hone-tree-sitter-parse@sha256:dd7fed81a644ffd07a59d17dd1f95b7833bc6f85d15789e5666f1fc7fb017f26",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    ".*",
+    "LICENSE",
+    "benchmark.rs",
+    "challenge.json",
+    "eval.py",
+    "harness.c",
+    "toolchain.lock.json",
+    "lib/include/**"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "sandbox": {
+    "memoryBytes": 2147483648,
+    "cpus": 2
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-oss-current-head-terminal",
+    "terminalSeal": {
+      "taskId": "OSS-H06",
+      "cohort": "terminal",
+      "optimizerPilot": false,
+      "mutationRuns": false,
+      "seedOptimizerSessions": false,
+      "trustedAdmissionOnly": [
+        "correctness",
+        "determinism",
+        "interleaved A-A",
+        "noise",
+        "sensitivity",
+        "exploit review"
+      ],
+      "corpusExposure": "capsule directory and admission evidence only; never inserted into optimizer corpus or panel evidence"
+    },
+    "license": "MIT; upstream Tree-sitter and all three pinned grammar LICENSE files preserved",
+    "provenance": "tree-sitter/tree-sitter at exact revision 1ffd612be56259938c47507bbe953af739c7f640. Grammar fixtures are vendored protected assets from tree-sitter-javascript v0.25.0 (44c892e0be055ac465d5eeddae6d3e194424e7de), tree-sitter-rust v0.24.0 (18b0515fca567f5a10aee9978c6d2640e878671a), and tree-sitter-python v0.23.6 (bffb65a8cfe4e46290331dfef0dbf0ef3679de11). Deterministic generated source workloads contain no third-party corpus text. The trusted harness preserves the Parser::parse repetition and bytes/sec semantics of crates/cli/benches/benchmark.rs and adds deterministic TSInputEdit incremental parses. qReference is frozen after interleaved terminal A-A as qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Interleaved fresh-process A-A samples [47778399.75282585, 52437080.21368476, 51769493.524844304] give qBase=50661657.83045164, sigma=2519186.5459757065, and qReference=63257590.56033017.",
+    "sourceDetails": {
+      "repository": "tree-sitter/tree-sitter",
+      "revision": "1ffd612be56259938c47507bbe953af739c7f640",
+      "url": "https://github.com/tree-sitter/tree-sitter/commit/1ffd612be56259938c47507bbe953af739c7f640",
+      "mutableEnvelope": [
+        "lib/src/**"
+      ],
+      "upstreamBenchmark": "crates/cli/benches/benchmark.rs",
+      "upstreamBenchmarkSha256": "sha256:73a8527db20c268836ccda17646aa8d47072609828cf9e1c3e5ca42834b14d6a",
+      "toolchain": "GCC 12.2.0 and Python 3.11.2 on pinned Debian linux/arm64",
+      "offlineDependencies": "all runtime, generated grammar C sources, workloads, tests, and build tools are vendored or image-pinned; evaluator network disabled",
+      "grammarRevisions": {
+        "javascript": "44c892e0be055ac465d5eeddae6d3e194424e7de",
+        "rust": "18b0515fca567f5a10aee9978c6d2640e878671a",
+        "python": "bffb65a8cfe4e46290331dfef0dbf0ef3679de11"
+      }
+    },
+    "measurement": {
+      "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local terminal calibration",
+      "freshProcess": true,
+      "q": "geometric mean bytes/sec across 12 full/incremental language-size cells",
+      "qFail": 0,
+      "qBase": 50661657.83045164,
+      "sigma": 2519186.5459757065,
+      "qReference": 63257590.56033017,
+      "qReferenceConstruction": "50661657.83045164 + max(5*2519186.5459757065, 0.05*abs(50661657.83045164-0)) = 63257590.56033017",
+      "rssGate": "GNU time wait4 peak workload RSS <= frozen same-workload baseline RSS * 1.02",
+      "correctness": "SHA-256 exact original/edited trees, exact changed ranges, incremental equals fresh full parse, and error-free parser tests",
+      "aaSamples": [
+        47778399.75282585,
+        52437080.21368476,
+        51769493.524844304
+      ],
+      "normalizationScale": 12595932.729878534,
+      "noiseFractionOfScale": 0.19999999999999998
+    },
+    "exploitReview": {
+      "protectedPathEscape": "broker protects evaluator, harness, headers, metadata, image, assets, and all paths outside lib/src; evaluator independently reconstructs protected files from /trusted/baseline and rejects symlinks/non-regular files and new files outside lib/src",
+      "benchmarkSpecialCasing": "separate all-holdout train and validation splits; shortcut diagnostic fingerprints the train prefix, wins train, and is forced below baseline on validation",
+      "fixtureFingerprinting": "workload and expected-tree assets are root-only broker mounts; compilation completes as uid 2000 before workload bytes are copied into the runnable build directory; protected validation is independently measured",
+      "outputFabrication": "trusted harness invokes the real C runtime API, serializes real trees, checks incremental/full equality, and emits counters only after every parse succeeds; evaluator hashes trusted harness files",
+      "timerTampering": "trusted harness reads CLOCK_MONOTONIC_RAW with a direct pinned linux/arm64 kernel syscall, bypassing candidate-linked symbols; compiler flags, harness, iterations, scalarizer, and GNU-time RSS supervisor are protected; prlimit blocks candidate forks and evaluator processes run unprivileged",
+      "buildScriptMutation": "no candidate build script executes; trusted evaluator invokes pinned cc commands on lib/src and protected grammar sources with network disabled",
+      "deadCodeBenchmarkBypass": "the same ts_parser_parse_string API and language parsers produce exact-tree/parser-test evidence immediately before timed full and incremental calls"
+    },
+    "tags": [
+      "m2",
+      "terminal",
+      "oss",
+      "tree-sitter",
+      "parser",
+      "incremental",
+      "performance"
+    ]
+  }
+}

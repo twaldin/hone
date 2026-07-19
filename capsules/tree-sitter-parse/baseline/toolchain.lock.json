@@ -1,0 +1,14 @@
+{
+  "architecture": "linux/arm64",
+  "baseImage": "docker.io/library/debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+  "packages": {
+    "build-essential": "12.9",
+    "ca-certificates": "20230311+deb12u1",
+    "python3": "3.11.2-1+b1",
+    "time": "1.9-0.2",
+    "util-linux": "2.38.1-5+deb12u3"
+  },
+  "image": "hone-tree-sitter-parse@sha256:dd7fed81a644ffd07a59d17dd1f95b7833bc6f85d15789e5666f1fc7fb017f26",
+  "networkDuringEvaluation": false,
+  "compilerFlags": "cc -O3 -DNDEBUG -std=c11 -D_DEFAULT_SOURCE -D_BSD_SOURCE -fvisibility=hidden"
+}

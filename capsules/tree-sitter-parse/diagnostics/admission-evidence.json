@@ -1,0 +1,106 @@
+{
+  "aa": {
+    "noiseFractionOfScale": 0.19999999999999998,
+    "samples": [
+      47778399.75282585,
+      52437080.21368476,
+      51769493.524844304
+    ],
+    "sigma": 2519186.5459757065
+  },
+  "controls": [
+    {
+      "hardGatesPass": false,
+      "id": "broken",
+      "q": 0,
+      "role": "trusted compile failure in the parser runtime",
+      "trainQ": 0,
+      "validationQ": 0
+    },
+    {
+      "hardGatesPass": true,
+      "id": "naive",
+      "q": 30045684.360202573,
+      "role": "deliberately slower but correct volatile work in ts_parser_parse",
+      "trainQ": 29695664.35231209,
+      "validationQ": 30395704.368093055
+    },
+    {
+      "hardGatesPass": true,
+      "id": "baseline",
+      "q": 47778399.75282585,
+      "role": "exact pinned upstream runtime",
+      "trainQ": 46868758.203855105,
+      "validationQ": 48688041.30179659
+    },
+    {
+      "hardGatesPass": true,
+      "id": "improved",
+      "q": 52087081.6058138,
+      "role": "independently authored branch hint plus targeted hot-function unrolling",
+      "trainQ": 52192460.84245257,
+      "validationQ": 51981702.36917503
+    },
+    {
+      "hardGatesPass": true,
+      "id": "shortcut",
+      "q": 38659767.06915141,
+      "role": "train-prefix fingerprint with validation-only delay",
+      "shortcutGated": true,
+      "trainQ": 52657668.68476194,
+      "validationQ": 24661865.45354088
+    }
+  ],
+  "determinism": {
+    "correctnessHash": "406d6d2f2543b93201654dff40054111568fa0148ff2f2cca8232ea87bce0b2e",
+    "exactOracleHashesFrozen": true,
+    "freshProcessBaselineAggregates": [
+      47778399.75282585,
+      52437080.21368476,
+      51769493.524844304
+    ],
+    "freshProcessRunsPerSplitAcrossConsecutiveChecks": 6
+  },
+  "feasibility": {
+    "cleanBuildSec": 5.156889293997665,
+    "evalSec": 9.926998,
+    "incrementalRebuildSec": 3.192752377002762
+  },
+  "measurement": {
+    "finalGceRecalibrationRequired": true,
+    "freshProcess": true,
+    "globalLockHeld": true,
+    "normalizationScale": 12595932.729878534,
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))"
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstReportHash": "sha256:2a262a927ab69987d3f57fc48671cfedabefbaf45fe23d8fce60606f475399b4",
+    "secondReportHash": "sha256:0d55e514030a5a646a0dbe3f1c2c656cfc471ece65f8b6eaef9db2bbb27e5c1b"
+  },
+  "perturbation": {
+    "deltaFromOrderingBaseline": 4308681.8529879525,
+    "deltaFromQBase": 1425423.7753621638,
+    "description": "GCC branch likelihood for string EOF plus loop unrolling confined to ts_parser__advance",
+    "id": "improved",
+    "independentlyAuthored": true,
+    "q": 52087081.6058138,
+    "reachesReference": false,
+    "valid": true
+  },
+  "qBase": 50661657.83045164,
+  "qFail": 0,
+  "qReference": 63257590.56033017,
+  "terminalSeal": {
+    "cohort": "terminal",
+    "mutationRuns": false,
+    "optimizerPilot": false,
+    "panelEvidenceExposure": false,
+    "queryCorpusExposure": false,
+    "searchVisibleStateExposure": false,
+    "seedOptimizerSessions": false,
+    "taskId": "OSS-H06",
+    "trustedAdmissionOnly": true
+  }
+}
