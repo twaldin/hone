@@ -1,0 +1,20 @@
+[package]
+name = "yastl"
+version = "0.1.2"
+description = "Yet another scoped threadpool library"
+authors = ["Justus K <justus.k@protonmail.com>"]
+edition = "2018"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Stupremee/yastl"
+documentation = "https://docs.rs/yastl"
+keywords = [ "thread", "pool", "scoped", "threadpool" ]
+categories = ["concurrency"]
+
+[dependencies]
+scopeguard = "1.1"
+flume = { version = "0.10", default-features = false }
+coz = { version = "0.1", optional = true }
+
+[dev-dependencies]
+num_cpus = "1.13"

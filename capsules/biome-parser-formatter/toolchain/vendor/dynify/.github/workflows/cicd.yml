@@ -1,0 +1,191 @@
+# Adapted from:
+# - https://github.com/starship/starship/blob/27cc4bc/.github/workflows/release.yml
+# - https://github.com/sharkdp/bat/blob/6fc5882/.github/workflows/CICD.yml
+name: CICD
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["CHANGELOG.md"]
+  pull_request:
+    paths-ignore: ["CHANGELOG.md"]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  metadata:
+    name: Extract crate metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup | Rust
+        id: setup-rust
+        uses: dtolnay/rust-toolchain@stable
+      - run: rustup override set '${{ steps.setup-rust.outputs.name }}'
+
+      - name: Setup | Extract crate metadata
+        id: metadata
+        run: |
+          cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[0]
+              | {name, version, rust_version}
+              | to_entries
+              | map("\(.key)=\(.value)")
+              | join("\n")' \
+            | tee -a $GITHUB_OUTPUT
+    outputs:
+      name: ${{ steps.metadata.outputs.name }}
+      version: ${{ steps.metadata.outputs.version }}
+      rust_version: ${{ steps.metadata.outputs.rust_version }}
+
+  check:
+    name: Run tests and checks
+    needs: [metadata]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # prettier-ignore
+          - { os: ubuntu-latest, toolchain: "${{ needs.metadata.outputs.rust_version }}" }
+          - { os: ubuntu-latest, toolchain: nightly }
+          - { os: ubuntu-latest, toolchain: stable  }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup | Rust
+        id: setup-rust
+        uses: dtolnay/rust-toolchain@stable # Avoid frequent cache updates
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: ${{ format('clippy,rustfmt{0}', matrix.toolchain == 'nightly' && ',miri' || '') }}
+      - run: rustup override set '${{ steps.setup-rust.outputs.name }}' # Override rust-toolchain.toml
+
+      - name: Setup | Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Setup | Install cargo-llvm-cov
+        if: matrix.toolchain == 'nightly'
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Setup | Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Post Setup | Show information
+        run: |
+          gcc --version || true
+          cargo --version
+          rustc --version
+
+      - name: Check | Audit
+        run: cargo audit
+
+      - name: Check | Formatting
+        run: cargo fmt --check
+
+      - name: Check | Clippy
+        run: cargo clippy --workspace
+
+      - name: Check | Clippy without default features
+        run: cargo clippy --workspace --no-default-features
+
+      - name: Check | Clippy with all features
+        run: cargo clippy --workspace --all-features
+
+      - name: Check | Build
+        run: cargo build --workspace
+
+      - name: Check | Test suite
+        run: cargo test --workspace --all-features
+
+      - name: Check | Miri
+        if: matrix.toolchain == 'nightly'
+        run: cargo miri test -p dynify --all-features
+
+      - name: Check | Coverage
+        if: matrix.toolchain == 'nightly'
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      - name: Check | Rustdoc
+        if: matrix.toolchain == 'nightly'
+        run: RUSTDOCFLAGS='--cfg docsrs' cargo doc --all-features --no-deps
+
+      - name: Post Check | Upload coverage to Codecov
+        if: matrix.toolchain == 'nightly'
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true
+
+  changelog:
+    name: Update changelog
+    needs: [check]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: write # need to commit changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v4
+        with: { ref: "${{ github.head_ref }}" }
+
+      - name: Doc | Update changelog
+        run: |
+          sed -i \
+            -e 's/{{PRNUM}}/${{ github.event.number }}/g' \
+            -e "s/{{DATE}}/$(date -u +'%Y-%m-%d')/g" \
+            CHANGELOG.md
+
+      - name: Post Doc | Commit changes
+        uses: stefanzweifel/git-auto-commit-action@v6
+        with:
+          commit_message: "docs: expand variables in changelog"
+          commit_user_name: github-actions[bot]
+          commit_user_email: github-actions[bot]@users.noreply.github.com
+          commit_author: github-actions[bot] <github-actions[bot]@users.noreply.github.com>
+
+  # How to create a new GitHub release?
+  # 1. Create a release branch named "release/<tag>".
+  # 2. Open a PR from the branch, including the release note in the PR body.
+  # 3. Wait for the CI to create a draft release.
+  # 4. Publish the release when it's ready.
+  release:
+    name: Create GitHub release
+    needs: [check, changelog]
+    if: startsWith(github.head_ref, 'release/') && github.repository == 'loichyan/dynify'
+    permissions:
+      contents: write # need to update release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup | Configure
+        id: configure
+        run: echo tag="${GITHUB_HEAD_REF#release/}" >$GITHUB_OUTPUT
+
+      - name: Release | Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          release_tag: ${{ steps.configure.outputs.tag }}
+          release_body: ${{ github.event.pull_request.body }}
+        run: |
+          if gh release view "$release_tag" >/dev/null; then
+            echo "update existing release $release_tag"
+            gh release edit "$release_tag" --notes="$release_body"
+          else
+            echo "create new release $release_tag"
+            gh release create "$release_tag" \
+              --target="$GITHUB_BASE_REF" \
+              --draft=true \
+              --title="${release_tag#v} ($(date -u +'%Y-%m-%d'))" \
+              --notes="$release_body"
+          fi

@@ -1,0 +1,46 @@
+[package]
+name = "console"
+description = "A terminal and console abstraction for Rust"
+version = "0.15.5"
+keywords = ["cli", "terminal", "colors", "console", "ansi"]
+authors = ["Armin Ronacher <armin.ronacher@active-4.com>"]
+license = "MIT"
+edition = "2018"
+homepage = "https://github.com/console-rs/console"
+repository = "https://github.com/console-rs/console"
+documentation = "https://docs.rs/console"
+readme = "README.md"
+rust-version = "1.48.0"
+
+[features]
+default = ["unicode-width", "ansi-parsing"]
+windows-console-colors = ["ansi-parsing"]
+ansi-parsing = []
+
+[dependencies]
+libc = "0.2.30"
+unicode-width = { version = "0.1", optional = true }
+lazy_static = "1.4.0"
+
+[target.'cfg(windows)'.dependencies]
+encode_unicode = "0.3"
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.42.0"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Input_KeyboardAndMouse",
+]
+
+[dev-dependencies]
+proptest = "1.0.0"
+regex = "1.4.2"
+
+## These are currently disabled.  If you want to play around with the benchmarks
+## uncommit this.
+#criterion = "0.3.5"
+#[[bench]]
+#name = "ansi_parser"
+#harness = false

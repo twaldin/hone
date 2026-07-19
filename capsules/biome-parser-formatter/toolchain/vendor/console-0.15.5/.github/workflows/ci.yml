@@ -1,0 +1,116 @@
+name: CI
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+jobs:
+  build-msrv:
+    name: Build on MSRV (1.48)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rust: 1.48.0
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            rust: 1.48.0
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+          target: ${{ matrix.target }}
+          override: true
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Build
+        env: 
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: make check
+
+  test:
+    name: Tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            rust: stable
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rust: 1.51.0
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            rust: 1.51.0
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            rust: 1.51.0
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust: 1.51.0
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rust: stable
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rust: beta
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+          target: ${{ matrix.target }}
+          override: true
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install linker
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install gcc-multilib
+      - name: Test
+        env: 
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: make test
+  wasm:
+    name: Wasm
+    strategy:
+      fail-fast: false
+      matrix:
+          target: [wasm32-unknown-unknown, wasm32-wasi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Check
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: make check
+  nightly:
+    name: Nightly Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Test
+        run: make test

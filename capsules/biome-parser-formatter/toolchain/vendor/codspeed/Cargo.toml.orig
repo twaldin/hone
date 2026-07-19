@@ -1,0 +1,39 @@
+[package]
+name = "codspeed"
+version = "4.4.1"
+rust-version = "1.74" # MSRV
+edition = "2021"
+description = "Core instrumentation library for CodSpeed"
+authors = ["Arthur Pastel <arthur@codspeed.io>"]
+documentation = "https://codspeed.io/docs/reference/codspeed-rust"
+readme = "README.md"
+repository = "https://github.com/CodSpeedHQ/codspeed-rust"
+homepage = "https://codspeed.io"
+license = "MIT OR Apache-2.0"
+categories = [
+    "development-tools",
+    "development-tools::profiling",
+    "development-tools::testing",
+]
+keywords = ["codspeed", "benchmark"]
+
+[dependencies]
+anyhow = { workspace = true }
+colored = "2.0.0"
+glob = "0.3.2"
+libc = "^0.2"
+nix = { version = "0.31.1", features = ["time"] }
+getrandom = "0.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+statrs = { version = "0.18.0", default-features = false }
+
+[[bench]]
+name = "native"
+harness = false
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[build-dependencies]
+cc = "1.0"

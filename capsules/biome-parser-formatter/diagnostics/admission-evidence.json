@@ -1,0 +1,75 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 25.93,
+    "incrementalRebuildSec": 2.13,
+    "evalSec": 36.34
+  },
+  "aa": {
+    "samples": [
+      0.07665950552010314,
+      0.07682270769944124,
+      0.0772179328158752
+    ],
+    "sigma": 0.000287134953365207,
+    "noiseFractionOfScale": 0.0746774438516888
+  },
+  "qBase": 0.0769000486784732,
+  "qFail": 1e-12,
+  "qReference": 0.08074505111234687,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 1e-12,
+      "correct": false,
+      "purpose": "compile-failing source overlay maps fail-closed to qFail"
+    },
+    {
+      "id": "naive",
+      "q": 0.05655106758351777,
+      "correct": true,
+      "purpose": "bounded CPU delay in parser entrypoints is slower but byte-exact"
+    },
+    {
+      "id": "baseline",
+      "q": 0.07665950552010314,
+      "correct": true
+    },
+    {
+      "id": "improved",
+      "q": 0.22552729615412495,
+      "correct": true,
+      "purpose": "independently authored repeated-parse memoization and uncached one-shot tree sinking"
+    },
+    {
+      "id": "shortcut",
+      "trainQ": 0.21361879451451135,
+      "validationQ": 1e-12,
+      "gated": true,
+      "purpose": "train-fingerprint shortcut is rejected by protected validation"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "valid": true,
+    "q": 0.22552729615412495,
+    "movesMetric": true,
+    "mutableFiles": [
+      "mutable/biome_js_parser/src/parse.rs",
+      "mutable/biome_css_parser/src/lib.rs",
+      "mutable/biome_css_parser/src/lexer/source_cursor.rs",
+      "mutable/biome_js_formatter/src/lib.rs",
+      "mutable/biome_css_formatter/src/lib.rs"
+    ]
+  },
+  "rss": {
+    "baselinePeakKb": 23772,
+    "limitKb": 24247,
+    "construction": "floor(23772 * 1.02)"
+  },
+  "ordering": {
+    "consecutivePassingRuns": 2,
+    "lastStabilitySpread": 0.007261728768298967,
+    "band": 0.15,
+    "brokerEvalInvocationsPerRun": 14
+  }
+}

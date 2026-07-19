@@ -1,0 +1,3 @@
+{
+    "rust-analyzer.cargo.features": ["enable", "print_at_exit"]
+}
