@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-T02",
+  "capsule": "ripgrep-search",
+  "cohort": "train",
+  "stratum": "oss",
+  "panel": "B",
+  "status": "pending-authoring",
+  "objective": "Improve mixed literal, regex, Unicode, ignore-file, and many-small-file searches on a frozen tree using the repository benchsuite.",
+  "scalarAndGates": "Reciprocal geometric mean latency; exact stdout/stderr/exit hashes, relevant tests, peak RSS \u2264 baseline +2%.",
+  "source": {
+    "repository": "BurntSushi/ripgrep",
+    "revision": "227381db0ee83dfa4341f1e27ff9617c0f5ad992",
+    "url": "https://github.com/BurntSushi/ripgrep/commit/227381db0ee83dfa4341f1e27ff9617c0f5ad992",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

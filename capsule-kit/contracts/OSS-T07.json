@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-T07",
+  "capsule": "biome-parser-formatter",
+  "cohort": "train",
+  "stratum": "oss",
+  "panel": "A",
+  "status": "pending-authoring",
+  "objective": "Improve JS/TS/CSS parser+formatter throughput across frozen large files using crate benches and the upstream benchmark project.",
+  "scalarAndGates": "Reciprocal geometric mean time; byte-exact formatting, diagnostic hashes, idempotence, parser/formatter tests, peak RSS \u2264 baseline +2%.",
+  "source": {
+    "repository": "biomejs/biome",
+    "revision": "8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
+    "url": "https://github.com/biomejs/biome/commit/8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-H03",
+  "capsule": "swc-transform",
+  "cohort": "terminal",
+  "stratum": "oss",
+  "panel": null,
+  "status": "pending-authoring",
+  "objective": "Improve TS/JS/React parse+transform throughput on frozen corpora.",
+  "scalarAndGates": "Reciprocal geometric mean time; AST/output semantic hashes, transform tests, output size \u2264 baseline +1%, RSS \u2264 baseline +2%.",
+  "source": {
+    "repository": "swc-project/swc",
+    "revision": "d5fd89520be380493479d232b88c532e94e1df94",
+    "url": "https://github.com/swc-project/swc/commit/d5fd89520be380493479d232b88c532e94e1df94",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

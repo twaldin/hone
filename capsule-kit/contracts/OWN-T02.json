@@ -1,0 +1,23 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-T02",
+  "capsule": "monoagent-context-retention",
+  "cohort": "train",
+  "stratum": "owner",
+  "panel": "B",
+  "status": "existing-admitted",
+  "objective": "Maximize valid weighted structured-record utility under a hard character cap while preserving current input exactly.",
+  "character": "Current product, open quality, private.",
+  "source": {
+    "visibility": "private",
+    "existingCapsuleId": "cap_d5ca7c9f999b",
+    "existingCapsuleDigest": "sha256:a48be2217d65125145aede0b81d95eac6a193b5247a5a525d71d12f7bbcba652"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
+    "workloadHashes": "see capsule manifest contentHashes"
+  },
+  "publication": "private-redacted"
+}

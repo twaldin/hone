@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-T05",
+  "capsule": "simdjson-parse",
+  "cohort": "train",
+  "stratum": "oss",
+  "panel": "A",
+  "status": "pending-authoring",
+  "objective": "Improve DOM and On-Demand parsing over mixed corpora using the upstream benchmark harness.",
+  "scalarAndGates": "Geometric mean GB/s; exact parse/event hashes, malformed-input behavior, full relevant tests, peak RSS \u2264 baseline +2%.",
+  "source": {
+    "repository": "simdjson",
+    "revision": "8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
+    "url": "https://github.com/simdjson/simdjson/commit/8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

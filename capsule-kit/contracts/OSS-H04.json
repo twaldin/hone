@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-H04",
+  "capsule": "quickjs-interpreter",
+  "cohort": "terminal",
+  "stratum": "oss",
+  "panel": null,
+  "status": "pending-authoring",
+  "objective": "Improve selected interpreter microbenchmarks from tests/microbench.js and module startup.",
+  "scalarAndGates": "Geometric mean throughput; selected Test262 subset and exact observable outputs, binary size \u2264 baseline +1%.",
+  "source": {
+    "repository": "bellard/quickjs",
+    "revision": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+    "url": "https://github.com/bellard/quickjs/commit/04be246001599f5995fa2f2d8c91a0f198d3f34c",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

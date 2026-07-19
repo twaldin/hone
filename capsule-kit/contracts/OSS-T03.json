@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-T03",
+  "capsule": "esbuild-bundling",
+  "cohort": "train",
+  "stratum": "oss",
+  "panel": "A",
+  "status": "pending-authoring",
+  "objective": "Improve bundling of frozen TS/JSX/ESM/CJS graphs without changing output semantics.",
+  "scalarAndGates": "Reciprocal geometric mean build time; output and sourcemap semantic hashes, parser/bundler tests, output bytes \u2264 baseline +1%.",
+  "source": {
+    "repository": "evanw/esbuild",
+    "revision": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+    "url": "https://github.com/evanw/esbuild/commit/6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-H02",
+  "capsule": "duckdb-tpch",
+  "cohort": "terminal",
+  "stratum": "oss",
+  "panel": null,
+  "status": "pending-authoring",
+  "objective": "Improve TPC-H Q1/Q6/Q12 execution on frozen SF1 data using benchmark/tpch.",
+  "scalarAndGates": "Reciprocal geometric mean latency; exact result hashes, planner/executor tests, peak RSS \u2264 baseline +2%.",
+  "source": {
+    "repository": "duckdb/duckdb",
+    "revision": "117e1a46be1c903c5a36ee3c881c125597f93c60",
+    "url": "https://github.com/duckdb/duckdb/commit/117e1a46be1c903c5a36ee3c881c125597f93c60",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}
