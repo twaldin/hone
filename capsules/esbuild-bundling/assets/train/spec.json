@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "repetitions": 5,
+  "jobs": [
+    {"id": "ts-wide", "kind": "ts-esm", "modules": 900, "fanout": 3},
+    {"id": "jsx-commonjs", "kind": "jsx-cjs", "modules": 720, "fanout": 1}
+  ]
+}

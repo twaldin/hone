@@ -1,0 +1,3 @@
+package linker
+
+func honeBrokenDiagnostic( {

@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_af8f9ff0663c",
+  "objective": "Improve bundling time for frozen TS, JSX, ESM, and CommonJS graphs without changing output or sourcemap semantics or increasing output bytes by more than 1%. Only internal/linker is mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "08016ed1c721b20c26c2ed3482640804be10984b"
+  },
+  "image": "hone-esbuild-capsule@sha256:daff4fddaef30fa7fde6705e90fb178141375f6c580d5c6b9073584bd7b9ca4a",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "workload.py",
+    "go.mod",
+    "go.sum",
+    "LICENSE.md",
+    "version.txt",
+    "cmd",
+    "pkg",
+    "vendor",
+    "internal/api_helpers",
+    "internal/ast",
+    "internal/bundler",
+    "internal/bundler_tests",
+    "internal/cache",
+    "internal/cli_helpers",
+    "internal/compat",
+    "internal/config",
+    "internal/css_ast",
+    "internal/css_lexer",
+    "internal/css_parser",
+    "internal/css_printer",
+    "internal/fs",
+    "internal/graph",
+    "internal/helpers",
+    "internal/js_ast",
+    "internal/js_lexer",
+    "internal/js_parser",
+    "internal/js_printer",
+    "internal/logger",
+    "internal/renamer",
+    "internal/resolver",
+    "internal/runtime",
+    "internal/sourcemap",
+    "internal/test",
+    "internal/xxhash"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/oracle.json",
+        "assets/train/spec.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "public",
+      "paths": [
+        "assets/validation/oracle.json",
+        "assets/validation/spec.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:fca29aa0f46125fdd58de84343804c187a4947583228ab3fc4ee4e0a71c18d76"
+  },
+  "contentHashes": {
+    "assets/train/oracle.json": "sha256:e4517d86306acea6e960b15b4d1a6c6659e4860c1c4a7e14e5034964a7b06833",
+    "assets/train/spec.json": "sha256:307c5ced80e0cba8bda9b8bcea3f639383bb9117a3d180cdb6c1bda4a741f288",
+    "assets/validation/oracle.json": "sha256:f213d40fbdcb7f33d57524f9fb4dad07e36953777d1ad470ca1632aba2cfd718",
+    "assets/validation/spec.json": "sha256:bb85b2a5d8217e0a0351f44b6d325a362587f5611d186259a07de60a8b97792c"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "Current-head OSS-T03 at evanw/esbuild 6ff1d8b0d8c134e867a397eef39702a223ebef9e; no reference patch or privileged winning artifact. Local preregistration used six interleaved A-A pairs and qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail)) = 15.50870398700801. Final numeric recalibration remains frozen-host admission work.",
+    "license": "MIT",
+    "tags": [
+      "m2",
+      "oss",
+      "esbuild",
+      "bundling",
+      "performance"
+    ],
+    "partition": "m2-frozen-corpus",
+    "sourceDetails": {
+      "repository": "evanw/esbuild",
+      "commit": "6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+      "url": "https://github.com/evanw/esbuild/commit/6ff1d8b0d8c134e867a397eef39702a223ebef9e",
+      "licenseFile": "LICENSE.md",
+      "derivation": "License-preserving offline source subset containing the CLI, Go packages, vendored module dependency, parser/bundler tests, and snapshots; repository metadata and upstream prose/history are excluded.",
+      "mutableEnvelope": [
+        "internal/linker/debug.go",
+        "internal/linker/linker.go",
+        "internal/linker/*.go additions"
+      ]
+    },
+    "toolchain": {
+      "go": "1.26.4",
+      "baseImage": "golang:1.26.4-bookworm@sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b",
+      "image": "hone-esbuild-capsule@sha256:daff4fddaef30fa7fde6705e90fb178141375f6c580d5c6b9073584bd7b9ca4a",
+      "network": "none",
+      "goFlags": "-mod=vendor",
+      "moduleCache": "vendor plus read-only image-baked Go build cache with anonymous per-evaluation overlay"
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max (provisional; frozen GCE recalibration required)",
+      "freshProcess": true,
+      "repetitionsPerGraph": 5,
+      "q": "reciprocal geometric mean of per-graph median esbuild CLI wall seconds after all hard gates pass",
+      "qFail": 0,
+      "qBase": 14.073506215235307,
+      "sigma": 0.2870395543545407,
+      "qReference": 15.50870398700801,
+      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+      "aaSamples": [
+        14.223957859747843,
+        13.51337699556403,
+        14.022941068003352,
+        14.195080924833881,
+        14.22171164878161,
+        14.263968794481132
+      ],
+      "hardGates": [
+        "upstream internal/js_parser tests",
+        "upstream internal/bundler_tests snapshot suite",
+        "Node-observed output semantic SHA-256",
+        "canonical sourcemap semantic SHA-256",
+        "output JavaScript bytes <= frozen baseline +1%"
+      ]
+    }
+  }
+}
