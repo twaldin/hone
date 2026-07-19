@@ -9,6 +9,7 @@ import {
 import { join } from "node:path";
 import {
   CampaignPauseSignal,
+  CampaignResumeSignal,
   M2_INNER_MODEL_ROUTE,
   M2_MODEL_ROUTING,
   M2_OUTER_MODEL_ROUTE,
@@ -140,10 +141,15 @@ export interface ProxyConfig {
    */
   recordBudgetExhaustion?: (dimension: BudgetDimension) => void | Promise<void>;
   /**
-   * Trusted global signal sink. The local journal pause is fsynced before
-   * this callback runs, so a callback failure can never reopen model egress.
+   * Mandatory idempotent global campaign-authority transition. The durable
+   * local pause is fsynced first; recovery re-delivers the same `pauseId`.
    */
-  recordCampaignPause?: (signal: CampaignPauseSignal) => void | Promise<void>;
+  recordCampaignPause: (signal: CampaignPauseSignal) => void | Promise<void>;
+  /**
+   * Mandatory idempotent global resume transition, keyed by `pauseId`.
+   * It runs only after durable preflight attempts prove both frozen routes.
+   */
+  recordCampaignResume: (signal: CampaignResumeSignal) => void | Promise<void>;
   /** TEST-ONLY deterministic entropy source; values are clamped inside the trusted jitter bound. */
   retryRandom?: () => number;
   /**
@@ -411,7 +417,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
   // optimizer never supplies a route for these bearer capabilities.
   const routing: ModelRouting = { ...config.routing, ...M2_MODEL_ROUTING };
 
-  const tokens: ProxyAuthToken[] = Object.keys(config.routing).map((role) => ({
+  const tokens: ProxyAuthToken[] = Object.keys(routing).map((role) => ({
     token: `hone_${randomBytes(24).toString("hex")}`,
     runId: config.runId,
     role,
@@ -547,6 +553,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
   let activeCampaignPause: CampaignPauseSignal | undefined;
   let pausePending = false;
   let pauseAppend: Promise<CampaignPauseSignal> | undefined;
+  let resumePromise: Promise<ProxyPreflightResult> | undefined;
   // Durable intents whose terminal journal record is not yet durable. Any
   // id still here after handler quiescence is a settlement that failed
   // part-way — close() must reject rather than report a clean shutdown.
@@ -557,6 +564,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       if (report.poisoned !== undefined) dispatchPoison = report.poisoned;
       activeCampaignPause = report.pause;
       pausePending = report.pause !== undefined;
+      if (report.pause !== undefined) await config.recordCampaignPause(report.pause);
       return report;
     } catch (err) {
       // Recovery could not establish (or repair) the journal's history —
@@ -598,7 +606,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       await recoveryPromise;
       await journal.pause(signal);
       activeCampaignPause = signal;
-      await config.recordCampaignPause?.(signal);
+      await config.recordCampaignPause(signal);
       return signal;
     })().catch((err: unknown) => {
       const failure = err instanceof Error ? err : new Error(String(err));
@@ -713,6 +721,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
     promptTokens: number;
     pricing: PricingEntry | undefined;
     attempt: number;
+    purpose: "request" | "preflight";
     allowPaused: boolean;
     onResponseReady?: (
       status: number,
@@ -726,6 +735,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
     | { kind: "sealed"; status: 503; body: string }
     | {
         kind: "attempt";
+        dispatchId: string;
         status: number;
         providerStatus: number | null;
         contentType: string;
@@ -878,6 +888,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           usd: fixed.charge.usd,
           returnedModel: fixed.returnedModel,
           classification: fixed.classification,
+          status: fixed.traceInput?.status ?? null,
           outcome: fixed.outcome,
           traced,
           ...(traceFailure !== undefined ? { traceError: traceFailure.message } : {}),
@@ -924,6 +935,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           model: input.route.model,
           requestedRoute: input.route.model,
           attempt: input.attempt,
+          purpose: input.purpose,
           requestAt,
           requestSha256: createHash("sha256").update(forwardText).digest("hex"),
           promptTokens: reservation.promptTokens,
@@ -990,6 +1002,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           method: "POST",
           headers: upstreamHeaders(input.role, input.route.model),
           body: forwardText,
+          redirect: "manual",
           signal: controller.signal,
         });
       } catch (err) {
@@ -1053,6 +1066,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
         }
         return {
           kind: "attempt",
+          dispatchId,
           status: 502,
           providerStatus: null,
           contentType: "application/json",
@@ -1089,22 +1103,32 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       const responseText = Buffer.concat(chunks).toString("utf8");
       const returnedModels = responseModelIdentities(responseText, contentType);
       const returnedModel = returnedModels[0] ?? null;
-      const decision = responseTooLarge
-        ? { classification: "candidate-invalidity" as const }
-        : closing && responseIncomplete
-          ? { classification: "client-invalidity" as const }
-          : classifyProviderAttempt({
-              attempt: input.attempt,
-              status: upstream.status,
-              transportError: responseIncomplete,
-              proxyFailover: isProxyFailover(upstream.headers, responseText),
-              requestedRoute: input.route.model,
-              returnedModels,
-              malformedSuccessfulOutput:
-                upstream.status >= 200 &&
-                upstream.status <= 299 &&
-                isMalformedSuccessfulAgentResponse(responseText, contentType),
-            });
+      const observedDrift = returnedModels.some(
+        (identity) => identity !== input.route.model,
+      );
+      const policyDecision = closing && responseIncomplete && !observedDrift
+        ? { classification: "client-invalidity" as const }
+        : classifyProviderAttempt({
+            attempt: input.attempt,
+            status: upstream.status,
+            transportError: responseIncomplete && !responseTooLarge,
+            proxyFailover:
+              (upstream.status >= 300 && upstream.status <= 399) ||
+              isProxyFailover(upstream.headers, responseText),
+            requestedRoute: input.route.model,
+            returnedModels,
+            malformedSuccessfulOutput:
+              upstream.status >= 200 &&
+              upstream.status <= 299 &&
+              isMalformedSuccessfulAgentResponse(responseText, contentType),
+          });
+      const decision =
+        responseTooLarge &&
+        upstream.status >= 200 &&
+        upstream.status <= 299 &&
+        !observedDrift
+          ? { classification: "candidate-invalidity" as const }
+          : policyDecision;
 
       let usage: Usage | undefined;
       if (contentType.includes("text/event-stream")) {
@@ -1177,6 +1201,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       );
       return {
         kind: "attempt",
+        dispatchId,
         status: upstream.status,
         providerStatus: upstream.status,
         contentType,
@@ -1306,6 +1331,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           promptTokens,
           pricing,
           attempt,
+          purpose: "request",
           allowPaused: false,
           onResponseReady(status, contentType, classification): void {
             if (res.destroyed || res.headersSent) return;
@@ -1370,7 +1396,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       { role: "inner-capsule-improvement", model: M2_INNER_MODEL_ROUTE },
     ] as const;
     const observations: ProxyPreflightObservation[] = [];
-    for (const target of targets) {
+    for (const [targetIndex, target] of targets.entries()) {
       const forward: Record<string, unknown> = {
         model: target.model,
         messages: [{ role: "user", content: "Reply with exactly: HONE_PREFLIGHT_OK" }],
@@ -1389,6 +1415,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           promptTokens,
           pricing: config.pricing?.[target.model],
           attempt,
+          purpose: "preflight",
           allowPaused: true,
         });
         final = result;
@@ -1401,6 +1428,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       }
       observations.push({
         role: target.role,
+        dispatchId: final?.kind === "attempt" ? final.dispatchId : null,
         requestedRoute: target.model,
         returnedModel: final?.kind === "attempt" ? final.returnedModel : null,
         status: final?.kind === "attempt" ? final.providerStatus : null,
@@ -1412,6 +1440,19 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           final.providerStatus <= 299 &&
           final.returnedModel === target.model,
       });
+      if (final?.kind === "attempt" && final.classification === "campaign-pause") {
+        for (const skipped of targets.slice(targetIndex + 1)) {
+          observations.push({
+            role: skipped.role,
+            dispatchId: null,
+            requestedRoute: skipped.model,
+            returnedModel: null,
+            status: null,
+            passed: false,
+          });
+        }
+        break;
+      }
     }
     return ProxyPreflightResult.parse({
       passed: observations.every((observation) => observation.passed),
@@ -1430,11 +1471,17 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
     if (first === undefined || second === undefined) {
       throw new Error("frozen-route preflight did not produce exactly two observations");
     }
-    await journal.resume({
+    const signal = CampaignResumeSignal.parse({
+      version: 1,
       pauseId: paused.pauseId,
+      runId: config.runId,
       at: new Date().toISOString(),
       observations: [first, second],
     });
+    // Global authority first, keyed idempotently by pauseId. A crash before
+    // the local receipt leaves this proxy paused (safe over-constraint).
+    await config.recordCampaignResume(signal);
+    await journal.resume(signal);
     activeCampaignPause = undefined;
     pausePending = false;
     pauseAppend = undefined;
@@ -1452,6 +1499,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       try {
         const upstream = await fetch(new URL("/v1/models", base), {
           headers: upstreamHeaders(),
+          redirect: "manual",
           signal: controller.signal,
         });
         const chunks: Buffer[] = [];
@@ -1688,13 +1736,31 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
     preflight(): Promise<ProxyPreflightResult> {
       const operation = preflightFrozenRoutes();
       inflightTrustedOperations.add(operation);
-      void operation.finally(() => inflightTrustedOperations.delete(operation));
+      void operation.then(
+        () => inflightTrustedOperations.delete(operation),
+        () => inflightTrustedOperations.delete(operation),
+      );
       return operation;
     },
     resume(): Promise<ProxyPreflightResult> {
-      const operation = resumeAfterPreflight();
+      if (resumePromise === undefined) {
+        const operation = resumeAfterPreflight();
+        resumePromise = operation;
+        void operation.then(
+          () => {
+            if (resumePromise === operation) resumePromise = undefined;
+          },
+          () => {
+            if (resumePromise === operation) resumePromise = undefined;
+          },
+        );
+      }
+      const operation = resumePromise;
       inflightTrustedOperations.add(operation);
-      void operation.finally(() => inflightTrustedOperations.delete(operation));
+      void operation.then(
+        () => inflightTrustedOperations.delete(operation),
+        () => inflightTrustedOperations.delete(operation),
+      );
       return operation;
     },
     async listenUnix(socketPath: string): Promise<void> {

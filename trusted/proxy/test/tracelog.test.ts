@@ -323,6 +323,8 @@ async function setup(traceIo?: Partial<DurableIo>, casIo?: Partial<DurableIo>): 
     recordSpend: (s) => {
       spends.push(s);
     },
+    recordCampaignPause: () => undefined,
+    recordCampaignResume: () => undefined,
     ...(traceIo === undefined ? {} : { traceIo }),
     ...(casIo === undefined ? {} : { casIo }),
   });

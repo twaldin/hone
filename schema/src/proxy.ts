@@ -78,6 +78,8 @@ export type CampaignPauseSignal = z.infer<typeof CampaignPauseSignal>;
 
 export const ProxyPreflightObservation = z.object({
   role: M2ProxyRole,
+  /** Durable preflight dispatch proving this observation, null when no call was attempted. */
+  dispatchId: z.string().min(1).nullable(),
   requestedRoute: z.string().min(1),
   returnedModel: z.string().min(1).nullable(),
   status: z.number().int().nullable(),
@@ -90,6 +92,15 @@ export const ProxyPreflightResult = z.object({
   observations: z.array(ProxyPreflightObservation).length(2),
 });
 export type ProxyPreflightResult = z.infer<typeof ProxyPreflightResult>;
+
+export const CampaignResumeSignal = z.object({
+  version: z.literal(1),
+  pauseId: z.string().min(1),
+  runId: z.string().min(1),
+  at: z.string().datetime(),
+  observations: z.array(ProxyPreflightObservation).length(2),
+});
+export type CampaignResumeSignal = z.infer<typeof CampaignResumeSignal>;
 
 const ProxyTraceRecordV1 = z.object({
   version: z.literal(1),

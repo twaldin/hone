@@ -45,6 +45,9 @@ export function classifyProviderAttempt(facts: ProviderAttemptFacts): ProviderAt
     case 429:
       return { classification: "campaign-pause", pauseReason: "provider-rate-limit" };
   }
+  if (facts.returnedModels.some((identity) => identity !== facts.requestedRoute)) {
+    return { classification: "campaign-pause", pauseReason: "returned-model-drift" };
+  }
   if (facts.transportError) {
     return facts.attempt < MAX_PROVIDER_ATTEMPTS
       ? { classification: "retry" }
@@ -56,10 +59,7 @@ export function classifyProviderAttempt(facts: ProviderAttemptFacts): ProviderAt
       : { classification: "campaign-pause", pauseReason: "provider-5xx" };
   }
   if (facts.status !== null && facts.status >= 200 && facts.status <= 299) {
-    if (
-      facts.returnedModels.length === 0 ||
-      facts.returnedModels.some((identity) => identity !== facts.requestedRoute)
-    ) {
+    if (facts.returnedModels.length === 0) {
       return { classification: "campaign-pause", pauseReason: "returned-model-drift" };
     }
     return {
@@ -115,7 +115,12 @@ export function isMalformedSuccessfulAgentResponse(responseText: string, content
       try {
         const value: unknown = JSON.parse(payload);
         if (!isJsonObject(value) || !Array.isArray(value["choices"])) return true;
-        if (value["choices"].length > 0) sawChoice = true;
+        if (value["choices"].length > 0) {
+          for (const choice of value["choices"]) {
+            if (!isJsonObject(choice) || !isJsonObject(choice["delta"])) return true;
+          }
+          sawChoice = true;
+        }
       } catch {
         return true;
       }
@@ -124,7 +129,12 @@ export function isMalformedSuccessfulAgentResponse(responseText: string, content
   }
   try {
     const value: unknown = JSON.parse(responseText);
-    return !isJsonObject(value) || !Array.isArray(value["choices"]);
+    if (!isJsonObject(value) || !Array.isArray(value["choices"]) || value["choices"].length !== 1) {
+      return true;
+    }
+    const choice = value["choices"][0];
+    if (!isJsonObject(choice) || !isJsonObject(choice["message"])) return true;
+    return typeof choice["message"]["content"] !== "string";
   } catch {
     return true;
   }

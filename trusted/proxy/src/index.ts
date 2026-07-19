@@ -7,6 +7,7 @@ export {
   type DispatchIntentRecord,
   type DispatchJournalState,
   type DispatchPauseRecord,
+  type DispatchPurpose,
   type DispatchPoisonRecord,
   type DispatchRecord,
   type DispatchRecoveredRecord,
