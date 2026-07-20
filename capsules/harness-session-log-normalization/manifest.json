@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_e61f6d822ca1",
+  "id": "cap_1c3864ffbfaa",
   "objective": "Recover model, token usage, cost, and completion state across sealed Crush, Gemini, Kilo, OpenCode, Qwen, and SWE-agent transcript envelopes. Maximize weighted exact recovery; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "8d7478282bf19db59ee7a05ee98c00bbe946cd03"
+    "commit": "636fdf0cad55398965cda7953c46f6c0327f1e86"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
@@ -22,14 +22,14 @@
   "assetGroups": [
     {
       "id": "train",
-      "visibility": "holdout",
+      "visibility": "public",
       "paths": [
         "assets/train/cases.json"
       ]
     },
     {
       "id": "validation",
-      "visibility": "holdout",
+      "visibility": "protected",
       "paths": [
         "assets/validation/cases.json"
       ]
@@ -43,7 +43,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:4dd6d32bcb5993905c6ea09b24871459451265ed31493488f738d362af580f45"
+    "hash": "sha256:13ed47aab69fcaff7c51dd081399a436f6623c3cafa566d21f37ffdadf13e115"
   },
   "contentHashes": {
     "assets/train/cases.json": "sha256:0c1acc280ba4703c5f6450c2b7e963b576cb5668325030692c79333e862cca22",
@@ -70,7 +70,7 @@
       "platform": "linux",
       "samples": 3,
       "freshProcess": true,
-      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
+      "q": "weighted exact recovery: per sealed case, registered field weights recovered in all repetitions divided by total declared weight, averaged over cases",
       "qFail": 0
     }
   }

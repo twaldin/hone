@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Trusted exact-output evaluator for bounded M2 subsystem capsules.
+"""Trusted weighted-field evaluator for the harness transcript-normalization capsule.
 
 Candidate code is imported only by an unprivileged worker subprocess. This
-root-side parent owns hidden fixtures, timing, equality, gates, and output.
-Each timed repetition gets fresh PID/IPC/NET/UTS namespaces and writable state.
+root-side parent owns hidden fixtures, field equality, gates, and output.
+Each repetition gets fresh PID/IPC/NET/UTS namespaces and writable state.
+
+The registered objective is weighted exact recovery: for every sealed
+transcript case, each declared output field (model, token counts, cost,
+completion state) earns its registered weight when the candidate recovers it
+exactly in every repetition; the case score is recovered weight divided by
+total declared weight. Wall-clock timing is measured for diagnostics only and
+never enters the score. Invalidity is reserved for protocol violations and
+public-suite failures; sealed-case misses cost score, not validity.
 """
 from __future__ import annotations
 
@@ -29,6 +37,21 @@ INNER_REPS = int(CHALLENGE.get("innerReps", 3))
 CALL_TIMEOUT_SEC = float(os.environ.get("CAPSULE_CALL_TIMEOUT_SEC", CHALLENGE.get("timeoutSec", 10)))
 MAX_RESPONSE_BYTES = int(os.environ.get("CAPSULE_MAX_RESPONSE_BYTES", "8000000"))
 WORKER_UID = int(os.environ.get("CAPSULE_WORKER_UID", "2000"))
+_RAW_FIELD_WEIGHTS = CHALLENGE.get("fieldWeights")
+if (
+    not isinstance(_RAW_FIELD_WEIGHTS, dict)
+    or not _RAW_FIELD_WEIGHTS
+    or not all(
+        isinstance(name, str) and isinstance(weight, (int, float)) and not isinstance(weight, bool) and weight > 0
+        for name, weight in _RAW_FIELD_WEIGHTS.items()
+    )
+):
+    raise RuntimeError("challenge.json must register a non-empty fieldWeights map of positive weights")
+FIELD_WEIGHTS: dict[str, float] = {name: float(weight) for name, weight in _RAW_FIELD_WEIGHTS.items()}
+TOTAL_FIELD_WEIGHT = sum(FIELD_WEIGHTS.values())
+# Errors with these prefixes are transport/protocol failures of the candidate
+# worker stream; they invalidate the evaluation instead of scoring 0.
+PROTOCOL_ERROR_PREFIXES = ("protocol violation", "response exceeded")
 CANDIDATE_WRITABLE_ROOTS = (Path("/tmp"), Path("/dev/shm"), Path("/dev/mqueue"))
 PR_SET_CHILD_SUBREAPER = 36
 IPC_RMID = 0
@@ -318,11 +341,25 @@ def load_cases(path: Path) -> list[dict]:
         for row in rows:
             if not isinstance(row, dict) or not isinstance(row.get("id"), str) or "input" not in row or "expected" not in row:
                 raise ValueError(f"malformed case in {file}")
+            expected = row["expected"]
+            if not isinstance(expected, dict) or any(field not in expected for field in FIELD_WEIGHTS):
+                raise ValueError(f"case {row['id']} in {file} does not declare every weighted field")
             cases.append(row)
     return cases
 
 
+def _is_protocol_error(error: str | None) -> bool:
+    return error is not None and error.startswith(PROTOCOL_ERROR_PREFIXES)
+
+
 def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
+    """Score one sealed case; returns (slowest_ms, protocol_ok, perExample entry).
+
+    A declared field earns its registered weight only when every repetition
+    recovers it exactly (canonical JSON equality against the sealed expected
+    value). Candidate errors and timeouts score 0 but stay valid; transport
+    protocol violations are reported for the validity gate.
+    """
     outcomes: list[CallOutcome] = []
     for _ in range(INNER_REPS):
         reset_candidate_state()
@@ -339,16 +376,29 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
             break
     slowest_ms = max((outcome.elapsed_ms for outcome in outcomes), default=0.0)
     error = next((outcome.error for outcome in outcomes if outcome.error is not None), None)
-    correct = error is None and len(outcomes) == INNER_REPS and all(
-        canonical(outcome.result) == canonical(case["expected"]) for outcome in outcomes
-    )
-    score = (1.0 / (1.0 + slowest_ms)) if correct else 0.0
+    protocol_ok = not _is_protocol_error(error)
+    if error is not None or len(outcomes) != INNER_REPS:
+        entry = {"score": 0.0, "feedback": f"failed: {error or 'incomplete repetitions'}"}
+        return slowest_ms, protocol_ok, entry
+    expected = case["expected"]
+    recovered: list[str] = []
+    missed: list[str] = []
+    for field in FIELD_WEIGHTS:
+        hit = all(
+            isinstance(outcome.result, dict)
+            and field in outcome.result
+            and canonical(outcome.result[field]) == canonical(expected[field])
+            for outcome in outcomes
+        )
+        (recovered if hit else missed).append(field)
+    score = sum(FIELD_WEIGHTS[field] for field in recovered) / TOTAL_FIELD_WEIGHT
     feedback = (
-        f"all {INNER_REPS} repetitions matched in slowest {slowest_ms:.3f} ms"
-        if correct
-        else f"incorrect or failed in slowest {slowest_ms:.3f} ms: {error or 'exact output mismatch'}"
+        f"recovered {len(recovered)}/{len(FIELD_WEIGHTS)} weighted fields across "
+        f"{INNER_REPS} repetitions"
+        + (f"; recovered: {', '.join(recovered)}" if recovered else "")
+        + (f"; missed: {', '.join(missed)}" if missed else "")
     )
-    return slowest_ms, correct, {"score": score, "feedback": feedback}
+    return slowest_ms, protocol_ok, {"score": score, "feedback": feedback}
 
 
 def run_public_suite(workspace: Path) -> tuple[bool, str]:
@@ -380,24 +430,24 @@ def main() -> None:
     cases = load_cases(assets_dir)
     per_example: dict[str, dict] = {}
     runtimes: list[float] = []
-    correct: list[bool] = []
+    protocol_clean = True
     for case in cases:
-        elapsed, ok, entry = evaluate_case(workspace, case)
+        elapsed, protocol_ok, entry = evaluate_case(workspace, case)
         per_example[case["id"]] = entry
         runtimes.append(elapsed)
-        correct.append(ok)
+        protocol_clean = protocol_clean and protocol_ok
     tests_pass, suite_detail = run_public_suite(workspace)
-    quality = statistics.fmean([1.0 if ok else 0.0 for ok in correct]) if correct else 0.0
-    hidden_cases_pass = bool(correct) and all(correct)
+    scores = [entry["score"] for entry in per_example.values()]
+    quality = statistics.fmean(scores) if scores else 0.0
     output = {
-        "valid": tests_pass and hidden_cases_pass,
+        "valid": tests_pass and protocol_clean,
         "objectives": {
-            "score": statistics.fmean([entry["score"] for entry in per_example.values()]) if per_example else 0.0,
+            "score": quality,
         },
-        "constraints": {"tests_pass": tests_pass, "hidden_cases_pass": hidden_cases_pass},
+        "constraints": {"tests_pass": tests_pass, "protocol_clean": protocol_clean},
         "perExample": per_example,
         "diagnostics": {
-            "summary": f"{len(cases)} sealed cases; {suite_detail}",
+            "summary": f"{len(cases)} sealed cases, weighted field recovery; {suite_detail}",
             "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
             "quality": quality,
         },
