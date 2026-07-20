@@ -1,0 +1,65 @@
+name: Ubuntu 22.04 CI (GCC 12, CXX 20)
+
+on: [push, pull_request]
+
+jobs:
+  ubuntu-build:
+    if: >-
+      ! contains(toJSON(github.event.commits.*.message), '[skip ci]') &&
+      ! contains(toJSON(github.event.commits.*.message), '[skip github]')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/cache@v5
+        with:
+          path: dependencies/.cache
+          key: ${{ hashFiles('dependencies/CMakeLists.txt') }}
+
+      - name: Configure Debug Build
+        run: |
+          CXX=g++-12 cmake -DSIMDJSON_CXX_STANDARD=20 -DCMAKE_BUILD_TYPE=Debug -DSIMDJSON_GOOGLE_BENCHMARKS=OFF -DSIMDJSON_DEVELOPER_MODE=ON -DBUILD_SHARED_LIBS=OFF -B builddebug
+
+      - name: Compile Debug Build
+        run: |
+          cmake --build builddebug
+
+      - name: Test Debug Build
+        run: |
+          ctest --output-on-failure -LE explicitonly -j --test-dir builddebug
+
+      - name: Configure Release Build
+        run: |
+          CXX=g++-12 cmake -DSIMDJSON_CXX_STANDARD=20 -DSIMDJSON_GOOGLE_BENCHMARKS=ON -DSIMDJSON_DEVELOPER_MODE=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX:PATH=destination -B build
+
+      - name: Compile Release Build
+        run: |
+          cmake --build build
+
+      - name: Test Release Build
+        run: |
+          ctest --output-on-failure -LE explicitonly -j --test-dir build
+
+      - name: Install Release Build
+        run: |
+          cmake --install build
+
+      - name: Generate Example Code
+        run: |
+          echo -e '#include <simdjson.h>\nint main(int argc,char**argv) {simdjson::dom::parser parser;simdjson::dom::element tweets = parser.load(argv[1]); }' > tmp.cpp
+
+      - name: Compile Example Code
+        run: |
+          c++ -Idestination/include -Ldestination/lib -std=c++17 -Wl,-rpath,destination/lib -o linkandrun tmp.cpp -lsimdjson
+
+      - name: Run Example Code
+        run: |
+          ./linkandrun jsonexamples/twitter.json
+
+      - name: Configure Find Tests
+        run: |
+          cd tests/installation_tests/find && \
+          cmake -DCMAKE_INSTALL_PREFIX:PATH=../../../destination -B build
+
+      - name: Compile Find Tests
+        run: |
+          cd tests/installation_tests/find && cmake --build build

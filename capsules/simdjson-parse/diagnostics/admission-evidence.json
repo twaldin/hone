@@ -1,0 +1,67 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 3.2,
+    "incrementalRebuildSec": 2.47,
+    "evalSec": 11.5
+  },
+  "aa": {
+    "samples": [
+      3.2450295376938207,
+      3.3643197906049362,
+      3.3784558630149
+    ],
+    "sigma": 0.07329458514727193,
+    "noiseFractionOfScale": 0.19999999999999998
+  },
+  "qBase": 3.3292683971045522,
+  "qFail": 0.0,
+  "qReference": 3.6957413228409117,
+  "activeImplementation": "arm64",
+  "controls": [
+    {
+      "name": "broken",
+      "train": 0,
+      "validation": 0,
+      "combined": 0,
+      "hardGatesPass": false
+    },
+    {
+      "name": "naive",
+      "train": 3.0048226507691096,
+      "validation": 2.7020964905995837,
+      "combined": 2.853459570684347,
+      "hardGatesPass": true,
+      "description": "slower-but-correct extra input scan"
+    },
+    {
+      "name": "shortcut",
+      "train": 6.7064470205996125,
+      "validation": 0,
+      "combined": 3.3532235102998063,
+      "hardGatesPass": false,
+      "description": "train-size timer manipulation rejected by validation fixture fingerprints"
+    }
+  ],
+  "perturbation": {
+    "name": "arm64-adaptive-stage1",
+    "source": "diagnostics/improved/src/arm64.cpp",
+    "train": 3.5523137694163958,
+    "validation": 3.0884991067171956,
+    "combined": 3.3204064380667955,
+    "deltaFromQBase": -0.008861959037756773,
+    "hardGatesPass": true,
+    "description": "independently authored NEON stage-1 perturbation uses an 8-wide structural-index writer and adaptive 128-byte blocks"
+  },
+  "rss": {
+    "baselinePeakRssKb": {
+      "train": 18000,
+      "validation": 13500
+    },
+    "toleranceFraction": 0.02
+  },
+  "normalization": {
+    "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "scale": 0.36647292573635964,
+    "status": "provisional local arm64 calibration; final frozen-host like-for-like re-calibration required"
+  }
+}

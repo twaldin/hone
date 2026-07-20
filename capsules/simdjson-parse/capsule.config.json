@@ -1,0 +1,109 @@
+{
+  "objective": "Improve geometric-mean DOM and On-Demand JSON parsing throughput across frozen mixed corpora at simdjson 8e6bac94 while preserving exact event hashes, malformed-input errors, the full relevant upstream test set, and peak RSS.",
+  "image": "hone-simdjson-parse@sha256:63083edb85b611e342254616b8d2515cb7263b7828602da817cec1cd143fcb4c",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    "hone/**",
+    "include/**",
+    "benchmark/**",
+    "tests/**",
+    "cmake/**",
+    "dependencies/**",
+    "examples/**",
+    "fuzz/**",
+    "jsonexamples/**",
+    "scripts/**",
+    "singleheader/**",
+    "style/**",
+    "tools/**",
+    "windows/**",
+    "CMakeLists.txt",
+    "src/simdjson.cpp",
+    "src/implementation.cpp",
+    "src/to_chars.cpp",
+    "src/from_chars.cpp",
+    "src/internal/**",
+    "LICENSE",
+    "LICENSE-MIT",
+    "AUTHORS",
+    "CONTRIBUTORS"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-oss-train-panel-a",
+    "license": "Apache-2.0 OR MIT (upstream LICENSE and LICENSE-MIT preserved)",
+    "provenance": "Pinned public source simdjson/simdjson@8e6bac94877f2d3d026000d36ce81e0aaf38d26f; upstream jsonexamples plus deterministic generated JSON; current-head A-A qReference construction is frozen after local calibration.",
+    "sourceDetails": {
+      "repository": "simdjson/simdjson",
+      "commit": "8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
+      "sourceTree": ".hone-sources/train/simdjson_simdjson@8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
+      "mutableSurface": "src/generic parsing kernels and architecture implementation translation units; public headers, evaluator, build files, benchmark harness, tests, fixtures, and expected hashes are protected",
+      "upstreamHarness": "benchmark/dom/parse.cpp and benchmark/bench_ondemand.cpp",
+      "relevantTests": 44
+    },
+    "toolchain": {
+      "base": "debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+      "compiler": "GCC 12.2.0",
+      "cmake": "3.25.1-1",
+      "googleBenchmark": "Debian libbenchmark-dev 1.7.1-1",
+      "dockerfile": "Dockerfile",
+      "dockerfileSha256": "sha256:c0750efb496e42bb91892d4c567c806361238941dad36973c6321fc41ec0a318"
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+      "activeImplementation": "arm64 (NEON)",
+      "q": "geometric mean GB/s across three upstream DOM parse corpus results and four upstream Google Benchmark DOM/On-Demand access workloads",
+      "qFail": 0,
+      "peakRssGate": "candidate parser/benchmark peak RSS <= frozen baseline peak RSS * 1.02",
+      "freshProcess": true,
+      "normalization": {
+        "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+        "qBase": 3.3292683971045522,
+        "sigma": 0.07329458514727193,
+        "qReference": 3.6957413228409117,
+        "status": "provisional local locked A-A calibration; final frozen GCE like-for-like re-calibration required"
+      }
+    },
+    "tags": [
+      "m2",
+      "oss",
+      "simdjson",
+      "dom",
+      "ondemand",
+      "performance"
+    ]
+  }
+}
