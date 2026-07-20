@@ -1,0 +1,544 @@
+use crate::metadata::DEFAULT_EXCLUDES;
+use crate::wheel::build_exclude_matcher;
+use crate::{
+    BuildBackendSettings, DirectoryWriter, Error, FileList, ListWriter, PyProjectToml,
+    error_on_venv, find_roots, write_directory_once, write_file_with_directories,
+};
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use fs_err::File;
+use futures_lite::future::block_on;
+use globset::{Glob, GlobSet};
+use rustc_hash::FxHashSet;
+use std::io;
+use std::io::{BufReader, Cursor, Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_tar::{EntryType, Header};
+use tracing::{debug, trace};
+use uv_distribution_filename::{SourceDistExtension, SourceDistFilename};
+use uv_fs::{Simplified, normalize_path};
+use uv_globfilter::{GlobDirFilter, PortableGlobParser};
+use uv_preview::PreviewFeature;
+use uv_toml::has_toml11_features;
+use uv_warnings::warn_user_once;
+use walkdir::WalkDir;
+
+/// Build a source distribution from the source tree and place it in the output directory.
+pub fn build_source_dist(
+    source_tree: &Path,
+    source_dist_directory: &Path,
+    uv_version: &str,
+    show_warnings: bool,
+) -> Result<SourceDistFilename, Error> {
+    let pyproject_toml = PyProjectToml::parse(&source_tree.join("pyproject.toml"))?;
+    let filename = SourceDistFilename {
+        name: pyproject_toml.name().clone(),
+        version: pyproject_toml.version().clone(),
+        extension: SourceDistExtension::TarGz,
+    };
+    let source_dist_path = source_dist_directory.join(filename.to_string());
+
+    if source_dist_path.exists() {
+        fs_err::remove_file(&source_dist_path)?;
+    }
+
+    let temp_file = uv_fs::tempfile_in(source_dist_directory)?;
+    let writer = TarGzWriter::new(temp_file.as_file(), &source_dist_path);
+    write_source_dist(source_tree, writer, uv_version, show_warnings)?;
+    temp_file
+        .persist(&source_dist_path)
+        .map_err(|err| Error::Persist(source_dist_path.clone(), err.error))?;
+
+    Ok(filename)
+}
+
+/// List the files that would be included in a source distribution and their origin.
+pub fn list_source_dist(
+    source_tree: &Path,
+    uv_version: &str,
+    show_warnings: bool,
+) -> Result<(SourceDistFilename, FileList), Error> {
+    let pyproject_toml = PyProjectToml::parse(&source_tree.join("pyproject.toml"))?;
+    let filename = SourceDistFilename {
+        name: pyproject_toml.name().clone(),
+        version: pyproject_toml.version().clone(),
+        extension: SourceDistExtension::TarGz,
+    };
+    let mut files = FileList::new();
+    let writer = ListWriter::new(&mut files);
+    write_source_dist(source_tree, writer, uv_version, show_warnings)?;
+    Ok((filename, files))
+}
+
+/// Build includes and excludes for source tree walking for source dists.
+fn source_dist_matcher(
+    source_tree: &Path,
+    pyproject_toml: &PyProjectToml,
+    settings: BuildBackendSettings,
+    show_warnings: bool,
+) -> Result<(GlobDirFilter, GlobSet), Error> {
+    // File and directories to include in the source directory
+    let mut include_globs = Vec::new();
+    let mut includes: Vec<String> = settings.source_include;
+    // pyproject.toml is always included.
+    includes.push(globset::escape("pyproject.toml"));
+
+    // Check that the source tree contains a module.
+    let (src_root, modules_relative) = find_roots(
+        source_tree,
+        pyproject_toml,
+        &settings.module_root,
+        settings.module_name.as_ref(),
+        settings.namespace,
+        show_warnings,
+    )?;
+    for module_relative in modules_relative {
+        // The wheel must not include any files included by the source distribution (at least until we
+        // have files generated in the source dist -> wheel build step).
+        let path = &uv_fs::relative_to(src_root.join(module_relative), source_tree)
+            .expect("module root is inside source tree");
+        let import_path = normalize_path(path).portable_display().to_string();
+        includes.push(format!("{}/**", globset::escape(&import_path)));
+    }
+    for include in includes {
+        let glob = PortableGlobParser::Uv
+            .parse(&include)
+            .map_err(|err| Error::PortableGlob {
+                field: "tool.uv.build-backend.source-include".to_string(),
+                source: err,
+            })?;
+        include_globs.push(glob);
+    }
+
+    // Include the Readme
+    if let Some(readme) = pyproject_toml
+        .readme()
+        .as_ref()
+        .and_then(|readme| readme.path())
+    {
+        let readme = normalize_path(readme);
+        trace!("Including readme at: {}", readme.user_display());
+        let readme = readme.portable_display().to_string();
+        let glob = Glob::new(&globset::escape(&readme)).expect("escaped globset is parseable");
+        include_globs.push(glob);
+    }
+
+    // Include the license files
+    for license_files in pyproject_toml.license_files_source_dist() {
+        trace!("Including license files at: {license_files}`");
+        let glob = PortableGlobParser::Pep639
+            .parse(license_files)
+            .map_err(|err| Error::PortableGlob {
+                field: "project.license-files".to_string(),
+                source: err,
+            })?;
+        include_globs.push(glob);
+    }
+
+    // Include the data files
+    for (name, directory) in settings.data.iter() {
+        let directory = normalize_path(directory);
+        trace!("Including data ({}) at: {}", name, directory.user_display());
+        if directory
+            .components()
+            .next()
+            .is_some_and(|component| !matches!(component, Component::CurDir | Component::Normal(_)))
+        {
+            return Err(Error::InvalidDataRoot {
+                name: name.to_string(),
+                path: directory.to_path_buf(),
+            });
+        }
+        let directory = directory.portable_display().to_string();
+        let glob = PortableGlobParser::Uv
+            .parse(&format!("{}/**", globset::escape(&directory)))
+            .map_err(|err| Error::PortableGlob {
+                field: format!("tool.uv.build-backend.data.{name}"),
+                source: err,
+            })?;
+        include_globs.push(glob);
+    }
+
+    debug!(
+        "Source distribution includes: {:?}",
+        include_globs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+    let include_matcher =
+        GlobDirFilter::from_globs(include_globs).map_err(|err| Error::GlobSetTooLarge {
+            field: "tool.uv.build-backend.source-include".to_string(),
+            source: err,
+        })?;
+
+    let mut excludes: Vec<String> = Vec::new();
+    if settings.default_excludes {
+        excludes.extend(DEFAULT_EXCLUDES.iter().map(ToString::to_string));
+    }
+    for exclude in settings.source_exclude {
+        // Avoid duplicate entries.
+        if !excludes.contains(&exclude) {
+            excludes.push(exclude);
+        }
+    }
+    debug!("Source dist excludes: {:?}", excludes);
+    let exclude_matcher = build_exclude_matcher(excludes)?;
+    if exclude_matcher.is_match("pyproject.toml") {
+        return Err(Error::PyprojectTomlExcluded);
+    }
+    Ok((include_matcher, exclude_matcher))
+}
+
+/// Shared implementation for building and listing a source distribution.
+fn write_source_dist(
+    source_tree: &Path,
+    mut writer: impl DirectoryWriter,
+    uv_version: &str,
+    show_warnings: bool,
+) -> Result<SourceDistFilename, Error> {
+    let pyproject_toml = PyProjectToml::parse(&source_tree.join("pyproject.toml"))?;
+    for warning in pyproject_toml.check_build_system(uv_version) {
+        warn_user_once!("{warning}");
+    }
+    let settings = pyproject_toml
+        .settings()
+        .cloned()
+        .unwrap_or_else(BuildBackendSettings::default);
+
+    let filename = SourceDistFilename {
+        name: pyproject_toml.name().clone(),
+        version: pyproject_toml.version().clone(),
+        extension: SourceDistExtension::TarGz,
+    };
+
+    let top_level = format!(
+        "{}-{}",
+        pyproject_toml.name().as_dist_info_name(),
+        pyproject_toml.version()
+    );
+
+    let metadata = pyproject_toml.to_metadata(source_tree)?;
+    let metadata_email = metadata.core_metadata_format();
+
+    debug!("Adding content files to source distribution");
+    writer.write_bytes(
+        &Path::new(&top_level)
+            .join("PKG-INFO")
+            .portable_display()
+            .to_string(),
+        metadata_email.as_bytes(),
+    )?;
+
+    // Build tools need to parse `pyproject.toml` in source distributions to extract the
+    // `[build-system]` table, and if any other part of the file contains too new TOML syntax, they
+    // fail to build. This generally doesn't trigger backtracking, so the user is left if a failure
+    // when any (transitive) dependency in their dependency tree has started using a single instance
+    // of TOML 1.1. Most package managers, including pip, are implemented in Python and use stdlib's
+    // tomllib, which only support TOML 1.0 up to including Python 3.14.
+    //
+    // To work around this, we do a best-effort rewrite of `pyproject.toml` to TOML 1.0. We also
+    // add the original `pyproject.toml` as `pyproject.toml.orig` for reference.
+    //
+    // The feature is enabled either explicitly via the preview flag, or automatically when the
+    // `pyproject.toml` is detected to contain TOML 1.1-only syntax.
+    let pyproject_path = source_tree.join("pyproject.toml");
+    let pyproject_contents = fs_err::read_to_string(&pyproject_path)?;
+    let toml_backwards_compatibility =
+        if uv_preview::is_enabled(PreviewFeature::TomlBackwardsCompatibility) {
+            true
+        } else if has_toml11_features(&pyproject_contents) {
+            warn_user_once!(
+                "`pyproject.toml` uses TOML 1.1 features; rewriting to TOML 1.0 for \
+                compatibility with older build tools. Use `--preview-feature \
+                {feature}` to suppress this warning.",
+                feature = PreviewFeature::TomlBackwardsCompatibility
+            );
+            true
+        } else {
+            false
+        };
+    if toml_backwards_compatibility {
+        let mut pyproject_value: toml::Value = toml::from_str(&pyproject_contents)
+            .map_err(|err| Error::Toml(pyproject_path.clone(), err))?;
+        // See https://github.com/toml-rs/toml/issues/1088 for `to_string_pretty`.
+        normalize_toml10_datetimes(&mut pyproject_value);
+        let pyproject_rewritten =
+            toml::to_string_pretty(&pyproject_value).map_err(Error::TomlSerialize)?;
+        writer.write_bytes(
+            &Path::new(&top_level)
+                .join("pyproject.toml")
+                .portable_display()
+                .to_string(),
+            pyproject_rewritten.as_bytes(),
+        )?;
+        writer.write_file(
+            &Path::new(&top_level)
+                .join("pyproject.toml.orig")
+                .portable_display()
+                .to_string(),
+            &pyproject_path,
+        )?;
+    }
+
+    let (include_matcher, exclude_matcher) =
+        source_dist_matcher(source_tree, &pyproject_toml, settings, show_warnings)?;
+
+    let mut files_visited = 0;
+    let mut written_directories = FxHashSet::<PathBuf>::default();
+    let top_level_directory = PathBuf::from(&top_level).join("");
+    write_directory_once(&mut writer, &mut written_directories, &top_level_directory)?;
+    for entry in WalkDir::new(source_tree)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            // TODO(konsti): This should be prettier.
+            let relative = entry
+                .path()
+                .strip_prefix(source_tree)
+                .expect("walkdir starts with root");
+
+            // Fast path: Don't descend into a directory that can't be included. This is the most
+            // important performance optimization, it avoids descending into directories such as
+            // `.venv`. While walkdir is generally cheap, we still avoid traversing large data
+            // directories that often exist on the top level of a project. This is especially noticeable
+            // on network file systems with high latencies per operation (while contiguous reading may
+            // still be fast).
+            include_matcher.match_directory(relative) && !exclude_matcher.is_match(relative)
+        })
+    {
+        let entry = entry.map_err(|err| Error::WalkDir {
+            root: source_tree.to_path_buf(),
+            err,
+        })?;
+
+        files_visited += 1;
+        if files_visited > 10000 {
+            warn_user_once!(
+                "Visited more than 10,000 files for source distribution build. \
+                Consider using more constrained includes or more excludes."
+            );
+        }
+        // TODO(konsti): This should be prettier.
+        let relative = entry
+            .path()
+            .strip_prefix(source_tree)
+            .expect("walkdir starts with root");
+
+        if !include_matcher.match_path(relative) || exclude_matcher.is_match(relative) {
+            trace!("Excluding from sdist: {}", relative.user_display());
+            continue;
+        }
+
+        if toml_backwards_compatibility {
+            // `pyproject.toml` is handled separately.
+            if relative == "pyproject.toml" {
+                continue;
+            }
+            if relative == "pyproject.toml.orig" {
+                debug!("Ignoring existing `pyproject.toml.orig`");
+                continue;
+            }
+        }
+
+        error_on_venv(entry.file_name(), entry.path())?;
+
+        if entry.file_type().is_dir() {
+            continue;
+        }
+
+        debug!("Adding to sdist: {}", relative.user_display());
+        write_file_with_directories(
+            &mut writer,
+            &mut written_directories,
+            Path::new(&top_level),
+            relative,
+            entry.path(),
+        )?;
+    }
+    debug!("Visited {files_visited} files for source dist build");
+
+    writer.close(&top_level)?;
+
+    Ok(filename)
+}
+
+pub(crate) struct SyncReader<R> {
+    reader: R,
+}
+
+impl<R> SyncReader<R> {
+    pub(crate) fn new(reader: R) -> Self {
+        Self { reader }
+    }
+}
+
+impl<R: Read + Unpin> AsyncRead for SyncReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let read = self.reader.read(buffer.initialize_unfilled())?;
+        buffer.advance(read);
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct SyncWriter<W> {
+    writer: W,
+}
+
+impl<W> SyncWriter<W> {
+    fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+impl<W: Write + Unpin> AsyncWrite for SyncWriter<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(self.writer.write(buffer))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // `tokio::io::copy` flushes after each copied entry. Forwarding those flushes to the gzip
+        // encoder changes the deflate stream, even though the tar payload is identical. The
+        // encoder is finalized by `GzEncoder::finish` when the archive is closed.
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(context)
+    }
+}
+
+struct TarGzWriter<W: Write + Unpin + Send> {
+    path: PathBuf,
+    tar: tokio_tar::Builder<SyncWriter<GzEncoder<W>>>,
+}
+
+impl<W: Write + Unpin + Send> TarGzWriter<W> {
+    fn new(writer: W, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let enc = GzEncoder::new(writer, Compression::default());
+        let tar = tokio_tar::Builder::new_non_terminated(SyncWriter::new(enc));
+        Self { path, tar }
+    }
+}
+
+fn normalize_toml10_datetimes(value: &mut toml::Value) {
+    match value {
+        toml::Value::Datetime(datetime) => {
+            if let Some(time) = datetime.time.as_mut()
+                && time.second.is_none()
+            {
+                time.second = Some(0);
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                normalize_toml10_datetimes(value);
+            }
+        }
+        toml::Value::Table(values) => {
+            for (_, value) in values.iter_mut() {
+                normalize_toml10_datetimes(value);
+            }
+        }
+        toml::Value::String(_)
+        | toml::Value::Integer(_)
+        | toml::Value::Float(_)
+        | toml::Value::Boolean(_) => {}
+    }
+}
+
+impl<W: Write + Unpin + Send> DirectoryWriter for TarGzWriter<W> {
+    fn write_bytes(&mut self, path: &str, bytes: &[u8]) -> Result<(), Error> {
+        let mut header = Header::new_gnu();
+        // Work around bug in Python's std tar module
+        // https://github.com/python/cpython/issues/141707
+        // https://github.com/astral-sh/uv/pull/17043#issuecomment-3636841022
+        header.set_entry_type(EntryType::Regular);
+        header.set_size(bytes.len() as u64);
+        // Reasonable default to avoid 0o000 permissions, the user's umask will be applied on
+        // unpacking.
+        header.set_mode(0o644);
+        block_on(
+            self.tar
+                .append_data(&mut header, path, SyncReader::new(Cursor::new(bytes))),
+        )
+        .map_err(|err| Error::TarWrite(self.path.clone(), err))?;
+        Ok(())
+    }
+
+    fn write_file(&mut self, path: &str, file: &Path) -> Result<(), Error> {
+        let metadata = fs_err::metadata(file)?;
+        let mut header = Header::new_gnu();
+        // Work around bug in Python's std tar module
+        // https://github.com/python/cpython/issues/141707
+        // https://github.com/astral-sh/uv/pull/17043#issuecomment-3636841022
+        header.set_entry_type(EntryType::Regular);
+        // Preserve the executable bit, especially for scripts
+        #[cfg(unix)]
+        let executable_bit = {
+            use std::os::unix::fs::PermissionsExt;
+            file.metadata()?.permissions().mode() & 0o111 != 0
+        };
+        // Windows has no executable bit
+        #[cfg(not(unix))]
+        let executable_bit = false;
+
+        // Set reasonable defaults to avoid 0o000 permissions, while avoiding adding the exact
+        // filesystem permissions to the archive for reproducibility. Where applicable, the
+        // operating system filters the stored permission by the user's umask when unpacking.
+        if executable_bit {
+            header.set_mode(0o755);
+        } else {
+            header.set_mode(0o644);
+        }
+        header.set_size(metadata.len());
+        let reader = BufReader::new(File::open(file)?);
+        block_on(
+            self.tar
+                .append_data(&mut header, path, SyncReader::new(reader)),
+        )
+        .map_err(|err| Error::TarWrite(self.path.clone(), err))?;
+        Ok(())
+    }
+
+    fn write_directory(&mut self, directory: &str) -> Result<(), Error> {
+        let mut header = Header::new_gnu();
+        // Directories are always executable, which means they can be listed.
+        header.set_mode(0o755);
+        header.set_entry_type(EntryType::Directory);
+        header.set_size(0);
+        block_on(
+            self.tar
+                .append_data(&mut header, directory, SyncReader::new(io::empty())),
+        )
+        .map_err(|err| Error::TarWrite(self.path.clone(), err))?;
+        Ok(())
+    }
+
+    fn close(self, _dist_info_dir: &str) -> Result<(), Error> {
+        let path = self.path;
+        let writer =
+            block_on(self.tar.into_inner()).map_err(|err| Error::TarWrite(path.clone(), err))?;
+        writer
+            .into_inner()
+            .finish()
+            .map_err(|err| Error::TarWrite(path, err))?;
+        Ok(())
+    }
+}

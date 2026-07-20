@@ -1,0 +1,22 @@
+[package]
+name = "temp-env"
+version = "0.3.6"
+authors = ["Volker Mische <volker.mische@gmail.com>", "Fabian Braun <fabian-braun-os@mailbox.org>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vmx/temp-env"
+description = "Set environment variables temporarily."
+keywords = ["env", "environment", "envvar", "temporary", "testing"]
+categories = ["development-tools", "development-tools::testing"]
+edition = "2018"
+rust-version = "1.62.1"
+
+[dependencies]
+futures = { version = "0.3.21", optional = true }
+parking_lot = "0.12.1"
+
+[dev-dependencies]
+tokio = { version = "1.21.1", features = ["full"]}
+
+[features]
+default = []
+async_closure = ["dep:futures"]

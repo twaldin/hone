@@ -1,0 +1,42 @@
+[package]
+name = "tracing-tree"
+version = "0.4.1"
+authors = ["David Barsky <me@davidbarsky.com>", "Nathan Whitaker", "Oli Scherer <tracing-tree@oli-obk.de>"]
+edition = "2018"
+license = "MIT OR Apache-2.0"
+description = "A Tracing Layer which prints a tree of spans and events."
+repository = "https://github.com/davidbarsky/tracing-tree"
+readme = "README.md"
+rust-version = "1.70"
+resolver = "2"
+
+[dependencies]
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "registry",
+    "fmt",
+    "std",
+] }
+nu-ansi-term = "0.50.0"
+tracing-log = { version = "0.2", optional = true, default-features = false, features = [
+    "std",
+    "log-tracer",
+] }
+time = { version = "0.3.20", optional = true, features = [
+    "formatting",
+    "local-offset",
+] }
+
+[features]
+default = ["tracing-log"]
+tracing-log = ["dep:tracing-log"]
+
+[dev-dependencies]
+tracing = "0.1"
+ui_test = "0.7"
+futures = "0.3"
+log = "0.4"
+
+[[test]]
+name = "ui"
+harness = false

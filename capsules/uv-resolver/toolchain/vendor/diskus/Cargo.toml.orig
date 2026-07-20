@@ -1,0 +1,48 @@
+[package]
+authors = ["David Peter <mail@david-peter.de>"]
+categories = ["command-line-utilities"]
+description = "A minimal, fast alternative to 'du -sh'."
+homepage = "https://github.com/sharkdp/diskus"
+license = "MIT/Apache-2.0"
+name = "diskus"
+readme = "README.md"
+repository = "https://github.com/sharkdp/diskus"
+version = "0.9.0"
+edition = "2021"
+rust-version = "1.80"
+
+[features]
+default = ["cli"]
+cli = [
+    "dep:clap",
+    "dep:humansize",
+    "dep:num-format",
+    "dep:atty",
+]
+
+[dependencies]
+# Library dependencies
+rayon = "1.11"
+crossbeam-channel = "0.5"
+
+# CLI dependencies (optional)
+humansize = { version = "2.1", optional = true }
+num-format = { version = "0.4", optional = true }
+atty = { version = "0.2", optional = true }
+clap = { version = "4.5", features = [
+    "suggestions",
+    "color",
+    "wrap_help",
+], optional = true }
+
+[dev-dependencies]
+tempdir = "0.3"
+
+[[bin]]
+name = "diskus"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[profile.release]
+lto = true
+codegen-units = 1

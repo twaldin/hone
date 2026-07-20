@@ -1,0 +1,111 @@
+┐fibonacci_seq{to=5}
+├─ DEBUG Pushing 0 fibonacci
+└─┐nth_fibonacci{n=0}
+  ├─ DEBUG Base case
+┌─┘
+├─ DEBUG Pushing 1 fibonacci
+└─┐nth_fibonacci{n=1}
+  ├─ DEBUG Base case
+┌─┘
+├─ DEBUG Pushing 2 fibonacci
+└─┐nth_fibonacci{n=2}
+  ├─ DEBUG Recursing
+  └─┐nth_fibonacci{n=1}
+    ├─ DEBUG Base case
+  ┌─┘
+  └─┐nth_fibonacci{n=0}
+    ├─ DEBUG Base case
+  ┌─┘
+┌─┘
+├─ DEBUG Pushing 3 fibonacci
+└─┐nth_fibonacci{n=3}
+  ├─ DEBUG Recursing
+  └─┐nth_fibonacci{n=2}
+    ├─ DEBUG Recursing
+    └─┐nth_fibonacci{n=1}
+      ├─ DEBUG Base case
+    ┌─┘
+    └─┐nth_fibonacci{n=0}
+      ├─ DEBUG Base case
+    ┌─┘
+  ┌─┘
+  └─┐nth_fibonacci{n=1}
+    ├─ DEBUG Base case
+  ┌─┘
+┌─┘
+├─ DEBUG Pushing 4 fibonacci
+└─┐nth_fibonacci{n=4}
+  ├─ DEBUG Recursing
+  └─┐nth_fibonacci{n=3}
+    ├─ DEBUG Recursing
+    └─┐nth_fibonacci{n=2}
+      ├─ DEBUG Recursing
+      └─┐nth_fibonacci{n=1}
+        ├─ DEBUG Base case
+      ┌─┘
+      └─┐nth_fibonacci{n=0}
+        ├─ DEBUG Base case
+      ┌─┘
+    ┌─┘
+    └─┐nth_fibonacci{n=1}
+      ├─ DEBUG Base case
+    ┌─┘
+  ┌─┘
+  └─┐nth_fibonacci{n=2}
+    ├─ DEBUG Recursing
+    └─┐nth_fibonacci{n=1}
+      ├─ DEBUG Base case
+    ┌─┘
+    └─┐nth_fibonacci{n=0}
+      ├─ DEBUG Base case
+    ┌─┘
+  ┌─┘
+┌─┘
+├─ DEBUG Pushing 5 fibonacci
+└─┐nth_fibonacci{n=5}
+  ├─ DEBUG Recursing
+  └─┐nth_fibonacci{n=4}
+    ├─ DEBUG Recursing
+    └─┐nth_fibonacci{n=3}
+      ├─ DEBUG Recursing
+      └─┐nth_fibonacci{n=2}
+        ├─ DEBUG Recursing
+        └─┐nth_fibonacci{n=1}
+          ├─ DEBUG Base case
+        ┌─┘
+        └─┐nth_fibonacci{n=0}
+          ├─ DEBUG Base case
+        ┌─┘
+      ┌─┘
+      └─┐nth_fibonacci{n=1}
+        ├─ DEBUG Base case
+      ┌─┘
+    ┌─┘
+    └─┐nth_fibonacci{n=2}
+      ├─ DEBUG Recursing
+      └─┐nth_fibonacci{n=1}
+        ├─ DEBUG Base case
+      ┌─┘
+      └─┐nth_fibonacci{n=0}
+        ├─ DEBUG Base case
+      ┌─┘
+    ┌─┘
+  ┌─┘
+  └─┐nth_fibonacci{n=3}
+    ├─ DEBUG Recursing
+    └─┐nth_fibonacci{n=2}
+      ├─ DEBUG Recursing
+      └─┐nth_fibonacci{n=1}
+        ├─ DEBUG Base case
+      ┌─┘
+      └─┐nth_fibonacci{n=0}
+        ├─ DEBUG Base case
+      ┌─┘
+    ┌─┘
+    └─┐nth_fibonacci{n=1}
+      ├─ DEBUG Base case
+    ┌─┘
+  ┌─┘
+┌─┘
+┘
+INFO The first 5 fibonacci numbers are [1, 1, 2, 3, 5, 8]

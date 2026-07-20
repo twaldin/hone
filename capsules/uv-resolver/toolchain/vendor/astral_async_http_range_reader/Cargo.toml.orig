@@ -1,0 +1,35 @@
+[package]
+name = "astral_async_http_range_reader"
+authors = ["Bas Zalmstra <zalmstra.bas@gmail.com>"]
+version = "0.11.0"
+edition = "2021"
+description = "A library for streaming reading of files over HTTP using range requests"
+license = "MIT"
+repository = "https://github.com/astral-sh/async_http_range_reader"
+exclude = ["test-data/*"]
+rust-version = "1.74"
+
+[lib]
+name = "async_http_range_reader"
+
+[dependencies]
+futures = "0.3.28"
+http-content-range = "0.2.0"
+itertools = "0.14.0"
+memmap2 = "0.9.0"
+reqwest = { version = "0.13.1", default-features = false, features = ["stream"] }
+reqwest-middleware = { version = "0.5.1", package = "astral-reqwest-middleware" }
+tokio = { version = "1.33.0", default-features = false }
+tokio-stream = { version = "0.1.14", features = ["sync"] }
+tokio-util = "0.7.9"
+thiserror = "2.0.18"
+tracing = "0.1.40"
+
+[dev-dependencies]
+axum = { version = "0.7.5", default-features = false, features = ["tokio", "http1"] }
+tokio = { version = "1.33.0", default-features = false, features = ["macros", "test-util"] }
+tower-http = { version = "0.6.1", default-features = false, features = ["fs"] }
+astral_async_zip = { version = "0.0.17", default-features = false, features = ["tokio"] }
+assert_matches = "1.5.0"
+rstest = { version = "0.26.0" }
+url = { version = "2.4.1" }

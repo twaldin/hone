@@ -1,0 +1,748 @@
+//!
+//! Tools to render plots
+//!
+
+use crate::build::{PlotIterator, PlotRes, Point};
+
+use super::*;
+mod render_base;
+mod render_plot;
+
+///
+/// Specify options for the svg plots
+///
+#[derive(Clone)]
+pub struct RenderFrameBuilder {
+    num_css_classes: Option<usize>,
+    preserve_aspect: bool,
+    dim: Option<[f64; 2]>,
+    xtick_lines: bool,
+    ytick_lines: bool,
+    precision: usize,
+    bar_width: f64,
+}
+
+impl Default for RenderFrameBuilder {
+    fn default() -> Self {
+        RenderFrameBuilder {
+            num_css_classes: Some(8),
+            preserve_aspect: false,
+            dim: None,
+            xtick_lines: false,
+            ytick_lines: false,
+            precision: 2,
+            bar_width: 20.0,
+        }
+    }
+}
+
+impl RenderFrameBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_viewbox(&mut self, dim: [f64; 2]) -> &mut Self {
+        self.dim = Some(dim);
+        self
+    }
+
+    pub fn with_tick_lines(&mut self, a: [bool; 2]) -> &mut Self {
+        self.xtick_lines = a[0];
+        self.ytick_lines = a[1];
+        self
+    }
+
+    ///
+    /// The number of distinct css classes. If there are more plots than
+    /// classes, then they will wrap around. The default value is 8.
+    ///
+    /// A value of None, means it will never wrap around.
+    ///
+    pub fn num_css_class(&mut self, a: Option<usize>) -> &mut Self {
+        self.num_css_classes = a;
+        self
+    }
+
+    ///
+    /// Specify the number of decimal places of each plot value in the SVG output itself.
+    /// Defaults to a precision of 2 (2 decimal places).
+    ///
+    /// For most usecases, you don't need a high precision. However, if you plan on blowing
+    /// up the svg output significantly or zooming in a bunch, then you might want better
+    /// precision.
+    ///
+    pub fn with_precision(&mut self, precision: usize) -> &mut Self {
+        self.precision = precision;
+        self
+    }
+    ///
+    /// Preserve the aspect ratio by drawing a smaller graph in the same area.
+    ///
+    pub fn preserve_aspect(&mut self) -> &mut Self {
+        self.preserve_aspect = true;
+        self
+    }
+
+    pub fn bar_width(&mut self, val: f64) -> &mut Self {
+        self.bar_width = val;
+        self
+    }
+
+    #[deprecated]
+    pub fn move_into(&mut self) -> Self {
+        self.clone()
+    }
+
+    pub fn build(&self) -> RenderFrame {
+        let (width, height) = if let Some([x, y]) = self.dim {
+            (x, y)
+        } else {
+            let [x, y] = Header::new().get_viewbox();
+            (x, y)
+        };
+
+        let ideal_dash_size = 20.0;
+        let padding = 150.0;
+        let paddingy = 100.0;
+
+        //The range over which the data will be scaled to fit
+        let (scalex, scaley) = if self.preserve_aspect {
+            if width > height {
+                (height - paddingy * 2.0, height - paddingy * 2.0)
+            } else {
+                (width - padding * 2.0, width - padding * 2.0)
+            }
+        } else {
+            (width - padding * 2.0, height - paddingy * 2.0)
+        };
+
+        let distancex_min_to_max = scalex;
+        let distancey_min_to_max = scaley;
+
+        let (xaspect_offset, yaspect_offset) = if self.preserve_aspect {
+            if width > height {
+                (-padding + width / 2.0 - distancey_min_to_max / 2.0, 0.0)
+            } else {
+                (
+                    0.0,
+                    -height + paddingy + height / 2.0 + distancey_min_to_max / 2.0,
+                )
+            }
+        } else {
+            (0.0, 0.0)
+        };
+
+        let ideal_xtick_spacing = 80.0;
+
+        let ideal_ytick_spacing = 60.0;
+
+        let ideal_num_xsteps = (distancex_min_to_max / ideal_xtick_spacing).floor() as u32;
+        let ideal_num_ysteps = (distancey_min_to_max / ideal_ytick_spacing).floor() as u32;
+        let ideal_num_xsteps = ideal_num_xsteps.max(2);
+        let ideal_num_ysteps = ideal_num_ysteps.max(2);
+
+        let spacing = padding / 3.0;
+        let legendx1 = width - padding / 1.2 + padding / 30.0;
+
+        RenderFrame {
+            boundx: ticks::RenderFrameBound {
+                ideal_num_steps: ideal_num_xsteps,
+                ideal_dash_size,
+                max: scalex,
+                axis: Axis::X,
+            },
+            boundy: ticks::RenderFrameBound {
+                ideal_num_steps: ideal_num_ysteps,
+                ideal_dash_size,
+                max: scaley,
+                axis: Axis::Y,
+            },
+
+            width,
+            height,
+            padding,
+            paddingy,
+            xaspect_offset,
+            yaspect_offset,
+            spacing,
+            legendx1,
+            num_css_classes: self.num_css_classes,
+            xtick_lines: self.xtick_lines,
+            ytick_lines: self.ytick_lines,
+            precision: self.precision,
+            bar_width: self.bar_width,
+        }
+    }
+}
+
+///
+/// Contains graphical information for a svg graph.
+///
+#[derive(Clone)]
+pub struct RenderFrame {
+    boundx: ticks::RenderFrameBound,
+    boundy: ticks::RenderFrameBound,
+    width: f64,
+    height: f64,
+    padding: f64,
+    paddingy: f64,
+    xaspect_offset: f64,
+    yaspect_offset: f64,
+    spacing: f64,
+    legendx1: f64,
+    num_css_classes: Option<usize>,
+    xtick_lines: bool,
+    ytick_lines: bool,
+    precision: usize,
+    bar_width: f64,
+}
+
+impl RenderFrame {
+    pub fn data<X: PlotNum, Y: PlotNum, L: Point<X = X, Y = Y>, J: build::PlotIterator<L = L>>(
+        self,
+        plots: J,
+    ) -> Stage1<PlotRes<J::P, L>, X::DefaultTicks, Y::DefaultTicks>
+    where
+        X: HasDefaultTicks,
+        Y: HasDefaultTicks,
+    {
+        render::Stage1::from_parts(plots, X::default_ticks(), Y::default_ticks(), self)
+    }
+}
+
+#[deprecated]
+pub fn render_opt() -> RenderFrameBuilder {
+    RenderFrameBuilder::default()
+}
+
+///
+/// Link some plots with a way to render them.
+///
+pub struct Stage1<P: PlotIterator, TX, TY> {
+    //TODO make this a reference eventually
+    opt: RenderFrame,
+    tickx: TX,
+    ticky: TY,
+    plots: P,
+    boundx: DataBound<<P::L as Point>::X>,
+    boundy: DataBound<<P::L as Point>::Y>,
+}
+
+impl<X: PlotNum, Y: PlotNum, L: Point<X = X, Y = Y>, P: build::PlotIterator<L = L>>
+    Stage1<P, X::DefaultTicks, Y::DefaultTicks>
+where
+    X: HasDefaultTicks,
+    Y: HasDefaultTicks,
+{
+    pub fn new(plots: P) -> Stage1<PlotRes<P::P, L>, X::DefaultTicks, Y::DefaultTicks> {
+        Self::from_parts(
+            plots,
+            X::default_ticks(),
+            Y::default_ticks(),
+            RenderFrameBuilder::new().build(),
+        )
+    }
+}
+
+impl<
+        X: PlotNum,
+        Y: PlotNum,
+        L: Point<X = X, Y = Y>,
+        P: build::PlotIterator<L = L>,
+        TX: TickDistGen<X>,
+        TY: TickDistGen<Y>,
+    > Stage1<P, TX, TY>
+{
+    pub fn from_parts(
+        plots: P,
+        tickx: TX,
+        ticky: TY,
+        opt: RenderFrame,
+    ) -> Stage1<PlotRes<P::P, L>, TX, TY> {
+        let PlotRes {
+            area,
+            it,
+            num_plots,
+        } = plots.unpack();
+
+        let (boundx, boundy) = area.build();
+
+        Stage1 {
+            opt,
+            plots: PlotRes {
+                it,
+                area,
+                num_plots,
+            },
+            ticky,
+            tickx,
+            boundx,
+            boundy,
+        }
+    }
+
+    #[deprecated]
+    pub fn map_opt<F: FnOnce(RenderFrame) -> RenderFrame>(self, func: F) -> Self {
+        Stage1 {
+            opt: func(self.opt),
+            tickx: self.tickx,
+            ticky: self.ticky,
+            plots: self.plots,
+            boundx: self.boundx,
+            boundy: self.boundy,
+        }
+    }
+    pub fn map_xticks<TTT: TickDistGen<X>, F: FnOnce(TX) -> TTT>(
+        self,
+        func: F,
+    ) -> Stage1<P, TTT, TY> {
+        let tickx = func(self.tickx);
+        Stage1 {
+            opt: self.opt,
+            tickx,
+            ticky: self.ticky,
+            plots: self.plots,
+            boundx: self.boundx,
+            boundy: self.boundy,
+        }
+    }
+
+    pub fn map_yticks<TTT: TickDistGen<Y>, F: FnOnce(TY) -> TTT>(
+        self,
+        func: F,
+    ) -> Stage1<P, TX, TTT> {
+        let ticky = func(self.ticky);
+        Stage1 {
+            opt: self.opt,
+            tickx: self.tickx,
+            ticky,
+            plots: self.plots,
+            boundx: self.boundx,
+            boundy: self.boundy,
+        }
+    }
+
+    pub fn build_map<F: FnOnce(Stage2<P, TX::Res, TY::Res>) -> K, K>(self, func: F) -> K {
+        let k = self.build();
+        func(k)
+    }
+
+    pub fn build(self) -> Stage2<P, TX::Res, TY::Res> {
+        let mut index_counter = 0;
+        let data = self;
+        let opt = data.opt;
+
+        let xticks = data.tickx.generate(
+            &data.boundx,
+            &opt.boundx,
+            IndexRequester::new(&mut index_counter),
+        );
+        let yticks = data.ticky.generate(
+            &data.boundy,
+            &opt.boundy,
+            IndexRequester::new(&mut index_counter),
+        );
+        Stage2 {
+            opt,
+            xticks,
+            yticks,
+            boundx: data.boundx,
+            boundy: data.boundy,
+            plots: data.plots,
+        }
+    }
+
+    pub fn build_and_label<Fmt: BaseFmt>(self, fmt: Fmt) -> Stage3<P, TX::Res, TY::Res, Fmt> {
+        self.build().label(fmt)
+    }
+}
+
+pub struct Stage2<P: PlotIterator, A, B> {
+    opt: RenderFrame,
+    xticks: A,
+    yticks: B,
+    plots: P,
+    boundx: DataBound<<P::L as Point>::X>,
+    boundy: DataBound<<P::L as Point>::Y>,
+}
+
+impl<
+        X: PlotNum,
+        Y: PlotNum,
+        L: Point<X = X, Y = Y>,
+        P: PlotIterator<L = L>,
+        A: TickDist<Num = X>,
+        B: TickDist<Num = Y>,
+    > Stage2<P, A, B>
+{
+    pub fn label<Fmt: BaseFmt>(self, fmt: Fmt) -> Stage3<P, A, B, Fmt> {
+        Stage3 {
+            data: self,
+            base: fmt,
+        }
+    }
+
+    pub fn boundx(&self) -> &DataBound<X> {
+        &self.boundx
+    }
+
+    pub fn boundy(&self) -> &DataBound<Y> {
+        &self.boundy
+    }
+
+    pub fn xticks(&self) -> &A {
+        &self.xticks
+    }
+    pub fn yticks(&self) -> &B {
+        &self.yticks
+    }
+
+    // pub fn map_xticks<X: TickDist<Num = P::X>, F: FnOnce(A) -> X>(
+    //     self,
+    //     func: F,
+    // ) -> DataBuilt<P, X, B> {
+    //     let k = func(self.xticks);
+    //     DataBuilt {
+    //         opt: self.opt,
+    //         xticks: k,
+    //         yticks: self.yticks,
+    //         plots: self.plots,
+    //         boundx: self.boundx,
+    //         boundy: self.boundy,
+    //     }
+    // }
+
+    // pub fn map_yticks<Y: TickDist<Num = P::Y>, F: FnOnce(B) -> Y>(
+    //     self,
+    //     func: F,
+    // ) -> DataBuilt<P, A, Y> {
+    //     let k = func(self.yticks);
+    //     DataBuilt {
+    //         opt: self.opt,
+    //         xticks: self.xticks,
+    //         yticks: k,
+    //         plots: self.plots,
+    //         boundx: self.boundx,
+    //         boundy: self.boundy,
+    //     }
+    // }
+}
+
+pub struct Stage3<P: PlotIterator, A, B, BB> {
+    data: Stage2<P, A, B>,
+    base: BB,
+}
+
+impl<X: PlotNum, Y: PlotNum, L: Point<X = X, Y = Y>, P, A, B, BB> Stage3<P, A, B, BB>
+where
+    P: PlotIterator<L = L>,
+    A: crate::ticks::TickDist<Num = X>,
+    B: crate::ticks::TickDist<Num = Y>,
+    BB: BaseFmt,
+{
+    pub fn append_to<E: Elem>(self, elem: E) -> Stage4<elem::Append<E, Self>> {
+        Stage4(elem.append(self))
+    }
+
+    pub fn headless(self) -> Stage4<Self> {
+        Stage4(self)
+    }
+}
+
+use tagu::stack::*;
+impl<X: PlotNum, Y: PlotNum, L: Point<X = X, Y = Y>, P, A, B, BB> ElemOuter for Stage3<P, A, B, BB>
+where
+    P: PlotIterator<L = L>,
+    A: crate::ticks::TickDist<Num = X>,
+    B: crate::ticks::TickDist<Num = Y>,
+    BB: BaseFmt,
+{
+    fn render<'a>(
+        mut self,
+        mut writer: ElemStack<'a, Sentinel>,
+    ) -> Result<ElemStack<'a, Sentinel>, fmt::Error> {
+        writer.put(hbuild::single("circle").with(attrs!(
+            ("r", "1e5"),
+            ("class", "poloto_background"),
+            ("fill", "white")
+        )))?;
+
+        let writer = render::render_plot::render_plot(
+            writer,
+            &self.data.boundx,
+            &self.data.boundy,
+            &self.data.opt,
+            self.data.plots,
+        )?;
+
+        render::render_base::render_base(
+            writer,
+            self.data.xticks,
+            self.data.yticks,
+            &self.data.boundx,
+            &self.data.boundy,
+            &mut self.base,
+            &self.data.opt,
+        )
+    }
+}
+
+impl<A, B, C> BaseFmt for (A, B, C)
+where
+    A: Display,
+    B: Display,
+    C: Display,
+{
+    fn write_title(&self, writer: &mut dyn fmt::Write) -> fmt::Result {
+        write!(writer, "{}", self.0)
+    }
+    fn write_xname(&self, writer: &mut dyn fmt::Write) -> fmt::Result {
+        write!(writer, "{}", self.1)
+    }
+    fn write_yname(&self, writer: &mut dyn fmt::Write) -> fmt::Result {
+        write!(writer, "{}", self.2)
+    }
+}
+
+pub struct Stage4<R>(R);
+impl<R: Elem + Locked> Stage4<R> {
+    pub fn render_stdout(self) {
+        tagu::render(self.0, tagu::stdout_fmt()).unwrap()
+    }
+
+    pub fn render_fmt_write<T: fmt::Write>(self, w: T) -> fmt::Result {
+        tagu::render(self.0, w)
+    }
+
+    pub fn render_io_write<T: std::io::Write>(self, w: T) -> std::fmt::Result {
+        tagu::render(self.0, tagu::tools::upgrade_write(w))
+    }
+
+    pub fn render_string(self) -> Result<String, fmt::Error> {
+        let mut s = String::new();
+        tagu::render(self.0, &mut s)?;
+        Ok(s)
+    }
+}
+
+impl<R> Locked for Stage4<R> {}
+
+impl<R: Elem> Elem for Stage4<R> {
+    type Tail = R::Tail;
+
+    fn render_head(self, w: elem::ElemWrite) -> Result<Self::Tail, fmt::Error> {
+        self.0.render_head(w)
+    }
+}
+
+///
+/// Default svg header
+///
+#[derive(Copy, Clone)]
+pub struct Header<A> {
+    dim: [f64; 2],
+    viewbox: [f64; 2],
+    attr: A,
+}
+impl Default for Header<()> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+use tagu::{attr::Attr, elem::Locked};
+impl Header<()> {
+    pub fn new() -> Self {
+        let a = [800.0, 500.0];
+        Header {
+            dim: a,
+            viewbox: a,
+            attr: (),
+        }
+    }
+}
+
+impl<A: Attr> Header<A> {
+    pub fn with<AA: Attr>(self, attr: AA) -> Header<AA> {
+        Header {
+            dim: self.dim,
+            viewbox: self.viewbox,
+            attr,
+        }
+    }
+
+    pub fn with_viewbox_width(self, width: f64) -> Self {
+        let [xx, yy] = self.dim;
+        let vh = width * (yy / xx);
+        Header {
+            dim: self.dim,
+            viewbox: [width, vh],
+            attr: self.attr,
+        }
+    }
+
+    pub fn get_viewbox(&self) -> [f64; 2] {
+        self.viewbox
+    }
+
+    pub fn with_dim(self, dim: [f64; 2]) -> Self {
+        Header {
+            dim,
+            viewbox: self.viewbox,
+            attr: self.attr,
+        }
+    }
+    pub fn with_viewbox(self, viewbox: [f64; 2]) -> Self {
+        Header {
+            dim: self.dim,
+            viewbox,
+            attr: self.attr,
+        }
+    }
+
+    pub fn light_theme(self) -> elem::Append<Self, Theme<'static>> {
+        self.append(Theme::light())
+    }
+    pub fn dark_theme(self) -> elem::Append<Self, Theme<'static>> {
+        self.append(Theme::dark())
+    }
+}
+
+impl<A> Locked for Header<A> {}
+impl<A: Attr> Elem for Header<A> {
+    type Tail = tagu::elem::ElementTail<&'static str>;
+    fn render_head(self, w: elem::ElemWrite) -> Result<Self::Tail, fmt::Error> {
+        let elem = tagu::build::elem("svg").with(attrs!(
+            ("class", "poloto"),
+            ("width", self.dim[0]),
+            ("height", self.dim[1]),
+            (
+                "viewBox",
+                format_move!("{} {} {} {}", 0, 0, self.viewbox[0], self.viewbox[1])
+            ),
+            ("xmlns", "http://www.w3.org/2000/svg"),
+            self.attr
+        ));
+
+        elem.render_head(w)
+    }
+}
+
+///
+/// Default theme
+///
+#[derive(Copy, Clone)]
+pub struct Theme<'a> {
+    styles: &'a str,
+}
+
+impl Theme<'static> {
+    pub const fn light() -> Theme<'static> {
+        /// Default light theme
+
+        const STYLE_CONFIG_LIGHT_DEFAULT: &str = ".poloto{
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  font-family:Roboto,sans-serif;
+  font-size:16px;
+}
+.poloto_background{fill:AliceBlue;}
+.poloto_scatter{stroke-width:7}
+.poloto_line{stroke-width:2}
+.poloto_text{fill: black;}
+.poloto_name{font-size:24px;dominant-baseline:auto;text-anchor:middle;}
+.poloto_where{dominant-baseline:middle;text-anchor:start}
+.poloto_text.poloto_legend{font-size:20px;dominant-baseline:middle;text-anchor:start;}
+.poloto_text.poloto_ticks.poloto_y{dominant-baseline:middle;text-anchor:end}
+.poloto_text.poloto_ticks.poloto_x{dominant-baseline:auto;text-anchor:middle}
+.poloto_imgs.poloto_ticks{stroke: black;stroke-width:3;fill:none;stroke-dasharray:none}
+.poloto_grid{stroke:gray;stroke-width:0.5}
+
+.poloto0.poloto_stroke{stroke:blue;}
+.poloto1.poloto_stroke{stroke:red;}
+.poloto2.poloto_stroke{stroke:green;}
+.poloto3.poloto_stroke{stroke:gold;}
+.poloto4.poloto_stroke{stroke:aqua;}
+.poloto5.poloto_stroke{stroke:lime;}
+.poloto6.poloto_stroke{stroke:orange;}
+.poloto7.poloto_stroke{stroke:chocolate;}
+.poloto0.poloto_fill{fill:blue;}
+.poloto1.poloto_fill{fill:red;}
+.poloto2.poloto_fill{fill:green;}
+.poloto3.poloto_fill{fill:gold;}
+.poloto4.poloto_fill{fill:aqua;}
+.poloto5.poloto_fill{fill:lime;}
+.poloto6.poloto_fill{fill:orange;}
+.poloto7.poloto_fill{fill:chocolate;}";
+
+        Theme {
+            styles: STYLE_CONFIG_LIGHT_DEFAULT,
+        }
+    }
+    pub const fn dark() -> Theme<'static> {
+        const STYLE_CONFIG_DARK_DEFAULT: &str = ".poloto{
+  stroke-linecap:round;
+  stroke-linejoin:round;
+  font-family:Roboto,sans-serif;
+  font-size:16px;
+}
+.poloto_background{fill:#262626;}
+.poloto_scatter{stroke-width:7}
+.poloto_line{stroke-width:2}
+.poloto_text{fill: white;}
+.poloto_name{font-size:24px;dominant-baseline:auto;text-anchor:middle;}
+.poloto_where{dominant-baseline:middle;text-anchor:start}
+.poloto_text.poloto_legend{font-size:20px;dominant-baseline:middle;text-anchor:start;}
+.poloto_text.poloto_ticks.poloto_y{dominant-baseline:middle;text-anchor:end}
+.poloto_text.poloto_ticks.poloto_x{dominant-baseline:auto;text-anchor:middle}
+.poloto_imgs.poloto_ticks{stroke: white;stroke-width:3;fill:none;stroke-dasharray:none}
+.poloto_grid{stroke:gray;stroke-width:0.5}
+
+.poloto0.poloto_stroke{stroke:blue;}
+.poloto1.poloto_stroke{stroke:red;}
+.poloto2.poloto_stroke{stroke:green;}
+.poloto3.poloto_stroke{stroke:gold;}
+.poloto4.poloto_stroke{stroke:aqua;}
+.poloto5.poloto_stroke{stroke:lime;}
+.poloto6.poloto_stroke{stroke:orange;}
+.poloto7.poloto_stroke{stroke:chocolate;}
+.poloto0.poloto_fill{fill:blue;}
+.poloto1.poloto_fill{fill:red;}
+.poloto2.poloto_fill{fill:green;}
+.poloto3.poloto_fill{fill:gold;}
+.poloto4.poloto_fill{fill:aqua;}
+.poloto5.poloto_fill{fill:lime;}
+.poloto6.poloto_fill{fill:orange;}
+.poloto7.poloto_fill{fill:chocolate;}";
+        Theme {
+            styles: STYLE_CONFIG_DARK_DEFAULT,
+        }
+    }
+
+    pub const fn get_str(&self) -> &'static str {
+        self.styles
+    }
+}
+
+impl<'a> Locked for Theme<'a> {}
+impl<'a> Elem for Theme<'a> {
+    type Tail = tagu::elem::ElementTail<&'static str>;
+    fn render_head(self, w: elem::ElemWrite) -> Result<Self::Tail, fmt::Error> {
+        let k = tagu::build::elem("style");
+        let k = k.append(tagu::build::raw(self.styles));
+        k.render_head(w)
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct FloatFmt {
+    precision: usize,
+}
+impl FloatFmt {
+    pub fn new(precision: usize) -> Self {
+        FloatFmt { precision }
+    }
+    pub fn disp(&self, num: f64) -> impl Display {
+        let precision = self.precision;
+        util::disp_const(move |f| write!(f, "{:.*}", precision, num))
+    }
+}

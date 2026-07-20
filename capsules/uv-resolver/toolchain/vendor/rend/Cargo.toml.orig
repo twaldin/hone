@@ -1,0 +1,27 @@
+[package]
+name = "rend"
+description = "Cross-platform, endian-aware primitives for Rust"
+version = "0.5.3"
+authors = ["David Koloski <djkoloski@gmail.com>"]
+edition = "2021"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/djkoloski/rend"
+keywords = ["endian", "no_std"]
+categories = ["encoding", "no-std"]
+documentation = "https://docs.rs/rend"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bytecheck = { version = "0.8", optional = true, default-features = false }
+bytemuck-1 = { package = "bytemuck", version = "1", optional = true, default-features = false }
+zerocopy = { version = "0.8", optional = true, default-features = false }
+zerocopy-derive = { version = "0.8", optional = true, default-features = false }
+
+[features]
+default = []
+zerocopy-0_8 = ["dep:zerocopy", "dep:zerocopy-derive"]
+
+[patch.crates-io]
+bytecheck = { git = "https://github.com/rkyv/bytecheck" }

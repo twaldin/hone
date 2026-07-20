@@ -1,0 +1,28 @@
+[package]
+name = "configparser"
+version = "3.2.0"
+authors = ["QEDK <hi@qedk.xyz>"]
+edition = "2024"
+description = "A simple configuration parsing utility with no dependencies that allows you to parse INI and ini-style syntax. You can use this to write Rust programs which can be customized by end users easily."
+homepage = "https://github.com/QEDK/configparser-rs"
+repository = "https://github.com/QEDK/configparser-rs"
+documentation = "https://docs.rs/configparser"
+readme = "README.md"
+license = "MIT OR LGPL-3.0-or-later"
+keywords = ["config", "ini", "settings", "configuration", "parser"]
+categories = ["config", "encoding", "parser-implementations"]
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[dependencies]
+indexmap = { version = "^2.14.0", optional = true }
+tokio = { version = "^1.52.3", optional = true, features = ["fs"] }
+serde = { version = "^1.0.228", optional = true }
+
+[features]
+serde = ["dep:serde", "indexmap/serde"]
+
+[dev-dependencies]
+tokio = { version = "^1.52.3", features = ["fs", "macros", "rt-multi-thread"] }
+serde_json = { version = "^1.0.150" }

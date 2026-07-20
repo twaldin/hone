@@ -1,0 +1,48 @@
+# Cargo.toml
+#
+# Copyright (C) 2023-2025 James Petersen <m@jamespetersen.ca>
+# Licensed under Apache 2.0 OR MIT. See LICENSE-APACHE or LICENSE-MIT
+
+[package]
+name = "homedir"
+version = "0.3.6"
+edition = "2024"
+authors = ["James Petersen <m@jamespetersen.ca>"]
+license = "MIT OR Apache-2.0"
+description = "A crate to help get the home directory of any user on a system."
+homepage = "https://jamespetersen.ca/homedir"
+readme = "README.md"
+repository = "https://github.com/ljtpetersen/homedir"
+keywords = ["home", "directory", "utility", "lightweight", "profile"]
+categories = ["config", "filesystem"]
+rust-version = "1.88"
+
+# Unix Dependencies
+[target.'cfg(unix)'.dependencies]
+# I debated rolling with my own implementation, but it would probably
+# just be a copy of the implementation in here, so I didn't.
+nix = { version = "0.30", features = ["user"] }
+
+# Windows Dependencies
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
+windows = { version = "0.61", features = [
+    "Win32",
+    "Win32_UI_Shell",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Rpc",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_Wmi",
+] }
+
+[dependencies]
+cfg-if = "1"
+
+[features]
+default = ["windows-coinitialize"]
+windows-coinitialize = []
+

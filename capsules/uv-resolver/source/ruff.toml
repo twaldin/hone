@@ -1,0 +1,14 @@
+target-version = "py312"
+exclude = [
+  "crates/uv-virtualenv/src/activator/activate_this.py",
+  "crates/uv-virtualenv/src/_virtualenv.py",
+  "test/ecosystem",
+  "test/workspaces",
+  "test/packages",
+]
+
+[lint]
+extend-select = ["I", "B"]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F403", "F405"]

@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[workspace]
+members = ["version-ranges"]
+
+[package]
+name = "astral-pubgrub"
+version = "0.6.0"
+authors = [
+    "Matthieu Pizenberg <matthieu.pizenberg@gmail.com>",
+    "Alex Tokarev <aleksator@gmail.com>",
+    "Jacob Finkelman <Eh2406@wayne.edu>",
+]
+edition = "2024"
+description = "PubGrub version solving algorithm"
+readme = "README.md"
+repository = "https://github.com/astral-sh/pubgrub"
+license = "MPL-2.0"
+keywords = ["dependency", "pubgrub", "semver", "solver", "version"]
+categories = ["algorithms"]
+include = ["Cargo.toml", "LICENSE", "README.md", "src/**", "tests/**", "examples/**", "benches/**"]
+# NOTE: Keep in sync with `ci.yml`
+rust-version = "1.92"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "pubgrub"
+
+[dependencies]
+indexmap = "2.7.0"
+# for debug logs in tests
+log = "0.4.27"
+priority-queue = "2.3.1"
+rustc-hash = "^2.1.1"
+serde = { version = "1.0.219", features = ["derive"], optional = true }
+thiserror = "2.0"
+version-ranges = { version = "0.2.1", package = "astral-version-ranges", path = "version-ranges" }
+
+[dev-dependencies]
+criterion = { version = "4.7.0", package = "codspeed-criterion-compat" }
+env_logger = "0.11.6"
+# Lower-bound guard for `codspeed-criterion-compat` in the minimal-versions CI job.
+cc = "1.2.40"
+proptest = "1.6.0"
+ron = "0.12.0"
+varisat = "0.2.2"
+version-ranges = { version = "0.2.1", path = "version-ranges", package = "astral-version-ranges", features = ["proptest"] }
+
+[features]
+serde = ["dep:serde", "version-ranges/serde"]
+
+[[bench]]
+name = "backtracking"
+harness = false
+
+[[bench]]
+name = "large_case"
+harness = false
+required-features = ["serde"]
+
+[[bench]]
+name = "sudoku"
+harness = false

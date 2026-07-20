@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!source/
+!source/**
+!toolchain/
+!toolchain/vendor/
+!toolchain/vendor/**
+!toolchain/finalize_image.py

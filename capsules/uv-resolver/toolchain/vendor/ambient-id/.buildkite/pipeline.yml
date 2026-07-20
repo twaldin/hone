@@ -1,0 +1,15 @@
+steps:
+  - label: ":rust: Test"
+    key: test
+    command: "cargo test --features test-buildkite-1p -- --test-threads=1"
+    plugins:
+      - docker:
+          image: "rust"
+          # NOTE(ww): Buildkite's Docker plugin starts with a very small
+          # environment by default; we need to explicitly propagate the
+          # main CI environment into it so that detection works.
+          # We also need to explicitly mount the Buildkite agent binary
+          # into the container so that the Buildkite detection strategy
+          # can invoke it.
+          propagate-environment: true
+          mount-buildkite-agent: true

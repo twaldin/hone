@@ -1,0 +1,116 @@
+pub use crate::extras::*;
+pub use crate::lookahead::*;
+pub use crate::source_tree::*;
+pub use crate::sources::*;
+pub use crate::specification::*;
+pub use crate::unnamed::*;
+pub use crate::upgrade::{
+    LockedRequirements, read_lock_requirements, read_pylock_toml_requirements,
+    read_requirements_txt,
+};
+
+use uv_distribution_types::{Dist, DistErrorKind, Requirement, RequirementSource};
+
+mod extras;
+mod lookahead;
+mod source_tree;
+mod sources;
+mod specification;
+mod unnamed;
+mod upgrade;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0} `{1}`")]
+    Dist(
+        DistErrorKind,
+        Box<Dist>,
+        #[source] Box<uv_distribution::Error>,
+    ),
+
+    #[error(transparent)]
+    Distribution(#[from] Box<uv_distribution::Error>),
+
+    #[error(transparent)]
+    DistributionTypes(#[from] uv_distribution_types::Error),
+
+    #[error(transparent)]
+    HashStrategy(#[from] uv_types::HashStrategyError),
+
+    #[error(transparent)]
+    WheelFilename(#[from] uv_distribution_filename::WheelFilenameError),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+impl Error {
+    /// Create an [`Error`] from a distribution error.
+    fn from_dist(dist: Dist, err: uv_distribution::Error) -> Self {
+        Self::Dist(
+            DistErrorKind::from_dist(&dist, &err),
+            Box::new(dist),
+            Box::new(err),
+        )
+    }
+}
+
+/// Convert a [`Requirement`] into a [`Dist`], if it is a direct URL.
+pub(crate) fn required_dist(
+    requirement: &Requirement,
+) -> Result<Option<Dist>, uv_distribution_types::Error> {
+    Ok(Some(match &requirement.source {
+        RequirementSource::Registry { .. } => return Ok(None),
+        RequirementSource::Url {
+            subdirectory,
+            location,
+            ext,
+            url,
+        } => Dist::from_http_url(
+            requirement.name.clone(),
+            url.clone(),
+            location.clone(),
+            subdirectory.clone(),
+            *ext,
+        )?,
+        RequirementSource::GitDirectory {
+            git,
+            subdirectory,
+            url,
+        } => Dist::from_git_directory_url(
+            requirement.name.clone(),
+            url.clone(),
+            git.clone(),
+            subdirectory.clone(),
+        )?,
+        RequirementSource::GitPath {
+            git,
+            install_path,
+            ext,
+            url,
+        } => Dist::from_git_path_url(
+            requirement.name.clone(),
+            url.clone(),
+            git.clone(),
+            install_path.clone(),
+            *ext,
+        )?,
+        RequirementSource::Path {
+            install_path,
+            ext,
+            url,
+        } => Dist::from_file_url(requirement.name.clone(), url.clone(), install_path, *ext)?,
+        RequirementSource::Directory {
+            install_path,
+            r#virtual,
+            url,
+            editable,
+        } => Dist::from_directory_url(
+            requirement.name.clone(),
+            url.clone(),
+            install_path,
+            *editable,
+            *r#virtual,
+        )?,
+    }))
+}

@@ -1,0 +1,471 @@
+//! Vendored from <https://github.com/PyO3/python-pkginfo-rs>
+use std::collections::BTreeSet;
+use std::fmt::Display;
+use std::fmt::Write;
+use std::str;
+use std::str::FromStr;
+
+use indexmap::IndexMap;
+
+use crate::MetadataError;
+use crate::metadata::Headers;
+
+/// Core Metadata 2.x as specified in
+/// <https://packaging.python.org/specifications/core-metadata/>.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Metadata23 {
+    /// Version of the file format; legal values are `1.0`, `1.1`, `1.2`, `2.1`, `2.2`, `2.3`,
+    /// `2.4`, and `2.5`.
+    pub metadata_version: String,
+    /// The name of the distribution.
+    pub name: String,
+    /// A string containing the distribution's version number.
+    pub version: String,
+    /// A Platform specification describing an operating system supported by the distribution
+    /// which is not listed in the “Operating System” Trove classifiers.
+    pub platforms: Vec<String>,
+    /// Binary distributions containing a PKG-INFO file will use the Supported-Platform field
+    /// in their metadata to specify the OS and CPU for which the binary distribution was compiled.
+    pub supported_platforms: Vec<String>,
+    /// A one-line summary of what the distribution does.
+    pub summary: Option<String>,
+    /// A longer description of the distribution that can run to several paragraphs.
+    pub description: Option<String>,
+    /// A string stating the markup syntax (if any) used in the distribution's description,
+    /// so that tools can intelligently render the description.
+    ///
+    /// Known values: `text/plain`, `text/markdown` and `text/x-rst`.
+    pub description_content_type: Option<String>,
+    /// A list of additional keywords, separated by commas, to be used to
+    /// assist searching for the distribution in a larger catalog.
+    pub keywords: Option<Keywords>,
+    /// A string containing the URL for the distribution's home page.
+    ///
+    /// Deprecated by PEP 753.
+    pub home_page: Option<String>,
+    /// A string containing the URL from which this version of the distribution can be downloaded.
+    ///
+    /// Deprecated by PEP 753.
+    pub download_url: Option<String>,
+    /// A string containing the author's name at a minimum; additional contact information may be
+    /// provided.
+    pub author: Option<String>,
+    /// A string containing the author's e-mail address. It can contain a name and e-mail address in
+    /// the legal forms for an RFC-822 `From:` header.
+    pub author_email: Option<String>,
+    /// A string containing the maintainer's name at a minimum; additional contact information may
+    /// be provided.
+    ///
+    /// Note that this field is intended for use when a project is being maintained by someone other
+    /// than the original author:
+    /// it should be omitted if it is identical to `author`.
+    pub maintainer: Option<String>,
+    /// A string containing the maintainer's e-mail address.
+    /// It can contain a name and e-mail address in the legal forms for an RFC-822 `From:` header.
+    ///
+    /// Note that this field is intended for use when a project is being maintained by someone other
+    /// than the original author: it should be omitted if it is identical to `author_email`.
+    pub maintainer_email: Option<String>,
+    /// Text indicating the license covering the distribution where the license is not a selection
+    /// from the `License` Trove classifiers or an SPDX license expression.
+    pub license: Option<String>,
+    /// An SPDX expression indicating the license covering the distribution.
+    ///
+    /// Introduced by PEP 639, requires metadata version 2.4.
+    pub license_expression: Option<String>,
+    /// Paths to files containing the text of the licenses covering the distribution.
+    ///
+    /// Introduced by PEP 639, requires metadata version 2.4.
+    pub license_files: Vec<String>,
+    /// Each entry is a string giving a single classification value for the distribution.
+    pub classifiers: Vec<String>,
+    /// Each entry contains a string naming some other distutils project required by this
+    /// distribution.
+    pub requires_dist: Vec<String>,
+    /// Each entry contains a string naming a Distutils project which is contained within this
+    /// distribution.
+    pub provides_dist: Vec<String>,
+    /// Each entry contains a string describing a distutils project's distribution which this
+    /// distribution renders obsolete,
+    /// meaning that the two projects should not be installed at the same time.
+    pub obsoletes_dist: Vec<String>,
+    /// This field specifies the Python version(s) that the distribution is guaranteed to be
+    /// compatible with.
+    pub requires_python: Option<String>,
+    /// Each entry contains a string describing some dependency in the system that the distribution
+    /// is to be used.
+    pub requires_external: Vec<String>,
+    /// A string containing a browsable URL for the project and a label for it, separated by a
+    /// comma.
+    pub project_urls: ProjectUrls,
+    /// A string containing the name of an optional feature. Must be a valid Python identifier.
+    /// May be used to make a dependency conditional on whether the optional feature has been
+    /// requested.
+    pub provides_extra: Vec<String>,
+    /// Import names exclusively provided by the project.
+    ///
+    /// Introduced by PEP 794, requires metadata version 2.5.
+    pub import_names: Vec<String>,
+    /// Import namespaces provided by the project.
+    ///
+    /// Introduced by PEP 794, requires metadata version 2.5.
+    pub import_namespaces: Vec<String>,
+    /// A string containing the name of another core metadata field.
+    pub dynamic: Vec<String>,
+}
+
+impl Metadata23 {
+    /// Parse distribution metadata from metadata `MetadataError`
+    pub fn parse(content: &[u8]) -> Result<Self, MetadataError> {
+        let headers = Headers::parse(content)?;
+
+        let metadata_version = headers
+            .get_first_value("Metadata-Version")
+            .ok_or(MetadataError::FieldNotFound("Metadata-Version"))?;
+        let name = headers
+            .get_first_value("Name")
+            .ok_or(MetadataError::FieldNotFound("Name"))?;
+        let version = headers
+            .get_first_value("Version")
+            .ok_or(MetadataError::FieldNotFound("Version"))?;
+        let platforms = headers.get_all_values("Platform").collect();
+        let supported_platforms = headers.get_all_values("Supported-Platform").collect();
+        let summary = headers.get_first_value("Summary");
+        let body = str::from_utf8(&content[headers.body_start..])
+            .map_err(MetadataError::DescriptionEncoding)?;
+        let description = if body.trim().is_empty() {
+            headers.get_first_value("Description")
+        } else {
+            Some(body.to_string())
+        };
+        let keywords = headers
+            .get_first_value("Keywords")
+            .as_deref()
+            .map(Keywords::from_metadata);
+        let home_page = headers.get_first_value("Home-Page");
+        let download_url = headers.get_first_value("Download-URL");
+        let author = headers.get_first_value("Author");
+        let author_email = headers.get_first_value("Author-email");
+        let license = headers.get_first_value("License");
+        let license_expression = headers.get_first_value("License-Expression");
+        let license_files = headers.get_all_values("License-File").collect();
+        let classifiers = headers.get_all_values("Classifier").collect();
+        let requires_dist = headers.get_all_values("Requires-Dist").collect();
+        let provides_dist = headers.get_all_values("Provides-Dist").collect();
+        let obsoletes_dist = headers.get_all_values("Obsoletes-Dist").collect();
+        let maintainer = headers.get_first_value("Maintainer");
+        let maintainer_email = headers.get_first_value("Maintainer-email");
+        let requires_python = headers.get_first_value("Requires-Python");
+        let requires_external = headers.get_all_values("Requires-External").collect();
+        let project_urls = ProjectUrls::from_iter_str(headers.get_all_values("Project-URL"));
+        let provides_extra = headers.get_all_values("Provides-Extra").collect();
+        let import_names: Vec<String> = headers.get_all_values("Import-Name").collect();
+        let import_namespaces: Vec<String> = headers.get_all_values("Import-Namespace").collect();
+        // PEP 794 requires rejecting modules that are used both in import names and import
+        // namespaces. (Nesting is allowed, only exact matches are forbidden.)
+        validate_import_name_overlap(&import_names, &import_namespaces)?;
+        let description_content_type = headers.get_first_value("Description-Content-Type");
+        let dynamic = headers.get_all_values("Dynamic").collect();
+        Ok(Self {
+            metadata_version,
+            name,
+            version,
+            platforms,
+            supported_platforms,
+            summary,
+            description,
+            description_content_type,
+            keywords,
+            home_page,
+            download_url,
+            author,
+            author_email,
+            maintainer,
+            maintainer_email,
+            license,
+            license_expression,
+            license_files,
+            classifiers,
+            requires_dist,
+            provides_dist,
+            obsoletes_dist,
+            requires_python,
+            requires_external,
+            project_urls,
+            provides_extra,
+            import_names,
+            import_namespaces,
+            dynamic,
+        })
+    }
+
+    /// Convert to the pseudo-email format used by Python's METADATA.
+    ///
+    /// > The standard file format for metadata (including in wheels and installed projects) is
+    /// > based on the format of email headers. However, email formats have been revised several
+    /// > times, and exactly which email RFC applies to packaging metadata is not specified. In the
+    /// > absence of a precise definition, the practical standard is set by what the standard
+    /// > library `email.parser` module can parse using the `compat32` policy.
+    /// - <https://packaging.python.org/en/latest/specifications/core-metadata/#core-metadata-specifications>
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// Metadata-Version: 2.3
+    /// Name: hello-world
+    /// Version: 0.1.0
+    /// License: THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+    ///          INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A [...]
+    /// ```
+    pub fn core_metadata_format(&self) -> String {
+        fn write_str(writer: &mut String, key: &str, value: impl Display) {
+            let value = value.to_string();
+            let mut lines = value.lines();
+            if let Some(line) = lines.next() {
+                let _ = writeln!(writer, "{key}: {line}");
+            } else {
+                // The value is an empty string
+                let _ = writeln!(writer, "{key}: ");
+            }
+            for line in lines {
+                // Python implementations vary
+                // https://github.com/pypa/pyproject-metadata/pull/150/files#diff-7d938dbc255a08c2cfab1b4f1f8d1f6519c9312dd0a39d7793fa778474f1fbd1L135-R141
+                let _ = writeln!(writer, "{}{}", " ".repeat(key.len() + 2), line);
+            }
+        }
+        fn write_opt_str(writer: &mut String, key: &str, value: Option<&impl Display>) {
+            if let Some(value) = value {
+                write_str(writer, key, value);
+            }
+        }
+        fn write_all(
+            writer: &mut String,
+            key: &str,
+            values: impl IntoIterator<Item = impl Display>,
+        ) {
+            for value in values {
+                write_str(writer, key, value);
+            }
+        }
+
+        let mut writer = String::new();
+        write_str(&mut writer, "Metadata-Version", &self.metadata_version);
+        write_str(&mut writer, "Name", &self.name);
+        write_str(&mut writer, "Version", &self.version);
+        write_all(&mut writer, "Platform", &self.platforms);
+        write_all(&mut writer, "Supported-Platform", &self.supported_platforms);
+        write_all(&mut writer, "Summary", &self.summary);
+        write_opt_str(
+            &mut writer,
+            "Keywords",
+            self.keywords.as_ref().map(Keywords::as_metadata).as_ref(),
+        );
+        write_opt_str(&mut writer, "Home-Page", self.home_page.as_ref());
+        write_opt_str(&mut writer, "Download-URL", self.download_url.as_ref());
+        write_opt_str(&mut writer, "Author", self.author.as_ref());
+        write_opt_str(&mut writer, "Author-email", self.author_email.as_ref());
+        write_opt_str(&mut writer, "License", self.license.as_ref());
+        write_opt_str(
+            &mut writer,
+            "License-Expression",
+            self.license_expression.as_ref(),
+        );
+        write_all(&mut writer, "License-File", &self.license_files);
+        write_all(&mut writer, "Classifier", &self.classifiers);
+        write_all(&mut writer, "Requires-Dist", &self.requires_dist);
+        write_all(&mut writer, "Provides-Dist", &self.provides_dist);
+        write_all(&mut writer, "Obsoletes-Dist", &self.obsoletes_dist);
+        write_opt_str(&mut writer, "Maintainer", self.maintainer.as_ref());
+        write_opt_str(
+            &mut writer,
+            "Maintainer-email",
+            self.maintainer_email.as_ref(),
+        );
+        write_opt_str(
+            &mut writer,
+            "Requires-Python",
+            self.requires_python.as_ref(),
+        );
+        write_all(&mut writer, "Requires-External", &self.requires_external);
+        write_all(&mut writer, "Project-URL", self.project_urls.to_vec_str());
+        write_all(&mut writer, "Provides-Extra", &self.provides_extra);
+        write_all(&mut writer, "Import-Name", &self.import_names);
+        write_all(&mut writer, "Import-Namespace", &self.import_namespaces);
+        write_opt_str(
+            &mut writer,
+            "Description-Content-Type",
+            self.description_content_type.as_ref(),
+        );
+        write_all(&mut writer, "Dynamic", &self.dynamic);
+
+        if let Some(description) = &self.description {
+            writer.push('\n');
+            writer.push_str(description);
+        }
+        writer
+    }
+}
+
+fn import_name_base(value: &str) -> &str {
+    match value.split_once(';') {
+        Some((base, _suffix)) => base.trim_end(),
+        None => value,
+    }
+}
+
+fn validate_import_name_overlap(
+    import_names: &[String],
+    import_namespaces: &[String],
+) -> Result<(), MetadataError> {
+    let import_name_set: BTreeSet<_> = import_names
+        .iter()
+        .map(|import_name| import_name_base(import_name))
+        .collect();
+    if let Some(overlap) = import_namespaces
+        .iter()
+        .map(|import_namespace| import_name_base(import_namespace))
+        .find(|import_namespace| import_name_set.contains(import_namespace))
+    {
+        return Err(MetadataError::DuplicateImportName(overlap.to_string()));
+    }
+    Ok(())
+}
+
+impl FromStr for Metadata23 {
+    type Err = MetadataError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s.as_bytes())
+    }
+}
+
+/// Handle the different keywords representation between `METADATA` and `METADATA.json`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Keywords(Vec<String>);
+
+impl Keywords {
+    pub fn new(keywords: Vec<String>) -> Self {
+        Self(keywords)
+    }
+
+    /// Read the `METADATA` format.
+    fn from_metadata(keywords: &str) -> Self {
+        Self(keywords.split(',').map(ToString::to_string).collect())
+    }
+
+    /// Write the `METADATA` format.
+    pub fn as_metadata(&self) -> String {
+        let mut keywords = self.0.iter();
+        let mut rendered = String::new();
+        if let Some(keyword) = keywords.next() {
+            rendered.push_str(keyword);
+        }
+        for keyword in keywords {
+            rendered.push(',');
+            rendered.push_str(keyword);
+        }
+        rendered
+    }
+}
+
+/// Handle the different project URLs representation between `METADATA` and `METADATA.json`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectUrls(IndexMap<String, String>);
+
+impl ProjectUrls {
+    pub fn new(project_urls: IndexMap<String, String>) -> Self {
+        Self(project_urls)
+    }
+
+    /// Read the `METADATA` format.
+    fn from_iter_str(project_urls: impl IntoIterator<Item = String>) -> Self {
+        Self(
+            project_urls
+                .into_iter()
+                .map(|project_url| {
+                    let (label, url) = project_url.split_once(',').unwrap_or((&project_url, ""));
+                    // TODO(konsti): The spec says separated by comma, but it's actually comma and a
+                    // space.
+                    (label.trim().to_string(), url.trim().to_string())
+                })
+                .collect(),
+        )
+    }
+
+    /// Write the `METADATA` format.
+    pub fn to_vec_str(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|(label, url)| format!("{label}, {url}"))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MetadataError;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn test_parse_from_str() {
+        let s = "Metadata-Version: 1.0";
+        let meta: Result<Metadata23, MetadataError> = s.parse();
+        assert!(matches!(meta, Err(MetadataError::FieldNotFound("Name"))));
+
+        let s = "Metadata-Version: 1.0\nName: asdf";
+        let meta = Metadata23::parse(s.as_bytes());
+        assert!(matches!(meta, Err(MetadataError::FieldNotFound("Version"))));
+
+        let s = "Metadata-Version: 1.0\nName: asdf\nVersion: 1.0";
+        let meta = Metadata23::parse(s.as_bytes()).unwrap();
+        assert_eq!(meta.metadata_version, "1.0");
+        assert_eq!(meta.name, "asdf");
+        assert_eq!(meta.version, "1.0");
+
+        let s = "Metadata-Version: 1.0\nName: asdf\nVersion: 1.0\nDescription: a Python package";
+        let meta: Metadata23 = s.parse().unwrap();
+        assert_eq!(meta.description.as_deref(), Some("a Python package"));
+
+        let s = "Metadata-Version: 1.0\nName: asdf\nVersion: 1.0\n\na Python package";
+        let meta: Metadata23 = s.parse().unwrap();
+        assert_eq!(meta.description.as_deref(), Some("a Python package"));
+
+        let s = "Metadata-Version: 1.0\nName: asdf\nVersion: 1.0\nAuthor: 中文\n\n一个 Python 包";
+        let meta: Metadata23 = s.parse().unwrap();
+        assert_eq!(meta.author.as_deref(), Some("中文"));
+        assert_eq!(meta.description.as_deref(), Some("一个 Python 包"));
+    }
+
+    #[test]
+    fn import_name_round_trip() {
+        let metadata = Metadata23 {
+            metadata_version: "2.5".to_string(),
+            name: "pkg".to_string(),
+            version: "1.0".to_string(),
+            import_names: vec!["spam.foo".to_string(), "spam.eggs; private".to_string()],
+            import_namespaces: vec!["spam".to_string(), "zope".to_string()],
+            ..Default::default()
+        };
+
+        let formatted = metadata.core_metadata_format();
+        assert_eq!(
+            formatted,
+            "Metadata-Version: 2.5\nName: pkg\nVersion: 1.0\nImport-Name: spam.foo\nImport-Name: spam.eggs; private\nImport-Namespace: spam\nImport-Namespace: zope\n"
+        );
+
+        let parsed: Metadata23 = formatted.parse().unwrap();
+        assert_eq!(parsed.import_names, metadata.import_names);
+        assert_eq!(parsed.import_namespaces, metadata.import_namespaces);
+    }
+
+    #[test]
+    fn import_name_overlap() {
+        let metadata = "Metadata-Version: 2.5\nName: pkg\nVersion: 1.0\nImport-Name: spam ; private\nImport-Namespace: spam\n";
+        assert_snapshot!(
+            Metadata23::parse(metadata.as_bytes()).unwrap_err(),
+            @"`Import-Name` and `Import-Namespace` must not both contain `spam`"
+        );
+    }
+}

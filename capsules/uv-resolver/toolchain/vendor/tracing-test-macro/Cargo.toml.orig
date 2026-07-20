@@ -1,0 +1,28 @@
+[package]
+name = "tracing-test-macro"
+version = "0.2.6"
+authors = ["Danilo Bargen <mail@dbrgn.ch>"]
+license = "MIT"
+edition = "2018"
+repository = "https://github.com/dbrgn/tracing-test"
+description = """
+A procedural macro that allow for easier testing of crates that use `tracing`.
+
+Internal crate, should only be used through the `tracing-test` crate.
+"""
+readme = "../README.md"
+categories = ["development-tools::testing"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[badges]
+maintenance = { status = "experimental" }
+
+[features]
+# Disable hardcoded env filter
+no-env-filter = []

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions: {}
+
+jobs:
+  ci:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
+    name: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: "Install latest stable Rust"
+        run: rustup update
+      - run: cargo fmt --all -- --check
+      - uses: taiki-e/install-action@213ccc1a076163c093f914550b94feb90fab916d # v2.79.2
+        with:
+          tool: cargo-hack
+      - run: cargo hack check --all --ignore-private --each-feature --no-dev-deps
+      - run: cargo check --all --all-targets --all-features
+      - run: cargo test
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: SebRollen/toml-action@b1b3628f55fc3a28208d4203ada8b737e9687876 # v1.2.0
+        id: msrv
+        with:
+          file: "Cargo.toml"
+          field: "package.rust-version"
+      - name: "Install Rust toolchain"
+        run: rustup default ${MSRV}
+        env:
+          MSRV: ${{ steps.msrv.outputs.value }}
+      - run: cargo +${MSRV} test
+        env:
+          MSRV: ${{ steps.msrv.outputs.value }}

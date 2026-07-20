@@ -1,0 +1,15 @@
+[package]
+name = "axotag"
+description = "Library to share tag-parsing code between axodotdev projects"
+version = "0.3.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/axodotdev/axotag"
+readme = "README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+miette = "7.0.0"
+semver = "1.0.14"
+thiserror = "2.0"

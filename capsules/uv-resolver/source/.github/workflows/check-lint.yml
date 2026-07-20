@@ -1,0 +1,197 @@
+on:
+  workflow_call:
+    inputs:
+      code-changed:
+        required: true
+        type: string
+      save-rust-cache:
+        required: false
+        type: string
+        default: "true"
+
+permissions: {}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  # renovate: datasource=github-releases depName=astral-sh/hawk
+  HAWK_VERSION: 0.1.7
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  ruff:
+    timeout-minutes: 10
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: "Install uv"
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+      - run: uvx ruff check .
+
+  ty:
+    timeout-minutes: 10
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: "Install uv"
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+      # `uv check` checks the entire repository; keep this scoped to the Python package.
+      - run: uvx ty check python/uv
+      - name: "Check scrolls"
+        env:
+          # TODO: Remove once ty infers Python versions from script environments instead of the root project.
+          TY_CONFIG_FILE: /dev/null
+          UV_PREVIEW_FEATURES: check-command,workspace-list-scripts
+        run: |
+          set -e -o pipefail
+          uv workspace list --scripts |
+          while IFS= read -r script; do
+            printf 'Checking %s\n' "$script" >&2
+            uv check --script "$script" --locked
+          done
+
+  shellcheck:
+    timeout-minutes: 10
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: "Install shellcheck"
+        run: |
+          # renovate: datasource=github-releases depName=koalaman/shellcheck
+          SHELLCHECK_VERSION="v0.11.0"
+          curl -sSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" | tar -xJf -
+          sudo mv "shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/
+      - name: "Run shellcheck"
+        run: find . -name '*.sh' -type f | xargs shellcheck --shell bash --severity style
+
+  validate-pyproject:
+    timeout-minutes: 10
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: "Install uv"
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+      - run: uvx --from 'validate-pyproject[all,store]' validate-pyproject pyproject.toml
+
+  readme:
+    timeout-minutes: 10
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: 3.14
+      - run: python scripts/transform_readme.py --target pypi
+
+  clippy-ubuntu:
+    name: "clippy on linux"
+    timeout-minutes: 10
+    if: ${{ inputs.code-changed == 'true' || github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ inputs.save-rust-cache == 'true' }}
+      - name: "Check uv_build dependencies"
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check bans
+          manifest-path: crates/uv-build/Cargo.toml
+      - name: "Install Rust toolchain"
+        run: rustup component add clippy
+      - name: "Clippy"
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  clippy-windows:
+    name: "clippy on windows"
+    timeout-minutes: 15
+    if: ${{ inputs.code-changed == 'true' || github.ref == 'refs/heads/main' }}
+    runs-on: namespace-profile-windows-2022-x86-64-4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Dev Drive
+        run: ${{ github.workspace }}/.github/workflows/setup-dev-drive.ps1
+
+      # actions/checkout does not let us clone into anywhere outside ${{ github.workspace }}, so we have to copy the clone...
+      - name: Copy Git Repo to Dev Drive
+        run: |
+          Copy-Item -Path "${{ github.workspace }}" -Destination "$Env:UV_WORKSPACE" -Recurse
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: ${{ env.UV_WORKSPACE }}
+          save-if: ${{ inputs.save-rust-cache == 'true' }}
+
+      - name: "Install Rust toolchain"
+        run: rustup component add clippy
+
+      - name: "Clippy"
+        working-directory: ${{ env.UV_WORKSPACE }}
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  hawk:
+    timeout-minutes: 15
+    if: ${{ inputs.code-changed == 'true' || github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: ". -> target/hawk"
+          cache-workspace-crates: "false"
+          save-if: ${{ inputs.save-rust-cache == 'true' }}
+      - name: "Install Rust toolchain"
+        run: rustup toolchain install 1.97.0
+      - name: "Install Hawk"
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
+      - name: "Hawk"
+        run: cargo +1.97.0 hawk --target-dir target/hawk -D warnings
+
+  shear:
+    name: "cargo shear"
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: "Install cargo shear"
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        with:
+          tool: cargo-shear@1.12.4
+      - run: cargo shear --deny-warnings
+
+  typos:
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.48.0

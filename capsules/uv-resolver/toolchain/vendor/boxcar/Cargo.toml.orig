@@ -1,0 +1,33 @@
+[package]
+name = "boxcar"
+version = "0.2.14"
+authors = ["Ibraheem Ahmed <ibraheem@ibraheem.ca>"]
+edition = "2021"
+license = "MIT"
+rust-version = "1.72.0"
+
+readme = "README.md"
+description = "A concurrent, append-only vector"
+repository = "https://github.com/ibraheemdev/boxcar"
+
+categories = ["concurrency", "data-structures"]
+keywords = ["concurrent", "vector", "atomic", "lock-free"]
+exclude = [
+  ".gitignore",
+  ".github/**",
+]
+
+[[bench]]
+name = "bench"
+harness = false
+
+[dependencies]
+
+[target.'cfg(loom)'.dependencies]
+loom = { version = "0.7", optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[dev-dependencies]
+criterion = "0.5"

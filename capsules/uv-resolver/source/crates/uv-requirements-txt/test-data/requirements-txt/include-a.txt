@@ -1,0 +1,3 @@
+--requirement include-b.txt
+
+numpy==1.24.2

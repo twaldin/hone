@@ -1,0 +1,32 @@
+[package]
+name = "clap_complete_command"
+version = "0.6.1"
+edition = "2021"
+
+description = "Reduces boilerplate for adding a shell completion command to Clap"
+repository = "https://github.com/nihaals/clap-complete-command"
+documentation = "https://docs.rs/clap_complete_command"
+license = "MIT"
+keywords = ["clap", "cli", "completion"]
+categories = ["command-line-interface"]
+
+[features]
+default = ["nushell"]
+carapace = ["dep:carapace_spec_clap"]
+fig = ["dep:clap_complete_fig"]
+nushell = ["dep:clap_complete_nushell"]
+
+[dependencies]
+clap = "4"
+clap_complete = "4"
+
+carapace_spec_clap = { version = "1", optional = true }
+clap_complete_fig = { version = "4", optional = true }
+clap_complete_nushell = { version = "4", optional = true }
+
+[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

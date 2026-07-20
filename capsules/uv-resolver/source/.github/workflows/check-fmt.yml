@@ -1,0 +1,38 @@
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  rust:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: "Install Rustfmt"
+        run: rustup component add rustfmt
+      - run: cargo fmt --all --check
+
+  prettier:
+    timeout-minutes: 10
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: npx prettier@3.9.0 --check .
+
+  python:
+    timeout-minutes: 10
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: "Install uv"
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.28"
+      - run: uvx ruff format --diff .

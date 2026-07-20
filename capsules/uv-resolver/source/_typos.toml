@@ -1,0 +1,29 @@
+[files]
+extend-exclude = [
+    "**/snapshots/",
+    "test/ecosystem/**",
+    "test/requirements/**/*.in",
+    "crates/uv-build-frontend/src/pipreqs/mapping",
+]
+ignore-hidden = false
+
+[default]
+extend-ignore-re = [
+    "FRiENDlY-\\.\\.\\.-_-BARd",
+    "FrIeNdLy-\\._\\.-bArD",
+    "I borken you cache",
+    "eb1ba5f5",
+    "e8208120cae3ba69",
+    "github_pat_[0-9a-zA-Z_]+",
+    "LICENSEs",
+    "astroid",
+]
+
+[default.extend-identifiers]
+seeked = "seeked" # special term used for streams
+CPY_VERSION_RE = "CPY_VERSION_RE" # CPython version regex
+
+[default.extend-words]
+certifi = "certifi" # Python package name
+Iz = "Iz" # appears in base64-encoded hashes
+vulnerabilit = "vulnerabilit" # appears in pluralization renderings of "vulnerability"/"vulnerabilities"

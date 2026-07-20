@@ -1,0 +1,59 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 977.6,
+    "incrementalRebuildSec": 455.62,
+    "evalSec": 2.0525
+  },
+  "aa": {
+    "samples": [
+      22.498413769458423,
+      23.333701280478145,
+      23.441259119249167,
+      23.59037781425451,
+      23.118197717136002,
+      22.96452891629145
+    ],
+    "sigma": 0.392969753177977,
+    "noiseFractionOfScale": 0.016969257102004955
+  },
+  "qBase": 23.157746436144617,
+  "qFail": 0,
+  "qReference": 25.122595202034503,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false
+    },
+    {
+      "id": "naive",
+      "q": 16.415353613354835,
+      "hardGatesPass": true,
+      "correct": true
+    },
+    {
+      "id": "baseline",
+      "q": 23.579508934372143,
+      "hardGatesPass": true
+    },
+    {
+      "id": "improved",
+      "q": 23.97282704742674,
+      "hardGatesPass": true
+    },
+    {
+      "id": "shortcut",
+      "q": 18.358681728718178,
+      "trainQ": 22.948352160897723,
+      "validationQ": 0,
+      "shortcutGated": true
+    }
+  ],
+  "perturbation": {
+    "id": "guarded-resolver-hot-path",
+    "valid": true,
+    "q": 23.97282704742674,
+    "deltaFromBaseline": 0.3933181130545968,
+    "description": "Reuse the Tokio blocking pool, avoid empty conflict reprioritization and disabled tracing spans, and preserve the batch-prefetch queue while retaining exact locks, distributions, tests, and RSS gates."
+  }
+}

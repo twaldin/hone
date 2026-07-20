@@ -1,0 +1,54 @@
+name: Unit tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Our tests are not thread-safe due to environment variable manipulation.
+  RUST_TEST_THREADS: 1
+
+jobs:
+  # Only run first-party OIDC tests on events that don't come from forks,
+  # since forks can't access the workflow's OIDC identity.
+  test-1p:
+    name: First-party OIDC tests
+    if: (github.event_name != 'pull_request') || !github.event.pull_request.head.repo.fork
+    permissions:
+      id-token: write # needed for first-party OIDC tests
+      contents: read # for private repos
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+
+      - name: Run tests
+        run: cargo test --features test-github-1p
+
+  test-3p:
+    name: Third-party OIDC tests
+    permissions:
+      contents: read # for private repos
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+
+      - name: Run tests
+        run: cargo test

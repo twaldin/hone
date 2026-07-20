@@ -1,0 +1,32 @@
+[package]
+name = "uv-distribution-filename"
+version = "0.0.62"
+description = "This is an internal component crate of uv"
+edition = { workspace = true }
+rust-version = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+uv-cache-key = { workspace = true }
+uv-normalize = { workspace = true }
+uv-pep440 = { workspace = true }
+uv-platform-tags = { workspace = true }
+uv-small-str = { workspace = true }
+
+memchr = { workspace = true }
+rkyv = { workspace = true, features = ["smallvec-1"] }
+serde = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

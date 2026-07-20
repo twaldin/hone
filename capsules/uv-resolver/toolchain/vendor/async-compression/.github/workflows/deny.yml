@@ -1,0 +1,32 @@
+name: deny
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  cargo-deny-advisories:
+    name: cargo deny advisories
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+    - uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        command: check advisories
+
+  cargo-deny-licenses:
+    name: cargo deny bans licenses sources
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Ignore dev-dependencies
+      run: sed -i 's/\[dev-dependencies\]/[workaround-avoid-dev-deps]/g' Cargo.toml
+    - uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        command: check bans licenses sources
+
+on:
+  merge_group:
+    types: [checks_requested]
+  pull_request:
+    branches: [main]

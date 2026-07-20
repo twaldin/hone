@@ -1,0 +1,6 @@
+./test/packages/black_editable
+./test/packages/black_editable[dev]
+file:///test/packages/black_editable
+./test/packages/black editable
+./test/packages/black editable ; python_version >= "3.9"
+./test/packages/black editable # comment

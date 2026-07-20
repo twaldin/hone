@@ -1,0 +1,97 @@
+{
+  "objective": "Improve cold and warm uv dependency-resolution time on a frozen hash-pinned offline PEP 503 index. Exact locks, selected wheel hashes, uv-resolver tests, and peak RSS at or below baseline plus 2% are hard gates; only crates/uv-resolver/src is mutable.",
+  "image": "hone-uv-resolver@sha256:4ecfce6915c97234480adf92909b9c2d98c9df42a705da8b69671c257f528e0c",
+  "sandbox": {
+    "memoryBytes": 4831838208,
+    "cpus": 2
+  },
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    "UPSTREAM_REVISION",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "toolchain.lock.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "MIT OR Apache-2.0",
+    "provenance": "astral-sh/uv current head 336535f83fd933ea54685e24e3c08468339937ce; frozen universal wheels acquired from PyPI and served only from a local file:// PEP 503 index; the workload exercises the Manifest/Resolver engine benchmarked by crates/uv-bench/benches/uv.rs and follows the resolve-cold/resolve-warm cache preparation in scripts/benchmark/src/benchmark/resolver.py",
+    "sourceDetails": {
+      "repository": "astral-sh/uv",
+      "commit": "336535f83fd933ea54685e24e3c08468339937ce",
+      "licenses": [
+        "LICENSE-MIT",
+        "LICENSE-APACHE"
+      ],
+      "mutableSurface": "crates/uv-resolver/src/**",
+      "protectedSurface": "toolchain image, Cargo manifests and lock, benchmark/evaluator code, resolver tests, package index, requirements, expected locks, distribution hashes"
+    },
+    "toolchain": {
+      "rust": "1.97.0",
+      "baseImage": "rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+      "cargoVendor": "toolchain/vendor generated from Cargo.lock",
+      "buildProfile": "profiling with debug=0, lto=false, no uv default features, and rust-lld",
+      "network": "none at mutation, build, test, and evaluation time"
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+      "freshProcess": true,
+      "coldRepetitionsPerWorkload": 5,
+      "warmRepetitionsPerWorkload": 6,
+      "q": "1000 / geometric mean resolver wall milliseconds across cold and warm samples",
+      "qFail": 0,
+      "rssGate": "per-workload peak RSS <= 37760 KiB frozen maximum across the locked final A-A suite * 1.02",
+      "sandboxPeakMemoryBytes": 3226365952,
+      "sandboxMemoryCapBytes": 4831838208,
+      "sandboxHeadroomOverPeakFraction": 0.4976,
+      "sandboxUnusedCapacityFraction": 0.3323,
+      "qBase": 23.157746436144617,
+      "sigma": 0.392969753177977,
+      "qReference": 25.122595202034503,
+      "qReferenceConstruction": "locked interleaved A-A with 5 cold and 6 warm repetitions on final split-isolated assets, linux/arm64 Docker Desktop: mean([22.498413769458423,23.333701280478145,23.441259119249167,23.59037781425451,23.118197717136002,22.96452891629145]) + max(5*sample_sigma, 0.05*abs(qBase-qFail)) = 23.157746436144617 + max(1.964848765889885,1.1578873218072309) = 25.122595202034503"
+    },
+    "tags": [
+      "m2",
+      "oss",
+      "rust",
+      "dependency-resolution",
+      "offline-index",
+      "performance"
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+[package]
+name = "quoted_printable"
+version = "0.5.1"
+authors = ["Kartikaya Gupta <kats@seldon.staktrace.com>"]
+edition = "2018"
+license = "0BSD"
+
+description = "A simple encoder/decoder for quoted-printable data"
+homepage = "https://github.com/staktrace/quoted-printable/blob/master/README.md"
+repository = "https://github.com/staktrace/quoted-printable"
+readme = "README.md"
+keywords = ["decode", "encode", "quoted", "printable"]
+categories = ["email", "parsing"]
+exclude = [".gitignore", ".github/**"]
+
+[badges]
+maintenance = { status = "passively-maintained" }
+
+[dependencies]
+
+[features]
+default = ["std"]
+std = []
