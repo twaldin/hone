@@ -1,17 +1,21 @@
 {
   "feasibility": {
-    "cleanBuildSec": 5.749776,
+    "cleanBuildSec": 8.83,
     "incrementalRebuildSec": 0.664334,
-    "evalSec": 15.17694
+    "evalSec": 16.97
   },
   "aa": {
-    "samples": [323.57208976999243, 329.9391761915163, 328.3354322077437],
-    "sigma": 3.311626373951895,
+    "samples": [
+      205.88747400568312,
+      195.56053609474435,
+      204.04802992746863
+    ],
+    "sigma": 5.508580468895706,
     "noiseFractionOfScale": 0.2
   },
-  "qBase": 327.2822327230842,
-  "qFail": 0,
-  "qReference": 343.8403645928436,
+  "qBase": 201.83201334263205,
+  "qFail": 0.0,
+  "qReference": 229.3749156871106,
   "controls": [
     {
       "id": "broken",
@@ -21,30 +25,30 @@
     },
     {
       "id": "naive",
-      "q": 215.10519755331825,
+      "q": 135.44529441000827,
       "hardGatesPass": true,
       "role": "deliberately slower but correct volatile work in the compression entry point"
     },
     {
       "id": "baseline",
-      "q": 323.57208976999243,
+      "q": 205.88747400568312,
       "hardGatesPass": true,
-      "role": "exact pinned upstream source with its sole symlink materialized byte-for-byte"
+      "role": "synthetic baseline: pinned upstream source plus trusted evaluator glue, sole upstream symlink materialized byte-for-byte"
     },
     {
       "id": "improved",
-      "q": 351.26302677416095,
+      "q": 216.439358552614,
       "hardGatesPass": true,
       "role": "independently authored bounded thread-local arena for one-shot encoder allocations"
     },
     {
       "id": "shortcut",
-      "q": 500506.5277739672,
-      "trainQ": 1000841.1036715661,
-      "validationQ": 171.95187636828763,
+      "q": 356.74807106186523,
+      "trainQ": 597.4236445146881,
+      "validationQ": 116.07249760904237,
       "hardGatesPass": true,
       "shortcutGated": true,
-      "role": "repeated-2-MiB memoization that wins train plus a size-triggered validation delay"
+      "role": "content-fingerprint memoization of the frozen 2 MiB training corpora plus a size-triggered validation delay; wins train over fresh measurement buffers and is rejected by validation"
     }
   ],
   "perturbation": {
@@ -52,10 +56,11 @@
     "description": "A bounded thread-local arena replaces repeated one-shot encoder heap allocation while preserving fallback allocation and exact output",
     "independentlyAuthored": true,
     "valid": true,
-    "q": 351.26302677416095,
-    "deltaFromQBase": 23.98079405107675,
-    "deltaFromOrderingBaseline": 27.69093700416852,
-    "reachesReference": true
+    "q": 216.439358552614,
+    "deltaFromQBase": 14.607345209981958,
+    "deltaFromOrderingBaseline": 10.551884546930893,
+    "reachesReference": false,
+    "note": "5-sigma reference sensitivity is evaluated under Docker Desktop noise; final recalibration on the low-noise frozen GCE host is required and is where the reference threshold is authoritative"
   },
   "determinism": {
     "freshProcessRunsPerSplit": 6,
@@ -67,18 +72,26 @@
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:7a0bebd59f75ecc257bae89bfef8bce6da99509461ef052db17b10b7e3b94397",
-    "secondReportHash": "sha256:a44473a2b42010b8f96930351743d7f169ab2c8a257c80a9725fff6eb232223a"
+    "firstReportHash": "sha256:eab835dbdd9e7207c04d048e58e24837af214887afeb126b9b388485dbf58e33",
+    "secondReportHash": "sha256:d70f5c44603181b386c7b9e433dc593b126bd3f8b0b350036fffa8f213bfa7ca"
   },
   "measurement": {
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "globalLockHeld": true,
     "tokenCheckedLock": "/tmp/hone-bench-lock.sh",
-    "orderingWallSecs": [201.5, 203.4],
+    "orderingWallSecs": [
+      248.2,
+      254.3
+    ],
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "normalizationScale": 16.558131869759475,
+    "normalizationScale": 27.542902344478534,
+    "noiseFractionOfScale": 0.2,
     "freshProcess": true,
-    "finalGceRecalibrationRequired": true
+    "finalGceRecalibrationRequired": true,
+    "benchmarkTargetMsPerSample": 125,
+    "benchmarkSamplesPerCell": 3,
+    "compressedSizeTolerance": 0.0025,
+    "harness": "timing via a non-interposable direct kernel-syscall monotonic clock; encode and decode run as separate processes under distinct uids; every measured repetition uses fresh source/output buffers; the candidate decoder is cross-checked against sealed upstream brotli vectors"
   },
   "terminalSeal": {
     "taskId": "OSS-H08",

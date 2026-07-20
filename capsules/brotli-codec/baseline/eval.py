@@ -10,6 +10,7 @@ import resource
 import shutil
 import stat
 import subprocess
+import tempfile
 import sys
 import time
 from pathlib import Path
@@ -26,6 +27,15 @@ PROCESS_TIMEOUT_SEC = 240
 ALLOWED_MUTABLE_PREFIXES = ("c/common/", "c/dec/", "c/enc/")
 REQUIRED_KINDS = frozenset({"binary", "text", "web"})
 QUALITIES = (4, 9)
+DECODE_UID = 2001
+# The container mounts /tmp noexec; the sealed harness and per-run working
+# directories must live under the build tmpfs, which is mounted exec.
+SEALED_DIR = BUILD_ROOT / "sealed"
+SEALED_BIN = SEALED_DIR / "hone-brotli-bench"
+RUN_ROOT = BUILD_ROOT / "runs"
+# Standard upstream brotli streams used to cross-check the candidate decoder in
+# isolation from the candidate encoder (independent-oracle gaming resistance).
+DECODER_VECTORS = ("quickfox", "ukkonooa", "10x10y", "xyzzy")
 
 
 class GateFailure(RuntimeError):
@@ -57,10 +67,14 @@ def emit_failure(detail: str, result_hash: str = "") -> None:
     sys.stdout.write("\n")
 
 
-def demote() -> None:
+def _apply_rlimits() -> None:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 30, 1 << 30))
     resource.setrlimit(resource.RLIMIT_AS, (1536 << 20, 1536 << 20))
+
+
+def demote() -> None:
+    _apply_rlimits()
     if os.geteuid() == 0:
         os.setgroups([])
         os.setgid(SANDBOX_UID)
@@ -199,6 +213,95 @@ def copy_candidate() -> None:
     shutil.copy2(TRUSTED_DIR / "bench.c", SOURCE / "bench.c")
 
 
+def seal_binary() -> None:
+    """Copy the freshly built candidate benchmark to a root-owned path so it
+    cannot be swapped (e.g. via /proc/self/exe) between measured runs. The
+    evaluator container grants no CAP_CHOWN, so ownership is left as the
+    creating root identity (already the sealing identity we want)."""
+    SEALED_DIR.mkdir(mode=0o755, parents=True, exist_ok=True)
+    RUN_ROOT.mkdir(mode=0o755, exist_ok=True)
+    os.chmod(SEALED_DIR, 0o755)
+    os.chmod(RUN_ROOT, 0o755)
+    built = SOURCE / "hone-brotli-bench"
+    if not built.is_file():
+        raise GateFailure("benchmark binary was not built")
+    if SEALED_BIN.exists():
+        SEALED_BIN.unlink()
+    shutil.copy2(built, SEALED_BIN)
+    os.chmod(SEALED_BIN, 0o755)
+
+
+def run_bench(mode_args: list[str], stdin_bytes: bytes, uid: int, timeout: int = 90) -> tuple[int, bytes, str]:
+    """Run the sealed benchmark as `uid` in a fresh private working directory.
+    The result envelope arrives over a dedicated pipe the candidate cannot
+    address, and stdout carries the raw codec bytes for out-of-process
+    validation by the trusted parent."""
+    cwd = Path(tempfile.mkdtemp(dir=str(RUN_ROOT)))
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(write_fd, True)
+
+    def preexec() -> None:
+        _apply_rlimits()
+        if os.geteuid() == 0:
+            os.setgroups([])
+            os.setgid(uid)
+            os.setuid(uid)
+
+    try:
+        # Root-owned, world-traversable but not world-writable: the dropped
+        # candidate uid can enter and execute but cannot leave artifacts here.
+        os.chmod(cwd, 0o755)
+        argv = [str(SEALED_BIN), mode_args[0], str(write_fd), *mode_args[1:]]
+        completed = subprocess.run(
+            argv,
+            input=stdin_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+            preexec_fn=preexec,
+            cwd=str(cwd),
+            pass_fds=(write_fd,),
+        )
+        os.close(write_fd)
+        write_fd = -1
+        report = b""
+        while True:
+            chunk = os.read(read_fd, 4096)
+            if not chunk:
+                break
+            report += chunk
+        return completed.returncode, completed.stdout, report.decode("ascii", "replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GateFailure(f"benchmark process failed: {exc}") from exc
+    finally:
+        if write_fd != -1:
+            os.close(write_fd)
+        os.close(read_fd)
+        shutil.rmtree(cwd, ignore_errors=True)
+
+
+def check_decoder_reference() -> None:
+    """Cross-check the candidate decoder against sealed upstream brotli vectors
+    in a process that never receives any source, so a decoder cannot fake a
+    round trip by echoing a colluding encoder's saved input."""
+    vector_dir = TRUSTED_DIR / "tests" / "testdata"
+    for name in DECODER_VECTORS:
+        try:
+            plaintext = (vector_dir / name).read_bytes()
+            compressed = (vector_dir / f"{name}.compressed").read_bytes()
+        except OSError as exc:
+            raise GateFailure("trusted decoder vectors are missing") from exc
+        returncode, decoded, _ = run_bench(
+            ["d", str(len(plaintext)), str(len(compressed)), "4", "20"],
+            compressed,
+            DECODE_UID,
+            timeout=60,
+        )
+        if returncode != 0 or decoded != plaintext:
+            raise GateFailure(f"candidate decoder failed standard vector: {name}")
+
+
 def load_workloads() -> tuple[dict, Path]:
     metadata_files = sorted(ASSETS.rglob("workloads.json"))
     if len(metadata_files) != 1:
@@ -239,33 +342,42 @@ def verify_workload(row: dict, split_dir: Path) -> bytes:
 
 
 def run_benchmark(data: bytes, quality: int) -> tuple[int, float, float]:
-    binary = SOURCE / "hone-brotli-bench"
+    encode_rc, compressed, encode_report = run_bench(
+        ["c", str(len(data)), str(quality), str(BENCH_TARGET_MS)],
+        data,
+        SANDBOX_UID,
+    )
+    if encode_rc != 0:
+        raise GateFailure(f"compression benchmark failed at quality {quality}")
+    encode_fields = encode_report.split()
+    if len(encode_fields) != 2:
+        raise GateFailure(f"compression report malformed at quality {quality}")
     try:
-        completed = subprocess.run(
-            [str(binary), str(len(data)), str(quality), str(BENCH_TARGET_MS)],
-            input=data,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=90,
-            check=False,
-            preexec_fn=demote,
-            cwd=SOURCE,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise GateFailure(f"benchmark worker failed at quality {quality}: {exc}") from exc
+        reported_size = int(encode_fields[0])
+        compression_mib_s = float(encode_fields[1]) / 1000000.0
+    except ValueError as exc:
+        raise GateFailure(f"compression report malformed at quality {quality}") from exc
+    compressed_size = len(compressed)
+    if compressed_size <= 0 or reported_size != compressed_size:
+        raise GateFailure(f"reported compressed size is inconsistent at quality {quality}")
+
+    decode_rc, decoded, decode_report = run_bench(
+        ["d", str(len(data)), str(compressed_size), str(quality), str(BENCH_TARGET_MS)],
+        compressed,
+        DECODE_UID,
+    )
+    if decode_rc != 0:
+        raise GateFailure(f"decompression benchmark failed at quality {quality}")
+    decode_fields = decode_report.split()
+    if len(decode_fields) != 1:
+        raise GateFailure(f"decompression report malformed at quality {quality}")
     try:
-        fields = completed.stdout.decode("ascii").strip().split()
-        if completed.returncode != 0 or len(fields) != 5 or fields[0] != "ok":
-            raise ValueError
-        compressed_size = int(fields[1])
-        compression_mib_s = float(fields[2])
-        decompression_mib_s = float(fields[3])
-        int(fields[4])
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise GateFailure(f"benchmark or round-trip gate failed at quality {quality}") from exc
-    if compressed_size <= 0 or not all(
-        math.isfinite(value) and value > 0 for value in (compression_mib_s, decompression_mib_s)
-    ):
+        decompression_mib_s = float(decode_fields[0]) / 1000000.0
+    except ValueError as exc:
+        raise GateFailure(f"decompression report malformed at quality {quality}") from exc
+    if decoded != data:
+        raise GateFailure(f"independent round-trip mismatch at quality {quality}")
+    if not all(math.isfinite(value) and value > 0 for value in (compression_mib_s, decompression_mib_s)):
         raise GateFailure(f"benchmark returned non-finite throughput at quality {quality}")
     return compressed_size, compression_mib_s, decompression_mib_s
 
@@ -301,6 +413,8 @@ def main() -> None:
         run_worker("build")
         build_sec = time.monotonic() - build_started
         run_worker("test")
+        seal_binary()
+        check_decoder_reference()
 
         throughputs: list[float] = []
         compressed_sizes: dict[str, int] = {}
