@@ -1,0 +1,85 @@
+{
+  "aa": {
+    "noiseFractionOfScale": 0.1357591830910767,
+    "samples": [
+      7327244.016726127,
+      7415293.781379168,
+      7412795.1472102925
+    ],
+    "sigma": 50129.83169611437
+  },
+  "controls": [
+    {
+      "hardGatesPass": false,
+      "id": "broken",
+      "q": 0,
+      "role": "compile-time interpreter failure"
+    },
+    {
+      "hardGatesPass": true,
+      "id": "naive",
+      "q": 1951250.6612201594,
+      "role": "deliberately slower but correct per-opcode volatile work"
+    },
+    {
+      "hardGatesPass": true,
+      "id": "baseline",
+      "q": 7327244.016726127,
+      "role": "exact pinned upstream source"
+    },
+    {
+      "hardGatesPass": true,
+      "id": "improved",
+      "q": 7397886.49002724,
+      "role": "independently authored no-handler interrupt polling fast path"
+    },
+    {
+      "hardGatesPass": true,
+      "id": "shortcut",
+      "q": 7125820.333663082,
+      "role": "train-valid fast path plus validation-only UTF-16 regexp delay",
+      "shortcutGated": true,
+      "trainQ": 7834980.362459332,
+      "validationQ": 6416660.304866833
+    }
+  ],
+  "feasibility": {
+    "cleanBuildSec": 21.82,
+    "evalSec": 13.25,
+    "incrementalRebuildSec": 21.38
+  },
+  "measurement": {
+    "benchmarkBatchWallSec": 318.15,
+    "finalGceRecalibrationRequired": true,
+    "freshProcess": true,
+    "globalLockHeld": true,
+    "normalizationScale": 369255.5490885931,
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))"
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstReportHash": "sha256:480a1c917d551f17c689cb93aa172bfe446b92b84af025bdf203d2f4145f06a3",
+    "secondReportHash": "sha256:1582dc488e7ca4571c8dd0a1a786ee46fbb0ee63ffdce04fa2278b616b4e12b8"
+  },
+  "perturbation": {
+    "deltaFromOrderingBaseline": 70642.47330111265,
+    "deltaFromQBase": 12775.508255377412,
+    "description": "Skip interrupt-counter work when the runtime has no installed interrupt handler",
+    "id": "improved",
+    "independentlyAuthored": true,
+    "q": 7397886.49002724,
+    "reachesReference": false,
+    "valid": true
+  },
+  "qBase": 7385110.981771862,
+  "qFail": 0,
+  "qReference": 7754366.530860456,
+  "terminalSeal": {
+    "mutationOrHeadroomRuns": false,
+    "optimizerPilot": false,
+    "searchVisibleState": false,
+    "seedOptimizerSessions": false,
+    "trustedWorkOnly": true
+  }
+}
