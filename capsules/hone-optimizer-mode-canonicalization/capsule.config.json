@@ -16,14 +16,14 @@
   "assetGroups": [
     {
       "id": "train",
-      "visibility": "holdout",
+      "visibility": "public",
       "paths": [
         "assets/train"
       ]
     },
     {
       "id": "validation",
-      "visibility": "holdout",
+      "visibility": "protected",
       "paths": [
         "assets/validation"
       ]
@@ -53,7 +53,7 @@
       "platform": "linux",
       "samples": 3,
       "freshProcess": true,
-      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
+      "q": "passed cross-host identity cases divided by declared cases",
       "qFail": 0
     },
     "tags": [

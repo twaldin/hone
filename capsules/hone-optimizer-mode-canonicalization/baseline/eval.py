@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Trusted exact-output evaluator for bounded M2 subsystem capsules.
+"""Trusted exact-output evaluator for the optimizer mode-canonicalization capsule.
 
 Candidate code is imported only by an unprivileged worker subprocess. This
 root-side parent owns hidden fixtures, timing, equality, gates, and output.
 Each timed repetition gets fresh PID/IPC/NET/UTS namespaces and writable state.
+
+Registered scalar: passed cross-host identity cases divided by declared cases.
+Timing is reported as diagnostics only and never enters the objective. valid
+is reserved for protocol/public failures; sealed-case misses lower the score
+without invalidating the measurement.
 """
 from __future__ import annotations
 
@@ -342,7 +347,7 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
     correct = error is None and len(outcomes) == INNER_REPS and all(
         canonical(outcome.result) == canonical(case["expected"]) for outcome in outcomes
     )
-    score = (1.0 / (1.0 + slowest_ms)) if correct else 0.0
+    score = 1.0 if correct else 0.0
     feedback = (
         f"all {INNER_REPS} repetitions matched in slowest {slowest_ms:.3f} ms"
         if correct
@@ -389,8 +394,9 @@ def main() -> None:
     tests_pass, suite_detail = run_public_suite(workspace)
     quality = statistics.fmean([1.0 if ok else 0.0 for ok in correct]) if correct else 0.0
     hidden_cases_pass = bool(correct) and all(correct)
+    protocol_ok = bool(cases)
     output = {
-        "valid": tests_pass and hidden_cases_pass,
+        "valid": tests_pass and protocol_ok,
         "objectives": {
             "score": statistics.fmean([entry["score"] for entry in per_example.values()]) if per_example else 0.0,
         },
