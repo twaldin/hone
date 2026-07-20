@@ -1,0 +1,105 @@
+{
+  "status": "failed-admission",
+  "failure": {
+    "gate": "sensitivity-ordering",
+    "reason": "Two consecutive terminal ordering passes were not obtained. Repeated checks failed on narrow shortcut/baseline split margins. After the single owner-authorized deliberate source-level control repair, shortcut separation widened, but the improved perturbation failed correctness gates because its comparison-filter bypass also affected non-diagnostic filters. Per admission policy, authoring stopped without further control iteration.",
+    "latestCheck": {
+      "baselineTrain": 11.39,
+      "baselineValidation": 11.32,
+      "baselineCombined": 11.354620722946677,
+      "shortcutTrain": 11.65,
+      "shortcutValidation": 1.531,
+      "shortcutCombined": 6.591,
+      "improvedCombined": 0,
+      "stabilitySamplesAsPrinted": [11.35, 11.38, 11.28],
+      "stabilitySpread": 0.0087,
+      "stabilityBand": 0.15,
+      "allCorrectnessAndResourceGatesPassed": false,
+      "wallSec": 2260.2
+    }
+  },
+  "feasibility": {
+    "cleanBuildSec": 421.17,
+    "incrementalRebuildSec": 9.56,
+    "evalSec": 514.1
+  },
+  "aa": {
+    "samples": [11.35, 11.38, 11.28],
+    "sigma": 0.05131601439446948,
+    "noiseFractionOfScale": 0.2
+  },
+  "qBase": 11.336666666666666,
+  "qFail": 0,
+  "qReference": 11.9035,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "intentional compile failure"
+    },
+    {
+      "id": "naive",
+      "q": 3.668,
+      "hardGatesPass": true,
+      "role": "deliberately slower but correct per-chunk volatile work"
+    },
+    {
+      "id": "baseline",
+      "q": 11.354620722946677,
+      "trainQ": 11.39,
+      "validationQ": 11.32,
+      "hardGatesPass": true,
+      "role": "exact pinned upstream source"
+    },
+    {
+      "id": "improved",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "independently authored filter fast-path perturbation after the one deliberate control-repair round"
+    },
+    {
+      "id": "shortcut",
+      "q": 6.591,
+      "trainQ": 11.65,
+      "validationQ": 1.531,
+      "hardGatesPass": true,
+      "shortcutGated": true,
+      "role": "split-specific redundant-filter bypass with bounded validation-only diagnostic delay"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "description": "Independently authored execution-filter fast path for provably redundant diagnostic comparisons.",
+    "independentlyAuthored": true,
+    "valid": false,
+    "q": 0,
+    "deltaFromQBase": -11.336666666666666,
+    "reachesReference": false,
+    "sensitivityMarginCleared": false
+  },
+  "orderingChecks": {
+    "consecutivePasses": 0,
+    "failedPass2Attempts": 2,
+    "latestFailure": "improved train and validation hard gates failed after the single deliberate control repair",
+    "stalePassingReportRemoved": true
+  },
+  "measurement": {
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "globalTokenLockHeld": true,
+    "latestBenchmarkBatchWallSec": 2260.2,
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "normalizationScale": 0.5668333333333333,
+    "freshProcess": true,
+    "finalGceRecalibrationRequired": true
+  },
+  "terminalSeal": {
+    "taskId": "OSS-H02",
+    "contract": "capsules/contracts/OSS-H02.json",
+    "optimizerPilots": 0,
+    "mutationHeadroomRuns": 0,
+    "seedOptimizerSessions": 0,
+    "trustedActivitiesOnly": true,
+    "optimizerCorpusExposure": false
+  }
+}

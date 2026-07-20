@@ -1,0 +1,315 @@
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "core_functions/scalar/string_functions.hpp"
+#include "duckdb/function/scalar/string_common.hpp"
+#include "duckdb/common/local_file_system.hpp"
+#include <iostream>
+
+namespace duckdb {
+
+static string GetSeparator(const string_t &input) {
+	string option = input.GetString();
+
+	// system's path separator
+	auto fs = FileSystem::CreateLocal();
+	auto system_sep = fs->PathSeparator(option);
+
+	string separator;
+	if (option == "system") {
+		separator = system_sep;
+	} else if (option == "forward_slash") {
+		separator = "/";
+	} else if (option == "backslash") {
+		separator = "\\";
+	} else { // both_slash (default)
+		separator = "/\\";
+	}
+	return separator;
+}
+
+static bool IsIdxValid(const idx_t &i, const idx_t &sentence_size) {
+	if (i > sentence_size || i == DConstants::INVALID_INDEX) {
+		return false;
+	}
+	return true;
+}
+
+static idx_t Find(const char *input_data, idx_t input_size, const string &sep_data) {
+	if (sep_data.empty()) {
+		return 0;
+	}
+	auto pos = FindStrInStr(const_uchar_ptr_cast(input_data), input_size, const_uchar_ptr_cast(&sep_data[0]), 1);
+	// both_slash option
+	if (sep_data.size() > 1) {
+		auto sec_pos =
+		    FindStrInStr(const_uchar_ptr_cast(input_data), input_size, const_uchar_ptr_cast(&sep_data[1]), 1);
+		// choose the leftmost valid position
+		if (sec_pos != DConstants::INVALID_INDEX && (sec_pos < pos || pos == DConstants::INVALID_INDEX)) {
+			return sec_pos;
+		}
+	}
+	return pos;
+}
+
+static idx_t FindLast(const char *data_ptr, idx_t input_size, const string &sep_data) {
+	idx_t start = 0;
+	while (input_size > 0) {
+		auto pos = Find(data_ptr, input_size, sep_data);
+		if (!IsIdxValid(pos, input_size)) {
+			break;
+		}
+		start += (pos + 1);
+		data_ptr += (pos + 1);
+		input_size -= (pos + 1);
+	}
+	if (start < 1) {
+		return DConstants::INVALID_INDEX;
+	}
+	return start - 1;
+}
+
+template <class CB>
+static idx_t SplitPath(string_t input, const string &sep, CB &&emit) {
+	auto input_data = input.GetData();
+	auto input_size = input.GetSize();
+	if (!input_size) {
+		return 0;
+	}
+	idx_t list_idx = 0;
+	while (input_size > 0) {
+		auto pos = Find(input_data, input_size, sep);
+		if (!IsIdxValid(pos, input_size)) {
+			break;
+		}
+
+		D_ASSERT(input_size >= pos);
+		if (pos == 0) {
+			if (list_idx == 0) { // first character in path is separator
+				emit(input_data, 1);
+				list_idx++;
+				if (input_size == 1) { // special case: the only character in path is a separator
+					return list_idx;
+				}
+			} // else: separator is in the path
+		} else {
+			emit(input_data, pos);
+			list_idx++;
+		}
+		input_data += (pos + 1);
+		input_size -= (pos + 1);
+	}
+	if (input_size > 0) {
+		emit(input_data, input_size);
+		list_idx++;
+	}
+	return list_idx;
+}
+
+static void ReadOptionalArgs(DataChunk &args, Vector &sep, Vector &trim, const bool &front_trim) {
+	switch (args.ColumnCount()) {
+	case 1: {
+		// use default values
+		break;
+	}
+	case 2: {
+		UnifiedVectorFormat sec_arg;
+		args.data[1].ToUnifiedFormat(sec_arg);
+		if (sec_arg.validity.RowIsValid(0)) { // if not NULL
+			switch (args.data[1].GetType().id()) {
+			case LogicalTypeId::VARCHAR: {
+				sep.Reinterpret(args.data[1]);
+				break;
+			}
+			case LogicalTypeId::BOOLEAN: { // parse_path and parse_driname won't get in here
+				trim.Reinterpret(args.data[1]);
+				break;
+			}
+			default:
+				throw InvalidInputException("Invalid argument type");
+			}
+		}
+		break;
+	}
+	case 3: {
+		if (!front_trim) {
+			// set trim_extension
+			UnifiedVectorFormat sec_arg;
+			args.data[1].ToUnifiedFormat(sec_arg);
+			if (sec_arg.validity.RowIsValid(0)) {
+				trim.Reinterpret(args.data[1]);
+			}
+			UnifiedVectorFormat third_arg;
+			args.data[2].ToUnifiedFormat(third_arg);
+			if (third_arg.validity.RowIsValid(0)) {
+				sep.Reinterpret(args.data[2]);
+			}
+		} else {
+			throw InvalidInputException("Invalid number of arguments");
+		}
+		break;
+	}
+	default:
+		throw InvalidInputException("Invalid number of arguments");
+	}
+}
+
+template <bool FRONT_TRIM>
+static void TrimPathFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	// set default values
+	const Vector &path = args.data[0];
+	Vector separator(string_t("default"), count_t(args.size()));
+	Vector trim_extension(Value::BOOLEAN(false), count_t(args.size()));
+	ReadOptionalArgs(args, separator, trim_extension, FRONT_TRIM);
+
+	TernaryExecutor::Execute<string_t, string_t, bool, string_t>(
+	    path, separator, trim_extension, result, [&](string_t &inputs, string_t input_sep, bool trim_extension) {
+		    auto data = inputs.GetData();
+		    auto input_size = inputs.GetSize();
+		    auto sep = GetSeparator(input_sep.GetString());
+
+		    // find the beginning idx and the size of the result string
+		    idx_t begin = 0;
+		    idx_t new_size = input_size;
+		    if (FRONT_TRIM) { // left trim
+			    auto pos = Find(data, input_size, sep);
+			    if (pos == 0) { // path starts with separator
+				    pos = 1;
+			    }
+			    new_size = (IsIdxValid(pos, input_size)) ? pos : 0;
+		    } else { // right trim
+			    auto idx_last_sep = FindLast(data, input_size, sep);
+			    if (IsIdxValid(idx_last_sep, input_size)) {
+				    begin = idx_last_sep + 1;
+			    }
+			    if (trim_extension) {
+				    auto idx_extension_sep = FindLast(data, input_size, ".");
+				    if (begin <= idx_extension_sep && IsIdxValid(idx_extension_sep, input_size)) {
+					    new_size = idx_extension_sep;
+				    }
+			    }
+		    }
+		    // copy the trimmed string
+		    D_ASSERT(begin <= new_size);
+		    auto target = StringVector::EmptyString(result, new_size - begin);
+		    auto output = target.GetDataWriteable();
+		    memcpy(output, data + begin, new_size - begin);
+
+		    target.Finalize();
+		    return target;
+	    });
+}
+
+static void ParseDirpathFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	// set default values
+	const Vector &path = args.data[0];
+	Vector separator(string_t("default"), count_t(args.size()));
+	Vector trim_extension(Value::BOOLEAN(false), count_t(args.size()));
+	ReadOptionalArgs(args, separator, trim_extension, true);
+
+	auto &heap = StringVector::GetStringHeap(result);
+	BinaryExecutor::Execute<string_t, string_t, string_t>(
+	    path, separator, result, [&](string_t input_path, string_t input_sep) {
+		    auto path = input_path.GetData();
+		    auto path_size = input_path.GetSize();
+		    auto sep = GetSeparator(input_sep.GetString());
+
+		    auto last_sep = FindLast(path, path_size, sep);
+		    if (last_sep == 0 && path_size == 1) {
+			    last_sep = 1;
+		    }
+		    idx_t new_size = (IsIdxValid(last_sep, path_size)) ? last_sep : 0;
+
+		    auto target = heap.EmptyString(new_size);
+		    auto output = target.GetDataWriteable();
+		    memcpy(output, path, new_size);
+		    target.Finalize();
+		    return target;
+	    });
+}
+
+static void ParsePathFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	D_ASSERT(args.ColumnCount() == 1 || args.ColumnCount() == 2);
+	UnifiedVectorFormat input_data;
+	args.data[0].ToUnifiedFormat(input_data);
+	auto inputs = UnifiedVectorFormat::GetData<string_t>(input_data);
+
+	// set the separator
+	string input_sep = "default";
+	if (args.ColumnCount() == 2) {
+		UnifiedVectorFormat sep_data;
+		args.data[1].ToUnifiedFormat(sep_data);
+		if (sep_data.validity.RowIsValid(0)) {
+			input_sep = UnifiedVectorFormat::GetData<string_t>(sep_data)->GetString();
+		}
+	}
+	const string sep = GetSeparator(input_sep);
+
+	D_ASSERT(result.GetType().id() == LogicalTypeId::LIST);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+
+	auto list_writer = FlatVector::Writer<VectorListType<string_t>>(result, args.size());
+	for (idx_t i = 0; i < args.size(); i++) {
+		auto input_idx = input_data.sel->get_index(i);
+		if (!input_data.validity.RowIsValid(input_idx)) {
+			list_writer.WriteNull();
+			continue;
+		}
+		auto list = list_writer.WriteDynamicList();
+		SplitPath(inputs[input_idx], sep, [&](const char *split_data, idx_t split_size) {
+			list.WriteElement().WriteValue(string_t(split_data, UnsafeNumericCast<uint32_t>(split_size)));
+		});
+	}
+}
+
+ScalarFunctionSet ParseDirnameFun::GetFunctions() {
+	ScalarFunctionSet parse_dirname;
+	ScalarFunction func({LogicalType::VARCHAR}, LogicalType::VARCHAR, TrimPathFunction<true>, nullptr, nullptr, nullptr,
+	                    LogicalType::INVALID, FunctionStability::CONSISTENT, FunctionNullHandling::SPECIAL_HANDLING);
+	parse_dirname.AddFunction(func);
+	// separator options
+	func.GetSignature().AddParameter(LogicalType::VARCHAR);
+	parse_dirname.AddFunction(func);
+	return parse_dirname;
+}
+
+ScalarFunctionSet ParseDirpathFun::GetFunctions() {
+	ScalarFunctionSet parse_dirpath;
+	ScalarFunction func({LogicalType::VARCHAR}, LogicalType::VARCHAR, ParseDirpathFunction, nullptr, nullptr, nullptr,
+	                    LogicalType::INVALID, FunctionStability::CONSISTENT, FunctionNullHandling::SPECIAL_HANDLING);
+	parse_dirpath.AddFunction(func);
+	// separator options
+	func.GetSignature().AddParameter(LogicalType::VARCHAR);
+	parse_dirpath.AddFunction(func);
+	return parse_dirpath;
+}
+
+ScalarFunctionSet ParseFilenameFun::GetFunctions() {
+	ScalarFunctionSet parse_filename;
+	parse_filename.AddFunction(ScalarFunction({LogicalType::VARCHAR}, LogicalType::VARCHAR, TrimPathFunction<false>,
+	                                          nullptr, nullptr, nullptr, LogicalType::INVALID,
+	                                          FunctionStability::CONSISTENT, FunctionNullHandling::SPECIAL_HANDLING));
+	parse_filename.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                                          TrimPathFunction<false>, nullptr, nullptr, nullptr, LogicalType::INVALID,
+	                                          FunctionStability::CONSISTENT, FunctionNullHandling::SPECIAL_HANDLING));
+	parse_filename.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::VARCHAR,
+	                                          TrimPathFunction<false>, nullptr, nullptr, nullptr, LogicalType::INVALID,
+	                                          FunctionStability::CONSISTENT, FunctionNullHandling::SPECIAL_HANDLING));
+	parse_filename.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BOOLEAN, LogicalType::VARCHAR},
+	                                          LogicalType::VARCHAR, TrimPathFunction<false>, nullptr, nullptr, nullptr,
+	                                          LogicalType::INVALID, FunctionStability::CONSISTENT,
+	                                          FunctionNullHandling::SPECIAL_HANDLING));
+	return parse_filename;
+}
+
+ScalarFunctionSet ParsePathFun::GetFunctions() {
+	auto varchar_list_type = LogicalType::LIST(LogicalType::VARCHAR);
+	ScalarFunctionSet parse_path;
+	ScalarFunction func({LogicalType::VARCHAR}, varchar_list_type, ParsePathFunction, nullptr, nullptr, nullptr,
+	                    LogicalType::INVALID, FunctionStability::CONSISTENT, FunctionNullHandling::SPECIAL_HANDLING);
+	parse_path.AddFunction(func);
+	// separator options
+	func.GetSignature().AddParameter(LogicalType::VARCHAR);
+	parse_path.AddFunction(func);
+	return parse_path;
+}
+
+} // namespace duckdb

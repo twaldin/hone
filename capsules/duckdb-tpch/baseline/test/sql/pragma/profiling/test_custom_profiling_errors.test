@@ -1,0 +1,37 @@
+# name: test/sql/pragma/profiling/test_custom_profiling_errors.test
+# description: Test that custom_profiling_settings is deprecated and errors on use.
+# group: [profiling]
+
+require json
+
+statement error
+PRAGMA custom_profiling_settings='}}}}}}';
+----
+<REGEX>:Invalid Input Error.*deprecated.*tracked_metrics.*
+
+statement error
+PRAGMA custom_profiling_settings=BONJOUR;
+----
+<REGEX>:Invalid Input Error.*deprecated.*tracked_metrics.*
+
+statement error
+PRAGMA configure_profiling='{"INVALID_SETTING": "true"}';
+----
+<REGEX>:Invalid Input Error.*deprecated.*tracked_metrics.*
+
+statement error
+SET configure_metrics = 'hello';
+----
+<REGEX>:Invalid Input Error.*deprecated.*tracked_metrics.*
+
+# Verify tracked_metrics is the new way
+statement ok
+SET tracked_metrics = ['*'];
+
+query I
+SELECT unnest(current_setting('tracked_metrics'));
+----
+*
+
+statement ok
+RESET tracked_metrics;

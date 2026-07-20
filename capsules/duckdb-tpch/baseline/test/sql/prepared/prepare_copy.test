@@ -1,0 +1,34 @@
+# name: test/sql/prepared/prepare_copy.test
+# group: [prepared]
+
+statement ok
+PREPARE q1 AS
+	COPY (
+		select $1 as 'col'
+	) to '{TEST_DIR}/res.csv' (
+		FORMAT csv
+	);
+
+statement ok
+execute q1 (42);
+
+query I
+select i from '{TEST_DIR}/res.csv' tbl(i);
+----
+42
+
+statement ok
+PREPARE q2 AS
+	COPY (
+		select 42 as 'col'
+	) to $1 (
+		FORMAT csv
+	);
+
+statement ok
+EXECUTE q2('{TEST_DIR}/res2.csv')
+
+query I
+select i from '{TEST_DIR}/res2.csv' tbl(i);
+----
+42

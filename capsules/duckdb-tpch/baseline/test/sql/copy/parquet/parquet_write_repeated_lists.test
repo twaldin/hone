@@ -1,0 +1,18 @@
+# name: test/sql/copy/parquet/parquet_write_repeated_lists.test
+# description: Write lists that have repeated list elements
+# group: [parquet]
+
+require parquet
+
+statement ok
+COPY (
+    SELECT *
+            FROM (values(['asdf', 'fdsa']))
+            JOIN (values(1),(2)) ON TRUE
+) to '{TEST_DIR}/lists.parquet';
+
+query II
+SELECT * FROM read_parquet('{TEST_DIR}/lists.parquet');
+----
+[asdf, fdsa]	1
+[asdf, fdsa]	2

@@ -1,0 +1,104 @@
+{
+  "objective": "Improve reciprocal geometric-mean latency for single-threaded TPC-H Q1, Q6, and Q12 on the deterministically generated and frozen SF1 DuckDB database. Exact query-result hashes, the frozen upstream planner/executor test subset, and peak RSS no greater than baseline plus 2% are hard gates. Only the declared aggregate, filter, join, and scan execution operators and their matching headers are mutable.",
+  "image": "hone-duckdb-tpch@sha256:a19dc4edd5d6c1a43cdbff7bced30eb1eb2920518aac888473e2ec830161d1e2",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": [
+    ".*",
+    "*.md",
+    "CITATION.cff",
+    "CMakeLists.txt",
+    "LICENSE",
+    "Makefile",
+    "benchmark/**",
+    "extension/**",
+    "scripts/**",
+    "test/**",
+    "third_party/**",
+    "tools/**",
+    "eval.py",
+    "result_hash.cpp",
+    "toolchain.lock.json",
+    "train_queries/**",
+    "validation_queries/**",
+    "worker.py",
+    "src/CMakeLists.txt",
+    "src/catalog/**",
+    "src/common/**",
+    "src/function/**",
+    "src/logging/**",
+    "src/main/**",
+    "src/optimizer/**",
+    "src/parallel/**",
+    "src/parser/**",
+    "src/planner/**",
+    "src/storage/**",
+    "src/transaction/**",
+    "src/execution/CMakeLists.txt",
+    "src/execution/expression_executor/**",
+    "src/execution/index/**",
+    "src/execution/nested_loop_join/**",
+    "src/execution/physical_plan/**",
+    "src/execution/sample/**"
+  ],
+  "assetGroups": [
+    {"id": "train", "visibility": "holdout", "paths": ["assets/sf1.duckdb", "assets/train/workload.json"]},
+    {"id": "validation", "visibility": "holdout", "paths": ["assets/sf1.duckdb", "assets/validation/workload.json"]}
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "sandbox": {"memoryBytes": 8589934592, "cpus": 8},
+  "diagnosticOrdering": {"path": "diagnostics/ordering-report.json"},
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-terminal-holdout",
+    "license": "MIT (upstream LICENSE preserved)",
+    "provenance": "duckdb/duckdb at exact revision 117e1a46be1c903c5a36ee3c881c125597f93c60; SF1 generated once at authoring with the in-tree extension/tpch dbgen implementation, threads=1, checkpointed to a 279195648-byte database with SHA-256 1e2a17dedac4da19efb6c8c154b82042cd78f1faa862a8a1b7d95f717ea0bb94; trusted interleaved fresh-process A-A samples [15.709397899705193,16.505731622355174,16.623680927383045] give qBase=16.279603483147802 and sample sigma=0.49732164157714465; qReference=16.279603483147802+max(5*0.49732164157714465,0.05*abs(16.279603483147802-0))=18.766211691033526; holdout seal attested: no optimizer pilot, mutation measurement, seed-optimizer session, or optimizer-visible terminal evidence was used",
+    "sourceDetails": {
+      "repository": "duckdb/duckdb",
+      "revision": "117e1a46be1c903c5a36ee3c881c125597f93c60",
+      "upstreamUrl": "https://github.com/duckdb/duckdb/commit/117e1a46be1c903c5a36ee3c881c125597f93c60",
+      "mutableEnvelope": [
+        "src/execution/operator/aggregate/**",
+        "src/execution/operator/filter/**",
+        "src/execution/operator/join/**",
+        "src/execution/operator/scan/**",
+        "src/include/duckdb/execution/operator/aggregate/**",
+        "src/include/duckdb/execution/operator/filter/**",
+        "src/include/duckdb/execution/operator/join/**",
+        "src/include/duckdb/execution/operator/scan/**"
+      ],
+      "upstreamTests": [
+        "test/unittest test/sql/tpch/tpch_sf01.test_slow test/sql/filter/test_expression_executor_select.test test/optimizer/partial_aggregate_pushdown.test test/sql/join/hash_join/hash_join_residual_predicates.test"
+      ]
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+      "freshProcess": true,
+      "q": "reciprocal geometric mean of median single-threaded Q1/Q6/Q12 latency in seconds",
+      "qFail": 0,
+      "qBase": 16.279603483147802,
+      "sigma": 0.49732164157714465,
+      "qReference": 18.766211691033526,
+      "qReferenceConstruction": "16.279603483147802 + max(5*0.49732164157714465, 0.05*abs(16.279603483147802-0)) = 18.766211691033526",
+      "aaSamples": [15.709397899705193, 16.505731622355174, 16.623680927383045],
+      "normalizationScale": 2.4866082078857232,
+      "noiseFractionOfScale": 0.2,
+      "benchmarkTimedRunsPerQuery": 9,
+      "peakRssTolerance": 0.02
+    },
+    "exploitReview": {
+      "protectedPathEscape": "the broker protects evaluator, build graph, benchmark, extension, tests, third-party dependencies, validation queries, and all non-execution subsystems; evaluator independently rejects files outside the narrow execution-operator envelope and every symlink",
+      "benchmarkSpecialCasing": "canonical upstream queries and independently authored semantically equivalent holdout queries share the exact frozen SF1 database and result hashes; a canonical-query shortcut is required to lose on the semantic holdout",
+      "fixtureFingerprinting": "the frozen database is root-read and hash-verified before a read-only runtime copy is exposed to the unprivileged candidate; semantic holdout queries prevent text-only canonical-query fingerprinting",
+      "outputFabrication": "the protected upstream benchmark runner compares every result exactly to root-owned upstream SF1 answers and an independent protected helper hashes actual typed result values",
+      "timerTampering": "the protected evaluator invokes /usr/bin/time and the upstream benchmark runner under uid 2000 after sealing the candidate tree read-only",
+      "buildScriptMutation": "CMake, Ninja configuration, compiler flags, evaluator, worker, toolchain lock, and generated benchmark specifications are protected; every evaluation configures and builds the submitted source from scratch",
+      "deadCodeBenchmarkBypass": "the benchmarked Q1/Q6/Q12 paths run through the same linked DuckDB library exercised by the frozen upstream planner/executor tests"
+    },
+    "tags": ["m2", "terminal", "oss", "duckdb", "tpch", "query-execution", "performance"]
+  }
+}

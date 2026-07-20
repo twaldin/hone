@@ -1,0 +1,115 @@
+#include "duckdb/common/vector/union_vector.hpp"
+#include "core_functions/scalar/union_functions.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_parameter_expression.hpp"
+
+namespace duckdb {
+
+namespace {
+
+struct UnionExtractBindData : public FunctionData {
+	UnionExtractBindData(Identifier key, idx_t index, LogicalType type)
+	    : key(std::move(key)), index(index), type(std::move(type)) {
+	}
+
+	string key;
+	idx_t index;
+	LogicalType type;
+
+public:
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<UnionExtractBindData>(Identifier(key), index, type);
+	}
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<UnionExtractBindData>();
+		return key == other.key && index == other.index && type == other.type;
+	}
+};
+
+void UnionExtractFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	auto &info = func_expr.BindInfo()->Cast<UnionExtractBindData>();
+
+	// this should be guaranteed by the binder
+	const auto &vec = args.data[0];
+	vec.Verify();
+
+	D_ASSERT(info.index < UnionType::GetMemberCount(vec.GetType()));
+	auto &member = UnionVector::GetMember(vec, info.index);
+	result.Reference(member);
+	result.Verify();
+}
+
+unique_ptr<FunctionData> UnionExtractBind(BindScalarFunctionInput &input) {
+	auto &context = input.GetClientContext();
+	auto &bound_function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
+	D_ASSERT(bound_function.GetArguments().size() == 2);
+	if (arguments[0]->GetReturnType().id() == LogicalTypeId::UNKNOWN) {
+		throw ParameterNotResolvedException();
+	}
+	if (arguments[0]->GetReturnType().id() != LogicalTypeId::UNION) {
+		throw BinderException("union_extract can only take a union parameter");
+	}
+	idx_t union_member_count = UnionType::GetMemberCount(arguments[0]->GetReturnType());
+	if (union_member_count == 0) {
+		throw InternalException("Can't extract something from an empty union");
+	}
+	bound_function.GetArguments()[0] = arguments[0]->GetReturnType();
+
+	auto &key_child = arguments[1];
+	if (key_child->HasParameter()) {
+		throw ParameterNotResolvedException();
+	}
+
+	if (key_child->GetReturnType().id() != LogicalTypeId::VARCHAR || !key_child->IsFoldable()) {
+		throw BinderException("Key name for union_extract needs to be a constant string");
+	}
+	Value key_val = ExpressionExecutor::EvaluateScalar(context, *key_child);
+	D_ASSERT(key_val.type().id() == LogicalTypeId::VARCHAR);
+	auto &key_str = StringValue::Get(key_val);
+	if (key_val.IsNull() || key_str.empty()) {
+		throw BinderException("Key name for union_extract needs to be neither NULL nor empty");
+	}
+	auto key = Identifier(key_str);
+
+	LogicalType return_type;
+	idx_t key_index = 0;
+	bool found_key = false;
+
+	for (size_t i = 0; i < union_member_count; i++) {
+		auto &member_name = UnionType::GetMemberName(arguments[0]->GetReturnType(), i);
+		if (member_name == key) {
+			found_key = true;
+			key_index = i;
+			return_type = UnionType::GetMemberType(arguments[0]->GetReturnType(), i);
+			break;
+		}
+	}
+
+	if (!found_key) {
+		vector<string> candidates;
+		candidates.reserve(union_member_count);
+		for (idx_t i = 0; i < union_member_count; i++) {
+			candidates.emplace_back(UnionType::GetMemberName(arguments[0]->GetReturnType(), i));
+		}
+		auto closest_settings = StringUtil::TopNJaroWinkler(candidates, key);
+		auto message = StringUtil::CandidatesMessage(closest_settings, "Candidate Entries");
+		throw BinderException("Could not find key \"%s\" in union\n%s", key.GetIdentifierName(), message);
+	}
+
+	bound_function.SetReturnType(return_type);
+	return make_uniq<UnionExtractBindData>(key, key_index, return_type);
+}
+
+} // namespace
+
+ScalarFunction UnionExtractFun::GetFunction() {
+	// the arguments and return types are actually set in the binder function
+	return ScalarFunction({LogicalTypeId::UNION, LogicalType::VARCHAR}, LogicalType::ANY, UnionExtractFunction,
+	                      UnionExtractBind, nullptr, nullptr);
+}
+
+} // namespace duckdb
