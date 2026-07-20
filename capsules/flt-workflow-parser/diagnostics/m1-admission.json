@@ -2,10 +2,10 @@
   "schema": "hone-m1-admission-v1",
   "admission": "PASS",
   "capsule": {
-    "id": "cap_3118c309e2fb",
-    "capsuleDigest": "sha256:80e39e08091fae0720fc607c94698a86e31c6e6a640d668695d15b3996d2135b",
-    "manifestSha256": "sha256:8a6cdbdbf6d60595fb287cbd8889bf4bde3decf9445b5c2bd8046af25df836de",
-    "configSha256": "sha256:2ed542785cc279cf92ebe73f4f61da014e616e46d8a49671d5fee66b7485250c",
+    "id": "cap_5aec8ccc6650",
+    "capsuleDigest": "sha256:80ba38d5099d7de155670fe5c11e86d58ff50e4317911fa400a0086e09034fcd",
+    "manifestSha256": "sha256:6beff2c5a35a35fcdc1304b306798e52cf424d8e33da6375f848cba85b638ba1",
+    "configSha256": "sha256:c073975ca2c70bbee7644c1a458d592ac4e786a97ca156f346469ebc8238ad61",
     "orderingReport": {
       "path": "diagnostics/ordering-report.json",
       "sha256": "sha256:157520d2176df2025e436df6f8ceaa60b220042a9ada5d7b193de19fc05782f8"
@@ -69,12 +69,12 @@
   "scaffold": {
     "passes": 2,
     "ids": [
-      "cap_3118c309e2fb",
-      "cap_3118c309e2fb"
+      "cap_5aec8ccc6650",
+      "cap_5aec8ccc6650"
     ],
     "manifestSha256": [
-      "sha256:8a6cdbdbf6d60595fb287cbd8889bf4bde3decf9445b5c2bd8046af25df836de",
-      "sha256:8a6cdbdbf6d60595fb287cbd8889bf4bde3decf9445b5c2bd8046af25df836de"
+      "sha256:6beff2c5a35a35fcdc1304b306798e52cf424d8e33da6375f848cba85b638ba1",
+      "sha256:6beff2c5a35a35fcdc1304b306798e52cf424d8e33da6375f848cba85b638ba1"
     ],
     "identical": true
   },

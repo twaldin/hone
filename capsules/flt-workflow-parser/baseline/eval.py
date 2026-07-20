@@ -390,7 +390,6 @@ def hard_failure(message: str) -> dict[str, Any]:
             "tests_pass": False,
             "protected_unchanged": False,
             "protocol_valid": False,
-            "all_cases_pass": False,
         },
         "perExample": {},
         "diagnostics": {
@@ -448,7 +447,6 @@ def evaluate() -> dict[str, Any]:
             "tests_pass": protocol_valid,
             "protected_unchanged": True,
             "protocol_valid": protocol_valid,
-            "all_cases_pass": protocol_valid and passed == declared,
         },
         "perExample": per_example,
         "diagnostics": {
@@ -456,6 +454,7 @@ def evaluate() -> dict[str, Any]:
             "quality": 1.0 if protocol_valid else 0.0,
             "passed": passed,
             "declared": declared,
+            "all_cases_pass": protocol_valid and passed == declared,
             "groups": {group: {"passed": counts[0], "declared": counts[1]} for group, counts in sorted(group_counts.items())},
         },
     }

@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_ec5c5ad0ad97",
+  "id": "cap_5aec8ccc6650",
   "objective": "Improve FLT workflow parsing across legacy, dynamic-DAG, human-gate, reference, preset, and generated YAML structures. Preserve owner-consistent AST projection, localized errors, and canonical round-trip stability. Only src/workflow/parser.mjs may change.",
   "baseline": {
     "kind": "git",
-    "commit": "f34003301bb7470fadcbdff453e8546295d6d1d7"
+    "commit": "c8d1ac52497fcb9dcca4589014c99fa8df3eb029"
   },
   "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
   "evalEntrypoint": [
