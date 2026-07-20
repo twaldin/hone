@@ -1,0 +1,70 @@
+---
+title: Mock functions in `bun test`
+sidebarTitle: Mock functions
+mode: center
+---
+
+Create mocks with the `mock` function from `bun:test`.
+
+```ts test.ts icon="/icons/typescript.svg"
+import { test, expect, mock } from "bun:test";
+
+const random = mock(() => Math.random());
+```
+
+---
+
+The mock function can accept arguments.
+
+```ts test.ts icon="/icons/typescript.svg"
+import { test, expect, mock } from "bun:test";
+
+const random = mock((multiplier: number) => multiplier * Math.random());
+```
+
+---
+
+The result of `mock()` is a new function decorated with extra properties.
+
+```ts test.ts icon="/icons/typescript.svg"
+import { mock } from "bun:test";
+
+const random = mock((multiplier: number) => multiplier * Math.random());
+
+random(2);
+random(10);
+
+random.mock.calls;
+// [[ 2 ], [ 10 ]]
+
+random.mock.results;
+//  [
+//    { type: "return", value: 0.6533907460954099 },
+//    { type: "return", value: 0.6452713933037312 }
+//  ]
+```
+
+---
+
+Use these properties to write `expect` assertions about how the mock was used: how many times it was called, with which arguments, and what it returned.
+
+```ts test.ts icon="/icons/typescript.svg"
+import { test, expect, mock } from "bun:test";
+
+const random = mock((multiplier: number) => multiplier * Math.random());
+
+test("random", async () => {
+  const a = random(1);
+  const b = random(2);
+  const c = random(3);
+
+  expect(random).toHaveBeenCalled();
+  expect(random).toHaveBeenCalledTimes(3);
+  expect(random.mock.calls).toEqual([[1], [2], [3]]);
+  expect(random.mock.results[0]).toEqual({ type: "return", value: a });
+});
+```
+
+---
+
+See [Mocks](/test/mocks).

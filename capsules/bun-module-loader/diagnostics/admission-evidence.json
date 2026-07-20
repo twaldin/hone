@@ -1,0 +1,65 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 437.853947,
+    "incrementalRebuildSec": 131.51538706100837,
+    "evalSec": 128.94285714285715
+  },
+  "aa": {
+    "samples": [
+      14.240027524960464,
+      13.892704485087384,
+      13.851970228861177,
+      13.838580388131351,
+      14.32568507011914,
+      14.0550530197367
+    ],
+    "sigma": 0.20940813525668572,
+    "noiseFractionOfScale": 0.2
+  },
+  "qBase": 14.034003452816037,
+  "qFail": 0,
+  "qReference": 15.081044129099466,
+  "controls": [
+    {
+      "name": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "invalid resolver source fails the offline native build and maps closed to qFail"
+    },
+    {
+      "name": "naive",
+      "q": 0.7290235547487349,
+      "trainQ": 0.7112538807395461,
+      "validationQ": 0.7467932287579236,
+      "hardGatesPass": true,
+      "role": "deliberately slower but correct 100-microsecond delay on every resolver entry"
+    },
+    {
+      "name": "shortcut",
+      "q": 14.177324945395366,
+      "trainQ": 14.500137468858062,
+      "validationQ": 13.854512421932672,
+      "hardGatesPass": true,
+      "role": "split-path fingerprinting control beats baseline on train but not validation"
+    }
+  ],
+  "perturbation": {
+    "name": "improved",
+    "path": "diagnostics/improved/src/resolver/resolver.rs",
+    "description": "Independently authored valid source perturbation removes disabled resolver tracing and avoids cold debug-log flush calls while preserving exact observations, focused tests, and RSS.",
+    "q": 14.182308124835766,
+    "trainQ": 14.529404934556126,
+    "validationQ": 13.835211315115407,
+    "hardGatesPass": true,
+    "movesMetric": true
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstPassStabilitySpread": 0.027728477903053307,
+    "finalStabilitySpread": 0.034612449907861144,
+    "stabilityBand": 0.15,
+    "containerEvaluationsPerPass": 14,
+    "firstPassWallSec": 1803.2,
+    "finalPassWallSec": 1805.2
+  }
+}

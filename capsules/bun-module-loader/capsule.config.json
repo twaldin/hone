@@ -1,0 +1,62 @@
+{
+  "objective": "Improve cold and warm module-loader performance on frozen ESM and TypeScript graph shapes derived from bench/module-loader. Only src/resolver/** is mutable; exact exports and side effects, focused upstream resolver tests, and peak RSS no more than baseline +2% are hard gates.",
+  "image": "hone-bun-module-loader@sha256:42510480a076778ff594c95fd200610a41721d37ab20b97c80f3e98569c36747",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": ["eval.py", "workload.py", "LICENSE.md", "revision.txt"],
+  "assetGroups": [
+    {"id": "train", "visibility": "public", "paths": ["assets/train"]},
+    {"id": "validation", "visibility": "public", "paths": ["assets/validation"]}
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 21600,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {"path": "diagnostics/ordering-report.json"},
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "MIT",
+    "provenance": "Current-head OSS-T01 at oven-sh/bun 5187e27669440a72ab1b082f92b7f1b5ca94cfc1; no reference patch or privileged winning artifact. Owner-approved plan revision 2026-07-18 repinned OSS-T01 from a227ad991b62fc4e9b9ee5e998ad6c2e6508fe88 because upstream WebKit prebuilt/generated-source skew makes a227ad99 non-self-buildable. Six interleaved A-A measurements set qBase=14.034003452816037, sigma=0.20940813525668572, qFail=0, and qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=15.081044129099466.",
+    "sourceDetails": {
+      "repository": "oven-sh/bun",
+      "commit": "5187e27669440a72ab1b082f92b7f1b5ca94cfc1",
+      "tree": "5e09213e3cf377246c6abe446fa94ae91f211850",
+      "url": "https://github.com/oven-sh/bun/commit/5187e27669440a72ab1b082f92b7f1b5ca94cfc1",
+      "licenseFile": "LICENSE.md",
+      "derivation": "Exact pinned source is image-baked without repository metadata; the candidate artifact exposes only src/resolver plus trusted evaluator identity files.",
+      "mutableEnvelope": ["src/resolver/**"]
+    },
+    "toolchain": {
+      "baseImage": "ghcr.io/oven-sh/bun-development-docker-image@sha256:f627937ba0ed62821e75b7cbe2a9b8a73dd69234442c04ad49f7b327fb7f8300",
+      "bootstrapBun": "1.3.13 sha256:67892bb6734ef352f90a964f0a2a680d5f6e6d15bdb5510e56b8065ac4d599ae",
+      "clangLlvm": "21.1.8",
+      "rust": "nightly-2026-05-06",
+      "cargoProfile": "release, lto=off, codegen-units=16",
+      "image": "hone-bun-module-loader@sha256:42510480a076778ff594c95fd200610a41721d37ab20b97c80f3e98569c36747",
+      "network": "none",
+      "dependencies": "image-baked Bun install cache, complete Cargo registry cache, rustup toolchain, native build objects, WebKit/Node prebuilt caches, reflect-metadata 0.2.2 and tsyringe 4.8.0"
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max (provisional; frozen-host recalibration required)",
+      "freshProcess": true,
+      "warmRepetitions": 5,
+      "q": "reciprocal geometric mean of cold and warm per-graph wall time after all hard gates pass",
+      "qFail": 0,
+      "qBase": 14.034003452816037,
+      "sigma": 0.20940813525668572,
+      "qReference": 15.081044129099466,
+      "aaSamples": [14.240027524960464, 13.892704485087384, 13.851970228861177, 13.838580388131351, 14.32568507011914, 14.0550530197367],
+      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+      "boundedEvaluatorSec": 600,
+      "hardGates": [
+        "80 focused upstream resolver tests pass (plus 2 upstream skips and 1 todo; one uid-sensitive auto-install permission case is excluded from the unprivileged test runner)",
+        "exact canonical export SHA-256 for every cold and warm observation",
+        "exact canonical side-effect SHA-256 for every cold and warm observation",
+        "peak RSS for every graph <= frozen baseline +2%"
+      ]
+    },
+    "tags": ["m2", "oss", "bun", "module-loader", "resolver", "performance"]
+  }
+}

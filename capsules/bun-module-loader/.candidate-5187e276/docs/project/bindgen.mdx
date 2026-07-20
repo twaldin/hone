@@ -1,0 +1,289 @@
+---
+title: Bindgen
+description: Bindgen for Bun
+---
+
+<Note>This document is for maintainers and contributors to Bun, and describes internal implementation details.</Note>
+
+The bindings generator scans for `*.bind.ts` files to find function and class
+definitions, and generates glue code to interop between JavaScript and native
+code.
+
+There are other code generators and systems that achieve similar purposes;
+the following will all eventually be phased out in favor of this one:
+
+- "Classes generator", converting `*.classes.ts` for custom classes.
+- "JS2Native", allowing ad-hoc calls from `src/js` to native code.
+
+## Creating JS Functions in Rust
+
+Given a file implementing a function, such as `add`:
+
+```rust src/jsc/bindgen_test.rs
+use crate::{JSGlobalObject, JsResult};
+use crate::r#gen::bindgen_test as generated;
+
+pub fn add(global: &JSGlobalObject, a: i32, b: i32) -> JsResult<i32> {
+    match a.checked_add(b) {
+        Some(v) => Ok(v),
+        None => {
+            // Binding functions can propagate out-of-memory and JS exceptions
+            // directly; other failures (like this integer overflow) must be
+            // converted into a thrown error. Remember to be descriptive.
+            Err(global.throw_pretty(format_args!("Integer overflow while adding")))
+        }
+    }
+}
+```
+
+Then describe the API schema using a `.bind.ts` file. The binding file goes
+next to the Rust file.
+
+```ts src/jsc/bindgen_test.bind.ts icon="/icons/typescript.svg"
+import { fn, t } from "bindgen";
+
+export const add = fn({
+  args: {
+    global: t.globalObject,
+    a: t.i32,
+    b: t.i32.default(-1),
+  },
+  ret: t.i32,
+});
+```
+
+This function declaration is equivalent to:
+
+```ts
+/**
+ * Throws if zero arguments are provided.
+ * Wraps out of range numbers using modulo.
+ */
+declare function add(a: number, b: number = -1): number;
+```
+
+The code generator emits a C++ thunk that validates and coerces the JS
+arguments, then calls the Rust implementation. On the Rust side the generated
+module is reachable as `crate::r#gen::<basename>` (for `bindgen_test.bind.ts`,
+that's `crate::r#gen::bindgen_test`). To construct a `JSFunction` wrapping the
+native implementation, use `generated::create_add_callback(global)`:
+
+```rust
+use crate::r#gen::bindgen_test as generated;
+
+let js_fn: JSValue = generated::create_add_callback(global);
+```
+
+In JS files in `src/js/`, `$bindgenFn("bindgen_test.bind.ts", "add")` returns
+a handle to the implementation.
+
+Exported bindgen functions are snake_cased on the Rust side
+(`requiredAndOptionalArg` → `required_and_optional_arg`), and the generated
+callback constructor follows the same convention
+(`create_required_and_optional_arg_callback`).
+
+## Strings
+
+To receive a string, use [`t.DOMString`](https://webidl.spec.whatwg.org/#idl-DOMString), [`t.ByteString`](https://webidl.spec.whatwg.org/#idl-ByteString), or [`t.USVString`](https://webidl.spec.whatwg.org/#idl-USVString). These map directly to their WebIDL counterparts and have slightly different conversion logic. Bindgen passes `bun_core::String` to native code in all cases.
+
+When in doubt, use DOMString.
+
+`t.UTF8String` works in place of `t.DOMString`, but eagerly converts to UTF-8.
+The native callback receives a `&[u8]` slice (WTF-8 data) that is
+freed after the function returns.
+
+TLDRs from the WebIDL spec:
+
+- ByteString can only contain valid latin1 characters. It is not safe to assume `bun_core::String` is already in 8-bit format, but it is extremely likely.
+- USVString does not contain invalid surrogate pairs, so its text can be represented correctly in UTF-8.
+- DOMString is the loosest but also the most recommended strategy.
+
+## Function Variants
+
+The `variants` key declares multiple variants (also known as overloads) of a function.
+
+```ts
+import { fn, t } from "bindgen";
+
+export const action = fn({
+  variants: [
+    {
+      args: {
+        a: t.i32,
+      },
+      ret: t.i32,
+    },
+    {
+      args: {
+        a: t.DOMString,
+      },
+      ret: t.DOMString,
+    },
+  ],
+});
+```
+
+Each variant gets a numbered Rust function:
+
+```rust
+pub fn action_1(a: i32) -> i32 {
+    a
+}
+
+pub fn action_2(a: bun_core::String) -> bun_core::String {
+    a
+}
+```
+
+## `t.dictionary`
+
+A `dictionary` describes a JavaScript object, typically a function input. For function outputs, prefer a class type so you can add methods and support destructuring.
+
+## Enumerations
+
+`t.stringEnum` creates a [WebIDL enumeration](https://webidl.spec.whatwg.org/#idl-enums) and generates a new enum type for it.
+
+An example of `stringEnum` from `fmt_jsc.bind.ts` / `bun:internal-for-testing`:
+
+```ts
+export const Formatter = t.stringEnum("highlight-javascript", "highlight-javascript-redacted", "escape-powershell");
+
+export const fmtString = fn({
+  implNamespace: "js_bindings",
+  args: {
+    global: t.globalObject,
+    code: t.UTF8String,
+    formatter: Formatter,
+  },
+  ret: t.DOMString,
+});
+```
+
+On the Rust side, the enum is mirrored as a `#[repr(u8)]` enum. Bindgen
+**sorts `t.stringEnum` values alphabetically** before emitting the C++
+`enum class`, so discriminants must match the generated header's order, not
+the `.bind.ts` declaration order:
+
+```rust
+pub mod js_bindings {
+    #[repr(u8)]
+    #[derive(Copy, Clone, Eq, PartialEq)]
+    pub enum Formatter {
+        EscapePowershell = 0,
+        HighlightJavascript = 1,
+        HighlightJavascriptRedacted = 2,
+    }
+
+    pub fn fmt_string(
+        global: &JSGlobalObject,
+        code: &[u8],
+        formatter_id: Formatter,
+    ) -> JsResult<bun_core::String> {
+        // ...
+    }
+}
+```
+
+WebIDL strongly encourages kebab-case for enumeration values, to be consistent with existing Web APIs.
+
+## `implNamespace`
+
+Setting `implNamespace: "foo"` on a `fn({...})` routes the generated call to
+`crate::<basename>::foo::fn_name` instead of `crate::<basename>::fn_name`. Use
+this to group related binding implementations under a submodule.
+
+## `t.oneOf`
+
+A `oneOf` is a union of two or more types. It is represented as a Rust
+`enum` with one variant per member type.
+
+## Attributes
+
+Attributes can be chained onto `t.*` types. On all types:
+
+- `.required`, in dictionary parameters only
+- `.optional`, in function arguments only
+- `.default(T)`
+
+When a value is `.optional`, it is lowered to a Rust `Option<T>`:
+
+```ts
+export const requiredAndOptionalArg = fn({
+  args: {
+    a: t.boolean,
+    b: t.usize.optional,
+    c: t.i32.enforceRange(0, 100).default(42),
+    d: t.u8.optional,
+  },
+  ret: t.i32,
+});
+```
+
+```rust
+pub fn required_and_optional_arg(a: bool, b: Option<usize>, c: i32, d: Option<u8>) -> i32 {
+    // ...
+}
+```
+
+Depending on the type, more attributes are available. See the type definitions
+in auto-complete for details. Only one of these three attributes can be
+applied, and it must be applied last.
+
+### Integer Attributes
+
+Integer types take `clamp` or `enforceRange` to customize overflow behavior:
+
+```ts
+import { fn, t } from "bindgen";
+
+export const add = fn({
+  args: {
+    global: t.globalObject,
+    // enforce in i32 range
+    a: t.i32.enforceRange(),
+    // clamp to u16 range
+    b: t.u16,
+    // enforce in arbitrary range, with a default if not provided
+    c: t.i32.enforceRange(0, 1000).default(5),
+    // clamp to arbitrary range, or None
+    d: t.u16.clamp(0, 10).optional,
+  },
+  ret: t.i32,
+});
+```
+
+Node.js validator functions such as `validateInteger` and `validateNumber`
+are also available. Use these when implementing Node.js APIs so the error
+messages match Node exactly.
+
+Unlike `enforceRange`, which is taken from WebIDL, the `validate*` functions
+are much stricter about the input they accept. For example, Node's numerical
+validator checks `typeof value === 'number'`, while WebIDL uses `ToNumber` for
+lossy conversion.
+
+```ts
+import { fn, t } from "bindgen";
+
+export const add = fn({
+  args: {
+    global: t.globalObject,
+    // throw if not given a number
+    a: t.f64.validateNumber(),
+    // valid in i32 range
+    b: t.i32.validateInt32(),
+    // f64 within safe integer range
+    c: t.f64.validateInteger(),
+    // f64 in given range
+    d: t.f64.validateNumber(-10000, 10000),
+  },
+  ret: t.i32,
+});
+```
+
+## Callbacks
+
+TODO
+
+## Classes
+
+TODO

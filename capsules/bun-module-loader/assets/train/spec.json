@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "warmRepetitions": 5,
+  "jobs": [
+    {"id": "train-ts-chain", "kind": "ts-chain", "modules": 1100},
+    {"id": "train-extensionless", "kind": "extensionless-ts", "modules": 1050},
+    {"id": "train-esm-fanout", "kind": "esm-fanout", "modules": 900, "fanout": 5},
+    {"id": "train-package-exports", "kind": "package-exports", "modules": 700},
+    {"id": "train-tsconfig-alias", "kind": "tsconfig-alias", "modules": 1000}
+  ]
+}

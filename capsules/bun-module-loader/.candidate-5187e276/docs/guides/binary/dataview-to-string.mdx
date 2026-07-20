@@ -1,0 +1,17 @@
+---
+title: Convert a DataView to a string
+sidebarTitle: "DataView to string"
+mode: center
+---
+
+If a [`DataView`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/DataView) contains ASCII-encoded text, use the [`TextDecoder`](https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder) class to convert it to a string.
+
+```ts
+const dv: DataView = ...;
+const decoder = new TextDecoder();
+const str = decoder.decode(dv);
+```
+
+---
+
+See [Binary Data](/runtime/binary-data#conversion).

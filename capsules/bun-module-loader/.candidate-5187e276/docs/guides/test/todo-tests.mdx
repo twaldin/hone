@@ -1,0 +1,74 @@
+---
+title: Mark a test as a "todo" with the Bun test runner
+sidebarTitle: Todo tests
+mode: center
+---
+
+To remind yourself to write a test later, use the `test.todo` function. An implementation isn't required.
+
+```ts test.ts icon="/icons/typescript.svg"
+import { test, expect } from "bun:test";
+
+// write this later
+test.todo("unimplemented feature");
+```
+
+---
+
+The `bun test` output reports the number of `todo` tests.
+
+```sh terminal icon="terminal"
+bun test
+```
+
+```txt
+test.test.ts:
+✓ add [0.03ms]
+✓ multiply [0.02ms]
+✎ unimplemented feature
+
+ 2 pass
+ 1 todo
+ 0 fail
+ 2 expect() calls
+Ran 3 tests across 1 files. [74.00ms]
+```
+
+---
+
+You can provide a test implementation.
+
+```ts
+import { test, expect } from "bun:test";
+
+test.todo("unimplemented feature", () => {
+  expect(Bun.isAwesome()).toBe(true);
+});
+```
+
+---
+
+Bun doesn't run the implementation unless you pass the `--todo` flag. With `--todo`, the test runs and is _expected to fail_. If a todo test passes, `bun test` returns a non-zero exit code.
+
+```sh terminal icon="terminal"
+bun test --todo
+```
+
+```txt
+my.test.ts:
+✗ unimplemented feature
+  ^ this test is marked as todo but passes. Remove `.todo` or check that test is correct.
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+$ echo $?
+1 # this is the exit code of the previous command
+```
+
+---
+
+See also:
+
+- [Skip a test](/guides/test/skip-tests)
+- [Writing tests](/test/writing-tests)

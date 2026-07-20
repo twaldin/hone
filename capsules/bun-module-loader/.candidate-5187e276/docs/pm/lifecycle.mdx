@@ -1,0 +1,89 @@
+---
+title: "Lifecycle scripts"
+description: "How Bun handles package lifecycle scripts securely"
+---
+
+Packages on `npm` can define _lifecycle scripts_ in their `package.json`. These are some of the most common, among [many others](https://docs.npmjs.com/cli/v10/using-npm/scripts):
+
+- `preinstall`: Runs before the package is installed
+- `postinstall`: Runs after the package is installed
+- `preuninstall`: Runs before the package is uninstalled
+- `prepublishOnly`: Runs before the package is published
+
+These scripts are arbitrary shell commands that the package manager is expected to run at the appropriate time. Because running arbitrary code is a security risk, Bun does not execute arbitrary lifecycle scripts by default, unlike other `npm` clients.
+
+---
+
+## `postinstall`
+
+The `postinstall` script is particularly important. It's widely used to build or install platform-specific binaries for packages that are implemented as [native Node.js add-ons](https://nodejs.org/api/addons.html). For example, `node-sass` uses `postinstall` to build a native binary for Sass.
+
+```json package.json icon="file-json"
+{
+  "name": "my-app",
+  "version": "1.0.0",
+  "dependencies": {
+    "node-sass": "^6.0.1"
+  }
+}
+```
+
+---
+
+## `trustedDependencies`
+
+Bun is "default-secure": it only runs lifecycle scripts for packages on an allow list. To allow lifecycle scripts for a particular package, add its name to the `trustedDependencies` array in your `package.json`.
+
+```json package.json icon="file-json"
+{
+  "name": "my-app",
+  "version": "1.0.0",
+  "trustedDependencies": ["node-sass"] // [!code ++]
+}
+```
+
+After adding the package to `trustedDependencies`, install or re-install it. Bun reads the field and runs its lifecycle scripts.
+
+A curated list of popular npm packages with lifecycle scripts is allowed by default. See [the full list](https://github.com/oven-sh/bun/blob/main/src/install/default-trusted-dependencies.txt).
+
+<Note>
+  The default trusted dependencies list only applies to packages installed from npm. For packages from other sources
+  (such as `file:`, `link:`, `git:`, or `github:` dependencies), you must explicitly add them to `trustedDependencies`
+  to run their lifecycle scripts, even if the package name matches an entry in the default list. This prevents malicious
+  packages from spoofing trusted package names through local file paths or git repositories.
+</Note>
+
+### Behavior of the `trustedDependencies` field
+
+Defining `trustedDependencies` in `package.json` **replaces** the default list rather than extending it. Exactly one of three modes applies per project:
+
+| `package.json`                        | Packages allowed to run lifecycle scripts                  |
+| ------------------------------------- | ---------------------------------------------------------- |
+| `trustedDependencies` omitted         | The packages in Bun's built-in list (npm sources only).    |
+| `trustedDependencies: ["pkg-a", ...]` | **Only** the listed packages. The default list is ignored. |
+| `trustedDependencies: []`             | **No** packages, including none from the default list.     |
+
+Set `trustedDependencies: []` when you want to opt out of the default allow list entirely without passing `--ignore-scripts` on every install. If you define `trustedDependencies` with an explicit list, include any packages from the [default list](https://github.com/oven-sh/bun/blob/main/src/install/default-trusted-dependencies.txt) whose lifecycle scripts you still need (for example, `sharp` or `esbuild`) — they are no longer trusted implicitly.
+
+---
+
+## `--ignore-scripts`
+
+To disable lifecycle scripts for all packages, use the `--ignore-scripts` flag.
+
+```bash terminal icon="terminal"
+bun install --ignore-scripts
+```
+
+To make this the default for a project, set [`install.ignoreScripts`](/runtime/bunfig#install-ignorescripts) in `bunfig.toml`:
+
+```toml bunfig.toml icon="settings"
+[install]
+ignoreScripts = true
+```
+
+Or in `.npmrc`:
+
+```ini .npmrc icon="npm"
+ignore-scripts=true
+```

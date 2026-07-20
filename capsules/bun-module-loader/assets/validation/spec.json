@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "warmRepetitions": 5,
+  "jobs": [
+    {"id": "validation-ts-chain", "kind": "ts-chain", "modules": 1000},
+    {"id": "validation-extensionless", "kind": "extensionless-ts", "modules": 1100},
+    {"id": "validation-esm-fanout", "kind": "esm-fanout", "modules": 950, "fanout": 6},
+    {"id": "validation-package-exports", "kind": "package-exports", "modules": 750},
+    {"id": "validation-tsconfig-alias", "kind": "tsconfig-alias", "modules": 900}
+  ]
+}

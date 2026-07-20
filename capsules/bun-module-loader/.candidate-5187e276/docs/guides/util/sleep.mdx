@@ -1,0 +1,24 @@
+---
+title: Sleep for a fixed number of milliseconds
+sidebarTitle: Sleep
+mode: center
+---
+
+`Bun.sleep()` returns a void `Promise` that resolves after a given number of milliseconds.
+
+```ts
+// sleep for 1 second
+await Bun.sleep(1000);
+```
+
+---
+
+Internally, it is equivalent to the following [`setTimeout`](https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope/setTimeout) snippet.
+
+```ts
+await new Promise(resolve => setTimeout(resolve, ms));
+```
+
+---
+
+See [Utils](/runtime/utils).

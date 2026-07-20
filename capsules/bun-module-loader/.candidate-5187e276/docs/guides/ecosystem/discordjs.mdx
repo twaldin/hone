@@ -1,0 +1,162 @@
+---
+title: Create a Discord bot
+sidebarTitle: "Discord.js with Bun"
+mode: center
+---
+
+Discord.js runs on Bun with no extra setup. This guide builds a bot that answers a `/ping` slash command: you register the command once, then start the bot and use it in your server. If this is your first bot, copy each block as you reach it.
+
+---
+
+Create a folder for your bot and set it up with `bun init`. Pick the defaults when it asks.
+
+```sh terminal icon="terminal"
+mkdir my-bot
+cd my-bot
+bun init
+```
+
+---
+
+Add Discord.js to the project.
+
+```sh terminal icon="terminal"
+bun add discord.js
+```
+
+---
+
+Your bot needs its own account, which you create in Discord's developer portal. Open the [developer portal](https://discord.com/developers/applications), sign in, and create an **Application**. Inside it, open the **Bot** tab to create the bot user. Discord's [setup walkthrough](https://discordjs.guide/legacy/preparations/app-setup) has screenshots if you get lost.
+
+Copy two values from the portal:
+
+- The **token** on the **Bot** tab. It's the password your code uses to log in, so treat it like one and keep it to yourself.
+- The **Application ID** on the **General Information** tab. Discord uses it to tie your commands to this app.
+
+---
+
+A bot can't do anything in a server until you invite it. In the portal's **OAuth2** section, generate an invite URL with the `bot` and `applications.commands` scopes, open it, and add the bot to a server you manage. Slash commands need the `applications.commands` scope, so don't skip it. A personal server you make for testing is the easiest place to start, and Discord's [guide to adding a bot](https://discordjs.guide/legacy/preparations/adding-your-app) walks through it with screenshots.
+
+---
+
+You also need your server's ID to register the command there. In Discord, turn on **Settings > Advanced > Developer Mode**, then right-click your server's icon and choose **Copy Server ID**.
+
+---
+
+Save all three values in `.env.local`. Bun reads this file on startup and loads it into `process.env`, so nothing secret lives in your code.
+
+```ini .env.local icon="settings"
+DISCORD_TOKEN=your-bot-token
+DISCORD_CLIENT_ID=your-application-id
+DISCORD_GUILD_ID=your-server-id
+```
+
+---
+
+Add `.env.local` to your `.gitignore` before you commit anything. Anyone who reads the token can control your bot, so it should never land in version control.
+
+```txt .gitignore icon="file-code"
+node_modules
+.env.local
+```
+
+---
+
+Discord has to know about a command before anyone can use it. Register `/ping` with a short script named `deploy-commands.ts`.
+
+```ts deploy-commands.ts icon="/icons/typescript.svg"
+import { REST, Routes, SlashCommandBuilder } from "discord.js";
+
+const { DISCORD_TOKEN, DISCORD_CLIENT_ID, DISCORD_GUILD_ID } = process.env;
+if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DISCORD_GUILD_ID) {
+  throw new Error("Set DISCORD_TOKEN, DISCORD_CLIENT_ID, and DISCORD_GUILD_ID in .env.local");
+}
+
+// the commands you want to register
+const commands = [new SlashCommandBuilder().setName("ping").setDescription("Replies with Pong!").toJSON()];
+
+const rest = new REST().setToken(DISCORD_TOKEN);
+
+// register them in your test server
+await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID), { body: commands });
+
+console.log("Registered /ping");
+```
+
+Run it once.
+
+```sh terminal icon="terminal"
+bun run deploy-commands.ts
+```
+
+You only run this again when you add a command or change its name or description, not every time the bot starts. Registering to your server instead of globally keeps the command scoped to where you're testing.
+
+---
+
+Now the bot itself. Save it as `bot.ts`.
+
+```ts bot.ts icon="/icons/typescript.svg"
+import { Client, Events, GatewayIntentBits } from "discord.js";
+
+const { DISCORD_TOKEN } = process.env;
+if (!DISCORD_TOKEN) {
+  throw new Error("Set DISCORD_TOKEN in .env.local");
+}
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// runs once, right after the bot connects
+client.once(Events.ClientReady, readyClient => {
+  console.log(`Logged in as ${readyClient.user.tag}`);
+});
+
+// runs every time someone uses a slash command
+client.on(Events.InteractionCreate, async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === "ping") {
+    await interaction.reply("Pong!");
+  }
+});
+
+client.login(DISCORD_TOKEN);
+```
+
+The ready handler logs a line once the bot connects. After that, `interactionCreate` runs whenever someone uses a slash command; it confirms the command was `/ping` and replies with `Pong!`.
+
+---
+
+Start the bot with `bun run`.
+
+```sh terminal icon="terminal"
+bun run bot.ts
+```
+
+The first connection takes a few seconds. Once the login line prints, switch to Discord and type `/ping` in your server.
+
+```txt
+Logged in as my-bot#1234
+```
+
+The bot replies with `Pong!`. You've got a working Discord bot.
+
+---
+
+To add another command, define it in `deploy-commands.ts`, run that script again, and add an `if` branch for its name in `bot.ts`. The [Discord.js docs](https://discord.js.org/docs) cover command options, permissions, buttons, embeds, and the rest of the API.
+
+---
+
+When you deploy, there's no build or bundling step. Bun runs `bot.ts` and every file it imports directly, so you ship your source as-is and start it with the same `bun run bot.ts` you use while developing.
+
+`deploy-commands.ts` registers `/ping` in your test server, which is the right scope while you're building. To publish the bot to every server it joins, register globally instead: change the route to `Routes.applicationCommands(DISCORD_CLIENT_ID)`. Global registration doesn't use a server, so you can also drop `DISCORD_GUILD_ID` from the script's check and from `.env.local`.
+
+To keep the bot online and bring it back after a crash or reboot, run it under a process manager.
+
+<Columns cols={2}>
+  <Card title="systemd" href="/guides/ecosystem/systemd" icon="server">
+    Run your bot as a Linux daemon
+  </Card>
+  <Card title="PM2" href="/guides/ecosystem/pm2" icon="cog">
+    Manage your bot with PM2
+  </Card>
+</Columns>

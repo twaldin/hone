@@ -1,0 +1,24 @@
+name: Lint
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  BUN_VERSION: "1.2.10"
+
+jobs:
+  lint-js:
+    name: "Lint JavaScript"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Setup Dependencies
+        run: |
+          bun install --frozen-lockfile
+      - name: Lint
+        run: bun lint

@@ -1,0 +1,1105 @@
+import { $ } from "bun";
+import { patchInternals } from "bun:internal-for-testing";
+import { describe, expect, test } from "bun:test";
+import fs from "fs/promises";
+import { tempDirWithFiles as __tempDirWithFiles, bunEnv, bunExe } from "harness";
+import { join as __join } from "node:path";
+const { parse, apply, makeDiff } = patchInternals;
+
+const makeDiffJs = async (aFolder: string, bFolder: string, cwd: string): Promise<string> => {
+  const { stdout, stderr } =
+    await $`git -c core.safecrlf=false diff --src-prefix=a/ --dst-prefix=b/ --ignore-cr-at-eol --irreversible-delete --full-index --no-index ${aFolder} ${bFolder}`
+      .env(
+        // https://github.com/pnpm/pnpm/blob/45f4262f0369cadf41cea3b823e8932eae157c4b/patching/plugin-commands-patching/src/patchCommit.ts#L117
+        {
+          ...process.env,
+          // #region Predictable output
+          // These variables aim to ignore the global git config so we get predictable output
+          // https://git-scm.com/docs/git#Documentation/git.txt-codeGITCONFIGNOSYSTEMcode
+          GIT_CONFIG_NOSYSTEM: "1",
+          HOME: "",
+          XDG_CONFIG_HOME: "",
+          USERPROFILE: "",
+        },
+      )
+      .quiet()
+      .cwd(cwd)
+      // For some reason git diff returns exit code 1 when it is not an error
+      // So we must check that there is no stderr output instead of the exit code
+      // to determine if the command was successful
+      .throws(false);
+
+  if (stderr.length > 0) throw new Error(stderr.toString());
+
+  const patch = stdout.toString();
+
+  return patch
+    .replace(new RegExp(`(a|b)(${escapeStringRegexp(`/${removeTrailingAndLeadingSlash(aFolder)}/`)})`, "g"), "$1/")
+    .replace(new RegExp(`(a|b)${escapeStringRegexp(`/${removeTrailingAndLeadingSlash(bFolder)}/`)}`, "g"), "$1/")
+    .replace(new RegExp(escapeStringRegexp(`${aFolder}/`), "g"), "")
+    .replace(new RegExp(escapeStringRegexp(`${bFolder}/`), "g"), "");
+  // .replace(/\n\\ No newline at end of file\n$/, "\n");
+};
+
+const tempDirWithFiles: typeof __tempDirWithFiles =
+  process.platform === "win32"
+    ? (a, b) => __tempDirWithFiles(a.replaceAll("\\", "/"), b).replaceAll("\\", "/")
+    : __tempDirWithFiles;
+const join =
+  process.platform === "win32"
+    ? (...strings: string[]): string => __join(...strings.map(s => s.replaceAll("\\", "/"))).replaceAll("\\", "/")
+    : __join;
+
+// Recurse through a nested object, and return a copy where for any object where the only two
+// properties are a numeric `capacity` and an array `items`, the capacity has been deleted. Meant to
+// be used on serialized Zig structs that contain ArrayLists, because the allocation strategy of
+// ArrayList can change and result in a different `capacity` without changing the interpretation of
+// the ArrayList's value.
+function removeCapacity(patch: any): any {
+  if (Array.isArray(patch)) {
+    return patch.map(removeCapacity);
+  } else if (patch !== null && typeof patch == "object") {
+    const keys = Object.keys(patch);
+    keys.sort();
+    if (keys.length == 2 && keys[0] == "capacity" && keys[1] == "items") {
+      if (typeof patch.capacity == "number" && Array.isArray(patch.items)) {
+        // this looks like an ArrayList, so delete the capacity because it is unstable
+        return { items: patch.items.map(removeCapacity) };
+      }
+    }
+    // ordinary object, so just apply to all the children
+    const result = {};
+    for (const k of keys) {
+      result[k] = removeCapacity(patch[k]);
+    }
+    return result;
+  }
+  return patch;
+}
+
+describe("apply", () => {
+  test("edgecase", async () => {
+    const newcontents = "module.exports = x => x % 420 === 0;";
+    const tempdir2 = tempDirWithFiles("patch-test2", {
+      ".bun/install/cache/is-even@1.0.0": {
+        "index.js": "module.exports = x => x % 2 === 0;",
+      },
+    });
+    const tempdir = tempDirWithFiles("patch-test", {
+      a: {},
+      ["node_modules/is-even"]: {
+        "index.js": newcontents,
+      },
+    });
+
+    const patchfile = await makeDiff(
+      `${tempdir2}/.bun/install/cache/is-even@1.0.0`,
+      `${tempdir}/node_modules/is-even`,
+      tempdir,
+    );
+
+    await apply(patchfile, `${tempdir}/node_modules/is-even`);
+    expect(await fs.readFile(`${tempdir}/node_modules/is-even/index.js`).then(b => b.toString())).toBe(newcontents);
+  });
+
+  test("empty", async () => {
+    const tempdir = tempDirWithFiles("patch-test", {
+      a: {},
+      b: {},
+    });
+
+    const afolder = join(tempdir, "a");
+    const bfolder = join(tempdir, "b");
+
+    const patchfile = await makeDiff(afolder, bfolder, tempdir);
+    expect(patchfile).toBe("");
+
+    await apply(patchfile, afolder);
+
+    expect(await fs.readdir(afolder)).toEqual([]);
+  });
+
+  describe("deletion", () => {
+    test("simple", async () => {
+      const files = {
+        "a/hey.txt": "hello!",
+        "a/byebye.txt": "goodbye :(",
+        "b/hey.txt": "hello!",
+      };
+      const tempdir = tempDirWithFiles("patch-test", files);
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      console.log("makeDiff args", afolder, bfolder);
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      console.log("PATCHFILE", patchfile);
+      console.log("afolder", afolder);
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "hey.txt")}`.cwd(tempdir).text()).toBe(files["b/hey.txt"]);
+      expect(
+        await $`if ls -d ${join(afolder, "byebye.txt")}; then echo oops; else echo okay!; fi;`.cwd(tempdir).text(),
+      ).toBe("okay!\n");
+    });
+  });
+
+  describe("creation", () => {
+    test("simple", async () => {
+      const files = {
+        "a": {},
+        "b/newfile.txt": "hey im new here!",
+      };
+      const tempdir = tempDirWithFiles("patch-test", files);
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "newfile.txt")}`.cwd(tempdir).text()).toBe(files["b/newfile.txt"]);
+    });
+
+    test("multi-line", async () => {
+      const files = {
+        "a": {},
+        "b/newfile.txt": "hey im new here!\nhello",
+      };
+      const tempdir = tempDirWithFiles("patch-test", files);
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "newfile.txt")}`.cwd(tempdir).text()).toBe(files["b/newfile.txt"]);
+    });
+  });
+
+  describe("rename", () => {
+    test("files", async () => {
+      const files = {
+        "a/hey.txt": "hello!",
+        "b/heynow.txt": "hello!",
+      };
+      const tempdir = tempDirWithFiles("patch-test", files);
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "heynow.txt")}`.cwd(tempdir).text()).toBe(files["b/heynow.txt"]);
+      expect(
+        await $`if ls -d ${join(afolder, "hey.txt")}; then echo oops; else echo okay!; fi;`.cwd(tempdir).text(),
+      ).toBe("okay!\n");
+    });
+
+    test("to a destination dir longer than the path buffer throws instead of crashing", async () => {
+      const tempdir = tempDirWithFiles("patch-test", { "from.txt": "hello!" });
+
+      await using proc = Bun.spawn({
+        cmd: [
+          bunExe(),
+          "-e",
+          `import { patchInternals } from "bun:internal-for-testing";
+           const hugeDir = Buffer.alloc(8000, "a").toString();
+           const patchfile = "rename from from.txt\\nrename to " + hugeDir + "/to.txt\\n";
+           try {
+             patchInternals.apply(patchfile, ${JSON.stringify(tempdir)});
+             console.log("no-error");
+           } catch (e) {
+             console.log("caught: " + e.code);
+           }`,
+        ],
+        env: bunEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+      expect(stderr).toBe("");
+      if (process.platform !== "win32") {
+        expect(stdout.trim()).toBe("caught: ENAMETOOLONG");
+      } else {
+        expect(stdout.trim()).toStartWith("caught:");
+      }
+      expect(exitCode).toBe(0);
+    });
+
+    test("folders", async () => {
+      const files = {
+        "a/foo/hey.txt": "hello!",
+        "a/foo/hi.txt": "hello!",
+        "a/foo/lmao.txt": "lmao!",
+        "b/foo": {},
+        "b/bar/hey.txt": "hello!",
+        "b/bar/hi.txt": "hello!",
+        "b/bar/lmao.txt": "lmao!",
+      };
+      const tempdir = tempDirWithFiles("patch-test", files);
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      // Should we remove the folder if it's empty? Technically running `git apply` does this
+      // But git does not track empty directories so it's not really a problem
+      // expect(
+      //   await $`if ls -d ${join(afolder, "foo")}; then echo should not exist!; else echo okay!; fi;`
+      //     .cwd(tempdir)
+      //     .text(),
+      // ).toBe("okay!\n");
+
+      expect(await $`cat ${join(afolder, "bar", "hey.txt")}`.cwd(tempdir).text()).toBe(files["b/bar/hey.txt"]);
+      expect(await $`cat ${join(afolder, "bar", "hi.txt")}`.cwd(tempdir).text()).toBe(files["b/bar/hi.txt"]);
+      expect(await $`cat ${join(afolder, "bar", "lmao.txt")}`.cwd(tempdir).text()).toBe(files["b/bar/lmao.txt"]);
+      expect(
+        await $`ls ${join(afolder, "bar")}`
+          .cwd(tempdir)
+          .text()
+          .then((out: string) =>
+            out
+              .split("\n")
+              .filter(x => x !== "")
+              .sort(),
+          ),
+      ).toEqual(["hey.txt", "hi.txt", "lmao.txt"].sort());
+    });
+  });
+
+  describe("mode change", () => {
+    // chmod doesn't do anything on windows so skiip
+    test.if(process.platform !== "win32")("simple", async () => {
+      const files = {
+        "a/hi.txt": "hello!",
+        "b/hi.txt": "hi!",
+      };
+
+      const tempdir = tempDirWithFiles("patch-test", files);
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      await fs.chmod(join(bfolder, "hi.txt"), 0o755);
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "hi.txt")}`.cwd(tempdir).text()).toBe(files["b/hi.txt"]);
+      const stat = await fs.stat(join(afolder, "hi.txt"));
+      expect((stat.mode & parseInt("777", 8)).toString(8)).toBe("755");
+    });
+  });
+
+  describe("patch", () => {
+    test("simple insertion", async () => {
+      const afile = `hello!\n`;
+      const bfile = `hello!\nwassup?\n`;
+
+      const tempdir = tempDirWithFiles("patch-test", {
+        "a/hello.txt": afile,
+        "b/hello.txt": bfile,
+      });
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "hello.txt")}`.cwd(tempdir).text()).toBe(bfile);
+    });
+
+    test("simple deletion", async () => {
+      const afile = `hello!\nwassup?\n`;
+      const bfile = `hello!\n`;
+
+      const tempdir = tempDirWithFiles("patch-test", {
+        "a/hello.txt": afile,
+        "b/hello.txt": bfile,
+      });
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "hello.txt")}`.cwd(tempdir).text()).toBe(bfile);
+    });
+
+    test("multi insertion", async () => {
+      const afile = `hello!\n`;
+      const bfile = `lol\nhello!\nwassup?\n`;
+
+      const tempdir = tempDirWithFiles("patch-test", {
+        "a/hello.txt": afile,
+        "b/hello.txt": bfile,
+      });
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "hello.txt")}`.cwd(tempdir).text()).toBe(bfile);
+    });
+
+    test("multi deletion", async () => {
+      const afile = `hello!\nwassup?\nlmao\n`;
+      const bfile = `wassup?\n`;
+
+      const tempdir = tempDirWithFiles("patch-test", {
+        "a/hello.txt": afile,
+        "b/hello.txt": bfile,
+      });
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "hello.txt")}`.cwd(tempdir).text()).toBe(bfile);
+    });
+
+    test("multi-hunk insertion", async () => {
+      const afile = `0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20`;
+      const bfile = `0
+0.5 hi
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+19.5 lol hi
+20`;
+
+      const tempdir = tempDirWithFiles("patch-test", {
+        "a/hello.txt": afile,
+        "b/hello.txt": bfile,
+      });
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "hello.txt")}`.cwd(tempdir).text()).toBe(bfile);
+    });
+
+    test("multi-hunk deletion", async () => {
+      const bfile = `0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20`;
+      const afile = `0
+0.5 hi
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+19.5 lol hi
+20`;
+
+      const tempdir = tempDirWithFiles("patch-test", {
+        "a/hello.txt": afile,
+        "b/hello.txt": bfile,
+      });
+
+      const afolder = join(tempdir, "a");
+      const bfolder = join(tempdir, "b");
+
+      const patchfile = await makeDiff(afolder, bfolder, tempdir);
+
+      await apply(patchfile, afolder);
+
+      expect(await $`cat ${join(afolder, "hello.txt")}`.cwd(tempdir).text()).toBe(bfile);
+    });
+  });
+
+  describe("No newline at end of file", () => {
+    // TODO: simple, multiline, multiple hunks
+  });
+
+  // Each of these hits an error path in `parse_apply_args`. The native code must
+  // surface the failure as a catchable JS exception; it used to return a normal
+  // value while the exception was still pending, which aborts debug/ASAN builds
+  // with "Unexpected exception observed" (releaseAssertNoException).
+  test("invalid arguments throw a catchable error", async () => {
+    await using proc = Bun.spawn({
+      cmd: [
+        bunExe(),
+        "-e",
+        `import { patchInternals } from "bun:internal-for-testing";
+         try { patchInternals.apply("@@"); console.log("no-error"); } catch (e) { console.log("invalid-patchfile: " + e.message); }
+         try { patchInternals.apply(); console.log("no-error"); } catch (e) { console.log("missing-argument: " + e.message); }
+         try { patchInternals.apply("@@", "bun-patch-test-nonexistent-dir"); console.log("no-error"); } catch (e) { console.log("bad-dir: " + e.code); }
+         try { patchInternals.apply({ toString() { throw new Error("coerce-fail"); } }, process.cwd()); console.log("no-error"); } catch (e) { console.log("bad-patchfile-arg: " + e.message); }`,
+      ],
+      env: bunEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+    expect(stderr).toBe("");
+    expect(stdout.trim().split("\n")).toEqual([
+      "invalid-patchfile: bad_header_line failed to parse patchfile",
+      "missing-argument: apply: expected at least 1 argument, got 0",
+      "bad-dir: ENOENT",
+      "bad-patchfile-arg: coerce-fail",
+    ]);
+    expect(exitCode).toBe(0);
+  });
+
+  // A crafted patch from an untrusted source must never panic the process. Both
+  // cases below used to crash `bun install` when applying patchedDependencies.
+  describe.concurrent("malformed patches do not crash", () => {
+    test("file creation hunk with empty parts creates an empty file", async () => {
+      const dir = tempDirWithFiles("patch-empty-parts", { ".keep": "" });
+
+      await using proc = Bun.spawn({
+        cmd: [
+          bunExe(),
+          "-e",
+          `import { patchInternals } from "bun:internal-for-testing";
+           import { readFileSync } from "node:fs";
+           const patch = [
+             "diff --git a/newfile.txt b/newfile.txt",
+             "new file mode 100644",
+             "--- /dev/null",
+             "+++ b/newfile.txt",
+             "@@ -0,0 +0,0 @@",
+             "",
+           ].join("\\n");
+           try {
+             const ok = patchInternals.apply(patch, ${JSON.stringify(dir)});
+             console.log("ok=" + ok + " contents=" + JSON.stringify(readFileSync(${JSON.stringify(dir)} + "/newfile.txt", "utf8")));
+           } catch (e) {
+             console.log("threw: " + e.code + " " + e.message);
+           }`,
+        ],
+        env: bunEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+      expect({ stdout: stdout.trim(), stderr, exitCode }).toEqual({
+        stdout: 'ok=true contents=""',
+        stderr: "",
+        exitCode: 0,
+      });
+    });
+
+    test("header deleting more lines than the target file has returns EINVAL", async () => {
+      const dir = tempDirWithFiles("patch-underflow", { "target.txt": "only line\n" });
+
+      await using proc = Bun.spawn({
+        cmd: [
+          bunExe(),
+          "-e",
+          `import { patchInternals } from "bun:internal-for-testing";
+           const body = [" only line"];
+           for (let i = 0; i < 9; i++) body.push("-deleted " + i);
+           const patch = [
+             "diff --git a/target.txt b/target.txt",
+             "--- a/target.txt",
+             "+++ b/target.txt",
+             "@@ -1,10 +1,1 @@",
+             ...body,
+             "",
+           ].join("\\n");
+           try {
+             patchInternals.apply(patch, ${JSON.stringify(dir)});
+             console.log("no-error");
+           } catch (e) {
+             console.log("caught: " + e.code);
+           }`,
+        ],
+        env: bunEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+      expect({ stdout: stdout.trim(), stderr, exitCode }).toEqual({
+        stdout: "caught: EINVAL",
+        stderr: "",
+        exitCode: 0,
+      });
+    });
+  });
+});
+
+describe("parse", () => {
+  test("works for a simple case", () => {
+    expect(removeCapacity(JSON.parse(parse(patch)))).toEqual({
+      "parts": {
+        "items": [
+          {
+            "file_patch": {
+              "path": "banana.ts",
+              "hunks": {
+                "items": [
+                  {
+                    "header": { "original": { "start": 1, "len": 5 }, "patched": { "start": 1, "len": 5 } },
+                    "parts": {
+                      "items": [
+                        {
+                          "type": "context",
+                          "lines": { "items": ["this", "is", ""] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "deletion",
+                          "lines": { "items": ["a"] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "insertion",
+                          "lines": { "items": [""] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "context",
+                          "lines": { "items": ["file"] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+              "before_hash": "2de83dd",
+              "after_hash": "842652c",
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  test("fails when the patch file has invalid headers", () => {
+    expect(() => parse(invalidHeaders1)).toThrow();
+    expect(() => parse(invalidHeaders2)).toThrow();
+    expect(() => parse(invalidHeaders3)).toThrow();
+    expect(() => parse(invalidHeaders4)).toThrow();
+    expect(() => parse(invalidHeaders5)).toThrow();
+  });
+
+  test("is OK when blank lines are accidentally created", () => {
+    expect(parse(accidentalBlankLine)).toEqual(parse(patch));
+  });
+
+  test(`can handle files with CRLF line breaks`, () => {
+    expect(removeCapacity(JSON.parse(parse(crlfLineBreaks)))).toEqual({
+      "parts": {
+        "items": [
+          {
+            "file_creation": {
+              "path": "banana.ts",
+              "mode": "non_executable",
+              "hunk": {
+                "header": { "original": { "start": 1, "len": 0 }, "patched": { "start": 1, "len": 1 } },
+                "parts": {
+                  "items": [
+                    {
+                      "type": "insertion",
+                      "lines": { "items": ["this is a new file\r"] },
+                      "no_newline_at_end_of_file": false,
+                    },
+                  ],
+                },
+              },
+              "hash": "3e1267f",
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  test("works", () => {
+    expect(removeCapacity(JSON.parse(parse(modeChangeAndModifyAndRename)))).toEqual({
+      "parts": {
+        "items": [
+          { "file_rename": { "from_path": "numbers.txt", "to_path": "banana.txt" } },
+          { "file_mode_change": { "path": "banana.txt", "old_mode": "non_executable", "new_mode": "executable" } },
+          {
+            "file_patch": {
+              "path": "banana.txt",
+              "hunks": {
+                "items": [
+                  {
+                    "header": { "original": { "start": 1, "len": 4 }, "patched": { "start": 1, "len": 4 } },
+                    "parts": {
+                      "items": [
+                        {
+                          "type": "deletion",
+                          "lines": { "items": ["one"] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "insertion",
+                          "lines": { "items": ["ne"] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "context",
+                          "lines": { "items": ["", "two", ""] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+              "before_hash": "fbf1785",
+              "after_hash": "92d2c5f",
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  test("parses old-style patches", () => {
+    expect(removeCapacity(JSON.parse(parse(oldStylePatch)))).toEqual({
+      "parts": {
+        "items": [
+          {
+            "file_patch": {
+              "path": "node_modules/graphql/utilities/assertValidName.js",
+              "hunks": {
+                "items": [
+                  {
+                    "header": { "original": { "start": 41, "len": 10 }, "patched": { "start": 41, "len": 11 } },
+                    "parts": {
+                      "items": [
+                        {
+                          "type": "context",
+                          "lines": {
+                            "items": [
+                              " */",
+                              "function isValidNameError(name, node) {",
+                              "  !(typeof name === 'string') ? (0, _invariant2.default)(0, 'Expected string') : void 0;",
+                            ],
+                          },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "deletion",
+                          "lines": {
+                            "items": [
+                              "  if (name.length > 1 && name[0] === '_' && name[1] === '_') {",
+                              "    return new _GraphQLError.GraphQLError('Name \"' + name + '\" must not begin with \"__\", which is reserved by ' + 'GraphQL introspection.', node);",
+                              "  }",
+                            ],
+                          },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "insertion",
+                          "lines": {
+                            "items": [
+                              "  // if (name.length > 1 && name[0] === '_' && name[1] === '_') {",
+                              "  //   return new _GraphQLError.GraphQLError('Name \"' + name + '\" must not begin with \"__\", which is reserved by ' + 'GraphQL introspection.', node);",
+                              "  // }",
+                            ],
+                          },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "context",
+                          "lines": {
+                            "items": [
+                              "  if (!NAME_RX.test(name)) {",
+                              "    return new _GraphQLError.GraphQLError('Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but \"' + name + '\" does not.', node);",
+                              "  }",
+                            ],
+                          },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "insertion",
+                          "lines": { "items": [""] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "context",
+                          "lines": { "items": ["}"] },
+                          "no_newline_at_end_of_file": true,
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+              "before_hash": null,
+              "after_hash": null,
+            },
+          },
+          {
+            "file_patch": {
+              "path": "node_modules/graphql/utilities/assertValidName.mjs",
+              "hunks": {
+                "items": [
+                  {
+                    "header": { "original": { "start": 29, "len": 9 }, "patched": { "start": 29, "len": 9 } },
+                    "parts": {
+                      "items": [
+                        {
+                          "type": "context",
+                          "lines": {
+                            "items": [
+                              " */",
+                              "export function isValidNameError(name, node) {",
+                              "  !(typeof name === 'string') ? invariant(0, 'Expected string') : void 0;",
+                            ],
+                          },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "deletion",
+                          "lines": {
+                            "items": [
+                              "  if (name.length > 1 && name[0] === '_' && name[1] === '_') {",
+                              "    return new GraphQLError('Name \"' + name + '\" must not begin with \"__\", which is reserved by ' + 'GraphQL introspection.', node);",
+                              "  }",
+                            ],
+                          },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "insertion",
+                          "lines": {
+                            "items": [
+                              "  // if (name.length > 1 && name[0] === '_' && name[1] === '_') {",
+                              "  //   return new GraphQLError('Name \"' + name + '\" must not begin with \"__\", which is reserved by ' + 'GraphQL introspection.', node);",
+                              "  // }",
+                            ],
+                          },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "context",
+                          "lines": {
+                            "items": [
+                              "  if (!NAME_RX.test(name)) {",
+                              "    return new GraphQLError('Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but \"' + name + '\" does not.', node);",
+                              "  }",
+                            ],
+                          },
+                          "no_newline_at_end_of_file": false,
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+              "before_hash": null,
+              "after_hash": null,
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  // After stripping the "index " prefix the remainder can itself start with "index ",
+  // which used to trip a bogus debug assertion in parse_diff_hashes.
+  test("does not crash when an index line repeats the 'index ' prefix", () => {
+    for (const line of ["index index ", "index index \n", "index index 2de83dd..842652c 100644\n"]) {
+      expect(removeCapacity(JSON.parse(parse(line)))).toEqual({ parts: { items: [] } });
+    }
+  });
+
+  // A `---`/`+++` header line can be shorter than "--- a/"/"+++ b/" (no path after the marker).
+  // This used to crash the parser with an out-of-bounds slice.
+  test("does not crash on truncated ---/+++ header lines", () => {
+    for (const truncated of ["+++ ", "--- ", "--- a", "+++ b"]) {
+      expect(removeCapacity(JSON.parse(parse(truncated)))).toEqual({ "parts": { "items": [] } });
+    }
+
+    // a truncated header line falls back to the paths from the `diff --git` line
+    const truncatedHeaderPatch = `diff --git a/banana.ts b/banana.ts\n--- \n+++ \n@@ -1,1 +1,1 @@\n-a\n+b\n`;
+    expect(removeCapacity(JSON.parse(parse(truncatedHeaderPatch)))).toEqual({
+      "parts": {
+        "items": [
+          {
+            "file_patch": {
+              "path": "banana.ts",
+              "hunks": {
+                "items": [
+                  {
+                    "header": { "original": { "start": 1, "len": 1 }, "patched": { "start": 1, "len": 1 } },
+                    "parts": {
+                      "items": [
+                        {
+                          "type": "deletion",
+                          "lines": { "items": ["a"] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                        {
+                          "type": "insertion",
+                          "lines": { "items": ["b"] },
+                          "no_newline_at_end_of_file": false,
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+              "before_hash": null,
+              "after_hash": null,
+            },
+          },
+        ],
+      },
+    });
+  });
+});
+
+const patch = `diff --git a/banana.ts b/banana.ts\nindex 2de83dd..842652c 100644\n--- a/banana.ts\n+++ b/banana.ts\n@@ -1,5 +1,5 @@\n this\n is\n \n-a\n+\n file\n`;
+
+const invalidHeaders1 = /* diff */ `diff --git a/banana.ts b/banana.ts
+index 2de83dd..842652c 100644
+--- a/banana.ts
++++ b/banana.ts
+@@ -1,5 +1,4 @@
+ this
+ is
+
+-a
++
+ file
+`;
+
+const invalidHeaders2 = /* diff */ `diff --git a/banana.ts b/banana.ts
+index 2de83dd..842652c 100644
+--- a/banana.ts
++++ b/banana.ts
+@@ -1,4 +1,5 @@
+ this
+ is
+
+-a
++
+ file
+`;
+
+const invalidHeaders3 = /* diff */ `diff --git a/banana.ts b/banana.ts
+index 2de83dd..842652c 100644
+--- a/banana.ts
++++ b/banana.ts
+@@ -1,0 +1,5 @@
+ this
+ is
+
+-a
++
+ file
+`;
+const invalidHeaders4 = /* diff */ `diff --git a/banana.ts b/banana.ts
+index 2de83dd..842652c 100644
+--- a/banana.ts
++++ b/banana.ts
+@@ -1,5 +1,0 @@
+ this
+ is
+
+-a
++
+ file
+`;
+
+const invalidHeaders5 = /* diff */ `diff --git a/banana.ts b/banana.ts
+index 2de83dd..842652c 100644
+--- a/banana.ts
++++ b/banana.ts
+@@ -1,5 +1,5@@
+ this
+ is
+
+-a
++
+ file
+`;
+
+const accidentalBlankLine = /* diff */ `diff --git a/banana.ts b/banana.ts
+index 2de83dd..842652c 100644
+--- a/banana.ts
++++ b/banana.ts
+@@ -1,5 +1,5 @@
+ this
+ is
+
+-a
++
+ file
+`;
+
+const crlfLineBreaks = /* diff */ `diff --git a/banana.ts b/banana.ts
+new file mode 100644
+index 0000000..3e1267f
+--- /dev/null
++++ b/banana.ts
+@@ -0,0 +1 @@
++this is a new file
+`.replace(/\n/g, "\r\n");
+
+const modeChangeAndModifyAndRename = /* diff */ `diff --git a/numbers.txt b/banana.txt
+old mode 100644
+new mode 100755
+similarity index 96%
+rename from numbers.txt
+rename to banana.txt
+index fbf1785..92d2c5f
+--- a/numbers.txt
++++ b/banana.txt
+@@ -1,4 +1,4 @@
+-one
++ne
+
+ two
+
+`;
+
+const oldStylePatch = /* diff */ `patch-package
+--- a/node_modules/graphql/utilities/assertValidName.js
++++ b/node_modules/graphql/utilities/assertValidName.js
+@@ -41,10 +41,11 @@ function assertValidName(name) {
+  */
+ function isValidNameError(name, node) {
+   !(typeof name === 'string') ? (0, _invariant2.default)(0, 'Expected string') : void 0;
+-  if (name.length > 1 && name[0] === '_' && name[1] === '_') {
+-    return new _GraphQLError.GraphQLError('Name "' + name + '" must not begin with "__", which is reserved by ' + 'GraphQL introspection.', node);
+-  }
++  // if (name.length > 1 && name[0] === '_' && name[1] === '_') {
++  //   return new _GraphQLError.GraphQLError('Name "' + name + '" must not begin with "__", which is reserved by ' + 'GraphQL introspection.', node);
++  // }
+   if (!NAME_RX.test(name)) {
+     return new _GraphQLError.GraphQLError('Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but "' + name + '" does not.', node);
+   }
++
+ }
+\\ No newline at end of file
+--- a/node_modules/graphql/utilities/assertValidName.mjs
++++ b/node_modules/graphql/utilities/assertValidName.mjs
+@@ -29,9 +29,9 @@ export function assertValidName(name) {
+  */
+ export function isValidNameError(name, node) {
+   !(typeof name === 'string') ? invariant(0, 'Expected string') : void 0;
+-  if (name.length > 1 && name[0] === '_' && name[1] === '_') {
+-    return new GraphQLError('Name "' + name + '" must not begin with "__", which is reserved by ' + 'GraphQL introspection.', node);
+-  }
++  // if (name.length > 1 && name[0] === '_' && name[1] === '_') {
++  //   return new GraphQLError('Name "' + name + '" must not begin with "__", which is reserved by ' + 'GraphQL introspection.', node);
++  // }
+   if (!NAME_RX.test(name)) {
+     return new GraphQLError('Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but "' + name + '" does not.', node);
+   }
+`;
+function escapeStringRegexp(string: string) {
+  if (typeof string !== "string") {
+    throw new TypeError("Expected a string");
+  }
+
+  // Escape characters with special meaning either inside or outside character sets.
+  // Use a simple backslash escape when it’s always valid, and a `\xnn` escape when the simpler form would be disallowed by Unicode patterns’ stricter grammar.
+  return string.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&").replace(/-/g, "\\x2d");
+}
+
+function removeTrailingAndLeadingSlash(p: string): string {
+  if (p[0] === "/" || p.endsWith("/")) {
+    return p.replace(/^\/|\/$/g, "");
+  }
+  return p;
+}

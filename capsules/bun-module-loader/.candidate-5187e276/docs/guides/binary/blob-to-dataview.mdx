@@ -1,0 +1,16 @@
+---
+title: Convert a Blob to a DataView
+sidebarTitle: "Blob to DataView"
+mode: center
+---
+
+The [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) class provides several methods for consuming its contents in different formats. Read the contents into an `ArrayBuffer` with `.arrayBuffer()`, then create a `DataView` from the buffer.
+
+```ts
+const blob = new Blob(["hello world"]);
+const arr = new DataView(await blob.arrayBuffer());
+```
+
+---
+
+See [Binary Data](/runtime/binary-data#conversion).
