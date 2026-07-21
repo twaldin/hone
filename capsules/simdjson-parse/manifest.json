@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "id": "cap_326a0df9e683",
+  "id": "cap_e1ecaffc8dde",
   "objective": "Improve geometric-mean DOM and On-Demand JSON parsing throughput across frozen mixed corpora at simdjson 8e6bac94 while preserving exact event hashes, malformed-input errors, the full relevant upstream test set, and peak RSS.",
   "baseline": {
     "kind": "git",
@@ -47,6 +47,7 @@
       "id": "train",
       "visibility": "public",
       "paths": [
+        "assets/train/expected.json",
         "assets/train/malformed/bad-escape.json",
         "assets/train/malformed/leading-zero.json",
         "assets/train/malformed/trailing-comma.json",
@@ -72,6 +73,7 @@
       "id": "validation",
       "visibility": "protected",
       "paths": [
+        "assets/validation/expected.json",
         "assets/validation/malformed/bad-escape.json",
         "assets/validation/malformed/leading-zero.json",
         "assets/validation/malformed/trailing-comma.json",
@@ -102,9 +104,10 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:6e4c40912808c980e3fbcf894981e59146a486534b10ab6b00b190ac40e84b46"
+    "hash": "sha256:76e6875d0df7868bdd34e482eeceb080770f442e56a41e33d00cd64215132b18"
   },
   "contentHashes": {
+    "assets/train/expected.json": "sha256:791e5b626a3af3ad725511f9354a97060986f15793398cbbcf8c4b8ebb6839de",
     "assets/train/malformed/bad-escape.json": "sha256:42b77952612b42489d505c0ba69416af16b015daf2602f9a40da170e75d40655",
     "assets/train/malformed/leading-zero.json": "sha256:df23609a04be6111ef966b85af4e1bceacf8df6d194338e4e4dba718de904c63",
     "assets/train/malformed/trailing-comma.json": "sha256:0dc60d43ade7930ba6c0d8918c8da45835912b7d9b80600ce662a339c34840b8",
@@ -124,6 +127,7 @@
     "assets/train/valid/small/truenull.json": "sha256:c721b7450adef5eb5847f71fb9ede34eea4a52afcffccb48b6825f64af2cd849",
     "assets/train/valid/twitter.json": "sha256:30721e496a8d73cfc50658923c34eb2c0fbe15ee6835005e43ee624d8dedf200",
     "assets/train/valid/twitter_timeline.json": "sha256:91be22ebdfff29d08f3fb1a6842e171f47cb5187545e9eb8d5d7bf33bc9233f0",
+    "assets/validation/expected.json": "sha256:f9e0383d0e31b3ebcc2c66d369d4bd844ec236d716be6e64004b6fed4d74787f",
     "assets/validation/malformed/bad-escape.json": "sha256:42b77952612b42489d505c0ba69416af16b015daf2602f9a40da170e75d40655",
     "assets/validation/malformed/leading-zero.json": "sha256:df23609a04be6111ef966b85af4e1bceacf8df6d194338e4e4dba718de904c63",
     "assets/validation/malformed/trailing-comma.json": "sha256:0dc60d43ade7930ba6c0d8918c8da45835912b7d9b80600ce662a339c34840b8",
@@ -162,7 +166,7 @@
       "commit": "8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
       "sourceTree": ".hone-sources/train/simdjson_simdjson@8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
       "mutableSurface": "src/generic parsing kernels and architecture implementation translation units; public headers, evaluator, build files, benchmark harness, tests, fixtures, and expected hashes are protected",
-      "upstreamHarness": "benchmark/dom/parse.cpp and benchmark/bench_ondemand.cpp",
+      "upstreamHarness": "hone/verify.cpp trusted event harness (parent-timed; no self-reported throughput consumed)",
       "relevantTests": 44
     },
     "toolchain": {
@@ -176,15 +180,16 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
       "activeImplementation": "arm64 (NEON)",
-      "q": "geometric mean GB/s across three upstream DOM parse corpus results and four upstream Google Benchmark DOM/On-Demand access workloads",
+      "q": "geometric mean of candidate/reference speed ratios for full-document DOM and On-Demand parses across the three frozen corpora; two-point (N vs 2N iterations) wall clock measured in the trusted evaluator parent around the non-self-reporting harness, reference parser rebuilt from frozen trusted sources in the same eval and timed back-to-back (median across samples), never a self-reported number from candidate-linked code",
       "qFail": 0,
-      "peakRssGate": "candidate parser/benchmark peak RSS <= frozen baseline peak RSS * 1.02",
+      "peakRssGate": "candidate harness peak RSS <= per-split frozen baseline (protected asset) * 1.05",
       "freshProcess": true,
+      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus",
       "normalization": {
         "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-        "qBase": 3.3292683971045522,
-        "sigma": 0.07329458514727193,
-        "qReference": 3.6957413228409117,
+        "qBase": 1.0075577263098319,
+        "sigma": 0.01372750564359946,
+        "qReference": 1.0761952545278293,
         "status": "provisional local locked A-A calibration; final frozen GCE like-for-like re-calibration required"
       }
     }

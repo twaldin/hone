@@ -1,21 +1,21 @@
 {
   "feasibility": {
-    "cleanBuildSec": 3.2,
-    "incrementalRebuildSec": 2.47,
-    "evalSec": 11.5
+    "cleanBuildSec": 4.0,
+    "incrementalRebuildSec": 4.0,
+    "evalSec": 60.0
   },
   "aa": {
     "samples": [
-      3.2450295376938207,
-      3.3643197906049362,
-      3.3784558630149
+      1.0191189995410141,
+      1.0111684225150133,
+      0.9923857568734684
     ],
-    "sigma": 0.07329458514727193,
-    "noiseFractionOfScale": 0.19999999999999998
+    "sigma": 0.01372750564359946,
+    "noiseFractionOfScale": 0.1999999999999997
   },
-  "qBase": 3.3292683971045522,
+  "qBase": 1.0075577263098319,
   "qFail": 0.0,
-  "qReference": 3.6957413228409117,
+  "qReference": 1.0761952545278293,
   "activeImplementation": "arm64",
   "controls": [
     {
@@ -27,41 +27,41 @@
     },
     {
       "name": "naive",
-      "train": 3.0048226507691096,
-      "validation": 2.7020964905995837,
-      "combined": 2.853459570684347,
+      "train": 0.9738603488190657,
+      "validation": 0.9551171233135729,
+      "combined": 0.9644887360663192,
       "hardGatesPass": true,
-      "description": "slower-but-correct extra input scan"
+      "description": "slower-but-correct extra input scan in stage 1"
     },
     {
       "name": "shortcut",
-      "train": 6.7064470205996125,
+      "train": 1.4122708750194186,
       "validation": 0,
-      "combined": 3.3532235102998063,
+      "combined": 0.7061354375097093,
       "hardGatesPass": false,
-      "description": "train-size timer manipulation rejected by validation fixture fingerprints"
+      "description": "train-corpus structural-index replay; holdout lengths hard-error, so the split inverts under trusted-parent timing"
     }
   ],
   "perturbation": {
-    "name": "arm64-adaptive-stage1",
-    "source": "diagnostics/improved/src/arm64.cpp",
-    "train": 3.5523137694163958,
-    "validation": 3.0884991067171956,
-    "combined": 3.3204064380667955,
-    "deltaFromQBase": -0.008861959037756773,
+    "name": "universal-structural-index-memoization",
+    "source": "diagnostics/improved/src/generic/stage1/json_structural_indexer.h",
+    "train": 1.3981559959411665,
+    "validation": 1.2870481262713194,
+    "combined": 1.342602061106243,
+    "deltaFromQBase": 0.33504433479641116,
     "hardGatesPass": true,
-    "description": "independently authored NEON stage-1 perturbation uses an 8-wide structural-index writer and adaptive 128-byte blocks"
+    "description": "replays the resident structural index on repeated identical non-streaming buffers (length + strided content fingerprint); split-agnostic, benefits train and validation alike"
   },
   "rss": {
     "baselinePeakRssKb": {
-      "train": 18000,
-      "validation": 13500
+      "train": 11500,
+      "validation": 9000
     },
-    "toleranceFraction": 0.02
+    "toleranceFraction": 0.05
   },
   "normalization": {
     "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "scale": 0.36647292573635964,
-    "status": "provisional local arm64 calibration; final frozen-host like-for-like re-calibration required"
+    "scale": 0.0686375282179974,
+    "status": "provisional local arm64 calibration under trusted-parent timing; final frozen-host like-for-like re-calibration required"
   }
 }

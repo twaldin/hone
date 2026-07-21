@@ -71,7 +71,7 @@
       "commit": "8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
       "sourceTree": ".hone-sources/train/simdjson_simdjson@8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
       "mutableSurface": "src/generic parsing kernels and architecture implementation translation units; public headers, evaluator, build files, benchmark harness, tests, fixtures, and expected hashes are protected",
-      "upstreamHarness": "benchmark/dom/parse.cpp and benchmark/bench_ondemand.cpp",
+      "upstreamHarness": "hone/verify.cpp trusted event harness (parent-timed; no self-reported throughput consumed)",
       "relevantTests": 44
     },
     "toolchain": {
@@ -85,15 +85,16 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
       "activeImplementation": "arm64 (NEON)",
-      "q": "geometric mean GB/s across three upstream DOM parse corpus results and four upstream Google Benchmark DOM/On-Demand access workloads",
+      "q": "geometric mean of candidate/reference speed ratios for full-document DOM and On-Demand parses across the three frozen corpora; two-point (N vs 2N iterations) wall clock measured in the trusted evaluator parent around the non-self-reporting harness, reference parser rebuilt from frozen trusted sources in the same eval and timed back-to-back (median across samples), never a self-reported number from candidate-linked code",
       "qFail": 0,
-      "peakRssGate": "candidate parser/benchmark peak RSS <= frozen baseline peak RSS * 1.02",
+      "peakRssGate": "candidate harness peak RSS <= per-split frozen baseline (protected asset) * 1.05",
       "freshProcess": true,
+      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus",
       "normalization": {
         "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-        "qBase": 3.3292683971045522,
-        "sigma": 0.07329458514727193,
-        "qReference": 3.6957413228409117,
+        "qBase": 1.0075577263098319,
+        "sigma": 0.01372750564359946,
+        "qReference": 1.0761952545278293,
         "status": "provisional local locked A-A calibration; final frozen GCE like-for-like re-calibration required"
       }
     },

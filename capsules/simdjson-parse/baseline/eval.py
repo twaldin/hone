@@ -1,5 +1,24 @@
 #!/usr/bin/env python3
-"""Trusted offline evaluator for the simdjson DOM/On-Demand parse capsule."""
+"""Trusted offline evaluator for the simdjson DOM/On-Demand parse capsule.
+
+Gaming-resistance model
+-----------------------
+* Timing is performed by THIS trusted parent process (``time.monotonic``),
+  around a harness that never reports its own timing. The candidate parser is
+  linked into that harness, but the wall clock lives in a separate,
+  non-candidate-linked process, so a ``clock_gettime`` / benchmark-JSON
+  override inside the candidate object cannot bias the measurement.
+* Speed is a candidate/reference ratio from two-point measurements (``N`` and
+  ``2N`` iterations of the SAME reused parser). Subtracting the two wall times
+  cancels process startup, memfd exec, file load and teardown; dividing by the
+  frozen TRUSTED reference parser — rebuilt in this eval and timed interleaved
+  with the candidate — cancels host-load drift; per-point minima across rounds
+  reject one-sided load bursts.
+* Correctness is validated in this parent against expected event hashes that
+  live ONLY in the protected asset mount (``/capsule/assets/assets/<split>/
+  expected.json``); they are never staged into the candidate-readable corpus
+  and never shipped in the /workspace baseline tree.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -18,7 +37,6 @@ from pathlib import Path
 TRUSTED = Path(__file__).resolve().parent
 WORKSPACE = Path("/workspace")
 ASSETS_ROOT = Path("/capsule/assets/assets")
-WORKER = TRUSTED / "worker.py"
 CHALLENGE = json.loads((TRUSTED / "challenge.json").read_text())
 OBJECTS = Path("/opt/hone-objects")
 BUILD_ROOT = Path("/dev/shm")
@@ -110,6 +128,36 @@ def compile_candidate() -> Path:
     return output
 
 
+def build_harnesses(simdjson_object: Path) -> tuple[Path, Path]:
+    """Compile the TRUSTED harness and link it twice: candidate and reference.
+
+    The harness source and public headers are protected (immutable) inputs, so
+    only the parser object varies. The reference binary links the parser
+    compiled from the frozen TRUSTED sources; every speed number this
+    evaluator emits is a candidate/reference ratio measured back-to-back, so
+    slow host-load drift cancels instead of polluting the metric.
+    """
+    harness_object = BUILD_ROOT / "verify-harness.o"
+    command = [
+        "g++", "-std=c++20", "-O3", "-DNDEBUG",
+        f"-I{TRUSTED / 'include'}", f"-I{TRUSTED / 'src'}",
+        "-c", str(TRUSTED / "hone/verify.cpp"), "-o", str(harness_object),
+    ]
+    checked(command, float(CHALLENGE["compileTimeoutSec"]), "trusted harness compile")
+    reference_object = BUILD_ROOT / "trusted-simdjson.o"
+    command = [
+        "g++", "-std=c++20", "-O3", "-DNDEBUG",
+        f"-I{TRUSTED / 'include'}", f"-I{TRUSTED / 'src'}",
+        "-c", str(TRUSTED / "src/simdjson.cpp"), "-o", str(reference_object),
+    ]
+    checked(command, float(CHALLENGE["compileTimeoutSec"]), "trusted reference compile")
+    candidate_bin = BUILD_ROOT / "verify-candidate"
+    link(candidate_bin, harness_object, simdjson_object)
+    reference_bin = BUILD_ROOT / "verify-reference"
+    link(reference_bin, harness_object, reference_object)
+    return candidate_bin, reference_bin
+
+
 def link(output: Path, *objects: Path, libraries: tuple[str, ...] = ()) -> None:
     command = ["g++", *(str(path) for path in objects), *(f"-l{name}" for name in libraries), "-o", str(output)]
     checked(command, 60.0, f"link {output.name}")
@@ -147,22 +195,31 @@ def reap_candidate_processes() -> None:
                 pass
 
 
-def run_candidate(binary: Path, args: list[str], timeout: float, label: str) -> tuple[bytes, bytes, int]:
+def run_candidate(binary: Path, args: list[str], timeout: float, label: str) -> tuple[bytes, bytes, int, float]:
+    """Run a candidate-linked binary as the unprivileged worker.
+
+    Returns (stdout, stderr, peak_rss_kb, wall_seconds). ``wall_seconds`` is
+    measured by this trusted parent around the entire child lifetime and is the
+    ONLY timing source the evaluator trusts.
+    """
     nonce = uuid.uuid4().hex
     stdout_path = Path("/tmp") / f"hone-{nonce}.out"
     stderr_path = Path("/tmp") / f"hone-{nonce}.err"
     max_rss_kb = 0
+    wall = 0.0
     try:
         with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            worker = TRUSTED / "worker.py"
+            started = time.monotonic()
             proc = subprocess.Popen(
-                [sys.executable, "-I", "-B", str(WORKER), str(binary), *args],
+                [sys.executable, "-I", "-B", str(worker), str(binary), *args],
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
                 cwd=str(TRUSTED),
                 preexec_fn=worker_preexec,
             )
-            deadline = time.monotonic() + timeout
+            deadline = started + timeout
             while proc.poll() is None:
                 try:
                     status = Path(f"/proc/{proc.pid}/status").read_text()
@@ -176,12 +233,13 @@ def run_candidate(binary: Path, args: list[str], timeout: float, label: str) -> 
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
                     raise GateFailure(f"{label} timed out")
-                time.sleep(0.002)
+                time.sleep(0.001)
+            wall = time.monotonic() - started
         out = stdout_path.read_bytes()
         err = stderr_path.read_bytes()
         if proc.returncode != 0:
             raise GateFailure(f"{label} failed ({proc.returncode}): {err.decode('utf-8', 'replace')[-1500:]}")
-        return out, err, max_rss_kb
+        return out, err, max_rss_kb, wall
     finally:
         stdout_path.unlink(missing_ok=True)
         stderr_path.unlink(missing_ok=True)
@@ -195,6 +253,25 @@ def selected_split() -> tuple[str, Path]:
     return found[0]
 
 
+def load_split_secrets(source: Path) -> tuple[dict[str, str], float]:
+    """Load the split's expected event hashes and peak-RSS baseline.
+
+    These live in the protected asset mount, root-owned and never staged into
+    the candidate-readable corpus, so candidate code cannot branch on them.
+    """
+    secret_path = source / "expected.json"
+    if not secret_path.is_file():
+        raise GateFailure("protected validation expectations missing for split")
+    secrets = json.loads(secret_path.read_text())
+    expected = secrets.get("expected")
+    if not isinstance(expected, dict) or not expected:
+        raise GateFailure("protected expected hash table is empty")
+    baseline_rss = secrets.get("baselinePeakRssKb")
+    if not isinstance(baseline_rss, (int, float)) or baseline_rss <= 0:
+        raise GateFailure("protected peak-RSS baseline missing")
+    return {str(k): str(v) for k, v in expected.items()}, float(baseline_rss)
+
+
 def stage_corpus(source: Path) -> None:
     if CORPUS.exists():
         shutil.rmtree(CORPUS)
@@ -204,7 +281,6 @@ def stage_corpus(source: Path) -> None:
         os.chmod(root, 0o777)
         for name in files:
             os.chmod(Path(root) / name, 0o644)
-
 
 
 def run_upstream_tests(simdjson_object: Path) -> int:
@@ -230,127 +306,123 @@ def event_bytes(output: bytes) -> bytes:
     return b"\n".join(lines[1:]) + b"\n"
 
 
-def verify_outputs(split: str, source: Path, verifier: Path) -> tuple[str, int]:
-    expected = CHALLENGE["expected"].get(split)
-    if not isinstance(expected, dict) or not expected:
-        raise GateFailure(f"trusted expected hashes missing for {split}")
-    active_impl: str | None = None
-    max_rss = 0
-    observed: dict[str, str] = {}
-    for name in CHALLENGE["validFiles"]:
-        for mode in ("dom", "ondemand"):
-            out, _, rss = run_candidate(verifier, [mode, str(CORPUS / name)], 45.0, f"{mode} verify {name}")
-            max_rss = max(max_rss, rss)
-            first = out.splitlines()[0].decode("ascii", "strict") if out else ""
-            if not first.startswith("IMPL:"):
-                raise GateFailure(f"{mode} verifier omitted implementation")
-            impl = first.removeprefix("IMPL:")
-            active_impl = impl if active_impl is None else active_impl
-            if impl != active_impl:
-                raise GateFailure("active implementation changed within evaluation")
-            observed[f"{mode}/{name}"] = sha256(event_bytes(out))
-    for name in CHALLENGE["ndjsonFiles"]:
-        out, _, rss = run_candidate(verifier, ["ondemand-many", str(CORPUS / name)], 45.0, f"ondemand-many verify {name}")
-        max_rss = max(max_rss, rss)
+class _Verifier:
+    """Trusted-parent driver over the harness: correctness + parent timing."""
+
+    def __init__(self, candidate: Path, reference: Path) -> None:
+        self.candidate = candidate
+        self.reference = reference
+        self.active_impl: str | None = None
+        self.max_rss = 0
+
+    def _run(self, binary: Path, args: list[str], timeout: float, label: str) -> tuple[bytes, float]:
+        out, _, rss, wall = run_candidate(binary, args, timeout, label)
+        self.max_rss = max(self.max_rss, rss)
         first = out.splitlines()[0].decode("ascii", "strict") if out else ""
-        impl = first.removeprefix("IMPL:") if first.startswith("IMPL:") else ""
-        active_impl = impl if active_impl is None else active_impl
-        if not impl or impl != active_impl:
-            raise GateFailure("On-Demand stream verifier implementation mismatch")
-        observed[f"ondemand-many/{name}"] = sha256(event_bytes(out))
+        if not first.startswith("IMPL:"):
+            raise GateFailure(f"{label}: verifier omitted implementation banner")
+        impl = first.removeprefix("IMPL:")
+        if self.active_impl is None:
+            self.active_impl = impl
+        elif impl != self.active_impl:
+            raise GateFailure("active implementation changed within evaluation")
+        return event_bytes(out), wall
+
+    def check(self, mode: str, path: Path, key: str, expected: dict[str, str], label: str) -> None:
+        ev, _ = self._run(self.candidate, [mode, str(path)], float(CHALLENGE["testTimeoutSec"]), label)
+        if sha256(ev) != expected.get(key):
+            raise GateFailure(f"exact parse/event or malformed behavior mismatch: {key}")
+
+    def timed(self, mode: str, name: str, key: str, expected: dict[str, str]) -> float:
+        """Parent-timed candidate/reference speed ratio for one workload.
+
+        Each round runs reference and candidate at N iterations, then both at
+        2N, back-to-back on the parent's monotonic clock. The 2N-N difference
+        cancels fixed process overhead; the reference/candidate ratio cancels
+        host-load drift; the per-point minimum across rounds filters one-sided
+        load bursts. Every run — reference included — must reproduce the
+        protected expected event hash, so speed can never be traded against
+        correctness and a reference/toolchain defect is caught immediately.
+        """
+        path = CORPUS / name
+        size = path.stat().st_size
+        # Iterations scale with a fixed per-mode work budget so every timed
+        # diff spans a comparable wall interval regardless of corpus size —
+        # small files no longer produce jitter-dominated measurements.
+        iters = max(4, int(CHALLENGE["timingWorkBytes"][mode]) // size)
+        samples = int(CHALLENGE["timingSamples"])
+        timeout = float(CHALLENGE["benchmarkTimeoutSec"])
+        want = expected.get(key)
+
+        def run_point(binary: Path, n: int, who: str) -> float:
+            ev, wall = self._run(binary, [mode, str(path), str(n)], timeout, f"{mode} timing {name} ({who} x{n})")
+            if sha256(ev) != want:
+                raise GateFailure(f"exact parse/event mismatch under timing ({who}): {key}")
+            return wall
+
+        # Rounds interleave the four points (ref/cand at N and 2N) so all of
+        # them sample the same load window; the MINIMUM wall per point across
+        # rounds filters one-sided host-load bursts (the classic robust timing
+        # estimator), and one ratio is formed from the four filtered points.
+        # A discarded warmup evens out cold-start (page cache, CPU ramp).
+        run_point(self.reference, iters, "warmup")
+        best = {"rn": math.inf, "cn": math.inf, "r2": math.inf, "c2": math.inf}
+        for _ in range(samples):
+            best["rn"] = min(best["rn"], run_point(self.reference, iters, "reference"))
+            best["cn"] = min(best["cn"], run_point(self.candidate, iters, "candidate"))
+            best["r2"] = min(best["r2"], run_point(self.reference, 2 * iters, "reference"))
+            best["c2"] = min(best["c2"], run_point(self.candidate, 2 * iters, "candidate"))
+        d_ref = best["r2"] - best["rn"]
+        d_cand = best["c2"] - best["cn"]
+        if not (math.isfinite(d_ref) and math.isfinite(d_cand) and d_ref > 0 and d_cand > 0):
+            raise GateFailure(f"non-positive parent-measured parse time for {key}")
+        return d_ref / d_cand
+
+
+def evaluate_candidate(split: str, expected: dict[str, str], candidate: Path, reference: Path) -> tuple[str, int, list[tuple[str, float]]]:
+    driver = _Verifier(candidate, reference)
+    metrics: list[tuple[str, float]] = []
+
+    # Full-document DOM and On-Demand parse speed on every valid corpus, as a
+    # candidate/reference ratio timed by the trusted parent. Each timing run
+    # also validates the exact event hash, so a candidate cannot trade
+    # correctness for speed.
+    for mode in CHALLENGE["timingModes"]:
+        for name in CHALLENGE["validFiles"]:
+            key = f"{mode}/{name}"
+            metrics.append((f"{mode}/{name}", driver.timed(mode, name, key, expected)))
+
+    # On-Demand streaming and malformed behavior: correctness only.
+    for name in CHALLENGE["ndjsonFiles"]:
+        driver.check("ondemand-many", CORPUS / name, f"ondemand-many/{name}", expected,
+                     f"ondemand-many verify {name}")
     for name in CHALLENGE["malformedFiles"]:
         path = CORPUS / "malformed" / name
         for mode in ("dom", "ondemand"):
-            out, _, rss = run_candidate(verifier, [mode, str(path)], 10.0, f"{mode} malformed {name}")
-            max_rss = max(max_rss, rss)
-            observed[f"malformed/{mode}/{name}"] = sha256(event_bytes(out))
-    if observed != expected:
-        mismatches = sorted(key for key in set(observed) | set(expected) if observed.get(key) != expected.get(key))
-        raise GateFailure("exact parse/event or malformed behavior mismatch: " + ", ".join(mismatches[:8]))
-    return active_impl or "unknown", max_rss
+            driver.check(mode, path, f"malformed/{mode}/{name}", expected, f"{mode} malformed {name}")
 
+    observed_keys = {f"{mode}/{name}" for mode in CHALLENGE["timingModes"] for name in CHALLENGE["validFiles"]}
+    observed_keys |= {f"ondemand-many/{name}" for name in CHALLENGE["ndjsonFiles"]}
+    observed_keys |= {f"malformed/{mode}/{name}" for mode in ("dom", "ondemand") for name in CHALLENGE["malformedFiles"]}
+    if observed_keys != set(expected):
+        missing = sorted(set(expected) ^ observed_keys)
+        raise GateFailure("expected coverage mismatch: " + ", ".join(missing[:8]))
 
-def parse_dom_throughputs(stdout: bytes) -> list[tuple[str, float]]:
-    metrics: list[tuple[str, float]] = []
-    for raw in stdout.decode("utf-8", "strict").splitlines():
-        if not raw.startswith('"'):
-            continue
-        fields = raw.split("\t")
-        if len(fields) < 8:
-            raise GateFailure("unexpected upstream DOM benchmark output")
-        name = fields[0].strip('"')
-        value = float(fields[5])
-        if not math.isfinite(value) or value <= 0:
-            raise GateFailure("non-finite DOM throughput")
-        metrics.append((f"dom-parse/{name}", value))
-    if len(metrics) != len(CHALLENGE["validFiles"]):
-        raise GateFailure("upstream DOM benchmark omitted a frozen corpus")
-    return metrics
-
-
-def compile_trusted_baseline() -> Path:
-    output = BUILD_ROOT / "trusted-simdjson.o"
-    command = [
-        "g++", "-std=c++20", "-O3", "-DNDEBUG",
-        f"-I{TRUSTED / 'include'}", f"-I{TRUSTED / 'src'}",
-        "-c", str(TRUSTED / "src/simdjson.cpp"), "-o", str(output),
-    ]
-    checked(command, float(CHALLENGE["compileTimeoutSec"]), "trusted comparator compile")
-    return output
-
-
-def run_benchmarks(simdjson_object: Path) -> tuple[list[tuple[str, float]], int]:
-    dom_binary = BUILD_ROOT / "dom-parse"
-    link(dom_binary, OBJECTS / "parse.o", simdjson_object)
-    args = ["-n", str(CHALLENGE["domIterations"]), "-i", str(CHALLENGE["domIterations"]), "-t"]
-    args.extend(str(CORPUS / name) for name in CHALLENGE["validFiles"])
-    dom_out, _, dom_rss = run_candidate(dom_binary, args, float(CHALLENGE["benchmarkTimeoutSec"]), "upstream DOM parse benchmark")
-    metrics = parse_dom_throughputs(dom_out)
-
-    google_binary = BUILD_ROOT / "bench-ondemand"
-    link(google_binary, OBJECTS / "bench_ondemand.o", simdjson_object, libraries=("benchmark", "pthread"))
-    output_path = BUILD_ROOT / "google-benchmark.json"
-    output_path.unlink(missing_ok=True)
-    args = [
-        f"--benchmark_filter={CHALLENGE['googleBenchmarkFilter']}",
-        f"--benchmark_min_time={CHALLENGE['googleBenchmarkMinTimeSec']}",
-        f"--benchmark_out={output_path}",
-        "--benchmark_out_format=json",
-    ]
-    _, _, google_rss = run_candidate(google_binary, args, float(CHALLENGE["benchmarkTimeoutSec"]), "upstream On-Demand benchmark")
-    try:
-        report = json.loads(output_path.read_text())
-    except (OSError, ValueError) as exc:
-        raise GateFailure("upstream On-Demand benchmark produced no valid report") from exc
-    finally:
-        output_path.unlink(missing_ok=True)
-    records = report.get("benchmarks") if isinstance(report, dict) else None
-    if not isinstance(records, list) or len(records) != 4:
-        raise GateFailure("upstream On-Demand benchmark workload count changed")
-    for record in records:
-        if not isinstance(record, dict) or record.get("error_occurred"):
-            raise GateFailure("upstream On-Demand benchmark correctness diff failed")
-        value = record.get("bytes_per_second")
-        name = record.get("name")
-        if not isinstance(name, str) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-            raise GateFailure("invalid upstream On-Demand throughput record")
-        metrics.append((f"upstream/{name}", float(value) / 1.0e9))
-    return metrics, max(dom_rss, google_rss)
+    return driver.active_impl or "unknown", driver.max_rss, metrics
 
 
 def main() -> None:
     started = time.monotonic()
     try:
         split, source = selected_split()
+        expected, baseline_rss = load_split_secrets(source)
         simdjson_object = compile_candidate()
         stage_corpus(source)
         test_count = run_upstream_tests(simdjson_object)
-        verifier = BUILD_ROOT / "verify"
-        link(verifier, OBJECTS / "verify.o", simdjson_object)
-        active_impl, verify_rss = verify_outputs(split, source, verifier)
-        metrics, benchmark_rss = run_benchmarks(simdjson_object)
-        peak_rss_kb = max(verify_rss, benchmark_rss)
-        rss_limit = float(CHALLENGE["baselinePeakRssKb"][split]) * (1.0 + float(CHALLENGE["peakRssToleranceFraction"]))
+        candidate_bin, reference_bin = build_harnesses(simdjson_object)
+        active_impl, peak_rss_kb, metrics = evaluate_candidate(split, expected, candidate_bin, reference_bin)
+
+        rss_limit = baseline_rss * (1.0 + float(CHALLENGE["peakRssToleranceFraction"]))
         if peak_rss_kb > rss_limit:
             raise GateFailure(f"peak RSS {peak_rss_kb} KiB exceeds frozen limit {rss_limit:.1f} KiB")
         values = [value for _, value in metrics]

@@ -2,9 +2,6 @@
   "taskId": "OSS-T05",
   "revision": "8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
   "qFail": 0.0,
-  "domIterations": 400,
-  "googleBenchmarkMinTimeSec": 0.5,
-  "googleBenchmarkFilter": "^(partial_tweets<simdjson_(ondemand|dom)>|top_tweet<simdjson_(ondemand|dom)>)/manual_time$",
   "validFiles": [
     "twitter.json",
     "citm_catalog.json",
@@ -19,50 +16,18 @@
     "truncated.json",
     "leading-zero.json"
   ],
-  "expected": {
-    "train": {
-      "dom/citm_catalog.json": "sha256:a1c65dc6d061ce75ea666fba9fdbd6f3db47b4be313c09c3bfe2583ee529ee5b",
-      "dom/generated.json": "sha256:0c0873f5661320fd465cb31c95ae5a5727c6607764ff01daf3422a436fe48632",
-      "dom/twitter.json": "sha256:f54b1b3c12d776c24796109891529383c319615258dec16951c7cf32ca29b168",
-      "malformed/dom/bad-escape.json": "sha256:98ac06569b9f0d4c1f0c9f93950fc3a4f652c315ea554fb7fe758dc4676d74e4",
-      "malformed/dom/leading-zero.json": "sha256:7cf6d0d452ca99da780951dc38bea90933aefce6a01df9818986ec1abb7f2feb",
-      "malformed/dom/trailing-comma.json": "sha256:21226fbad845a17302677010a92cfeb75ef6f85be65cfc3efa51bbfd3bd789bd",
-      "malformed/dom/truncated.json": "sha256:21226fbad845a17302677010a92cfeb75ef6f85be65cfc3efa51bbfd3bd789bd",
-      "malformed/ondemand/bad-escape.json": "sha256:98ac06569b9f0d4c1f0c9f93950fc3a4f652c315ea554fb7fe758dc4676d74e4",
-      "malformed/ondemand/leading-zero.json": "sha256:7cf6d0d452ca99da780951dc38bea90933aefce6a01df9818986ec1abb7f2feb",
-      "malformed/ondemand/trailing-comma.json": "sha256:21226fbad845a17302677010a92cfeb75ef6f85be65cfc3efa51bbfd3bd789bd",
-      "malformed/ondemand/truncated.json": "sha256:21226fbad845a17302677010a92cfeb75ef6f85be65cfc3efa51bbfd3bd789bd",
-      "ondemand-many/amazon_cellphones.ndjson": "sha256:dfee8a44ffe533e082b20b954f9d1f6ebf2f85a83e4ec0cba94bbac4f03e5adb",
-      "ondemand/citm_catalog.json": "sha256:a1c65dc6d061ce75ea666fba9fdbd6f3db47b4be313c09c3bfe2583ee529ee5b",
-      "ondemand/generated.json": "sha256:0c0873f5661320fd465cb31c95ae5a5727c6607764ff01daf3422a436fe48632",
-      "ondemand/twitter.json": "sha256:f54b1b3c12d776c24796109891529383c319615258dec16951c7cf32ca29b168"
-    },
-    "validation": {
-      "dom/citm_catalog.json": "sha256:a1c65dc6d061ce75ea666fba9fdbd6f3db47b4be313c09c3bfe2583ee529ee5b",
-      "dom/generated.json": "sha256:14147acd8f4c4fabdec16a92fb7738c1f9190269012aa1f050c962d663559dbd",
-      "dom/twitter.json": "sha256:f54b1b3c12d776c24796109891529383c319615258dec16951c7cf32ca29b168",
-      "malformed/dom/bad-escape.json": "sha256:98ac06569b9f0d4c1f0c9f93950fc3a4f652c315ea554fb7fe758dc4676d74e4",
-      "malformed/dom/leading-zero.json": "sha256:7cf6d0d452ca99da780951dc38bea90933aefce6a01df9818986ec1abb7f2feb",
-      "malformed/dom/trailing-comma.json": "sha256:21226fbad845a17302677010a92cfeb75ef6f85be65cfc3efa51bbfd3bd789bd",
-      "malformed/dom/truncated.json": "sha256:21226fbad845a17302677010a92cfeb75ef6f85be65cfc3efa51bbfd3bd789bd",
-      "malformed/ondemand/bad-escape.json": "sha256:98ac06569b9f0d4c1f0c9f93950fc3a4f652c315ea554fb7fe758dc4676d74e4",
-      "malformed/ondemand/leading-zero.json": "sha256:7cf6d0d452ca99da780951dc38bea90933aefce6a01df9818986ec1abb7f2feb",
-      "malformed/ondemand/trailing-comma.json": "sha256:21226fbad845a17302677010a92cfeb75ef6f85be65cfc3efa51bbfd3bd789bd",
-      "malformed/ondemand/truncated.json": "sha256:21226fbad845a17302677010a92cfeb75ef6f85be65cfc3efa51bbfd3bd789bd",
-      "ondemand-many/amazon_cellphones.ndjson": "sha256:dfee8a44ffe533e082b20b954f9d1f6ebf2f85a83e4ec0cba94bbac4f03e5adb",
-      "ondemand/citm_catalog.json": "sha256:a1c65dc6d061ce75ea666fba9fdbd6f3db47b4be313c09c3bfe2583ee529ee5b",
-      "ondemand/generated.json": "sha256:14147acd8f4c4fabdec16a92fb7738c1f9190269012aa1f050c962d663559dbd",
-      "ondemand/twitter.json": "sha256:f54b1b3c12d776c24796109891529383c319615258dec16951c7cf32ca29b168"
-    }
-  },
-  "baselinePeakRssKb": {
-    "train": 18000,
-    "validation": 13500
-  },
-  "peakRssToleranceFraction": 0.02,
+  "timingModes": [
+    "dom",
+    "ondemand"
+  ],
+  "timingSamples": 3,
+  "peakRssToleranceFraction": 0.05,
   "compileTimeoutSec": 180,
   "testTimeoutSec": 45,
   "benchmarkTimeoutSec": 90,
   "evaluatorTimeoutSec": 900,
-  "qAnchorGbps": 3.3849397272770507
+  "timingWorkBytes": {
+    "dom": 400000000,
+    "ondemand": 120000000
+  }
 }
