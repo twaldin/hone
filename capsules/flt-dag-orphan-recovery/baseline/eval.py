@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Trusted exact-output evaluator for bounded M2 subsystem capsules.
+"""Trusted evaluator for the flt-dag-orphan-recovery capsule.
 
 Candidate code is imported only by an unprivileged worker subprocess. This
-root-side parent owns hidden fixtures, timing, equality, gates, and output.
-Each timed repetition gets fresh PID/IPC/NET/UTS namespaces and writable state.
+root-side parent owns sealed fixtures, equality, gates, and output.
+Each repetition gets fresh PID/IPC/NET/UTS namespaces and writable state.
+
+Scoring (registered scalar): passed sealed transitions divided by declared
+transitions. Each sealed transition earns 1.0 when all repetitions match the
+expected output exactly, else 0.0; the objective is the mean. `valid` is
+reserved for protocol/public-suite integrity — a partial sealed result is a
+low score, not an invalid evaluation. Elapsed time is reported only as
+diagnostics and never enters the score.
 """
 from __future__ import annotations
 
@@ -342,11 +349,11 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
     correct = error is None and len(outcomes) == INNER_REPS and all(
         canonical(outcome.result) == canonical(case["expected"]) for outcome in outcomes
     )
-    score = (1.0 / (1.0 + slowest_ms)) if correct else 0.0
+    score = 1.0 if correct else 0.0
     feedback = (
-        f"all {INNER_REPS} repetitions matched in slowest {slowest_ms:.3f} ms"
+        f"all {INNER_REPS} repetitions matched exactly (slowest {slowest_ms:.3f} ms, diagnostic only)"
         if correct
-        else f"incorrect or failed in slowest {slowest_ms:.3f} ms: {error or 'exact output mismatch'}"
+        else f"incorrect or failed: {error or 'exact output mismatch'}"
     )
     return slowest_ms, correct, {"score": score, "feedback": feedback}
 
@@ -388,16 +395,15 @@ def main() -> None:
         correct.append(ok)
     tests_pass, suite_detail = run_public_suite(workspace)
     quality = statistics.fmean([1.0 if ok else 0.0 for ok in correct]) if correct else 0.0
-    hidden_cases_pass = bool(correct) and all(correct)
     output = {
-        "valid": tests_pass and hidden_cases_pass,
+        "valid": tests_pass,
         "objectives": {
-            "score": statistics.fmean([entry["score"] for entry in per_example.values()]) if per_example else 0.0,
+            "score": quality,
         },
-        "constraints": {"tests_pass": tests_pass, "hidden_cases_pass": hidden_cases_pass},
+        "constraints": {"tests_pass": tests_pass},
         "perExample": per_example,
         "diagnostics": {
-            "summary": f"{len(cases)} sealed cases; {suite_detail}",
+            "summary": f"{sum(1 for ok in correct if ok)}/{len(cases)} sealed transitions passed; {suite_detail}",
             "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
             "quality": quality,
         },
