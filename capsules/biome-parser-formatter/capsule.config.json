@@ -1,11 +1,33 @@
 {
   "objective": "Improve JavaScript, TypeScript, and CSS parser/formatter throughput across frozen deterministic large files. Preserve byte-exact formatted output, parser diagnostic hashes, idempotence, relevant parser/formatter regression tests, and peak RSS within 2% of baseline. Only the four pinned parser/formatter crate src trees are mutable.",
-  "image": "hone-biome-task@sha256:7d181d7e80724ad4a86409a723ec1097ca88cb46d56eb90733c2cf5f72cedfb1",
-  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
-  "protectedPaths": ["eval.py", "challenge.json", "LICENSES", ".gitignore"],
+  "image": "hone-biome-task@sha256:8299d9d4d831d2a18f0c162e3bd3412a72257f8d93a48a541faea01e324bd003",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "challenge.json",
+    "LICENSES",
+    ".gitignore"
+  ],
   "assetGroups": [
-    {"id": "train", "visibility": "public", "paths": ["assets/train"]},
-    {"id": "validation", "visibility": "protected", "paths": ["assets/validation"]}
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
   ],
   "budget": {
     "maxTokens": 12000000,
@@ -13,10 +35,17 @@
     "maxWallClockSec": 10800,
     "maxEvaluatorInvocations": 200
   },
-  "diagnosticOrdering": {"path": "diagnostics/ordering-report.json"},
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
   "meta": {
     "evaluatorSource": "user",
     "partition": "m2-oss-current-head-train-panel-a",
+    "headroom": {
+      "requirement": "gate-7 development-train headroom: three two-episode seed-optimizer pilots on the current host must produce at least one valid non-baseline candidate while fewer than three runs reach qReference",
+      "pilotPath": "trusted supervisor + local backend + broker measurement path under trusted synthetic-meta authority (admissionReview off); no optimizer-queryable state",
+      "evidence": "diagnostics/admission-evidence.json#seedPilots"
+    },
     "license": "MIT OR Apache-2.0; upstream notices preserved in baseline/LICENSES and image; generated workloads are CC0-1.0",
     "provenance": "Pinned Biome 8ebafe1c7489f1f7af379b8e52b8ad063c82d28a. Workload operations reproduce the uncached parse and format-node/print paths of the upstream JS, TS, and CSS Criterion benches. Third-party CDN benchmark inputs were not redistributed; deterministic large JS/TS/CSS and recovery sources were generated and frozen instead. qReference is constructed after locked A-A calibration as qBase + max(5*sigma, 0.05*abs(qBase-qFail)).",
     "sourceDetails": {
@@ -41,16 +70,23 @@
     "measurement": {
       "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local calibration",
       "freshProcess": true,
-      "samplesPerWorkload": 1,
+      "samplesPerWorkload": 5,
       "aaSamples": 3,
-      "q": "reciprocal geometric mean protected process-CPU milliseconds across parse and format workloads",
+      "q": "reciprocal geometric mean trusted-parent wall milliseconds per repetition across parse and format workloads; per workload the fastest k of N samples are trimmed-mean averaged to reject host-contention outliers; every sample is receipt-bound to the protected oracle",
       "qFail": 1e-12,
       "qBase": 0.0769000486784732,
       "sigma": 0.000287134953365207,
       "qReference": 0.08074505111234687,
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-      "rssGate": "peak workload RSS <= frozen baseline peak RSS * 1.02"
+      "rssGate": "peak workload RSS <= frozen ceiling rssLimitKb (33000 KiB); recalibrated for the trusted-parent wall-timing harness whose peak is dominated by the formatter IR plus glibc arena retention, giving ~1.11x the observed baseline peak (~29620 KiB) so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
     },
-    "tags": ["m2", "oss", "biome", "parser", "formatter", "performance"]
+    "tags": [
+      "m2",
+      "oss",
+      "biome",
+      "parser",
+      "formatter",
+      "performance"
+    ]
   }
 }

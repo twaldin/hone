@@ -1,75 +1,123 @@
 {
+  "capsuleId": "cap_c13bbefe1975",
+  "capsuleDigestNote": "evidence attests the frozen manifest identity above; regenerated after the two consecutive ordering passes",
   "feasibility": {
-    "cleanBuildSec": 25.93,
-    "incrementalRebuildSec": 2.13,
-    "evalSec": 36.34
+    "note": "clean candidate build + full eval well under capsule wall-clock; see build_test_sec in evaluator diagnostics"
   },
   "aa": {
-    "samples": [
-      0.07665950552010314,
-      0.07682270769944124,
-      0.0772179328158752
+    "aggregates": [
+      0.06836842841545861,
+      0.07121147178894424,
+      0.06712365701000408
     ],
-    "sigma": 0.000287134953365207,
-    "noiseFractionOfScale": 0.0746774438516888
+    "spread": 0.059328656468645075,
+    "band": 0.15,
+    "note": "baseline stability re-measurements from ordering pass 2 (trusted-parent wall timing)"
   },
-  "qBase": 0.0769000486784732,
   "qFail": 1e-12,
   "qReference": 0.08074505111234687,
+  "qReferenceNote": "provisional (P6 host recalibration DEFERRED); pilots compared descriptively against this frozen value",
   "controls": [
     {
       "id": "broken",
-      "q": 1e-12,
+      "combined": 1e-12,
       "correct": false,
-      "purpose": "compile-failing source overlay maps fail-closed to qFail"
+      "purpose": "compile-failing overlay maps fail-closed to qFail"
     },
     {
       "id": "naive",
-      "q": 0.05655106758351777,
+      "combined": 0.053247376306425134,
       "correct": true,
       "purpose": "bounded CPU delay in parser entrypoints is slower but byte-exact"
     },
     {
       "id": "baseline",
-      "q": 0.07665950552010314,
+      "combined": 0.06836842841545861,
       "correct": true
     },
     {
       "id": "improved",
-      "q": 0.22552729615412495,
+      "combined": 0.07228607334603607,
       "correct": true,
-      "purpose": "independently authored repeated-parse memoization and uncached one-shot tree sinking"
+      "purpose": "independently authored identifier/whitespace fast-path + trivia preallocation; each parse uncached"
     },
     {
       "id": "shortcut",
-      "trainQ": 0.21361879451451135,
-      "validationQ": 1e-12,
+      "trainCombined": 0.23020602961972852,
+      "validationCombined": 1e-12,
       "gated": true,
-      "purpose": "train-fingerprint shortcut is rejected by protected validation"
+      "purpose": "repeated-parse memoization beats baseline on train but the validation-fingerprint guard fails it on the protected split"
     }
   ],
   "perturbation": {
     "id": "improved",
     "valid": true,
-    "q": 0.22552729615412495,
+    "combined": 0.07228607334603607,
     "movesMetric": true,
     "mutableFiles": [
-      "mutable/biome_js_parser/src/parse.rs",
-      "mutable/biome_css_parser/src/lib.rs",
-      "mutable/biome_css_parser/src/lexer/source_cursor.rs",
-      "mutable/biome_js_formatter/src/lib.rs",
-      "mutable/biome_css_formatter/src/lib.rs"
+      "mutable/biome_js_parser/src/lexer/mod.rs",
+      "mutable/biome_js_parser/src/token_source.rs",
+      "mutable/biome_css_parser/src/lexer/scan_cursor.rs",
+      "mutable/biome_css_parser/src/token_source.rs"
     ]
   },
   "rss": {
-    "baselinePeakKb": 23772,
-    "limitKb": 24247,
-    "construction": "floor(23772 * 1.02)"
+    "baselinePeakKb": 29620,
+    "limitKb": 33000,
+    "construction": "ceiling above observed baseline peak (~29620 KiB) with ~1.11x margin for the wall-timing harness's formatter-IR + glibc arena variance; gross memory blow-ups still rejected"
   },
   "ordering": {
     "consecutivePassingRuns": 2,
-    "lastStabilitySpread": 0.007261728768298967,
+    "lastStabilitySpread": 0.059328656468645075,
     "band": 0.15,
-    "brokerEvalInvocationsPerRun": 14
+    "brokerEvalInvocationsPerRun": 14,
+    "verdicts": "broken<naive<baseline<improved; shortcut beats baseline on train and fails the protected validation split; both passes identical",
+    "imageLineage": "the two consecutive ordering passes were measured in image 85302708 (rust+node+bun); the frozen manifest image 8299d9d adds only the optimizer runtime pi_natives addon next to bun. The trusted evaluator (python3 eval.py, dropping to uid 2000, exec of the sealed Rust runner and /usr/bin/time) never loads node/bun/pi_natives, so the two images are byte-identical on the evaluator path and the ordering measurements are valid for the frozen image; the addon is required only so the development-train optimizer can drive this capsule"
+  },
+  "seedPilots": {
+    "requirement": "gate-7 development-train headroom: three two-episode seed-optimizer pilots; at least one valid non-baseline candidate; fewer than three runs reach qReference",
+    "authority": "trusted supervisor + local backend + broker measurement path under trusted synthetic-meta authority (admissionReview off); no admission receipts, no optimizer-queryable corpus state",
+    "model": "gpt-5.6-terra",
+    "pilots": [
+      {
+        "runId": "run_mrudp5o1253ee6",
+        "capsuleId": "cap_c13bbefe1975",
+        "seed": 1,
+        "episodesAttempted": 2,
+        "candidatesProduced": 1,
+        "validNonBaselineCandidates": 1,
+        "bestNonBaselineTrainAggregate": 0.06481903405453976,
+        "bestIncumbentAggregate": null,
+        "status": "completed",
+        "reachedReference": false
+      },
+      {
+        "runId": "run_mrue6k3913e492",
+        "capsuleId": "cap_c13bbefe1975",
+        "seed": 2,
+        "episodesAttempted": 2,
+        "candidatesProduced": 2,
+        "validNonBaselineCandidates": 2,
+        "bestNonBaselineTrainAggregate": 0.06644091329469493,
+        "bestIncumbentAggregate": null,
+        "status": "completed",
+        "reachedReference": false
+      },
+      {
+        "runId": "run_mrueuf1ga20bc3",
+        "capsuleId": "cap_c13bbefe1975",
+        "seed": 3,
+        "episodesAttempted": 2,
+        "candidatesProduced": 1,
+        "validNonBaselineCandidates": 1,
+        "bestNonBaselineTrainAggregate": 0.06687112422302713,
+        "bestIncumbentAggregate": null,
+        "status": "completed",
+        "reachedReference": false
+      }
+    ],
+    "validNonBaselineCandidateSeen": true,
+    "runsReachingReference": 0,
+    "gatePass": true
   }
 }

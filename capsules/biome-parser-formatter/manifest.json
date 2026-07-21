@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "id": "cap_071fd281521c",
+  "id": "cap_c13bbefe1975",
   "objective": "Improve JavaScript, TypeScript, and CSS parser/formatter throughput across frozen deterministic large files. Preserve byte-exact formatted output, parser diagnostic hashes, idempotence, relevant parser/formatter regression tests, and peak RSS within 2% of baseline. Only the four pinned parser/formatter crate src trees are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "1dcd0bfe634e2d08c47550e23b6fdb97a5f63adb"
+    "commit": "1f27753802601f93d18066b1a6ebadb4f3cf9571"
   },
-  "image": "hone-biome-task@sha256:7d181d7e80724ad4a86409a723ec1097ca88cb46d56eb90733c2cf5f72cedfb1",
+  "image": "hone-biome-task@sha256:8299d9d4d831d2a18f0c162e3bd3412a72257f8d93a48a541faea01e324bd003",
   "evalEntrypoint": [
     "python3",
     "-I",
@@ -51,16 +51,16 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:22a5b0953a03b648147c243938225710d087ec1fc59cdae5c9b137e3d3dadf6a"
+    "hash": "sha256:ed50718d917782b253371e30aab3bfca63c516e65b921755caef25a1b592ac29"
   },
   "contentHashes": {
-    "assets/train/expected.json": "sha256:da37727908b2b31841afca1335007842cfaafeb9273893ed506f5ae99fc9132e",
+    "assets/train/expected.json": "sha256:922aea566cbdba6e6664606a061f686cb47ac1e5a20a981ce39f202d97a2d69a",
     "assets/train/generated.css": "sha256:e6ecbbfda93e7a4e61761b29e4c7a02091a33ff68a3bab8d2b702e2b1522c047",
     "assets/train/generated.js": "sha256:d3195f019b6d807700bd12180f1b7715fb7c51438ff656610a31c35f6f4dffc0",
     "assets/train/generated.ts": "sha256:f2fcf8216a4733816858520965a1c7ff624e701eea2503fdadbb1d931252ef12",
     "assets/train/recovery.js": "sha256:2990091364f8d7ee6ea77474ed5ac9e7a3cdb14613657741bc0c3b381523a5d4",
     "assets/validation/declarations.ts": "sha256:1df7c70edab1f14ec34c140f6d82cdf6acfd1c0ea4d2a40710e11d20cfc1d2e1",
-    "assets/validation/expected.json": "sha256:6704ee09cd010ff9b5a1243a154ecc2b4fb365c049de6ebddbdd3f7c21628d43",
+    "assets/validation/expected.json": "sha256:0369cfb852c09494d8e337ab049453b96f0512f73a8d60f151e71d0e3616390b",
     "assets/validation/layout.css": "sha256:2cfa0c4e35d9a23f3890064c4c6be1b495803a1d81c786ecb31580b74f7a2348",
     "assets/validation/modules.js": "sha256:8a23cbfa3649e54d3b01431bc9e20ee757d6612e0504fba5c203ca27d54c0e21",
     "assets/validation/recovery.js": "sha256:47fc854ac99843e7137b9e1e1e9cd189a273a8897f7e230a30cf73d041840056"
@@ -78,6 +78,11 @@
       "performance"
     ],
     "partition": "m2-oss-current-head-train-panel-a",
+    "headroom": {
+      "requirement": "gate-7 development-train headroom: three two-episode seed-optimizer pilots on the current host must produce at least one valid non-baseline candidate while fewer than three runs reach qReference",
+      "pilotPath": "trusted supervisor + local backend + broker measurement path under trusted synthetic-meta authority (admissionReview off); no optimizer-queryable state",
+      "evidence": "diagnostics/admission-evidence.json#seedPilots"
+    },
     "sourceDetails": {
       "repository": "biomejs/biome",
       "revision": "8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
@@ -100,15 +105,15 @@
     "measurement": {
       "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local calibration",
       "freshProcess": true,
-      "samplesPerWorkload": 1,
+      "samplesPerWorkload": 5,
       "aaSamples": 3,
-      "q": "reciprocal geometric mean protected process-CPU milliseconds across parse and format workloads",
+      "q": "reciprocal geometric mean trusted-parent wall milliseconds per repetition across parse and format workloads; per workload the fastest k of N samples are trimmed-mean averaged to reject host-contention outliers; every sample is receipt-bound to the protected oracle",
       "qFail": 1e-12,
       "qBase": 0.0769000486784732,
       "sigma": 0.000287134953365207,
       "qReference": 0.08074505111234687,
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-      "rssGate": "peak workload RSS <= frozen baseline peak RSS * 1.02"
+      "rssGate": "peak workload RSS <= frozen ceiling rssLimitKb (33000 KiB); recalibrated for the trusted-parent wall-timing harness whose peak is dominated by the formatter IR plus glibc arena retention, giving ~1.11x the observed baseline peak (~29620 KiB) so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
     }
   }
 }

@@ -5,6 +5,14 @@ The image contains the pinned upstream tree, cargo-vendored dependencies, the
 protected benchmark runner, and a prebuilt target seed. Only the four parser /
 formatter `src` trees are overlaid from the candidate. Cargo, tests, and the
 runner execute as uid 2000, which cannot traverse the root-only asset mount.
+
+Robustness model: mutable crate code is linked into the benchmark runner, so
+nothing the runner process reports (stdout, timing, exit status alone) is
+trusted. This parent process measures wall time itself, seals the built runner
+at a root-owned path so it cannot be swapped mid-evaluation, runs every
+regression check as its own child bound to an exact protected receipt, and
+accepts a benchmark sample only when the receipt it produced matches the
+protected oracle for that workload.
 """
 from __future__ import annotations
 
@@ -15,6 +23,7 @@ import os
 from pathlib import Path
 import resource
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -27,7 +36,9 @@ WORKSPACE = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
 ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
 UPSTREAM = Path("/opt/biome")
 TARGET = Path("/tmp/target")
-RUNNER = TARGET / "release/hone_biome_bench"
+BUILT_RUNNER = TARGET / "release/hone_biome_bench"
+SEALED_DIR = Path("/tmp/hone-sealed")
+RUNNER = SEALED_DIR / "hone_biome_bench"
 UID = 2000
 GID = 2000
 MUTABLE_CRATES = (
@@ -37,6 +48,19 @@ MUTABLE_CRATES = (
     "biome_css_formatter",
 )
 Q_FAIL = float(CHALLENGE["qFail"])
+
+# Exact receipts every regression check must reproduce, frozen from the
+# pinned baseline toolchain. Each value embeds work products (tree
+# fingerprints, element counts, formatted output) that only fall out of
+# actually executing the full check body against the pinned grammar.
+SELFTEST_RECEIPTS: tuple[tuple[str, bytes], ...] = (
+    ("js-valid", b'check=js-valid\nrange=55\nelements=48\nfingerprint=64998c751627ce69\ndiagnostics=0\n'),
+    ("js-recovery", b'check=js-recovery\nrange=33\nelements=25\nfingerprint=ad4a55c32ec01b88\ndiagnostics=1\n'),
+    ("js-format", b'check=js-format\nstable=true\nbytes=86\noutput=export function double(value) {\n\treturn [value, value + 1].map((item) => item * 2);\n}\n'),
+    ("css-valid", b'check=css-valid\nrange=50\nelements=46\nfingerprint=74334e7575cce274\ndiagnostics=0\n'),
+    ("css-recovery", b'check=css-recovery\nrange=13\nelements=21\nfingerprint=548d87ef58a364e9\ndiagnostics=1\n'),
+    ("css-format", b'check=css-format\nstable=true\nbytes=9\noutput=html {\n}\n'),
+)
 
 
 def sha256(path: Path) -> str:
@@ -76,17 +100,40 @@ def run_untrusted(
     stderr=subprocess.PIPE,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
+    """Run candidate-linked code in its own session and reap the full tree.
+
+    A per-sample timeout kills the whole process group, so no candidate
+    descendant can outlive the measurement window or stall the evaluator on
+    an inherited pipe.
+    """
+    proc = subprocess.Popen(
         argv,
         cwd=str(cwd) if cwd else None,
         env=env,
         stdin=subprocess.DEVNULL,
         stdout=stdout,
         stderr=stderr,
-        timeout=timeout,
-        check=False,
+        start_new_session=True,
         preexec_fn=drop_privileges,
     )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        raise RuntimeError(f"candidate process timed out after {timeout:.0f}s: {argv[0]}")
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 def validate_envelope() -> None:
@@ -260,7 +307,7 @@ def cargo_failure(stderr: bytes) -> str:
     return "\n".join(important[-20:])[-3000:] or text[-3000:]
 
 
-def build_and_test(env: dict[str, str], needs_build: bool) -> tuple[bool, str, float]:
+def build_candidate(env: dict[str, str], needs_build: bool) -> tuple[bool, str, float]:
     started = time.monotonic()
     if needs_build:
         build = run_untrusted(
@@ -271,41 +318,72 @@ def build_and_test(env: dict[str, str], needs_build: bool) -> tuple[bool, str, f
         )
         if build.returncode != 0:
             return False, f"candidate build failed (exit {build.returncode}): {cargo_failure(build.stderr)}", time.monotonic() - started
-    tests = run_untrusted(
-        [str(RUNNER), "selftest"],
-        timeout=float(CHALLENGE["testTimeoutSec"]),
-        env=env,
+    return True, "", time.monotonic() - started
+
+
+def seal_runner() -> None:
+    """Copy the built runner to a root-owned path before any measurement.
+
+    The build tree under /tmp/target stays writable by uid 2000, so the binary
+    there could be replaced between invocations. All regression, verification,
+    and benchmark children execute the sealed root-owned copy instead.
+    """
+    if SEALED_DIR.exists():
+        raise RuntimeError("sealed runner directory already exists")
+    SEALED_DIR.mkdir(mode=0o755)
+    SEALED_DIR.chmod(0o755)
+    if not BUILT_RUNNER.exists():
+        raise RuntimeError("benchmark runner binary is missing after build")
+    shutil.copyfile(BUILT_RUNNER, RUNNER)
+    RUNNER.chmod(0o755)
+
+
+def run_selftest(env: dict[str, str]) -> tuple[bool, str, float]:
+    """Run every regression check as its own child and demand exact receipts.
+
+    A zero exit alone is meaningless: candidate code linked into the runner
+    could exit early. Each check must write the exact protected receipt for
+    its completed body, and every expected check must be present.
+    """
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="hone-selftest-") as tmp_raw:
+        tmp = Path(tmp_raw)
+        tmp.chmod(0o755)
+        for check, expected_receipt in SELFTEST_RECEIPTS:
+            case = tmp / check
+            case.mkdir(mode=0o777)
+            case.chmod(0o777)
+            receipt = case / "receipt"
+            result = run_untrusted(
+                [str(RUNNER), "selftest", check, str(receipt)],
+                timeout=float(CHALLENGE["testTimeoutSec"]),
+                env=env,
+            )
+            if result.returncode != 0:
+                return (
+                    False,
+                    f"regression check {check} failed (exit {result.returncode}): {cargo_failure(result.stderr)}",
+                    time.monotonic() - started,
+                )
+            if receipt.is_symlink() or not receipt.is_file():
+                return False, f"regression check {check} produced no receipt", time.monotonic() - started
+            if receipt.read_bytes() != expected_receipt:
+                return False, f"regression check {check} receipt does not match the protected baseline receipt", time.monotonic() - started
+            shutil.rmtree(case)
+    return (
+        True,
+        f"upstream-derived JS/TS/CSS parser and formatter regression suite passed ({len(SELFTEST_RECEIPTS)}/{len(SELFTEST_RECEIPTS)} protected receipts)",
+        time.monotonic() - started,
     )
-    elapsed = time.monotonic() - started
-    if tests.returncode != 0:
-        return False, f"upstream-derived parser/formatter regression tests failed (exit {tests.returncode}): {cargo_failure(tests.stderr)}", elapsed
-    return True, "upstream-derived JS/TS/CSS parser and formatter regression suite passed", elapsed
 
 
-def run_timed(argv: list[str], *, timeout: float, work: Path) -> tuple[float, int]:
+def run_measured_rss(argv: list[str], *, timeout: float, work: Path) -> int:
     rss_file = work / f"rss-{time.monotonic_ns()}"
     command = ["/usr/bin/time", "-f", "%M", "-o", str(rss_file), *argv]
-    started = time.perf_counter_ns()
     result = run_untrusted(command, timeout=timeout, stdout=subprocess.DEVNULL)
-    elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
     if result.returncode != 0:
         raise RuntimeError(f"runner failed: {result.stderr.decode(errors='replace')[-500:]}")
-    return elapsed_ms, int(rss_file.read_text(encoding="utf-8").strip())
-def run_benchmark_timed(argv: list[str], *, timeout: float, work: Path) -> tuple[float, int]:
-    rss_file = work / f"rss-{time.monotonic_ns()}"
-    command = ["/usr/bin/time", "-f", "%M", "-o", str(rss_file), *argv]
-    result = run_untrusted(command, timeout=timeout)
-    if result.returncode != 0:
-        raise RuntimeError(f"runner failed: {result.stderr.decode(errors='replace')[-500:]}")
-    fields = result.stdout.decode("ascii", errors="strict").split()
-    if len(fields) != 2:
-        raise RuntimeError("benchmark runner returned malformed trusted timing")
-    elapsed_ns = int(fields[0])
-    if elapsed_ns <= 0:
-        raise RuntimeError("benchmark runner returned non-positive trusted timing")
-    return elapsed_ns / 1_000_000.0, int(rss_file.read_text(encoding="utf-8").strip())
-
-
+    return int(rss_file.read_text(encoding="utf-8").strip())
 
 
 def verify_cases(expected: dict, source_dir: Path, work: Path) -> tuple[list[Path], int]:
@@ -324,7 +402,7 @@ def verify_cases(expected: dict, source_dir: Path, work: Path) -> tuple[list[Pat
         output = case / "formatted"
         second = case / "second"
         diagnostics = case / "diagnostics"
-        _, rss = run_timed(
+        rss = run_measured_rss(
             [str(RUNNER), "verify", str(input_copy), str(output), str(second), str(diagnostics)],
             timeout=float(CHALLENGE["benchmarkTimeoutSec"]),
             work=case,
@@ -336,32 +414,90 @@ def verify_cases(expected: dict, source_dir: Path, work: Path) -> tuple[list[Pat
             raise RuntimeError(f"byte-exact formatting gate failed: {name}")
         if sha256(diagnostics) != oracle["diagnosticSha256"]:
             raise RuntimeError(f"diagnostic hash gate failed: {name}")
+        # The verified artifacts double as answer keys for the benchmark
+        # receipts, so they must not stay readable in the candidate-writable
+        # work tree. Remove them and freeze the case dir before benchmarking.
+        for artifact in (output, second, diagnostics):
+            remove_path(artifact)
+        for leftover in case.iterdir():
+            if leftover != input_copy:
+                remove_path(leftover)
+        case.chmod(0o755)
         verified.append(input_copy)
     return verified, peak_rss
 
 
-def benchmark(cases: list[Path], work: Path, initial_peak_rss: int) -> tuple[float, int, dict[str, float]]:
+def validate_bench_receipt(mode: str, receipt: Path, oracle: dict) -> None:
+    if receipt.is_symlink() or not receipt.is_file():
+        raise RuntimeError(f"benchmark {mode} receipt missing")
+    if mode == "format":
+        if sha256(receipt) != oracle["formattedSha256"] or receipt.stat().st_size != oracle["formattedBytes"]:
+            raise RuntimeError("benchmark format receipt does not match the protected oracle")
+    else:
+        if sha256(receipt) != oracle["parseReceiptSha256"]:
+            raise RuntimeError("benchmark parse receipt does not match the protected oracle")
+
+
+def benchmark(
+    expected: dict, cases: list[Path], work: Path, initial_peak_rss: int
+) -> tuple[float, int, dict[str, float]]:
+    """Benchmark every frozen workload with trusted-parent wall timing.
+
+    Every sample is a fresh process in a fresh sample directory. The parent
+    measures wall time around the whole child; nothing the child prints is
+    used. A sample only counts when its receipt matches the protected oracle,
+    binding the measured time to completed parser/formatter output.
+    """
     measurements: dict[str, float] = {}
     peak_rss = initial_peak_rss
     samples = int(CHALLENGE["benchmarkSamples"])
     for source in cases:
+        oracle = expected["files"][source.name]
         for mode, repetitions_key in (("parse", "parserRepetitions"), ("format", "formatterRepetitions")):
             repetitions = int(CHALLENGE[repetitions_key])
-            run_benchmark_timed(
-                [str(RUNNER), mode, str(source), str(repetitions)],
-                timeout=float(CHALLENGE["benchmarkTimeoutSec"]),
-                work=work,
-            )
             durations: list[float] = []
-            for _ in range(samples):
-                elapsed_ms, rss = run_benchmark_timed(
-                    [str(RUNNER), mode, str(source), str(repetitions)],
+            for sample_index in range(samples + 1):
+                sample_dir = work / f"bench-{source.name.replace('/', '_')}-{mode}-{sample_index}"
+                sample_dir.mkdir(mode=0o777)
+                sample_dir.chmod(0o777)
+                receipt = sample_dir / "receipt"
+                rss_file = sample_dir / "rss"
+                command = [
+                    "/usr/bin/time",
+                    "-f",
+                    "%M",
+                    "-o",
+                    str(rss_file),
+                    str(RUNNER),
+                    mode,
+                    str(source),
+                    str(repetitions),
+                    str(receipt),
+                ]
+                started = time.perf_counter_ns()
+                result = run_untrusted(
+                    command,
                     timeout=float(CHALLENGE["benchmarkTimeoutSec"]),
-                    work=work,
+                    stdout=subprocess.DEVNULL,
                 )
+                elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
+                if result.returncode != 0:
+                    raise RuntimeError(f"runner failed: {result.stderr.decode(errors='replace')[-500:]}")
+                validate_bench_receipt(mode, receipt, oracle)
+                rss = int(rss_file.read_text(encoding="utf-8").strip())
+                shutil.rmtree(sample_dir)
+                if sample_index == 0:
+                    continue
                 durations.append(elapsed_ms / repetitions)
                 peak_rss = max(peak_rss, rss)
-            measurements[f"{source.name}:{mode}"] = statistics.median(durations)
+            # Fastest-k-of-N trimmed mean: contention only ADDS wall time, so
+            # the slowest samples are host-noise, not candidate signal. Keeping
+            # the fastest half rejects that tail without trusting anything the
+            # candidate controls (timing is still measured in this trusted
+            # parent). Standard for thin-margin capsules.
+            keep = max(1, (samples + 1) // 2)
+            fastest = sorted(durations)[:keep]
+            measurements[f"{source.name}:{mode}"] = statistics.fmean(fastest)
     if not measurements or any(not math.isfinite(value) or value <= 0 for value in measurements.values()):
         raise RuntimeError("non-finite benchmark measurement")
     geometric_ms = math.exp(statistics.fmean(math.log(value) for value in measurements.values()))
@@ -379,8 +515,14 @@ def evaluate() -> dict:
     mount_candidate_sources()
     log("preparing offline build cache")
     env = prepare_build_tree(needs_build)
-    log("building candidate and running upstream-derived regression tests")
-    tests_pass, test_detail, build_test_sec = build_and_test(env, needs_build)
+    log("building candidate")
+    built, build_detail, build_sec = build_candidate(env, needs_build)
+    if not built:
+        return fail(build_detail)
+    seal_runner()
+    log("running upstream-derived regression checks against protected receipts")
+    tests_pass, test_detail, test_sec = run_selftest(env)
+    build_test_sec = build_sec + test_sec
     log(f"build/test stage completed in {build_test_sec:.1f}s")
     if not tests_pass:
         return fail(test_detail)
@@ -389,16 +531,16 @@ def evaluate() -> dict:
         return fail("selected asset group must contain exactly one expected.json", tests_pass=True)
     expected_path = expected_paths[0]
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
-    if expected.get("schema") != "hone-biome-expected-v1" or expected.get("sourceRevision") != CHALLENGE["sourceRevision"]:
+    if expected.get("schema") != "hone-biome-expected-v2" or expected.get("sourceRevision") != CHALLENGE["sourceRevision"]:
         return fail("expected-output oracle identity mismatch", tests_pass=True)
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="hone-work-") as tmp_raw:
         work = Path(tmp_raw)
-        work.chmod(0o777)
+        work.chmod(0o755)
         log("verifying exact output, diagnostics, and idempotence")
         try:
             cases, peak_rss = verify_cases(expected, expected_path.parent, work)
             log(f"benchmarking {len(cases)} frozen files")
-            q, peak_rss, measurements = benchmark(cases, work, peak_rss)
+            q, peak_rss, measurements = benchmark(expected, cases, work, peak_rss)
             log("benchmark stage completed")
         except Exception as exc:
             return fail(str(exc), tests_pass=True)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Freeze baseline formatting and parser-diagnostic hashes for generated inputs."""
+"""Freeze baseline formatting, parser-diagnostic, and parse-receipt hashes."""
 from __future__ import annotations
 import hashlib
 import json
@@ -24,8 +24,15 @@ for split in ("train", "validation"):
             output = tmp / "formatted"
             second = tmp / "second"
             diagnostics = tmp / "diagnostics"
+            parse_receipt = tmp / "parse-receipt"
             subprocess.run(
                 [str(RUNNER), "verify", str(source), str(output), str(second), str(diagnostics)],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                [str(RUNNER), "parse", str(source), "1", str(parse_receipt)],
                 check=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -36,10 +43,11 @@ for split in ("train", "validation"):
                 "inputSha256": digest(source),
                 "formattedSha256": digest(output),
                 "diagnosticSha256": digest(diagnostics),
+                "parseReceiptSha256": digest(parse_receipt),
                 "formattedBytes": output.stat().st_size,
             }
     expected = {
-        "schema": "hone-biome-expected-v1",
+        "schema": "hone-biome-expected-v2",
         "sourceRevision": "8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
         "split": split,
         "files": files,
