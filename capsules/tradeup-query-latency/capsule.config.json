@@ -35,14 +35,15 @@
       "interleaved": true,
       "freshProcess": true,
       "cacheContract": "immutable read-only DB; POSIX_FADV_DONTNEED plus mincore resident-fraction <= 0.01 before every process",
+      "stateReset": "before every sample the trusted parent reaps worker-uid processes and removes all worker-uid persistent state (/tmp, /var/tmp, /dev/shm trees and System V IPC objects); each worker is started in fresh IPC+NET namespaces before its privilege drop; the candidate workspace is broker-mounted read-only",
       "q": "positive reciprocal latency score emitted by the trusted evaluator; invalid, broken, malformed, crashed, or timed-out output maps to qFail",
       "qFail": 0
     },
     "normalization": {
       "qFail": 0,
-      "qBase": 0.00030146691673015795,
-      "qReference": 0.0017501767746974616,
-      "scale": 0.0014487098579673036
+      "qBase": 0.0002942307770092168,
+      "qReference": 0.0018040334961153181,
+      "scale": 0.0015098027191061012
     },
     "diagnosticContentHashes": {
       "diagnostics/alternate/query.py": "sha256:007f5288dbb4f0a05539f1a27f0e9b70b532ad5e62df9f71441f8b88869befa1",

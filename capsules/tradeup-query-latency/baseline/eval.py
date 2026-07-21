@@ -4,10 +4,14 @@
 Every candidate and sealed-reference timing is a fresh one-shot process over a
 fresh read-only bind of the immutable database.  Its pages are evicted with
 POSIX_FADV_DONTNEED and verified nonresident with mincore before the timed
-process starts.  Nine candidate/reference pairs are interleaved in
-alternating order.  Only an exact
-registered response+quality hash receives the continuous negative log latency
-objective.
+process starts.  Before every sample the evaluator reaps worker-uid processes,
+removes all worker-uid persistent state (tmp trees, shared-memory files, and
+System V IPC objects), and each worker starts in fresh IPC+NET namespaces
+before its privilege drop (the broker mounts the candidate workspace
+read-only), so no repetition can observe state left behind by an earlier
+one.  Nine candidate/reference pairs are interleaved in alternating
+order.  Only an exact registered response+quality hash receives the continuous
+negative log latency objective.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ import resource
 import selectors
 import shutil
 import signal
+import stat
 import statistics
 import subprocess
 import sys
@@ -51,6 +56,12 @@ MS_NOEXEC = 8
 MS_REMOUNT = 32
 MS_BIND = 4096
 MNT_DETACH = 2
+IPC_RMID = 0
+CLONE_NEWIPC = 0x08000000
+CLONE_NEWNET = 0x40000000
+# World-writable persistence surfaces a worker-uid process could reach inside
+# the eval container; swept before every timed sample for robustness.
+PURGE_ROOTS = ("/tmp", "/var/tmp", "/dev/shm", "/dev/mqueue")
 
 
 def _canonical(value: object) -> bytes:
@@ -151,6 +162,90 @@ def _reap_candidate_processes() -> None:
         time.sleep(0.005)
 
 
+def _purge_owned_entries(root: Path) -> int:
+    """Delete every filesystem entry under root owned by the worker uid."""
+    removed = 0
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        base = Path(dirpath)
+        kept: list[str] = []
+        for name in dirnames:
+            child = base / name
+            try:
+                info = child.lstat()
+            except OSError:
+                continue
+            if info.st_uid != WORKER_UID:
+                kept.append(name)
+                continue
+            removed += 1
+            if stat.S_ISDIR(info.st_mode):
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        dirnames[:] = kept
+        for name in filenames:
+            child = base / name
+            try:
+                if child.lstat().st_uid == WORKER_UID:
+                    child.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+    return removed
+
+
+def _purge_sysv_ipc() -> int:
+    """Remove worker-uid System V IPC objects, which outlive their creators."""
+    removed = 0
+    for table, remove in (
+        ("shm", lambda ipc_id: _LIBC.shmctl(ipc_id, IPC_RMID, None)),
+        ("msg", lambda ipc_id: _LIBC.msgctl(ipc_id, IPC_RMID, None)),
+        ("sem", lambda ipc_id: _LIBC.semctl(ipc_id, 0, IPC_RMID, 0)),
+    ):
+        path = Path("/proc/sysvipc") / table
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        if not lines:
+            continue
+        header = lines[0].split()
+        try:
+            uid_column = header.index("uid")
+        except ValueError:
+            continue
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) <= uid_column:
+                continue
+            try:
+                if int(fields[uid_column]) != WORKER_UID:
+                    continue
+                remove(int(fields[1]))
+            except ValueError:
+                continue
+            removed += 1
+    return removed
+
+
+def _purge_candidate_state() -> int:
+    """Reset worker-uid writable state so every sample starts from scratch.
+
+    A repetition may use scratch space while it runs, but nothing it creates
+    (tmp files, shared-memory segments, SysV IPC) may survive into the next
+    timed sample.  Returns the number of entries removed.
+    """
+    if os.geteuid() != 0:
+        return 0
+    removed = 0
+    for root in PURGE_ROOTS:
+        root_path = Path(root)
+        if root_path.is_dir():
+            removed += _purge_owned_entries(root_path)
+    removed += _purge_sysv_ipc()
+    return removed
+
+
 def _preexec() -> None:
     os.setsid()
     resource.setrlimit(resource.RLIMIT_AS, (384 * 1024 * 1024, 384 * 1024 * 1024))
@@ -159,6 +254,14 @@ def _preexec() -> None:
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if os.geteuid() == 0:
+        # Fresh IPC + NET namespaces per repetition BEFORE the uid drop (the
+        # eval container grants SYS_ADMIN to the trusted scorer for exactly
+        # this), so SysV IPC objects and loopback state can never carry
+        # between samples.  The setuid drop then strips the capability from
+        # the worker and no-new-privileges prevents reacquisition.
+        if _LIBC.unshare(CLONE_NEWIPC | CLONE_NEWNET) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, f"namespace unshare failed: {os.strerror(code)}")
         os.setgroups([])
         os.setgid(WORKER_GID)
         os.setuid(WORKER_UID)
@@ -291,11 +394,12 @@ def _read_process(process: subprocess.Popen[bytes]) -> tuple[bytes, str | None]:
 
 def _run_once(root: Path, db: Path, workload: Path, query: Path, copy_query: bool) -> dict[str, Any]:
     _reap_candidate_processes()
+    purged = _purge_candidate_state()
     run_dir, db_copy, workload_copy, local_query, resident = _prepare_run(root, db, workload, query, copy_query)
     if resident > MAX_RESIDENT_FRACTION:
         _unbind(db_copy)
         shutil.rmtree(run_dir, ignore_errors=True)
-        return {"ms": TIMEOUT_SEC * 1000.0, "hash": None, "error": f"cache-resident:{resident:.6f}", "resident": resident}
+        return {"ms": TIMEOUT_SEC * 1000.0, "hash": None, "error": f"cache-resident:{resident:.6f}", "resident": resident, "purged": purged}
     env = {
         "HOME": str(run_dir),
         "LANG": "C.UTF-8",
@@ -335,9 +439,9 @@ def _run_once(root: Path, db: Path, workload: Path, query: Path, copy_query: boo
                 else:
                     result = decoded["result"]
                     response_hash = hashlib.sha256(_canonical(result)).hexdigest()
-        return {"ms": elapsed_ms, "hash": response_hash, "result": result, "error": problem, "resident": resident}
+        return {"ms": elapsed_ms, "hash": response_hash, "result": result, "error": problem, "resident": resident, "purged": purged}
     except (ValueError, TypeError, json.JSONDecodeError) as error:
-        return {"ms": elapsed_ms, "hash": None, "result": None, "error": type(error).__name__, "resident": resident}
+        return {"ms": elapsed_ms, "hash": None, "result": None, "error": type(error).__name__, "resident": resident, "purged": purged}
     finally:
         _unbind(db_copy)
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -497,6 +601,7 @@ def main() -> None:
         "cpuQuota": {"cpus": cpu_count, "source": cpu_source},
         "freshProcesses": len(candidate_runs) + len(reference_runs),
         "interleave": "R,C,C,R,R,C,C,R,R,C,C,R,R,C,C,R,R,C",
+        "statePurgedEntries": sum(int(run.get("purged", 0)) for run in [*candidate_runs, *reference_runs]),
         "maxColdResidentFraction": max(run["resident"] for run in [*candidate_runs, *reference_runs]),
         "errors": [run["error"] for run in candidate_runs if run["error"] is not None],
     }
