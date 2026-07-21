@@ -9,13 +9,74 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const safeParse = JSON.parse.bind(JSON);
+// Captured before any candidate code can run; used ONLY on primitives, where
+// the serialization algorithm consults no user-reachable hook.
 const safeStringify = JSON.stringify.bind(JSON);
 const safeWrite = process.stdout.write.bind(process.stdout);
+const safeExit = process.exit.bind(process);
+const safeKeys = Object.keys;
+const safeIsArray = Array.isArray;
+const safeIsFinite = Number.isFinite;
 const workspace = resolve(process.argv[2] ?? "/workspace");
 const requestLine = readFileSync(0, "utf8");
 
+const MAX_ENCODE_DEPTH = 64;
+
+/**
+ * Prototype-independent JSON encoder. JSON.stringify invokes an inherited
+ * `toJSON` (e.g. one installed on Object.prototype by candidate code), which
+ * would let a candidate rewrite the trusted result envelope. This encoder
+ * never performs a prototype-chain method lookup: it delegates to the bound
+ * JSON.stringify only for primitives and walks objects via captured
+ * Object.keys over own enumerable properties.
+ */
+function encodeJson(value, depth) {
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      return safeStringify(value);
+    case "number":
+      return safeIsFinite(value) ? safeStringify(value) : "null";
+    case "boolean":
+      return value ? "true" : "false";
+    case "object":
+      break;
+    default:
+      // function, symbol, bigint, undefined: not representable.
+      return undefined;
+  }
+  if (depth <= 0) throw new RangeError("encode depth exceeded");
+  if (safeIsArray(value)) {
+    let out = "[";
+    for (let i = 0; i < value.length; i += 1) {
+      if (i > 0) out += ",";
+      const encoded = encodeJson(value[i], depth - 1);
+      out += encoded === undefined ? "null" : encoded;
+    }
+    return `${out}]`;
+  }
+  let out = "{";
+  let first = true;
+  for (const key of safeKeys(value)) {
+    const encoded = encodeJson(value[key], depth - 1);
+    if (encoded === undefined) continue;
+    out += `${first ? "" : ","}${safeStringify(key)}:${encoded}`;
+    first = false;
+  }
+  return `${out}}`;
+}
+
 function respond(payload) {
-  safeWrite(`${safeStringify(payload)}\n`);
+  let line;
+  try {
+    line = encodeJson(payload, MAX_ENCODE_DEPTH);
+  } catch {
+    line = undefined;
+  }
+  if (typeof line !== "string") {
+    line = '{"ok":false,"error":"unserializable candidate value"}';
+  }
+  safeWrite(`${line}\n`);
 }
 
 function withTranscript(input, invoke) {
@@ -47,8 +108,8 @@ try {
     typeof request.input !== "object" ||
     Array.isArray(request.input)
   ) {
-    respond({ ok: false, error: "invalid trusted request" });
-    process.exit(0);
+    respond({ __proto__: null, ok: false, error: "invalid trusted request" });
+    safeExit(0);
   }
 
   const require = createRequire(import.meta.url);
@@ -70,9 +131,9 @@ try {
       { ...(request.input.b ?? {}) },
       { ...(request.input.options ?? {}) },
     );
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      respond({ ok: false, error: "computeScore returned nonfinite or nonnumeric value" });
-      process.exit(0);
+    if (typeof value !== "number" || !safeIsFinite(value)) {
+      respond({ __proto__: null, ok: false, error: "computeScore returned nonfinite or nonnumeric value" });
+      safeExit(0);
     }
   } else {
     if (typeof scoring.pickBetterSubmission !== "function") {
@@ -84,13 +145,14 @@ try {
     if (picked === current) value = "current";
     else if (picked === candidate) value = "candidate";
     else {
-      respond({ ok: false, error: "pickBetterSubmission returned foreign value" });
-      process.exit(0);
+      respond({ __proto__: null, ok: false, error: "pickBetterSubmission returned foreign value" });
+      safeExit(0);
     }
   }
-  respond({ ok: true, value });
+  respond({ __proto__: null, ok: true, value });
 } catch (error) {
   respond({
+    __proto__: null,
     ok: false,
     error: error instanceof Error ? error.name : "candidate threw non-Error",
   });
