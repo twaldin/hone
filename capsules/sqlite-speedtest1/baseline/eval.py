@@ -22,14 +22,22 @@ BUILD_ROOT = Path("/tmp/hone-sqlite-build")
 SOURCE = BUILD_ROOT / "source"
 FROZEN_DIR = BUILD_ROOT / "frozen"
 DATABASE_COPY = FROZEN_DIR / "speedtest.db"
+SEALED_DIR = BUILD_ROOT / "sealed"
+SEALED_BINARY = SEALED_DIR / "hone-sqlite-bench"
+STATE_ROOT = BUILD_ROOT / "state"
 SANDBOX_UID = 2000
 PROCESS_TIMEOUT_SEC = 300
-ALLOWED_MUTABLE_PREFIX = "src/"
+ALLOWED_MUTABLE_FILES = frozenset({
+    "src/btree.c", "src/expr.c", "src/main.c", "src/pager.c",
+    "src/select.c", "src/sqliteInt.h", "src/vdbe.c", "src/vdbeapi.c",
+    "src/vdbesort.c", "src/where.c", "src/wherecode.c",
+})
 REQUIRED_TESTS = ("select1.test", "index.test", "join.test", "where.test")
-WORKLOADS = ("read", "index", "aggregate", "join")
+WORKLOADS = ("sort",)
+SAMPLE_REPS = 7
+SCORED_FASTEST_REPS = 3
 BENCH_PATTERN = re.compile(
-    r"ok workload=(read|index|aggregate|join) "
-    r"result=([0-9a-f]{64}) result_bytes=(\d+)"
+    r"ok workload=(sort) result=([0-9a-f]{64}) result_bytes=(\d+)"
 )
 
 
@@ -144,7 +152,10 @@ def check_source_envelope() -> None:
         relative = path.relative_to(WORKSPACE).as_posix()
         if relative == ".git" or relative.startswith((".git/", ".gitdir/")):
             raise GateFailure("candidate workspace contains repository history")
-        if relative in trusted_paths or relative.startswith(ALLOWED_MUTABLE_PREFIX):
+        if relative in trusted_paths:
+            if relative.startswith("src/") and relative not in ALLOWED_MUTABLE_FILES:
+                if sha256_file(path) != sha256_file(TRUSTED_DIR / relative):
+                    raise GateFailure(f"protected SQLite source changed: {relative}")
             continue
         raise GateFailure(f"file outside mutable source envelope: {relative}")
 
@@ -204,7 +215,12 @@ def parse_benchmark(output: object, expected_workload: str) -> tuple[str, int]:
 
 
 def reciprocal_geometric_mean_ns(values: list[int]) -> float:
-    seconds = [value / 1_000_000_000.0 for value in values]
+    # Score the fastest repetitions: shared-host contention only ever adds
+    # time, and the trusted parent supplies every sample, so a trimmed
+    # fastest-subset geometric mean is robust to interference spikes while
+    # staying impossible for candidate-controlled code to deflate.
+    fastest = sorted(values)[:SCORED_FASTEST_REPS]
+    seconds = [value / 1_000_000_000.0 for value in fastest]
     mean_seconds = math.exp(math.fsum(math.log(value) for value in seconds) / len(seconds))
     score = 1.0 / mean_seconds
     if not math.isfinite(score) or score <= 0:
@@ -251,28 +267,51 @@ def main() -> None:
         copied_hash = sha256_file(DATABASE_COPY)
         if copied_hash != database_hash:
             raise GateFailure("database copy hash mismatch")
+        SEALED_DIR.mkdir(mode=0o755)
+        shutil.copyfile(SOURCE / "hone-sqlite-bench", SEALED_BINARY)
+        SEALED_BINARY.chmod(0o555)
+        SEALED_DIR.chmod(0o555)
+        sealed_binary_hash = sha256_file(SEALED_BINARY)
+        if SEALED_BINARY.stat().st_size != binary_bytes:
+            raise GateFailure("sealed benchmark binary size mismatch")
+
+        # Let build/test load drain before the timed repetitions begin.
+        time.sleep(1.0)
+        STATE_ROOT.mkdir(mode=0o755)
         times_ns: list[int] = []
         observed_results: dict[str, str] = {}
         result_bytes: dict[str, int] = {}
         peak_rss_kib = 0
-        for workload in WORKLOADS:
-            workload_started = time.monotonic_ns()
-            benchmark_payload = run_worker("benchmark", SOURCE, DATABASE_COPY, workload)
-            elapsed_ns = time.monotonic_ns() - workload_started
-            if elapsed_ns <= 0 or elapsed_ns > 120_000_000_000:
-                raise GateFailure("trusted external timer returned an invalid duration")
-            observed_result, observed_bytes = parse_benchmark(benchmark_payload.get("output"), workload)
-            times_ns.append(elapsed_ns)
-            observed_results[workload] = observed_result
-            result_bytes[workload] = observed_bytes
-            observed_rss = benchmark_payload.get("peakRssKiB")
-            if not isinstance(observed_rss, int):
-                raise GateFailure("benchmark RSS receipt is malformed")
-            peak_rss_kib = max(peak_rss_kib, observed_rss)
+        for rep in range(SAMPLE_REPS):
+            state_dir = STATE_ROOT / f"rep-{rep}"
+            state_dir.mkdir(mode=0o777)
+            state_dir.chmod(0o777)
+            try:
+                workload_started = time.monotonic_ns()
+                benchmark_payload = run_worker(
+                    "benchmark", SOURCE, SEALED_BINARY, DATABASE_COPY, state_dir
+                )
+                elapsed_ns = time.monotonic_ns() - workload_started
+                if elapsed_ns <= 0 or elapsed_ns > 120_000_000_000:
+                    raise GateFailure("trusted external timer returned an invalid duration")
+                observed_result, observed_bytes = parse_benchmark(
+                    benchmark_payload.get("output"), "sort"
+                )
+                times_ns.append(elapsed_ns)
+                observed_results["sort"] = observed_result
+                result_bytes["sort"] = observed_bytes
+                observed_rss = benchmark_payload.get("peakRssKiB")
+                if not isinstance(observed_rss, int):
+                    raise GateFailure("benchmark RSS receipt is malformed")
+                peak_rss_kib = max(peak_rss_kib, observed_rss)
+            finally:
+                shutil.rmtree(state_dir, ignore_errors=True)
         if observed_results != expected["resultHashes"] or result_bytes != expected["resultBytes"]:
             raise GateFailure("exact benchmark result hash gate failed")
         if sha256_file(DATABASE_COPY) != database_hash:
             raise GateFailure("benchmark modified the frozen database")
+        if sha256_file(SEALED_BINARY) != sealed_binary_hash:
+            raise GateFailure("benchmark modified the sealed binary")
         if peak_rss_kib > expected["peakRssMaxKiB"]:
             raise GateFailure("peak RSS exceeds the frozen baseline cap")
 

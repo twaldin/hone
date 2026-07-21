@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import resource
+import signal
 import shutil
 import subprocess
 import sys
@@ -94,25 +95,39 @@ def test(source: Path) -> dict:
     }
 
 
-def benchmark(source: Path, database: Path, workload: str) -> dict:
+def benchmark(binary: Path, database: Path, state_dir: Path) -> dict:
+    environment = os.environ.copy()
+    environment["HOME"] = str(state_dir)
+    environment["TMPDIR"] = str(state_dir)
     try:
-        completed = subprocess.run(
-            [str(source / "hone-sqlite-bench"), str(database), workload],
-            cwd=source,
+        process = subprocess.Popen(
+            [str(binary), str(database), "sort"],
+            cwd=state_dir,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=120,
-            check=False,
+            env=environment,
+            start_new_session=True,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+        try:
+            stdout, stderr = process.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+            return {"ok": False, "stage": "benchmark", "detail": "sample timed out"}
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    except OSError as exc:
         return {"ok": False, "stage": "benchmark", "detail": str(exc)}
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-    if completed.returncode != 0:
-        detail = completed.stderr.decode("utf-8", "replace")[-1000:]
-        return {"ok": False, "stage": "benchmark", "detail": f"exit {completed.returncode}: {detail}"}
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", "replace")[-1000:]
+        return {"ok": False, "stage": "benchmark", "detail": f"exit {process.returncode}: {detail}"}
     try:
-        output = completed.stdout.decode("ascii").strip()
+        output = stdout.decode("ascii").strip()
     except UnicodeDecodeError:
         return {"ok": False, "stage": "benchmark", "detail": "non-ASCII output"}
     return {
@@ -124,7 +139,7 @@ def benchmark(source: Path, database: Path, workload: str) -> dict:
 
 
 def main() -> None:
-    if len(sys.argv) not in {3, 4, 5} or sys.argv[1] not in {"prepare", "build", "test", "benchmark"}:
+    if len(sys.argv) not in {3, 4, 6} or sys.argv[1] not in {"prepare", "build", "test", "benchmark"}:
         raise SystemExit(64)
     action = sys.argv[1]
     if action == "prepare":
@@ -137,7 +152,7 @@ def main() -> None:
         output = prepare(workspace, source)
     else:
         if action == "benchmark":
-            if len(sys.argv) != 5 or sys.argv[4] not in {"read", "index", "aggregate", "join"}:
+            if len(sys.argv) != 6:
                 raise SystemExit(64)
         elif len(sys.argv) != 3:
             raise SystemExit(64)
@@ -149,10 +164,12 @@ def main() -> None:
         elif action == "test":
             output = test(source)
         else:
-            database = Path(sys.argv[3]).resolve()
-            if not database.is_file():
+            binary = Path(sys.argv[3]).resolve()
+            database = Path(sys.argv[4]).resolve()
+            state_dir = Path(sys.argv[5]).resolve()
+            if not binary.is_file() or not database.is_file() or not state_dir.is_dir():
                 raise SystemExit(64)
-            output = benchmark(source, database, sys.argv[4])
+            output = benchmark(binary, database, state_dir)
     json.dump(output, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
     raise SystemExit(0 if output["ok"] else 1)

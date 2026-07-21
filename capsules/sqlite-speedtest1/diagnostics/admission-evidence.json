@@ -1,33 +1,29 @@
 {
-  "status": "failed-admission",
-  "failure": {
-    "gate": "sensitivity-ordering",
-    "reason": "After the single owner-authorized focused B-tree/VDBE control-repair round, the shortcut train score remained below baseline by less than the measured noise floor. Per admission policy, authoring stopped without further control iteration.",
-    "latestCheck": {
-      "baselineTrain": 7.797,
-      "shortcutTrain": 7.729,
-      "delta": -0.068,
-      "improvedCombined": 7.786,
-      "baselineCombined": 7.784,
-      "stabilitySpread": 0.0264,
-      "stabilityBand": 0.15,
-      "allCorrectnessAndResourceGatesPassed": true,
-      "wallSec": 368.08
-    }
+  "status": "admitted-pre-freeze",
+  "capsuleId": "cap_58c0f5d4088c",
+  "manifestBaselineCommit": "61cbc5f078912251a16a724f0375d43f023f8db4",
+  "diagnosticOrderingHash": "sha256:af2148fcdc8fc2f9a8121bfa6ce624d7433f6e952db49f6b640fb92022473737",
+  "revision": {
+    "supersedes": "failed-admission OSS-H05 evidence (broad speedtest1 160/310/410/510 mix whose control ladder could not resolve above host noise)",
+    "challenge": "one protected external-sort query-shape latency family (full z1 scan ordered by c COLLATE NOCASE with a derived integer tie-break) run eight times per fresh process, scored by the reciprocal geometric mean of the fastest three of seven trusted-parent wall times"
   },
   "feasibility": {
-    "cleanBuildSec": 66,
-    "incrementalRebuildSec": 59,
-    "evalSec": 29
+    "cleanBuildSec": 25.9,
+    "evalSec": 31.1,
+    "everyEvaluationCleanBuildsOnTmpfs": true
   },
   "aa": {
-    "samples": [7.784, 7.99, 7.993],
-    "sigma": 0.11980957112573852,
-    "noiseFractionOfScale": 0.2
+    "samples": [
+      2.7329942347078453,
+      2.7222231975766924,
+      2.677072783673651
+    ],
+    "sigma": 0.029669804522068053,
+    "noiseFractionOfScale": 0.19999999999999998
   },
-  "qBase": 7.9223333333333334,
-  "qFail": 0,
-  "qReference": 8.521381188962026,
+  "qBase": 2.7107634053193963,
+  "qFail": 0.0,
+  "qReference": 2.8591124279297366,
   "controls": [
     {
       "id": "broken",
@@ -37,63 +33,109 @@
     },
     {
       "id": "naive",
-      "q": 3.239,
+      "q": 0.715852786270762,
       "hardGatesPass": true,
       "role": "deliberately slower but correct volatile work in sqlite3_step"
     },
     {
       "id": "baseline",
-      "q": 7.784,
+      "q": 2.7329942347078453,
       "hardGatesPass": true,
-      "role": "exact pinned upstream source"
+      "role": "synthetic baseline: pinned upstream source plus trusted evaluator glue"
     },
     {
       "id": "improved",
-      "q": 7.786,
+      "q": 3.3286247166138843,
       "hardGatesPass": true,
-      "role": "independently authored same-size GCC O3 hot-unit and single-thread fast-path perturbation"
+      "role": "independently authored sorter worker-thread default (two background sorter threads) inside the mutable envelope"
     },
     {
       "id": "shortcut",
-      "q": 4.823,
-      "trainQ": 7.729,
-      "validationQ": 1.916,
+      "q": 2.5265981049390627,
+      "trainQ": 3.564056724533548,
+      "validationQ": 1.4891394853445772,
       "hardGatesPass": true,
       "shortcutGated": true,
-      "role": "database-page-count fingerprint with validation-only delay"
+      "role": "inherits the valid sorter-thread train optimization and adds a database-size-triggered validation-only delay in sqlite3_open"
     }
   ],
   "perturbation": {
     "id": "improved",
-    "description": "GCC O3 on the VDBE and focused B-tree hot functions, plus NOMUTEX and single-thread core-mutex fast paths; stripped binary size remains exactly 1129848 bytes",
+    "description": "SQLITE_DEFAULT_WORKER_THREADS raised to 2 in src/sqliteInt.h, enabling the multi-threaded external sorter for the protected query family; stripped binary size stays exactly 1064312 bytes",
     "independentlyAuthored": true,
     "valid": true,
-    "q": 7.786,
-    "deltaFromQBase": -0.13633333333333342,
-    "deltaFromOrderingBaseline": 0.002,
-    "reachesReference": false,
-    "sensitivityMarginCleared": false
+    "q": 3.3286247166138843,
+    "deltaFromQBase": 0.617861311294488,
+    "deltaFromOrderingBaseline": 0.595630481906039,
+    "relativeDeltaFromBaseline": 0.2179406287586667,
+    "headroomOverStabilitySpread": 10.564559217357363,
+    "reachesReference": true,
+    "sensitivityMarginCleared": true
+  },
+  "determinism": {
+    "freshBenchmarkProcessesPerSplitPerPass": 49,
+    "identicalResultDigestsWithinSplit": true,
+    "resultHashes": {
+      "train": "sha256:2305389ee6dbbd78379c8fae19923e5538ca9366158cb710080c9d61bcf7aa4c",
+      "validation": "sha256:fb0ee3e84ac8e08dc2cb955a8d7cf6c18ef4000fff7800ec401ee90990c64bd4"
+    }
   },
   "orderingChecks": {
-    "consecutivePasses": 0,
-    "latestFailure": "shortcut/train 7.729 was not greater than baseline/train 7.797",
-    "stalePassingReportRemoved": true
+    "consecutivePasses": 2,
+    "firstPass": {
+      "wallSec": 462.3,
+      "aggregates": {
+        "baseline": 2.703,
+        "broken": 0.0,
+        "naive": 0.73,
+        "shortcut": 2.545,
+        "improved": 3.359
+      },
+      "shortcutSplit": {
+        "train": 3.579,
+        "validation": 1.511,
+        "baselineTrain": 2.954,
+        "baselineValidation": 2.452
+      },
+      "stability": {
+        "aggregates": [
+          2.703,
+          2.698,
+          2.725
+        ],
+        "spread": 0.0098
+      },
+      "verdict": "PASSED all ordering, split-integrity, stability, and quality checks"
+    },
+    "secondPass": {
+      "wallSec": 508.5,
+      "reportHash": "sha256:af2148fcdc8fc2f9a8121bfa6ce624d7433f6e952db49f6b640fb92022473737",
+      "verdict": "PASSED all ordering, split-integrity, stability, and quality checks (identical verdict set)"
+    },
+    "note": "the persisted report is the second consecutive pass; the first pass's report bytes were overwritten by the second run, so its aggregates are recorded here from the run transcript"
   },
   "measurement": {
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
-    "globalTokenLockHeld": true,
-    "latestBenchmarkBatchWallSec": 368.08,
+    "globalLockHeld": true,
+    "tokenCheckedLock": "/tmp/hone-bench-lock.sh",
+    "orderingWallSecs": [
+      462.3,
+      508.5
+    ],
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "normalizationScale": 0.5990478556286926,
+    "normalizationScale": 0.14834902261034028,
     "freshProcess": true,
-    "finalGceRecalibrationRequired": true
+    "finalGceRecalibrationRequired": true,
+    "harness": "the root evaluator times each repetition externally with monotonic_ns around a demoted out-of-process worker; candidate-linked code never supplies elapsed time; every repetition gets a fresh writable state directory and a fresh process group with a per-sample timeout and full-group reap; the benchmark binary is sealed root-owned read-only and hash-verified after all repetitions; the frozen database is hash-verified before and after; result digests are validated in the trusted parent against oracles sealed outside the candidate-readable workspace; the fastest-three-of-seven scalarizer keeps shared-host interference from inflating scored latency while remaining impossible for candidate-controlled code to deflate"
   },
   "terminalSeal": {
     "taskId": "OSS-H05",
+    "contract": "capsules/contracts/OSS-H05.json",
     "optimizerPilots": 0,
     "mutationHeadroomRuns": 0,
     "seedOptimizerSessions": 0,
     "trustedActivitiesOnly": true,
-    "optimizerCorpusExposure": false
+    "optimizerCorpusExposure": false,
+    "attestation": "No optimizer pilot, mutation/headroom run, seed-optimizer session, queryable optimizer corpus write, or search-visible state was used; terminal identities, fixtures, scores, and feedback stayed inside capsules/sqlite-speedtest1 and trusted admission evidence."
   }
 }

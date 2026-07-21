@@ -1,6 +1,8 @@
 /*
-** Trusted benchmark harness for selected test/speedtest1.c workloads.
-** The SQL corresponds to speedtest1 main tests 160, 310, 410, and 510.
+** Trusted benchmark harness for one protected query-shape latency family on
+** the frozen speedtest1 z1 table: a full scan ordered by c COLLATE NOCASE
+** with a derived integer tie-break, forced through the external sorter by
+** PRAGMA temp_store=FILE and a 64-page cache.
 */
 #include "sqlite3.h"
 #include <inttypes.h>
@@ -141,10 +143,6 @@ static void hash_row(BenchState *p, sqlite3_stmt *pStmt){
   }
 }
 
-static void reset_stmt(BenchState *p, sqlite3_stmt *pStmt){
-  int rc = sqlite3_reset(pStmt);
-  if( rc!=SQLITE_OK || sqlite3_clear_bindings(pStmt)!=SQLITE_OK ) fail(p, "reset");
-}
 
 static void step_all(BenchState *p, sqlite3_stmt *pStmt){
   int rc;
@@ -158,141 +156,43 @@ static sqlite3_stmt *prepare(BenchState *p, const char *zSql){
   return pStmt;
 }
 
-static sqlite3_int64 *load_int_keys(BenchState *p){
-  sqlite3_int64 *a = sqlite3_malloc64(sizeof(*a)*KEY_COUNT);
-  sqlite3_stmt *pStmt = prepare(p, "SELECT a FROM t5 ORDER BY a LIMIT 4096");
-  int i = 0;
-  if( !a ) fail(p, "integer key allocation");
-  while( i<KEY_COUNT && sqlite3_step(pStmt)==SQLITE_ROW ) a[i++] = sqlite3_column_int64(pStmt, 0);
-  if( i!=KEY_COUNT ) fail(p, "integer key fixture");
-  sqlite3_finalize(pStmt);
-  return a;
-}
+#define SORT_ITERATIONS 8
 
-static char **load_text_keys(BenchState *p){
-  char **az = sqlite3_malloc64(sizeof(*az)*KEY_COUNT);
-  sqlite3_stmt *pStmt = prepare(p, "SELECT a FROM t6 ORDER BY a LIMIT 4096");
-  int i = 0;
-  if( !az ) fail(p, "text key allocation");
-  while( i<KEY_COUNT && sqlite3_step(pStmt)==SQLITE_ROW ){
-    az[i] = sqlite3_mprintf("%s", sqlite3_column_text(pStmt, 0));
-    if( !az[i] ) fail(p, "text key copy");
-    i++;
+/*
+** Run the protected query family SORT_ITERATIONS times per process so the
+** measured latency dwarfs constant per-invocation overhead. Every iteration
+** re-prepares the statement (full planner + external-sorter path) and every
+** emitted row of every iteration feeds the result digest.
+*/
+static void run_sort(BenchState *p){
+  int iter;
+  for(iter=0; iter<SORT_ITERATIONS; iter++){
+    sqlite3_stmt *pStmt = prepare(p,
+      "SELECT a,b,c FROM z1 "
+      "ORDER BY c COLLATE NOCASE, (a*3+b) DESC");
+    step_all(p, pStmt);
+    sqlite3_finalize(pStmt);
   }
-  if( i!=KEY_COUNT ) fail(p, "text key fixture");
-  sqlite3_finalize(pStmt);
-  return az;
-}
-
-static void run_read(BenchState *p, sqlite3_int64 *aKey, int n){
-  sqlite3_stmt *pStmt = prepare(p, "SELECT b FROM t5 WHERE a=?1");
-  int i;
-  for(i=0; i<1024; i++){
-    sqlite3_bind_int64(pStmt, 1, aKey[(i*4051)&(KEY_COUNT-1)]);
-    step_all(p, pStmt); reset_stmt(p, pStmt);
-  }
-  for(i=0; i<n; i++){
-    sqlite3_bind_int64(pStmt, 1, aKey[(i*4051)&(KEY_COUNT-1)]);
-    step_all(p, pStmt); reset_stmt(p, pStmt);
-  }
-  sqlite3_finalize(pStmt);
-}
-
-static void run_index(BenchState *p, char **azKey, int n){
-  sqlite3_stmt *pStmt = prepare(p, "SELECT b FROM t6 WHERE a=?1");
-  int i;
-  for(i=0; i<1024; i++){
-    sqlite3_bind_text(pStmt, 1, azKey[(i*4051)&(KEY_COUNT-1)], -1, SQLITE_STATIC);
-    step_all(p, pStmt); reset_stmt(p, pStmt);
-  }
-  for(i=0; i<n; i++){
-    sqlite3_bind_text(pStmt, 1, azKey[(i*4051)&(KEY_COUNT-1)], -1, SQLITE_STATIC);
-    step_all(p, pStmt); reset_stmt(p, pStmt);
-  }
-  sqlite3_finalize(pStmt);
-}
-
-static void run_aggregate(BenchState *p, int n, int nRow){
-  sqlite3_stmt *pStmt = prepare(p,
-    "SELECT count(*), avg(b), sum(length(c)), group_concat(a) FROM z1 "
-    "WHERE b BETWEEN ?1 AND ?2");
-  int i;
-  for(i=0; i<128; i++){
-    int x = (int)(((uint64_t)i*8191u)%(uint64_t)(nRow-32)) + 1;
-    sqlite3_bind_int(pStmt, 1, x); sqlite3_bind_int(pStmt, 2, x+19);
-    step_all(p, pStmt); reset_stmt(p, pStmt);
-  }
-  for(i=0; i<n; i++){
-    int x = (int)(((uint64_t)i*8191u)%(uint64_t)(nRow-32)) + 1;
-    sqlite3_bind_int(pStmt, 1, x); sqlite3_bind_int(pStmt, 2, x+19);
-    step_all(p, pStmt); reset_stmt(p, pStmt);
-  }
-  sqlite3_finalize(pStmt);
-}
-
-static void run_join(BenchState *p, int n, int nRow){
-  sqlite3_stmt *pStmt = prepare(p,
-    "SELECT z1.c FROM z1, z2, t3, t4 "
-    "WHERE t4.a BETWEEN ?1 AND ?2 AND t3.a=t4.b "
-    "AND z2.a=t3.b AND z1.c=z2.c");
-  int i;
-  for(i=0; i<128; i++){
-    int x = (int)(((uint64_t)i*8191u)%(uint64_t)(nRow-32)) + 1;
-    sqlite3_bind_int(pStmt, 1, x); sqlite3_bind_int(pStmt, 2, x+14);
-    step_all(p, pStmt); reset_stmt(p, pStmt);
-  }
-  for(i=0; i<n; i++){
-    int x = (int)(((uint64_t)i*8191u)%(uint64_t)(nRow-32)) + 1;
-    sqlite3_bind_int(pStmt, 1, x); sqlite3_bind_int(pStmt, 2, x+14);
-    step_all(p, pStmt); reset_stmt(p, pStmt);
-  }
-  sqlite3_finalize(pStmt);
 }
 
 int main(int argc, char **argv){
   BenchState s = {0};
-  sqlite3_int64 *aInt = 0;
-  char **azText = 0;
-  sqlite3_stmt *pCount;
-  const char *zWorkload;
-  int nRow, i;
   unsigned char digest[32];
-  if( argc!=3 ){
-    fprintf(stderr, "usage: %s DATABASE WORKLOAD\n", argv[0]);
-    return 2;
-  }
-  zWorkload = argv[2];
-  if( strcmp(zWorkload, "read") && strcmp(zWorkload, "index")
-   && strcmp(zWorkload, "aggregate") && strcmp(zWorkload, "join") ){
-    fprintf(stderr, "unknown workload\n");
+  int i;
+  if( argc!=3 || strcmp(argv[2], "sort")!=0 ){
+    fprintf(stderr, "usage: %s DATABASE sort\n", argv[0]);
     return 2;
   }
   sha256_init(&s.hash);
   if( sqlite3_open_v2(argv[1], &s.db, SQLITE_OPEN_READONLY|SQLITE_OPEN_NOMUTEX, 0)!=SQLITE_OK ) fail(&s, "open");
-  if( sqlite3_exec(s.db, "PRAGMA query_only=ON; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-32768;", 0, 0, 0)!=SQLITE_OK ) fail(&s, "pragma");
-  pCount = prepare(&s, "SELECT count(*) FROM z1");
-  if( sqlite3_step(pCount)!=SQLITE_ROW || (nRow=sqlite3_column_int(pCount, 0))<10000 ) fail(&s, "row count");
-  sqlite3_finalize(pCount);
-  if( strcmp(zWorkload, "read")==0 ){
-    aInt = load_int_keys(&s);
-    run_read(&s, aInt, 16000);
-  }else if( strcmp(zWorkload, "index")==0 ){
-    azText = load_text_keys(&s);
-    run_index(&s, azText, 16000);
-  }else if( strcmp(zWorkload, "aggregate")==0 ){
-    run_aggregate(&s, 32000, nRow);
-  }else{
-    run_join(&s, 16000, nRow);
-  }
+  if( sqlite3_exec(s.db,
+        "PRAGMA query_only=ON; PRAGMA temp_store=FILE; PRAGMA cache_size=64;",
+        0, 0, 0)!=SQLITE_OK ) fail(&s, "pragma");
+  run_sort(&s);
   sha256_final(&s.hash, digest);
-  printf("ok workload=%s result=", zWorkload);
+  printf("ok workload=sort result=");
   for(i=0; i<32; i++) printf("%02x", digest[i]);
   printf(" result_bytes=%" PRIu64 "\n", s.resultBytes);
-  if( azText ){
-    for(i=0; i<KEY_COUNT; i++) sqlite3_free(azText[i]);
-    sqlite3_free(azText);
-  }
-  sqlite3_free(aInt);
   if( sqlite3_close(s.db)!=SQLITE_OK ) fail(&s, "close");
   return 0;
 }
