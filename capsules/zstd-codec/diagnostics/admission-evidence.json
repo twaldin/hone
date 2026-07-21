@@ -1,17 +1,17 @@
 {
   "feasibility": {
-    "cleanBuildSec": 11,
+    "cleanBuildSec": 9,
     "incrementalRebuildSec": 5,
-    "evalSec": 28
+    "evalSec": 39
   },
   "aa": {
-    "samples": [2333.0470641344764, 2561.0194602658503, 2559.7402423891913],
-    "sigma": 131.25220433925418,
+    "samples": [2507.0296996242123, 2557.1485864171173, 2522.534397459323],
+    "sigma": 25.65943798268647,
     "noiseFractionOfScale": 0.2
   },
-  "qBase": 2484.602255596506,
+  "qBase": 2528.904227833551,
   "qFail": 0,
-  "qReference": 3140.8632772927767,
+  "qReference": 2657.201417746983,
   "controls": [
     {
       "id": "broken",
@@ -21,27 +21,27 @@
     },
     {
       "id": "naive",
-      "q": 1658.2436649954857,
+      "q": 1645.7306146455871,
       "hardGatesPass": true,
       "role": "deliberately slower but correct volatile work in compression and decompression entry points"
     },
     {
       "id": "baseline",
-      "q": 2333.0470641344764,
+      "q": 2507.0296996242123,
       "hardGatesPass": true,
       "role": "exact pinned upstream source"
     },
     {
       "id": "improved",
-      "q": 2608.14577066385,
+      "q": 2674.0363562592383,
       "hardGatesPass": true,
       "role": "independently authored source optimization control"
     },
     {
       "id": "shortcut",
-      "q": 1339.2912166053998,
-      "trainQ": 2628.120248429,
-      "validationQ": 50.46218478179916,
+      "q": 1334.3961467051881,
+      "trainQ": 2617.9714357103144,
+      "validationQ": 50.82085770006191,
       "hardGatesPass": true,
       "shortcutGated": true,
       "role": "input-size overfit that wins train and loses validation"
@@ -52,23 +52,24 @@
     "description": "GCC O3 and loop-unrolling pragmas on codec hot translation units",
     "independentlyAuthored": true,
     "valid": true,
-    "q": 2608.14577066385,
-    "deltaFromQBase": 123.54351506734383,
-    "deltaFromOrderingBaseline": 275.09870652937343,
-    "reachesReference": false
+    "q": 2674.0363562592383,
+    "deltaFromQBase": 145.13212842568737,
+    "deltaFromOrderingBaseline": 167.00665663502605,
+    "reachesReference": true
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:e8c090d337075f9bf852bf3aceb6610aff41b8127561478c42aeb028dcbb1e3d",
-    "secondReportHash": "sha256:9f36f9b1d97aab856cd76e57924f8d0e045049156feaca5196cb55e07f530dac"
+    "firstReportHash": "sha256:bd03f8e2523403a65429dda2c05499c341b5410511903610a446cbae959e9699",
+    "secondReportHash": "sha256:6016aaa0c8b57e858f245afb006c208d2e13fc5d4c1d75a5c1760dcb69eb126f"
   },
   "measurement": {
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "globalLockHeld": true,
-    "benchmarkBatchWallSec": 464,
+    "benchmarkBatchWallSec": 553,
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "normalizationScale": 656.2610216962709,
+    "normalizationScale": 128.29718991343236,
     "freshProcess": true,
+    "timingAuthority": "trusted evaluator parent process wall clock around each sealed runner lifetime; candidate-linked runner contains no clock reads",
     "finalGceRecalibrationRequired": true
   }
 }

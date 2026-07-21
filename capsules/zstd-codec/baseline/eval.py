@@ -8,6 +8,7 @@ import math
 import os
 import resource
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -19,12 +20,23 @@ WORKSPACE = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
 ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
 BUILD_ROOT = Path("/tmp/hone-zstd-build")
 SOURCE = BUILD_ROOT / "source"
+REFERENCE = BUILD_ROOT / "reference"
+TRUSTED_BIN_DIR = BUILD_ROOT / "trusted-bin"
+TRUSTED_BENCH = TRUSTED_BIN_DIR / "hone-zstd-bench"
+CANDIDATE_BIN_DIR = BUILD_ROOT / "candidate-bin"
+CANDIDATE_BENCH = CANDIDATE_BIN_DIR / "hone-zstd-bench"
+SCRATCH_ROOT = BUILD_ROOT / "scratch"
 SANDBOX_UID = 2000
-BENCH_TARGET_MS = 125
+BENCH_TARGET_MS = 200
+SAMPLE_COUNT = 3
+MAX_REPS = 1 << 24
+SAMPLE_TIMEOUT_SEC = 45
 PROCESS_TIMEOUT_SEC = 240
 ALLOWED_MUTABLE_PREFIXES = ("lib/common/", "lib/compress/", "lib/decompress/")
 REQUIRED_KINDS = frozenset({"binary", "json", "repetitive", "text"})
 LEVELS = (1, 3)
+
+_SCRATCH_SEQUENCE = 0
 
 
 class GateFailure(RuntimeError):
@@ -180,36 +192,140 @@ def verify_workload(row: dict, split_dir: Path) -> bytes:
     return data
 
 
-def run_benchmark(data: bytes, level: int) -> tuple[int, float, float]:
-    binary = SOURCE / "hone-zstd-bench"
+def fresh_scratch() -> Path:
+    """Fresh writable directory per runner invocation so no sample can
+    inherit state left behind by an earlier one."""
+    global _SCRATCH_SEQUENCE
+    _SCRATCH_SEQUENCE += 1
+    directory = SCRATCH_ROOT / f"run-{_SCRATCH_SEQUENCE}"
+    directory.mkdir(mode=0o700)
+    # The eval container has no CAP_CHOWN; a plain owner chmod makes the
+    # fresh directory writable for the demoted runner.
+    os.chmod(directory, 0o777)
+    return directory
+
+
+def reap_sandbox_processes() -> None:
+    """Kill every process still running under the sandbox uid so nothing a
+    build or test phase left behind can touch later phases."""
+    if os.geteuid() != 0:
+        return
+    script = (
+        "import os\n"
+        "os.setgroups([])\n"
+        f"os.setgid({SANDBOX_UID})\n"
+        f"os.setuid({SANDBOX_UID})\n"
+        "try:\n"
+        "    os.kill(-1, 9)\n"
+        "except ProcessLookupError:\n"
+        "    pass\n"
+    )
+    subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+
+
+def seal_binary(built: Path, sealed_dir: Path) -> Path:
+    """Copy a built runner into an evaluator-owned directory. The sealed copy
+    cannot be replaced or modified by the sandbox uid between samples."""
+    if not built.is_file() or built.stat().st_size == 0:
+        raise GateFailure("benchmark binary missing after build")
+    sealed_dir.mkdir(mode=0o755)
+    sealed = sealed_dir / "hone-zstd-bench"
+    sealed.write_bytes(built.read_bytes())
+    os.chmod(sealed, 0o555)
+    return sealed
+
+
+def run_runner(binary: Path, arguments: list[str], payload: bytes, expected_size: int | None) -> tuple[int, bytes]:
+    """Run one sealed runner invocation and measure its whole lifetime on the
+    trusted evaluator clock. The runner is candidate-linked and contains no
+    clock reads; nothing it prints or does can alter this measurement."""
+    scratch = fresh_scratch()
+    environment = {"PATH": "/usr/bin:/bin", "TMPDIR": str(scratch)}
+    started = time.perf_counter_ns()
     try:
-        completed = subprocess.run(
-            [str(binary), str(len(data)), str(level), str(BENCH_TARGET_MS)],
-            input=data,
+        process = subprocess.Popen(
+            [str(binary), *arguments],
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            timeout=45,
-            check=False,
             preexec_fn=demote,
-            cwd=SOURCE,
+            start_new_session=True,
+            cwd=scratch,
+            env=environment,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise GateFailure(f"benchmark worker failed at level {level}: {exc}") from exc
+    except OSError as exc:
+        raise GateFailure(f"benchmark runner failed to start: {exc}") from exc
     try:
-        fields = completed.stdout.decode("ascii").strip().split()
-        if completed.returncode != 0 or len(fields) != 5 or fields[0] != "ok":
-            raise ValueError
-        compressed_size = int(fields[1])
-        compression_mib_s = float(fields[2])
-        decompression_mib_s = float(fields[3])
-        int(fields[4])
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise GateFailure(f"benchmark or round-trip gate failed at level {level}") from exc
-    if compressed_size <= 0 or not all(
-        math.isfinite(value) and value > 0 for value in (compression_mib_s, decompression_mib_s)
-    ):
-        raise GateFailure(f"benchmark returned non-finite throughput at level {level}")
-    return compressed_size, compression_mib_s, decompression_mib_s
+        stdout, _ = process.communicate(payload, timeout=SAMPLE_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            process.kill()
+        process.communicate()
+        raise GateFailure("benchmark sample exceeded its wall-clock limit") from exc
+    elapsed_ns = time.perf_counter_ns() - started
+    if process.returncode != 0:
+        raise GateFailure(f"benchmark runner exited {process.returncode}")
+    if not stdout:
+        raise GateFailure("benchmark runner emitted no output")
+    if expected_size is not None and len(stdout) != expected_size:
+        raise GateFailure("benchmark runner emitted an unexpected byte count")
+    return max(elapsed_ns, 1), stdout
+
+
+def trusted_compress(data: bytes, level: int, expected_size: int) -> bytes:
+    frame = run_runner(TRUSTED_BENCH, ["compress", str(len(data)), str(level), "1"], data, None)[1]
+    if len(frame) != expected_size:
+        raise GateFailure("trusted reference frame size mismatched the sealed baseline size")
+    return frame
+
+
+def trusted_round_trip(frame: bytes, data: bytes) -> None:
+    decoded = run_runner(TRUSTED_BENCH, ["decompress", str(len(frame)), str(len(data)), "1"], frame, len(data))[1]
+    if decoded != data:
+        raise GateFailure("compressed output failed the trusted reference round trip")
+
+
+def throughput_mib(work_bytes: int, repetitions: int, elapsed_ns: int) -> float:
+    return (work_bytes * repetitions * 1_000_000_000) / (elapsed_ns * 1048576)
+
+
+def measure_cell(mode: str, payload: bytes, parameter: int, work_bytes: int, expected_size: int | None) -> tuple[float, bytes]:
+    """Median throughput for one benchmark cell, timed entirely in this
+    trusted process. Repetition count is calibrated by re-running the sealed
+    candidate runner until one invocation spans the target wall window."""
+    target_ns = BENCH_TARGET_MS * 1_000_000
+
+    def sample(repetitions: int) -> tuple[int, bytes]:
+        return run_runner(
+            CANDIDATE_BENCH,
+            [mode, str(len(payload)), str(parameter), str(repetitions)],
+            payload,
+            expected_size,
+        )
+
+    repetitions = 1
+    elapsed_ns, reference = sample(repetitions)
+    while elapsed_ns < target_ns and repetitions < MAX_REPS:
+        scale = min(32.0, (target_ns / elapsed_ns) * 1.25)
+        repetitions = min(MAX_REPS, max(repetitions + 1, int(repetitions * scale)))
+        elapsed_ns, reference = sample(repetitions)
+    samples: list[float] = []
+    for _ in range(SAMPLE_COUNT):
+        elapsed_ns, observed = sample(repetitions)
+        if observed != reference:
+            raise GateFailure("benchmark output drifted across repeated samples")
+        samples.append(throughput_mib(work_bytes, repetitions, elapsed_ns))
+    samples.sort()
+    return samples[SAMPLE_COUNT // 2], reference
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -238,22 +354,51 @@ def main() -> None:
 
         mount_build_tmpfs()
         mounted = True
+        SCRATCH_ROOT.mkdir(mode=0o755)
+
+        # Trusted reference runner: pristine baseline sources, sealed before
+        # any candidate code runs. It validates candidate round trips and
+        # produces the fixed decompression inputs for every candidate.
+        run_worker("prepare", TRUSTED_DIR, REFERENCE)
+        run_worker("refbuild", REFERENCE)
+        reap_sandbox_processes()
+        seal_binary(REFERENCE / "hone-zstd-bench", TRUSTED_BIN_DIR)
+        trusted_frames: dict[tuple[str, int], bytes] = {}
+        for row, data in workload_bytes:
+            for level in LEVELS:
+                trusted_frames[(row["id"], level)] = trusted_compress(
+                    data, level, row["expectedCompressedBytes"][str(level)]
+                )
+
         copy_candidate()
         build_started = time.monotonic()
         run_worker("build")
         build_sec = time.monotonic() - build_started
         run_worker("test")
+        reap_sandbox_processes()
+        seal_binary(SOURCE / "hone-zstd-bench", CANDIDATE_BIN_DIR)
 
         throughputs: list[float] = []
         compressed_sizes: dict[str, int] = {}
         for row, data in workload_bytes:
             for level in LEVELS:
-                compressed_size, compression_mib_s, decompression_mib_s = run_benchmark(data, level)
                 baseline_size = row["expectedCompressedBytes"][str(level)]
+                compression_mib_s, candidate_frame = measure_cell(
+                    "compress", data, level, len(data), None
+                )
+                compressed_size = len(candidate_frame)
                 # Candidate size may be at most baseline * 1.0025, exactly.
                 if compressed_size * 400 > baseline_size * 401:
                     raise GateFailure(
                         f"compressed-size gate failed for {row['id']} level {level}: {compressed_size} > baseline+0.25%"
+                    )
+                trusted_round_trip(candidate_frame, data)
+                decompression_mib_s, decoded = measure_cell(
+                    "decompress", trusted_frames[(row["id"], level)], len(data), len(data), len(data)
+                )
+                if decoded != data:
+                    raise GateFailure(
+                        f"decompression output mismatched the sealed workload for {row['id']} level {level}"
                     )
                 compressed_sizes[f"{row['id']}:L{level}"] = compressed_size
                 throughputs.extend((compression_mib_s, decompression_mib_s))
@@ -277,7 +422,7 @@ def main() -> None:
                 }
             },
             "diagnostics": {
-                "summary": "upstream fuzzer subset passed; exact round trips and size limits passed",
+                "summary": "upstream fuzzer subset passed; trusted-reference round trips and size limits passed",
                 "quality": 1.0,
                 "result_hash": result_hash,
                 "build_sec": round(build_sec, 6),

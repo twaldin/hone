@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "id": "cap_59f4b3034001",
+  "id": "cap_9c8249db0e8d",
   "objective": "Improve geometric-mean level-1/3 compression and decompression throughput over deterministic text, JSON, binary, and repetitive corpora. Exact round trip, the pinned upstream library fuzzer subset, and compressed size no worse than baseline by more than 0.25% are hard gates. Only lib/common, lib/compress, and lib/decompress are mutable.",
   "baseline": {
     "kind": "git",
@@ -80,7 +80,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:9f36f9b1d97aab856cd76e57924f8d0e045049156feaca5196cb55e07f530dac"
+    "hash": "sha256:6016aaa0c8b57e858f245afb006c208d2e13fc5d4c1d75a5c1760dcb69eb126f"
   },
   "contentHashes": {
     "assets/train/binary.bin": "sha256:d3d58c944a066858ce32b195d2e69f034ba49e9dc0418691f91817542da5b859",
@@ -96,7 +96,7 @@
   },
   "meta": {
     "evaluatorSource": "user",
-    "provenance": "facebook/zstd at exact revision 5c7b7bad26808e6b40ac3b3d0075466e27738a9d; deterministic xorshift64-v1 corpora contain no third-party text or binary data; interleaved fresh-process A-A samples [2333.0470641344764,2561.0194602658503,2559.7402423891913] give qBase=2484.602255596506 and sample sigma=131.25220433925418; qReference=2484.602255596506+max(5*131.25220433925418,0.05*abs(2484.602255596506-0))=3140.8632772927767; the independently authored GCC O3/unroll source perturbation passes every gate and moves q without being present in the mutation sandbox",
+    "provenance": "facebook/zstd at exact revision 5c7b7bad26808e6b40ac3b3d0075466e27738a9d; deterministic xorshift64-v1 corpora contain no third-party text or binary data; interleaved fresh-process A-A samples [2507.0296996242123,2557.1485864171173,2522.534397459323] give qBase=2528.904227833551 and sample sigma=25.65943798268647; qReference=2528.904227833551+max(5*25.65943798268647,0.05*abs(2528.904227833551-0))=2657.201417746983; the independently authored GCC O3/unroll source perturbation passes every gate and moves q without being present in the mutation sandbox",
     "license": "BSD-3-Clause OR GPL-2.0-only (upstream dual license; LICENSE and COPYING preserved)",
     "tags": [
       "m2",
@@ -125,18 +125,18 @@
       "freshProcess": true,
       "q": "geometric mean MiB/s across level 1 and 3 compression and decompression for four sealed corpus categories",
       "qFail": 0,
-      "qBase": 2484.602255596506,
-      "sigma": 131.25220433925418,
-      "qReference": 3140.8632772927767,
-      "qReferenceConstruction": "2484.602255596506 + max(5*131.25220433925418, 0.05*abs(2484.602255596506-0)) = 3140.8632772927767",
+      "qBase": 2528.904227833551,
+      "sigma": 25.65943798268647,
+      "qReference": 2657.201417746983,
+      "qReferenceConstruction": "2528.904227833551 + max(5*25.65943798268647, 0.05*abs(2528.904227833551-0)) = 2657.201417746983",
       "aaSamples": [
-        2333.0470641344764,
-        2561.0194602658503,
-        2559.7402423891913
+        2507.0296996242123,
+        2557.1485864171173,
+        2522.534397459323
       ],
-      "normalizationScale": 656.2610216962709,
+      "normalizationScale": 128.29718991343236,
       "noiseFractionOfScale": 0.2,
-      "benchmarkTargetMsPerSample": 125,
+      "benchmarkTargetMsPerSample": 200,
       "benchmarkSamplesPerCell": 3,
       "compressedSizeTolerance": 0.0025
     },
@@ -144,9 +144,9 @@
       "protectedPathEscape": "broker diff-protects all build, evaluator, harness, test, fixture, and metadata paths; evaluator rejects newly introduced files outside lib/common, lib/compress, and lib/decompress",
       "benchmarkSpecialCasing": "separate protected validation corpus; size-threshold overfit diagnostic wins train and is gated on validation",
       "fixtureFingerprinting": "sealed assets remain under root-only /capsule; compilation runs as uid 2000 before corpus bytes are piped to the protected harness",
-      "outputFabrication": "trusted harness performs real ZSTD_compress2/ZSTD_decompressDCtx calls and byte-exact comparison; evaluator independently enforces compressed-size limits",
-      "timerTampering": "protected harness uses CLOCK_MONOTONIC_RAW under unprivileged uid 2000 with no network and no-new-privileges",
-      "buildScriptMutation": "Makefiles, worker, compiler flags, test code, and toolchain lock are protected; every evaluation performs a clean source rebuild",
+      "outputFabrication": "the evaluator validates runner output independently of candidate code: candidate frames must round-trip byte-exactly through a sealed reference binary built from the pristine baseline, decompression output is byte-compared in the trusted parent, and compressed-size limits are enforced on evaluator-observed byte counts",
+      "timerTampering": "every duration is measured on the trusted evaluator parent's own clock around the whole sealed-runner process lifetime; the candidate-linked runner contains no clock reads at all, so a strong timer symbol in a candidate object can never interpose the measurement",
+      "buildScriptMutation": "Makefiles, worker, compiler flags, test code, and toolchain lock are protected; every evaluation performs a clean source rebuild, reaps leftover sandbox-uid processes, and seals both measured binaries into evaluator-owned root-only paths before sampling",
       "deadCodeBenchmarkBypass": "benchmarked symbols are the same public library entry points exercised by the upstream fuzzer subset"
     }
   }

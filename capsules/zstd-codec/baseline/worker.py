@@ -38,13 +38,19 @@ def run_quiet(argv: list[str], cwd: Path, timeout: int = TIMEOUT_SEC) -> tuple[b
 
 def prepare(workspace: Path, source: Path) -> dict:
     try:
-        shutil.copytree(workspace, source, symlinks=False)
+        shutil.copytree(
+            workspace,
+            source,
+            symlinks=False,
+            ignore=shutil.ignore_patterns(".gitdir", "__pycache__", ".hone-compiler-tmp"),
+        )
     except OSError as exc:
         return {"ok": False, "stage": "prepare", "detail": str(exc)}
     return {"ok": True, "stage": "prepare"}
 
 
-def build(source: Path) -> dict:
+def build(source: Path, include_tests: bool = True) -> dict:
+    stage = "build" if include_tests else "refbuild"
     commands = [
         [
             "make", "-C", "lib", "-j2", "libzstd.a-mt", "CFLAGS=-O2 -DNDEBUG",
@@ -53,16 +59,17 @@ def build(source: Path) -> dict:
             "cc", "-O2", "-DNDEBUG", "-std=c99", "-Wall", "-Wextra", "-Werror",
             "-I.", "bench.c", "lib/libzstd.a", "-pthread", "-o", "hone-zstd-bench",
         ],
-        [
+    ]
+    if include_tests:
+        commands.append([
             "make", "-C", "tests", "-j2", "fuzzer",
             "ZSTDMT_OBJECTS=../lib/libzstd.a", "ZDICT_FILES=",
-        ],
-    ]
+        ])
     for command in commands:
         ok, detail = run_quiet(command, source)
         if not ok:
-            return {"ok": False, "stage": "build", "detail": detail}
-    return {"ok": True, "stage": "build"}
+            return {"ok": False, "stage": stage, "detail": detail}
+    return {"ok": True, "stage": stage}
 
 
 def test(source: Path) -> dict:
@@ -78,7 +85,7 @@ def test(source: Path) -> dict:
 
 
 def main() -> None:
-    if len(sys.argv) not in {3, 4} or sys.argv[1] not in {"prepare", "build", "test"}:
+    if len(sys.argv) not in {3, 4} or sys.argv[1] not in {"prepare", "build", "refbuild", "test"}:
         raise SystemExit(64)
     action = sys.argv[1]
     if action == "prepare":
@@ -95,7 +102,12 @@ def main() -> None:
         source = Path(sys.argv[2]).resolve()
         if not source.is_dir():
             raise SystemExit(64)
-        output = build(source) if action == "build" else test(source)
+        if action == "build":
+            output = build(source)
+        elif action == "refbuild":
+            output = build(source, include_tests=False)
+        else:
+            output = test(source)
     json.dump(output, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
     raise SystemExit(0 if output["ok"] else 1)
