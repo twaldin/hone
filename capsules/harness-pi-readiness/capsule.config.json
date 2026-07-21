@@ -54,8 +54,18 @@
       "platform": "linux",
       "samples": 3,
       "freshProcess": true,
-      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
-      "qFail": 0
+      "q": "weighted exact-recovery fraction over sealed cases (recovered case weight divided by total weight; readiness cases weight 1, projection cases weight 2); trusted per-call timing is diagnostic only and never enters the score",
+      "qFail": 0,
+      "qBase": 0.7142857142857143,
+      "qReference": 1,
+      "scale": 0.2857142857142857,
+      "qBaseSource": "frozen baseline artifact measured by the trusted ordering tool under the admitted evaluator (ordering-report variants.baseline.train)",
+      "qReferenceSource": "improved diagnostic control, full recovery of every sealed case (ordering-report variants.improved.train); direction informed by reference commit 39ff71f",
+      "validationSplit": {
+        "qBase": 0.6666666666666666,
+        "qReference": 1
+      },
+      "normalization": "gain = (q - qBase) / scale, with scale = qReference - qBase"
     },
     "terminalSeal": {
       "holdout": true,

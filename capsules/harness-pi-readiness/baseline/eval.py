@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Trusted exact-output evaluator for bounded M2 subsystem capsules.
+"""Trusted exact-output evaluator for the harness-pi-readiness capsule.
 
 Candidate code is imported only by an unprivileged worker subprocess. This
 root-side parent owns hidden fixtures, timing, equality, gates, and output.
-Each timed repetition gets fresh PID/IPC/NET/UTS namespaces and writable state.
+Each repetition gets fresh PID/IPC/NET/UTS namespaces and writable state.
+
+Scoring: the registered objective is the weighted exact-recovery fraction
+across the sealed cases (per-case "weight", default 1). Public and protocol
+checks gate validity; hidden recovery is graded, so a partially recovering
+candidate keeps its measured objective. Trusted per-call timing is a
+diagnostic only and never enters the score.
 """
 from __future__ import annotations
 
 import ctypes
 import errno
 import json
+import math
 import os
 import resource
 import secrets
@@ -318,11 +325,14 @@ def load_cases(path: Path) -> list[dict]:
         for row in rows:
             if not isinstance(row, dict) or not isinstance(row.get("id"), str) or "input" not in row or "expected" not in row:
                 raise ValueError(f"malformed case in {file}")
+            weight = row.get("weight", 1.0)
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight <= 0:
+                raise ValueError(f"malformed case weight in {file}")
             cases.append(row)
     return cases
 
 
-def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
+def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, str]:
     outcomes: list[CallOutcome] = []
     for _ in range(INNER_REPS):
         reset_candidate_state()
@@ -342,13 +352,12 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
     correct = error is None and len(outcomes) == INNER_REPS and all(
         canonical(outcome.result) == canonical(case["expected"]) for outcome in outcomes
     )
-    score = (1.0 / (1.0 + slowest_ms)) if correct else 0.0
     feedback = (
-        f"all {INNER_REPS} repetitions matched in slowest {slowest_ms:.3f} ms"
+        f"all {INNER_REPS} repetitions matched exactly in slowest {slowest_ms:.3f} ms"
         if correct
         else f"incorrect or failed in slowest {slowest_ms:.3f} ms: {error or 'exact output mismatch'}"
     )
-    return slowest_ms, correct, {"score": score, "feedback": feedback}
+    return slowest_ms, correct, feedback
 
 
 def run_public_suite(workspace: Path) -> tuple[bool, str]:
@@ -378,28 +387,39 @@ def main() -> None:
     assets_dir = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
     workspace = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
     cases = load_cases(assets_dir)
+    weights = [float(case.get("weight", 1.0)) for case in cases]
+    total_weight = sum(weights)
     per_example: dict[str, dict] = {}
     runtimes: list[float] = []
     correct: list[bool] = []
-    for case in cases:
-        elapsed, ok, entry = evaluate_case(workspace, case)
-        per_example[case["id"]] = entry
+    recovered_weight = 0.0
+    for case, weight in zip(cases, weights):
+        elapsed, ok, feedback = evaluate_case(workspace, case)
+        # Normalized so the unweighted mean of perExample scores equals the
+        # weighted exact-recovery fraction registered as the objective.
+        share = weight * len(cases) / total_weight
+        per_example[case["id"]] = {"score": share if ok else 0.0, "feedback": feedback}
         runtimes.append(elapsed)
         correct.append(ok)
+        if ok:
+            recovered_weight += weight
     tests_pass, suite_detail = run_public_suite(workspace)
-    quality = statistics.fmean([1.0 if ok else 0.0 for ok in correct]) if correct else 0.0
-    hidden_cases_pass = bool(correct) and all(correct)
+    recovery = (recovered_weight / total_weight) if total_weight > 0 else 0.0
     output = {
-        "valid": tests_pass and hidden_cases_pass,
+        # Public/protocol gates are hard; hidden recovery is the graded
+        # objective, so partial recovery stays measurable and eligible.
+        "valid": tests_pass,
         "objectives": {
-            "score": statistics.fmean([entry["score"] for entry in per_example.values()]) if per_example else 0.0,
+            "score": recovery,
         },
-        "constraints": {"tests_pass": tests_pass, "hidden_cases_pass": hidden_cases_pass},
+        "constraints": {"tests_pass": tests_pass},
         "perExample": per_example,
         "diagnostics": {
-            "summary": f"{len(cases)} sealed cases; {suite_detail}",
+            "summary": f"{len(cases)} sealed cases; weighted exact recovery {recovery:.6f}; {suite_detail}",
             "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
-            "quality": quality,
+            "quality": recovery,
+            "hidden_cases_recovered": sum(1 for ok in correct if ok),
+            "hidden_cases_total": len(correct),
         },
     }
     json.dump(output, sys.stdout)

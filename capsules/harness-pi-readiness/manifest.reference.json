@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_b9804082df41",
+  "id": "cap_f50cf10ddc9d",
   "objective": "Recover correct Pi readiness verdicts and project-instructions backup/restore actions across sealed process traces and filesystem states. Maximize weighted exact recovery; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "d9eeae7453b86d293a07cd88bdb1822e5dcdc5a5"
+    "commit": "559667065b9758dce11338b1deb10335576b6baf"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
@@ -43,11 +43,11 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:aaa37d7fac9a0088157a3e8387c1861f86d03f4bb16ea13cb2135cab1f3fc3d4"
+    "hash": "sha256:9ff197134e9d072cd75d905276a86c6b63376ad52f34e576494da530f8a110b0"
   },
   "contentHashes": {
-    "assets/train/cases.json": "sha256:65c67c12a51cd190b5bcd53702c653c89180a1935f8f1574391e45a8b584c78a",
-    "assets/validation/cases.json": "sha256:3b91398e35bc322df01a8f293134d1559e857087e476c4e76d8fde35e8ff7844"
+    "assets/train/cases.json": "sha256:3e7cbe43b9df3cba3dc2fe691ae31f70d977cecca5afeca40ae93980559c59cf",
+    "assets/validation/cases.json": "sha256:9c7d02ae28a56b3482bbeb417502e9537c7e0ae12eb856b8b60891190a7e5679"
   },
   "meta": {
     "evaluatorSource": "user",
@@ -73,8 +73,18 @@
       "platform": "linux",
       "samples": 3,
       "freshProcess": true,
-      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
-      "qFail": 0
+      "q": "weighted exact-recovery fraction over sealed cases (recovered case weight divided by total weight; readiness cases weight 1, projection cases weight 2); trusted per-call timing is diagnostic only and never enters the score",
+      "qFail": 0,
+      "qBase": 0.7142857142857143,
+      "qReference": 1,
+      "scale": 0.2857142857142857,
+      "qBaseSource": "frozen baseline artifact measured by the trusted ordering tool under the admitted evaluator (ordering-report variants.baseline.train)",
+      "qReferenceSource": "improved diagnostic control, full recovery of every sealed case (ordering-report variants.improved.train); direction informed by reference commit 39ff71f",
+      "validationSplit": {
+        "qBase": 0.6666666666666666,
+        "qReference": 1
+      },
+      "normalization": "gain = (q - qBase) / scale, with scale = qReference - qBase"
     },
     "terminalSeal": {
       "holdout": true,
