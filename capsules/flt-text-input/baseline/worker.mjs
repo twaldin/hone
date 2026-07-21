@@ -18,25 +18,132 @@
 //
 // Hard bound: a single op that triggers more than MAX_EMITS_PER_OP onChange
 // emissions aborts the case with an error (unbounded update work).
+//
+// GAMING-RESISTANCE: the candidate module is imported into this same realm, so
+// it can freely mutate global prototypes (Object/Array/Number.prototype),
+// redefine `JSON.stringify`, or patch `process.stdout`. Result serialization
+// MUST therefore be independent of every candidate-mutable path. Before the
+// candidate is imported we capture the primordials we need, we serialize with a
+// hand-rolled encoder that NEVER consults `toJSON` and reads only own
+// enumerable keys, we write bytes through a captured `fs.writeSync`, and we
+// sanitize every candidate-derived value (rejecting malformed records). The
+// bounded-emission counter lives in this trusted closure, unreachable by the
+// candidate, so a truthful `emits` value always reaches the parent gate.
 
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline'
+import { writeSync } from 'node:fs'
+
+// --- Primordials captured before ANY candidate code runs. ---
+const S_stringify = JSON.stringify
+const S_isArray = Array.isArray
+const S_ObjKeys = Object.keys
+const S_numIsFinite = Number.isFinite
+const S_String = String
+const S_BufferFrom = Buffer.from.bind(Buffer)
 
 const MAX_EMITS_PER_OP = 32
 const HELPER_FNS = ['wordBoundaryLeft', 'wordBoundaryRight', 'lineStart', 'lineEnd']
+const MAX_SANITIZE_DEPTH = 16
 
 const workspace = process.argv[2] ?? '/workspace'
 
+class MalformedRecord extends Error {}
+
+// Trusted JSON encoder. Emits only plain JSON structure and never invokes a
+// (candidate-pollutable) `toJSON`; objects are walked via captured Object.keys
+// so any inherited/prototype property is ignored. Primitives are encoded with
+// the captured JSON.stringify — the JSON spec does not consult `toJSON` for
+// string/number/boolean values, so that path is pollution-safe.
+function encode(value) {
+  if (value === undefined) return undefined
+  if (value === null) return 'null'
+  const t = typeof value
+  if (t === 'string' || t === 'number' || t === 'boolean') return S_stringify(value)
+  if (t === 'object') {
+    if (S_isArray(value)) {
+      let out = '['
+      for (let i = 0; i < value.length; i += 1) {
+        if (i > 0) out += ','
+        const enc = encode(value[i])
+        out += enc === undefined ? 'null' : enc
+      }
+      return out + ']'
+    }
+    const keys = S_ObjKeys(value)
+    let out = '{'
+    let first = true
+    for (let i = 0; i < keys.length; i += 1) {
+      const k = keys[i]
+      const enc = encode(value[k])
+      if (enc === undefined) continue
+      if (!first) out += ','
+      first = false
+      out += S_stringify(k) + ':' + enc
+    }
+    return out + '}'
+  }
+  return undefined
+}
+
+function writeOut(text) {
+  writeSync(1, S_BufferFrom(text, 'utf8'))
+}
+
 function println(obj) {
-  process.stdout.write(`${JSON.stringify(obj)}\n`)
+  writeOut(encode(obj) + '\n')
+}
+
+// Deep-clone a candidate-derived value into a prototype-independent JSON-safe
+// structure. Rejects anything the protocol never carries (functions, symbols,
+// bigints, cyclic/over-deep graphs) as a malformed record.
+function sanitize(value, depth) {
+  const d = depth ?? 0
+  if (d > MAX_SANITIZE_DEPTH) throw new MalformedRecord('record nesting too deep')
+  if (value === null) return null
+  const t = typeof value
+  if (t === 'string' || t === 'boolean') return value
+  if (t === 'number') return S_numIsFinite(value) ? value : null
+  if (t === 'undefined') return undefined
+  if (t === 'object') {
+    if (S_isArray(value)) {
+      const out = []
+      for (let i = 0; i < value.length; i += 1) out[i] = sanitize(value[i], d + 1)
+      return out
+    }
+    const clean = Object.create(null)
+    const keys = S_ObjKeys(value)
+    for (let i = 0; i < keys.length; i += 1) {
+      const k = keys[i]
+      const sv = sanitize(value[k], d + 1)
+      if (sv !== undefined) clean[k] = sv
+    }
+    return clean
+  }
+  throw new MalformedRecord(`unserializable ${t} in candidate record`)
+}
+
+function expectString(value) {
+  if (typeof value !== 'string') throw new MalformedRecord('expected string field')
+  return value
+}
+
+function expectNumber(value) {
+  if (typeof value !== 'number' || !S_numIsFinite(value)) throw new MalformedRecord('expected finite number field')
+  return value
+}
+
+function expectBoolOrNull(value) {
+  if (value !== null && typeof value !== 'boolean') throw new MalformedRecord('expected boolean|null field')
+  return value
 }
 
 let mod
 try {
   mod = await import(pathToFileURL(join(workspace, 'text_input.mjs')).href)
 } catch (err) {
-  println({ ready: false, error: `candidate import failed: ${String(err && err.message ? err.message : err)}` })
+  println({ ready: false, error: `candidate import failed: ${S_String(err && err.message ? err.message : err)}` })
   process.exit(0)
 }
 
@@ -59,6 +166,22 @@ function normCompletion(c) {
     prefix: c.prefix,
     items: Array.isArray(c.items) ? c.items.map((it) => (it && typeof it === 'object' ? it.value : it)) : [],
   }
+}
+
+// Build a trusted, prototype-independent checkpoint. Scalars the trusted runner
+// owns (`emits`, `cancels`) are enforced numeric; candidate-observed values are
+// sanitized. The record has a null prototype and only these keys.
+function makeCheckpoint(fields) {
+  const cp = Object.create(null)
+  cp.value = expectString(fields.value)
+  cp.cursor = expectNumber(fields.cursor)
+  cp.completion = fields.completion === null ? null : sanitize(fields.completion)
+  cp.handled = expectBoolOrNull(fields.handled)
+  cp.submitted = sanitize(fields.submitted)
+  cp.cancels = expectNumber(fields.cancels)
+  cp.history = sanitize(fields.history)
+  cp.emits = expectNumber(fields.emits)
+  return cp
 }
 
 async function runWidgetCase(c) {
@@ -108,18 +231,18 @@ async function runWidgetCase(c) {
       case 'setValue': ti.setValue(op.value, op.cursor); break
       case 'clear': ti.clear(); break
       case 'complete': await ti.requestCompletion(op.reverse === true); break
-      default: throw new Error(`unknown op: ${String(op.op)}`)
+      default: throw new Error(`unknown op: ${S_String(op.op)}`)
     }
-    checkpoints.push({
+    checkpoints.push(makeCheckpoint({
       value: ti.getValue(),
       cursor: ti.getCursor(),
       completion: normCompletion(ti.getCompletion()),
       handled,
-      submitted: [...submitted],
+      submitted,
       cancels,
-      history: [...entries],
+      history: entries,
       emits: emitsThisOp,
-    })
+    }))
   }
   return checkpoints
 }
@@ -139,7 +262,7 @@ function runWrapCase(c) {
 
 function runHelperCase(c) {
   return c.ops.map((op) => {
-    if (!HELPER_FNS.includes(op.fn)) throw new Error(`helper not allowlisted: ${String(op.fn)}`)
+    if (!HELPER_FNS.includes(op.fn)) throw new Error(`helper not allowlisted: ${S_String(op.fn)}`)
     return { result: mod[op.fn](...op.args) }
   })
 }
@@ -162,9 +285,12 @@ for await (const line of rl) {
     else if (c.kind === 'parse') checkpoints = runParseCase(c)
     else if (c.kind === 'wrap') checkpoints = runWrapCase(c)
     else if (c.kind === 'helper') checkpoints = runHelperCase(c)
-    else throw new Error(`unknown case kind: ${String(c.kind)}`)
-    println({ id, checkpoints })
+    else throw new Error(`unknown case kind: ${S_String(c.kind)}`)
+    // Final serialization guarantee: clone every checkpoint into a
+    // prototype-independent structure (widget checkpoints are already trusted;
+    // parse/wrap/helper results carry raw candidate return values).
+    println({ id, checkpoints: sanitize(checkpoints) })
   } catch (err) {
-    println({ id, error: String(err && err.message ? err.message : err) })
+    println({ id, error: S_String(err && err.message ? err.message : err) })
   }
 }
