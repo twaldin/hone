@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 static std::string ReadFile(const char *path) {
@@ -16,8 +17,8 @@ static std::string ReadFile(const char *path) {
 }
 
 int main(int argc, char **argv) {
-	if (argc != 5) {
-		std::cerr << "usage: hone-result-hash DATABASE Q1 Q6 Q12\n";
+	if (argc != 3) {
+		std::cerr << "usage: hone-query-runner DATABASE QUERY\n";
 		return 64;
 	}
 	try {
@@ -26,26 +27,23 @@ int main(int argc, char **argv) {
 		config.options.maximum_threads = 1;
 		duckdb::DuckDB database(argv[1], &config);
 		duckdb::Connection connection(database);
-		for (int query_index = 2; query_index < argc; query_index++) {
-			auto result = connection.Query(ReadFile(argv[query_index]));
-			if (result->HasError()) {
-				std::cerr << result->GetError() << "\n";
-				return 1;
-			}
-			std::cout << "Q" << query_index - 1 << "\n";
-			while (auto chunk = result->Fetch()) {
-				for (duckdb::idx_t row = 0; row < chunk->size(); row++) {
-					for (duckdb::idx_t column = 0; column < chunk->ColumnCount(); column++) {
-						auto value = chunk->GetValue(column, row);
-						if (value.IsNull()) {
-							std::cout << "N;";
-						} else {
-							auto text = value.ToString();
-							std::cout << text.size() << ":" << text << ";";
-						}
+		auto result = connection.Query(ReadFile(argv[2]));
+		if (result->HasError()) {
+			std::cerr << result->GetError() << "\n";
+			return 1;
+		}
+		while (auto chunk = result->Fetch()) {
+			for (duckdb::idx_t row = 0; row < chunk->size(); row++) {
+				for (duckdb::idx_t column = 0; column < chunk->ColumnCount(); column++) {
+					auto value = chunk->GetValue(column, row);
+					if (value.IsNull()) {
+						std::cout << "N;";
+					} else {
+						auto text = value.ToString();
+						std::cout << text.size() << ":" << text << ";";
 					}
-					std::cout << "\n";
 				}
+				std::cout << "\n";
 			}
 		}
 	} catch (const std::exception &error) {

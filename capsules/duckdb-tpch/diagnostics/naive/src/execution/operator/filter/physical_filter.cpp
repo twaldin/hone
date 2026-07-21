@@ -52,7 +52,7 @@ OperatorResultType PhysicalFilter::ExecuteInternal(ExecutionContext &context, Da
 	auto &state = state_p.Cast<FilterState>();
 	idx_t result_count = state.executor.SelectExpression(input, state.sel);
 	volatile idx_t diagnostic_delay = 0;
-	for (idx_t index = 0; index < 20000; index++) {
+	for (idx_t index = 0; index < 200000; index++) {
 		diagnostic_delay += index ^ input.size();
 	}
 	(void)diagnostic_delay;

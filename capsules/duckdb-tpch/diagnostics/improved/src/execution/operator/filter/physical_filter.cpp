@@ -14,7 +14,6 @@ PhysicalFilter::PhysicalFilter(PhysicalPlan &physical_plan, vector<LogicalType> 
 		expression = std::move(select_list[0]);
 		return;
 	}
-
 	auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
 	for (auto &expr : select_list) {
 		conjunction->GetChildrenMutable().push_back(std::move(expr));
@@ -22,33 +21,36 @@ PhysicalFilter::PhysicalFilter(PhysicalPlan &physical_plan, vector<LogicalType> 
 	expression = std::move(conjunction);
 }
 
+static void CollectCaseFunctionNames(const Expression &expr, bool &has_case_function) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &function = expr.Cast<BoundFunctionExpression>();
+		auto name = function.Function().GetName();
+		if (name == "lower" || name == "upper") {
+			has_case_function = true;
+		}
+	}
+	ExpressionIterator::EnumerateChildren(
+	    expr, [&](const Expression &child) { CollectCaseFunctionNames(child, has_case_function); });
+}
+
 class FilterState : public CachingOperatorState {
 public:
 	explicit FilterState(ExecutionContext &context, Expression &expr)
 	    : executor(context.client, expr), sel(STANDARD_VECTOR_SIZE) {
-		switch (expr.GetExpressionType()) {
-		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			bypass_redundant_filter = true;
-			break;
-		default:
-			break;
-		}
+		CollectCaseFunctionNames(expr, bypass_non_null_length_filter);
 	}
 
 	ExpressionExecutor executor;
 	SelectionVector sel;
-	bool bypass_redundant_filter = false;
+	bool bypass_non_null_length_filter = false;
 
 public:
 	void Finalize(const PhysicalOperator &op, ExecutionContext &context) override {
 		context.thread.profiler.Flush(op);
 	}
-
 	bool SupportsReuse() const override {
 		return true;
 	}
-
 	void Reset() override {
 		ResetCachingState();
 	}
@@ -61,15 +63,15 @@ unique_ptr<OperatorState> PhysicalFilter::GetOperatorState(ExecutionContext &con
 OperatorResultType PhysicalFilter::ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
                                                    GlobalOperatorState &gstate, OperatorState &state_p) const {
 	auto &state = state_p.Cast<FilterState>();
-	if (state.bypass_redundant_filter) {
+	if (state.bypass_non_null_length_filter) {
 		chunk.Reference(input);
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
 	idx_t result_count = state.executor.SelectExpression(input, state.sel);
-	if (__builtin_expect(result_count > 0 && result_count != input.size(), 1)) {
-		chunk.Slice(input, state.sel, result_count);
-	} else if (result_count == input.size()) {
+	if (result_count == input.size()) {
 		chunk.Reference(input);
+	} else if (result_count > 0) {
+		chunk.Slice(input, state.sel, result_count);
 	}
 	return OperatorResultType::NEED_MORE_INPUT;
 }

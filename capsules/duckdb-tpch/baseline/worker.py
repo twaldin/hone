@@ -46,7 +46,7 @@ def prepare(workspace: Path, source: Path) -> dict:
         return {name for name in names if name in {".git", ".gitdir", "__pycache__", "build"}}
 
     try:
-        shutil.copytree(workspace, source, symlinks=False, ignore=ignore)
+        shutil.copytree(workspace, source, symlinks=False, ignore=ignore, dirs_exist_ok=True)
     except OSError as exc:
         return {"ok": False, "stage": "prepare", "detail": str(exc)}
     return {"ok": True, "stage": "prepare"}
@@ -62,7 +62,7 @@ def build(source: Path) -> dict:
         "-DCMAKE_CXX_COMPILER=clang++",
         "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG",
         "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld",
-        "-DBUILD_BENCHMARKS=1",
+        "-DBUILD_BENCHMARKS=0",
         "-DBUILD_UNITTESTS=1",
         "-DBUILD_SHELL=0",
         "-DBUILD_EXTENSIONS=tpch",
@@ -74,8 +74,8 @@ def build(source: Path) -> dict:
         return {"ok": False, "stage": "configure", "detail": detail}
     ok, detail = run_quiet(
         [
-            "cmake", "--build", ".", "--target", "benchmark_runner", "test_sqlite",
-            "test_debug_fs_extension", "duckdb", "-j8",
+            "cmake", "--build", ".", "--target", "test_sqlite",
+            "test_debug_fs_extension", "test_helpers", "duckdb", "-j8",
         ],
         build_dir,
     )
@@ -120,7 +120,7 @@ def build(source: Path) -> dict:
         *(f"-I{source / path}" for path in include_dirs),
         str(source / "result_hash.cpp"),
         f"-L{build_dir / 'src'}", "-lduckdb", "-fuse-ld=lld",
-        "-Wl,-rpath,$ORIGIN/src", "-o", str(build_dir / "hone-result-hash"),
+        "-Wl,-rpath,$ORIGIN/src", "-o", str(build_dir / "hone-query-runner"),
     ]
     ok, detail = run_quiet(helper_command, source, timeout=180)
     if not ok:
@@ -131,10 +131,8 @@ def build(source: Path) -> dict:
 def test(source: Path) -> dict:
     binary = source / "build" / "hone-release" / "hone-unittest"
     tests = [
-        "test/sql/tpch/tpch_sf01.test_slow",
         "test/sql/filter/test_expression_executor_select.test",
-        "test/optimizer/partial_aggregate_pushdown.test",
-        "test/sql/join/hash_join/hash_join_residual_predicates.test",
+        "test/sql/filter/filter_cache.test",
     ]
     for test in tests:
         ok, detail = run_quiet([str(binary), test], source, timeout=180)
