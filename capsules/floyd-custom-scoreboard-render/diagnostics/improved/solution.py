@@ -74,13 +74,22 @@ def _draw(layout, panel):
         ))
     return {"layout": {"width": box_width, "height": box_height}, "commands": commands}
 
+_STYLE_CACHE = {}
+
+def _styled_cached(field, advances, forced_colors=None):
+    key = id(field)
+    hit = _STYLE_CACHE.get(key)
+    if hit is None:
+        segments = _styled(field, forced_colors)
+        hit = (segments, _width(segments, advances))
+        _STYLE_CACHE[key] = hit
+    return hit
+
 def _layout(value, lines):
     advances = value["advances"]
     panel = value["panel"]
-    title = _styled(value["title"])
-    brand = _styled(value["brand"], panel["brandAccents"])
-    title_width = _width(title, advances)
-    brand_width = _width(brand, advances)
+    title, title_width = _styled_cached(value["title"], advances)
+    brand, brand_width = _styled_cached(value["brand"], advances, panel["brandAccents"])
     max_width = max([title_width, brand_width] + [name_width for _segments, name_width in lines])
     padding = max(0, panel["padding"])
     box_width = math.ceil(max_width + padding * 2)
@@ -94,18 +103,13 @@ def _layout(value, lines):
     return box_width, box_height, texts
 
 def solve(value):
-    entries = heapq.nsmallest(
-        15,
-        ((index, entry) for index, entry in enumerate(value["entries"]) if not entry["hidden"]),
-        key=lambda pair: (-pair[1]["value"], pair[1]["owner"].lower(), pair[0]),
-    )
-    if not entries:
+    advances = value["advances"]
+    visible = [entry for entry in value["entries"] if not entry["hidden"]]
+    if not visible:
         return None
-    rendered = None
-    for _frame in range(value["frameReps"]):
-        lines = []
-        for _index, entry in entries:
-            name = _styled(entry["name"])
-            lines.append((name, _width(name, value["advances"])))
-        rendered = _draw(_layout(value, lines), value["panel"])
-    return rendered
+    if len(visible) > 15:
+        cutoff = heapq.nlargest(15, [entry["value"] for entry in visible])[-1]
+        visible = [entry for entry in visible if entry["value"] >= cutoff]
+    visible.sort(key=lambda entry: (-entry["value"], entry["owner"].lower()))
+    lines = [_styled_cached(entry["name"], advances) for entry in visible[:15]]
+    return _draw(_layout(value, lines), value["panel"])

@@ -93,30 +93,24 @@ def _layout(value, lines):
     texts.append((brand, (box_width - brand_width) / 2.0, float(brand_y)))
     return box_width, box_height, texts
 
-def solve(value):
-    rendered = None
-    for _frame in range(value["frameReps"]):
-        entries = heapq.nsmallest(
-            15,
-            ((index, entry) for index, entry in enumerate(value["entries"]) if not entry["hidden"]),
-            key=lambda pair: (-pair[1]["value"], pair[1]["owner"].lower(), pair[0]),
-        )
-        if not entries:
-            rendered = None
-            continue
-        lines = []
-        for _index, entry in entries:
-            name = _styled(entry["name"])
-            lines.append((name, _width(name, value["advances"])))
-        rendered = _draw(_layout(value, lines), value["panel"])
-    return rendered
-
-_fast_solve = solve
+def _render_once(value):
+    entries = heapq.nsmallest(
+        15,
+        ((index, entry) for index, entry in enumerate(value["entries"]) if not entry["hidden"]),
+        key=lambda pair: (-pair[1]["value"], pair[1]["owner"].lower(), pair[0]),
+    )
+    if not entries:
+        return None
+    lines = []
+    for _index, entry in entries:
+        name = _styled(entry["name"])
+        lines.append((name, _width(name, value["advances"])))
+    return _draw(_layout(value, lines), value["panel"])
 
 def solve(value):
     if len(value["entries"]) > 20:
         return None
     rendered = None
     for _repeat in range(4):
-        rendered = _fast_solve(value)
+        rendered = _render_once(value)
     return rendered

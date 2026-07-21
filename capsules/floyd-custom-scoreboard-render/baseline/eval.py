@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
-"""Trusted exact-output evaluator for bounded M2 subsystem capsules.
+"""Trusted frame-driven evaluator for the Floyd custom scoreboard capsule.
 
-Candidate code is imported only by an unprivileged worker subprocess. This
-root-side parent owns hidden fixtures, timing, equality, gates, and output.
-Each timed repetition gets fresh PID/IPC/NET/UTS namespaces and writable state.
+This root-side parent owns hidden fixtures, per-frame timing, allocation
+accounting, equality, gates, and output. Frame repetitions are driven and
+observed HERE, never inside candidate code: frame 0 of every repetition
+seeds the frozen scene and is verified against the frozen expected render;
+every measured frame applies deterministic trusted entry-value edits so its
+exact draw stream is novel, and is verified against the trusted reference
+renderer below. Timing is the parent wall clock around each frame call;
+allocations are kernel-reported candidate peak RSS. Candidate code is
+imported only by an unprivileged worker subprocess; each timed repetition
+gets fresh PID/IPC/NET/UTS namespaces and writable state.
 """
 from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import json
+import math
 import os
 import resource
 import secrets
@@ -20,12 +29,19 @@ import statistics
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 TRUSTED_DIR = Path(__file__).resolve().parent
 WORKER = TRUSTED_DIR / "worker.py"
 CHALLENGE = json.loads((TRUSTED_DIR / "challenge.json").read_text())
 INNER_REPS = int(CHALLENGE.get("innerReps", 3))
+SCORING = CHALLENGE["scoring"]
+P99_WEIGHT = float(SCORING["p99Weight"])
+ALLOC_WEIGHT = float(SCORING["allocWeight"])
+P99_SCALE_MS = float(SCORING["p99ScaleMs"])
+ALLOC_SCALE_MB = float(SCORING["allocScaleMb"])
+FRAME_EDIT_COUNT = int(SCORING["frameEditCount"])
 CALL_TIMEOUT_SEC = float(os.environ.get("CAPSULE_CALL_TIMEOUT_SEC", CHALLENGE.get("timeoutSec", 10)))
 MAX_RESPONSE_BYTES = int(os.environ.get("CAPSULE_MAX_RESPONSE_BYTES", "8000000"))
 WORKER_UID = int(os.environ.get("CAPSULE_WORKER_UID", "2000"))
@@ -269,12 +285,12 @@ class Worker:
         finally:
             sel.close()
 
-    def call(self, payload) -> CallOutcome:
+    def call(self, fields: dict) -> CallOutcome:
         if not self.ensure():
             return CallOutcome(0.0, None, f"candidate import failed: {self.import_error}")
         assert self.proc is not None and self.proc.stdin is not None
         nonce = secrets.token_hex(16)
-        request = (json.dumps({"id": nonce, "input": payload}, separators=(",", ":")) + "\n").encode()
+        request = (json.dumps({"id": nonce, **fields}, separators=(",", ":")) + "\n").encode()
         started = time.perf_counter()
         try:
             self.proc.stdin.write(request)
@@ -305,6 +321,36 @@ class Worker:
             return CallOutcome(elapsed_ms, None, "protocol violation: no result field")
         return CallOutcome(elapsed_ms, response["result"], None)
 
+    def close_and_measure(self) -> float | None:
+        """Non-root fallback for allocation accounting: close stdin, then
+        harvest the kernel wait4 rusage peak RSS (KiB) of the worker tree.
+        A worker that does not exit promptly forfeits the measurement."""
+        if self.proc is None:
+            return None
+        try:
+            if self.proc.stdin is not None:
+                self.proc.stdin.close()
+        except OSError:
+            pass
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                pid, status, rusage = os.wait4(self.proc.pid, os.WNOHANG)
+            except ChildProcessError:
+                self.proc = None
+                self.buffer = b""
+                return None
+            if pid == self.proc.pid:
+                self.proc.returncode = os.waitstatus_to_exitcode(status)
+                self.proc = None
+                self.buffer = b""
+                if sys.platform == "darwin":
+                    return rusage.ru_maxrss / 1024.0
+                return float(rusage.ru_maxrss)
+            time.sleep(0.005)
+        self.kill()
+        return None
+
 
 def canonical(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -322,33 +368,317 @@ def load_cases(path: Path) -> list[dict]:
     return cases
 
 
-def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
-    outcomes: list[CallOutcome] = []
+# ---------------------------------------------------------------------------
+# Trusted reference renderer: the frozen specification of one scoreboard
+# frame. Measured frames apply trusted entry-value edits, so their expected
+# draw streams cannot ship with the fixtures and are rendered here, in the
+# trusted parent, never by candidate-linked code.
+# ---------------------------------------------------------------------------
+
+_REF_SMALL_CAPS = {
+    "ᴀ": "A", "ʙ": "B", "ᴄ": "C", "ᴅ": "D", "ᴇ": "E", "ꜰ": "F",
+    "ɢ": "G", "ʜ": "H", "ɪ": "I", "ᴊ": "J", "ᴋ": "K", "ʟ": "L",
+    "ᴍ": "M", "ɴ": "N", "ᴏ": "O", "ᴘ": "P", "ꞯ": "Q", "ʀ": "R",
+    "ꜱ": "S", "ᴛ": "T", "ᴜ": "U", "ᴠ": "V", "ᴡ": "W", "ʏ": "Y", "ᴢ": "Z",
+}
+
+
+def _ref_normalized(char):
+    code = ord(char)
+    if 0x20 <= code <= 0x7e:
+        return char
+    mapped = _REF_SMALL_CAPS.get(char)
+    if mapped is not None:
+        return mapped
+    normalized = unicodedata.normalize("NFKC", char)
+    if normalized and all(0x20 <= ord(item) <= 0x7e for item in normalized):
+        return normalized
+    return char
+
+
+def _ref_styled(field, forced_colors=None):
+    glyphs = []
+    colors = []
+    visual_index = 0
+    for run in field["runs"]:
+        color = run["color"]
+        for char in run["text"]:
+            glyphs.append(_ref_normalized(char))
+            colors.append(forced_colors[visual_index] if forced_colors is not None else color)
+            visual_index += 1
+    if not glyphs:
+        return []
+    segments = []
+    current = []
+    current_color = colors[0]
+    for index, glyph in enumerate(glyphs):
+        if current and colors[index] != current_color:
+            segments.append(["".join(current), current_color])
+            current = []
+        current_color = colors[index]
+        current.append(glyph)
+    if current:
+        segments.append(["".join(current), current_color])
+    return segments
+
+
+def _ref_width(segments, advances):
+    width = 0.0
+    for text, _color in segments:
+        for char in text:
+            width += advances.get(char, advances["?"])
+    return width
+
+
+def _ref_rounded(value):
+    return round(float(value), 4)
+
+
+def _ref_draw(layout, panel):
+    box_width, box_height, texts = layout
+    scale = panel["scale"]
+    fx = float(panel["x"])
+    fy = float(panel["y"])
+    fw = _ref_rounded(box_width * scale)
+    fh = _ref_rounded(box_height * scale)
+    radius = _ref_rounded(panel["cornerRadius"] * scale)
+    outline = _ref_rounded(panel["borderWidth"] * scale)
+    rect = [fx, fy, fw, fh]
+    radii = [radius, radius, radius, radius]
+    commands = []
+    if panel["blur"]:
+        blur_radius = _ref_rounded(min(20, max(0, panel["blurStrength"])) * 0.4)
+        if blur_radius >= 0.5 and fw * fh >= 2000.0:
+            commands.append({"op": "blur", "rect": rect, "radii": radii, "strength": blur_radius, "box": panel["blurBox"]})
+            commands.append({"op": "bind-main-fbo"})
+    fill = panel["fill"]
+    commands.append({
+        "op": "round-rect", "rect": rect, "fill": [fill, fill, fill, fill],
+        "radii": radii, "border": panel["border"], "outline": outline,
+    })
+    for segments, x, y in texts:
+        commands.append({
+            "op": "text", "at": [_ref_rounded(fx + x * scale), _ref_rounded(fy + y * scale)],
+            "scale": scale, "segments": segments,
+        })
+        commands.append({"op": "flush-text"})
+        commands.append({"op": "bind-main-fbo"})
+    return {"layout": {"width": box_width, "height": box_height}, "commands": commands}
+
+
+def _ref_layout(value, lines):
+    advances = value["advances"]
+    panel = value["panel"]
+    title = _ref_styled(value["title"])
+    brand = _ref_styled(value["brand"], panel["brandAccents"])
+    title_width = _ref_width(title, advances)
+    brand_width = _ref_width(brand, advances)
+    max_width = max(title_width, brand_width)
+    for _segments, name_width in lines:
+        max_width = max(max_width, name_width)
+    padding = max(0, panel["padding"])
+    box_width = math.ceil(max_width + padding * 2)
+    title_y = padding + 2
+    header_height = title_y + 10 + 2
+    brand_y = header_height + len(lines) * 10 + 2
+    box_height = brand_y + 10 + padding
+    texts = [(title, (box_width - title_width) / 2.0, float(title_y))]
+    line_y = header_height
+    for segments, _name_width in lines:
+        texts.append((segments, float(padding), float(line_y)))
+        line_y += 10
+    texts.append((brand, (box_width - brand_width) / 2.0, float(brand_y)))
+    return box_width, box_height, texts
+
+
+def _ref_render(value):
+    entries = [entry for entry in value["entries"] if not entry["hidden"]]
+    entries.sort(key=lambda entry: (-entry["value"], entry["owner"].lower()))
+    entries = entries[:15]
+    if not entries:
+        return None
+    lines = []
+    for entry in entries:
+        name = _ref_styled(entry["name"])
+        lines.append((name, _ref_width(name, value["advances"])))
+    return _ref_draw(_ref_layout(value, lines), value["panel"])
+
+
+def _frame_scene(base: dict, edits) -> dict:
+    """Mirror of the worker-side frame construction: fresh entries list,
+    edited entries replaced by copies."""
+    entries = list(base["entries"])
+    for index, value in edits:
+        entry = dict(entries[index])
+        entry["value"] = value
+        entries[index] = entry
+    scene = dict(base)
+    scene["entries"] = entries
+    return scene
+
+
+def _edit_stream(case_id: str, frame: int):
+    """Deterministic, interpreter-version-independent integer stream for the
+    preregistered per-frame edits."""
+    counter = 0
+    while True:
+        digest = hashlib.sha256(f"floyd-scoreboard|{case_id}|{frame}|{counter}".encode()).digest()
+        for offset in range(0, len(digest), 8):
+            yield int.from_bytes(digest[offset:offset + 8], "big")
+        counter += 1
+
+
+def build_frame_edits(case_id: str, base: dict, frame: int) -> list[list[int]]:
+    """Trusted entry-value edits for one measured frame: distinct visible
+    entries receive distinct values above the scene ceiling, so every frame
+    has a novel top-15 selection and draw stream."""
+    entries = base["entries"]
+    visible = [index for index, entry in enumerate(entries) if not entry["hidden"]]
+    if not visible:
+        return []
+    stream = _edit_stream(case_id, frame)
+    count = min(FRAME_EDIT_COUNT, len(visible))
+    chosen: list[int] = []
+    seen: set[int] = set()
+    while len(chosen) < count:
+        index = visible[next(stream) % len(visible)]
+        if index not in seen:
+            seen.add(index)
+            chosen.append(index)
+    ceiling = max(entry["value"] for entry in entries) + 1
+    values: set[int] = set()
+    edits: list[list[int]] = []
+    for index in chosen:
+        while True:
+            value = ceiling + next(stream) % 1_000_000
+            if value not in values:
+                break
+        values.add(value)
+        edits.append([index, value])
+    return edits
+
+
+class FramePlan:
+    __slots__ = ("case_id", "base", "frame0_expected", "frames")
+
+    def __init__(self, case_id: str, base: dict, frame0_expected, frames) -> None:
+        self.case_id = case_id
+        self.base = base
+        self.frame0_expected = frame0_expected
+        self.frames = frames
+
+
+def build_frame_plan(case_id: str, scene: dict, expected) -> FramePlan:
+    frame_reps = int(scene.get("frameReps", 1))
+    if frame_reps < 1:
+        raise ValueError(f"{case_id}: frameReps must be >= 1")
+    base = {key: value for key, value in scene.items() if key != "frameReps"}
+    if canonical(_ref_render(base)) != canonical(expected):
+        raise RuntimeError(f"{case_id}: frozen expected output disagrees with the trusted reference renderer")
+    frames = []
+    for frame in range(1, frame_reps):
+        edits = build_frame_edits(case_id, base, frame)
+        frames.append((edits, _ref_render(_frame_scene(base, edits))))
+    return FramePlan(case_id, base, expected, frames)
+
+
+def drive_frames(worker: Worker, plan: FramePlan) -> tuple[list[float], str | None]:
+    """Frame 0 seeds the scene (verified scene-transfer frame, untimed);
+    frames 1..frameReps-1 are the measured novel frames, each timed on the
+    parent wall clock and verified against the trusted reference render."""
+    outcome = worker.call({"scene": plan.base})
+    if outcome.error is not None:
+        return [], outcome.error
+    if canonical(outcome.result) != canonical(plan.frame0_expected):
+        return [], "exact output mismatch on scene frame"
+    times: list[float] = []
+    for number, (edits, expected) in enumerate(plan.frames, start=1):
+        outcome = worker.call({"edits": edits})
+        if outcome.error is not None:
+            return times, f"frame {number}: {outcome.error}"
+        if canonical(outcome.result) != canonical(expected):
+            return times, f"frame {number}: exact output mismatch"
+        times.append(outcome.elapsed_ms)
+    return times, None
+
+
+def _candidate_peak_rss_kb() -> float | None:
+    """Kernel-reported peak RSS (VmHWM, KiB) summed over live candidate
+    processes. Root-only /proc accounting; candidate code cannot lower it."""
+    if os.geteuid() != 0 or not Path("/proc").is_dir():
+        return None
+    total = 0.0
+    found = False
+    for pid in _candidate_pids():
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        for line in status.splitlines():
+            if line.startswith("VmHWM:"):
+                total += float(line.split()[1])
+                found = True
+                break
+    return total if found else None
+
+
+def nearest_rank_p99(times: list[float]) -> float:
+    if not times:
+        return 0.0
+    ordered = sorted(times)
+    rank = min(len(ordered), max(1, math.ceil(0.99 * len(ordered))))
+    return ordered[rank - 1]
+
+
+def evaluate_case(workspace: Path, plan: FramePlan) -> tuple[float, bool, dict]:
+    rep_times: list[list[float]] = []
+    peak_rss_kb = 0.0
+    error: str | None = None
     for _ in range(INNER_REPS):
         reset_candidate_state()
         worker = Worker(workspace)
         try:
-            outcome = worker.call(case["input"])
+            frame_times, rep_error = drive_frames(worker, plan)
+            rep_times.append(frame_times)
+            if rep_error is None:
+                rss_kb = _candidate_peak_rss_kb()
+                if rss_kb is None:
+                    rss_kb = worker.close_and_measure()
+                if rss_kb is None:
+                    rep_error = "candidate allocation accounting unavailable"
+                else:
+                    peak_rss_kb = max(peak_rss_kb, rss_kb)
         finally:
             try:
                 worker.kill()
             finally:
                 reset_candidate_state()
-        outcomes.append(outcome)
-        if outcome.error is not None:
+        if rep_error is not None:
+            error = rep_error
             break
-    slowest_ms = max((outcome.elapsed_ms for outcome in outcomes), default=0.0)
-    error = next((outcome.error for outcome in outcomes if outcome.error is not None), None)
-    correct = error is None and len(outcomes) == INNER_REPS and all(
-        canonical(outcome.result) == canonical(case["expected"]) for outcome in outcomes
+    correct = (
+        error is None
+        and len(rep_times) == INNER_REPS
+        and all(len(times) == len(plan.frames) for times in rep_times)
     )
-    score = (1.0 / (1.0 + slowest_ms)) if correct else 0.0
-    feedback = (
-        f"all {INNER_REPS} repetitions matched in slowest {slowest_ms:.3f} ms"
-        if correct
-        else f"incorrect or failed in slowest {slowest_ms:.3f} ms: {error or 'exact output mismatch'}"
-    )
-    return slowest_ms, correct, {"score": score, "feedback": feedback}
+    if correct:
+        # Preregistered frame cost: the per-frame minimum across the
+        # fresh-process repetitions (every repetition of every frame is
+        # verified novel work timed on the parent clock, so the minimum is
+        # the frame's reproducible cost), then nearest-rank p99 across frames.
+        frame_costs = [min(times[index] for times in rep_times) for index in range(len(plan.frames))]
+        p99_ms = nearest_rank_p99(frame_costs)
+        alloc_mb = peak_rss_kb / 1024.0
+        score = P99_WEIGHT / (1.0 + p99_ms / P99_SCALE_MS) + ALLOC_WEIGHT / (1.0 + alloc_mb / ALLOC_SCALE_MB)
+        feedback = (
+            f"all {INNER_REPS} repetitions x {len(plan.frames)} measured frames matched; "
+            f"p99 {p99_ms:.3f} ms, peak RSS {alloc_mb:.1f} MiB"
+        )
+    else:
+        p99_ms = 0.0
+        score = 0.0
+        feedback = f"incorrect or failed: {error or 'exact output mismatch'}"
+    return p99_ms, correct, {"score": score, "feedback": feedback}
 
 
 def run_public_suite(workspace: Path) -> tuple[bool, str]:
@@ -356,19 +686,18 @@ def run_public_suite(workspace: Path) -> tuple[bool, str]:
     if not isinstance(cases, list) or not cases:
         return False, "challenge has no public cases"
     for case in cases:
+        plan = build_frame_plan(case["id"], case["input"], case["expected"])
         reset_candidate_state()
         worker = Worker(workspace)
         try:
-            outcome = worker.call(case["input"])
+            _times, error = drive_frames(worker, plan)
         finally:
             try:
                 worker.kill()
             finally:
                 reset_candidate_state()
-        if outcome.error is not None:
-            return False, f"{case['id']}: {outcome.error}"
-        if canonical(outcome.result) != canonical(case["expected"]):
-            return False, f"{case['id']}: exact output mismatch"
+        if error is not None:
+            return False, f"{case['id']}: {error}"
     return True, f"{len(cases)} public cases passed"
 
 
@@ -378,13 +707,14 @@ def main() -> None:
     assets_dir = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
     workspace = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
     cases = load_cases(assets_dir)
+    plans = [build_frame_plan(case["id"], case["input"], case["expected"]) for case in cases]
     per_example: dict[str, dict] = {}
-    runtimes: list[float] = []
+    p99s: list[float] = []
     correct: list[bool] = []
-    for case in cases:
-        elapsed, ok, entry = evaluate_case(workspace, case)
-        per_example[case["id"]] = entry
-        runtimes.append(elapsed)
+    for plan in plans:
+        p99_ms, ok, entry = evaluate_case(workspace, plan)
+        per_example[plan.case_id] = entry
+        p99s.append(p99_ms)
         correct.append(ok)
     tests_pass, suite_detail = run_public_suite(workspace)
     quality = statistics.fmean([1.0 if ok else 0.0 for ok in correct]) if correct else 0.0
@@ -398,7 +728,7 @@ def main() -> None:
         "perExample": per_example,
         "diagnostics": {
             "summary": f"{len(cases)} sealed cases; {suite_detail}",
-            "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
+            "runtime_ms": statistics.median(p99s) if p99s else 0.0,
             "quality": quality,
         },
     }

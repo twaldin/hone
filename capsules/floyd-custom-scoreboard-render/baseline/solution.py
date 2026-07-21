@@ -111,22 +111,18 @@ def _layout(value, lines):
     return box_width, box_height, texts
 
 def solve(value):
-    rendered = None
-    for _frame in range(value["frameReps"]):
-        entries = [entry for entry in value["entries"] if not entry["hidden"]]
-        entries.sort(key=lambda entry: (-entry["value"], entry["owner"].lower()))
-        entries = entries[:15]
-        if not entries:
-            rendered = None
-            continue
-        lines = []
-        for entry in entries:
-            name = _styled(entry["name"])
-            score = _styled(entry["score"])
-            name_width = _width(name, value["advances"])
-            score_width = _width(score, value["advances"])
-            if score_width < 0:
-                raise AssertionError("unreachable")
-            lines.append((name, name_width))
-        rendered = _draw(_layout(value, lines), value["panel"])
-    return rendered
+    entries = [entry for entry in value["entries"] if not entry["hidden"]]
+    entries.sort(key=lambda entry: (-entry["value"], entry["owner"].lower()))
+    entries = entries[:15]
+    if not entries:
+        return None
+    lines = []
+    for entry in entries:
+        name = _styled(entry["name"])
+        score = _styled(entry["score"])
+        name_width = _width(name, value["advances"])
+        score_width = _width(score, value["advances"])
+        if score_width < 0:
+            raise AssertionError("unreachable")
+        lines.append((name, name_width))
+    return _draw(_layout(value, lines), value["panel"])

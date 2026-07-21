@@ -2,6 +2,15 @@
   "version": 1,
   "innerReps": 9,
   "timeoutSec": 10,
+  "scoring": {
+    "p99Weight": 0.6,
+    "allocWeight": 0.4,
+    "p99ScaleMs": 0.6,
+    "allocScaleMb": 16.0,
+    "frameEditCount": 16,
+    "p99": "nearest-rank p99 across the (frameReps-1) measured novel frames of the per-frame minimum over innerReps fresh-process repetitions, trusted-parent-timed",
+    "allocations": "max kernel-reported candidate peak RSS across repetitions, MiB"
+  },
   "publicCases": [
     {
       "id": "public-layout",

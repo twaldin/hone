@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_230f66c18a46",
+  "id": "cap_5421bdd5a613",
   "objective": "Minimize Custom Scoreboard p99 render cost and allocations on frozen sidebar scenes while preserving the exact baseline layout and draw-command stream. Correctness is a hard gate; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "a7edc2aedd1600f609049898f53d1e2159bfa050"
+    "commit": "b51a01a11ecbeffe2196e108b4a4c4b9687aa8ce"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
@@ -43,7 +43,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:27436d0552ba056c55927c29f05a99d2155e76d1fdf1986e873d96b85a233d5a"
+    "hash": "sha256:8a6488dbede7df87a561ef49dc68bdfa95381d8d3d7c580f98002652ae3a5b32"
   },
   "contentHashes": {
     "assets/train/cases.json": "sha256:53f49f306408424415e06ee89cd1f15a1305f6baf26eb707cf3165c6e16df5ed",
@@ -69,10 +69,19 @@
     },
     "measurement": {
       "platform": "linux",
-      "samples": 3,
+      "samples": 9,
       "freshProcess": true,
-      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
-      "qFail": 0
+      "frames": "frameReps per sealed case; frame 0 is the verified untimed scene-transfer frame, frames 1..frameReps-1 are the measured novel frames (trusted per-frame entry-value edits, verified against the trusted reference renderer)",
+      "q": "per sealed case, 0 when any frame mismatches, else 0.6/(1 + p99_ms/0.6) + 0.4/(1 + peak_rss_mib/16); p99_ms = nearest-rank p99 across measured novel frames of the per-frame minimum over the nine fresh-process repetitions, timed by the trusted parent; peak_rss_mib = max kernel-reported candidate peak RSS across repetitions; capsule scalar = mean across sealed cases",
+      "p99ScaleMs": 0.6,
+      "allocScaleMb": 16,
+      "p99Weight": 0.6,
+      "allocWeight": 0.4,
+      "qFail": 0,
+      "qBase": 0.5479684465002275,
+      "sigma": 0.002862855134451968,
+      "qReference": 0.5753668688252388,
+      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)) from the locked A-A calibration (stability aggregates of the pinned ordering report)"
     }
   }
 }
