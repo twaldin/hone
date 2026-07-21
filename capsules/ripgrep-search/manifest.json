@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_75e5807aeac9",
+  "id": "cap_e1f30ea0d177",
   "objective": "Improve reciprocal geometric-mean latency across 28 frozen cases spanning six mixed literal, regex, Unicode, ignore-file, no-match, and many-small-file ripgrep search categories. Exact stdout, stderr, and exit-result hashes, relevant cargo tests, and peak RSS at no more than 102% of baseline are hard gates. Only crates/searcher/src, crates/regex/src, and crates/ignore/src are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "688f0418e117f26b8ff65f78b2278d28381e85af"
+    "commit": "997137430e45cb46c635a6c77349e30eee88e78f"
   },
   "image": "hone-ripgrep-search@sha256:a8054f1c8594b544245ae18e41b838f1ccc6b955938d58254239c76716e5f457",
   "evalEntrypoint": [
@@ -69,7 +69,7 @@
   "assetGroups": [
     {
       "id": "train",
-      "visibility": "holdout",
+      "visibility": "public",
       "paths": [
         "assets/train/cases.json",
         "assets/train/corpus.tar.gz"
@@ -77,7 +77,7 @@
     },
     {
       "id": "validation",
-      "visibility": "holdout",
+      "visibility": "protected",
       "paths": [
         "assets/validation/cases.json",
         "assets/validation/corpus.tar.gz"
@@ -92,7 +92,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:07ddab4400a8ddc0cfac0f193a238f01562dcfd483c3bcc670e4fd971d539c5d"
+    "hash": "sha256:e90c0ac2e247f8455e363a9fc83dce215ab9fc395f340eafce998628f97181f5"
   },
   "contentHashes": {
     "assets/train/cases.json": "sha256:0119926a737d3d24900bcf92ebc91ccedac26c2f2bddbc0c46d5471c2235c298",

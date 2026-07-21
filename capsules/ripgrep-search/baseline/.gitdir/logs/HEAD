@@ -2,3 +2,4 @@
 0c0575de81f908dfda83cf964981f0163108face 9a4f1d95b774968fc1954e779f0b5dbb42b2fa2f twaldin <timothy@waldin.net> 1784433232 -0700	commit (amend): Seal pinned ripgrep baseline
 9a4f1d95b774968fc1954e779f0b5dbb42b2fa2f db7c135ec2c6442bb90d1b3dd0cf4681d48c1473 twaldin <timothy@waldin.net> 1784433280 -0700	commit (amend): Seal pinned ripgrep baseline
 db7c135ec2c6442bb90d1b3dd0cf4681d48c1473 688f0418e117f26b8ff65f78b2278d28381e85af twaldin <timothy@waldin.net> 1784439230 -0700	commit (amend): Seal pinned ripgrep baseline
+688f0418e117f26b8ff65f78b2278d28381e85af 997137430e45cb46c635a6c77349e30eee88e78f Hone Capsule Author <hone-capsule@invalid.local> 1784564318 -0700	commit: Seal search binary and isolate per-invocation writable state

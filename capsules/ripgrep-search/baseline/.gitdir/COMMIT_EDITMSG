@@ -1,1 +1,1 @@
-Seal pinned ripgrep baseline
+Seal search binary and isolate per-invocation writable state

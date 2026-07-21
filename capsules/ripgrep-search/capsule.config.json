@@ -63,14 +63,14 @@
   "assetGroups": [
     {
       "id": "train",
-      "visibility": "holdout",
+      "visibility": "public",
       "paths": [
         "assets/train"
       ]
     },
     {
       "id": "validation",
-      "visibility": "holdout",
+      "visibility": "protected",
       "paths": [
         "assets/validation"
       ]

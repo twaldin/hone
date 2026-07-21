@@ -41,6 +41,9 @@ Q_FAIL = 0.0
 _LIBC = ctypes.CDLL(None, use_errno=True)
 MS_NOSUID = 2
 MS_NODEV = 4
+MS_REC = 16384
+MS_PRIVATE = 1 << 18
+CLONE_NEWNS = 0x00020000
 
 def load_worker_module() -> Any:
     path = TRUSTED / "worker.py"
@@ -233,16 +236,42 @@ def child_setup() -> None:
     _WORKER.enter_candidate(CANDIDATE_UID, CANDIDATE_GID, MAX_BUILD_FILE)
 
 
+def isolate_mount_namespace(scratch: Path) -> None:
+    """Give this forked worker a private, ephemeral mount namespace.
+
+    Runs in the child while still root (before privilege drop). A fresh
+    namespace with only a per-invocation writable tmpfs at ``scratch`` means
+    the candidate binary has no persistent writable surface across warmup and
+    measured repetitions: the sealed executable and read-only corpus remain the
+    only durable state, and anything written here evaporates when this process
+    exits. This closes the warmup-record-then-replay gaming vector.
+    """
+    if _LIBC.unshare(CLONE_NEWNS) != 0:
+        raise OSError(ctypes.get_errno(), "unshare(CLONE_NEWNS) failed")
+    if _LIBC.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
+        raise OSError(ctypes.get_errno(), "mount / private failed")
+    target = os.fsencode(str(scratch))
+    data = f"size=64m,mode=0700,uid={CANDIDATE_UID},gid={CANDIDATE_GID}".encode("ascii")
+    if _LIBC.mount(b"tmpfs", target, b"tmpfs", MS_NOSUID | MS_NODEV, data) != 0:
+        raise OSError(ctypes.get_errno(), "mount scratch tmpfs failed")
+
+
 def run_child(
     argv: list[str],
     *,
     cwd: Path,
     env: dict[str, str],
     timeout_sec: float,
+    isolate: bool = False,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="command-", dir=BUILD_ROOT) as td:
         stdout_path = Path(td) / "stdout"
         stderr_path = Path(td) / "stderr"
+        scratch: Path | None = None
+        if isolate:
+            scratch = Path(td) / "scratch"
+            scratch.mkdir(mode=0o755)
+            env = {**env, "TMPDIR": str(scratch)}
         out_fd = os.open(stdout_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         err_fd = os.open(stderr_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         started = time.perf_counter_ns()
@@ -254,6 +283,8 @@ def run_child(
                 os.close(out_fd)
                 os.close(err_fd)
                 os.chdir(cwd)
+                if scratch is not None:
+                    isolate_mount_namespace(scratch)
                 child_setup()
                 os.execve(argv[0], argv, env)
             except BaseException as err:
@@ -383,6 +414,40 @@ def build_and_test(work: Path) -> tuple[Path, float]:
     return binary, time.perf_counter() - started
 
 
+def seal_binary(binary: Path) -> Path:
+    """Copy the freshly built rg into a root-owned, read-only directory.
+
+    The build directory is candidate-writable, so the binary that ran the
+    cargo build could be swapped or shadowed with a warmup-record between the
+    unmeasured warmup and the measured repetitions. Sealing it root-owned and
+    read-only, with no writable sibling, makes the measured executable
+    immutable and unforgeable for the duration of the search phase.
+    """
+    sealed_dir = BUILD_ROOT / "sealed"
+    if sealed_dir.exists():
+        shutil.rmtree(sealed_dir)
+    sealed_dir.mkdir(mode=0o755)
+    sealed = sealed_dir / "rg"
+    shutil.copyfile(binary, sealed)
+    os.chmod(sealed, 0o555)
+    os.chmod(sealed_dir, 0o555)
+    return sealed
+
+
+def lock_down_build_surfaces() -> None:
+    """Remove every candidate-writable build surface before measuring.
+
+    Once the binary is sealed and the corpus extracted read-only, no durable
+    writable location must survive into the search phase. Dropping the 0777
+    build/target/cargo/home/tmp directories leaves the candidate with only the
+    fresh per-invocation tmpfs granted by isolate_mount_namespace.
+    """
+    for name in ("work", "target", "cargo-home", "candidate-tmp", "home"):
+        path = BUILD_ROOT / name
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def load_benchsuite_module() -> Any:
     path = TRUSTED / "benchsuite" / "benchsuite"
     loader = importlib.machinery.SourceFileLoader("ripgrep_upstream_benchsuite", str(path))
@@ -454,7 +519,7 @@ def evaluate_searches(
         for index in range(benchmark.warmup_count + benchmark.count):
             batch_elapsed_ms = 0.0
             for _ in range(processes_per_sample):
-                outcome = run_child(command.cmd, cwd=corpus_cwd, env=env, timeout_sec=SEARCH_TIMEOUT_SEC)
+                outcome = run_child(command.cmd, cwd=corpus_cwd, env=env, timeout_sec=SEARCH_TIMEOUT_SEC, isolate=True)
                 stdout_hash = sha256_bytes(outcome["stdout"])
                 stderr_hash = sha256_bytes(outcome["stderr"])
                 observed_hash = result_hash(outcome["exitCode"], stdout_hash, stderr_hash)
@@ -528,7 +593,9 @@ def main() -> None:
         cases_path, config = locate_cases()
         binary, build_sec = build_and_test(work)
         corpus_cwd = extract_corpus(cases_path, config)
-        q, peak_rss, timings, correctness_digest = evaluate_searches(binary, corpus_cwd, config)
+        sealed_binary = seal_binary(binary)
+        lock_down_build_surfaces()
+        q, peak_rss, timings, correctness_digest = evaluate_searches(sealed_binary, corpus_cwd, config)
         output = {
             "valid": True,
             "objectives": {"score": q},
