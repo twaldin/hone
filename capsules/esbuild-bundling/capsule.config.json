@@ -54,7 +54,7 @@
     },
     {
       "id": "validation",
-      "visibility": "public",
+      "visibility": "protected",
       "paths": [
         "assets/validation"
       ]

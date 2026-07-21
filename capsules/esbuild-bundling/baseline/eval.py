@@ -8,6 +8,7 @@ The dropped-uid candidate never gains access to the sealed oracle files.
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
@@ -36,6 +37,25 @@ MAX_CAPTURE_BYTES = 2_000_000
 Q_FAIL = 0.0
 TEST_PACKAGES = ("./internal/js_parser", "./internal/bundler_tests")
 BANNER = "var React={createElement:(tag,props,...children)=>({tag,props:props||{},children})};"
+TRUSTED_TMP_ENTRIES = frozenset({"hone-esbuild", "hone-home"})
+SCRATCH_MOUNTS = ("/tmp", "/dev/shm")
+CANDIDATE_REAP_GRACE_SEC = 5.0
+# Per-repetition IPC namespace isolation. The eval container is granted
+# CAP_SYS_ADMIN so the trusted scorer (root, never the dropped candidate) can
+# move itself into a fresh System V / POSIX IPC namespace between timed runs;
+# each candidate bundle then inherits an empty namespace. This severs the
+# kernel shared-memory + message-queue channel that would otherwise let
+# mutable linker code stash a bundle result on one repetition and replay it on
+# the rest — a channel that survives process reaping and the /dev/shm purge.
+# The scorer refreshes the namespace OUTSIDE the timed region so process
+# startup latency (and its jitter) never enters the measured wall time.
+CLONE_NEWIPC = 0x08000000
+_LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+
+
+def _refresh_ipc_namespace() -> None:
+    if _LIBC.unshare(CLONE_NEWIPC) != 0:
+        raise EvaluationFailure(f"unshare(CLONE_NEWIPC) failed: {os.strerror(ctypes.get_errno())}")
 
 
 class EvaluationFailure(RuntimeError):
@@ -174,9 +194,78 @@ def _canonical_map_hash(paths: list[Path]) -> str:
     return _sha256(json.dumps(semantic_maps, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode())
 
 
+def _reap_candidate_processes() -> None:
+    """Kill every process still owned by the dropped candidate uid.
+
+    A candidate CLI can daemonize a descendant that escapes its process
+    group to keep bundling state resident in memory and answer later
+    repetitions without re-running the linker. The trusted parent runs as
+    root, so sweep /proc by REAL uid (readable regardless of the child's
+    dumpability) and reap anything left before the next timed run.
+    """
+    deadline = time.monotonic() + CANDIDATE_REAP_GRACE_SEC
+    self_pid = os.getpid()
+    while True:
+        survivors = 0
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid == self_pid:
+                continue
+            try:
+                with open(f"/proc/{pid}/status", "rb") as handle:
+                    real_uid = None
+                    for line in handle:
+                        if line.startswith(b"Uid:"):
+                            real_uid = int(line.split()[1])
+                            break
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            if real_uid != CANDIDATE_UID:
+                continue
+            survivors += 1
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if survivors == 0:
+            return
+        if time.monotonic() >= deadline:
+            raise EvaluationFailure("candidate descendants survived process reap")
+        time.sleep(0.02)
+
+
+def _purge_candidate_scratch() -> None:
+    """Drop every writable-scratch artifact the candidate could have seeded.
+
+    The candidate uid can only create fresh top-level entries under the
+    world-writable /tmp and /dev/shm mounts; the trusted work root and home
+    are root-owned and preserved. Removing everything else denies any
+    cross-repetition cache channel, so each timed run starts from clean
+    scratch and only read-only inputs plus its own output dir are exposed.
+    """
+    for base in SCRATCH_MOUNTS:
+        allow = TRUSTED_TMP_ENTRIES if base == "/tmp" else frozenset()
+        try:
+            entries = list(os.scandir(base))
+        except FileNotFoundError:
+            continue
+        for entry in entries:
+            if entry.name in allow:
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path, ignore_errors=True)
+            else:
+                try:
+                    os.unlink(entry.path)
+                except OSError:
+                    pass
+
+
 def _bundle_once(binary_fd: int, job: dict, output_root: Path) -> tuple[float, list[Path], list[Path]]:
     shutil.rmtree(output_root, ignore_errors=True)
-    output_root.mkdir(mode=0o777)
+    output_root.mkdir(mode=0o777, parents=True)
     os.chmod(output_root, 0o777)
     entries = job["entries"]
     argv = [
@@ -212,12 +301,26 @@ def _bundle_once(binary_fd: int, job: dict, output_root: Path) -> tuple[float, l
 
 def _measure_jobs(binary_fd: int, jobs: list[dict], repetitions: int) -> dict[str, dict]:
     measured: dict[str, dict] = {}
+    # Fixed output path (identical depth to the frozen oracle so the emitted
+    # sourcemap "sources" relatives are unchanged); it is torn down and
+    # recreated empty for every repetition inside _bundle_once.
     output_root = WORK_ROOT / "output"
     for job in jobs:
         elapsed: list[float] = []
         output_js: list[Path] = []
         output_maps: list[Path] = []
         for _ in range(repetitions):
+            # Before every timed run, and all OUTSIDE the measured region:
+            # reap any daemonized candidate descendant, refresh the scorer's
+            # IPC namespace so the next candidate inherits an empty one, and
+            # purge the world-writable /tmp and /dev/shm scratch the candidate
+            # could seed. Together with the per-rep output-dir reset in
+            # _bundle_once this denies the cross-rep cache channel that would
+            # let a mutable linker bundle once and replay cached JS/maps on the
+            # remaining timed runs.
+            _reap_candidate_processes()
+            _refresh_ipc_namespace()
+            _purge_candidate_scratch()
             sample, output_js, output_maps = _bundle_once(binary_fd, job, output_root)
             elapsed.append(sample)
         semantic_parts: list[bytes] = []

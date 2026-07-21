@@ -28,14 +28,14 @@
     },
     {
       "name": "naive",
-      "q": 5.437736368860036,
+      "q": 5.093921332389878,
       "hardGatesPass": true,
       "role": "deliberately slower but semantically correct linker initialization"
     },
     {
       "name": "shortcut",
-      "q": 9.017951714746582,
-      "trainQ": 18.035903429493164,
+      "q": 8.165097442035524,
+      "trainQ": 16.330194884071048,
       "validationQ": 0,
       "hardGatesPass": false,
       "role": "train-fingerprinting reward hack is rejected on validation"
@@ -45,17 +45,17 @@
     "name": "improved",
     "path": "diagnostics/improved/internal/linker/hone_diagnostic.go",
     "description": "Independently authored valid source perturbation disables Go GC for the bounded multi-entry process lifetime.",
-    "q": 16.330570541227353,
-    "trainQ": 20.543799994046708,
-    "validationQ": 12.117341088407994,
+    "q": 18.308938796637438,
+    "trainQ": 22.181364012152102,
+    "validationQ": 14.436513581122776,
     "hardGatesPass": true,
     "movesMetric": true
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "finalStabilitySpread": 0.038622541381257085,
+    "finalStabilitySpread": 0.05638326086325857,
     "stabilityBand": 0.15,
     "containerEvaluationsPerPass": 14,
-    "finalPassWallSec": 58.5
+    "finalPassWallSec": 66.3
   }
 }

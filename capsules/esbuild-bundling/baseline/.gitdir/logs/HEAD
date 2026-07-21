@@ -1,3 +1,6 @@
 0000000000000000000000000000000000000000 bd587f3b813d4ca33b04bf6acbce7bbc09818da5 Hone <hone@localhost> 1784430033 -0700	commit (initial): baseline
 bd587f3b813d4ca33b04bf6acbce7bbc09818da5 164a6e5b92b67ca07a90f8663d3a4768887c4567 Hone <hone@localhost> 1784431250 -0700	commit (amend): baseline
 164a6e5b92b67ca07a90f8663d3a4768887c4567 08016ed1c721b20c26c2ed3482640804be10984b Hone <hone@localhost> 1784431926 -0700	commit (amend): baseline
+08016ed1c721b20c26c2ed3482640804be10984b 08a1a01b8f9a9e2c5570a8a72e4e96b8fe64017a Hone <hone@localhost> 1784564010 -0700	commit: linker robustness: isolate writable scratch and reap candidate descendants between timed bundle repetitions
+08a1a01b8f9a9e2c5570a8a72e4e96b8fe64017a 18a39d106b4365284b1bb2841888e60ac12bb8e0 Hone <hone@localhost> 1784612803 -0700	commit: linker robustness: per-rep IPC namespace, /tmp+/dev/shm purge, descendant reap between timed bundle repetitions
+18a39d106b4365284b1bb2841888e60ac12bb8e0 7659dec928aa73f07788ae5c49b6f9b890b1e30b Hone <hone@localhost> 1784613137 -0700	commit: linker robustness: refresh IPC namespace parent-side (outside timed region) plus /tmp+/dev/shm purge and descendant reap between timed bundle repetitions
