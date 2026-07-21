@@ -176,31 +176,35 @@ async function callCandidate(input: RetentionInput): Promise<CandidateResponse> 
   });
   child.stdin.write(request);
   child.stdin.end();
-  let settled = false;
-  const timedExit = Bun.sleep(CALL_TIMEOUT_MS).then(() => {
-    if (!settled) child.kill("SIGKILL");
-    return { timedOut: !settled, exitCode: -1 };
-  });
-  const normalExit = child.exited.then((exitCode) => {
-    settled = true;
-    return { timedOut: false, exitCode };
-  });
+  const stdoutPromise = readLimited(child.stdout, MAX_RESPONSE_BYTES);
+  const stderrPromise = readLimited(child.stderr, 16_384);
+  // One deadline covers worker exit AND stream EOF: a candidate descendant
+  // that inherits the pipes cannot hold the evaluator past the per-sample
+  // budget, because the stream drain races the same timer as the exit.
+  const drained = Promise.all([child.exited, stdoutPromise, stderrPromise]).then(
+    ([exitCode, stdout, stderr]) => ({ timedOut: false as const, exitCode, stdout, stderr }),
+  );
+  drained.catch(() => undefined);
+  const expired = Bun.sleep(CALL_TIMEOUT_MS).then(() => ({ timedOut: true as const }));
   try {
-    const stdoutPromise = readLimited(child.stdout, MAX_RESPONSE_BYTES);
-    const stderrPromise = readLimited(child.stderr, 16_384);
-    const exit = await Promise.race([normalExit, timedExit]);
-    settled = true;
-    const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
-    if (exit.timedOut) return { error: `worker timeout after ${CALL_TIMEOUT_MS} ms` };
-    if (exit.exitCode !== 0) return { error: `worker exited ${exit.exitCode}: ${stderr.slice(0, 300)}` };
-    const parsed: unknown = JSON.parse(stdout.trim());
+    const outcome = await Promise.race([drained, expired]);
+    if (outcome.timedOut) {
+      child.kill("SIGKILL");
+      // Reap the full candidate process tree before returning so orphaned
+      // descendants cannot keep inherited pipes or state alive past the sample.
+      await resetCandidateState();
+      await child.exited;
+      return { error: `worker timeout after ${CALL_TIMEOUT_MS} ms` };
+    }
+    if (outcome.exitCode !== 0) return { error: `worker exited ${outcome.exitCode}: ${outcome.stderr.slice(0, 300)}` };
+    const parsed: unknown = JSON.parse(outcome.stdout.trim());
     if (!isRecord(parsed) || parsed.nonce !== nonce || typeof parsed.projection !== "string") {
       return { error: "invalid worker response envelope" };
     }
     return { projection: parsed.projection };
   } catch (error) {
-    settled = true;
     child.kill("SIGKILL");
+    await resetCandidateState();
     await child.exited;
     return { error: error instanceof Error ? error.message : String(error) };
   } finally {
@@ -235,6 +239,7 @@ export function assessProjection(
   let currentPreserved = false;
   let recordsArray = false;
   const selected: ProjectedRecord[] = [];
+  let malformedRecords = 0;
   if (projection !== undefined) {
     try {
       const parsed: unknown = JSON.parse(projection);
@@ -249,8 +254,12 @@ export function assessProjection(
         else {
           for (const value of parsed.records) {
             const record = projectedRecord(value);
-            if (record === undefined) issues.push("invalid-record-shape");
-            else selected.push(record);
+            if (record === undefined) {
+              // Any record that fails shape validation is treated as fabricated:
+              // the no-fabricated-record hard gate must fail, not just annotate.
+              malformedRecords += 1;
+              issues.push("invalid-record-shape");
+            } else selected.push(record);
           }
         }
       }
@@ -262,7 +271,7 @@ export function assessProjection(
   const sourceById = new Map(input.records.map((record) => [record.id, record]));
   const seen = new Set<string>();
   let duplicates = 0;
-  let fabricated = 0;
+  let fabricated = malformedRecords;
   let retainedUtility = 0;
   for (const item of selected) {
     if (seen.has(item.id)) {
@@ -416,7 +425,12 @@ async function main(): Promise<void> {
       groupCount: Object.keys(combinedGroups).length,
     },
   };
-  process.stdout.write(`${JSON.stringify(output)}\n`);
+  await Bun.write(Bun.stdout, `${JSON.stringify(output)}\n`);
 }
 
-if (import.meta.main) await main();
+if (import.meta.main) {
+  await main();
+  // Terminate deterministically: a leaked candidate pipe fd must never keep
+  // the trusted evaluator alive after the verdict has been flushed.
+  process.exit(0);
+}
