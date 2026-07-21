@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_494779558b18",
+  "id": "cap_fe4afdc181b6",
   "objective": "Minimize Block Search render cost on frozen scenes while preserving the exact selected block command stream. Correctness is a hard gate; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "9d4eb12dfb1258124279a161c022b3ad0d93c4a7"
+    "commit": "1f25ed25495167f0eacb085a16b772eef1393203"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
@@ -22,14 +22,14 @@
   "assetGroups": [
     {
       "id": "train",
-      "visibility": "holdout",
+      "visibility": "public",
       "paths": [
         "assets/train/cases.json"
       ]
     },
     {
       "id": "validation",
-      "visibility": "holdout",
+      "visibility": "protected",
       "paths": [
         "assets/validation/cases.json"
       ]
@@ -43,7 +43,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:9a66d791a7489dc287847bd34a0c74c9b8671af0be0bbae9b5c5c42d03c0a13d"
+    "hash": "sha256:33d9609da9742239790037d1bbd00ce9bf8577781c77308b2c79dafbe0aa2560"
   },
   "contentHashes": {
     "assets/train/cases.json": "sha256:af0f8f524b070405603f7b47b1c1b4d0c69e382cfef752a3e51a139df0832fd0",
@@ -68,9 +68,10 @@
     },
     "measurement": {
       "platform": "linux",
-      "samples": 3,
+      "samples": 5,
+      "frames": 100,
       "freshProcess": true,
-      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
+      "q": "exact-output hard gate times the bounded reciprocal 1/(1+g) of the geometric mean g of the median-across-samples p99 trusted per-frame render time (ms) and the trusted peak allocation footprint (MB); frame repetitions are driven by the evaluator over a once-loaded frozen scene",
       "qFail": 0
     }
   }

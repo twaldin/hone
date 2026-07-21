@@ -16,14 +16,14 @@
   "assetGroups": [
     {
       "id": "train",
-      "visibility": "holdout",
+      "visibility": "public",
       "paths": [
         "assets/train"
       ]
     },
     {
       "id": "validation",
-      "visibility": "holdout",
+      "visibility": "protected",
       "paths": [
         "assets/validation"
       ]
@@ -51,9 +51,10 @@
     },
     "measurement": {
       "platform": "linux",
-      "samples": 3,
+      "samples": 5,
+      "frames": 100,
       "freshProcess": true,
-      "q": "mean exact-output correctness divided by one plus trusted slowest-of-three milliseconds",
+      "q": "exact-output hard gate times the bounded reciprocal 1/(1+g) of the geometric mean g of the median-across-samples p99 trusted per-frame render time (ms) and the trusted peak allocation footprint (MB); frame repetitions are driven by the evaluator over a once-loaded frozen scene",
       "qFail": 0
     },
     "tags": [

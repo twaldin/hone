@@ -1,6 +1,9 @@
 {
   "version": 1,
-  "innerReps": 9,
+  "frames": 100,
+  "samples": 5,
+  "warmupFrames": 10,
+  "batch": 10,
   "timeoutSec": 10,
   "publicCases": [
     {

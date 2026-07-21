@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import gc
 import json
+import math
 import os
 import resource
 import secrets
@@ -25,7 +27,10 @@ from pathlib import Path
 TRUSTED_DIR = Path(__file__).resolve().parent
 WORKER = TRUSTED_DIR / "worker.py"
 CHALLENGE = json.loads((TRUSTED_DIR / "challenge.json").read_text())
-INNER_REPS = int(CHALLENGE.get("innerReps", 3))
+FRAMES = int(CHALLENGE.get("frames", 100))
+SAMPLES = int(CHALLENGE.get("samples", 4))
+WARMUP_FRAMES = int(CHALLENGE.get("warmupFrames", 8))
+BATCH = int(CHALLENGE.get("batch", 10))
 CALL_TIMEOUT_SEC = float(os.environ.get("CAPSULE_CALL_TIMEOUT_SEC", CHALLENGE.get("timeoutSec", 10)))
 MAX_RESPONSE_BYTES = int(os.environ.get("CAPSULE_MAX_RESPONSE_BYTES", "8000000"))
 WORKER_UID = int(os.environ.get("CAPSULE_WORKER_UID", "2000"))
@@ -269,12 +274,20 @@ class Worker:
         finally:
             sel.close()
 
-    def call(self, payload) -> CallOutcome:
+    def call(self, payload=None, *, load: bool = True, reps: int = 1) -> CallOutcome:
         if not self.ensure():
             return CallOutcome(0.0, None, f"candidate import failed: {self.import_error}")
         assert self.proc is not None and self.proc.stdin is not None
         nonce = secrets.token_hex(16)
-        request = (json.dumps({"id": nonce, "input": payload}, separators=(",", ":")) + "\n").encode()
+        # `load` sends the frozen scene; a repeat request (load=False) re-renders
+        # the already-loaded scene `reps` times inside the trusted worker loop so
+        # the trusted timing isolates render cost from pipe round-trips.
+        message: dict = {"id": nonce}
+        if load:
+            message["input"] = payload
+        if reps != 1:
+            message["reps"] = reps
+        request = (json.dumps(message, separators=(",", ":")) + "\n").encode()
         started = time.perf_counter()
         try:
             self.proc.stdin.write(request)
@@ -322,33 +335,129 @@ def load_cases(path: Path) -> list[dict]:
     return cases
 
 
+def _percentile(values: list[float], q: float) -> float:
+    """Nearest-rank percentile over trusted parent-measured frame times."""
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    rank = math.ceil(q * len(ordered))
+    index = min(max(rank - 1, 0), len(ordered) - 1)
+    return ordered[index]
+
+
+def _worker_alloc_kb(worker: "Worker") -> float | None:
+    """Peak resident set (VmHWM, KB) of the live candidate worker, read by the
+    trusted parent from /proc. Kernel-maintained and root-read, so candidate
+    code cannot forge or suppress it (allocation is never self-reported)."""
+    pid: int | None = None
+    candidates = _candidate_pids()
+    if candidates:
+        pid = max(candidates)
+    elif worker.proc is not None:
+        pid = worker.proc.pid
+    if pid is None:
+        return None
+    try:
+        status = Path(f"/proc/{pid}/status").read_text()
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+        return None
+    for line in status.splitlines():
+        if line.startswith("VmHWM:"):
+            fields = line.split()
+            if len(fields) >= 2:
+                try:
+                    return float(fields[1])
+                except ValueError:
+                    return None
+    return None
+
+
 def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
-    outcomes: list[CallOutcome] = []
-    for _ in range(INNER_REPS):
+    """Registered scalar: bounded reciprocal 1/(1+g) of the geometric mean g
+    of the p99 frame time (ms) and the peak-allocation footprint (MB), under a
+    per-frame exact-output hard gate.
+
+    Frame repetitions are driven HERE (trusted parent), never by candidate
+    code. The frozen scene is loaded once per fresh worker; the evaluator then
+    drives WARMUP_FRAMES + FRAMES repeated renders in trusted code, timed by
+    the trusted parent in batches of BATCH renders per request so the pipe
+    round-trip floor amortizes to noise, and validates the command stream it
+    returns. A candidate cannot delete or short-circuit the loop -- the
+    evaluator owns it -- and is scored on its own per-frame render cost, not
+    on scene transport."""
+    expected = canonical(case["expected"])
+    sample_p99: list[float] = []
+    total_frames = 0
+    alloc_kb: list[float] = []
+    error: str | None = None
+    correct = True
+    for _sample in range(SAMPLES):
+        # Fresh writable state + fresh worker process per sample, so no sample
+        # can carry writable state into the next.
         reset_candidate_state()
         worker = Worker(workspace)
+        frame_ms: list[float] = []
         try:
-            outcome = worker.call(case["input"])
+            first = worker.call(case["input"], load=True)
+            if first.error is not None:
+                error = first.error
+                correct = False
+            elif canonical(first.result) != expected:
+                correct = False
+            if error is None:
+                warm = worker.call(load=False, reps=WARMUP_FRAMES - 1)
+                if warm.error is not None:
+                    error = warm.error
+                    correct = False
+                elif canonical(warm.result) != expected:
+                    correct = False
+            if error is None:
+                for _ in range(FRAMES // BATCH):
+                    outcome = worker.call(load=False, reps=BATCH)
+                    frame_ms.append(outcome.elapsed_ms / BATCH)
+                    if outcome.error is not None:
+                        error = outcome.error
+                        correct = False
+                        break
+                    if canonical(outcome.result) != expected:
+                        correct = False
+                peak_kb = _worker_alloc_kb(worker)
+                if peak_kb is not None:
+                    alloc_kb.append(peak_kb)
         finally:
             try:
                 worker.kill()
             finally:
                 reset_candidate_state()
-        outcomes.append(outcome)
-        if outcome.error is not None:
+        total_frames += len(frame_ms) * BATCH
+        if len(frame_ms) == FRAMES // BATCH:
+            sample_p99.append(_percentile(frame_ms, 0.99))
+        if error is not None:
             break
-    slowest_ms = max((outcome.elapsed_ms for outcome in outcomes), default=0.0)
-    error = next((outcome.error for outcome in outcomes if outcome.error is not None), None)
-    correct = error is None and len(outcomes) == INNER_REPS and all(
-        canonical(outcome.result) == canonical(case["expected"]) for outcome in outcomes
-    )
-    score = (1.0 / (1.0 + slowest_ms)) if correct else 0.0
-    feedback = (
-        f"all {INNER_REPS} repetitions matched in slowest {slowest_ms:.3f} ms"
-        if correct
-        else f"incorrect or failed in slowest {slowest_ms:.3f} ms: {error or 'exact output mismatch'}"
-    )
-    return slowest_ms, correct, {"score": score, "feedback": feedback}
+    # Per-sample p99 then median across samples: a true p99 frame-time estimate
+    # that rejects outlier samples (a single scheduler preemption cannot set the
+    # reported latency).
+    p99_ms = statistics.median(sample_p99) if sample_p99 else 0.0
+    alloc_mb = (statistics.fmean(alloc_kb) / 1024.0) if alloc_kb else 1.0
+    correct = correct and error is None and total_frames == SAMPLES * FRAMES
+    if correct:
+        # Bounded reciprocal of the geometric mean (corpus-standard 1/(1+g)
+        # form): monotone-decreasing in cost, q in (0, 1], so no single case
+        # can dominate the cross-case mean and micro-second jitter on
+        # IPC-floor scenes cannot destabilize aggregates.
+        cost = math.sqrt(max(p99_ms, 1e-6) * max(alloc_mb, 1e-6))
+        score = 1.0 / (1.0 + cost)
+        feedback = (
+            f"{SAMPLES}x{FRAMES} frames matched; p99 {p99_ms:.3f} ms, "
+            f"peak alloc {alloc_mb:.2f} MB, q {score:.4f}"
+        )
+    else:
+        score = 0.0
+        feedback = (
+            f"incorrect or failed at p99 {p99_ms:.3f} ms: "
+            f"{error or 'exact output mismatch'}"
+        )
+    return p99_ms, correct, {"score": score, "feedback": feedback}
 
 
 def run_public_suite(workspace: Path) -> tuple[bool, str]:
@@ -373,6 +482,9 @@ def run_public_suite(workspace: Path) -> tuple[bool, str]:
 
 
 def main() -> None:
+    # Parent-side timing is nondeterministic under cyclic GC; refcounting keeps
+    # this short-lived process bounded, so disable it for stable frame timing.
+    gc.disable()
     _configure_candidate_subreaper()
     reset_candidate_state()
     assets_dir = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
