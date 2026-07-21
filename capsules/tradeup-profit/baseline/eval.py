@@ -12,9 +12,13 @@ from __future__ import annotations
 import json
 import os
 import resource
+import selectors
 import shutil
+import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +91,97 @@ def _load_cases(assets_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return cases, failures
 
 
+def _kill_worker_tree(process: subprocess.Popen) -> None:
+    """Kill and reap the FULL worker process group on every exit path.
+
+    The worker runs in its own session (start_new_session=True), so killing
+    the process group also reaches any descendant a policy spawned to hold
+    the response pipes open past its own exit.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        process.kill()
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        pass
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
+def _exchange_bounded(
+    process: subprocess.Popen, payload: bytes
+) -> tuple[bytes, bytes, str | None]:
+    """Feed the request stream and read both worker pipes incrementally.
+
+    Enforces an IN-FLIGHT byte cap and a hard wall-clock deadline, so a
+    stream flood or a descendant that inherits the pipes and outlives the
+    worker hits the fail path instead of stalling or exhausting the trusted
+    evaluator. The process group is killed and reaped on every exit path.
+    """
+    deadline = time.monotonic() + CALL_TIMEOUT_SEC
+
+    def _feed() -> None:
+        try:
+            process.stdin.write(payload)
+            process.stdin.flush()
+            process.stdin.close()
+        except Exception:
+            pass
+
+    feeder = threading.Thread(target=_feed, daemon=True)
+    feeder.start()
+
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    selector = selectors.DefaultSelector()
+    for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, name)
+    failure: str | None = None
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = "worker timeout"
+                break
+            for key, _events in selector.select(min(remaining, 0.25)):
+                name = key.data
+                try:
+                    chunk = os.read(key.fd, 65536)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                buffers[name].extend(chunk)
+                if len(buffers[name]) > MAX_RESPONSE_BYTES:
+                    failure = "worker response exceeded byte cap"
+                    break
+            if failure is not None:
+                break
+        if failure is None:
+            try:
+                process.wait(timeout=max(deadline - time.monotonic(), 0.1))
+            except subprocess.TimeoutExpired:
+                failure = "worker timeout"
+    finally:
+        selector.close()
+        _kill_worker_tree(process)
+        feeder.join(timeout=1.0)
+    return bytes(buffers["stdout"]), bytes(buffers["stderr"]), failure
+
+
 def _run_candidate(workspace: Path, cases: list[dict[str, Any]]) -> tuple[dict[str, Any], str | None]:
     requests = "".join(
         json.dumps({"id": case["id"], "case": public_case(case)}, separators=(",", ":")) + "\n"
@@ -112,17 +207,12 @@ def _run_candidate(workspace: Path, cases: list[dict[str, Any]]) -> tuple[dict[s
         )
     except Exception as exc:
         return {}, f"worker spawn failed: {type(exc).__name__}"
-    try:
-        stdout, stderr = process.communicate(requests, timeout=CALL_TIMEOUT_SEC)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
-        return {}, "worker timeout"
+    stdout, stderr, failure = _exchange_bounded(process, requests)
+    if failure is not None:
+        return {}, failure
     if process.returncode != 0:
         detail = stderr[:300].decode("utf8", "replace").replace("\n", " ")
         return {}, f"worker exited {process.returncode}: {detail}"
-    if len(stdout) > MAX_RESPONSE_BYTES or len(stderr) > MAX_RESPONSE_BYTES:
-        return {}, "worker response exceeded byte cap"
     responses: dict[str, Any] = {}
     try:
         for raw in stdout.splitlines():
