@@ -70,7 +70,8 @@
       "normalizationScale": 3851796.054818401,
       "noiseFractionOfScale": 0.07447095221456838,
       "benchmarkTargetMsPerSample": 250,
-      "benchmarkSamplesPerWorkload": 3,
+      "benchmarkSamplesPerWorkload": 5,
+      "benchmarkSampleSelection": "fastest of 5 timed samples per workload (k=1 trimmed selection; host contention can only lengthen a sample, so the minimum elapsed time rejects scheduler-noise outliers without candidate-controlled influence)",
       "threadCount": 4,
       "peakCommittedGate": "for each workload, mi_stats_get page_committed.peak after a fresh mi_stats_reset and fixed one-round memory pass must be <= split baseline * 1.01",
       "fragmentationGate": "at each driver's fixed live allocation checkpoint, max(0,page_committed.current-(malloc_normal.current+malloc_huge.current))/page_committed.current from merged mi_stats must be <= split baseline * 1.01"
@@ -88,9 +89,9 @@
       "protectedPathEscape": "broker diff-protects build files, public/statistics headers, statistics implementation, evaluator, worker, tests, and four workload drivers; evaluator rejects symlinks and new files outside src or include/mimalloc",
       "benchmarkSpecialCasing": "distinct sealed train and validation seeds; a trusted first-size fingerprint diagnostic is expected to win train and lose validation",
       "fixtureFingerprinting": "both split configurations are holdout-only and mounted under root-owned /capsule; compilation runs as uid 2000 before the protected evaluator invokes drivers",
-      "outputFabrication": "trusted drivers perform real mi_malloc/mi_zalloc/mi_free calls, touch allocation boundaries, and emit deterministic non-address checksums checked against sealed values",
-      "timerTampering": "protected harness uses CLOCK_MONOTONIC_RAW under uid 2000 with network disabled and no mutable clock or benchmark code",
+      "outputFabrication": "trusted drivers perform real mi_malloc/mi_zalloc/mi_free calls, touch allocation boundaries, and emit deterministic non-address checksums checked against sealed values; the trusted evaluator additionally audits every linked benchmark binary with nm and rejects candidate-defined timing or output symbols (clock_gettime, printf, write and variants), and runs each workload under a kernel-enforced RLIMIT_NPROC task cap of the sealed thread budget plus the coordinating main thread",
       "buildScriptMutation": "CMake files, fixed O2/MI_STAT flags, worker, test sources, and toolchain lock are protected; every evaluation performs a clean source rebuild",
+      "timerTampering": "protected harness reads CLOCK_MONOTONIC_RAW through a non-interposable inline direct-syscall boundary (no linkable timing symbol exists for a candidate translation unit to interpose), runs under uid 2000 with network disabled, and the evaluator's symbol audit rejects any candidate-defined timing or output symbols before a benchmark binary is executed",
       "deadCodeBenchmarkBypass": "the benchmark uses public allocation entry points linked to the same static library exercised by upstream api and stress tests"
     },
     "tags": ["m2", "terminal", "oss", "mimalloc", "allocator", "performance"]

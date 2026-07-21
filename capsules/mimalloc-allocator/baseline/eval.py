@@ -27,6 +27,20 @@ TARGET_MS = 250
 WORKLOAD_IDS = ("single", "multithread", "small", "fragmentation")
 ALLOWED_MUTABLE_PREFIXES = ("src/", "include/mimalloc/")
 STAT_GUARD_TOKENS = ("MI_STAT", "mi_stat_", "_mi_stat_", "mi_heap_stat_", "mi_os_stat_")
+MAIN_THREAD_ALLOWANCE = 1
+# Runtime symbols a candidate allocator translation unit must never define:
+# they are linked into the same executable as the trusted harness, so a strong
+# definition here would be resolved by the static linker in place of libc,
+# letting candidate code fabricate elapsed time or the reported result line.
+INTERPOSITION_SYMBOLS = frozenset({
+    "clock_gettime", "__clock_gettime", "clock_gettime64", "__clock_gettime64",
+    "gettimeofday", "__gettimeofday", "clock", "times",
+    "syscall",
+    "printf", "__printf_chk", "fprintf", "__fprintf_chk",
+    "vprintf", "vfprintf", "__vfprintf_chk", "dprintf", "sprintf", "snprintf",
+    "puts", "fputs", "fwrite", "putchar", "fputc",
+    "write", "__write", "writev", "pwrite",
+})
 
 
 class GateFailure(RuntimeError):
@@ -123,6 +137,36 @@ def unmount_build_tmpfs() -> None:
         BUILD_ROOT.rmdir()
 
 
+def assert_no_interposition() -> None:
+    binaries = sorted(BUILD_DIR.glob("hone-*"))
+    if len(binaries) != len(WORKLOAD_IDS):
+        raise GateFailure("benchmark binaries missing after build")
+    for binary in binaries:
+        try:
+            completed = subprocess.run(
+                ["nm", "--defined-only", "--format=posix", str(binary)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise GateFailure(f"symbol audit failed: {exc}") from exc
+        if completed.returncode != 0:
+            raise GateFailure("symbol audit could not read benchmark binary")
+        for line in completed.stdout.decode("ascii", "replace").splitlines():
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            name, symbol_type = fields[0], fields[1]
+            if symbol_type in ("U", "v", "w"):
+                continue
+            if name in INTERPOSITION_SYMBOLS:
+                raise GateFailure(
+                    f"candidate defines interposable runtime symbol '{name}' in {binary.name}"
+                )
+
 def check_source_envelope() -> None:
     if not WORKSPACE.is_dir():
         raise GateFailure("candidate workspace is missing")
@@ -215,6 +259,18 @@ def load_workloads() -> dict:
 
 def run_benchmark(row: dict) -> float:
     binary = BUILD_DIR / f"hone-{row['id']}"
+    task_cap = int(row["threads"]) + MAIN_THREAD_ALLOWANCE
+
+    def capped_demote() -> None:
+        # Kernel-enforced ceiling on the uid-2000 task count: an allowed
+        # allocator translation unit cannot spawn more concurrent threads than
+        # the sealed per-workload thread budget plus the coordinating main
+        # thread. Applied before the privilege drop so the exec'd workload
+        # inherits the limit; a candidate exceeding it fails clone() and the
+        # workload aborts rather than silently passing the thread-count gate.
+        resource.setrlimit(resource.RLIMIT_NPROC, (task_cap, task_cap))
+        demote()
+
     try:
         completed = subprocess.run(
             [str(binary), str(row["seed"]), str(row["targetMs"])],
@@ -223,7 +279,7 @@ def run_benchmark(row: dict) -> float:
             stderr=subprocess.DEVNULL,
             timeout=WORKLOAD_TIMEOUT_SEC,
             check=False,
-            preexec_fn=demote,
+            preexec_fn=capped_demote,
             cwd=BUILD_DIR,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -282,6 +338,7 @@ def main() -> None:
         run_worker("build")
         build_sec = time.monotonic() - build_started
         run_worker("test")
+        assert_no_interposition()
 
         throughputs = [run_benchmark(row) for row in metadata["workloads"]]
         score = geometric_mean(throughputs)

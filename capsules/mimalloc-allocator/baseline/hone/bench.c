@@ -12,14 +12,41 @@
 #include <string.h>
 #include <time.h>
 
-#define HONE_SAMPLES 3
+#define HONE_SAMPLES 5
 #define HONE_MAX_ROUNDS (UINT32_C(1) << 20)
 
 static volatile uint64_t hone_sink;
 
+/*
+ * Timing crosses a non-interposable direct-syscall boundary. The benchmark
+ * links the mutable allocator archive into this same executable, so a plain
+ * clock_gettime reference could be resolved by the static linker to a
+ * candidate-provided strong symbol. Emitting the syscall instruction inline
+ * removes that seam entirely; the trusted evaluator additionally rejects any
+ * candidate-defined timing or output symbols before this binary is run.
+ */
 static uint64_t monotonic_ns(void) {
   struct timespec ts;
-  if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) return 0;
+  ts.tv_sec = 0;
+  ts.tv_nsec = 0;
+  long rc;
+#if defined(__aarch64__)
+  register long x8 __asm__("x8") = 113; /* __NR_clock_gettime */
+  register long x0 __asm__("x0") = (long)CLOCK_MONOTONIC_RAW;
+  register long x1 __asm__("x1") = (long)&ts;
+  __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory");
+  rc = x0;
+#elif defined(__x86_64__)
+  register long rdi __asm__("rdi") = (long)CLOCK_MONOTONIC_RAW;
+  register long rsi __asm__("rsi") = (long)&ts;
+  __asm__ volatile("syscall"
+                   : "=a"(rc)
+                   : "a"(228L), "r"(rdi), "r"(rsi) /* __NR_clock_gettime */
+                   : "rcx", "r11", "memory");
+#else
+  rc = clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#endif
+  if (rc != 0) return 0;
   return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
 }
 
@@ -111,6 +138,12 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
     samples[sample] = (double)measured.operations * 1000000000.0 / (double)elapsed;
     hone_sink ^= measured.checksum;
   }
+  /*
+   * Robustness: report the fastest sample (k=1 of N trimmed selection).
+   * Host or sibling-container contention can only lengthen a sample, never
+   * shorten it, so the minimum rejects scheduler-noise outliers without
+   * giving candidate code any influence over the selection.
+   */
   qsort(samples, HONE_SAMPLES, sizeof(samples[0]), compare_double);
 
   mi_collect(true);
@@ -123,7 +156,7 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
   }
   hone_sink ^= validation.checksum;
   printf("ok %s %.9f %016" PRIx64 " %zu %.12f %u %" PRIu64 "\n",
-         workload, samples[HONE_SAMPLES / 2], validation.checksum,
+         workload, samples[HONE_SAMPLES - 1], validation.checksum,
          validation.peak_committed, validation.fragmentation, rounds, hone_sink);
   return 0;
 }

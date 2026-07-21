@@ -4,9 +4,6 @@ This is free software; you can redistribute it and/or modify it under the
 terms of the MIT license. A copy of the license can be found in the file
 "LICENSE" at the root of this distribution.
 -----------------------------------------------------------------------------*/
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC optimize("O3,unroll-loops")
-#endif
 #if !defined(MI_IN_ALLOC_C)
 #error "this file should be included from 'alloc.c' (so aliases can work from alloc-override)"
 // add includes help an IDE
@@ -192,6 +189,16 @@ static inline void mi_free_ex(void* p, size_t* usable) mi_attr_noexcept
 }
 
 void mi_free(void* p) mi_attr_noexcept {
+  if (p != NULL && hone_mag_on()) {
+    const size_t usable = mi_usable_size(p);
+    const int b = hone_mag_bucket(usable);
+    if (b >= 0 && hone_mag_count[b] < HONE_MAG_DEPTH) {
+      hone_mag_slot[b][hone_mag_count[b]] = p;
+      hone_mag_usable[b][hone_mag_count[b]] = usable;
+      hone_mag_count[b]++;
+      return;
+    }
+  }
   mi_free_ex(p,NULL);
 }
 

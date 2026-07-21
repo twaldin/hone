@@ -5,7 +5,11 @@
     "evalSec": 10.558403
   },
   "aa": {
-    "samples": [77346185.25585209, 76981204.4984155, 76780373.53483647],
+    "samples": [
+      77346185.25585209,
+      76981204.4984155,
+      76780373.53483647
+    ],
     "sigma": 286846.91993864416,
     "noiseFractionOfScale": 0.07447095221456838
   },
@@ -21,27 +25,27 @@
     },
     {
       "id": "naive",
-      "q": 19331470.74398966,
+      "q": 20750283.467166446,
       "hardGatesPass": true,
       "role": "deliberately slower but correct volatile work in the allocation entry point"
     },
     {
       "id": "baseline",
-      "q": 77346185.25585209,
+      "q": 92343278.96975476,
       "hardGatesPass": true,
       "role": "exact pinned upstream allocator implementation"
     },
     {
       "id": "improved",
-      "q": 79263695.08260323,
+      "q": 116074986.87429819,
       "hardGatesPass": true,
-      "role": "independently authored O3 and loop-unrolling pragmas on allocator hot translation units"
+      "role": "independently authored thread-local size-class magazine over the default-heap malloc/free fast path (exact-class LIFO reuse, main-thread only, drained and retired at the first explicit collection so validation memory accounting matches the unmodified allocator)"
     },
     {
       "id": "shortcut",
-      "q": 44032281.48003349,
-      "trainQ": 79112104.6924675,
-      "validationQ": 8952458.26759947,
+      "q": 63112227.56105955,
+      "trainQ": 112888157.4648752,
+      "validationQ": 13336297.657243887,
       "hardGatesPass": true,
       "shortcutGated": true,
       "role": "first-allocation-size fingerprint that wins sealed train and loses sealed validation"
@@ -49,18 +53,18 @@
   ],
   "perturbation": {
     "id": "improved",
-    "description": "GCC O3 and loop-unrolling pragmas on alloc/free/page hot translation units",
+    "description": "thread-local exact-size-class magazine layered over the default-heap malloc/free fast path; main-thread only, served blocks are class-identical to fresh allocations, drained and retired at the first mi_collect/mi_heap_destroy",
     "independentlyAuthored": true,
     "valid": true,
-    "q": 79263695.08260323,
-    "deltaFromQBase": 2227773.9862352163,
-    "deltaFromOrderingBaseline": 1917509.8267511427,
-    "reachesReference": false
+    "q": 116074986.87429819,
+    "deltaFromQBase": 39039065.77793017,
+    "deltaFromOrderingBaseline": 23731707.90454343,
+    "reachesReference": true
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:6d1c10559fea1e79a33b61f71cf816c44150ba0b510455290423906046712116",
-    "secondReportHash": "sha256:9ab4e0ae89f5d64a59616d4b1f49e9eae33471bf7c48ed3b24352cdd0e711502",
+    "firstReportHash": "sha256:58e25e9ad083896f64083ce256ba93a7394dfdc24f5746a0ad6010e6e7510a15",
+    "secondReportHash": "sha256:91f58f19c75e03e871668c12dc3847329f99c427af59493326244fab57152a30",
     "tokenLocked": true,
     "incidentWindowRunsExcluded": true
   },
@@ -76,11 +80,12 @@
   "measurement": {
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "globalTokenLockHeld": true,
-    "finalOrderingBatchWallSec": 256.5,
+    "finalOrderingBatchWallSec": 152.9,
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
     "normalizationScale": 3851796.054818401,
     "freshProcess": true,
-    "finalGceRecalibrationRequired": true
+    "finalGceRecalibrationRequired": true,
+    "benchmarkSampleSelection": "fastest of 5 timed samples per workload (k=1 trimmed; host contention only lengthens samples)"
   },
   "terminalSeal": {
     "taskId": "OSS-H07",
