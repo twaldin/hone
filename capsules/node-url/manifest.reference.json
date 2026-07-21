@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_2b91498b26c9",
+  "id": "cap_cf90cb84e848",
   "objective": "Improve geometric-mean WHATWG URL parse, href serialize/update, and URLSearchParams parse/serialize throughput using the pinned upstream benchmark/url harness. All parallel/test-url* and parallel/test-whatwg-url* tests, byte-exact serialized outputs, and peak heap/RSS no greater than the measured baseline plus 2% are hard gates. Only src/node_url.cc, src/node_url.h, lib/internal/url.js, deps/ada/ada.cpp, deps/ada/ada.h, and deps/ada/ada_c.h are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b"
+    "commit": "b11ab9ddc054523a980d1766c2af23de61a01115"
   },
   "image": "hone-node-url@sha256:e316c3e9fc3623e9d817c1a05233dc8ce54310facc635be2343bd684541df168",
   "evalEntrypoint": [
@@ -34,6 +34,7 @@
     "worker.py",
     "memory_probe.js",
     "exact_output.js",
+    "test_sentinel.js",
     "toolchain.lock.json",
     "benchmark/**",
     "test/**",
@@ -116,7 +117,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:ba88d3a43eed29d14460f65f8a4369235848b32cffad8f12d70a504d71e564eb"
+    "hash": "sha256:bdb6e5547baba024cde887262f9b731a08ec228ed52c7c5b682bcd249d867bea"
   },
   "contentHashes": {
     "assets/train/workload.json": "sha256:b06dc704a3a80fbe5417c44df305510ef26e6fc82f26c9752083b1c1b66bcb34",
@@ -124,9 +125,17 @@
   },
   "meta": {
     "evaluatorSource": "user",
-    "partition": "m2-terminal-holdout",
+    "provenance": "nodejs/node at exact revision 9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b; current-head terminal capsule with no reference patch; baseline commit is a synthetic sealed-store commit layering the trusted evaluator glue over the pinned upstream WHATWG URL surface; terminal holdout assets and all diagnostic measurements remain capsule-local and were never exposed to an optimizer; trusted parent-side marginal wall-clock baseline stability samples [2506995.963308928, 2478857.8243704624, 2472401.336947227] give qBase=2486085.041542206 and sample sigma=18394.878208677652; qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=2610389.293619316; independently authored URLSearchParams serialization caching passes all gates and moves q",
     "license": "MIT with bundled third-party notices and licenses preserved in the upstream LICENSE and deps trees",
-    "provenance": "nodejs/node at exact revision 9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b; current-head terminal capsule with no reference patch; terminal holdout assets and all diagnostic measurements remain capsule-local and were never exposed to an optimizer; interleaved fresh-process A-A samples [3033080.8615360023, 3048513.748301425, 3039970.3553504916] give qBase=3040521.6550626396 and sample sigma=7731.199584026476; qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=3192547.7378157717; independently authored URLSearchParams serialization caching passes all gates and moves q",
+    "tags": [
+      "m2",
+      "terminal",
+      "oss",
+      "nodejs",
+      "whatwg-url",
+      "performance"
+    ],
+    "partition": "m2-terminal-holdout",
     "sourceDetails": {
       "repository": "nodejs/node",
       "revision": "9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b",
@@ -153,41 +162,34 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on the frozen GCE Linux host",
       "freshProcess": true,
-      "q": "geometric mean ops/sec across 16 frozen upstream benchmark/url cells per split",
-      "qFail": 0.0,
+      "q": "geometric mean ops/sec across 16 frozen upstream benchmark/url cells per split; throughput is derived by the trusted parent evaluator from the marginal wall-clock between the fastest-of-2 base-scale and fastest-of-2 8x-scale runs of each protected upstream cell (trimmed sampling rejects host-contention outliers), never from candidate-emitted output",
+      "qFail": 0,
       "memoryTolerance": 0.02,
       "cleanBuildSec": 8144.85722,
       "worstSurfaceIncrementalRebuildSec": 33.67,
-      "feasibilityEvalSec": 6.09,
-      "qBase": 3040521.6550626396,
-      "sigma": 7731.199584026476,
-      "qReference": 3192547.7378157717,
-      "qReferenceConstruction": "3040521.6550626396 + max(5*7731.199584026476, 0.05*abs(3040521.6550626396-0)) = 3192547.7378157717",
+      "feasibilityEvalSec": 99.279104,
+      "qBase": 2486085.041542206,
+      "sigma": 18394.878208677652,
+      "qReference": 2610389.293619316,
+      "qReferenceConstruction": "2486085.041542206 + max(5*18394.878208677652, 0.05*abs(2486085.041542206-0)) = 2610389.293619316",
       "aaSamples": [
-        3033080.8615360023,
-        3048513.748301425,
-        3039970.3553504916
+        2506995.963308928,
+        2478857.8243704624,
+        2472401.336947227
       ],
-      "normalizationScale": 152026.08275313198,
-      "noiseFractionOfScale": 0.05085442868761414,
+      "normalizationScale": 124304.2520771103,
+      "noiseFractionOfScale": 0.14798269489016885,
       "benchmarkCellsPerSplit": 16
     },
     "exploitReview": {
-      "protectedPathEscape": "the broker protects evaluator, build, benchmark, test, fixture, and toolchain paths; the evaluator byte-hashes every non-mutable candidate file against the trusted baseline and rejects additions, deletions, symlinks, and repository metadata",
+      "protectedPathEscape": "the broker protects evaluator, build, benchmark, test, fixture, and toolchain paths; the evaluator byte-hashes every non-mutable candidate file that appears in the workspace against the trusted baseline and rejects additions, mismatches, symlinks, and repository metadata, while intentionally-hidden protected files are simply absent from the sanitized workspace",
       "benchmarkSpecialCasing": "train and validation choose disjoint holdout benchmark/common URL and SearchParams identities; the shortcut diagnostic accelerates recognized train inputs but is slowed and rejected in ordering on unseen validation inputs",
       "fixtureFingerprinting": "both terminal splits are holdout-visible only to the trusted terminal diagnostic path; workload JSON is staged root-only and only validated benchmark arguments are passed to unprivileged processes",
-      "outputFabrication": "a protected exact-output worker independently constructs real URL and URLSearchParams objects and byte-compares href and form serialization against sealed expected outputs before scoring",
-      "timerTampering": "the protected NODE_OPTIONS memory probe makes process.hrtime non-writable and non-configurable before the protected upstream benchmark harness loads candidate URL code",
+      "outputFabrication": "a protected exact-output worker independently constructs real URL and URLSearchParams objects and byte-compares href and form serialization against sealed expected outputs before scoring; benchmark throughput is computed by the trusted parent from its own monotonic wall-clock across base and 8x workload scales with fastest-of-2 trimmed sampling per scale, so candidate-controlled stdout, IPC, or in-process timers never set the score, and a sub-resolution marginal saturates at a bounded floor rate instead of a candidate-chosen value",
+      "timerTampering": "the trusted parent evaluator measures benchmark wall-clock outside every candidate-linked process; the protected NODE_OPTIONS memory probe additionally pins process.hrtime before the upstream harness loads candidate URL code, and candidate-reported rates serve only as structural completion markers",
+      "testShortCircuit": "each parallel URL test additionally runs under a protected sentinel preload whose completion marker fires only after the event loop drains naturally with exit code zero, checked against a frozen per-file inventory, so candidate code that terminates a test child early fails the gate instead of hiding assertion bodies",
       "buildScriptMutation": "configuration, Ninja graph, evaluator, worker, benchmark sources, tests, and toolchain lock are protected; only six implementation files are copied into a fresh image-backed build volume",
       "deadCodeBenchmarkBypass": "the protected upstream scripts retain live result values and benchmark the same URL and URLSearchParams entry points covered by the exact-output gate and upstream parallel tests"
-    },
-    "tags": [
-      "m2",
-      "terminal",
-      "oss",
-      "nodejs",
-      "whatwg-url",
-      "performance"
-    ]
+    }
   }
 }

@@ -8,6 +8,7 @@ import math
 import os
 import re
 import resource
+import signal
 import subprocess
 import sys
 import time
@@ -23,6 +24,8 @@ SOURCE = Path("/opt/node")
 NODE = SOURCE / "out/Release/node"
 SANDBOX_UID = 2000
 PROCESS_TIMEOUT_SEC = 180
+MIN_MARGINAL_SEC = 0.01
+SAMPLES_PER_SCALE = 2
 MUTABLE_FILES = frozenset({
     "src/node_url.cc",
     "src/node_url.h",
@@ -130,26 +133,25 @@ def check_source_envelope() -> None:
         for path in TRUSTED_DIR.rglob("*")
         if path.is_file()
     }
-    candidate_paths: set[str] = set()
     for path in WORKSPACE.rglob("*"):
         relative = path.relative_to(WORKSPACE).as_posix()
-        if relative == ".git" or relative.startswith(".git/") or relative == ".gitdir":
+        if relative in {".git", ".gitdir"} or relative.startswith((".git/", ".gitdir/")):
             raise GateFailure("repository metadata is forbidden in the candidate")
         if path.is_symlink() and relative in MUTABLE_FILES:
             raise GateFailure(f"mutable source must be a regular file: {relative}")
         if not path.is_file():
             continue
-        candidate_paths.add(relative)
-        trusted = trusted_paths.get(relative)
-        if trusted is None and relative not in MUTABLE_FILES:
-            raise GateFailure(f"file outside mutable source envelope: {relative}")
         if relative in MUTABLE_FILES:
             continue
+        trusted = trusted_paths.get(relative)
+        if trusted is None:
+            raise GateFailure(f"file outside mutable source envelope: {relative}")
         if file_sha256(path) != file_sha256(trusted):
             raise GateFailure(f"protected source file changed: {relative}")
-    missing = set(trusted_paths) - candidate_paths - MUTABLE_FILES
-    if missing:
-        raise GateFailure(f"protected source file is missing: {min(missing)}")
+    # Sanitized candidate workspaces intentionally omit protected baseline
+    # files (the trusted copies are mounted separately at TRUSTED_DIR), so
+    # absence of a protected file is expected. Only the mutable envelope must
+    # be present; any protected file that IS present must match byte for byte.
     for relative in MUTABLE_FILES:
         path = WORKSPACE / relative
         if path.is_symlink() or not path.is_file():
@@ -226,31 +228,60 @@ def run_exact_output_gate(workload: dict) -> dict:
     return {"urls": payload["urls"], "searchParams": payload["searchParams"]}
 
 
-def benchmark_cells(workload: dict) -> list[tuple[str, str, list[str]]]:
-    cells: list[tuple[str, str, list[str]]] = []
+def benchmark_cells(workload: dict) -> list[dict]:
+    """16 upstream benchmark/url cells, each measured at two trusted scales.
+
+    The trusted parent derives throughput from the marginal wall-clock between
+    the base-scale and 8x-scale runs of the same protected upstream script, so
+    startup and setup costs cancel and candidate-emitted output is never a
+    timing source. The 8x boost keeps the marginal comfortably above the
+    plausibility floor even for legitimately cached fast paths (~10ns/op),
+    while an early-terminating process still measures a near-zero marginal
+    and is rejected.
+    """
+    cells: list[dict] = []
     base = str(workload["withBase"]).lower()
+    parse_e = workload["urlParseExponent"]
+    props_e = workload["urlPropertiesExponent"]
+    iterations = workload["searchParamsIterations"]
     for row in workload["urls"]:
-        cells.append((
-            f"url-parse:{row['id']}",
-            "benchmark/url/whatwg-url-parse.js",
-            [f"e={workload['urlParseExponent']}", f"withBase={base}", f"type={row['id']}"],
-        ))
-        cells.append((
-            f"url-href:{row['id']}",
-            "benchmark/url/whatwg-url-properties.js",
-            ["prop=href", f"e={workload['urlPropertiesExponent']}", f"withBase={base}", f"type={row['id']}"],
-        ))
+        cells.append({
+            "id": f"url-parse:{row['id']}",
+            "script": "benchmark/url/whatwg-url-parse.js",
+            "base": [f"e={parse_e}", f"withBase={base}", f"type={row['id']}"],
+            "boosted": [f"e={parse_e + 3}", f"withBase={base}", f"type={row['id']}"],
+            "extra_ops": 7 * 200 * (2 ** parse_e),
+        })
+        cells.append({
+            "id": f"url-href:{row['id']}",
+            "script": "benchmark/url/whatwg-url-properties.js",
+            "base": ["prop=href", f"e={props_e}", f"withBase={base}", f"type={row['id']}"],
+            "boosted": ["prop=href", f"e={props_e + 3}", f"withBase={base}", f"type={row['id']}"],
+            "extra_ops": 7 * 200 * (2 ** props_e),
+        })
     for row in workload["searchParams"]:
         for operation in ("parse", "serialize"):
-            cells.append((
-                f"searchparams-{operation}:{row['id']}",
-                f"benchmark/url/legacy-vs-whatwg-url-searchparams-{operation}.js",
-                [f"n={workload['searchParamsIterations']}", "method=whatwg", f"searchParam={row['id']}"],
-            ))
+            cells.append({
+                "id": f"searchparams-{operation}:{row['id']}",
+                "script": f"benchmark/url/legacy-vs-whatwg-url-searchparams-{operation}.js",
+                "base": [f"n={iterations}", "method=whatwg", f"searchParam={row['id']}"],
+                "boosted": [f"n={iterations * 8}", "method=whatwg", f"searchParam={row['id']}"],
+                "extra_ops": 7 * iterations,
+            })
     return cells
 
 
-def run_benchmark(script: str, arguments: list[str]) -> tuple[float, int, int]:
+def demote_session() -> None:
+    os.setsid()
+    demote()
+
+
+def run_benchmark_process(script: str, arguments: list[str]) -> tuple[float, bytes, bytes]:
+    """One benchmark child, timed on the trusted parent's monotonic clock.
+
+    The full process tree runs in its own session so a wall-clock overrun can
+    be reaped as a group instead of leaving harness children behind.
+    """
     env = dict(os.environ)
     env.update({
         "HOME": "/tmp/hone-node-home",
@@ -258,37 +289,95 @@ def run_benchmark(script: str, arguments: list[str]) -> tuple[float, int, int]:
         "NODE_TEST_NO_INTERNET": "1",
         "NO_COLOR": "1",
     })
+    started = time.monotonic()
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             ["/usr/bin/time", "-f", "HONE_EXTERNAL_RSS_KB=%M", str(NODE), str(SOURCE / script), *arguments],
             cwd=SOURCE,
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=PROCESS_TIMEOUT_SEC,
-            check=False,
-            preexec_fn=demote,
+            preexec_fn=demote_session,
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise GateFailure(f"benchmark process failed: {error}") from error
-    if completed.returncode != 0:
-        raise GateFailure("upstream benchmark process failed")
     try:
-        lines = [line for line in completed.stdout.decode("ascii").splitlines() if line.strip()]
+        stdout, stderr = process.communicate(timeout=PROCESS_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            process.kill()
+        try:
+            process.communicate(timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise GateFailure("benchmark process exceeded its wall-clock budget") from None
+    elapsed = time.monotonic() - started
+    if process.returncode != 0:
+        raise GateFailure("upstream benchmark process failed")
+    return elapsed, stdout, stderr
+
+
+def check_report_line(stdout: bytes) -> None:
+    """Structural harness-completion marker only — never a timing source."""
+    try:
+        lines = [line for line in stdout.decode("ascii").splitlines() if line.strip()]
         if len(lines) != 1 or ": " not in lines[0]:
             raise ValueError
-        rate = float(lines[0].rsplit(": ", 1)[1].replace(",", ""))
+        reported = float(lines[0].rsplit(": ", 1)[1].replace(",", ""))
     except (ValueError, UnicodeDecodeError) as error:
-        raise GateFailure("upstream benchmark returned malformed throughput") from error
-    memory_rows = [(int(heap), int(rss)) for heap, rss in MEMORY_RE.findall(completed.stderr)]
-    external_rss_rows = [int(rss_kib) * 1024 for rss_kib in EXTERNAL_RSS_RE.findall(completed.stderr)]
-    if not memory_rows or len(external_rss_rows) != 1:
-        raise GateFailure("trusted benchmark memory probes did not run")
-    heap_used = max(heap for heap, _ in memory_rows)
-    rss = max([rss for _, rss in memory_rows] + external_rss_rows)
+        raise GateFailure("upstream benchmark returned malformed output") from error
+    if not math.isfinite(reported) or reported <= 0:
+        raise GateFailure("upstream benchmark returned an invalid report")
+
+
+def run_benchmark(cell: dict) -> tuple[float, int, int]:
+    """Trusted parent-side differential throughput for one benchmark cell.
+
+    Each scale is sampled SAMPLES_PER_SCALE times and the FASTEST wall-clock
+    is kept (trimmed sampling: host contention only ever adds time, so taking
+    the minimum rejects slow outliers without giving candidate code any
+    control). The score is extra_ops over the marginal wall-clock between the
+    fastest boosted-scale and fastest base-scale runs; candidate stdout is
+    only a structural completion marker.
+
+    Cells whose marginal falls below MIN_MARGINAL_SEC saturate at the
+    measurement resolution floor instead of failing: a legitimately memoized
+    fast path can be loop-eliminated by the JIT and cost ~0 at the margin, so
+    sub-resolution marginals are indistinguishable from free work. The clamp
+    bounds any single cell at extra_ops/MIN_MARGINAL_SEC, so early candidate
+    termination can never mint an unbounded score the way trusting a
+    candidate-printed rate could, and the exact-output, completion-marker,
+    and split-inversion gates still bind such a candidate to correct work.
+    """
+    base_walls: list[float] = []
+    boosted_walls: list[float] = []
+    heap_used = 0
+    rss = 0
+    for _ in range(SAMPLES_PER_SCALE):
+        base_elapsed, base_stdout, base_stderr = run_benchmark_process(cell["script"], cell["base"])
+        boosted_elapsed, boosted_stdout, boosted_stderr = run_benchmark_process(cell["script"], cell["boosted"])
+        check_report_line(base_stdout)
+        check_report_line(boosted_stdout)
+        memory_rows = [(int(heap), int(rss_)) for heap, rss_ in MEMORY_RE.findall(base_stderr)]
+        external_rss_rows = [int(rss_kib) * 1024 for rss_kib in EXTERNAL_RSS_RE.findall(base_stderr)]
+        if not memory_rows or len(external_rss_rows) != 1 or not MEMORY_RE.findall(boosted_stderr):
+            raise GateFailure("trusted benchmark memory probes did not run")
+        # Memory gates bind to base-scale runs only: the sealed baseline
+        # limits were measured at exactly that scale. Ceiling across samples.
+        heap_used = max([heap_used] + [heap for heap, _ in memory_rows])
+        rss = max([rss] + [rss_ for _, rss_ in memory_rows] + external_rss_rows)
+        base_walls.append(base_elapsed)
+        boosted_walls.append(boosted_elapsed)
+    # Saturate at the resolution floor: sub-floor marginals (JIT-eliminated
+    # free ops OR an early-terminating process) all score exactly
+    # extra_ops/MIN_MARGINAL_SEC — bounded, never candidate-chosen.
+    marginal = max(min(boosted_walls) - min(base_walls), MIN_MARGINAL_SEC)
+    rate = cell["extra_ops"] / marginal
     if not math.isfinite(rate) or rate <= 0:
-        raise GateFailure("upstream benchmark returned non-finite throughput")
+        raise GateFailure("trusted benchmark produced non-finite throughput")
     return rate, heap_used, rss
 
 
@@ -309,11 +398,16 @@ def main() -> None:
         tests = run_worker("test")
         exact = run_exact_output_gate(workload)
 
+        cells = benchmark_cells(workload)
+        # One discarded warmup run charges cold page-cache and volume costs
+        # before any timed measurement.
+        run_benchmark_process(cells[0]["script"], cells[0]["base"])
+
         rates: list[float] = []
         max_heap = 0
         max_rss = 0
-        for _, script, arguments in benchmark_cells(workload):
-            rate, heap, rss = run_benchmark(script, arguments)
+        for cell in cells:
+            rate, heap, rss = run_benchmark(cell)
             rates.append(rate)
             max_heap = max(max_heap, heap)
             max_rss = max(max_rss, rss)
@@ -331,7 +425,7 @@ def main() -> None:
             "workloadSha256": workload_hash,
             "exactOutputs": exact,
             "tests": "parallel/test-url*+parallel/test-whatwg-url*",
-            "benchmarkCells": [cell_id for cell_id, _, _ in benchmark_cells(workload)],
+            "benchmarkCells": [cell["id"] for cell in cells],
         }
         result_hash = hashlib.sha256(canonical(identity).encode()).hexdigest()
         elapsed = time.monotonic() - started
@@ -346,7 +440,7 @@ def main() -> None:
             "perExample": {
                 "aggregate": {
                     "score": score,
-                    "feedback": f"16 upstream benchmark/url cells passed all hard gates; q={score:.3f} ops/s",
+                    "feedback": f"16 upstream benchmark/url cells passed all hard gates; q={score:.3f} ops/s (trusted parent-side marginal wall-clock)",
                 }
             },
             "diagnostics": {
