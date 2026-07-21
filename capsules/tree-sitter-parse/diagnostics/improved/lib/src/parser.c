@@ -502,6 +502,7 @@ static bool ts_parser__can_reuse_first_leaf(
   return current_lex_mode.external_lex_state == 0 && table_entry->is_reusable;
 }
 
+__attribute__((optimize("O3,unroll-loops"), hot))
 static Subtree ts_parser__lex(
   TSParser *self,
   StackVersion version,

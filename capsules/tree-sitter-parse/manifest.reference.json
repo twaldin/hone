@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_7f678937c5a0",
+  "id": "cap_99b53d545bd2",
   "objective": "Improve geometric-mean full and incremental JavaScript, Rust, and Python parsing throughput using the operation and bytes/sec semantics of crates/cli/benches/benchmark.rs. Exact full and edited trees, exact changed ranges, incremental/full equivalence, parser tests, and per-workload peak RSS no greater than the frozen baseline plus 2% are hard gates. Only lib/src is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "1ffd612be56259938c47507bbe953af739c7f640"
+    "commit": "8b6f3edddc4adf24af9726fca705aa41235f074c"
   },
   "image": "hone-tree-sitter-parse@sha256:dd7fed81a644ffd07a59d17dd1f95b7833bc6f85d15789e5666f1fc7fb017f26",
   "evalEntrypoint": [
@@ -117,7 +117,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:0d55e514030a5a646a0dbe3f1c2c656cfc471ece65f8b6eaef9db2bbb27e5c1b"
+    "hash": "sha256:d9e7e17de3ae27d8ee118aa898f2e9711641d89fbeb2384f9ccd6b5dfb965a7f"
   },
   "contentHashes": {
     "assets/train/grammars/javascript/LICENSE": "sha256:2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
@@ -223,6 +223,8 @@
       "repository": "tree-sitter/tree-sitter",
       "revision": "1ffd612be56259938c47507bbe953af739c7f640",
       "url": "https://github.com/tree-sitter/tree-sitter/commit/1ffd612be56259938c47507bbe953af739c7f640",
+      "declaredBaselineCommit": "8b6f3edddc4adf24af9726fca705aa41235f074c",
+      "declaredBaselineConstruction": "synthetic admission baseline committed on top of the pinned upstream revision: the upstream tree reduced to the capsule envelope plus the trusted evaluator glue (eval.py, harness.c, benchmark.rs, challenge.json, toolchain.lock.json); the upstream commit is the sole parent and remains the provenance anchor",
       "mutableEnvelope": [
         "lib/src/**"
       ],
@@ -239,7 +241,8 @@
     "measurement": {
       "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local terminal calibration",
       "freshProcess": true,
-      "q": "geometric mean bytes/sec across 12 full/incremental language-size cells",
+      "q": "geometric mean bytes/sec across 12 full/incremental language-size cells, reference-normalized: multiplied by frozen scale 50661657.83045164 and divided by the same-eval geometric-mean throughput of a trusted in-eval baseline yardstick built from /trusted/baseline sources",
+      "benchSampling": "per workload: trusted-reference and candidate bench repetitions interleaved seconds apart, one warm repetition each, then fastest-of-3 timed repetitions with per-phase minimum nanoseconds (trusted trimmed sampling; host contention and frequency drift only add time and are not candidate-controlled, and the in-eval yardstick divides out drift shared across evaluations); byte counters re-verified against the sealed workload on every repetition; RSS gate uses the maximum candidate peak across all repetitions",
       "qFail": 0,
       "qBase": 50661657.83045164,
       "sigma": 2519186.5459757065,
@@ -259,8 +262,8 @@
       "protectedPathEscape": "broker protects evaluator, harness, headers, metadata, image, assets, and all paths outside lib/src; evaluator independently reconstructs protected files from /trusted/baseline and rejects symlinks/non-regular files and new files outside lib/src",
       "benchmarkSpecialCasing": "separate all-holdout train and validation splits; shortcut diagnostic fingerprints the train prefix, wins train, and is forced below baseline on validation",
       "fixtureFingerprinting": "workload and expected-tree assets are root-only broker mounts; compilation completes as uid 2000 before workload bytes are copied into the runnable build directory; protected validation is independently measured",
-      "outputFabrication": "trusted harness invokes the real C runtime API, serializes real trees, checks incremental/full equality, and emits counters only after every parse succeeds; evaluator hashes trusted harness files",
-      "timerTampering": "trusted harness reads CLOCK_MONOTONIC_RAW with a direct pinned linux/arm64 kernel syscall, bypassing candidate-linked symbols; compiler flags, harness, iterations, scalarizer, and GNU-time RSS supervisor are protected; prlimit blocks candidate forks and evaluator processes run unprivileged",
+      "outputFabrication": "trusted harness invokes the real C runtime API, serializes real trees, checks incremental/full equality, and emits verdicts and counters only after every parse succeeds through direct pinned linux/arm64 write syscalls with in-harness integer formatting, so candidate objects linked into the same executable cannot interpose libc output symbols; the evaluator independently recomputes both byte counters from the sealed workload sizes, edit deltas, and trusted iteration counts and rejects any disagreement; evaluator hashes trusted harness files",
+      "timerTampering": "trusted harness reads CLOCK_MONOTONIC_RAW with a direct pinned linux/arm64 kernel syscall, and failure exits use a direct exit_group syscall, bypassing candidate-linked symbols; compiler flags, harness, iterations, scalarizer, and GNU-time RSS supervisor are protected; prlimit blocks candidate forks and evaluator processes run unprivileged",
       "buildScriptMutation": "no candidate build script executes; trusted evaluator invokes pinned cc commands on lib/src and protected grammar sources with network disabled",
       "deadCodeBenchmarkBypass": "the same ts_parser_parse_string API and language parsers produce exact-tree/parser-test evidence immediately before timed full and incremental calls"
     }

@@ -19,9 +19,70 @@ typedef struct {
   uint32_t length;
 } Buffer;
 
-static void fail(const char *message) {
-  fprintf(stderr, "%s\n", message);
-  exit(2);
+/*
+ * Robustness: this executable links the mutable runtime under lib/src, so any
+ * libc symbol (printf, puts, exit, ...) can be overridden by candidate code.
+ * Every trusted result byte and every process exit therefore goes through the
+ * direct pinned linux/arm64 kernel syscalls below, never through symbols the
+ * candidate objects could interpose.
+ */
+static _Noreturn void raw_exit(int code) {
+#if !defined(__linux__) || !defined(__aarch64__)
+#error "trusted exit is pinned to linux/arm64"
+#endif
+  for (;;) {
+    register long syscall_number __asm__("x8") = 94; /* exit_group */
+    register long argument_0 __asm__("x0") = code;
+    __asm__ volatile("svc 0" : : "r"(argument_0), "r"(syscall_number) : "memory", "cc");
+  }
+}
+
+static void raw_write(int fd, const char *data, size_t length) {
+  while (length > 0) {
+    register long syscall_number __asm__("x8") = 64; /* write */
+    register long argument_0 __asm__("x0") = fd;
+    register long argument_1 __asm__("x1") = (long)data;
+    register long argument_2 __asm__("x2") = (long)length;
+    __asm__ volatile(
+        "svc 0"
+        : "+r"(argument_0)
+        : "r"(argument_1), "r"(argument_2), "r"(syscall_number)
+        : "memory", "cc");
+    if (argument_0 == -EINTR) continue;
+    if (argument_0 <= 0) raw_exit(2);
+    data += argument_0;
+    length -= (size_t)argument_0;
+  }
+}
+
+static _Noreturn void fail(const char *message) {
+  size_t length = 0;
+  while (message[length] != '\0') length++;
+  raw_write(2, message, length);
+  raw_write(2, "\n", 1);
+  raw_exit(2);
+}
+
+static size_t append_text(char *buffer, size_t offset, size_t capacity, const char *text) {
+  while (*text != '\0') {
+    if (offset >= capacity) fail("trusted emit overflow");
+    buffer[offset++] = *text++;
+  }
+  return offset;
+}
+
+static size_t append_u64(char *buffer, size_t offset, size_t capacity, uint64_t value) {
+  char digits[20];
+  size_t count = 0;
+  do {
+    digits[count++] = (char)('0' + (value % 10));
+    value /= 10;
+  } while (value > 0);
+  while (count > 0) {
+    if (offset >= capacity) fail("trusted emit overflow");
+    buffer[offset++] = digits[--count];
+  }
+  return offset;
 }
 
 static Buffer read_file(const char *path) {
@@ -195,7 +256,8 @@ static void verify(const char *language_name, Buffer source, uint32_t start, uin
   ts_tree_delete(fresh);
   ts_parser_delete(parser);
   free(edited.data);
-  puts("{\"ok\":true,\"parserTests\":true,\"incrementalEqualsFull\":true}");
+  static const char verdict[] = "{\"ok\":true,\"parserTests\":true,\"incrementalEqualsFull\":true}\n";
+  raw_write(1, verdict, sizeof verdict - 1);
 }
 
 static void benchmark(const char *language_name, Buffer source, uint32_t start, uint32_t old_end,
@@ -230,13 +292,21 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
   uint64_t incremental_ns = now_ns() - incremental_started;
 
   if (full_ns == 0 || incremental_ns == 0) fail("benchmark clock resolution failure");
-  printf(
-      "{\"ok\":true,\"fullBytes\":%" PRIu64 ",\"fullNs\":%" PRIu64
-      ",\"incrementalBytes\":%" PRIu64 ",\"incrementalNs\":%" PRIu64 "}\n",
-      (uint64_t)source.length * full_iterations,
-      full_ns,
-      (uint64_t)edited.length * incremental_iterations,
-      incremental_ns);
+  /* Counters travel only through the non-interposable raw channel; the trusted
+   * evaluator independently recomputes both byte counters from the sealed
+   * workload and iteration counts and rejects any disagreement. */
+  char line[192];
+  size_t offset = 0;
+  offset = append_text(line, offset, sizeof line, "{\"ok\":true,\"fullBytes\":");
+  offset = append_u64(line, offset, sizeof line, (uint64_t)source.length * full_iterations);
+  offset = append_text(line, offset, sizeof line, ",\"fullNs\":");
+  offset = append_u64(line, offset, sizeof line, full_ns);
+  offset = append_text(line, offset, sizeof line, ",\"incrementalBytes\":");
+  offset = append_u64(line, offset, sizeof line, (uint64_t)edited.length * incremental_iterations);
+  offset = append_text(line, offset, sizeof line, ",\"incrementalNs\":");
+  offset = append_u64(line, offset, sizeof line, incremental_ns);
+  offset = append_text(line, offset, sizeof line, "}\n");
+  raw_write(1, line, offset);
 
   ts_tree_delete(old_tree);
   ts_parser_delete(parser);
