@@ -132,6 +132,8 @@ export interface BrokerCorpusConfig {
     developmentCapsuleIds: readonly string[];
     terminalCapsuleIds: readonly string[];
     terminalContentHashes: readonly string[];
+    /** inputsDigest of the corpus-provenance.v1 artifact this config was minted from — run-time cohort fence material. */
+    provenanceInputsDigest?: string | undefined;
   };
   /** Hash of canonical publicSnapshot.documents; verified at broker construction. */
   publicSnapshot: {
@@ -1082,7 +1084,9 @@ export class Broker {
         terminalCapsuleIds.size !== config.corpus.provenance.terminalCapsuleIds.length ||
         terminalContentHashes.size !== config.corpus.provenance.terminalContentHashes.length ||
         [...developmentCapsuleIds].some((identity) => terminalCapsuleIds.has(identity)) ||
-        [...terminalContentHashes].some((hash) => !/^sha256:[0-9a-f]{64}$/.test(hash))
+        [...terminalContentHashes].some((hash) => !/^sha256:[0-9a-f]{64}$/.test(hash)) ||
+        (config.corpus.provenance.provenanceInputsDigest !== undefined &&
+          !/^sha256:[0-9a-f]{64}$/.test(config.corpus.provenance.provenanceInputsDigest))
       ) {
         throw new BrokerError("INTERNAL", "corpus provenance policy is invalid");
       }

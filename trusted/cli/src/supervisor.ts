@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { ApplyMode, BudgetEnvelope, M2ProxyRole, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
 import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue } from "@hone/schema";
-import type { BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
+import type { BrokerCorpusConfig, BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
 import {
   admitCapsule,
   authenticateFrozenCapsuleAssets,
@@ -21,6 +21,7 @@ import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
 import { createBackend as createLocalBackend } from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
 import { applyContractRevision, budgetEnvelopeError, contractHash, renderContract } from "./contract.js";
+import { brokerCorpusConfigDigest, corpusCohortFenceError, type CorpusCohortBinding } from "./corpus-provenance.js";
 import { LadderLockedError, deliver, ladderLocked, LADDER_REFUSAL } from "./deliver.js";
 import { DELIVERY_TARGET_FILE, assertTargetIdentity, isEmbeddedBaselineTarget, readSealedDeliveryTarget, sealDeliveryTarget } from "./delivery-target.js";
 import type { DeliveryTarget } from "./delivery-target.js";
@@ -68,6 +69,8 @@ const CampaignSessionSealV1 = z.object({
   campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   authorityPath: z.string().min(1),
   proxyRole: M2ProxyRole,
+  /** Canonical digest of the exact frozen corpus wire config, when the run carries one. */
+  corpusDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
 }).strict();
 type CampaignSessionSealV1 = z.infer<typeof CampaignSessionSealV1>;
 
@@ -94,11 +97,13 @@ function campaignSessionFenceError(
   campaignConfigHash: `sha256:${string}` | undefined,
   proxyRole: M2ProxyRoleValue | undefined,
   authority: CampaignPauseAuthority | undefined,
+  corpus: BrokerCorpusConfig | undefined,
+  cohort: CorpusCohortBinding | undefined,
 ): string | null {
   if (campaignConfigHash === undefined) {
-    return proxyRole === undefined && authority === undefined
+    return proxyRole === undefined && authority === undefined && corpus === undefined && cohort === undefined
       ? null
-      : "legacy run acquired campaign authority or an M2 proxy role";
+      : "legacy run acquired campaign authority, an M2 proxy role, or a frozen corpus";
   }
   try {
     assertCampaignAuthority(campaignConfigHash, proxyRole, authority);
@@ -109,6 +114,21 @@ function campaignSessionFenceError(
       || seal.authorityPath !== authority.path
     ) {
       return "campaign session role/config/authority seal changed";
+    }
+    if (corpus !== undefined && corpus.provenance.campaignConfigHash !== campaignConfigHash) {
+      return "frozen corpus provenance does not carry the run's sealed campaign config hash";
+    }
+    if (seal.corpusDigest !== (corpus === undefined ? undefined : brokerCorpusConfigDigest(corpus))) {
+      return "campaign corpus seal changed";
+    }
+    if ((corpus === undefined) !== (cohort === undefined)) {
+      return cohort === undefined
+        ? "frozen corpus requires the campaign corpusCohort binding"
+        : "campaign corpusCohort requires the frozen corpus wire config";
+    }
+    if (corpus !== undefined && cohort !== undefined) {
+      const cohortError = corpusCohortFenceError(corpus, cohort);
+      if (cohortError !== null) return cohortError;
     }
     if (authority.isCampaignPaused()) return "campaign is durably paused";
     return null;
@@ -457,6 +477,10 @@ export interface TrustedRunOptions {
   campaignConfigHash?: `sha256:${string}` | undefined;
   /** Trusted recursive broker authority; optimizer/config values cannot supply it. */
   recursiveBroker?: BrokerRecursiveConfig | undefined;
+  /** Frozen development-corpus wire config; trusted campaign orchestration only, never CLI flags/config. */
+  corpus?: BrokerCorpusConfig | undefined;
+  /** The frozen campaign config's corpusCohort block — fenced against the corpus wire config before supervision. */
+  corpusCohort?: CorpusCohortBinding | undefined;
 }
 
 export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunOptions = {}): Promise<number> {
@@ -513,6 +537,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       trusted.evaluationStrategy !== undefined
       || trusted.trustedValidPublicCandidateTarget !== undefined
       || trusted.terminalHoldoutAssetGroupIds !== undefined
+      || trusted.corpus !== undefined
     )
   ) {
     throw new UsageError("provisional capsule quarantine forbids corpus evaluation, optimizer promotion, and terminal holdout workflows");
@@ -553,8 +578,10 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         trusted.campaignConfigHash !== undefined
         || trusted.proxyRole !== undefined
         || trusted.campaignPauseAuthority !== undefined
+        || trusted.corpus !== undefined
+        || trusted.corpusCohort !== undefined
       ) {
-        throw new UsageError("legacy run cannot acquire campaign authority or an M2 proxy role on resume");
+        throw new UsageError("legacy run cannot acquire campaign authority, an M2 proxy role, or a frozen corpus on resume");
       }
     } else {
       if (trusted.campaignConfigHash !== sealedCampaignHash) {
@@ -569,8 +596,23 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ) {
         throw new UsageError("campaign session role/config/authority seal changed since the run started");
       }
+      if (trusted.corpus !== undefined && trusted.corpus.provenance.campaignConfigHash !== sealedCampaignHash) {
+        throw new UsageError("frozen corpus provenance does not carry the run's sealed campaign config hash");
+      }
+      if (campaignSeal.corpusDigest !== (trusted.corpus === undefined ? undefined : brokerCorpusConfigDigest(trusted.corpus))) {
+        throw new UsageError("campaign corpus seal changed since the run started — resume requires the exact frozen corpus");
+      }
       if (trusted.campaignPauseAuthority.isCampaignPaused()) {
         throw new UsageError("campaign is durably paused; only the trusted campaign resume coordinator may reopen admission");
+      }
+      if ((trusted.corpus === undefined) !== (trusted.corpusCohort === undefined)) {
+        throw new UsageError(trusted.corpusCohort === undefined
+          ? "frozen corpus requires the campaign corpusCohort binding"
+          : "campaign corpusCohort requires the frozen corpus wire config");
+      }
+      if (trusted.corpus !== undefined && trusted.corpusCohort !== undefined) {
+        const cohortError = corpusCohortFenceError(trusted.corpus, trusted.corpusCohort);
+        if (cohortError !== null) throw new UsageError(cohortError);
       }
     }
     // Resume replays Gate 2 again: revocation or a delegation change refuses
@@ -665,8 +707,13 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     plan = { runId: found.runId, runDir: found.runDir, config, resumed: true };
   } else {
     if (trusted.campaignConfigHash === undefined) {
-      if (trusted.proxyRole !== undefined || trusted.campaignPauseAuthority !== undefined) {
-        throw new UsageError("M2 proxy roles and campaign pause authority require a trusted campaign config seal");
+      if (
+        trusted.proxyRole !== undefined
+        || trusted.campaignPauseAuthority !== undefined
+        || trusted.corpus !== undefined
+        || trusted.corpusCohort !== undefined
+      ) {
+        throw new UsageError("M2 proxy roles, campaign pause authority, and a frozen corpus require a trusted campaign config seal");
       }
     } else {
       assertCampaignAuthority(
@@ -674,6 +721,18 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         trusted.proxyRole,
         trusted.campaignPauseAuthority,
       );
+      if (trusted.corpus !== undefined && trusted.corpus.provenance.campaignConfigHash !== trusted.campaignConfigHash) {
+        throw new UsageError("frozen corpus provenance does not carry the trusted campaign config hash");
+      }
+      if ((trusted.corpus === undefined) !== (trusted.corpusCohort === undefined)) {
+        throw new UsageError(trusted.corpusCohort === undefined
+          ? "frozen corpus requires the campaign corpusCohort binding"
+          : "campaign corpusCohort requires the frozen corpus wire config");
+      }
+      if (trusted.corpus !== undefined && trusted.corpusCohort !== undefined) {
+        const cohortError = corpusCohortFenceError(trusted.corpus, trusted.corpusCohort);
+        if (cohortError !== null) throw new UsageError(cohortError);
+      }
       if (trusted.campaignPauseAuthority.isCampaignPaused()) {
         throw new UsageError("campaign is durably paused; child/outer run admission remains closed");
       }
@@ -764,6 +823,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         campaignConfigHash: trusted.campaignConfigHash,
         authorityPath: trusted.campaignPauseAuthority?.path,
         proxyRole: trusted.proxyRole,
+        ...(trusted.corpus !== undefined ? { corpusDigest: brokerCorpusConfigDigest(trusted.corpus) } : {}),
       }))}\n`);
     }
     // Snapshot the ADMITTED manifest: resume proves capsule identity against it.
@@ -848,6 +908,8 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ...(trusted.admissionReview !== undefined ? { admissionReview: trusted.admissionReview } : {}),
       ...(trusted.campaignConfigHash !== undefined ? { campaignConfigHash: trusted.campaignConfigHash } : {}),
       ...(trusted.recursiveBroker !== undefined ? { recursiveBroker: trusted.recursiveBroker } : {}),
+      ...(trusted.corpus !== undefined ? { corpus: trusted.corpus } : {}),
+      ...(trusted.corpusCohort !== undefined ? { corpusCohort: trusted.corpusCohort } : {}),
     },
     io,
   );
@@ -1370,6 +1432,8 @@ export interface SuperviseExtra {
   trustedValidPublicCandidateTarget?: number | undefined;
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
   recursiveBroker?: BrokerRecursiveConfig | undefined;
+  corpus?: BrokerCorpusConfig | undefined;
+  corpusCohort?: CorpusCohortBinding | undefined;
   proxyRole?: M2ProxyRole | undefined;
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
   admissionReview?: "required" | "off" | undefined;
@@ -1552,6 +1616,8 @@ async function superviseLocked(
       extra.campaignConfigHash,
       extra.proxyRole,
       extra.campaignPauseAuthority,
+      extra.corpus,
+      extra.corpusCohort,
     );
     if (campaignFenceError !== null) {
       io.err(`resume campaign seal violated: ${campaignFenceError}`);
@@ -1569,6 +1635,8 @@ async function superviseLocked(
       extra.campaignConfigHash,
       extra.proxyRole,
       extra.campaignPauseAuthority,
+      extra.corpus,
+      extra.corpusCohort,
     );
     if (campaignFenceError !== null) {
       io.err(`campaign admission refused: ${campaignFenceError}`);
@@ -1704,6 +1772,7 @@ async function superviseLocked(
     ...(extra.campaignPauseAuthority !== undefined ? { campaignPauseAuthority: extra.campaignPauseAuthority } : {}),
     ...(extra.admissionReview !== undefined ? { admissionReview: extra.admissionReview } : {}),
     ...(extra.recursiveBroker !== undefined ? { recursiveBroker: extra.recursiveBroker } : {}),
+    ...(extra.corpus !== undefined ? { corpus: extra.corpus } : {}),
     replayed,
     signal: abort.signal,
     emit: (event) => (backendFenced ? RunEvent.parse(event) : emit(event)),

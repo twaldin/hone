@@ -1,4 +1,4 @@
-import type { BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
+import type { BrokerCorpusConfig, BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
 import type {
   ArtifactRef,
   BudgetState,
@@ -101,6 +101,8 @@ export interface RunnerBackendContext {
   admissionReview?: "required" | "off" | undefined;
   /** Trusted spawnRun authority for M2 outer/descendant brokers. */
   recursiveBroker?: BrokerRecursiveConfig | undefined;
+  /** Frozen development-corpus wire config (M2); trusted-only, never from CLI flags or run config. */
+  corpus?: BrokerCorpusConfig | undefined;
   /** State replayed from the event log — resume dedupe starts here (nextEpisode, incumbent, budget). */
   replayed: RunState;
   /** Aborted on stop request or budget exhaustion; backends must wind down. */
