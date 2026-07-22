@@ -81,7 +81,7 @@ import {
   type SpawnRunParams as SpawnRunRequest,
 } from "@hone/schema";
 import { extractWorkspaceArtifact } from "../artifact.js";
-import { admitCapsule, type AdmittedCapsule } from "../admission.js";
+import { admitCapsule, capsuleOracleDigest, capsuleScalarizerDigest, type AdmittedCapsule } from "../admission.js";
 import {
   finalizeMetaHoldout,
   selectMetaTrainWinner,
@@ -1416,30 +1416,6 @@ interface DiscoveredCapsule {
   readonly admitted: AdmittedCapsule;
 }
 
-function capsuleOracleDigest(admitted: AdmittedCapsule): Sha256Digest {
-  const manifest = admitted.manifest;
-  return sha256(canonicalJson({
-    domain: "hone-m1-capsule-oracle-v1",
-    capsuleDigest: admitted.digest,
-    baseline: manifest.baseline,
-    image: manifest.image,
-    evalEntrypoint: manifest.evalEntrypoint,
-    assetGroups: manifest.assetGroups,
-    contentHashes: manifest.contentHashes,
-  }));
-}
-
-function capsuleScalarizerDigest(admitted: AdmittedCapsule): Sha256Digest {
-  const manifest = admitted.manifest;
-  return sha256(canonicalJson({
-    domain: "hone-m1-capsule-scalarizer-v1",
-    capsuleDigest: admitted.digest,
-    objective: manifest.objective,
-    baseline: manifest.baseline,
-    image: manifest.image,
-    evalEntrypoint: manifest.evalEntrypoint,
-  }));
-}
 
 export function discoverCapsules(root: string): Map<string, DiscoveredCapsule> {
   const found = new Map<string, DiscoveredCapsule>();
