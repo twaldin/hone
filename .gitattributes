@@ -1,0 +1,5 @@
+# Inner capsule git stores are binary; upstream baseline .gitattributes must never normalize them.
+# NOTE: .git/info/attributes carries the same rules locally (higher precedence than nested in-tree files);
+# a fresh clone MUST copy these lines into .git/info/attributes BEFORE checkout.
+capsules/**/.gitdir/** -text -diff
+capsules/**/.candidate-*/** -text -diff
