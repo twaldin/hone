@@ -31,6 +31,7 @@ FRAMES = int(CHALLENGE.get("frames", 100))
 SAMPLES = int(CHALLENGE.get("samples", 4))
 WARMUP_FRAMES = int(CHALLENGE.get("warmupFrames", 8))
 BATCH = int(CHALLENGE.get("batch", 10))
+REFERENCE_SCALE_MS = float(CHALLENGE.get("referenceP99ScaleMs", 0.5))
 CALL_TIMEOUT_SEC = float(os.environ.get("CAPSULE_CALL_TIMEOUT_SEC", CHALLENGE.get("timeoutSec", 10)))
 MAX_RESPONSE_BYTES = int(os.environ.get("CAPSULE_MAX_RESPONSE_BYTES", "8000000"))
 WORKER_UID = int(os.environ.get("CAPSULE_WORKER_UID", "2000"))
@@ -43,6 +44,11 @@ CLONE_NEWPID = 0x20000000
 CLONE_NEWNET = 0x40000000
 STATE_RESET_TIMEOUT_SEC = 1.0
 _LIBC = ctypes.CDLL(None, use_errno=True)
+MS_NOSUID = 0x2
+MS_NODEV = 0x4
+MS_NOEXEC = 0x8
+MS_REMOUNT = 0x20
+_CGROUP_BASE: Path | None = None
 
 
 def _configure_candidate_subreaper() -> None:
@@ -51,6 +57,51 @@ def _configure_candidate_subreaper() -> None:
     if _LIBC.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
         code = ctypes.get_errno()
         raise RuntimeError(f"cannot become candidate subreaper: {os.strerror(code)}")
+
+
+def _setup_worker_cgroup_authority() -> None:
+    """Prepare a trusted cgroup-v2 measurement root for per-worker memory
+    accounting. Root-owned files under /sys/fs/cgroup are the measurement
+    authority: candidate code (uid 2000, no capabilities, no-new-privileges)
+    cannot create, join, leave, or reset them."""
+    global _CGROUP_BASE
+    if not sys.platform.startswith("linux") or os.geteuid() != 0:
+        return
+    base = Path("/sys/fs/cgroup")
+    controllers_file = base / "cgroup.controllers"
+    if not controllers_file.is_file():
+        raise RuntimeError("cgroup v2 is not mounted; no trusted memory authority")
+    supervisor = base / "hone-eval-supervisor"
+    try:
+        supervisor.mkdir(exist_ok=True)
+    except OSError:
+        # The eval container mounts /sys/fs/cgroup read-only; CAP_SYS_ADMIN
+        # (already granted for per-rep namespace isolation) permits remounting
+        # it writable here in the trusted parent. The candidate worker drops to
+        # uid 2000 under no-new-privileges, so it can never repeat this.
+        if _LIBC.mount(b"none", b"/sys/fs/cgroup", b"cgroup2", MS_REMOUNT | MS_NOSUID | MS_NODEV | MS_NOEXEC, None) != 0:
+            code = ctypes.get_errno()
+            raise RuntimeError(f"cannot remount cgroup2 writable: {os.strerror(code)}")
+        supervisor.mkdir(exist_ok=True)
+    if "memory" not in controllers_file.read_text().split():
+        raise RuntimeError("cgroup v2 memory controller unavailable")
+    # cgroup v2 forbids enabling child controllers while the parent still
+    # hosts processes: park every process (this evaluator) in a supervisor
+    # leaf, then delegate the memory controller to the per-worker siblings.
+    deadline = time.monotonic() + STATE_RESET_TIMEOUT_SEC
+    while True:
+        procs = [pid for pid in (base / "cgroup.procs").read_text().split() if pid]
+        if not procs:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"cannot park processes for cgroup delegation: {procs}")
+        for pid in procs:
+            try:
+                (supervisor / "cgroup.procs").write_text(pid)
+            except ProcessLookupError:
+                pass
+    (base / "cgroup.subtree_control").write_text("+memory")
+    _CGROUP_BASE = base
 
 
 def _candidate_pids() -> list[int]:
@@ -162,7 +213,12 @@ def reset_candidate_state() -> None:
         raise RuntimeError("candidate state survived reset")
 
 
-def _worker_preexec() -> None:
+def _worker_preexec(cgroup: Path | None) -> None:
+    if cgroup is not None:
+        # Enroll this child in its trusted per-worker cgroup BEFORE any
+        # candidate-reachable code runs; membership is inherited by every
+        # descendant, so the whole process tree is accounted.
+        (cgroup / "cgroup.procs").write_text(str(os.getpid()))
     for limit, value in ((resource.RLIMIT_CORE, 0), (resource.RLIMIT_AS, 4 << 30)):
         try:
             resource.setrlimit(limit, (value, value))
@@ -188,12 +244,21 @@ def _worker_preexec() -> None:
 
 
 class CallOutcome:
-    __slots__ = ("elapsed_ms", "result", "error")
+    __slots__ = ("elapsed_ms", "result", "error", "frame_ms", "matched")
 
-    def __init__(self, elapsed_ms: float, result, error: str | None) -> None:
+    def __init__(
+        self,
+        elapsed_ms: float,
+        result,
+        error: str | None,
+        frame_ms: list[float] | None = None,
+        matched: bool = True,
+    ) -> None:
         self.elapsed_ms = elapsed_ms
         self.result = result
         self.error = error
+        self.frame_ms = frame_ms if frame_ms is not None else []
+        self.matched = matched
 
 
 class Worker:
@@ -202,11 +267,13 @@ class Worker:
         self.proc: subprocess.Popen | None = None
         self.buffer = b""
         self.import_error: str | None = None
+        self.cgroup: Path | None = None
 
     def ensure(self) -> bool:
         if self.proc is not None and self.proc.poll() is None:
             return self.import_error is None
         self.buffer = b""
+        self._ensure_cgroup()
         try:
             self.proc = subprocess.Popen(
                 [sys.executable, "-I", "-B", str(WORKER), str(self.workspace)],
@@ -214,7 +281,7 @@ class Worker:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
-                preexec_fn=_worker_preexec,
+                preexec_fn=lambda: _worker_preexec(self.cgroup),
                 cwd=str(TRUSTED_DIR),
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -249,6 +316,34 @@ class Worker:
         self.proc = None
         self.buffer = b""
 
+    def _ensure_cgroup(self) -> None:
+        if _CGROUP_BASE is None or self.cgroup is not None:
+            return
+        path = _CGROUP_BASE / f"hone-worker-{secrets.token_hex(8)}"
+        path.mkdir()
+        self.cgroup = path
+
+    def release(self) -> None:
+        """Kill the worker and retire its trusted measurement cgroup."""
+        self.kill()
+        cgroup = self.cgroup
+        if cgroup is None:
+            return
+        self.cgroup = None
+        try:
+            (cgroup / "cgroup.kill").write_text("1")
+        except OSError:
+            pass
+        deadline = time.monotonic() + STATE_RESET_TIMEOUT_SEC
+        while True:
+            try:
+                os.rmdir(cgroup)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"worker cgroup {cgroup} survived release")
+                time.sleep(0.005)
+
     def _read_line(self, deadline: float) -> tuple[bytes | None, str | None]:
         assert self.proc is not None and self.proc.stdout is not None
         fd = self.proc.stdout.fileno()
@@ -274,14 +369,19 @@ class Worker:
         finally:
             sel.close()
 
-    def call(self, payload=None, *, load: bool = True, reps: int = 1) -> CallOutcome:
+    def call(self, payload=None, *, load: bool = True, reps: int = 1, expected: str | None = None) -> CallOutcome:
         if not self.ensure():
-            return CallOutcome(0.0, None, f"candidate import failed: {self.import_error}")
+            return CallOutcome(0.0, None, f"candidate import failed: {self.import_error}", matched=False)
         assert self.proc is not None and self.proc.stdin is not None
         nonce = secrets.token_hex(16)
         # `load` sends the frozen scene; a repeat request (load=False) re-renders
-        # the already-loaded scene `reps` times inside the trusted worker loop so
-        # the trusted timing isolates render cost from pipe round-trips.
+        # the already-loaded scene `reps` times inside the worker loop. The
+        # worker emits ONE response line per frame, so this trusted parent
+        # observes EVERY frame across the pipe boundary: it times each frame
+        # from arrival deltas on its own clock and exact-output validates each
+        # frame's command stream. Candidate code cannot interpose on the
+        # parent's clock or reads, so a cheap non-final frame is caught by the
+        # per-frame gate (wrong stream) or by the per-frame timing distribution.
         message: dict = {"id": nonce}
         if load:
             message["input"] = payload
@@ -294,29 +394,41 @@ class Worker:
             self.proc.stdin.flush()
         except (BrokenPipeError, OSError):
             self.kill()
-            return CallOutcome(0.0, None, "worker died before call")
-        line, violation = self._read_line(time.monotonic() + CALL_TIMEOUT_SEC)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        if violation is not None or line is None:
-            self.kill()
-            return CallOutcome(elapsed_ms, None, violation or "no response")
+            return CallOutcome(0.0, None, "worker died before call", matched=False)
+        deadline = time.monotonic() + CALL_TIMEOUT_SEC
+        frame_ms: list[float] = []
+        matched = True
+        result = None
+        previous = started
+        for frame in range(1, reps + 1):
+            line, violation = self._read_line(deadline)
+            arrived = time.perf_counter()
+            elapsed_ms = (arrived - started) * 1000.0
+            if violation is not None or line is None:
+                self.kill()
+                return CallOutcome(elapsed_ms, None, violation or "no response", frame_ms, False)
+            try:
+                response = json.loads(line)
+            except ValueError:
+                self.kill()
+                return CallOutcome(elapsed_ms, None, "protocol violation: unparseable response", frame_ms, False)
+            if not isinstance(response, dict) or response.get("id") != nonce:
+                self.kill()
+                return CallOutcome(elapsed_ms, None, "protocol violation: response id mismatch", frame_ms, False)
+            if "error" in response:
+                return CallOutcome(elapsed_ms, None, str(response["error"]), frame_ms, False)
+            if response.get("frame") != frame or "result" not in response:
+                self.kill()
+                return CallOutcome(elapsed_ms, None, "protocol violation: bad frame response", frame_ms, False)
+            frame_ms.append((arrived - previous) * 1000.0)
+            previous = arrived
+            result = response["result"]
+            if expected is not None and canonical(result) != expected:
+                matched = False
         if self.buffer:
             self.kill()
-            return CallOutcome(elapsed_ms, None, "protocol violation: extra data after response")
-        try:
-            response = json.loads(line)
-        except ValueError:
-            self.kill()
-            return CallOutcome(elapsed_ms, None, "protocol violation: unparseable response")
-        if not isinstance(response, dict) or response.get("id") != nonce:
-            self.kill()
-            return CallOutcome(elapsed_ms, None, "protocol violation: response id mismatch")
-        if "error" in response:
-            return CallOutcome(elapsed_ms, None, str(response["error"]))
-        if "result" not in response:
-            self.kill()
-            return CallOutcome(elapsed_ms, None, "protocol violation: no result field")
-        return CallOutcome(elapsed_ms, response["result"], None)
+            return CallOutcome((time.perf_counter() - started) * 1000.0, None, "protocol violation: extra data after response", frame_ms, False)
+        return CallOutcome((time.perf_counter() - started) * 1000.0, result, None, frame_ms, matched)
 
 
 def canonical(value) -> str:
@@ -346,98 +458,116 @@ def _percentile(values: list[float], q: float) -> float:
 
 
 def _worker_alloc_kb(worker: "Worker") -> float | None:
-    """Peak resident set (VmHWM, KB) of the live candidate worker, read by the
-    trusted parent from /proc. Kernel-maintained and root-read, so candidate
-    code cannot forge or suppress it (allocation is never self-reported)."""
-    pid: int | None = None
-    candidates = _candidate_pids()
-    if candidates:
-        pid = max(candidates)
-    elif worker.proc is not None:
-        pid = worker.proc.pid
-    if pid is None:
+    """Whole-tree peak memory footprint (KB) from the trusted per-worker
+    cgroup's memory.peak: kernel-maintained and monotone over the entire
+    process tree, so it still counts children that already exited and a
+    candidate cannot mask the peak by parking one small live child. The
+    cgroup files are root-owned and the candidate holds no capabilities, so
+    the reading is non-resettable (VmHWM, by contrast, resets via
+    /proc/self/clear_refs and misses exited children)."""
+    if worker.cgroup is None:
         return None
+    peak = int((worker.cgroup / "memory.peak").read_text().strip())
+    return peak / 1024.0
+
+
+def _collect_sample(workspace: Path, case: dict, expected: str) -> tuple[list[float], float | None, str | None, bool]:
+    """One fresh-worker sample: warmup + FRAMES trusted-parent-observed frames.
+    Returns (frame_ms, peak_alloc_kb, error, all_frames_matched). Fresh
+    writable state before and after, so no sample can leak state into the
+    next (in particular, candidate leftovers can never touch the trusted
+    reference sample that follows)."""
+    reset_candidate_state()
+    worker = Worker(workspace)
+    frame_ms: list[float] = []
+    matched = True
     try:
-        status = Path(f"/proc/{pid}/status").read_text()
-    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-        return None
-    for line in status.splitlines():
-        if line.startswith("VmHWM:"):
-            fields = line.split()
-            if len(fields) >= 2:
-                try:
-                    return float(fields[1])
-                except ValueError:
-                    return None
-    return None
+        first = worker.call(case["input"], load=True, expected=expected)
+        if first.error is not None:
+            return frame_ms, None, first.error, False
+        if not first.matched:
+            matched = False
+        warm = worker.call(load=False, reps=WARMUP_FRAMES - 1, expected=expected)
+        if warm.error is not None:
+            return frame_ms, None, warm.error, False
+        if not warm.matched:
+            matched = False
+        for _ in range(FRAMES // BATCH):
+            outcome = worker.call(load=False, reps=BATCH, expected=expected)
+            frame_ms.extend(outcome.frame_ms)
+            if outcome.error is not None:
+                return frame_ms, None, outcome.error, False
+            if not outcome.matched:
+                matched = False
+        return frame_ms, _worker_alloc_kb(worker), None, matched
+    finally:
+        try:
+            worker.release()
+        finally:
+            reset_candidate_state()
 
 
 def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
     """Registered scalar: bounded reciprocal 1/(1+g) of the geometric mean g
-    of the p99 frame time (ms) and the peak-allocation footprint (MB), under a
-    per-frame exact-output hard gate.
+    of the reference-normalized p99 frame time (ms) and the peak-allocation
+    footprint (MB), under a per-frame exact-output hard gate.
 
     Frame repetitions are driven HERE (trusted parent), never by candidate
     code. The frozen scene is loaded once per fresh worker; the evaluator then
-    drives WARMUP_FRAMES + FRAMES repeated renders in trusted code, timed by
-    the trusted parent in batches of BATCH renders per request so the pipe
-    round-trip floor amortizes to noise, and validates the command stream it
-    returns. A candidate cannot delete or short-circuit the loop -- the
-    evaluator owns it -- and is scored on its own per-frame render cost, not
-    on scene transport."""
+    drives WARMUP_FRAMES + FRAMES repeated renders in trusted code. The worker
+    emits one response line per frame, so EVERY frame is timed (parent-clock
+    arrival deltas) and exact-output validated by this trusted parent across
+    the pipe boundary. Requests still batch BATCH frames so the request
+    round-trip amortizes, but no frame's result or duration escapes trusted
+    observation. Peak allocation comes from the per-worker cgroup, never from
+    candidate-influenced self-reporting.
+
+    Robustness of thin margins: each candidate sample is immediately followed
+    by an in-eval trusted reference sample (the frozen seed solution from the
+    read-only TRUSTED_DIR, run through the identical worker protocol), so host
+    frequency/contention drift shared by the adjacent pair divides out of the
+    per-sample p99 ratio. The reported render cost is the median of those
+    per-pair ratios times a frozen scale — trusted trimmed sampling, exemplar
+    scheme — while candidate state is fully reset around every sample, so
+    candidate code can never touch a reference measurement."""
     expected = canonical(case["expected"])
     sample_p99: list[float] = []
+    reference_p99: list[float] = []
+    ratios: list[float] = []
     total_frames = 0
     alloc_kb: list[float] = []
     error: str | None = None
     correct = True
     for _sample in range(SAMPLES):
-        # Fresh writable state + fresh worker process per sample, so no sample
-        # can carry writable state into the next.
-        reset_candidate_state()
-        worker = Worker(workspace)
-        frame_ms: list[float] = []
-        try:
-            first = worker.call(case["input"], load=True)
-            if first.error is not None:
-                error = first.error
-                correct = False
-            elif canonical(first.result) != expected:
-                correct = False
-            if error is None:
-                warm = worker.call(load=False, reps=WARMUP_FRAMES - 1)
-                if warm.error is not None:
-                    error = warm.error
-                    correct = False
-                elif canonical(warm.result) != expected:
-                    correct = False
-            if error is None:
-                for _ in range(FRAMES // BATCH):
-                    outcome = worker.call(load=False, reps=BATCH)
-                    frame_ms.append(outcome.elapsed_ms / BATCH)
-                    if outcome.error is not None:
-                        error = outcome.error
-                        correct = False
-                        break
-                    if canonical(outcome.result) != expected:
-                        correct = False
-                peak_kb = _worker_alloc_kb(worker)
-                if peak_kb is not None:
-                    alloc_kb.append(peak_kb)
-        finally:
-            try:
-                worker.kill()
-            finally:
-                reset_candidate_state()
-        total_frames += len(frame_ms) * BATCH
-        if len(frame_ms) == FRAMES // BATCH:
-            sample_p99.append(_percentile(frame_ms, 0.99))
+        frame_ms, peak_kb, sample_error, matched = _collect_sample(workspace, case, expected)
+        if sample_error is not None:
+            error = sample_error
+            correct = False
+        elif not matched:
+            correct = False
+        total_frames += len(frame_ms)
+        if peak_kb is not None:
+            alloc_kb.append(peak_kb)
         if error is not None:
             break
-    # Per-sample p99 then median across samples: a true p99 frame-time estimate
-    # that rejects outlier samples (a single scheduler preemption cannot set the
-    # reported latency).
+        # Interleaved trusted reference yardstick, adjacent in time to the
+        # candidate sample it normalizes. A failing reference is a trusted
+        # infrastructure fault, never a candidate outcome.
+        ref_frames, _ref_peak, ref_error, ref_matched = _collect_sample(TRUSTED_DIR, case, expected)
+        if ref_error is not None or not ref_matched or len(ref_frames) != FRAMES:
+            raise RuntimeError(f"trusted reference sample failed: {ref_error or 'exact output mismatch'}")
+        if len(frame_ms) == FRAMES:
+            candidate_p99 = _percentile(frame_ms, 0.99)
+            ref_p99 = _percentile(ref_frames, 0.99)
+            sample_p99.append(candidate_p99)
+            reference_p99.append(ref_p99)
+            ratios.append(candidate_p99 / max(ref_p99, 1e-6))
+    # Per-sample p99, then median across samples; scoring uses the median of
+    # per-pair candidate/reference ratios so shared host drift cancels and a
+    # single scheduler preemption cannot set the reported latency.
     p99_ms = statistics.median(sample_p99) if sample_p99 else 0.0
+    ratio = statistics.median(ratios) if ratios else 0.0
+    normalized_p99_ms = ratio * REFERENCE_SCALE_MS
     alloc_mb = (statistics.fmean(alloc_kb) / 1024.0) if alloc_kb else 1.0
     correct = correct and error is None and total_frames == SAMPLES * FRAMES
     if correct:
@@ -445,10 +575,11 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
         # form): monotone-decreasing in cost, q in (0, 1], so no single case
         # can dominate the cross-case mean and micro-second jitter on
         # IPC-floor scenes cannot destabilize aggregates.
-        cost = math.sqrt(max(p99_ms, 1e-6) * max(alloc_mb, 1e-6))
+        cost = math.sqrt(max(normalized_p99_ms, 1e-6) * max(alloc_mb, 1e-6))
         score = 1.0 / (1.0 + cost)
         feedback = (
-            f"{SAMPLES}x{FRAMES} frames matched; p99 {p99_ms:.3f} ms, "
+            f"{SAMPLES}x{FRAMES} frames matched; p99 {p99_ms:.3f} ms "
+            f"(in-eval reference {statistics.median(reference_p99):.3f} ms, ratio {ratio:.3f}), "
             f"peak alloc {alloc_mb:.2f} MB, q {score:.4f}"
         )
     else:
@@ -471,7 +602,7 @@ def run_public_suite(workspace: Path) -> tuple[bool, str]:
             outcome = worker.call(case["input"])
         finally:
             try:
-                worker.kill()
+                worker.release()
             finally:
                 reset_candidate_state()
         if outcome.error is not None:
@@ -486,6 +617,7 @@ def main() -> None:
     # this short-lived process bounded, so disable it for stable frame timing.
     gc.disable()
     _configure_candidate_subreaper()
+    _setup_worker_cgroup_authority()
     reset_candidate_state()
     assets_dir = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
     workspace = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))

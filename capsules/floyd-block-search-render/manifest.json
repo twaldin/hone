@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_fe4afdc181b6",
+  "id": "cap_7084f0496801",
   "objective": "Minimize Block Search render cost on frozen scenes while preserving the exact selected block command stream. Correctness is a hard gate; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "1f25ed25495167f0eacb085a16b772eef1393203"
+    "commit": "213bf792b09f09c807893624f20d1cfd7e204fc2"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
@@ -43,7 +43,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:33d9609da9742239790037d1bbd00ce9bf8577781c77308b2c79dafbe0aa2560"
+    "hash": "sha256:d70337f7645c65f89ca0527a2be90420cb880706e102f69c3ed4f22d795d8c2d"
   },
   "contentHashes": {
     "assets/train/cases.json": "sha256:af0f8f524b070405603f7b47b1c1b4d0c69e382cfef752a3e51a139df0832fd0",
@@ -71,7 +71,7 @@
       "samples": 5,
       "frames": 100,
       "freshProcess": true,
-      "q": "exact-output hard gate times the bounded reciprocal 1/(1+g) of the geometric mean g of the median-across-samples p99 trusted per-frame render time (ms) and the trusted peak allocation footprint (MB); frame repetitions are driven by the evaluator over a once-loaded frozen scene",
+      "q": "per-frame exact-output hard gate times the bounded reciprocal 1/(1+g) of the geometric mean g of the reference-normalized p99 trusted per-frame render time (median across interleaved candidate/trusted-seed sample pairs of the p99 ratio, times the frozen 0.5 ms scale) and the trusted whole-tree cgroup peak allocation footprint (MB); frame repetitions are driven by the evaluator over a once-loaded frozen scene and every frame is timed and validated by the trusted parent",
       "qFail": 0
     }
   }

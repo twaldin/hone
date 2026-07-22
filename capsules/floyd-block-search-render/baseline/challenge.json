@@ -4,6 +4,7 @@
   "samples": 5,
   "warmupFrames": 10,
   "batch": 10,
+  "referenceP99ScaleMs": 0.5,
   "timeoutSec": 10,
   "publicCases": [
     {

@@ -42,9 +42,11 @@ def main() -> None:
     emit({"ready": True})
     # The trusted evaluator loads the frozen scene once (a request carrying
     # "input") and then drives repeated render frames with tiny repeat
-    # requests (no "input", optional "reps" batch count), so per-frame timing
-    # reflects render cost, not scene transport or pipe round-trips. The
-    # candidate never sees this protocol: it only ever receives solve(scene).
+    # requests (no "input", optional "reps" batch count). Every frame is
+    # rendered AND emitted individually: one response line per frame, so the
+    # trusted parent observes, times, and validates each frame arrival on its
+    # side of the pipe. The candidate never sees this protocol: it only ever
+    # receives solve(scene).
     have_scene = False
     scene = None
     for raw in sys.stdin.buffer:
@@ -62,10 +64,9 @@ def main() -> None:
             reps = request.get("reps", 1)
             if not isinstance(reps, int) or reps < 1 or reps > 1000:
                 raise ValueError("invalid reps")
-            result = None
-            for _ in range(reps):
+            for frame in range(1, reps + 1):
                 result = solve(scene)
-            emit({"id": nonce, "result": result})
+                emit({"id": nonce, "frame": frame, "result": result})
         except BaseException as exc:
             emit({"id": request.get("id") if isinstance(request, dict) else None, "error": f"{type(exc).__name__}: {exc}"})
 

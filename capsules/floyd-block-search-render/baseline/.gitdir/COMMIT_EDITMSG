@@ -1,1 +1,1 @@
-Batch trusted-driven renders per timed request (B=10): amortize pipe round-trip floor so per-frame p99 reflects render compute
+Interleaved trusted-reference yardstick: median per-pair p99 ratio x frozen 0.5ms scale stabilizes per-frame tail timing
