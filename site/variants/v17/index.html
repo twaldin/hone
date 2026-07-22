@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hone — a local-first, durable optimization CLI</title>
+<meta name="description" content="Hone improves code by measurement: state an objective, it searches for a better version in a sandbox and keeps the receipts on your machine. No published results yet — RelayBench will report either way.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header>
+  <div class="grid hd">
+    <div class="mark">hone</div>
+    <nav aria-label="Sections">
+      <a href="#s1"><span>01</span>Kernel</a>
+      <a href="#s2"><span>02</span>One run</a>
+      <a href="#s3"><span>03</span>Campaign</a>
+      <a href="#s4"><span>04</span>RelayBench</a>
+      <a href="#s5"><span>05</span>Trust</a>
+    </nav>
+    <div class="meta label">Local-first · Durable · <b>No telemetry</b></div>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ================= HERO ================= -->
+<section class="hero" aria-labelledby="h-t">
+  <div class="grid">
+    <div class="idx">
+      <span class="label">00 / Overview</span>
+      <span class="label">Optimization CLI</span>
+    </div>
+    <h1 id="h-t">State an objective. Hone finds a measurably better version — <span class="r">or tells you it didn’t.</span></h1>
+    <p class="standfirst">
+      Hone is a command-line tool that improves code by measurement. It edits a copy
+      of your project, builds and tests each candidate in a sandbox, scores it with
+      tooling the candidate cannot touch, and keeps whatever scores better. Every
+      step is written to disk as it happens — a crash, a reboot, or a week away
+      loses nothing.
+    </p>
+    <div class="facts" aria-label="Key properties">
+      <div class="f"><span class="label">Runs on</span><div class="v">Your machine. No telemetry, no network during evaluation.</div></div>
+      <div class="f"><span class="label">State</span><div class="v">Durable. Every event persists; resume any time.</div></div>
+      <div class="f"><span class="label">Results</span><div class="v">None published yet. First campaign in progress.</div></div>
+    </div>
+    <div class="cmd" role="img" aria-label='Terminal: hone "reduce cold-start time of the module loader without regressing conformance"'>
+      <span class="p">$</span>hone "reduce cold-start time of the module loader without regressing conformance"
+    </div>
+  </div>
+</section>
+
+<div class="notice" role="status">
+  <div class="grid">
+    <p>No published results yet. Every figure on this page is <b>illustrative</b> — drawn to show shape, not outcomes. The first campaign will be reported pass or fail, either way.</p>
+  </div>
+</div>
+
+<!-- ================= 01 KERNEL ================= -->
+<section class="sec" id="s1" aria-labelledby="s1-t">
+  <div class="grid sec-head">
+    <div class="no">01<small>Kernel</small></div>
+    <h2 id="s1-t">One engine, three targets</h2>
+    <p class="lede">
+      Hone has one engine: a durable coding session that proposes a change, measures
+      it, and keeps the result. There is no separate “meta” system. The parts of
+      Hone that improve Hone are the same engine pointed at different code.
+    </p>
+  </div>
+  <div class="grid uses">
+    <article class="use">
+      <span class="u-no">1.1</span>
+      <h3>Your code</h3>
+      <p>Name an objective — build time, binary size, throughput, a refactor that
+      must not change behavior. Hone proposes candidates and measures each one
+      against your checks. It lands nothing on its own: <code>hone diff</code>
+      shows the change, <code>hone apply --best</code> puts it on a branch.</p>
+    </article>
+    <article class="use">
+      <span class="u-no">1.2</span>
+      <h3>Its task-builders</h3>
+      <p>The programs that write Hone’s practice tasks are code too. Hone tunes
+      them against held-back scoring runs, so the next round of tasks is better
+      posed than the last one.</p>
+    </article>
+    <article class="use acc">
+      <span class="u-no">1.3</span>
+      <h3>Itself</h3>
+      <p>The controller that runs the search can search for a better controller.
+      Depth is capped. Budgets are reserved before recursion starts. No successor
+      is promoted without an independent evaluation and a person’s recorded
+      approval.</p>
+    </article>
+  </div>
+</section>
+
+<!-- ================= 02 ONE RUN ================= -->
+<section class="sec" id="s2" aria-labelledby="s2-t">
+  <div class="grid sec-head">
+    <div class="no">02<small>One run</small></div>
+    <h2 id="s2-t">One run, end to end</h2>
+    <p class="lede">
+      What happens between <code>hone "&lt;objective&gt;"</code> and <code>hone apply</code>.
+      The event names below are the real ones from the run log. The numbers are
+      illustrative — the product has published no results.
+    </p>
+  </div>
+
+  <div class="grid runsteps">
+    <div class="rstep">
+      <span class="ev">run.started</span>
+      <h3>The objective becomes a contract</h3>
+      <p>Hone snapshots your project and opens a durable session. The objective is
+      turned into a scored contract: what to improve, what must not regress, and
+      how both are measured. <code>hone status</code> shows it at any point.</p>
+    </div>
+    <div class="rstep">
+      <span class="ev">episode.started</span>
+      <h3>Each episode proposes one candidate</h3>
+      <p>An episode is one attempt: an edit, a build, a test run inside a fresh
+      sandbox. The candidate never reports its own numbers — a separate trusted
+      process does the timing and the scoring.</p>
+    </div>
+    <div class="rstep">
+      <span class="ev">incumbent.new</span>
+      <h3>Winning once is not enough</h3>
+      <p>The incumbent is the best version found so far. A candidate that beats it
+      is re-measured before it takes the title; the shaded band in Fig.&nbsp;2.1
+      is that repeat-measurement spread. One lucky run does not get promoted.</p>
+    </div>
+    <div class="rstep">
+      <span class="ev">budget.snapshot</span>
+      <h3>You set the ceiling</h3>
+      <p>Budgets are stated up front — <code>--budget-usd 20</code> — and reserved
+      before the search starts. Hone accounts for every evaluation against the
+      ceiling and stops when it is spent, keeping the best incumbent.</p>
+    </div>
+    <div class="rstep">
+      <span class="ev">run.finished</span>
+      <h3>You decide what lands</h3>
+      <p><code>hone best</code> names the winner, <code>hone diff --stat</code>
+      summarizes the change, <code>hone apply --best</code> lands it on a branch.
+      A stopped or crashed run continues from its own log with
+      <code>hone resume</code>.</p>
+    </div>
+  </div>
+
+  <div class="grid runfigs">
+    <figure class="fig fig-a">
+      <div class="fig-head">
+        <span class="fig-no">Fig. 2.1</span>
+        <h3>Score trajectory of one run</h3>
+        <span class="tag">Illustrative</span>
+      </div>
+      <div class="chart" id="c-traj"></div>
+      <figcaption>
+        Each grey dot is one measured candidate. The dark step line is the
+        incumbent — it only moves when a challenger wins and then wins again on
+        re-measurement. The band is the spread across those confirmation runs.
+      </figcaption>
+    </figure>
+    <figure class="fig fig-b">
+      <div class="fig-head">
+        <span class="fig-no">Fig. 2.2</span>
+        <h3>Budget burn-down</h3>
+        <span class="tag">Illustrative</span>
+      </div>
+      <div class="chart" id="c-burn"></div>
+      <figcaption>
+        The ceiling is reserved before the first evaluation. When the ledger
+        reaches zero the run ends — with the incumbent, not an excuse.
+      </figcaption>
+    </figure>
+  </div>
+
+  <div class="grid stats">
+    <div class="stats-head">
+      <h3>The same run, as its counters</h3>
+      <span class="tag">Illustrative</span>
+    </div>
+    <div class="stat">
+      <span class="k">Episodes</span>
+      <span class="v">62</span>
+      <div class="spark" data-spark="episodes"></div>
+      <span class="sub">one candidate per episode</span>
+    </div>
+    <div class="stat">
+      <span class="k">Evaluations</span>
+      <span class="v">240</span>
+      <div class="spark" data-spark="evals"></div>
+      <span class="sub">scored by the trusted process</span>
+    </div>
+    <div class="stat">
+      <span class="k">Best score</span>
+      <span class="v">0.726</span>
+      <div class="spark" data-spark="score"></div>
+      <span class="sub">confirmed on repeat measurement</span>
+    </div>
+    <div class="stat">
+      <span class="k">Checkpoints</span>
+      <span class="v">1,284</span>
+      <div class="spark" data-spark="ckpt"></div>
+      <span class="sub">resumable after any crash</span>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 03 CAMPAIGN ================= -->
+<section class="sec" id="s3" aria-labelledby="s3-t">
+  <div class="grid sec-head">
+    <div class="no">03<small>Campaign</small></div>
+    <h2 id="s3-t">The campaign and its gates</h2>
+    <p class="lede">
+      The first public test of Hone asks one falsifiable question: can the
+      controller find a better version of itself, twice in a row, on work it has
+      never seen? G0 is the controller Hone ships with; G1 and G2 are its
+      would-be successors. Three words carry the design.
+    </p>
+  </div>
+
+  <dl class="grid defs">
+    <div class="def">
+      <dt>Capsule</dt>
+      <dd>A frozen benchmark: <b>pinned source, a fixed harness, a scoring script
+      the candidate cannot modify.</b> Real open-source workloads — parsers,
+      allocators, codecs, bundlers, resolvers — plus owner-written tasks. Once
+      admitted, a capsule never changes.</dd>
+    </div>
+    <div class="def">
+      <dt>Panel</dt>
+      <dd>A fixed set of capsules assigned to one stage, <b>frozen before the
+      search begins.</b> Development, tournament, and holdout panels do not
+      overlap.</dd>
+    </div>
+    <div class="def">
+      <dt>Gate</dt>
+      <dd>A stop. <b>A person reviews the evidence and signs, or nothing
+      moves.</b> The campaign has two, and neither can be skipped by anything
+      the optimizer does.</dd>
+    </div>
+  </dl>
+
+  <div class="grid flow" role="img" aria-label="Three stages: Stage A searches for G1 on the development panel behind gate one; Stage B runs G0 against G1 on a fresh panel and yields G2 behind gate two; the terminal stage compares G0, G1 and G2 on an untouched holdout panel.">
+    <div class="stage">
+      <span class="s-no">3.1</span>
+      <h3>Stage A · G0 → G1</h3>
+      <p>G0 runs the search across the development panel, proposing candidate
+      controllers. The best-supported one is put to the first gate.</p>
+      <span class="gate">Gate 1 · human</span>
+    </div>
+    <div class="stage">
+      <span class="s-no">3.2</span>
+      <h3>Stage B · G0 vs G1 → G2</h3>
+      <p>On a fresh panel, G0 and G1 attempt identical work — same capsules, same
+      budgets, same seeds where the harness permits. The controller is the only
+      variable. The stage yields G2.</p>
+      <span class="gate">Gate 2 · human</span>
+    </div>
+    <div class="stage">
+      <span class="s-no">3.3</span>
+      <h3>Terminal · G0 G1 G2</h3>
+      <p>All three generations run the holdout panel — capsules that no
+      controller, prompt, or selection decision touched during development.
+      What transfers there was learned, not memorized.</p>
+    </div>
+  </div>
+
+  <div class="grid gatefigs">
+    <figure class="fig fig-a">
+      <div class="fig-head">
+        <span class="fig-no">Fig. 3.1</span>
+        <h3>Stage A as a funnel — proposal to promotion</h3>
+        <span class="tag">Illustrative</span>
+      </div>
+      <div class="chart" id="c-funnel"></div>
+      <figcaption>
+        Most candidates die at measurement, most survivors die at re-measurement,
+        and exactly one reaches the gate. The counts are illustrative; the shape
+        is the point.
+      </figcaption>
+    </figure>
+    <aside class="gatebox">
+      <h3>What the reviewer at a gate actually sees</h3>
+      <ul>
+        <li><b>Per-capsule paired scores</b> — not an average that hides the losses.</li>
+        <li><b>The budget ledger</b> — what was reserved, what was spent, by whom.</li>
+        <li><b>The full diff</b> of the candidate controller against its parent.</li>
+        <li><b>The replay command</b> that regenerates every number from the run log.</li>
+      </ul>
+      <p class="after">Approval is recorded as a receipt tied to that exact
+      evidence. A rejected candidate stays put; the campaign continues with the
+      incumbent.</p>
+    </aside>
+  </div>
+</section>
+
+<!-- ================= 04 RELAYBENCH ================= -->
+<section class="sec" id="s4" aria-labelledby="s4-t">
+  <div class="grid sec-head">
+    <div class="no">04<small>RelayBench</small></div>
+    <h2 id="s4-t">RelayBench — the report, either way</h2>
+    <p class="lede">
+      RelayBench is the campaign’s report. Its thresholds were registered before
+      the first run. When the campaign ends, it publishes the outcome against
+      them — pass or fail, in the same document, at the same thresholds. Nothing
+      below is a result yet.
+    </p>
+  </div>
+
+  <div class="grid pubs">
+    <div class="publist">
+      <h3>What it will publish</h3>
+      <ol>
+        <li><b>Learning curves</b> — score against budget, per capsule and across generations.</li>
+        <li><b>Paired deltas</b> — G1 − G0 and G2 − G1 on each capsule, with confidence intervals.</li>
+        <li><b>Sign consistency</b> — on how many capsules the later generation wins at all. A mean carried by two outliers is reported as exactly that.</li>
+        <li><b>The headline comparison</b> — on the holdout panel, weighted 50/50 between owner tasks and pinned open source, so neither family dominates.</li>
+        <li><b>The integrity audit</b> — the capsule pool was spent as registered: no holdout contact, no re-rolled panels, no post-hoc exclusions.</li>
+      </ol>
+    </div>
+    <figure class="fig fig-a">
+      <div class="fig-head">
+        <span class="fig-no">Fig. 4.1</span>
+        <h3>The shape of the published figure — paired deltas per capsule</h3>
+        <span class="tag">Illustrative</span>
+      </div>
+      <div class="chart" id="c-panel"></div>
+      <figcaption>
+        Each dot is one capsule’s paired difference against G0; hollow dots are
+        losses. The published version carries real positions and intervals;
+        this one shows only the format — every capsule visible, losses in the
+        open, no averaging away.
+      </figcaption>
+    </figure>
+    <div class="replay">
+      <h3>Why replayability matters</h3>
+      <p>Every published number ships with the run records that produced it. A
+      Hone run is an event log; replaying the log regenerates the number on your
+      machine, from <code>run.started</code> to <code>run.finished</code>. A
+      result that cannot be replayed is an anecdote.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 05 TRUST ================= -->
+<section class="sec" id="s5" aria-labelledby="s5-t">
+  <div class="grid sec-head">
+    <div class="no">05<small>Trust</small></div>
+    <h2 id="s5-t">Measurement lives outside the walls</h2>
+    <p class="lede">
+      A self-improving optimizer is the last system whose scores should be taken
+      on faith. Hone assumes the candidate will lean on any seam it can reach —
+      so every measured surface is kept out of reach.
+    </p>
+  </div>
+  <div class="grid trust">
+    <article class="t">
+      <h3><span>5.1</span>Sandbox isolation</h3>
+      <table>
+        <tr><td class="k">Network</td><td>none — no egress from any evaluation</td></tr>
+        <tr><td class="k">Root filesystem</td><td>read-only; writable scratch only where declared</td></tr>
+        <tr><td class="k">Privileges</td><td>no extra privileges; capabilities dropped</td></tr>
+        <tr><td class="k">Lifecycle</td><td>a fresh container for every evaluation</td></tr>
+        <tr><td class="k">Images</td><td>editing and evaluation run in separate containers</td></tr>
+      </table>
+    </article>
+    <article class="t">
+      <h3><span>5.2</span>Gaming resistance</h3>
+      <table>
+        <tr><td class="k">Timing</td><td>measured by a trusted parent process, never self-reported</td></tr>
+        <tr><td class="k">Binaries</td><td>sealed measurement tooling the candidate cannot rewrite</td></tr>
+        <tr><td class="k">Scoring</td><td>oracles protected from the code under test</td></tr>
+        <tr><td class="k">Panels</td><td>corpus and holdouts frozen before the search begins</td></tr>
+      </table>
+    </article>
+    <article class="t">
+      <h3><span>5.3</span>Independent review</h3>
+      <table>
+        <tr><td class="k">Review</td><td>capsules and results examined by people whose job is to find the seam</td></tr>
+        <tr><td class="k">Successors</td><td>candidates evaluated independently of the loop that proposed them</td></tr>
+        <tr><td class="k">Replay</td><td>runs persisted and replayable end to end</td></tr>
+      </table>
+    </article>
+    <article class="t">
+      <h3><span>5.4</span>Human gates</h3>
+      <table>
+        <tr><td class="k">Gate 1</td><td>no Stage-A promotion without a recorded human approval</td></tr>
+        <tr><td class="k">Gate 2</td><td>no Stage-B promotion without a recorded human approval</td></tr>
+        <tr><td class="k">Depth</td><td>recursion bounded; ancestor budgets reserved up front</td></tr>
+        <tr><td class="k">Secrets</td><td>strict source and credential isolation from the candidate</td></tr>
+      </table>
+    </article>
+  </div>
+</section>
+
+<section class="closer" aria-label="Closing statement">
+  <div class="grid">
+    <p>If the improvement is real, it survives all of this. If it isn’t, <span class="r">RelayBench says so</span> — same report, same thresholds.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="grid">
+    <div class="fa">hone<span>.</span></div>
+    <div class="fb label">A local-first, durable optimization CLI.<br>RelayBench is its evidence.</div>
+    <div class="fc label">No telemetry · Runs on your machine<br>Thresholds pre-registered · Published either way</div>
+  </div>
+</footer>
+
+<script src="chart.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- illustrative data (deterministic) ---------- */
+  function rng(seed) {
+    return function () {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+  }
+
+  /* incumbent promotions: [eval, confirmed score] */
+  var steps = [
+    [0, 0.642], [14, 0.655], [31, 0.668], [52, 0.671], [78, 0.690],
+    [96, 0.702], [133, 0.714], [168, 0.719], [205, 0.726], [240, 0.726]
+  ];
+  function incAt(x) {
+    var y = steps[0][1];
+    for (var i = 0; i < steps.length; i++) if (steps[i][0] <= x) y = steps[i][1];
+    return y;
+  }
+
+  /* confirmation band follows the step shape */
+  var band = [];
+  for (var bi = 0; bi < steps.length - 1; bi++) {
+    var sy = steps[bi][1], e = 0.0045 + (bi % 3) * 0.002;
+    band.push([steps[bi][0], sy - e, sy + e * 0.7]);
+    band.push([steps[bi + 1][0], sy - e, sy + e * 0.7]);
+  }
+
+  /* candidate scatter: one candidate per episode, mostly below the incumbent */
+  var r1 = rng(7);
+  var cand = [];
+  for (var ci = 0; ci < 62; ci++) {
+    var cx = 2 + ci * (236 / 62) + (r1() - 0.5) * 2.5;
+    var cy = incAt(cx) + (r1() * 0.055 - 0.049);
+    cand.push([cx, Math.max(0.602, Math.min(cy, incAt(cx) + 0.006))]);
+  }
+
+  Hairline.render("#c-traj", {
+    type: "line",
+    height: 280,
+    aria: "Line chart, illustrative: 62 candidate scores scattered below a stepped incumbent line that rises from 0.64 to about 0.73 over 240 evaluations, with a narrow confirmation band around the line.",
+    x: { min: 0, max: 240, ticks: [0, 60, 120, 180, 240], label: "evaluations" },
+    y: { min: 0.60, max: 0.76, ticks: [0.60, 0.64, 0.68, 0.72, 0.76],
+         format: function (v) { return v.toFixed(2); }, label: "score" },
+    series: [
+      { kind: "dots", dots: cand, dim: true, opacity: ".58",
+        label: "candidates", labelPos: [238, 0.617], labelAnchor: "end" },
+      { points: steps, step: true, accent: true, width: 1.75, band: band,
+        dots: steps.slice(1, 9),
+        label: "incumbent (confirmed)", labelPos: [238, 0.744], labelAnchor: "end" }
+    ]
+  });
+
+  /* budget burn-down */
+  var r2 = rng(41);
+  var burn = [[0, 20]];
+  var rem = 20, bx = 0;
+  while (rem > 0.4 && bx < 236) {
+    bx += 6 + Math.round(r2() * 5);
+    rem -= 0.45 + r2() * 0.35;
+    burn.push([Math.min(bx, 236), Math.max(rem, 0)]);
+  }
+  burn.push([240, Math.max(rem, 0)]);
+
+  Hairline.render("#c-burn", {
+    type: "line",
+    height: 280,
+    aria: "Step chart, illustrative: budget remaining in dollars falling from 20 to near zero across 240 evaluations.",
+    x: { min: 0, max: 240, ticks: [0, 120, 240], label: "evaluations" },
+    y: { min: 0, max: 20, ticks: [0, 5, 10, 15, 20],
+         format: function (v) { return "$" + v; }, label: "budget left" },
+    series: [
+      { points: burn, step: true, width: 1.5, label: "--budget-usd 20",
+        code: true, labelPos: [234, 16.6], labelAnchor: "end" }
+    ]
+  });
+
+  /* sparklines for the counter row — derived from the same illustrative run */
+  function counter(seed, total, ticks, burstEvery, burstSize) {
+    /* monotone cumulative series: same run, different cadence */
+    var rr = rng(seed), pts = [[0, 0]], sum = 0, raw = [];
+    var i, w = 0;
+    for (i = 1; i <= ticks; i++) {
+      var inc = rr();
+      if (burstEvery && i % burstEvery === 0) inc += burstSize;
+      raw.push(inc); w += inc;
+    }
+    for (i = 1; i <= ticks; i++) {
+      sum += raw[i - 1] * (total / w);
+      pts.push([i, sum]);
+    }
+    return pts;
+  }
+  function spark(kind, spec) {
+    Hairline.render(document.querySelector('[data-spark="' + kind + '"]'), spec);
+  }
+  spark("episodes", {
+    type: "spark", height: 26, points: counter(3, 62, 16, 5, 0.9),
+    aria: "Sparkline, illustrative: episodes counted 0 to 62 across the run, with pauses."
+  });
+  spark("evals", {
+    type: "spark", height: 26, points: counter(11, 240, 16, 4, 1.6),
+    aria: "Sparkline, illustrative: evaluations counted 0 to 240, in bursts where confirmation re-runs pile up."
+  });
+  spark("score", {
+    type: "spark", height: 26, points: steps, step: true, accent: true,
+    aria: "Sparkline, illustrative: best confirmed score stepping from 0.642 to 0.726 — the same steps as figure 2.1."
+  });
+  spark("ckpt", {
+    type: "spark", height: 26, points: counter(31, 1284, 16, 0, 0),
+    aria: "Sparkline, illustrative: checkpoints written steadily from 0 to 1,284."
+  });
+
+  /* stage-A funnel */
+  Hairline.render("#c-funnel", {
+    type: "funnel",
+    height: 250,
+    labelWidth: 210,
+    aria: "Funnel, illustrative: 96 controllers proposed, 17 beat G0 on the development panel, 5 held up on independent re-runs, 1 presented at gate one, 1 promoted to G1.",
+    rows: [
+      { label: "proposed by G0", note: "candidate controllers", value: 96 },
+      { label: "beat G0, dev panel", note: "first measurement", value: 17 },
+      { label: "held up on re-runs", note: "independent re-evaluation", value: 5 },
+      { label: "presented at gate 1", note: "full evidence file", value: 1 },
+      { label: "promoted to G1", note: "human signature", value: 1, accent: true }
+    ]
+  });
+
+  /* per-capsule paired deltas */
+  Hairline.render("#c-panel", {
+    type: "dots",
+    height: 260,
+    labelWidth: 130,
+    zeroLabel: "no change",
+    aria: "Strip plot, illustrative: paired score differences per capsule for six capsule families. Most dots sit right of the zero rule; losses render as hollow dots to its left.",
+    x: { min: -6, max: 12, ticks: [-6, 0, 6, 12],
+         format: function (v) { return (v > 0 ? "+" : "") + v + "%"; },
+         label: "paired delta vs G0" },
+    groups: [
+      { label: "json parsers", values: [3.8, 1.2, 6.4, -0.8] },
+      { label: "codecs", values: [2.1, 0.6, 4.9] },
+      { label: "allocators", values: [1.4, -1.6, 2.8] },
+      { label: "bundlers", values: [5.2, 2.4, 0.9] },
+      { label: "resolvers", values: [1.8, 3.1, -0.4] },
+      { label: "owner tasks", values: [7.6, 2.2, 4.4, 1.1, 5.8, 0.7] }
+    ]
+  });
+})();
+</script>
+</body>
+</html>
