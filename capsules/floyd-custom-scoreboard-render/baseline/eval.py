@@ -6,11 +6,16 @@ accounting, equality, gates, and output. Frame repetitions are driven and
 observed HERE, never inside candidate code: frame 0 of every repetition
 seeds the frozen scene and is verified against the frozen expected render;
 every measured frame applies deterministic trusted entry-value edits so its
-exact draw stream is novel, and is verified against the trusted reference
-renderer below. Timing is the parent wall clock around each frame call;
-allocations are kernel-reported candidate peak RSS. Candidate code is
-imported only by an unprivileged worker subprocess; each timed repetition
-gets fresh PID/IPC/NET/UTS namespaces and writable state.
+exact draw stream is novel, and is verified against the sealed reference
+renderer (shipped inside the holdout asset groups, staged under the
+root-only /capsule tmpfs, hash-verified and loaded in memory by this root
+process only — candidate-reachable code cannot read it). Timing is the
+parent wall clock around each frame call; allocations are the trusted
+cgroup-v2 memory.peak of a per-repetition candidate cgroup covering the
+WHOLE candidate process tree, including exited descendants — candidate code
+cannot write or reset it. Candidate code is imported only by an
+unprivileged worker subprocess; each timed repetition gets fresh
+PID/IPC/NET/UTS namespaces, a fresh cgroup, and fresh writable state.
 """
 from __future__ import annotations
 
@@ -29,7 +34,7 @@ import statistics
 import subprocess
 import sys
 import time
-import unicodedata
+import types
 from pathlib import Path
 
 TRUSTED_DIR = Path(__file__).resolve().parent
@@ -53,6 +58,11 @@ CLONE_NEWUTS = 0x04000000
 CLONE_NEWPID = 0x20000000
 CLONE_NEWNET = 0x40000000
 STATE_RESET_TIMEOUT_SEC = 1.0
+MS_REMOUNT = 32
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+CGROUP_TRUSTED = CGROUP_ROOT / "hone-trusted"
+REFERENCE_RENDERER_NAME = "renderer.py"
+REFERENCE_RENDERER_SHA256 = "dfcb48a694ee39eb9f9fcb26b8ef6fe8c7dd3eb0221ab1ebec1dd21a783ebe12"
 _LIBC = ctypes.CDLL(None, use_errno=True)
 
 
@@ -62,6 +72,86 @@ def _configure_candidate_subreaper() -> None:
     if _LIBC.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
         code = ctypes.get_errno()
         raise RuntimeError(f"cannot become candidate subreaper: {os.strerror(code)}")
+
+
+_CGROUP_READY = False
+_CGROUP_COUNTER = 0
+
+
+def _configure_candidate_cgroups() -> None:
+    """Trusted whole-tree allocation accounting (theme: non-resettable peaks).
+
+    Root-only, cgroup v2: remount the cgroup2 filesystem read-write (the
+    evaluator container grants CAP_SYS_ADMIN to the trusted root parent
+    only; setuid(WORKER_UID) strips it from candidate code and
+    no-new-privileges prevents reacquisition), move every container process
+    into a trusted leaf, and enable the memory controller for child
+    cgroups. Each candidate worker tree then runs in its own fresh cgroup
+    whose memory.peak covers every descendant — including ones that already
+    exited — and is written only by the kernel: candidate-uid code cannot
+    write cgroup files (root-owned) and /proc/self/clear_refs does not
+    touch cgroup accounting. Fails closed: a root evaluator without this
+    authority refuses to run rather than fall back to gameable accounting.
+    """
+    global _CGROUP_READY
+    if not sys.platform.startswith("linux") or os.geteuid() != 0:
+        return
+    controllers = CGROUP_ROOT / "cgroup.controllers"
+    if not controllers.is_file():
+        raise RuntimeError("cgroup v2 is required for trusted candidate allocation accounting")
+    if "memory" not in controllers.read_text().split():
+        raise RuntimeError("cgroup v2 memory controller is unavailable")
+    if _LIBC.mount(b"cgroup2", bytes(CGROUP_ROOT), b"cgroup2", MS_REMOUNT, None) != 0:
+        code = ctypes.get_errno()
+        raise RuntimeError(f"cannot remount {CGROUP_ROOT} read-write: {os.strerror(code)}")
+    CGROUP_TRUSTED.mkdir(exist_ok=True)
+    deadline = time.monotonic() + 5.0
+    while True:
+        pids = [pid for pid in (CGROUP_ROOT / "cgroup.procs").read_text().split() if pid]
+        if not pids:
+            break
+        for pid in pids:
+            try:
+                (CGROUP_TRUSTED / "cgroup.procs").write_text(pid)
+            except OSError as exc:
+                if exc.errno != errno.ESRCH:
+                    raise RuntimeError(f"cannot move pid {pid} into the trusted cgroup: {exc}") from exc
+        if time.monotonic() >= deadline:
+            raise RuntimeError("container processes survived the trusted-cgroup migration")
+    (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
+    _CGROUP_READY = True
+
+
+def _create_candidate_cgroup() -> Path | None:
+    """Fresh accounting cgroup for one candidate worker tree (None when the
+    evaluator runs unprivileged and the wait4 rusage fallback applies)."""
+    global _CGROUP_COUNTER
+    if not _CGROUP_READY:
+        return None
+    cgroup = CGROUP_ROOT / f"hone-candidate-{_CGROUP_COUNTER}"
+    _CGROUP_COUNTER += 1
+    cgroup.mkdir()
+    if not (cgroup / "memory.peak").is_file():
+        raise RuntimeError("cgroup v2 memory.peak is unavailable")
+    return cgroup
+
+
+def _remove_candidate_cgroup(cgroup: Path | None) -> None:
+    if cgroup is None or not cgroup.is_dir():
+        return
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            (cgroup / "cgroup.kill").write_text("1")
+        except OSError:
+            pass
+        try:
+            cgroup.rmdir()
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"cannot remove candidate cgroup {cgroup}")
+            time.sleep(0.005)
 
 
 def _candidate_pids() -> list[int]:
@@ -173,12 +263,19 @@ def reset_candidate_state() -> None:
         raise RuntimeError("candidate state survived reset")
 
 
-def _worker_preexec() -> None:
+def _worker_preexec(cgroup: Path | None) -> None:
     for limit, value in ((resource.RLIMIT_CORE, 0), (resource.RLIMIT_AS, 4 << 30)):
         try:
             resource.setrlimit(limit, (value, value))
         except (OSError, ValueError):
             pass
+    if cgroup is not None:
+        # Root-only, before the namespace unshare and the uid drop: the exec'd
+        # worker and every descendant it ever forks inherit this cgroup and
+        # cannot leave it (cgroup.procs files are root-owned).
+        (cgroup / "cgroup.procs").write_text("0")
+    elif _CGROUP_READY:
+        raise RuntimeError("candidate worker launched without an accounting cgroup")
     if os.geteuid() != 0:
         return
     if _LIBC.unshare(CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWPID | CLONE_NEWUTS) != 0:
@@ -208,8 +305,9 @@ class CallOutcome:
 
 
 class Worker:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, cgroup: Path | None = None) -> None:
         self.workspace = workspace
+        self.cgroup = cgroup
         self.proc: subprocess.Popen | None = None
         self.buffer = b""
         self.import_error: str | None = None
@@ -225,7 +323,7 @@ class Worker:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
-                preexec_fn=_worker_preexec,
+                preexec_fn=lambda: _worker_preexec(self.cgroup),
                 cwd=str(TRUSTED_DIR),
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -369,139 +467,73 @@ def load_cases(path: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Trusted reference renderer: the frozen specification of one scoreboard
+# Sealed reference renderer: the frozen specification of one scoreboard
 # frame. Measured frames apply trusted entry-value edits, so their expected
-# draw streams cannot ship with the fixtures and are rendered here, in the
-# trusted parent, never by candidate-linked code.
+# draw streams cannot ship with the fixtures. The renderer itself is NOT in
+# this (candidate-readable) file: it ships inside the holdout asset groups,
+# is staged under the root-only /capsule tmpfs (mode 0700) that the dropped
+# candidate uid cannot traverse, and is hash-verified and exec'd in memory
+# by this trusted root process only.
 # ---------------------------------------------------------------------------
 
-_REF_SMALL_CAPS = {
-    "ᴀ": "A", "ʙ": "B", "ᴄ": "C", "ᴅ": "D", "ᴇ": "E", "ꜰ": "F",
-    "ɢ": "G", "ʜ": "H", "ɪ": "I", "ᴊ": "J", "ᴋ": "K", "ʟ": "L",
-    "ᴍ": "M", "ɴ": "N", "ᴏ": "O", "ᴘ": "P", "ꞯ": "Q", "ʀ": "R",
-    "ꜱ": "S", "ᴛ": "T", "ᴜ": "U", "ᴠ": "V", "ᴡ": "W", "ʏ": "Y", "ᴢ": "Z",
-}
+_REF_RENDER = None
 
 
-def _ref_normalized(char):
-    code = ord(char)
-    if 0x20 <= code <= 0x7e:
-        return char
-    mapped = _REF_SMALL_CAPS.get(char)
-    if mapped is not None:
-        return mapped
-    normalized = unicodedata.normalize("NFKC", char)
-    if normalized and all(0x20 <= ord(item) <= 0x7e for item in normalized):
-        return normalized
-    return char
+def load_reference_renderer(assets_dir: Path) -> Path:
+    """Locate, hash-verify, and load the sealed reference renderer module
+    from the staged assets (each holdout split carries a byte-identical,
+    digest-pinned copy; a broker eval stages exactly one split). In-memory
+    exec: no candidate-readable copy is ever created, and the pinned digest
+    binds the oracle's identity to this protected evaluator."""
+    global _REF_RENDER
+    matches = sorted(path for path in assets_dir.rglob(REFERENCE_RENDERER_NAME) if path.is_file())
+    if not matches:
+        raise RuntimeError(f"sealed {REFERENCE_RENDERER_NAME} is missing from {assets_dir}")
+    for match in matches:
+        digest = hashlib.sha256(match.read_bytes()).hexdigest()
+        if digest != REFERENCE_RENDERER_SHA256:
+            raise RuntimeError(f"sealed reference renderer digest mismatch at {match}: {digest}")
+    source = matches[0].read_bytes()
+    module = types.ModuleType("hone_sealed_reference_renderer")
+    exec(compile(source, "<sealed reference renderer>", "exec"), module.__dict__)
+    render = getattr(module, "render", None)
+    if not callable(render):
+        raise RuntimeError("sealed reference renderer must export callable render(value)")
+    _REF_RENDER = render
+    return matches[0]
 
 
-def _ref_styled(field, forced_colors=None):
-    glyphs = []
-    colors = []
-    visual_index = 0
-    for run in field["runs"]:
-        color = run["color"]
-        for char in run["text"]:
-            glyphs.append(_ref_normalized(char))
-            colors.append(forced_colors[visual_index] if forced_colors is not None else color)
-            visual_index += 1
-    if not glyphs:
-        return []
-    segments = []
-    current = []
-    current_color = colors[0]
-    for index, glyph in enumerate(glyphs):
-        if current and colors[index] != current_color:
-            segments.append(["".join(current), current_color])
-            current = []
-        current_color = colors[index]
-        current.append(glyph)
-    if current:
-        segments.append(["".join(current), current_color])
-    return segments
-
-
-def _ref_width(segments, advances):
-    width = 0.0
-    for text, _color in segments:
-        for char in text:
-            width += advances.get(char, advances["?"])
-    return width
-
-
-def _ref_rounded(value):
-    return round(float(value), 4)
-
-
-def _ref_draw(layout, panel):
-    box_width, box_height, texts = layout
-    scale = panel["scale"]
-    fx = float(panel["x"])
-    fy = float(panel["y"])
-    fw = _ref_rounded(box_width * scale)
-    fh = _ref_rounded(box_height * scale)
-    radius = _ref_rounded(panel["cornerRadius"] * scale)
-    outline = _ref_rounded(panel["borderWidth"] * scale)
-    rect = [fx, fy, fw, fh]
-    radii = [radius, radius, radius, radius]
-    commands = []
-    if panel["blur"]:
-        blur_radius = _ref_rounded(min(20, max(0, panel["blurStrength"])) * 0.4)
-        if blur_radius >= 0.5 and fw * fh >= 2000.0:
-            commands.append({"op": "blur", "rect": rect, "radii": radii, "strength": blur_radius, "box": panel["blurBox"]})
-            commands.append({"op": "bind-main-fbo"})
-    fill = panel["fill"]
-    commands.append({
-        "op": "round-rect", "rect": rect, "fill": [fill, fill, fill, fill],
-        "radii": radii, "border": panel["border"], "outline": outline,
-    })
-    for segments, x, y in texts:
-        commands.append({
-            "op": "text", "at": [_ref_rounded(fx + x * scale), _ref_rounded(fy + y * scale)],
-            "scale": scale, "segments": segments,
-        })
-        commands.append({"op": "flush-text"})
-        commands.append({"op": "bind-main-fbo"})
-    return {"layout": {"width": box_width, "height": box_height}, "commands": commands}
-
-
-def _ref_layout(value, lines):
-    advances = value["advances"]
-    panel = value["panel"]
-    title = _ref_styled(value["title"])
-    brand = _ref_styled(value["brand"], panel["brandAccents"])
-    title_width = _ref_width(title, advances)
-    brand_width = _ref_width(brand, advances)
-    max_width = max(title_width, brand_width)
-    for _segments, name_width in lines:
-        max_width = max(max_width, name_width)
-    padding = max(0, panel["padding"])
-    box_width = math.ceil(max_width + padding * 2)
-    title_y = padding + 2
-    header_height = title_y + 10 + 2
-    brand_y = header_height + len(lines) * 10 + 2
-    box_height = brand_y + 10 + padding
-    texts = [(title, (box_width - title_width) / 2.0, float(title_y))]
-    line_y = header_height
-    for segments, _name_width in lines:
-        texts.append((segments, float(padding), float(line_y)))
-        line_y += 10
-    texts.append((brand, (box_width - brand_width) / 2.0, float(brand_y)))
-    return box_width, box_height, texts
+def verify_reference_sealed(path: Path) -> None:
+    """Candidate-uid probe: fork, drop to WORKER_UID, and require that
+    opening the sealed renderer fails. Runs wherever the evaluator holds
+    root (every broker container); a readable oracle refuses evaluation."""
+    if os.geteuid() != 0 or not sys.platform.startswith("linux"):
+        return
+    pid = os.fork()
+    if pid == 0:
+        code = 2
+        try:
+            os.setgroups([])
+            os.setgid(WORKER_UID)
+            os.setuid(WORKER_UID)
+            try:
+                fd = os.open(path, os.O_RDONLY)
+            except OSError:
+                code = 0
+            else:
+                os.close(fd)
+                code = 1
+        finally:
+            os._exit(code)
+    _, status = os.waitpid(pid, 0)
+    if os.waitstatus_to_exitcode(status) != 0:
+        raise RuntimeError(f"sealed reference renderer is reachable from the candidate uid: {path}")
 
 
 def _ref_render(value):
-    entries = [entry for entry in value["entries"] if not entry["hidden"]]
-    entries.sort(key=lambda entry: (-entry["value"], entry["owner"].lower()))
-    entries = entries[:15]
-    if not entries:
-        return None
-    lines = []
-    for entry in entries:
-        name = _ref_styled(entry["name"])
-        lines.append((name, _ref_width(name, value["advances"])))
-    return _ref_draw(_ref_layout(value, lines), value["panel"])
+    if _REF_RENDER is None:
+        raise RuntimeError("sealed reference renderer is not loaded")
+    return _REF_RENDER(value)
 
 
 def _frame_scene(base: dict, edits) -> dict:
@@ -602,24 +634,15 @@ def drive_frames(worker: Worker, plan: FramePlan) -> tuple[list[float], str | No
     return times, None
 
 
-def _candidate_peak_rss_kb() -> float | None:
-    """Kernel-reported peak RSS (VmHWM, KiB) summed over live candidate
-    processes. Root-only /proc accounting; candidate code cannot lower it."""
-    if os.geteuid() != 0 or not Path("/proc").is_dir():
+def _candidate_peak_rss_kb(cgroup: Path | None) -> float | None:
+    """Trusted allocation accounting: cgroup-v2 memory.peak (bytes -> KiB)
+    of the per-repetition candidate cgroup — the kernel's non-resettable
+    high-water mark over the WHOLE candidate process tree, including
+    descendants that already exited. Candidate code cannot write cgroup
+    files, and /proc/self/clear_refs does not touch cgroup accounting."""
+    if cgroup is None:
         return None
-    total = 0.0
-    found = False
-    for pid in _candidate_pids():
-        try:
-            status = Path(f"/proc/{pid}/status").read_text()
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
-            continue
-        for line in status.splitlines():
-            if line.startswith("VmHWM:"):
-                total += float(line.split()[1])
-                found = True
-                break
-    return total if found else None
+    return int((cgroup / "memory.peak").read_text()) / 1024.0
 
 
 def nearest_rank_p99(times: list[float]) -> float:
@@ -636,12 +659,13 @@ def evaluate_case(workspace: Path, plan: FramePlan) -> tuple[float, bool, dict]:
     error: str | None = None
     for _ in range(INNER_REPS):
         reset_candidate_state()
-        worker = Worker(workspace)
+        cgroup = _create_candidate_cgroup()
+        worker = Worker(workspace, cgroup)
         try:
             frame_times, rep_error = drive_frames(worker, plan)
             rep_times.append(frame_times)
             if rep_error is None:
-                rss_kb = _candidate_peak_rss_kb()
+                rss_kb = _candidate_peak_rss_kb(cgroup)
                 if rss_kb is None:
                     rss_kb = worker.close_and_measure()
                 if rss_kb is None:
@@ -652,7 +676,10 @@ def evaluate_case(workspace: Path, plan: FramePlan) -> tuple[float, bool, dict]:
             try:
                 worker.kill()
             finally:
-                reset_candidate_state()
+                try:
+                    reset_candidate_state()
+                finally:
+                    _remove_candidate_cgroup(cgroup)
         if rep_error is not None:
             error = rep_error
             break
@@ -688,14 +715,18 @@ def run_public_suite(workspace: Path) -> tuple[bool, str]:
     for case in cases:
         plan = build_frame_plan(case["id"], case["input"], case["expected"])
         reset_candidate_state()
-        worker = Worker(workspace)
+        cgroup = _create_candidate_cgroup()
+        worker = Worker(workspace, cgroup)
         try:
             _times, error = drive_frames(worker, plan)
         finally:
             try:
                 worker.kill()
             finally:
-                reset_candidate_state()
+                try:
+                    reset_candidate_state()
+                finally:
+                    _remove_candidate_cgroup(cgroup)
         if error is not None:
             return False, f"{case['id']}: {error}"
     return True, f"{len(cases)} public cases passed"
@@ -703,9 +734,12 @@ def run_public_suite(workspace: Path) -> tuple[bool, str]:
 
 def main() -> None:
     _configure_candidate_subreaper()
+    _configure_candidate_cgroups()
     reset_candidate_state()
     assets_dir = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
     workspace = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
+    renderer_path = load_reference_renderer(assets_dir)
+    verify_reference_sealed(renderer_path)
     cases = load_cases(assets_dir)
     plans = [build_frame_plan(case["id"], case["input"], case["expected"]) for case in cases]
     per_example: dict[str, dict] = {}

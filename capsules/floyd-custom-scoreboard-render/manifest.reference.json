@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_77d56656ca15",
+  "id": "cap_8eb079cef7aa",
   "objective": "Minimize Custom Scoreboard p99 render cost and allocations on frozen sidebar scenes while preserving the exact baseline layout and draw-command stream. Correctness is a hard gate; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "0ed7a7dec62fb90307eb3cddc68fa8b0ed472d6d"
+    "commit": "8136fc369614b5d377e5fb337f897730fc1b963e"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
@@ -24,6 +24,7 @@
       "id": "train",
       "visibility": "holdout",
       "paths": [
+        "assets/train/_reference/renderer.py",
         "assets/train/cases.json"
       ]
     },
@@ -31,6 +32,7 @@
       "id": "validation",
       "visibility": "holdout",
       "paths": [
+        "assets/validation/_reference/renderer.py",
         "assets/validation/cases.json"
       ]
     }
@@ -43,10 +45,12 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:8a6488dbede7df87a561ef49dc68bdfa95381d8d3d7c580f98002652ae3a5b32"
+    "hash": "sha256:f89a96ba9da96886e1878fee8a7cea06d1fcef48fd4c5b20e9f07be80c4f7d36"
   },
   "contentHashes": {
+    "assets/train/_reference/renderer.py": "sha256:dfcb48a694ee39eb9f9fcb26b8ef6fe8c7dd3eb0221ab1ebec1dd21a783ebe12",
     "assets/train/cases.json": "sha256:53f49f306408424415e06ee89cd1f15a1305f6baf26eb707cf3165c6e16df5ed",
+    "assets/validation/_reference/renderer.py": "sha256:dfcb48a694ee39eb9f9fcb26b8ef6fe8c7dd3eb0221ab1ebec1dd21a783ebe12",
     "assets/validation/cases.json": "sha256:c0556ae08e49c62402228b37a84fd7cb7ec624e8f53cb97603d46e474a9c3d5f"
   },
   "meta": {
@@ -71,16 +75,16 @@
       "platform": "linux",
       "samples": 9,
       "freshProcess": true,
-      "frames": "frameReps per sealed case; frame 0 is the verified untimed scene-transfer frame, frames 1..frameReps-1 are the measured novel frames (trusted per-frame entry-value edits, verified against the trusted reference renderer)",
-      "q": "per sealed case, 0 when any frame mismatches, else 0.6/(1 + p99_ms/0.6) + 0.4/(1 + peak_rss_mib/16); p99_ms = nearest-rank p99 across measured novel frames of the per-frame minimum over the nine fresh-process repetitions, timed by the trusted parent; peak_rss_mib = max kernel-reported candidate peak RSS across repetitions; capsule scalar = mean across sealed cases",
+      "frames": "frameReps per sealed case; frame 0 is the verified untimed scene-transfer frame, frames 1..frameReps-1 are the measured novel frames (trusted per-frame entry-value edits, verified against the sealed reference renderer: digest-pinned, shipped inside the holdout asset groups under the root-only /capsule tmpfs, loaded in memory by the trusted root evaluator only, with a candidate-uid readability probe that refuses evaluation if the oracle is reachable)",
+      "q": "per sealed case, 0 when any frame mismatches, else 0.6/(1 + p99_ms/0.6) + 0.4/(1 + peak_rss_mib/16); p99_ms = nearest-rank p99 across measured novel frames of the per-frame minimum over the nine fresh-process repetitions, timed by the trusted parent; peak_rss_mib = max across repetitions of the trusted cgroup-v2 memory.peak of the per-repetition candidate cgroup (whole candidate process tree including exited descendants; kernel-written, root-owned, non-resettable by candidate code); capsule scalar = mean across sealed cases",
       "p99ScaleMs": 0.6,
       "allocScaleMb": 16,
       "p99Weight": 0.6,
       "allocWeight": 0.4,
       "qFail": 0,
-      "qBase": 0.5479684465002275,
-      "sigma": 0.002862855134451968,
-      "qReference": 0.5753668688252388,
+      "qBase": 0.5712426368707456,
+      "sigma": 0.002278475267286488,
+      "qReference": 0.5998047687142829,
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)) from the locked A-A calibration (stability aggregates of the pinned ordering report)"
     }
   }
