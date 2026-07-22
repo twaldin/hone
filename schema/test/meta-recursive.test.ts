@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
 import {
+  M2_CALIBRATION_DEFERRED_BINDING,
+  M2_CALIBRATION_DEFERRED_REPORT_DIGEST,
   M2_INNER_MODEL_ROUTE,
   M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
+  MetaCampaignConfigV2Draft,
   type BudgetEnvelope,
 } from "../src/index.js";
 import { describe, expect, it } from "vitest";
@@ -29,7 +32,7 @@ function draft() {
     maxTokens: 1,
     maxUsd: 1,
     maxWallClockSec: 1,
-    maxEvaluatorInvocations: 1,
+    maxEvaluatorInvocations: 17,
   };
   const multiply = (budget: BudgetEnvelope, factor: number): BudgetEnvelope => ({
     maxTokens: budget.maxTokens * factor,
@@ -49,6 +52,19 @@ function draft() {
       image: "hone-mutation@sha256:" + "7".repeat(64),
     },
     generation: { stage: "A", panel: "A", targetGeneration: 0, controllerGeneration: 0, outerReplicate: 0 },
+    calibration: {
+      reportDigest: digest(800),
+      excludedCapsuleIds: Array.from({ length: 4 }, (_, index) => `cap_${(901 + index).toString(16).padStart(12, "0")}`),
+    },
+    corpusCohort: {
+      developmentCapsuleIds: [
+        ...train.map((entry) => entry.capsuleId),
+        // The other (off-panel) development panel's eight capsules.
+        ...Array.from({ length: 8 }, (_, index) => `cap_${(201 + index).toString(16).padStart(12, "0")}`),
+      ],
+      terminalCapsuleIds: holdout.map((entry) => entry.capsuleId),
+      provenanceInputsDigest: digest(801),
+    },
     train,
     holdout,
     routing: {
@@ -201,6 +217,81 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
     const reparsed = MetaCampaignConfigV1.parse(legacy);
     expect(reparsed.modelObservation.requestedRoute).toBe("gpt-5.6-sol");
     expect(reparsed.routing).toEqual({ outerMutation: "gpt-5.6-sol", innerMutation: "gpt-5.6-sol" });
+  });
+
+  it("requires the calibration binding on every V2 config", () => {
+    const { calibration: _calibration, ...withoutCalibration } = draft();
+    expect(() => MetaCampaignConfigV2.parse(withoutCalibration)).toThrow();
+
+    const duplicated = draft();
+    duplicated.calibration.excludedCapsuleIds = Array.from({ length: 4 }, () => duplicated.calibration.excludedCapsuleIds[0]!);
+    expect(() => MetaCampaignConfigV2.parse(duplicated)).toThrow(/four distinct identities/);
+  });
+
+  it("rejects calibration capsules that are registered corpus members", () => {
+    const value = draft();
+    value.calibration.excludedCapsuleIds = [
+      value.train[0]!.capsuleId,
+      ...value.calibration.excludedCapsuleIds.slice(1),
+    ];
+    expect(() => MetaCampaignConfigV2.parse(value)).toThrow(/must remain excluded/);
+  });
+
+  it("rejects per-run evaluator budgets below the complete-run floor", () => {
+    // Floor = 4 * innerEpisodesMax + 1 = 17 for the fixture's ceiling of 4.
+    const child = draft();
+    child.budgets.child.maxEvaluatorInvocations = 16;
+    expect(() => MetaCampaignConfigV2.parse(child)).toThrow(/child evaluator budget cannot fund one complete run \(needs 17\)/);
+
+    const outer = draft();
+    outer.budgets.outer.maxEvaluatorInvocations = 24;
+    expect(() => MetaCampaignConfigV2.parse(outer)).toThrow(/outer evaluator budget cannot fund candidateAttemptsMax \+ 1 evaluations \(needs 25\)/);
+
+    const ceiling = draft();
+    ceiling.developmentPanel.members[0]!.calibratedInnerCeiling = {
+      ...ceiling.developmentPanel.members[0]!.calibratedInnerCeiling,
+      maxEvaluatorInvocations: 16,
+    };
+    expect(() => MetaCampaignConfigV2.parse(ceiling)).toThrow(/calibrated inner ceiling cannot fund one complete run \(needs 17\)/);
+  });
+
+  it("rejects the deferred-calibration sentinel in the official schema (the freeze path)", () => {
+    const value = draft();
+    value.calibration = {
+      reportDigest: M2_CALIBRATION_DEFERRED_BINDING.reportDigest,
+      excludedCapsuleIds: [...M2_CALIBRATION_DEFERRED_BINDING.excludedCapsuleIds],
+    };
+    // Serializing a deferred draft's inner config directly (bypassing the
+    // non-freezable wrapper) must fail the official parse freeze performs.
+    expect(() => MetaCampaignConfigV2.parse(value)).toThrow(/deferred calibration sentinel/);
+    // The same content is tolerated ONLY by the draft-only schema.
+    const parsed = MetaCampaignConfigV2Draft.parse(value);
+    expect(parsed.calibration.reportDigest).toBe(M2_CALIBRATION_DEFERRED_REPORT_DIGEST);
+  });
+
+  it("rejects an off-panel development cohort capsule as a calibration exclusion", () => {
+    const value = draft();
+    // A Panel-B capsule: registered in the 16-dev cohort but absent from this cell's train(8)+holdout(12).
+    const offPanel = value.corpusCohort.developmentCapsuleIds[15]!;
+    expect(value.train.some((entry) => entry.capsuleId === offPanel)).toBe(false);
+    value.calibration.excludedCapsuleIds = [offPanel, ...value.calibration.excludedCapsuleIds.slice(1)];
+    expect(() => MetaCampaignConfigV2.parse(value)).toThrow(/registered cohort capsule/);
+  });
+
+  it("requires train and holdout members to be registered cohort capsules", () => {
+    const trainDrift = draft();
+    trainDrift.corpusCohort.developmentCapsuleIds = [
+      `cap_${(209).toString(16).padStart(12, "0")}`,
+      ...trainDrift.corpusCohort.developmentCapsuleIds.slice(1),
+    ];
+    expect(() => MetaCampaignConfigV2.parse(trainDrift)).toThrow(/not a registered development cohort capsule/);
+
+    const holdoutDrift = draft();
+    holdoutDrift.corpusCohort.terminalCapsuleIds = [
+      `cap_${(209).toString(16).padStart(12, "0")}`,
+      ...holdoutDrift.corpusCohort.terminalCapsuleIds.slice(1),
+    ];
+    expect(() => MetaCampaignConfigV2.parse(holdoutDrift)).toThrow(/not a registered terminal cohort capsule/);
   });
 
 });
