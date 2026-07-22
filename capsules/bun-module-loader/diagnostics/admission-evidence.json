@@ -1,65 +1,66 @@
 {
-  "feasibility": {
-    "cleanBuildSec": 437.853947,
-    "incrementalRebuildSec": 131.51538706100837,
-    "evalSec": 128.94285714285715
-  },
-  "aa": {
-    "samples": [
-      14.240027524960464,
-      13.892704485087384,
-      13.851970228861177,
-      13.838580388131351,
-      14.32568507011914,
-      14.0550530197367
-    ],
-    "sigma": 0.20940813525668572,
-    "noiseFractionOfScale": 0.2
-  },
-  "qBase": 14.034003452816037,
-  "qFail": 0,
-  "qReference": 15.081044129099466,
-  "controls": [
-    {
-      "name": "broken",
-      "q": 0,
-      "hardGatesPass": false,
-      "role": "invalid resolver source fails the offline native build and maps closed to qFail"
-    },
-    {
-      "name": "naive",
-      "q": 0.7290235547487349,
-      "trainQ": 0.7112538807395461,
-      "validationQ": 0.7467932287579236,
-      "hardGatesPass": true,
-      "role": "deliberately slower but correct 100-microsecond delay on every resolver entry"
-    },
-    {
-      "name": "shortcut",
-      "q": 14.177324945395366,
-      "trainQ": 14.500137468858062,
-      "validationQ": 13.854512421932672,
-      "hardGatesPass": true,
-      "role": "split-path fingerprinting control beats baseline on train but not validation"
-    }
+ "feasibility": {
+  "cleanBuildSec": 437.853947,
+  "incrementalRebuildSec": 131.51538706100837,
+  "evalSec": 157.21428571428572
+ },
+ "aa": {
+  "samples": [
+   13.987198728064019,
+   14.009116222933596,
+   13.984965397044792,
+   13.972097956561877,
+   13.866455712244862,
+   13.894249139632436
   ],
-  "perturbation": {
-    "name": "improved",
-    "path": "diagnostics/improved/src/resolver/resolver.rs",
-    "description": "Independently authored valid source perturbation removes disabled resolver tracing and avoids cold debug-log flush calls while preserving exact observations, focused tests, and RSS.",
-    "q": 14.182308124835766,
-    "trainQ": 14.529404934556126,
-    "validationQ": 13.835211315115407,
-    "hardGatesPass": true,
-    "movesMetric": true
+  "sigma": 0.057695965931277085,
+  "noiseFractionOfScale": 0.08222310351462814
+ },
+ "qBase": 14.034003452816037,
+ "qFail": 0,
+ "qReference": 14.73570362545684,
+ "controls": [
+  {
+   "name": "broken",
+   "q": 0,
+   "hardGatesPass": false,
+   "role": "invalid resolver source fails the offline native build and maps closed to qFail"
   },
-  "orderingChecks": {
-    "consecutivePasses": 2,
-    "firstPassStabilitySpread": 0.027728477903053307,
-    "finalStabilitySpread": 0.034612449907861144,
-    "stabilityBand": 0.15,
-    "containerEvaluationsPerPass": 14,
-    "firstPassWallSec": 1803.2,
-    "finalPassWallSec": 1805.2
+  {
+   "name": "naive",
+   "q": 2.028201610176765,
+   "trainQ": 2.022133610677642,
+   "validationQ": 2.034269609675887,
+   "hardGatesPass": true,
+   "role": "deliberately slower but correct: a fixed deterministic ~15us spin on every resolver entry (quantization-immune, ratio-stable under the interleaved reference yardstick)"
+  },
+  {
+   "name": "shortcut",
+   "q": 10.938397853227343,
+   "trainQ": 19.83527818281414,
+   "validationQ": 2.0415175236405476,
+   "hardGatesPass": true,
+   "role": "split-path memorization control: full train-split resolution results are memorized in a digest-keyed table promoted only on repeat sightings (correctness phase stays inside the frozen RSS gate) so repeated train resolutions skip the resolver entirely, while validation entries pay a bounded deterministic probe \u2014 beats baseline on train, clearly slower on validation"
   }
+ ],
+ "perturbation": {
+  "name": "improved",
+  "path": "diagnostics/improved/src/resolver/resolver.rs",
+  "description": "Independently authored valid source perturbation: removes disabled perf-event tracing, tracing-timer accumulation, and cold debug-log flush calls from the resolver entry path, skips the specifier-classification prologue for relative './'/'../' imports (a guaranteed no-op for them), joins single-segment relative specifiers directly instead of running the general path normalizer, and adds cold/no-inline layout hints on cold resolver functions. Observation-preserving: loader stdout and resolution-path checksums are byte-identical to the pristine baseline on every train and validation graph (20/20 phase outputs), focused tests pass, RSS unchanged.",
+  "q": 15.281315901778726,
+  "trainQ": 15.295543449548168,
+  "validationQ": 15.267088354009283,
+  "hardGatesPass": true,
+  "movesMetric": true
+ },
+ "orderingChecks": {
+  "consecutivePasses": 2,
+  "firstPassStabilitySpread": 0.0017258282040411423,
+  "finalStabilitySpread": 0.007594187584423491,
+  "stabilityBand": 0.15,
+  "containerEvaluationsPerPass": 14,
+  "firstPassWallSec": 2898.0,
+  "finalPassWallSec": 2201.0
+ },
+ "measurementNote": "Timed phase: per graph, one untimed settling repetition then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored by the median per-pair time ratio; fastest-of-N was abandoned because sub-200ms container runs are multi-modal and the fastest sample estimates the rare mode's own variance. The untimed correctness phase loads the full module graph and gates exact export/side-effect hashes and peak RSS against the frozen oracle."
 }

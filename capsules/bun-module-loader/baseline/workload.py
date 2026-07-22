@@ -119,6 +119,75 @@ def _aliases(root: Path, modules: int) -> None:
         _write(root / "lib" / f"node-{index:04d}.ts", _module_body(index, dependency, import_path))
     _write(root / "entry.ts", _entry("@hone/node-0000"))
 
+_DRIVER_PRELUDE = """const root = import.meta.dir;
+const pad = (n) => String(n).padStart(4, "0");
+let checksum = 2654435761 >>> 0;
+let count = 0;
+const take = (resolved) => {
+  const rel = resolved.startsWith(root) ? resolved.slice(root.length) : resolved;
+  for (let i = 0; i < rel.length; i++) {
+    checksum = (Math.imul((checksum ^ rel.charCodeAt(i)) >>> 0, 16777619) + 2246822519) >>> 0;
+  }
+  count++;
+};
+"""
+
+_DRIVER_EPILOGUE = """console.log(JSON.stringify({
+  exports: { value: checksum >>> 0, tag: "resolve" },
+  sideEffects: { count: count >>> 0, checksum: checksum >>> 0 },
+}));
+"""
+
+
+def _resolve_driver(kind: str, modules: int, fanout: int, reps: int) -> str:
+    """Emit the resolution-heavy timed driver: every import edge of the frozen
+    graph is resolved through Bun.resolveSync for `reps` passes and folded
+    into a deterministic root-relative path checksum (the timed-phase
+    observation). No module is loaded or executed."""
+    if kind in ("ts-chain", "extensionless-ts"):
+        ext = "" if kind == "extensionless-ts" else ".ts"
+        body = (
+            f"for (let r = 0; r < {reps}; r++) {{\n"
+            f"  for (let i = 0; i < {modules}; i++) {{\n"
+            f'    take(Bun.resolveSync("./node-" + pad(i) + "{ext}", root));\n'
+            f"  }}\n"
+            f"}}\n"
+        )
+    elif kind == "esm-fanout":
+        body = (
+            f"for (let r = 0; r < {reps}; r++) {{\n"
+            f'  take(Bun.resolveSync("./node-" + pad({modules - 1}) + ".mjs", root));\n'
+            f"  for (let i = 0; i < {modules}; i++) {{\n"
+            f"    for (let j = Math.max(0, i - {fanout}); j < i; j++) {{\n"
+            f'      take(Bun.resolveSync("./node-" + pad(j) + ".mjs", root));\n'
+            f"    }}\n"
+            f"  }}\n"
+            f"}}\n"
+        )
+    elif kind == "package-exports":
+        body = (
+            f"for (let r = 0; r < {reps}; r++) {{\n"
+            f'  take(Bun.resolveSync("hone-pkg-0000", root));\n'
+            f"  for (let k = 0; k + 1 < {modules}; k++) {{\n"
+            f'    const dir = root + "/node_modules/hone-pkg-" + pad(k) + "/src";\n'
+            f'    take(Bun.resolveSync("hone-pkg-" + pad(k + 1), dir));\n'
+            f"  }}\n"
+            f"}}\n"
+        )
+    elif kind == "tsconfig-alias":
+        body = (
+            f"for (let r = 0; r < {reps}; r++) {{\n"
+            f'  take(Bun.resolveSync("@hone/node-0000", root));\n'
+            f"  for (let k = 1; k < {modules}; k++) {{\n"
+            f'    take(Bun.resolveSync("@hone/node-" + pad(k), root + "/lib"));\n'
+            f"  }}\n"
+            f"}}\n"
+        )
+    else:
+        raise ValueError(f"unknown graph kind: {kind}")
+    return _DRIVER_PRELUDE + body + _DRIVER_EPILOGUE
+
+
 
 def materialize(spec: dict, root: Path) -> list[dict]:
     jobs = spec.get("jobs")
@@ -132,10 +201,13 @@ def materialize(spec: dict, root: Path) -> list[dict]:
         kind = raw.get("kind")
         modules = raw.get("modules")
         fanout = raw.get("fanout", 4)
+        reps = raw.get("resolveRepetitions")
         if not isinstance(job_id, str) or not job_id or not isinstance(modules, int) or not 32 <= modules <= 1200:
             raise ValueError("invalid workload job")
         if not isinstance(fanout, int) or not 2 <= fanout <= 8:
             raise ValueError("invalid graph fanout")
+        if not isinstance(reps, int) or not 1 <= reps <= 200:
+            raise ValueError("invalid resolve repetition count")
         job_root = root / job_id
         job_root.mkdir(parents=True)
         if kind == "ts-chain":
@@ -155,7 +227,15 @@ def materialize(spec: dict, root: Path) -> list[dict]:
             entry = "entry.ts"
         else:
             raise ValueError(f"unknown graph kind: {kind}")
-        realized.append({"id": job_id, "kind": kind, "entry": str(job_root / entry)})
+        _write(job_root / "hone-resolve.mjs", _resolve_driver(kind, modules, fanout, reps))
+        realized.append(
+            {
+                "id": job_id,
+                "kind": kind,
+                "entry": str(job_root / entry),
+                "resolveEntry": str(job_root / "hone-resolve.mjs"),
+            }
+        )
     return realized
 
 

@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_012c84df4174",
-  "objective": "Improve cold and warm module-loader performance on frozen ESM and TypeScript graph shapes derived from bench/module-loader. Only src/resolver/** is mutable; exact exports and side effects, focused upstream resolver tests, and peak RSS no more than baseline +2% are hard gates.",
+  "id": "cap_9c3636562af0",
+  "objective": "Improve module-resolution performance on frozen ESM and TypeScript graph shapes derived from bench/module-loader: the timed metric resolves every import edge of each frozen graph through the runtime resolver (Bun.resolveSync driver), aligning the score with the only mutable surface. Only src/resolver/** is mutable; exact module-graph load observations (exports and side effects), exact resolution-path checksums, focused upstream resolver tests, and peak RSS no more than baseline +2% are hard gates.",
   "baseline": {
     "kind": "git",
-    "commit": "45ef96c1bcee8a7eda46082786a96ea21635b931"
+    "commit": "f0ab939353a81ce65dd11b1590fad92a4ee24fed"
   },
   "image": "hone-bun-module-loader@sha256:42510480a076778ff594c95fd200610a41721d37ab20b97c80f3e98569c36747",
   "evalEntrypoint": [
@@ -30,7 +30,7 @@
     },
     {
       "id": "validation",
-      "visibility": "public",
+      "visibility": "protected",
       "paths": [
         "assets/validation/oracle.json",
         "assets/validation/spec.json"
@@ -45,17 +45,17 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:9bc5b2616075b5918ac5bedf91696c9c74a655531ce885ff76fe21b259c98a3d"
+    "hash": "sha256:75145b13a25bfc5cfdbc5bda5f074a90c4e43c9762d7c5ac28164f3b2d9d675b"
   },
   "contentHashes": {
-    "assets/train/oracle.json": "sha256:610c21330351574cc67c86e8357b4a9de979015eeaa4af60dd7133a7dd3ff9f4",
-    "assets/train/spec.json": "sha256:18de9610d99001242c49c7b8abb4127cf61645129c1c4c9a930a686ae080cf39",
-    "assets/validation/oracle.json": "sha256:98fbca9b24aa3287a8d9039c9c93473bf05b2b9a07557c7f90bfcc98e4771c7d",
-    "assets/validation/spec.json": "sha256:31d38e9d720ee949eb382b9bfc5f85536c96feeb2667ea733a9b847fb1c8d3bc"
+    "assets/train/oracle.json": "sha256:4385c808ede50e934578c1c7408f87f945c490c3f8c1181516439f24c3ee895d",
+    "assets/train/spec.json": "sha256:8d0d0112bb61729fb6c3b4edc63a31190be7d6a5d43bccacc8dfd4bef0ee6dc2",
+    "assets/validation/oracle.json": "sha256:6269e6a41fae71613ed9adb75a0b6a695b83fdebd230ecc59de7dceb4cec08ff",
+    "assets/validation/spec.json": "sha256:3432131b59aed2f92c466abae8bf4efc111a38f5b80cb8628bccb9648a58da14"
   },
   "meta": {
     "evaluatorSource": "user",
-    "provenance": "Current-head OSS-T01 at oven-sh/bun 5187e27669440a72ab1b082f92b7f1b5ca94cfc1; no reference patch or privileged winning artifact. Owner-approved plan revision 2026-07-18 repinned OSS-T01 from a227ad991b62fc4e9b9ee5e998ad6c2e6508fe88 because upstream WebKit prebuilt/generated-source skew makes a227ad99 non-self-buildable. Six interleaved A-A measurements set qBase=14.034003452816037, sigma=0.20940813525668572, qFail=0, and qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=15.081044129099466.",
+    "provenance": "Current-head OSS-T01 at oven-sh/bun 5187e27669440a72ab1b082f92b7f1b5ca94cfc1; no reference patch or privileged winning artifact. Owner-approved plan revision 2026-07-18 repinned OSS-T01 from a227ad991b62fc4e9b9ee5e998ad6c2e6508fe88 because upstream WebKit prebuilt/generated-source skew makes a227ad99 non-self-buildable. Six interleaved A-A measurements set qBase=14.034003452816037, sigma=0.20940813525668572, qFail=0, and qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=15.081044129099466. Metric-narrowing revision 2026-07-22 (owner-endorsed): the timed phase was realigned from whole-process module-graph loads (resolver share ~1-2%, margins swamped by binary-layout and scheduler noise) to a resolution-heavy driver resolving every frozen import edge, scored as the median of interleaved candidate/reference per-pair time ratios against the sealed pristine image binary. qBase is scale-invariant by yardstick construction (baseline == reference scores qBase for any ratio estimator); sigma and qReference are re-derived from the six post-revision stability aggregates via the original construction qBase+max(5*sigma,0.05*abs(qBase-qFail)).",
     "license": "MIT",
     "tags": [
       "m2",
@@ -91,18 +91,18 @@
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max (provisional; frozen-host recalibration required)",
       "freshProcess": true,
       "warmRepetitions": 5,
-      "q": "reciprocal geometric mean of cold and warm per-graph wall time after all hard gates pass",
+      "q": "reference-normalized per-graph score after all hard gates pass: each graph runs one untimed settling repetition then 30 warm (6 rounds x warmRepetitions) and 7 cold interleaved candidate/reference pairs; each phase is scored as the median per-pair time ratio (adjacent pair members share host state, so frequency drift, contention spikes, and scheduler mode-occupancy luck divide out) and q is the geometric mean over graphs of qBase/sqrt(warmRatio*coldRatio), so a candidate identical to the trusted baseline scores qBase by construction",
       "qFail": 0,
       "qBase": 14.034003452816037,
-      "sigma": 0.20940813525668572,
-      "qReference": 15.081044129099466,
+      "sigma": 0.057695965931277085,
+      "qReference": 14.73570362545684,
       "aaSamples": [
-        14.240027524960464,
-        13.892704485087384,
-        13.851970228861177,
-        13.838580388131351,
-        14.32568507011914,
-        14.0550530197367
+        13.987198728064019,
+        14.009116222933596,
+        13.984965397044792,
+        13.972097956561877,
+        13.866455712244862,
+        13.894249139632436
       ],
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
       "boundedEvaluatorSec": 600,

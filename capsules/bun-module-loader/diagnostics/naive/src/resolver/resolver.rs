@@ -1126,7 +1126,22 @@ impl<'a> Resolver<'a> {
         // TODO: thread an explicit lifetime through Result instead.
         let import_path: &'static [u8] = unsafe { &*std::ptr::from_ref::<[u8]>(import_path) };
         let _tracer = ::bun_perf::trace(::bun_perf::PerfEvent::ModuleResolverResolve);
-        std::thread::sleep(std::time::Duration::from_micros(100));
+        // Deliberately slower but correct control: a fixed deterministic
+        // spin (~15us) on every resolver entry. CPU-bound work instead of
+        // a sleep so the slowdown is immune to timer quantization, scales
+        // with host speed like real work (ratio-stable under the
+        // interleaved reference yardstick), and keeps the naive eval far
+        // inside the bounded evaluator wall at deep sampling depths.
+        {
+            let mut sink: u64 = 0x9e37_79b9_7f4a_7c15_u64 ^ (import_path.len() as u64);
+            for _ in 0..6000_u64 {
+                sink = sink
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                sink ^= sink >> 29;
+            }
+            std::hint::black_box(sink);
+        }
 
         // Only setting 'current_action' in debug mode because module resolution
         // is done very often, and has a very low crash rate.

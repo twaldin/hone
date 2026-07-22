@@ -1053,6 +1053,8 @@ impl<'a> Resolver<'a> {
         self.match_tsconfig_paths(tsconfig, import_path, kind, out)
     }
 
+    #[cold]
+    #[inline(never)]
     pub fn flush_debug_logs(
         &mut self,
         flush_mode: FlushMode,
@@ -1169,22 +1171,11 @@ impl<'a> Resolver<'a> {
             _ => options::ExtOrder::DefaultDefault,
         };
 
-        if FeatureFlags::TRACING {
-            self.timer.reset();
-        }
-
-        // The tracing-elapsed accumulation
-        // fires on EVERY return path. Capture raw field ptrs (Copy) so the closure
-        // does not hold a `&mut self` borrow across the function body.
-        let elapsed_ptr: *mut u64 = core::ptr::addr_of_mut!(self.elapsed);
-        let timer_ptr: *const Timer = core::ptr::addr_of!(self.timer);
-        scopeguard::defer! {
-            if FeatureFlags::TRACING {
-                // SAFETY: `self` outlives this guard (drops at end of fn body);
-                // `elapsed`/`timer` are not borrowed when the guard fires.
-                unsafe { *elapsed_ptr += (*timer_ptr).read(); }
-            }
-        }
+        // Improved control: the TRACING elapsed accumulation (a monotonic
+        // timer read on entry plus another in a scope guard on every return
+        // path) only feeds the bundler's optional stderr timing dump; it is
+        // dead weight on every resolver entry and is removed together with
+        // the perf-event span.
 
         if self.log_ref().level == bun_ast::Level::Verbose {
             if self.debug_logs.is_some() {
@@ -1199,6 +1190,21 @@ impl<'a> Resolver<'a> {
             return ResultUnion::NotFound;
         }
 
+        // Relative-specifier fast path: "./" and "../" specifiers can never
+        // name a "node:"/"bun:" builtin or hardcoded alias (all bare names),
+        // never pass `is_package_path` (so the tsconfig-paths /
+        // packages=external pre-check below is unreachable), never match the
+        // implicit-external URL shapes ("#" in css, "http://", "https://",
+        // "//"), and never parse as a "data:" URL — every classification
+        // block below is a guaranteed no-op for them. The only check that
+        // could observe a relative specifier is a user-supplied external
+        // wildcard pattern, so the shortcut is disabled whenever any
+        // patterns exist. Resolution results are bit-identical; only the
+        // dead per-import classification work is skipped.
+        let fast_relative_specifier = (import_path.starts_with(b"./")
+            || import_path.starts_with(b"../"))
+            && self.opts.external.patterns.is_empty();
+        if !fast_relative_specifier {
         if self.opts.mark_builtins_as_external {
             if import_path.starts_with(b"node:")
                 || import_path.starts_with(b"bun:")
@@ -1353,6 +1359,7 @@ impl<'a> Resolver<'a> {
             }
             Ok(None) => {}
         }
+        } // fast_relative_specifier: end of skipped classification prologue
 
         // When using `bun build --compile`, module resolution is never
         // relative to our special /$bunfs/ directory.
@@ -1561,7 +1568,7 @@ impl<'a> Resolver<'a> {
             }
         };
 
-        // (tracing `elapsed` accumulation handled by `_elapsed_guard` above on all paths)
+        // (tracing elapsed accumulation removed in the improved control)
         self.extension_order = original_order;
         ret
     }
@@ -2148,11 +2155,44 @@ impl<'a> Resolver<'a> {
         kind: ast::ImportKind,
         global_cache: GlobalCache,
     ) -> ResultUnion {
-        let Some(abs_path) = self
-            .fs_ref()
-            .abs_buf_checked(&[source_dir, import_path], bufs!(relative_abs_path))
-        else {
-            return ResultUnion::NotFound;
+        // Single-segment "./name" fast join: the general checked join walks
+        // and re-normalizes every byte of both parts to collapse "."/".."
+        // segments and duplicate separators. When the specifier is exactly
+        // "./" plus one plain segment and the (already normalized) source
+        // directory contains nothing to collapse, the joined path is
+        // `source_dir ++ "/" ++ segment`, byte-for-byte what the normalizer
+        // produces, so the bytes are copied directly instead.
+        let abs_path: &[u8] = 'joined: {
+            if cfg!(not(windows)) && import_path.len() > 2 && import_path.starts_with(b"./") {
+                let segment = &import_path[2..];
+                let plain_segment = !segment.iter().any(|&byte| byte == b'/' || byte == b'\\')
+                    && segment != b"."
+                    && segment != b"..";
+                let normalized_source_dir = source_dir.len() > 1
+                    && source_dir[0] == b'/'
+                    && source_dir[source_dir.len() - 1] != b'/'
+                    && !source_dir.contains(&b'\\')
+                    && !source_dir
+                        .windows(2)
+                        .any(|pair| pair == b"//" || pair == b"/.");
+                if plain_segment && normalized_source_dir {
+                    let buf = bufs!(relative_abs_path);
+                    let joined_len = source_dir.len() + 1 + segment.len();
+                    if joined_len <= buf.len() {
+                        buf[..source_dir.len()].copy_from_slice(source_dir);
+                        buf[source_dir.len()] = b'/';
+                        buf[source_dir.len() + 1..joined_len].copy_from_slice(segment);
+                        break 'joined &buf[..joined_len];
+                    }
+                }
+            }
+            let Some(joined) = self
+                .fs_ref()
+                .abs_buf_checked(&[source_dir, import_path], bufs!(relative_abs_path))
+            else {
+                return ResultUnion::NotFound;
+            };
+            joined
         };
 
         if self.opts.external.abs_paths.count() > 0
@@ -2269,6 +2309,7 @@ impl<'a> Resolver<'a> {
         ret
     }
 
+    #[inline(never)]
     pub fn check_package_path(
         &mut self,
         source_dir: &[u8],

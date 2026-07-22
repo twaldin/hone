@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """Trusted evaluator for the frozen Bun module-loader capsule.
 
-Only src/resolver is candidate-mutable. The evaluator builds that source with
-image-baked native objects and offline dependency caches, runs focused upstream
-resolver tests, then measures fresh Bun processes over sealed graph shapes.
+Only src/resolver is candidate-mutable, so the evaluator aligns its timed
+metric with that surface. It seals the pristine image baseline binary as an
+interleaved reference yardstick, builds the candidate source with image-baked
+native objects and offline dependency caches, copies the freshly built binary
+to a root-owned sealed path before any execution of it, and runs the focused
+upstream resolver tests. Each frozen graph then runs two phases as fresh Bun
+processes: an untimed CORRECTNESS phase that loads the full module graph and
+gates exact export/side-effect hashes and peak RSS against the frozen oracle,
+and a timed RESOLUTION phase where a driver script resolves every import edge
+of the graph through Bun.resolveSync for the spec'd repetition count (the
+resolver dominates this phase, so genuine resolver improvements move the
+score). Timed runs interleave candidate/reference pairs under the same host
+state and are scored as the median of per-pair time ratios, so host frequency
+drift, contention spikes, and scheduler mode luck divide out.
 """
 from __future__ import annotations
 
@@ -29,6 +40,26 @@ SOURCE_ROOT = Path("/opt/bun")
 BUILD_ROOT = SOURCE_ROOT / "build" / "release"
 WORK_ROOT = BUILD_ROOT / "hone-eval"
 BUN = BUILD_ROOT / "bun-profile"
+SEALED_ROOT = BUILD_ROOT / "hone-sealed"
+SEALED_BUN = SEALED_ROOT / "bun-profile"
+REF_ROOT = BUILD_ROOT / "hone-ref"
+REF_BUN = REF_ROOT / "bun-profile"
+# Frozen provisional yardstick scale: a candidate identical to the trusted
+# baseline resolver scores this value by construction (raw_q == reference_q),
+# independent of host frequency/contention drift. Final GCE recalibration
+# re-freezes it. Equal to the provisional local qBase.
+REFERENCE_NORMALIZATION = 14.034003452816037
+# Sub-200ms driver runs under a 2-cpu container are multi-modal (a stable
+# plateau, a rare shallow fast mode of varying depth, and occasional
+# contention spikes), so fastest-of-N estimates the rare mode's own variance
+# and leaves noise that swamps genuine candidate margins. Instead the timed
+# phase runs WARM_SAMPLE_ROUNDS x warmRepetitions interleaved
+# candidate/reference pairs scored by the median per-pair ratio; adjacent
+# pair members share host state, so spike tails and mode-occupancy luck
+# cancel. The yardstick construction keeps the frozen calibration valid under
+# any ratio estimator because baseline == reference scores
+# REFERENCE_NORMALIZATION by construction.
+WARM_SAMPLE_ROUNDS = 6
 CANDIDATE_UID = int(os.environ.get("CAPSULE_WORKER_UID", "2000"))
 CANDIDATE_GID = int(os.environ.get("CAPSULE_WORKER_GID", "2000"))
 BUILD_TIMEOUT_SEC = 390
@@ -218,6 +249,7 @@ def _prepare_candidate() -> None:
 
 
 def _build_candidate() -> float:
+    _seal_reference_binary()
     started = time.perf_counter()
     _run(
         ["/usr/local/bun/bin/bun", "scripts/build.ts", "--profile=release", "-j1"],
@@ -228,10 +260,38 @@ def _build_candidate() -> float:
     elapsed = time.perf_counter() - started
     if not BUN.is_file() or not os.access(BUN, os.X_OK):
         raise EvaluationFailure("incremental build did not produce bun-profile")
-    revision = _run([str(BUN), "--revision"], cwd=SOURCE_ROOT, timeout=20, candidate=True).stdout.decode().strip()
+    _seal_binary(BUN, SEALED_ROOT, SEALED_BUN)
+    os.chmod(BUILD_ROOT, 0o755)
+    revision = _run([str(SEALED_BUN), "--revision"], cwd=SOURCE_ROOT, timeout=20, candidate=True).stdout.decode().strip()
     if not revision.endswith("1.4.0-canary.1+5187e2766"):
         raise EvaluationFailure(f"built binary revision mismatch: {revision[-80:]}")
     return elapsed
+
+
+def _seal_binary(src: Path, root: Path, dest: Path) -> None:
+    """Copy a binary to a root-owned, candidate-immutable sealed path so the
+    measured bytes cannot be swapped (for example via a /proc/self/exe copy)
+    between repetitions. The 0o755 sealed directory is un-renameable by the
+    demoted worker while the 0o777 work subdirectories stay writable."""
+    if root.is_symlink() or root.is_file():
+        root.unlink()
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(mode=0o755)
+    os.chmod(root, 0o755)
+    with open(src, "rb") as source, open(dest, "wb") as sealed:
+        shutil.copyfileobj(source, sealed, 1024 * 1024)
+    os.chmod(dest, 0o755)
+
+
+def _seal_reference_binary() -> None:
+    """Seal the PRISTINE image baseline binary before the candidate rebuild
+    overwrites build/release/bun-profile. This binary is benchmarked alongside
+    the candidate in every eval as an interleaved yardstick, so cross-eval host
+    frequency and contention drift (which only ever adds time and is never
+    candidate-controlled) divides out of the reported drift-normalized score."""
+    if not BUN.is_file() or not os.access(BUN, os.X_OK):
+        raise EvaluationFailure("image did not ship a pristine bun-profile reference")
+    _seal_binary(BUN, REF_ROOT, REF_BUN)
 
 
 def _run_upstream_tests() -> None:
@@ -262,7 +322,7 @@ def _run_upstream_tests() -> None:
             path.chmod(path.stat().st_mode | 0o666)
     completed = _run(
         [
-            str(BUN),
+            str(SEALED_BUN),
             "test",
             "--test-name-pattern",
             "^(?!auto-install init failure from an unreadable cwd is a catchable error$).*",
@@ -289,7 +349,7 @@ def _load_assets() -> tuple[dict, dict]:
     return spec, oracle
 
 
-def _parse_observation(stdout: bytes) -> dict:
+def _parse_observation(stdout: bytes, expected_tag: str) -> dict:
     lines = [line for line in stdout.decode("utf-8", "strict").splitlines() if line]
     if len(lines) != 1:
         raise EvaluationFailure("loader emitted unexpected stdout")
@@ -305,12 +365,19 @@ def _parse_observation(stdout: bytes) -> dict:
     for field in (exports["value"], side_effects["checksum"], side_effects["count"]):
         if not isinstance(field, int) or not 0 <= field <= 0xFFFFFFFF:
             raise EvaluationFailure("loader observation contains invalid integer")
-    if exports["tag"] != "graph":
+    if exports["tag"] != expected_tag:
         raise EvaluationFailure("loader observation tag mismatch")
     return value
 
 
-def _run_loader(job: dict, cache: Path, sample: str) -> dict:
+def _run_loader(
+    binary: Path,
+    entry: str,
+    job: dict,
+    cache: Path,
+    sample: str,
+    expected_tag: str,
+) -> dict:
     rss_path = WORK_ROOT / f"rss-{job['id']}-{sample}.txt"
     rss_path.unlink(missing_ok=True)
     env = _candidate_env(
@@ -329,11 +396,11 @@ def _run_loader(job: dict, cache: Path, sample: str) -> dict:
         f"--regid={CANDIDATE_GID}",
         "--clear-groups",
         "--no-new-privs",
-        str(BUN),
-        job["entry"],
+        str(binary),
+        entry,
     ]
     started = time.perf_counter()
-    completed = _run(argv, cwd=Path(job["entry"]).parent, timeout=RUN_TIMEOUT_SEC, env=env)
+    completed = _run(argv, cwd=Path(entry).parent, timeout=RUN_TIMEOUT_SEC, env=env)
     elapsed = time.perf_counter() - started
     try:
         peak_rss_kib = int(rss_path.read_text(encoding="ascii").strip())
@@ -341,7 +408,7 @@ def _run_loader(job: dict, cache: Path, sample: str) -> dict:
         raise EvaluationFailure("GNU time did not report peak RSS") from exc
     if peak_rss_kib <= 0:
         raise EvaluationFailure("invalid peak RSS")
-    observation = _parse_observation(completed.stdout)
+    observation = _parse_observation(completed.stdout, expected_tag)
     return {
         "elapsedSec": elapsed,
         "peakRssKiB": peak_rss_kib,
@@ -350,31 +417,84 @@ def _run_loader(job: dict, cache: Path, sample: str) -> dict:
     }
 
 
+def _fresh_cache(path: Path) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, mode=0o777)
+    os.chmod(path, 0o777)
+
+
 def _measure_jobs(spec: dict, jobs: list[dict]) -> dict[str, dict]:
-    repetitions = spec.get("warmRepetitions")
-    if not isinstance(repetitions, int) or not 2 <= repetitions <= 7:
+    warm_reps = spec.get("warmRepetitions")
+    if not isinstance(warm_reps, int) or not 2 <= warm_reps <= 7:
         raise EvaluationFailure("invalid warm repetition count")
+    pair_samples = WARM_SAMPLE_ROUNDS * warm_reps
     measured: dict[str, dict] = {}
     for job in jobs:
-        cache = WORK_ROOT / "cache" / job["id"]
-        shutil.rmtree(cache, ignore_errors=True)
-        cache.mkdir(parents=True, mode=0o777)
-        os.chmod(cache, 0o777)
-        cold = _run_loader(job, cache, "cold")
-        warm_samples = [_run_loader(job, cache, f"warm-{index}") for index in range(repetitions)]
-        hashes = {(sample["exportHash"], sample["sideEffectHash"]) for sample in [cold, *warm_samples]}
-        if len(hashes) != 1:
-            raise EvaluationFailure(f"{job['id']}: cold/warm observations diverged")
-        warm_seconds = [sample["elapsedSec"] for sample in warm_samples]
-        peak_rss = max(sample["peakRssKiB"] for sample in [cold, *warm_samples])
+        cand_cache = WORK_ROOT / "cache" / f"{job['id']}-cand"
+        ref_cache = WORK_ROOT / "cache" / f"{job['id']}-ref"
+        _fresh_cache(cand_cache)
+        _fresh_cache(ref_cache)
+        # Correctness phase (untimed): load the full module graph once per
+        # binary; exports/side-effect hashes and peak RSS gate against the
+        # frozen oracle exactly as before.
+        cand_load = _run_loader(SEALED_BUN, job["entry"], job, cand_cache, "cand-load", "graph")
+        ref_load = _run_loader(REF_BUN, job["entry"], job, ref_cache, "ref-load", "graph")
+        if (cand_load["exportHash"], cand_load["sideEffectHash"]) != (
+            ref_load["exportHash"],
+            ref_load["sideEffectHash"],
+        ):
+            raise EvaluationFailure(f"{job['id']}: candidate and reference load observations diverged")
+        # Timed phase: the resolution-heavy driver resolves every import edge
+        # of the frozen graph for the spec'd repetition count. Both binaries
+        # run interleaved seconds apart under the SAME host state; the score
+        # is the median of per-pair time ratios. Driver runs are multi-modal
+        # (a stable plateau, a rare shallow fast mode of varying depth, and
+        # occasional contention spikes), so a fastest-sample estimator would
+        # measure the rare mode's own variance; the per-pair ratio median
+        # rejects both spike tails and mode-occupancy luck, and
+        # baseline == reference scores exactly REFERENCE_NORMALIZATION by
+        # construction.
+        driver = job["resolveEntry"]
+        cand_obs: list[dict] = [
+            _run_loader(SEALED_BUN, driver, job, cand_cache, "cand-resolve-warmup", "resolve")
+        ]
+        ref_obs: list[dict] = [
+            _run_loader(REF_BUN, driver, job, ref_cache, "ref-resolve-warmup", "resolve")
+        ]
+        cand_times: list[float] = []
+        ref_times: list[float] = []
+        for index in range(pair_samples):
+            c = _run_loader(SEALED_BUN, driver, job, cand_cache, f"cand-resolve-{index}", "resolve")
+            r = _run_loader(REF_BUN, driver, job, ref_cache, f"ref-resolve-{index}", "resolve")
+            cand_obs.append(c)
+            ref_obs.append(r)
+            cand_times.append(c["elapsedSec"])
+            ref_times.append(r["elapsedSec"])
+        cand_hashes = {(o["exportHash"], o["sideEffectHash"]) for o in cand_obs}
+        ref_hashes = {(o["exportHash"], o["sideEffectHash"]) for o in ref_obs}
+        if len(cand_hashes) != 1:
+            raise EvaluationFailure(f"{job['id']}: candidate observations diverged across repetitions")
+        if len(ref_hashes) != 1:
+            raise EvaluationFailure(f"{job['id']}: reference observations diverged across repetitions")
+        if cand_hashes != ref_hashes:
+            raise EvaluationFailure(f"{job['id']}: candidate and reference resolve observations diverged")
+        if min(min(cand_times), min(ref_times)) <= 0:
+            raise EvaluationFailure(f"{job['id']}: non-positive timing sample")
+        pair_ratio = statistics.median(c / r for c, r in zip(cand_times, ref_times))
+        resolve_export_hash, resolve_side_effect_hash = next(iter(cand_hashes))
         measured[job["id"]] = {
             "kind": job["kind"],
-            "coldSec": cold["elapsedSec"],
-            "warmMedianSec": statistics.median(warm_seconds),
-            "warmSamplesSec": warm_seconds,
-            "peakRssKiB": peak_rss,
-            "exportHash": cold["exportHash"],
-            "sideEffectHash": cold["sideEffectHash"],
+            "loadSec": cand_load["elapsedSec"],
+            "referenceLoadSec": ref_load["elapsedSec"],
+            "driverSec": statistics.median(cand_times),
+            "referenceDriverSec": statistics.median(ref_times),
+            "pairRatio": pair_ratio,
+            "normalizedScore": REFERENCE_NORMALIZATION / pair_ratio,
+            "peakRssKiB": cand_load["peakRssKiB"],
+            "exportHash": cand_load["exportHash"],
+            "sideEffectHash": cand_load["sideEffectHash"],
+            "resolveExportHash": resolve_export_hash,
+            "resolveSideEffectHash": resolve_side_effect_hash,
         }
     return measured
 
@@ -393,13 +513,14 @@ def _result(
     score = q if valid and math.isfinite(q) and q > Q_FAIL else Q_FAIL
     per_example = {
         job_id: {
-            "score": (
-                1.0 / math.sqrt(measured[job_id]["coldSec"] * measured[job_id]["warmMedianSec"])
-                if valid
-                else Q_FAIL
-            ),
+            "score": (measured[job_id]["normalizedScore"] if valid else Q_FAIL),
             "feedback": (
-                f"all hard gates passed; cold={measured[job_id]['coldSec']:.6f}s warm={measured[job_id]['warmMedianSec']:.6f}s"
+                "all hard gates passed; "
+                f"resolveDriver={measured[job_id]['driverSec']:.6f}s "
+                f"(reference driver={measured[job_id]['referenceDriverSec']:.6f}s, "
+                f"median pair ratio={measured[job_id]['pairRatio']:.6f}, "
+                f"reference-normalized score={measured[job_id]['normalizedScore']:.4f}; "
+                f"graph load={measured[job_id]['loadSec']:.6f}s)"
                 if valid
                 else "hard gate failed"
             ),
@@ -454,6 +575,8 @@ def evaluate() -> dict:
                 job_id: {
                     "exportHash": measured[job_id]["exportHash"],
                     "sideEffectHash": measured[job_id]["sideEffectHash"],
+                    "resolveExportHash": measured[job_id]["resolveExportHash"],
+                    "resolveSideEffectHash": measured[job_id]["resolveSideEffectHash"],
                     "baselinePeakRssKiB": measured[job_id]["peakRssKiB"],
                 }
                 for job_id in job_ids
@@ -472,6 +595,10 @@ def evaluate() -> dict:
                 failures.append(f"{job_id}: export hash mismatch")
             if actual["sideEffectHash"] != expected.get("sideEffectHash"):
                 failures.append(f"{job_id}: side-effect hash mismatch")
+            if actual["resolveExportHash"] != expected.get("resolveExportHash"):
+                failures.append(f"{job_id}: resolve export hash mismatch")
+            if actual["resolveSideEffectHash"] != expected.get("resolveSideEffectHash"):
+                failures.append(f"{job_id}: resolve side-effect hash mismatch")
             baseline_rss = expected.get("baselinePeakRssKiB")
             if not isinstance(baseline_rss, int) or actual["peakRssKiB"] > math.floor(baseline_rss * 1.02):
                 failures.append(f"{job_id}: peak RSS exceeds baseline +2%")
@@ -480,8 +607,7 @@ def evaluate() -> dict:
             return _result(valid=False, tests_pass=True, q=Q_FAIL, job_ids=job_ids, measured=measured, failures=failures, build_sec=build_sec)
         q = math.exp(
             statistics.fmean(
-                -0.5 * (math.log(measured[job_id]["coldSec"]) + math.log(measured[job_id]["warmMedianSec"]))
-                for job_id in job_ids
+                math.log(measured[job_id]["normalizedScore"]) for job_id in job_ids
             )
         )
         if not math.isfinite(q):
