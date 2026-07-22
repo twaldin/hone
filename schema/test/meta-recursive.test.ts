@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
+  M2_INNER_MODEL_ROUTE,
+  M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
@@ -49,6 +51,18 @@ function draft() {
     generation: { stage: "A", panel: "A", targetGeneration: 0, controllerGeneration: 0, outerReplicate: 0 },
     train,
     holdout,
+    routing: {
+      outerMutation: M2_OUTER_MODEL_ROUTE,
+      innerMutation: M2_INNER_MODEL_ROUTE,
+    },
+    modelObservation: {
+      outerRequestedRoute: M2_OUTER_MODEL_ROUTE,
+      innerRequestedRoute: M2_INNER_MODEL_ROUTE,
+      identity: "alias-observation" as const,
+      recordResponseModel: true,
+      recordProviderFingerprint: true,
+      driftSentinel: true,
+    },
     counts: {
       candidates: 12,
       candidateAttemptsMax: 24,
@@ -140,6 +154,53 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
     const inexact = draft();
     inexact.recursiveBudgets.search.outerTrajectory.maxTokens += 1;
     expect(() => MetaCampaignConfigV2.parse(inexact)).toThrow(/must equal 12 complete-panel/);
+  });
+
+  it("accepts the frozen two-role observation policy (outer=sol, inner=terra)", () => {
+    const parsed = MetaCampaignConfigV2.parse(draft());
+    expect(parsed.modelObservation.outerRequestedRoute).toBe(M2_OUTER_MODEL_ROUTE);
+    expect(parsed.modelObservation.innerRequestedRoute).toBe(M2_INNER_MODEL_ROUTE);
+    expect(parsed.routing.outerMutation).toBe(M2_OUTER_MODEL_ROUTE);
+    expect(parsed.routing.innerMutation).toBe(M2_INNER_MODEL_ROUTE);
+  });
+
+  it("rejects routing drift away from the frozen per-role observation routes", () => {
+    const innerDrift = draft();
+    innerDrift.routing.innerMutation = M2_OUTER_MODEL_ROUTE;
+    expect(() => MetaCampaignConfigV2.parse(innerDrift)).toThrow(/inner.*route/i);
+
+    const outerDrift = draft();
+    outerDrift.routing.outerMutation = M2_INNER_MODEL_ROUTE;
+    expect(() => MetaCampaignConfigV2.parse(outerDrift)).toThrow(/outer.*route/i);
+  });
+
+  it("rejects observed model-identity drift in the frozen policy literals", () => {
+    const swapped = draft();
+    swapped.modelObservation = {
+      ...swapped.modelObservation,
+      outerRequestedRoute: M2_INNER_MODEL_ROUTE,
+      innerRequestedRoute: M2_OUTER_MODEL_ROUTE,
+    };
+    swapped.routing = { outerMutation: M2_INNER_MODEL_ROUTE, innerMutation: M2_OUTER_MODEL_ROUTE };
+    expect(() => MetaCampaignConfigV2.parse(swapped)).toThrow();
+  });
+
+  it("rejects an M1-style single-route observation policy on a V2 config", () => {
+    const single = draft();
+    const m1Policy = {
+      requestedRoute: M2_OUTER_MODEL_ROUTE,
+      identity: "alias-observation",
+      recordResponseModel: true,
+      recordProviderFingerprint: true,
+      driftSentinel: true,
+    };
+    expect(() => MetaCampaignConfigV2.parse({ ...single, modelObservation: m1Policy })).toThrow();
+  });
+
+  it("keeps the M1 single-route config valid and unchanged", () => {
+    const reparsed = MetaCampaignConfigV1.parse(legacy);
+    expect(reparsed.modelObservation.requestedRoute).toBe("gpt-5.6-sol");
+    expect(reparsed.routing).toEqual({ outerMutation: "gpt-5.6-sol", innerMutation: "gpt-5.6-sol" });
   });
 
 });
