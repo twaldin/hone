@@ -67,6 +67,18 @@ function recursiveConfig(): RecursiveConfig {
       controllerGeneration: 0,
       outerReplicate: 0,
     },
+    calibration: {
+      reportDigest: digest("recursive:calibration-report"),
+      excludedCapsuleIds: Array.from({ length: 4 }, (_, index) => `cap_${(2001 + index).toString(16).padStart(12, "0")}`),
+    },
+    corpusCohort: {
+      developmentCapsuleIds: [
+        ...train.map((entry) => entry.capsuleId),
+        ...Array.from({ length: 8 }, (_, index) => `cap_${(2101 + index).toString(16).padStart(12, "0")}`),
+      ],
+      terminalCapsuleIds: holdout.map((entry) => entry.capsuleId),
+      provenanceInputsDigest: digest("recursive:corpus-provenance"),
+    },
     train,
     holdout,
     routing: {
@@ -89,6 +101,11 @@ function recursiveConfig(): RecursiveConfig {
       confirmationReplicates: 3,
       holdoutReplicates: 3,
       childConcurrency: 2,
+    },
+    budgets: {
+      ...legacy.budgets,
+      // Outer evaluator floor is candidateAttemptsMax + 1 under the V2 schema.
+      outer: { ...legacy.budgets.outer, maxEvaluatorInvocations: 92 },
     },
     developmentPanel: {
       panel: "A",

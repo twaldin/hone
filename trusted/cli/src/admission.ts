@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { CapsuleManifest, DiagnosticOrderingReport, capsuleDigest, deriveCapsuleId, validateDiagnosticOrdering } from "@hone/schema";
+import { CapsuleManifest, DiagnosticOrderingReport, canonicalJson, capsuleDigest, deriveCapsuleId, validateDiagnosticOrdering } from "@hone/schema";
 import { UsageError } from "./args.js";
 import { verifyAdmissionApproval, type VerifiedAdmissionApproval } from "./admission-receipts.js";
 import { loadCapsule } from "./capsule.js";
@@ -60,6 +60,33 @@ export interface AdmittedCapsule {
   approval: VerifiedAdmissionApproval | null;
   /** True only for a delegated private apply:none approval. */
   provisional: boolean;
+}
+
+/** Digest of the frozen case-level oracle assets an admitted capsule pins. */
+export function capsuleOracleDigest(admitted: Pick<AdmittedCapsule, "manifest" | "digest">): string {
+  const manifest = admitted.manifest;
+  return sha256Bytes(Buffer.from(canonicalJson({
+    domain: "hone-m1-capsule-oracle-v1",
+    capsuleDigest: admitted.digest,
+    baseline: manifest.baseline,
+    image: manifest.image,
+    evalEntrypoint: manifest.evalEntrypoint,
+    assetGroups: manifest.assetGroups,
+    contentHashes: manifest.contentHashes,
+  })));
+}
+
+/** Digest of the frozen scalarizer producing an admitted capsule's single oriented q. */
+export function capsuleScalarizerDigest(admitted: Pick<AdmittedCapsule, "manifest" | "digest">): string {
+  const manifest = admitted.manifest;
+  return sha256Bytes(Buffer.from(canonicalJson({
+    domain: "hone-m1-capsule-scalarizer-v1",
+    capsuleDigest: admitted.digest,
+    objective: manifest.objective,
+    baseline: manifest.baseline,
+    image: manifest.image,
+    evalEntrypoint: manifest.evalEntrypoint,
+  })));
 }
 
 function sha256File(path: string): string {
