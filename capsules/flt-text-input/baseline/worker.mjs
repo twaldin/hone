@@ -21,35 +21,91 @@
 //
 // GAMING-RESISTANCE: the candidate module is imported into this same realm, so
 // it can freely mutate global prototypes (Object/Array/Number.prototype),
-// redefine `JSON.stringify`, or patch `process.stdout`. Result serialization
-// MUST therefore be independent of every candidate-mutable path. Before the
-// candidate is imported we capture the primordials we need, we serialize with a
-// hand-rolled encoder that NEVER consults `toJSON` and reads only own
-// enumerable keys, we write bytes through a captured `fs.writeSync`, and we
-// sanitize every candidate-derived value (rejecting malformed records). The
-// bounded-emission counter lives in this trusted closure, unreachable by the
-// candidate, so a truthful `emits` value always reaches the parent gate.
+// redefine `JSON.stringify`/`JSON.parse`, or patch `process.stdout` and the
+// readline machinery. The whole record-and-report path is therefore built to
+// be independent of every candidate-mutable seam:
+//   * The ENTIRE request stream is drained from fd 0 and parsed BEFORE any
+//     candidate code runs (the trusted parent writes the request and closes
+//     stdin immediately, so this cannot block). No readline / stream / parser
+//     machinery is consulted after the candidate is loaded.
+//   * Every primordial the reporting path needs (JSON.stringify, Object.keys,
+//     Object.create, Array.isArray, Reflect.apply, Buffer.from, fs.writeSync,
+//     process.exit) is captured before the candidate import.
+//   * Trusted code NEVER calls a prototype-resolved array method after the
+//     import: every trusted-built list is a null-prototype array (created via
+//     the captured Object.create) filled by index assignment, so replacing
+//     Array.prototype.push/map/includes or defining numeric accessors on
+//     Array.prototype cannot observe or rewrite the recorded sequence.
+//   * Serialization uses a hand-rolled encoder that NEVER consults `toJSON`
+//     and reads only own enumerable keys; bytes go out through the captured
+//     `fs.writeSync`. Candidate-derived values are deep-cloned into
+//     null-prototype structures (rejecting malformed records) before encoding.
+//   * The bounded-emission counter lives in this trusted closure, unreachable
+//     by the candidate, so a truthful `emits` value always reaches the parent
+//     gate. The parent additionally rejects any output that is not exactly the
+//     two protocol lines, so direct fd-1 writes by the candidate self-destruct.
 
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { createInterface } from 'node:readline'
-import { writeSync } from 'node:fs'
+import { readFileSync, writeSync } from 'node:fs'
 
 // --- Primordials captured before ANY candidate code runs. ---
 const S_stringify = JSON.stringify
 const S_isArray = Array.isArray
 const S_ObjKeys = Object.keys
+const S_ObjCreate = Object.create
 const S_numIsFinite = Number.isFinite
 const S_String = String
 const S_BufferFrom = Buffer.from.bind(Buffer)
+const S_apply = Reflect.apply
+const S_exit = process.exit.bind(process)
+const S_setProto = Object.setPrototypeOf
 
 const MAX_EMITS_PER_OP = 32
-const HELPER_FNS = ['wordBoundaryLeft', 'wordBoundaryRight', 'lineStart', 'lineEnd']
+// Null-prototype allowlist: membership test is an own-key read, never a
+// (candidate-replaceable) Array.prototype.includes call.
+const HELPER_FNS = S_ObjCreate(null)
+HELPER_FNS.wordBoundaryLeft = true
+HELPER_FNS.wordBoundaryRight = true
+HELPER_FNS.lineStart = true
+HELPER_FNS.lineEnd = true
 const MAX_SANITIZE_DEPTH = 16
 
 const workspace = process.argv[2] ?? '/workspace'
 
 class MalformedRecord extends Error {}
+
+// Fresh trusted list: a null-prototype array. Array.isArray still recognizes
+// it, but index assignment can never hit an accessor planted on
+// Array.prototype/Object.prototype (the prototype chain is empty), and no
+// prototype method (push/map/...) is ever invoked on it.
+function newList() {
+  const list = []
+  S_setProto(list, null)
+  return list
+}
+
+// --- Request intake: drain and parse ALL of stdin BEFORE the candidate can
+// run. eval.py writes the single request line and closes stdin right away
+// (proc.communicate), so this read completes immediately and the candidate
+// never gets a chance to observe or interpose on the request channel.
+const requests = newList()
+{
+  const lines = readFileSync(0, 'utf8').split('\n')
+  let n = 0
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (!line.trim()) continue
+    let entry
+    try {
+      entry = { unparseable: false, request: JSON.parse(line) }
+    } catch {
+      entry = { unparseable: true, request: null }
+    }
+    requests[n] = entry
+    n += 1
+  }
+}
 
 // Trusted JSON encoder. Emits only plain JSON structure and never invokes a
 // (candidate-pollutable) `toJSON`; objects are walked via captured Object.keys
@@ -96,8 +152,9 @@ function println(obj) {
 }
 
 // Deep-clone a candidate-derived value into a prototype-independent JSON-safe
-// structure. Rejects anything the protocol never carries (functions, symbols,
-// bigints, cyclic/over-deep graphs) as a malformed record.
+// structure (null-prototype records, null-prototype arrays). Rejects anything
+// the protocol never carries (functions, symbols, bigints, cyclic/over-deep
+// graphs) as a malformed record.
 function sanitize(value, depth) {
   const d = depth ?? 0
   if (d > MAX_SANITIZE_DEPTH) throw new MalformedRecord('record nesting too deep')
@@ -108,11 +165,11 @@ function sanitize(value, depth) {
   if (t === 'undefined') return undefined
   if (t === 'object') {
     if (S_isArray(value)) {
-      const out = []
+      const out = newList()
       for (let i = 0; i < value.length; i += 1) out[i] = sanitize(value[i], d + 1)
       return out
     }
-    const clean = Object.create(null)
+    const clean = S_ObjCreate(null)
     const keys = S_ObjKeys(value)
     for (let i = 0; i < keys.length; i += 1) {
       const k = keys[i]
@@ -144,7 +201,7 @@ try {
   mod = await import(pathToFileURL(join(workspace, 'text_input.mjs')).href)
 } catch (err) {
   println({ ready: false, error: `candidate import failed: ${S_String(err && err.message ? err.message : err)}` })
-  process.exit(0)
+  S_exit(0)
 }
 
 const contract = {
@@ -160,11 +217,18 @@ println({ ready: true, contract })
 
 function normCompletion(c) {
   if (!c || typeof c !== 'object') return null
+  const items = newList()
+  if (S_isArray(c.items)) {
+    for (let i = 0; i < c.items.length; i += 1) {
+      const it = c.items[i]
+      items[i] = it && typeof it === 'object' ? it.value : it
+    }
+  }
   return {
     selectedIndex: c.selectedIndex,
     replaceFrom: c.replaceFrom,
     prefix: c.prefix,
-    items: Array.isArray(c.items) ? c.items.map((it) => (it && typeof it === 'object' ? it.value : it)) : [],
+    items,
   }
 }
 
@@ -172,7 +236,7 @@ function normCompletion(c) {
 // owns (`emits`, `cancels`) are enforced numeric; candidate-observed values are
 // sanitized. The record has a null prototype and only these keys.
 function makeCheckpoint(fields) {
-  const cp = Object.create(null)
+  const cp = S_ObjCreate(null)
   cp.value = expectString(fields.value)
   cp.cursor = expectNumber(fields.cursor)
   cp.completion = fields.completion === null ? null : sanitize(fields.completion)
@@ -186,22 +250,34 @@ function makeCheckpoint(fields) {
 
 async function runWidgetCase(c) {
   const setup = c.setup ?? {}
-  const submitted = []
+  // Trusted recording lists are null-prototype: candidate-replaced
+  // Array.prototype methods can neither observe them nor capture references.
+  const submitted = newList()
   let cancels = 0
   let emitsThisOp = 0
-  const entries = Array.isArray(setup.history) ? [...setup.history] : []
+  // `entries` is candidate-facing contract state (the widget may read and,
+  // via history.push, append to it), so it stays an ordinary array; its
+  // integrity is enforced by the sealed-oracle comparison, and sanitize()
+  // snapshots its own indices at every checkpoint. Copied without the
+  // (candidate-patchable) array iterator.
+  const src = S_isArray(setup.history) ? setup.history : []
+  const entries = []
+  for (let i = 0; i < src.length; i += 1) entries[i] = src[i]
   const history = setup.history === undefined
     ? undefined
     : setup.historyPush
-      ? { entries, push: (v) => { entries.push(v) } }
+      ? { entries, push: (v) => { entries[entries.length] = v } }
       : { entries }
-  const completions = Array.isArray(setup.completions) ? setup.completions : []
+  const completions = S_isArray(setup.completions) ? setup.completions : []
   const complete = completions.length === 0
     ? undefined
     : (text, cursor) => {
-        for (const entry of completions) {
+        for (let i = 0; i < completions.length; i += 1) {
+          const entry = completions[i]
           if (entry.value === text && entry.cursor === cursor) {
-            return { items: entry.items.map((v) => ({ value: v })), replaceFrom: entry.replaceFrom }
+            const items = []
+            for (let j = 0; j < entry.items.length; j += 1) items[j] = { value: entry.items[j] }
+            return { items, replaceFrom: entry.replaceFrom }
           }
         }
         return { items: [], replaceFrom: cursor }
@@ -211,7 +287,7 @@ async function runWidgetCase(c) {
     ...(setup.initialValue !== undefined ? { initialValue: setup.initialValue } : {}),
     ...(history !== undefined ? { history } : {}),
     ...(complete !== undefined ? { complete } : {}),
-    onSubmit: (v) => { submitted.push(v) },
+    onSubmit: (v) => { submitted[submitted.length] = v },
     onCancel: () => { cancels += 1 },
     onChange: () => {
       emitsThisOp += 1
@@ -219,7 +295,7 @@ async function runWidgetCase(c) {
     },
   })
 
-  const checkpoints = []
+  const checkpoints = newList()
   for (let i = 0; i < c.ops.length; i += 1) {
     const op = c.ops[i]
     emitsThisOp = 0
@@ -233,7 +309,7 @@ async function runWidgetCase(c) {
       case 'complete': await ti.requestCompletion(op.reverse === true); break
       default: throw new Error(`unknown op: ${S_String(op.op)}`)
     }
-    checkpoints.push(makeCheckpoint({
+    checkpoints[i] = makeCheckpoint({
       value: ti.getValue(),
       cursor: ti.getCursor(),
       completion: normCompletion(ti.getCompletion()),
@@ -242,41 +318,49 @@ async function runWidgetCase(c) {
       cancels,
       history: entries,
       emits: emitsThisOp,
-    }))
+    })
   }
   return checkpoints
 }
 
 function runParseCase(c) {
-  return c.ops.map((op) => ({
-    result: mod.parseRawKey(op.key, op.rawHex !== undefined ? Buffer.from(op.rawHex, 'hex') : undefined),
-  }))
+  const out = newList()
+  for (let i = 0; i < c.ops.length; i += 1) {
+    const op = c.ops[i]
+    out[i] = {
+      result: mod.parseRawKey(op.key, op.rawHex !== undefined ? S_BufferFrom(op.rawHex, 'hex') : undefined),
+    }
+  }
+  return out
 }
 
 function runWrapCase(c) {
-  return c.ops.map((op) => {
+  const out = newList()
+  for (let i = 0; i < c.ops.length; i += 1) {
+    const op = c.ops[i]
     const r = mod.wrapForDisplay(op.text, op.width, op.cursor)
-    return { lines: r.lines, cursorRow: r.cursorRow, cursorCol: r.cursorCol }
-  })
+    out[i] = { lines: r.lines, cursorRow: r.cursorRow, cursorCol: r.cursorCol }
+  }
+  return out
 }
 
 function runHelperCase(c) {
-  return c.ops.map((op) => {
-    if (!HELPER_FNS.includes(op.fn)) throw new Error(`helper not allowlisted: ${S_String(op.fn)}`)
-    return { result: mod[op.fn](...op.args) }
-  })
+  const out = newList()
+  for (let i = 0; i < c.ops.length; i += 1) {
+    const op = c.ops[i]
+    if (HELPER_FNS[op.fn] !== true) throw new Error(`helper not allowlisted: ${S_String(op.fn)}`)
+    out[i] = { result: S_apply(mod[op.fn], mod, op.args) }
+  }
+  return out
 }
 
-const rl = createInterface({ input: process.stdin, terminal: false })
-for await (const line of rl) {
-  if (!line.trim()) continue
-  let request
-  try {
-    request = JSON.parse(line)
-  } catch {
+for (let r = 0; r < requests.length; r += 1) {
+  const entry = requests[r]
+  if (entry.unparseable) {
     println({ error: 'unparseable request' })
     continue
   }
+  const request = entry.request
   const id = request.id
   try {
     const c = request.case
