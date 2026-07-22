@@ -18,29 +18,29 @@
     {
       "hardGatesPass": true,
       "id": "naive",
-      "q": 1951250.6612201594,
+      "q": 1915271.397442455,
       "role": "deliberately slower but correct per-opcode volatile work"
     },
     {
       "hardGatesPass": true,
       "id": "baseline",
-      "q": 7327244.016726127,
+      "q": 7341994.704402069,
       "role": "exact pinned upstream source"
     },
     {
       "hardGatesPass": true,
       "id": "improved",
-      "q": 7397886.49002724,
+      "q": 7501931.353189144,
       "role": "independently authored no-handler interrupt polling fast path"
     },
     {
       "hardGatesPass": true,
       "id": "shortcut",
-      "q": 7125820.333663082,
+      "q": 7131274.564644235,
       "role": "train-valid fast path plus validation-only UTF-16 regexp delay",
       "shortcutGated": true,
-      "trainQ": 7834980.362459332,
-      "validationQ": 6416660.304866833
+      "trainQ": 7569357.103557414,
+      "validationQ": 6693192.025731056
     }
   ],
   "feasibility": {
@@ -49,26 +49,28 @@
     "incrementalRebuildSec": 21.38
   },
   "measurement": {
-    "benchmarkBatchWallSec": 318.15,
+    "benchmarkBatchWallSec": 466.9,
     "finalGceRecalibrationRequired": true,
     "freshProcess": true,
     "globalLockHeld": true,
     "normalizationScale": 369255.5490885931,
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
-    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))"
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "referenceNormalization": 7385110.981771862,
+    "scoring": "reference-normalized: q = raw_q * 7385110.981771862 / reference_q with a pristine in-eval trusted-baseline build sampled interleaved with the candidate (micro fastest-2-of-3 round-robin, module fastest-16-of-31 median-of-3); cancels ambient host-speed drift between evaluations"
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:480a1c917d551f17c689cb93aa172bfe446b92b84af025bdf203d2f4145f06a3",
-    "secondReportHash": "sha256:1582dc488e7ca4571c8dd0a1a786ee46fbb0ee63ffdce04fa2278b616b4e12b8"
+    "firstReportHash": "sha256:fb0be203a48bc7848d1f62d337da515b3ee7aa23eaec7b656df6099603adc237",
+    "secondReportHash": "sha256:ab4a1ed84c3aac2f46f7bd3f5003b8b91adb14950609047bac911e43c4fbb497"
   },
   "perturbation": {
-    "deltaFromOrderingBaseline": 70642.47330111265,
-    "deltaFromQBase": 12775.508255377412,
+    "deltaFromOrderingBaseline": 159936.64878707565,
+    "deltaFromQBase": 116820.37141728215,
     "description": "Skip interrupt-counter work when the runtime has no installed interrupt handler",
     "id": "improved",
     "independentlyAuthored": true,
-    "q": 7397886.49002724,
+    "q": 7501931.353189144,
     "reachesReference": false,
     "valid": true
   },

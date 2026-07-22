@@ -8,6 +8,7 @@ import math
 import os
 import re
 import resource
+import signal
 import shutil
 import statistics
 import subprocess
@@ -22,8 +23,24 @@ ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
 BUILD_ROOT = Path("/tmp/hone-quickjs-build")
 SOURCE = BUILD_ROOT / "source"
 WORKLOAD_DIR = SOURCE / "hone-workload"
+LAUNCH_SCRATCH = BUILD_ROOT / "launch-scratch"
+REF_SOURCE = BUILD_ROOT / "ref-source"
+REF_WORKSPACE = BUILD_ROOT / "ref-workspace"
 SANDBOX_UID = 2000
 PROCESS_TIMEOUT_SEC = 180
+# Fastest-k-of-N trimmed sampling (trusted-parent timing). Host contention
+# only adds wall time and every sample is trusted-timed and output-gated, so
+# keeping the fastest samples rejects transient co-scheduling noise without
+# giving the candidate any control over which samples count.
+MICRO_SAMPLES = 3
+MICRO_KEEP = 2
+MODULE_KEEP = 16
+# Frozen provisional yardstick scale (provisional local qBase; final GCE
+# recalibration re-freezes it): a candidate identical to the trusted baseline
+# scores this value by construction, independent of host drift, because the
+# reported score is raw_q * REFERENCE_NORMALIZATION / reference_q with the
+# reference measured from a pristine in-eval build of the trusted baseline.
+REFERENCE_NORMALIZATION = 7385110.981771862
 SOURCE_REVISION = "04be246001599f5995fa2f2d8c91a0f198d3f34c"
 TEST262_REVISION = "5c8206929d81b2d3d727ca6aac56c18358c8d790"
 
@@ -125,6 +142,81 @@ def fixed_environment() -> dict[str, str]:
     return environment
 
 
+def candidate_environment() -> dict[str, str]:
+    """Environment for a candidate launch pinned to a fresh private scratch dir
+    so temp files never leak into the next launch or into shared /tmp."""
+    environment = fixed_environment()
+    scratch = str(LAUNCH_SCRATCH)
+    environment.update({"TMPDIR": scratch, "TMP": scratch, "TEMP": scratch, "HOME": scratch})
+    return environment
+
+
+def reap_candidate_processes() -> None:
+    """SIGKILL any surviving unprivileged (candidate/helper) processes so a
+    launch cannot outlive its wall clock or carry state into the next launch."""
+    self_pid = os.getpid()
+    try:
+        pids = [name for name in os.listdir("/proc") if name.isdigit()]
+    except OSError:
+        return
+    for pid in pids:
+        if int(pid) == self_pid:
+            continue
+        real_uid: int | None = None
+        try:
+            with open(f"/proc/{pid}/status", "r", encoding="ascii", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("Uid:"):
+                        real_uid = int(line.split()[1])
+                        break
+        except (OSError, ValueError):
+            continue
+        if real_uid == SANDBOX_UID:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def reset_candidate_state() -> None:
+    """Hand the next launch a pristine writable environment. Every scored and
+    unscored candidate launch is a fresh subprocess, but its writable state is
+    not reset by the broker between launches; without this a candidate could
+    stash a record (e.g. keyed by module source) during an unscored invocation
+    and replay it on every timed launch instead of parsing/executing the
+    module. Clear every candidate-writable location and reap surviving helpers
+    before each launch. Writable locations in the eval container: the shared
+    16 MiB /tmp and /dev/shm tmpfs, and the mode-1777 trusted build tmpfs
+    mounted at BUILD_ROOT (a candidate could write beside the sealed source),
+    so BUILD_ROOT is swept too — keeping only the sealed source tree and the
+    fresh private launch scratch."""
+    reap_candidate_processes()
+    keep: dict[Path, set[str]] = {
+        Path("/tmp"): {BUILD_ROOT.name},
+        Path("/dev/shm"): set(),
+        BUILD_ROOT: {SOURCE.name, LAUNCH_SCRATCH.name, REF_SOURCE.name, REF_WORKSPACE.name},
+    }
+    for root, keep_names in keep.items():
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in keep_names:
+                continue
+            try:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink()
+            except OSError:
+                pass
+    if LAUNCH_SCRATCH.exists():
+        shutil.rmtree(LAUNCH_SCRATCH, ignore_errors=True)
+    LAUNCH_SCRATCH.mkdir(parents=True, exist_ok=True)
+    os.chmod(LAUNCH_SCRATCH, 0o1777)
+
+
 def run_worker(action: str, *paths: Path) -> dict[str, object]:
     arguments = paths or (SOURCE,)
     try:
@@ -162,7 +254,8 @@ def run_candidate(argv: list[str], timeout: float = 10.0) -> subprocess.Complete
             timeout=timeout,
             check=False,
             preexec_fn=demote,
-            env=fixed_environment(),
+            env=candidate_environment(),
+            start_new_session=True,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateFailure(f"candidate process failed: {exc}") from exc
@@ -315,6 +408,16 @@ def copy_candidate() -> None:
     run_worker("prepare", WORKSPACE, SOURCE)
 
 
+def prepare_reference() -> None:
+    # Reference yardstick: a pristine build of the trusted baseline, prepared
+    # and benchmarked inside the SAME evaluation so host frequency/contention
+    # drift between evaluations cancels out of the reported score. The
+    # candidate workspace never touches this tree: prepare() seeds from the
+    # trusted baseline and overlays mutable files from an EMPTY workspace.
+    REF_WORKSPACE.mkdir(mode=0o755)
+    run_worker("prepare", REF_WORKSPACE, REF_SOURCE)
+
+
 def install_trusted_workload(split_dir: Path) -> None:
     shutil.copy2(TRUSTED_DIR / "tests" / "microbench.js", SOURCE / "tests" / "microbench.js")
     shutil.copy2(TRUSTED_DIR / "test262.conf", SOURCE / "test262.conf")
@@ -325,25 +428,26 @@ def install_trusted_workload(split_dir: Path) -> None:
     shutil.copytree(split_dir / "test262", SOURCE / "test262", symlinks=False)
 
 
-def seal_built_source() -> None:
-    for path in SOURCE.rglob("*"):
+def seal_built_tree(root: Path) -> None:
+    for path in root.rglob("*"):
         if path.is_symlink():
             raise GateFailure("build produced a forbidden symbolic link")
         if not path.is_dir() and not path.is_file():
             raise GateFailure("build produced a non-regular entry")
-    unsealed = BUILD_ROOT / "unsealed-source"
-    SOURCE.rename(unsealed)
-    shutil.copytree(unsealed, SOURCE, symlinks=False)
+    unsealed = BUILD_ROOT / f"unsealed-{root.name}"
+    root.rename(unsealed)
+    shutil.copytree(unsealed, root, symlinks=False)
     shutil.rmtree(unsealed)
-    for path in SOURCE.rglob("*"):
+    for path in root.rglob("*"):
         if path.is_dir():
             path.chmod(0o555)
         else:
             path.chmod(0o555 if os.access(path, os.X_OK) else 0o444)
-    SOURCE.chmod(0o555)
+    root.chmod(0o555)
 
 
 def require_exact_output(script: Path, expected: str, module: bool = False) -> bytes:
+    reset_candidate_state()
     argv = [str(SOURCE / "qjs")]
     if module:
         argv.append("-m")
@@ -355,10 +459,23 @@ def require_exact_output(script: Path, expected: str, module: bool = False) -> b
     return completed.stdout
 
 
-def run_microbenchmarks(rows: object) -> list[float]:
+def timed_gated_run(argv: list[str], expected_bytes: bytes, timeout: float, label: str) -> float:
+    """One trusted-timed, output-gated launch from a pristine writable state."""
+    reset_candidate_state()
+    started = time.monotonic_ns()
+    completed = run_candidate(argv, timeout=timeout)
+    elapsed = (time.monotonic_ns() - started) / 1_000_000_000.0
+    if completed.returncode != 0 or completed.stderr or completed.stdout != expected_bytes:
+        raise GateFailure(f"{label} exact-output gate failed")
+    if not math.isfinite(elapsed) or elapsed <= 0:
+        raise GateFailure(f"trusted {label} timer failed")
+    return elapsed
+
+
+def run_microbenchmarks(rows: object) -> tuple[list[float], list[float]]:
     if not isinstance(rows, list):
         raise GateFailure("sealed microbenchmark rows are invalid")
-    throughputs: list[float] = []
+    validated: list[tuple[str, int, int, str]] = []
     for row in rows:
         if not isinstance(row, dict):
             raise GateFailure("sealed microbenchmark row is invalid")
@@ -373,43 +490,68 @@ def run_microbenchmarks(rows: object) -> list[float]:
             or not isinstance(expected, str)
         ):
             raise GateFailure("sealed microbenchmark row has invalid values")
-        started = time.monotonic_ns()
-        completed = run_candidate(
-            [
-                str(SOURCE / "qjs"),
-                str(WORKLOAD_DIR / "benchmark.js"),
-                name,
-                str(iterations),
-            ],
-            timeout=30,
-        )
-        elapsed = (time.monotonic_ns() - started) / 1_000_000_000.0
-        if completed.returncode != 0 or completed.stderr or completed.stdout != expected.encode():
-            raise GateFailure("microbenchmark exact-output gate failed")
-        if not math.isfinite(elapsed) or elapsed <= 0:
-            raise GateFailure("trusted microbenchmark timer failed")
-        throughputs.append(operations / elapsed)
-    return throughputs
+        validated.append((name, iterations, operations, expected))
+    # Fastest-k-of-N trimmed sampling in the trusted parent: host contention
+    # only ever ADDS wall time, and every sample is taken by this trusted
+    # process with the full exact-output gate, so keeping the fastest samples
+    # rejects transient co-scheduling noise without giving the candidate any
+    # influence over which samples count. Sampling rounds are INTERLEAVED
+    # round-robin across the sealed benchmarks, and every candidate sample is
+    # bracketed by a pristine in-eval trusted-reference sample of the SAME
+    # benchmark seconds apart, so both see the same ambient host speed and the
+    # reference-normalized ratio cancels cross-eval drift.
+    candidate_elapsed: list[list[float]] = [[] for _ in validated]
+    reference_elapsed: list[list[float]] = [[] for _ in validated]
+    for _ in range(MICRO_SAMPLES):
+        for index, (name, iterations, operations, expected) in enumerate(validated):
+            script = str(WORKLOAD_DIR / "benchmark.js")
+            arguments = [script, name, str(iterations)]
+            expected_bytes = expected.encode()
+            reference_elapsed[index].append(
+                timed_gated_run([str(REF_SOURCE / "qjs"), *arguments], expected_bytes, 120, "reference microbenchmark")
+            )
+            candidate_elapsed[index].append(
+                timed_gated_run([str(SOURCE / "qjs"), *arguments], expected_bytes, 120, "microbenchmark")
+            )
+    candidate_throughputs: list[float] = []
+    reference_throughputs: list[float] = []
+    for (name, iterations, operations, expected), cand, ref in zip(validated, candidate_elapsed, reference_elapsed):
+        candidate_throughputs.append(operations / statistics.fmean(sorted(cand)[:MICRO_KEEP]))
+        reference_throughputs.append(operations / statistics.fmean(sorted(ref)[:MICRO_KEEP]))
+    return candidate_throughputs, reference_throughputs
 
 
-def measure_module_startup(expected: str, launches: int, rounds: int) -> float:
+def measure_module_startup(expected: str, launches: int, rounds: int) -> tuple[float, float]:
     expected_bytes = expected.encode()
     module_path = WORKLOAD_DIR / "module-main.js"
-    samples: list[float] = []
+    candidate_samples: list[float] = []
+    reference_samples: list[float] = []
     for _ in range(rounds):
-        started = time.monotonic_ns()
+        candidate_sec: list[float] = []
+        reference_sec: list[float] = []
         for _ in range(launches):
-            completed = run_candidate([str(SOURCE / "qjs"), "-m", str(module_path)], timeout=1.0)
-            if completed.returncode != 0 or completed.stderr or completed.stdout != expected_bytes:
-                raise GateFailure("module-startup exact-output gate failed")
-        elapsed = (time.monotonic_ns() - started) / 1_000_000_000.0
-        if not math.isfinite(elapsed) or elapsed <= 0:
-            raise GateFailure("module-startup timer failed")
-        samples.append(launches / elapsed)
-    throughput = statistics.median(samples)
-    if not math.isfinite(throughput) or throughput <= 0:
+            reference_sec.append(
+                timed_gated_run([str(REF_SOURCE / "qjs"), "-m", str(module_path)], expected_bytes, 1.0, "reference module-startup")
+            )
+            candidate_sec.append(
+                timed_gated_run([str(SOURCE / "qjs"), "-m", str(module_path)], expected_bytes, 1.0, "module-startup")
+            )
+        # Same trimmed-sampling rationale as the microbenchmarks: every launch
+        # is separately timed by the trusted parent and interleaved with a
+        # pristine reference launch; keep the fastest windows of the sealed
+        # 31-launch round so a transient host-contention burst cannot halve
+        # the round's throughput.
+        for source_sec, samples in ((candidate_sec, candidate_samples), (reference_sec, reference_samples)):
+            kept = sorted(source_sec)[:MODULE_KEEP]
+            elapsed = sum(kept)
+            if not math.isfinite(elapsed) or elapsed <= 0:
+                raise GateFailure("module-startup timer failed")
+            samples.append(len(kept) / elapsed)
+    candidate_throughput = statistics.median(candidate_samples)
+    reference_throughput = statistics.median(reference_samples)
+    if not all(math.isfinite(value) and value > 0 for value in (candidate_throughput, reference_throughput)):
         raise GateFailure("module-startup throughput is invalid")
-    return throughput
+    return candidate_throughput, reference_throughput
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -436,8 +578,10 @@ def main() -> None:
         mount_build_tmpfs()
         mounted = True
         copy_candidate()
+        prepare_reference()
         build_started = time.monotonic()
         run_worker("build")
+        run_worker("build", REF_SOURCE)
         build_sec = time.monotonic() - build_started
         install_trusted_workload(split_dir)
 
@@ -446,7 +590,8 @@ def main() -> None:
         if binary_bytes * int(metadata["binarySizeToleranceDenominator"]) > baseline_bytes * int(metadata["binarySizeToleranceNumerator"]):
             raise GateFailure("binary-size gate failed: stripped qjs exceeds baseline by more than 1%")
 
-        seal_built_source()
+        seal_built_tree(SOURCE)
+        seal_built_tree(REF_SOURCE)
         run_worker("test")
         observable = require_exact_output(
             WORKLOAD_DIR / "observable.js", str(metadata["observableExpected"])
@@ -454,15 +599,22 @@ def main() -> None:
         module = require_exact_output(
             WORKLOAD_DIR / "module-main.js", str(metadata["moduleExpected"]), module=True
         )
-        throughputs = run_microbenchmarks(metadata["microbenchmarks"])
-        throughputs.append(
-            measure_module_startup(
-                str(metadata["moduleExpected"]),
-                int(metadata["moduleLaunchesPerRound"]),
-                int(metadata["moduleRounds"]),
-            )
+        throughputs, reference_throughputs = run_microbenchmarks(metadata["microbenchmarks"])
+        module_throughput, reference_module_throughput = measure_module_startup(
+            str(metadata["moduleExpected"]),
+            int(metadata["moduleLaunchesPerRound"]),
+            int(metadata["moduleRounds"]),
         )
-        score = geometric_mean(throughputs)
+        throughputs.append(module_throughput)
+        reference_throughputs.append(reference_module_throughput)
+        raw_q = geometric_mean(throughputs)
+        reference_q = geometric_mean(reference_throughputs)
+        # Drift compensation: the trusted in-eval baseline yardstick divides
+        # out host frequency/contention state shared by both measurements, so
+        # the reported score is comparable across evaluations.
+        score = raw_q * REFERENCE_NORMALIZATION / reference_q
+        if not math.isfinite(score) or score <= 0:
+            raise GateFailure("reference-normalized score is invalid")
         deterministic = {
             **identity,
             "binaryBytes": binary_bytes,
@@ -482,7 +634,7 @@ def main() -> None:
             "perExample": {
                 "aggregate": {
                     "score": score,
-                    "feedback": "valid geometric-mean throughput across four upstream interpreter microbenchmarks and module startup",
+                    "feedback": "valid reference-normalized geometric-mean throughput across four upstream interpreter microbenchmarks and module startup",
                 }
             },
             "diagnostics": {
@@ -493,6 +645,8 @@ def main() -> None:
                 "build_sec": build_sec,
                 "eval_sec": time.monotonic() - started,
                 "metric_count": len(throughputs),
+                "raw_q": raw_q,
+                "reference_q": reference_q,
             },
         }
         json.dump(output, sys.stdout, sort_keys=True, separators=(",", ":"))

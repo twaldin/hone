@@ -96,7 +96,7 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
       "freshProcess": true,
-      "q": "geometric mean operations per trusted external wall-second over four split-specific fixed-work derivatives of upstream microbench.js plus 31-launch median ES-module startup throughput",
+      "q": "reference-normalized geometric mean operations per trusted external wall-second over four split-specific fixed-work derivatives of upstream microbench.js plus median-of-3-rounds ES-module startup throughput (fastest 16 of each round's 31 trusted-timed fresh-process launches); every candidate sample is trimmed fastest-2-of-3 over round-robin interleaved rounds and bracketed by identical samples of a pristine in-eval trusted-baseline build, with q = raw_q * 7385110.981771862 / reference_q so ambient host-speed drift cancels",
       "qFail": 0,
       "qBase": 7385110.981771862,
       "sigma": 50129.83169611437,

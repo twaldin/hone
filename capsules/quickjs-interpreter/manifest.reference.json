@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_9ed110714a98",
+  "id": "cap_d67e520d9fd4",
   "objective": "Improve geometric-mean throughput across the frozen prop_read, array_read, int_arith, regexp_ascii, prop_update, typed_array_read, float_arith, and regexp_utf16 cases selected from upstream tests/microbench.js plus fresh-process ES-module startup. The split-specific pinned Test262 subset, byte-exact observable and module outputs, and stripped qjs binary size no greater than baseline plus 1% are hard gates. Only the interpreter, numeric conversion, regexp, Unicode, utility, and their public/internal header files enumerated by sourceDetails.mutableEnvelope are mutable; the CLI, clock provider, build, evaluator, tests, and workloads are protected.",
   "baseline": {
     "kind": "git",
-    "commit": "04be246001599f5995fa2f2d8c91a0f198d3f34c"
+    "commit": "1dec00edc6e18b3da64bc53b39ba53c832c22ded"
   },
   "image": "hone-quickjs-interpreter@sha256:a6d66620ed213b953131398eb5ada2c6494f296a7dcd99024d0cca4362c48b6b",
   "evalEntrypoint": [
@@ -110,7 +110,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:1582dc488e7ca4571c8dd0a1a786ee46fbb0ee63ffdce04fa2278b616b4e12b8"
+    "hash": "sha256:ab4a1ed84c3aac2f46f7bd3f5003b8b91adb14950609047bac911e43c4fbb497"
   },
   "contentHashes": {
     "assets/train/benchmark.js": "sha256:3cf9ba47a9a24b5465ff793a0bb86d24766a8e6f11cd678b3b0788b4a44d1ee1",
@@ -130,7 +130,7 @@
     "assets/train/test262/test/built-ins/RegExp/prototype/exec/S15.10.6.2_A4_T2.js": "sha256:147c06e3bd746b82c42229f99aa88bf381bd2cf2d615e0185df01ea185df66b6",
     "assets/train/test262/test/built-ins/String/prototype/replace/regexp-capture-by-index.js": "sha256:add5ce9e21929278979c3a02da48658a1e83b3085011faa63395ca8415ba0892",
     "assets/train/test262/test/built-ins/TypedArray/prototype/set/typedarray-arg-set-values-diff-buffer-same-type.js": "sha256:136906138ce5ebcb3d102c980f7a9edc1827781c17530d697b5f626db40e5bd0",
-    "assets/train/workload.json": "sha256:dc8a2bb097c6a05bf79051af8dc68d133418caa78dc4627abb5d249b85a6e9a7",
+    "assets/train/workload.json": "sha256:c7aaae78d389c93f35d10b8ce1a8c4fba10698338df14d8f151e7254d9e5e009",
     "assets/validation/benchmark.js": "sha256:60b802a097c22ff9e11e27ca623a35837819e5c01fc52055f0f48cfd7b9ea71b",
     "assets/validation/module-lib.js": "sha256:6ce0bb3389557cd0048a433f4bfa11dfa49904c5b7a66f6b630b43da4664174c",
     "assets/validation/module-main.js": "sha256:ef115a4d030e47248fef7809560f57b15ef52eebea577992a4a5d7f7a306b7d8",
@@ -148,7 +148,7 @@
     "assets/validation/test262/test/built-ins/RegExp/prototype/exec/success-lastindex-access.js": "sha256:7ddd6c9d3d49939a60149769745ada98d48277d3b04192239194c0553e8ab5a7",
     "assets/validation/test262/test/built-ins/String/prototype/replace/replaceValue-evaluation-order.js": "sha256:441f90651898c5ec49946f4b1d2c63e8183f608262c79c843caf0d9f1573f3b7",
     "assets/validation/test262/test/built-ins/TypedArray/prototype/set/typedarray-arg-set-values-same-buffer-same-type.js": "sha256:1a2d2f5f8c2945f16ca2f6a70a950e59c2ad72a39024e848c36800446423f38d",
-    "assets/validation/workload.json": "sha256:251ffefbf311b317388d3933743488a0684d0fc7985b7ca6e73c59cc728861ae"
+    "assets/validation/workload.json": "sha256:9d5c05c1c582efab47a56b883f9b24da481c5d8b0dc5ff8e281791a51fa0a2dd"
   },
   "meta": {
     "evaluatorSource": "user",
@@ -194,7 +194,7 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
       "freshProcess": true,
-      "q": "geometric mean operations per trusted external wall-second over four split-specific fixed-work derivatives of upstream microbench.js plus 31-launch median ES-module startup throughput",
+      "q": "reference-normalized geometric mean operations per trusted external wall-second over four split-specific fixed-work derivatives of upstream microbench.js plus median-of-3-rounds ES-module startup throughput (fastest 16 of each round's 31 trusted-timed fresh-process launches); every candidate sample is trimmed fastest-2-of-3 over round-robin interleaved rounds and bracketed by identical samples of a pristine in-eval trusted-baseline build, with q = raw_q * 7385110.981771862 / reference_q so ambient host-speed drift cancels",
       "qFail": 0,
       "qBase": 7385110.981771862,
       "sigma": 50129.83169611437,
