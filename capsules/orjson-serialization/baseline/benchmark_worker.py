@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Unprivileged worker for frozen orjson throughput workloads."""
+"""Unprivileged worker for frozen orjson throughput workloads.
+
+Command-driven protocol: the trusted evaluator parent writes one JSON command
+per line on stdin and reads one JSON reply per line from stdout. All elapsed
+time is measured by the parent around each `run` command, so no clock read
+inside this candidate-linked process is ever trusted. Every timed iteration
+operates on content-distinct input (a per-iteration tag folded into the
+argument for dumps, a per-iteration wrapper document for loads), so replaying
+a cached result for a repeated argument cannot satisfy the protocol; the
+digest returned for each run comes from a final pristine invocation and is
+checked by the parent against the frozen expected hash.
+"""
 from __future__ import annotations
 
 import base64
@@ -8,17 +19,17 @@ import datetime as dt
 import gc
 import hashlib
 import json
-import math
 import os
 import sys
-import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 SITE = os.environ["ORJSON_SITE"]
 sys.path.insert(0, SITE)
 import orjson  # noqa: E402
+
+MUTATION_KEY = "\x00hone-rotation"
 
 
 @dataclasses.dataclass(slots=True)
@@ -109,62 +120,129 @@ def result_hash(operation: str, result: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def measure(case: dict[str, Any]) -> dict[str, Any]:
-    operation = case["operation"]
-    kind = case["kind"]
-    option = option_for(kind)
-    if operation == "dumps":
-        argument = make_value(case)
+def make_mutator(value: Any) -> tuple[Callable[[str], None], Callable[[], None]]:
+    """Small, size-neutral apply/undo pair that makes the argument content
+    distinct for every timed iteration without disturbing the pristine value."""
+    if isinstance(value, Envelope):
+        original = value.source
 
-        def invoke() -> Any:
-            return orjson.dumps(argument, option=option)
+        def apply(tag: str) -> None:
+            value.source = f"{original}:{tag}"
 
-    elif operation == "loads":
-        argument = base64.b64decode(case["inputB64"])
+        def undo() -> None:
+            value.source = original
 
-        def invoke() -> Any:
-            return orjson.loads(argument)
+        return apply, undo
+    if isinstance(value, dict):
+        def apply(tag: str) -> None:
+            value[MUTATION_KEY] = tag
 
-    else:
-        raise ValueError(f"unknown operation: {operation}")
+        def undo() -> None:
+            del value[MUTATION_KEY]
 
-    result: Any = None
-    for _ in range(12):
-        result = invoke()
-    probe_iterations = 8
-    started = time.perf_counter_ns()
-    for _ in range(probe_iterations):
-        result = invoke()
-    probe_ns = max(1, time.perf_counter_ns() - started)
-    target_ns = int(case.get("targetNs", 80_000_000)) * 2
-    iterations = max(1, min(2_000_000, math.ceil(target_ns * probe_iterations / probe_ns)))
-    samples: list[int] = []
-    for _ in range(int(case.get("repeats", 5))):
-        started = time.perf_counter_ns()
-        for _ in range(iterations):
-            result = invoke()
-        samples.append(time.perf_counter_ns() - started)
-    return {
-        "id": case["id"],
-        "operation": operation,
-        "iterations": iterations,
-        "elapsedNs": samples,
-        "resultSha256": result_hash(operation, result),
-    }
+        return apply, undo
+    if isinstance(value, list):
+        def apply(tag: str) -> None:
+            value.append(tag)
+
+        def undo() -> None:
+            value.pop()
+
+        return apply, undo
+    raise ValueError(f"unsupported workload container: {type(value).__name__}")
+
+
+class CaseState:
+    __slots__ = ("case", "operation", "option", "argument", "apply", "undo")
+
+    def __init__(self, case: dict[str, Any]) -> None:
+        self.case = case
+        self.operation = case["operation"]
+        self.option = option_for(case["kind"])
+        if self.operation not in ("dumps", "loads"):
+            raise ValueError(f"unknown operation: {self.operation}")
+        self.argument: Any = None
+        self.apply: Callable[[str], None] | None = None
+        self.undo: Callable[[], None] | None = None
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Rebuild the argument so every sample uses an identity-distinct input.
+        References to the previous argument are dropped FIRST so the rebuild
+        never holds two copies of a large workload at once (peak-RSS neutral
+        with the original single-argument protocol)."""
+        self.argument = None
+        self.apply = None
+        self.undo = None
+        if self.operation == "dumps":
+            self.argument = make_value(self.case)
+            self.apply, self.undo = make_mutator(self.argument)
+        else:
+            # base64.b64decode always allocates a fresh buffer, so successive
+            # samples are identity-distinct without an extra copy.
+            self.argument = base64.b64decode(self.case["inputB64"])
+
+    def run(self, iterations: int, nonce: int) -> str:
+        if iterations < 1:
+            raise ValueError("iterations must be positive")
+        if self.operation == "dumps":
+            argument = self.argument
+            option = self.option
+            apply = self.apply
+            undo = self.undo
+            assert apply is not None and undo is not None
+            for index in range(iterations - 1):
+                apply(f"{nonce}:{index}")
+                orjson.dumps(argument, option=option)
+                undo()
+            result = orjson.dumps(argument, option=option)
+            return result_hash("dumps", result)
+        base = self.argument
+        prefix = b"[%d," % nonce
+        for index in range(iterations - 1):
+            orjson.loads(b"%s%d,%s]" % (prefix, index, base))
+        result = orjson.loads(base)
+        return result_hash("loads", result)
 
 
 def main() -> None:
-    request = json.load(sys.stdin)
-    cases = request.get("cases")
-    if not isinstance(cases, list) or not cases:
-        raise ValueError("request has no cases")
     if hasattr(gc, "freeze"):
         gc.freeze()
     gc.collect()
     gc.disable()
-    response = {"cases": [measure(case) for case in cases]}
-    json.dump(response, sys.stdout, separators=(",", ":"))
-    sys.stdout.write("\n")
+    states: dict[str, CaseState] = {}
+    out = sys.stdout
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        command = json.loads(line)
+        op = command["op"]
+        if op == "exit":
+            break
+        if op == "setup":
+            case = command["case"]
+            state = CaseState(case)
+            state.run(12, 0)
+            states[case["id"]] = state
+            reply: dict[str, Any] = {"op": "setup", "id": case["id"]}
+        elif op == "refresh":
+            case_id = command["id"]
+            states[case_id].refresh()
+            reply = {"op": "refresh", "id": case_id}
+        elif op == "run":
+            case_id = command["id"]
+            digest = states[case_id].run(int(command["iterations"]), int(command["nonce"]))
+            reply = {"op": "run", "id": case_id, "resultSha256": digest}
+        elif op == "teardown":
+            case_id = command["id"]
+            del states[case_id]
+            gc.collect()
+            reply = {"op": "teardown", "id": case_id}
+        else:
+            raise ValueError(f"unknown command: {op}")
+        out.write(json.dumps(reply, separators=(",", ":")))
+        out.write("\n")
+        out.flush()
 
 
 if __name__ == "__main__":

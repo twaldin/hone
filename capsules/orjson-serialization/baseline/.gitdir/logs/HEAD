@@ -1,1 +1,5 @@
 0000000000000000000000000000000000000000 705515d77b28429d0b7c30c3d781abe52e8a1e5a twaldin <timothy@waldin.net> 1784423193 -0700	checkout: moving from main to FETCH_HEAD
+705515d77b28429d0b7c30c3d781abe52e8a1e5a b4fc7e86ce065db5522a1bae49fe6e72dfd7b2a2 hone-capsule-author <capsules@hone.invalid> 1784564617 -0700	commit: OSS-T08 evaluator baseline: layer trusted evaluator glue on upstream 3.11.9
+b4fc7e86ce065db5522a1bae49fe6e72dfd7b2a2 e6cfe4de3bceb37b847f69643fa6786291653163 hone-capsule-author <capsules@hone.invalid> 1784569215 -0700	commit (amend): OSS-T08 evaluator baseline: layer trusted evaluator glue on upstream 3.11.9
+e6cfe4de3bceb37b847f69643fa6786291653163 5caaeb659ee8bc53dc34c7d432256f1193622bf6 hone-capsule-author <capsules@hone.invalid> 1784613450 -0700	commit (amend): OSS-T08 evaluator baseline: layer trusted evaluator glue on upstream 3.11.9
+5caaeb659ee8bc53dc34c7d432256f1193622bf6 81fa6499d13121c9f7fb5d5ebbfdeba30c2e589f hone-capsule-author <capsules@hone.invalid> 1784617715 -0700	commit (amend): OSS-T08 evaluator baseline: layer trusted evaluator glue on upstream 3.11.9

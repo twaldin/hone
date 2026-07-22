@@ -3,43 +3,43 @@
   "taskId": "OSS-T08",
   "capsule": "orjson-serialization",
   "sourceRevision": "705515d77b28429d0b7c30c3d781abe52e8a1e5a",
-  "image": "hone-orjson-serialization@sha256:493e9c3c3b52759e423344a4b361de158b0132578342be56e03cdf1ebb576af2",
+  "image": "hone-orjson-serialization@sha256:9fda64d476ea8edfcace3bb89902e8790e0f3ce1efd29a97026a8f945724c824",
   "provisionalPlatform": "linux/arm64 Docker Desktop on Apple M3 Max",
   "feasibility": {
     "cleanBuildSec": 12.918980922000173,
-    "incrementalRebuildSec": 7.52029671199989,
-    "evalSec": 27.45906809600092,
-    "rebuildPlusEvalSec": 34.97936480800081,
-    "cleanBuildPlusEvalSec": 40.37804901800109,
+    "incrementalRebuildSec": 6.0942721276665,
+    "evalSec": 15.111915503416563,
+    "rebuildPlusEvalSec": 21.20618763108306,
+    "cleanBuildPlusEvalSec": 28.030896425416735,
     "budgetSec": 10800,
-    "headroomFraction": 0.9962612917575925
+    "headroomFraction": 0.9974045466272762
   },
   "aa": {
-    "method": "three interleaved A-A pairs; each sample is the mean of train and validation geometric-mean throughput",
+    "method": "three interleaved A-A pairs under the trusted parent-timed protocol; each sample is the mean of train and validation geometric-mean throughput (fastest-3-of-5 trimmed samples per workload)",
     "samples": [
-      20250.695858599727,
-      21464.835225341685,
-      21481.639744478114,
-      21520.995279338586,
-      22067.17076864686,
-      21876.826146439118
+      21374.68155295771,
+      22261.90459999763,
+      21713.55316648729,
+      22139.0414864365,
+      21886.157158634025,
+      22215.544510836244
     ],
-    "sigma": 633.629800660601,
-    "noiseFractionOfScale": 0.029548537927880134,
+    "sigma": 344.24553454681256,
+    "noiseFractionOfScale": 0.0156961726255449,
     "freshProcess": true,
     "measurementLock": "/tmp/hone-bench.lock"
   },
-  "qBase": 21443.693837140683,
+  "qBase": 21931.81374589157,
   "qFail": 0,
-  "qReference": 24611.84284044369,
+  "qReference": 23653.04141862563,
   "qReferenceConstruction": {
     "formula": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "fiveSigma": 3168.149003303005,
-    "fivePercentScale": 1072.1846918570342,
-    "selectedMargin": 3168.149003303005
+    "fiveSigma": 1721.2276727340627,
+    "fivePercentScale": 1096.5906872945786,
+    "selectedMargin": 1721.2276727340627
   },
   "rss": {
-    "observedBaselineMaxKiB": 63776,
+    "observedBaselineMaxKiB": 67844,
     "baselineEnvelopeKiB": 68608,
     "limitKiB": 69980,
     "limitFormula": "floor(68608 * 1.02)"
@@ -60,27 +60,27 @@
     },
     {
       "id": "naive",
-      "q": 19244.648381721134,
+      "q": 18762.64518503278,
       "hardGatesPass": true,
       "description": "deliberately slower but correct entrypoint loops"
     },
     {
       "id": "baseline",
-      "q": 21127.977708755916,
+      "q": 22315.96896143176,
       "hardGatesPass": true,
       "description": "pinned current-head source"
     },
     {
       "id": "improved",
-      "q": 25219.466873058376,
+      "q": 24546.886709227845,
       "hardGatesPass": true,
       "description": "independently authored AArch64 NEON escaped-string fast path"
     },
     {
       "id": "shortcut",
-      "q": 23213.03495397399,
-      "trainQ": 38729.69842877505,
-      "validationQ": 7696.371479172931,
+      "q": 23700.239873765793,
+      "trainQ": 40334.3909320195,
+      "validationQ": 7066.088815512081,
       "hardGatesPass": true,
       "description": "fixture-length fingerprint control beats train but is split-gated on validation"
     }
@@ -92,12 +92,79 @@
       "src/serialize/writer/str/mod.rs",
       "src/serialize/writer/str/neon.rs"
     ],
-    "q": 25219.466873058376,
-    "deltaFromDiagnosticBaseline": 4091.48916430246,
+    "q": 24546.886709227845,
+    "deltaFromDiagnosticBaseline": 2230.917747796084,
     "fullPytestPass": true,
     "dumpBytesExact": true,
     "loadsSemanticHashesMatch": true,
     "rssGatePass": true
   },
-  "frozenHostRecalibrationRequired": true
+  "frozenHostRecalibrationRequired": true,
+  "capsuleId": "cap_3412c7bb684b",
+  "baselineCommit": "81fa6499d13121c9f7fb5d5ebbfdeba30c2e589f",
+  "seedPilots": {
+    "method": "three two-episode seed-optimizer pilots through the trusted supervisor local-backend path (admissionReview: off \u2014 the trusted synthetic-meta/recheck authority, the same trusted authority the ordering check runs under); no admission receipts read or written; optimizer model gpt-5.6-terra via the sealed proxy relay; per-pilot budget maxUsd 5 / 5400 s wall / 12 evaluator invocations; distinct config seeds 1-3",
+    "capsuleId": "cap_3412c7bb684b",
+    "baselineCommit": "81fa6499d13121c9f7fb5d5ebbfdeba30c2e589f",
+    "image": "hone-orjson-serialization@sha256:9fda64d476ea8edfcace3bb89902e8790e0f3ce1efd29a97026a8f945724c824",
+    "measurementLock": "/tmp/hone-bench.lock",
+    "referenceTest": {
+      "formula": "trainReference = orderingBaselineTrain * (qReference / qBase); a pilot reaches the reference when any valid candidate train aggregate >= trainReference (pilot search evaluates the public train split only)",
+      "orderingBaselineTrain": 36511.62399288281,
+      "qBase": 21931.81374589157,
+      "qReference": 23653.04141862563,
+      "trainReference": 39377.08775803918
+    },
+    "pilots": [
+      {
+        "id": "pilot-1",
+        "runId": "run_mrvctd466220c6",
+        "configSeed": 1,
+        "episodesConfigured": 2,
+        "episodesUsed": 1,
+        "evaluatorInvocations": 3,
+        "baselineTrainAggregate": 34595.56328895607,
+        "candidatesProposed": 1,
+        "validNonBaselineCandidates": 1,
+        "promotedNonBaselineIncumbent": true,
+        "bestCandidateTrainAggregate": 36093.00823826523,
+        "status": "completed",
+        "reachedReference": false
+      },
+      {
+        "id": "pilot-2",
+        "runId": "run_mrvd0jqde23058",
+        "configSeed": 2,
+        "episodesConfigured": 2,
+        "episodesUsed": 1,
+        "evaluatorInvocations": 4,
+        "baselineTrainAggregate": 33335.199905289795,
+        "candidatesProposed": 1,
+        "validNonBaselineCandidates": 1,
+        "promotedNonBaselineIncumbent": true,
+        "bestCandidateTrainAggregate": 36465.39327809878,
+        "status": "completed",
+        "reachedReference": false
+      },
+      {
+        "id": "pilot-3",
+        "runId": "run_mrvd8z6nbefd09",
+        "configSeed": 3,
+        "episodesConfigured": 2,
+        "episodesUsed": 2,
+        "evaluatorInvocations": 4,
+        "baselineTrainAggregate": 35582.307385074324,
+        "candidatesProposed": 2,
+        "validNonBaselineCandidates": 1,
+        "promotedNonBaselineIncumbent": true,
+        "bestCandidateTrainAggregate": 36317.78510251541,
+        "status": "completed",
+        "reachedReference": false
+      }
+    ],
+    "gate": {
+      "atLeastOneValidNonBaselineCandidatePerPilot": true,
+      "referenceNotReachedInAnyPilot": true
+    }
+  }
 }

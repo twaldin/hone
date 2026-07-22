@@ -30,3 +30,15 @@ RUN cd /opt/orjson/source \
     && rm -rf /root/.cache /tmp/*
 
 RUN useradd --uid 2000 --no-create-home --shell /usr/sbin/nologin sandbox
+
+# nodejs: optimizer/proxy relay (node -e); bun + Pi native addon: the sealed
+# mutation-worker runtime baked next to bun where the SDK loader's exec-dir
+# candidate resolves it. Optimizer-topology runtime the frozen capsule image
+# must host so the development-train optimizer (and seed-optimizer pilots)
+# can drive this capsule; never used by the trusted evaluator (python3 eval.py).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=mutation /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=mutation /usr/local/bin/pi_natives.linux-arm64.node /usr/local/bin/pi_natives.linux-arm64.node
+RUN node --version && bun --version && test -f /usr/local/bin/pi_natives.linux-arm64.node

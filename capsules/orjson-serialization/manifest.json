@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "id": "cap_d8e9098551bf",
+  "id": "cap_3412c7bb684b",
   "objective": "Improve orjson dumps+loads throughput across frozen dataclass, datetime, NumPy, Unicode, and nested corpora. Maximize the geometric mean throughput after byte-exact dumps, semantic loads, full upstream pytest, and peak-RSS gates; only src/lib.rs, src/serialize/, and src/deserialize/ are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "705515d77b28429d0b7c30c3d781abe52e8a1e5a"
+    "commit": "81fa6499d13121c9f7fb5d5ebbfdeba30c2e589f"
   },
-  "image": "hone-orjson-serialization@sha256:493e9c3c3b52759e423344a4b361de158b0132578342be56e03cdf1ebb576af2",
+  "image": "hone-orjson-serialization@sha256:9fda64d476ea8edfcace3bb89902e8790e0f3ce1efd29a97026a8f945724c824",
   "evalEntrypoint": [
     "python3",
     "-I",
@@ -34,6 +34,7 @@
     "eval.py",
     "include",
     "integration",
+    "orjson_report_sink.py",
     "pyproject.toml",
     "pysrc",
     "requirements-lint.txt",
@@ -73,7 +74,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:3e1b4546ed5ede0e02180f8f1b18f586a5e12725413110b1f24d960a55dc363f"
+    "hash": "sha256:7dad74e575768bc9422c47c185e5e10cbe897c1fb8ea0e5585635cddede71125"
   },
   "contentHashes": {
     "assets/train/twitter.json.xz": "sha256:73e96118c9db8cf5af4f160e21767803842247bf2400282d0ec74f63ac561c3d",
@@ -83,7 +84,7 @@
   },
   "meta": {
     "evaluatorSource": "user",
-    "provenance": "Current-head OSS-T08 at ijl/orjson 705515d77b28429d0b7c30c3d781abe52e8a1e5a; no reference artifact or known winning patch. Local interleaved A-A calibration set qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail)) = 21443.693837140683 + max(3168.149003303005, 1072.1846918570342) = 24611.84284044369. Numbers are provisional pending frozen-GCE recalibration.",
+    "provenance": "Current-head OSS-T08 layered on ijl/orjson 705515d77b28429d0b7c30c3d781abe52e8a1e5a (3.11.9); the pinned baseline commit is a synthetic overlay commit that adds the trusted evaluator glue (eval.py, benchmark_worker.py, orjson_report_sink.py, challenge.json) on top of that upstream tree so the visible baseline matches the declared commit byte-for-byte. No reference artifact or known winning patch. Local interleaved A-A calibration set qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Numbers are provisional pending frozen-GCE recalibration.",
     "license": "MPL-2.0 AND (Apache-2.0 OR MIT)",
     "tags": [
       "m2",
@@ -123,33 +124,34 @@
       "pytest": "9.0.2",
       "cargo": "vendored Cargo.lock sources, offline",
       "pip": "frozen wheels, --no-index",
-      "networkDuringMutationAndEvaluation": false
+      "networkDuringMutationAndEvaluation": false,
+      "optimizerRuntime": "nodejs (proxy relay) + bun 1.3.14 + pi_natives 16.5.2 baked beside bun for mutation sandboxes; unused by the trusted evaluator"
     },
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
       "targetPlatform": "frozen GCE Linux profile (recalibration required)",
       "freshProcess": true,
-      "q": "geometric mean operations/second across ten frozen dumps+loads workloads per split; train+validation aggregate is their arithmetic mean",
+      "q": "geometric mean operations/second across ten frozen dumps+loads workloads per split; per-workload throughput is the median of the fastest 3 of 5 trusted-parent-timed samples; train+validation aggregate is their arithmetic mean",
       "qFail": 0,
-      "qBase": 21443.693837140683,
-      "sigma": 633.629800660601,
-      "qReference": 24611.84284044369,
+      "qBase": 21931.81374589157,
+      "sigma": 344.24553454681256,
+      "qReference": 23653.04141862563,
       "referenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
       "aaSamples": [
-        20250.695858599727,
-        21464.835225341685,
-        21481.639744478114,
-        21520.995279338586,
-        22067.17076864686,
-        21876.826146439118
+        21374.68155295771,
+        22261.90459999763,
+        21713.55316648729,
+        22139.0414864365,
+        21886.157158634025,
+        22215.544510836244
       ],
-      "noiseFractionOfScale": 0.029548537927880134,
+      "noiseFractionOfScale": 0.0156961726255449,
       "correctnessResultHashes": {
         "train": "eea12554a2b934636ee36d8291b474b97a247fd98df937fe37d3b4ebf605b686",
         "validation": "8a9c59a91d1cf6bf2bf9e20dadc5422be6b53a6e5220fe4955adfeec591c38ff"
       },
       "rss": {
-        "baselineObservedMaxKiB": 63776,
+        "baselineObservedMaxKiB": 67844,
         "baselineEnvelopeKiB": 68608,
         "envelopeConstruction": "67 MiB frozen baseline high-water envelope covering allocator and 5 ms sampler jitter",
         "limitKiB": 69980,
@@ -157,8 +159,8 @@
       },
       "feasibility": {
         "cleanBuildSec": 12.918980922000173,
-        "incrementalRebuildSec": 7.52029671199989,
-        "passingEvalSec": 27.45906809600092
+        "incrementalRebuildSec": 6.0942721276665,
+        "passingEvalSec": 15.111915503416563
       }
     }
   }

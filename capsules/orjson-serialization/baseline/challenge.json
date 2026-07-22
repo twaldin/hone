@@ -25,6 +25,8 @@
       "-q",
       "-p",
       "no:cacheprovider",
+      "-p",
+      "orjson_report_sink",
       "/workspace/test"
     ],
     "timeoutSec": 90,
