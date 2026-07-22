@@ -29,6 +29,7 @@ CHALLENGE = json.loads((TRUSTED_DIR / "challenge.json").read_text())
 WORKSPACE = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
 ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
 WORKER = TRUSTED_DIR / "benchmark_worker.py"
+CONDUCTOR = TRUSTED_DIR / "test_conductor.py"
 TARGET = Path("/tmp/target")
 WHEELS = Path("/tmp/wheels")
 SITE = Path("/tmp/site")
@@ -350,15 +351,123 @@ def build_candidate() -> tuple[bool, str, float]:
     return True, "offline maturin build passed", elapsed
 
 
+def sweep_candidate_tmp() -> None:
+    """Drop candidate-owned (uid 2000) scratch left directly under /tmp between
+    candidate launches so a file planted by the test process cannot become
+    shared state a later launch replays. SITE holds the trusted-extracted
+    extension and is root-owned, so it is never a candidate-owned entry."""
+    root = Path("/tmp")
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            st = entry.lstat()
+        except OSError:
+            continue
+        if st.st_uid != WORKER_UID:
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+
+
+def score_test_records(conductor_code: int, blob: bytes) -> tuple[bool, str]:
+    """Accept the per-test records the conductor relayed ONLY when its
+    authenticated trailer proves: the conductor itself completed, pytest exited
+    cleanly, and the stream carried the conductor's fresh per-run nonce (so the
+    records came from the trusted plugin, not a candidate that merely wrote to
+    the advertised channel). Trailer:
+        C\t<child_exit>\t<authenticated>\t<record_count>\t<detail_b64>"""
+    expected_passed = int(CHALLENGE["tests"]["passed"])
+    expected_skipped = int(CHALLENGE["tests"]["skipped"])
+    lines = blob.decode("utf-8", "replace").splitlines()
+    trailer = lines.pop() if lines and lines[-1].startswith("C\t") else None
+    if conductor_code != 0 or trailer is None:
+        return False, "test conductor did not complete"
+    tfields = trailer.split("\t")
+    if len(tfields) < 4:
+        return False, "malformed conductor trailer"
+    try:
+        child_exit = int(tfields[1])
+        authenticated = tfields[2] == "1"
+        declared = int(tfields[3])
+    except ValueError:
+        return False, "malformed conductor trailer"
+
+    def detail() -> str:
+        if len(tfields) >= 5 and tfields[4]:
+            try:
+                text = base64.b64decode(tfields[4]).decode("utf-8", "replace")
+            except ValueError:
+                return ""
+            tail = text.strip().splitlines()[-1:]
+            return tail[0] if tail else ""
+        return ""
+
+    if not authenticated:
+        return False, "test records not authenticated by the trusted channel"
+    if child_exit != 0:
+        suffix = f": {detail()}" if detail() else ""
+        return False, f"pytest exited {child_exit}{suffix}"
+    if declared != len(lines):
+        return False, "conductor record accounting mismatch"
+    passed: set[str] = set()
+    skipped: set[str] = set()
+    failures = 0
+    malformed = 0
+    for record in lines:
+        fields = record.split("\t")
+        if len(fields) == 2 and fields[0] in ("P", "S", "F") and "::" in fields[1]:
+            kind, nodeid = fields
+            if kind == "F":
+                failures += 1
+            elif kind == "P":
+                if nodeid in passed:
+                    malformed += 1
+                passed.add(nodeid)
+            else:
+                if nodeid in skipped:
+                    malformed += 1
+                skipped.add(nodeid)
+        else:
+            malformed += 1
+    counts_ok = (
+        failures == 0
+        and malformed == 0
+        and len(passed) == expected_passed
+        and len(skipped) == expected_skipped
+        and not (passed & skipped)
+    )
+    return counts_ok, (
+        f"{expected_passed} passed, {expected_skipped} skipped"
+        if counts_ok
+        else "full upstream pytest suite failed or count changed"
+    )
+
+
 def run_tests() -> tuple[bool, str]:
-    env = dict(os.environ)
-    # SITE for the built extension; TRUSTED_DIR so pytest can import the
-    # trusted report-sink plugin. The candidate workspace is deliberately
-    # NOT importable at interpreter startup.
-    env["PYTHONPATH"] = f"{SITE}:{TRUSTED_DIR}"
-    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    if EXTENSION_FD is None:
+        return False, "candidate extension unavailable"
+    timeout = float(CHALLENGE["tests"]["timeoutSec"])
+    # The parent owns the record channel: it holds the read end and passes ONLY
+    # the write end to the trusted conductor. The candidate-executed pytest
+    # process never inherits it (conductor clears it CLOEXEC + scrubs env and
+    # marks itself non-dumpable), so candidate-linked code cannot write records
+    # the trusted side will read.
     read_fd, write_fd = os.pipe()
-    env["ORJSON_REPORT_FD"] = str(write_fd)
+    env = dict(os.environ)
+    env["HONE_CONDUCTOR_OUT_FD"] = str(write_fd)
+    env["HONE_PYTEST_ARGV"] = json.dumps(list(CHALLENGE["tests"]["command"]))
+    env["HONE_SITE"] = str(SITE)
+    env["HONE_TRUSTED_DIR"] = str(TRUSTED_DIR)
+    env["HONE_EXTENSION_FD"] = str(EXTENSION_FD)
+    env["HONE_CONDUCTOR_DEADLINE"] = repr(max(5.0, timeout - 5.0))
     chunks: list[bytes] = []
 
     def drain() -> None:
@@ -376,9 +485,9 @@ def run_tests() -> tuple[bool, str]:
     drainer.start()
     try:
         code, _, _, _ = run_command(
-            list(CHALLENGE["tests"]["command"]),
+            [sys.executable, "-I", "-B", str(CONDUCTOR)],
             cwd=TRUSTED_DIR,
-            timeout=float(CHALLENGE["tests"]["timeoutSec"]),
+            timeout=timeout,
             env=env,
             candidate=True,
             extra_pass_fds=(write_fd,),
@@ -388,52 +497,8 @@ def run_tests() -> tuple[bool, str]:
         drainer.join(timeout=10.0)
         os.close(read_fd)
     reap_candidates()
-    # Trusted accounting: count structured per-test records ourselves instead
-    # of trusting summary text emitted by a process that imported the
-    # candidate native extension.
-    expected_passed = int(CHALLENGE["tests"]["passed"])
-    expected_skipped = int(CHALLENGE["tests"]["skipped"])
-    passed: set[str] = set()
-    skipped: set[str] = set()
-    failures = 0
-    malformed = 0
-    sessions: list[tuple[int, int]] = []
-    for record in b"".join(chunks).decode("utf-8", "replace").splitlines():
-        fields = record.split("\t")
-        if len(fields) == 2 and fields[0] in ("P", "S", "F") and "::" in fields[1]:
-            kind, nodeid = fields
-            if kind == "F":
-                failures += 1
-            elif kind == "P":
-                if nodeid in passed:
-                    malformed += 1
-                passed.add(nodeid)
-            else:
-                if nodeid in skipped:
-                    malformed += 1
-                skipped.add(nodeid)
-        elif len(fields) == 3 and fields[0] == "Z":
-            try:
-                sessions.append((int(fields[1]), int(fields[2])))
-            except ValueError:
-                malformed += 1
-        else:
-            malformed += 1
-    counts_ok = (
-        code == 0
-        and failures == 0
-        and malformed == 0
-        and len(sessions) == 1
-        and sessions[0] == (0, expected_passed + expected_skipped)
-        and len(passed) == expected_passed
-        and len(skipped) == expected_skipped
-        and not (passed & skipped)
-    )
-    return counts_ok, (
-        f"{expected_passed} passed, {expected_skipped} skipped"
-        if counts_ok
-        else "full upstream pytest suite failed or count changed"
-    )
+    sweep_candidate_tmp()
+    return score_test_records(code, b"".join(chunks))
 
 
 PROBE_ITERATIONS = 8

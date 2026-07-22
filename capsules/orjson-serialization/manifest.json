@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_3412c7bb684b",
+  "id": "cap_eb25ea33e256",
   "objective": "Improve orjson dumps+loads throughput across frozen dataclass, datetime, NumPy, Unicode, and nested corpora. Maximize the geometric mean throughput after byte-exact dumps, semantic loads, full upstream pytest, and peak-RSS gates; only src/lib.rs, src/serialize/, and src/deserialize/ are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "81fa6499d13121c9f7fb5d5ebbfdeba30c2e589f"
+    "commit": "51d5f805a103508b4f1ccdf0d26de7467b773eee"
   },
   "image": "hone-orjson-serialization@sha256:9fda64d476ea8edfcace3bb89902e8790e0f3ce1efd29a97026a8f945724c824",
   "evalEntrypoint": [
@@ -46,7 +46,8 @@
     "src/opt.rs",
     "src/typeref.rs",
     "src/util.rs",
-    "test"
+    "test",
+    "test_conductor.py"
   ],
   "assetGroups": [
     {

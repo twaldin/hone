@@ -40,7 +40,8 @@
     "src/opt.rs",
     "src/typeref.rs",
     "src/util.rs",
-    "test"
+    "test",
+    "test_conductor.py"
   ],
   "assetGroups": [
     {
