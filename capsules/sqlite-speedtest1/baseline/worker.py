@@ -20,6 +20,13 @@ CONFIGURE = [
     "--with-tcl=/usr/lib/aarch64-linux-gnu",
 ]
 TEST_SCRIPTS = ("select1.test", "index.test", "join.test", "where.test")
+TRUSTED_DIR = Path(__file__).resolve().parent
+MUTABLE_FILES = (
+    "src/btree.c", "src/expr.c", "src/main.c", "src/pager.c",
+    "src/select.c", "src/sqliteInt.h", "src/vdbe.c", "src/vdbeapi.c",
+    "src/vdbesort.c", "src/where.c", "src/wherecode.c",
+)
+SEED_EXCLUDE = frozenset({".gitdir", "eval.py", "worker.py", "__pycache__"})
 
 
 def run_quiet(argv: list[str], cwd: Path, timeout: int = TIMEOUT_SEC) -> tuple[bool, str]:
@@ -47,8 +54,27 @@ def run_quiet(argv: list[str], cwd: Path, timeout: int = TIMEOUT_SEC) -> tuple[b
 
 
 def prepare(workspace: Path, source: Path) -> dict:
+    # Seed the FULL pinned baseline from the trusted capsule directory so the
+    # sanitized terminal artifact (which carries only the mutable files) still
+    # builds: configure/Makefile*/test/tool/bench.c always come from the
+    # trusted seed, and ONLY the mutable source files are overlaid from the
+    # candidate workspace.
+    def ignore_seed(directory: str, names: list[str]) -> set[str]:
+        if Path(directory) == TRUSTED_DIR:
+            return {name for name in names if name in SEED_EXCLUDE}
+        return {name for name in names if name == "__pycache__"}
+
     try:
-        shutil.copytree(workspace, source, symlinks=False)
+        shutil.copytree(TRUSTED_DIR, source, symlinks=False, ignore=ignore_seed)
+        for relative in MUTABLE_FILES:
+            candidate = workspace / relative
+            if not candidate.is_file():
+                return {
+                    "ok": False,
+                    "stage": "prepare",
+                    "detail": f"missing mutable source file: {relative}",
+                }
+            shutil.copyfile(candidate, source / relative)
     except OSError as exc:
         return {"ok": False, "stage": "prepare", "detail": str(exc)}
     return {"ok": True, "stage": "prepare"}
@@ -139,7 +165,7 @@ def benchmark(binary: Path, database: Path, state_dir: Path) -> dict:
 
 
 def main() -> None:
-    if len(sys.argv) not in {3, 4, 6} or sys.argv[1] not in {"prepare", "build", "test", "benchmark"}:
+    if len(sys.argv) < 2 or sys.argv[1] not in {"prepare", "build", "test", "benchmark"}:
         raise SystemExit(64)
     action = sys.argv[1]
     if action == "prepare":
@@ -150,26 +176,22 @@ def main() -> None:
         if not workspace.is_dir() or source.exists():
             raise SystemExit(64)
         output = prepare(workspace, source)
+    elif action == "benchmark":
+        if len(sys.argv) != 5:
+            raise SystemExit(64)
+        binary = Path(sys.argv[2]).resolve()
+        database = Path(sys.argv[3]).resolve()
+        state_dir = Path(sys.argv[4]).resolve()
+        if not binary.is_file() or not database.is_file() or not state_dir.is_dir():
+            raise SystemExit(64)
+        output = benchmark(binary, database, state_dir)
     else:
-        if action == "benchmark":
-            if len(sys.argv) != 6:
-                raise SystemExit(64)
-        elif len(sys.argv) != 3:
+        if len(sys.argv) != 3:
             raise SystemExit(64)
         source = Path(sys.argv[2]).resolve()
         if not source.is_dir():
             raise SystemExit(64)
-        if action == "build":
-            output = build(source)
-        elif action == "test":
-            output = test(source)
-        else:
-            binary = Path(sys.argv[3]).resolve()
-            database = Path(sys.argv[4]).resolve()
-            state_dir = Path(sys.argv[5]).resolve()
-            if not binary.is_file() or not database.is_file() or not state_dir.is_dir():
-                raise SystemExit(64)
-            output = benchmark(binary, database, state_dir)
+        output = build(source) if action == "build" else test(source)
     json.dump(output, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
     raise SystemExit(0 if output["ok"] else 1)

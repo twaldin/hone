@@ -1,15 +1,16 @@
 {
   "status": "admitted-pre-freeze",
-  "capsuleId": "cap_58c0f5d4088c",
-  "manifestBaselineCommit": "61cbc5f078912251a16a724f0375d43f023f8db4",
-  "diagnosticOrderingHash": "sha256:af2148fcdc8fc2f9a8121bfa6ce624d7433f6e952db49f6b640fb92022473737",
+  "capsuleId": "cap_3432da05c288",
+  "manifestBaselineCommit": "57f3d787f8f3ad02db7efa003c0de8a4d1e52dc6",
+  "diagnosticOrderingHash": "sha256:84614d2b8d0eac6d5c6fbe2d6f1da22f6156a3ad78a5a3f177f7b27341ada4ab",
   "revision": {
     "supersedes": "failed-admission OSS-H05 evidence (broad speedtest1 160/310/410/510 mix whose control ladder could not resolve above host noise)",
-    "challenge": "one protected external-sort query-shape latency family (full z1 scan ordered by c COLLATE NOCASE with a derived integer tie-break) run eight times per fresh process, scored by the reciprocal geometric mean of the fastest three of seven trusted-parent wall times"
+    "challenge": "one protected external-sort query-shape latency family (full z1 scan ordered per iteration by a rotated NOCASE text key with a per-iteration derived integer key emitted as column k) run eight identity-distinct times per fresh process, scored by the reciprocal geometric mean of the fastest three of seven trusted-parent wall times",
+    "round2": "supersedes cap_58c0f5d4088c evidence after round-2 gaming-resistance hardening: (1) terminal prepare now seeds the full pinned baseline from the trusted capsule dir and overlays only the 11 mutable files, with the source envelope requiring the full mutable inventory while tolerating absent protected files; (2) the eight in-process sort iterations are identity-distinct (per-iteration rotated NOCASE text key, per-iteration derived integer key emitted as a result column, unique-column tie-break, iteration tag folded into the digest \u2014 pairwise-distinct row permutations verified on both frozen databases), every repetition is validated against the frozen digest inside the loop, and each timed repetition runs in fresh mount+IPC+net namespaces with a private tmpfs MS_MOVEd over /tmp plus subreaper reap-until-none of candidate-uid processes; (3) expected result digests/bytes re-frozen for the revised bench (binary size unchanged at 1064312) and the peak-RSS cap re-frozen at 12736 KiB (observed 12068-12240 across baseline and improved on both splits). The aa/qBase/qReference/controls/perturbation figures below predate this bench revision (original pre-freeze pilot scale); current margins are in orderingChecks."
   },
   "feasibility": {
-    "cleanBuildSec": 25.9,
-    "evalSec": 31.1,
+    "cleanBuildSec": 27.4,
+    "evalSec": 32.3,
     "everyEvaluationCleanBuildsOnTmpfs": true
   },
   "aa": {
@@ -76,51 +77,66 @@
     "freshBenchmarkProcessesPerSplitPerPass": 49,
     "identicalResultDigestsWithinSplit": true,
     "resultHashes": {
-      "train": "sha256:2305389ee6dbbd78379c8fae19923e5538ca9366158cb710080c9d61bcf7aa4c",
-      "validation": "sha256:fb0ee3e84ac8e08dc2cb955a8d7cf6c18ef4000fff7800ec401ee90990c64bd4"
+      "train": "sha256:68c6c627f310f4828f0d06279f23d1650ac1508a36a6d44cb8fe56d72fa5dfe7",
+      "validation": "sha256:83895bca541564569fa36860e37ea32cb0aa518736bb7488b966f9dc2236eb81"
     }
   },
   "orderingChecks": {
     "consecutivePasses": 2,
     "firstPass": {
-      "wallSec": 462.3,
+      "wallSec": 453.8,
       "aggregates": {
-        "baseline": 2.703,
+        "baseline": 2.239,
         "broken": 0.0,
-        "naive": 0.73,
-        "shortcut": 2.545,
-        "improved": 3.359
+        "naive": 0.6823,
+        "shortcut": 2.132,
+        "improved": 2.717
       },
       "shortcutSplit": {
-        "train": 3.579,
-        "validation": 1.511,
-        "baselineTrain": 2.954,
-        "baselineValidation": 2.452
+        "train": 2.95,
+        "validation": 1.314,
+        "baselineTrain": 2.437,
+        "baselineValidation": 2.041
       },
       "stability": {
         "aggregates": [
-          2.703,
-          2.698,
-          2.725
+          2.239,
+          2.232,
+          2.211
         ],
-        "spread": 0.0098
+        "spread": 0.0125
       },
       "verdict": "PASSED all ordering, split-integrity, stability, and quality checks"
     },
     "secondPass": {
-      "wallSec": 508.5,
-      "reportHash": "sha256:af2148fcdc8fc2f9a8121bfa6ce624d7433f6e952db49f6b640fb92022473737",
+      "wallSec": 480.3,
+      "aggregates": {
+        "baseline": 2.23,
+        "broken": 0.0,
+        "naive": 0.6847,
+        "shortcut": 2.041,
+        "improved": 2.541
+      },
+      "stability": {
+        "aggregates": [
+          2.23,
+          2.039,
+          2.067
+        ],
+        "spread": 0.0905
+      },
+      "reportHash": "sha256:84614d2b8d0eac6d5c6fbe2d6f1da22f6156a3ad78a5a3f177f7b27341ada4ab",
       "verdict": "PASSED all ordering, split-integrity, stability, and quality checks (identical verdict set)"
     },
-    "note": "the persisted report is the second consecutive pass; the first pass's report bytes were overwritten by the second run, so its aggregates are recorded here from the run transcript"
+    "note": "round-2 reruns after the bench revision; the persisted report is the second consecutive pass; the first pass's report bytes were overwritten by the second run, so its aggregates are recorded here from the run transcript"
   },
   "measurement": {
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "globalLockHeld": true,
     "tokenCheckedLock": "/tmp/hone-bench-lock.sh",
     "orderingWallSecs": [
-      462.3,
-      508.5
+      453.8,
+      480.3
     ],
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
     "normalizationScale": 0.14834902261034028,

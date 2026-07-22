@@ -2,6 +2,7 @@
 """Trusted evaluator for the terminal sqlite/sqlite speedtest1 capsule."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
@@ -9,6 +10,7 @@ import os
 import re
 import resource
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -24,7 +26,6 @@ FROZEN_DIR = BUILD_ROOT / "frozen"
 DATABASE_COPY = FROZEN_DIR / "speedtest.db"
 SEALED_DIR = BUILD_ROOT / "sealed"
 SEALED_BINARY = SEALED_DIR / "hone-sqlite-bench"
-STATE_ROOT = BUILD_ROOT / "state"
 SANDBOX_UID = 2000
 PROCESS_TIMEOUT_SEC = 300
 ALLOWED_MUTABLE_FILES = frozenset({
@@ -39,6 +40,38 @@ SCORED_FASTEST_REPS = 3
 BENCH_PATTERN = re.compile(
     r"ok workload=(sort) result=([0-9a-f]{64}) result_bytes=(\d+)"
 )
+PR_SET_CHILD_SUBREAPER = 36
+CLONE_NEWNS = 0x00020000
+CLONE_NEWIPC = 0x08000000
+CLONE_NEWNET = 0x40000000
+MS_NOSUID = 0x2
+MS_NODEV = 0x4
+MS_NOEXEC = 0x8
+MS_BIND = 0x1000
+MS_REC = 0x4000
+MS_PRIVATE = 0x40000
+MS_MOVE = 0x2000
+FRESH_SCRATCH_OPTIONS = b"size=192m,mode=1777"
+SHM_SCRATCH_OPTIONS = b"size=16m,mode=1777"
+REAP_TIMEOUT_SEC = 10.0
+# Staging mount point on the always-writable /dev tmpfs (the container rootfs
+# is read-only). Each timed repetition mounts a FRESH private tmpfs here,
+# binds the sealed binary and frozen database into it, then MS_MOVEs the
+# whole staged view over /tmp inside the repetition's private mount
+# namespace: the shared /tmp (and the build tree under it) disappears from
+# the candidate's view, and every scratch byte dies with the namespace.
+REP_STAGE = Path("/dev/hone-sqlite-stage")
+REP_BINARY = Path("/tmp/sealed/hone-sqlite-bench")
+REP_DATABASE = Path("/tmp/frozen/speedtest.db")
+REP_STATE = Path("/tmp/state")
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC.unshare.argtypes = [ctypes.c_int]
+_LIBC.mount.argtypes = [
+    ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p,
+]
+_LIBC.prctl.argtypes = [
+    ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
+]
 
 
 class GateFailure(RuntimeError):
@@ -83,7 +116,88 @@ def demote() -> None:
         os.setuid(SANDBOX_UID)
 
 
-def run_worker(action: str, *items: object) -> dict:
+def isolated_benchmark_preexec() -> None:
+    """Give each timed repetition a private kernel view: fresh mount, IPC,
+    and network namespaces whose /tmp is a brand-new tmpfs containing ONLY
+    the sealed binary, the frozen database, and an empty scratch directory,
+    plus a fresh /dev/shm. Nothing candidate-linked code writes during one
+    repetition is visible to any other repetition, and no SysV/shm or
+    abstract-socket channel survives between launches."""
+    if _LIBC.unshare(CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWNET) != 0:
+        raise OSError(ctypes.get_errno(), "benchmark namespace isolation failed")
+    if _LIBC.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
+        raise OSError(ctypes.get_errno(), "private mount propagation failed")
+    stage = os.fsencode(str(REP_STAGE))
+    if _LIBC.mount(
+        b"hone-fresh-scratch", stage, b"tmpfs",
+        MS_NOSUID | MS_NODEV | MS_NOEXEC, FRESH_SCRATCH_OPTIONS,
+    ) != 0:
+        raise OSError(ctypes.get_errno(), "fresh scratch tmpfs mount failed")
+    os.mkdir(REP_STAGE / "sealed", 0o555)
+    os.mkdir(REP_STAGE / "frozen", 0o555)
+    os.mkdir(REP_STAGE / "state", 0o777)
+    os.chmod(REP_STAGE / "state", 0o777)
+    binds = (
+        (os.fsencode(str(SEALED_DIR)), os.fsencode(str(REP_STAGE / "sealed"))),
+        (os.fsencode(str(FROZEN_DIR)), os.fsencode(str(REP_STAGE / "frozen"))),
+    )
+    for bind_source, bind_target in binds:
+        if _LIBC.mount(bind_source, bind_target, None, MS_BIND, None) != 0:
+            raise OSError(ctypes.get_errno(), "benchmark input bind failed")
+    if _LIBC.mount(stage, b"/tmp", None, MS_MOVE, None) != 0:
+        raise OSError(ctypes.get_errno(), "staged benchmark view move failed")
+    if _LIBC.mount(
+        b"hone-fresh-shm", b"/dev/shm", b"tmpfs",
+        MS_NOSUID | MS_NODEV | MS_NOEXEC, SHM_SCRATCH_OPTIONS,
+    ) != 0:
+        raise OSError(ctypes.get_errno(), "fresh shm tmpfs mount failed")
+    demote()
+
+
+def candidate_pids() -> list[int]:
+    pids: list[int] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/status", "rb") as handle:
+                for line in handle:
+                    if line.startswith(b"Uid:"):
+                        if int(line.split()[1]) == SANDBOX_UID:
+                            pids.append(int(entry))
+                        break
+        except (OSError, ValueError, IndexError):
+            continue
+    return pids
+
+
+def reap_candidate_tree() -> None:
+    """As subreaper, kill and reap EVERY candidate-uid process until none
+    remain: killpg alone misses descendants that detached into new sessions,
+    and any survivor could carry state between timed repetitions."""
+    deadline = time.monotonic() + REAP_TIMEOUT_SEC
+    while True:
+        pids = candidate_pids()
+        while True:
+            try:
+                waited, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if waited == 0:
+                break
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if time.monotonic() > deadline:
+            raise GateFailure("candidate process tree could not be reaped")
+        time.sleep(0.02)
+
+
+def run_worker(action: str, *items: object, preexec=demote) -> dict:
     arguments = items or (SOURCE,)
     try:
         completed = subprocess.run(
@@ -94,7 +208,7 @@ def run_worker(action: str, *items: object) -> dict:
             stderr=subprocess.DEVNULL,
             timeout=PROCESS_TIMEOUT_SEC,
             check=False,
-            preexec_fn=demote,
+            preexec_fn=preexec,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateFailure(f"{action} worker failed: {exc}") from exc
@@ -144,6 +258,7 @@ def check_source_envelope() -> None:
         for path in TRUSTED_DIR.rglob("*")
         if path.is_file()
     }
+    seen_mutable: set[str] = set()
     for path in WORKSPACE.rglob("*"):
         if path.is_symlink():
             raise GateFailure("candidate workspace contains a symbolic link")
@@ -153,11 +268,19 @@ def check_source_envelope() -> None:
         if relative == ".git" or relative.startswith((".git/", ".gitdir/")):
             raise GateFailure("candidate workspace contains repository history")
         if relative in trusted_paths:
-            if relative.startswith("src/") and relative not in ALLOWED_MUTABLE_FILES:
+            if relative in ALLOWED_MUTABLE_FILES:
+                seen_mutable.add(relative)
+            elif relative.startswith("src/"):
                 if sha256_file(path) != sha256_file(TRUSTED_DIR / relative):
                     raise GateFailure(f"protected SQLite source changed: {relative}")
             continue
         raise GateFailure(f"file outside mutable source envelope: {relative}")
+    # The sanitized terminal artifact legitimately omits protected files (the
+    # trusted seed reconstructs them during prepare), but the full mutable
+    # inventory must always be present.
+    missing = sorted(set(ALLOWED_MUTABLE_FILES) - seen_mutable)
+    if missing:
+        raise GateFailure(f"mutable source file missing from workspace: {missing[0]}")
 
 
 def copy_candidate() -> None:
@@ -233,6 +356,8 @@ def main() -> None:
     result_hash = ""
     started = time.monotonic()
     try:
+        if _LIBC.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+            raise GateFailure("trusted subreaper setup failed")
         check_source_envelope()
         metadata, sealed_database = load_workload()
         expected = metadata["expected"]
@@ -275,21 +400,22 @@ def main() -> None:
         if SEALED_BINARY.stat().st_size != binary_bytes:
             raise GateFailure("sealed benchmark binary size mismatch")
 
-        # Let build/test load drain before the timed repetitions begin.
+        # Let build/test load drain before the timed repetitions begin, and
+        # make sure no candidate-uid process from build/test survives into
+        # the timed window.
+        reap_candidate_tree()
         time.sleep(1.0)
-        STATE_ROOT.mkdir(mode=0o755)
+        REP_STAGE.mkdir(mode=0o755, exist_ok=True)
         times_ns: list[int] = []
         observed_results: dict[str, str] = {}
         result_bytes: dict[str, int] = {}
         peak_rss_kib = 0
-        for rep in range(SAMPLE_REPS):
-            state_dir = STATE_ROOT / f"rep-{rep}"
-            state_dir.mkdir(mode=0o777)
-            state_dir.chmod(0o777)
+        for _ in range(SAMPLE_REPS):
             try:
                 workload_started = time.monotonic_ns()
                 benchmark_payload = run_worker(
-                    "benchmark", SOURCE, SEALED_BINARY, DATABASE_COPY, state_dir
+                    "benchmark", REP_BINARY, REP_DATABASE, REP_STATE,
+                    preexec=isolated_benchmark_preexec,
                 )
                 elapsed_ns = time.monotonic_ns() - workload_started
                 if elapsed_ns <= 0 or elapsed_ns > 120_000_000_000:
@@ -297,6 +423,13 @@ def main() -> None:
                 observed_result, observed_bytes = parse_benchmark(
                     benchmark_payload.get("output"), "sort"
                 )
+                # Validate EVERY repetition against the frozen expectation so
+                # no fast-but-wrong repetition can enter the scored set.
+                if (
+                    {"sort": observed_result} != expected["resultHashes"]
+                    or {"sort": observed_bytes} != expected["resultBytes"]
+                ):
+                    raise GateFailure("exact benchmark result hash gate failed")
                 times_ns.append(elapsed_ns)
                 observed_results["sort"] = observed_result
                 result_bytes["sort"] = observed_bytes
@@ -305,7 +438,7 @@ def main() -> None:
                     raise GateFailure("benchmark RSS receipt is malformed")
                 peak_rss_kib = max(peak_rss_kib, observed_rss)
             finally:
-                shutil.rmtree(state_dir, ignore_errors=True)
+                reap_candidate_tree()
         if observed_results != expected["resultHashes"] or result_bytes != expected["resultBytes"]:
             raise GateFailure("exact benchmark result hash gate failed")
         if sha256_file(DATABASE_COPY) != database_hash:

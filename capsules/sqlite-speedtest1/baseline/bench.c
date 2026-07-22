@@ -163,13 +163,47 @@ static sqlite3_stmt *prepare(BenchState *p, const char *zSql){
 ** measured latency dwarfs constant per-invocation overhead. Every iteration
 ** re-prepares the statement (full planner + external-sorter path) and every
 ** emitted row of every iteration feeds the result digest.
+**
+** Each iteration is identity-distinct: the NOCASE text key is rotated by a
+** per-iteration offset and the derived integer tie-break uses per-iteration
+** multiplier/addend literals, and that derived key is emitted as a result
+** column. The eight variants produce pairwise-distinct row permutations AND
+** pairwise-distinct row bytes on both frozen databases, so replaying a
+** cached earlier sort cannot reproduce a later iteration's contribution to
+** the digest. The unique column `a` is the final tie-break, keeping every
+** variant's total order deterministic, and an iteration tag byte is folded
+** into the digest before each variant so contributions cannot be reordered.
 */
+typedef struct SortVariant SortVariant;
+struct SortVariant {
+  int mult;         /* derived-key multiplier */
+  int add;          /* derived-key addend */
+  int rot;          /* text-key rotation offset (0 = original key) */
+};
+static const SortVariant kVariant[SORT_ITERATIONS] = {
+  {  3,     0,  0 },
+  {  5,   911,  5 },
+  {  7,  8191,  9 },
+  { 11, 30011, 13 },
+  { 13, 51137, 17 },
+  { 17,  4099, 21 },
+  { 19, 65537, 25 },
+  { 23, 20011, 29 },
+};
+
 static void run_sort(BenchState *p){
   int iter;
+  char zSql[256];
   for(iter=0; iter<SORT_ITERATIONS; iter++){
-    sqlite3_stmt *pStmt = prepare(p,
-      "SELECT a,b,c FROM z1 "
-      "ORDER BY c COLLATE NOCASE, (a*3+b) DESC");
+    const SortVariant *pVar = &kVariant[iter];
+    unsigned char tag = (unsigned char)iter;
+    sqlite3_stmt *pStmt;
+    hash_bytes(p, &tag, 1);
+    sqlite3_snprintf((int)sizeof(zSql), zSql,
+      "SELECT a, b, c, (a*%d+b+%d) AS k FROM z1 "
+      "ORDER BY substr(c,%d)||substr(c,1,%d) COLLATE NOCASE, k DESC, a",
+      pVar->mult, pVar->add, pVar->rot+1, pVar->rot);
+    pStmt = prepare(p, zSql);
     step_all(p, pStmt);
     sqlite3_finalize(pStmt);
   }
