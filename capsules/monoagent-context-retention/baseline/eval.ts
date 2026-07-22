@@ -1,3 +1,4 @@
+import { dlopen, FFIType } from "bun:ffi";
 import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -24,6 +25,8 @@ const WORKER_PATH = join(TRUSTED_DIR, "worker.ts");
 const WORKSPACE = resolve(process.env.CAPSULE_WORKSPACE ?? "/workspace");
 const ASSETS = resolve(process.env.CAPSULE_ASSETS ?? "/capsule/assets");
 const WORKER_UID = 2000;
+const PR_SET_CHILD_SUBREAPER = 36;
+const WNOHANG = 1;
 const CALL_TIMEOUT_MS = 3_000;
 const MAX_RESPONSE_BYTES = 256_000;
 const MAX_REQUEST_BYTES = 2_000_000;
@@ -64,6 +67,53 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function runningAsRoot(): boolean {
   return typeof process.getuid === "function" && process.getuid() === 0;
 }
+
+interface CandidateReaper {
+  waitpid(pid: number, status: null, options: number): number;
+}
+
+/**
+ * On the broker host the evaluator runs as root and must own the WHOLE
+ * candidate process tree, not just the direct worker child: a detached or
+ * new-session candidate descendant whose parent has died reparents past this
+ * process unless it is a subreaper, and once SIGKILLed it lingers as a
+ * candidate-uid zombie in /proc forever (nobody waits on it when the
+ * evaluator is pid 1), wedging the uid sweep in resetCandidateState.
+ * Register as a child subreaper before the first candidate launch and expose
+ * targeted waitpid so the sweep can collect every orphan it kills. This is
+ * trusted-only startup code; no candidate code ever runs in this process.
+ */
+function initCandidateReaper(): CandidateReaper | null {
+  if (process.platform !== "linux" || !runningAsRoot()) return null;
+  let lastError: unknown;
+  for (const library of ["libc.so.6", "libc.so"]) {
+    try {
+      const libc = dlopen(library, {
+        prctl: {
+          args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
+          returns: FFIType.i32,
+        },
+        waitpid: {
+          args: [FFIType.i32, FFIType.ptr, FFIType.i32],
+          returns: FFIType.i32,
+        },
+      });
+      if (libc.symbols.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) !== 0) {
+        throw new Error("prctl(PR_SET_CHILD_SUBREAPER) failed");
+      }
+      return {
+        waitpid: (pid, status, options) => libc.symbols.waitpid(pid, status, options),
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(
+    `candidate-tree reaper unavailable: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  );
+}
+
+const REAPER = initCandidateReaper();
 
 function assetJsonFiles(root: string): string[] {
   const files: string[] = [];
@@ -106,7 +156,7 @@ function candidatePids(): number[] {
 
 async function resetCandidateState(): Promise<void> {
   if (!runningAsRoot()) return;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
     const pids = candidatePids();
     if (pids.length === 0) break;
     for (const pid of pids) {
@@ -115,9 +165,16 @@ async function resetCandidateState(): Promise<void> {
       } catch {
         // Already gone.
       }
+      // Collect the orphan if it reparented to this subreaper: a SIGKILLed
+      // detached descendant stays a candidate-uid zombie in /proc until its
+      // parent waits on it. Targeted per-pid waitpid can never steal Bun's
+      // tracked worker child — every call path awaits child.exited (which
+      // reaps it) before this sweep runs, so any pid still visible here is
+      // either alive (killed above) or an orphan owned by this process.
+      REAPER?.waitpid(pid, null, WNOHANG);
     }
     await Bun.sleep(5);
-    if (attempt === 4 && candidatePids().length > 0) {
+    if (attempt === 39 && candidatePids().length > 0) {
       throw new Error("candidate uid processes survived reset");
     }
   }
@@ -190,9 +247,10 @@ async function callCandidate(input: RetentionInput): Promise<CandidateResponse> 
     const outcome = await Promise.race([drained, expired]);
     if (outcome.timedOut) {
       child.kill("SIGKILL");
-      // Reap the full candidate process tree before returning so orphaned
-      // descendants cannot keep inherited pipes or state alive past the sample.
-      await resetCandidateState();
+      // Await the direct worker first so Bun reaps its tracked child; the
+      // finally sweep then kills and reaps every remaining candidate-tree
+      // orphan, so no descendant keeps inherited pipes or state alive past
+      // the sample.
       await child.exited;
       return { error: `worker timeout after ${CALL_TIMEOUT_MS} ms` };
     }
@@ -204,7 +262,6 @@ async function callCandidate(input: RetentionInput): Promise<CandidateResponse> 
     return { projection: parsed.projection };
   } catch (error) {
     child.kill("SIGKILL");
-    await resetCandidateState();
     await child.exited;
     return { error: error instanceof Error ? error.message : String(error) };
   } finally {
