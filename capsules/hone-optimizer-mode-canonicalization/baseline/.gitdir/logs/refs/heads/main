@@ -1,3 +1,4 @@
 0000000000000000000000000000000000000000 7286fa2cc843f5a90b3ee12eab4ffb5a692014b6 Hone Capsule Author <hone-capsule@invalid.local> 1784398528 -0700	commit (initial): Frozen capsule baseline
 7286fa2cc843f5a90b3ee12eab4ffb5a692014b6 51870f0cef45fafe0d646cbb4f2304dbf46a7513 twaldin <timothy@waldin.net> 1784563963 -0700	commit: Register partial-case scoring; reserve valid for protocol/public gates
 51870f0cef45fafe0d646cbb4f2304dbf46a7513 8723907de9e8ae328e5b476d911d9770c997d66d twaldin <timothy@waldin.net> 1784701609 -0700	commit: Baseline: exclude .gitdir self-reference from tree
+8723907de9e8ae328e5b476d911d9770c997d66d eb0f16b88a2df92675a1a86b0ebd80abf5b59bc0 twaldin <timothy@waldin.net> 1784737664 -0700	commit: Distinct protocol-integrity flag: malformed/incomplete sealed envelopes set valid=false; plain mismatches stay valid zero-credit

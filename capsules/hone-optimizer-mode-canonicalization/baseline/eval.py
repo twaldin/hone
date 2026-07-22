@@ -7,8 +7,10 @@ Each timed repetition gets fresh PID/IPC/NET/UTS namespaces and writable state.
 
 Registered scalar: passed cross-host identity cases divided by declared cases.
 Timing is reported as diagnostics only and never enters the objective. valid
-is reserved for protocol/public failures; sealed-case misses lower the score
-without invalidating the measurement.
+is reserved for envelope/protocol integrity and public failures: a malformed,
+unparseable, or incomplete sealed response sets valid=false via a distinct
+protocol flag, while an ordinary wrong answer stays valid=true with zero
+credit for that case.
 """
 from __future__ import annotations
 
@@ -188,12 +190,13 @@ def _worker_preexec() -> None:
 
 
 class CallOutcome:
-    __slots__ = ("elapsed_ms", "result", "error")
+    __slots__ = ("elapsed_ms", "result", "error", "protocol")
 
-    def __init__(self, elapsed_ms: float, result, error: str | None) -> None:
+    def __init__(self, elapsed_ms: float, result, error: str | None, protocol: bool = False) -> None:
         self.elapsed_ms = elapsed_ms
         self.result = result
         self.error = error
+        self.protocol = protocol
 
 
 class Worker:
@@ -221,7 +224,7 @@ class Worker:
             self.proc = None
             self.import_error = f"worker spawn failed: {exc}"
             return False
-        line, violation = self._read_line(time.monotonic() + CALL_TIMEOUT_SEC)
+        line, violation, _ = self._read_line(time.monotonic() + CALL_TIMEOUT_SEC)
         if violation is not None or line is None:
             self.import_error = violation or "worker produced no handshake"
             self.kill()
@@ -249,7 +252,7 @@ class Worker:
         self.proc = None
         self.buffer = b""
 
-    def _read_line(self, deadline: float) -> tuple[bytes | None, str | None]:
+    def _read_line(self, deadline: float) -> tuple[bytes | None, str | None, bool]:
         assert self.proc is not None and self.proc.stdout is not None
         fd = self.proc.stdout.fileno()
         os.set_blocking(fd, False)
@@ -259,18 +262,21 @@ class Worker:
             while b"\n" not in self.buffer:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return None, f"timeout after {CALL_TIMEOUT_SEC:g}s"
+                    return None, f"timeout after {CALL_TIMEOUT_SEC:g}s", False
                 if not sel.select(remaining):
                     continue
                 chunk = os.read(fd, 65536)
                 if chunk == b"":
-                    return None, "worker died mid-call"
+                    # Dying with a partially written envelope is a protocol
+                    # breach; dying before writing anything is an ordinary
+                    # candidate failure.
+                    return None, "worker died mid-call", bool(self.buffer)
                 self.buffer += chunk
                 if len(self.buffer) > MAX_RESPONSE_BYTES:
-                    return None, f"response exceeded {MAX_RESPONSE_BYTES} bytes"
+                    return None, f"response exceeded {MAX_RESPONSE_BYTES} bytes", True
             line, _, rest = self.buffer.partition(b"\n")
             self.buffer = rest
-            return line, None
+            return line, None, False
         finally:
             sel.close()
 
@@ -287,27 +293,27 @@ class Worker:
         except (BrokenPipeError, OSError):
             self.kill()
             return CallOutcome(0.0, None, "worker died before call")
-        line, violation = self._read_line(time.monotonic() + CALL_TIMEOUT_SEC)
+        line, violation, proto = self._read_line(time.monotonic() + CALL_TIMEOUT_SEC)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         if violation is not None or line is None:
             self.kill()
-            return CallOutcome(elapsed_ms, None, violation or "no response")
+            return CallOutcome(elapsed_ms, None, violation or "no response", proto)
         if self.buffer:
             self.kill()
-            return CallOutcome(elapsed_ms, None, "protocol violation: extra data after response")
+            return CallOutcome(elapsed_ms, None, "protocol violation: extra data after response", True)
         try:
             response = json.loads(line)
         except ValueError:
             self.kill()
-            return CallOutcome(elapsed_ms, None, "protocol violation: unparseable response")
+            return CallOutcome(elapsed_ms, None, "protocol violation: unparseable response", True)
         if not isinstance(response, dict) or response.get("id") != nonce:
             self.kill()
-            return CallOutcome(elapsed_ms, None, "protocol violation: response id mismatch")
+            return CallOutcome(elapsed_ms, None, "protocol violation: response id mismatch", True)
         if "error" in response:
             return CallOutcome(elapsed_ms, None, str(response["error"]))
         if "result" not in response:
             self.kill()
-            return CallOutcome(elapsed_ms, None, "protocol violation: no result field")
+            return CallOutcome(elapsed_ms, None, "protocol violation: no result field", True)
         return CallOutcome(elapsed_ms, response["result"], None)
 
 
@@ -327,7 +333,7 @@ def load_cases(path: Path) -> list[dict]:
     return cases
 
 
-def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
+def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, bool, dict]:
     outcomes: list[CallOutcome] = []
     for _ in range(INNER_REPS):
         reset_candidate_state()
@@ -344,6 +350,7 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
             break
     slowest_ms = max((outcome.elapsed_ms for outcome in outcomes), default=0.0)
     error = next((outcome.error for outcome in outcomes if outcome.error is not None), None)
+    protocol_breach = any(outcome.protocol for outcome in outcomes)
     correct = error is None and len(outcomes) == INNER_REPS and all(
         canonical(outcome.result) == canonical(case["expected"]) for outcome in outcomes
     )
@@ -353,7 +360,7 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
         if correct
         else f"incorrect or failed in slowest {slowest_ms:.3f} ms: {error or 'exact output mismatch'}"
     )
-    return slowest_ms, correct, {"score": score, "feedback": feedback}
+    return slowest_ms, correct, protocol_breach, {"score": score, "feedback": feedback}
 
 
 def run_public_suite(workspace: Path) -> tuple[bool, str]:
@@ -386,24 +393,28 @@ def main() -> None:
     per_example: dict[str, dict] = {}
     runtimes: list[float] = []
     correct: list[bool] = []
+    protocol_breaches: list[str] = []
     for case in cases:
-        elapsed, ok, entry = evaluate_case(workspace, case)
+        elapsed, ok, breach, entry = evaluate_case(workspace, case)
         per_example[case["id"]] = entry
         runtimes.append(elapsed)
         correct.append(ok)
+        if breach:
+            protocol_breaches.append(case["id"])
     tests_pass, suite_detail = run_public_suite(workspace)
     quality = statistics.fmean([1.0 if ok else 0.0 for ok in correct]) if correct else 0.0
     hidden_cases_pass = bool(correct) and all(correct)
-    protocol_ok = bool(cases)
+    protocol_ok = bool(cases) and not protocol_breaches
     output = {
         "valid": tests_pass and protocol_ok,
         "objectives": {
             "score": statistics.fmean([entry["score"] for entry in per_example.values()]) if per_example else 0.0,
         },
-        "constraints": {"tests_pass": tests_pass, "hidden_cases_pass": hidden_cases_pass},
+        "constraints": {"tests_pass": tests_pass, "hidden_cases_pass": hidden_cases_pass, "protocol_ok": protocol_ok},
         "perExample": per_example,
         "diagnostics": {
-            "summary": f"{len(cases)} sealed cases; {suite_detail}",
+            "summary": f"{len(cases)} sealed cases; {suite_detail}"
+            + (f"; protocol breaches: {', '.join(protocol_breaches)}" if protocol_breaches else ""),
             "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
             "quality": quality,
         },
