@@ -1,1 +1,1 @@
-Specialize evaluator: partial transition scoring, validity reserved for protocol/public-suite gates
+Baseline: exclude .gitdir self-reference from tree

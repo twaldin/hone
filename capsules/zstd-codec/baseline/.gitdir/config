@@ -5,6 +5,8 @@
 	logallrefupdates = true
 	ignorecase = true
 	precomposeunicode = true
+	autocrlf = false
+	safecrlf = false
 [remote "origin"]
 	url = https://github.com/facebook/zstd.git
 	fetch = +refs/heads/*:refs/remotes/origin/*

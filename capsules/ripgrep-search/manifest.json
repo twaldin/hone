@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_e1f30ea0d177",
+  "id": "cap_afa06f930bb6",
   "objective": "Improve reciprocal geometric-mean latency across 28 frozen cases spanning six mixed literal, regex, Unicode, ignore-file, no-match, and many-small-file ripgrep search categories. Exact stdout, stderr, and exit-result hashes, relevant cargo tests, and peak RSS at no more than 102% of baseline are hard gates. Only crates/searcher/src, crates/regex/src, and crates/ignore/src are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "997137430e45cb46c635a6c77349e30eee88e78f"
+    "commit": "62925c970c70b3418c4fd3e392bf8981683871a8"
   },
   "image": "hone-ripgrep-search@sha256:a8054f1c8594b544245ae18e41b838f1ccc6b955938d58254239c76716e5f457",
   "evalEntrypoint": [

@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_9c8249db0e8d",
+  "id": "cap_5482ad2007ae",
   "objective": "Improve geometric-mean level-1/3 compression and decompression throughput over deterministic text, JSON, binary, and repetitive corpora. Exact round trip, the pinned upstream library fuzzer subset, and compressed size no worse than baseline by more than 0.25% are hard gates. Only lib/common, lib/compress, and lib/decompress are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "5c7b7bad26808e6b40ac3b3d0075466e27738a9d"
+    "commit": "c56dddbe0414d0bbe49c1907b8c89fc86118e0db"
   },
   "image": "hone-zstd-codec@sha256:007f66f4cb558b5f196023aac4d3384e4f022e627c99c40ba4e944763faf0cbb",
   "evalEntrypoint": [

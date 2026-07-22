@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_1c3864ffbfaa",
+  "id": "cap_f6d5da197fb2",
   "objective": "Recover model, token usage, cost, and completion state across sealed Crush, Gemini, Kilo, OpenCode, Qwen, and SWE-agent transcript envelopes. Maximize weighted exact recovery; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "636fdf0cad55398965cda7953c46f6c0327f1e86"
+    "commit": "94239c460b83ea88dd48311a52c95d089f08546b"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [

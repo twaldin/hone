@@ -1,2 +1,3 @@
 0000000000000000000000000000000000000000 e842c268606653c6412ee8d5a4843b0e67886195 Hone Capsule Author <hone-capsule@invalid.local> 1784398528 -0700	commit (initial): Frozen capsule baseline
 e842c268606653c6412ee8d5a4843b0e67886195 d1e5a40492df01844ec3f4bd3aa185183964f59d twaldin <timothy@waldin.net> 1784563996 -0700	commit: Specialize evaluator: partial transition scoring, validity reserved for protocol/public-suite gates
+d1e5a40492df01844ec3f4bd3aa185183964f59d b2e11cdc30eda0b781db678289131fe2bd05d229 twaldin <timothy@waldin.net> 1784701644 -0700	commit: Baseline: exclude .gitdir self-reference from tree

@@ -1,1 +1,1 @@
-Register partial-case scoring; reserve valid for protocol/public gates
+Baseline: exclude .gitdir self-reference from tree

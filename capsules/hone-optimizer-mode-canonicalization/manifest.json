@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_4a5be9661bc5",
+  "id": "cap_ad2c6b44cb30",
   "objective": "Canonicalize optimizer source modes across umask and executable-bit differences while retaining real executable identity. Maximize exact cross-host identity cases; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "51870f0cef45fafe0d646cbb4f2304dbf46a7513"
+    "commit": "8723907de9e8ae328e5b476d911d9770c997d66d"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [

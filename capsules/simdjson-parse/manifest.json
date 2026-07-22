@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_e1ecaffc8dde",
+  "id": "cap_4e0754bef989",
   "objective": "Improve geometric-mean DOM and On-Demand JSON parsing throughput across frozen mixed corpora at simdjson 8e6bac94 while preserving exact event hashes, malformed-input errors, the full relevant upstream test set, and peak RSS.",
   "baseline": {
     "kind": "git",
-    "commit": "8e6bac94877f2d3d026000d36ce81e0aaf38d26f"
+    "commit": "461736e4b9e487ca5f9217b8fdda4dc280047742"
   },
   "image": "hone-simdjson-parse@sha256:63083edb85b611e342254616b8d2515cb7263b7828602da817cec1cd143fcb4c",
   "evalEntrypoint": [

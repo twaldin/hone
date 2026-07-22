@@ -1,1 +1,1 @@
-Seal search binary and isolate per-invocation writable state
+Baseline: commit vendored cc target sources

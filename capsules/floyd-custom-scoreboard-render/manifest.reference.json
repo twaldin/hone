@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_5421bdd5a613",
+  "id": "cap_77d56656ca15",
   "objective": "Minimize Custom Scoreboard p99 render cost and allocations on frozen sidebar scenes while preserving the exact baseline layout and draw-command stream. Correctness is a hard gate; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "b51a01a11ecbeffe2196e108b4a4c4b9687aa8ce"
+    "commit": "0ed7a7dec62fb90307eb3cddc68fa8b0ed472d6d"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
