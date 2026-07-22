@@ -2,6 +2,7 @@
 """Trusted evaluator for frozen offline uv dependency resolution."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
@@ -21,16 +22,32 @@ ASSETS = Path("/capsule/assets")
 WORKER = TRUSTED_DIR / "worker.py"
 BUILD_ROOT = Path("/tmp/hone-uv-build")
 TARGET_BASE = Path("/opt/uv-target-base")
+REFERENCE_BINARY_SOURCE = TARGET_BASE / "profiling" / "uv"
 TARGET = BUILD_ROOT / "target"
 SOURCE_BASE = Path("/opt/uv-resolver-src-base")
 SOURCE = BUILD_ROOT / "resolver-src"
 UPSTREAM_ROOT = Path("/opt/uv-root")
+SEALED_ROOT = Path("/mnt")
+BENCH_ROOT = Path("/srv")
+SEALED_TMPFS_DATA = b"size=512m,mode=0755,nr_inodes=40000"
+BENCH_TMPFS_DATA = b"size=512m,mode=0755,uid=2000,gid=2000,nr_inodes=120000"
+BUILD_TMPFS_DATA = b"size=1600m,mode=0755,uid=2000,gid=2000,nr_inodes=300000"
 SANDBOX_UID = 2000
 BUILD_TIMEOUT_SEC = 555
 PROCESS_TIMEOUT_SEC = 30
-COLD_REPETITIONS = 5
-WARM_REPETITIONS = 6
+COLD_REPETITIONS = 13
+WARM_REPETITIONS = 13
+# Symmetric trim applied to the per-pair reference/candidate ratios: with 13
+# interleaved pairs the 3 most extreme ratios at each end are dropped and the
+# middle 7 kept, rejecting single-repetition glitches in either binary.
+PAIR_TRIM = 3
 Q_FAIL = 0.0
+# Frozen yardstick anchor. Each eval interleaves the pristine trusted-baseline
+# reference binary with the candidate and divides out their shared per-eval
+# ambient CPU speed, so a candidate identical to the baseline scores this value
+# by construction, independent of host frequency/contention drift. Provisional
+# local anchor; final GCE recalibration re-freezes it.
+REFERENCE_NORMALIZATION = 25.0
 ALLOWED_PROTECTED = {
     "LICENSE-APACHE",
     "LICENSE-MIT",
@@ -42,6 +59,20 @@ ALLOWED_PROTECTED = {
     ".gitignore",
 }
 MUTABLE_PREFIX = "crates/uv-resolver/src/"
+LIBC = ctypes.CDLL(None, use_errno=True)
+LIBC.unshare.argtypes = [ctypes.c_int]
+LIBC.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p]
+LIBC.umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
+CLONE_NEWNS = 0x00020000
+MS_RDONLY = 0x0001
+MS_NOSUID = 0x0002
+MS_NODEV = 0x0004
+MS_NOEXEC = 0x0008
+MS_REMOUNT = 0x0020
+MS_REC = 0x4000
+MS_PRIVATE = 0x40000
+MNT_DETACH = 0x0002
+FRESH_SCRATCH_OPTIONS = b"size=16m,mode=1777"
 
 
 class GateFailure(RuntimeError):
@@ -116,40 +147,61 @@ def run_worker(action: str, *arguments: str, timeout: int) -> dict:
     return payload
 
 
+def mount_tmpfs(point: Path, flags: int, data: bytes) -> None:
+    # Direct mount(2) rather than a mount(8) fork: no per-repetition child
+    # process churn to perturb the very timings being measured.
+    if LIBC.mount(b"hone-uv-eval", str(point).encode(), b"tmpfs", flags, data) != 0:
+        raise GateFailure(f"trusted tmpfs mount failed: {point} (errno {ctypes.get_errno()})")
+
+
+def unmount_tmpfs(point: Path) -> bool:
+    # umount2(2) directly; fall back to a lazy detach so a stray descendant
+    # holding the mount can never strand candidate-writable state.
+    target = str(point).encode()
+    if LIBC.umount2(target, 0) == 0:
+        return True
+    return LIBC.umount2(target, MNT_DETACH) == 0
+
+
 def mount_build_tmpfs() -> None:
     BUILD_ROOT.mkdir(mode=0o755, exist_ok=False)
-    completed = subprocess.run(
-        [
-            "mount",
-            "-t",
-            "tmpfs",
-            "-o",
-            "size=1600m,mode=0755,uid=2000,gid=2000,nr_inodes=300000",
-            "hone-uv-build",
-            str(BUILD_ROOT),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        timeout=10,
-        check=False,
-    )
-    if completed.returncode != 0:
+    try:
+        mount_tmpfs(BUILD_ROOT, 0, BUILD_TMPFS_DATA)
+    except GateFailure:
         BUILD_ROOT.rmdir()
-        raise GateFailure("trusted build tmpfs mount failed")
+        raise
 
 
-def unmount_build_tmpfs() -> None:
-    completed = subprocess.run(
-        ["umount", str(BUILD_ROOT)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=15,
-        check=False,
-    )
-    if completed.returncode == 0:
-        BUILD_ROOT.rmdir()
+def reap_candidate_processes() -> None:
+    """Kill and collect every sandbox-uid process before writable state is torn down."""
+    deadline = time.monotonic() + 5.0
+    while True:
+        while True:
+            try:
+                waited, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if waited == 0:
+                break
+        alive: list[int] = []
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            try:
+                if entry.stat().st_uid == SANDBOX_UID:
+                    alive.append(int(entry.name))
+            except OSError:
+                continue
+        if not alive:
+            return
+        for candidate_pid in alive:
+            try:
+                os.kill(candidate_pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if time.monotonic() > deadline:
+            raise GateFailure("candidate process tree could not be reaped")
+        time.sleep(0.005)
 
 
 def regular_files(root: Path) -> dict[str, Path]:
@@ -277,12 +329,32 @@ def verify_workloads(metadata: dict, split_root: Path, index: dict) -> str:
     return hashlib.sha256(canonical(identity).encode()).hexdigest()
 
 
+def isolate_measurement_namespace() -> None:
+    """Give the measured process a private mount view with brand-new /tmp and
+    /dev/shm tmpfs mounts: no scratch state written by any earlier repetition
+    is visible, and nothing written here outlives this process."""
+    if LIBC.unshare(CLONE_NEWNS) != 0:
+        raise OSError(ctypes.get_errno(), "mount namespace unshare failed")
+    if LIBC.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
+        raise OSError(ctypes.get_errno(), "private mount propagation failed")
+    for target in (b"/tmp", b"/dev/shm"):
+        flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
+        if LIBC.mount(b"hone-fresh-scratch", target, b"tmpfs", flags, FRESH_SCRATCH_OPTIONS) != 0:
+            raise OSError(ctypes.get_errno(), "fresh scratch tmpfs mount failed")
+
+
 def fork_exec(argv: list[str], environment: dict[str, str], timeout: int) -> tuple[int, float, int]:
-    started = time.monotonic_ns()
+    # A readiness pipe lets the parent start the clock only AFTER the child has
+    # finished its (variable-latency) namespace unshare, fresh /tmp and
+    # /dev/shm mounts, and privilege drop — so the measured interval is the
+    # resolver's own execution, not setup jitter that would swamp a short run.
+    ready_r, ready_w = os.pipe()
     pid = os.fork()
     if pid == 0:
         try:
+            os.close(ready_r)
             os.setsid()
+            isolate_measurement_namespace()
             devnull = os.open(os.devnull, os.O_RDWR)
             os.dup2(devnull, 0)
             os.dup2(devnull, 1)
@@ -290,9 +362,17 @@ def fork_exec(argv: list[str], environment: dict[str, str], timeout: int) -> tup
             if devnull > 2:
                 os.close(devnull)
             demote()
+            os.write(ready_w, b"\x01")
+            os.close(ready_w)
             os.execve(argv[0], argv, environment)
         except BaseException:
             os._exit(127)
+    os.close(ready_w)
+    try:
+        os.read(ready_r, 1)
+    finally:
+        os.close(ready_r)
+    started = time.monotonic_ns()
     deadline = time.monotonic() + timeout
     status: int | None = None
     usage = None
@@ -348,85 +428,220 @@ def geometric_mean(values: list[float]) -> float:
     return math.exp(math.fsum(math.log(value) for value in values) / len(values))
 
 
-def run_workloads(binary: Path, metadata: dict, split_root: Path, index_root: Path) -> tuple[dict, dict, int]:
-    bench_root = BUILD_ROOT / "bench"
-    local_index = bench_root / "index"
+def paired_ratio(reference_ms: list[float], candidate_ms: list[float]) -> float:
+    """Drift-cancelling per-pair speed ratio (reference_ms / candidate_ms).
+
+    Each interleaved pair shares the same ambient CPU speed, so the ratio
+    removes host frequency/contention drift the candidate cannot control,
+    while averaging over pairs suppresses independent per-repetition jitter.
+    The extreme PAIR_TRIM ratios at each end are dropped to reject glitches.
+    A ratio > 1 means the candidate resolved faster than the trusted
+    baseline; candidate code can only add work, never remove it."""
+    if len(reference_ms) != len(candidate_ms) or not reference_ms:
+        raise GateFailure("reference/candidate repetitions are unpaired")
+    ratios = sorted(r / c for r, c in zip(reference_ms, candidate_ms))
+    kept = ratios[PAIR_TRIM: len(ratios) - PAIR_TRIM]
+    if not kept:
+        raise GateFailure("insufficient paired repetitions for ratio")
+    return geometric_mean(kept)
+
+
+def seal_measurement_inputs(binary: Path, metadata: dict, split_root: Path, index_root: Path) -> None:
+    """Copy the built binary, package index, and requirement inputs into a
+    dedicated root-owned tmpfs and remount it read-only: measured processes
+    can read but never modify or replace any measurement input."""
+    mount_tmpfs(SEALED_ROOT, MS_NOSUID | MS_NODEV, SEALED_TMPFS_DATA)
+    sealed_binary = SEALED_ROOT / "uv"
+    shutil.copyfile(binary, sealed_binary)
+    os.chmod(sealed_binary, 0o755)
+    # The pristine prebuilt trusted-baseline binary is sealed alongside the
+    # candidate to serve as the interleaved per-eval reference yardstick.
+    reference_binary = SEALED_ROOT / "uv-ref"
+    shutil.copyfile(REFERENCE_BINARY_SOURCE, reference_binary)
+    os.chmod(reference_binary, 0o755)
+    local_index = SEALED_ROOT / "index"
     shutil.copytree(index_root, local_index)
-    os.chmod(bench_root, 0o777)
     for directory, _, files in os.walk(local_index):
-        os.chmod(directory, 0o755)
+        base = Path(directory)
+        os.chmod(base, 0o755)
         for filename in files:
-            os.chmod(Path(directory) / filename, 0o644)
+            os.chmod(base / filename, 0o644)
+    requirements = SEALED_ROOT / "requirements"
+    requirements.mkdir(mode=0o755)
+    for row in metadata["workloads"]:
+        # The requirement path deliberately keeps the "<id>/requirements.in"
+        # tail: split-boundary integrity diagnostics identify the workload by
+        # this path, so the sealed layout must preserve it byte-for-byte.
+        workload_dir = requirements / row["id"]
+        workload_dir.mkdir(mode=0o755)
+        destination = workload_dir / "requirements.in"
+        shutil.copyfile(split_root / row["requirements"], destination)
+        os.chmod(destination, 0o644)
+    if LIBC.mount(None, str(SEALED_ROOT).encode(), None,
+                  MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV, None) != 0:
+        raise GateFailure("sealed measurement tmpfs could not be made read-only")
+
+
+def fresh_bench() -> None:
+    """Mount a brand-new candidate-writable tmpfs for one measurement phase."""
+    mount_tmpfs(BENCH_ROOT, MS_NOSUID | MS_NODEV | MS_NOEXEC, BENCH_TMPFS_DATA)
+    for name in ("home", "cache"):
+        directory = BENCH_ROOT / name
+        directory.mkdir(mode=0o777)
+        os.chmod(directory, 0o777)
+
+
+def teardown_bench() -> None:
+    reap_candidate_processes()
+    if not unmount_tmpfs(BENCH_ROOT):
+        raise GateFailure("bench tmpfs teardown failed")
+
+
+def run_workloads(metadata: dict, split_root: Path) -> tuple[dict, dict, int, float, float]:
+    candidate = SEALED_ROOT / "uv"
+    reference = SEALED_ROOT / "uv-ref"
+    local_index = SEALED_ROOT / "index"
     environment = {
-        "HOME": str(bench_root / "home"),
+        "HOME": str(BENCH_ROOT / "home"),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "UV_NO_PROGRESS": "1",
         "UV_PYTHON_DOWNLOADS": "never",
     }
-    Path(environment["HOME"]).mkdir(mode=0o777)
-    os.chmod(environment["HOME"], 0o777)
+    # The reference is the pristine trusted baseline and is never gated on
+    # memory: only the candidate's peak RSS is held to the baseline+2% ceiling.
+    NO_RSS_GATE = 1 << 30
     scores: dict[str, float] = {}
     measurements: dict[str, dict] = {}
     maximum_rss = 0
+
+    def timed(binary: Path, requirement: Path, output: Path, expected: bytes,
+              mode: str, wid: str, rss_limit: int, cache_dir: Path) -> tuple[float, int]:
+        if output.exists():
+            output.unlink()
+        command = resolution_command(binary, requirement, output, cache_dir, local_index)
+        code, elapsed_ms, peak_rss = fork_exec(command, environment, PROCESS_TIMEOUT_SEC)
+        if code != 0 or not output.is_file() or output.read_bytes() != expected:
+            raise GateFailure(f"exact lockfile gate failed: {wid}:{mode}")
+        if peak_rss <= 0 or peak_rss > rss_limit:
+            raise GateFailure(f"peak RSS gate failed: {wid}:{mode} {peak_rss}KiB > {rss_limit}KiB")
+        return elapsed_ms, peak_rss
+
     for row in metadata["workloads"]:
-        work = bench_root / row["id"]
-        work.mkdir(mode=0o777)
-        os.chmod(work, 0o777)
-        requirement = work / "requirements.in"
-        shutil.copy2(split_root / row["requirements"], requirement)
-        os.chmod(requirement, 0o644)
+        wid = str(row["id"])
+        requirement = SEALED_ROOT / "requirements" / wid / "requirements.in"
         expected = (split_root / row["expectedLock"]).read_bytes()
         rss_limit = math.floor(row["baselinePeakRssKb"] * 1.02)
-        for mode, repetitions in (("cold", COLD_REPETITIONS), ("warm", WARM_REPETITIONS)):
-            cache = work / f"cache-{mode}"
-            output = work / f"{mode}.lock"
-            if mode == "warm":
-                cache.mkdir(mode=0o755)
-                os.chmod(cache, 0o777)
-                command = resolution_command(binary, requirement, output, cache, local_index)
-                code, _, _ = fork_exec(command, environment, PROCESS_TIMEOUT_SEC)
-                if code != 0 or output.read_bytes() != expected:
-                    raise GateFailure(f"warm-prime lockfile gate failed: {row['id']}")
-            times: list[float] = []
+        cand_out = BENCH_ROOT / "candidate.lock"
+        ref_out = BENCH_ROOT / "reference.lock"
+        for mode, repetitions in (
+            ("cold", COLD_REPETITIONS),
+            ("warm", WARM_REPETITIONS),
+        ):
+            cand_ms: list[float] = []
+            ref_ms: list[float] = []
             peaks: list[int] = []
-            for _ in range(repetitions):
-                if mode == "cold":
-                    shutil.rmtree(cache, ignore_errors=True)
-                    cache.mkdir(mode=0o755)
-                    os.chmod(cache, 0o777)
-                if output.exists():
-                    output.unlink()
-                command = resolution_command(binary, requirement, output, cache, local_index)
-                code, elapsed_ms, peak_rss = fork_exec(command, environment, PROCESS_TIMEOUT_SEC)
-                if code != 0 or not output.is_file() or output.read_bytes() != expected:
-                    raise GateFailure(f"exact lockfile gate failed: {row['id']}:{mode}")
-                if peak_rss <= 0 or peak_rss > rss_limit:
-                    raise GateFailure(
-                        f"peak RSS gate failed: {row['id']}:{mode} {peak_rss}KiB > {rss_limit}KiB"
-                    )
-                times.append(elapsed_ms)
-                peaks.append(peak_rss)
-            score = 1000.0 / geometric_mean(times)
+            if mode == "cold":
+                # Reference and candidate cold repetitions are interleaved and
+                # each starts from a freshly mounted writable tree torn down
+                # immediately after: no cache/lock/scratch byte survives to the
+                # next repetition, and the two binaries share the same per-pair
+                # ambient CPU speed so cross-eval drift divides out.
+                def cold_reference() -> float:
+                    fresh_bench()
+                    try:
+                        return timed(reference, requirement, ref_out, expected, mode, wid, NO_RSS_GATE, BENCH_ROOT / "cache")[0]
+                    finally:
+                        teardown_bench()
+
+                def cold_candidate() -> tuple[float, int]:
+                    fresh_bench()
+                    try:
+                        return timed(candidate, requirement, cand_out, expected, mode, wid, rss_limit, BENCH_ROOT / "cache")
+                    finally:
+                        teardown_bench()
+
+                for rep in range(repetitions):
+                    # Alternate which binary runs first in each pair so any
+                    # systematic first-vs-second-slot bias cancels across pairs.
+                    if rep % 2 == 0:
+                        r_ms = cold_reference()
+                        c_ms, c_rss = cold_candidate()
+                    else:
+                        c_ms, c_rss = cold_candidate()
+                        r_ms = cold_reference()
+                    ref_ms.append(r_ms)
+                    cand_ms.append(c_ms)
+                    peaks.append(c_rss)
+            else:
+                # Warm phase on one fresh mount: each binary primes its OWN
+                # cache, then timed reference and candidate repetitions are
+                # interleaved rep-by-rep against those primed caches so the two
+                # binaries share the same ambient CPU speed within each pair and
+                # cross-eval drift divides out exactly as for cold. The primed
+                # cache is the only deliberately shared state and never outlives
+                # the phase; cold reuse is impossible (cold uses fresh mounts).
+                fresh_bench()
+                try:
+                    ref_cache = BENCH_ROOT / "cache-ref"
+                    cand_cache = BENCH_ROOT / "cache-cand"
+                    for directory in (ref_cache, cand_cache):
+                        directory.mkdir(mode=0o777)
+                        os.chmod(directory, 0o777)
+                    for binary, out, cdir, who in (
+                        (reference, ref_out, ref_cache, "reference"),
+                        (candidate, cand_out, cand_cache, wid),
+                    ):
+                        prime = resolution_command(binary, requirement, out, cdir, local_index)
+                        code, _, _ = fork_exec(prime, environment, PROCESS_TIMEOUT_SEC)
+                        if code != 0 or not out.is_file() or out.read_bytes() != expected:
+                            raise GateFailure(f"warm-prime lockfile gate failed: {wid}:{who}")
+                    for rep in range(repetitions):
+                        if rep % 2 == 0:
+                            r_ms, _ = timed(reference, requirement, ref_out, expected, mode, wid, NO_RSS_GATE, ref_cache)
+                            c_ms, c_rss = timed(candidate, requirement, cand_out, expected, mode, wid, rss_limit, cand_cache)
+                        else:
+                            c_ms, c_rss = timed(candidate, requirement, cand_out, expected, mode, wid, rss_limit, cand_cache)
+                            r_ms, _ = timed(reference, requirement, ref_out, expected, mode, wid, NO_RSS_GATE, ref_cache)
+                        ref_ms.append(r_ms)
+                        cand_ms.append(c_ms)
+                        peaks.append(c_rss)
+                finally:
+                    teardown_bench()
+            cell_ratio = paired_ratio(ref_ms, cand_ms)
+            score = REFERENCE_NORMALIZATION * cell_ratio
+            candidate_q = 1000.0 / geometric_mean(cand_ms)
+            reference_q = 1000.0 / geometric_mean(ref_ms)
             if not math.isfinite(score) or score <= 0:
                 raise GateFailure("resolver scalar is non-finite")
-            key = f"{row['id']}:{mode}"
+            key = f"{wid}:{mode}"
             scores[key] = score
-            measurements[key] = {"milliseconds": times, "peakRssKb": peaks}
+            measurements[key] = {
+                "allMilliseconds": cand_ms,
+                "allReferenceMilliseconds": ref_ms,
+                "peakRssKb": peaks,
+                "candidateQ": candidate_q,
+                "referenceQ": reference_q,
+                "pairRatio": cell_ratio,
+                "score": score,
+            }
             maximum_rss = max(maximum_rss, *peaks)
-    return scores, measurements, maximum_rss
+    raw_q = geometric_mean([m["candidateQ"] for m in measurements.values()])
+    reference_q = geometric_mean([m["referenceQ"] for m in measurements.values()])
+    return scores, measurements, maximum_rss, raw_q, reference_q
 
 
 def main() -> None:
-    mounted = False
+    build_mounted = False
+    sealed = False
     result_hash = ""
     try:
         metadata, split_root, index, index_root = load_assets()
         verify_index(index, index_root)
         result_hash = verify_workloads(metadata, split_root, index)
         mount_build_tmpfs()
-        mounted = True
+        build_mounted = True
         run_worker(
             "prepare",
             str(TARGET_BASE),
@@ -446,10 +661,19 @@ def main() -> None:
         )
         build_sec = time.monotonic() - build_started
         binary = Path(built["binary"])
-        scores, measurements, peak_rss = run_workloads(binary, metadata, split_root, index_root)
-        scalar = 1000.0 / geometric_mean(
-            [sample for value in measurements.values() for sample in value["milliseconds"]]
-        )
+        reap_candidate_processes()
+        seal_measurement_inputs(binary, metadata, split_root, index_root)
+        sealed = True
+        # The candidate-writable build tmpfs is destroyed before the first
+        # measured repetition: no build-time state survives into measurement.
+        if not unmount_tmpfs(BUILD_ROOT):
+            raise GateFailure("build tmpfs teardown failed")
+        BUILD_ROOT.rmdir()
+        build_mounted = False
+        scores, measurements, peak_rss, raw_q, reference_q = run_workloads(metadata, split_root)
+        # The reported per-cell scores are already reference-normalized; the
+        # scalar objective is their geometric mean.
+        scalar = geometric_mean(list(scores.values()))
         if not math.isfinite(scalar) or scalar <= Q_FAIL:
             raise GateFailure("oriented resolver scalar is invalid")
         output = {
@@ -462,7 +686,7 @@ def main() -> None:
                 "rss_pass": True,
             },
             "perExample": {
-                key: {"score": value, "feedback": f"offline {key} resolution passed exact gates"}
+                key: {"score": value, "feedback": f"offline {key} resolution passed exact gates (reference-normalized)"}
                 for key, value in scores.items()
             },
             "diagnostics": {
@@ -471,6 +695,8 @@ def main() -> None:
                 "summary": "offline locks, selected wheel hashes, resolver tests, and RSS gate passed",
                 "build_sec": build_sec,
                 "peak_rss_kb": peak_rss,
+                "raw_q": raw_q,
+                "reference_q": reference_q,
                 "measurements": measurements,
             },
         }
@@ -481,8 +707,10 @@ def main() -> None:
     except BaseException as exc:
         emit_failure(f"evaluator internal failure: {type(exc).__name__}", result_hash)
     finally:
-        if mounted:
-            unmount_build_tmpfs()
+        if build_mounted and unmount_tmpfs(BUILD_ROOT):
+            BUILD_ROOT.rmdir()
+        if sealed:
+            unmount_tmpfs(SEALED_ROOT)
 
 
 if __name__ == "__main__":
