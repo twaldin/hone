@@ -32,36 +32,113 @@ CALL_TIMEOUT_SEC = float(os.environ.get("CAPSULE_CALL_TIMEOUT_SEC", "3"))
 MAX_RESPONSE_BYTES = int(os.environ.get("CAPSULE_MAX_RESPONSE_BYTES", "65536"))
 GROUPS = ("no-diff", "infra", "precedence", "dedup")
 OPERATIONS = ("analyze", "score", "dedup")
+PR_SET_CHILD_SUBREAPER = 36
+CANDIDATE_WRITABLE_ROOTS = (Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"))
 
 
-def _kill_candidate_processes() -> None:
-    """Best-effort reap of every process owned by the fixed candidate uid."""
-    if os.geteuid() != 0:
-        return
+def _become_subreaper() -> None:
+    """Adopt orphaned candidate descendants so they can be reaped.
+
+    Detached/new-session children reparent to the nearest subreaper instead of
+    pid 1, which lets _reap_candidate_processes wait() on them.
+    """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _candidate_pids() -> dict[int, bool]:
+    """Map of candidate-uid pid -> is_zombie from a full /proc scan."""
+    pids: dict[int, bool] = {}
     proc = Path("/proc")
     if not proc.exists():
-        return
+        return pids
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
         try:
             status = (entry / "status").read_text()
-            uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
-            if int(uid_line.split()[1]) == WORKER_UID:
-                os.kill(int(entry.name), signal.SIGKILL)
-        except (FileNotFoundError, ProcessLookupError, PermissionError, StopIteration, ValueError):
-            pass
-
-
-def _clear_candidate_tmp() -> None:
-    for path in Path("/tmp").glob("agentelo-case-*"):
-        try:
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
-            else:
-                path.unlink(missing_ok=True)
         except OSError:
-            pass
+            continue
+        uid: int | None = None
+        zombie = False
+        for line in status.splitlines():
+            if line.startswith("Uid:"):
+                try:
+                    uid = int(line.split()[1])
+                except (IndexError, ValueError):
+                    uid = None
+            elif line.startswith("State:"):
+                zombie = line.split()[1:2] == ["Z"]
+        if uid == WORKER_UID:
+            pids[int(entry.name)] = zombie
+    return pids
+
+
+def _reap_candidate_processes() -> None:
+    """Kill and reap every candidate-uid process until none remain.
+
+    killpg alone misses detached/new-session descendants, and a plain SIGKILL
+    sweep leaves zombies pinned by dead parents.  As subreaper this process
+    inherits those orphans, so we loop: SIGKILL every live candidate pid,
+    drain waitpid(-1, WNOHANG), and stop only when a full /proc scan finds no
+    candidate-uid process at all (bounded by a hard deadline).
+    """
+    if os.geteuid() != 0:
+        return
+    deadline = time.monotonic() + 5.0
+    while True:
+        pids = _candidate_pids()
+        if not pids:
+            return
+        for pid, zombie in pids.items():
+            if zombie:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        while True:
+            try:
+                reaped, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if reaped == 0:
+                break
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.01)
+
+
+def _clear_candidate_writable() -> None:
+    """Purge candidate residue from every candidate-writable root.
+
+    The worker drops to WORKER_UID before candidate code runs, so anything the
+    candidate persisted (including its own agentelo-case-* transcript dirs) is
+    owned by that uid; sweep /tmp, /var/tmp, and /dev/shm rather than only the
+    trusted transcript prefix.
+    """
+    for root in CANDIDATE_WRITABLE_ROOTS:
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for path in entries:
+            try:
+                owned = path.lstat().st_uid == WORKER_UID
+            except OSError:
+                continue
+            if not owned and not path.name.startswith("agentelo-case-"):
+                continue
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _worker_preexec() -> None:
@@ -128,8 +205,8 @@ def _kill_worker(proc: subprocess.Popen[bytes]) -> None:
 
 
 def _call_candidate(case: dict[str, Any]) -> tuple[Any | None, str | None]:
-    _kill_candidate_processes()
-    _clear_candidate_tmp()
+    _reap_candidate_processes()
+    _clear_candidate_writable()
     request = json.dumps(
         {"operation": case["operation"], "input": case["input"]},
         separators=(",", ":"),
@@ -169,8 +246,8 @@ def _call_candidate(case: dict[str, Any]) -> tuple[Any | None, str | None]:
             _kill_worker(proc)
         return None, f"worker spawn/protocol failure: {type(exc).__name__}"
     finally:
-        _kill_candidate_processes()
-        _clear_candidate_tmp()
+        _reap_candidate_processes()
+        _clear_candidate_writable()
 
 
 def _validate_case(case: Any, seen: set[str]) -> dict[str, Any]:
@@ -248,6 +325,7 @@ def _emit_failure(summary: str) -> None:
 
 
 def main() -> None:
+    _become_subreaper()
     try:
         cases = _load_cases()
     except (OSError, ValueError, json.JSONDecodeError) as exc:

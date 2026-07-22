@@ -4,6 +4,7 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -12,7 +13,16 @@ const safeParse = JSON.parse.bind(JSON);
 // Captured before any candidate code can run; used ONLY on primitives, where
 // the serialization algorithm consults no user-reachable hook.
 const safeStringify = JSON.stringify.bind(JSON);
-const safeWrite = process.stdout.write.bind(process.stdout);
+// Emission is fd-level: process.stdout.write — even bound pre-import — still
+// dispatches through the stream's own _write/_writev at call time, which
+// candidate code can replace after import to rewrite the trusted envelope.
+// fs.writeSync (captured pre-import) reaches Node's primordial-guarded fd
+// binding directly and consults no candidate-reachable hook.
+const safeFdWrite = writeSync;
+const safeBufferFrom = Buffer.from.bind(Buffer);
+const safeByteLength = Buffer.byteLength.bind(Buffer);
+const safeAtomicsWait = Atomics.wait;
+const sleepCell = new Int32Array(new SharedArrayBuffer(4));
 const safeExit = process.exit.bind(process);
 const safeKeys = Object.keys;
 const safeIsArray = Array.isArray;
@@ -66,6 +76,25 @@ function encodeJson(value, depth) {
   return `${out}}`;
 }
 
+function emitLine(text) {
+  const buf = safeBufferFrom(text, "utf8");
+  const total = safeByteLength(text, "utf8");
+  let offset = 0;
+  while (offset < total) {
+    try {
+      offset += safeFdWrite(1, buf, offset, total - offset);
+    } catch (error) {
+      if (error !== null && typeof error === "object" && error.code === "EAGAIN") {
+        // fd 1 turns non-blocking if candidate code initializes process.stdout;
+        // the trusted parent drains continuously, so back off 1ms and retry.
+        safeAtomicsWait(sleepCell, 0, 0, 1);
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
 function respond(payload) {
   let line;
   try {
@@ -76,7 +105,7 @@ function respond(payload) {
   if (typeof line !== "string") {
     line = '{"ok":false,"error":"unserializable candidate value"}';
   }
-  safeWrite(`${line}\n`);
+  emitLine(`${line}\n`);
 }
 
 function withTranscript(input, invoke) {
