@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unprivileged build, upstream-test, and benchmark worker for brotli-codec."""
+"""Unprivileged build, upstream-test, and source-staging worker for brotli-codec."""
 from __future__ import annotations
 
 import json
@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 
 TIMEOUT_SEC = 180
+TRUSTED_DIR = Path(__file__).resolve().parent
+MUTABLE_PREFIXES = ("c/common/", "c/dec/", "c/enc/")
 
 
 def run_quiet(argv: list[str], cwd: Path, timeout: int = TIMEOUT_SEC) -> tuple[bool, str]:
@@ -37,8 +39,24 @@ def run_quiet(argv: list[str], cwd: Path, timeout: int = TIMEOUT_SEC) -> tuple[b
 
 
 def prepare(workspace: Path, source: Path) -> dict:
+    """Seed the build tree from the FULL trusted baseline, then overlay ONLY
+    the mutable candidate files (c/common, c/dec, c/enc). A sanitized terminal
+    artifact that omits protected files therefore still reconstructs the
+    complete worktree, and a candidate copy of any protected file can never
+    reach the build."""
     try:
-        shutil.copytree(workspace, source, symlinks=False)
+        shutil.copytree(TRUSTED_DIR, source, symlinks=False)
+        for root, _dirs, files in os.walk(workspace):
+            for name in files:
+                path = Path(root) / name
+                relative = path.relative_to(workspace).as_posix()
+                if not relative.startswith(MUTABLE_PREFIXES):
+                    continue
+                if path.is_symlink() or not path.is_file():
+                    continue
+                destination = source / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, destination)
     except OSError as exc:
         return {"ok": False, "stage": "prepare", "detail": str(exc)}
     return {"ok": True, "stage": "prepare"}

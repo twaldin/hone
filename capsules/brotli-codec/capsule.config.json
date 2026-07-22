@@ -1,7 +1,12 @@
 {
   "objective": "Improve geometric-mean quality-4/9 compression and decompression throughput over deterministic web, text, and binary corpora. Exact round trip, all 28 pinned upstream CTest cases, and compressed size no worse than baseline by more than 0.25% are hard gates. Only c/common, c/enc, and c/dec are mutable.",
   "image": "hone-brotli-codec@sha256:432ce8dbe85174d10ea0de3562874e7996dfbd2537d8d6148bc5f5a29fff5adc",
-  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
   "protectedPaths": [
     ".*",
     "*.md",
@@ -15,6 +20,7 @@
     "bench.c",
     "eval.py",
     "pyproject.toml",
+    "refdecode.c",
     "sbom.cdx.json",
     "setup.cfg",
     "setup.py",
@@ -39,12 +45,16 @@
     {
       "id": "train",
       "visibility": "holdout",
-      "paths": ["assets/train"]
+      "paths": [
+        "assets/train"
+      ]
     },
     {
       "id": "validation",
       "visibility": "holdout",
-      "paths": ["assets/validation"]
+      "paths": [
+        "assets/validation"
+      ]
     }
   ],
   "budget": {
@@ -64,13 +74,17 @@
     "evaluatorSource": "user",
     "partition": "m2-frozen-corpus",
     "license": "MIT (upstream LICENSE preserved)",
-    "provenance": "google/brotli upstream revision 037b70e2ad03b20480e6407ed5851e0f114b67a7; the declared baseline is a synthetic commit layering the trusted evaluator glue (eval.py, worker.py, bench.c, toolchain.lock.json) over that upstream tree and materializing the sole upstream research/dictionary.bin symlink byte-for-byte because the broker rejects symlink artifact entries; deterministic xorshift64-v1 corpora contain no third-party text or binary data; interleaved fresh-process A-A samples [323.57208976999243,329.9391761915163,328.3354322077437] give qBase=327.2822327230842 and sample sigma=3.311626373951895; qReference=327.2822327230842+max(5*3.311626373951895,0.05*abs(327.2822327230842-0))=343.8403645928436; the independently authored thread-local bounded encoder arena perturbation passes every hard gate and is absent from the mutation sandbox",
+    "provenance": "google/brotli upstream revision 037b70e2ad03b20480e6407ed5851e0f114b67a7; the declared baseline is a synthetic commit layering the trusted evaluator glue (eval.py, worker.py, bench.c, toolchain.lock.json) over that upstream tree and materializing the sole upstream research/dictionary.bin symlink byte-for-byte because the broker rejects symlink artifact entries; deterministic xorshift64-v1 corpora contain no third-party text or binary data; fresh-container A-A samples [190.169814330113, 179.97267427789876, 194.3044178708032] give qBase=188.14896882627167 and sample sigma=7.376488393265881; qReference=188.14896882627167+max(5*7.376488393265881,0.05*abs(188.14896882627167-0))=225.0314107926011; the independently authored thread-local bounded encoder arena control scores q=193.13717062153327 (ordering-run baseline 190.169814330113), passing all hard gates and absent from the mutation sandbox; evaluator glue additionally ships refdecode.c, a protected reference decoder compiled from the pristine baseline c/common+c/dec sources that independently validates every candidate-encoder stream; all values are Docker Desktop provisional pending frozen-GCE recalibration",
     "sourceDetails": {
       "repository": "google/brotli",
       "revision": "037b70e2ad03b20480e6407ed5851e0f114b67a7",
       "baselineCommit": "synthetic commit on top of upstream 037b70e2ad03b20480e6407ed5851e0f114b67a7 that adds the trusted evaluator/worker/benchmark glue and the materialized research/dictionary.bin so the exact git-baseline verifier reconstructs the complete evaluated worktree; the upstream parent commit is retained in git history and in this provenance record",
       "upstreamUrl": "https://github.com/google/brotli/commit/037b70e2ad03b20480e6407ed5851e0f114b67a7",
-      "mutableEnvelope": ["c/common/**", "c/enc/**", "c/dec/**"],
+      "mutableEnvelope": [
+        "c/common/**",
+        "c/enc/**",
+        "c/dec/**"
+      ],
       "artifactNormalization": "research/dictionary.bin is the sole upstream symlink; its target c/common/dictionary.bin is materialized with identical bytes because trusted broker artifacts forbid symlinks",
       "upstreamTests": [
         "cmake -S . -B build -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release",
@@ -82,14 +96,18 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
       "freshProcess": true,
-      "q": "geometric mean MiB/s across quality 4 and 9 compression and decompression for three sealed corpus categories",
+      "q": "geometric mean MiB/s across quality 4 and 9 compression and decompression for three sealed corpus categories, measured as trusted-parent wall-clock process lifetime over identity-distinct rotated+perturbed inputs",
       "qFail": 0,
-      "qBase": 327.2822327230842,
-      "sigma": 3.311626373951895,
-      "qReference": 343.8403645928436,
-      "qReferenceConstruction": "327.2822327230842 + max(5*3.311626373951895, 0.05*abs(327.2822327230842-0)) = 343.8403645928436",
-      "aaSamples": [323.57208976999243, 329.9391761915163, 328.3354322077437],
-      "normalizationScale": 16.558131869759475,
+      "qBase": 188.14896882627167,
+      "sigma": 7.376488393265881,
+      "qReference": 225.0314107926011,
+      "qReferenceConstruction": "188.14896882627167 + max(5*7.376488393265881, 0.05*abs(188.14896882627167-0)) = 225.0314107926011",
+      "aaSamples": [
+        190.169814330113,
+        179.97267427789876,
+        194.3044178708032
+      ],
+      "normalizationScale": 36.882441966329424,
       "noiseFractionOfScale": 0.2,
       "benchmarkTargetMsPerSample": 125,
       "benchmarkSamplesPerCell": 3,
@@ -101,18 +119,31 @@
       "cohort": "terminal",
       "optimizerPilots": 0,
       "optimizerCorpusExposure": false,
-      "allowedAuthoringWork": ["correctness", "determinism", "A-A/noise", "sensitivity", "exploit-resistance"],
+      "allowedAuthoringWork": [
+        "correctness",
+        "determinism",
+        "A-A/noise",
+        "sensitivity",
+        "exploit-resistance"
+      ],
       "attestation": "No optimizer pilot, mutation/headroom run, seed-optimizer session, queryable optimizer corpus write, panel evidence write, or search-visible state was used. All terminal fixtures, identities, scores, and feedback remain confined to this capsule and its trusted admission evidence."
     },
     "exploitReview": {
-      "protectedPathEscape": "the broker diff-protects all build, evaluator, harness, test, fixture, and metadata paths; the evaluator also byte-compares every protected baseline file, rejects non-regular paths, and rejects new files outside c/common, c/enc, and c/dec",
-      "benchmarkSpecialCasing": "separate root-only holdout train and validation corpora; the shortcut control memoizes only the frozen 2 MiB training corpora, keyed on an address-independent content fingerprint, plus a size-triggered validation delay, so it wins train over fresh measurement buffers and is rejected by validation",
+      "protectedPathEscape": "the broker diff-protects all build, evaluator, harness, test, fixture, and metadata paths; the evaluator byte-compares every protected baseline file that is present (a sanitized terminal artifact may omit protected files, which are reconstructed from the trusted seed), requires the full mutable-file inventory, rejects non-regular paths, and rejects new files outside c/common, c/enc, and c/dec; every build seeds the full tree from the trusted baseline and overlays only the mutable candidate files",
+      "benchmarkSpecialCasing": "separate root-only holdout train and validation corpora, and every timed iteration processes a fresh rotation+sparse-perturbation of the corpus so repeated timed work is identity-distinct; the shortcut control specializes to the frozen 2 MiB training binary corpus via a rotation-invariant byte-histogram fingerprint plus a size-triggered validation delay, so it wins train yet is rejected by validation",
       "fixtureFingerprinting": "both deterministic corpora are visibility=holdout; compilation runs as uid 2000 before corpus bytes are piped by the trusted evaluator to the sealed root-owned harness",
-      "outputFabrication": "encode and decode run as separate processes under distinct uids; the trusted parent alone holds the source and confirms every round trip out of process, independently re-derives the compressed size from the byte stream, and cross-checks the candidate decoder against sealed upstream brotli test vectors, so a colluding or dummy-emitting codec cannot pass",
-      "timerTampering": "throughput is measured through a non-interposable direct kernel-syscall monotonic clock and reported over a dedicated parent-owned pipe, so a strong candidate clock_gettime/printf/write definition linked into the same executable cannot fabricate timing or output; every measured repetition uses fresh buffers",
+      "outputFabrication": "encode and decode run as separate processes under distinct uids; the trusted parent alone holds the source, byte-compares every decoded output out of process, decodes every candidate-encoder stream with a protected reference decoder compiled from the pristine baseline c/common+c/dec sources, derives all compressed sizes from the validated byte stream, and cross-checks the candidate decoder against sealed upstream brotli test vectors, so a colluding or dummy-emitting codec cannot pass",
+      "timerTampering": "throughput is the wall-clock lifetime of each sealed codec process measured in the trusted root evaluator; candidate-linked code holds no report channel and contributes no timestamp, the evaluator is a child subreaper that fails the run if any candidate-uid process or persistent candidate-owned tmp state survives a codec process, codec processes run in fresh IPC namespaces, and the build tree is destroyed with the build tmpfs made root-only before the first measurement",
       "buildScriptMutation": "CMake files, worker, compiler flags, test code, toolchain lock, and benchmark are protected; every evaluation copies into a fresh tmpfs and performs a clean build",
       "deadCodeBenchmarkBypass": "benchmarked public one-shot encoder and decoder entry points are also exercised by the complete pinned upstream CTest round-trip suite"
     },
-    "tags": ["m2", "oss", "terminal", "brotli", "compression", "performance"]
+    "tags": [
+      "m2",
+      "oss",
+      "terminal",
+      "brotli",
+      "compression",
+      "performance"
+    ]
   }
 }
