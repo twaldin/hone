@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HONE — Observatory (Deep-Space Draft)</title>
+<meta name="description" content="Hone is a local-first, durable optimization CLI. RelayBench publishes the evidence. Deep-space observatory landing draft.">
+<style>
+/* ============================================================
+   V08 — OBSERVATORY. Vast near-black. A living starfield.
+   Orbital diagrams and constellation lines instead of cards.
+   Thin type, enormous tracking, enormous silence.
+   ============================================================ */
+:root{
+  --space:#04050a;
+  --starlight:#dfe6f2;
+  --dim:#8b94ab;
+  --faint:#4d5569;
+  --ice:#9fc4ff;
+  --warm:#ffd9a0;
+  --line:rgba(159,196,255,.18);
+  --line-soft:rgba(159,196,255,.09);
+  --sans:"Helvetica Neue","Segoe UI",Helvetica,Arial,sans-serif;
+  --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--space);
+  color:var(--starlight);
+  font-family:var(--sans);
+  font-weight:300;
+  font-size:16px;
+  line-height:1.75;
+  overflow-x:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:rgba(159,196,255,.3)}
+.mono{font-family:var(--mono)}
+#sky{position:fixed;inset:0;z-index:-1;display:block}
+
+.shell{max-width:980px;margin:0 auto;padding:0 40px}
+
+/* ---------- header — a thin instrument bar ---------- */
+header{position:fixed;top:0;left:0;right:0;z-index:20;
+  background:linear-gradient(rgba(4,5,10,.92), rgba(4,5,10,0));padding:22px 0}
+.hrow{display:flex;justify-content:space-between;align-items:center}
+.wm{text-decoration:none;color:var(--starlight);font-size:.82rem;letter-spacing:.58em;font-weight:400}
+.wm i{font-style:normal;color:var(--ice)}
+nav{display:flex;gap:30px}
+nav a{color:var(--faint);text-decoration:none;font-size:.62rem;letter-spacing:.3em;transition:color .3s}
+nav a:hover{color:var(--ice)}
+
+/* ---------- hero — vast ---------- */
+.hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;position:relative;padding:120px 0 80px}
+.hero>.shell{min-width:0;width:100%}
+.coord{font-size:.6rem;letter-spacing:.5em;color:var(--faint);margin-bottom:44px}
+.coord b{color:var(--warm);font-weight:400}
+h1{font-weight:200;font-size:clamp(2.4rem,5vw,4.2rem);line-height:1.2;letter-spacing:.045em;max-width:19em}
+h1 b{font-weight:400;color:var(--ice)}
+.lede{margin-top:38px;max-width:37em;color:var(--dim);font-size:1rem}
+.cmd{margin-top:52px;font-size:.8rem;color:var(--dim);max-width:100%;overflow-x:auto;white-space:nowrap;
+  border-left:1px solid var(--line);padding:10px 0 10px 24px}
+.cmd .p{color:var(--warm)}
+.cmd .a{color:var(--ice)}
+.hero-links{margin-top:46px;display:flex;gap:44px;flex-wrap:wrap}
+.hlink{color:var(--starlight);text-decoration:none;font-size:.66rem;letter-spacing:.34em;display:inline-flex;align-items:center;gap:14px;transition:color .3s}
+.hlink::before{content:"";width:34px;height:1px;background:var(--line);transition:width .3s,background .3s}
+.hlink:hover{color:var(--ice)}
+.hlink:hover::before{width:52px;background:var(--ice)}
+.scroll-cue{position:absolute;bottom:36px;left:40px;font-size:.56rem;letter-spacing:.44em;color:var(--faint);
+  display:flex;align-items:center;gap:14px}
+.scroll-cue::after{content:"";width:1px;height:44px;background:linear-gradient(var(--line),transparent);
+  animation:fall 2.4s ease-in-out infinite}
+@keyframes fall{0%{transform:scaleY(0);transform-origin:top}45%{transform:scaleY(1);transform-origin:top}55%{transform:scaleY(1);transform-origin:bottom}100%{transform:scaleY(0);transform-origin:bottom}}
+
+/* ---------- section scaffolding ---------- */
+section{padding:140px 0;position:relative}
+.obs{font-size:.6rem;letter-spacing:.5em;color:var(--warm);display:block;margin-bottom:26px}
+h2{font-weight:200;font-size:clamp(1.7rem,3.2vw,2.6rem);letter-spacing:.06em;line-height:1.25;max-width:18em}
+.sec-lede{margin-top:22px;color:var(--dim);max-width:40em;font-size:.95rem}
+
+/* kernel — constellation trio */
+.constellation{margin-top:80px;display:grid;grid-template-columns:repeat(3,1fr);gap:64px;position:relative}
+.constellation::before{content:"";position:absolute;top:5px;left:8%;right:8%;height:1px;
+  background:linear-gradient(90deg,transparent,var(--line) 20%,var(--line) 80%,transparent)}
+.star-point{position:relative;padding-top:40px}
+.star-point::before{content:"";position:absolute;top:0;left:0;width:11px;height:11px;border-radius:50%;
+  background:var(--ice);box-shadow:0 0 16px rgba(159,196,255,.8), 0 0 44px rgba(159,196,255,.3);transform:translateY(-5px)}
+.star-point:nth-child(2)::before{background:var(--warm);box-shadow:0 0 16px rgba(255,217,160,.8), 0 0 44px rgba(255,217,160,.3)}
+.star-point .sp-no{font-size:.6rem;letter-spacing:.4em;color:var(--faint)}
+.star-point h3{font-weight:400;font-size:1.02rem;letter-spacing:.14em;margin:12px 0 12px}
+.star-point p{font-size:.86rem;color:var(--dim)}
+
+/* method — orbital diagram + log entries */
+.orbit-wrap{margin:80px auto 70px;max-width:640px}
+.orbit-svg{width:100%;height:auto;display:block}
+.orbit-svg .orb{fill:none;stroke:var(--line-soft);stroke-width:1}
+.orbit-svg .orb-hot{stroke:var(--line)}
+.orbit-svg .body{fill:var(--ice)}
+.orbit-svg .body-warm{fill:var(--warm)}
+.orbit-svg .body-core{fill:var(--starlight)}
+.orbit-svg text{fill:var(--dim);font-family:var(--mono);font-size:9.5px;letter-spacing:.18em}
+.orbit-svg .lab-hot{fill:var(--ice)}
+.orbit-svg .lab-warm{fill:var(--warm)}
+.orbit-svg .halo{fill:none;stroke:rgba(159,196,255,.35);stroke-width:1;animation:halo 5s ease-in-out infinite}
+@keyframes halo{0%,100%{opacity:.25}50%{opacity:.8}}
+.log{max-width:44em;margin:0 auto}
+.entry{display:grid;grid-template-columns:150px 1fr;gap:30px;padding:34px 0;border-top:1px solid var(--line-soft)}
+.entry:last-child{border-bottom:1px solid var(--line-soft)}
+.entry .eno{font-size:.6rem;letter-spacing:.34em;color:var(--warm);padding-top:5px}
+.entry h3{font-weight:400;font-size:1rem;letter-spacing:.12em;margin-bottom:10px}
+.entry h3 small{font-size:.56rem;letter-spacing:.3em;color:var(--ice);margin-left:14px;vertical-align:2px}
+.entry p{font-size:.86rem;color:var(--dim)}
+
+/* relaybench — telemetry readouts */
+.tele-status{display:inline-flex;align-items:center;gap:16px;margin-top:34px;font-size:.62rem;
+  letter-spacing:.34em;color:var(--ice)}
+.tele-status i{width:8px;height:8px;border-radius:50%;background:var(--ice);
+  box-shadow:0 0 12px rgba(159,196,255,.9);animation:halo 3s ease-in-out infinite;flex:none}
+.tele{margin-top:70px;display:grid;grid-template-columns:repeat(2,1fr);gap:0;border:1px solid var(--line-soft)}
+.tcell{padding:38px 36px;border-right:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft);position:relative}
+.tcell:nth-child(2n){border-right:0}
+.tcell:nth-child(n+3){border-bottom:0}
+.tcell h3{font-weight:400;font-size:.92rem;letter-spacing:.14em;margin-bottom:12px}
+.tcell p{font-size:.82rem;color:var(--faint)}
+.readout{margin-top:26px;display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.readout .v{font-family:var(--mono);font-size:1.4rem;color:var(--dim);letter-spacing:.12em}
+.readout .l{font-family:var(--mono);font-size:.54rem;letter-spacing:.3em;color:var(--faint)}
+.tcell .ping{position:absolute;top:18px;right:18px;font-size:.52rem;letter-spacing:.26em;color:var(--faint)}
+
+/* trust — twin columns of coordinates */
+.shield{margin-top:80px;display:grid;grid-template-columns:1fr 1fr;gap:70px}
+.axiom{margin-bottom:44px}
+.axiom h3{font-size:.62rem;letter-spacing:.42em;color:var(--ice);font-weight:400;margin-bottom:18px;display:flex;align-items:center;gap:16px}
+.axiom h3::after{content:"";flex:1;height:1px;background:var(--line-soft)}
+.axiom li{list-style:none;display:grid;grid-template-columns:110px 1fr;gap:18px;padding:7px 0;font-size:.84rem}
+.axiom .k{font-family:var(--mono);font-size:.64rem;letter-spacing:.14em;color:var(--warm);padding-top:3px}
+.axiom .d{color:var(--dim)}
+.vow{margin-top:100px;text-align:center}
+.vow em{font-style:normal;font-weight:200;font-size:clamp(1.3rem,2.6vw,2rem);letter-spacing:.12em;display:block;color:var(--starlight)}
+.vow span{display:block;margin-top:16px;font-size:.85rem;color:var(--faint)}
+
+/* footer */
+footer{border-top:1px solid var(--line-soft);padding:64px 0 80px}
+.frow{display:flex;justify-content:space-between;gap:32px;flex-wrap:wrap}
+.frow b{font-size:.8rem;letter-spacing:.58em;font-weight:400}
+.frow p{color:var(--faint);font-size:.8rem;margin-top:10px}
+.fmeta{font-size:.56rem;letter-spacing:.3em;color:var(--faint);display:flex;flex-direction:column;gap:10px;justify-content:center;text-align:right}
+
+/* reveal */
+.rv{opacity:0;transform:translateY(22px);transition:opacity 1.1s ease,transform 1.1s ease}
+.rv.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){
+  .rv{opacity:1;transform:none;transition:none}
+  .scroll-cue::after,.halo,.tele-status i{animation:none}
+}
+
+/* ---------- responsive ---------- */
+@media (max-width:900px){
+  .constellation{grid-template-columns:1fr;gap:44px}
+  .constellation::before{top:8%;bottom:8%;left:5px;right:auto;width:1px;height:auto;
+    background:linear-gradient(transparent,var(--line) 20%,var(--line) 80%,transparent)}
+  .tele{grid-template-columns:1fr}
+  .tcell{border-right:0}
+  .tcell:nth-child(n+3){border-bottom:1px solid var(--line-soft)}
+  .tcell:last-child{border-bottom:0}
+  .shield{grid-template-columns:1fr;gap:0}
+  .entry{grid-template-columns:1fr;gap:8px}
+  nav{display:none}
+  .fmeta{text-align:left}
+}
+@media (max-width:560px){
+  .shell{padding:0 24px}
+  section{padding:90px 0}
+  .hero{padding:110px 0 70px}
+  .scroll-cue{left:24px}
+  .axiom li{grid-template-columns:1fr;gap:2px}
+  .wm{letter-spacing:.4em}
+}
+</style>
+</head>
+<body>
+
+<canvas id="sky" aria-hidden="true"></canvas>
+
+<header>
+  <div class="shell hrow">
+    <a class="wm" href="#top">HONE<i>&nbsp;·&nbsp;RELAYBENCH</i></a>
+    <nav class="mono" aria-label="Sections">
+      <a href="#kernel">KERNEL</a>
+      <a href="#method">CAMPAIGN</a>
+      <a href="#relaybench">TELEMETRY</a>
+      <a href="#trust">TRUST</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<section class="hero">
+  <div class="shell">
+    <p class="coord mono rv">OPTIMIZATION CLI · <b>SELF-IMPROVEMENT UNDER MEASUREMENT</b> · LOCAL-FIRST · DURABLE</p>
+    <h1 class="rv">State an objective.<br>Hone <b>earns</b> the improvement — and the receipts.</h1>
+    <p class="lede rv">
+      A local-first, durable optimization CLI. One shared coding-session kernel — an
+      AIDE&hairsp;+&hairsp;GEPA&hairsp;+&hairsp;Pi lineage — optimizes artifacts,
+      optimizes the task-builders that produce them, and, under bounded and
+      human-gated conditions, optimizes the optimizer itself.
+    </p>
+    <div class="cmd mono rv" role="img" aria-label='Terminal: hone "reduce cold-start time of the module loader without regressing conformance"'>
+      <span class="p">$</span> hone <span class="a">"reduce cold-start time of the module loader without regressing conformance"</span>
+    </div>
+    <div class="hero-links rv">
+      <a class="hlink mono" href="#method">THE CAMPAIGN</a>
+      <a class="hlink mono" href="#relaybench">THE TELEMETRY</a>
+    </div>
+  </div>
+  <div class="scroll-cue mono" aria-hidden="true">DESCEND</div>
+</section>
+
+<section id="kernel">
+  <div class="shell">
+    <span class="obs mono rv">OBSERVATION 01</span>
+    <h2 class="rv">One kernel, three uses</h2>
+    <p class="sec-lede rv">
+      There is no separate “meta” system. The same durable coding-session kernel that
+      improves a JSON parser is the one that improves the process that improves it.
+      What changes between uses is the target — never the discipline around it.
+    </p>
+    <div class="constellation">
+      <article class="star-point rv">
+        <span class="sp-no mono">1a</span>
+        <h3>OPTIMIZE ARTIFACTS</h3>
+        <p>Point Hone at a concrete objective — build time, binary size, throughput,
+        conformance-preserving refactors. Runs are resumable and every intermediate
+        state is persisted locally; a crash or a week away loses nothing.</p>
+      </article>
+      <article class="star-point rv">
+        <span class="sp-no mono">1b</span>
+        <h3>OPTIMIZE TASK-BUILDERS</h3>
+        <p>The programs that construct optimization tasks are themselves artifacts.
+        Hone tunes them against held-out evaluation, so the tasks it later attempts
+        are better-posed than the ones it started with.</p>
+      </article>
+      <article class="star-point rv">
+        <span class="sp-no mono">1c</span>
+        <h3>OPTIMIZE THE OPTIMIZER</h3>
+        <p>Bounded recursive self-optimization: recursion depth capped, budgets
+        reserved up front, and every promotion contingent on independent evaluation
+        and a human gate.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="method">
+  <div class="shell">
+    <span class="obs mono rv">OBSERVATION 02</span>
+    <h2 class="rv">The campaign — three generations, two gates, one holdout</h2>
+    <p class="sec-lede rv">
+      The flagship experiment asks a falsifiable question: can a coding agent find a
+      measurably better version of itself, twice in a row, on work it has never seen?
+      Every orbit below is designed so the answer — either answer — is trustworthy.
+    </p>
+
+    <div class="orbit-wrap rv">
+      <svg class="orbit-svg" viewBox="0 0 640 420" role="img" aria-label="Orbital diagram: G0 at the core; Stage A promotes G1 to the first orbit behind a human gate; Stage B promotes G2 to the second orbit behind a human gate; the terminal holdout ring encloses all three.">
+        <ellipse class="orb orb-hot" cx="320" cy="210" rx="120" ry="66"/>
+        <ellipse class="orb orb-hot" cx="320" cy="210" rx="210" ry="118"/>
+        <ellipse class="orb" cx="320" cy="210" rx="292" ry="168"/>
+        <circle class="halo" cx="320" cy="210" r="17"/>
+        <circle class="body-core body" cx="320" cy="210" r="8" style="fill:#dfe6f2"/>
+        <text x="320" y="246" text-anchor="middle">G0 · FROZEN AT ADMISSION</text>
+        <circle class="body" cx="440" cy="210" r="5.5"/>
+        <text class="lab-hot" x="452" y="196">G1</text>
+        <text x="452" y="210">STAGE A · ▲ HUMAN GATE</text>
+        <circle class="body body-warm" cx="150" cy="145" r="5.5"/>
+        <text class="lab-warm" x="150" y="118" text-anchor="middle">G2</text>
+        <text x="150" y="132" text-anchor="middle">STAGE B · ▲ HUMAN GATE</text>
+        <text x="320" y="30" text-anchor="middle">TERMINAL HOLDOUT RING — UNSEEN IN DEVELOPMENT</text>
+        <line x1="320" y1="36" x2="320" y2="42" stroke="rgba(159,196,255,.35)"/>
+        <text x="320" y="404" text-anchor="middle">SANDBOX: NETWORK-NONE · READ-ONLY ROOT · FRESH CONTAINER PER EVALUATION</text>
+      </svg>
+    </div>
+
+    <div class="log">
+      <article class="entry rv">
+        <span class="eno mono">LOG 001 · CAPSULES</span>
+        <div>
+          <h3>THE UNIT OF EVIDENCE</h3>
+          <p>A capsule is a frozen, sandboxed build-or-optimization benchmark: a pinned
+          source tree, a deterministic harness, and a protected scoring oracle. Real OSS
+          workloads — JSON parsers, allocators, codecs, bundlers, resolvers — alongside
+          owner-authored coding tasks. Once admitted, a capsule does not change for the
+          life of the campaign.</p>
+        </div>
+      </article>
+      <article class="entry rv">
+        <span class="eno mono">LOG 002 · STAGE A</span>
+        <div>
+          <h3>DEVELOP G1 <small class="mono">▲ HUMAN GATE</small></h3>
+          <p>The starting controller G0 runs the inner optimization loop across a frozen
+          panel of development capsules, proposing candidate controllers. The
+          best-supported candidate is selected as G1 — subject to independent evaluation
+          and a mandatory human approval gate before promotion.</p>
+        </div>
+      </article>
+      <article class="entry rv">
+        <span class="eno mono">LOG 003 · STAGE B</span>
+        <div>
+          <h3>PAIRED TOURNAMENT → G2 <small class="mono">▲ HUMAN GATE</small></h3>
+          <p>On a fresh panel, G0 and G1 attempt identical work in paired runs — same
+          capsules, same budgets, same seeds where the harness permits. The pairing
+          isolates the controller as the only variable. The stage yields G2, again
+          behind a human gate.</p>
+        </div>
+      </article>
+      <article class="entry rv">
+        <span class="eno mono">LOG 004 · TERMINAL</span>
+        <div>
+          <h3>THE UNTOUCHED HOLDOUT</h3>
+          <p>G0, G1, and G2 are compared on terminal holdout capsules that no controller,
+          prompt, or selection decision ever saw during development. This is the
+          pre-registered estimand: adjacent-generation transfer measured on work the
+          campaign could not have overfit.</p>
+        </div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="relaybench">
+  <div class="shell">
+    <span class="obs mono rv">OBSERVATION 03</span>
+    <h2 class="rv">RelayBench — telemetry, either way</h2>
+    <p class="sec-lede rv">
+      RelayBench is the reporting system for the recursive campaign. Its thresholds were
+      registered before the first run; when the campaign concludes, it publishes the
+      outcome as success <em>or</em> failure against those thresholds — the goalposts
+      do not move.
+    </p>
+    <div class="tele-status mono rv" role="status"><i aria-hidden="true"></i>SIGNAL PENDING — CAMPAIGN IN PROGRESS · NO NUMBERS PUBLISHED · ALL READOUTS ARE PLACEHOLDERS</div>
+
+    <div class="tele">
+      <article class="tcell rv">
+        <span class="ping mono">PLACEHOLDER</span>
+        <h3>LEARNING CURVES — INNER + OUTER LOOP</h3>
+        <p>Per-capsule inner-loop curves (score versus evaluation budget) and the
+        outer-loop curve across generations: whether improvement is search doing
+        work — or noise.</p>
+        <div class="readout"><span class="v">· · · ∿</span><span class="l">CURVES AT PUBLICATION</span></div>
+      </article>
+      <article class="tcell rv">
+        <span class="ping mono">PLACEHOLDER</span>
+        <h3>ADJACENT-GENERATION TRANSFER</h3>
+        <p>The core claims on the terminal holdout: does G1 outperform G0, and does G2
+        outperform G1 — each against its pre-registered threshold, pass or fail.</p>
+        <div class="readout"><span class="v">G1&gt;G0 · G2&gt;G1</span><span class="l">PENDING · PENDING</span></div>
+      </article>
+      <article class="tcell rv">
+        <span class="ping mono">PLACEHOLDER</span>
+        <h3>TERMINAL ESTIMAND — 50/50 OWNER / OSS</h3>
+        <p>The headline number is computed over a terminal panel weighted 50/50 between
+        owner-authored tasks and pinned open-source benchmarks, so neither family can
+        dominate the conclusion.</p>
+        <div class="readout"><span class="v">——.—%</span><span class="l">AWAITING PUBLICATION</span></div>
+      </article>
+      <article class="tcell rv">
+        <span class="ping mono">PLACEHOLDER</span>
+        <h3>SIGN CONSISTENCY + INTEGRITY AUDIT</h3>
+        <p>Across individual holdout capsules, how often does the later generation win
+        at all — plus an audit that the finite capsule pool was spent as pre-registered,
+        violations published alongside results.</p>
+        <div class="readout"><span class="v">—— / ——</span><span class="l">AWAITING PUBLICATION</span></div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="trust">
+  <div class="shell">
+    <span class="obs mono rv">OBSERVATION 04</span>
+    <h2 class="rv">Architecture of distrust</h2>
+    <p class="sec-lede rv">
+      A self-improving optimizer is the last system whose scores should be taken on
+      faith. Hone assumes its own agent will game the score if it can, and measures
+      accordingly: the trusted runtime stays small and frozen, and everything the agent
+      can mutate is scored from outside the walls.
+    </p>
+    <div class="shield">
+      <div>
+        <div class="axiom rv">
+          <h3 class="mono">SANDBOX ISOLATION</h3>
+          <ul>
+            <li><span class="k">network</span><span class="d">none — no egress from any evaluation</span></li>
+            <li><span class="k">rootfs</span><span class="d">read-only; writable scratch only where declared</span></li>
+            <li><span class="k">capabilities</span><span class="d">dropped to the floor</span></li>
+            <li><span class="k">lifecycle</span><span class="d">a fresh container for every evaluation</span></li>
+          </ul>
+        </div>
+        <div class="axiom rv">
+          <h3 class="mono">INDEPENDENT REVIEW</h3>
+          <ul>
+            <li><span class="k">red-team</span><span class="d">capsules and results reviewed by parties incentivized to find the seam</span></li>
+            <li><span class="k">successors</span><span class="d">candidates evaluated independently of the loop that proposed them</span></li>
+            <li><span class="k">replay</span><span class="d">runs persisted and replayable end to end</span></li>
+          </ul>
+        </div>
+      </div>
+      <div>
+        <div class="axiom rv">
+          <h3 class="mono">GAMING RESISTANCE</h3>
+          <ul>
+            <li><span class="k">timing</span><span class="d">measured by a trusted parent process, never self-reported</span></li>
+            <li><span class="k">binaries</span><span class="d">sealed measurement tooling the agent cannot rewrite</span></li>
+            <li><span class="k">oracles</span><span class="d">scoring logic protected from the code under test</span></li>
+            <li><span class="k">panels</span><span class="d">corpus and holdouts frozen before search begins</span></li>
+          </ul>
+        </div>
+        <div class="axiom rv">
+          <h3 class="mono">HUMAN GATES</h3>
+          <ul>
+            <li><span class="k">G1 gate</span><span class="d">no Stage-A promotion without explicit human approval</span></li>
+            <li><span class="k">G2 gate</span><span class="d">no Stage-B promotion without explicit human approval</span></li>
+            <li><span class="k">depth</span><span class="d">recursion bounded; budgets reserved for ancestors up front</span></li>
+            <li><span class="k">secrets</span><span class="d">strict source and credential isolation from the agent</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="vow rv">
+      <em>IF THE RESULT IS REAL, IT SURVIVES ALL OF THIS.</em>
+      <span>If it isn’t, RelayBench says so — in the same report, at the same thresholds.</span>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="shell frow">
+    <div>
+      <b>HONE</b>
+      <p>A local-first, durable optimization CLI.<br>RelayBench is its evidence.</p>
+    </div>
+    <div class="fmeta mono">
+      <span>NO TELEMETRY LEAVES YOUR MACHINE — RUNS LIVE LOCALLY</span>
+      <span>THRESHOLDS PRE-REGISTERED · RESULTS PUBLISHED EITHER WAY</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* Starfield — layered depth, gentle twinkle, slow drift, scroll parallax */
+(function(){
+  var cv=document.getElementById('sky'),cx=cv.getContext('2d');
+  var stars=[],W=0,H=0,DPR=Math.min(window.devicePixelRatio||1,2);
+  var reduced=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function size(){
+    W=window.innerWidth;H=window.innerHeight;
+    cv.width=W*DPR;cv.height=H*DPR;
+    cv.style.width=W+'px';cv.style.height=H+'px';
+    cx.setTransform(DPR,0,0,DPR,0,0);
+    seed();
+  }
+  function seed(){
+    stars=[];
+    var n=Math.round(W*H/4200);
+    for(var i=0;i<n;i++){
+      var depth=Math.random(); // 0 far … 1 near
+      stars.push({
+        x:Math.random()*W,
+        y:Math.random()*(H*2), // extra field for parallax scroll
+        r:.3+depth*1.15,
+        depth:depth,
+        base:.25+depth*.55,
+        tw:Math.random()*Math.PI*2,
+        twv:.0035+Math.random()*.009,
+        warm:Math.random()<.12
+      });
+    }
+  }
+  var scrollY=0;
+  window.addEventListener('scroll',function(){scrollY=window.pageYOffset||0;},{passive:true});
+  function frame(){
+    cx.clearRect(0,0,W,H);
+    for(var i=0;i<stars.length;i++){
+      var s=stars[i];
+      s.tw+=s.twv;
+      var a=s.base*(reduced?1:(.72+.28*Math.sin(s.tw)));
+      var py=s.y-scrollY*(.05+s.depth*.16);
+      py=((py%(H*2))+H*2)%(H*2);
+      if(py>H+4)continue;
+      cx.beginPath();
+      cx.arc(s.x,py,s.r,0,6.2832);
+      cx.fillStyle=s.warm?'rgba(255,217,160,'+a+')':'rgba(203,222,255,'+a+')';
+      cx.fill();
+    }
+    if(!reduced)requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize',size);
+  size();
+  if(reduced){frame();}else{requestAnimationFrame(frame);}
+})();
+
+/* Reveal on scroll */
+(function(){
+  var els=document.querySelectorAll('.rv');
+  if(!('IntersectionObserver' in window)){els.forEach(function(e){e.classList.add('in')});return}
+  var io=new IntersectionObserver(function(es){es.forEach(function(en){
+    if(en.isIntersecting){en.target.classList.add('in');io.unobserve(en.target)}})},{threshold:.1});
+  els.forEach(function(e){io.observe(e)});
+})();
+</script>
+</body>
+</html>

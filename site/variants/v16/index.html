@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HONE — SHARPEN THE SHARPENER (v16 · Color-Block Poster)</title>
+<meta name="description" content="Hone is a local-first, durable optimization CLI. State an objective. It earns the improvement — and the receipts. RelayBench publishes either way.">
+<style>
+:root{
+  --red:#e8401f;
+  --cobalt:#1633b8;
+  --yellow:#f5c518;
+  --black:#141210;
+  --cream:#f4ecdc;
+  --white:#faf6ec;
+  --cond:"Avenir Next Condensed","Helvetica Neue Condensed","Arial Narrow","Roboto Condensed",Impact,"Franklin Gothic Medium",sans-serif;
+  --mono:"SF Mono",Menlo,Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--black);color:var(--cream);
+  font-family:var(--cond);
+  line-height:1.35;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:inherit;text-decoration:none}
+a:focus-visible{outline:3px solid currentColor;outline-offset:3px}
+.mono{font-family:var(--mono)}
+
+/* ============ shared panel machinery ============ */
+.panel{
+  position:relative;padding:9vh 5vw;
+  border-bottom:6px solid var(--black);
+  overflow:hidden;
+}
+.panel-tag{
+  position:absolute;top:24px;left:5vw;right:5vw;
+  display:flex;justify-content:space-between;
+  font-family:var(--mono);font-size:11px;letter-spacing:.22em;font-weight:700;
+}
+.giant{
+  font-weight:800;text-transform:uppercase;
+  font-size:clamp(56px,11.5vw,168px);
+  line-height:.88;letter-spacing:-.015em;
+  word-break:keep-all;
+}
+.big{
+  font-weight:800;text-transform:uppercase;
+  font-size:clamp(38px,6.4vw,92px);
+  line-height:.92;letter-spacing:-.01em;
+}
+.body-copy{
+  font-family:var(--cond);font-weight:500;
+  font-size:clamp(17px,1.6vw,21px);line-height:1.4;
+  max-width:56ch;text-transform:none;letter-spacing:.01em;
+}
+.rule-fat{border:0;border-top:6px solid currentColor;margin:26px 0}
+
+/* ============ P1: red hero ============ */
+.p1{background:var(--red);color:var(--black);min-height:92vh;display:flex;flex-direction:column;justify-content:center}
+.p1 .giant{margin:60px 0 30px}
+.p1 .giant .out{
+  color:transparent;-webkit-text-stroke:3px var(--black);
+}
+.p1-sub{display:flex;gap:4vw;align-items:flex-start;flex-wrap:wrap}
+.p1-cmd{
+  font-family:var(--mono);font-weight:700;font-size:clamp(13px,1.3vw,17px);
+  background:var(--black);color:var(--cream);padding:16px 22px;
+  max-width:560px;line-height:1.5;
+}
+.p1-cmd b{color:var(--yellow)}
+.p1 .body-copy{max-width:44ch}
+@media (prefers-reduced-motion:no-preference){
+  .p1 .giant span{display:inline-block;transform:translateY(.35em);opacity:0;animation:rise .7s cubic-bezier(.2,.8,.2,1) forwards}
+  .p1 .giant span:nth-child(2){animation-delay:.1s}
+  .p1 .giant span:nth-child(3){animation-delay:.2s}
+  @keyframes rise{to{transform:none;opacity:1}}
+}
+
+/* marquee strip */
+.strip{
+  background:var(--black);color:var(--yellow);
+  border-bottom:6px solid var(--black);
+  padding:14px 0;white-space:nowrap;overflow:hidden;
+}
+.strip-in{display:inline-block;font-weight:800;text-transform:uppercase;font-size:clamp(15px,1.7vw,22px);letter-spacing:.14em}
+@media (prefers-reduced-motion:no-preference){
+  .strip-in{animation:mq 26s linear infinite}
+  @keyframes mq{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+}
+.strip-in i{font-style:normal;color:var(--red);padding:0 18px}
+
+/* ============ P2: cream — one kernel ============ */
+.p2{background:var(--cream);color:var(--black)}
+.p2-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border:6px solid var(--black);margin-top:52px}
+.p2-cell{padding:34px 28px 40px;border-right:6px solid var(--black)}
+.p2-cell:last-child{border-right:0}
+.p2-cell .no{
+  display:block;font-size:clamp(48px,6vw,84px);font-weight:800;line-height:1;
+  color:var(--red);margin-bottom:14px;
+}
+.p2-cell:nth-child(2) .no{color:var(--cobalt)}
+.p2-cell h3{font-size:clamp(20px,2vw,27px);font-weight:800;text-transform:uppercase;letter-spacing:.02em;margin-bottom:10px}
+.p2-cell p{font-weight:500;font-size:16px;line-height:1.45}
+
+/* ============ P3: cobalt — the question ============ */
+.p3{background:var(--cobalt);color:var(--white);text-align:left}
+.p3 .giant{max-width:14ch}
+.p3 .giant em{font-style:normal;color:var(--yellow)}
+.p3-steps{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:0;
+  border:5px solid var(--white);margin-top:56px;
+}
+.p3-step{padding:26px 22px 30px;border-right:5px solid var(--white)}
+.p3-step:last-child{border-right:0}
+.p3-step .k{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.2em;display:block;margin-bottom:12px;color:var(--yellow)}
+.p3-step h3{font-size:clamp(18px,1.8vw,24px);font-weight:800;text-transform:uppercase;margin-bottom:8px}
+.p3-step p{font-size:14.5px;font-weight:500;line-height:1.4}
+.p3-step.gate{background:var(--white);color:var(--cobalt)}
+.p3-step.gate .k{color:var(--red)}
+
+/* ============ P4: black — distrust ============ */
+.p4{background:var(--black);color:var(--cream)}
+.p4 .big em{font-style:normal;color:var(--red)}
+.p4-list{margin-top:46px;border-top:4px solid var(--cream)}
+.p4-row{
+  display:grid;grid-template-columns:minmax(140px,300px) 1fr;gap:3vw;align-items:baseline;
+  padding:20px 0;border-bottom:4px solid var(--cream);
+}
+.p4-row b{
+  font-size:clamp(22px,3vw,42px);font-weight:800;text-transform:uppercase;line-height:.95;
+}
+.p4-row span{font-size:clamp(15px,1.4vw,18px);font-weight:500;max-width:64ch}
+.p4-row:hover b{color:var(--yellow)}
+
+/* ============ P5: yellow — scoreboard ============ */
+.p5{background:var(--yellow);color:var(--black)}
+.p5-board{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border:6px solid var(--black);margin-top:50px}
+.p5-slot{padding:30px 26px 36px;border-right:6px solid var(--black);background:var(--yellow)}
+.p5-slot:last-child{border-right:0}
+.p5-slot .v{display:block;font-size:clamp(44px,6vw,84px);font-weight:800;line-height:1;letter-spacing:-.01em}
+.p5-slot .l{display:block;font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.18em;margin-top:12px}
+.p5-slot p{margin-top:12px;font-size:14.5px;font-weight:500;line-height:1.4;max-width:34ch}
+.p5-banner{
+  margin-top:0;background:var(--black);color:var(--yellow);
+  font-family:var(--mono);font-size:11.5px;font-weight:700;letter-spacing:.16em;
+  padding:12px 18px;display:inline-block;
+}
+
+/* ============ P6: final ============ */
+.p6{background:var(--red);color:var(--black);text-align:center;padding:12vh 5vw;border-bottom:0}
+.p6 .giant{font-size:clamp(48px,9vw,140px)}
+.p6-cmd{
+  display:inline-block;margin-top:36px;font-family:var(--mono);font-weight:700;
+  font-size:clamp(14px,1.5vw,19px);background:var(--black);color:var(--cream);
+  padding:18px 30px;
+}
+.p6-cmd b{color:var(--yellow)}
+.p6-foot{
+  margin-top:52px;display:flex;justify-content:center;gap:30px;flex-wrap:wrap;
+  font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.2em;
+}
+
+/* vertical side label */
+.side-label{
+  position:absolute;right:18px;top:50%;transform:translateY(-50%) rotate(180deg);
+  writing-mode:vertical-rl;
+  font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.3em;opacity:.55;
+}
+
+@media (max-width:900px){
+  .p2-grid{grid-template-columns:1fr}
+  .p2-cell{border-right:0;border-bottom:6px solid var(--black)}
+  .p2-cell:last-child{border-bottom:0}
+  .p3-steps{grid-template-columns:1fr 1fr}
+  .p3-step{border-bottom:5px solid var(--white)}
+  .p3-step:nth-child(2n){border-right:0}
+  .p3-step:nth-child(3),.p3-step:nth-child(4){border-bottom:0}
+  .p5-board{grid-template-columns:1fr}
+  .p5-slot{border-right:0;border-bottom:6px solid var(--black)}
+  .p5-slot:last-child{border-bottom:0}
+  .side-label{display:none}
+}
+@media (max-width:560px){
+  .panel{padding:64px 20px}
+  .panel-tag{left:20px;right:20px}
+  .p4-row{grid-template-columns:1fr;gap:6px}
+}
+</style>
+</head>
+<body>
+
+<!-- P1 · HERO -->
+<section class="panel p1" aria-labelledby="h1t">
+  <div class="panel-tag" aria-hidden="true">
+    <span>HONE / RELAYBENCH</span><span>LOCAL-FIRST · DURABLE · NO TELEMETRY</span>
+  </div>
+  <h1 class="giant" id="h1t"><span>SHARPEN</span><br><span class="out">THE</span><br><span>SHARPENER.</span></h1>
+  <div class="p1-sub">
+    <div class="p1-cmd" role="img" aria-label='Terminal: hone "reduce cold-start time of the module loader without regressing conformance"'>
+      <b>$</b> hone "reduce cold-start time of the<br>&nbsp;&nbsp;module loader without regressing<br>&nbsp;&nbsp;conformance"
+    </div>
+    <p class="body-copy">
+      Hone is a local-first, durable optimization CLI. One kernel improves artifacts,
+      the task-builders that pose them, and — bounded, measured, human-gated — itself.
+      State the objective. It earns the improvement, and the receipts.
+    </p>
+  </div>
+  <span class="side-label" aria-hidden="true">V16 · POSTER</span>
+</section>
+
+<!-- MARQUEE -->
+<div class="strip" aria-hidden="true">
+  <div class="strip-in">
+    ARTIFACTS <i>●</i> TASK-BUILDERS <i>●</i> THE OPTIMIZER ITSELF <i>●</i> GOALPOSTS DO NOT MOVE <i>●</i>
+    ARTIFACTS <i>●</i> TASK-BUILDERS <i>●</i> THE OPTIMIZER ITSELF <i>●</i> GOALPOSTS DO NOT MOVE <i>●</i>
+  </div>
+</div>
+
+<!-- P2 · ONE KERNEL -->
+<section class="panel p2" aria-labelledby="p2t">
+  <div class="panel-tag" aria-hidden="true"><span>01 / KERNEL</span><span>NO SEPARATE META SYSTEM</span></div>
+  <h2 class="big" id="p2t">One kernel.<br>Three levels of leverage.</h2>
+  <div class="p2-grid">
+    <article class="p2-cell">
+      <span class="no" aria-hidden="true">1a</span>
+      <h3>Artifacts</h3>
+      <p>Build time. Binary size. Throughput. Conformance-preserving refactors. Every intermediate state persisted locally — a crash or a week away loses nothing.</p>
+    </article>
+    <article class="p2-cell">
+      <span class="no" aria-hidden="true">1b</span>
+      <h3>Task-builders</h3>
+      <p>The programs that pose optimization tasks are artifacts too. Hone tunes them against held-out evaluation, so tomorrow's tasks are better-posed than today's.</p>
+    </article>
+    <article class="p2-cell">
+      <span class="no" aria-hidden="true">1c</span>
+      <h3>The optimizer</h3>
+      <p>Bounded recursion. Depth capped. Budgets reserved up front. Every promotion behind independent evaluation and a human gate.</p>
+    </article>
+  </div>
+</section>
+
+<!-- P3 · THE QUESTION -->
+<section class="panel p3" aria-labelledby="p3t">
+  <div class="panel-tag" aria-hidden="true"><span>02 / METHOD</span><span>FALSIFIABLE BY DESIGN</span></div>
+  <h2 class="giant" id="p3t">CAN IT BEAT <em>ITSELF</em> — TWICE?</h2>
+  <p class="body-copy" style="margin-top:26px">
+    On work it has never seen. That is the flagship question, and every step of the
+    campaign is built so that either answer is trustworthy.
+  </p>
+  <div class="p3-steps">
+    <div class="p3-step">
+      <span class="k">FREEZE</span>
+      <h3>Capsules</h3>
+      <p>Pinned source, deterministic harness, protected oracle. Admitted once, never changed.</p>
+    </div>
+    <div class="p3-step gate">
+      <span class="k">STAGE A · HUMAN GATE</span>
+      <h3>G0 → G1</h3>
+      <p>The starting controller searches a frozen panel for a better version of itself.</p>
+    </div>
+    <div class="p3-step gate">
+      <span class="k">STAGE B · HUMAN GATE</span>
+      <h3>G0 vs G1 → G2</h3>
+      <p>Paired tournament. Same capsules, budgets, seeds. The controller is the only variable.</p>
+    </div>
+    <div class="p3-step">
+      <span class="k">TERMINAL</span>
+      <h3>Holdout</h3>
+      <p>G0 · G1 · G2 on untouched capsules nothing saw during development.</p>
+    </div>
+  </div>
+</section>
+
+<!-- P4 · DISTRUST -->
+<section class="panel p4" aria-labelledby="p4t">
+  <div class="panel-tag" aria-hidden="true"><span>03 / TRUST</span><span>SCORED FROM OUTSIDE THE WALLS</span></div>
+  <h2 class="big" id="p4t">Built on the assumption<br>that <em>scores lie.</em></h2>
+  <div class="p4-list">
+    <div class="p4-row"><b>Net: none</b><span>No egress from any evaluation. Read-only rootfs. A fresh container every time. Mutation and evaluation never share an image.</span></div>
+    <div class="p4-row"><b>Trusted clock</b><span>Timing measured by a trusted parent process — never self-reported. Sealed measurement tooling the agent cannot rewrite.</span></div>
+    <div class="p4-row"><b>Frozen panels</b><span>Corpus and holdouts fixed before search begins. Scoring oracles protected from the code under test.</span></div>
+    <div class="p4-row"><b>Hostile review</b><span>Capsules and results examined by parties incentivized to find the seam. Successors judged independently of the loop that proposed them.</span></div>
+    <div class="p4-row"><b>Human gates</b><span>No promotion at G1 or G2 without explicit approval. Recursion bounded, ancestor budgets reserved first, secrets isolated.</span></div>
+  </div>
+</section>
+
+<!-- P5 · SCOREBOARD -->
+<section class="panel p5" aria-labelledby="p5t">
+  <div class="panel-tag" aria-hidden="true"><span>04 / RELAYBENCH</span><span>PRE-REGISTERED THRESHOLDS</span></div>
+  <h2 class="big" id="p5t">The scoreboard is empty.<br>On purpose.</h2>
+  <p class="body-copy" style="margin-top:22px">
+    Thresholds were registered before the first run. When the campaign concludes,
+    RelayBench publishes success <strong>or</strong> failure against them.
+  </p>
+  <div class="p5-board">
+    <div class="p5-slot">
+      <span class="v" aria-hidden="true">G1&gt;G0?</span>
+      <span class="l">AWAITING PUBLICATION</span>
+      <p>Adjacent-generation transfer on the terminal holdout. Pass or fail — published either way.</p>
+    </div>
+    <div class="p5-slot">
+      <span class="v" aria-hidden="true">——.—%</span>
+      <span class="l">TERMINAL ESTIMAND · 50/50</span>
+      <p>Owner tasks and pinned OSS benchmarks weighted equally, so neither family dominates.</p>
+    </div>
+    <div class="p5-slot">
+      <span class="v" aria-hidden="true">——/——</span>
+      <span class="l">SIGN CONSISTENCY</span>
+      <p>How often the later generation wins at all. A mean carried by outliers is reported as exactly that.</p>
+    </div>
+  </div>
+  <p style="margin-top:26px"><span class="p5-banner" role="status">STATUS: CAMPAIGN IN PROGRESS — NO NUMBERS PUBLISHED. ALL SLOTS ARE PLACEHOLDERS.</span></p>
+</section>
+
+<!-- P6 · FINAL -->
+<section class="panel p6" aria-labelledby="p6t">
+  <h2 class="giant" id="p6t">STATE AN<br>OBJECTIVE.</h2>
+  <div class="p6-cmd" role="img" aria-label='Terminal command: hone "your objective"'><b>$</b> hone "your objective"</div>
+  <div class="p6-foot" aria-label="Footer">
+    <span>HONE — LOCAL-FIRST, DURABLE OPTIMIZATION CLI</span>
+    <span>RELAYBENCH IS ITS EVIDENCE</span>
+    <span>RESULTS PUBLISHED EITHER WAY</span>
+  </div>
+</section>
+
+</body>
+</html>
