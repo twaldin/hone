@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { BudgetEnvelope, IMAGE_DIGEST_REF } from "./capsule.js";
 import { M2_INNER_MODEL_ROUTE, M2_OUTER_MODEL_ROUTE } from "./proxy.js";
@@ -451,6 +452,53 @@ const M2CalibratedCapsuleEnvelope = z.object({
   maxEvaluatorInvocations: z.number().int().positive().max(Math.floor(MAX_CALIBRATED_CAPSULE_COMPONENT)),
 }).strict();
 
+/**
+ * Digest-bound saturation calibration binding carried INSIDE the frozen
+ * config: the canonical-JSON digest of the trusted-recomputed ceiling report
+ * plus the four designated excluded calibration capsules. Freeze revalidates
+ * this block, so two distinct valid reports selecting the same ceiling are
+ * still distinguishable in the frozen artifact, and the excluded capsules
+ * can never be corpus members.
+ */
+export const M2CalibrationBinding = z.object({
+  reportDigest: SHA256,
+  excludedCapsuleIds: z.array(z.string().regex(/^cap_[0-9a-f]{12}$/)).length(4),
+}).strict();
+export type M2CalibrationBinding = z.infer<typeof M2CalibrationBinding>;
+
+const reservedDeferredDigest = (label: string): string =>
+  `sha256:${createHash("sha256").update(`hone-m2-calibration-deferred:${label}`).digest("hex")}`;
+
+/**
+ * RESERVED deferred-calibration sentinel. A draft generated before the
+ * saturation report exists carries this binding, and the OFFICIAL
+ * MetaCampaignConfigV2 schema (and therefore recursive freeze) REJECTS it —
+ * deferred content validates only under MetaCampaignConfigV2Draft, which is
+ * accepted solely inside the non-freezable m2-launch-draft wrapper.
+ */
+export const M2_CALIBRATION_DEFERRED_REPORT_DIGEST = reservedDeferredDigest("report");
+export const M2_CALIBRATION_DEFERRED_BINDING: M2CalibrationBinding = {
+  reportDigest: M2_CALIBRATION_DEFERRED_REPORT_DIGEST,
+  excludedCapsuleIds: [1, 2, 3, 4].map(
+    (index) => `cap_${createHash("sha256").update(`hone-m2-calibration-deferred:excluded-${index}`).digest("hex").slice(0, 12)}`,
+  ),
+};
+
+/**
+ * The complete frozen launch cohort, bound INTO the config from the verified
+ * corpus-provenance artifact: all 16 development capsules (both panels) and
+ * all 12 terminal capsules, plus the provenance self-binding digest. Freeze
+ * revalidates train/holdout membership and calibration exclusion against the
+ * FULL cohort — an off-panel development capsule is still a cohort member.
+ */
+export const M2CorpusCohort = z.object({
+  developmentCapsuleIds: z.array(z.string().regex(/^cap_[0-9a-f]{12}$/)).length(16),
+  terminalCapsuleIds: z.array(z.string().regex(/^cap_[0-9a-f]{12}$/)).length(M2_TERMINAL_CAPSULE_COUNT),
+  /** inputsDigest of the corpus-provenance.v1 artifact these identities came from. */
+  provenanceInputsDigest: SHA256,
+}).strict();
+export type M2CorpusCohort = z.infer<typeof M2CorpusCohort>;
+
 export const M2PanelMember = z.object({
   taskId: M2PanelTaskId,
   capsule: MetaCapsuleEntry,
@@ -641,13 +689,19 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   train: z.array(MetaCapsuleEntry),
   holdout: z.array(MetaCapsuleEntry),
   counts: RecursiveCampaignCounts,
+  calibration: M2CalibrationBinding,
+  corpusCohort: M2CorpusCohort,
   modelObservation: M2ModelObservationPolicy,
   developmentPanel: M2DevelopmentPanel,
   recursiveBudgets: M2RecursiveBudgets,
   allowedClaim: z.literal(M2_ALLOWED_CLAIM),
 }).strict();
 
-export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, ctx) => {
+function refineMetaCampaignV2(
+  cfg: z.infer<typeof MetaCampaignConfigV2Shape>,
+  ctx: z.RefinementCtx,
+  official: boolean,
+): void {
   if (cfg.train.length !== M2_PANEL_CAPSULE_COUNT) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -680,6 +734,83 @@ export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, 
       }
     });
   }
+
+  const development = new Set(cfg.corpusCohort.developmentCapsuleIds);
+  const terminal = new Set(cfg.corpusCohort.terminalCapsuleIds);
+  if (development.size !== cfg.corpusCohort.developmentCapsuleIds.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["corpusCohort", "developmentCapsuleIds"], message: "development cohort ids are not distinct" });
+  }
+  if (terminal.size !== cfg.corpusCohort.terminalCapsuleIds.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["corpusCohort", "terminalCapsuleIds"], message: "terminal cohort ids are not distinct" });
+  }
+  cfg.corpusCohort.terminalCapsuleIds.forEach((capsuleId, index) => {
+    if (development.has(capsuleId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["corpusCohort", "terminalCapsuleIds", index], message: "cohort capsule cannot be both development and terminal" });
+    }
+  });
+  cfg.train.forEach((entry, index) => {
+    if (!development.has(entry.capsuleId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["train", index, "capsuleId"], message: "train capsule is not a registered development cohort capsule" });
+    }
+  });
+  cfg.holdout.forEach((entry, index) => {
+    if (!terminal.has(entry.capsuleId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["holdout", index, "capsuleId"], message: "holdout capsule is not a registered terminal cohort capsule" });
+    }
+  });
+
+  if (official && cfg.calibration.reportDigest === M2_CALIBRATION_DEFERRED_REPORT_DIGEST) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["calibration", "reportDigest"],
+      message: "deferred calibration sentinel cannot enter an official M2 config; bind the saturation calibration report first",
+    });
+  }
+  const excludedIds = new Set(cfg.calibration.excludedCapsuleIds);
+  if (excludedIds.size !== cfg.calibration.excludedCapsuleIds.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["calibration", "excludedCapsuleIds"], message: "excluded calibration capsules must be four distinct identities" });
+  }
+  // Compare against the FULL 28-capsule cohort, not just the cell's train+holdout:
+  // an off-panel development capsule (the other panel) is still a cohort member.
+  cfg.calibration.excludedCapsuleIds.forEach((capsuleId, index) => {
+    if (development.has(capsuleId) || terminal.has(capsuleId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["calibration", "excludedCapsuleIds", index],
+        message: `calibration capsule ${capsuleId} is a registered cohort capsule; calibration capsules must remain excluded`,
+      });
+    }
+  });
+
+  // Per-run evaluator floors: one complete child run needs 4 * innerEpisodesMax + 1
+  // evaluator invocations, and the outer trajectory needs candidateAttemptsMax + 1
+  // (every attempt plus the baseline). Aggregate arithmetic cannot repair a
+  // per-run budget that cannot fund a single complete run.
+  const perRunEvaluatorFloor = 4 * cfg.counts.innerEpisodesMax + 1;
+  if (cfg.budgets.child.maxEvaluatorInvocations < perRunEvaluatorFloor) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["budgets", "child", "maxEvaluatorInvocations"],
+      message: `child evaluator budget cannot fund one complete run (needs ${perRunEvaluatorFloor})`,
+    });
+  }
+  const outerEvaluatorFloor = cfg.counts.candidateAttemptsMax + 1;
+  if (cfg.budgets.outer.maxEvaluatorInvocations < outerEvaluatorFloor) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["budgets", "outer", "maxEvaluatorInvocations"],
+      message: `outer evaluator budget cannot fund candidateAttemptsMax + 1 evaluations (needs ${outerEvaluatorFloor})`,
+    });
+  }
+  cfg.developmentPanel.members.forEach((member, index) => {
+    if (member.calibratedInnerCeiling.maxEvaluatorInvocations < perRunEvaluatorFloor) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["developmentPanel", "members", index, "calibratedInnerCeiling", "maxEvaluatorInvocations"],
+        message: `calibrated inner ceiling cannot fund one complete run (needs ${perRunEvaluatorFloor})`,
+      });
+    }
+  });
 
   if (cfg.developmentPanel.panel !== cfg.generation.panel) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["developmentPanel", "panel"], message: "development panel must match the trajectory generation cell" });
@@ -757,8 +888,23 @@ export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, 
     }
   }
 
-});
+}
+
+/** Official M2 config: the deferred-calibration sentinel is REJECTED here (and therefore at freeze). */
+export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine(
+  (cfg, ctx) => refineMetaCampaignV2(cfg, ctx, true),
+);
 export type MetaCampaignConfigV2 = z.infer<typeof MetaCampaignConfigV2>;
+
+/**
+ * Draft-only variant: identical rules EXCEPT the deferred-calibration
+ * sentinel is tolerated. Accepted solely inside the non-freezable
+ * m2-launch-draft wrapper — never by freeze or any run phase.
+ */
+export const MetaCampaignConfigV2Draft = MetaCampaignConfigV2Shape.superRefine(
+  (cfg, ctx) => refineMetaCampaignV2(cfg, ctx, false),
+);
+export type MetaCampaignConfigV2Draft = z.infer<typeof MetaCampaignConfigV2Draft>;
 
 export const MetaCampaignConfig = z.union([MetaCampaignConfigV1, MetaCampaignConfigV2]);
 export type MetaCampaignConfig = z.infer<typeof MetaCampaignConfig>;
