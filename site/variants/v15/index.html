@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hone: Bounded Recursive Self-Optimization — A Working Paper (v15 · Warm Academic)</title>
+<meta name="description" content="Hone is a local-first, durable optimization CLI. This working paper describes the kernel, the recursive campaign, and how RelayBench reports results either way.">
+<style>
+:root{
+  --paper:#f6f0e3;
+  --paper-2:#efe7d5;
+  --ink:#2b2620;
+  --ink-2:#57503f;
+  --ink-3:#8a8069;
+  --rule:#d8cdb4;
+  --rule-2:#c4b795;
+  --accent:#8c3320;      /* oxblood */
+  --accent-2:#5d5133;
+  --serif:"Palatino","Palatino Linotype","Book Antiqua","Iowan Old Style",Charter,Georgia,serif;
+  --mono:"American Typewriter","Courier New",Courier,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--paper);
+  background-image:radial-gradient(ellipse 1200px 700px at 50% -100px, #fbf7ec 0%, var(--paper) 60%);
+  color:var(--ink);
+  font-family:var(--serif);
+  font-size:18px;line-height:1.68;
+  padding:0 24px;
+}
+a{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
+a:hover{border-bottom-style:solid}
+a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.page{max-width:720px;margin:0 auto;position:relative}
+.smallcaps{font-variant:small-caps;letter-spacing:.06em}
+sup.fn{font-size:.68em;line-height:0}
+sup.fn a{border-bottom:none;font-family:var(--serif)}
+
+/* ---------- masthead ---------- */
+.mast{
+  text-align:center;padding:64px 0 0;
+}
+.mast .journal{
+  font-size:13px;letter-spacing:.28em;text-transform:uppercase;color:var(--ink-3);
+  margin-bottom:10px;
+}
+.mast .rule-double{
+  border-top:1px solid var(--rule-2);border-bottom:1px solid var(--rule-2);
+  height:5px;margin:0 auto 44px;max-width:720px;
+}
+h1{
+  font-size:clamp(30px,4.6vw,44px);
+  font-weight:500;line-height:1.22;letter-spacing:-.005em;
+  margin:0 auto 18px;max-width:24ch;
+}
+h1 i{font-style:italic}
+.subtitle{font-style:italic;font-size:20px;color:var(--ink-2);margin-bottom:30px}
+.byline{font-size:15px;color:var(--ink-2);margin-bottom:6px}
+.byline .smallcaps{color:var(--ink)}
+.affil{font-size:13.5px;color:var(--ink-3);font-style:italic;margin-bottom:38px}
+.mast-meta{
+  display:flex;justify-content:center;gap:26px;flex-wrap:wrap;
+  font-family:var(--mono);font-size:11.5px;color:var(--ink-3);letter-spacing:.04em;
+  border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);
+  padding:10px 0;margin-bottom:54px;
+}
+
+/* ---------- abstract ---------- */
+.abstract{
+  margin:0 auto 58px;max-width:600px;
+  font-size:16px;line-height:1.72;
+}
+.abstract h2{
+  font-size:14px;font-variant:small-caps;letter-spacing:.22em;font-weight:500;
+  text-align:center;margin-bottom:14px;color:var(--ink-2);
+}
+.abstract p{text-align:justify;hyphens:auto}
+.abstract .keywords{
+  margin-top:16px;font-size:14px;color:var(--ink-2);font-style:italic;text-align:left;
+}
+.abstract .keywords b{font-style:normal;font-variant:small-caps;font-weight:500;letter-spacing:.06em}
+
+/* the command, set like a display equation */
+.equation{
+  margin:44px auto;text-align:center;position:relative;max-width:640px;
+}
+.equation code{
+  font-family:var(--mono);font-size:15.5px;color:var(--ink);
+  background:var(--paper-2);border:1px solid var(--rule);
+  padding:14px 22px;display:inline-block;
+}
+.equation code b{color:var(--accent);font-weight:700}
+.equation .eqno{
+  position:absolute;right:0;top:50%;transform:translateY(-50%);
+  font-size:15px;color:var(--ink-3);
+}
+
+/* ---------- sections ---------- */
+section{margin:0 0 54px}
+h2.sec{
+  font-size:21px;font-weight:600;margin:0 0 16px;
+  display:flex;gap:14px;align-items:baseline;
+}
+h2.sec .no{font-weight:500;color:var(--accent);font-variant-numeric:oldstyle-nums}
+h3.sub{font-size:17px;font-style:italic;font-weight:500;margin:26px 0 10px}
+p{margin-bottom:16px}
+p.justify{text-align:justify;hyphens:auto}
+.lead-caps::first-letter{
+  font-size:3.1em;float:left;line-height:.82;padding:4px 8px 0 0;color:var(--accent);
+  font-weight:500;
+}
+
+/* margin notes */
+.note{
+  float:right;clear:right;width:200px;margin:4px -240px 12px 20px;
+  font-size:13px;line-height:1.5;color:var(--ink-2);
+  border-top:1px solid var(--rule-2);padding-top:6px;
+}
+.note .no{color:var(--accent);font-weight:700;margin-right:4px}
+@media (max-width:1220px){
+  .note{float:none;width:auto;margin:14px 0 18px;background:var(--paper-2);
+    border:1px solid var(--rule);border-top:2px solid var(--rule-2);padding:10px 14px;font-size:13.5px}
+}
+
+/* definition block */
+.defn{
+  border-left:3px solid var(--accent);background:var(--paper-2);
+  padding:16px 20px;margin:22px 0;font-size:16px;
+}
+.defn b{font-variant:small-caps;letter-spacing:.05em;font-weight:600}
+
+/* figure: campaign diagram */
+figure{margin:34px 0}
+.fig-frame{border:1px solid var(--rule-2);background:#faf5ea;padding:26px 18px 14px}
+.fig-frame svg{display:block;width:100%;height:auto}
+.dg-box{fill:none;stroke:var(--ink-2);stroke-width:1.3}
+.dg-box-acc{fill:none;stroke:var(--accent);stroke-width:1.3}
+.dg-t{fill:var(--ink);font-family:var(--serif);font-size:13px}
+.dg-s{fill:var(--ink-3);font-family:var(--serif);font-size:11px;font-style:italic}
+.dg-edge{stroke:var(--ink-2);stroke-width:1.1;fill:none;marker-end:url(#arr)}
+.dg-gate{fill:var(--accent);font-family:var(--serif);font-size:11px;font-style:italic}
+figcaption{
+  font-size:13.5px;color:var(--ink-2);margin-top:10px;text-align:justify;
+}
+figcaption b{font-variant:small-caps;font-weight:600;letter-spacing:.04em}
+
+/* numbered protocol list */
+ol.protocol{margin:18px 0 18px 0;list-style:none;counter-reset:proto}
+ol.protocol li{
+  counter-increment:proto;position:relative;padding:12px 0 12px 58px;
+  border-top:1px solid var(--rule);
+}
+ol.protocol li:last-child{border-bottom:1px solid var(--rule)}
+ol.protocol li::before{
+  content:"§" counter(proto);position:absolute;left:6px;top:12px;
+  font-size:15px;color:var(--accent);font-variant-numeric:oldstyle-nums;
+}
+ol.protocol b{font-weight:600}
+ol.protocol li p{margin:2px 0 0;font-size:15.5px;color:var(--ink-2)}
+
+/* table I — trust properties */
+.tbl{width:100%;border-collapse:collapse;margin:20px 0 8px;font-size:15px}
+.tbl caption{
+  caption-side:top;font-variant:small-caps;letter-spacing:.14em;font-size:13.5px;
+  color:var(--ink-2);padding-bottom:10px;
+}
+.tbl th{
+  text-align:left;font-weight:600;font-size:13.5px;font-variant:small-caps;letter-spacing:.06em;
+  border-top:2px solid var(--ink-2);border-bottom:1px solid var(--ink-2);padding:8px 12px 6px;
+}
+.tbl td{border-bottom:1px solid var(--rule);padding:9px 12px;vertical-align:top;color:var(--ink-2)}
+.tbl td:first-child{font-family:var(--mono);font-size:12px;color:var(--ink);white-space:nowrap}
+.tbl tr:last-child td{border-bottom:2px solid var(--ink-2)}
+.tbl-note{font-size:12.5px;color:var(--ink-3);font-style:italic}
+
+/* results = empty table */
+.pending{
+  text-align:center;font-family:var(--mono);font-size:12px;color:var(--ink-3);letter-spacing:.08em;
+}
+
+/* footnotes */
+.footnotes{
+  margin:64px 0 0;padding-top:14px;border-top:1px solid var(--ink-2);
+  font-size:14px;color:var(--ink-2);
+}
+.footnotes .fnrule{width:180px;border-top:1px solid var(--ink-2);margin-bottom:14px}
+.footnotes ol{list-style:none;counter-reset:fnc}
+.footnotes li{counter-increment:fnc;padding-left:26px;position:relative;margin-bottom:10px;line-height:1.55}
+.footnotes li::before{content:counter(fnc) ".";position:absolute;left:2px;color:var(--accent)}
+
+/* colophon */
+.colophon{
+  margin:56px 0 70px;text-align:center;font-size:13px;color:var(--ink-3);
+}
+.colophon .orn{font-size:18px;color:var(--rule-2);letter-spacing:.6em;margin-bottom:14px}
+.colophon .mono{font-family:var(--mono);font-size:11px;letter-spacing:.06em}
+
+@media (max-width:640px){
+  body{font-size:16.5px;padding:0 18px}
+  .mast{padding-top:40px}
+  .equation .eqno{display:none}
+  .note{margin:12px 0 16px}
+  ol.protocol li{padding-left:44px}
+  .tbl{font-size:13.5px}
+  .tbl td,.tbl th{padding:7px 8px}
+}
+</style>
+</head>
+<body>
+
+<header class="mast">
+  <p class="journal">A Working Paper · Local-First Systems</p>
+  <div class="page"><div class="rule-double" aria-hidden="true"></div></div>
+  <h1>Hone: Bounded Recursive Self-Optimization <i>under Measurement</i></h1>
+  <p class="subtitle">with RelayBench, a reporting system whose goalposts do not move</p>
+  <p class="byline"><span class="smallcaps">The Hone Project</span></p>
+  <p class="affil">A local-first, durable optimization CLI · no telemetry · runs live on your machine</p>
+  <div class="page">
+    <div class="mast-meta">
+      <span>DRAFT · CAMPAIGN OPEN</span>
+      <span>THRESHOLDS PRE-REGISTERED</span>
+      <span>RESULTS PUBLISHED EITHER WAY</span>
+    </div>
+  </div>
+</header>
+
+<main class="page">
+
+<div class="abstract">
+  <h2>Abstract</h2>
+  <p>
+    We describe <span class="smallcaps">Hone</span>, a local-first, durable optimization
+    CLI built around a single coding-session kernel of AIDE&thinsp;+&thinsp;GEPA&thinsp;+&thinsp;Pi
+    lineage. The same kernel is applied at three levels: to concrete artifacts, to the
+    task-builders that pose optimization problems, and — under bounded, human-gated
+    conditions — to the optimizing controller itself. The flagship experiment asks a
+    falsifiable question: <em>can a coding agent find a measurably better version of
+    itself, twice in succession, on work it has never seen?</em> We outline the campaign
+    protocol, the trust architecture that treats the agent’s own scores as unreliable,
+    and the reporting discipline under which either answer is publishable.
+  </p>
+  <p class="keywords"><b>Keywords:</b> optimization, self-improvement, sandboxed evaluation, pre-registration, holdout transfer.</p>
+</div>
+
+<div class="equation" role="img" aria-label='The interface, displayed as an equation: hone "reduce cold-start time of the module loader without regressing conformance"'>
+  <code><b>$</b> hone "reduce cold-start time of the module loader<br>&nbsp;&nbsp;without regressing conformance"</code>
+  <span class="eqno" aria-hidden="true">(1)</span>
+</div>
+
+<section aria-labelledby="s1">
+  <h2 class="sec" id="s1"><span class="no">1.</span>Introduction</h2>
+  <aside class="note"><span class="no">*</span>Durability is not an implementation detail: interrupted search that cannot resume is search that quietly re-samples, and re-sampling is how results stop being comparable.</aside>
+  <p class="justify lead-caps">
+    The entire interface is equation&nbsp;(1): the user states an objective in plain
+    language, and the system earns the improvement — together with the evidence for it.
+    Hone persists every intermediate state locally,<sup class="fn"><a href="#fn1" id="r1">1</a></sup>
+    so a crash or a week away loses nothing.* There is no separate “meta” system:
+    the kernel that improves a JSON parser is the kernel that improves the process
+    which improves it. What changes between uses is the target — never the discipline
+    around it.
+  </p>
+  <div class="defn">
+    <b>Definition 1 (Capsule).</b>&ensp;A frozen, sandboxed build-or-optimization
+    benchmark: a pinned source tree, a deterministic harness, and a protected scoring
+    oracle. Once admitted, a capsule does not change for the life of the campaign.
+  </div>
+  <p class="justify">
+    The capsule panel spans real open-source workloads — JSON parsers, allocators,
+    codecs, bundlers, resolvers — alongside owner-authored coding tasks, weighted
+    equally in the terminal estimand so that neither family can dominate the
+    conclusion.<sup class="fn"><a href="#fn2" id="r2">2</a></sup>
+  </p>
+</section>
+
+<section aria-labelledby="s2">
+  <h2 class="sec" id="s2"><span class="no">2.</span>The Campaign Protocol</h2>
+  <p class="justify">
+    The experiment proceeds in stages, each conditional on the last, with human
+    approval required at both promotion points. Figure&nbsp;1 gives the topology;
+    the protocol below gives the invariants.
+  </p>
+
+  <figure aria-labelledby="fig1cap">
+    <div class="fig-frame">
+      <svg viewBox="0 0 680 168" role="img" aria-label="Diagram: capsules flow into a sandbox trust boundary; Stage A develops G1 from G0 behind a human gate; Stage B runs a paired tournament yielding G2 behind a second human gate; all three generations are compared on terminal holdout capsules.">
+        <defs>
+          <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6.5" markerHeight="6.5" orient="auto">
+            <path d="M0 0 L8 4 L0 8 z" fill="#57503f"/>
+          </marker>
+        </defs>
+        <rect class="dg-box" x="6" y="52" width="112" height="56"/>
+        <text class="dg-t" x="62" y="76" text-anchor="middle">Capsules</text>
+        <text class="dg-s" x="62" y="93" text-anchor="middle">frozen at admission</text>
+
+        <path class="dg-edge" d="M118 80 L146 80"/>
+        <rect class="dg-box" x="148" y="52" width="112" height="56" stroke-dasharray="4 3"/>
+        <text class="dg-t" x="204" y="76" text-anchor="middle">Sandbox</text>
+        <text class="dg-s" x="204" y="93" text-anchor="middle">trust boundary</text>
+
+        <path class="dg-edge" d="M260 80 L288 80"/>
+        <rect class="dg-box-acc" x="290" y="52" width="112" height="56"/>
+        <text class="dg-t" x="346" y="76" text-anchor="middle">Stage A</text>
+        <text class="dg-s" x="346" y="93" text-anchor="middle">G0 → G1</text>
+        <text class="dg-gate" x="346" y="34" text-anchor="middle">human gate</text>
+        <line x1="346" y1="38" x2="346" y2="50" stroke="#8c3320" stroke-width="1"/>
+
+        <path class="dg-edge" d="M402 80 L430 80"/>
+        <rect class="dg-box-acc" x="432" y="52" width="112" height="56"/>
+        <text class="dg-t" x="488" y="76" text-anchor="middle">Stage B</text>
+        <text class="dg-s" x="488" y="93" text-anchor="middle">G0 vs G1 → G2</text>
+        <text class="dg-gate" x="488" y="34" text-anchor="middle">human gate</text>
+        <line x1="488" y1="38" x2="488" y2="50" stroke="#8c3320" stroke-width="1"/>
+
+        <path class="dg-edge" d="M544 80 L572 80"/>
+        <rect class="dg-box" x="574" y="52" width="100" height="56"/>
+        <text class="dg-t" x="624" y="76" text-anchor="middle">Terminal</text>
+        <text class="dg-s" x="624" y="93" text-anchor="middle">G0 · G1 · G2</text>
+
+        <text class="dg-s" x="62" y="136" text-anchor="middle">pinned OSS + owner tasks</text>
+        <text class="dg-s" x="204" y="136" text-anchor="middle">network none · read-only root</text>
+        <text class="dg-s" x="624" y="136" text-anchor="middle">unseen in development</text>
+      </svg>
+    </div>
+    <figcaption id="fig1cap"><b>Figure 1.</b> The recursive campaign. Promotion at
+    G1 and G2 requires explicit human approval; the terminal holdout is never touched
+    during development, so adjacent-generation transfer is measured on work the
+    campaign could not have overfit.</figcaption>
+  </figure>
+
+  <ol class="protocol">
+    <li>
+      <b>Stage A — develop G1.</b>
+      <p>The starting controller G0 runs the inner loop across a frozen development
+      panel, proposing candidates. The best-supported is selected as G1, subject to
+      independent evaluation and the first human gate.</p>
+    </li>
+    <li>
+      <b>Stage B — paired tournament, G2.</b>
+      <p>On a fresh panel, G0 and G1 attempt identical work in paired runs — same
+      capsules, same budgets, same seeds where the harness permits — isolating the
+      controller as the only variable. The stage yields G2, behind the second gate.</p>
+    </li>
+    <li>
+      <b>Terminal — the untouched holdout.</b>
+      <p>G0, G1, and G2 are compared on holdout capsules that no controller, prompt,
+      or selection decision ever saw. This is the pre-registered estimand.</p>
+    </li>
+    <li>
+      <b>Report — either way.</b>
+      <p>RelayBench publishes the outcome as success <em>or</em> failure against
+      thresholds registered before the first run. Violations of the protocol are
+      published alongside results.<sup class="fn"><a href="#fn3" id="r3">3</a></sup></p>
+    </li>
+  </ol>
+</section>
+
+<section aria-labelledby="s3">
+  <h2 class="sec" id="s3"><span class="no">3.</span>An Architecture of Distrust</h2>
+  <aside class="note"><span class="no">†</span>The trusted runtime stays deliberately small: admission, snapshots, sandboxes, evaluators, budgets, persistence, promotion. Everything else is mutable — and therefore untrusted.</aside>
+  <p class="justify">
+    A self-improving optimizer is the last system whose scores should be taken on
+    faith. Hone therefore assumes its own agent will game any measurement it can
+    reach, and measures accordingly:† everything the agent can mutate is scored from
+    outside the walls. Table&nbsp;I summarizes the properties.
+  </p>
+
+  <table class="tbl">
+    <caption>Table I — Trust properties of the evaluation regime</caption>
+    <thead>
+      <tr><th scope="col">Property</th><th scope="col">Mechanism</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>network</td><td>none — no egress from any evaluation</td></tr>
+      <tr><td>rootfs</td><td>read-only; writable scratch only where declared</td></tr>
+      <tr><td>lifecycle</td><td>a fresh container for every evaluation; mutation and evaluation in separated images</td></tr>
+      <tr><td>timing</td><td>measured by a trusted parent process, never self-reported</td></tr>
+      <tr><td>oracles</td><td>scoring logic protected from the code under test; sealed measurement tooling</td></tr>
+      <tr><td>panels</td><td>corpus and holdouts frozen before search begins</td></tr>
+      <tr><td>review</td><td>capsules and results examined by parties incentivized to find the seam</td></tr>
+      <tr><td>gates</td><td>no promotion at G1 or G2 without explicit human approval</td></tr>
+      <tr><td>recursion</td><td>depth bounded; budgets reserved for ancestors up front</td></tr>
+      <tr><td>secrets</td><td>strict source and credential isolation from the agent</td></tr>
+    </tbody>
+  </table>
+  <p class="tbl-note">Successor controllers are additionally evaluated independently of the loop that proposed them; all runs persist and replay end to end.</p>
+</section>
+
+<section aria-labelledby="s4">
+  <h2 class="sec" id="s4"><span class="no">4.</span>Results</h2>
+  <p class="justify">
+    None yet — and that is the point. The campaign is in progress; no numbers are
+    published. When it concludes, this section will contain the pre-registered
+    comparisons (G1 vs G0, G2 vs G1, terminal estimand, sign consistency across
+    capsules, and the finite-task integrity audit), each reported pass <em>or</em>
+    fail against its registered threshold.
+  </p>
+  <table class="tbl">
+    <caption>Table II — Pre-registered comparisons (placeholders)</caption>
+    <thead>
+      <tr><th scope="col">Comparison</th><th scope="col">Threshold</th><th scope="col">Outcome</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>G1 &gt; G0</td><td class="pending">registered</td><td class="pending">— pending —</td></tr>
+      <tr><td>G2 &gt; G1</td><td class="pending">registered</td><td class="pending">— pending —</td></tr>
+      <tr><td>estimand 50/50</td><td class="pending">registered</td><td class="pending">— pending —</td></tr>
+      <tr><td>sign consistency</td><td class="pending">registered</td><td class="pending">— pending —</td></tr>
+      <tr><td>integrity audit</td><td class="pending">registered</td><td class="pending">— pending —</td></tr>
+    </tbody>
+  </table>
+  <p class="justify">
+    <em>If the result is real, it survives all of this. If it is not, RelayBench says
+    so — in the same report, at the same thresholds.</em>
+  </p>
+</section>
+
+<div class="footnotes" role="doc-endnotes">
+  <ol>
+    <li id="fn1">Locally means locally: state lives in SQLite on the operator’s machine; there is no telemetry and no cloud dependency. <a href="#r1" aria-label="Back to reference 1">↩</a></li>
+    <li id="fn2">The development panel and the terminal holdout are disjoint by construction; the holdout is fixed before any search begins and audited afterward — no re-rolled panels, no post-hoc exclusions. <a href="#r2" aria-label="Back to reference 2">↩</a></li>
+    <li id="fn3">Publication either way is the discipline that makes the question falsifiable rather than promotional. An empty scoreboard, honestly labeled, is a feature. <a href="#r3" aria-label="Back to reference 3">↩</a></li>
+  </ol>
+</div>
+
+<div class="colophon">
+  <div class="orn" aria-hidden="true">❦ ❦ ❦</div>
+  <p><span class="smallcaps">Hone</span> — a local-first, durable optimization CLI. RelayBench is its evidence.</p>
+  <p class="mono">NO TELEMETRY · RUNS LIVE ON YOUR MACHINE · GOALPOSTS DO NOT MOVE</p>
+</div>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hone, Considered — V03 · EDITORIAL MAGAZINE</title>
+<meta name="description" content="Hone: a local-first, durable optimization CLI. Editorial-magazine draft.">
+<style>
+/* ============ V03 · EDITORIAL MAGAZINE ============
+   long-read feature treatment: serif display, hairline
+   rules, drop caps, pull quotes, air everywhere. */
+:root{
+  --paper:#faf7f0;
+  --ink:#211d18;
+  --ink-soft:#5d564b;
+  --hairline:#d8d2c4;
+  --wine:#7a2e2e;          /* single editorial accent */
+  --serif:Didot,"Bodoni MT","Playfair Display",Georgia,"Times New Roman",serif;
+  --text:Georgia,"Iowan Old Style",Palatino,"Palatino Linotype",serif;
+  --caps:"Avenir Next","Gill Sans","Trebuchet MS",Verdana,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+::selection{background:var(--wine);color:var(--paper)}
+html{scroll-behavior:smooth}
+body{
+  background:var(--paper);color:var(--ink);
+  font-family:var(--text);
+  font-size:clamp(16px,1.15vw,19px);
+  line-height:1.62;
+}
+a{color:var(--wine)}
+a:focus-visible{outline:2px solid var(--wine);outline-offset:3px}
+.page{max-width:1160px;margin:0 auto;padding:0 clamp(20px,4vw,64px)}
+.smallcaps{
+  font-family:var(--caps);font-size:11px;letter-spacing:.28em;
+  text-transform:uppercase;color:var(--ink-soft);
+}
+hr.hair{border:none;border-top:1px solid var(--hairline);margin:0}
+
+/* ---------- masthead ---------- */
+.masthead{padding:26px 0 18px;text-align:center;border-bottom:3px double var(--ink)}
+.masthead .issue-row{
+  display:flex;justify-content:space-between;align-items:center;gap:16px;
+  padding-bottom:16px;
+}
+.masthead .title{
+  font-family:var(--serif);font-size:clamp(34px,4.5vw,58px);
+  font-weight:400;letter-spacing:.01em;
+}
+.masthead .title i{color:var(--wine)}
+.masthead nav{display:flex;gap:26px;justify-content:center;padding-top:14px;flex-wrap:wrap}
+.masthead nav a{
+  font-family:var(--caps);font-size:11px;letter-spacing:.24em;
+  text-transform:uppercase;text-decoration:none;color:var(--ink);
+}
+.masthead nav a:hover{color:var(--wine)}
+
+/* ---------- feature opener ---------- */
+.opener{padding:clamp(48px,8vh,110px) 0 clamp(40px,6vh,80px);text-align:center}
+.opener .rubric{color:var(--wine);font-family:var(--caps);font-size:11px;letter-spacing:.3em;text-transform:uppercase}
+.opener h1{
+  font-family:var(--serif);font-weight:400;
+  font-size:clamp(40px,6.4vw,92px);line-height:1.04;letter-spacing:-.012em;
+  max-width:18ch;margin:22px auto 0;
+}
+.opener h1 em{font-style:italic;color:var(--wine)}
+.opener .standfirst{
+  max-width:56ch;margin:30px auto 0;font-size:clamp(18px,1.5vw,23px);
+  line-height:1.5;color:var(--ink-soft);font-style:italic;
+}
+.opener .byline{margin-top:30px}
+.opener .cmd{
+  display:inline-block;margin-top:38px;
+  font-family:"Courier New",Courier,monospace;font-size:clamp(12px,1.1vw,15px);
+  border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);
+  padding:14px 10px;color:var(--ink);max-width:100%;overflow-x:auto;white-space:nowrap;
+}
+.opener .cmd b{color:var(--wine);font-weight:700}
+
+/* ---------- section furniture ---------- */
+.article{padding:clamp(44px,7vh,90px) 0}
+.kicker-row{
+  display:flex;align-items:center;gap:18px;margin-bottom:26px;
+}
+.kicker-row .folio{
+  font-family:var(--serif);font-size:clamp(26px,2.6vw,38px);color:var(--wine);
+  font-style:italic;
+}
+.kicker-row .rule{flex:1;border-top:1px solid var(--hairline)}
+.article h2{
+  font-family:var(--serif);font-weight:400;
+  font-size:clamp(30px,3.6vw,52px);line-height:1.1;letter-spacing:-.01em;
+  max-width:22ch;margin-bottom:26px;
+}
+.article h2 i{color:var(--wine)}
+.lede-graf{font-size:clamp(17px,1.35vw,21px);color:var(--ink-soft);max-width:62ch;margin-bottom:36px}
+
+/* drop cap */
+.dropcap::first-letter{
+  font-family:var(--serif);float:left;
+  font-size:4.6em;line-height:.82;padding:.06em .12em 0 0;color:var(--wine);
+}
+
+/* two-column body copy */
+.cols{
+  column-count:2;column-gap:52px;column-rule:1px solid var(--hairline);
+  max-width:70em;
+}
+.cols p{margin-bottom:1.1em;break-inside:avoid-column}
+.cols h3{
+  font-family:var(--caps);font-size:12px;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--ink);margin:1.6em 0 .6em;break-after:avoid;
+}
+.cols h3 .n{color:var(--wine)}
+
+/* pull quote */
+.pull{
+  margin:clamp(40px,6vh,70px) auto;max-width:30ch;text-align:center;
+  font-family:var(--serif);font-style:italic;
+  font-size:clamp(24px,2.8vw,40px);line-height:1.28;
+  padding:30px 0;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink);
+}
+.pull b{color:var(--wine);font-weight:400}
+
+/* margin-note layout for kernel section */
+.uses{display:grid;grid-template-columns:1fr 1fr 1fr;gap:44px;margin-top:14px}
+.use .num{
+  font-family:var(--serif);font-style:italic;font-size:clamp(30px,3vw,44px);
+  color:var(--wine);display:block;margin-bottom:8px;
+}
+.use h3{
+  font-family:var(--serif);font-weight:400;font-size:clamp(20px,1.8vw,26px);
+  margin-bottom:10px;line-height:1.2;
+}
+.use p{font-size:15.5px;color:var(--ink-soft)}
+
+/* relaybench: catalogue of plates */
+.notice{
+  text-align:center;font-family:var(--caps);font-size:11px;letter-spacing:.26em;
+  text-transform:uppercase;color:var(--wine);
+  border:1px solid var(--wine);padding:12px 18px;max-width:640px;margin:0 auto 46px;
+}
+.plates{display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid var(--hairline)}
+.plate{
+  padding:30px 34px 34px;border-bottom:1px solid var(--hairline);
+}
+.plate:nth-child(odd){border-right:1px solid var(--hairline)}
+.plate .plate-no{
+  font-family:var(--caps);font-size:10px;letter-spacing:.26em;color:var(--ink-soft);
+  text-transform:uppercase;
+}
+.plate h3{
+  font-family:var(--serif);font-weight:400;font-size:clamp(20px,1.9vw,27px);
+  margin:8px 0 10px;line-height:1.2;
+}
+.plate p{font-size:15px;color:var(--ink-soft);max-width:46ch}
+.plate .empty{
+  margin-top:18px;font-family:"Courier New",Courier,monospace;
+  font-size:13px;color:var(--wine);
+  border:1px dashed var(--hairline);padding:14px;text-align:center;
+}
+
+/* trust: appendix list */
+.appendix{max-width:74em}
+.appendix dl{
+  display:grid;grid-template-columns:1fr 1fr;gap:0 56px;
+}
+.appendix .entry{border-top:1px solid var(--hairline);padding:22px 0 26px}
+.appendix dt{
+  font-family:var(--caps);font-size:11px;letter-spacing:.24em;
+  text-transform:uppercase;margin-bottom:12px;color:var(--wine);
+}
+.appendix dd ul{list-style:none}
+.appendix dd li{
+  padding:5px 0;font-size:15.5px;color:var(--ink);
+  display:flex;gap:12px;align-items:baseline;
+}
+.appendix dd li::before{content:"—";color:var(--hairline)}
+.appendix dd li i{color:var(--ink-soft)}
+
+/* coda */
+.coda{
+  text-align:center;padding:clamp(50px,9vh,110px) 0;
+}
+.coda p{
+  font-family:var(--serif);font-style:italic;
+  font-size:clamp(26px,3.4vw,46px);line-height:1.25;max-width:26ch;margin:0 auto;
+}
+.coda p b{color:var(--wine);font-weight:400}
+.coda .smallcaps{display:block;margin-top:26px}
+
+/* footer / colophon */
+.colophon{
+  border-top:3px double var(--ink);padding:26px 0 60px;text-align:center;
+}
+.colophon .smallcaps{display:block;margin-top:8px}
+
+@media (max-width:900px){
+  .cols{column-count:1;column-rule:none}
+  .uses{grid-template-columns:1fr}
+  .plates{grid-template-columns:1fr}
+  .plate:nth-child(odd){border-right:none}
+  .appendix dl{grid-template-columns:1fr}
+  .masthead .issue-row{flex-direction:column;gap:6px}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead page">
+  <div class="issue-row">
+    <span class="smallcaps">Vol. I — The Recursion Issue</span>
+    <span class="smallcaps">Summer 2026</span>
+  </div>
+  <div class="title">Hone, <i>Considered</i></div>
+  <nav aria-label="Sections">
+    <a href="#kernel">The Kernel</a>
+    <a href="#method">The Method</a>
+    <a href="#relaybench">The Ledger</a>
+    <a href="#trust">The Appendix</a>
+  </nav>
+</header>
+
+<main>
+
+<!-- ============ OPENER ============ -->
+<section class="opener page" aria-labelledby="feature-title">
+  <p class="rubric">A Feature on Self-Improvement Under Measurement</p>
+  <h1 id="feature-title">The optimizer that must <em>earn</em> its own promotion</h1>
+  <p class="standfirst">
+    Hone is a local-first, durable optimization CLI: one coding-session kernel that
+    improves artifacts, improves the builders of its tasks, and — under bounds and
+    human gates — improves itself. RelayBench prints the verdict, whichever way it falls.
+  </p>
+  <p class="byline smallcaps">Runs on your machine · keeps no secrets from you · tells you if it failed</p>
+  <p class="cmd">$ hone <b>"reduce cold-start time of the module loader without regressing conformance"</b></p>
+</section>
+
+<hr class="hair">
+
+<!-- ============ KERNEL ============ -->
+<section class="article page" id="kernel" aria-labelledby="kernel-title">
+  <div class="kicker-row"><span class="folio">i.</span><span class="rule"></span><span class="smallcaps">The Kernel</span></div>
+  <h2 id="kernel-title">One kernel, <i>three uses</i></h2>
+  <p class="lede-graf">
+    There is no separate “meta” system. The same durable coding-session kernel that
+    improves a JSON parser is the one that improves the process that improves it.
+    What changes between uses is the target — never the discipline around it.
+  </p>
+  <div class="uses">
+    <article class="use">
+      <span class="num">1a.</span>
+      <h3>Optimize artifacts</h3>
+      <p>Point Hone at a concrete objective — build time, binary size, throughput,
+      conformance-preserving refactors. Runs are resumable and every intermediate
+      state is persisted locally; a crash or a week away loses nothing.</p>
+    </article>
+    <article class="use">
+      <span class="num">1b.</span>
+      <h3>Optimize task-builders</h3>
+      <p>The programs that construct optimization tasks are themselves artifacts.
+      Hone tunes them against held-out evaluation, so the tasks it later attempts
+      are better-posed than the ones it started with.</p>
+    </article>
+    <article class="use">
+      <span class="num">1c.</span>
+      <h3>Optimize the optimizer</h3>
+      <p>Bounded recursive self-optimization: the controller searches for improved
+      versions of itself, recursion depth capped, budgets reserved up front, every
+      promotion contingent on independent evaluation and a human gate.</p>
+    </article>
+  </div>
+</section>
+
+<hr class="hair">
+
+<!-- ============ METHOD ============ -->
+<section class="article page" id="method" aria-labelledby="method-title">
+  <div class="kicker-row"><span class="folio">ii.</span><span class="rule"></span><span class="smallcaps">The Method</span></div>
+  <h2 id="method-title">A campaign built to be <i>falsified</i></h2>
+  <p class="lede-graf">
+    The flagship experiment asks one question: can a coding agent find a measurably
+    better version of itself, twice in a row, on work it has never seen? Every step
+    is designed so that the answer — either answer — is trustworthy.
+  </p>
+
+  <div class="cols">
+    <p class="dropcap">
+      It begins with the capsule, the unit of evidence: a frozen, sandboxed
+      build-or-optimization benchmark comprising a pinned source tree, a
+      deterministic harness, and a protected scoring oracle. The panel spans real
+      open-source workloads — JSON parsers, allocators, codecs, bundlers,
+      resolvers — alongside owner-authored coding tasks. Once admitted, a capsule
+      does not change for the life of the campaign.
+    </p>
+    <h3><span class="n">Stage A ·</span> Developing G1</h3>
+    <p>
+      The starting controller, G0, runs the inner optimization loop across a frozen
+      panel of development capsules, proposing candidate controllers. The
+      best-supported candidate is selected as G1 — subject to independent evaluation
+      and a mandatory human approval gate before promotion.
+    </p>
+    <h3><span class="n">Stage B ·</span> The paired tournament</h3>
+    <p>
+      On a fresh panel, G0 and G1 attempt identical work in paired runs — same
+      capsules, same budgets, same seeds where the harness permits. The pairing
+      isolates the controller as the only variable. The stage yields G2, again
+      behind a human gate.
+    </p>
+    <h3><span class="n">Terminal ·</span> The untouched holdout</h3>
+    <p>
+      Finally G0, G1, and G2 are compared on terminal holdout capsules that no
+      controller, prompt, or selection decision ever saw during development. This is
+      the pre-registered estimand: adjacent-generation transfer measured on work the
+      campaign could not have overfit.
+    </p>
+  </div>
+
+  <blockquote class="pull">
+    “Same capsules, same budgets, same seeds — the controller is <b>the only variable</b>.”
+  </blockquote>
+</section>
+
+<hr class="hair">
+
+<!-- ============ RELAYBENCH ============ -->
+<section class="article page" id="relaybench" aria-labelledby="rb-title">
+  <div class="kicker-row"><span class="folio">iii.</span><span class="rule"></span><span class="smallcaps">The Ledger</span></div>
+  <h2 id="rb-title">RelayBench: results, <i>either way</i></h2>
+  <p class="lede-graf">
+    RelayBench is the reporting system for the recursive campaign. Its thresholds
+    were registered before the first run; when the campaign concludes, it publishes
+    the outcome as success or failure against those thresholds. The goalposts do
+    not move.
+  </p>
+
+  <p class="notice" role="status">Campaign in progress — no numbers published. All plates below are placeholders.</p>
+
+  <div class="plates">
+    <article class="plate">
+      <span class="plate-no">Plate I</span>
+      <h3>Learning curves, inner &amp; outer</h3>
+      <p>Per-capsule inner-loop curves — score against evaluation budget — and the
+      outer-loop curve across generations. Together they show whether improvement
+      is search doing work, or noise.</p>
+      <div class="empty">[ curves render here at publication ]</div>
+    </article>
+    <article class="plate">
+      <span class="plate-no">Plate II</span>
+      <h3>Paired controller-transfer efficiency</h3>
+      <p>From Stage B’s paired runs: how much of one generation’s advantage carries
+      to the next under identical budgets. Reported with paired confidence intervals.</p>
+      <div class="empty">[ awaiting publication — · —— ]</div>
+    </article>
+    <article class="plate">
+      <span class="plate-no">Plate III</span>
+      <h3>Adjacent-generation transfer</h3>
+      <p>The core claims, tested on the terminal holdout: does G1 outperform G0, and
+      does G2 outperform G1? Each comparison published against its pre-registered
+      threshold — pass or fail.</p>
+      <div class="empty">[ G1 &gt; G0 : pending &nbsp;·&nbsp; G2 &gt; G1 : pending ]</div>
+    </article>
+    <article class="plate">
+      <span class="plate-no">Plate IV</span>
+      <h3>The terminal estimand</h3>
+      <p>The headline number is computed over a terminal panel weighted 50/50 between
+      owner-authored tasks and pinned open-source benchmarks, so neither family
+      dominates the conclusion.</p>
+      <div class="empty">[ ——.—% — awaiting publication ]</div>
+    </article>
+    <article class="plate">
+      <span class="plate-no">Plate V</span>
+      <h3>Sign consistency</h3>
+      <p>Not just the average: across individual holdout capsules, how often does the
+      later generation win at all? A large mean carried by a few capsules is
+      reported as exactly that.</p>
+      <div class="empty">[ —— / —— capsules ]</div>
+    </article>
+    <article class="plate">
+      <span class="plate-no">Plate VI</span>
+      <h3>Finite-task integrity</h3>
+      <p>An audit that the finite capsule pool was spent as pre-registered: no
+      development contact with terminal capsules, no re-rolled panels, no post-hoc
+      exclusions. Violations are published alongside results.</p>
+      <div class="empty">[ audit log — awaiting publication ]</div>
+    </article>
+  </div>
+</section>
+
+<hr class="hair">
+
+<!-- ============ TRUST ============ -->
+<section class="article page" id="trust" aria-labelledby="trust-title">
+  <div class="kicker-row"><span class="folio">iv.</span><span class="rule"></span><span class="smallcaps">The Appendix</span></div>
+  <h2 id="trust-title">An architecture of <i>distrust</i></h2>
+  <p class="lede-graf">
+    A self-improving optimizer is the last system whose scores should be taken on
+    faith. Hone assumes its own agent will game whatever can be gamed, and measures
+    accordingly: the trusted runtime stays small and frozen, and everything the
+    agent can mutate is scored from outside the walls.
+  </p>
+
+  <div class="appendix">
+    <dl>
+      <div class="entry">
+        <dt>A · Sandbox isolation</dt>
+        <dd><ul>
+          <li><span><i>Network:</i> none — no egress from any evaluation</span></li>
+          <li><span><i>Root filesystem:</i> read-only; writable scratch only where declared</span></li>
+          <li><span><i>Capabilities:</i> dropped to the floor</span></li>
+          <li><span><i>Lifecycle:</i> a fresh container for every evaluation</span></li>
+          <li><span><i>Containers:</i> mutation and evaluation in separated images</span></li>
+        </ul></dd>
+      </div>
+      <div class="entry">
+        <dt>B · Gaming resistance</dt>
+        <dd><ul>
+          <li><span><i>Timing:</i> measured by a trusted parent process, never self-reported</span></li>
+          <li><span><i>Binaries:</i> sealed measurement tooling the agent cannot rewrite</span></li>
+          <li><span><i>Oracles:</i> scoring logic protected from the code under test</span></li>
+          <li><span><i>Panels:</i> corpus and holdouts frozen before search begins</span></li>
+        </ul></dd>
+      </div>
+      <div class="entry">
+        <dt>C · Independent review</dt>
+        <dd><ul>
+          <li><span><i>Review:</i> capsules and results examined by parties incentivized to find the flaw</span></li>
+          <li><span><i>Successors:</i> candidates evaluated independently of the loop that proposed them</span></li>
+          <li><span><i>Replay:</i> runs persisted and replayable end to end</span></li>
+        </ul></dd>
+      </div>
+      <div class="entry">
+        <dt>D · Human gates</dt>
+        <dd><ul>
+          <li><span><i>G1 gate:</i> no Stage-A promotion without explicit human approval</span></li>
+          <li><span><i>G2 gate:</i> no Stage-B promotion without explicit human approval</span></li>
+          <li><span><i>Depth:</i> recursion bounded; budgets reserved for ancestors up front</span></li>
+          <li><span><i>Secrets:</i> strict source and credential isolation from the agent</span></li>
+        </ul></dd>
+      </div>
+    </dl>
+  </div>
+
+  <div class="coda">
+    <p>“If the result is real, it survives all of this. If it isn’t, <b>RelayBench says so.</b>”</p>
+    <span class="smallcaps">Same report · Same thresholds</span>
+  </div>
+</section>
+
+</main>
+
+<footer class="colophon page">
+  <span class="smallcaps">Hone — a local-first, durable optimization CLI · RelayBench is its evidence</span>
+  <span class="smallcaps">No telemetry · Thresholds pre-registered · Results published either way</span>
+</footer>
+
+</body>
+</html>
