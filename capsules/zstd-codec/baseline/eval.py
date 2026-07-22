@@ -288,26 +288,46 @@ def trusted_compress(data: bytes, level: int, expected_size: int) -> bytes:
     return frame
 
 
+def trusted_decode(frame: bytes, decoded_size: int) -> bytes:
+    return run_runner(TRUSTED_BENCH, ["decompress", str(len(frame)), str(decoded_size), "1"], frame, decoded_size)[1]
+
+
 def trusted_round_trip(frame: bytes, data: bytes) -> None:
-    decoded = run_runner(TRUSTED_BENCH, ["decompress", str(len(frame)), str(len(data)), "1"], frame, len(data))[1]
-    if decoded != data:
+    if trusted_decode(frame, len(data)) != data:
         raise GateFailure("compressed output failed the trusted reference round trip")
+
+
+def trusted_stamped_frame(data: bytes, level: int, phase: int) -> bytes:
+    """Trusted-encoder frame over the stamped content of iteration `phase`.
+
+    The sealed trusted runner applies the identical stamp_iteration rotation
+    (one repetition starting at `phase`), so this reconstructs — through the
+    single stamp implementation shared with the candidate-linked runner's
+    trusted source — the exact bytes the candidate compressed on that timed
+    iteration."""
+    return run_runner(TRUSTED_BENCH, ["compress", str(len(data)), str(level), "1", str(phase)], data, None)[1]
 
 
 def throughput_mib(work_bytes: int, repetitions: int, elapsed_ns: int) -> float:
     return (work_bytes * repetitions * 1_000_000_000) / (elapsed_ns * 1048576)
 
 
-def measure_cell(mode: str, payload: bytes, parameter: int, work_bytes: int, expected_size: int | None) -> tuple[float, bytes]:
+def measure_cell(mode: str, payload: bytes, parameter: int, work_bytes: int, expected_size: int | None) -> tuple[float, bytes, int]:
     """Median throughput for one benchmark cell, timed entirely in this
     trusted process. Repetition count is calibrated by re-running the sealed
-    candidate runner until one invocation spans the target wall window."""
+    candidate runner until one invocation spans the target wall window.
+    Compression cells run with identity rotation (phase 0): every timed
+    iteration compresses distinct stamped content, so a content-keyed cache
+    of earlier results can never replay a timed iteration. The calibrated
+    repetition count is returned so the caller can reconstruct the final
+    iteration's content for the trusted output gates."""
     target_ns = BENCH_TARGET_MS * 1_000_000
+    rotation = ["0"] if mode == "compress" else []
 
     def sample(repetitions: int) -> tuple[int, bytes]:
         return run_runner(
             CANDIDATE_BENCH,
-            [mode, str(len(payload)), str(parameter), str(repetitions)],
+            [mode, str(len(payload)), str(parameter), str(repetitions), *rotation],
             payload,
             expected_size,
         )
@@ -325,7 +345,7 @@ def measure_cell(mode: str, payload: bytes, parameter: int, work_bytes: int, exp
             raise GateFailure("benchmark output drifted across repeated samples")
         samples.append(throughput_mib(work_bytes, repetitions, elapsed_ns))
     samples.sort()
-    return samples[SAMPLE_COUNT // 2], reference
+    return samples[SAMPLE_COUNT // 2], reference, repetitions
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -382,18 +402,41 @@ def main() -> None:
         compressed_sizes: dict[str, int] = {}
         for row, data in workload_bytes:
             for level in LEVELS:
-                baseline_size = row["expectedCompressedBytes"][str(level)]
-                compression_mib_s, candidate_frame = measure_cell(
+                compression_mib_s, candidate_frame, compress_reps = measure_cell(
                     "compress", data, level, len(data), None
                 )
-                compressed_size = len(candidate_frame)
-                # Candidate size may be at most baseline * 1.0025, exactly.
-                if compressed_size * 400 > baseline_size * 401:
+                # Identity-rotated compression: reconstruct the exact content
+                # of the first and final timed iterations with the sealed
+                # trusted runner and anchor every output gate to that content.
+                trusted_first = trusted_stamped_frame(data, level, 0)
+                first_content = trusted_decode(trusted_first, len(data))
+                if compress_reps > 1:
+                    trusted_final = trusted_stamped_frame(data, level, compress_reps - 1)
+                    final_content = trusted_decode(trusted_final, len(data))
+                else:
+                    trusted_final, final_content = trusted_first, first_content
+                # The timed reference frame is the final iteration's output: it
+                # must be at most 0.25% larger than the trusted encoder's frame
+                # over the SAME stamped content, and it must round trip through
+                # the trusted decoder back to that content.
+                if len(candidate_frame) * 400 > len(trusted_final) * 401:
                     raise GateFailure(
-                        f"compressed-size gate failed for {row['id']} level {level}: {compressed_size} > baseline+0.25%"
+                        f"compressed-size gate failed for {row['id']} level {level}: {len(candidate_frame)} > trusted+0.25%"
                     )
-                trusted_round_trip(candidate_frame, data)
-                decompression_mib_s, decoded = measure_cell(
+                trusted_round_trip(candidate_frame, final_content)
+                # Canonical single-repetition phase-0 frame: independent of the
+                # calibrated repetition count, so the recorded size (and the
+                # result hash derived from it) stays deterministic across runs.
+                canonical_frame = run_runner(
+                    CANDIDATE_BENCH, ["compress", str(len(data)), str(level), "1", "0"], data, None
+                )[1]
+                compressed_size = len(canonical_frame)
+                if compressed_size * 400 > len(trusted_first) * 401:
+                    raise GateFailure(
+                        f"canonical compressed-size gate failed for {row['id']} level {level}: {compressed_size} > trusted+0.25%"
+                    )
+                trusted_round_trip(canonical_frame, first_content)
+                decompression_mib_s, decoded, _ = measure_cell(
                     "decompress", trusted_frames[(row["id"], level)], len(data), len(data), len(data)
                 )
                 if decoded != data:

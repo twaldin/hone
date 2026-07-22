@@ -3,3 +3,5 @@
 09e4f944617a9ccab996ebe7fc6d890a98a5e6e4 63c1ccd0a64bbf7039cf86825deec9e99e914d95 twaldin <timothy@waldin.net> 1784701867 -0700	commit: Baseline: sync tree to worktree (drop stale deleted entries)
 63c1ccd0a64bbf7039cf86825deec9e99e914d95 75b55bc0f5ff49a5c093b0b49c6564662dca19e3 twaldin <timothy@waldin.net> 1784701893 -0700	commit: Baseline: commit evaluator glue into baseline tree
 75b55bc0f5ff49a5c093b0b49c6564662dca19e3 c56dddbe0414d0bbe49c1907b8c89fc86118e0db twaldin <timothy@waldin.net> 1784701931 -0700	commit: Baseline: store exact bytes (disable CRLF normalization)
+c56dddbe0414d0bbe49c1907b8c89fc86118e0db b7cb56e87cbbee6db02de9c3b28b3b75844c80a4 twaldin <timothy@waldin.net> 1784738053 -0700	commit: Identity-rotated compression iterations with trusted per-iteration output gates
+b7cb56e87cbbee6db02de9c3b28b3b75844c80a4 47084124da6c4b0564b17defc75647bfdb593416 twaldin <timothy@waldin.net> 1784744571 -0700	commit: Spot-check in-loop round trips to keep timed loop compression-dominated

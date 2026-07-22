@@ -1,1 +1,1 @@
-Baseline: store exact bytes (disable CRLF normalization)
+Spot-check in-loop round trips to keep timed loop compression-dominated
