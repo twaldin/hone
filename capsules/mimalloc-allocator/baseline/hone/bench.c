@@ -64,6 +64,86 @@ uint64_t hone_checksum(uint64_t state, uint64_t value) {
   return state;
 }
 
+/*
+ * Distinct per-allocation fill pattern. Every (seed, round, index) triple
+ * yields a different 64-bit pattern, so two live blocks can never satisfy
+ * each other's canary bytes and a recycled buffer cannot replay a prior
+ * block's contents.
+ */
+uint64_t hone_pattern(uint64_t seed, uint64_t round, uint64_t index) {
+  uint64_t state = seed ^ ((round + 1) * UINT64_C(0xa0761d6478bd642f)) ^
+                   ((index + 1) * UINT64_C(0xe7037ed1a0b428db));
+  if (state == 0) state = UINT64_C(0x8ebc6af09c88c6e3);
+  return hone_prng_next(&state);
+}
+
+void hone_canary_write(unsigned char* block, size_t size, uint64_t pattern) {
+  const size_t head = size < 8 ? size : 8;
+  for (size_t j = 0; j < head; ++j) block[j] = (unsigned char)(pattern >> ((j & 7) * 8));
+  if (size > 8) {
+    const size_t remaining = size - 8;
+    const size_t tail = remaining < 8 ? remaining : 8;
+    const uint64_t mirrored = ~pattern;
+    for (size_t j = 0; j < tail; ++j) {
+      block[size - tail + j] = (unsigned char)(mirrored >> ((j & 7) * 8));
+    }
+  }
+}
+
+bool hone_canary_verify(const unsigned char* block, size_t size, uint64_t pattern) {
+  const size_t head = size < 8 ? size : 8;
+  for (size_t j = 0; j < head; ++j) {
+    if (block[j] != (unsigned char)(pattern >> ((j & 7) * 8))) return false;
+  }
+  if (size > 8) {
+    const size_t remaining = size - 8;
+    const size_t tail = remaining < 8 ? remaining : 8;
+    const uint64_t mirrored = ~pattern;
+    for (size_t j = 0; j < tail; ++j) {
+      if (block[size - tail + j] != (unsigned char)(mirrored >> ((j & 7) * 8))) return false;
+    }
+  }
+  return true;
+}
+
+static void hone_range_sift(hone_range_t* ranges, size_t start, size_t end) {
+  size_t root = start;
+  for (;;) {
+    size_t child = root * 2 + 1;
+    if (child >= end) return;
+    if (child + 1 < end && ranges[child].begin < ranges[child + 1].begin) child += 1;
+    if (ranges[root].begin >= ranges[child].begin) return;
+    const hone_range_t swap = ranges[root];
+    ranges[root] = ranges[child];
+    ranges[child] = swap;
+    root = child;
+  }
+}
+
+/*
+ * Reject any two overlapping live ranges. In-place heapsort by begin, then
+ * one adjacent pass: an allocator that hands out one reusable (or partially
+ * shared) buffer for several simultaneously-live allocations fails here in
+ * EVERY round, timed and validation alike. Deliberately free of libc qsort:
+ * an interposable sort or comparator symbol must never sit inside this
+ * integrity check.
+ */
+bool hone_ranges_disjoint(hone_range_t* ranges, size_t count) {
+  if (count == 0) return true;
+  for (size_t start = count / 2; start-- > 0;) hone_range_sift(ranges, start, count);
+  for (size_t end = count; end-- > 1;) {
+    const hone_range_t swap = ranges[0];
+    ranges[0] = ranges[end];
+    ranges[end] = swap;
+    hone_range_sift(ranges, 0, end);
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (ranges[i].begin >= ranges[i].end) return false;
+    if (i > 0 && ranges[i - 1].end > ranges[i].begin) return false;
+  }
+  return true;
+}
+
 bool hone_capture_memory(hone_result_t* result) {
   mi_stats_t_decl(stats);
   mi_stats_merge();
@@ -83,10 +163,16 @@ bool hone_capture_memory(hone_result_t* result) {
   return true;
 }
 
-static int compare_double(const void* left, const void* right) {
-  const double a = *(const double*)left;
-  const double b = *(const double*)right;
-  return (a > b) - (a < b);
+static void sort_samples(double* samples, size_t count) {
+  for (size_t i = 1; i < count; ++i) {
+    const double value = samples[i];
+    size_t j = i;
+    while (j > 0 && samples[j - 1] > value) {
+      samples[j] = samples[j - 1];
+      j -= 1;
+    }
+    samples[j] = value;
+  }
 }
 
 static bool parse_u64(const char* text, uint64_t* value) {
@@ -144,7 +230,7 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
    * shorten it, so the minimum rejects scheduler-noise outliers without
    * giving candidate code any influence over the selection.
    */
-  qsort(samples, HONE_SAMPLES, sizeof(samples[0]), compare_double);
+  sort_samples(samples, HONE_SAMPLES);
 
   mi_collect(true);
   mi_stats_reset();

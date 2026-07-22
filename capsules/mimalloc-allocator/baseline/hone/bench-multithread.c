@@ -17,6 +17,7 @@ typedef struct thread_work_s {
   uint64_t checksum;
   uint64_t operations;
   void* slots[THREAD_SLOTS];
+  size_t live[THREAD_SLOTS];
 } thread_work_t;
 
 static void cleanup_slots(thread_work_t* work) {
@@ -28,6 +29,7 @@ static void cleanup_slots(thread_work_t* work) {
 
 static void* thread_main(void* argument) {
   thread_work_t* work = (thread_work_t*)argument;
+  hone_range_t ranges[THREAD_SLOTS];
   uint64_t checksum = UINT64_C(0x6a09e667f3bcc909);
   work->ok = false;
   for (uint32_t round = 0; round < work->rounds; ++round) {
@@ -39,11 +41,32 @@ static void* thread_main(void* argument) {
         cleanup_slots(work);
         return NULL;
       }
-      block[0] = (unsigned char)(i + round);
-      block[size - 1] = (unsigned char)(work->seed ^ size);
+      hone_canary_write(block, size, hone_pattern(work->seed, round, i));
       work->slots[i] = block;
-      checksum = hone_checksum(checksum, size + block[0] + ((uint64_t)block[size - 1] << 8));
+      work->live[i] = size;
       work->operations++;
+    }
+    /*
+     * All of this thread's allocations are live: reject overlapping live
+     * ranges and re-read every block's distinct canary after all later
+     * allocations completed. Cross-thread overlap is verified once over the
+     * retained final round in run_multithread.
+     */
+    for (size_t i = 0; i < THREAD_SLOTS; ++i) {
+      ranges[i].begin = (uintptr_t)work->slots[i];
+      ranges[i].end = (uintptr_t)work->slots[i] + work->live[i];
+    }
+    if (!hone_ranges_disjoint(ranges, THREAD_SLOTS)) {
+      cleanup_slots(work);
+      return NULL;
+    }
+    for (size_t i = 0; i < THREAD_SLOTS; ++i) {
+      const uint64_t pattern = hone_pattern(work->seed, round, i);
+      if (!hone_canary_verify((const unsigned char*)work->slots[i], work->live[i], pattern)) {
+        cleanup_slots(work);
+        return NULL;
+      }
+      checksum = hone_checksum(checksum, pattern ^ (uint64_t)work->live[i]);
     }
     if (work->retain_last && round + 1 == work->rounds) break;
     for (size_t i = 0; i < THREAD_SLOTS; ++i) {
@@ -60,6 +83,7 @@ static void* thread_main(void* argument) {
 static bool run_multithread(uint64_t seed, uint32_t rounds, bool capture_memory, hone_result_t* result) {
   pthread_t threads[THREAD_COUNT];
   thread_work_t work[THREAD_COUNT] = {0};
+  hone_range_t all_ranges[THREAD_COUNT * THREAD_SLOTS];
   size_t started = 0;
 
   for (size_t thread = 0; thread < THREAD_COUNT; ++thread) {
@@ -78,8 +102,29 @@ static bool run_multithread(uint64_t seed, uint32_t rounds, bool capture_memory,
     result->checksum = hone_checksum(result->checksum, work[thread].checksum ^ thread);
     result->operations += work[thread].operations;
   }
-  if (capture_memory && !hone_capture_memory(result)) goto failure;
   if (capture_memory) {
+    /*
+     * The final round of every thread is retained, so all THREAD_COUNT live
+     * sets coexist here: reject cross-thread overlap and re-verify the
+     * per-thread canaries one last time before release.
+     */
+    for (size_t thread = 0; thread < THREAD_COUNT; ++thread) {
+      for (size_t i = 0; i < THREAD_SLOTS; ++i) {
+        const size_t slot = thread * THREAD_SLOTS + i;
+        all_ranges[slot].begin = (uintptr_t)work[thread].slots[i];
+        all_ranges[slot].end = (uintptr_t)work[thread].slots[i] + work[thread].live[i];
+      }
+    }
+    if (!hone_ranges_disjoint(all_ranges, THREAD_COUNT * THREAD_SLOTS)) goto failure;
+    for (size_t thread = 0; thread < THREAD_COUNT; ++thread) {
+      for (size_t i = 0; i < THREAD_SLOTS; ++i) {
+        const uint64_t pattern = hone_pattern(work[thread].seed, rounds - 1, i);
+        if (!hone_canary_verify((const unsigned char*)work[thread].slots[i], work[thread].live[i], pattern)) {
+          goto failure;
+        }
+      }
+    }
+    if (!hone_capture_memory(result)) goto failure;
     for (size_t thread = 0; thread < THREAD_COUNT; ++thread) {
       cleanup_slots(&work[thread]);
       result->operations += THREAD_SLOTS;

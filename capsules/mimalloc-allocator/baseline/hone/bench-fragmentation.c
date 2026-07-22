@@ -7,9 +7,29 @@
 
 #define SLOT_COUNT 2048
 
+/* Overlap + canary pass over the CURRENT live set; folds every live block's
+ * distinct pattern into the checksum so verification is part of the scored
+ * value, not a side gate. */
+static bool verify_live(void* const* slots, const size_t* live, const uint64_t* patterns,
+                        hone_range_t* ranges, uint64_t* checksum) {
+  for (size_t i = 0; i < SLOT_COUNT; ++i) {
+    ranges[i].begin = (uintptr_t)slots[i];
+    ranges[i].end = (uintptr_t)slots[i] + live[i];
+  }
+  if (!hone_ranges_disjoint(ranges, SLOT_COUNT)) return false;
+  for (size_t i = 0; i < SLOT_COUNT; ++i) {
+    if (!hone_canary_verify((const unsigned char*)slots[i], live[i], patterns[i])) return false;
+    *checksum = hone_checksum(*checksum, patterns[i] ^ (uint64_t)live[i]);
+  }
+  return true;
+}
+
 static bool run_fragmentation(uint64_t seed, uint32_t rounds, bool capture_memory, hone_result_t* result) {
   void* slots[SLOT_COUNT] = {0};
   size_t sizes[SLOT_COUNT];
+  size_t live[SLOT_COUNT];
+  uint64_t patterns[SLOT_COUNT];
+  hone_range_t ranges[SLOT_COUNT];
   uint64_t state = seed ^ UINT64_C(0x667261676d656e74);
   uint64_t checksum = UINT64_C(0x9e3779b97f4a7c15);
   uint64_t operations = 0;
@@ -24,12 +44,14 @@ static bool run_fragmentation(uint64_t seed, uint32_t rounds, bool capture_memor
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
       unsigned char* block = (unsigned char*)mi_malloc(sizes[i]);
       if (block == NULL) goto failure;
-      block[0] = (unsigned char)(i + round);
-      block[sizes[i] - 1] = (unsigned char)(seed >> (i & 7));
+      patterns[i] = hone_pattern(seed, round, i);
+      hone_canary_write(block, sizes[i], patterns[i]);
       slots[i] = block;
-      checksum = hone_checksum(checksum, block[0] | ((uint64_t)block[sizes[i] - 1] << 8));
+      live[i] = sizes[i];
       operations++;
     }
+    /* First stable point: all SLOT_COUNT initial allocations live at once. */
+    if (!verify_live(slots, live, patterns, ranges, &checksum)) goto failure;
     for (size_t i = 0; i < SLOT_COUNT; i += 2) {
       mi_free(slots[i]);
       slots[i] = NULL;
@@ -40,11 +62,14 @@ static bool run_fragmentation(uint64_t seed, uint32_t rounds, bool capture_memor
       const size_t replacement_size = 48 + ((sizes[i] ^ (size_t)seed) % 4049);
       unsigned char* replacement = (unsigned char*)mi_malloc(replacement_size);
       if (replacement == NULL) goto failure;
-      replacement[0] = (unsigned char)(replacement_size + round);
+      patterns[i] = hone_pattern(seed, round, SLOT_COUNT + i);
+      hone_canary_write(replacement, replacement_size, patterns[i]);
       slots[i] = replacement;
-      checksum = hone_checksum(checksum, replacement[0] + replacement_size);
+      live[i] = replacement_size;
       operations++;
     }
+    /* Second stable point: surviving odd blocks + even replacements live. */
+    if (!verify_live(slots, live, patterns, ranges, &checksum)) goto failure;
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
       mi_free(slots[i]);
       slots[i] = NULL;

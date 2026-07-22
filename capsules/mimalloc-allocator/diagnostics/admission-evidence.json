@@ -25,27 +25,27 @@
     },
     {
       "id": "naive",
-      "q": 20750283.467166446,
+      "q": 13561500.411777642,
       "hardGatesPass": true,
       "role": "deliberately slower but correct volatile work in the allocation entry point"
     },
     {
       "id": "baseline",
-      "q": 92343278.96975476,
+      "q": 27371050.348602816,
       "hardGatesPass": true,
       "role": "exact pinned upstream allocator implementation"
     },
     {
       "id": "improved",
-      "q": 116074986.87429819,
+      "q": 29721108.77821014,
       "hardGatesPass": true,
       "role": "independently authored thread-local size-class magazine over the default-heap malloc/free fast path (exact-class LIFO reuse, main-thread only, drained and retired at the first explicit collection so validation memory accounting matches the unmodified allocator)"
     },
     {
       "id": "shortcut",
-      "q": 63112227.56105955,
-      "trainQ": 112888157.4648752,
-      "validationQ": 13336297.657243887,
+      "q": 18759392.717983518,
+      "trainQ": 29558007.939949315,
+      "validationQ": 7960777.496017723,
       "hardGatesPass": true,
       "shortcutGated": true,
       "role": "first-allocation-size fingerprint that wins sealed train and loses sealed validation"
@@ -56,15 +56,13 @@
     "description": "thread-local exact-size-class magazine layered over the default-heap malloc/free fast path; main-thread only, served blocks are class-identical to fresh allocations, drained and retired at the first mi_collect/mi_heap_destroy",
     "independentlyAuthored": true,
     "valid": true,
-    "q": 116074986.87429819,
-    "deltaFromQBase": 39039065.77793017,
-    "deltaFromOrderingBaseline": 23731707.90454343,
-    "reachesReference": true
+    "q": 29721108.77821014,
+    "deltaFromOrderingBaseline": 2350058.4296073243
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:58e25e9ad083896f64083ce256ba93a7394dfdc24f5746a0ad6010e6e7510a15",
-    "secondReportHash": "sha256:91f58f19c75e03e871668c12dc3847329f99c427af59493326244fab57152a30",
+    "firstReportHash": "sha256:b399f97e82e32beb92c1f479a7fd8b2d28f345064009b6b12a5fd169ed247ddd",
+    "secondReportHash": "sha256:608fac5eca08b011d85ab32d00d965b7dbedd8754957083a38225f4430a1d864",
     "tokenLocked": true,
     "incidentWindowRunsExcluded": true
   },
@@ -80,12 +78,13 @@
   "measurement": {
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "globalTokenLockHeld": true,
-    "finalOrderingBatchWallSec": 152.9,
+    "finalOrderingBatchWallSec": 154.3,
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
     "normalizationScale": 3851796.054818401,
     "freshProcess": true,
     "finalGceRecalibrationRequired": true,
-    "benchmarkSampleSelection": "fastest of 5 timed samples per workload (k=1 trimmed; host contention only lengthens samples)"
+    "benchmarkSampleSelection": "fastest of 5 timed samples per workload (k=1 trimmed; host contention only lengthens samples)",
+    "round2Note": "round-2 hardening changed bench measurement semantics (per-allocation canaries, live-range overlap rejection folded into every timed round; trusted cgroup whole-tree memory.peak gate at 1.20x sealed baseline). Throughput scale dropped accordingly (ordering baseline ~2.74e7 ops/s). aa/qBase/qReference/normalizationScale predate this change and are superseded; they are re-derived during the already-required frozen-host GCE recalibration (finalGceRecalibrationRequired remains true)."
   },
   "terminalSeal": {
     "taskId": "OSS-H07",
