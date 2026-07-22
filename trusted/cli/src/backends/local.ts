@@ -1400,6 +1400,9 @@ export function createBackend(
           ...(ctx.measurementEpoch !== undefined ? { measurementEpoch: ctx.measurementEpoch } : {}),
           ...(ctx.evaluationStrategy !== undefined ? { evaluationStrategy: ctx.evaluationStrategy } : {}),
           ...(ctx.recursiveBroker !== undefined ? { recursive: ctx.recursiveBroker } : {}),
+          // Frozen development corpus (M2 queryCorpus): trusted campaign
+          // orchestration supplies it; absent => broker fails closed.
+          ...(ctx.corpus !== undefined ? { corpus: ctx.corpus } : {}),
           ...(ctx.terminalHoldoutAssetGroupIds !== undefined
             ? { terminalHoldoutAssetGroupIds: ctx.terminalHoldoutAssetGroupIds }
             : {}),
