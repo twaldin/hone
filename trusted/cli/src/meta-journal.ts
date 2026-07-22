@@ -512,7 +512,9 @@ export class MetaJournalV1 {
       qBase: capsule.qBase,
       scale: capsule.scale,
       qNormalized: normalizedScore(qRaw, capsule.qBase, capsule.scale),
-      requestedModel: this.config.modelObservation.requestedRoute,
+      // Child measurements execute the inner mutation role; in M1 the frozen
+      // refinement pins this to the single observation route unchanged.
+      requestedModel: this.config.routing.innerMutation,
       responseModel: SAFE_ID.parse(input.responseModel),
       providerFingerprint: input.providerFingerprint === null ? null : SAFE_ID.parse(input.providerFingerprint),
       modelDriftSentinel: SAFE_ID.parse(input.modelDriftSentinel),
@@ -786,7 +788,7 @@ export class MetaJournalV1 {
       measurement.workKey !== expectedKey ||
       measurement.childRunId !== reservation.childRunId ||
       measurement.capsuleDigest !== capsule.capsuleDigest ||
-      measurement.requestedModel !== this.config.modelObservation.requestedRoute ||
+      measurement.requestedModel !== this.config.routing.innerMutation ||
       measurement.qBase !== capsule.qBase ||
       measurement.scale !== capsule.scale ||
       measurement.qNormalized !== expectedNormalized ||

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { BudgetEnvelope, IMAGE_DIGEST_REF } from "./capsule.js";
+import { M2_INNER_MODEL_ROUTE, M2_OUTER_MODEL_ROUTE } from "./proxy.js";
 import { canonicalJson } from "./canonical.js";
 import { PromotionRule } from "./runconfig.js";
 
@@ -168,7 +169,7 @@ const MetaCampaignConfigShape = z.object({
   train: z.array(MetaCapsuleEntry),
   /** Ordered holdout partition — exactly M1_HOLDOUT_CAPSULE_COUNT entries. */
   holdout: z.array(MetaCapsuleEntry),
-  /** Requested model per mutation role; both roles fixed to one route in M1. */
+  /** Requested model per mutation role; both roles fixed to one route in M1, per-role frozen routes in M2. */
   routing: z.object({
     outerMutation: z.string().min(1),
     innerMutation: z.string().min(1),
@@ -388,6 +389,23 @@ export const M2_CANDIDATE_COUNT = M2_SEARCH_CANDIDATE_EQUIVALENTS;
 export const M2_CANDIDATE_ATTEMPTS_MAX = 24;
 export const M2_INNER_EPISODES_MAX = 4;
 export const M2_ALLOWED_CLAIM = "recursive-transfer-frozen-corpus";
+
+/**
+ * M2 two-role model observation policy. The frozen contract routes outer /
+ * capsule-author reasoning and inner capsule improvement to SEPARATE observed
+ * routes (outer = gpt-5.6-sol, inner = gpt-5.6-terra). Requested and returned
+ * model identity is recorded per role; drift fails closed. Like M1, identity
+ * without provider attestation is an alias observation — never a snapshot.
+ */
+export const M2ModelObservationPolicy = z.object({
+  outerRequestedRoute: z.literal(M2_OUTER_MODEL_ROUTE),
+  innerRequestedRoute: z.literal(M2_INNER_MODEL_ROUTE),
+  identity: z.enum(["alias-observation", "provider-snapshot"]),
+  recordResponseModel: z.literal(true),
+  recordProviderFingerprint: z.literal(true),
+  driftSentinel: z.literal(true),
+}).strict();
+export type M2ModelObservationPolicy = z.infer<typeof M2ModelObservationPolicy>;
 
 export const M2_PANEL_A_TASK_IDS = [
   "OWN-T01",
@@ -623,6 +641,7 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   train: z.array(MetaCapsuleEntry),
   holdout: z.array(MetaCapsuleEntry),
   counts: RecursiveCampaignCounts,
+  modelObservation: M2ModelObservationPolicy,
   developmentPanel: M2DevelopmentPanel,
   recursiveBudgets: M2RecursiveBudgets,
   allowedClaim: z.literal(M2_ALLOWED_CLAIM),
@@ -714,10 +733,11 @@ export const MetaCampaignConfigV2 = MetaCampaignConfigV2Shape.superRefine((cfg, 
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["mutablePaths", index], message: `mutable path "${mutable}" overlaps protected path "${hit}"` });
     }
   });
-  for (const role of ["outerMutation", "innerMutation"] as const) {
-    if (cfg.routing[role] !== cfg.modelObservation.requestedRoute) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["routing", role], message: "routing must match the frozen model observation route" });
-    }
+  if (cfg.routing.outerMutation !== cfg.modelObservation.outerRequestedRoute) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["routing", "outerMutation"], message: `outer routing must match the frozen outer observation route ("${cfg.modelObservation.outerRequestedRoute}")` });
+  }
+  if (cfg.routing.innerMutation !== cfg.modelObservation.innerRequestedRoute) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["routing", "innerMutation"], message: `inner routing must match the frozen inner observation route ("${cfg.modelObservation.innerRequestedRoute}")` });
   }
 
   const target = canonicalIdentity(cfg.seedOptimizer);

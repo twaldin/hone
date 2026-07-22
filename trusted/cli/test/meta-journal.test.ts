@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  M2_INNER_MODEL_ROUTE,
+  M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
@@ -67,6 +69,18 @@ function recursiveConfig(): RecursiveConfig {
     },
     train,
     holdout,
+    routing: {
+      outerMutation: M2_OUTER_MODEL_ROUTE,
+      innerMutation: M2_INNER_MODEL_ROUTE,
+    },
+    modelObservation: {
+      outerRequestedRoute: M2_OUTER_MODEL_ROUTE,
+      innerRequestedRoute: M2_INNER_MODEL_ROUTE,
+      identity: "alias-observation",
+      recordResponseModel: true,
+      recordProviderFingerprint: true,
+      driftSentinel: true,
+    },
     counts: {
       candidates: 37,
       candidateAttemptsMax: 91,

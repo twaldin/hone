@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   EvaluationRecord,
+  M2_INNER_MODEL_ROUTE,
+  M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
@@ -92,6 +94,18 @@ function recursiveFixture(): RecursiveMetaCampaignConfig {
     },
     train,
     holdout,
+    routing: {
+      outerMutation: M2_OUTER_MODEL_ROUTE,
+      innerMutation: M2_INNER_MODEL_ROUTE,
+    },
+    modelObservation: {
+      outerRequestedRoute: M2_OUTER_MODEL_ROUTE,
+      innerRequestedRoute: M2_INNER_MODEL_ROUTE,
+      identity: "alias-observation",
+      recordResponseModel: true,
+      recordProviderFingerprint: true,
+      driftSentinel: true,
+    },
     counts: {
       candidates: 37,
       candidateAttemptsMax: 91,
@@ -206,7 +220,7 @@ class MemoryJournal implements MetaJournalPort {
       analysisConfigHash: this.config.analysisConfigHash as Sha256Digest,
       ...identity,
       capsuleDigest: capsule.capsuleDigest as Sha256Digest,
-      requestedModel: this.config.modelObservation.requestedRoute,
+      requestedModel: this.config.routing.innerMutation,
       responseModel: input.responseModel,
       providerFingerprint: input.providerFingerprint,
       modelDriftSentinel: input.modelDriftSentinel,
