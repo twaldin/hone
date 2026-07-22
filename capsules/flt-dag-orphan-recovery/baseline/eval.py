@@ -44,6 +44,12 @@ CLONE_NEWUTS = 0x04000000
 CLONE_NEWPID = 0x20000000
 CLONE_NEWNET = 0x40000000
 STATE_RESET_TIMEOUT_SEC = 1.0
+# Envelope-integrity failure prefixes: the sealed response stream itself was
+# malformed, unparseable, or incomplete (empty output / truncated line / wrong
+# envelope shape / oversized or trailing bytes / stream cut mid-response).
+# These invalidate the evaluation (valid=false) instead of scoring 0; ordinary
+# wrong answers and in-envelope candidate errors stay valid with zero credit.
+PROTOCOL_ERROR_PREFIXES = ("protocol violation", "response exceeded", "worker died")
 _LIBC = ctypes.CDLL(None, use_errno=True)
 
 
@@ -317,6 +323,10 @@ def canonical(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _is_protocol_error(error: str | None) -> bool:
+    return error is not None and error.startswith(PROTOCOL_ERROR_PREFIXES)
+
+
 def load_cases(path: Path) -> list[dict]:
     cases: list[dict] = []
     for file in sorted(path.rglob("*.json")):
@@ -329,7 +339,7 @@ def load_cases(path: Path) -> list[dict]:
     return cases
 
 
-def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
+def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, bool, dict]:
     outcomes: list[CallOutcome] = []
     for _ in range(INNER_REPS):
         reset_candidate_state()
@@ -346,6 +356,7 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
             break
     slowest_ms = max((outcome.elapsed_ms for outcome in outcomes), default=0.0)
     error = next((outcome.error for outcome in outcomes if outcome.error is not None), None)
+    protocol_ok = not _is_protocol_error(error)
     correct = error is None and len(outcomes) == INNER_REPS and all(
         canonical(outcome.result) == canonical(case["expected"]) for outcome in outcomes
     )
@@ -355,7 +366,7 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
         if correct
         else f"incorrect or failed: {error or 'exact output mismatch'}"
     )
-    return slowest_ms, correct, {"score": score, "feedback": feedback}
+    return slowest_ms, correct, protocol_ok, {"score": score, "feedback": feedback}
 
 
 def run_public_suite(workspace: Path) -> tuple[bool, str]:
@@ -388,22 +399,24 @@ def main() -> None:
     per_example: dict[str, dict] = {}
     runtimes: list[float] = []
     correct: list[bool] = []
+    protocol_clean = True
     for case in cases:
-        elapsed, ok, entry = evaluate_case(workspace, case)
+        elapsed, ok, protocol_ok, entry = evaluate_case(workspace, case)
         per_example[case["id"]] = entry
         runtimes.append(elapsed)
         correct.append(ok)
+        protocol_clean = protocol_clean and protocol_ok
     tests_pass, suite_detail = run_public_suite(workspace)
     quality = statistics.fmean([1.0 if ok else 0.0 for ok in correct]) if correct else 0.0
     output = {
-        "valid": tests_pass,
+        "valid": tests_pass and protocol_clean,
         "objectives": {
             "score": quality,
         },
-        "constraints": {"tests_pass": tests_pass},
+        "constraints": {"tests_pass": tests_pass, "protocol_clean": protocol_clean},
         "perExample": per_example,
         "diagnostics": {
-            "summary": f"{sum(1 for ok in correct if ok)}/{len(cases)} sealed transitions passed; {suite_detail}",
+            "summary": f"{sum(1 for ok in correct if ok)}/{len(cases)} sealed transitions passed; protocol_clean={protocol_clean}; {suite_detail}",
             "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
             "quality": quality,
         },

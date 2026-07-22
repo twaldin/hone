@@ -1,1 +1,1 @@
-Baseline: exclude .gitdir self-reference from tree
+Round-2: distinct protocol-integrity flag (protocol_clean) gating valid

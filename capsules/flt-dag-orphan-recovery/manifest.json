@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_47e8e208522e",
+  "id": "cap_ee50c90bf277",
   "objective": "Repair plan-reread orphan retirement and parallel spawn-failure stalls. Maximize the fraction of declared sealed transitions handled exactly; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "b2e11cdc30eda0b781db678289131fe2bd05d229"
+    "commit": "55f30cafb6c2bd73ddc5ac2fd6753984f624477e"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
