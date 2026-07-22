@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_f6d9a555ae6e",
+  "id": "cap_5e8c673e8d6f",
   "objective": "Maximize sealed-case fixed-capital top-3 expected net profit by changing the genuine candidate generation, pruning, ranking, and portfolio-selection policy. Each case admits exactly 72 distinct mechanically valid proposals; protected KNN observations, owner-derived profit math, liquidity/capital checks, and exhaustive case oracle remain trusted. Invalid protocol or protected edits fail closed; duplicate, liquidity-overlapping, or over-capital selections score zero for that case.",
   "baseline": {
     "kind": "git",
-    "commit": "fd5cb554233fb07ed3f5b8747c2b99e6eb076e7b"
+    "commit": "2e3e10246c35c3d18a7457e1bfadc928dbec6860"
   },
   "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
   "evalEntrypoint": [

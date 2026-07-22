@@ -46,6 +46,113 @@ def _drop_candidate_privileges() -> None:
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
 
 
+def _become_subreaper() -> None:
+    """Adopt orphaned candidate descendants (PR_SET_CHILD_SUBREAPER).
+
+    A candidate policy can double-fork or setsid so a descendant leaves the
+    worker's session and process group; killpg alone never reaches it. As a
+    subreaper every such orphan reparents to this trusted process, where
+    _reap_candidate_descendants can collect it. No-op off Linux / non-root.
+    """
+    if sys.platform != "linux" or os.geteuid() != 0:
+        return
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+    except Exception:
+        pass
+
+
+def _candidate_pids() -> list[int]:
+    """List live pids owned by the candidate uid via /proc."""
+    proc = Path("/proc")
+    pids: list[int] = []
+    if not proc.is_dir():
+        return pids
+    own_pid = os.getpid()
+    for entry in proc.iterdir():
+        if not entry.name.isdigit() or int(entry.name) == own_pid:
+            continue
+        try:
+            status = (entry / "status").read_text()
+        except OSError:
+            continue
+        for line in status.splitlines():
+            if line.startswith("Uid:"):
+                if int(line.split()[1]) == WORKER_UID:
+                    pids.append(int(entry.name))
+                break
+    return pids
+
+
+def _reap_candidate_descendants(deadline_sec: float = 5.0) -> None:
+    """Kill and reap EVERY candidate-uid process until none remain.
+
+    Covers descendants that escaped the worker's process group (new session,
+    double-fork): SIGKILL them by uid scan, then collect the orphans that
+    reparented to this subreaper with waitpid, looping until the uid scan
+    comes back empty or the hard deadline lapses.
+    """
+    if sys.platform != "linux" or os.geteuid() != 0:
+        return
+    deadline = time.monotonic() + deadline_sec
+    while True:
+        pids = _candidate_pids()
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        while True:
+            try:
+                reaped, _status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if reaped == 0:
+                break
+        if not pids:
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.05)
+
+
+def _fresh_candidate_state() -> None:
+    """Give each worker launch fresh candidate-writable state.
+
+    Purges every candidate-uid-owned entry under /tmp (state a previous
+    launch's descendants may have left behind) and rebuilds the worker HOME
+    empty. chmod-based sealing only: eval containers have no CAP_CHOWN.
+    """
+    tmp = Path("/tmp")
+    home = tmp / "candidate-home"
+    shutil.rmtree(home, ignore_errors=True)
+    try:
+        for entry in tmp.iterdir():
+            try:
+                owned = entry.lstat().st_uid == WORKER_UID
+            except OSError:
+                continue
+            if not owned:
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    try:
+        home.mkdir(mode=0o777)
+        os.chmod(home, 0o777)
+    except OSError:
+        pass
+
+
 def _load_cases(assets_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
     paths = sorted(assets_dir.rglob("cases.json"))
     failures: list[str] = []
@@ -92,11 +199,11 @@ def _load_cases(assets_dir: Path) -> tuple[list[dict[str, Any]], list[str]]:
 
 
 def _kill_worker_tree(process: subprocess.Popen) -> None:
-    """Kill and reap the FULL worker process group on every exit path.
+    """Kill and reap the FULL worker process tree on every exit path.
 
-    The worker runs in its own session (start_new_session=True), so killing
-    the process group also reaches any descendant a policy spawned to hold
-    the response pipes open past its own exit.
+    killpg reaches the worker's own session/group; descendants that started
+    a new session escape it, so we then sweep every candidate-uid process
+    and reap the orphans that reparented to this subreaper.
     """
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -116,6 +223,7 @@ def _kill_worker_tree(process: subprocess.Popen) -> None:
                 stream.close()
             except Exception:
                 pass
+    _reap_candidate_descendants()
 
 
 def _exchange_bounded(
@@ -187,6 +295,8 @@ def _run_candidate(workspace: Path, cases: list[dict[str, Any]]) -> tuple[dict[s
         json.dumps({"id": case["id"], "case": public_case(case)}, separators=(",", ":")) + "\n"
         for case in cases
     ).encode()
+    _reap_candidate_descendants()
+    _fresh_candidate_state()
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": "/tmp/candidate-home",
@@ -293,6 +403,7 @@ def _score_case(case: dict[str, Any], result: dict[str, Any]) -> tuple[float, di
 
 
 def main() -> None:
+    _become_subreaper()
     assets_dir = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
     workspace = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
     cases, fixture_failures = _load_cases(assets_dir)
