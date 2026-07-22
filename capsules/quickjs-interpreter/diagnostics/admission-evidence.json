@@ -61,8 +61,8 @@
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:fb0be203a48bc7848d1f62d337da515b3ee7aa23eaec7b656df6099603adc237",
-    "secondReportHash": "sha256:ab4a1ed84c3aac2f46f7bd3f5003b8b91adb14950609047bac911e43c4fbb497"
+    "firstReportHash": "sha256:57603d2b1d0eed312f42dbe1f3a6dcf170d6e2c2b75372515d2817d105026ebf",
+    "secondReportHash": "sha256:823b8c397cc84eb061e49af3353722d038a80dc156df04cc1ced99b9ad2c35c9"
   },
   "perturbation": {
     "deltaFromOrderingBaseline": 159936.64878707565,

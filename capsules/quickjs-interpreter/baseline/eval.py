@@ -2,10 +2,12 @@
 """Trusted evaluator for the terminal bellard/quickjs interpreter capsule."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
 import os
+import random
 import re
 import resource
 import signal
@@ -28,6 +30,16 @@ REF_SOURCE = BUILD_ROOT / "ref-source"
 REF_WORKSPACE = BUILD_ROOT / "ref-workspace"
 SANDBOX_UID = 2000
 PROCESS_TIMEOUT_SEC = 180
+# unshare(2) flag: every demoted (candidate-reachable) launch enters a FRESH
+# IPC namespace so SysV shared memory, semaphores, and message queues can
+# never carry candidate state from one launch to the next (the namespace dies
+# with its last process). The broker eval container grants the trusted scorer
+# CAP_SYS_ADMIN for exactly this preexec unshare; setuid(2000) then strips it
+# from the candidate worker and no-new-privileges prevents reacquisition.
+CLONE_NEWIPC = 0x08000000
+# Loaded once in the trusted parent BEFORE any fork so the preexec child never
+# allocates: dlopen inside preexec_fn is not async-signal-safe.
+_LIBC = ctypes.CDLL(None, use_errno=True)
 # Fastest-k-of-N trimmed sampling (trusted-parent timing). Host contention
 # only adds wall time and every sample is trusted-timed and output-gated, so
 # keeping the fastest samples rejects transient co-scheduling noise without
@@ -131,6 +143,11 @@ def demote() -> None:
     resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 30, 1 << 30))
     resource.setrlimit(resource.RLIMIT_AS, (1536 << 20, 1536 << 20))
     if os.geteuid() == 0:
+        # Fresh IPC namespace per launch, taken while still root (CAP_SYS_ADMIN
+        # is required and is dropped by the setuid below). Fail CLOSED: a launch
+        # that cannot get an isolated IPC namespace must not run at all.
+        if _LIBC.unshare(CLONE_NEWIPC) != 0:
+            raise OSError(ctypes.get_errno(), "unshare(CLONE_NEWIPC) failed")
         os.setgroups([])
         os.setgid(SANDBOX_UID)
         os.setuid(SANDBOX_UID)
@@ -446,6 +463,168 @@ def seal_built_tree(root: Path) -> None:
     root.chmod(0o555)
 
 
+# ---------------------------------------------------------------------------
+# Trusted per-case Test262 boundary.
+#
+# run-test262 links the candidate-mutable quickjs.c, so EVERYTHING that
+# process emits (per-case report lines, the Result summary, its exit status)
+# is candidate-influenced: a build-time seam (e.g. a constructor in the
+# mutable objects) can print six passing lines and exit 0 without executing a
+# single case. The worker's run-test262 gate is therefore kept only as
+# defense-in-depth; the AUTHORITATIVE gate below is driven entirely by this
+# trusted parent: it composes one root-owned read-only driver per frozen case
+# (harness + case + a freshly randomized receipt program), computes the
+# expected receipt independently in Python, and requires the candidate qjs to
+# print exactly that receipt with an empty stderr and exit 0. The receipt
+# statement is only reached after the case body completes without throwing,
+# and its value cannot be produced without actually evaluating fresh random
+# JavaScript, so a runtime that fabricates results instead of executing cases
+# has no channel left: the per-case receipt is checked in the parent against
+# parent-computed truth, never against candidate-emitted bookkeeping.
+# ---------------------------------------------------------------------------
+
+T262_DRIVER_DIR = BUILD_ROOT / "hone-t262"
+# Default harness, prepended in this order exactly like the Test262 runner
+# contract (assert.js and sta.js are implicit includes of every case).
+T262_BASE_HARNESS = ("assert.js", "sta.js")
+# Frontmatter keys this trusted composer understands. Anything else (flags,
+# negative, ...) would change execution semantics, so the gate fails CLOSED on
+# it instead of guessing: the frozen six-case corpus uses none of those.
+T262_KNOWN_KEYS = frozenset(
+    {"author", "defines", "description", "es5id", "es6id", "esid", "features", "includes", "info"}
+)
+T262_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):")
+T262_INCLUDES = re.compile(r"^includes:\s*\[([^\]]*)\]\s*$")
+T262_HARNESS_NAME = re.compile(r"^[A-Za-z0-9_.-]+\.js$")
+# Receipt arithmetic runs modulo this prime; every intermediate stays a safe
+# integer (max ~2^31 * 2^20 < 2^53), so JS doubles and Python ints agree bit
+# for bit.
+T262_MODULUS = 2147483647
+T262_STEPS = 24
+
+
+def base36(value: int) -> str:
+    if value == 0:
+        return "0"
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = []
+    while value > 0:
+        value, digit = divmod(value, 36)
+        out.append(digits[digit])
+    return "".join(reversed(out))
+
+
+def parse_case_includes(text: str, case: str) -> list[str]:
+    start = text.find("/*---")
+    end = text.find("---*/")
+    if start < 0 or end <= start:
+        raise GateFailure(f"Test262 case {case} lacks parseable metadata")
+    includes: list[str] = []
+    for line in text[start + 5 : end].splitlines():
+        key_match = T262_KEY.match(line)
+        if key_match is None:
+            continue  # indented continuation of a block scalar
+        key = key_match.group(1)
+        if key not in T262_KNOWN_KEYS:
+            raise GateFailure(f"Test262 case {case} uses unsupported metadata key: {key}")
+        if key != "includes":
+            continue
+        include_match = T262_INCLUDES.match(line.strip())
+        if include_match is None:
+            raise GateFailure(f"Test262 case {case} has an unsupported includes form")
+        for name in include_match.group(1).split(","):
+            name = name.strip()
+            if T262_HARNESS_NAME.fullmatch(name) is None:
+                raise GateFailure(f"Test262 case {case} names an invalid harness include")
+            includes.append(name)
+    return includes
+
+
+def make_receipt_program(rng: random.SystemRandom) -> tuple[str, bytes]:
+    """A fresh random JS program plus its exact expected stdout. The program is
+    regenerated per case per evaluation, so its output cannot be baked into a
+    candidate build or replayed from any earlier launch; producing it requires
+    evaluating the program."""
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    nonce = "".join(rng.choice(alphabet) for _ in range(48))
+    value = rng.randrange(1, T262_MODULUS)
+    lines = [f'  var s = "{nonce}";', f"  var v = {value};"]
+    for _ in range(T262_STEPS):
+        kind = rng.randrange(3)
+        if kind == 0:
+            k = rng.randrange(3, 1 << 20)
+            a = rng.randrange(T262_MODULUS)
+            lines.append(f"  v = (v * {k} + {a}) % {T262_MODULUS};")
+            value = (value * k + a) % T262_MODULUS
+        elif kind == 1:
+            i = rng.randrange(len(nonce))
+            k = rng.randrange(3, 1 << 16)
+            lines.append(f"  v = (v + s.charCodeAt({i}) * {k}) % {T262_MODULUS};")
+            value = (value + ord(nonce[i]) * k) % T262_MODULUS
+        else:
+            start = rng.randrange(len(nonce) - 9)
+            stop = start + rng.randrange(2, 9)
+            k = rng.randrange(3, 512)
+            lines.append(
+                f"  for (var i = {start}; i < {stop}; i++) v = (v * {k} + s.charCodeAt(i)) % {T262_MODULUS};"
+            )
+            for ch in nonce[start:stop]:
+                value = (value * k + ord(ch)) % T262_MODULUS
+    lines.append('  var parts = v.toString(36).split("");')
+    lines.append("  parts.reverse();")
+    lines.append('  print("HONE262 " + parts.join("") + "-" + (v % 997));')
+    program = ";(function(){\n" + "\n".join(lines) + "\n})();\n"
+    expected = f"HONE262 {base36(value)[::-1]}-{value % 997}\n".encode()
+    return program, expected
+
+
+def run_receipt_driver(binary: Path, driver: Path, expected: bytes, label: str) -> None:
+    completed = run_candidate([str(binary), str(driver)], timeout=30.0)
+    if completed.returncode != 0 or completed.stderr or completed.stdout != expected:
+        raise GateFailure(label)
+
+
+def run_trusted_test262(metadata: dict[str, object]) -> None:
+    cases = sorted(str(case) for case in metadata["test262Cases"])
+    harness_dir = SOURCE / "test262" / "harness"
+    rng = random.SystemRandom()
+    for case in cases:
+        case_path = SOURCE / "test262" / case
+        if case_path.is_symlink() or not case_path.is_file():
+            raise GateFailure(f"frozen Test262 case is missing from the sealed tree: {case}")
+        case_text = case_path.read_text(encoding="utf-8")
+        pieces: list[str] = []
+        for name in (*T262_BASE_HARNESS, *parse_case_includes(case_text, case)):
+            harness_path = harness_dir / name
+            if harness_path.is_symlink() or not harness_path.is_file():
+                raise GateFailure(f"Test262 harness include is missing: {name}")
+            pieces.append(harness_path.read_text(encoding="utf-8"))
+        # Sloppy mode, matching the frozen run-test262 configuration
+        # (mode=default -> nostrict; no frozen case is onlyStrict).
+        pieces.append(case_text)
+        receipt_js, expected = make_receipt_program(rng)
+        pieces.append(receipt_js)
+        # Fresh writable state (and a fresh IPC namespace inside run_candidate)
+        # per case; the driver lives in a root-owned directory the demoted
+        # candidate cannot write, created AFTER the reset that sweeps
+        # BUILD_ROOT, and is swept again by the next reset.
+        reset_candidate_state()
+        T262_DRIVER_DIR.mkdir(mode=0o755)
+        driver = T262_DRIVER_DIR / "driver.js"
+        driver.write_text("\n".join(pieces), encoding="utf-8")
+        driver.chmod(0o444)
+        # The pristine in-eval reference build must accept every composed
+        # driver first: a failure here is a trusted-composition bug (or a
+        # corrupt sealed tree), never candidate behavior, and it fails loudly
+        # instead of silently zeroing candidates.
+        run_receipt_driver(
+            REF_SOURCE / "qjs", driver, expected, f"trusted Test262 driver self-check failed: {case}"
+        )
+        run_receipt_driver(
+            SOURCE / "qjs", driver, expected, f"trusted Test262 gate failed: {case}"
+        )
+
+
 def require_exact_output(script: Path, expected: str, module: bool = False) -> bytes:
     reset_candidate_state()
     argv = [str(SOURCE / "qjs")]
@@ -592,7 +771,10 @@ def main() -> None:
 
         seal_built_tree(SOURCE)
         seal_built_tree(REF_SOURCE)
+        # Candidate-linked run-test262 first (defense-in-depth), then the
+        # authoritative trusted parent-driven per-case receipt gate.
         run_worker("test")
+        run_trusted_test262(metadata)
         observable = require_exact_output(
             WORKLOAD_DIR / "observable.js", str(metadata["observableExpected"])
         )
