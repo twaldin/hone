@@ -1,1 +1,1 @@
-Baseline: commit evaluator glue into baseline tree
+T4 anti-replay harness: per-iteration distinct-input perturbation + chain oracle, corpus seal, worker-state purge

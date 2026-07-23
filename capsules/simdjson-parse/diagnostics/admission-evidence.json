@@ -6,16 +6,16 @@
   },
   "aa": {
     "samples": [
-      1.0191189995410141,
-      1.0111684225150133,
-      0.9923857568734684
+      0.9936113371862831,
+      0.9877092232314759,
+      1.0036551043920918
     ],
-    "sigma": 0.01372750564359946,
-    "noiseFractionOfScale": 0.1999999999999997
+    "sigma": 0.008062085491241221,
+    "noiseFractionOfScale": 0.16205329081143027
   },
-  "qBase": 1.0075577263098319,
+  "qBase": 0.9949918882699503,
   "qFail": 0.0,
-  "qReference": 1.0761952545278293,
+  "qReference": 1.0447414826834478,
   "activeImplementation": "arm64",
   "controls": [
     {
@@ -27,30 +27,30 @@
     },
     {
       "name": "naive",
-      "train": 0.9738603488190657,
-      "validation": 0.9551171233135729,
-      "combined": 0.9644887360663192,
+      "train": 0.8871050527271699,
+      "validation": 0.922173864291469,
+      "combined": 0.9046394585093194,
       "hardGatesPass": true,
       "description": "slower-but-correct extra input scan in stage 1"
     },
     {
       "name": "shortcut",
-      "train": 1.4122708750194186,
+      "train": 1.2178451236769956,
       "validation": 0,
-      "combined": 0.7061354375097093,
+      "combined": 0.6089225618384978,
       "hardGatesPass": false,
-      "description": "train-corpus structural-index replay; holdout lengths hard-error, so the split inverts under trusted-parent timing"
+      "description": "train-corpus structural-index replay keyed on memorized train lengths; survives the value-perturbed timed iterations (structure is preserved) so it still beats baseline on train, but holdout lengths hard-error, so the split inverts under trusted-parent timing"
     }
   ],
   "perturbation": {
-    "name": "universal-structural-index-memoization",
+    "name": "sound-mask-verified-structural-replay",
     "source": "diagnostics/improved/src/generic/stage1/json_structural_indexer.h",
-    "train": 1.3981559959411665,
-    "validation": 1.2870481262713194,
-    "combined": 1.342602061106243,
-    "deltaFromQBase": 0.33504433479641116,
+    "train": 1.0190963783088476,
+    "validation": 1.029301956579074,
+    "combined": 1.0241991674439608,
+    "deltaFromQBase": 0.029207279174010448,
     "hardGatesPass": true,
-    "description": "replays the resident structural index on repeated identical non-streaming buffers (length + strided content fingerprint); split-agnostic, benefits train and validation alike"
+    "description": "re-validates every same-length reparse in full (scanner classification, UTF-8, unescaped checks) and compares per-block structural bitmasks against the previous full pass; on a complete match only the bit-flatten/index writes are skipped (the resident index array is a pure function of the masks). Split-agnostic and observation-preserving: structure is re-verified on every parse, values always re-parsed; benefits repeated-parse workloads on any corpus, including the identity-distinct (value-perturbed) timed iterations"
   },
   "rss": {
     "baselinePeakRssKb": {
@@ -61,7 +61,7 @@
   },
   "normalization": {
     "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "scale": 0.0686375282179974,
+    "scale": 0.04974959441349752,
     "status": "provisional local arm64 calibration under trusted-parent timing; final frozen-host like-for-like re-calibration required"
   }
 }

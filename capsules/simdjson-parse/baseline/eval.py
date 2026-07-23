@@ -18,9 +18,19 @@ Gaming-resistance model
   live ONLY in the protected asset mount (``/capsule/assets/assets/<split>/
   expected.json``); they are never staged into the candidate-readable corpus
   and never shipped in the /workspace baseline tree.
+* Timed iterations are identity-distinct: the trusted harness perturbs value
+  bytes deterministically before every iteration after the first (structure
+  and size preserved) and folds each perturbed iteration's full event stream
+  into a CHAIN line this parent validates against the trusted reference's
+  chain at the same iteration count, so repeated timed work can neither be
+  memoized (no two iterations parse identical bytes) nor skipped (every
+  iteration's parse output is validated). Candidate-writable residue in
+  /tmp, /dev/shm, and SysV IPC is purged between launches so deterministic
+  chains cannot be cached across runs either.
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
@@ -122,10 +132,19 @@ def compile_candidate() -> Path:
             "candidate compile",
             unprivileged=True,
         )
+        # Root-copy seal (the eval container has no CAP_CHOWN): the object was
+        # written by the unprivileged worker, so re-home its bytes into a
+        # root-owned file before any candidate process runs again; the
+        # worker-owned original goes with the rest of the purged residue.
+        sealed = BUILD_ROOT / "simdjson-sealed.o"
+        sealed.write_bytes(output.read_bytes())
+        sealed.chmod(0o644)
+        output.unlink()
     finally:
         reap_candidate_processes()
+        purge_worker_state()
         shutil.rmtree(COMPILE_ROOT, ignore_errors=True)
-    return output
+    return sealed
 
 
 def build_harnesses(simdjson_object: Path) -> tuple[Path, Path]:
@@ -195,6 +214,55 @@ def reap_candidate_processes() -> None:
                 pass
 
 
+def purge_worker_state() -> None:
+    """Remove candidate-writable residue between candidate launches.
+
+    Timed inputs are identity-distinct per iteration, but their event chains
+    are deterministic per (file, iteration count) — a candidate process that
+    stashed computed chains in /tmp, /dev/shm, or a SysV IPC object could
+    read them back in a later launch and replay instead of parsing. Every
+    launch therefore starts with no worker-owned filesystem entries and no
+    SysV objects (the container's IPC namespace is private, so the tables
+    only ever contain candidate-created entries).
+    """
+    for base in (Path("/tmp"), BUILD_ROOT):
+        try:
+            entries = list(base.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.lstat().st_uid != WORKER_UID:
+                    continue
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+            except OSError:
+                continue
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    except OSError:
+        return
+
+    def remove_all(table: str, remove) -> None:
+        try:
+            rows = Path(f"/proc/sysvipc/{table}").read_text().splitlines()[1:]
+        except OSError:
+            return
+        for row in rows:
+            fields = row.split()
+            if len(fields) >= 2 and fields[1].lstrip("-").isdigit():
+                try:
+                    remove(int(fields[1]))
+                except Exception:
+                    pass
+
+    remove_all("shm", lambda ipc_id: libc.shmctl(ipc_id, 0, None))  # IPC_RMID == 0
+    remove_all("msg", lambda ipc_id: libc.msgctl(ipc_id, 0, None))
+    remove_all("sem", lambda ipc_id: libc.semctl(ipc_id, 0, 0))
+
+
 def run_candidate(binary: Path, args: list[str], timeout: float, label: str) -> tuple[bytes, bytes, int, float]:
     """Run a candidate-linked binary as the unprivileged worker.
 
@@ -244,6 +312,7 @@ def run_candidate(binary: Path, args: list[str], timeout: float, label: str) -> 
         stdout_path.unlink(missing_ok=True)
         stderr_path.unlink(missing_ok=True)
         reap_candidate_processes()
+        purge_worker_state()
 
 
 def selected_split() -> tuple[str, Path]:
@@ -278,7 +347,7 @@ def stage_corpus(source: Path) -> None:
     shutil.copytree(source / "valid", CORPUS)
     shutil.copytree(source / "malformed", CORPUS / "malformed")
     for root, _, files in os.walk(CORPUS):
-        os.chmod(root, 0o777)
+        os.chmod(root, 0o755)
         for name in files:
             os.chmod(Path(root) / name, 0o644)
 
@@ -299,11 +368,22 @@ def sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def event_bytes(output: bytes) -> bytes:
+def parse_output(output: bytes) -> tuple[bytes, str | None]:
+    """Split harness stdout into the event payload and the optional CHAIN line.
+
+    The payload (everything after the IMPL banner) is hash-compared against
+    the protected expected table; the CHAIN line folds every perturbed timed
+    iteration's event stream and is validated against the trusted reference's
+    chain in ``_Verifier.timed``.
+    """
     lines = output.splitlines()
+    chain: str | None = None
+    if lines and lines[-1].startswith(b"CHAIN:"):
+        chain = lines[-1].decode("ascii", "strict")
+        lines = lines[:-1]
     if len(lines) < 2:
         raise GateFailure("verifier emitted no parse/event result")
-    return b"\n".join(lines[1:]) + b"\n"
+    return b"\n".join(lines[1:]) + b"\n", chain
 
 
 class _Verifier:
@@ -315,7 +395,7 @@ class _Verifier:
         self.active_impl: str | None = None
         self.max_rss = 0
 
-    def _run(self, binary: Path, args: list[str], timeout: float, label: str) -> tuple[bytes, float]:
+    def _run(self, binary: Path, args: list[str], timeout: float, label: str) -> tuple[bytes, str | None, float]:
         out, _, rss, wall = run_candidate(binary, args, timeout, label)
         self.max_rss = max(self.max_rss, rss)
         first = out.splitlines()[0].decode("ascii", "strict") if out else ""
@@ -326,57 +406,98 @@ class _Verifier:
             self.active_impl = impl
         elif impl != self.active_impl:
             raise GateFailure("active implementation changed within evaluation")
-        return event_bytes(out), wall
+        payload, chain = parse_output(out)
+        return payload, chain, wall
 
     def check(self, mode: str, path: Path, key: str, expected: dict[str, str], label: str) -> None:
-        ev, _ = self._run(self.candidate, [mode, str(path)], float(CHALLENGE["testTimeoutSec"]), label)
+        ev, _, _ = self._run(self.candidate, [mode, str(path)], float(CHALLENGE["testTimeoutSec"]), label)
         if sha256(ev) != expected.get(key):
             raise GateFailure(f"exact parse/event or malformed behavior mismatch: {key}")
 
     def timed(self, mode: str, name: str, key: str, expected: dict[str, str]) -> float:
         """Parent-timed candidate/reference speed ratio for one workload.
 
-        Each round runs reference and candidate at N iterations, then both at
-        2N, back-to-back on the parent's monotonic clock. The 2N-N difference
-        cancels fixed process overhead; the reference/candidate ratio cancels
-        host-load drift; the per-point minimum across rounds filters one-sided
-        load bursts. Every run — reference included — must reproduce the
-        protected expected event hash, so speed can never be traded against
-        correctness and a reference/toolchain defect is caught immediately.
+        Contention-robust minimum estimator. Each binary is run at a calibrated
+        iteration count ``samples`` times (lead alternating), timed by the
+        parent's monotonic clock; the ratio is min(reference)/min(candidate).
+        The fastest of several runs is the one that caught the least-contended
+        window, so each per-binary minimum converges to that binary's true
+        uncontended time no matter when its clean window occurred — the ratio
+        is therefore immune to both slow drift and one-sided bursts, which is
+        essential on a shared, heavily-loaded host. (Per-round ratios and 2N-N
+        differences were both tried and reintroduced large variance under load
+        by combining independently-noisy wall times; the per-binary minimum
+        does not.) The iteration count is calibrated up front so each run lasts
+        ~timingTargetSec, keeping the shared fixed per-process overhead (exec,
+        file load, site scan) a negligible common-mode term in the ratio.
+
+        Iteration 1 of every run parses the PRISTINE document and must
+        reproduce the protected expected event hash; every further iteration
+        parses a distinct, deterministically value-perturbed variant (trusted
+        harness code, identical in both binaries), and the harness folds each
+        perturbed iteration's full event stream into a CHAIN line. The trusted
+        reference runs first at each iteration count and pins the expected
+        chain; every subsequent run at that count must reproduce it exactly,
+        so timed work can neither be memoized (no two iterations see the same
+        bytes) nor skipped (every iteration's output is validated).
         """
         path = CORPUS / name
         size = path.stat().st_size
-        # Iterations scale with a fixed per-mode work budget so every timed
-        # diff spans a comparable wall interval regardless of corpus size —
-        # small files no longer produce jitter-dominated measurements.
-        iters = max(4, int(CHALLENGE["timingWorkBytes"][mode]) // size)
+        base_iters = max(4, int(CHALLENGE["timingWorkBytes"][mode]) // size)
         samples = int(CHALLENGE["timingSamples"])
+        target_wall = float(CHALLENGE["timingTargetSec"])
         timeout = float(CHALLENGE["benchmarkTimeoutSec"])
         want = expected.get(key)
+        chains: dict[int, str] = {}
 
         def run_point(binary: Path, n: int, who: str) -> float:
-            ev, wall = self._run(binary, [mode, str(path), str(n)], timeout, f"{mode} timing {name} ({who} x{n})")
+            ev, chain, wall = self._run(binary, [mode, str(path), str(n)], timeout, f"{mode} timing {name} ({who} x{n})")
             if sha256(ev) != want:
                 raise GateFailure(f"exact parse/event mismatch under timing ({who}): {key}")
+            if chain is None:
+                raise GateFailure(f"perturbed-iteration chain missing ({who}): {key}")
+            if chains.setdefault(n, chain) != chain:
+                raise GateFailure(f"perturbed-iteration event chain mismatch ({who} x{n}): {key}")
             return wall
 
-        # Rounds interleave the four points (ref/cand at N and 2N) so all of
-        # them sample the same load window; the MINIMUM wall per point across
-        # rounds filters one-sided host-load bursts (the classic robust timing
-        # estimator), and one ratio is formed from the four filtered points.
-        # A discarded warmup evens out cold-start (page cache, CPU ramp).
-        run_point(self.reference, iters, "warmup")
-        best = {"rn": math.inf, "cn": math.inf, "r2": math.inf, "c2": math.inf}
-        for _ in range(samples):
-            best["rn"] = min(best["rn"], run_point(self.reference, iters, "reference"))
-            best["cn"] = min(best["cn"], run_point(self.candidate, iters, "candidate"))
-            best["r2"] = min(best["r2"], run_point(self.reference, 2 * iters, "reference"))
-            best["c2"] = min(best["c2"], run_point(self.candidate, 2 * iters, "candidate"))
-        d_ref = best["r2"] - best["rn"]
-        d_cand = best["c2"] - best["cn"]
-        if not (math.isfinite(d_ref) and math.isfinite(d_cand) and d_ref > 0 and d_cand > 0):
-            raise GateFailure(f"non-positive parent-measured parse time for {key}")
-        return d_ref / d_cand
+        # Calibrate the iteration count so each timed run lasts ~target_wall,
+        # regardless of file size or mode cost — the reference warmup doubles
+        # as the probe. Longer runs shrink the common-mode overhead term to
+        # noise, so the adjacent ref/candidate ratio needs no 2N-N subtraction.
+        probe_wall = run_point(self.reference, base_iters, "warmup")
+        iters = base_iters
+        if probe_wall > 0:
+            scaled = int(base_iters * target_wall / probe_wall)
+            iters = max(base_iters, min(base_iters * 32, scaled))
+        # Candidate warmup at the calibrated count (page cache, CPU ramp,
+        # first-parse replay-cache population for the candidate).
+        run_point(self.candidate, iters, "warmup")
+
+        # Contention-robust minimum estimator. Each binary is run ``samples``
+        # times (lead alternating), and the MINIMUM wall per binary is kept:
+        # the fastest run is the one that caught the least-contended window, so
+        # min_ref and min_cand each converge to the true uncontended time
+        # regardless of when their clean window occurred. Their ratio is the
+        # drift- and contention-immune speed ratio — differencing (2N-N) or
+        # per-round ratios both reintroduce variance under load, while the
+        # per-binary minimum does not. Long calibrated reps keep the shared
+        # fixed overhead a negligible common-mode term in the ratio.
+        best_ref = math.inf
+        best_cand = math.inf
+        for round_index in range(samples):
+            if round_index % 2 == 0:
+                r = run_point(self.reference, iters, "reference")
+                c = run_point(self.candidate, iters, "candidate")
+            else:
+                c = run_point(self.candidate, iters, "candidate")
+                r = run_point(self.reference, iters, "reference")
+            if math.isfinite(r) and r > 0:
+                best_ref = min(best_ref, r)
+            if math.isfinite(c) and c > 0:
+                best_cand = min(best_cand, c)
+        if not (math.isfinite(best_ref) and math.isfinite(best_cand) and best_ref > 0 and best_cand > 0):
+            raise GateFailure(f"no positive parent-measured parse time for {key}")
+        return best_ref / best_cand
 
 
 def evaluate_candidate(split: str, expected: dict[str, str], candidate: Path, reference: Path) -> tuple[str, int, list[tuple[str, float]]]:
@@ -459,6 +580,7 @@ def main() -> None:
         emit_failure(f"{type(exc).__name__}: {exc}", {"wallSec": time.monotonic() - started})
     finally:
         reap_candidate_processes()
+        purge_worker_state()
 
 
 if __name__ == "__main__":

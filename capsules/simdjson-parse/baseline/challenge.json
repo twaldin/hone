@@ -20,14 +20,15 @@
     "dom",
     "ondemand"
   ],
-  "timingSamples": 3,
+  "timingSamples": 10,
+  "timingTargetSec": 1.0,
   "peakRssToleranceFraction": 0.05,
   "compileTimeoutSec": 180,
   "testTimeoutSec": 45,
   "benchmarkTimeoutSec": 90,
   "evaluatorTimeoutSec": 900,
   "timingWorkBytes": {
-    "dom": 400000000,
+    "dom": 200000000,
     "ondemand": 120000000
   }
 }

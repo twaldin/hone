@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_4e0754bef989",
+  "id": "cap_8b4162c1ca5a",
   "objective": "Improve geometric-mean DOM and On-Demand JSON parsing throughput across frozen mixed corpora at simdjson 8e6bac94 while preserving exact event hashes, malformed-input errors, the full relevant upstream test set, and peak RSS.",
   "baseline": {
     "kind": "git",
-    "commit": "461736e4b9e487ca5f9217b8fdda4dc280047742"
+    "commit": "78b020a05798abe563e22d00700ed4af89356744"
   },
   "image": "hone-simdjson-parse@sha256:63083edb85b611e342254616b8d2515cb7263b7828602da817cec1cd143fcb4c",
   "evalEntrypoint": [
@@ -104,7 +104,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:76e6875d0df7868bdd34e482eeceb080770f442e56a41e33d00cd64215132b18"
+    "hash": "sha256:a851a2dc7f912b5b78cf3e70b8b68cfeb6cf055fa3df167c3e7500a062de6693"
   },
   "contentHashes": {
     "assets/train/expected.json": "sha256:791e5b626a3af3ad725511f9354a97060986f15793398cbbcf8c4b8ebb6839de",
@@ -180,16 +180,16 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
       "activeImplementation": "arm64 (NEON)",
-      "q": "geometric mean of candidate/reference speed ratios for full-document DOM and On-Demand parses across the three frozen corpora; two-point (N vs 2N iterations) wall clock measured in the trusted evaluator parent around the non-self-reporting harness, reference parser rebuilt from frozen trusted sources in the same eval and timed back-to-back (median across samples), never a self-reported number from candidate-linked code",
+      "q": "geometric mean of candidate/reference speed ratios for full-document DOM and On-Demand parses across the three frozen corpora; two-point (N vs 2N iterations) wall clock measured in the trusted evaluator parent around the non-self-reporting harness, reference parser rebuilt from frozen trusted sources in the same eval and timed back-to-back (per-point minimum across samples), never a self-reported number from candidate-linked code; timed iterations are identity-distinct (trusted harness deterministically perturbs value bytes before every iteration after the first, structure and size preserved) and every perturbed iteration's full event stream is folded into a chain the parent validates against the trusted reference's chain at the same iteration count, so repeated timed work can neither be memoized nor skipped",
       "qFail": 0,
       "peakRssGate": "candidate harness peak RSS <= per-split frozen baseline (protected asset) * 1.05",
       "freshProcess": true,
-      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus",
+      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus; perturbed-iteration chains are pinned per iteration count by the trusted reference binary within each eval, and candidate-writable residue (/tmp, /dev/shm, SysV IPC) is purged between launches",
       "normalization": {
         "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-        "qBase": 1.0075577263098319,
-        "sigma": 0.01372750564359946,
-        "qReference": 1.0761952545278293,
+        "qBase": 0.9949918882699503,
+        "sigma": 0.008062085491241221,
+        "qReference": 1.0447414826834478,
         "status": "provisional local locked A-A calibration; final frozen GCE like-for-like re-calibration required"
       }
     }

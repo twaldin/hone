@@ -195,8 +195,11 @@ error_code json_structural_indexer::index(const uint8_t *buf, size_t len, dom_pa
   if (simdjson_unlikely(len > parser.capacity())) { return CAPACITY; }
   // We guard the rest of the code so that we can assume that len > 0 throughout.
   if (len == 0) { return EMPTY; }
+  // Slower-but-correct control: a serialized extra pass over the input whose
+  // cost must sit clearly below baseline even after the trusted harness's
+  // per-iteration validation traversal dilutes candidate-side deltas.
   volatile uint64_t hone_naive_scan = 0;
-  for (size_t offset = 0; offset < len; offset += 64) {
+  for (size_t offset = 0; offset < len; offset += 16) {
     hone_naive_scan = hone_naive_scan ^ (uint64_t(buf[offset]) + offset);
   }
   (void)hone_naive_scan;

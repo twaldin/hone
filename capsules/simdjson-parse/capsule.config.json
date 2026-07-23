@@ -85,16 +85,16 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
       "activeImplementation": "arm64 (NEON)",
-      "q": "geometric mean of candidate/reference speed ratios for full-document DOM and On-Demand parses across the three frozen corpora; two-point (N vs 2N iterations) wall clock measured in the trusted evaluator parent around the non-self-reporting harness, reference parser rebuilt from frozen trusted sources in the same eval and timed back-to-back (median across samples), never a self-reported number from candidate-linked code",
+      "q": "geometric mean of candidate/reference speed ratios for full-document DOM and On-Demand parses across the three frozen corpora; two-point (N vs 2N iterations) wall clock measured in the trusted evaluator parent around the non-self-reporting harness, reference parser rebuilt from frozen trusted sources in the same eval and timed back-to-back (per-point minimum across samples), never a self-reported number from candidate-linked code; timed iterations are identity-distinct (trusted harness deterministically perturbs value bytes before every iteration after the first, structure and size preserved) and every perturbed iteration's full event stream is folded into a chain the parent validates against the trusted reference's chain at the same iteration count, so repeated timed work can neither be memoized nor skipped",
       "qFail": 0,
       "peakRssGate": "candidate harness peak RSS <= per-split frozen baseline (protected asset) * 1.05",
       "freshProcess": true,
-      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus",
+      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus; perturbed-iteration chains are pinned per iteration count by the trusted reference binary within each eval, and candidate-writable residue (/tmp, /dev/shm, SysV IPC) is purged between launches",
       "normalization": {
         "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-        "qBase": 1.0075577263098319,
-        "sigma": 0.01372750564359946,
-        "qReference": 1.0761952545278293,
+        "qBase": 0.9949918882699503,
+        "sigma": 0.008062085491241221,
+        "qReference": 1.0447414826834478,
         "status": "provisional local locked A-A calibration; final frozen GCE like-for-like re-calibration required"
       }
     },
