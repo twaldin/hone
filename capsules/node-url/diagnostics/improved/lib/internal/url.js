@@ -312,7 +312,7 @@ ObjectDefineProperties(URLSearchParamsIterator.prototype, {
 
 class URLSearchParams {
   #searchParams = [];
-  #serialized;
+  #encodedPairs;
 
   // "associated url object"
   #context;
@@ -323,7 +323,7 @@ class URLSearchParams {
     };
     getURLSearchParamsList = (obj) => obj.#searchParams;
     setURLSearchParams = (obj, query) => {
-      obj.#serialized = undefined;
+      obj.#encodedPairs = undefined;
       if (query === undefined) {
         obj.#searchParams = [];
       } else {
@@ -480,7 +480,7 @@ class URLSearchParams {
 
     name = StringPrototypeToWellFormed(`${name}`);
     value = StringPrototypeToWellFormed(`${value}`);
-    this.#serialized = undefined;
+    this.#encodedPairs = undefined;
     ArrayPrototypePush(this.#searchParams, name, value);
 
     if (this.#context) {
@@ -498,7 +498,7 @@ class URLSearchParams {
 
     const list = this.#searchParams;
     name = StringPrototypeToWellFormed(`${name}`);
-    this.#serialized = undefined;
+    this.#encodedPairs = undefined;
     const { length } = list;
     let write = 0;
 
@@ -609,7 +609,7 @@ class URLSearchParams {
     const list = this.#searchParams;
     name = StringPrototypeToWellFormed(`${name}`);
     value = StringPrototypeToWellFormed(`${value}`);
-    this.#serialized = undefined;
+    this.#encodedPairs = undefined;
     const { length } = list;
 
     // If there are any name-value pairs whose name is `name`, in `list`, set
@@ -656,7 +656,7 @@ class URLSearchParams {
       throw new ERR_INVALID_THIS('URLSearchParams');
 
     const a = this.#searchParams;
-    this.#serialized = undefined;
+    this.#encodedPairs = undefined;
     const len = a.length;
 
     if (len <= 2) {
@@ -751,8 +751,30 @@ class URLSearchParams {
     if (typeof this !== 'object' || this === null || !(#searchParams in this))
       throw new ERR_INVALID_THIS('URLSearchParams');
 
-    this.#serialized ??= serializeParams(this.#searchParams);
-    return this.#serialized;
+    // Independently authored improvement: cache the percent-encoded
+    // `name=value` fragments (invalidated on every list mutation or
+    // associated-URL refresh) so repeated stringification skips re-encoding,
+    // while every call still performs the full pair join. Serialization
+    // therefore stays real, per-call, scale-dependent work.
+    let pairs = this.#encodedPairs;
+    if (pairs === undefined) {
+      const list = this.#searchParams;
+      pairs = [];
+      for (let i = 0; i < list.length; i += 2) {
+        ArrayPrototypePush(
+          pairs,
+          `${encodeStr(list[i], noEscape, paramHexTable)}=${encodeStr(list[i + 1], noEscape, paramHexTable)}`,
+        );
+      }
+      this.#encodedPairs = pairs;
+    }
+    const len = pairs.length;
+    if (len === 0)
+      return '';
+    let output = pairs[0];
+    for (let i = 1; i < len; i++)
+      output += `&${pairs[i]}`;
+    return output;
   }
 }
 

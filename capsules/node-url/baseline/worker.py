@@ -151,32 +151,68 @@ def source_flags(path: Path) -> list[str]:
 
 
 def run_single_test(name: str) -> str | None:
-    """Run one URL test bound to a trusted completion marker.
+    """Run one URL test bound to a parent-held completion receipt channel.
 
-    The sentinel preload emits the marker only after the event loop drained
-    naturally with exit code zero, so a test body cut short by an early exit
-    cannot count as complete. Returns a failure detail or None.
+    The nonce travels over a parent-written pipe that the trusted sentinel
+    preload drains before the test body (or any lazily loaded mutable module)
+    runs, and the receipt returns over a second pipe whose read end only this
+    trusted parent holds. The environment carries only descriptor numbers,
+    never the nonce, and stderr is never a receipt channel, so a process that
+    merely prints a marker and exits zero cannot satisfy the gate. The
+    sentinel emits the receipt only after the event loop drained naturally
+    with exit code zero, so a test body cut short by an early exit cannot
+    count as complete. Returns a failure detail or None.
     """
     path = SOURCE / "test/parallel" / name
     nonce = secrets.token_hex(16)
-    env = worker_env()
-    env["HONE_TEST_NONCE"] = nonce
-    completed = subprocess.run(
-        [str(NODE), *source_flags(path), "-r", str(TEST_SENTINEL), str(path)],
-        cwd=SOURCE,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=PER_TEST_TIMEOUT,
-        check=False,
-    )
+    expected_receipt = f"{COMPLETION_PREFIX}{nonce}\n".encode()
+    challenge_read, challenge_write = os.pipe()
+    receipt_read, receipt_write = os.pipe()
+    receipt = bytearray()
+    try:
+        os.set_inheritable(challenge_read, True)
+        os.set_inheritable(receipt_write, True)
+        os.write(challenge_write, f"{nonce}\n".encode())
+        os.close(challenge_write)
+        challenge_write = -1
+        env = worker_env()
+        env["HONE_CHALLENGE_FD"] = str(challenge_read)
+        env["HONE_RECEIPT_FD"] = str(receipt_write)
+        completed = subprocess.run(
+            [str(NODE), *source_flags(path), "-r", str(TEST_SENTINEL), str(path)],
+            cwd=SOURCE,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=PER_TEST_TIMEOUT,
+            check=False,
+            pass_fds=(challenge_read, receipt_write),
+        )
+        os.close(challenge_read)
+        challenge_read = -1
+        os.close(receipt_write)
+        receipt_write = -1
+        while len(receipt) <= 4096:
+            chunk = os.read(receipt_read, 4096)
+            if not chunk:
+                break
+            receipt.extend(chunk)
+    finally:
+        for descriptor in (challenge_read, challenge_write, receipt_read, receipt_write):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
     if completed.returncode != 0:
         tail = (completed.stdout + b"\n" + completed.stderr).decode("utf-8", "replace")[-400:]
         return f"{name} exited with {completed.returncode}: {tail}"
-    marker = f"{COMPLETION_PREFIX}{nonce}".encode() in completed.stderr
-    if EXPECTED_TESTS[name] and not marker:
-        return f"{name} did not run its body to completion"
+    if EXPECTED_TESTS[name]:
+        if bytes(receipt) != expected_receipt:
+            return f"{name} did not deliver the trusted completion receipt"
+    elif receipt and bytes(receipt) != expected_receipt:
+        return f"{name} wrote unexpected bytes on the trusted receipt channel"
     return None
 
 

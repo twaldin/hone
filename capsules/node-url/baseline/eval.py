@@ -343,14 +343,14 @@ def run_benchmark(cell: dict) -> tuple[float, int, int]:
     fastest boosted-scale and fastest base-scale runs; candidate stdout is
     only a structural completion marker.
 
-    Cells whose marginal falls below MIN_MARGINAL_SEC saturate at the
-    measurement resolution floor instead of failing: a legitimately memoized
-    fast path can be loop-eliminated by the JIT and cost ~0 at the margin, so
-    sub-resolution marginals are indistinguishable from free work. The clamp
-    bounds any single cell at extra_ops/MIN_MARGINAL_SEC, so early candidate
-    termination can never mint an unbounded score the way trusting a
-    candidate-printed rate could, and the exact-output, completion-marker,
-    and split-inversion gates still bind such a candidate to correct work.
+    A cell only earns credit from a positive, scale-dependent marginal
+    strictly above MIN_MARGINAL_SEC. The boosted run does 8x the base-scale
+    protected work, so every legitimate build pays a marginal wall-clock far
+    above the floor (roughly seconds per cell); a marginal at or below the
+    floor means the extra work was never actually performed (an
+    early-terminating or short-circuited process) or is below measurement
+    resolution, and neither may mint throughput: the cell hard-fails instead
+    of saturating at extra_ops/MIN_MARGINAL_SEC.
     """
     base_walls: list[float] = []
     boosted_walls: list[float] = []
@@ -371,10 +371,12 @@ def run_benchmark(cell: dict) -> tuple[float, int, int]:
         rss = max([rss] + [rss_ for _, rss_ in memory_rows] + external_rss_rows)
         base_walls.append(base_elapsed)
         boosted_walls.append(boosted_elapsed)
-    # Saturate at the resolution floor: sub-floor marginals (JIT-eliminated
-    # free ops OR an early-terminating process) all score exactly
-    # extra_ops/MIN_MARGINAL_SEC — bounded, never candidate-chosen.
-    marginal = max(min(boosted_walls) - min(base_walls), MIN_MARGINAL_SEC)
+    marginal = min(boosted_walls) - min(base_walls)
+    if marginal <= MIN_MARGINAL_SEC:
+        raise GateFailure(
+            f"benchmark cell {cell['id']} marginal wall-clock {marginal:.6f}s is not a "
+            f"positive scale-dependent cost above the {MIN_MARGINAL_SEC}s floor"
+        )
     rate = cell["extra_ops"] / marginal
     if not math.isfinite(rate) or rate <= 0:
         raise GateFailure("trusted benchmark produced non-finite throughput")
