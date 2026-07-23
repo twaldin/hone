@@ -1,5 +1,5 @@
 {
-  "capsuleId": "cap_c13bbefe1975",
+  "capsuleId": "cap_3cb31f099fc5",
   "capsuleDigestNote": "evidence attests the frozen manifest identity above; regenerated after the two consecutive ordering passes",
   "feasibility": {
     "note": "clean candidate build + full eval well under capsule wall-clock; see build_test_sec in evaluator diagnostics"
@@ -68,11 +68,12 @@
   },
   "ordering": {
     "consecutivePassingRuns": 2,
-    "lastStabilitySpread": 0.059328656468645075,
+    "lastStabilitySpread": 0.0141,
     "band": 0.15,
     "brokerEvalInvocationsPerRun": 14,
-    "verdicts": "broken<naive<baseline<improved; shortcut beats baseline on train and fails the protected validation split; both passes identical",
-    "imageLineage": "the two consecutive ordering passes were measured in image 85302708 (rust+node+bun); the frozen manifest image 8299d9d adds only the optimizer runtime pi_natives addon next to bun. The trusted evaluator (python3 eval.py, dropping to uid 2000, exec of the sealed Rust runner and /usr/bin/time) never loads node/bun/pi_natives, so the two images are byte-identical on the evaluator path and the ordering measurements are valid for the frozen image; the addon is required only so the development-train optimizer can drive this capsule"
+    "verdicts": "broken<naive<baseline<improved; shortcut beats baseline on train and panics on the protected validation split (split-inverting); both round-2 passes clean (stability spreads 0.0239 then 0.0141)",
+    "measurementNote": "round-2 hardening: benchmark uses the T4-hardened harness (per-iteration identity-distinct rotated inputs with probe validation) and an interleaved reference-yardstick score — every sample pairs the candidate against the pristine root-owned /opt/target-seed reference, q = manifest qBase anchor * geomean of per-workload min-of-N reference/candidate per-rep ratios. Common-mode host drift cancels per binary, so thin true margins survive a loaded shared host. Between timed legs the evaluator becomes a subreaper and reaps every candidate-uid process so no candidate residue overlaps a reference leg.",
+    "imageLineage": "round-2 image rebuilt from the pinned biome checkout + hardened harness (hone-biome-task@sha256:3e6e6f4584b05ebdb125974aece501c0aa64b7b1483bc98bf50c4c8985dc6c8d), bakes the pristine reference runner at /opt/target-seed used as the in-container yardstick. Both consecutive ordering passes were measured in this frozen image; the trusted evaluator (python3 eval.py, uid 2000, sealed Rust runner + /usr/bin/time) never loads node/bun/pi_natives."
   },
   "seedPilots": {
     "requirement": "gate-7 development-train headroom: three two-episode seed-optimizer pilots; at least one valid non-baseline candidate; fewer than three runs reach qReference",

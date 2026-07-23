@@ -13,6 +13,14 @@ at a root-owned path so it cannot be swapped mid-evaluation, runs every
 regression check as its own child bound to an exact protected receipt, and
 accepts a benchmark sample only when the receipt it produced matches the
 protected oracle for that workload.
+
+Scoring model: every benchmark sample is an interleaved candidate/reference
+pair against the pristine root-owned reference runner baked into the image,
+and the score is a frozen anchor scaled by the geometric mean of the median
+per-pair wall-time ratios. Common-mode host drift (thermals, vCPU placement)
+cancels inside each pair, so thin true margins survive noisy hosts. Between
+timed legs the evaluator sweeps and reaps every candidate-uid process, so no
+candidate residue can run while the reference leg is being timed.
 """
 from __future__ import annotations
 
@@ -39,6 +47,22 @@ TARGET = Path("/tmp/target")
 BUILT_RUNNER = TARGET / "release/hone_biome_bench"
 SEALED_DIR = Path("/tmp/hone-sealed")
 RUNNER = SEALED_DIR / "hone_biome_bench"
+# Pristine reference runner baked into the image at build time from the
+# frozen baseline sources and the same benchmark harness. Root-owned and
+# read-only inside the eval container, so candidate-linked code can never
+# influence it. It is the in-container yardstick every candidate sample is
+# ratioed against.
+REFERENCE_RUNNER = Path("/opt/target-seed/release/hone_biome_bench")
+# Frozen scale anchor for the ratio-normalized score: the locked A-A
+# calibration qBase from the capsule manifest. A candidate exactly as fast as
+# the pristine reference scores this value; relative speedups scale it by the
+# measured ratio. The anchor is a constant, so it carries no host state.
+REFERENCE_ANCHOR_Q = 0.0769000486784732
+# Timed batches per binary per workload/mode. Each binary runs this many
+# times, strictly alternating with the other, and the estimator keeps each
+# binary's MINIMUM per-rep time — the least-contended sample. Larger batches
+# raise the chance both binaries catch a quiet instant on a loaded host.
+BENCH_BATCHES = 9
 UID = 2000
 GID = 2000
 MUTABLE_CRATES = (
@@ -89,6 +113,67 @@ def drop_privileges() -> None:
     os.setuid(UID)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+
+
+def become_subreaper() -> None:
+    """Best-effort PR_SET_CHILD_SUBREAPER so orphaned candidate descendants
+    reparent to this evaluator (already the case when it runs as container
+    PID 1) and can be reaped by the sweep below."""
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(36, 1, 0, 0, 0)
+    except Exception:
+        pass
+
+
+def reap_candidate_processes() -> None:
+    """Kill and reap every process still running as the candidate uid.
+
+    killpg alone misses descendants that started their own session. Under
+    reference-ratio scoring a surviving candidate process could burn CPU
+    selectively while the pristine reference leg runs and inflate the
+    candidate's ratio, so after every timed leg the evaluator sweeps the
+    whole container for candidate-uid processes until none remain.
+    """
+    for _ in range(50):
+        while True:
+            try:
+                pid, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if pid == 0:
+                break
+        live: list[int] = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                status = Path(f"/proc/{entry}/status").read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            uid_fields: list[str] = []
+            state_fields: list[str] = []
+            for line in status.splitlines():
+                if line.startswith("Uid:"):
+                    uid_fields = line.split()
+                elif line.startswith("State:"):
+                    state_fields = line.split()
+            if len(uid_fields) < 2 or uid_fields[1] != str(UID):
+                continue
+            if len(state_fields) >= 2 and state_fields[1] == "Z":
+                continue
+            live.append(int(entry))
+        if not live:
+            return
+        for pid in live:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        time.sleep(0.02)
+    raise RuntimeError("candidate processes survived the reaping sweep")
 
 
 def run_untrusted(
@@ -438,70 +523,123 @@ def validate_bench_receipt(mode: str, receipt: Path, oracle: dict) -> None:
             raise RuntimeError("benchmark parse receipt does not match the protected oracle")
 
 
+def run_bench_sample(
+    runner: Path,
+    mode: str,
+    source: Path,
+    repetitions: int,
+    oracle: dict,
+    sample_dir: Path,
+) -> tuple[float, int]:
+    """One timed runner invocation: trusted-parent wall time around the whole
+    child, receipt validated against the protected oracle before the sample
+    counts. Returns (elapsed_ms, rss_kb)."""
+    sample_dir.mkdir(mode=0o777)
+    sample_dir.chmod(0o777)
+    receipt = sample_dir / "receipt"
+    rss_file = sample_dir / "rss"
+    command = [
+        "/usr/bin/time",
+        "-f",
+        "%M",
+        "-o",
+        str(rss_file),
+        str(runner),
+        mode,
+        str(source),
+        str(repetitions),
+        str(receipt),
+    ]
+    started = time.perf_counter_ns()
+    result = run_untrusted(
+        command,
+        timeout=float(CHALLENGE["benchmarkTimeoutSec"]),
+        stdout=subprocess.DEVNULL,
+    )
+    elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
+    # Sweep candidate-uid stragglers before anything else runs: a leftover
+    # process from this leg must never overlap the other leg of the pair.
+    reap_candidate_processes()
+    if result.returncode != 0:
+        raise RuntimeError(f"runner failed: {result.stderr.decode(errors='replace')[-500:]}")
+    validate_bench_receipt(mode, receipt, oracle)
+    rss = int(rss_file.read_text(encoding="utf-8").strip())
+    shutil.rmtree(sample_dir)
+    return elapsed_ms, rss
+
+
 def benchmark(
     expected: dict, cases: list[Path], work: Path, initial_peak_rss: int
-) -> tuple[float, int, dict[str, float]]:
-    """Benchmark every frozen workload with trusted-parent wall timing.
+) -> tuple[float, int, dict[str, float], dict[str, float]]:
+    """Benchmark every frozen workload against the in-container reference.
 
-    Every sample is a fresh process in a fresh sample directory. The parent
-    measures wall time around the whole child; nothing the child prints is
-    used. A sample only counts when its receipt matches the protected oracle,
-    binding the measured time to completed parser/formatter output.
+    Every sample is a fresh process in a fresh sample directory. Per
+    workload/mode the candidate and the pristine reference each run
+    BENCH_BATCHES times, strictly alternating so both binaries sample the
+    same wall-clock window, and the estimator is the contention-robust
+    minimum of each binary's per-rep times:
+        ratio = min(reference per-rep) / min(candidate per-rep)
+    The minimum is the least-contended sample, i.e. the closest approach to
+    true compute time; taking it per binary (not per pair) makes the ratio
+    robust to a loaded shared host, where mean/median or subtractive
+    estimators blow up. The score is the frozen anchor scaled by the
+    geometric mean of the per-workload/mode ratios:
+        q = REFERENCE_ANCHOR_Q * geomean(ratio per workload/mode)
+    A candidate exactly as fast as the reference scores the anchor. Nothing
+    the child prints is used; a sample only counts when its receipt matches
+    the protected oracle, binding measured time to completed parser/formatter
+    output. RSS is taken from candidate runs only.
     """
+    if REFERENCE_RUNNER.is_symlink() or not REFERENCE_RUNNER.is_file():
+        raise RuntimeError("pristine reference runner is missing from the image")
+    reap_candidate_processes()
     measurements: dict[str, float] = {}
+    ratios: dict[str, float] = {}
     peak_rss = initial_peak_rss
-    samples = int(CHALLENGE["benchmarkSamples"])
+    batches = BENCH_BATCHES
     for source in cases:
         oracle = expected["files"][source.name]
         for mode, repetitions_key in (("parse", "parserRepetitions"), ("format", "formatterRepetitions")):
             repetitions = int(CHALLENGE[repetitions_key])
-            durations: list[float] = []
-            for sample_index in range(samples + 1):
-                sample_dir = work / f"bench-{source.name.replace('/', '_')}-{mode}-{sample_index}"
-                sample_dir.mkdir(mode=0o777)
-                sample_dir.chmod(0o777)
-                receipt = sample_dir / "receipt"
-                rss_file = sample_dir / "rss"
-                command = [
-                    "/usr/bin/time",
-                    "-f",
-                    "%M",
-                    "-o",
-                    str(rss_file),
-                    str(RUNNER),
-                    mode,
-                    str(source),
-                    str(repetitions),
-                    str(receipt),
-                ]
-                started = time.perf_counter_ns()
-                result = run_untrusted(
-                    command,
-                    timeout=float(CHALLENGE["benchmarkTimeoutSec"]),
-                    stdout=subprocess.DEVNULL,
-                )
-                elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
-                if result.returncode != 0:
-                    raise RuntimeError(f"runner failed: {result.stderr.decode(errors='replace')[-500:]}")
-                validate_bench_receipt(mode, receipt, oracle)
-                rss = int(rss_file.read_text(encoding="utf-8").strip())
-                shutil.rmtree(sample_dir)
-                if sample_index == 0:
-                    continue
-                durations.append(elapsed_ms / repetitions)
-                peak_rss = max(peak_rss, rss)
-            # Fastest-k-of-N trimmed mean: contention only ADDS wall time, so
-            # the slowest samples are host-noise, not candidate signal. Keeping
-            # the fastest half rejects that tail without trusting anything the
-            # candidate controls (timing is still measured in this trusted
-            # parent). Standard for thin-margin capsules.
-            keep = max(1, (samples + 1) // 2)
-            fastest = sorted(durations)[:keep]
-            measurements[f"{source.name}:{mode}"] = statistics.fmean(fastest)
-    if not measurements or any(not math.isfinite(value) or value <= 0 for value in measurements.values()):
+            candidate_ms: list[float] = []
+            reference_ms: list[float] = []
+            stem = f"bench-{source.name.replace('/', '_')}-{mode}"
+            # One untimed warmup per binary equalizes cold-start (page cache,
+            # allocator arenas) before the measured batches.
+            for warm, runner in (("candidate", RUNNER), ("reference", REFERENCE_RUNNER)):
+                run_bench_sample(runner, mode, source, repetitions, oracle, work / f"{stem}-warm-{warm}")
+            for batch in range(batches):
+                legs = [("candidate", RUNNER), ("reference", REFERENCE_RUNNER)]
+                if batch % 2 == 1:
+                    legs.reverse()
+                for leg_name, runner in legs:
+                    elapsed_ms, rss = run_bench_sample(
+                        runner,
+                        mode,
+                        source,
+                        repetitions,
+                        oracle,
+                        work / f"{stem}-{batch}-{leg_name}",
+                    )
+                    per_rep = elapsed_ms / repetitions
+                    if leg_name == "candidate":
+                        candidate_ms.append(per_rep)
+                        peak_rss = max(peak_rss, rss)
+                    else:
+                        reference_ms.append(per_rep)
+            best_candidate = min(candidate_ms)
+            best_reference = min(reference_ms)
+            measurements[f"{source.name}:{mode}"] = best_candidate
+            ratios[f"{source.name}:{mode}"] = best_reference / best_candidate
+    if not ratios or any(
+        not math.isfinite(value) or value <= 0
+        for value in list(ratios.values()) + list(measurements.values())
+    ):
         raise RuntimeError("non-finite benchmark measurement")
-    geometric_ms = math.exp(statistics.fmean(math.log(value) for value in measurements.values()))
-    return 1.0 / geometric_ms, peak_rss, measurements
+    q = REFERENCE_ANCHOR_Q * math.exp(
+        statistics.fmean(math.log(value) for value in ratios.values())
+    )
+    return q, peak_rss, measurements, ratios
 
 
 def log(message: str) -> None:
@@ -509,6 +647,7 @@ def log(message: str) -> None:
 
 
 def evaluate() -> dict:
+    become_subreaper()
     validate_envelope()
     needs_build = not candidate_matches_baseline()
     log("mounting candidate source envelope")
@@ -540,7 +679,7 @@ def evaluate() -> dict:
         try:
             cases, peak_rss = verify_cases(expected, expected_path.parent, work)
             log(f"benchmarking {len(cases)} frozen files")
-            q, peak_rss, measurements = benchmark(expected, cases, work, peak_rss)
+            q, peak_rss, measurements, ratios = benchmark(expected, cases, work, peak_rss)
             log("benchmark stage completed")
         except Exception as exc:
             return fail(str(exc), tests_pass=True)
@@ -566,7 +705,7 @@ def evaluate() -> dict:
         "perExample": {
             "aggregate": {
                 "score": q,
-                "feedback": f"{len(cases)} frozen files; reciprocal geometric mean milliseconds",
+                "feedback": f"{len(cases)} frozen files; anchor-scaled geometric mean of median candidate/reference wall-time ratios",
             }
         },
         "diagnostics": {
@@ -576,7 +715,8 @@ def evaluate() -> dict:
             "peak_rss_kb": peak_rss,
             "rss_limit_kb": rss_limit,
             "build_test_sec": build_test_sec,
-            "geometric_mean_ms": 1.0 / q,
+            "reference_anchor_q": REFERENCE_ANCHOR_Q,
+            "reference_ratio": ratios,
             "workload_ms": measurements,
         },
     }

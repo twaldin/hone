@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "id": "cap_c13bbefe1975",
+  "id": "cap_3cb31f099fc5",
   "objective": "Improve JavaScript, TypeScript, and CSS parser/formatter throughput across frozen deterministic large files. Preserve byte-exact formatted output, parser diagnostic hashes, idempotence, relevant parser/formatter regression tests, and peak RSS within 2% of baseline. Only the four pinned parser/formatter crate src trees are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "1f27753802601f93d18066b1a6ebadb4f3cf9571"
+    "commit": "bae979bc0477d948aa1de6822bb5d840aa3b814d"
   },
-  "image": "hone-biome-task@sha256:8299d9d4d831d2a18f0c162e3bd3412a72257f8d93a48a541faea01e324bd003",
+  "image": "hone-biome-task@sha256:3e6e6f4584b05ebdb125974aece501c0aa64b7b1483bc98bf50c4c8985dc6c8d",
   "evalEntrypoint": [
     "python3",
     "-I",
@@ -51,7 +51,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:ed50718d917782b253371e30aab3bfca63c516e65b921755caef25a1b592ac29"
+    "hash": "sha256:cece3c618e7bdd89fec5c3be15656a1dfbe7279786e7cf20c5fda5af79f69f2e"
   },
   "contentHashes": {
     "assets/train/expected.json": "sha256:922aea566cbdba6e6664606a061f686cb47ac1e5a20a981ce39f202d97a2d69a",
