@@ -66,7 +66,7 @@
       "corpusExposure": "capsule directory and admission evidence only; never inserted into optimizer corpus or panel evidence"
     },
     "license": "MIT; upstream Tree-sitter and all three pinned grammar LICENSE files preserved",
-    "provenance": "tree-sitter/tree-sitter at exact revision 1ffd612be56259938c47507bbe953af739c7f640. Grammar fixtures are vendored protected assets from tree-sitter-javascript v0.25.0 (44c892e0be055ac465d5eeddae6d3e194424e7de), tree-sitter-rust v0.24.0 (18b0515fca567f5a10aee9978c6d2640e878671a), and tree-sitter-python v0.23.6 (bffb65a8cfe4e46290331dfef0dbf0ef3679de11). Deterministic generated source workloads contain no third-party corpus text. The trusted harness preserves the Parser::parse repetition and bytes/sec semantics of crates/cli/benches/benchmark.rs and adds deterministic TSInputEdit incremental parses. qReference is frozen after interleaved terminal A-A as qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Interleaved fresh-process A-A samples [47778399.75282585, 52437080.21368476, 51769493.524844304] give qBase=50661657.83045164, sigma=2519186.5459757065, and qReference=63257590.56033017.",
+    "provenance": "tree-sitter/tree-sitter at exact revision 1ffd612be56259938c47507bbe953af739c7f640. Grammar fixtures are vendored protected assets from tree-sitter-javascript v0.25.0 (44c892e0be055ac465d5eeddae6d3e194424e7de), tree-sitter-rust v0.24.0 (18b0515fca567f5a10aee9978c6d2640e878671a), and tree-sitter-python v0.23.6 (bffb65a8cfe4e46290331dfef0dbf0ef3679de11). Deterministic generated source workloads contain no third-party corpus text. The trusted harness preserves the Parser::parse repetition and bytes/sec semantics of crates/cli/benches/benchmark.rs and adds deterministic TSInputEdit incremental parses. qReference is frozen after interleaved terminal A-A as qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Fastest-of-five reference-normalized fresh-process A-A samples [50666505.29794153, 51955609.6264734, 51102086.23932623, 50809293.91475852, 51566649.62333815, 50522360.646954104] across two consecutive ordering passes give sigma=557825.1604303756, with qBase=50661657.83045164 fixed by the frozen yardstick scale, and qReference=53450783.63260352.",
     "sourceDetails": {
       "repository": "tree-sitter/tree-sitter",
       "revision": "1ffd612be56259938c47507bbe953af739c7f640",
@@ -89,31 +89,34 @@
     "measurement": {
       "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local terminal calibration",
       "freshProcess": true,
-      "q": "geometric mean bytes/sec across 12 full/incremental language-size cells, reference-normalized: multiplied by frozen scale 50661657.83045164 and divided by the same-eval geometric-mean throughput of a trusted in-eval baseline yardstick built from /trusted/baseline sources",
-      "benchSampling": "per workload: trusted-reference and candidate bench repetitions interleaved seconds apart, one warm repetition each, then fastest-of-3 timed repetitions with per-phase minimum nanoseconds (trusted trimmed sampling; host contention and frequency drift only add time and are not candidate-controlled, and the in-eval yardstick divides out drift shared across evaluations); byte counters re-verified against the sealed workload on every repetition; RSS gate uses the maximum candidate peak across all repetitions",
+      "q": "geometric mean across 12 full/incremental language-size cells of the fastest-of-five per-phase candidate/reference time ratio, multiplied by the frozen scale 50661657.83045164; the reference is a trusted in-eval baseline yardstick built from /trusted/baseline sources and run interleaved with the candidate inside the same evaluation",
+      "benchSampling": "per workload: trusted-reference and candidate bench repetitions interleaved seconds apart on the same trusted per-repetition schedule seed, one warm repetition each, then five timed repetitions with each phase scored from its minimum nanoseconds for candidate and reference alike (trusted trimmed sampling; timing noise is strictly additive and not candidate-controlled, and the interleaved in-eval yardstick divides out drift shared across evaluations); every warmup and timed iteration parses identity-distinct schedule-variant content (class-preserving alphanumeric byte swaps dispersed across the whole buffer) so cached or replayed trees from any other iteration are structurally wrong, and each timed tree's full pre-order signature digest must equal the in-eval trusted reference run on the same seed; byte counters re-verified against the sealed workload on every repetition; RSS gate uses the maximum candidate peak across all repetitions",
       "qFail": 0,
       "qBase": 50661657.83045164,
-      "sigma": 2519186.5459757065,
-      "qReference": 63257590.56033017,
-      "qReferenceConstruction": "50661657.83045164 + max(5*2519186.5459757065, 0.05*abs(50661657.83045164-0)) = 63257590.56033017",
-      "rssGate": "GNU time wait4 peak workload RSS <= frozen same-workload baseline RSS * 1.02",
+      "sigma": 557825.1604303756,
+      "qReference": 53450783.63260352,
+      "qReferenceConstruction": "50661657.83045164 + max(5*557825.1604303756, 0.05*abs(50661657.83045164-0)) = 53450783.63260352",
+      "rssGate": "GNU time wait4 peak workload RSS <= frozen same-workload baseline RSS * 1.02; baselines frozen over the schedule-variant harness with ten samples per workload",
       "correctness": "SHA-256 exact original/edited trees, exact changed ranges, incremental equals fresh full parse, and error-free parser tests",
       "aaSamples": [
-        47778399.75282585,
-        52437080.21368476,
-        51769493.524844304
+        50666505.29794153,
+        51955609.6264734,
+        51102086.23932623,
+        50809293.91475852,
+        51566649.62333815,
+        50522360.646954104
       ],
-      "normalizationScale": 12595932.729878534,
-      "noiseFractionOfScale": 0.19999999999999998
+      "normalizationScale": 2789125.802151878,
+      "noiseFractionOfScale": 0.2
     },
     "exploitReview": {
       "protectedPathEscape": "broker protects evaluator, harness, headers, metadata, image, assets, and all paths outside lib/src; evaluator independently reconstructs protected files from /trusted/baseline and rejects symlinks/non-regular files and new files outside lib/src",
       "benchmarkSpecialCasing": "separate all-holdout train and validation splits; shortcut diagnostic fingerprints the train prefix, wins train, and is forced below baseline on validation",
       "fixtureFingerprinting": "workload and expected-tree assets are root-only broker mounts; compilation completes as uid 2000 before workload bytes are copied into the runnable build directory; protected validation is independently measured",
-      "outputFabrication": "trusted harness invokes the real C runtime API, serializes real trees, checks incremental/full equality, and emits verdicts and counters only after every parse succeeds through direct pinned linux/arm64 write syscalls with in-harness integer formatting, so candidate objects linked into the same executable cannot interpose libc output symbols; the evaluator independently recomputes both byte counters from the sealed workload sizes, edit deltas, and trusted iteration counts and rejects any disagreement; evaluator hashes trusted harness files",
+      "outputFabrication": "trusted harness invokes the real C runtime API, serializes real trees, checks incremental/full equality, and emits verdicts and counters only after every parse succeeds through direct pinned linux/arm64 write syscalls with in-harness integer formatting, so candidate objects linked into the same executable cannot interpose libc output symbols; the evaluator independently recomputes both byte counters from the sealed workload sizes, edit deltas, and trusted iteration counts and rejects any disagreement, and additionally requires the candidate's per-phase timed-tree signature digests to equal those of the trusted in-eval reference binary run on the same schedule seed; evaluator hashes trusted harness files",
       "timerTampering": "trusted harness reads CLOCK_MONOTONIC_RAW with a direct pinned linux/arm64 kernel syscall, and failure exits use a direct exit_group syscall, bypassing candidate-linked symbols; compiler flags, harness, iterations, scalarizer, and GNU-time RSS supervisor are protected; prlimit blocks candidate forks and evaluator processes run unprivileged",
       "buildScriptMutation": "no candidate build script executes; trusted evaluator invokes pinned cc commands on lib/src and protected grammar sources with network disabled",
-      "deadCodeBenchmarkBypass": "the same ts_parser_parse_string API and language parsers produce exact-tree/parser-test evidence immediately before timed full and incremental calls"
+      "deadCodeBenchmarkBypass": "the same ts_parser_parse_string API and language parsers produce exact-tree/parser-test evidence immediately before the timed phases, and every timed full and incremental call parses identity-distinct schedule-variant content whose full pre-order tree signature is digest-checked against the trusted in-eval reference run, so replaying, caching, or skipping timed parses cannot reproduce the required digests"
     },
     "tags": [
       "m2",

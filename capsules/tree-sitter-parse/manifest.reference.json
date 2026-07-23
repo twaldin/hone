@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_99b53d545bd2",
+  "id": "cap_92535fc85901",
   "objective": "Improve geometric-mean full and incremental JavaScript, Rust, and Python parsing throughput using the operation and bytes/sec semantics of crates/cli/benches/benchmark.rs. Exact full and edited trees, exact changed ranges, incremental/full equivalence, parser tests, and per-workload peak RSS no greater than the frozen baseline plus 2% are hard gates. Only lib/src is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "8b6f3edddc4adf24af9726fca705aa41235f074c"
+    "commit": "b1e7fd73585e742d1fd8ebb9d8c5129817822752"
   },
   "image": "hone-tree-sitter-parse@sha256:dd7fed81a644ffd07a59d17dd1f95b7833bc6f85d15789e5666f1fc7fb017f26",
   "evalEntrypoint": [
@@ -117,7 +117,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:d9e7e17de3ae27d8ee118aa898f2e9711641d89fbeb2384f9ccd6b5dfb965a7f"
+    "hash": "sha256:c800bdd911186e45ce18b2368d2341e66fe7fba1b1ec76bc024f05c825017efb"
   },
   "contentHashes": {
     "assets/train/grammars/javascript/LICENSE": "sha256:2e0110e07abef7c2548b26ec9d6969775617ca539a0dc8dbeeb14d6452c711d1",
@@ -147,7 +147,7 @@
     "assets/train/grammars/rust/src/tree_sitter/alloc.h": "sha256:b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
     "assets/train/grammars/rust/src/tree_sitter/array.h": "sha256:5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
     "assets/train/grammars/rust/src/tree_sitter/parser.h": "sha256:11b654fbba7770b1c710cc14b169be2deb5d89c0f87233d4605037c26c1ff657",
-    "assets/train/workloads.json": "sha256:ee02bbd02c8dea7136bdd2c2b20eee05dd915dbaf16eed7aeb407499cf341694",
+    "assets/train/workloads.json": "sha256:aecd976fa03e101db00816a84a39250ac33141614bd420d37556d7e5e04a7b8a",
     "assets/train/workloads/javascript-1.txt": "sha256:e56eea6b594ea1a4d6740da4bebab69291d00e212f34e76c3702ce981b9c41a9",
     "assets/train/workloads/javascript-2.txt": "sha256:cbe8a504e42202d16106ab91ee47165bd4e7d81110d141f19928857093e19f6a",
     "assets/train/workloads/python-1.txt": "sha256:046c5520e4144e2f4f2badc34cd9d2af0353e43c070d559f5210283349e6a0da",
@@ -181,7 +181,7 @@
     "assets/validation/grammars/rust/src/tree_sitter/alloc.h": "sha256:b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea",
     "assets/validation/grammars/rust/src/tree_sitter/array.h": "sha256:5bdf6ed1a78e3409fd443e085ca967a64c188a5d082aaf7f819bccd53a471c94",
     "assets/validation/grammars/rust/src/tree_sitter/parser.h": "sha256:11b654fbba7770b1c710cc14b169be2deb5d89c0f87233d4605037c26c1ff657",
-    "assets/validation/workloads.json": "sha256:4bf2fecce43a0ce9ddfaa539e11156539068bb073095e0b89b8d554cfe521faf",
+    "assets/validation/workloads.json": "sha256:ed7eaf1564534443be20349d22954bff681932d417e978f74c30df91eb0852c5",
     "assets/validation/workloads/javascript-1.txt": "sha256:4a1511026c7d781f26ee211dad6f78503ed643ea42664dbcb586d7a2e17ada44",
     "assets/validation/workloads/javascript-2.txt": "sha256:b119637ccb778873555cfaba59fd4bf0de6a7c62c8d29514b7f31e7b75c8e71f",
     "assets/validation/workloads/python-1.txt": "sha256:b288c4a91fd5586f0e814526ee36caa048dd69642f6b989a84fa1f002b9f8265",
@@ -191,7 +191,7 @@
   },
   "meta": {
     "evaluatorSource": "user",
-    "provenance": "tree-sitter/tree-sitter at exact revision 1ffd612be56259938c47507bbe953af739c7f640. Grammar fixtures are vendored protected assets from tree-sitter-javascript v0.25.0 (44c892e0be055ac465d5eeddae6d3e194424e7de), tree-sitter-rust v0.24.0 (18b0515fca567f5a10aee9978c6d2640e878671a), and tree-sitter-python v0.23.6 (bffb65a8cfe4e46290331dfef0dbf0ef3679de11). Deterministic generated source workloads contain no third-party corpus text. The trusted harness preserves the Parser::parse repetition and bytes/sec semantics of crates/cli/benches/benchmark.rs and adds deterministic TSInputEdit incremental parses. qReference is frozen after interleaved terminal A-A as qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Interleaved fresh-process A-A samples [47778399.75282585, 52437080.21368476, 51769493.524844304] give qBase=50661657.83045164, sigma=2519186.5459757065, and qReference=63257590.56033017.",
+    "provenance": "tree-sitter/tree-sitter at exact revision 1ffd612be56259938c47507bbe953af739c7f640. Grammar fixtures are vendored protected assets from tree-sitter-javascript v0.25.0 (44c892e0be055ac465d5eeddae6d3e194424e7de), tree-sitter-rust v0.24.0 (18b0515fca567f5a10aee9978c6d2640e878671a), and tree-sitter-python v0.23.6 (bffb65a8cfe4e46290331dfef0dbf0ef3679de11). Deterministic generated source workloads contain no third-party corpus text. The trusted harness preserves the Parser::parse repetition and bytes/sec semantics of crates/cli/benches/benchmark.rs and adds deterministic TSInputEdit incremental parses. qReference is frozen after interleaved terminal A-A as qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Fastest-of-five reference-normalized fresh-process A-A samples [50666505.29794153, 51955609.6264734, 51102086.23932623, 50809293.91475852, 51566649.62333815, 50522360.646954104] across two consecutive ordering passes give sigma=557825.1604303756, with qBase=50661657.83045164 fixed by the frozen yardstick scale, and qReference=53450783.63260352.",
     "license": "MIT; upstream Tree-sitter and all three pinned grammar LICENSE files preserved",
     "tags": [
       "m2",
@@ -241,31 +241,34 @@
     "measurement": {
       "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local terminal calibration",
       "freshProcess": true,
-      "q": "geometric mean bytes/sec across 12 full/incremental language-size cells, reference-normalized: multiplied by frozen scale 50661657.83045164 and divided by the same-eval geometric-mean throughput of a trusted in-eval baseline yardstick built from /trusted/baseline sources",
-      "benchSampling": "per workload: trusted-reference and candidate bench repetitions interleaved seconds apart, one warm repetition each, then fastest-of-3 timed repetitions with per-phase minimum nanoseconds (trusted trimmed sampling; host contention and frequency drift only add time and are not candidate-controlled, and the in-eval yardstick divides out drift shared across evaluations); byte counters re-verified against the sealed workload on every repetition; RSS gate uses the maximum candidate peak across all repetitions",
+      "q": "geometric mean across 12 full/incremental language-size cells of the fastest-of-five per-phase candidate/reference time ratio, multiplied by the frozen scale 50661657.83045164; the reference is a trusted in-eval baseline yardstick built from /trusted/baseline sources and run interleaved with the candidate inside the same evaluation",
+      "benchSampling": "per workload: trusted-reference and candidate bench repetitions interleaved seconds apart on the same trusted per-repetition schedule seed, one warm repetition each, then five timed repetitions with each phase scored from its minimum nanoseconds for candidate and reference alike (trusted trimmed sampling; timing noise is strictly additive and not candidate-controlled, and the interleaved in-eval yardstick divides out drift shared across evaluations); every warmup and timed iteration parses identity-distinct schedule-variant content (class-preserving alphanumeric byte swaps dispersed across the whole buffer) so cached or replayed trees from any other iteration are structurally wrong, and each timed tree's full pre-order signature digest must equal the in-eval trusted reference run on the same seed; byte counters re-verified against the sealed workload on every repetition; RSS gate uses the maximum candidate peak across all repetitions",
       "qFail": 0,
       "qBase": 50661657.83045164,
-      "sigma": 2519186.5459757065,
-      "qReference": 63257590.56033017,
-      "qReferenceConstruction": "50661657.83045164 + max(5*2519186.5459757065, 0.05*abs(50661657.83045164-0)) = 63257590.56033017",
-      "rssGate": "GNU time wait4 peak workload RSS <= frozen same-workload baseline RSS * 1.02",
+      "sigma": 557825.1604303756,
+      "qReference": 53450783.63260352,
+      "qReferenceConstruction": "50661657.83045164 + max(5*557825.1604303756, 0.05*abs(50661657.83045164-0)) = 53450783.63260352",
+      "rssGate": "GNU time wait4 peak workload RSS <= frozen same-workload baseline RSS * 1.02; baselines frozen over the schedule-variant harness with ten samples per workload",
       "correctness": "SHA-256 exact original/edited trees, exact changed ranges, incremental equals fresh full parse, and error-free parser tests",
       "aaSamples": [
-        47778399.75282585,
-        52437080.21368476,
-        51769493.524844304
+        50666505.29794153,
+        51955609.6264734,
+        51102086.23932623,
+        50809293.91475852,
+        51566649.62333815,
+        50522360.646954104
       ],
-      "normalizationScale": 12595932.729878534,
-      "noiseFractionOfScale": 0.19999999999999998
+      "normalizationScale": 2789125.802151878,
+      "noiseFractionOfScale": 0.2
     },
     "exploitReview": {
       "protectedPathEscape": "broker protects evaluator, harness, headers, metadata, image, assets, and all paths outside lib/src; evaluator independently reconstructs protected files from /trusted/baseline and rejects symlinks/non-regular files and new files outside lib/src",
       "benchmarkSpecialCasing": "separate all-holdout train and validation splits; shortcut diagnostic fingerprints the train prefix, wins train, and is forced below baseline on validation",
       "fixtureFingerprinting": "workload and expected-tree assets are root-only broker mounts; compilation completes as uid 2000 before workload bytes are copied into the runnable build directory; protected validation is independently measured",
-      "outputFabrication": "trusted harness invokes the real C runtime API, serializes real trees, checks incremental/full equality, and emits verdicts and counters only after every parse succeeds through direct pinned linux/arm64 write syscalls with in-harness integer formatting, so candidate objects linked into the same executable cannot interpose libc output symbols; the evaluator independently recomputes both byte counters from the sealed workload sizes, edit deltas, and trusted iteration counts and rejects any disagreement; evaluator hashes trusted harness files",
+      "outputFabrication": "trusted harness invokes the real C runtime API, serializes real trees, checks incremental/full equality, and emits verdicts and counters only after every parse succeeds through direct pinned linux/arm64 write syscalls with in-harness integer formatting, so candidate objects linked into the same executable cannot interpose libc output symbols; the evaluator independently recomputes both byte counters from the sealed workload sizes, edit deltas, and trusted iteration counts and rejects any disagreement, and additionally requires the candidate's per-phase timed-tree signature digests to equal those of the trusted in-eval reference binary run on the same schedule seed; evaluator hashes trusted harness files",
       "timerTampering": "trusted harness reads CLOCK_MONOTONIC_RAW with a direct pinned linux/arm64 kernel syscall, and failure exits use a direct exit_group syscall, bypassing candidate-linked symbols; compiler flags, harness, iterations, scalarizer, and GNU-time RSS supervisor are protected; prlimit blocks candidate forks and evaluator processes run unprivileged",
       "buildScriptMutation": "no candidate build script executes; trusted evaluator invokes pinned cc commands on lib/src and protected grammar sources with network disabled",
-      "deadCodeBenchmarkBypass": "the same ts_parser_parse_string API and language parsers produce exact-tree/parser-test evidence immediately before timed full and incremental calls"
+      "deadCodeBenchmarkBypass": "the same ts_parser_parse_string API and language parsers produce exact-tree/parser-test evidence immediately before the timed phases, and every timed full and incremental call parses identity-distinct schedule-variant content whose full pre-order tree signature is digest-checked against the trusted in-eval reference run, so replaying, caching, or skipping timed parses cannot reproduce the required digests"
     }
   }
 }

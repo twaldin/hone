@@ -126,6 +126,14 @@ static uint32_t parse_u32(const char *value) {
   return (uint32_t)result;
 }
 
+static uint64_t parse_u64(const char *value) {
+  char *end = NULL;
+  errno = 0;
+  unsigned long long result = strtoull(value, &end, 10);
+  if (errno != 0 || !end || end == value || *end != '\0') fail("invalid integer argument");
+  return (uint64_t)result;
+}
+
 static TSPoint point_for_byte(const char *data, uint32_t byte) {
   TSPoint point = {0, 0};
   for (uint32_t i = 0; i < byte; i++) {
@@ -197,6 +205,201 @@ static uint64_t now_ns(void) {
   return (uint64_t)value.tv_sec * UINT64_C(1000000000) + (uint64_t)value.tv_nsec;
 }
 
+/*
+ * Replay resistance: every warmup and timed repetition parses
+ * identity-distinct content drawn from a deterministic schedule seeded by the
+ * trusted evaluator (the same seed drives the candidate and the in-eval
+ * reference binary). A tree cached during one iteration is therefore
+ * structurally wrong for every other iteration, and each timed tree's full
+ * pre-order (symbol, start_byte, end_byte) signature is folded into a digest
+ * the evaluator compares against the trusted reference run.
+ */
+#define FULL_MUTATION_STRIDE 2048u
+/* Wider incremental stride: 4-11 dispersed edit sites per iteration keeps the
+ * timed operation incremental-parse-shaped while still making every
+ * iteration's content identity distinct and digest-bound. */
+#define INCREMENTAL_MUTATION_STRIDE 32768u
+#define WARMUP_ITERATIONS 2u
+
+#define FULL_WARMUP_SALT UINT64_C(0x9A3D6B1F0C55E101)
+#define FULL_TIMED_SALT UINT64_C(0x2C7E19D4B8A0F202)
+#define INCREMENTAL_WARMUP_SALT UINT64_C(0x6F1B84C2D93A5303)
+#define INCREMENTAL_TIMED_SALT UINT64_C(0xE45A0F7186C2D404)
+#define DIGEST_BASIS UINT64_C(0xCBF29CE484222325)
+/* The first 128 input bytes are never mutated: split-marker prefixes that
+ * prefix-sensitive diagnostics (and their gating checks) depend on must stay
+ * byte-stable across every schedule variant. */
+#define MUTATION_PREFIX_EXCLUSION 128u
+
+static uint64_t mix64(uint64_t value) {
+  value ^= value >> 30;
+  value *= UINT64_C(0xBF58476D1CE4E5B9);
+  value ^= value >> 27;
+  value *= UINT64_C(0x94D049BB133111EB);
+  value ^= value >> 31;
+  return value;
+}
+
+static uint64_t schedule_next(uint64_t *state) {
+  *state += UINT64_C(0x9E3779B97F4A7C15);
+  return mix64(*state);
+}
+
+static uint64_t fold_value(uint64_t digest, uint64_t value) {
+  digest ^= value;
+  digest *= UINT64_C(0x00000100000001B3);
+  return digest;
+}
+
+typedef struct {
+  uint32_t *positions;
+  char *saved;
+  uint32_t count;
+} Mutation;
+
+/*
+ * Overwrite roughly one alphanumeric byte per stride-sized block with a
+ * schedule-chosen different byte of the same character class (letter case and
+ * digits preserved). Length is preserved, so the trusted byte counters are
+ * unchanged, and string/bracket/operator bytes are never touched, so the
+ * workload magnitude stays comparable to the pristine input while the content
+ * identity of every repetition is distinct and dispersed across the whole
+ * buffer. Swaps landing on keywords or literal prefixes still change
+ * tokenization, which is what binds the timed tree digests to each variant.
+ */
+static Mutation mutate_buffer(Buffer buffer, uint32_t stride, uint64_t seed, uint64_t salt, uint32_t iteration) {
+  uint32_t max_count = buffer.length / stride + 1;
+  Mutation mutation = {malloc(max_count * sizeof(uint32_t)), malloc(max_count), 0};
+  if (!mutation.positions || !mutation.saved) fail("out of memory");
+  uint64_t state = mix64(seed ^ salt ^ (((uint64_t)iteration << 1) | 1));
+  for (uint64_t block = 0; block * stride < buffer.length; block++) {
+    uint64_t word = schedule_next(&state);
+    uint64_t position64 = block * stride + (uint32_t)(word % stride);
+    if (position64 < MUTATION_PREFIX_EXCLUSION || position64 >= buffer.length) continue;
+    uint32_t position = (uint32_t)position64;
+    char original = buffer.data[position];
+    char class_base;
+    uint32_t class_size;
+    if (original >= 'a' && original <= 'z') {
+      class_base = 'a';
+      class_size = 26;
+    } else if (original >= 'A' && original <= 'Z') {
+      class_base = 'A';
+      class_size = 26;
+    } else if (original >= '0' && original <= '9') {
+      class_base = '0';
+      class_size = 10;
+    } else {
+      continue;
+    }
+    uint32_t shift = 1 + (uint32_t)((word >> 32) % (class_size - 1));
+    char replacement = (char)(class_base + ((uint32_t)(original - class_base) + shift) % class_size);
+    mutation.positions[mutation.count] = position;
+    mutation.saved[mutation.count] = original;
+    mutation.count++;
+    buffer.data[position] = replacement;
+  }
+  return mutation;
+}
+
+static void revert_buffer(Buffer buffer, Mutation *mutation) {
+  for (uint32_t i = 0; i < mutation->count; i++) {
+    buffer.data[mutation->positions[i]] = mutation->saved[i];
+  }
+  free(mutation->positions);
+  free(mutation->saved);
+  mutation->positions = NULL;
+  mutation->saved = NULL;
+  mutation->count = 0;
+}
+
+typedef struct {
+  uint32_t *starts;
+  uint32_t count;
+} LineIndex;
+
+static LineIndex build_line_index(Buffer buffer) {
+  uint32_t count = 1;
+  for (uint32_t i = 0; i < buffer.length; i++) {
+    if (buffer.data[i] == '\n') count++;
+  }
+  uint32_t *starts = malloc((size_t)count * sizeof(uint32_t));
+  if (!starts) fail("out of memory");
+  starts[0] = 0;
+  uint32_t next = 1;
+  for (uint32_t i = 0; i < buffer.length; i++) {
+    if (buffer.data[i] == '\n') starts[next++] = i + 1;
+  }
+  return (LineIndex){starts, count};
+}
+
+/* Mutations never target newline bytes, so the line index stays valid for
+ * every schedule variant of the buffer it was built from. */
+static TSPoint indexed_point(const LineIndex *index, uint32_t byte) {
+  uint32_t low = 0;
+  uint32_t high = index->count - 1;
+  while (low < high) {
+    uint32_t mid = low + (high - low + 1) / 2;
+    if (index->starts[mid] <= byte) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return (TSPoint){low, byte - index->starts[low]};
+}
+
+/* Copy the sealed-edit base tree and register every schedule mutation as a
+ * length-preserving single-byte edit, so the timed incremental parse must do
+ * real re-lex work at each dispersed mutation site. */
+static TSTree *copy_edited_tree(const TSTree *old_tree, const Mutation *mutation, const LineIndex *lines) {
+  TSTree *tree = ts_tree_copy(old_tree);
+  if (!tree) fail("cannot copy incremental base tree");
+  for (uint32_t i = 0; i < mutation->count; i++) {
+    uint32_t position = mutation->positions[i];
+    TSPoint start_point = indexed_point(lines, position);
+    TSPoint end_point = {start_point.row, start_point.column + 1};
+    TSInputEdit micro = {
+        .start_byte = position,
+        .old_end_byte = position + 1,
+        .new_end_byte = position + 1,
+        .start_point = start_point,
+        .old_end_point = end_point,
+        .new_end_point = end_point,
+    };
+    ts_tree_edit(tree, &micro);
+  }
+  return tree;
+}
+
+/* Fold the complete pre-order (symbol, start_byte, end_byte) walk of the tree
+ * into the digest. Schedule variants may legitimately contain error nodes;
+ * the walk covers them identically for candidate and reference. */
+static uint64_t fold_tree_signature(uint64_t digest, TSTree *tree) {
+  TSNode root = ts_tree_root_node(tree);
+  if (ts_node_is_null(root)) fail("timed parse produced no root node");
+  digest = fold_value(digest, ts_node_has_error(root) ? 3 : 5);
+  TSTreeCursor cursor = ts_tree_cursor_new(root);
+  bool descend = true;
+  for (;;) {
+    if (descend) {
+      TSNode node = ts_tree_cursor_current_node(&cursor);
+      digest = fold_value(digest, ts_node_symbol(node));
+      digest = fold_value(digest, ts_node_start_byte(node));
+      digest = fold_value(digest, ts_node_end_byte(node));
+      if (ts_tree_cursor_goto_first_child(&cursor)) continue;
+    }
+    if (ts_tree_cursor_goto_next_sibling(&cursor)) {
+      descend = true;
+      continue;
+    }
+    if (!ts_tree_cursor_goto_parent(&cursor)) break;
+    descend = false;
+  }
+  ts_tree_cursor_delete(&cursor);
+  return digest;
+}
+
 static void verify(const char *language_name, Buffer source, uint32_t start, uint32_t old_end,
                    Buffer replacement, const char *output_directory) {
   Buffer edited = apply_edit(source, start, old_end, replacement);
@@ -261,7 +464,8 @@ static void verify(const char *language_name, Buffer source, uint32_t start, uin
 }
 
 static void benchmark(const char *language_name, Buffer source, uint32_t start, uint32_t old_end,
-                      Buffer replacement, uint32_t full_iterations, uint32_t incremental_iterations) {
+                      Buffer replacement, uint32_t full_iterations, uint32_t incremental_iterations,
+                      uint64_t schedule_seed) {
   if (full_iterations == 0 || incremental_iterations == 0) fail("benchmark iteration count must be positive");
   Buffer edited = apply_edit(source, start, old_end, replacement);
   TSInputEdit edit = make_edit(source, edited, start, old_end, replacement.length);
@@ -270,51 +474,89 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
 
   TSTree *old_tree = parse_checked(parser, source.data, source.length);
   ts_tree_edit(old_tree, &edit);
-  for (uint32_t i = 0; i < 2; i++) {
-    TSTree *full = parse_checked(parser, source.data, source.length);
+  LineIndex edited_lines = build_line_index(edited);
+
+  /* Warmup repetitions draw from salts disjoint from the timed schedule, so
+   * no warmup content identity ever recurs in a timed iteration. */
+  for (uint32_t i = 0; i < WARMUP_ITERATIONS; i++) {
+    Mutation full_mutation = mutate_buffer(source, FULL_MUTATION_STRIDE, schedule_seed, FULL_WARMUP_SALT, i);
+    TSTree *full = ts_parser_parse_string(parser, NULL, source.data, source.length);
+    if (!full) fail("warmup parser returned no tree");
     ts_tree_delete(full);
-    TSTree *incremental = parse_incremental_checked(parser, old_tree, edited.data, edited.length);
+    revert_buffer(source, &full_mutation);
+
+    Mutation incremental_mutation =
+        mutate_buffer(edited, INCREMENTAL_MUTATION_STRIDE, schedule_seed, INCREMENTAL_WARMUP_SALT, i);
+    TSTree *base = copy_edited_tree(old_tree, &incremental_mutation, &edited_lines);
+    TSTree *incremental = ts_parser_parse_string(parser, base, edited.data, edited.length);
+    if (!incremental) fail("warmup incremental parser returned no tree");
     ts_tree_delete(incremental);
+    ts_tree_delete(base);
+    revert_buffer(edited, &incremental_mutation);
   }
 
-  uint64_t full_started = now_ns();
+  /* Timed iterations each parse identity-distinct content; mutation, digest,
+   * and cleanup work stays outside the clock. */
+  uint64_t full_ns = 0;
+  uint64_t full_digest = DIGEST_BASIS;
   for (uint32_t i = 0; i < full_iterations; i++) {
-    TSTree *tree = parse_checked(parser, source.data, source.length);
+    Mutation mutation = mutate_buffer(source, FULL_MUTATION_STRIDE, schedule_seed, FULL_TIMED_SALT, i);
+    uint64_t started = now_ns();
+    TSTree *tree = ts_parser_parse_string(parser, NULL, source.data, source.length);
+    full_ns += now_ns() - started;
+    if (!tree) fail("timed parser returned no tree");
+    full_digest = fold_value(full_digest, i);
+    full_digest = fold_tree_signature(full_digest, tree);
     ts_tree_delete(tree);
+    revert_buffer(source, &mutation);
   }
-  uint64_t full_ns = now_ns() - full_started;
 
-  uint64_t incremental_started = now_ns();
+  uint64_t incremental_ns = 0;
+  uint64_t incremental_digest = DIGEST_BASIS;
   for (uint32_t i = 0; i < incremental_iterations; i++) {
-    TSTree *tree = parse_incremental_checked(parser, old_tree, edited.data, edited.length);
+    Mutation mutation = mutate_buffer(edited, INCREMENTAL_MUTATION_STRIDE, schedule_seed, INCREMENTAL_TIMED_SALT, i);
+    TSTree *base = copy_edited_tree(old_tree, &mutation, &edited_lines);
+    uint64_t started = now_ns();
+    TSTree *tree = ts_parser_parse_string(parser, base, edited.data, edited.length);
+    incremental_ns += now_ns() - started;
+    if (!tree) fail("timed incremental parser returned no tree");
+    incremental_digest = fold_value(incremental_digest, i);
+    incremental_digest = fold_tree_signature(incremental_digest, tree);
     ts_tree_delete(tree);
+    ts_tree_delete(base);
+    revert_buffer(edited, &mutation);
   }
-  uint64_t incremental_ns = now_ns() - incremental_started;
 
   if (full_ns == 0 || incremental_ns == 0) fail("benchmark clock resolution failure");
   /* Counters travel only through the non-interposable raw channel; the trusted
    * evaluator independently recomputes both byte counters from the sealed
-   * workload and iteration counts and rejects any disagreement. */
-  char line[192];
+   * workload and iteration counts, and requires both digests to match the
+   * in-eval trusted reference run on the same schedule seed. */
+  char line[320];
   size_t offset = 0;
   offset = append_text(line, offset, sizeof line, "{\"ok\":true,\"fullBytes\":");
   offset = append_u64(line, offset, sizeof line, (uint64_t)source.length * full_iterations);
+  offset = append_text(line, offset, sizeof line, ",\"fullDigest\":");
+  offset = append_u64(line, offset, sizeof line, full_digest);
   offset = append_text(line, offset, sizeof line, ",\"fullNs\":");
   offset = append_u64(line, offset, sizeof line, full_ns);
   offset = append_text(line, offset, sizeof line, ",\"incrementalBytes\":");
   offset = append_u64(line, offset, sizeof line, (uint64_t)edited.length * incremental_iterations);
+  offset = append_text(line, offset, sizeof line, ",\"incrementalDigest\":");
+  offset = append_u64(line, offset, sizeof line, incremental_digest);
   offset = append_text(line, offset, sizeof line, ",\"incrementalNs\":");
   offset = append_u64(line, offset, sizeof line, incremental_ns);
   offset = append_text(line, offset, sizeof line, "}\n");
   raw_write(1, line, offset);
 
+  free(edited_lines.starts);
   ts_tree_delete(old_tree);
   ts_parser_delete(parser);
   free(edited.data);
 }
 
 int main(int argc, char **argv) {
-  if (argc != 8 && argc != 9) fail("invalid argument count");
+  if (argc != 8 && argc != 10) fail("invalid argument count");
   const char *action = argv[1];
   const char *language_name = argv[2];
   Buffer source = read_file(argv[3]);
@@ -324,8 +566,9 @@ int main(int argc, char **argv) {
 
   if (strcmp(action, "verify") == 0 && argc == 8) {
     verify(language_name, source, start, old_end, replacement, argv[7]);
-  } else if (strcmp(action, "bench") == 0 && argc == 9) {
-    benchmark(language_name, source, start, old_end, replacement, parse_u32(argv[7]), parse_u32(argv[8]));
+  } else if (strcmp(action, "bench") == 0 && argc == 10) {
+    benchmark(language_name, source, start, old_end, replacement, parse_u32(argv[7]), parse_u32(argv[8]),
+              parse_u64(argv[9]));
   } else {
     fail("invalid action");
   }

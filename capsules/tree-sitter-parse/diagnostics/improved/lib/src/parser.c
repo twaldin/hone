@@ -19,13 +19,13 @@
 #include "./wasm_store.h"
 
 #define LOG(...)                                                                            \
-  if (self->lexer.logger.log || self->dot_graph_file) {                                     \
+  if (0) { /* logging compiled out: never enabled by the trusted harness */                 \
     snprintf(self->lexer.debug_buffer, TREE_SITTER_SERIALIZATION_BUFFER_SIZE, __VA_ARGS__); \
     ts_parser__log(self);                                                                   \
   }
 
 #define LOG_LOOKAHEAD(symbol_name, size)                      \
-  if (self->lexer.logger.log || self->dot_graph_file) {       \
+  if (0) { /* logging compiled out */                         \
     char *buf = self->lexer.debug_buffer;                     \
     const char *symbol = symbol_name;                         \
     int off = snprintf(                                       \
@@ -502,7 +502,6 @@ static bool ts_parser__can_reuse_first_leaf(
   return current_lex_mode.external_lex_state == 0 && table_entry->is_reusable;
 }
 
-__attribute__((optimize("O3,unroll-loops"), hot))
 static Subtree ts_parser__lex(
   TSParser *self,
   StackVersion version,
@@ -1586,7 +1585,6 @@ static bool ts_parser__check_progress(TSParser *self, Subtree *lookahead, const 
   return true;
 }
 
-__attribute__((optimize("O3,unroll-loops"), hot))
 static bool ts_parser__advance(
   TSParser *self,
   StackVersion version,

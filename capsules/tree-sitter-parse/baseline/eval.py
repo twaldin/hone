@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 TRUSTED_DIR = Path(__file__).resolve().parent
 WORKSPACE = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
@@ -36,7 +37,7 @@ PROCESS_MEMORY_BYTES = 1792 << 20
 BUILD_TIMEOUT_SEC = 180
 VERIFY_TIMEOUT_SEC = 60
 BENCH_TIMEOUT_SEC = 90
-BENCH_TIMED_REPS = 3
+BENCH_TIMED_REPS = 5
 OUTPUT_LIMIT = 1 << 20
 TREE_SITTER_REVISION = "1ffd612be56259938c47507bbe953af739c7f640"
 LANGUAGES = ("javascript", "rust", "python")
@@ -131,7 +132,11 @@ def check_source_envelope() -> None:
     for relative, trusted_path in protected.items():
         candidate_path = candidate.get(relative)
         if candidate_path is None:
-            raise GateFailure(f"protected source missing: {relative}")
+            # Sanitized terminal artifacts strip protected files from the
+            # candidate workspace; prepare_source reconstructs every one of
+            # them from TRUSTED_DIR, so absence is tolerated. A protected
+            # file that IS present must still match the trusted bytes.
+            continue
         if sha256(candidate_path) != sha256(trusted_path):
             raise GateFailure(f"protected source changed: {relative}")
 
@@ -410,7 +415,25 @@ def run_sandbox(arguments: list[str], timeout: int) -> tuple[bytes, resource.str
     return bytes(output), usage
 
 
-def run_workload(row: dict[str, object], split_dir: Path) -> tuple[float, float, float, float, int, dict[str, str]]:
+class WorkloadResult(NamedTuple):
+    full_ratio: float
+    incremental_ratio: float
+    full_speed: float
+    incremental_speed: float
+    reference_full_speed: float
+    reference_incremental_speed: float
+    peak_rss_kib: int
+    observed: dict[str, str]
+
+
+def schedule_seed(identifier: str, rep: int) -> int:
+    """Trusted per-repetition schedule seed shared by the candidate and the
+    in-eval reference binary, so both parse the same identity-distinct
+    timed-iteration variants and must report identical tree digests."""
+    return int.from_bytes(hashlib.sha256(f"{identifier}:{rep}".encode()).digest()[:8], "big")
+
+
+def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     identifier = str(row["id"])
     replacement = BUILD_ROOT / f"replacement-{identifier}.txt"
     replacement.write_text(str(row["edit"]["replacement"]))
@@ -458,39 +481,56 @@ def run_workload(row: dict[str, object], split_dir: Path) -> tuple[float, float,
 
     # Robustness: host contention and frequency drift only ever add time and
     # neither is candidate-controlled. Candidate and trusted-reference
-    # repetitions are interleaved seconds apart, one warm repetition settles
-    # the machine, and the fastest timed repetition is kept per phase
-    # (trusted trimmed sampling). Byte counters are re-verified against the
-    # sealed workload on every repetition.
+    # repetitions are interleaved seconds apart on the SAME per-rep schedule
+    # seed, one warm repetition settles the machine, and each phase keeps the
+    # fastest of five timed repetitions (trusted trimmed sampling: timing
+    # noise is strictly additive, so the per-phase minimum is the cleanest
+    # estimate for candidate and reference alike). Byte counters are
+    # re-verified against the sealed workload on every repetition, and both
+    # timed-phase tree digests must match the trusted reference run exactly.
     candidate_full_ns: list[int] = []
     candidate_incremental_ns: list[int] = []
     reference_full_ns: list[int] = []
     reference_incremental_ns: list[int] = []
     peak_rss_kib = 0
     for rep in range(1 + BENCH_TIMED_REPS):
-        ref_full, ref_incremental, _ = run_bench_rep(
-            REF_BINARY, f"ref-{rep}", base, benchmark, output_dir, identifier, expected_full_bytes, expected_incremental_bytes
+        seed = schedule_seed(identifier, rep)
+        ref_full, ref_incremental, _, ref_digests = run_bench_rep(
+            REF_BINARY, f"ref-{rep}", base, benchmark, output_dir, identifier, expected_full_bytes, expected_incremental_bytes, seed
         )
-        full_ns, incremental_ns, rep_rss_kib = run_bench_rep(
-            BINARY, f"candidate-{rep}", base, benchmark, output_dir, identifier, expected_full_bytes, expected_incremental_bytes
+        full_ns, incremental_ns, rep_rss_kib, digests = run_bench_rep(
+            BINARY, f"candidate-{rep}", base, benchmark, output_dir, identifier, expected_full_bytes, expected_incremental_bytes, seed
         )
+        if digests != ref_digests:
+            raise GateFailure(f"timed-iteration parse signature disagrees with trusted reference: {identifier}")
         peak_rss_kib = max(peak_rss_kib, rep_rss_kib)
         if rep > 0:
             reference_full_ns.append(ref_full)
             reference_incremental_ns.append(ref_incremental)
             candidate_full_ns.append(full_ns)
             candidate_incremental_ns.append(incremental_ns)
+    full_ratio = min(reference_full_ns) / min(candidate_full_ns)
+    incremental_ratio = min(reference_incremental_ns) / min(candidate_incremental_ns)
     full_speed = expected_full_bytes * 1_000_000_000.0 / min(candidate_full_ns)
     incremental_speed = expected_incremental_bytes * 1_000_000_000.0 / min(candidate_incremental_ns)
     reference_full_speed = expected_full_bytes * 1_000_000_000.0 / min(reference_full_ns)
     reference_incremental_speed = expected_incremental_bytes * 1_000_000_000.0 / min(reference_incremental_ns)
-    speeds = (full_speed, incremental_speed, reference_full_speed, reference_incremental_speed)
-    if not all(math.isfinite(value) and value > 0 for value in speeds):
+    values = (full_ratio, incremental_ratio, full_speed, incremental_speed, reference_full_speed, reference_incremental_speed)
+    if not all(math.isfinite(value) and value > 0 for value in values):
         raise GateFailure(f"benchmark throughput non-finite: {identifier}")
     baseline_rss_kib = int(row["baselinePeakRssKiB"])
     if peak_rss_kib * 100 > baseline_rss_kib * 102:
         raise GateFailure(f"peak RSS gate failed: {identifier} {peak_rss_kib} KiB > baseline+2%")
-    return full_speed, incremental_speed, reference_full_speed, reference_incremental_speed, peak_rss_kib, observed
+    return WorkloadResult(
+        full_ratio,
+        incremental_ratio,
+        full_speed,
+        incremental_speed,
+        reference_full_speed,
+        reference_incremental_speed,
+        peak_rss_kib,
+        observed,
+    )
 
 
 def run_bench_rep(
@@ -502,7 +542,8 @@ def run_bench_rep(
     identifier: str,
     expected_full_bytes: int,
     expected_incremental_bytes: int,
-) -> tuple[int, int, int]:
+    seed: int,
+) -> tuple[int, int, int, tuple[int, int]]:
     rss_path = output_dir / f"peak-rss-kib-{label}.txt"
     bench_output, _ = run_sandbox(
         [
@@ -520,6 +561,7 @@ def run_bench_rep(
             *base,
             str(benchmark["fullIterations"]),
             str(benchmark["incrementalIterations"]),
+            str(seed),
         ],
         BENCH_TIMEOUT_SEC,
     )
@@ -527,15 +569,19 @@ def run_bench_rep(
         payload = json.loads(bench_output)
     except (ValueError, UnicodeDecodeError) as exc:
         raise GateFailure(f"benchmark output malformed: {identifier}") from exc
-    if not isinstance(payload, dict) or set(payload) != {"ok", "fullBytes", "fullNs", "incrementalBytes", "incrementalNs"} or payload.get("ok") is not True:
+    expected_keys = {"ok", "fullBytes", "fullDigest", "fullNs", "incrementalBytes", "incrementalDigest", "incrementalNs"}
+    if not isinstance(payload, dict) or set(payload) != expected_keys or payload.get("ok") is not True:
         raise GateFailure(f"benchmark output invalid: {identifier}")
     numeric = [payload.get(key) for key in ("fullBytes", "fullNs", "incrementalBytes", "incrementalNs")]
     if any(not isinstance(value, int) or value <= 0 for value in numeric):
         raise GateFailure(f"benchmark counters invalid: {identifier}")
+    digests = (payload.get("fullDigest"), payload.get("incrementalDigest"))
+    if any(not isinstance(value, int) or value < 0 or value >= 1 << 64 for value in digests):
+        raise GateFailure(f"benchmark digests invalid: {identifier}")
     # Robustness: recompute both byte counters from the sealed workload row and
     # trusted iteration counts; the harness value is accepted only when it
     # matches exactly, so candidate-linked code cannot inflate throughput by
-    # forging counters.
+    # fabricating counters.
     if payload["fullBytes"] != expected_full_bytes:
         raise GateFailure(f"benchmark full byte counter disagrees with sealed workload: {identifier}")
     if payload["incrementalBytes"] != expected_incremental_bytes:
@@ -544,7 +590,7 @@ def run_bench_rep(
         peak_rss_kib = int(rss_path.read_text().strip())
     except (OSError, ValueError) as exc:
         raise GateFailure(f"benchmark RSS output malformed: {identifier}") from exc
-    return payload["fullNs"], payload["incrementalNs"], peak_rss_kib
+    return payload["fullNs"], payload["incrementalNs"], peak_rss_kib, (digests[0], digests[1])
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -563,22 +609,26 @@ def main() -> None:
         mount_build_tmpfs()
         prepare_source(split_dir)
         build_sec = build_harness()
+        ratios: list[float] = []
         speeds: list[float] = []
         reference_speeds: list[float] = []
         rss: dict[str, int] = {}
         exact: dict[str, dict[str, str]] = {}
         for row in metadata["workloads"]:
-            full, incremental, ref_full, ref_incremental, peak, observed = run_workload(row, split_dir)
-            speeds.extend((full, incremental))
-            reference_speeds.extend((ref_full, ref_incremental))
-            rss[str(row["id"])] = peak
-            exact[str(row["id"])] = observed
+            result = run_workload(row, split_dir)
+            ratios.extend((result.full_ratio, result.incremental_ratio))
+            speeds.extend((result.full_speed, result.incremental_speed))
+            reference_speeds.extend((result.reference_full_speed, result.reference_incremental_speed))
+            rss[str(row["id"])] = result.peak_rss_kib
+            exact[str(row["id"])] = result.observed
         raw_q = geometric_mean(speeds)
         reference_q = geometric_mean(reference_speeds)
-        # Drift compensation: the trusted in-eval baseline yardstick divides
-        # out host frequency/contention state shared by both measurements, so
-        # the reported bytes/sec-scale score is comparable across evaluations.
-        score = raw_q * REFERENCE_NORMALIZATION / reference_q
+        # Drift compensation: every cell is the ratio of fastest-of-five
+        # per-phase times between the candidate and the trusted in-eval
+        # baseline yardstick run interleaved in the same evaluation, so host
+        # frequency/contention state shared by the paired measurements
+        # divides out of the reported bytes/sec-scale score.
+        score = REFERENCE_NORMALIZATION * geometric_mean(ratios)
         deterministic = {
             "treeSitterRevision": TREE_SITTER_REVISION,
             "grammarRevisions": EXPECTED_GRAMMAR_REVISIONS,
@@ -600,7 +650,7 @@ def main() -> None:
             "perExample": {
                 "aggregate": {
                     "score": score,
-                    "feedback": f"12 full/incremental throughput cells passed exact tree, parser-test, edit, and RSS gates; q={score:.3f} bytes/s (reference-normalized; raw {raw_q:.3f}, in-eval trusted baseline {reference_q:.3f})",
+                    "feedback": f"12 full/incremental throughput cells passed exact tree, parser-test, edit, digest, and RSS gates; q={score:.3f} bytes/s (fastest-of-five reference-normalized; raw {raw_q:.3f}, in-eval trusted baseline {reference_q:.3f})",
                 }
             },
             "diagnostics": {

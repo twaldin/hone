@@ -1,14 +1,17 @@
 {
   "aa": {
-    "noiseFractionOfScale": 0.19999999999999998,
+    "noiseFractionOfScale": 0.2,
     "samples": [
-      47778399.75282585,
-      52437080.21368476,
-      51769493.524844304
+      50666505.29794153,
+      51955609.6264734,
+      51102086.23932623,
+      50809293.91475852,
+      51566649.62333815,
+      50522360.646954104
     ],
-    "sigma": 2519186.5459757065
+    "sigma": 557825.1604303756
   },
-  "capsuleId": "cap_99b53d545bd2",
+  "capsuleId": "cap_92535fc85901",
   "controls": [
     {
       "hardGatesPass": false,
@@ -21,87 +24,96 @@
     {
       "hardGatesPass": true,
       "id": "naive",
-      "q": 29728916.097584985,
+      "q": 38433572.3222111,
       "role": "deliberately slower but correct volatile work in ts_parser_parse",
-      "trainQ": 29608089.88378924,
-      "validationQ": 29849742.311380725
+      "trainQ": 38129454.88246088,
+      "validationQ": 38737689.76196132
     },
     {
       "hardGatesPass": true,
       "id": "baseline",
-      "q": 50498642.074747324,
+      "q": 50809293.91475852,
       "role": "exact pinned upstream runtime",
-      "trainQ": 50748602.90063876,
-      "validationQ": 50248681.24885588
+      "trainQ": 50161445.05378901,
+      "validationQ": 51457142.77572802
     },
     {
       "hardGatesPass": true,
       "id": "improved",
-      "q": 51281642.730037995,
-      "role": "independently authored branch likelihood for string EOF, targeted hot-function unrolling in ts_parser__advance/ts_parser__lex and the lexer advance path, and an ASCII single-byte fast path in ts_lexer__get_lookahead",
-      "trainQ": 51463022.65716573,
-      "validationQ": 51100262.80291026
+      "q": 51796280.95205361,
+      "role": "independently authored: never-enabled lex/parse LOG branches compiled out, allocation entry points devirtualized from the ts_current_* function pointers to direct libc calls, a branch-likelihood hint for string-input EOF, and single-byte UTF-8 fast paths in ts_lexer__get_lookahead and ts_lexer__do_advance",
+      "trainQ": 51394930.71112941,
+      "validationQ": 52197631.1929778
     },
     {
       "hardGatesPass": true,
       "id": "shortcut",
-      "q": 38065459.64230514,
+      "q": 40846585.84508632,
       "role": "train-prefix fingerprint with validation-only delay layered on the improved optimization set",
       "shortcutGated": true,
-      "trainQ": 51790570.746447705,
-      "validationQ": 24340348.53816258
+      "trainQ": 51997778.83777394,
+      "validationQ": 29695392.852398705
     }
   ],
-  "declaredBaselineCommit": "8b6f3edddc4adf24af9726fca705aa41235f074c",
+  "declaredBaselineCommit": "b1e7fd73585e742d1fd8ebb9d8c5129817822752",
   "determinism": {
     "correctnessHash": "406d6d2f2543b93201654dff40054111568fa0148ff2f2cca8232ea87bce0b2e",
     "exactOracleHashesFrozen": true,
     "freshProcessBaselineAggregates": [
-      51151957.01323232,
-      50415114.43534044,
-      50678960.95039968,
-      50498642.074747324,
-      50230690.4844639,
-      50189757.56224084
+      50666505.29794153,
+      51955609.6264734,
+      51102086.23932623,
+      50809293.91475852,
+      51566649.62333815,
+      50522360.646954104
     ],
     "freshProcessRunsPerSplitAcrossConsecutiveChecks": 6
   },
   "feasibility": {
-    "buildNote": "cleanBuildSec and incrementalRebuildSec predate the in-eval reference yardstick (single-tree build); the evaluator now builds candidate and reference trees in each eval",
-    "cleanBuildSec": 5.156889293997665,
-    "evalSec": 44.9,
-    "evalSecNote": "mean containerized eval wall across the two admission ordering passes (628.0s and 629.6s over 14 evals each); includes the candidate plus in-eval reference harness builds and 8 bench repetitions per workload",
-    "incrementalRebuildSec": 3.192752377002762
+    "buildNote": "cleanBuildSec and incrementalRebuildSec measure the single-tree freeze build; the evaluator builds candidate and reference trees in each eval",
+    "cleanBuildSec": 7.619410170000265,
+    "evalSec": 117.8,
+    "evalSecNote": "mean containerized eval wall across the two admission ordering passes (122.4 and 113.3 averaged over 14 evals each); includes the candidate plus in-eval reference harness builds and 12 bench repetitions per workload",
+    "incrementalRebuildSec": 4.587914294000257
   },
   "measurement": {
-    "benchSampling": "per workload: trusted-reference and candidate bench repetitions interleaved, one warm repetition each, fastest-of-3 timed repetitions with per-phase minimum nanoseconds; score is reference-normalized by the same-eval trusted baseline yardstick (frozen scale 50661657.83045164)",
+    "benchSampling": "per workload: trusted-reference and candidate bench repetitions interleaved on the same trusted per-repetition schedule seed, one warm repetition each, five timed repetitions with each phase scored from its minimum nanoseconds for candidate and reference alike; every warmup and timed iteration parses identity-distinct schedule-variant content and each timed tree's full pre-order signature digest must equal the in-eval trusted reference run; score is the frozen scale 50661657.83045164 times the geometric mean of the 12 per-cell reference/candidate minimum-time ratios",
     "finalGceRecalibrationRequired": true,
     "freshProcess": true,
     "globalLockHeld": true,
-    "normalizationScale": 12595932.729878534,
+    "normalizationScale": 2789125.802151878,
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
-    "provisionalCalibrationNote": "qBase, sigma, qReference, aa samples, and normalizationScale predate the reference-normalized trimmed-sampling evaluator and remain provisional local calibration; final GCE recalibration (deferred finding) re-freezes them on the target host",
+    "provisionalCalibrationNote": "aa samples, sigma, qReference, and normalizationScale are measured under the reference-normalized fastest-of-five schedule-variant evaluator on Docker Desktop and remain provisional local calibration; final GCE recalibration (deferred finding) re-freezes them on the target host",
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
     "referenceNormalized": true
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:67f471fb97cdf90548edfebc3f20f280d8402dee03d2dd2bf8eaa4afed45c758",
-    "secondReportHash": "sha256:d9e7e17de3ae27d8ee118aa898f2e9711641d89fbeb2384f9ccd6b5dfb965a7f"
+    "firstReportHash": "sha256:76429eca963a95d9e7d5aa4abb4ba56509714fbc111018712679d1d41a1d85be",
+    "secondReportHash": "sha256:c800bdd911186e45ce18b2368d2341e66fe7fba1b1ec76bc024f05c825017efb"
   },
   "perturbation": {
-    "deltaFromOrderingBaseline": 783000.6552906707,
-    "deltaFromQBase": 619984.8995863572,
-    "description": "GCC branch likelihood for string EOF, targeted hot-function unrolling confined to ts_parser__advance, ts_parser__lex, and the lexer advance path, plus an ASCII single-byte fast path in ts_lexer__get_lookahead",
+    "deltaFromOrderingBaseline": 986987.0372950882,
+    "deltaFromOrderingBaselineBothPasses": [
+      2025075.473778598,
+      986987.0372950882
+    ],
+    "deltaFromOrderingBaselineOverSigma": 1.7693483681044502,
+    "deltaFromOrderingBaselineOverSigmaBothPasses": [
+      3.6303050085015944,
+      1.7693483681044502
+    ],
+    "deltaFromQBase": 1134623.121601969,
+    "description": "independently authored: never-enabled lex/parse LOG branches compiled out, allocation entry points devirtualized from the ts_current_* function pointers to direct libc calls, a branch-likelihood hint for string-input EOF, and single-byte UTF-8 fast paths in ts_lexer__get_lookahead and ts_lexer__do_advance",
     "id": "improved",
     "independentlyAuthored": true,
-    "q": 51281642.730037995,
+    "q": 51796280.95205361,
     "reachesReference": false,
     "valid": true
   },
   "qBase": 50661657.83045164,
-  "qFail": 0,
-  "qReference": 63257590.56033017,
+  "qFail": 0.0,
+  "qReference": 53450783.63260352,
   "terminalSeal": {
     "cohort": "terminal",
     "mutationRuns": false,

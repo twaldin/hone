@@ -8,7 +8,7 @@
 #include <stdio.h>
 
 #define LOG(message, character)              \
-  if (self->logger.log) {                    \
+  if (0) { /* logging compiled out: never enabled by the trusted harness */ \
     snprintf(                                \
       self->debug_buffer,                    \
       TREE_SITTER_SERIALIZATION_BUFFER_SIZE, \
@@ -204,8 +204,33 @@ static void ts_lexer_goto(Lexer *self, Length position) {
  * @param self The lexer state.
  * @param skip Whether to mark the consumed codepoint as whitespace.
  */
-__attribute__((optimize("O3,unroll-loops"), hot))
 static void ts_lexer__do_advance(Lexer *self, bool skip) {
+  // Fast path: a single-byte non-newline lookahead advancing to a position
+  // strictly inside both the current chunk and the current included range,
+  // where the next byte is itself a single-byte UTF-8 codepoint. Semantically
+  // identical to the general path below: the row cannot change, the
+  // range/chunk boundary walk is provably a no-op, and the inlined lookahead
+  // matches ts_lexer__get_lookahead's single-byte decode.
+  if (self->lookahead_size == 1 && self->data.lookahead != '\n' && self->chunk &&
+      self->input.encoding == TSInputEncodingUTF8 &&
+      self->current_position.bytes >= self->chunk_start) {
+    const TSRange *fast_range = &self->included_ranges[self->current_included_range_index];
+    uint32_t fast_next = self->current_position.bytes + 1;
+    if (fast_range->end_byte > fast_range->start_byte &&
+        fast_next < fast_range->end_byte &&
+        fast_next < self->chunk_start + self->chunk_size) {
+      uint8_t fast_byte = (uint8_t)self->chunk[fast_next - self->chunk_start];
+      if (__builtin_expect(fast_byte < 0x80, 1)) {
+        ts_lexer__increment_column_data(self);
+        self->current_position.extent.column += 1;
+        self->current_position.bytes = fast_next;
+        if (skip) self->token_start_position = self->current_position;
+        self->data.lookahead = fast_byte;
+        self->lookahead_size = 1;
+        return;
+      }
+    }
+  }
   if (self->lookahead_size) {
     if (self->data.lookahead == '\n') {
       self->current_position.extent.row++;
@@ -259,7 +284,6 @@ static void ts_lexer__do_advance(Lexer *self, bool skip) {
 
 // Advance to the next character in the source code, retrieving a new
 // chunk of source code if needed.
-__attribute__((optimize("O3,unroll-loops"), hot))
 static void ts_lexer__advance(TSLexer *_self, bool skip) {
   Lexer *self = (Lexer *)_self;
   if (!self->chunk) return;
