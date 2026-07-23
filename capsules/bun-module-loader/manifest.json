@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_9c3636562af0",
+  "id": "cap_02aa674739b5",
   "objective": "Improve module-resolution performance on frozen ESM and TypeScript graph shapes derived from bench/module-loader: the timed metric resolves every import edge of each frozen graph through the runtime resolver (Bun.resolveSync driver), aligning the score with the only mutable surface. Only src/resolver/** is mutable; exact module-graph load observations (exports and side effects), exact resolution-path checksums, focused upstream resolver tests, and peak RSS no more than baseline +2% are hard gates.",
   "baseline": {
     "kind": "git",
-    "commit": "f0ab939353a81ce65dd11b1590fad92a4ee24fed"
+    "commit": "92936ceaa42346ca1bac65144f966eb14201fd04"
   },
   "image": "hone-bun-module-loader@sha256:42510480a076778ff594c95fd200610a41721d37ab20b97c80f3e98569c36747",
   "evalEntrypoint": [
@@ -45,7 +45,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:75145b13a25bfc5cfdbc5bda5f074a90c4e43c9762d7c5ac28164f3b2d9d675b"
+    "hash": "sha256:d05b2d0ab3bd21030724676ff608c2dfea0fd34689b6199cd30463e802fcd669"
   },
   "contentHashes": {
     "assets/train/oracle.json": "sha256:4385c808ede50e934578c1c7408f87f945c490c3f8c1181516439f24c3ee895d",
@@ -90,8 +90,9 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max (provisional; frozen-host recalibration required)",
       "freshProcess": true,
+      "freshStatePerLaunch": true,
       "warmRepetitions": 5,
-      "q": "reference-normalized per-graph score after all hard gates pass: each graph runs one untimed settling repetition then 30 warm (6 rounds x warmRepetitions) and 7 cold interleaved candidate/reference pairs; each phase is scored as the median per-pair time ratio (adjacent pair members share host state, so frequency drift, contention spikes, and scheduler mode-occupancy luck divide out) and q is the geometric mean over graphs of qBase/sqrt(warmRatio*coldRatio), so a candidate identical to the trusted baseline scores qBase by construction",
+      "q": "reference-normalized per-graph score after all hard gates pass: each graph runs an untimed correctness load per binary, one untimed settling repetition, then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored as the median per-pair time ratio (adjacent pair members share host state, so frequency drift, contention spikes, and scheduler mode-occupancy luck divide out), and q is the geometric mean over graphs of qBase/pairRatio, so a candidate identical to the trusted baseline scores qBase by construction; every loader launch gets a fresh per-launch transpiler cache and TMPDIR under a root-owned measurement root plus a fresh IPC namespace, and is followed by a candidate-uid process reap and shared tmp-root purge, so no repetition can replay state persisted by an earlier one",
       "qFail": 0,
       "qBase": 14.034003452816037,
       "sigma": 0.057695965931277085,

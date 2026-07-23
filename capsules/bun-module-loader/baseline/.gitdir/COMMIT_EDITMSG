@@ -1,1 +1,9 @@
-baseline
+Per-launch fresh candidate-writable state in the measurement phase
+
+Each loader launch now runs against a per-launch transpiler cache and
+TMPDIR under a root-owned measurement root, inside a fresh IPC namespace,
+and is followed by a candidate-uid process reap (subreaper-backed) and a
+purge of the shared tmp roots; the post-test lockdown rebuilds the 0777
+build/test scratch dirs root-owned and strips group/other write from
+root-owned paths under the build tree, so no repetition can replay
+resolution state persisted by an earlier one.

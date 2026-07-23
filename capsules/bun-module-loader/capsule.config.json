@@ -67,8 +67,9 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max (provisional; frozen-host recalibration required)",
       "freshProcess": true,
+      "freshStatePerLaunch": true,
       "warmRepetitions": 5,
-      "q": "reference-normalized per-graph score after all hard gates pass: each graph runs one untimed settling repetition then 30 warm (6 rounds x warmRepetitions) and 7 cold interleaved candidate/reference pairs; each phase is scored as the median per-pair time ratio (adjacent pair members share host state, so frequency drift, contention spikes, and scheduler mode-occupancy luck divide out) and q is the geometric mean over graphs of qBase/sqrt(warmRatio*coldRatio), so a candidate identical to the trusted baseline scores qBase by construction",
+      "q": "reference-normalized per-graph score after all hard gates pass: each graph runs an untimed correctness load per binary, one untimed settling repetition, then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored as the median per-pair time ratio (adjacent pair members share host state, so frequency drift, contention spikes, and scheduler mode-occupancy luck divide out), and q is the geometric mean over graphs of qBase/pairRatio, so a candidate identical to the trusted baseline scores qBase by construction; every loader launch gets a fresh per-launch transpiler cache and TMPDIR under a root-owned measurement root plus a fresh IPC namespace, and is followed by a candidate-uid process reap and shared tmp-root purge, so no repetition can replay state persisted by an earlier one",
       "qFail": 0,
       "qBase": 14.034003452816037,
       "sigma": 0.057695965931277085,

@@ -28,17 +28,17 @@
   },
   {
    "name": "naive",
-   "q": 2.028201610176765,
-   "trainQ": 2.022133610677642,
-   "validationQ": 2.034269609675887,
+   "q": 2.186777794280104,
+   "trainQ": 2.1850134933830763,
+   "validationQ": 2.188542095177131,
    "hardGatesPass": true,
    "role": "deliberately slower but correct: a fixed deterministic ~15us spin on every resolver entry (quantization-immune, ratio-stable under the interleaved reference yardstick)"
   },
   {
    "name": "shortcut",
-   "q": 10.938397853227343,
-   "trainQ": 19.83527818281414,
-   "validationQ": 2.0415175236405476,
+   "q": 11.366741557100909,
+   "trainQ": 20.518584806725364,
+   "validationQ": 2.21489830747645,
    "hardGatesPass": true,
    "role": "split-path memorization control: full train-split resolution results are memorized in a digest-keyed table promoted only on repeat sightings (correctness phase stays inside the frozen RSS gate) so repeated train resolutions skip the resolver entirely, while validation entries pay a bounded deterministic probe \u2014 beats baseline on train, clearly slower on validation"
   }
@@ -47,20 +47,20 @@
   "name": "improved",
   "path": "diagnostics/improved/src/resolver/resolver.rs",
   "description": "Independently authored valid source perturbation: removes disabled perf-event tracing, tracing-timer accumulation, and cold debug-log flush calls from the resolver entry path, skips the specifier-classification prologue for relative './'/'../' imports (a guaranteed no-op for them), joins single-segment relative specifiers directly instead of running the general path normalizer, and adds cold/no-inline layout hints on cold resolver functions. Observation-preserving: loader stdout and resolution-path checksums are byte-identical to the pristine baseline on every train and validation graph (20/20 phase outputs), focused tests pass, RSS unchanged.",
-  "q": 15.281315901778726,
-  "trainQ": 15.295543449548168,
-  "validationQ": 15.267088354009283,
+  "q": 15.454276026588897,
+  "trainQ": 15.423720878503019,
+  "validationQ": 15.484831174674772,
   "hardGatesPass": true,
   "movesMetric": true
  },
  "orderingChecks": {
   "consecutivePasses": 2,
-  "firstPassStabilitySpread": 0.0017258282040411423,
-  "finalStabilitySpread": 0.007594187584423491,
+  "firstPassStabilitySpread": 0.0142,
+  "finalStabilitySpread": 0.006460846030595572,
   "stabilityBand": 0.15,
   "containerEvaluationsPerPass": 14,
-  "firstPassWallSec": 2898.0,
-  "finalPassWallSec": 2201.0
+  "firstPassWallSec": 3015.3,
+  "finalPassWallSec": 2994.0
  },
- "measurementNote": "Timed phase: per graph, one untimed settling repetition then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored by the median per-pair time ratio; fastest-of-N was abandoned because sub-200ms container runs are multi-modal and the fastest sample estimates the rare mode's own variance. The untimed correctness phase loads the full module graph and gates exact export/side-effect hashes and peak RSS against the frozen oracle."
+ "measurementNote": "Timed phase: per graph, one untimed settling repetition then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored by the median per-pair time ratio; fastest-of-N was abandoned because sub-200ms container runs are multi-modal and the fastest sample estimates the rare mode's own variance. The untimed correctness phase loads the full module graph and gates exact export/side-effect hashes and peak RSS against the frozen oracle. Round-2 state hygiene: every loader launch runs against a per-launch fresh transpiler cache and TMPDIR under a root-owned measurement root inside a fresh IPC namespace, and is followed by a subreaper-backed candidate-uid process reap plus a purge of the shared tmp roots; the post-test lockdown rebuilds the 0777 build/test scratch dirs root-owned, strips group/other write from root-owned build-tree paths, and hosts graphs and RSS outputs under the root-owned measurement root, so no repetition can replay state persisted by an earlier one."
 }

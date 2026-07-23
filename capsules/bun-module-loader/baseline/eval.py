@@ -14,10 +14,16 @@ of the graph through Bun.resolveSync for the spec'd repetition count (the
 resolver dominates this phase, so genuine resolver improvements move the
 score). Timed runs interleave candidate/reference pairs under the same host
 state and are scored as the median of per-pair time ratios, so host frequency
-drift, contention spikes, and scheduler mode luck divide out.
+drift, contention spikes, and scheduler mode luck divide out. Every loader
+launch runs against completely fresh candidate-writable state — a per-launch
+transpiler cache and TMPDIR under a root-owned measurement root, a fresh IPC
+namespace — and is followed by a candidate-uid process sweep plus a purge of
+the shared tmp roots, so no launch can persist resolution state for a later
+repetition to replay.
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
@@ -27,6 +33,7 @@ import shutil
 import signal
 import statistics
 import subprocess
+import stat as stat_module
 import sys
 import time
 from pathlib import Path
@@ -44,6 +51,10 @@ SEALED_ROOT = BUILD_ROOT / "hone-sealed"
 SEALED_BUN = SEALED_ROOT / "bun-profile"
 REF_ROOT = BUILD_ROOT / "hone-ref"
 REF_BUN = REF_ROOT / "bun-profile"
+MEASURE_ROOT = BUILD_ROOT / "hone-measure"
+PR_SET_CHILD_SUBREAPER = 36
+CLONE_NEWIPC = 0x08000000
+CANDIDATE_WRITABLE_ROOTS = (Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"))
 # Frozen provisional yardstick scale: a candidate identical to the trusted
 # baseline resolver scores this value by construction (raw_q == reference_q),
 # independent of host frequency/contention drift. Final GCE recalibration
@@ -92,6 +103,116 @@ def _candidate_preexec() -> None:
     resource.setrlimit(resource.RLIMIT_NOFILE, (1024, 1024))
 
 
+def _become_subreaper() -> None:
+    """Adopt orphaned candidate descendants so they can be reaped.
+
+    Detached/new-session children reparent to the nearest subreaper instead
+    of pid 1, which lets _reap_candidate_processes wait() on them.
+    """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _ipc_isolated_preexec() -> None:
+    """Give the launch a fresh IPC namespace so SysV segments cannot carry
+    resolution state between repetitions (runs before /usr/bin/time execs;
+    setpriv then drops the whole subtree to the candidate uid inside it)."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.unshare(CLONE_NEWIPC) != 0:
+        os._exit(126)
+
+
+def _candidate_pids() -> dict[int, bool]:
+    """Map of candidate-uid pid -> is_zombie from a full /proc scan."""
+    pids: dict[int, bool] = {}
+    proc = Path("/proc")
+    if not proc.exists():
+        return pids
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = (entry / "status").read_text()
+        except OSError:
+            continue
+        uid: int | None = None
+        zombie = False
+        for line in status.splitlines():
+            if line.startswith("Uid:"):
+                try:
+                    uid = int(line.split()[1])
+                except (IndexError, ValueError):
+                    uid = None
+            elif line.startswith("State:"):
+                zombie = line.split()[1:2] == ["Z"]
+        if uid == CANDIDATE_UID:
+            pids[int(entry.name)] = zombie
+    return pids
+
+
+def _reap_candidate_processes() -> None:
+    """Kill and reap every candidate-uid process until none remain.
+
+    killpg alone misses detached/new-session descendants, and a plain SIGKILL
+    sweep leaves zombies pinned by dead parents.  As subreaper this process
+    inherits those orphans, so we loop: SIGKILL every live candidate pid,
+    drain waitpid(-1, WNOHANG), and stop only when a full /proc scan finds no
+    candidate-uid process at all (bounded by a hard deadline).
+    """
+    if os.geteuid() != 0:
+        return
+    deadline = time.monotonic() + 5.0
+    while True:
+        pids = _candidate_pids()
+        if not any(not zombie for zombie in pids.values()):
+            return
+        for pid, zombie in pids.items():
+            if zombie:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        while True:
+            try:
+                reaped, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if reaped == 0:
+                break
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.01)
+
+
+def _clear_candidate_writable() -> None:
+    """Purge candidate-owned residue from the shared tmp roots so nothing a
+    launch stashed under /tmp, /var/tmp, or /dev/shm survives into the next
+    repetition (TMPDIR points at per-launch scratch, but hardcoded paths and
+    POSIX shm land here)."""
+    for root in CANDIDATE_WRITABLE_ROOTS:
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for path in entries:
+            try:
+                if path.lstat().st_uid != CANDIDATE_UID:
+                    continue
+            except OSError:
+                continue
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def _candidate_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {
         **os.environ,
@@ -124,6 +245,7 @@ def _run(
     cwd: Path,
     timeout: int,
     candidate: bool = False,
+    fresh_ipc: bool = False,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     try:
@@ -134,7 +256,11 @@ def _run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
-            preexec_fn=_candidate_preexec if candidate else None,
+            preexec_fn=(
+                _candidate_preexec
+                if candidate
+                else (_ipc_isolated_preexec if fresh_ipc else None)
+            ),
             env=env or _candidate_env(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -374,16 +500,29 @@ def _run_loader(
     binary: Path,
     entry: str,
     job: dict,
-    cache: Path,
     sample: str,
     expected_tag: str,
 ) -> dict:
-    rss_path = WORK_ROOT / f"rss-{job['id']}-{sample}.txt"
+    """Run one loader launch against completely fresh candidate-writable
+    state.  The transpiler cache and TMPDIR are per-launch directories under
+    the root-owned measurement root (created here, destroyed below), the
+    launch gets a fresh IPC namespace, and after it exits every candidate-uid
+    process is killed and reaped and the shared tmp roots are purged — so no
+    launch can persist resolution state for a later repetition to replay."""
+    state_root = MEASURE_ROOT / f"state-{job['id']}-{sample}"
+    shutil.rmtree(state_root, ignore_errors=True)
+    state_root.mkdir(mode=0o755)
+    cache = state_root / "cache"
+    tmp = state_root / "tmp"
+    for scratch in (cache, tmp):
+        scratch.mkdir(mode=0o777)
+        os.chmod(scratch, 0o777)
+    rss_path = MEASURE_ROOT / f"rss-{job['id']}-{sample}.txt"
     rss_path.unlink(missing_ok=True)
     env = _candidate_env(
         {
             "BUN_RUNTIME_TRANSPILER_CACHE_PATH": str(cache),
-            "TMPDIR": str(WORK_ROOT),
+            "TMPDIR": str(tmp),
         }
     )
     argv = [
@@ -399,9 +538,20 @@ def _run_loader(
         str(binary),
         entry,
     ]
-    started = time.perf_counter()
-    completed = _run(argv, cwd=Path(entry).parent, timeout=RUN_TIMEOUT_SEC, env=env)
-    elapsed = time.perf_counter() - started
+    try:
+        started = time.perf_counter()
+        completed = _run(
+            argv,
+            cwd=Path(entry).parent,
+            timeout=RUN_TIMEOUT_SEC,
+            fresh_ipc=True,
+            env=env,
+        )
+        elapsed = time.perf_counter() - started
+    finally:
+        _reap_candidate_processes()
+        _clear_candidate_writable()
+        shutil.rmtree(state_root, ignore_errors=True)
     try:
         peak_rss_kib = int(rss_path.read_text(encoding="ascii").strip())
     except (OSError, ValueError) as exc:
@@ -417,10 +567,46 @@ def _run_loader(
     }
 
 
-def _fresh_cache(path: Path) -> None:
-    shutil.rmtree(path, ignore_errors=True)
-    path.mkdir(parents=True, mode=0o777)
-    os.chmod(path, 0o777)
+def _strip_shared_write(root: Path) -> None:
+    """Remove group/other write bits from every root-owned path in the tree.
+
+    Candidate-owned build outputs cannot be relocked without CAP_CHOWN (their
+    owner can always chmod them back); cross-repetition persistence through
+    those is handled by the per-launch process sweep and per-launch fresh
+    scratch instead."""
+    for directory, _names, files in os.walk(root):
+        for path in (Path(directory), *(Path(directory) / name for name in files)):
+            try:
+                st = path.lstat()
+            except OSError:
+                continue
+            if st.st_uid != 0 or stat_module.S_ISLNK(st.st_mode):
+                continue
+            if st.st_mode & 0o022:
+                os.chmod(path, st.st_mode & ~0o022)
+
+
+def _prepare_measurement() -> None:
+    """Transition from the candidate-writable build/test phase to the
+    measurement phase.  Kills and reaps every candidate-uid process, purges
+    the shared tmp roots, rebuilds the 0o777 build/test scratch directories
+    as root-owned non-writable stubs, strips group/other write from every
+    root-owned path under the build tree and the staged resolver source, and
+    creates the root-owned measurement root.  After this point the only
+    candidate-writable filesystem state is the per-launch scratch created
+    (and destroyed) around each loader run."""
+    _reap_candidate_processes()
+    _clear_candidate_writable()
+    for name in ("hone-home", "hone-bun-cache", WORK_ROOT.name):
+        path = BUILD_ROOT / name
+        shutil.rmtree(path, ignore_errors=True)
+        path.mkdir(mode=0o755)
+        os.chmod(path, 0o755)
+    _strip_shared_write(SOURCE_ROOT / "src" / "resolver")
+    _strip_shared_write(BUILD_ROOT)
+    shutil.rmtree(MEASURE_ROOT, ignore_errors=True)
+    MEASURE_ROOT.mkdir(mode=0o755)
+    os.chmod(MEASURE_ROOT, 0o755)
 
 
 def _measure_jobs(spec: dict, jobs: list[dict]) -> dict[str, dict]:
@@ -430,15 +616,14 @@ def _measure_jobs(spec: dict, jobs: list[dict]) -> dict[str, dict]:
     pair_samples = WARM_SAMPLE_ROUNDS * warm_reps
     measured: dict[str, dict] = {}
     for job in jobs:
-        cand_cache = WORK_ROOT / "cache" / f"{job['id']}-cand"
-        ref_cache = WORK_ROOT / "cache" / f"{job['id']}-ref"
-        _fresh_cache(cand_cache)
-        _fresh_cache(ref_cache)
         # Correctness phase (untimed): load the full module graph once per
         # binary; exports/side-effect hashes and peak RSS gate against the
-        # frozen oracle exactly as before.
-        cand_load = _run_loader(SEALED_BUN, job["entry"], job, cand_cache, "cand-load", "graph")
-        ref_load = _run_loader(REF_BUN, job["entry"], job, ref_cache, "ref-load", "graph")
+        # frozen oracle exactly as before. Every launch (here and in the
+        # timed phase) gets its own fresh transpiler cache and TMPDIR and is
+        # followed by a candidate-uid process sweep, so no repetition can
+        # observe state persisted by an earlier one.
+        cand_load = _run_loader(SEALED_BUN, job["entry"], job, "cand-load", "graph")
+        ref_load = _run_loader(REF_BUN, job["entry"], job, "ref-load", "graph")
         if (cand_load["exportHash"], cand_load["sideEffectHash"]) != (
             ref_load["exportHash"],
             ref_load["sideEffectHash"],
@@ -456,16 +641,16 @@ def _measure_jobs(spec: dict, jobs: list[dict]) -> dict[str, dict]:
         # construction.
         driver = job["resolveEntry"]
         cand_obs: list[dict] = [
-            _run_loader(SEALED_BUN, driver, job, cand_cache, "cand-resolve-warmup", "resolve")
+            _run_loader(SEALED_BUN, driver, job, "cand-resolve-warmup", "resolve")
         ]
         ref_obs: list[dict] = [
-            _run_loader(REF_BUN, driver, job, ref_cache, "ref-resolve-warmup", "resolve")
+            _run_loader(REF_BUN, driver, job, "ref-resolve-warmup", "resolve")
         ]
         cand_times: list[float] = []
         ref_times: list[float] = []
         for index in range(pair_samples):
-            c = _run_loader(SEALED_BUN, driver, job, cand_cache, f"cand-resolve-{index}", "resolve")
-            r = _run_loader(REF_BUN, driver, job, ref_cache, f"ref-resolve-{index}", "resolve")
+            c = _run_loader(SEALED_BUN, driver, job, f"cand-resolve-{index}", "resolve")
+            r = _run_loader(REF_BUN, driver, job, f"ref-resolve-{index}", "resolve")
             cand_obs.append(c)
             ref_obs.append(r)
             cand_times.append(c["elapsedSec"])
@@ -559,12 +744,14 @@ def evaluate() -> dict:
     build_sec: float | None = None
     tests_pass = False
     try:
+        _become_subreaper()
         _prepare_candidate()
         build_sec = _build_candidate()
         _run_upstream_tests()
         tests_pass = True
+        _prepare_measurement()
         spec, oracle = _load_assets()
-        graph_root = WORK_ROOT / "graphs"
+        graph_root = MEASURE_ROOT / "graphs"
         graph_root.mkdir(mode=0o755)
         jobs = materialize(spec, graph_root)
         job_ids = [job["id"] for job in jobs]
