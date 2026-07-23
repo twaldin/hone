@@ -10,6 +10,10 @@ import sys
 from pathlib import Path
 
 BUILD_TIMEOUT_SEC = 2700
+# The one candidate-mutable source file. prepare() seeds EVERYTHING else from
+# the trusted baseline, so a sanitized terminal artifact that carries only this
+# file still yields a complete, buildable tree.
+MUTABLE_FILES = ("src/execution/operator/filter/physical_filter.cpp",)
 
 
 def run_quiet(argv: list[str], cwd: Path, timeout: int = BUILD_TIMEOUT_SEC) -> tuple[bool, str]:
@@ -42,11 +46,31 @@ def run_quiet(argv: list[str], cwd: Path, timeout: int = BUILD_TIMEOUT_SEC) -> t
 
 
 def prepare(workspace: Path, source: Path) -> dict:
+    """Seed the full pinned baseline from the trusted directory, then overlay
+    ONLY the mutable physical-filter source from the candidate workspace.
+
+    The sanitized terminal artifact legitimately omits every protected file
+    (CMakeLists, build graph, tests, result_hash.cpp), so the workspace must
+    never be the seed of the build tree. Seeding from the trusted directory
+    also means tampered protected-file content in a development workspace is
+    ignored outright: only the declared mutable inventory is candidate input.
+    """
     def ignore(_directory: str, names: list[str]) -> set[str]:
         return {name for name in names if name in {".git", ".gitdir", "__pycache__", "build"}}
 
+    trusted_dir = Path(__file__).resolve().parent
     try:
-        shutil.copytree(workspace, source, symlinks=False, ignore=ignore, dirs_exist_ok=True)
+        shutil.copytree(trusted_dir, source, symlinks=False, ignore=ignore, dirs_exist_ok=True)
+        os.chmod(source, 0o755)
+        for relative in MUTABLE_FILES:
+            candidate = workspace / relative
+            if candidate.is_symlink() or not candidate.is_file():
+                return {"ok": False, "stage": "prepare", "detail": f"candidate is missing mutable file {relative}"}
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(target.parent, 0o755)
+            target.unlink(missing_ok=True)
+            shutil.copyfile(candidate, target)
     except OSError as exc:
         return {"ok": False, "stage": "prepare", "detail": str(exc)}
     return {"ok": True, "stage": "prepare"}
@@ -133,6 +157,7 @@ def test(source: Path) -> dict:
     tests = [
         "test/sql/filter/test_expression_executor_select.test",
         "test/sql/filter/filter_cache.test",
+        "test/sql/filter/length_case_filter.test",
     ]
     for test in tests:
         ok, detail = run_quiet([str(binary), test], source, timeout=180)

@@ -28,18 +28,18 @@
     "evaluatorSource": "user",
     "partition": "m2-terminal-holdout",
     "license": "MIT (upstream LICENSE preserved)",
-    "provenance": "duckdb/duckdb at exact revision 117e1a46be1c903c5a36ee3c881c125597f93c60, layered with trusted evaluator glue in synthetic baseline commit lineage; fixed SF1 database SHA-256 1e2a17dedac4da19efb6c8c154b82042cd78f1faa862a8a1b7d95f717ea0bb94; trusted repeated-baseline fresh-container aggregates [2.23876246674634,2.244652529713055,2.217627299730003] give qBase=2.233680765396466, sample sigma=0.014211211432041987, qReference=qBase+max(5*sigma,0.05*abs(qBase-0))=2.345364803666289; terminal holdout seal attested with no optimizer pilot, mutation/headroom run, seed-optimizer session, or optimizer-visible terminal evidence",
+    "provenance": "duckdb/duckdb at exact revision 117e1a46be1c903c5a36ee3c881c125597f93c60, layered with trusted evaluator glue in synthetic baseline commit lineage; fixed SF1 database SHA-256 1e2a17dedac4da19efb6c8c154b82042cd78f1faa862a8a1b7d95f717ea0bb94; q is the host-normalized reference-yardstick score NORM_CONST(1.0)*min(reference)/min(target) (interleaved candidate-independent filter-free reference query, per-binary minimum over 7 timed fresh-process pairs); trusted repeated-baseline fresh-container aggregates [1.0058890680841304,1.0319232517875827,1.0037035234007132] give qBase=1.0138386144241422, sample sigma=0.015699832254395817, qReference=qBase+max(5*sigma,0.05*abs(qBase-0))=1.0923377756961212; terminal holdout seal attested with no optimizer pilot, mutation/headroom run, seed-optimizer session, or optimizer-visible terminal evidence",
     "sourceDetails": {
       "repository": "duckdb/duckdb",
       "revision": "117e1a46be1c903c5a36ee3c881c125597f93c60",
       "upstreamUrl": "https://github.com/duckdb/duckdb/commit/117e1a46be1c903c5a36ee3c881c125597f93c60",
       "mutableEnvelope": ["src/execution/operator/filter/physical_filter.cpp"],
-      "upstreamTests": ["test/sql/filter/test_expression_executor_select.test", "test/sql/filter/filter_cache.test"]
+      "upstreamTests": ["test/sql/filter/test_expression_executor_select.test", "test/sql/filter/filter_cache.test", "test/sql/filter/length_case_filter.test"]
     },
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
       "freshProcess": true,
-      "q": "reciprocal median of the fastest 5 of 7 trusted-parent wall latencies in seconds (host contention only adds time; trimming rejects it without candidate control)",
+      "q": "host-normalized reference-yardstick score NORM_CONST(1.0) * min(reference)/min(target) over 7 timed fresh-process target/reference pairs (2 warmups); the reference query has no WHERE clause so it never invokes the mutable PhysicalFilter and is candidate-independent, and the per-binary minimum cancels shared-host contention drift while rewarding a genuinely faster filter path",
       "qFail": 0,
       "warmupRuns": 2,
       "timedRuns": 7,
@@ -50,7 +50,7 @@
     },
     "robustnessReview": {
       "protectedPathEscape": "the broker protects the evaluator, build graph, runner, tests, dependencies, assets, and every source file outside the one-file physical-filter envelope; the evaluator independently rejects additions and every symlink",
-      "benchmarkSpecialCasing": "independently authored train and validation predicates exercise the same physical-filter kernel over the same fixed database and exact typed output; split-inverting diagnostics must lose on validation",
+      "benchmarkSpecialCasing": "independently authored, non-tautological train and validation predicates (distinct selective length thresholds over lower()/upper() case kernels) exercise the same physical-filter kernel over the same fixed database and exact typed output; any pass-through of the input chunk changes the selected row set and fails the exact-output oracle, the frozen upstream test subset includes a length-case filter test whose predicates drop rows, and split-inverting diagnostics must lose on validation",
       "fixtureFingerprinting": "assets are hash-verified, copied read-only, and unmounted before candidate build; every sample starts with a swept /tmp and /dev/shm, a fresh working directory, and fresh IPC and NET namespaces",
       "outputFabrication": "each process stdout is checked against an oracle retained only in the trusted parent after the sealed asset mount is removed",
       "timerTampering": "CLOCK_MONOTONIC timing surrounds each full process in the trusted Python parent and the score is the median of the fastest 5 of 7 samples; no candidate-linked clock or reported duration is accepted",

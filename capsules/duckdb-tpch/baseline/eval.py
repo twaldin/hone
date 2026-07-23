@@ -11,7 +11,6 @@ import resource
 import select
 import shutil
 import signal
-import statistics
 import subprocess
 import sys
 import time
@@ -35,6 +34,21 @@ WARMUP_RUNS = 2
 TIMED_RUNS = 7
 FASTEST_K = 5
 QFAIL = 0.0
+# Reference-yardstick normalization. The reference query never invokes the
+# mutable PhysicalFilter operator (no WHERE clause), so its wall time is
+# candidate-independent and tracks only host speed. Timed alongside each target
+# rep, the per-pair ratio reference/target cancels cross-eval host drift while
+# preserving the candidate's real filter-path speedup. It reads and case-folds
+# the same columns the target does, so it co-varies with the target's I/O and
+# string-kernel cost without a second build. NORM_CONST is a fixed scale factor.
+
+# Source reference only; the original executable terminal bundle stays private.
+def _withheld_terminal_input(name):
+    raise RuntimeError(f"Private terminal input withheld: {name}; use the original capsule bundle")
+
+REFERENCE_QUERY = _withheld_terminal_input('REFERENCE_QUERY')
+REFERENCE_ORACLE = _withheld_terminal_input('REFERENCE_ORACLE')
+NORM_CONST = 1.0
 ALLOWED_MUTABLE_FILES = frozenset({
     "src/execution/operator/filter/physical_filter.cpp",
 })
@@ -147,20 +161,31 @@ def cleanup() -> None:
 
 
 def check_source_envelope() -> None:
+    """Protected files may legitimately be ABSENT (the sanitized terminal
+    artifact strips them; prepare() reconstructs the tree from the trusted
+    seed), but the full mutable-file inventory MUST be present, every present
+    file must be inside the envelope, and symlinks are rejected outright."""
     trusted_paths = {
         path.relative_to(TRUSTED_DIR).as_posix()
         for path in TRUSTED_DIR.rglob("*")
         if path.is_file()
     }
+    present_mutable: set[str] = set()
     for path in WORKSPACE.rglob("*"):
         if path.is_symlink():
             raise GateFailure("candidate source contains a symbolic link")
         if not path.is_file():
             continue
         relative = path.relative_to(WORKSPACE).as_posix()
-        if relative in trusted_paths or relative in ALLOWED_MUTABLE_FILES:
+        if relative in ALLOWED_MUTABLE_FILES:
+            present_mutable.add(relative)
+            continue
+        if relative in trusted_paths:
             continue
         raise GateFailure(f"file outside mutable source envelope: {relative}")
+    missing = sorted(ALLOWED_MUTABLE_FILES - present_mutable)
+    if missing:
+        raise GateFailure(f"candidate source is missing mutable files: {', '.join(missing)}")
 
 
 def load_and_seal_assets() -> tuple[dict, str]:
@@ -201,10 +226,13 @@ def load_and_seal_assets() -> tuple[dict, str]:
     OUTPUT.mkdir(mode=0o755)
     database = FIXTURE / "input.duckdb"
     query = FIXTURE / "query.sql"
+    reference = FIXTURE / "reference.sql"
     shutil.copyfile(database_files[0], database)
     query.write_bytes(query_bytes)
+    reference.write_text(REFERENCE_QUERY)
     os.chmod(database, 0o444)
     os.chmod(query, 0o444)
+    os.chmod(reference, 0o444)
     if not unmount(ASSETS):
         raise GateFailure("sealed assets could not be hidden before candidate build")
     return metadata, oracle
@@ -293,12 +321,13 @@ def sweep_candidate_state() -> None:
                 pass
 
 
-def run_one_sample(binary: Path, expected_hash: str, index: int) -> tuple[float, int, str]:
+def run_one_sample(binary: Path, query_name: str, expected_hash: str, index: int,
+                   tag: str) -> tuple[float, int, str]:
     sweep_candidate_state()
-    rep = OUTPUT / f"rep-{index}"
+    rep = OUTPUT / f"rep-{tag}-{index}"
     rep.mkdir(mode=0o777)
     os.chmod(rep, 0o777)
-    argv = [str(binary), str(FIXTURE / "input.duckdb"), str(FIXTURE / "query.sql")]
+    argv = [str(binary), str(FIXTURE / "input.duckdb"), str(FIXTURE / query_name)]
     started_ns = time.monotonic_ns()
     process = subprocess.Popen(
         argv,
@@ -389,15 +418,27 @@ def main() -> None:
         build_sec = time.monotonic() - build_started
         run_worker("test")
         binary = seal_runner()
-        samples: list[float] = []
+        target_samples: list[float] = []
+        reference_samples: list[float] = []
         rss_samples: list[int] = []
         actual_result_hash = ""
         for index in range(WARMUP_RUNS + TIMED_RUNS):
-            elapsed, peak_rss_kb, actual_result_hash = run_one_sample(binary, oracle, index)
+            # Interleave target and reference in the same rep so both see the
+            # same instantaneous host load; the per-pair ratio cancels drift.
+            target_elapsed, peak_rss_kb, actual_result_hash = run_one_sample(
+                binary, "query.sql", oracle, index, "target")
+            reference_elapsed, _reference_rss, _reference_hash = run_one_sample(
+                binary, "reference.sql", REFERENCE_ORACLE, index, "reference")
             if index >= WARMUP_RUNS:
-                samples.append(elapsed)
+                target_samples.append(target_elapsed)
+                reference_samples.append(reference_elapsed)
                 rss_samples.append(peak_rss_kb)
-        if len(samples) != TIMED_RUNS or any(not math.isfinite(value) or value <= 0 for value in samples):
+        if (
+            len(target_samples) != TIMED_RUNS
+            or len(reference_samples) != TIMED_RUNS
+            or any(not math.isfinite(value) or value <= 0 for value in target_samples)
+            or any(not math.isfinite(value) or value <= 0 for value in reference_samples)
+        ):
             raise GateFailure("trusted parent produced invalid latency samples")
         peak_rss_kb = max(rss_samples)
         baseline_rss_kb = metadata["baselinePeakRssKb"]
@@ -405,14 +446,22 @@ def main() -> None:
             raise GateFailure("invalid baseline RSS limit")
         if peak_rss_kb * 100 > baseline_rss_kb * 102:
             raise GateFailure(f"peak RSS gate failed: {peak_rss_kb} KiB exceeds baseline+2%")
-        trimmed = sorted(samples)[:FASTEST_K]
-        median_latency = statistics.median(trimmed)
-        score = 1.0 / median_latency
+        # Contention-robust MIN-of-N estimator (converged lesson from the
+        # thin-margin fixers on this shared loaded host): the per-binary minimum
+        # wall is the least-contended, most reproducible realization. Both minima
+        # inflate together under load, so their ratio cancels host drift while
+        # rewarding a genuinely faster candidate filter path. Median/mean or
+        # per-pair-difference estimators amplify contention and blow the A-A band.
+        min_target = min(target_samples)
+        min_reference = min(reference_samples)
+        score = NORM_CONST * (min_reference / min_target)
+        if not math.isfinite(score) or score <= 0:
+            raise GateFailure("trusted parent produced an invalid normalized score")
         deterministic = {
             "databaseSha256": metadata["databaseSha256"],
             "queryResultSha256": actual_result_hash,
             "querySha256": metadata["querySha256"],
-            "tests": "physical-filter-v1",
+            "tests": "physical-filter-v2",
         }
         result_hash = hashlib.sha256(canonical(deterministic).encode()).hexdigest()
         output = {
@@ -427,17 +476,19 @@ def main() -> None:
             "perExample": {
                 "aggregate": {
                     "score": score,
-                    "feedback": f"physical-filter exact output and upstream tests passed; reciprocal fastest-{FASTEST_K}-of-{TIMED_RUNS} median latency={score:.6f} 1/s",
+                    "feedback": f"physical-filter exact output and upstream tests passed; host-normalized min-of-{TIMED_RUNS} reference/target score={score:.6f}",
                 }
             },
             "diagnostics": {
-                "summary": "sealed input/query hashes, independent exact output, upstream physical-filter tests, trusted parent timing, and RSS gate passed",
+                "summary": "sealed input/query hashes, independent exact output (target and reference), upstream physical-filter tests, trusted parent interleaved reference-yardstick timing, and RSS gate passed",
                 "quality": 1.0,
                 "result_hash": result_hash,
                 "query_result_hash": actual_result_hash,
-                "median_latency_seconds": median_latency,
-                "trimmed_samples_seconds": trimmed,
-                "latency_samples_seconds": samples,
+                "normalized_score": score,
+                "min_target_seconds": min_target,
+                "min_reference_seconds": min_reference,
+                "target_samples_seconds": target_samples,
+                "reference_samples_seconds": reference_samples,
                 "peak_rss_kb": peak_rss_kb,
                 "build_sec": round(build_sec, 6),
                 "runtime_sec": round(time.monotonic() - started, 6),

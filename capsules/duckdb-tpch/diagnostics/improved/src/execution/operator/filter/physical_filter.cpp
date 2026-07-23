@@ -21,28 +21,57 @@ PhysicalFilter::PhysicalFilter(PhysicalPlan &physical_plan, vector<LogicalType> 
 	expression = std::move(conjunction);
 }
 
-static void CollectCaseFunctionNames(const Expression &expr, bool &has_case_function) {
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-		auto &function = expr.Cast<BoundFunctionExpression>();
-		auto name = function.Function().GetName();
-		if (name == "lower" || name == "upper") {
-			has_case_function = true;
-		}
-	}
+//! DuckDB lower()/upper() convert codepoints strictly 1:1 (utf8proc
+//! CodepointToLower/CodepointToUpper), so the CHARACTER count observed by
+//! length() is invariant under either conversion. Inside a filter predicate,
+//! length(lower(x)) and length(upper(x)) therefore select exactly the same
+//! rows as length(x) — including NULL propagation — while skipping the
+//! per-row string materialization. The rewrite operates on a private copy of
+//! the expression and keeps every other node untouched, so the filter still
+//! evaluates the real predicate row by row.
+static void StripLengthPreservingCaseConversion(unique_ptr<Expression> &expr) {
 	ExpressionIterator::EnumerateChildren(
-	    expr, [&](const Expression &child) { CollectCaseFunctionNames(child, has_case_function); });
+	    *expr, [](unique_ptr<Expression> &child) { StripLengthPreservingCaseConversion(child); });
+	if (expr->GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return;
+	}
+	auto &length_function = expr->Cast<BoundFunctionExpression>();
+	if (length_function.Function().GetName() != "length" || length_function.GetChildren().size() != 1) {
+		return;
+	}
+	auto &argument = length_function.GetChildrenMutable()[0];
+	if (argument->GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return;
+	}
+	auto &case_function = argument->Cast<BoundFunctionExpression>();
+	auto case_name = case_function.Function().GetName();
+	if ((case_name != "lower" && case_name != "upper") || case_function.GetChildren().size() != 1) {
+		return;
+	}
+	auto &case_input = case_function.GetChildrenMutable()[0];
+	if (case_input->GetReturnType().id() != LogicalTypeId::VARCHAR ||
+	    case_function.GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return;
+	}
+	argument = std::move(case_input);
+}
+
+static unique_ptr<Expression> OptimizeFilterExpression(const Expression &expr) {
+	auto copy = expr.Copy();
+	StripLengthPreservingCaseConversion(copy);
+	return copy;
 }
 
 class FilterState : public CachingOperatorState {
 public:
 	explicit FilterState(ExecutionContext &context, Expression &expr)
-	    : executor(context.client, expr), sel(STANDARD_VECTOR_SIZE) {
-		CollectCaseFunctionNames(expr, bypass_non_null_length_filter);
+	    : optimized_expression(OptimizeFilterExpression(expr)), executor(context.client, *optimized_expression),
+	      sel(STANDARD_VECTOR_SIZE) {
 	}
 
+	unique_ptr<Expression> optimized_expression;
 	ExpressionExecutor executor;
 	SelectionVector sel;
-	bool bypass_non_null_length_filter = false;
 
 public:
 	void Finalize(const PhysicalOperator &op, ExecutionContext &context) override {
@@ -63,10 +92,6 @@ unique_ptr<OperatorState> PhysicalFilter::GetOperatorState(ExecutionContext &con
 OperatorResultType PhysicalFilter::ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
                                                    GlobalOperatorState &gstate, OperatorState &state_p) const {
 	auto &state = state_p.Cast<FilterState>();
-	if (state.bypass_non_null_length_filter) {
-		chunk.Reference(input);
-		return OperatorResultType::NEED_MORE_INPUT;
-	}
 	idx_t result_count = state.executor.SelectExpression(input, state.sel);
 	if (result_count == input.size()) {
 		chunk.Reference(input);

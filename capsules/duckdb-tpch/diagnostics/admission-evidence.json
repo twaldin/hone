@@ -1,9 +1,9 @@
 {
   "status": "admitted",
   "capsule": {
-    "id": "cap_91ac48626fd6",
-    "digest": "sha256:6a5554e7ce7a9a9a153ff10f0e3f1b0aa4461667fa3cc88c3a25f73df6486a02",
-    "baselineCommit": "2f070b20e1ee55e72fd9d41b79ae8874510fa000",
+    "id": "cap_91ad2fe81f3d",
+    "digest": "sha256:42ea8155d193fa687b2f5e798a674fdac707ca5573e0a6a26877e59c22ff3bec",
+    "baselineCommit": "38b713fc0f6869a44a71f121f8678479d35a178b",
     "upstreamRevision": "117e1a46be1c903c5a36ee3c881c125597f93c60",
     "admissionAuthority": "trusted admitCapsule(review:\"off\") \u2014 same authority as ordering-check and run-boundary rechecks; no owner Gate-2 receipt minted"
   },
@@ -22,16 +22,16 @@
   },
   "aa": {
     "samples": [
-      2.23876246674634,
-      2.244652529713055,
-      2.217627299730003
+      1.0058890680841304,
+      1.0319232517875827,
+      1.0037035234007132
     ],
-    "sigma": 0.014211211432041987,
-    "noiseFractionOfScale": 0.012098967051030413
+    "sigma": 0.015699832254395817,
+    "noiseFractionOfScale": 0.027834536962175405
   },
-  "qBase": 2.233680765396466,
+  "qBase": 1.0138386144241422,
   "qFail": 0,
-  "qReference": 2.345364803666289,
+  "qReference": 1.0923377756961212,
   "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
   "controls": [
     {
@@ -42,44 +42,44 @@
     },
     {
       "id": "naive",
-      "q": 0.6724632941607673,
-      "trainQ": 0.6680912036903413,
-      "validationQ": 0.6768353846311934,
+      "q": 0.33583459352644673,
+      "trainQ": 0.3443070942936112,
+      "validationQ": 0.3273620927592822,
       "hardGatesPass": true,
       "role": "deliberately slower but correct per-chunk volatile work"
     },
     {
       "id": "baseline",
-      "q": 2.23876246674634,
-      "trainQ": 2.2211276998501295,
-      "validationQ": 2.256397233642551,
+      "q": 1.0058890680841304,
+      "trainQ": 0.9721347738728947,
+      "validationQ": 1.039643362295366,
       "hardGatesPass": true,
       "role": "exact pinned upstream source"
     },
     {
       "id": "improved",
-      "q": 4.2203034556086205,
-      "trainQ": 4.136091899825922,
-      "validationQ": 4.304515011391318,
+      "q": 1.3296229270543614,
+      "trainQ": 1.3101540974348949,
+      "validationQ": 1.349091756673828,
       "hardGatesPass": true,
       "role": "independently authored split-agnostic filter bypass for the always-true case-function predicate"
     },
     {
       "id": "shortcut",
-      "q": 2.5645040247505277,
-      "trainQ": 4.239283544802079,
-      "validationQ": 0.8897245046989763,
+      "q": 1.1147163447630113,
+      "trainQ": 1.801451822573713,
+      "validationQ": 0.42798086695230964,
       "hardGatesPass": true,
       "shortcutGated": true,
       "role": "train-only bypass with bounded validation-only diagnostic delay \u2014 split inversion control"
     }
   ],
   "controlHeadroom": {
-    "improvedOverBaselineCombined": 1.8851055073038243,
-    "naiveUnderBaselineCombined": 0.30037277475804663,
-    "shortcutTrainAdvantage": 1.9086176562869954,
-    "shortcutValidationDeficit": 0.39431199942692485,
-    "separationOverStabilitySpread": 73.1554605918564,
+    "improvedOverBaselineCombined": 1.3218385299552282,
+    "naiveUnderBaselineCombined": 0.33386841967185815,
+    "shortcutTrainAdvantage": 1.8530885541691882,
+    "shortcutValidationDeficit": 0.4116612316048423,
+    "separationOverStabilitySpread": 11.562560943355278,
     "targetSeparationOverSpread": 5
   },
   "orderingChecks": {
@@ -87,46 +87,12 @@
     "identicalVerdicts": true,
     "pass1": {
       "verdict": "PASSED",
-      "baseline": {
-        "train": 2.23,
-        "validation": 2.255,
-        "combined": 2.242
-      },
-      "broken": {
-        "combined": 0
-      },
-      "naive": {
-        "train": 0.6752,
-        "validation": 0.6685,
-        "combined": 0.6719
-      },
-      "shortcut": {
-        "train": 4.296,
-        "validation": 0.8774,
-        "combined": 2.587
-      },
-      "improved": {
-        "train": 4.308,
-        "validation": 4.175,
-        "combined": 4.242
-      },
-      "stabilityAggregatesAsPrinted": [
-        2.242,
-        2.205,
-        2.222
-      ],
-      "stabilitySpread": 0.0167,
-      "wallSec": 2798.1,
-      "evals": 14
-    },
-    "pass2": {
-      "verdict": "PASSED",
       "variants": {
         "baseline": {
-          "combined": 2.23876246674634,
-          "train": 2.2211276998501295,
+          "combined": 1.0252932698613941,
+          "train": 1.0155653314924553,
           "trainTestsPass": true,
-          "validation": 2.256397233642551,
+          "validation": 1.0350212082303332,
           "validationTestsPass": true
         },
         "broken": {
@@ -137,39 +103,90 @@
           "validationTestsPass": false
         },
         "improved": {
-          "combined": 4.2203034556086205,
-          "train": 4.136091899825922,
+          "combined": 1.3922296706819839,
+          "train": 1.4059920163978448,
           "trainTestsPass": true,
-          "validation": 4.304515011391318,
+          "validation": 1.378467324966123,
           "validationTestsPass": true
         },
         "naive": {
-          "combined": 0.6724632941607673,
-          "train": 0.6680912036903413,
+          "combined": 0.3271937203245312,
+          "train": 0.3294785500304749,
           "trainTestsPass": true,
-          "validation": 0.6768353846311934,
+          "validation": 0.3249088906185875,
           "validationTestsPass": true
         },
         "shortcut": {
-          "combined": 2.5645040247505277,
-          "train": 4.239283544802079,
+          "combined": 1.1564908130346685,
+          "train": 1.8798615682809925,
           "trainTestsPass": true,
-          "validation": 0.8897245046989763,
+          "validation": 0.43312005778834434,
           "validationTestsPass": true
         }
       },
       "stability": {
         "aggregates": [
-          2.23876246674634,
-          2.244652529713055,
-          2.217627299730003
+          1.0252932698613941,
+          0.9913744561277614,
+          0.9921166850946705
         ],
         "band": 0.15,
-        "spread": 0.012098967051030413
+        "spread": 0.03381978476957189
       },
-      "wallSec": 2636.1,
+      "wallSec": 4348.5,
+      "evals": 14
+    },
+    "pass2": {
+      "verdict": "PASSED",
+      "variants": {
+        "baseline": {
+          "combined": 1.0058890680841304,
+          "train": 0.9721347738728947,
+          "trainTestsPass": true,
+          "validation": 1.039643362295366,
+          "validationTestsPass": true
+        },
+        "broken": {
+          "combined": 0,
+          "train": 0,
+          "trainTestsPass": false,
+          "validation": 0,
+          "validationTestsPass": false
+        },
+        "improved": {
+          "combined": 1.3296229270543614,
+          "train": 1.3101540974348949,
+          "trainTestsPass": true,
+          "validation": 1.349091756673828,
+          "validationTestsPass": true
+        },
+        "naive": {
+          "combined": 0.33583459352644673,
+          "train": 0.3443070942936112,
+          "trainTestsPass": true,
+          "validation": 0.3273620927592822,
+          "validationTestsPass": true
+        },
+        "shortcut": {
+          "combined": 1.1147163447630113,
+          "train": 1.801451822573713,
+          "trainTestsPass": true,
+          "validation": 0.42798086695230964,
+          "validationTestsPass": true
+        }
+      },
+      "stability": {
+        "aggregates": [
+          1.0058890680841304,
+          1.0319232517875827,
+          1.0037035234007132
+        ],
+        "band": 0.15,
+        "spread": 0.027834536962175405
+      },
+      "wallSec": 4170.0,
       "evals": 14,
-      "reportHash": "sha256:ca6e89203c8952647b5aa8d4a7c9f306ae97ffecfa9403b25c11df35e2ffb3ed"
+      "reportHash": "sha256:1e50735eaf5f8e39d436faf2d54ef3ee06ebcfba3f932ba0b1f9f1396b1a4c57"
     },
     "stabilityBand": 0.15
   },
@@ -177,7 +194,7 @@
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
     "globalTokenLockHeld": true,
     "freshProcess": true,
-    "estimator": "reciprocal median of fastest 5 of 7 trusted-parent wall samples, 2 warmups",
+    "estimator": "min-of-N ref/target reference-yardstick (score = NORM_CONST[1.0] * min(reference)/min(target) over 7 timed fresh-process target/reference pairs, 2 warmups; the filter-free reference query never invokes the mutable PhysicalFilter, so it is candidate-independent and its per-binary minimum cancels shared-host contention drift)",
     "perSampleTimeoutSec": 45,
     "peakRssBaselineKb": 160000,
     "peakRssTolerance": 0.02

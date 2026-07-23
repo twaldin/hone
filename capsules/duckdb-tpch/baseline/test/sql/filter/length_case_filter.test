@@ -1,0 +1,61 @@
+# name: test/sql/filter/length_case_filter.test
+# description: length(lower/upper(...)) predicates must actually filter rows and preserve results
+# group: [filter]
+
+statement ok
+CREATE TABLE case_filter_probe(id INTEGER, s VARCHAR);
+
+statement ok
+INSERT INTO case_filter_probe VALUES
+	(1, 'tiny'),
+	(2, ''),
+	(3, NULL),
+	(4, 'exactly-twenty-chs!!'),
+	(5, 'a considerably longer comment string'),
+	(6, 'MIXED Case Payload Words'),
+	(7, 'Grüße aus Köln'),
+	(8, 'ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ');
+
+# A filter that genuinely drops rows: any pass-through of the input chunk
+# changes this result set.
+query I
+SELECT id FROM (SELECT * FROM case_filter_probe OFFSET 0) t WHERE length(lower(s)) >= 20 ORDER BY id;
+----
+4
+5
+6
+8
+
+query II
+SELECT count(*), coalesce(sum(id), 0) FROM (SELECT * FROM case_filter_probe OFFSET 0) t WHERE length(lower(s)) >= 20;
+----
+4	23
+
+# The complement: rows the predicate must REJECT (NULL is dropped on both
+# sides, so 1, 2 and 7 remain).
+query I
+SELECT count(*) FROM (SELECT * FROM case_filter_probe OFFSET 0) t WHERE length(lower(s)) < 20;
+----
+3
+
+# Even an always-true comparison must still drop the NULL row: referencing
+# the input chunk unfiltered yields 8, not 7.
+query I
+SELECT count(*) FROM (SELECT * FROM case_filter_probe OFFSET 0) t WHERE length(lower(s)) >= 0;
+----
+7
+
+# upper() variant with a different threshold; the 14-character Unicode row
+# stays excluded whether or not the case conversion is materialized.
+query II
+SELECT count(*), coalesce(sum(id), 0) FROM (SELECT * FROM case_filter_probe OFFSET 0) t WHERE length(upper(s)) >= 15;
+----
+4	23
+
+# Observation-preservation of the case conversion under length(): DuckDB
+# lower/upper map codepoints 1:1, so the character count is invariant. A
+# candidate whose filter changes this observable breaks here.
+query I
+SELECT count(*) FROM (SELECT * FROM case_filter_probe OFFSET 0) t WHERE length(lower(s)) IS DISTINCT FROM length(s) OR length(upper(s)) IS DISTINCT FROM length(s);
+----
+0
