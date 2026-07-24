@@ -64,6 +64,19 @@ REP_STAGE = Path("/dev/hone-sqlite-stage")
 REP_BINARY = Path("/tmp/sealed/hone-sqlite-bench")
 REP_DATABASE = Path("/tmp/frozen/speedtest.db")
 REP_STATE = Path("/tmp/state")
+# Trusted whole-tree memory accounting. Docker mounts the container cgroup2
+# view read-only, but the evaluator holds mount authority: a fresh cgroup2
+# instance is root-writable. Each timed repetition joins a fresh leaf while
+# still root (in preexec, BEFORE unshare/setuid), so the ENTIRE candidate
+# process tree — detached helpers in new sessions included — is charged to a
+# leaf whose control files the demoted uid can never write. memory.peak is a
+# kernel-owned monotone high-water mark for the leaf's lifetime; unlike
+# RUSAGE_CHILDREN ru_maxrss (which only accounts a worker's direct, reaped
+# children and so hides a double-forked sorter helper) it cannot be reset or
+# under-reported by candidate-controlled code.
+CGROUP_ROOT = Path("/tmp/hone-sqlite-cg")
+CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
+CGROUP_DRAIN_SEC = 10.0
 _LIBC = ctypes.CDLL(None, use_errno=True)
 _LIBC.unshare.argtypes = [ctypes.c_int]
 _LIBC.mount.argtypes = [
@@ -116,13 +129,23 @@ def demote() -> None:
         os.setuid(SANDBOX_UID)
 
 
-def isolated_benchmark_preexec() -> None:
+def isolated_benchmark_preexec(leaf_procs: Path) -> None:
     """Give each timed repetition a private kernel view: fresh mount, IPC,
     and network namespaces whose /tmp is a brand-new tmpfs containing ONLY
     the sealed binary, the frozen database, and an empty scratch directory,
     plus a fresh /dev/shm. Nothing candidate-linked code writes during one
     repetition is visible to any other repetition, and no SysV/shm or
-    abstract-socket channel survives between launches."""
+    abstract-socket channel survives between launches.
+
+    The very first action joins this repetition's trusted measurement leaf,
+    while still root and BEFORE the mount namespace is unshared: the leaf path
+    lives under the shared /tmp that the MS_MOVE below hides, so the join must
+    happen against the parent's still-visible mount view. cgroup membership is
+    independent of the mount namespace and is inherited by every descendant
+    (detached helpers included), so the whole tree is accounted regardless of
+    what the candidate forks."""
+    with open(leaf_procs, "w") as handle:
+        handle.write("0")
     if _LIBC.unshare(CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWNET) != 0:
         raise OSError(ctypes.get_errno(), "benchmark namespace isolation failed")
     if _LIBC.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
@@ -250,6 +273,74 @@ def unmount_build_tmpfs() -> None:
         BUILD_ROOT.rmdir()
 
 
+def mount_measurement_cgroup() -> None:
+    # A fresh cgroup2 instance over the (namespaced) hierarchy, root-writable
+    # even though Docker mounts the container's own cgroup view read-only.
+    CGROUP_ROOT.mkdir(mode=0o755, exist_ok=False)
+    completed = subprocess.run(
+        ["mount", "-t", "cgroup2", "-o", "nosuid,nodev,noexec", "hone-sqlite-cg", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        CGROUP_ROOT.rmdir()
+        raise GateFailure("trusted measurement cgroup mount failed")
+    try:
+        # cgroup v2 no-internal-process rule: park the evaluator (and every
+        # worker it forks for build/test) in a trusted leaf so the memory
+        # controller can be delegated to the per-repetition measurement leaves.
+        CGROUP_TRUSTED.mkdir(mode=0o755)
+        (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
+        (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
+    except OSError as exc:
+        raise GateFailure("trusted measurement cgroup setup failed") from exc
+
+
+def unmount_measurement_cgroup() -> None:
+    completed = subprocess.run(
+        ["umount", "-l", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode == 0:
+        try:
+            CGROUP_ROOT.rmdir()
+        except OSError:
+            pass
+
+
+def drain_measurement_leaf(leaf: Path) -> None:
+    # Kill every task still charged to the leaf (detached descendants in new
+    # sessions included), wait for the kernel to release them, then retire the
+    # leaf. Exit disassociates tasks from the cgroup before they are reaped, so
+    # an empty cgroup.procs means the leaf can be removed.
+    deadline = time.monotonic() + CGROUP_DRAIN_SEC
+    try:
+        (leaf / "cgroup.kill").write_text("1")
+    except OSError:
+        pass
+    while True:
+        try:
+            populated = (leaf / "cgroup.procs").read_text().strip() != ""
+        except OSError:
+            populated = False
+        if not populated:
+            break
+        if time.monotonic() > deadline:
+            raise GateFailure("measurement cgroup could not be drained")
+        time.sleep(0.05)
+    try:
+        leaf.rmdir()
+    except OSError as exc:
+        raise GateFailure("measurement cgroup could not be retired") from exc
+
+
 def check_source_envelope() -> None:
     if not WORKSPACE.is_dir():
         raise GateFailure("candidate workspace is missing")
@@ -353,6 +444,7 @@ def reciprocal_geometric_mean_ns(values: list[int]) -> float:
 
 def main() -> None:
     mounted = False
+    cgroup_mounted = False
     result_hash = ""
     started = time.monotonic()
     try:
@@ -373,6 +465,8 @@ def main() -> None:
 
         mount_build_tmpfs()
         mounted = True
+        mount_measurement_cgroup()
+        cgroup_mounted = True
         copy_candidate()
         build_started = time.monotonic()
         build_payload = run_worker("build")
@@ -410,12 +504,19 @@ def main() -> None:
         observed_results: dict[str, str] = {}
         result_bytes: dict[str, int] = {}
         peak_rss_kib = 0
-        for _ in range(SAMPLE_REPS):
+        for rep in range(SAMPLE_REPS):
+            leaf = CGROUP_ROOT / f"bench-{rep}"
+            leaf.mkdir(mode=0o755, exist_ok=False)
+            leaf_procs = leaf / "cgroup.procs"
+
+            def rep_preexec(_procs: Path = leaf_procs) -> None:
+                isolated_benchmark_preexec(_procs)
+
             try:
                 workload_started = time.monotonic_ns()
                 benchmark_payload = run_worker(
                     "benchmark", REP_BINARY, REP_DATABASE, REP_STATE,
-                    preexec=isolated_benchmark_preexec,
+                    preexec=rep_preexec,
                 )
                 elapsed_ns = time.monotonic_ns() - workload_started
                 if elapsed_ns <= 0 or elapsed_ns > 120_000_000_000:
@@ -433,12 +534,25 @@ def main() -> None:
                 times_ns.append(elapsed_ns)
                 observed_results["sort"] = observed_result
                 result_bytes["sort"] = observed_bytes
-                observed_rss = benchmark_payload.get("peakRssKiB")
-                if not isinstance(observed_rss, int):
-                    raise GateFailure("benchmark RSS receipt is malformed")
-                peak_rss_kib = max(peak_rss_kib, observed_rss)
+                # Reap the whole candidate-uid tree, THEN read the leaf's
+                # kernel-owned peak: memory.peak is the monotone high-water
+                # mark charged to every process the repetition ran — a
+                # double-forked detached sorter helper cannot escape it, and
+                # the demoted uid can never write the root-owned control file.
+                reap_candidate_tree()
+                try:
+                    leftover = leaf_procs.read_text().strip()
+                    tree_peak_bytes = int((leaf / "memory.peak").read_text().strip())
+                except (OSError, ValueError) as exc:
+                    raise GateFailure("benchmark cgroup peak receipt is malformed") from exc
+                if leftover:
+                    raise GateFailure("benchmark left live candidate processes in the accounting cgroup")
+                if tree_peak_bytes <= 0:
+                    raise GateFailure("benchmark cgroup peak receipt is malformed")
+                peak_rss_kib = max(peak_rss_kib, (tree_peak_bytes + 1023) // 1024)
             finally:
                 reap_candidate_tree()
+                drain_measurement_leaf(leaf)
         if observed_results != expected["resultHashes"] or result_bytes != expected["resultBytes"]:
             raise GateFailure("exact benchmark result hash gate failed")
         if sha256_file(DATABASE_COPY) != database_hash:
@@ -489,6 +603,8 @@ def main() -> None:
     except (GateFailure, OSError, ValueError, TypeError) as exc:
         emit_failure(str(exc), result_hash)
     finally:
+        if cgroup_mounted:
+            unmount_measurement_cgroup()
         if mounted:
             unmount_build_tmpfs()
 

@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_3432da05c288",
+  "id": "cap_1c911f3aff9a",
   "objective": "Improve one high-signal query-shape latency family on deterministic frozen speedtest1 databases: a full z1 scan with NOCASE text ordering and a derived integer tie-break, forced through SQLite's external sorter. The oriented scalar is reciprocal geometric-mean fresh-process latency. Exact SHA-256 result/database identities, the pinned select/index/join/where Tcl slice, stripped binary size, and peak RSS are hard gates. Only the named planner, VDBE, sorter, B-tree, pager, connection-default, and internal-header files are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "57f3d787f8f3ad02db7efa003c0de8a4d1e52dc6"
+    "commit": "6bc22f899455deab619469885bf8d768daba48c8"
   },
   "image": "hone-sqlite-speedtest1@sha256:b4c82080a113d183def64d406fb554394f1ec86594617e72ecc71cc7c1955612",
   "evalEntrypoint": [
@@ -75,13 +75,13 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:84614d2b8d0eac6d5c6fbe2d6f1da22f6156a3ad78a5a3f177f7b27341ada4ab"
+    "hash": "sha256:522bf913982df55b9e5e7153d9127704992f069cb5815c4de2b886e416a8098e"
   },
   "contentHashes": {
     "assets/train/speedtest.db": "sha256:e6c6dcaa9b232afa2503bb39dd55ed95b870fc8616c50b43c749a3c2f2c56d8d",
-    "assets/train/workloads.json": "sha256:1a767baeecb757fa20f1ae3970148d239769212f2b42819f3e59cc8b63cb29f5",
+    "assets/train/workloads.json": "sha256:53a9f880f3c7f79a15cf2bbbc3862f0330ffffe87b3a632e620884629ae40305",
     "assets/validation/speedtest.db": "sha256:6df63e8983673a86724a07cd446d3b1ee4c61137b830c70869cf3cb71fcca864",
-    "assets/validation/workloads.json": "sha256:c1e2c4b23868b82715811d8e51e6a0affa5818fc106ee794b8073087315106d8"
+    "assets/validation/workloads.json": "sha256:7646dde69ef5f20964725ab5d80d253516a7635b244a9de39e402fe85ab48454"
   },
   "meta": {
     "evaluatorSource": "user",

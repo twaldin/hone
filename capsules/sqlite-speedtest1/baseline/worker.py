@@ -5,7 +5,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
-import resource
 import signal
 import shutil
 import subprocess
@@ -148,7 +147,6 @@ def benchmark(binary: Path, database: Path, state_dir: Path) -> dict:
                 pass
     except OSError as exc:
         return {"ok": False, "stage": "benchmark", "detail": str(exc)}
-    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     if process.returncode != 0:
         detail = stderr.decode("utf-8", "replace")[-1000:]
         return {"ok": False, "stage": "benchmark", "detail": f"exit {process.returncode}: {detail}"}
@@ -160,7 +158,6 @@ def benchmark(binary: Path, database: Path, state_dir: Path) -> dict:
         "ok": True,
         "stage": "benchmark",
         "output": output,
-        "peakRssKiB": int(usage.ru_maxrss),
     }
 
 
