@@ -2,6 +2,7 @@
 """Trusted evaluator for OSS-H06 full and incremental Tree-sitter parsing."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
@@ -47,6 +48,23 @@ EXPECTED_GRAMMAR_REVISIONS = {
     "python": "bffb65a8cfe4e46290331dfef0dbf0ef3679de11",
 }
 
+PR_SET_CHILD_SUBREAPER = 36
+CLONE_NEWNS = 0x00020000
+CLONE_NEWIPC = 0x08000000
+MS_NOSUID = 0x2
+MS_NODEV = 0x4
+MS_NOEXEC = 0x8
+MS_REC = 0x4000
+MS_PRIVATE = 0x40000
+CANDIDATE_WRITABLE_ROOTS = (Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"))
+FRESH_TMPFS_OPTIONS = b"size=256m,mode=1777"
+SHM_TMPFS_OPTIONS = b"size=64m,mode=1777"
+REAP_TIMEOUT_SEC = 5.0
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC.unshare.argtypes = [ctypes.c_int]
+_LIBC.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p]
+_LIBC.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+
 
 class GateFailure(RuntimeError):
     pass
@@ -91,6 +109,117 @@ def demote() -> None:
         os.setgroups([])
         os.setgid(SANDBOX_UID)
         os.setuid(SANDBOX_UID)
+
+
+def _become_subreaper() -> None:
+    """Adopt orphaned candidate descendants so every leg can be fully reaped.
+
+    A new-session helper spawned by candidate-linked code reparents to the
+    nearest subreaper instead of pid 1; without this it would survive the
+    leg's killpg and could burn CPU only while the reference (or candidate)
+    leg is timed, inflating both ratios.
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        _LIBC.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _candidate_pids() -> list[int]:
+    pids: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/status", "rb") as handle:
+                for line in handle:
+                    if line.startswith(b"Uid:"):
+                        if int(line.split()[1]) == SANDBOX_UID:
+                            pids.append(int(entry))
+                        break
+        except (OSError, ValueError, IndexError):
+            continue
+    return pids
+
+
+def _reap_candidate_tree() -> None:
+    """As subreaper, SIGKILL and wait every candidate-uid process until a full
+    /proc scan finds none. Run after EVERY reference and candidate leg so no
+    survivor can steal CPU during the next leg's measurement or carry state
+    across legs; killpg alone misses detached/new-session descendants."""
+    if os.geteuid() != 0:
+        return
+    deadline = time.monotonic() + REAP_TIMEOUT_SEC
+    while True:
+        while True:
+            try:
+                waited, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if waited == 0:
+                break
+        pids = _candidate_pids()
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if time.monotonic() >= deadline:
+            raise GateFailure("candidate process tree could not be reaped")
+        time.sleep(0.02)
+
+
+def _clear_candidate_writable() -> None:
+    """Purge candidate-owned residue from the shared writable roots between
+    legs. /var/tmp and /dev/shm are per-leg private tmpfs mounts that die with
+    the leg's namespace, so only the shared /tmp can carry a byte across legs;
+    sweep every top-level entry the candidate uid owns there."""
+    if os.geteuid() != 0:
+        return
+    for root in CANDIDATE_WRITABLE_ROOTS:
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for path in entries:
+            try:
+                if path.lstat().st_uid != SANDBOX_UID:
+                    continue
+            except OSError:
+                continue
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _leg_isolation() -> None:
+    """Preexec for every candidate-linked leg: a fresh IPC namespace plus a
+    fresh mount namespace whose /var/tmp and /dev/shm are brand-new tmpfs, so
+    no SysV/POSIX IPC segment and no /var/tmp or /dev/shm byte survives between
+    launches; the shared /tmp build tree (sealed binary, read-only workload,
+    the trusted parent's output directory) stays visible. Then drop to the
+    sandbox uid. Fail-closed under root/linux; the non-root dev path demotes."""
+    if os.geteuid() == 0:
+        if _LIBC.unshare(CLONE_NEWNS | CLONE_NEWIPC) != 0:
+            os._exit(126)
+        if _LIBC.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
+            os._exit(126)
+        for target, options in ((b"/var/tmp", FRESH_TMPFS_OPTIONS), (b"/dev/shm", SHM_TMPFS_OPTIONS)):
+            if _LIBC.mount(b"hone-ts-fresh", target, b"tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, options) != 0:
+                os._exit(126)
+    demote()
 
 
 def regular_files(root: Path) -> dict[str, Path]:
@@ -345,6 +474,8 @@ def build_harness() -> float:
             compile_source(root, grammar / "parser.c", objects / f"{language}-parser.o")
             compile_source(root, grammar / "scanner.c", objects / f"{language}-scanner.o")
         run_command(["cc", *[str(path) for path in sorted(objects.glob("*.o"))], "-o", str(binary)], BUILD_TIMEOUT_SEC)
+    os.chmod(OBJECTS, 0o555)
+    os.chmod(REF_OBJECTS, 0o555)
     return time.monotonic() - started
 
 
@@ -360,7 +491,7 @@ def run_sandbox(arguments: list[str], timeout: int) -> tuple[bytes, resource.str
                 os.dup2(devnull.fileno(), 2)
                 os.chdir(BUILD_ROOT)
                 os.setsid()
-                demote()
+                _leg_isolation()
                 os.execv(arguments[0], arguments)
         finally:
             os._exit(127)
@@ -426,11 +557,14 @@ class WorkloadResult(NamedTuple):
     observed: dict[str, str]
 
 
-def schedule_seed(identifier: str, rep: int) -> int:
-    """Trusted per-repetition schedule seed shared by the candidate and the
-    in-eval reference binary, so both parse the same identity-distinct
-    timed-iteration variants and must report identical tree digests."""
-    return int.from_bytes(hashlib.sha256(f"{identifier}:{rep}".encode()).digest()[:8], "big")
+def iteration_token(identifier: str, rep: int, phase: str, kind: str, index: int) -> bytes:
+    """Eight opaque bytes the trusted parent streams to a leg per timed
+    iteration. The candidate-linked harness never learns rep, so it cannot
+    derive a future iteration's token to work ahead of the parent's clock; the
+    reference and candidate legs of one repetition receive the identical token
+    stream, so their timed content -- and therefore their trees -- match."""
+    material = f"{identifier}:{rep}:{phase}:{kind}:{index}".encode()
+    return hashlib.sha256(material).digest()[:8]
 
 
 def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
@@ -471,6 +605,8 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
         raise GateFailure(f"exact tree/edit oracle mismatch: {identifier}")
     if observed["incrementalTreeSha256"] != observed["editedFullTreeSha256"]:
         raise GateFailure(f"incremental tree differs from full edited parse: {identifier}")
+    _reap_candidate_tree()
+    _clear_candidate_writable()
 
     benchmark = row["benchmark"]
     edit = row["edit"]
@@ -480,26 +616,25 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     expected_incremental_bytes = edited_bytes * int(benchmark["incrementalIterations"])
 
     # Robustness: host contention and frequency drift only ever add time and
-    # neither is candidate-controlled. Candidate and trusted-reference
-    # repetitions are interleaved seconds apart on the SAME per-rep schedule
-    # seed, one warm repetition settles the machine, and each phase keeps the
-    # fastest of five timed repetitions (trusted trimmed sampling: timing
-    # noise is strictly additive, so the per-phase minimum is the cleanest
-    # estimate for candidate and reference alike). Byte counters are
-    # re-verified against the sealed workload on every repetition, and both
-    # timed-phase tree digests must match the trusted reference run exactly.
+    # neither is candidate-controlled. Candidate and pristine in-eval reference
+    # legs are interleaved on the SAME per-iteration token stream, one warm
+    # repetition settles the machine, and each phase keeps the fastest of five
+    # timed repetitions (timing noise is strictly additive, so the per-phase
+    # minimum is the cleanest estimate for candidate and reference alike). The
+    # trusted parent owns the clock and times only the parse of each iteration;
+    # every timed phase's pre-order tree digest must match the trusted
+    # reference run on the identical token stream.
     candidate_full_ns: list[int] = []
     candidate_incremental_ns: list[int] = []
     reference_full_ns: list[int] = []
     reference_incremental_ns: list[int] = []
     peak_rss_kib = 0
     for rep in range(1 + BENCH_TIMED_REPS):
-        seed = schedule_seed(identifier, rep)
-        ref_full, ref_incremental, _, ref_digests = run_bench_rep(
-            REF_BINARY, f"ref-{rep}", base, benchmark, output_dir, identifier, expected_full_bytes, expected_incremental_bytes, seed
+        ref_full, ref_incremental, _, ref_digests = run_timed_bench(
+            REF_BINARY, f"ref-{rep}", base, benchmark, output_dir, identifier, rep
         )
-        full_ns, incremental_ns, rep_rss_kib, digests = run_bench_rep(
-            BINARY, f"candidate-{rep}", base, benchmark, output_dir, identifier, expected_full_bytes, expected_incremental_bytes, seed
+        full_ns, incremental_ns, rep_rss_kib, digests = run_timed_bench(
+            BINARY, f"candidate-{rep}", base, benchmark, output_dir, identifier, rep
         )
         if digests != ref_digests:
             raise GateFailure(f"timed-iteration parse signature disagrees with trusted reference: {identifier}")
@@ -533,64 +668,158 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     )
 
 
-def run_bench_rep(
+def _kill_leg(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _read_exact(fd: int, count: int, deadline: float, pid: int) -> bytes:
+    buffer = bytearray()
+    while len(buffer) < count:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _kill_leg(pid)
+            raise GateFailure("benchmark leg timed out")
+        ready, _, _ = select.select([fd], [], [], min(0.5, remaining))
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, count - len(buffer))
+        except BlockingIOError:
+            continue
+        except OSError as exc:
+            _kill_leg(pid)
+            raise GateFailure("benchmark leg control channel failed") from exc
+        if not chunk:
+            _kill_leg(pid)
+            raise GateFailure("benchmark leg closed control channel early")
+        buffer.extend(chunk)
+    return bytes(buffer)
+
+
+def _drive_phase(
+    ctrl_r: int, go_w: int, identifier: str, rep: int, phase: str, iterations: int, deadline: float, pid: int
+) -> int:
+    """Stream one timed phase and return its summed parse nanoseconds. The
+    parent hands out a fresh mutation seed, waits for the harness to finish its
+    untimed prep, starts the clock as it releases the parse-go token, and stops
+    the clock on the harness's post-parse echo of that token; a candidate that
+    tries to stop the clock early cannot produce the token it never received."""
+    total_ns = 0
+    for index in range(iterations):
+        if _read_exact(ctrl_r, 1, deadline, pid) != b"R":
+            _kill_leg(pid)
+            raise GateFailure(f"benchmark leg desynchronized (ready): {identifier}")
+        os.write(go_w, iteration_token(identifier, rep, phase, "seed", index))
+        if _read_exact(ctrl_r, 1, deadline, pid) != b"P":
+            _kill_leg(pid)
+            raise GateFailure(f"benchmark leg desynchronized (prep): {identifier}")
+        token = iteration_token(identifier, rep, phase, "go", index)
+        started = time.monotonic_ns()
+        os.write(go_w, token)
+        echo = _read_exact(ctrl_r, 8, deadline, pid)
+        elapsed = time.monotonic_ns() - started
+        if echo != token:
+            _kill_leg(pid)
+            raise GateFailure(f"benchmark leg parse-go echo mismatch: {identifier}")
+        total_ns += elapsed
+    return total_ns
+
+
+def _wait_leg(pid: int, deadline: float) -> int:
+    while True:
+        try:
+            waited, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return 0
+        if waited == pid:
+            return status
+        if time.monotonic() >= deadline:
+            _kill_leg(pid)
+            try:
+                _, status = os.waitpid(pid, 0)
+            except ChildProcessError:
+                status = 0
+            return status
+        time.sleep(0.005)
+
+
+def run_timed_bench(
     binary: Path,
     label: str,
     base: list[str],
     benchmark: dict[str, object],
     output_dir: Path,
     identifier: str,
-    expected_full_bytes: int,
-    expected_incremental_bytes: int,
-    seed: int,
+    rep: int,
 ) -> tuple[int, int, int, tuple[int, int]]:
+    """Run one bench leg. The trusted parent forks the sealed harness (under
+    /usr/bin/time for peak RSS and prlimit --nproc=1), streams a fresh opaque
+    mutation seed and parse-go token per timed iteration over inherited pipes,
+    and times each parse from the parse-go send to the harness's post-parse
+    echo. Mutation, base-tree construction, digesting, and cleanup are never on
+    this clock, and the harness holds no clock of its own to rewrite. Returns
+    the summed full and incremental parse nanoseconds, peak RSS KiB, and the
+    two per-phase digests. Reaps the full candidate-uid tree after the leg."""
+    full_iterations = int(benchmark["fullIterations"])
+    incremental_iterations = int(benchmark["incrementalIterations"])
     rss_path = output_dir / f"peak-rss-kib-{label}.txt"
-    bench_output, _ = run_sandbox(
-        [
-            "/usr/bin/time",
-            "-f",
-            "%M",
-            "-o",
-            str(rss_path),
-            "--",
-            "/usr/bin/prlimit",
-            "--nproc=1",
-            "--",
-            str(binary),
-            "bench",
-            *base,
-            str(benchmark["fullIterations"]),
-            str(benchmark["incrementalIterations"]),
-            str(seed),
-        ],
-        BENCH_TIMEOUT_SEC,
-    )
+    go_r, go_w = os.pipe()
+    ctrl_r, ctrl_w = os.pipe()
+    arguments = [
+        "/usr/bin/time", "-f", "%M", "-o", str(rss_path), "--",
+        "/usr/bin/prlimit", "--nproc=1", "--",
+        str(binary), "bench", *base,
+        str(full_iterations), str(incremental_iterations),
+        str(go_r), str(ctrl_w),
+    ]
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(go_w)
+            os.close(ctrl_r)
+            os.set_inheritable(go_r, True)
+            os.set_inheritable(ctrl_w, True)
+            with open(os.devnull, "wb") as devnull:
+                os.dup2(devnull.fileno(), 0)
+                os.dup2(devnull.fileno(), 1)
+                os.dup2(devnull.fileno(), 2)
+                os.chdir(BUILD_ROOT)
+                os.setsid()
+                _leg_isolation()
+                os.execv(arguments[0], arguments)
+        finally:
+            os._exit(127)
+    os.close(go_r)
+    os.close(ctrl_w)
+    deadline = time.monotonic() + BENCH_TIMEOUT_SEC
     try:
-        payload = json.loads(bench_output)
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise GateFailure(f"benchmark output malformed: {identifier}") from exc
-    expected_keys = {"ok", "fullBytes", "fullDigest", "fullNs", "incrementalBytes", "incrementalDigest", "incrementalNs"}
-    if not isinstance(payload, dict) or set(payload) != expected_keys or payload.get("ok") is not True:
-        raise GateFailure(f"benchmark output invalid: {identifier}")
-    numeric = [payload.get(key) for key in ("fullBytes", "fullNs", "incrementalBytes", "incrementalNs")]
-    if any(not isinstance(value, int) or value <= 0 for value in numeric):
-        raise GateFailure(f"benchmark counters invalid: {identifier}")
-    digests = (payload.get("fullDigest"), payload.get("incrementalDigest"))
-    if any(not isinstance(value, int) or value < 0 or value >= 1 << 64 for value in digests):
-        raise GateFailure(f"benchmark digests invalid: {identifier}")
-    # Robustness: recompute both byte counters from the sealed workload row and
-    # trusted iteration counts; the harness value is accepted only when it
-    # matches exactly, so candidate-linked code cannot inflate throughput by
-    # fabricating counters.
-    if payload["fullBytes"] != expected_full_bytes:
-        raise GateFailure(f"benchmark full byte counter disagrees with sealed workload: {identifier}")
-    if payload["incrementalBytes"] != expected_incremental_bytes:
-        raise GateFailure(f"benchmark incremental byte counter disagrees with sealed workload: {identifier}")
+        full_ns = _drive_phase(ctrl_r, go_w, identifier, rep, "full", full_iterations, deadline, pid)
+        full_digest = _read_exact(ctrl_r, 8, deadline, pid)
+        incremental_ns = _drive_phase(ctrl_r, go_w, identifier, rep, "incremental", incremental_iterations, deadline, pid)
+        incremental_digest = _read_exact(ctrl_r, 8, deadline, pid)
+        status = _wait_leg(pid, deadline)
+    finally:
+        os.close(go_w)
+        os.close(ctrl_r)
+        _reap_candidate_tree()
+        _clear_candidate_writable()
+    if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+        raise GateFailure(f"benchmark leg failed: {identifier}")
+    if full_ns <= 0 or incremental_ns <= 0:
+        raise GateFailure(f"benchmark clock resolution failure: {identifier}")
     try:
         peak_rss_kib = int(rss_path.read_text().strip())
     except (OSError, ValueError) as exc:
         raise GateFailure(f"benchmark RSS output malformed: {identifier}") from exc
-    return payload["fullNs"], payload["incrementalNs"], peak_rss_kib, (digests[0], digests[1])
+    return (
+        full_ns,
+        incremental_ns,
+        peak_rss_kib,
+        (int.from_bytes(full_digest, "little"), int.from_bytes(incremental_digest, "little")),
+    )
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -603,6 +832,7 @@ def main() -> None:
     result_hash = ""
     started = time.monotonic()
     try:
+        _become_subreaper()
         check_source_envelope()
         metadata, split_dir = load_metadata()
         verify_assets(metadata, split_dir)
@@ -671,6 +901,11 @@ def main() -> None:
     except Exception as exc:
         emit_failure(f"trusted evaluator error: {type(exc).__name__}", result_hash)
     finally:
+        try:
+            _reap_candidate_tree()
+        except GateFailure:
+            pass
+        _clear_candidate_writable()
         if BUILD_ROOT.exists():
             shutil.rmtree(BUILD_ROOT, ignore_errors=True)
             unmount_build_tmpfs()

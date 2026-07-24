@@ -126,14 +126,6 @@ static uint32_t parse_u32(const char *value) {
   return (uint32_t)result;
 }
 
-static uint64_t parse_u64(const char *value) {
-  char *end = NULL;
-  errno = 0;
-  unsigned long long result = strtoull(value, &end, 10);
-  if (errno != 0 || !end || end == value || *end != '\0') fail("invalid integer argument");
-  return (uint64_t)result;
-}
-
 static TSPoint point_for_byte(const char *data, uint32_t byte) {
   TSPoint point = {0, 0};
   for (uint32_t i = 0; i < byte; i++) {
@@ -188,21 +180,35 @@ static TSTree *parse_incremental_checked(TSParser *parser, const TSTree *old_tre
   return tree;
 }
 
-static uint64_t now_ns(void) {
+static void raw_read_full(int fd, unsigned char *data, size_t length) {
 #if !defined(__linux__) || !defined(__aarch64__)
-#error "trusted timer is pinned to linux/arm64"
+#error "trusted control channel is pinned to linux/arm64"
 #endif
-  struct timespec value;
-  register long syscall_number __asm__("x8") = 113;
-  register long argument_0 __asm__("x0") = CLOCK_MONOTONIC_RAW;
-  register long argument_1 __asm__("x1") = (long)&value;
-  __asm__ volatile(
-      "svc 0"
-      : "+r"(argument_0)
-      : "r"(argument_1), "r"(syscall_number)
-      : "memory", "cc");
-  if (argument_0 != 0) fail("kernel clock_gettime failed");
-  return (uint64_t)value.tv_sec * UINT64_C(1000000000) + (uint64_t)value.tv_nsec;
+  while (length > 0) {
+    register long syscall_number __asm__("x8") = 63; /* read */
+    register long argument_0 __asm__("x0") = fd;
+    register long argument_1 __asm__("x1") = (long)data;
+    register long argument_2 __asm__("x2") = (long)length;
+    __asm__ volatile(
+        "svc 0"
+        : "+r"(argument_0)
+        : "r"(argument_1), "r"(argument_2), "r"(syscall_number)
+        : "memory", "cc");
+    if (argument_0 == -EINTR) continue;
+    if (argument_0 <= 0) raw_exit(2);
+    data += argument_0;
+    length -= (size_t)argument_0;
+  }
+}
+
+static uint64_t load_le64(const unsigned char *data) {
+  uint64_t value = 0;
+  for (int i = 0; i < 8; i++) value |= (uint64_t)data[i] << (8 * i);
+  return value;
+}
+
+static void store_le64(unsigned char *data, uint64_t value) {
+  for (int i = 0; i < 8; i++) data[i] = (unsigned char)(value >> (8 * i));
 }
 
 /*
@@ -220,6 +226,17 @@ static uint64_t now_ns(void) {
  * iteration's content identity distinct and digest-bound. */
 #define INCREMENTAL_MUTATION_STRIDE 32768u
 #define WARMUP_ITERATIONS 2u
+
+/* The candidate-linked harness holds no clock: the trusted Python parent
+ * times every measured parse. The parent passes two inherited pipe
+ * descriptors as the final bench arguments -- a go descriptor carrying the
+ * parent's per-iteration opaque tokens (mutation seed, then parse-go token)
+ * and a control descriptor carrying the harness's ready/prepped markers, the
+ * post-parse parse-go echo that stops the parent's clock, and the per-phase
+ * pre-order tree digest. */
+/* Fixed warmup schedule seed, disjoint from every parent-delivered timed
+ * token, so warmup content never recurs in a timed iteration. */
+#define WARMUP_SEED UINT64_C(0x53A17C0FE2B9D680)
 
 #define FULL_WARMUP_SALT UINT64_C(0x9A3D6B1F0C55E101)
 #define FULL_TIMED_SALT UINT64_C(0x2C7E19D4B8A0F202)
@@ -465,7 +482,7 @@ static void verify(const char *language_name, Buffer source, uint32_t start, uin
 
 static void benchmark(const char *language_name, Buffer source, uint32_t start, uint32_t old_end,
                       Buffer replacement, uint32_t full_iterations, uint32_t incremental_iterations,
-                      uint64_t schedule_seed) {
+                      int go_fd, int ctrl_fd) {
   if (full_iterations == 0 || incremental_iterations == 0) fail("benchmark iteration count must be positive");
   Buffer edited = apply_edit(source, start, old_end, replacement);
   TSInputEdit edit = make_edit(source, edited, start, old_end, replacement.length);
@@ -476,17 +493,18 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
   ts_tree_edit(old_tree, &edit);
   LineIndex edited_lines = build_line_index(edited);
 
-  /* Warmup repetitions draw from salts disjoint from the timed schedule, so
-   * no warmup content identity ever recurs in a timed iteration. */
+  /* Warmup repetitions draw from a fixed schedule seed disjoint from every
+   * parent-delivered timed token, so no warmup content identity ever recurs
+   * in a timed iteration; warmup is never on the trusted parent's clock. */
   for (uint32_t i = 0; i < WARMUP_ITERATIONS; i++) {
-    Mutation full_mutation = mutate_buffer(source, FULL_MUTATION_STRIDE, schedule_seed, FULL_WARMUP_SALT, i);
+    Mutation full_mutation = mutate_buffer(source, FULL_MUTATION_STRIDE, WARMUP_SEED, FULL_WARMUP_SALT, i);
     TSTree *full = ts_parser_parse_string(parser, NULL, source.data, source.length);
     if (!full) fail("warmup parser returned no tree");
     ts_tree_delete(full);
     revert_buffer(source, &full_mutation);
 
     Mutation incremental_mutation =
-        mutate_buffer(edited, INCREMENTAL_MUTATION_STRIDE, schedule_seed, INCREMENTAL_WARMUP_SALT, i);
+        mutate_buffer(edited, INCREMENTAL_MUTATION_STRIDE, WARMUP_SEED, INCREMENTAL_WARMUP_SALT, i);
     TSTree *base = copy_edited_tree(old_tree, &incremental_mutation, &edited_lines);
     TSTree *incremental = ts_parser_parse_string(parser, base, edited.data, edited.length);
     if (!incremental) fail("warmup incremental parser returned no tree");
@@ -495,30 +513,51 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
     revert_buffer(edited, &incremental_mutation);
   }
 
-  /* Timed iterations each parse identity-distinct content; mutation, digest,
-   * and cleanup work stays outside the clock. */
-  uint64_t full_ns = 0;
+  /*
+   * The trusted Python parent owns the clock. Per timed iteration the parent
+   * delivers two opaque tokens on the go descriptor: a mutation seed, then
+   * (after the per-iteration prep work it must never time) a parse-go token.
+   * The harness echoes the parse-go token on the control descriptor only after
+   * the parse returns, so the measured window is exactly the parse of
+   * schedule-distinct content and the candidate-linked runtime holds no clock
+   * it could rewrite or accumulator it could zero. Mutation, base-tree
+   * construction, digesting, and cleanup all stay outside the measured window.
+   * Every timed tree's full pre-order signature is folded into a digest the
+   * parent compares against the pristine in-eval reference run on the same
+   * token stream.
+   */
+  unsigned char seed_bytes[8];
+  unsigned char go_bytes[8];
+  unsigned char digest_bytes[8];
+
   uint64_t full_digest = DIGEST_BASIS;
   for (uint32_t i = 0; i < full_iterations; i++) {
-    Mutation mutation = mutate_buffer(source, FULL_MUTATION_STRIDE, schedule_seed, FULL_TIMED_SALT, i);
-    uint64_t started = now_ns();
+    raw_write(ctrl_fd, "R", 1);
+    raw_read_full(go_fd, seed_bytes, 8);
+    Mutation mutation = mutate_buffer(source, FULL_MUTATION_STRIDE, load_le64(seed_bytes), FULL_TIMED_SALT, i);
+    raw_write(ctrl_fd, "P", 1);
+    raw_read_full(go_fd, go_bytes, 8);
     TSTree *tree = ts_parser_parse_string(parser, NULL, source.data, source.length);
-    full_ns += now_ns() - started;
+    raw_write(ctrl_fd, (const char *)go_bytes, 8);
     if (!tree) fail("timed parser returned no tree");
     full_digest = fold_value(full_digest, i);
     full_digest = fold_tree_signature(full_digest, tree);
     ts_tree_delete(tree);
     revert_buffer(source, &mutation);
   }
+  store_le64(digest_bytes, full_digest);
+  raw_write(ctrl_fd, (const char *)digest_bytes, 8);
 
-  uint64_t incremental_ns = 0;
   uint64_t incremental_digest = DIGEST_BASIS;
   for (uint32_t i = 0; i < incremental_iterations; i++) {
-    Mutation mutation = mutate_buffer(edited, INCREMENTAL_MUTATION_STRIDE, schedule_seed, INCREMENTAL_TIMED_SALT, i);
+    raw_write(ctrl_fd, "R", 1);
+    raw_read_full(go_fd, seed_bytes, 8);
+    Mutation mutation = mutate_buffer(edited, INCREMENTAL_MUTATION_STRIDE, load_le64(seed_bytes), INCREMENTAL_TIMED_SALT, i);
     TSTree *base = copy_edited_tree(old_tree, &mutation, &edited_lines);
-    uint64_t started = now_ns();
+    raw_write(ctrl_fd, "P", 1);
+    raw_read_full(go_fd, go_bytes, 8);
     TSTree *tree = ts_parser_parse_string(parser, base, edited.data, edited.length);
-    incremental_ns += now_ns() - started;
+    raw_write(ctrl_fd, (const char *)go_bytes, 8);
     if (!tree) fail("timed incremental parser returned no tree");
     incremental_digest = fold_value(incremental_digest, i);
     incremental_digest = fold_tree_signature(incremental_digest, tree);
@@ -526,28 +565,8 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
     ts_tree_delete(base);
     revert_buffer(edited, &mutation);
   }
-
-  if (full_ns == 0 || incremental_ns == 0) fail("benchmark clock resolution failure");
-  /* Counters travel only through the non-interposable raw channel; the trusted
-   * evaluator independently recomputes both byte counters from the sealed
-   * workload and iteration counts, and requires both digests to match the
-   * in-eval trusted reference run on the same schedule seed. */
-  char line[320];
-  size_t offset = 0;
-  offset = append_text(line, offset, sizeof line, "{\"ok\":true,\"fullBytes\":");
-  offset = append_u64(line, offset, sizeof line, (uint64_t)source.length * full_iterations);
-  offset = append_text(line, offset, sizeof line, ",\"fullDigest\":");
-  offset = append_u64(line, offset, sizeof line, full_digest);
-  offset = append_text(line, offset, sizeof line, ",\"fullNs\":");
-  offset = append_u64(line, offset, sizeof line, full_ns);
-  offset = append_text(line, offset, sizeof line, ",\"incrementalBytes\":");
-  offset = append_u64(line, offset, sizeof line, (uint64_t)edited.length * incremental_iterations);
-  offset = append_text(line, offset, sizeof line, ",\"incrementalDigest\":");
-  offset = append_u64(line, offset, sizeof line, incremental_digest);
-  offset = append_text(line, offset, sizeof line, ",\"incrementalNs\":");
-  offset = append_u64(line, offset, sizeof line, incremental_ns);
-  offset = append_text(line, offset, sizeof line, "}\n");
-  raw_write(1, line, offset);
+  store_le64(digest_bytes, incremental_digest);
+  raw_write(ctrl_fd, (const char *)digest_bytes, 8);
 
   free(edited_lines.starts);
   ts_tree_delete(old_tree);
@@ -556,7 +575,7 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
 }
 
 int main(int argc, char **argv) {
-  if (argc != 8 && argc != 10) fail("invalid argument count");
+  if (argc != 8 && argc != 11) fail("invalid argument count");
   const char *action = argv[1];
   const char *language_name = argv[2];
   Buffer source = read_file(argv[3]);
@@ -566,9 +585,9 @@ int main(int argc, char **argv) {
 
   if (strcmp(action, "verify") == 0 && argc == 8) {
     verify(language_name, source, start, old_end, replacement, argv[7]);
-  } else if (strcmp(action, "bench") == 0 && argc == 10) {
+  } else if (strcmp(action, "bench") == 0 && argc == 11) {
     benchmark(language_name, source, start, old_end, replacement, parse_u32(argv[7]), parse_u32(argv[8]),
-              parse_u64(argv[9]));
+              (int)parse_u32(argv[9]), (int)parse_u32(argv[10]));
   } else {
     fail("invalid action");
   }
