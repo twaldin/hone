@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_0319b25c1cfe",
+  "id": "cap_f91a959a1f65",
   "objective": "Reduce the fixed Linux latency of query.py for the sealed skin-data workload while preserving the exact registered response+quality hash. The evaluator starts every measurement in a fresh process with empty SQLite connection state and verified page-cache eviction. Only query/indexing/batching/cache strategy may change; eval.py, worker.py, and toolchain.lock.json are protected.",
   "baseline": {
     "kind": "git",
-    "commit": "49d8cb7faf1a38965da0917db25dbe9e70c80a7d"
+    "commit": "56d52e1f1badc9f2f629127e16347cb66a06ce25"
   },
   "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
   "evalEntrypoint": [
@@ -51,7 +51,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:ac53cc7dd4e91eaf458e4bdf185328e0b18beea7793b91addab5080bdef54330"
+    "hash": "sha256:20805888d698e538669a00671e907095f6cad110c55956e506ad6a18fdfd5094"
   },
   "contentHashes": {
     "assets/train/market.sqlite3": "sha256:a0c2a8b1a20ef74b9e263f6f7cf56054322820b15dddbedfc20c41718d34d2de",
@@ -98,9 +98,9 @@
     },
     "normalization": {
       "qFail": 0,
-      "qBase": 0.0002942307770092168,
-      "qReference": 0.0018040334961153181,
-      "scale": 0.0015098027191061012
+      "qBase": 0.0002686543730516923,
+      "qReference": 0.0015857711233475968,
+      "scale": 0.0013171167502959045
     },
     "diagnosticContentHashes": {
       "diagnostics/alternate/query.py": "sha256:007f5288dbb4f0a05539f1a27f0e9b70b532ad5e62df9f71441f8b88869befa1",

@@ -41,9 +41,9 @@
     },
     "normalization": {
       "qFail": 0,
-      "qBase": 0.0002942307770092168,
-      "qReference": 0.0018040334961153181,
-      "scale": 0.0015098027191061012
+      "qBase": 0.0002686543730516923,
+      "qReference": 0.0015857711233475968,
+      "scale": 0.0013171167502959045
     },
     "diagnosticContentHashes": {
       "diagnostics/alternate/query.py": "sha256:007f5288dbb4f0a05539f1a27f0e9b70b532ad5e62df9f71441f8b88869befa1",
