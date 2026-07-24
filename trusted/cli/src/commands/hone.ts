@@ -99,6 +99,22 @@ import type { CmdIo } from "../io.js";
 import { MetaJournalV1, metaWorkKey } from "../meta-journal.js";
 import { persistMetaSearchTrajectory } from "../meta-trajectory.js";
 import {
+  assembleG1Authorization,
+  assembleG1Record,
+  assembleG2Authorization,
+  assembleG2Record,
+  assertG1Authorized,
+  assertG2Authorized,
+  readG1Record,
+  readG2Record,
+  readConfirmationReceipt,
+  readGateThresholdsFile,
+  writeAuthorization,
+  writeG1Record,
+  writeG2Record,
+  type HumanDecision,
+} from "../gate-records.js";
+import {
   buildBrokenMetaControl,
   buildDegradedMetaControl,
   captureMetaControlSourceSeal,
@@ -2207,10 +2223,12 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
 }
 
 const RECURSIVE_USAGE =
-  "usage: hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal] "
+  "usage: hone recursive --campaign <path> --headless "
+  + "[--phase freeze|search|confirmation|terminal|authorize] "
   + "[--out <gitignored-path>] [--target-artifact sha256:<64hex>] [--controller-artifact sha256:<64hex>] "
   + "[--control-winner sha256:<64hex>] [--generation0 sha256:<64hex>] [--generation1 sha256:<64hex>] "
-  + "[--generation2 sha256:<64hex>]";
+  + "[--generation2 sha256:<64hex>] [--gate-thresholds <path>] [--gate G1|G2] [--approver <name>] "
+  + "[--reason <text>] [--record-dir <stage-a-cell-dir>] [--attest-diff-confined] [--attest-mechanism-plausible]";
 
 function digestFlag(value: string | undefined, label: string): Sha256Digest | undefined {
   if (value === undefined) return undefined;
@@ -2282,7 +2300,7 @@ function recursivePhaseReceipt(
 /** Execute one frozen recursive generation cell; orchestration composes these durable cells. */
 export async function recursiveCommand(args: string[], io: CmdIo): Promise<number> {
   const { positionals, flags } = parseFlags(args, {
-    booleans: ["headless"],
+    booleans: ["headless", "attest-diff-confined", "attest-mechanism-plausible"],
     strings: [
       "campaign",
       "phase",
@@ -2293,14 +2311,19 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       "generation0",
       "generation1",
       "generation2",
+      "gate-thresholds",
+      "gate",
+      "approver",
+      "reason",
+      "record-dir",
     ],
   });
   if (positionals.length !== 0 || !boolFlag(flags, "headless")) throw new UsageError(RECURSIVE_USAGE);
   const campaignFlag = strFlag(flags, "campaign");
   if (campaignFlag === undefined) throw new UsageError(RECURSIVE_USAGE);
   const phaseFlag = strFlag(flags, "phase") ?? "search";
-  if (!["freeze", "search", "confirmation", "terminal"].includes(phaseFlag)) throw new UsageError(RECURSIVE_USAGE);
-  const phase = phaseFlag as "freeze" | "search" | "confirmation" | "terminal";
+  if (!["freeze", "search", "confirmation", "terminal", "authorize"].includes(phaseFlag)) throw new UsageError(RECURSIVE_USAGE);
+  const phase = phaseFlag as "freeze" | "search" | "confirmation" | "terminal" | "authorize";
   const outFlag = strFlag(flags, "out");
   if ((phase === "freeze") !== (outFlag !== undefined)) throw new UsageError(RECURSIVE_USAGE);
   if (optimizerOverridden(io.env)) throw new UsageError("official recursive campaigns refuse HONE_OPTIMIZER_CMD");
@@ -2455,6 +2478,9 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     if (phase === "confirmation") {
       assertExactSearchCardinality(journal, config);
       if (config.generation.stage === "A") {
+        const thresholdsPath = strFlag(flags, "gate-thresholds");
+        if (thresholdsPath === undefined) throw new UsageError(RECURSIVE_USAGE);
+        const thresholds = readGateThresholdsFile(resolve(io.root, thresholdsPath));
         const winner = await selectedSearchWinner(outerRunDir, config, gate);
         const result = await runner.runConfirmation({
           seed: targetIdentity,
@@ -2462,20 +2488,39 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
           brokenControl: controls.broken,
           degradedControl: controls.degraded,
         });
+        const measurementHash = sha256(canonicalJson(result.measurements));
         const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
           generation: config.generation,
           winner,
           measurementCount: result.measurements.length,
-          measurementHash: sha256(canonicalJson(result.measurements)),
+          measurementHash,
         });
-        io.out(canonicalJson({ configHash, phase, winner, receiptPath }));
+        const g1Record = assembleG1Record({
+          config,
+          measurements: result.measurements,
+          receipt: readConfirmationReceipt(receiptPath),
+          thresholds: thresholds.g1,
+          seed: targetIdentity,
+          winner,
+        });
+        const g1RecordPath = writeG1Record(campaignDir, g1Record);
+        io.out(canonicalJson({ configHash, phase, winner, receiptPath, g1RecordPath, g1Pass: g1Record.pass }));
         return 0;
       }
+      const thresholdsPath = strFlag(flags, "gate-thresholds");
+      if (thresholdsPath === undefined) throw new UsageError(RECURSIVE_USAGE);
+      const thresholds = readGateThresholdsFile(resolve(io.root, thresholdsPath));
       const controlWinner = digestFlag(strFlag(flags, "control-winner"), "--control-winner");
       const generation2 = digestFlag(strFlag(flags, "generation2"), "--generation2");
       if (controlWinner === undefined || generation2 === undefined) throw new UsageError(RECURSIVE_USAGE);
       const controlWinnerIdentity = await checkedPublicIdentity(controlWinner, gate);
       const generation2Identity = await checkedPublicIdentity(generation2, gate);
+      // Fail closed: Stage B cannot run without the accepted G1 human authorization.
+      assertG1Authorized(campaignDir, configHash, {
+        target: targetIdentity,
+        controlWinner: controlWinnerIdentity,
+        generation2: generation2Identity,
+      });
       const result = await runner.runRecursiveConfirmation({
         target: targetIdentity,
         controlControllerWinner: controlWinnerIdentity,
@@ -2483,14 +2528,25 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
         brokenControl: controls.broken,
         degradedControl: controls.degraded,
       });
+      const measurementHash = sha256(canonicalJson(result.measurements));
       const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
         generation: config.generation,
         controlWinner: controlWinnerIdentity,
         generation2: generation2Identity,
         measurementCount: result.measurements.length,
-        measurementHash: sha256(canonicalJson(result.measurements)),
+        measurementHash,
       });
-      io.out(canonicalJson({ configHash, phase, controlWinner: controlWinnerIdentity, generation2: generation2Identity, receiptPath }));
+      const g2Record = assembleG2Record({
+        config,
+        measurements: result.measurements,
+        receipt: readConfirmationReceipt(receiptPath),
+        thresholds: thresholds.g2,
+        target: targetIdentity,
+        controlWinner: controlWinnerIdentity,
+        generation2: generation2Identity,
+      });
+      const g2RecordPath = writeG2Record(campaignDir, g2Record);
+      io.out(canonicalJson({ configHash, phase, controlWinner: controlWinnerIdentity, generation2: generation2Identity, receiptPath, g2RecordPath, g2Pass: g2Record.pass }));
       return 0;
     }
 
@@ -2504,6 +2560,12 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
         generation1: await checkedPublicIdentity(generation1, gate),
         generation2: await checkedPublicIdentity(generation2, gate),
       };
+      // Fail closed: terminal requires both accepted dev-gate authorizations (G1 + G2).
+      assertG2Authorized(campaignDir, configHash, {
+        generation0: identities.generation0,
+        generation1: identities.generation1,
+        generation2: identities.generation2,
+      });
       const result = await runner.runRecursiveTerminal(identities);
       const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
         generation: config.generation,
@@ -2512,6 +2574,57 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
         measurementHash: sha256(canonicalJson(result.measurements)),
       });
       io.out(canonicalJson({ configHash, phase, artifacts: identities, receiptPath }));
+      return 0;
+    }
+
+    if (phase === "authorize") {
+      const gateFlag = strFlag(flags, "gate");
+      if (gateFlag !== "G1" && gateFlag !== "G2") throw new UsageError(RECURSIVE_USAGE);
+      const approver = strFlag(flags, "approver");
+      const reason = strFlag(flags, "reason");
+      if (approver === undefined || reason === undefined) throw new UsageError(RECURSIVE_USAGE);
+      if (!boolFlag(flags, "attest-diff-confined") || !boolFlag(flags, "attest-mechanism-plausible")) {
+        throw new UsageError("authorization requires --attest-diff-confined and --attest-mechanism-plausible");
+      }
+      const humanDecision: HumanDecision = {
+        approver,
+        decision: "approved",
+        diffConfinedIntelligible: true,
+        mechanismPlausible: true,
+        reason,
+        decidedAt: new Date().toISOString(),
+      };
+      if (gateFlag === "G1") {
+        const controlWinner = digestFlag(strFlag(flags, "control-winner"), "--control-winner");
+        const generation2 = digestFlag(strFlag(flags, "generation2"), "--generation2");
+        const recordDir = strFlag(flags, "record-dir");
+        if (controlWinner === undefined || generation2 === undefined || recordDir === undefined) throw new UsageError(RECURSIVE_USAGE);
+        // The G1 statistical record lives in the (separate) stage-A cell directory.
+        const authorization = assembleG1Authorization({
+          configHash,
+          record: readG1Record(resolve(io.root, recordDir)),
+          controlWinner: await checkedPublicIdentity(controlWinner, gate),
+          generation2: await checkedPublicIdentity(generation2, gate),
+          humanDecision,
+        });
+        const authorizationPath = writeAuthorization(campaignDir, authorization);
+        io.out(canonicalJson({ configHash, phase, gate: gateFlag, authorizationPath }));
+        return 0;
+      }
+      const generation0 = digestFlag(strFlag(flags, "generation0"), "--generation0");
+      const generation1 = digestFlag(strFlag(flags, "generation1"), "--generation1");
+      const generation2 = digestFlag(strFlag(flags, "generation2"), "--generation2");
+      if (generation0 === undefined || generation1 === undefined || generation2 === undefined) throw new UsageError(RECURSIVE_USAGE);
+      const authorization = assembleG2Authorization({
+        configHash,
+        record: readG2Record(campaignDir),
+        generation0: await checkedPublicIdentity(generation0, gate),
+        generation1: await checkedPublicIdentity(generation1, gate),
+        generation2: await checkedPublicIdentity(generation2, gate),
+        humanDecision,
+      });
+      const authorizationPath = writeAuthorization(campaignDir, authorization);
+      io.out(canonicalJson({ configHash, phase, gate: gateFlag, authorizationPath }));
       return 0;
     }
 
