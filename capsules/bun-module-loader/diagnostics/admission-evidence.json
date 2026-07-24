@@ -28,39 +28,39 @@
   },
   {
    "name": "naive",
-   "q": 2.186777794280104,
-   "trainQ": 2.1850134933830763,
-   "validationQ": 2.188542095177131,
+   "q": 2.550034,
+   "trainQ": 2.550316,
+   "validationQ": 2.549752,
    "hardGatesPass": true,
    "role": "deliberately slower but correct: a fixed deterministic ~15us spin on every resolver entry (quantization-immune, ratio-stable under the interleaved reference yardstick)"
   },
   {
    "name": "shortcut",
-   "q": 11.366741557100909,
-   "trainQ": 20.518584806725364,
-   "validationQ": 2.21489830747645,
+   "q": 10.720533,
+   "trainQ": 18.866015,
+   "validationQ": 2.575050,
    "hardGatesPass": true,
-   "role": "split-path memorization control: full train-split resolution results are memorized in a digest-keyed table promoted only on repeat sightings (correctness phase stays inside the frozen RSS gate) so repeated train resolutions skip the resolver entirely, while validation entries pay a bounded deterministic probe \u2014 beats baseline on train, clearly slower on validation"
+   "role": "split-path memorization control: full train-split resolution results are memorized in a digest-keyed table promoted only on repeat sightings (the untimed correctness load stays inside the frozen whole-tree cgroup memory gate) so repeated train resolutions skip the resolver entirely, while validation entries pay a bounded deterministic probe \u2014 beats baseline on train, clearly slower on validation"
   }
  ],
  "perturbation": {
   "name": "improved",
   "path": "diagnostics/improved/src/resolver/resolver.rs",
-  "description": "Independently authored valid source perturbation: removes disabled perf-event tracing, tracing-timer accumulation, and cold debug-log flush calls from the resolver entry path, skips the specifier-classification prologue for relative './'/'../' imports (a guaranteed no-op for them), joins single-segment relative specifiers directly instead of running the general path normalizer, and adds cold/no-inline layout hints on cold resolver functions. Observation-preserving: loader stdout and resolution-path checksums are byte-identical to the pristine baseline on every train and validation graph (20/20 phase outputs), focused tests pass, RSS unchanged.",
-  "q": 15.454276026588897,
-  "trainQ": 15.423720878503019,
-  "validationQ": 15.484831174674772,
+  "description": "Independently authored valid source perturbation: removes disabled perf-event tracing, tracing-timer accumulation, and cold debug-log flush calls from the resolver entry path, skips the specifier-classification prologue for relative './'/'../' imports (a guaranteed no-op for them), joins single-segment relative specifiers directly instead of running the general path normalizer, and adds cold/no-inline layout hints on cold resolver functions. Observation-preserving: loader stdout and resolution-path checksums are byte-identical to the pristine baseline on every train and validation graph (20/20 phase outputs), focused tests pass, whole-tree cgroup memory.peak stays within the +10% baseline gate.",
+  "q": 15.078717,
+  "trainQ": 15.090504,
+  "validationQ": 15.066930,
   "hardGatesPass": true,
   "movesMetric": true
  },
  "orderingChecks": {
   "consecutivePasses": 2,
-  "firstPassStabilitySpread": 0.0142,
-  "finalStabilitySpread": 0.006460846030595572,
+  "firstPassStabilitySpread": 0.0209,
+  "finalStabilitySpread": 0.009364635047932349,
   "stabilityBand": 0.15,
   "containerEvaluationsPerPass": 14,
-  "firstPassWallSec": 3015.3,
-  "finalPassWallSec": 2994.0
+  "firstPassWallSec": 3343.4,
+  "finalPassWallSec": 3347.9
  },
- "measurementNote": "Timed phase: per graph, one untimed settling repetition then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored by the median per-pair time ratio; fastest-of-N was abandoned because sub-200ms container runs are multi-modal and the fastest sample estimates the rare mode's own variance. The untimed correctness phase loads the full module graph and gates exact export/side-effect hashes and peak RSS against the frozen oracle. Round-2 state hygiene: every loader launch runs against a per-launch fresh transpiler cache and TMPDIR under a root-owned measurement root inside a fresh IPC namespace, and is followed by a subreaper-backed candidate-uid process reap plus a purge of the shared tmp roots; the post-test lockdown rebuilds the 0777 build/test scratch dirs root-owned, strips group/other write from root-owned build-tree paths, and hosts graphs and RSS outputs under the root-owned measurement root, so no repetition can replay state persisted by an earlier one."
+ "measurementNote": "Timed phase: per graph, one untimed settling repetition then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored by the median per-pair time ratio; fastest-of-N was abandoned because sub-200ms container runs are multi-modal and the fastest sample estimates the rare mode's own variance. The untimed correctness phase loads the full module graph and gates exact export/side-effect hashes and the whole-process-tree peak memory against the frozen oracle. Round-4 CG: peak memory is the kernel-owned monotone cgroup memory.peak of a fresh per-launch leaf the launch joins (writing its own pid to leaf/cgroup.procs) before the setpriv privilege drop, read AFTER the full candidate-uid-tree reap and before the leaf is drained; this replaces the /usr/bin/time %M single-pid ru_maxrss reading, which a launch could dodge by shedding memory to a detached child. The demoted uid-2000 candidate cannot write the leaf control files (CAP_SYS_ADMIN is stripped by setpriv+no-new-privileges) or reset the counter. Whole-tree peak charges only pages newly faulted by the launch (shared code already page-cached is charged elsewhere), so baselines are ~19-24MiB with <4% A-A spread and the gate allows +10%. Round-2 state hygiene: every loader launch runs against a per-launch fresh transpiler cache and TMPDIR under a root-owned measurement root inside a fresh IPC namespace, and is followed by a subreaper-backed candidate-uid process reap plus a purge of the shared tmp roots; the post-test lockdown rebuilds the 0777 build/test scratch dirs root-owned, strips group/other write from root-owned build-tree paths, and hosts graphs under the root-owned measurement root, so no repetition can replay state persisted by an earlier one."
 }

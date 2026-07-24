@@ -52,6 +52,21 @@ SEALED_BUN = SEALED_ROOT / "bun-profile"
 REF_ROOT = BUILD_ROOT / "hone-ref"
 REF_BUN = REF_ROOT / "bun-profile"
 MEASURE_ROOT = BUILD_ROOT / "hone-measure"
+# Whole-tree memory accounting authority (mimalloc-allocator exemplar): a
+# fresh root-only cgroup2 hierarchy the trusted evaluator mounts (CAP_SYS_ADMIN
+# is granted for exactly this). Each loader launch joins a per-launch leaf
+# BEFORE the setpriv privilege drop, so the WHOLE candidate process tree
+# (exited children included) is charged to a cgroup whose control files the
+# demoted uid can never write; memory.peak is kernel-owned and monotone, so
+# candidate code cannot reset or under-report it the way /proc-self VmHWM or a
+# GNU-time %M ru_maxrss reading of a single pid can be dodged.
+CGROUP_ROOT = Path("/tmp/hone-bun-cg")
+CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
+CGROUP_DRAIN_SEC = 10
+# Set by _prepare_measurement once the accounting cgroup is mounted. When
+# false (non-root / non-linux developer runs), the launch falls back to a
+# GNU-time wait4 ru_maxrss reading in a separate trusted process.
+_CGROUP_ACTIVE = False
 PR_SET_CHILD_SUBREAPER = 36
 CLONE_NEWIPC = 0x08000000
 CANDIDATE_WRITABLE_ROOTS = (Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"))
@@ -78,6 +93,12 @@ TEST_TIMEOUT_SEC = 150
 RUN_TIMEOUT_SEC = 45
 MAX_CAPTURE_BYTES = 8_000_000
 Q_FAIL = 0.0
+# Peak-memory hard gate tolerance over the frozen baseline. The metric is the
+# whole-tree cgroup memory.peak (page cache included), which is inherently
+# noisier than a single-pid ru_maxrss reading, so the multiplier is looser
+# than the historical +2% while still bounding a memory-for-speed trade well
+# below any candidate that would double the resident tree.
+RSS_TOLERANCE = 1.10
 TEST_FILES = (
     "./js/bun/resolve/resolve.test.ts",
     "./js/bun/resolve/resolve-ts.test.ts",
@@ -118,11 +139,113 @@ def _become_subreaper() -> None:
 
 def _ipc_isolated_preexec() -> None:
     """Give the launch a fresh IPC namespace so SysV segments cannot carry
-    resolution state between repetitions (runs before /usr/bin/time execs;
-    setpriv then drops the whole subtree to the candidate uid inside it)."""
+    resolution state between repetitions (runs before the setpriv exec that
+    drops the whole subtree to the candidate uid inside it)."""
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.unshare(CLONE_NEWIPC) != 0:
         os._exit(126)
+
+
+def _cgroup_available() -> bool:
+    """Whole-tree cgroup accounting is only reachable as root on Linux."""
+    return sys.platform == "linux" and os.geteuid() == 0
+
+
+def _mount_measurement_cgroup() -> None:
+    """Mount a fresh root-only cgroup2 hierarchy and park the evaluator in a
+    trusted leaf so the memory controller can be delegated to per-launch
+    measurement leaves (mimalloc-allocator exemplar). Docker mounts the
+    container cgroup2 view read-only, but the trusted evaluator holds mount
+    authority via CAP_SYS_ADMIN. Fail-closed under root+linux; a no-op for
+    developer runs where the wait4 ru_maxrss fallback applies."""
+    global _CGROUP_ACTIVE
+    _CGROUP_ACTIVE = False
+    if not _cgroup_available():
+        return
+    CGROUP_ROOT.mkdir(mode=0o755, exist_ok=False)
+    completed = subprocess.run(
+        ["mount", "-t", "cgroup2", "-o", "nosuid,nodev,noexec", "hone-bun-cg", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        CGROUP_ROOT.rmdir()
+        raise EvaluationFailure("trusted measurement cgroup mount failed")
+    try:
+        # cgroup v2 no-internal-process rule: park the evaluator (and every
+        # process it forks) in a trusted leaf so the memory controller can be
+        # delegated to the per-launch measurement leaves.
+        CGROUP_TRUSTED.mkdir(mode=0o755)
+        (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
+        (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
+    except OSError as exc:
+        raise EvaluationFailure("trusted measurement cgroup setup failed") from exc
+    _CGROUP_ACTIVE = True
+
+
+def _unmount_measurement_cgroup() -> None:
+    if not _CGROUP_ACTIVE:
+        return
+    subprocess.run(
+        ["umount", "-l", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    try:
+        CGROUP_ROOT.rmdir()
+    except OSError:
+        pass
+
+
+def _drain_measurement_leaf(leaf: Path) -> None:
+    """Kill anything still charged to the leaf, wait for the kernel to release
+    it, then retire the leaf (mimalloc-allocator exemplar). memory.peak has
+    already been read by the caller; this only reclaims the leaf."""
+    deadline = time.monotonic() + CGROUP_DRAIN_SEC
+    try:
+        (leaf / "cgroup.kill").write_text("1")
+    except OSError:
+        pass
+    while True:
+        try:
+            populated = (leaf / "cgroup.procs").read_text().strip() != ""
+        except OSError:
+            populated = False
+        if not populated:
+            break
+        if time.monotonic() > deadline:
+            raise EvaluationFailure("measurement cgroup could not be drained")
+        time.sleep(0.05)
+    try:
+        leaf.rmdir()
+    except OSError as exc:
+        raise EvaluationFailure("measurement cgroup could not be retired") from exc
+
+
+def _make_loader_preexec(cgroup_leaf: "Path | None", fresh_ipc: bool):
+    """Build the child-side setup for a loader launch: join the per-launch
+    measurement leaf while still root (so the whole setpriv-demoted subtree is
+    charged to it), then optionally enter a fresh IPC namespace. Both run
+    before the setpriv exec drops privilege."""
+    leaf_procs = None if cgroup_leaf is None else str(cgroup_leaf / "cgroup.procs")
+
+    def _preexec() -> None:
+        if leaf_procs is not None:
+            fd = os.open(leaf_procs, os.O_WRONLY)
+            try:
+                os.write(fd, b"0")
+            finally:
+                os.close(fd)
+        if fresh_ipc:
+            _ipc_isolated_preexec()
+
+    return _preexec
 
 
 def _candidate_pids() -> dict[int, bool]:
@@ -246,8 +369,15 @@ def _run(
     timeout: int,
     candidate: bool = False,
     fresh_ipc: bool = False,
+    cgroup_leaf: "Path | None" = None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    if candidate:
+        preexec_fn = _candidate_preexec
+    elif fresh_ipc or cgroup_leaf is not None:
+        preexec_fn = _make_loader_preexec(cgroup_leaf, fresh_ipc)
+    else:
+        preexec_fn = None
     try:
         process = subprocess.Popen(
             argv,
@@ -256,11 +386,7 @@ def _run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
-            preexec_fn=(
-                _candidate_preexec
-                if candidate
-                else (_ipc_isolated_preexec if fresh_ipc else None)
-            ),
+            preexec_fn=preexec_fn,
             env=env or _candidate_env(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -506,9 +632,14 @@ def _run_loader(
     """Run one loader launch against completely fresh candidate-writable
     state.  The transpiler cache and TMPDIR are per-launch directories under
     the root-owned measurement root (created here, destroyed below), the
-    launch gets a fresh IPC namespace, and after it exits every candidate-uid
-    process is killed and reaped and the shared tmp roots are purged — so no
-    launch can persist resolution state for a later repetition to replay."""
+    launch joins a fresh per-launch cgroup leaf (before the setpriv drop) and
+    gets a fresh IPC namespace, and after it exits every candidate-uid process
+    is killed and reaped — so no launch can persist resolution state for a
+    later repetition to replay.  Peak memory is the leaf's whole-tree
+    kernel-owned memory.peak, read AFTER the full-tree reap; a demoted
+    candidate cannot write the leaf control files or reset the counter.  When
+    the accounting cgroup is unavailable (developer runs) the launch falls
+    back to a GNU-time wait4 ru_maxrss reading in a separate trusted process."""
     state_root = MEASURE_ROOT / f"state-{job['id']}-{sample}"
     shutil.rmtree(state_root, ignore_errors=True)
     state_root.mkdir(mode=0o755)
@@ -517,27 +648,30 @@ def _run_loader(
     for scratch in (cache, tmp):
         scratch.mkdir(mode=0o777)
         os.chmod(scratch, 0o777)
-    rss_path = MEASURE_ROOT / f"rss-{job['id']}-{sample}.txt"
-    rss_path.unlink(missing_ok=True)
     env = _candidate_env(
         {
             "BUN_RUNTIME_TRANSPILER_CACHE_PATH": str(cache),
             "TMPDIR": str(tmp),
         }
     )
-    argv = [
-        "/usr/bin/time",
-        "--format=%M",
-        f"--output={rss_path}",
-        "--",
+    demote = [
         "/usr/bin/setpriv",
         f"--reuid={CANDIDATE_UID}",
         f"--regid={CANDIDATE_GID}",
         "--clear-groups",
         "--no-new-privs",
-        str(binary),
-        entry,
     ]
+    leaf: Path | None = None
+    rss_path: Path | None = None
+    if _CGROUP_ACTIVE:
+        leaf = CGROUP_ROOT / f"leaf-{job['id']}-{sample}"
+        leaf.mkdir(mode=0o755, exist_ok=False)
+        argv = [*demote, str(binary), entry]
+    else:
+        rss_path = MEASURE_ROOT / f"rss-{job['id']}-{sample}.txt"
+        rss_path.unlink(missing_ok=True)
+        argv = ["/usr/bin/time", "--format=%M", f"--output={rss_path}", "--", *demote, str(binary), entry]
+    peak_from_cgroup: int | None = None
     try:
         started = time.perf_counter()
         completed = _run(
@@ -545,19 +679,35 @@ def _run_loader(
             cwd=Path(entry).parent,
             timeout=RUN_TIMEOUT_SEC,
             fresh_ipc=True,
+            cgroup_leaf=leaf,
             env=env,
         )
         elapsed = time.perf_counter() - started
     finally:
         _reap_candidate_processes()
+        if leaf is not None:
+            # Whole-tree peak is monotone for the leaf's lifetime, so reading
+            # it after the full-tree reap still captures the true maximum.
+            try:
+                peak_from_cgroup = int((leaf / "memory.peak").read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                peak_from_cgroup = None
+            finally:
+                _drain_measurement_leaf(leaf)
         _clear_candidate_writable()
         shutil.rmtree(state_root, ignore_errors=True)
-    try:
-        peak_rss_kib = int(rss_path.read_text(encoding="ascii").strip())
-    except (OSError, ValueError) as exc:
-        raise EvaluationFailure("GNU time did not report peak RSS") from exc
-    if peak_rss_kib <= 0:
-        raise EvaluationFailure("invalid peak RSS")
+    if leaf is not None:
+        if peak_from_cgroup is None or peak_from_cgroup <= 0:
+            raise EvaluationFailure("cgroup did not report a positive whole-tree memory peak")
+        # Bytes -> KiB, rounded up, so the oracle stays in the historical unit.
+        peak_rss_kib = -(-peak_from_cgroup // 1024)
+    else:
+        try:
+            peak_rss_kib = int(rss_path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError) as exc:
+            raise EvaluationFailure("GNU time did not report peak RSS") from exc
+        if peak_rss_kib <= 0:
+            raise EvaluationFailure("invalid peak RSS")
     observation = _parse_observation(completed.stdout, expected_tag)
     return {
         "elapsedSec": elapsed,
@@ -592,9 +742,10 @@ def _prepare_measurement() -> None:
     the shared tmp roots, rebuilds the 0o777 build/test scratch directories
     as root-owned non-writable stubs, strips group/other write from every
     root-owned path under the build tree and the staged resolver source, and
-    creates the root-owned measurement root.  After this point the only
-    candidate-writable filesystem state is the per-launch scratch created
-    (and destroyed) around each loader run."""
+    creates the root-owned measurement root, and mounts the whole-tree
+    accounting cgroup.  After this point the only candidate-writable
+    filesystem state is the per-launch scratch created (and destroyed) around
+    each loader run."""
     _reap_candidate_processes()
     _clear_candidate_writable()
     for name in ("hone-home", "hone-bun-cache", WORK_ROOT.name):
@@ -607,6 +758,7 @@ def _prepare_measurement() -> None:
     shutil.rmtree(MEASURE_ROOT, ignore_errors=True)
     MEASURE_ROOT.mkdir(mode=0o755)
     os.chmod(MEASURE_ROOT, 0o755)
+    _mount_measurement_cgroup()
 
 
 def _measure_jobs(spec: dict, jobs: list[dict]) -> dict[str, dict]:
@@ -787,8 +939,8 @@ def evaluate() -> dict:
             if actual["resolveSideEffectHash"] != expected.get("resolveSideEffectHash"):
                 failures.append(f"{job_id}: resolve side-effect hash mismatch")
             baseline_rss = expected.get("baselinePeakRssKiB")
-            if not isinstance(baseline_rss, int) or actual["peakRssKiB"] > math.floor(baseline_rss * 1.02):
-                failures.append(f"{job_id}: peak RSS exceeds baseline +2%")
+            if not isinstance(baseline_rss, int) or actual["peakRssKiB"] > math.floor(baseline_rss * RSS_TOLERANCE):
+                failures.append(f"{job_id}: peak RSS exceeds baseline allowance")
         capture = os.environ.get("HONE_CAPTURE_ORACLE") == "1"
         if failures and not capture:
             return _result(valid=False, tests_pass=True, q=Q_FAIL, job_ids=job_ids, measured=measured, failures=failures, build_sec=build_sec)
@@ -819,6 +971,8 @@ def evaluate() -> dict:
             failures=[f"{type(exc).__name__}: {exc}"],
             build_sec=build_sec,
         )
+    finally:
+        _unmount_measurement_cgroup()
 
 
 def main() -> None:

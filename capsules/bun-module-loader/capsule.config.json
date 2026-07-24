@@ -1,5 +1,5 @@
 {
-  "objective": "Improve module-resolution performance on frozen ESM and TypeScript graph shapes derived from bench/module-loader: the timed metric resolves every import edge of each frozen graph through the runtime resolver (Bun.resolveSync driver), aligning the score with the only mutable surface. Only src/resolver/** is mutable; exact module-graph load observations (exports and side effects), exact resolution-path checksums, focused upstream resolver tests, and peak RSS no more than baseline +2% are hard gates.",
+  "objective": "Improve module-resolution performance on frozen ESM and TypeScript graph shapes derived from bench/module-loader: the timed metric resolves every import edge of each frozen graph through the runtime resolver (Bun.resolveSync driver), aligning the score with the only mutable surface. Only src/resolver/** is mutable; exact module-graph load observations (exports and side effects), exact resolution-path checksums, focused upstream resolver tests, and whole-process-tree peak memory no more than baseline +10% are hard gates.",
   "image": "hone-bun-module-loader@sha256:42510480a076778ff594c95fd200610a41721d37ab20b97c80f3e98569c36747",
   "evalEntrypoint": [
     "python3",
@@ -69,7 +69,7 @@
       "freshProcess": true,
       "freshStatePerLaunch": true,
       "warmRepetitions": 5,
-      "q": "reference-normalized per-graph score after all hard gates pass: each graph runs an untimed correctness load per binary, one untimed settling repetition, then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored as the median per-pair time ratio (adjacent pair members share host state, so frequency drift, contention spikes, and scheduler mode-occupancy luck divide out), and q is the geometric mean over graphs of qBase/pairRatio, so a candidate identical to the trusted baseline scores qBase by construction; every loader launch gets a fresh per-launch transpiler cache and TMPDIR under a root-owned measurement root plus a fresh IPC namespace, and is followed by a candidate-uid process reap and shared tmp-root purge, so no repetition can replay state persisted by an earlier one",
+      "q": "reference-normalized per-graph score after all hard gates pass: each graph runs an untimed correctness load per binary, one untimed settling repetition, then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored as the median per-pair time ratio (adjacent pair members share host state, so frequency drift, contention spikes, and scheduler mode-occupancy luck divide out), and q is the geometric mean over graphs of qBase/pairRatio, so a candidate identical to the trusted baseline scores qBase by construction; every loader launch gets a fresh per-launch transpiler cache and TMPDIR under a root-owned measurement root plus a fresh IPC namespace, joins a fresh per-launch cgroup leaf before the setpriv privilege drop so its whole-process-tree peak memory is the kernel-owned monotone cgroup memory.peak read after the full-tree reap (candidate code can neither write the leaf control files nor reset the counter), and is followed by a candidate-uid process reap and shared tmp-root purge, so no repetition can replay state persisted by an earlier one",
       "qFail": 0,
       "qBase": 14.034003452816037,
       "sigma": 0.057695965931277085,
@@ -88,7 +88,7 @@
         "80 focused upstream resolver tests pass (plus 2 upstream skips and 1 todo; one uid-sensitive auto-install permission case is excluded from the unprivileged test runner)",
         "exact canonical export SHA-256 for every cold and warm observation",
         "exact canonical side-effect SHA-256 for every cold and warm observation",
-        "peak RSS for every graph <= frozen baseline +2%"
+        "whole-process-tree cgroup memory.peak for every graph <= frozen baseline +10%"
       ]
     },
     "tags": [
