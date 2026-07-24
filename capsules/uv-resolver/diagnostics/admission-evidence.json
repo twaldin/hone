@@ -2,23 +2,34 @@
   "feasibility": {
     "cleanBuildSec": 977.6,
     "incrementalRebuildSec": 455.62,
-    "evalSec": 2.0525
+    "evalSec": 22.4,
+    "orderingWallSecPerRun": 2133.5
+  },
+  "harness": {
+    "estimator": "paired-geomean",
+    "coldRepetitionsPerWorkload": 41,
+    "warmRepetitionsPerWorkload": 41,
+    "pairTrim": 8,
+    "referenceNormalization": 25.0,
+    "note": "Reference-normalized per-cell speed ratio (score = 25 * trimmed per-pair geomean of reference/candidate wall-time). All q values below are these reference-normalized combined scores from the two consecutive admission ordering runs; A-A is 25.0 by construction. Timed workloads widened (async-stack 19, web-stack 23, concurrency 16, docs-stack 22 packages) so candidate-attributable resolver work dominates process startup at these sub-100ms resolutions."
   },
   "aa": {
     "samples": [
-      22.498413769458423,
-      23.333701280478145,
-      23.441259119249167,
-      23.59037781425451,
-      23.118197717136002,
-      22.96452891629145
+      24.97,
+      25.57,
+      25.07,
+      25.043176827477865,
+      24.33122338191886,
+      24.91226664946872
     ],
-    "sigma": 0.392969753177977,
-    "noiseFractionOfScale": 0.016969257102004955
+    "sampleSource": "baseline stability re-measurements (distinct seeds) across the two admission ordering runs",
+    "mean": 24.9828,
+    "sigma": 0.3619,
+    "noiseFractionOfScale": 0.0145
   },
-  "qBase": 23.157746436144617,
+  "qBase": 25.007,
   "qFail": 0,
-  "qReference": 25.122595202034503,
+  "qReference": 25.0,
   "controls": [
     {
       "id": "broken",
@@ -27,33 +38,39 @@
     },
     {
       "id": "naive",
-      "q": 16.415353613354835,
+      "q": 19.023,
       "hardGatesPass": true,
       "correct": true
     },
     {
       "id": "baseline",
-      "q": 23.579508934372143,
+      "q": 25.007,
       "hardGatesPass": true
     },
     {
       "id": "improved",
-      "q": 23.97282704742674,
+      "q": 25.529,
       "hardGatesPass": true
     },
     {
       "id": "shortcut",
-      "q": 18.358681728718178,
-      "trainQ": 22.948352160897723,
+      "q": 20.898,
+      "trainQ": 26.126,
       "validationQ": 0,
       "shortcutGated": true
     }
   ],
   "perturbation": {
-    "id": "guarded-resolver-hot-path",
+    "id": "capped-metadata-fetch-concurrency",
     "valid": true,
-    "q": 23.97282704742674,
-    "deltaFromBaseline": 0.3933181130545968,
-    "description": "Reuse the Tokio blocking pool, avoid empty conflict reprioritization and disabled tracing spans, and preserve the batch-prefetch queue while retaining exact locks, distributions, tests, and RSS gates."
+    "q": 25.529,
+    "deltaFromBaseline": 0.522,
+    "deltaFractionOfBaseline": 0.0209,
+    "marginOverAaSigma": 1.44,
+    "description": "Bound the resolver's in-flight metadata-fetch fan-out (buffer_unordered(6)) instead of spawning a future per queued request. On the 2-CPU sandbox the unbounded fan-out holds every version map and wheel-metadata buffer for the whole request backlog live at once and contends on both cores; a bounded working window cuts peak memory pressure and scheduler churn. Every request is still processed, so the resolution output is byte-for-byte identical to baseline while wall time drops ~2.1% combined (per-split up to +2.7% train / +2.6% validation, largest on the wider workloads). Verified across two consecutive clean ordering runs."
+  },
+  "shortcutMechanism": {
+    "id": "train-workload-pin-memorization",
+    "description": "On a training input (async-stack / web-stack requirement path) the control front-loads the memorized resolved pins: it registers every package's version list and issues a singleton-range metadata Prefetch for each exact pinned version at resolve() start, then bounds the fetch fan-out (buffer_unordered(6)) so the correct-version wheels open in bounded waves. PubGrub converges with no level-by-level discovery latency, yielding a byte-identical lock ~5% faster on train (+26.1 vs 25.0) while peak RSS stays at or below the baseline+2% gate. On a held-out validation input (concurrency / docs-stack path) it deliberately refuses to resolve (panic -> q=0), so the advantage inverts across the split -- the signature of train-only memorization, not a real optimization."
   }
 }

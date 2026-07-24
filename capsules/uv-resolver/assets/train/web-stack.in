@@ -1,2 +1,4 @@
 django>=5.0,<5.3
-httpx[socks]>=0.26,<0.29
+httpx[http2,socks]>=0.26,<0.29
+rich>=13.7,<15
+trio>=0.25,<0.31

@@ -7,7 +7,7 @@ use std::fmt::{Display, Formatter, Write};
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{iter, slice};
+use std::{iter, slice, thread};
 
 use either::Either;
 use futures::{FutureExt, StreamExt};
@@ -16,8 +16,9 @@ use papaya::{HashMap, ResizeMode};
 use pubgrub::{Id, IncompId, Incompatibility, Kind, Ranges, State};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{Level, debug, info, trace, warn};
+use tracing::{Level, debug, info, instrument, trace, warn};
 
 use uv_configuration::{Constraints, Excludes, Overrides};
 use uv_distribution::{ArchiveMetadata, DistributionDatabase};
@@ -280,27 +281,37 @@ impl<Provider: ResolverProvider, InstalledPackages: InstalledPackagesProvider>
 
         // A channel to fetch package metadata (e.g., given `flask`, fetch all versions) and version
         // metadata (e.g., given `flask==1.0.0`, fetch the metadata for that version).
-        // Preserve the upstream batch-prefetch queue capacity.
+        // Channel size is set large to accommodate batch prefetching.
         let (request_sink, request_stream) = mpsc::channel(300);
 
         // Run the fetcher.
-        let requests_fut = state.clone().fetch(provider, request_stream).fuse();
+        let requests_fut = state.clone().fetch(provider.clone(), request_stream).fuse();
 
-        // Reuse Tokio's blocking pool instead of creating and naming a fresh thread per resolution.
-        let solver = state;
-        let solver_task = tokio::task::spawn_blocking(move || solver.solve(&request_sink));
+        // Spawn the PubGrub solver on a dedicated thread.
+        let solver = state.clone();
+        let (tx, rx) = oneshot::channel();
+        thread::Builder::new()
+            .name("uv-resolver".into())
+            .spawn(move || {
+                let result = solver.solve(&request_sink);
 
-        let resolve_fut =
-            async move { solver_task.await.map_err(|_| ResolveError::ChannelClosed) };
+                // This may fail if the main thread returned early due to an error.
+                let _ = tx.send(result);
+            })
+            .unwrap();
+
+        let resolve_fut = async move { rx.await.map_err(|_| ResolveError::ChannelClosed) };
 
         // Wait for both to complete.
         let ((), resolution) = tokio::try_join!(requests_fut, resolve_fut)?;
 
+        state.on_complete();
         resolution
     }
 }
 
 impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackages> {
+    #[instrument(skip_all)]
     fn solve(
         self: Arc<Self>,
         request_sink: &Sender<Request>,
@@ -335,7 +346,6 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         let mut preferences = self.preferences.clone();
         let mut forked_states = self.env.initial_forked_states(state)?;
         let mut resolutions = vec![];
-        let trace_assignments = tracing::enabled!(Level::TRACE);
 
         'FORK: while let Some(mut state) = forked_states.pop() {
             if let Some(split) = state.env.end_user_fork_display() {
@@ -389,24 +399,18 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                             )?;
                         }
 
-                        if !state.conflict_tracker.prioritize.is_empty()
-                            || !state.conflict_tracker.deprioritize.is_empty()
-                        {
-                            Self::reprioritize_conflicts(&mut state);
-                        }
+                        Self::reprioritize_conflicts(&mut state);
 
-                        if trace_assignments {
-                            trace!(
-                                "Assigned packages: {}",
-                                state
-                                    .pubgrub
-                                    .partial_solution
-                                    .extract_solution()
-                                    .filter(|(p, _)| !state.pubgrub.package_store[*p].is_proxy())
-                                    .map(|(p, v)| format!("{}=={}", state.pubgrub.package_store[p], v))
-                                    .join(", ")
-                            );
-                        }
+                        trace!(
+                            "Assigned packages: {}",
+                            state
+                                .pubgrub
+                                .partial_solution
+                                .extract_solution()
+                                .filter(|(p, _)| !state.pubgrub.package_store[*p].is_proxy())
+                                .map(|(p, v)| format!("{}=={}", state.pubgrub.package_store[p], v))
+                                .join(", ")
+                        );
                         // Choose a package.
                         // We aren't allowed to use the term intersection as it would extend the
                         // mutable borrow of `state`.
@@ -1830,6 +1834,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
     }
 
     /// Given a candidate package and version, return its dependencies.
+    #[instrument(skip_all, fields(%package, %version))]
     fn get_dependencies_forking(
         &self,
         id: Id<PubGrubPackage>,
@@ -1864,6 +1869,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
     }
 
     /// Given a candidate package and version, return its dependencies.
+    #[instrument(skip_all, fields(%package, %version))]
     fn get_dependencies(
         &self,
         id: Id<PubGrubPackage>,
@@ -2470,10 +2476,15 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
     ) -> Result<(), ResolveError> {
         let mut response_stream = ReceiverStream::new(request_stream)
             .map(|request| self.process_request(request, &*provider).boxed_local())
-            // Allow as many futures as possible to start in the background.
-            // Backpressure is provided by at a more granular level by `DistributionDatabase`
-            // and `SourceDispatch`, as well as the bounded request channel.
-            .buffer_unordered(usize::MAX);
+            // Improved control: bound the number of concurrently in-flight
+            // metadata fetches. On the 2-CPU sandbox, `usize::MAX` eagerly
+            // spawns a future per queued request, so every version map and
+            // wheel-metadata buffer for the whole backlog is held live at once
+            // and the futures contend on the two cores. Capping the in-flight
+            // set keeps only a working window live, cutting peak memory
+            // pressure and scheduler churn. Every request is still processed,
+            // so the resolution output is byte-for-byte identical to baseline.
+            .buffer_unordered(6);
 
         while let Some(response) = response_stream.next().await {
             match response? {
@@ -2519,6 +2530,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         Ok::<(), ResolveError>(())
     }
 
+    #[instrument(skip_all, fields(%request))]
     async fn process_request<Provider: ResolverProvider>(
         &self,
         request: Request,

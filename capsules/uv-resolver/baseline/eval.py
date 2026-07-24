@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -35,12 +36,12 @@ BUILD_TMPFS_DATA = b"size=1600m,mode=0755,uid=2000,gid=2000,nr_inodes=300000"
 SANDBOX_UID = 2000
 BUILD_TIMEOUT_SEC = 555
 PROCESS_TIMEOUT_SEC = 30
-COLD_REPETITIONS = 13
-WARM_REPETITIONS = 13
-# Symmetric trim applied to the per-pair reference/candidate ratios: with 13
-# interleaved pairs the 3 most extreme ratios at each end are dropped and the
-# middle 7 kept, rejecting single-repetition glitches in either binary.
-PAIR_TRIM = 3
+COLD_REPETITIONS = 41
+WARM_REPETITIONS = 41
+# Symmetric trim on the per-pair reference/candidate ratios: the 8 most extreme
+# ratios at each end of the 41 interleaved pairs are dropped, keeping the middle
+# 25 and rejecting single-repetition glitches in either binary.
+PAIR_TRIM = 8
 Q_FAIL = 0.0
 # Frozen yardstick anchor. Each eval interleaves the pristine trusted-baseline
 # reference binary with the candidate and divides out their shared per-eval
@@ -431,12 +432,18 @@ def geometric_mean(values: list[float]) -> float:
 def paired_ratio(reference_ms: list[float], candidate_ms: list[float]) -> float:
     """Drift-cancelling per-pair speed ratio (reference_ms / candidate_ms).
 
-    Each interleaved pair shares the same ambient CPU speed, so the ratio
-    removes host frequency/contention drift the candidate cannot control,
-    while averaging over pairs suppresses independent per-repetition jitter.
-    The extreme PAIR_TRIM ratios at each end are dropped to reject glitches.
-    A ratio > 1 means the candidate resolved faster than the trusted
-    baseline; candidate code can only add work, never remove it."""
+    Reference and candidate are interleaved rep-by-rep, so each pair shares the
+    same instant of the host's permanent repo-watcher load; the per-pair ratio
+    therefore cancels that shared ambient contention (which the candidate cannot
+    control), and the geometric mean over many trimmed pairs drives the residual
+    per-repetition jitter down as 1/sqrt(pairs). For these sub-100ms resolutions
+    this paired cancellation is far tighter than a min-of-N-per-binary estimator,
+    whose two independent minima are sampled at different (differently-loaded)
+    instants and so do not cancel. The PAIR_TRIM most extreme ratios at each end
+    are dropped to reject single-repetition glitches. A ratio > 1 means the
+    candidate resolved faster than the trusted baseline; because every timed
+    repetition does full resolution from fresh per-repetition state (no earlier
+    repetition's cache/scratch survives), the candidate can only add work."""
     if len(reference_ms) != len(candidate_ms) or not reference_ms:
         raise GateFailure("reference/candidate repetitions are unpaired")
     ratios = sorted(r / c for r, c in zip(reference_ms, candidate_ms))
@@ -495,6 +502,25 @@ def teardown_bench() -> None:
     reap_candidate_processes()
     if not unmount_tmpfs(BENCH_ROOT):
         raise GateFailure("bench tmpfs teardown failed")
+
+
+def seed_warm_cache(template: Path, destination: Path) -> None:
+    """Materialize one timed repetition's private copy of a primed cache onto
+    the freshly mounted bench tmpfs. The template lives in a root-owned 0700
+    directory outside every sandbox-visible mount, so its bytes are exactly
+    the post-prime snapshot; the copy is opened up with chmod (the eval
+    container deliberately has no chown capability) so the sandbox uid can
+    read and write it like a cache it primed itself."""
+    shutil.copytree(template, destination, symlinks=True)
+    os.chmod(destination, 0o777)
+    for directory, dirnames, filenames in os.walk(destination):
+        base = Path(directory)
+        for name in dirnames:
+            os.chmod(base / name, 0o777)
+        for name in filenames:
+            path = base / name
+            if not path.is_symlink():
+                os.chmod(path, 0o666)
 
 
 def run_workloads(metadata: dict, split_root: Path) -> tuple[dict, dict, int, float, float]:
@@ -575,40 +601,72 @@ def run_workloads(metadata: dict, split_root: Path) -> tuple[dict, dict, int, fl
                     cand_ms.append(c_ms)
                     peaks.append(c_rss)
             else:
-                # Warm phase on one fresh mount: each binary primes its OWN
-                # cache, then timed reference and candidate repetitions are
-                # interleaved rep-by-rep against those primed caches so the two
-                # binaries share the same ambient CPU speed within each pair and
-                # cross-eval drift divides out exactly as for cold. The primed
-                # cache is the only deliberately shared state and never outlives
-                # the phase; cold reuse is impossible (cold uses fresh mounts).
-                fresh_bench()
+                # Warm phase with per-repetition fresh writable state: each
+                # binary primes its OWN cache once on a throwaway mount, both
+                # primed caches are snapshotted into a root-held 0700 template
+                # directory no sandbox-uid process can see (measured children
+                # get a private /tmp) or touch, and every timed repetition then
+                # runs on a brand-new bench mount seeded from that immutable
+                # template. Shared state flows prime -> repetition only: no
+                # byte written by one timed repetition survives into the next,
+                # so later repetitions cannot replay state cached by earlier
+                # ones, while every repetition still resolves against a fully
+                # primed cache (workload magnitude and metric semantics are
+                # unchanged). Timed reference and candidate repetitions stay
+                # interleaved rep-by-rep so the two binaries share the same
+                # ambient CPU speed within each pair and cross-eval drift
+                # divides out exactly as for cold.
+                template = Path(tempfile.mkdtemp(prefix="hone-uv-warm-", dir="/tmp"))
                 try:
-                    ref_cache = BENCH_ROOT / "cache-ref"
-                    cand_cache = BENCH_ROOT / "cache-cand"
-                    for directory in (ref_cache, cand_cache):
-                        directory.mkdir(mode=0o777)
-                        os.chmod(directory, 0o777)
-                    for binary, out, cdir, who in (
-                        (reference, ref_out, ref_cache, "reference"),
-                        (candidate, cand_out, cand_cache, wid),
-                    ):
-                        prime = resolution_command(binary, requirement, out, cdir, local_index)
-                        code, _, _ = fork_exec(prime, environment, PROCESS_TIMEOUT_SEC)
-                        if code != 0 or not out.is_file() or out.read_bytes() != expected:
-                            raise GateFailure(f"warm-prime lockfile gate failed: {wid}:{who}")
+                    fresh_bench()
+                    try:
+                        for binary, out, name, who in (
+                            (reference, ref_out, "ref", "reference"),
+                            (candidate, cand_out, "cand", wid),
+                        ):
+                            cache_dir = BENCH_ROOT / f"cache-{name}"
+                            cache_dir.mkdir(mode=0o777)
+                            os.chmod(cache_dir, 0o777)
+                            prime = resolution_command(binary, requirement, out, cache_dir, local_index)
+                            code, _, _ = fork_exec(prime, environment, PROCESS_TIMEOUT_SEC)
+                            if code != 0 or not out.is_file() or out.read_bytes() != expected:
+                                raise GateFailure(f"warm-prime lockfile gate failed: {wid}:{who}")
+                        # Reap stragglers BEFORE snapshotting so no sandbox-uid
+                        # process can keep mutating a cache while it is copied.
+                        reap_candidate_processes()
+                        shutil.copytree(BENCH_ROOT / "cache-ref", template / "ref", symlinks=True)
+                        shutil.copytree(BENCH_ROOT / "cache-cand", template / "cand", symlinks=True)
+                    finally:
+                        teardown_bench()
                     for rep in range(repetitions):
-                        if rep % 2 == 0:
-                            r_ms, _ = timed(reference, requirement, ref_out, expected, mode, wid, NO_RSS_GATE, ref_cache)
-                            c_ms, c_rss = timed(candidate, requirement, cand_out, expected, mode, wid, rss_limit, cand_cache)
-                        else:
-                            c_ms, c_rss = timed(candidate, requirement, cand_out, expected, mode, wid, rss_limit, cand_cache)
-                            r_ms, _ = timed(reference, requirement, ref_out, expected, mode, wid, NO_RSS_GATE, ref_cache)
-                        ref_ms.append(r_ms)
-                        cand_ms.append(c_ms)
-                        peaks.append(c_rss)
+                        fresh_bench()
+                        try:
+                            ref_cache = BENCH_ROOT / "cache-ref"
+                            cand_cache = BENCH_ROOT / "cache-cand"
+                            # Each binary's cache copy is materialized only
+                            # immediately before its own timed run, with all
+                            # sandbox-uid processes reaped between the two runs
+                            # of a pair, so the pair's earlier run can never
+                            # touch the later run's freshly seeded cache.
+                            if rep % 2 == 0:
+                                seed_warm_cache(template / "ref", ref_cache)
+                                r_ms, _ = timed(reference, requirement, ref_out, expected, mode, wid, NO_RSS_GATE, ref_cache)
+                                reap_candidate_processes()
+                                seed_warm_cache(template / "cand", cand_cache)
+                                c_ms, c_rss = timed(candidate, requirement, cand_out, expected, mode, wid, rss_limit, cand_cache)
+                            else:
+                                seed_warm_cache(template / "cand", cand_cache)
+                                c_ms, c_rss = timed(candidate, requirement, cand_out, expected, mode, wid, rss_limit, cand_cache)
+                                reap_candidate_processes()
+                                seed_warm_cache(template / "ref", ref_cache)
+                                r_ms, _ = timed(reference, requirement, ref_out, expected, mode, wid, NO_RSS_GATE, ref_cache)
+                            ref_ms.append(r_ms)
+                            cand_ms.append(c_ms)
+                            peaks.append(c_rss)
+                        finally:
+                            teardown_bench()
                 finally:
-                    teardown_bench()
+                    shutil.rmtree(template, ignore_errors=True)
             cell_ratio = paired_ratio(ref_ms, cand_ms)
             score = REFERENCE_NORMALIZATION * cell_ratio
             candidate_q = 1000.0 / geometric_mean(cand_ms)

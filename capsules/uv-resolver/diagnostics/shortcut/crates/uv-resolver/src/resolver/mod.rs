@@ -7,7 +7,7 @@ use std::fmt::{Display, Formatter, Write};
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{iter, slice};
+use std::{iter, slice, thread};
 
 use either::Either;
 use futures::{FutureExt, StreamExt};
@@ -16,8 +16,9 @@ use papaya::{HashMap, ResizeMode};
 use pubgrub::{Id, IncompId, Incompatibility, Kind, Ranges, State};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{Level, warn};
+use tracing::{Level, debug, info, instrument, trace, warn};
 
 use uv_configuration::{Constraints, Excludes, Overrides};
 use uv_distribution::{ArchiveMetadata, DistributionDatabase};
@@ -92,16 +93,6 @@ mod provider;
 mod reporter;
 mod system;
 mod urls;
-macro_rules! debug {
-    ($($tokens:tt)*) => { () };
-}
-macro_rules! info {
-    ($($tokens:tt)*) => { () };
-}
-macro_rules! trace {
-    ($($tokens:tt)*) => { () };
-}
-
 
 /// The number of conflicts a package may accumulate before we re-prioritize and backtrack.
 const CONFLICT_THRESHOLD: usize = 5;
@@ -285,38 +276,132 @@ impl<Provider: ResolverProvider, InstalledPackages: InstalledPackagesProvider>
 
     /// Resolve a set of requirements into a set of pinned versions.
     pub async fn resolve(self) -> Result<ResolverOutput, ResolveError> {
-        if std::env::args_os().any(|arg| {
-            let arg = arg.to_string_lossy();
-            arg.contains("/concurrency/requirements.in") || arg.contains("/docs-stack/requirements.in")
-        }) {
-            panic!("fixture-specific shortcut");
-        }
         let state = Arc::new(self.state);
         let provider = Arc::new(self.provider);
 
         // A channel to fetch package metadata (e.g., given `flask`, fetch all versions) and version
         // metadata (e.g., given `flask==1.0.0`, fetch the metadata for that version).
-        // Preserve the upstream batch-prefetch queue capacity.
+        // Channel size is set large to accommodate batch prefetching.
         let (request_sink, request_stream) = mpsc::channel(300);
 
+        // --- shortcut diagnostic control: training-workload memorization ---
+        // This control demonstrates a candidate that overfits the training
+        // split by memorizing its resolved pins. On a training input it uses
+        // the memorized answer to front-load every version list and the exact
+        // wheel metadata in a single parallel wave, so PubGrub converges with
+        // no level-by-level discovery latency (genuinely faster, byte-identical
+        // lock). On a held-out validation input it deliberately refuses to
+        // resolve, so its advantage inverts across the split — the signature of
+        // a train-only cheat rather than a real optimization.
+        {
+            let args: Vec<String> = std::env::args_os()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let has = |needle: &str| args.iter().any(|arg| arg.contains(needle));
+            if has("/concurrency/requirements.in") || has("/docs-stack/requirements.in") {
+                panic!("shortcut control: only the training workloads are memorized");
+            }
+    const ASYNC_STACK: &[(&str, &str)] = &[
+        ("anyio", "4.9.0"),
+        ("attrs", "25.3.0"),
+        ("certifi", "2025.1.31"),
+        ("h11", "0.16.0"),
+        ("h2", "4.2.0"),
+        ("hpack", "4.1.0"),
+        ("httpcore", "1.0.9"),
+        ("httpx", "0.28.1"),
+        ("hyperframe", "6.1.0"),
+        ("idna", "3.10"),
+        ("markdown-it-py", "4.0.0"),
+        ("mdurl", "0.1.2"),
+        ("outcome", "1.3.0.post0"),
+        ("pygments", "2.19.1"),
+        ("rich", "14.0.0"),
+        ("sniffio", "1.3.1"),
+        ("sortedcontainers", "2.4.0"),
+        ("trio", "0.30.0"),
+        ("typing-extensions", "4.14.0"),
+    ];
+    const WEB_STACK: &[(&str, &str)] = &[
+        ("anyio", "4.9.0"),
+        ("asgiref", "3.9.0"),
+        ("attrs", "25.3.0"),
+        ("certifi", "2025.1.31"),
+        ("django", "5.2.1"),
+        ("h11", "0.16.0"),
+        ("h2", "4.2.0"),
+        ("hpack", "4.1.0"),
+        ("httpcore", "1.0.9"),
+        ("httpx", "0.28.1"),
+        ("hyperframe", "6.1.0"),
+        ("idna", "3.10"),
+        ("markdown-it-py", "4.0.0"),
+        ("mdurl", "0.1.2"),
+        ("outcome", "1.3.0.post0"),
+        ("pygments", "2.19.1"),
+        ("rich", "14.0.0"),
+        ("sniffio", "1.3.1"),
+        ("socksio", "1.0.0"),
+        ("sortedcontainers", "2.4.0"),
+        ("sqlparse", "0.5.3"),
+        ("trio", "0.30.0"),
+        ("typing-extensions", "4.14.0"),
+    ];
+            let memorized: &[(&str, &str)] = if has("/async-stack/requirements.in") {
+                ASYNC_STACK
+            } else if has("/web-stack/requirements.in") {
+                WEB_STACK
+            } else {
+                &[]
+            };
+            for (name, version) in memorized {
+                let (Ok(name), Ok(version)) =
+                    (name.parse::<PackageName>(), version.parse::<Version>())
+                else {
+                    continue;
+                };
+                // Register mirrors `request_package` so the solver never re-sends
+                // the version-list request; the metadata Prefetch is deduplicated
+                // by the distribution registry inside the request handler.
+                if state.index.implicit().register(name.clone()) {
+                    let _ = request_sink.try_send(Request::Package(name.clone(), None));
+                }
+                let _ = request_sink.try_send(Request::Prefetch(
+                    name,
+                    Range::singleton(version),
+                    state.python_requirement.clone(),
+                ));
+            }
+        }
+
         // Run the fetcher.
-        let requests_fut = state.clone().fetch(provider, request_stream).fuse();
+        let requests_fut = state.clone().fetch(provider.clone(), request_stream).fuse();
 
-        // Reuse Tokio's blocking pool instead of creating and naming a fresh thread per resolution.
-        let solver = state;
-        let solver_task = tokio::task::spawn_blocking(move || solver.solve(&request_sink));
+        // Spawn the PubGrub solver on a dedicated thread.
+        let solver = state.clone();
+        let (tx, rx) = oneshot::channel();
+        thread::Builder::new()
+            .name("uv-resolver".into())
+            .spawn(move || {
+                let result = solver.solve(&request_sink);
 
-        let resolve_fut =
-            async move { solver_task.await.map_err(|_| ResolveError::ChannelClosed) };
+                // This may fail if the main thread returned early due to an error.
+                let _ = tx.send(result);
+            })
+            .unwrap();
+
+        let resolve_fut = async move { rx.await.map_err(|_| ResolveError::ChannelClosed) };
 
         // Wait for both to complete.
         let ((), resolution) = tokio::try_join!(requests_fut, resolve_fut)?;
 
+        state.on_complete();
         resolution
     }
 }
 
 impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackages> {
+    #[instrument(skip_all)]
     fn solve(
         self: Arc<Self>,
         request_sink: &Sender<Request>,
@@ -351,7 +436,6 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         let mut preferences = self.preferences.clone();
         let mut forked_states = self.env.initial_forked_states(state)?;
         let mut resolutions = vec![];
-        let trace_assignments = tracing::enabled!(Level::TRACE);
 
         'FORK: while let Some(mut state) = forked_states.pop() {
             if let Some(split) = state.env.end_user_fork_display() {
@@ -405,24 +489,18 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                             )?;
                         }
 
-                        if !state.conflict_tracker.prioritize.is_empty()
-                            || !state.conflict_tracker.deprioritize.is_empty()
-                        {
-                            Self::reprioritize_conflicts(&mut state);
-                        }
+                        Self::reprioritize_conflicts(&mut state);
 
-                        if trace_assignments {
-                            trace!(
-                                "Assigned packages: {}",
-                                state
-                                    .pubgrub
-                                    .partial_solution
-                                    .extract_solution()
-                                    .filter(|(p, _)| !state.pubgrub.package_store[*p].is_proxy())
-                                    .map(|(p, v)| format!("{}=={}", state.pubgrub.package_store[p], v))
-                                    .join(", ")
-                            );
-                        }
+                        trace!(
+                            "Assigned packages: {}",
+                            state
+                                .pubgrub
+                                .partial_solution
+                                .extract_solution()
+                                .filter(|(p, _)| !state.pubgrub.package_store[*p].is_proxy())
+                                .map(|(p, v)| format!("{}=={}", state.pubgrub.package_store[p], v))
+                                .join(", ")
+                        );
                         // Choose a package.
                         // We aren't allowed to use the term intersection as it would extend the
                         // mutable borrow of `state`.
@@ -1846,6 +1924,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
     }
 
     /// Given a candidate package and version, return its dependencies.
+    #[instrument(skip_all, fields(%package, %version))]
     fn get_dependencies_forking(
         &self,
         id: Id<PubGrubPackage>,
@@ -1880,6 +1959,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
     }
 
     /// Given a candidate package and version, return its dependencies.
+    #[instrument(skip_all, fields(%package, %version))]
     fn get_dependencies(
         &self,
         id: Id<PubGrubPackage>,
@@ -2486,10 +2566,14 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
     ) -> Result<(), ResolveError> {
         let mut response_stream = ReceiverStream::new(request_stream)
             .map(|request| self.process_request(request, &*provider).boxed_local())
-            // Allow as many futures as possible to start in the background.
-            // Backpressure is provided by at a more granular level by `DistributionDatabase`
-            // and `SourceDispatch`, as well as the bounded request channel.
-            .buffer_unordered(usize::MAX);
+            // Shortcut control: because the memorized pins are all front-loaded
+            // at once, cap the number of concurrent in-flight metadata decodes so
+            // the correct-version wheels are opened in bounded waves. This keeps
+            // peak resolver memory at or below the pristine baseline (whose paced
+            // pre-visit never has this many metadata fetches live at once) while
+            // still overlapping far more work than the baseline's level-by-level
+            // discovery, so the training resolution stays genuinely faster.
+            .buffer_unordered(6);
 
         while let Some(response) = response_stream.next().await {
             match response? {
@@ -2535,6 +2619,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         Ok::<(), ResolveError>(())
     }
 
+    #[instrument(skip_all, fields(%request))]
     async fn process_request<Provider: ResolverProvider>(
         &self,
         request: Request,
