@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_e832bfc7eb69",
+  "id": "cap_dd9d37a26fe3",
   "objective": "Improve geometric-mean throughput across the frozen prop_read, array_read, int_arith, regexp_ascii, prop_update, typed_array_read, float_arith, and regexp_utf16 cases selected from upstream tests/microbench.js plus fresh-process ES-module startup. The split-specific pinned Test262 subset, byte-exact observable and module outputs, and stripped qjs binary size no greater than baseline plus 1% are hard gates. Only the interpreter, numeric conversion, regexp, Unicode, utility, and their public/internal header files enumerated by sourceDetails.mutableEnvelope are mutable; the CLI, clock provider, build, evaluator, tests, and workloads are protected.",
   "baseline": {
     "kind": "git",
-    "commit": "8770cf2a0fb72006397cdf8ce003b6e25cab4367"
+    "commit": "83430cdabc983f9f287e94a9fd329122cca851e2"
   },
   "image": "hone-quickjs-interpreter@sha256:a6d66620ed213b953131398eb5ada2c6494f296a7dcd99024d0cca4362c48b6b",
   "evalEntrypoint": [

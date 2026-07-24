@@ -473,14 +473,21 @@ def seal_built_tree(root: Path) -> None:
 # single case. The worker's run-test262 gate is therefore kept only as
 # defense-in-depth; the AUTHORITATIVE gate below is driven entirely by this
 # trusted parent: it composes one root-owned read-only driver per frozen case
-# (harness + case + a freshly randomized receipt program), computes the
-# expected receipt independently in Python, and requires the candidate qjs to
-# print exactly that receipt with an empty stderr and exit 0. The receipt
-# statement is only reached after the case body completes without throwing,
-# and its value cannot be produced without actually evaluating fresh random
-# JavaScript, so a runtime that fabricates results instead of executing cases
-# has no channel left: the per-case receipt is checked in the parent against
-# parent-computed truth, never against candidate-emitted bookkeeping.
+# (a trusted instrumentation prologue + harness + an assertion wrapper + the
+# case + a freshly randomized receipt program). The instrumentation seeds a
+# global accumulator and wraps every assertion so each per-case assertion
+# EVENT folds the case's real computed values into it; the receipt folds that
+# accumulator into its printed value. The expected receipt is CAPTURED from
+# the pristine in-eval reference build (a sealed copy of the trusted baseline,
+# never candidate-linked), and the candidate qjs must reproduce it byte for
+# byte with empty stderr and exit 0. Because the receipt value now depends on
+# the accumulator, an engine that locates the HONE262 suffix and evaluates
+# only the receipt -- skipping the Test262 source -- leaves the accumulator at
+# its seed and prints a different value: passing REQUIRES the frozen case's
+# assertions to have actually fired with their real values. The observation is
+# thus bound to case execution across a boundary the candidate engine cannot
+# bypass, and truth comes from the trusted reference, never from
+# candidate-emitted bookkeeping.
 # ---------------------------------------------------------------------------
 
 T262_DRIVER_DIR = BUILD_ROOT / "hone-t262"
@@ -503,15 +510,47 @@ T262_MODULUS = 2147483647
 T262_STEPS = 24
 
 
-def base36(value: int) -> str:
-    if value == 0:
-        return "0"
-    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-    out = []
-    while value > 0:
-        value, digit = divmod(value, 36)
-        out.append(digits[digit])
-    return "".join(reversed(out))
+def make_instrumentation(rng: random.SystemRandom) -> tuple[str, str]:
+    """Trusted-composed instrumentation woven into each driver so the receipt
+    value is BOUND to the frozen case actually executing. The prologue seeds a
+    global accumulator; the wrapper (installed after assert.js has defined
+    `assert`) folds every asserted value into that accumulator on each
+    assertion EVENT the case fires. The receipt folds the accumulator into its
+    printed value, so an engine that skips the Test262 source and evaluates
+    only the HONE262 receipt leaves the accumulator at its seed and prints a
+    different value than the reference build produced."""
+    seed = rng.randrange(1, T262_MODULUS)
+    prologue = (
+        f"var __hone_acc = {seed};\n"
+        "function __hone_fold(x) {\n"
+        '  var s; try { s = String(x); } catch (e) { s = "?"; }\n'
+        "  var h = 0;\n"
+        f"  for (var i = 0; i < s.length; i++) {{ h = (h * 131 + s.charCodeAt(i)) % {T262_MODULUS}; }}\n"
+        f"  __hone_acc = (__hone_acc * 1000003 + h + 1) % {T262_MODULUS};\n"
+        "}"
+    )
+    wrapper = (
+        "(function(){\n"
+        "  function wrap(orig, tag) {\n"
+        "    var w = function() {\n"
+        "      __hone_fold(tag);\n"
+        "      for (var i = 0; i < arguments.length; i++) __hone_fold(arguments[i]);\n"
+        "      return orig.apply(this, arguments);\n"
+        "    };\n"
+        "    for (var k in orig) { if (Object.prototype.hasOwnProperty.call(orig, k)) w[k] = orig[k]; }\n"
+        "    return w;\n"
+        "  }\n"
+        "  var base = assert;\n"
+        '  var wrapped = wrap(base, "assert");\n'
+        "  for (var k in base) {\n"
+        '    if (Object.prototype.hasOwnProperty.call(base, k) && typeof base[k] === "function") {\n'
+        '      wrapped[k] = wrap(base[k], "assert." + k);\n'
+        "    }\n"
+        "  }\n"
+        "  assert = wrapped;\n"
+        "})();"
+    )
+    return prologue, wrapper
 
 
 def parse_case_includes(text: str, case: str) -> list[str]:
@@ -540,11 +579,14 @@ def parse_case_includes(text: str, case: str) -> list[str]:
     return includes
 
 
-def make_receipt_program(rng: random.SystemRandom) -> tuple[str, bytes]:
-    """A fresh random JS program plus its exact expected stdout. The program is
-    regenerated per case per evaluation, so its output cannot be baked into a
-    candidate build or replayed from any earlier launch; producing it requires
-    evaluating the program."""
+def make_receipt_program(rng: random.SystemRandom) -> str:
+    """A fresh random JS program regenerated per case per evaluation, so its
+    output cannot be baked into a candidate build or replayed from an earlier
+    launch. It folds the assertion accumulator (see make_instrumentation) into
+    its printed value, so the receipt cannot be reproduced without the frozen
+    case's assertions having actually fired with their real values. The
+    expected receipt is captured from the pristine reference build, never
+    computed against candidate-emitted bookkeeping."""
     alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
     nonce = "".join(rng.choice(alphabet) for _ in range(48))
     value = rng.randrange(1, T262_MODULUS)
@@ -555,12 +597,10 @@ def make_receipt_program(rng: random.SystemRandom) -> tuple[str, bytes]:
             k = rng.randrange(3, 1 << 20)
             a = rng.randrange(T262_MODULUS)
             lines.append(f"  v = (v * {k} + {a}) % {T262_MODULUS};")
-            value = (value * k + a) % T262_MODULUS
         elif kind == 1:
             i = rng.randrange(len(nonce))
             k = rng.randrange(3, 1 << 16)
             lines.append(f"  v = (v + s.charCodeAt({i}) * {k}) % {T262_MODULUS};")
-            value = (value + ord(nonce[i]) * k) % T262_MODULUS
         else:
             start = rng.randrange(len(nonce) - 9)
             stop = start + rng.randrange(2, 9)
@@ -568,14 +608,31 @@ def make_receipt_program(rng: random.SystemRandom) -> tuple[str, bytes]:
             lines.append(
                 f"  for (var i = {start}; i < {stop}; i++) v = (v * {k} + s.charCodeAt(i)) % {T262_MODULUS};"
             )
-            for ch in nonce[start:stop]:
-                value = (value * k + ord(ch)) % T262_MODULUS
+    lines.append(f'  v = (v + (typeof __hone_acc === "number" ? __hone_acc : -1)) % {T262_MODULUS};')
     lines.append('  var parts = v.toString(36).split("");')
     lines.append("  parts.reverse();")
     lines.append('  print("HONE262 " + parts.join("") + "-" + (v % 997));')
     program = ";(function(){\n" + "\n".join(lines) + "\n})();\n"
-    expected = f"HONE262 {base36(value)[::-1]}-{value % 997}\n".encode()
-    return program, expected
+    return program
+
+
+def capture_receipt_reference(binary: Path, driver: Path, label: str) -> bytes:
+    """Run the pristine reference build and CAPTURE its receipt as the trusted
+    expected output. The reference genuinely executes the case, so its
+    accumulator reflects real assertion events; the candidate must reproduce
+    this byte for byte. A malformed reference result is a trusted-composition
+    bug (or a corrupt sealed tree), never candidate behavior, so it fails
+    loudly instead of silently zeroing candidates."""
+    completed = run_candidate([str(binary), str(driver)], timeout=30.0)
+    expected = completed.stdout
+    if (
+        completed.returncode != 0
+        or completed.stderr
+        or not expected.startswith(b"HONE262 ")
+        or not expected.endswith(b"\n")
+    ):
+        raise GateFailure(label)
+    return expected
 
 
 def run_receipt_driver(binary: Path, driver: Path, expected: bytes, label: str) -> None:
@@ -593,17 +650,22 @@ def run_trusted_test262(metadata: dict[str, object]) -> None:
         if case_path.is_symlink() or not case_path.is_file():
             raise GateFailure(f"frozen Test262 case is missing from the sealed tree: {case}")
         case_text = case_path.read_text(encoding="utf-8")
-        pieces: list[str] = []
+        prologue, wrapper = make_instrumentation(rng)
+        # Order matters: the seed prologue first, then the full harness (which
+        # defines `assert`), then the assertion wrapper (which rebinds it), then
+        # the case, then the receipt. Only after this does an assertion event
+        # fold into the accumulator the receipt reads.
+        pieces: list[str] = [prologue]
         for name in (*T262_BASE_HARNESS, *parse_case_includes(case_text, case)):
             harness_path = harness_dir / name
             if harness_path.is_symlink() or not harness_path.is_file():
                 raise GateFailure(f"Test262 harness include is missing: {name}")
             pieces.append(harness_path.read_text(encoding="utf-8"))
+        pieces.append(wrapper)
         # Sloppy mode, matching the frozen run-test262 configuration
         # (mode=default -> nostrict; no frozen case is onlyStrict).
         pieces.append(case_text)
-        receipt_js, expected = make_receipt_program(rng)
-        pieces.append(receipt_js)
+        pieces.append(make_receipt_program(rng))
         # Fresh writable state (and a fresh IPC namespace inside run_candidate)
         # per case; the driver lives in a root-owned directory the demoted
         # candidate cannot write, created AFTER the reset that sweeps
@@ -613,12 +675,10 @@ def run_trusted_test262(metadata: dict[str, object]) -> None:
         driver = T262_DRIVER_DIR / "driver.js"
         driver.write_text("\n".join(pieces), encoding="utf-8")
         driver.chmod(0o444)
-        # The pristine in-eval reference build must accept every composed
-        # driver first: a failure here is a trusted-composition bug (or a
-        # corrupt sealed tree), never candidate behavior, and it fails loudly
-        # instead of silently zeroing candidates.
-        run_receipt_driver(
-            REF_SOURCE / "qjs", driver, expected, f"trusted Test262 driver self-check failed: {case}"
+        # Expected receipt = whatever the pristine reference build produces for
+        # this driver (it truly runs the case, so its accumulator is authentic).
+        expected = capture_receipt_reference(
+            REF_SOURCE / "qjs", driver, f"trusted Test262 driver self-check failed: {case}"
         )
         run_receipt_driver(
             SOURCE / "qjs", driver, expected, f"trusted Test262 gate failed: {case}"
