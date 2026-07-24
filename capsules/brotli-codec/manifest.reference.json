@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_3f1ba15c2685",
+  "id": "cap_1ca0b4e383da",
   "objective": "Improve geometric-mean quality-4/9 compression and decompression throughput over deterministic web, text, and binary corpora. Exact round trip, all 28 pinned upstream CTest cases, and compressed size no worse than baseline by more than 0.25% are hard gates. Only c/common, c/enc, and c/dec are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "80f677f726b19a1aacd3fde0b06fb3a975e38c77"
+    "commit": "e380a2b7ca642c8aee355267c8ce2d845f93af61"
   },
   "image": "hone-brotli-codec@sha256:432ce8dbe85174d10ea0de3562874e7996dfbd2537d8d6148bc5f5a29fff5adc",
   "evalEntrypoint": [
@@ -81,7 +81,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:ef816095db24d6bc41e78a5047158a6cfa8925789a03f1e4e578961d3968c8f6"
+    "hash": "sha256:c1b9ba49209252cb17056e888443e4d48ffb5b05c0b3365beda4c22079575358"
   },
   "contentHashes": {
     "assets/train/binary.bin": "sha256:b164650baa0211c670e00c31c6c25757edf8bc00a96e3d74b652318a86ae88da",

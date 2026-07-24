@@ -4,11 +4,19 @@
 Measurement-integrity design (the broker gives per-eval container isolation
 only; every guarantee below lives in this trusted process):
 
-- TIMING: throughput is the wall-clock lifetime of each sealed codec process,
-  measured HERE, in the trusted root evaluator. The candidate never holds a
-  report channel, never contributes a timestamp, and has no envelope to
-  write; the only thing a codec process emits is the raw codec byte stream,
-  which is independently validated out of process.
+- TIMING & LOAD NORMALIZATION: throughput is the wall-clock lifetime of each
+  sealed codec process, measured HERE, in the trusted root evaluator. The
+  candidate never holds a report channel, never contributes a timestamp, and
+  has no envelope to write; the only thing a codec process emits is the raw
+  codec byte stream, which is independently validated out of process. Quality
+  is scored as a load-normalized ratio: every timed sample runs the candidate
+  leg immediately followed by a PRISTINE reference leg (bench.c linked against
+  the baseline sources, NEVER the candidate overlay) on the SAME inputs, and
+  the per-pair wall-time ratio cancels the ambient host load of that instant.
+  A trimmed geometric mean over the pairs is stable across independent
+  evaluations even under the campaign host's permanent full-tree git poller,
+  where an absolute-time estimate drifts far more than a real optimization's
+  margin.
 
 - IDENTITY-DISTINCT WORK: every timed iteration processes a fresh
   rotation+sparse-perturbation of the sealed corpus (offsets and perturbed
@@ -41,7 +49,6 @@ import resource
 import shutil
 import signal
 import stat
-import statistics
 import subprocess
 import tempfile
 import sys
@@ -58,19 +65,35 @@ SANDBOX_UID = 2000
 DECODE_UID = 2001
 REF_UID = 2002
 CANDIDATE_UIDS = (SANDBOX_UID, DECODE_UID, REF_UID)
-BENCH_TARGET_MS = 125
+BENCH_TARGET_MS = 150
 TARGET_NS = BENCH_TARGET_MS * 1_000_000
-SAMPLES_PER_CELL = 3
+# Paired reference/candidate legs per cell direction. Each timed sample is a
+# candidate leg immediately followed by a PRISTINE reference leg on the same
+# inputs; the per-pair ratio cancels the shared host load present in that
+# instant (the campaign host runs a permanent full-tree git poller), so the
+# quality estimate is stable across independent evaluations under contention.
+SAMPLES_PER_CELL = 6
 MAX_BATCH = 32
 PROCESS_TIMEOUT_SEC = 240
 ALLOWED_MUTABLE_PREFIXES = ("c/common/", "c/dec/", "c/enc/")
 REQUIRED_KINDS = frozenset({"binary", "text", "web"})
 QUALITIES = (4, 9)
+# Quality is a load-normalized speed ratio (pristine reference wall time over
+# candidate wall time) scaled by this constant. A baseline-identical candidate
+# scores ~NORM_SCALE; a genuine speedup scores proportionally higher. Using the
+# interleaved yardstick instead of absolute MiB/s removes the between-run
+# ambient-load drift that previously swamped the improved control's margin.
+NORM_SCALE = 100.0
 # The container mounts /tmp noexec; the sealed harness and per-run working
 # directories must live under the build tmpfs, which is mounted exec.
 SEALED_DIR = BUILD_ROOT / "sealed"
 SEALED_BIN = SEALED_DIR / "hone-brotli-bench"
 REF_BIN = SEALED_DIR / "hone-ref-decode"
+# PRISTINE reference codec (bench.c linked against the baseline c/common+c/enc
+# +c/dec sources, NEVER the candidate overlay): the interleaved yardstick that
+# the trusted parent times back-to-back with each candidate leg.
+REF_BENCH_BIN = SEALED_DIR / "hone-ref-bench"
+REF_OBJ_DIR = BUILD_ROOT / "ref-obj"
 RUN_ROOT = BUILD_ROOT / "runs"
 # Shared world-writable locations a candidate process could use to carry
 # state between launches; swept and gated after every codec process.
@@ -404,6 +427,81 @@ def build_reference_decoder() -> None:
     os.chmod(REF_BIN, 0o755)
 
 
+def build_reference_bench() -> None:
+    """Compile the PRISTINE reference codec: the trusted bench.c linked against
+    the baseline c/common + c/enc + c/dec sources. This is the interleaved
+    yardstick binary, built from TRUSTED_DIR ONLY and NEVER from the candidate
+    overlay, so its wall time reflects host load without any candidate
+    influence. Objects are compiled in parallel to keep the per-eval cost low.
+    """
+    SEALED_DIR.mkdir(mode=0o755, parents=True, exist_ok=True)
+    REF_OBJ_DIR.mkdir(mode=0o700, exist_ok=True)
+    cc_tmp = BUILD_ROOT / "cc-tmp"
+    cc_tmp.mkdir(mode=0o700, exist_ok=True)
+    sources = (
+        [TRUSTED_DIR / "bench.c"]
+        + sorted((TRUSTED_DIR / "c" / "common").glob("*.c"))
+        + sorted((TRUSTED_DIR / "c" / "enc").glob("*.c"))
+        + sorted((TRUSTED_DIR / "c" / "dec").glob("*.c"))
+    )
+    if len(sources) < 4:
+        raise GateFailure("trusted reference codec sources are missing")
+    environment = os.environ.copy()
+    environment["TMPDIR"] = str(cc_tmp)
+    common_flags = [
+        "cc", "-O3", "-DNDEBUG", "-std=c99",
+        "-I", str(TRUSTED_DIR),
+        "-I", str(TRUSTED_DIR / "c" / "include"),
+    ]
+    objects: list[Path] = []
+    running: list[tuple[subprocess.Popen, Path]] = []
+    max_parallel = max(1, (os.cpu_count() or 2))
+
+    def drain(limit: int) -> None:
+        while len(running) >= limit:
+            proc, obj = running.pop(0)
+            try:
+                stderr = proc.communicate(timeout=PROCESS_TIMEOUT_SEC)[1]
+            except subprocess.TimeoutExpired as exc:
+                proc.kill()
+                proc.communicate()
+                raise GateFailure("trusted reference codec build timed out") from exc
+            if proc.returncode != 0:
+                detail = (stderr or b"").decode("utf-8", "replace")[-500:]
+                raise GateFailure(f"trusted reference codec build failed: {detail}")
+
+    for index, source in enumerate(sources):
+        obj = REF_OBJ_DIR / f"{index}_{source.stem}.o"
+        objects.append(obj)
+        drain(max_parallel)
+        proc = subprocess.Popen(
+            [*common_flags, "-c", str(source), "-o", str(obj)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=environment,
+            cwd=str(BUILD_ROOT),
+        )
+        running.append((proc, obj))
+    drain(1)
+
+    link = subprocess.run(
+        ["cc", *(str(obj) for obj in objects), "-lm", "-o", str(REF_BENCH_BIN)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=PROCESS_TIMEOUT_SEC,
+        check=False,
+        env=environment,
+        cwd=str(BUILD_ROOT),
+    )
+    if link.returncode != 0:
+        detail = link.stderr.decode("utf-8", "replace")[-500:]
+        raise GateFailure(f"trusted reference codec link failed: {detail}")
+    shutil.rmtree(REF_OBJ_DIR, ignore_errors=True)
+    os.chmod(REF_BENCH_BIN, 0o755)
+
+
 def seal_binary() -> None:
     """Copy the freshly built candidate benchmark to a root-owned path so it
     cannot be swapped (e.g. via /proc/self/exe) between measured runs. The
@@ -575,20 +673,33 @@ def verify_workload(row: dict, split_dir: Path) -> bytes:
     return data
 
 
-def throughput_mib_s(byte_count: int, elapsed_ns: int) -> float:
-    if elapsed_ns <= 0:
-        raise GateFailure("benchmark returned an invalid elapsed time")
-    return (byte_count * 1_000_000_000.0) / (elapsed_ns * 1048576.0)
+def robust_ratio(ratios: list[float]) -> float:
+    """Trimmed geometric mean of paired reference/candidate wall-time ratios.
+    Dropping the single lowest and highest pair removes the occasional leg that
+    caught (or dodged) a load spike between its two halves; the geometric mean
+    of the remainder tightens as 1/sqrt(pairs) and, because each ratio already
+    cancels the shared load of its own instant, is stable across independent
+    evaluations."""
+    vals = sorted(r for r in ratios if math.isfinite(r) and r > 0)
+    if not vals:
+        raise GateFailure("no valid timing ratios")
+    if len(vals) >= 5:
+        vals = vals[1:-1]
+    return math.exp(math.fsum(math.log(v) for v in vals) / len(vals))
 
 
 def measure_cell(
     workload_id: str, data: bytes, quality: int, baseline_size: int
 ) -> tuple[int, float, float]:
-    """Measure one (workload, quality) cell: canonical encode with the strict
-    compressed-size gate, then trusted-parent wall-clock throughput over
-    identity-distinct rotated/perturbed inputs for encode and decode, with
-    every emitted stream reference-decoded and every decoded output
-    byte-compared out of process."""
+    """Measure one (workload, quality) cell as a load-normalized speed ratio.
+    Each timed sample runs the candidate leg immediately followed by a PRISTINE
+    reference leg (bench.c linked against the baseline sources) on the SAME
+    inputs; the per-pair wall-time ratio cancels the host load present in that
+    instant, so the estimate no longer drifts with ambient contention between
+    evaluations. The strict compressed-size gate, out-of-process reference
+    decoding of every candidate stream, and byte-exact round-trip checks are
+    unchanged. Returns (canonical_size, compression_q, decompression_q) where a
+    baseline-identical candidate scores ~NORM_SCALE."""
     n = len(data)
     rng = random.SystemRandom()
     used_offsets: set[int] = set()
@@ -607,24 +718,24 @@ def measure_cell(
 
     frame_cap = n + n // 2 + 4096
 
-    def encode_batch(inputs: list[bytes]) -> tuple[list[bytes], int]:
+    def encode_batch(binary: Path, uid: int, inputs: list[bytes]) -> tuple[list[bytes], int]:
         returncode, out, elapsed_ns = run_bench(
-            SEALED_BIN,
+            binary,
             ["c", str(len(inputs)), str(n), str(quality)],
             b"".join(inputs),
-            SANDBOX_UID,
+            uid,
             output_cap=len(inputs) * (frame_cap + 8),
         )
         if returncode != 0:
             raise GateFailure(f"compression benchmark failed at quality {quality}")
         return parse_frames(out, len(inputs), frame_cap), elapsed_ns
 
-    def decode_batch(streams: list[bytes], expected: bytes) -> int:
+    def decode_batch(binary: Path, uid: int, streams: list[bytes], expected: bytes) -> int:
         returncode, out, elapsed_ns = run_bench(
-            SEALED_BIN,
+            binary,
             ["d", str(len(streams)), str(n)],
             frame_streams(streams),
-            DECODE_UID,
+            uid,
             output_cap=len(streams) * n + 16,
         )
         if returncode != 0:
@@ -639,7 +750,7 @@ def measure_cell(
 
     # Canonical encode: probe + strict compressed-size gate against the
     # sealed baseline, validated by the protected reference decoder.
-    canonical_frames, encode_probe_ns = encode_batch([data])
+    canonical_frames, encode_probe_ns = encode_batch(SEALED_BIN, SANDBOX_UID, [data])
     canonical_stream = canonical_frames[0]
     reference_decode_check(canonical_stream, data)
     canonical_size = len(canonical_stream)
@@ -657,14 +768,18 @@ def measure_cell(
             )
         reference_decode_check(stream, source)
 
-    # Pool of (identity-distinct input, validated candidate stream).
+    # Pool of (identity-distinct input, validated candidate stream). Retention
+    # is capped so parent memory stays bounded across the six timed samples.
     pool: list[tuple[bytes, bytes]] = []
+    pool_cap = MAX_BATCH + SAMPLES_PER_CELL + 4
 
     def grow_pool(batch: list[bytes]) -> int:
-        frames, elapsed_ns = encode_batch(batch)
+        frames, elapsed_ns = encode_batch(SEALED_BIN, SANDBOX_UID, batch)
         for source, stream in zip(batch, frames):
             validate_rotated(stream, source)
             pool.append((source, stream))
+            if len(pool) > pool_cap:
+                del pool[0]
         return elapsed_ns
 
     # Two-point probe: per-call encode cost without the constant process
@@ -675,42 +790,58 @@ def measure_cell(
         per_encode_ns = max(encode_probe_ns, 1)
     encode_batch_size = pick_batch_size(per_encode_ns)
 
-    encode_samples: list[float] = []
+    # Interleaved encode yardstick: each timed sample pairs a candidate leg
+    # with a pristine reference leg over the SAME fresh rotated/perturbed
+    # inputs. The candidate leg also validates and pools its streams.
+    encode_ratios: list[float] = []
     for _ in range(SAMPLES_PER_CELL):
         batch = [variant() for _ in range(encode_batch_size)]
-        elapsed_ns = grow_pool(batch)
-        encode_samples.append(throughput_mib_s(encode_batch_size * n, elapsed_ns))
-    compression_mib_s = statistics.median(encode_samples)
+        cand_ns = grow_pool(batch)
+        ref_frames, ref_ns = encode_batch(REF_BENCH_BIN, REF_UID, batch)
+        if len(ref_frames) != encode_batch_size:
+            raise GateFailure("reference encoder produced malformed output")
+        encode_ratios.append(ref_ns / max(cand_ns, 1))
+    compression_q = NORM_SCALE * robust_ratio(encode_ratios)
 
     # Decode probes: canonical round trip through the candidate decoder, then
     # a three-stream batch for the per-call estimate.
-    decode_probe_ns = decode_batch([canonical_stream], data)
+    decode_probe_ns = decode_batch(SEALED_BIN, DECODE_UID, [canonical_stream], data)
+    while len(pool) < 3:
+        grow_pool([variant() for _ in range(3 - len(pool))])
     trio = pool[:3]
-    trio_ns = decode_batch([s for _, s in trio], b"".join(src for src, _ in trio))
+    trio_ns = decode_batch(
+        SEALED_BIN, DECODE_UID, [s for _, s in trio], b"".join(src for src, _ in trio)
+    )
     per_decode_ns = (trio_ns - decode_probe_ns) // 2
     if per_decode_ns <= 0:
         per_decode_ns = max(decode_probe_ns, 1)
     decode_batch_size = pick_batch_size(per_decode_ns)
 
-    while len(pool) < decode_batch_size:
-        batch = [variant() for _ in range(min(decode_batch_size - len(pool), MAX_BATCH))]
-        grow_pool(batch)
-    selection = pool[:decode_batch_size]
-    selection_streams = [stream for _, stream in selection]
-    selection_expected = b"".join(source for source, _ in selection)
+    # Grow enough validated streams for a distinct window per timed sample.
+    need = decode_batch_size + SAMPLES_PER_CELL - 1
+    while len(pool) < need:
+        grow_pool([variant() for _ in range(min(need - len(pool), MAX_BATCH))])
 
-    decode_samples: list[float] = []
-    for _ in range(SAMPLES_PER_CELL):
-        elapsed_ns = decode_batch(selection_streams, selection_expected)
-        decode_samples.append(throughput_mib_s(decode_batch_size * n, elapsed_ns))
-    decompression_mib_s = statistics.median(decode_samples)
+    # Interleaved decode yardstick: candidate then pristine reference decode the
+    # SAME window of validated streams; the window rotates by one per sample.
+    span = max(1, len(pool) - decode_batch_size + 1)
+    decode_ratios: list[float] = []
+    for sample in range(SAMPLES_PER_CELL):
+        start = sample % span
+        window = pool[start : start + decode_batch_size]
+        streams = [stream for _, stream in window]
+        expected = b"".join(source for source, _ in window)
+        cand_ns = decode_batch(SEALED_BIN, DECODE_UID, streams, expected)
+        ref_ns = decode_batch(REF_BENCH_BIN, REF_UID, streams, expected)
+        decode_ratios.append(ref_ns / max(cand_ns, 1))
+    decompression_q = NORM_SCALE * robust_ratio(decode_ratios)
 
     if not all(
         math.isfinite(value) and value > 0
-        for value in (compression_mib_s, decompression_mib_s)
+        for value in (compression_q, decompression_q)
     ):
-        raise GateFailure(f"benchmark returned non-finite throughput at quality {quality}")
-    return canonical_size, compression_mib_s, decompression_mib_s
+        raise GateFailure(f"benchmark returned non-finite quality at quality {quality}")
+    return canonical_size, compression_q, decompression_q
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -741,6 +872,7 @@ def main() -> None:
         mount_build_tmpfs()
         mounted = True
         build_reference_decoder()
+        build_reference_bench()
         copy_candidate()
         build_started = time.monotonic()
         run_worker("build")
@@ -750,17 +882,17 @@ def main() -> None:
         seal_measurement_state()
         check_decoder_reference()
 
-        throughputs: list[float] = []
+        cell_scores: list[float] = []
         compressed_sizes: dict[str, int] = {}
         for row, data in workload_bytes:
             for quality in QUALITIES:
-                canonical_size, compression_mib_s, decompression_mib_s = measure_cell(
+                canonical_size, compression_q, decompression_q = measure_cell(
                     row["id"], data, quality, row["expectedCompressedBytes"][str(quality)]
                 )
                 compressed_sizes[f"{row['id']}:Q{quality}"] = canonical_size
-                throughputs.extend((compression_mib_s, decompression_mib_s))
+                cell_scores.extend((compression_q, decompression_q))
 
-        score = geometric_mean(throughputs)
+        score = geometric_mean(cell_scores)
         deterministic = {"identity": identity, "compressedSizes": compressed_sizes, "tests": "ctest-28-v1"}
         result_hash = hashlib.sha256(canonical(deterministic).encode()).hexdigest()
         elapsed_sec = time.monotonic() - started
@@ -775,7 +907,7 @@ def main() -> None:
             "perExample": {
                 "aggregate": {
                     "score": score,
-                    "feedback": f"12 compression/decompression throughput cells passed all hard gates; q={score:.3f} MiB/s",
+                    "feedback": f"12 compression/decompression cells passed all hard gates; load-normalized q={score:.3f}",
                 }
             },
             "diagnostics": {

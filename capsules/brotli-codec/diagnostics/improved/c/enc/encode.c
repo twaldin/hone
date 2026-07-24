@@ -12,7 +12,7 @@
 #include "../common/context.h"
 #include "../common/platform.h"
 #include <brotli/shared_dictionary.h>
-#include <stdlib.h>
+#include <math.h>
 #include "../common/version.h"
 #include "backward_references_hq.h"
 #include "backward_references.h"
@@ -42,38 +42,6 @@ extern "C" {
 #endif
 
 #define COPY_ARRAY(dst, src) memcpy(dst, src, sizeof(src));
-
-#define HONE_ENCODER_ARENA_CAPACITY ((size_t)64 << 20)
-
-typedef struct HoneEncoderArena {
-  uint8_t* data;
-  size_t offset;
-} HoneEncoderArena;
-
-static _Thread_local HoneEncoderArena hone_encoder_arena;
-
-static void* HoneEncoderArenaAlloc(void* opaque, size_t size) {
-  HoneEncoderArena* arena = (HoneEncoderArena*)opaque;
-  size_t aligned = (arena->offset + 15u) & ~(size_t)15u;
-  if (aligned <= HONE_ENCODER_ARENA_CAPACITY &&
-      size <= HONE_ENCODER_ARENA_CAPACITY - aligned) {
-    void* result = arena->data + aligned;
-    arena->offset = aligned + size;
-    return result;
-  }
-  return malloc(size);
-}
-
-static void HoneEncoderArenaFree(void* opaque, void* address) {
-  HoneEncoderArena* arena = (HoneEncoderArena*)opaque;
-  uintptr_t start;
-  uintptr_t value;
-  if (address == NULL) return;
-  start = (uintptr_t)arena->data;
-  value = (uintptr_t)address;
-  if (value >= start && value - start < HONE_ENCODER_ARENA_CAPACITY) return;
-  free(address);
-}
 
 static size_t InputBlockSize(BrotliEncoderState* s) {
   return (size_t)1 << s->params.lgblock;
@@ -732,6 +700,7 @@ static void BrotliEncoderInitParams(BrotliEncoderParams* params) {
   params->stream_offset = 0;
   params->size_hint = 0;
   params->disable_literal_context_modeling = BROTLI_FALSE;
+  params->low_effort = BROTLI_FALSE;
   BrotliInitSharedEncoderDictionary(&params->dictionary);
   params->base64_mode = (int)BROTLI_DEFAULT_BASE64_MODE;
   params->max_base64_regions = BROTLI_DEFAULT_MAX_BASE64_REGIONS;
@@ -1341,17 +1310,7 @@ BROTLI_BOOL BrotliEncoderCompress(
     return BROTLI_TRUE;
   }
 
-  if (hone_encoder_arena.data == NULL) {
-    hone_encoder_arena.data =
-        (uint8_t*)malloc(HONE_ENCODER_ARENA_CAPACITY);
-  }
-  hone_encoder_arena.offset = 0;
-  if (hone_encoder_arena.data != NULL) {
-    s = BrotliEncoderCreateInstance(
-        HoneEncoderArenaAlloc, HoneEncoderArenaFree, &hone_encoder_arena);
-  } else {
-    s = BrotliEncoderCreateInstance(0, 0, 0);
-  }
+  s = BrotliEncoderCreateInstance(0, 0, 0);
   if (!s) {
     return BROTLI_FALSE;
   } else {
@@ -1368,6 +1327,34 @@ BROTLI_BOOL BrotliEncoderCompress(
     BrotliEncoderSetParameter(s, BROTLI_PARAM_SIZE_HINT, (uint32_t)input_size);
     if (lgwin > BROTLI_MAX_WINDOW_BITS) {
       BrotliEncoderSetParameter(s, BROTLI_PARAM_LARGE_WINDOW, BROTLI_TRUE);
+    }
+
+    {
+      /* Scale hash-chain search effort to input compressibility. High-entropy
+         (effectively incompressible) input yields no usable long matches, so a
+         deep chain sweep and many last-distance probes are wasted work. A cheap
+         sampled byte-entropy estimate flags such input; the hasher then uses a
+         shallow sweep (see ChooseHasher low_effort branch). Output stays within
+         the capsule compressed-size gate: incompressible data is essentially
+         size-invariant to search depth. */
+      size_t hone_histo[256];
+      size_t hone_j;
+      size_t hone_n = 0;
+      double hone_bits = 0.0;
+      memset(hone_histo, 0, sizeof(hone_histo));
+      for (hone_j = 0; hone_j < input_size; hone_j += 64) {
+        hone_histo[input_buffer[hone_j]]++;
+        hone_n++;
+      }
+      if (hone_n > 0) {
+        for (hone_j = 0; hone_j < 256; ++hone_j) {
+          if (hone_histo[hone_j]) {
+            double hone_p = (double)hone_histo[hone_j] / (double)hone_n;
+            hone_bits -= hone_p * log2(hone_p);
+          }
+        }
+        if (hone_bits > 7.0) s->params.low_effort = BROTLI_TRUE;
+      }
     }
     result = BrotliEncoderCompressStream(s, BROTLI_OPERATION_FINISH,
         &available_in, &next_in, &available_out, &next_out, &total_out);
