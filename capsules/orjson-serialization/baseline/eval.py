@@ -25,6 +25,11 @@ from pathlib import Path
 from typing import Any
 
 TRUSTED_DIR = Path(__file__).resolve().parent
+# Under `python -I` the script directory is NOT on sys.path; append it (lowest
+# priority, so it never shadows the pristine system orjson) so the trusted
+# orjson_workload module can be imported for the reference oracle.
+if str(TRUSTED_DIR) not in sys.path:
+    sys.path.append(str(TRUSTED_DIR))
 CHALLENGE = json.loads((TRUSTED_DIR / "challenge.json").read_text())
 WORKSPACE = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
 ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
@@ -42,6 +47,10 @@ CLONE_NEWNET = 0x40000000
 PR_SET_CHILD_SUBREAPER = 36
 _LIBC = ctypes.CDLL(None, use_errno=True)
 EXTENSION_FD: int | None = None
+CGROUP_ROOT = Path("/tmp/hone-orjson-cg")
+CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
+CGROUP_BENCH = CGROUP_ROOT / "bench"
+CGROUP_DRAIN_SEC = 10
 
 
 def failed(summary: str, constraints: dict[str, bool] | None = None) -> None:
@@ -92,7 +101,9 @@ def candidate_pids() -> list[int]:
     return found
 
 
-def candidate_rss_kib() -> int:
+def candidate_vmhwm_kib() -> int:
+    """Dev-only fallback (non-root, no cgroup authority): sum VmHWM of the
+    live candidate-uid processes. Never used on the root+linux broker path."""
     total = 0
     for pid in candidate_pids():
         try:
@@ -100,10 +111,77 @@ def candidate_rss_kib() -> int:
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue
         for line in status.splitlines():
-            if line.startswith("VmRSS:"):
+            if line.startswith("VmHWM:"):
                 total += int(line.split()[1])
                 break
     return total
+
+
+def cgroup_available() -> bool:
+    return os.geteuid() == 0 and sys.platform.startswith("linux")
+
+
+def mount_measurement_cgroup() -> None:
+    """Trusted whole-tree memory accounting. Docker mounts the container's
+    cgroup2 view read-only, but the trusted evaluator holds mount authority
+    (CAP_SYS_ADMIN): a fresh cgroup2 instance over the same namespaced
+    hierarchy is writable by root only. The evaluator (and every worker it
+    forks) is parked in a trusted leaf so the memory controller can be
+    delegated to the per-run measurement leaf."""
+    CGROUP_ROOT.mkdir(mode=0o755, exist_ok=True)
+    completed = subprocess.run(
+        ["mount", "-t", "cgroup2", "-o", "nosuid,nodev,noexec", "hone-orjson-cg", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("trusted measurement cgroup mount failed")
+    CGROUP_TRUSTED.mkdir(mode=0o755, exist_ok=True)
+    (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
+    (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
+
+
+def unmount_measurement_cgroup() -> None:
+    subprocess.run(
+        ["umount", "-l", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    try:
+        CGROUP_ROOT.rmdir()
+    except OSError:
+        pass
+
+
+def drain_measurement_leaf(leaf: Path) -> None:
+    """Kill every process still charged to the leaf (detached descendants in
+    new sessions included), wait for the kernel to release them, then retire
+    the leaf, so memory.peak has already been read for the whole tree."""
+    deadline = time.monotonic() + CGROUP_DRAIN_SEC
+    try:
+        (leaf / "cgroup.kill").write_text("1")
+    except OSError:
+        pass
+    while True:
+        try:
+            populated = (leaf / "cgroup.procs").read_text().strip() != ""
+        except OSError:
+            populated = False
+        if not populated:
+            break
+        if time.monotonic() > deadline:
+            raise RuntimeError("measurement cgroup could not be drained")
+        time.sleep(0.05)
+    try:
+        leaf.rmdir()
+    except OSError:
+        pass
 
 
 def reap_candidates() -> None:
@@ -157,9 +235,8 @@ def run_command(
     env: dict[str, str] | None = None,
     payload: bytes | None = None,
     candidate: bool = False,
-    measure_rss: bool = False,
     extra_pass_fds: tuple[int, ...] = (),
-) -> tuple[int, bytes, bytes, int]:
+) -> tuple[int, bytes, bytes]:
     proc = subprocess.Popen(
         argv,
         cwd=str(cwd),
@@ -174,17 +251,6 @@ def run_command(
             + extra_pass_fds
         ),
     )
-    peak_rss = 0
-    stop = threading.Event()
-
-    def sample() -> None:
-        nonlocal peak_rss
-        while not stop.wait(0.005):
-            peak_rss = max(peak_rss, candidate_rss_kib())
-
-    sampler = threading.Thread(target=sample, daemon=True)
-    if measure_rss:
-        sampler.start()
     try:
         stdout, stderr = proc.communicate(input=payload, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -194,15 +260,10 @@ def run_command(
             pass
         proc.kill()
         stdout, stderr = proc.communicate()
-        return 124, stdout[:MAX_OUTPUT_BYTES], stderr[:MAX_OUTPUT_BYTES], peak_rss
-    finally:
-        stop.set()
-        if measure_rss:
-            sampler.join(timeout=1)
-            peak_rss = max(peak_rss, candidate_rss_kib())
+        return 124, stdout[:MAX_OUTPUT_BYTES], stderr[:MAX_OUTPUT_BYTES]
     if len(stdout) > MAX_OUTPUT_BYTES or len(stderr) > MAX_OUTPUT_BYTES:
-        return 125, stdout[:MAX_OUTPUT_BYTES], stderr[:MAX_OUTPUT_BYTES], peak_rss
-    return proc.returncode, stdout, stderr, peak_rss
+        return 125, stdout[:MAX_OUTPUT_BYTES], stderr[:MAX_OUTPUT_BYTES]
+    return proc.returncode, stdout, stderr
 
 
 SKIP_TREE_ENTRIES = {".git", ".gitdir", "__pycache__", ".pytest_cache"}
@@ -328,7 +389,7 @@ def build_candidate() -> tuple[bool, str, float]:
     if prepare.returncode != 0:
         return False, "target preparation failed", time.perf_counter() - started
     WHEELS.mkdir()
-    code, _, stderr, _ = run_command(
+    code, _, stderr = run_command(
         list(CHALLENGE["build"]["command"]),
         cwd=WORKSPACE,
         timeout=float(CHALLENGE["build"]["timeoutSec"]),
@@ -378,32 +439,42 @@ def sweep_candidate_tmp() -> None:
 
 
 def score_test_records(conductor_code: int, blob: bytes) -> tuple[bool, str]:
-    """Accept the per-test records the conductor relayed ONLY when its
-    authenticated trailer proves: the conductor itself completed, pytest exited
-    cleanly, and the stream carried the conductor's fresh per-run nonce (so the
-    records came from the trusted plugin, not a candidate that merely wrote to
-    the advertised channel). Trailer:
-        C\t<child_exit>\t<authenticated>\t<record_count>\t<detail_b64>"""
+    """Accept the run ONLY when the conductor relayed the trusted plugin's
+    authenticated session-finish summary and it matches the frozen expected
+    test identity. The plugin emits exactly ONE nonce-authenticated line, and
+    only from pytest_sessionfinish, so a candidate that found the inherited
+    channel can neither forge the summary (it never learned the nonce) nor
+    terminate pytest early with a fabricated one (no session finish -> no
+    summary). The conductor relays only that authenticated summary:
+        C\\t<child_exit>\\t<auth>\\t<passed>\\t<skipped>\\t<failed>\\t<dups>\\t<identity_sha256>\\t<detail_b64>
+    Identity (a sha256 over the exact sorted pass/skip node-id set), not a bare
+    count, is compared: a candidate that ran a different or shortened suite
+    changes the identity even when the totals coincide."""
     expected_passed = int(CHALLENGE["tests"]["passed"])
     expected_skipped = int(CHALLENGE["tests"]["skipped"])
+    expected_identity = str(CHALLENGE["tests"].get("identitySha256", ""))
     lines = blob.decode("utf-8", "replace").splitlines()
-    trailer = lines.pop() if lines and lines[-1].startswith("C\t") else None
+    trailer = lines[-1] if lines and lines[-1].startswith("C\t") else None
     if conductor_code != 0 or trailer is None:
         return False, "test conductor did not complete"
     tfields = trailer.split("\t")
-    if len(tfields) < 4:
+    if len(tfields) != 9:
         return False, "malformed conductor trailer"
     try:
         child_exit = int(tfields[1])
         authenticated = tfields[2] == "1"
-        declared = int(tfields[3])
+        passed = int(tfields[3])
+        skipped = int(tfields[4])
+        failures = int(tfields[5])
+        duplicates = int(tfields[6])
     except ValueError:
         return False, "malformed conductor trailer"
+    identity = tfields[7]
 
     def detail() -> str:
-        if len(tfields) >= 5 and tfields[4]:
+        if tfields[8]:
             try:
-                text = base64.b64decode(tfields[4]).decode("utf-8", "replace")
+                text = base64.b64decode(tfields[8]).decode("utf-8", "replace")
             except ValueError:
                 return ""
             tail = text.strip().splitlines()[-1:]
@@ -411,44 +482,24 @@ def score_test_records(conductor_code: int, blob: bytes) -> tuple[bool, str]:
         return ""
 
     if not authenticated:
-        return False, "test records not authenticated by the trusted channel"
+        suffix = f": {detail()}" if detail() else ""
+        return False, f"test summary not authenticated by the trusted channel{suffix}"
     if child_exit != 0:
         suffix = f": {detail()}" if detail() else ""
         return False, f"pytest exited {child_exit}{suffix}"
-    if declared != len(lines):
-        return False, "conductor record accounting mismatch"
-    passed: set[str] = set()
-    skipped: set[str] = set()
-    failures = 0
-    malformed = 0
-    for record in lines:
-        fields = record.split("\t")
-        if len(fields) == 2 and fields[0] in ("P", "S", "F") and "::" in fields[1]:
-            kind, nodeid = fields
-            if kind == "F":
-                failures += 1
-            elif kind == "P":
-                if nodeid in passed:
-                    malformed += 1
-                passed.add(nodeid)
-            else:
-                if nodeid in skipped:
-                    malformed += 1
-                skipped.add(nodeid)
-        else:
-            malformed += 1
-    counts_ok = (
-        failures == 0
-        and malformed == 0
-        and len(passed) == expected_passed
-        and len(skipped) == expected_skipped
-        and not (passed & skipped)
-    )
-    return counts_ok, (
-        f"{expected_passed} passed, {expected_skipped} skipped"
-        if counts_ok
-        else "full upstream pytest suite failed or count changed"
-    )
+    if failures != 0:
+        return False, "upstream pytest suite reported failures"
+    if duplicates != 0:
+        return False, "unclassified or duplicated test outcomes"
+    if passed != expected_passed or skipped != expected_skipped:
+        return False, f"pytest count changed: {passed} passed, {skipped} skipped"
+    if not expected_identity:
+        # Fail-closed: shipped config always pins the identity. This branch only
+        # fires during pre-freeze capture and surfaces the observed value.
+        return False, f"tests identity unset; observed={identity}"
+    if identity != expected_identity:
+        return False, f"pytest identity mismatch; observed={identity}"
+    return True, f"{expected_passed} passed, {expected_skipped} skipped"
 
 
 def run_tests() -> tuple[bool, str]:
@@ -484,7 +535,7 @@ def run_tests() -> tuple[bool, str]:
     drainer = threading.Thread(target=drain, daemon=True)
     drainer.start()
     try:
-        code, _, _, _ = run_command(
+        code, _, _ = run_command(
             [sys.executable, "-I", "-B", str(CONDUCTOR)],
             cwd=TRUSTED_DIR,
             timeout=timeout,
@@ -502,10 +553,27 @@ def run_tests() -> tuple[bool, str]:
 
 
 PROBE_ITERATIONS = 8
+# Interleaved candidate/reference pairs per workload. The per-pair ref/cand
+# ratio cancels shared host load; the paired geomean over this many pairs
+# tightens the estimate under the contended shared host.
+BENCH_PAIRS = 9
 
 
 class WorkerProtocolError(RuntimeError):
     pass
+
+
+def _load_reference_orjson() -> Any:
+    """Import the PRISTINE orjson built from the frozen baseline at image time
+    (installed in the system site-packages), never the candidate overlay under
+    SITE. The parent uses it to reproduce the reference result-chain for every
+    timed run."""
+    import orjson  # noqa: PLC0415
+
+    module_path = getattr(orjson, "__file__", "") or ""
+    if str(SITE) in module_path:
+        raise WorkerProtocolError("reference orjson resolved to the candidate build")
+    return orjson
 
 
 def benchmark(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
@@ -515,7 +583,33 @@ def benchmark(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
     elapsed time for every probe and sample is measured here with
     time.perf_counter_ns() around the full command round-trip, so a clock
     rewritten inside the candidate-linked worker process changes nothing.
-    """
+
+    Anti-shortcut is owned here too: every timed run returns a data-dependent
+    result-chain over the real serializer output of EVERY iteration, and this
+    parent independently reproduces that chain with a pristine reference orjson
+    over the same per-run-unpredictable nonce. A run whose chain does not match
+    the reference cannot have done the real serialization work for each
+    iteration, so it is scored as incorrect.
+
+    Peak memory is the kernel cgroup2 memory.peak of the whole worker process
+    tree (exited children included), read from a leaf whose control files the
+    demoted uid-2000 worker can never write — not a /proc self-reported value a
+    candidate could under-report."""
+    reference = _load_reference_orjson()
+    import orjson_workload as workload  # noqa: PLC0415
+
+    use_cgroup = cgroup_available()
+    if use_cgroup:
+        mount_measurement_cgroup()
+        CGROUP_BENCH.mkdir(mode=0o755, exist_ok=True)
+    bench_procs = CGROUP_BENCH / "cgroup.procs"
+
+    def bench_preexec() -> None:
+        if use_cgroup:
+            with open(bench_procs, "w") as handle:
+                handle.write("0")
+        worker_preexec()
+
     env = dict(os.environ)
     env["ORJSON_SITE"] = str(SITE)
     deadline = time.monotonic() + float(CHALLENGE["benchmarkTimeoutSec"])
@@ -527,22 +621,13 @@ def benchmark(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=stderr_file,
-        preexec_fn=worker_preexec,
+        preexec_fn=bench_preexec,
         start_new_session=True,
         pass_fds=((EXTENSION_FD,) if EXTENSION_FD is not None else ()),
     )
     assert proc.stdin is not None and proc.stdout is not None
     stdout_fd = proc.stdout.fileno()
     peak_rss = 0
-    stop = threading.Event()
-
-    def sample_rss() -> None:
-        nonlocal peak_rss
-        while not stop.wait(0.005):
-            peak_rss = max(peak_rss, candidate_rss_kib())
-
-    sampler = threading.Thread(target=sample_rss, daemon=True)
-    sampler.start()
     buffer = bytearray()
     consumed = 0
 
@@ -588,44 +673,50 @@ def benchmark(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
     try:
         for case in cases:
             case_id = case["id"]
-            command({"op": "setup", "case": case, "id": case_id})
-            digests: set[str] = set()
-            reply, probe_ns = command(
-                {
-                    "op": "run",
-                    "id": case_id,
-                    "iterations": PROBE_ITERATIONS,
-                    "nonce": secrets.randbelow(1 << 30),
-                }
-            )
-            digests.add(str(reply.get("resultSha256")))
+            reference_state = workload.Workload(case)
+            setup_reply, _ = command({"op": "setup", "case": case, "id": case_id})
+            canon = str(setup_reply.get("canon"))
+
+            def validate(iterations: int, nonce: int) -> tuple[bool, int, int]:
+                if time.monotonic() > deadline:
+                    raise WorkerProtocolError("benchmark wall clock exhausted")
+                reply, cand_ns = command(
+                    {"op": "run", "id": case_id, "iterations": iterations, "nonce": nonce}
+                )
+                candidate_chain = str(reply.get("resultChain"))
+                # Interleaved pristine-reference yardstick: time the SAME work on
+                # the pristine reference right after the candidate leg, so the
+                # per-pair ref/cand ratio cancels the shared host load that
+                # otherwise makes absolute timing unstable under contention.
+                ref_start = time.perf_counter_ns()
+                reference_chain = reference_state.chain(reference, iterations, nonce)
+                ref_ns = max(1, time.perf_counter_ns() - ref_start)
+                return candidate_chain == reference_chain, cand_ns, ref_ns
+
+            probe_ok, probe_ns, _ = validate(PROBE_ITERATIONS, secrets.randbelow(1 << 30))
             target_ns = int(case.get("targetNs", 80_000_000)) * 2
             iterations = max(
-                1, min(2_000_000, math.ceil(target_ns * PROBE_ITERATIONS / probe_ns))
+                1, min(1_000_000, math.ceil(target_ns * PROBE_ITERATIONS / probe_ns))
             )
-            samples: list[int] = []
-            for _ in range(int(case.get("repeats", 5))):
+            chain_ok = probe_ok
+            cand_samples: list[int] = []
+            ref_samples: list[int] = []
+            for _ in range(BENCH_PAIRS):
                 command({"op": "refresh", "id": case_id})
-                reply, elapsed = command(
-                    {
-                        "op": "run",
-                        "id": case_id,
-                        "iterations": iterations,
-                        "nonce": secrets.randbelow(1 << 30),
-                    }
-                )
-                digests.add(str(reply.get("resultSha256")))
-                samples.append(elapsed)
+                sample_ok, cand_ns, ref_ns = validate(iterations, secrets.randbelow(1 << 30))
+                chain_ok = chain_ok and sample_ok
+                cand_samples.append(cand_ns)
+                ref_samples.append(ref_ns)
             command({"op": "teardown", "id": case_id})
-            if len(digests) != 1:
-                raise WorkerProtocolError(f"unstable result digest for {case_id}")
             rows.append(
                 {
                     "id": case_id,
                     "operation": case["operation"],
                     "iterations": iterations,
-                    "elapsedNs": samples,
-                    "resultSha256": digests.pop(),
+                    "candNs": cand_samples,
+                    "refNs": ref_samples,
+                    "resultSha256": canon,
+                    "chainOk": chain_ok,
                 }
             )
         proc.stdin.write(b'{"op":"exit"}\n')
@@ -642,9 +733,14 @@ def benchmark(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
         detail = tail[0] if tail else "no worker stderr"
         raise WorkerProtocolError(f"benchmark worker failed: {exc} ({detail})") from None
     finally:
-        stop.set()
-        sampler.join(timeout=1)
-        peak_rss = max(peak_rss, candidate_rss_kib())
+        if use_cgroup:
+            try:
+                peak_bytes = int((CGROUP_BENCH / "memory.peak").read_text().strip())
+                peak_rss = peak_bytes // 1024
+            except (OSError, ValueError):
+                peak_rss = 0
+        else:
+            peak_rss = candidate_vmhwm_kib()
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -656,6 +752,11 @@ def benchmark(cases: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
             pass
         reap_candidates()
         stderr_file.close()
+        if use_cgroup:
+            try:
+                drain_measurement_leaf(CGROUP_BENCH)
+            finally:
+                unmount_measurement_cgroup()
     return {"cases": rows}, peak_rss
 
 
@@ -697,35 +798,40 @@ def main() -> None:
     seen_ids: set[str] = set()
     for row in rows:
         case_id = row.get("id")
-        elapsed = row.get("elapsedNs")
+        cand = row.get("candNs")
+        ref = row.get("refNs")
         iterations = row.get("iterations")
         digest = row.get("resultSha256")
         if (
             not isinstance(case_id, str)
             or case_id not in expected
-            or not isinstance(elapsed, list)
-            or len(elapsed) != 5
+            or not isinstance(cand, list)
+            or not isinstance(ref, list)
+            or len(cand) != BENCH_PAIRS
+            or len(ref) != BENCH_PAIRS
             or not isinstance(iterations, int)
             or iterations <= 0
-            or not all(isinstance(value, int) and value > 0 for value in elapsed)
+            or not all(isinstance(value, int) and value > 0 for value in cand)
+            or not all(isinstance(value, int) and value > 0 for value in ref)
             or not isinstance(digest, str)
+            or not isinstance(row.get("chainOk"), bool)
         ):
             failed("malformed benchmark result", {"build_pass": True, "tests_pass": True})
         if case_id in seen_ids:
             failed("duplicate workload id in benchmark result", {"build_pass": True, "tests_pass": True})
         seen_ids.add(case_id)
-        matches = digest == expected[case_id]
+        matches = digest == expected[case_id] and bool(row["chainOk"])
         if operations[case_id] == "dumps":
             dump_ok = dump_ok and matches
         else:
             loads_ok = loads_ok and matches
-        # Fastest-3-of-5 trimmed sampling: host contention only ever ADDS
-        # time, so trimming the slow outliers rejects sibling-load noise
-        # without giving candidate-controlled code any lever (running slower
-        # never helps a candidate).
-        fastest = sorted(elapsed)[:3]
-        samples = [iterations * 1_000_000_000.0 / value for value in fastest]
-        throughput = statistics.median(samples)
+        # Interleaved-yardstick throughput: the per-pair ratio of pristine
+        # reference time to candidate time cancels the shared host load in each
+        # back-to-back pair (running slower never helps a candidate: it only
+        # shrinks the ratio). Paired geomean over the pairs is the stable
+        # per-workload speed relative to the pristine baseline (~1.0 == pristine).
+        ratios = [r / c for r, c in zip(ref, cand)]
+        throughput = math.exp(statistics.fmean(math.log(value) for value in ratios))
         if not math.isfinite(throughput) or throughput <= 0:
             failed("non-finite throughput", {"build_pass": True, "tests_pass": True})
         throughputs[case_id] = throughput

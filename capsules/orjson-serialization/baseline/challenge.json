@@ -31,12 +31,13 @@
     ],
     "timeoutSec": 90,
     "passed": 1612,
-    "skipped": 24
+    "skipped": 24,
+    "identitySha256": "a634cf7344b0d50d467e13f73bf03bcd86e1aef4c7751a650c7362a46484059d"
   },
   "benchmarkTimeoutSec": 120,
-  "baselinePeakRssObservedKiB": 63776,
-  "baselinePeakRssEnvelopeKiB": 68608,
-  "peakRssLimitKiB": 69980,
+  "baselinePeakRssObservedKiB": 46192,
+  "baselinePeakRssEnvelopeKiB": 51200,
+  "peakRssLimitKiB": 61440,
   "qFail": 0,
   "toolchain": {
     "python": "3.12.11",

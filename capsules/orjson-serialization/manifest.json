@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_eb25ea33e256",
+  "id": "cap_4d3886231114",
   "objective": "Improve orjson dumps+loads throughput across frozen dataclass, datetime, NumPy, Unicode, and nested corpora. Maximize the geometric mean throughput after byte-exact dumps, semantic loads, full upstream pytest, and peak-RSS gates; only src/lib.rs, src/serialize/, and src/deserialize/ are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "51d5f805a103508b4f1ccdf0d26de7467b773eee"
+    "commit": "3059e0a1fe506c2599137b987fd48cd61a1ec458"
   },
   "image": "hone-orjson-serialization@sha256:9fda64d476ea8edfcace3bb89902e8790e0f3ce1efd29a97026a8f945724c824",
   "evalEntrypoint": [
@@ -35,6 +35,7 @@
     "include",
     "integration",
     "orjson_report_sink.py",
+    "orjson_workload.py",
     "pyproject.toml",
     "pysrc",
     "requirements-lint.txt",
@@ -75,7 +76,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:7dad74e575768bc9422c47c185e5e10cbe897c1fb8ea0e5585635cddede71125"
+    "hash": "sha256:3ce3d4294389a2b47a84f33dfb15e39af897de1d617199481b092444b66c1cb9"
   },
   "contentHashes": {
     "assets/train/twitter.json.xz": "sha256:73e96118c9db8cf5af4f160e21767803842247bf2400282d0ec74f63ac561c3d",
@@ -85,7 +86,7 @@
   },
   "meta": {
     "evaluatorSource": "user",
-    "provenance": "Current-head OSS-T08 layered on ijl/orjson 705515d77b28429d0b7c30c3d781abe52e8a1e5a (3.11.9); the pinned baseline commit is a synthetic overlay commit that adds the trusted evaluator glue (eval.py, benchmark_worker.py, orjson_report_sink.py, challenge.json) on top of that upstream tree so the visible baseline matches the declared commit byte-for-byte. No reference artifact or known winning patch. Local interleaved A-A calibration set qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Numbers are provisional pending frozen-GCE recalibration.",
+    "provenance": "Current-head OSS-T08 layered on ijl/orjson 705515d77b28429d0b7c30c3d781abe52e8a1e5a (3.11.9); the pinned baseline commit is a synthetic overlay commit that adds the trusted evaluator glue (eval.py, benchmark_worker.py, orjson_report_sink.py, orjson_workload.py, test_conductor.py, challenge.json) on top of that upstream tree so the visible baseline matches the declared commit byte-for-byte. No reference artifact or known winning patch. Round-4 hardening: the pytest gate is a single session-finish nonce-authenticated summary compared against a frozen exact test-identity sha256 (not counts); every benchmark iteration is a data-dependent serialize/parse chain validated against a pristine in-parent reference orjson over a per-run-unpredictable nonce; peak RSS is cgroup2 memory.peak of the whole worker tree; q is the interleaved pristine-reference yardstick (paired geomean of ref/cand time over 9 pairs). Local A-A calibration set qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Numbers are provisional pending frozen-GCE recalibration.",
     "license": "MPL-2.0 AND (Apache-2.0 OR MIT)",
     "tags": [
       "m2",
@@ -132,36 +133,36 @@
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
       "targetPlatform": "frozen GCE Linux profile (recalibration required)",
       "freshProcess": true,
-      "q": "geometric mean operations/second across ten frozen dumps+loads workloads per split; per-workload throughput is the median of the fastest 3 of 5 trusted-parent-timed samples; train+validation aggregate is their arithmetic mean",
+      "q": "per workload, the paired geomean over 9 interleaved candidate/reference pairs of (pristine-reference chain time / candidate chain time); the per-pair ratio cancels shared host load. Per-split q is the geometric mean across the ten frozen dumps+loads workloads (~1.0 == pristine baseline speed); train+validation aggregate is their arithmetic mean. Every timed run is a data-dependent serialize/parse chain whose final digest is validated against the pristine reference over a per-run-unpredictable nonce.",
       "qFail": 0,
-      "qBase": 21931.81374589157,
-      "sigma": 344.24553454681256,
-      "qReference": 23653.04141862563,
+      "qBase": 1.016433,
+      "sigma": 0.01386,
+      "qReference": 1.085731,
       "referenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
       "aaSamples": [
-        21374.68155295771,
-        22261.90459999763,
-        21713.55316648729,
-        22139.0414864365,
-        21886.157158634025,
-        22215.544510836244
+        0.9976,
+        1.021,
+        1.026,
+        1.036,
+        1.009,
+        1.009
       ],
-      "noiseFractionOfScale": 0.0156961726255449,
+      "noiseFractionOfScale": 0.013635,
       "correctnessResultHashes": {
         "train": "eea12554a2b934636ee36d8291b474b97a247fd98df937fe37d3b4ebf605b686",
         "validation": "8a9c59a91d1cf6bf2bf9e20dadc5422be6b53a6e5220fe4955adfeec591c38ff"
       },
       "rss": {
-        "baselineObservedMaxKiB": 67844,
-        "baselineEnvelopeKiB": 68608,
-        "envelopeConstruction": "67 MiB frozen baseline high-water envelope covering allocator and 5 ms sampler jitter",
-        "limitKiB": 69980,
-        "limitConstruction": "floor(68608 * 1.02)"
+        "baselineObservedMaxKiB": 46192,
+        "baselineEnvelopeKiB": 51200,
+        "envelopeConstruction": "cgroup2 memory.peak of the whole benchmark worker tree (~46 MiB validation high-water), rounded up to a 50 MiB envelope",
+        "limitKiB": 61440,
+        "limitConstruction": "60 MiB (envelope * ~1.2) headroom for measurement jitter under host contention",
+        "source": "kernel cgroup2 memory.peak (whole-tree, non-resettable), replacing round-2 VmRSS 5 ms polling"
       },
       "feasibility": {
-        "cleanBuildSec": 12.918980922000173,
-        "incrementalRebuildSec": 6.0942721276665,
-        "passingEvalSec": 15.111915503416563
+        "cleanBuildSec": 9.894,
+        "passingEvalSec": 43.4
       }
     }
   }

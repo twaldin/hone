@@ -1,8 +1,1 @@
-OSS-T08 round-2 T2: parent-owned nonce-authenticated test-record conductor
-
-Interpose a trusted conductor between eval.py and the candidate-executed
-pytest so the parent-owned record channel is never inherited by candidate
-code; the trusted plugin consumes a one-shot per-run nonce before any
-extension import and emits an authenticated header. Records are accepted only
-when the conductor's authenticated trailer proves clean pytest exit + nonce.
-Add per-phase /tmp hygiene sweep (T3).
+round-4: session-auth pytest identity gate; data-dependent chain + pristine-reference yardstick; cgroup memory.peak

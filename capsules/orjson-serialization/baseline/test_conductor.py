@@ -171,14 +171,25 @@ def main() -> None:
         drainer.join(timeout=min(10.0, max(1.0, deadline_sec)))
 
     lines = bytes(collected).split(b"\n")
-    if lines and lines[-1] == b"":
-        lines.pop()
 
-    nonce_ok = bool(lines) and lines[0] == b"H\t" + nonce
-    records = lines[1:] if nonce_ok else []
+    # The trusted plugin emits exactly ONE authenticated summary line, only
+    # from pytest_sessionfinish (so an early candidate exit never produces it):
+    #   Z\t<nonce>\t<passed>\t<skipped>\t<failed>\t<duplicates>\t<identity_sha256>
+    # Candidate-linked code that found the inherited channel cannot forge this
+    # line because it never learned the nonce. Anything else on the wire is
+    # untrusted noise and is dropped.
+    prefix = b"Z\t" + nonce + b"\t"
+    summary: list[bytes] | None = None
+    for line in lines:
+        if line.startswith(prefix):
+            fields = line.split(b"\t")
+            if len(fields) == 7:
+                summary = fields
+                break
+    authenticated = summary is not None and child_exit == 0 and not truncated
 
     detail_b64 = ""
-    if child_exit != 0 or not nonce_ok:
+    if not authenticated:
         try:
             stderr_file.seek(0)
             tail = stderr_file.read()[-2000:]
@@ -188,16 +199,24 @@ def main() -> None:
             detail_b64 = base64.b64encode(tail).decode("ascii")
     stderr_file.close()
 
-    out = bytearray()
-    for record in records:
-        out.extend(record)
-        out.extend(b"\n")
-    out.extend(
-        b"C\t%d\t%d\t%d\t%s\n"
+    if summary is not None:
+        passed, skipped, failed, duplicates, identity = summary[2:7]
+    else:
+        passed = skipped = failed = duplicates = b"0"
+        identity = b""
+
+    # Relay ONLY the authenticated summary (nonce stripped) plus the trusted
+    # session facts the parent scores against.
+    out = (
+        b"C\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n"
         % (
             child_exit,
-            1 if (nonce_ok and not truncated) else 0,
-            len(records),
+            1 if authenticated else 0,
+            passed,
+            skipped,
+            failed,
+            duplicates,
+            identity,
             detail_b64.encode("ascii"),
         )
     )
