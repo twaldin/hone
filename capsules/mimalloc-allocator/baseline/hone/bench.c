@@ -10,45 +10,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include <limits.h>
+#include <unistd.h>
 
-#define HONE_SAMPLES 5
+#define HONE_SAMPLES 7
 #define HONE_MAX_ROUNDS (UINT32_C(1) << 20)
+#define HONE_DEFAULT_REPORT_FD 3
 
 static volatile uint64_t hone_sink;
-
-/*
- * Timing crosses a non-interposable direct-syscall boundary. The benchmark
- * links the mutable allocator archive into this same executable, so a plain
- * clock_gettime reference could be resolved by the static linker to a
- * candidate-provided strong symbol. Emitting the syscall instruction inline
- * removes that seam entirely; the trusted evaluator additionally rejects any
- * candidate-defined timing or output symbols before this binary is run.
- */
-static uint64_t monotonic_ns(void) {
-  struct timespec ts;
-  ts.tv_sec = 0;
-  ts.tv_nsec = 0;
-  long rc;
-#if defined(__aarch64__)
-  register long x8 __asm__("x8") = 113; /* __NR_clock_gettime */
-  register long x0 __asm__("x0") = (long)CLOCK_MONOTONIC_RAW;
-  register long x1 __asm__("x1") = (long)&ts;
-  __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1) : "memory");
-  rc = x0;
-#elif defined(__x86_64__)
-  register long rdi __asm__("rdi") = (long)CLOCK_MONOTONIC_RAW;
-  register long rsi __asm__("rsi") = (long)&ts;
-  __asm__ volatile("syscall"
-                   : "=a"(rc)
-                   : "a"(228L), "r"(rdi), "r"(rsi) /* __NR_clock_gettime */
-                   : "rcx", "r11", "memory");
-#else
-  rc = clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-#endif
-  if (rc != 0) return 0;
-  return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
-}
 
 uint64_t hone_prng_next(uint64_t* state) {
   uint64_t x = *state;
@@ -163,18 +132,6 @@ bool hone_capture_memory(hone_result_t* result) {
   return true;
 }
 
-static void sort_samples(double* samples, size_t count) {
-  for (size_t i = 1; i < count; ++i) {
-    const double value = samples[i];
-    size_t j = i;
-    while (j > 0 && samples[j - 1] > value) {
-      samples[j] = samples[j - 1];
-      j -= 1;
-    }
-    samples[j] = value;
-  }
-}
-
 static bool parse_u64(const char* text, uint64_t* value) {
   char* end = NULL;
   errno = 0;
@@ -184,53 +141,92 @@ static bool parse_u64(const char* text, uint64_t* value) {
   return true;
 }
 
+static bool hone_write_all(int fd, const char* buffer, size_t length) {
+  size_t offset = 0;
+  while (offset < length) {
+    const ssize_t written = write(fd, buffer + offset, length - offset);
+    if (written < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (written == 0) return false;
+    offset += (size_t)written;
+  }
+  return true;
+}
+
+/*
+ * Read one newline-terminated control token from stdin. The trusted parent
+ * process owns this pipe and emits a fresh unpredictable token per sample:
+ * the benchmark can only produce a response the parent accepts by blocking
+ * here until that token arrives, so the measured region can never be reported
+ * before the parent has started its own clock.
+ */
+static bool hone_read_token(char* buffer, size_t capacity) {
+  size_t offset = 0;
+  for (;;) {
+    char c;
+    const ssize_t got = read(0, &c, 1);
+    if (got == 1) {
+      if (c == '\n') {
+        buffer[offset] = '\0';
+        return true;
+      }
+      if (offset + 1 >= capacity) return false;
+      buffer[offset++] = c;
+      continue;
+    }
+    if (got < 0 && errno == EINTR) continue;
+    return false;
+  }
+}
+
 int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_fn run) {
+  (void)workload;
   uint64_t seed;
-  uint64_t target_ms;
+  uint64_t rounds_arg;
   if (argc != 3 || !parse_u64(argv[1], &seed) || seed == 0 ||
-      !parse_u64(argv[2], &target_ms) || target_ms < 50 || target_ms > 2000) {
+      !parse_u64(argv[2], &rounds_arg) || rounds_arg == 0 ||
+      rounds_arg > HONE_MAX_ROUNDS) {
     return 64;
+  }
+  const uint32_t rounds = (uint32_t)rounds_arg;
+
+  /*
+   * The trusted evaluator owns fd 1 and the wall clock. This benchmark never
+   * prints the scored result: it streams work-completion tokens to the report
+   * fd the parent handed it, and the parent brackets each measured region with
+   * its own monotonic clock across that process boundary. Candidate allocator
+   * code linked into this executable can neither write the scoring channel nor
+   * fabricate the elapsed time; a constructor that skips the workload also
+   * skips this protocol and the parent rejects the incomplete stream.
+   */
+  int report_fd = HONE_DEFAULT_REPORT_FD;
+  const char* report_env = getenv("HONE_REPORT_FD");
+  if (report_env != NULL) {
+    uint64_t parsed;
+    if (!parse_u64(report_env, &parsed) || parsed > (uint64_t)INT_MAX) return 64;
+    report_fd = (int)parsed;
   }
 
   hone_result_t probe = {0};
   if (!run(seed, 1, false, &probe) || probe.operations == 0) return 1;
 
-  const uint64_t target_ns = target_ms * UINT64_C(1000000);
-  uint32_t rounds = 1;
-  for (;;) {
-    hone_result_t calibration = {0};
-    const uint64_t started = monotonic_ns();
-    if (started == 0 || !run(seed, rounds, false, &calibration)) return 1;
-    const uint64_t elapsed = monotonic_ns() - started;
-    if (elapsed >= target_ns || rounds >= HONE_MAX_ROUNDS) break;
-    uint64_t next;
-    if (elapsed == 0) {
-      next = (uint64_t)rounds * 8;
-    } else {
-      const double scale = (double)target_ns / (double)elapsed;
-      next = (uint64_t)((double)rounds * (scale > 8.0 ? 8.0 : scale * 1.10));
-    }
-    if (next <= rounds) next = (uint64_t)rounds + 1;
-    rounds = (uint32_t)(next > HONE_MAX_ROUNDS ? HONE_MAX_ROUNDS : next);
-  }
-
-  double samples[HONE_SAMPLES];
+  char token[64];
+  char line[128];
+  uint64_t measured_ops = 0;
   for (size_t sample = 0; sample < HONE_SAMPLES; ++sample) {
+    if (!hone_write_all(report_fd, "R\n", 2)) return 1;
+    if (!hone_read_token(token, sizeof token) || token[0] == '\0') return 1;
     hone_result_t measured = {0};
-    const uint64_t started = monotonic_ns();
-    if (started == 0 || !run(seed, rounds, false, &measured)) return 1;
-    const uint64_t elapsed = monotonic_ns() - started;
-    if (elapsed == 0 || measured.operations == 0) return 1;
-    samples[sample] = (double)measured.operations * 1000000000.0 / (double)elapsed;
+    if (!run(seed, rounds, false, &measured) || measured.operations == 0) return 1;
     hone_sink ^= measured.checksum;
+    measured_ops = measured.operations;
+    const int length =
+      snprintf(line, sizeof line, "T %s %" PRIu64 "\n", token, measured.operations);
+    if (length <= 0 || (size_t)length >= sizeof line) return 1;
+    if (!hone_write_all(report_fd, line, (size_t)length)) return 1;
   }
-  /*
-   * Robustness: report the fastest sample (k=1 of N trimmed selection).
-   * Host or sibling-container contention can only lengthen a sample, never
-   * shorten it, so the minimum rejects scheduler-noise outliers without
-   * giving candidate code any influence over the selection.
-   */
-  sort_samples(samples, HONE_SAMPLES);
 
   mi_collect(true);
   mi_stats_reset();
@@ -241,8 +237,11 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
     return 1;
   }
   hone_sink ^= validation.checksum;
-  printf("ok %s %.9f %016" PRIx64 " %zu %.12f %u %" PRIu64 "\n",
-         workload, samples[HONE_SAMPLES - 1], validation.checksum,
-         validation.peak_committed, validation.fragmentation, rounds, hone_sink);
+  const int length = snprintf(
+    line, sizeof line, "D %016" PRIx64 " %" PRIu64 " %zu %.12f\n",
+    validation.checksum, measured_ops, validation.peak_committed,
+    validation.fragmentation);
+  if (length <= 0 || (size_t)length >= sizeof line) return 1;
+  if (!hone_write_all(report_fd, line, (size_t)length)) return 1;
   return 0;
 }

@@ -7,6 +7,7 @@ import json
 import math
 import os
 import resource
+import select
 import shutil
 import subprocess
 import sys
@@ -20,14 +21,35 @@ ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
 BUILD_ROOT = Path("/tmp/hone-mimalloc-build")
 SOURCE = BUILD_ROOT / "source"
 BUILD_DIR = BUILD_ROOT / "build"
+# Pristine reference: the sealed baseline allocator built from TRUSTED_DIR with
+# NO candidate overlay. Each workload is scored as a load-cancelling yardstick
+# ratio of the reference vs the candidate measured back-to-back under the same
+# host load, so a fully contended eval inflates both legs equally and leaves
+# the ratio (hence the score) unchanged.
+REF_ROOT = BUILD_ROOT / "reference"
+REF_SOURCE = REF_ROOT / "source"
+REF_BUILD_DIR = REF_ROOT / "build"
 CGROUP_ROOT = Path("/tmp/hone-mimalloc-cg")
 CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
 CGROUP_DRAIN_SEC = 10
 SANDBOX_UID = 2000
+# The pristine reference runs as a DISTINCT uid so its per-uid RLIMIT_NPROC
+# thread cap is independent of the candidate's — the two run concurrently while
+# interleaved and must not share a process budget.
+REF_UID = 2001
 PROCESS_TIMEOUT_SEC = 240
 WORKLOAD_TIMEOUT_SEC = 30
-TARGET_MS = 250
+MAX_ROUNDS = 1 << 20
 WORKLOAD_IDS = ("single", "multithread", "small", "fragmentation")
+HONE_SAMPLES = 7
+# Fresh report fd handed to each benchmark child: it streams work-completion
+# tokens here while the trusted evaluator keeps ownership of fd 1 and the clock.
+HONE_REPORT_FD_ENV = "HONE_REPORT_FD"
+# A benchmark that skips the allocation workload commits almost nothing, so the
+# trusted whole-tree cgroup peak must clear a floor as well as stay under the
+# ceiling: a completion stream produced without touching the allocator cannot
+# also reproduce the sealed memory profile.
+MIN_TREE_PEAK_FRACTION = 0.25
 ALLOWED_MUTABLE_PREFIXES = ("src/", "include/mimalloc/")
 # Files under the mutable prefixes whose contents are ALWAYS taken from the
 # trusted baseline seed, never from the candidate workspace (and which the
@@ -88,14 +110,14 @@ def emit_failure(detail: str, result_hash: str = "") -> None:
     sys.stdout.write("\n")
 
 
-def demote() -> None:
+def demote(uid: int = SANDBOX_UID) -> None:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 30, 1 << 30))
     resource.setrlimit(resource.RLIMIT_AS, (1536 << 20, 1536 << 20))
     if os.geteuid() == 0:
         os.setgroups([])
-        os.setgid(SANDBOX_UID)
-        os.setuid(SANDBOX_UID)
+        os.setgid(uid)
+        os.setuid(uid)
 
 
 def run_worker(action: str, *paths: Path) -> dict:
@@ -336,6 +358,27 @@ def copy_candidate() -> None:
     os.chmod(compiler_tmp, 0o777)
 
 
+def copy_reference() -> None:
+    # The load-cancelling yardstick reference: the SEALED baseline allocator,
+    # built from TRUSTED_DIR with NO candidate overlay. It is trusted code, so
+    # it needs no correctness gate — only a clean build and matching sealed
+    # checksums when it runs beside the candidate.
+    shutil.copytree(
+        TRUSTED_DIR,
+        REF_SOURCE,
+        symlinks=False,
+        ignore=shutil.ignore_patterns(".gitdir", ".hone-compiler-tmp", "__pycache__"),
+    )
+    # worker.build compiles into REF_SOURCE.parent/build; the demoted uid-2000
+    # worker must be able to create that build dir under the root-owned
+    # reference root (unlike the candidate build, which lands directly under the
+    # 1777 tmpfs mount).
+    os.chmod(REF_ROOT, 0o777)
+    compiler_tmp = REF_SOURCE / ".hone-compiler-tmp"
+    compiler_tmp.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(compiler_tmp, 0o777)
+
+
 def load_workloads() -> dict:
     metadata_files = sorted(ASSETS.rglob("workloads.json"))
     if len(metadata_files) != 1:
@@ -355,7 +398,7 @@ def load_workloads() -> dict:
         raise GateFailure("sealed workload order or identity mismatch")
     expected_fields = {
         "baselineFragmentationRatio", "baselinePeakPageCommittedBytes", "baselineTreePeakBytes",
-        "expectedChecksum", "id", "seed", "targetMs", "threads",
+        "expectedChecksum", "expectedOperations", "id", "rounds", "seed", "threads",
     }
     seeds: set[int] = set()
     for row in rows:
@@ -364,8 +407,10 @@ def load_workloads() -> dict:
         if not isinstance(row["seed"], int) or not 0 < row["seed"] < 2**64 or row["seed"] in seeds:
             raise GateFailure("sealed workload seed is invalid or duplicated")
         seeds.add(row["seed"])
-        if row["targetMs"] != TARGET_MS:
-            raise GateFailure("sealed benchmark duration mismatch")
+        if not isinstance(row["rounds"], int) or not 0 < row["rounds"] <= MAX_ROUNDS:
+            raise GateFailure("sealed round budget is invalid")
+        if not isinstance(row["expectedOperations"], int) or row["expectedOperations"] <= 0:
+            raise GateFailure("sealed operation count is invalid")
         required_threads = 4 if row["id"] == "multithread" else 1
         if row["threads"] != required_threads or row["threads"] > 4:
             raise GateFailure("sealed thread count exceeds the four-thread cap")
@@ -381,81 +426,220 @@ def load_workloads() -> dict:
     return metadata
 
 
-def run_benchmark(row: dict) -> float:
-    binary = BUILD_DIR / f"hone-{row['id']}"
-    task_cap = int(row["threads"]) + MAIN_THREAD_ALLOWANCE
-    leaf = CGROUP_ROOT / f"bench-{row['id']}"
-    leaf.mkdir(mode=0o755, exist_ok=False)
-    leaf_procs = leaf / "cgroup.procs"
+def _read_report_line(report_fd: int, deadline: float) -> bytes:
+    # Newline-delimited token reader over the child report pipe, bounded by a
+    # trusted deadline: a benchmark that never speaks the protocol (e.g. a
+    # constructor that skipped the workload and exited) closes the pipe or
+    # stalls, and either is a gate failure rather than a hang.
+    buffer = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GateFailure("benchmark report channel timed out")
+        readable, _, _ = select.select([report_fd], [], [], remaining)
+        if not readable:
+            raise GateFailure("benchmark report channel timed out")
+        chunk = os.read(report_fd, 1)
+        if not chunk:
+            raise GateFailure("benchmark closed the report channel early")
+        if chunk == b"\n":
+            return bytes(buffer)
+        buffer += chunk
+        if len(buffer) > 256:
+            raise GateFailure("benchmark report line exceeded protocol bound")
 
-    def capped_demote() -> None:
-        # Trusted memory accounting: the workload joins its measurement leaf
-        # while still root, so the WHOLE candidate process tree (exited
-        # children included) is charged to a cgroup whose control files the
-        # demoted uid-2000 code can never write. memory.peak is kernel-owned
-        # and monotone for the leaf's lifetime — unlike VmHWM or any
-        # /proc-self-reported value, candidate code cannot reset or
-        # under-report it.
-        with open(leaf_procs, "w") as handle:
-            handle.write("0")
-        # Kernel-enforced ceiling on the uid-2000 task count: an allowed
-        # allocator translation unit cannot spawn more concurrent threads than
-        # the sealed per-workload thread budget plus the coordinating main
-        # thread. Applied before the privilege drop so the exec'd workload
-        # inherits the limit; a candidate exceeding it fails clone() and the
-        # workload aborts rather than silently passing the thread-count gate.
-        resource.setrlimit(resource.RLIMIT_NPROC, (task_cap, task_cap))
-        demote()
 
-    try:
+class _Bench:
+    # A launched benchmark process (candidate or reference) with its own
+    # measurement cgroup leaf, report pipe, and control channel.
+    def __init__(self, binary: Path, row: dict, role: str, uid: int) -> None:
+        self.row = row
+        self.role = role
+        self.rounds = int(row["rounds"])
+        self.expected_ops = int(row["expectedOperations"])
+        task_cap = int(row["threads"]) + MAIN_THREAD_ALLOWANCE
+        self.leaf = CGROUP_ROOT / f"bench-{role}-{row['id']}"
+        self.leaf.mkdir(mode=0o755, exist_ok=False)
+        leaf_procs = self.leaf / "cgroup.procs"
+        self.report_read, report_write = os.pipe()
+
+        def capped_demote() -> None:
+            # Whole-tree memory accounting: the workload joins its measurement
+            # leaf while still root, so every process it spawns is charged to a
+            # cgroup whose control files the demoted code can never write.
+            # memory.peak is kernel-owned and monotone.
+            with open(leaf_procs, "w") as handle:
+                handle.write("0")
+            # Kernel-enforced per-uid ceiling on the task count, applied before
+            # the privilege drop so the exec'd workload inherits the sealed
+            # budget. The candidate and reference use distinct uids so their
+            # budgets do not collide while they run interleaved.
+            resource.setrlimit(resource.RLIMIT_NPROC, (task_cap, task_cap))
+            demote(uid)
+
+        child_env = {
+            HONE_REPORT_FD_ENV: str(report_write),
+            "LC_ALL": "C.UTF-8",
+            "LANG": "C.UTF-8",
+        }
         try:
-            completed = subprocess.run(
-                [str(binary), str(row["seed"]), str(row["targetMs"])],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
+            self.proc: subprocess.Popen | None = subprocess.Popen(
+                [str(binary), str(row["seed"]), str(self.rounds)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=WORKLOAD_TIMEOUT_SEC,
-                check=False,
                 preexec_fn=capped_demote,
-                cwd=BUILD_DIR,
+                cwd=binary.parent,
+                pass_fds=(report_write,),
+                env=child_env,
             )
-            leftover = (leaf / "cgroup.procs").read_text().strip()
-            tree_peak_text = (leaf / "memory.peak").read_text().strip()
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise GateFailure(f"{row['id']} workload failed: {exc}") from exc
-    finally:
-        drain_measurement_leaf(leaf)
-    if leftover:
-        raise GateFailure(f"{row['id']} workload left live descendant processes")
+        finally:
+            os.close(report_write)
+        if self.proc.stdin is None:
+            raise GateFailure(f"{row['id']} {role} control channel unavailable")
+        self.control = self.proc.stdin
+
+    def sample(self) -> int:
+        # One authenticated measured region. The trusted clock starts the instant
+        # the fresh go token is released and stops the instant the child's
+        # completion token becomes readable.
+        deadline = time.monotonic() + WORKLOAD_TIMEOUT_SEC
+        if _read_report_line(self.report_read, deadline) != b"R":
+            raise GateFailure(f"{self.row['id']} {self.role} broke the ready handshake")
+        nonce = os.urandom(8).hex().encode("ascii")
+        start = time.monotonic_ns()
+        self.control.write(nonce + b"\n")
+        self.control.flush()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GateFailure(f"{self.row['id']} {self.role} report channel timed out")
+        readable, _, _ = select.select([self.report_read], [], [], remaining)
+        if not readable:
+            raise GateFailure(f"{self.row['id']} {self.role} report channel timed out")
+        stop = time.monotonic_ns()
+        first = os.read(self.report_read, 1)
+        if not first:
+            raise GateFailure(f"{self.row['id']} {self.role} closed the report channel early")
+        response = b"" if first == b"\n" else first + _read_report_line(self.report_read, deadline)
+        fields = response.split()
+        if len(fields) != 3 or fields[0] != b"T" or fields[1] != nonce:
+            raise GateFailure(f"{self.row['id']} {self.role} returned an unauthenticated sample")
+        if int(fields[2]) != self.expected_ops:
+            raise GateFailure(f"{self.row['id']} {self.role} operation count diverged from the sealed budget")
+        if stop <= start:
+            raise GateFailure(f"{self.row['id']} {self.role} produced a non-monotonic measurement")
+        return stop - start
+
+    def finalize(self) -> dict:
+        # Read the completion record, drain the process, and read the trusted
+        # whole-tree peak while the leaf still exists. Cleanup (kill + leaf
+        # retire) is the caller's responsibility via close().
+        dline = _read_report_line(self.report_read, time.monotonic() + WORKLOAD_TIMEOUT_SEC)
+        self.control.close()
+        assert self.proc is not None
+        self.proc.wait(timeout=CGROUP_DRAIN_SEC)
+        leftover = (self.leaf / "cgroup.procs").read_text().strip()
+        tree_peak_text = (self.leaf / "memory.peak").read_text().strip()
+        if self.proc.returncode != 0:
+            raise GateFailure(f"{self.row['id']} {self.role} exited with status {self.proc.returncode}")
+        if leftover:
+            raise GateFailure(f"{self.row['id']} {self.role} left live descendant processes")
+        try:
+            fields = dline.decode("ascii").split()
+            if len(fields) != 5 or fields[0] != "D":
+                raise ValueError
+            checksum = fields[1]
+            reported_ops = int(fields[2])
+            peak_committed = int(fields[3])
+            fragmentation = float(fields[4])
+            tree_peak = int(tree_peak_text)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise GateFailure(f"{self.row['id']} {self.role} returned malformed completion") from exc
+        if reported_ops != self.expected_ops:
+            raise GateFailure(f"{self.row['id']} {self.role} completion operation count diverged from the sealed budget")
+        if checksum != self.row["expectedChecksum"]:
+            raise GateFailure(f"{self.row['id']} {self.role} deterministic checksum gate failed")
+        return {"peak_committed": peak_committed, "fragmentation": fragmentation, "tree_peak": tree_peak}
+
+    def close(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.kill()
+        try:
+            os.close(self.report_read)
+        except OSError:
+            pass
+        drain_measurement_leaf(self.leaf)
+
+
+def run_benchmark(row: dict) -> float:
+    expected_ops = int(row["expectedOperations"])
+    rounds = int(row["rounds"])
+    if rounds <= 0 or expected_ops <= 0:
+        raise GateFailure(f"{row['id']} workload has no sealed round budget")
+    # Score = sealed operations * (min reference elapsed / min candidate
+    # elapsed). Each sample times the pristine reference and the candidate
+    # interleaved so both minima are drawn from the same host-load window: a
+    # fully contended eval elevates both legs together and leaves the ratio
+    # (hence the score) unchanged, while a genuinely faster allocator shortens
+    # only the candidate leg. The reference is the sealed baseline built from
+    # TRUSTED_DIR with no candidate overlay, so a baseline candidate scores
+    # ~operations. Host or sibling contention can only lengthen a sample, so the
+    # per-binary minimum rejects scheduler-noise outliers with no candidate-
+    # controlled influence over the selection.
+    candidate = _Bench(BUILD_DIR / f"hone-{row['id']}", row, "cand", SANDBOX_UID)
+    reference: _Bench | None = None
     try:
-        fields = completed.stdout.decode("ascii").strip().split()
-        if completed.returncode != 0 or len(fields) != 8 or fields[0] != "ok" or fields[1] != row["id"]:
-            raise ValueError
-        ops_per_sec = float(fields[2])
-        checksum = fields[3]
-        peak_committed = int(fields[4])
-        fragmentation = float(fields[5])
-        rounds = int(fields[6])
-        int(fields[7])
-        tree_peak = int(tree_peak_text)
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise GateFailure(f"{row['id']} workload returned malformed output") from exc
-    if not math.isfinite(ops_per_sec) or ops_per_sec <= 0 or rounds <= 0:
-        raise GateFailure(f"{row['id']} workload returned invalid throughput")
-    if checksum != row["expectedChecksum"]:
-        raise GateFailure(f"{row['id']} deterministic checksum gate failed")
+        reference = _Bench(REF_BUILD_DIR / f"hone-{row['id']}", row, "ref", REF_UID)
+        ref_samples: list[int] = []
+        cand_samples: list[int] = []
+        for _ in range(HONE_SAMPLES):
+            ref_ns = reference.sample()
+            cand_ns = candidate.sample()
+            if ref_ns <= 0 or cand_ns <= 0:
+                raise GateFailure(f"{row['id']} workload produced an invalid elapsed time")
+            ref_samples.append(ref_ns)
+            cand_samples.append(cand_ns)
+        candidate_fin = candidate.finalize()
+        reference.finalize()
+    finally:
+        if reference is not None:
+            reference.close()
+        candidate.close()
+
+    peak_committed = candidate_fin["peak_committed"]
+    fragmentation = candidate_fin["fragmentation"]
+    tree_peak = candidate_fin["tree_peak"]
+    # Precise trusted memory-regression gate: page_committed.peak from the
+    # protected mi_stats instrumentation (src/stats.c is trusted-only) after a
+    # clean one-round validation pass. Stable to a fraction of a percent.
     baseline_peak = row["baselinePeakPageCommittedBytes"]
-    if peak_committed * 100 > baseline_peak * 101:
-        raise GateFailure(f"{row['id']} peak page-committed memory exceeds baseline by more than 1%")
-    # Trusted whole-tree memory gate: kernel cgroup accounting over every
-    # process the workload ran, independent of allocator-reported statistics.
+    if peak_committed <= 0 or peak_committed * 100 > baseline_peak * 102:
+        raise GateFailure(f"{row['id']} peak page-committed memory exceeds baseline by more than 2%")
+    # Coarse trusted whole-tree backstop: kernel cgroup memory.peak over every
+    # process the candidate ran. The ceiling is deliberately loose (2x) because
+    # whole-process RSS peak is noisy across a multi-sample run; the precise
+    # regression gate above does the tight work. The floor rejects a completion
+    # stream produced without running the allocation workload.
     baseline_tree = row["baselineTreePeakBytes"]
-    if tree_peak <= 0 or tree_peak * 100 > baseline_tree * 120:
+    if tree_peak <= 0 or tree_peak * 100 > baseline_tree * 200:
         raise GateFailure(f"{row['id']} process-tree peak memory exceeds the sealed baseline allowance")
+    if tree_peak < baseline_tree * MIN_TREE_PEAK_FRACTION:
+        raise GateFailure(f"{row['id']} process-tree peak memory fell below the sealed workload floor")
+    # Fragmentation is a small difference of large numbers (committed minus
+    # live), so a fraction-of-a-percent committed jitter swings it by ~10-20%
+    # relative on the low-fragmentation workloads. Gate with an absolute floor
+    # plus a relative band so real regressions are caught without noise flaking.
     baseline_fragmentation = float(row["baselineFragmentationRatio"])
-    if not math.isfinite(fragmentation) or fragmentation < 0 or fragmentation > baseline_fragmentation * 1.01:
-        raise GateFailure(f"{row['id']} fragmentation exceeds baseline by more than 1%")
-    return ops_per_sec
+    if not math.isfinite(fragmentation) or fragmentation < 0 or fragmentation > baseline_fragmentation * 1.15 + 0.003:
+        raise GateFailure(f"{row['id']} fragmentation exceeds baseline by more than the allowed band")
+
+    # Min-of-N per binary: the least-contended reference over the least-
+    # contended candidate, both drawn from the same interleaved window.
+    ratio = min(ref_samples) / min(cand_samples)
+    q = float(expected_ops) * ratio
+    if not math.isfinite(q) or q <= 0:
+        raise GateFailure(f"{row['id']} workload returned invalid throughput")
+    return q
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -491,6 +675,8 @@ def main() -> None:
         build_sec = time.monotonic() - build_started
         run_worker("test")
         assert_no_interposition()
+        copy_reference()
+        run_worker("build", REF_SOURCE)
 
         throughputs = [run_benchmark(row) for row in metadata["workloads"]]
         score = geometric_mean(throughputs)

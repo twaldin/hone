@@ -6,16 +6,19 @@
   },
   "aa": {
     "samples": [
-      77346185.25585209,
-      76981204.4984155,
-      76780373.53483647
+      13792981.46369658,
+      13689235.197234899,
+      13619706.034476556,
+      13469888.217224881,
+      13795608.904651089,
+      13690334.434754014
     ],
-    "sigma": 286846.91993864416,
-    "noiseFractionOfScale": 0.07447095221456838
+    "sigma": 121673.46796984819,
+    "noiseFractionOfScale": 0.17793341152788314
   },
-  "qBase": 77035921.09636801,
+  "qBase": 13676292.37533967,
   "qFail": 0,
-  "qReference": 80887717.15118642,
+  "qReference": 14360106.994106654,
   "controls": [
     {
       "id": "broken",
@@ -25,27 +28,27 @@
     },
     {
       "id": "naive",
-      "q": 13561500.411777642,
+      "q": 6937686.971715674,
       "hardGatesPass": true,
       "role": "deliberately slower but correct volatile work in the allocation entry point"
     },
     {
       "id": "baseline",
-      "q": 27371050.348602816,
+      "q": 13469888.217224881,
       "hardGatesPass": true,
       "role": "exact pinned upstream allocator implementation"
     },
     {
       "id": "improved",
-      "q": 29721108.77821014,
+      "q": 14591699.247707736,
       "hardGatesPass": true,
       "role": "independently authored thread-local size-class magazine over the default-heap malloc/free fast path (exact-class LIFO reuse, main-thread only, drained and retired at the first explicit collection so validation memory accounting matches the unmodified allocator)"
     },
     {
       "id": "shortcut",
-      "q": 18759392.717983518,
-      "trainQ": 29558007.939949315,
-      "validationQ": 7960777.496017723,
+      "q": 9503560.766122919,
+      "trainQ": 14685179.64993167,
+      "validationQ": 4321941.88231417,
       "hardGatesPass": true,
       "shortcutGated": true,
       "role": "first-allocation-size fingerprint that wins sealed train and loses sealed validation"
@@ -56,13 +59,13 @@
     "description": "thread-local exact-size-class magazine layered over the default-heap malloc/free fast path; main-thread only, served blocks are class-identical to fresh allocations, drained and retired at the first mi_collect/mi_heap_destroy",
     "independentlyAuthored": true,
     "valid": true,
-    "q": 29721108.77821014,
-    "deltaFromOrderingBaseline": 2350058.4296073243
+    "q": 14591699.247707736,
+    "deltaFromOrderingBaseline": 1121811.0304828547
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:b399f97e82e32beb92c1f479a7fd8b2d28f345064009b6b12a5fd169ed247ddd",
-    "secondReportHash": "sha256:608fac5eca08b011d85ab32d00d965b7dbedd8754957083a38225f4430a1d864",
+    "firstReportHash": "sha256:8c02234eb093f66f37c9f93028ac4db5cae13329c4c141fb90e0482eb2069b4e",
+    "secondReportHash": "sha256:69090bdd1056c2dedd936c37b269fa7f4047482c51033c7f19115ab182c52d9f",
     "tokenLocked": true,
     "incidentWindowRunsExcluded": true
   },
@@ -80,11 +83,12 @@
     "globalTokenLockHeld": true,
     "finalOrderingBatchWallSec": 154.3,
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "normalizationScale": 3851796.054818401,
+    "normalizationScale": 683814.6187669835,
     "freshProcess": true,
     "finalGceRecalibrationRequired": true,
-    "benchmarkSampleSelection": "fastest of 5 timed samples per workload (k=1 trimmed; host contention only lengthens samples)",
-    "round2Note": "round-2 hardening changed bench measurement semantics (per-allocation canaries, live-range overlap rejection folded into every timed round; trusted cgroup whole-tree memory.peak gate at 1.20x sealed baseline). Throughput scale dropped accordingly (ordering baseline ~2.74e7 ops/s). aa/qBase/qReference/normalizationScale predate this change and are superseded; they are re-derived during the already-required frozen-host GCE recalibration (finalGceRecalibrationRequired remains true)."
+    "benchmarkSampleSelection": "per workload, the candidate and the pristine reference are timed interleaved (7 samples each) and scored as q = sealed operations * (min reference elapsed / min candidate elapsed); host contention can only lengthen a measured region, so the per-binary minimum rejects scheduler-noise outliers and the reference ratio cancels sustained per-eval load with no candidate-controlled influence",
+    "round2Note": "round-2 hardening changed bench measurement semantics (per-allocation canaries, live-range overlap rejection folded into every timed round; trusted cgroup whole-tree memory.peak gate at 1.20x sealed baseline). Throughput scale dropped accordingly (ordering baseline ~2.74e7 ops/s). aa/qBase/qReference/normalizationScale predate this change and are superseded; they are re-derived during the already-required frozen-host GCE recalibration (finalGceRecalibrationRequired remains true).",
+    "round4Note": "round-4 moved benchmark timing, completion, and result emission out of the candidate-linked executable into the trusted evaluator (child streams work-completion tokens over a report fd while the parent owns fd 1 and brackets each measured region with its own monotonic clock across a per-sample fresh-nonce handshake; whole-tree cgroup memory floor rejects a completion stream produced without allocating) AND replaced the absolute throughput with a load-cancelling yardstick: each workload builds a pristine reference (sealed baseline allocator from TRUSTED_DIR, no candidate overlay) and scores the min-of-N ratio of reference to candidate, so a fully contended eval elevates both legs together and leaves the score unchanged. aa/qBase/qReference/normalizationScale re-derived under this harness from 6 pooled fresh-process baseline runs."
   },
   "terminalSeal": {
     "taskId": "OSS-H07",
