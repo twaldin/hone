@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_8eb079cef7aa",
+  "id": "cap_62751d238ab7",
   "objective": "Minimize Custom Scoreboard p99 render cost and allocations on frozen sidebar scenes while preserving the exact baseline layout and draw-command stream. Correctness is a hard gate; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "8136fc369614b5d377e5fb337f897730fc1b963e"
+    "commit": "a49d28545359c1bf798fafdbc3189c3b3e8dd956"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
@@ -16,6 +16,7 @@
   "protectedPaths": [
     "eval.py",
     "worker.py",
+    "candidate_runner.py",
     "challenge.json",
     ".gitignore"
   ],
@@ -45,7 +46,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:f89a96ba9da96886e1878fee8a7cea06d1fcef48fd4c5b20e9f07be80c4f7d36"
+    "hash": "sha256:7a46fa5dc2734f18e4a0f675b0ac0916f16a1cf338ddcb0f8d1933a0784f1571"
   },
   "contentHashes": {
     "assets/train/_reference/renderer.py": "sha256:dfcb48a694ee39eb9f9fcb26b8ef6fe8c7dd3eb0221ab1ebec1dd21a783ebe12",
@@ -82,9 +83,9 @@
       "p99Weight": 0.6,
       "allocWeight": 0.4,
       "qFail": 0,
-      "qBase": 0.5712426368707456,
-      "sigma": 0.002278475267286488,
-      "qReference": 0.5998047687142829,
+      "qBase": 0.4223506898498743,
+      "sigma": 0.005868886735696766,
+      "qReference": 0.4516951235283581,
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)) from the locked A-A calibration (stability aggregates of the pinned ordering report)"
     }
   }

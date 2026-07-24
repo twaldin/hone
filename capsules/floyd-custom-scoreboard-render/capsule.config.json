@@ -10,6 +10,7 @@
   "protectedPaths": [
     "eval.py",
     "worker.py",
+    "candidate_runner.py",
     "challenge.json",
     ".gitignore"
   ],
@@ -60,9 +61,9 @@
       "p99Weight": 0.6,
       "allocWeight": 0.4,
       "qFail": 0,
-      "qBase": 0.5712426368707456,
-      "sigma": 0.002278475267286488,
-      "qReference": 0.5998047687142829,
+      "qBase": 0.4223506898498743,
+      "sigma": 0.005868886735696766,
+      "qReference": 0.4516951235283581,
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)) from the locked A-A calibration (stability aggregates of the pinned ordering report)"
     },
     "tags": [
