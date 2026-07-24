@@ -1,1 +1,1 @@
-Baseline: commit vendored cc target sources
+round-4: NS (fresh /tmp+/var/tmp+/dev/shm+IPC per invocation) + CG (cgroup2 memory.peak whole-tree)

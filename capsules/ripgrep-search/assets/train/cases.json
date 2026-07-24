@@ -1,5 +1,5 @@
 {
-  "baselinePeakRssKb": 34080,
+  "baselinePeakRssKb": 1860,
   "cases": [
     {
       "args": [
@@ -694,7 +694,7 @@
     }
   },
   "measurementRepetitions": 5,
-  "peakRssLimitKb": 34762,
+  "peakRssLimitKb": 16384,
   "processesPerSample": 5,
   "split": "train",
   "version": 1,

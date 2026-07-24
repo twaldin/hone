@@ -4,3 +4,4 @@
 db7c135ec2c6442bb90d1b3dd0cf4681d48c1473 688f0418e117f26b8ff65f78b2278d28381e85af twaldin <timothy@waldin.net> 1784439230 -0700	commit (amend): Seal pinned ripgrep baseline
 688f0418e117f26b8ff65f78b2278d28381e85af 997137430e45cb46c635a6c77349e30eee88e78f Hone Capsule Author <hone-capsule@invalid.local> 1784564318 -0700	commit: Seal search binary and isolate per-invocation writable state
 997137430e45cb46c635a6c77349e30eee88e78f 62925c970c70b3418c4fd3e392bf8981683871a8 twaldin <timothy@waldin.net> 1784701775 -0700	commit: Baseline: commit vendored cc target sources
+62925c970c70b3418c4fd3e392bf8981683871a8 b2eabb5767aca5edf08695fefb2c5da91320ad40 twaldin <timothy@waldin.net> 1784893825 -0700	commit: round-4: NS (fresh /tmp+/var/tmp+/dev/shm+IPC per invocation) + CG (cgroup2 memory.peak whole-tree)

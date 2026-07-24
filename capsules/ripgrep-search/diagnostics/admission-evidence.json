@@ -2,23 +2,24 @@
   "feasibility": {
     "cleanBuildSec": 22.834,
     "incrementalRebuildSec": 6.977,
-    "evalSec": 44.16
+    "evalSec": 74.0
   },
   "aa": {
     "samples": [
-      0.02777020495383072,
-      0.0281499940070603,
-      0.027528105989719734,
-      0.027071650248604896,
-      0.02824651330469477,
-      0.02852922176316179
+      0.01824,
+      0.01753,
+      0.01852,
+      0.01780,
+      0.01778,
+      0.01785
     ],
-    "sigma": 0.0005325392568811868,
+    "sigma": 0.000359648,
     "noiseFractionOfScale": 0.2
   },
-  "qBase": 0.027882615044512036,
+  "qBase": 0.017953333,
   "qFail": 0,
-  "qReference": 0.03054531132891797,
+  "qReference": 0.019751573,
+  "peakRssSource": "cgroup2.memory.peak (whole process tree, per-invocation leaf; replaces wait4 ru_maxrss)",
   "controls": [
     {
       "id": "broken",
@@ -28,22 +29,24 @@
     },
     {
       "id": "naive",
-      "q": 0.007024921640668062,
+      "q": 0.004277,
       "testsPass": true,
       "purpose": "deliberately slower but exact-output-correct large-file search"
     },
     {
       "id": "shortcut",
-      "trainQ": 0.029800292196073542,
-      "validationQ": 0.006049913757023487,
+      "trainQ": 0.02254,
+      "validationQ": 0.004115,
       "testsPass": true,
-      "purpose": "train-path shortcut is rejected by validation split"
+      "purpose": "train-path shortcut is rejected by the validation split"
     }
   ],
   "perturbation": {
     "id": "improved",
     "description": "independently authored read-only large-text mmap heuristic plus removal of disabled trace checks",
-    "q": 0.03201438526817894,
+    "q": 0.02192,
+    "gainSigmaOverQBase": 11.03,
+    "reachesReference": true,
     "testsPass": true,
     "exactOutputsPass": true,
     "peakRssPass": true

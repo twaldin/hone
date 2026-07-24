@@ -1,5 +1,5 @@
 {
-  "objective": "Improve reciprocal geometric-mean latency across 28 frozen cases spanning six mixed literal, regex, Unicode, ignore-file, no-match, and many-small-file ripgrep search categories. Exact stdout, stderr, and exit-result hashes, relevant cargo tests, and peak RSS at no more than 102% of baseline are hard gates. Only crates/searcher/src, crates/regex/src, and crates/ignore/src are mutable.",
+  "objective": "Improve reciprocal geometric-mean latency across 28 frozen cases spanning six mixed literal, regex, Unicode, ignore-file, no-match, and many-small-file ripgrep search categories. Exact stdout, stderr, and exit-result hashes, relevant cargo tests, and whole-process-tree peak memory (cgroup2 memory.peak) within a sealed ceiling are hard gates. Only crates/searcher/src, crates/regex/src, and crates/ignore/src are mutable.",
   "image": "hone-ripgrep-search@sha256:a8054f1c8594b544245ae18e41b838f1ccc6b955938d58254239c76716e5f457",
   "evalEntrypoint": [
     "python3",
@@ -89,7 +89,7 @@
     "evaluatorSource": "user",
     "partition": "m2-frozen-corpus",
     "license": "Unlicense OR MIT",
-    "provenance": "Current-head OSS-T02 capsule from BurntSushi/ripgrep 227381db0ee83dfa4341f1e27ff9617c0f5ad992. Deterministic frozen corpora sha256:9bbe113734c15b3ba19852297be7fab25e05cc84202b6ab7fc52d8fa81f472ff (train) and sha256:72105b465a54f255132c7835b1091418bf86bcd4b30bdb98c814b3655903b868 (validation) are measured through the pinned upstream benchsuite API with no privileged winning patch. Interleaved A-A qBase=0.027882615044512036, sigma=0.00053253925688118685; qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=0.030545311328917971. Local Docker Desktop numbers are provisional pending frozen GCE recalibration.",
+    "provenance": "Current-head OSS-T02 capsule from BurntSushi/ripgrep 227381db0ee83dfa4341f1e27ff9617c0f5ad992. Deterministic frozen corpora sha256:9bbe113734c15b3ba19852297be7fab25e05cc84202b6ab7fc52d8fa81f472ff (train) and sha256:72105b465a54f255132c7835b1091418bf86bcd4b30bdb98c814b3655903b868 (validation) are measured through the pinned upstream benchsuite API with no privileged winning patch. Round-4 hardening: fresh /tmp+/var/tmp+/dev/shm tmpfs + CLONE_NEWIPC per invocation, and whole-process-tree memory via a per-invocation cgroup2 memory.peak leaf (replaces wait4 ru_maxrss). Interleaved A-A qBase=0.017953333, sigma=0.000359648; qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=0.019751573. Local Docker Desktop numbers are provisional pending frozen GCE recalibration.",
     "sourceDetails": {
       "repository": "BurntSushi/ripgrep",
       "commit": "227381db0ee83dfa4341f1e27ff9617c0f5ad992",
@@ -124,27 +124,28 @@
       "freshProcess": true,
       "q": "reciprocal geometric mean of median batched latency in milliseconds across frozen search cases",
       "qFail": 0.0,
-      "qBase": 0.027882615044512036,
-      "sigma": 0.0005325392568811868,
-      "normalizationScale": 0.002662696284405934,
-      "qReference": 0.03054531132891797,
+      "qBase": 0.017953333,
+      "sigma": 0.000359648,
+      "normalizationScale": 0.00179824,
+      "qReference": 0.019751573,
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
       "noiseFractionOfScale": 0.2,
       "processesPerSample": 5,
       "measurementRepetitions": 5,
+      "peakRssSource": "cgroup2.memory.peak (whole process tree, per-invocation leaf)",
       "peakRssBaselineKb": {
-        "train": 34080,
-        "validation": 36128
+        "train": 1860,
+        "validation": 2124
       },
       "peakRssLimitKb": {
-        "train": 34762,
-        "validation": 36851
+        "train": 16384,
+        "validation": 16384
       },
       "relevantTests": "cargo test --release --locked --offline --quiet --tests -p grep-searcher -p grep-regex -p ignore -p ripgrep",
       "feasibility": {
         "cleanBuildSec": 22.834,
         "incrementalRebuildSec": 6.977,
-        "evalSec": 44.16
+        "evalSec": 74.0
       }
     }
   }

@@ -44,6 +44,25 @@ MS_NODEV = 4
 MS_REC = 16384
 MS_PRIVATE = 1 << 18
 CLONE_NEWNS = 0x00020000
+CLONE_NEWIPC = 0x08000000
+MS_NOEXEC = 8
+# Shared writable roots a candidate rg process could stash warmup state under
+# (hardcoded paths, POSIX shm) so a measured repetition of the SAME command +
+# corpus could replay it. Each isolated invocation gets a brand-new tmpfs over
+# every one of these, inside its private mount + IPC namespace.
+CANDIDATE_WRITABLE_ROOTS = (b"/tmp", b"/var/tmp", b"/dev/shm")
+# Trusted whole-process-tree memory accounting via a per-invocation cgroup2
+# leaf. Replaces wait4 ru_maxrss (which only sees the direct child, letting a
+# candidate hide memory in a detached descendant). memory.peak is kernel-owned,
+# monotone for the leaf's lifetime, and unwritable by the demoted candidate uid.
+CGROUP_ROOT = Path("/mnt/hone-ripgrep-cg")
+CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
+CGROUP_DRAIN_SEC = 10.0
+# Set True in main() once the measurement cgroup is mounted (root + Linux only).
+# Non-root dev falls back to wait4 ru_maxrss; the broker eval container runs as
+# root with CAP_SYS_ADMIN, where the cgroup path is required (fail-closed).
+_CGROUP_ACTIVE = False
+_LEAF_SEQ = 0
 
 def load_worker_module() -> Any:
     path = TRUSTED / "worker.py"
@@ -143,6 +162,66 @@ def mount_build_tmpfs() -> None:
         raise GateFailure("tests_pass", f"cannot mount isolated build tmpfs: {os.strerror(err)}")
 
 
+def mount_measurement_cgroup() -> None:
+    """Mount a fresh, root-only cgroup2 hierarchy for whole-tree memory
+    accounting.
+
+    The container's own cgroup view is read-only, but the trusted evaluator
+    holds mount authority (CAP_SYS_ADMIN): a fresh cgroup2 instance over the
+    (namespaced) hierarchy is writable by root only. The evaluator parks itself
+    in a trusted leaf so the memory controller can be delegated to per-invocation
+    measurement leaves (cgroup2 no-internal-process rule).
+    """
+    global _CGROUP_ACTIVE
+    CGROUP_ROOT.mkdir(mode=0o755, exist_ok=False)
+    rc = _LIBC.mount(b"hone-ripgrep-cg", os.fsencode(CGROUP_ROOT), b"cgroup2", MS_NOSUID | MS_NODEV | MS_NOEXEC, None)
+    if rc != 0:
+        err = ctypes.get_errno()
+        CGROUP_ROOT.rmdir()
+        raise GateFailure("peak_rss", f"cannot mount measurement cgroup: {os.strerror(err)}")
+    try:
+        CGROUP_TRUSTED.mkdir(mode=0o755)
+        (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
+        (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
+    except OSError as exc:
+        raise GateFailure("peak_rss", f"measurement cgroup setup failed: {exc}") from exc
+    _CGROUP_ACTIVE = True
+
+
+def unmount_measurement_cgroup() -> None:
+    if _LIBC.umount2(os.fsencode(CGROUP_ROOT), 2) == 0:  # MNT_DETACH
+        try:
+            CGROUP_ROOT.rmdir()
+        except OSError:
+            pass
+
+
+def drain_measurement_leaf(leaf: Path) -> None:
+    """Kill every process still charged to the leaf (detached descendants in
+    new sessions included), wait for the kernel to release them, then retire the
+    leaf. An empty cgroup.procs means every task exited and the leaf can be
+    removed."""
+    deadline = time.monotonic() + CGROUP_DRAIN_SEC
+    try:
+        (leaf / "cgroup.kill").write_text("1")
+    except OSError:
+        pass
+    while True:
+        try:
+            populated = (leaf / "cgroup.procs").read_text().strip() != ""
+        except OSError:
+            populated = False
+        if not populated:
+            break
+        if time.monotonic() > deadline:
+            raise GateFailure("peak_rss", "measurement cgroup could not be drained")
+        time.sleep(0.02)
+    try:
+        leaf.rmdir()
+    except OSError as exc:
+        raise GateFailure("peak_rss", f"measurement cgroup could not be retired: {exc}") from exc
+
+
 def copy_candidate() -> Path:
     target = BUILD_ROOT / "work"
     shutil.copytree(WORKSPACE, target, symlinks=True)
@@ -237,19 +316,34 @@ def child_setup() -> None:
 
 
 def isolate_mount_namespace(scratch: Path) -> None:
-    """Give this forked worker a private, ephemeral mount namespace.
+    """Give this forked worker a private, ephemeral mount AND IPC namespace.
 
-    Runs in the child while still root (before privilege drop). A fresh
-    namespace with only a per-invocation writable tmpfs at ``scratch`` means
-    the candidate binary has no persistent writable surface across warmup and
-    measured repetitions: the sealed executable and read-only corpus remain the
-    only durable state, and anything written here evaporates when this process
-    exits. This closes the warmup-record-then-replay gaming vector.
+    Runs in the child while still root (before privilege drop). Warmup and
+    measured repetitions replay the SAME command over the SAME corpus, so any
+    writable surface that survives between them is a record-then-replay seam. A
+    fresh mount namespace with brand-new tmpfs over the per-invocation scratch
+    (TMPDIR) AND over every shared candidate-writable root (/tmp, /var/tmp,
+    /dev/shm), plus a fresh IPC namespace (no SysV/POSIX shm carried between
+    launches), leaves the sealed executable and read-only corpus as the only
+    durable state. Everything written here evaporates when this process exits.
     """
-    if _LIBC.unshare(CLONE_NEWNS) != 0:
-        raise OSError(ctypes.get_errno(), "unshare(CLONE_NEWNS) failed")
+    if _LIBC.unshare(CLONE_NEWNS | CLONE_NEWIPC) != 0:
+        raise OSError(ctypes.get_errno(), "unshare(CLONE_NEWNS|CLONE_NEWIPC) failed")
     if _LIBC.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
         raise OSError(ctypes.get_errno(), "mount / private failed")
+    tmpfs_flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
+    for root in CANDIDATE_WRITABLE_ROOTS:
+        # A writable root only needs a fresh tmpfs if it exists as a directory:
+        # a demoted candidate uid cannot create a missing one on the root-owned
+        # rootfs, so an absent path is not a durable replay surface to isolate.
+        try:
+            if not stat.S_ISDIR(os.stat(root).st_mode):
+                continue
+        except FileNotFoundError:
+            continue
+        data = b"size=64m,mode=1777"
+        if _LIBC.mount(b"tmpfs", root, b"tmpfs", tmpfs_flags, data) != 0:
+            raise OSError(ctypes.get_errno(), f"mount fresh tmpfs over {root.decode()} failed")
     target = os.fsencode(str(scratch))
     data = f"size=64m,mode=0700,uid={CANDIDATE_UID},gid={CANDIDATE_GID}".encode("ascii")
     if _LIBC.mount(b"tmpfs", target, b"tmpfs", MS_NOSUID | MS_NODEV, data) != 0:
@@ -264,6 +358,7 @@ def run_child(
     timeout_sec: float,
     isolate: bool = False,
 ) -> dict[str, Any]:
+    global _LEAF_SEQ
     with tempfile.TemporaryDirectory(prefix="command-", dir=BUILD_ROOT) as td:
         stdout_path = Path(td) / "stdout"
         stderr_path = Path(td) / "stderr"
@@ -272,6 +367,14 @@ def run_child(
             scratch = Path(td) / "scratch"
             scratch.mkdir(mode=0o755)
             env = {**env, "TMPDIR": str(scratch)}
+        measure_cgroup = isolate and _CGROUP_ACTIVE
+        leaf: Path | None = None
+        leaf_procs: bytes | None = None
+        if measure_cgroup:
+            _LEAF_SEQ += 1
+            leaf = CGROUP_ROOT / f"rg-{os.getpid()}-{_LEAF_SEQ}"
+            leaf.mkdir(mode=0o755, exist_ok=False)
+            leaf_procs = os.fsencode(str(leaf / "cgroup.procs"))
         out_fd = os.open(stdout_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         err_fd = os.open(stderr_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         started = time.perf_counter_ns()
@@ -283,6 +386,14 @@ def run_child(
                 os.close(out_fd)
                 os.close(err_fd)
                 os.chdir(cwd)
+                if leaf_procs is not None:
+                    # Join the per-invocation measurement leaf while still root
+                    # so the WHOLE candidate process tree (exited descendants
+                    # included) is charged to a cgroup whose control files the
+                    # demoted candidate uid can never write.
+                    join_fd = os.open(leaf_procs, os.O_WRONLY)
+                    os.write(join_fd, b"0")
+                    os.close(join_fd)
                 if scratch is not None:
                     isolate_mount_namespace(scratch)
                 child_setup()
@@ -292,46 +403,63 @@ def run_child(
                 os._exit(126)
         os.close(out_fd)
         os.close(err_fd)
-        deadline = time.monotonic() + timeout_sec
-        status = 0
-        usage = None
-        while True:
-            waited, status, usage = os.wait4(pid, os.WNOHANG)
-            if waited == pid:
-                break
-            if time.monotonic() >= deadline:
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                _, status, usage = os.wait4(pid, 0)
-                reap_candidate_descendants()
-                raise GateFailure("tests_pass", f"command timed out after {timeout_sec:.0f}s: {argv[0]}")
-            time.sleep(0.002)
-        elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
         try:
-            os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        reap_candidate_descendants()
-        stdout = stdout_path.read_bytes()
-        stderr = stderr_path.read_bytes()
-        if len(stdout) > MAX_COMMAND_OUTPUT or len(stderr) > MAX_COMMAND_OUTPUT:
-            raise GateFailure("tests_pass", "command output exceeded sealed limit")
-        if os.WIFEXITED(status):
-            exit_code = os.WEXITSTATUS(status)
-        elif os.WIFSIGNALED(status):
-            exit_code = 128 + os.WTERMSIG(status)
-        else:
-            exit_code = 125
-        assert usage is not None
-        return {
-            "exitCode": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-            "elapsedMs": elapsed_ms,
-            "peakRssKb": int(usage.ru_maxrss),
-        }
+            deadline = time.monotonic() + timeout_sec
+            status = 0
+            usage = None
+            while True:
+                waited, status, usage = os.wait4(pid, os.WNOHANG)
+                if waited == pid:
+                    break
+                if time.monotonic() >= deadline:
+                    try:
+                        os.killpg(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    _, status, usage = os.wait4(pid, 0)
+                    reap_candidate_descendants()
+                    raise GateFailure("tests_pass", f"command timed out after {timeout_sec:.0f}s: {argv[0]}")
+                time.sleep(0.002)
+            elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
+            tree_peak_kb: int | None = None
+            if measure_cgroup and leaf is not None:
+                # Kernel-owned whole-tree high-water mark over every process the
+                # leaf ran (descendants that already exited included), read
+                # before the leaf is drained. A surviving descendant is the exact
+                # memory-hiding seam this closes: fail closed if any remain.
+                leftover = (leaf / "cgroup.procs").read_text().strip()
+                tree_peak_bytes = int((leaf / "memory.peak").read_text().strip())
+                if leftover:
+                    reap_candidate_descendants()
+                    raise GateFailure("peak_rss", f"command left live descendant processes: {argv[0]}")
+                tree_peak_kb = (tree_peak_bytes + 1023) // 1024
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            reap_candidate_descendants()
+            stdout = stdout_path.read_bytes()
+            stderr = stderr_path.read_bytes()
+            if len(stdout) > MAX_COMMAND_OUTPUT or len(stderr) > MAX_COMMAND_OUTPUT:
+                raise GateFailure("tests_pass", "command output exceeded sealed limit")
+            if os.WIFEXITED(status):
+                exit_code = os.WEXITSTATUS(status)
+            elif os.WIFSIGNALED(status):
+                exit_code = 128 + os.WTERMSIG(status)
+            else:
+                exit_code = 125
+            assert usage is not None
+            peak_rss_kb = tree_peak_kb if tree_peak_kb is not None else int(usage.ru_maxrss)
+            return {
+                "exitCode": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "elapsedMs": elapsed_ms,
+                "peakRssKb": peak_rss_kb,
+            }
+        finally:
+            if leaf is not None:
+                drain_measurement_leaf(leaf)
 
 
 def build_and_test(work: Path) -> tuple[Path, float]:
@@ -586,6 +714,7 @@ def output_failure(failure: GateFailure, elapsed_sec: float) -> dict[str, Any]:
 
 def main() -> None:
     started = time.perf_counter()
+    cgroup_mounted = False
     try:
         verify_mutable_envelope()
         mount_build_tmpfs()
@@ -595,6 +724,13 @@ def main() -> None:
         corpus_cwd = extract_corpus(cases_path, config)
         sealed_binary = seal_binary(binary)
         lock_down_build_surfaces()
+        # Whole-tree memory accounting is required under root on Linux (the
+        # broker eval container: root + CAP_SYS_ADMIN). Non-root dev has no
+        # mount authority, so it fails closed here and falls back to wait4
+        # ru_maxrss inside run_child.
+        if os.geteuid() == 0 and sys.platform.startswith("linux"):
+            mount_measurement_cgroup()
+            cgroup_mounted = True
         q, peak_rss, timings, correctness_digest = evaluate_searches(sealed_binary, corpus_cwd, config)
         output = {
             "valid": True,
@@ -615,6 +751,7 @@ def main() -> None:
                 "evalSec": time.perf_counter() - started,
                 "peakRssKb": peak_rss,
                 "peakRssLimitKb": config["peakRssLimitKb"],
+                "peakRssSource": "cgroup2.memory.peak" if cgroup_mounted else "wait4.ru_maxrss",
                 "latencySamplesMs": timings,
                 "correctnessDigest": correctness_digest,
                 "upstreamRevision": UPSTREAM_REVISION,
@@ -627,6 +764,9 @@ def main() -> None:
             GateFailure("tests_pass", f"evaluator fail-closed: {type(err).__name__}: {err}"),
             time.perf_counter() - started,
         )
+    finally:
+        if cgroup_mounted:
+            unmount_measurement_cgroup()
     json.dump(output, sys.stdout, sort_keys=True, separators=(",", ":"))
     sys.stdout.write("\n")
 

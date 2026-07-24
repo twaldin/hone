@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_afa06f930bb6",
-  "objective": "Improve reciprocal geometric-mean latency across 28 frozen cases spanning six mixed literal, regex, Unicode, ignore-file, no-match, and many-small-file ripgrep search categories. Exact stdout, stderr, and exit-result hashes, relevant cargo tests, and peak RSS at no more than 102% of baseline are hard gates. Only crates/searcher/src, crates/regex/src, and crates/ignore/src are mutable.",
+  "id": "cap_23e28fdedb7e",
+  "objective": "Improve reciprocal geometric-mean latency across 28 frozen cases spanning six mixed literal, regex, Unicode, ignore-file, no-match, and many-small-file ripgrep search categories. Exact stdout, stderr, and exit-result hashes, relevant cargo tests, and whole-process-tree peak memory (cgroup2 memory.peak) within a sealed ceiling are hard gates. Only crates/searcher/src, crates/regex/src, and crates/ignore/src are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "62925c970c70b3418c4fd3e392bf8981683871a8"
+    "commit": "b2eabb5767aca5edf08695fefb2c5da91320ad40"
   },
   "image": "hone-ripgrep-search@sha256:a8054f1c8594b544245ae18e41b838f1ccc6b955938d58254239c76716e5f457",
   "evalEntrypoint": [
@@ -92,17 +92,17 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:e90c0ac2e247f8455e363a9fc83dce215ab9fc395f340eafce998628f97181f5"
+    "hash": "sha256:f4553e1ce5db77e30f0bb7008f6f812e7b6fa6429d95c675848297e139565e2c"
   },
   "contentHashes": {
-    "assets/train/cases.json": "sha256:0119926a737d3d24900bcf92ebc91ccedac26c2f2bddbc0c46d5471c2235c298",
+    "assets/train/cases.json": "sha256:dfa44d870c29ad36147db68f38d5a0b45edd2d93ff7631f322b21b797a0aa925",
     "assets/train/corpus.tar.gz": "sha256:9bbe113734c15b3ba19852297be7fab25e05cc84202b6ab7fc52d8fa81f472ff",
-    "assets/validation/cases.json": "sha256:21b09431e8e53d37eb33bcaede30e011c451cc5a239e7090292d8c661a108a33",
+    "assets/validation/cases.json": "sha256:d09bb6d0d865c86f646d616dd19551bfcd2fe5e3ccfaa43da5a858107d3885db",
     "assets/validation/corpus.tar.gz": "sha256:72105b465a54f255132c7835b1091418bf86bcd4b30bdb98c814b3655903b868"
   },
   "meta": {
     "evaluatorSource": "user",
-    "provenance": "Current-head OSS-T02 capsule from BurntSushi/ripgrep 227381db0ee83dfa4341f1e27ff9617c0f5ad992. Deterministic frozen corpora sha256:9bbe113734c15b3ba19852297be7fab25e05cc84202b6ab7fc52d8fa81f472ff (train) and sha256:72105b465a54f255132c7835b1091418bf86bcd4b30bdb98c814b3655903b868 (validation) are measured through the pinned upstream benchsuite API with no privileged winning patch. Interleaved A-A qBase=0.027882615044512036, sigma=0.00053253925688118685; qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=0.030545311328917971. Local Docker Desktop numbers are provisional pending frozen GCE recalibration.",
+    "provenance": "Current-head OSS-T02 capsule from BurntSushi/ripgrep 227381db0ee83dfa4341f1e27ff9617c0f5ad992. Deterministic frozen corpora sha256:9bbe113734c15b3ba19852297be7fab25e05cc84202b6ab7fc52d8fa81f472ff (train) and sha256:72105b465a54f255132c7835b1091418bf86bcd4b30bdb98c814b3655903b868 (validation) are measured through the pinned upstream benchsuite API with no privileged winning patch. Round-4 hardening: fresh /tmp+/var/tmp+/dev/shm tmpfs + CLONE_NEWIPC per invocation, and whole-process-tree memory via a per-invocation cgroup2 memory.peak leaf (replaces wait4 ru_maxrss). Interleaved A-A qBase=0.017953333, sigma=0.000359648; qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=0.019751573. Local Docker Desktop numbers are provisional pending frozen GCE recalibration.",
     "license": "Unlicense OR MIT",
     "tags": [
       "m2",
@@ -139,27 +139,28 @@
       "freshProcess": true,
       "q": "reciprocal geometric mean of median batched latency in milliseconds across frozen search cases",
       "qFail": 0,
-      "qBase": 0.027882615044512036,
-      "sigma": 0.0005325392568811868,
-      "normalizationScale": 0.002662696284405934,
-      "qReference": 0.03054531132891797,
+      "qBase": 0.017953333,
+      "sigma": 0.000359648,
+      "normalizationScale": 0.00179824,
+      "qReference": 0.019751573,
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
       "noiseFractionOfScale": 0.2,
       "processesPerSample": 5,
       "measurementRepetitions": 5,
+      "peakRssSource": "cgroup2.memory.peak (whole process tree, per-invocation leaf)",
       "peakRssBaselineKb": {
-        "train": 34080,
-        "validation": 36128
+        "train": 1860,
+        "validation": 2124
       },
       "peakRssLimitKb": {
-        "train": 34762,
-        "validation": 36851
+        "train": 16384,
+        "validation": 16384
       },
       "relevantTests": "cargo test --release --locked --offline --quiet --tests -p grep-searcher -p grep-regex -p ignore -p ripgrep",
       "feasibility": {
         "cleanBuildSec": 22.834,
         "incrementalRebuildSec": 6.977,
-        "evalSec": 44.16
+        "evalSec": 74
       }
     }
   }
