@@ -3,7 +3,7 @@
   "repository": "swc-project/swc",
   "revision": "d5fd89520be380493479d232b88c532e94e1df94",
   "license": "Apache-2.0",
-  "objective": "Improve reciprocal geometric-mean parse and transform time across frozen JavaScript, TypeScript, and React TSX corpora.",
+  "objective": "Improve fresh-process parse and transform time across frozen JavaScript, TypeScript, and React TSX corpora, measured against an interleaved pristine reference yardstick.",
   "mutableSurface": [
     "crates/swc_ecma_parser/src/**",
     "crates/swc_ecma_transforms_base/src/**",
@@ -18,7 +18,7 @@
     "peak benchmark RSS is no larger than baseline plus 2%"
   ],
   "build": "cargo test/build --locked --offline --jobs 2 --profile hone",
-  "benchmark": "protected fresh-process hone-swc-bench transformations over one primary split while the opposite split is a mandatory semantic/output/RSS gate",
-  "q": "1000000000 / geometric_mean(trusted-parent wall nanoseconds per fresh parse+transform operation)",
+  "benchmark": "protected fresh-process hone-swc-bench 'bench' legs over one primary split (pristine parse+transform plus 16 identity-rotated repetitions per leg, each rotation lexing distinct bytes and byte-compared against the pristine emitted output), interleaved with the pristine in-image reference benchmark as a same-eval yardstick, while the opposite split is a mandatory semantic/output/RSS gate",
+  "q": "16.53675424408473 (frozen local scale) * median over primary workloads of (min reference wall ns / min candidate wall ns) across five timed fresh-process bench-leg pairs after one fully-gated warm pair",
   "qFail": 0
 }

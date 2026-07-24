@@ -22,7 +22,7 @@ for split, root in roots.items():
             if pid == 0:
                 os.dup2(output_fd, 1)
                 os.close(output_fd)
-                os.execv(binary, [binary, "once", f"{root}/{filename}", kind])
+                os.execv(binary, [binary, "bench", f"{root}/{filename}", kind])
             os.close(output_fd)
             _, status, usage = os.wait4(pid, 0)
             timings.append(float(time.monotonic_ns() - started))

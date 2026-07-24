@@ -1,6 +1,6 @@
 {
-  "objective": "Improve reciprocal geometric-mean parse and transform time across frozen JavaScript, TypeScript, and React TSX corpora. SWC parser/TypeScript/React transform tests, exact transformed-AST and emitted-output semantic hashes, per-workload output size at no more than baseline plus 1%, and benchmark peak RSS at no more than baseline plus 2% are hard gates. Only the measured parser, base-transform, TypeScript-transform, and React-transform crate source trees are mutable.",
-  "image": "hone-swc-transform@sha256:c6b37aa36586ae253e2e502c1f260adce8cd7eb20567dc79046926948363f7e5",
+  "objective": "Improve fresh-process parse and transform time across frozen JavaScript, TypeScript, and React TSX corpora, measured against an interleaved pristine reference yardstick. SWC parser/TypeScript/React transform tests, exact transformed-AST and emitted-output semantic hashes, per-workload output size at no more than baseline plus 1%, and benchmark peak RSS at no more than baseline plus 2% are hard gates. Only the measured parser, base-transform, TypeScript-transform, and React-transform crate source trees are mutable.",
+  "image": "hone-swc-transform@sha256:f41b9cb5be72a4df5c1f27f959a595c23668c5edb11468394102fd575bf92bdf",
   "sandbox": {
     "memoryBytes": 6442450944,
     "cpus": 2
@@ -57,7 +57,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:f64b3ffb5562d1b6cc820ddf2afd82aeeb7b34ec50cd13c3838d3f3bd1e95b84"
+    "hash": "sha256:be89e34d2f68700f0dc96acbfe4178fddcc5ac178aa8e2b435cfa3a7429b47ce"
   },
   "meta": {
     "evaluatorSource": "user",
@@ -93,23 +93,24 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
       "freshProcess": true,
-      "q": "1000000000 / geometric mean trusted-parent wall nanoseconds across three fresh-process repetitions of each primary JavaScript, TypeScript, and TSX parse+transform operation",
+      "q": "16.53675424408473 (frozen local scale) * median over primary workloads of (min reference wall ns / min candidate wall ns); each timed primary workload interleaves five fresh-process candidate/reference 'bench' pairs after one fully-gated warm pair, alternating leg order; a bench leg performs the pristine parse+transform plus 16 identity-rotated repetitions (unique trailing comment per iteration, emitted output byte-compared to pristine) so candidate-attributable work dominates the leg; the pristine in-image baseline benchmark is the same-eval yardstick and fastest-of-pairs minima are the per-leg location estimator (timing noise is one-sided)",
       "qFail": 0,
-      "qBase": 16.53675424408473,
-      "sigma": 0.630537809385501,
-      "qReference": 19.689443291012235,
-      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)) from the six interleaved baseline replicates across the two consecutive terminal ordering checks",
-      "noiseFractionOfScale": 0.19999999999999998,
-      "normalizationScale": 3.152689046927505,
+      "qBase": 16.420196806768764,
+      "sigma": 0.23599787557938373,
+      "qReference": 17.600186184665684,
+      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)) from the six interleaved reference-normalized baseline replicates across the two consecutive terminal ordering checks",
+      "noiseFractionOfScale": 0.2,
+      "normalizationScale": 1.1799893778969186,
       "aaSamples": [
-        15.654800363989956,
-        16.2759967428984,
-        17.37072383889655,
-        16.9510618511218,
-        16.11700786509535,
-        16.850934802506313
+        16.186493483541575,
+        16.349321585883057,
+        16.47557532599226,
+        16.243647786683617,
+        16.84982808766751,
+        16.416314570844577
       ],
-      "freshProcessesPerPrimaryWorkload": 3,
+      "timedPairsPerPrimaryWorkload": 5,
+      "warmPairsPerPrimaryWorkload": 1,
       "oppositeSplitGateProcessesPerWorkload": 1,
       "outputSizeTolerance": 0.01,
       "rssTolerance": 0.02
@@ -137,10 +138,10 @@
       "benchmarkSpecialCasing": "each holdout coordinate includes both corpora; the selected split supplies q while the opposite split must pass semantic, output-size, RSS, and source-hash gates",
       "fixtureFingerprinting": "evaluator reads and hashes assets into root memory, overmounts the asset tree with a root-only tmpfs before compilation, then materializes source bytes without oracle metadata only after the compiled source and executable are frozen",
       "outputFabrication": "candidate process returns emitted code; trusted parent counts its bytes and an immutable baseline oracle independently reparses and hashes it; AST and source hashes are compared with oracle metadata never exposed to candidate uid",
-      "timerIntegrity": "trusted parent times exactly one fresh-process evidenced transform per sample; measurement uid has a one-process limit and all uid-2000 processes are reaped between samples",
+      "timerIntegrity": "trusted parent times each fresh-process bench leg and normalizes every timed workload by interleaved same-eval legs of the pristine read-only in-image reference benchmark (fastest-of-pairs minima ratio per workload, median across workloads; per-pair ratios retained as diagnostics), cancelling host drift the candidate cannot influence; measurement uid has a one-process limit and all uid-2000 processes are reaped between samples",
       "rssAccounting": "trusted wait4 accounts each only permitted measurement process and enforces the per-workload baseline plus 2% ceiling",
       "buildStateIntegrity": "Cargo manifests, lock, vendor tree, benchmark crate, profile, and image are digest pinned; source is rehashed after compile, source and target are kernel-remounted read-only, and the containing build tmpfs is remounted read-only before candidate code runs; only fresh bounded home/tmp mounts remain writable",
-      "timedWorkBinding": "every timed child performs one parse+transform and must return the source hash, transformed-AST semantic hash, and emitted code that passes the immutable output oracle"
+      "timedWorkBinding": "every timed bench child performs the pristine parse+transform plus 16 identity-rotated repetitions whose emitted code must byte-match the pristine iteration, and must return the source hash, transformed-AST semantic hash, and emitted code that passes the immutable output oracle"
     },
     "tags": [
       "m2",

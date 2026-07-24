@@ -291,7 +291,7 @@ impl<I: Tokens> Parser<I> {
     /// Note: This is not perfect yet. It means, some strict mode violations may
     /// not be reported even if the method returns [Module].
     pub fn parse_program(&mut self) -> PResult<Program> {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(3));
         let start = self.cur_pos();
         let shebang = self.parse_shebang()?;
 

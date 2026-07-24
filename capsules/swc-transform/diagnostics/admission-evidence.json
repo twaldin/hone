@@ -2,31 +2,32 @@
   "feasibility": {
     "cleanBuildSec": 283.2,
     "incrementalRebuildSec": 92.17,
-    "evalSec": 2.920161,
+    "evalSec": 20.558923,
     "envelopeLimitSec": 900,
     "sandboxMemoryBytes": 6442450944,
     "sandboxCpus": 2,
-    "basis": "clean capsule-image build compiled the benchmark and four relevant test crates under the pinned offline profile; the independently authored parser overlay rebuilt and linked incrementally in 92.17 seconds; the final broker-like evaluator receipt measured 2.920161 seconds"
+    "basis": "clean capsule-image build compiled the benchmark and four relevant test crates under the pinned offline profile; the independently authored parser overlay rebuilt and linked incrementally in 92.17 seconds; the round-2 reference-yardstick evaluator receipt measured the runtime below (interleaved warm+5 timed candidate/reference pairs per primary workload plus opposite-split gates)"
   },
   "aa": {
     "samples": [
-      15.654800363989956,
-      16.2759967428984,
-      17.37072383889655,
-      16.9510618511218,
-      16.11700786509535,
-      16.850934802506313
+      16.186493483541575,
+      16.349321585883057,
+      16.47557532599226,
+      16.243647786683617,
+      16.84982808766751,
+      16.416314570844577
     ],
-    "sigma": 0.630537809385501,
-    "noiseFractionOfScale": 0.19999999999999998
+    "sigma": 0.23599787557938373,
+    "noiseFractionOfScale": 0.2
   },
-  "qBase": 16.53675424408473,
-  "qFail": 0,
-  "qReference": 19.689443291012235,
+  "qBase": 16.420196806768764,
+  "qFail": 0.0,
+  "qReference": 17.600186184665684,
   "normalization": {
-    "scale": 3.152689046927505,
+    "scale": 1.1799893778969186,
     "construction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
     "interleavedBaselineReplicates": 6,
+    "referenceYardstickNormalized": true,
     "finalGceRecalibrationRequired": true
   },
   "controls": [
@@ -40,32 +41,32 @@
     },
     {
       "id": "naive",
-      "firstQ": 12.302941617038494,
-      "secondQ": 11.44260699716098,
-      "firstTrainQ": 12.754509993520035,
-      "firstValidationQ": 11.851373240556953,
-      "secondTrainQ": 11.68094921680509,
-      "secondValidationQ": 11.204264777516869,
+      "firstQ": 10.536167284691231,
+      "secondQ": 10.434235831824086,
+      "firstTrainQ": 10.518094469939102,
+      "firstValidationQ": 10.554240099443362,
+      "secondTrainQ": 10.80789550907286,
+      "secondValidationQ": 10.06057615457531,
       "trainTestsPass": true,
       "validationTestsPass": true,
       "purpose": "bounded parser-entry CPU work is deliberately slower while preserving all semantic, output-size, RSS, source-hash, and upstream-test gates"
     },
     {
       "id": "shortcut",
-      "firstQ": 12.044880428477075,
-      "secondQ": 11.73630466910712,
-      "firstTrainQ": 18.5278076814185,
-      "firstValidationQ": 5.56195317553565,
-      "secondTrainQ": 18.45898701445157,
-      "secondValidationQ": 5.013622323762673,
+      "firstQ": 9.167799970449083,
+      "secondQ": 9.342805225226899,
+      "firstTrainQ": 16.22094192307732,
+      "firstValidationQ": 2.114658017820846,
+      "secondTrainQ": 16.44277428183147,
+      "secondValidationQ": 2.2428361686223295,
       "trainTestsPass": true,
       "validationTestsPass": true,
-      "purpose": "the otherwise-valid parser allocation perturbation adds delay only in the validation corpus number-sign lexer path, proving split-specific gaming loses the opposite-split ordering gate"
+      "purpose": "the otherwise-valid SWAR parser optimization is unchanged on training inputs but self-penalizes on a validation-split fingerprint token (the pervasive Record type name in the held-out TypeScript and TSX corpora, absent from every training corpus), inverting the split ordering so split-specific gaming loses the opposite-split gate"
     },
     {
       "id": "baseline",
-      "firstQ": 15.654800363989956,
-      "secondQ": 16.9510618511218,
+      "firstQ": 16.186493483541575,
+      "secondQ": 16.243647786683617,
       "trainTestsPass": true,
       "validationTestsPass": true
     }
@@ -75,30 +76,27 @@
     "independentlyAuthored": true,
     "valid": true,
     "movesMetric": true,
-    "firstQ": 16.955901696256547,
-    "secondQ": 17.181565157176053,
-    "firstTrainQ": 17.879121374098762,
-    "firstValidationQ": 16.03268201841433,
-    "secondTrainQ": 17.990301125739077,
-    "secondValidationQ": 16.372829188613032,
+    "firstQ": 16.678160334848634,
+    "secondQ": 16.84696291406429,
+    "firstTrainQ": 16.960726855172005,
+    "firstValidationQ": 16.395593814525267,
+    "secondTrainQ": 16.755895905733414,
+    "secondValidationQ": 16.938029922395163,
     "trainTestsPass": true,
     "validationTestsPass": true,
-    "description": "trusted hand-authored frozen-workload allocation tuning: realistic capacities for top-level statements, classes, formal parameters, arrays, object properties, JSX attributes/children, and TypeScript lists",
+    "description": "trusted hand-authored SWAR (SIMD-within-a-register) wide-word ASCII identifier-continue scan replacing the scalar byte-search in the hot read_word_as_str_with lexer path; tokenization and emitted output verified byte-for-byte identical to the scalar identifier-continue predicate",
     "mutableFiles": [
-      "crates/swc_ecma_parser/src/parser/class_and_fn.rs",
-      "crates/swc_ecma_parser/src/parser/expr.rs",
-      "crates/swc_ecma_parser/src/parser/jsx.rs",
-      "crates/swc_ecma_parser/src/parser/object.rs",
-      "crates/swc_ecma_parser/src/parser/pat.rs",
-      "crates/swc_ecma_parser/src/parser/stmt.rs",
-      "crates/swc_ecma_parser/src/parser/typescript.rs"
+      "crates/swc_ecma_parser/src/lexer/mod.rs",
+      "crates/swc_ecma_parser/src/lexer/search.rs"
     ]
   },
   "determinism": {
     "freshProcess": true,
-    "freshProcessRunsPerPrimaryWorkload": 3,
+    "timedPairsPerPrimaryWorkload": 5,
+    "warmPairsPerPrimaryWorkload": 1,
+    "referenceYardstick": "pristine in-image baseline benchmark interleaved per pair; timed 'bench' legs perform the pristine parse+transform plus 16 identity-rotated repetitions; per-workload speed is the fastest-of-pairs minima ratio (min reference ns / min candidate ns), median across workloads; per-pair ratios retained as diagnostics",
     "oppositeSplitGateRunsPerWorkload": 1,
-    "finalSmokeResultHash": "38e5ca730d272fcfc2b525721209e79004df9aeefb2f664b6f56a213474ef329",
+    "finalSmokeResultHash": "910e044970bfa508d59830ca0b8c0e274ade252c3b6ba2f9b9e83f9e071bb6ad",
     "exactSourceHashesFrozen": true,
     "exactAstSemanticHashesFrozen": true,
     "independentEmittedOutputOracle": true,
@@ -107,22 +105,22 @@
   },
   "rss": {
     "baselinePeakKb": {
-      "javascript-control-flow": 51776,
-      "typescript-domain-models": 23068,
-      "react-dashboard": 44728,
-      "javascript-async-classes": 49428,
-      "typescript-mapped-types": 22444,
-      "react-generic-forms": 57488
+      "javascript-control-flow": 51912,
+      "typescript-domain-models": 23080,
+      "react-dashboard": 44692,
+      "javascript-async-classes": 49600,
+      "typescript-mapped-types": 22388,
+      "react-generic-forms": 57628
     },
-    "limitConstruction": "floor(baselinePeakKb * 1.02)",
-    "finalSmokePeakKb": 57496,
+    "limitConstruction": "floor(baselinePeakKb * 1.02); baselines re-frozen from bench-mode (16 identity-rotated iterations) trusted wait4 peaks",
+    "finalSmokePeakKb": 57456,
     "finalSmokePass": true
   },
   "finalSmoke": {
     "valid": true,
-    "q": 18.17081660631819,
-    "buildSec": 0.019277,
-    "runtimeSec": 2.920161,
+    "q": 16.80307190831817,
+    "buildSec": 0.108316,
+    "runtimeSec": 20.558923,
     "constraints": {
       "testsPass": true,
       "astSemanticHashPass": true,
@@ -135,11 +133,11 @@
     "mode": "terminal-holdout",
     "consecutivePasses": 2,
     "brokerContainerEvalsPerPass": 14,
-    "firstStabilitySpread": 0.10441402873514985,
-    "secondStabilitySpread": 0.05012443621829135,
+    "firstStabilitySpread": 0.017694775038113408,
+    "secondStabilitySpread": 0.03673093516654438,
     "band": 0.15,
-    "firstReportHash": "sha256:678ee462e669e13b06921e87f97e979f2bd613f12b553180df41d2832d0eb534",
-    "secondReportHash": "sha256:f64b3ffb5562d1b6cc820ddf2afd82aeeb7b34ec50cd13c3838d3f3bd1e95b84"
+    "firstReportHash": "sha256:c7c1f8b3aab65a4a1fc2bdd3606b7794d6ce9915e5ca73821b029208386fefed",
+    "secondReportHash": "sha256:be89e34d2f68700f0dc96acbfe4178fddcc5ac178aa8e2b435cfa3a7429b47ce"
   },
   "robustnessReview": {
     "verdict": "PASS",
@@ -163,7 +161,7 @@
     "taskId": "OSS-H03",
     "cohort": "terminal",
     "sourceRevision": "d5fd89520be380493479d232b88c532e94e1df94",
-    "sealedBaselineCommit": "6c856fe0705ec3ac18f7cff17caff5335d52b215",
+    "sealedBaselineCommit": "70ce24005bdd6799a2b87bce5c6b04448a850ed8",
     "image": "hone-swc-transform@sha256:c6b37aa36586ae253e2e502c1f260adce8cd7eb20567dc79046926948363f7e5",
     "holdoutModeRequired": true,
     "optimizerPilot": false,
@@ -171,5 +169,19 @@
     "headroomRuns": false,
     "seedOptimizerSessions": false,
     "trustedWorkOnly": true
+  },
+  "improvedControlMargin": {
+    "construction": "improved combined q minus baseline combined q per ordering pass, and improved combined q minus qBase; sigma is the sample stdev of the six interleaved reference-normalized baseline replicates",
+    "perPassMargins": [
+      0.491666851307059,
+      0.6033151273806716
+    ],
+    "againstQBase": [
+      0.2579635280798698,
+      0.4267661072955242
+    ],
+    "minMargin": 0.2579635280798698,
+    "sigma": 0.23599787557938373,
+    "minMarginOverSigma": 1.0930756365774883
   }
 }

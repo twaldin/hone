@@ -17,6 +17,13 @@ use swc_ecma_transforms_base::{fixer::fixer, resolver};
 use swc_ecma_transforms_react as react;
 use swc_ecma_transforms_typescript as typescript;
 
+/// Timed-mode widening: each `bench` invocation performs the pristine
+/// parse+transform plus this many identity-rotated repetitions. Every
+/// rotation appends a unique trailing line comment, so each iteration lexes
+/// distinct bytes (no content-identical replay) while the semantic AST and
+/// the emitted code must stay byte-identical to the pristine iteration.
+const BENCH_ROTATIONS: usize = 16;
+
 #[derive(Clone, Copy)]
 enum WorkloadKind {
     JavaScript,
@@ -206,6 +213,25 @@ fn verify_workload(workload: &Workload) -> Result<Value, Box<dyn Error>> {
 }
 
 
+fn bench_workload(source: &str, kind: WorkloadKind) -> Result<(), Box<dyn Error>> {
+    let pristine = parse_and_transform(source, kind)?;
+    let expected = to_code_default(pristine.source_map, None, &pristine.program);
+    if expected.is_empty() {
+        return Err("bench emitted empty output".into());
+    }
+    for iteration in 1..=BENCH_ROTATIONS {
+        let rotated = format!("{source}\n//hone-rot-{iteration:04}");
+        let transformed = parse_and_transform(&rotated, kind)?;
+        let output = to_code_default(transformed.source_map, None, &transformed.program);
+        if output != expected {
+            return Err(
+                format!("identity-rotated iteration {iteration} diverged from pristine output").into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn selftest() -> Result<(), Box<dyn Error>> {
     for (kind, source) in [
         (WorkloadKind::JavaScript, "export const value = ({ a: 1 })?.a ?? 0;"),
@@ -239,13 +265,29 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string(&verify_workload(&workload)?)?);
             Ok(())
         }
+        Some("bench") if args.len() == 4 => {
+            let path = Path::new(&args[2]);
+            let bytes = fs::read(path)?;
+            let source_hash = hex_hash(&bytes);
+            let kind = WorkloadKind::parse(&args[3])?;
+            let source = String::from_utf8(bytes)?;
+            bench_workload(&source, kind)?;
+            let workload = Workload {
+                id: "sealed".to_owned(),
+                kind,
+                source,
+                source_hash,
+            };
+            println!("{}", serde_json::to_string(&verify_workload(&workload)?)?);
+            Ok(())
+        }
         Some("output-hash") if args.len() == 3 => {
             let output = fs::read_to_string(&args[2])?;
             println!("{}", emitted_output_hash(&output)?);
             Ok(())
         }
         _ => Err(format!(
-            "usage: {} selftest | once SOURCE KIND | output-hash OUTPUT",
+            "usage: {} selftest | once SOURCE KIND | bench SOURCE KIND | output-hash OUTPUT",
             args.first().map(String::as_str).unwrap_or("hone-swc-bench")
         )
         .into()),

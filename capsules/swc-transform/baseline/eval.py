@@ -43,7 +43,24 @@ PR_SET_CHILD_SUBREAPER = 36
 CLONE_NEWIPC = 0x08000000
 CLONE_NEWNET = 0x40000000
 Q_FAIL = 0.0
-PRIMARY_REPETITIONS = 3
+# Interleaved reference-yardstick measurement: each timed primary workload
+# alternates fresh-process "bench" runs of the pristine prebuilt baseline
+# benchmark (ORACLE_BINARY, sealed in the image) with the candidate
+# benchmark. A "bench" run widens the timed workload: the pristine
+# parse+transform plus 16 identity-rotated repetitions (unique trailing
+# comment per iteration, emitted output byte-compared against the pristine
+# iteration), so candidate-attributable work dominates the leg and process
+# startup jitter does not. The oriented scalar is YARDSTICK_SCALE times the
+# median (across primary workloads) of the per-workload ratio of
+# fastest-of-pairs minima (min reference wall ns / min candidate wall ns
+# over the timed pairs). Timing noise here is one-sided (additive positive),
+# so the minimum is the robust per-leg location estimator, interleaving keeps
+# both legs under the same host conditions, the warm pair is fully gated but
+# its timing is discarded, and per-pair ratios are kept as diagnostics.
+PRIMARY_TIMED_PAIRS = 13
+# Frozen local calibration (baseline operations/second family from the prior
+# direct-timing calibration); final GCE recalibration re-freezes this scale.
+YARDSTICK_SCALE = 16.53675424408473
 MUTABLE_CRATES = (
     "swc_ecma_parser",
     "swc_ecma_transforms_base",
@@ -904,10 +921,38 @@ def verify_observation(row: dict[str, Any], payload: object, peak_rss_kb: int) -
     }
 
 
-def geometric_mean(values: list[float]) -> float:
+def median(values: list[float]) -> float:
     if not values or any(not math.isfinite(value) or value <= 0 for value in values):
         raise GateFailure("benchmark timing samples are invalid")
-    return math.exp(math.fsum(math.log(value) for value in values) / len(values))
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def verify_reference_observation(row: dict[str, Any], payload: object) -> None:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("id") != "sealed"
+        or payload.get("sourceSha256") != row["sha256"]
+        or payload.get("astSemanticSha256") != row["expectedAstSemanticSha256"]
+        or payload.get("outputSemanticSha256") != row["expectedOutputSemanticSha256"]
+    ):
+        raise GateFailure(f"reference yardstick observation failed: {row['id']}")
+
+
+def run_transform_once(argv: list[str], row_id: str) -> tuple[object, float, int]:
+    output, elapsed_ns, peak_rss_kb = run_child(
+        argv,
+        timeout=PROCESS_TIMEOUT_SEC,
+        max_processes=1,
+    )
+    try:
+        payload = json.loads(output)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise GateFailure(f"transform observation is malformed: {row_id}") from exc
+    return payload, float(elapsed_ns), peak_rss_kb
 
 
 def evaluate_corpora(
@@ -917,33 +962,60 @@ def evaluate_corpora(
     paths: dict[tuple[str, str], Path],
 ) -> tuple[float, dict[str, Any], int, list[dict[str, Any]]]:
     timings: dict[str, Any] = {}
-    primary_samples: list[float] = []
+    case_speeds: list[float] = []
     maximum_rss = 0
     deterministic: list[dict[str, Any]] = []
     for split in ("train", "validation"):
-        repetitions = PRIMARY_REPETITIONS if split == primary else 1
         for row in corpora[split]:
-            samples: list[float] = []
+            case_path = str(paths[(split, row["id"])])
+            candidate_argv = [binary, "bench", case_path, row["kind"]]
             first_observation: dict[str, Any] | None = None
-            for _ in range(repetitions):
-                output, elapsed_ns, peak_rss_kb = run_child(
-                    [binary, "once", str(paths[(split, row["id"])]), row["kind"]],
-                    timeout=PROCESS_TIMEOUT_SEC,
-                    max_processes=1,
-                )
-                try:
-                    payload = json.loads(output)
-                except (UnicodeDecodeError, ValueError) as exc:
-                    raise GateFailure(f"transform observation is malformed: {row['id']}") from exc
-                observation = verify_observation(row, payload, peak_rss_kb)
-                first_observation = first_observation or observation
-                samples.append(float(elapsed_ns))
+            if split != primary:
+                gate_argv = [binary, "once", case_path, row["kind"]]
+                payload, elapsed_ns, peak_rss_kb = run_transform_once(gate_argv, row["id"])
+                first_observation = verify_observation(row, payload, peak_rss_kb)
                 maximum_rss = max(maximum_rss, peak_rss_kb)
-            timings[f"{split}/{row['id']}"] = {"nanoseconds": samples}
-            if split == primary:
-                primary_samples.extend(samples)
+                timings[f"{split}/{row['id']}"] = {"candidateNanoseconds": [elapsed_ns]}
+                deterministic.append({"split": split, "id": row["id"], "observation": first_observation})
+                continue
+            reference_argv = [str(ORACLE_BINARY), "bench", case_path, row["kind"]]
+            candidate_samples: list[float] = []
+            reference_samples: list[float] = []
+            pair_speeds: list[float] = []
+            for pair in range(1 + PRIMARY_TIMED_PAIRS):
+                candidate_ns = 0.0
+                reference_ns = 0.0
+                legs = ("reference", "candidate") if pair % 2 == 0 else ("candidate", "reference")
+                for leg in legs:
+                    if leg == "reference":
+                        payload, reference_ns, _ = run_transform_once(reference_argv, row["id"])
+                        verify_reference_observation(row, payload)
+                    else:
+                        payload, candidate_ns, peak_rss_kb = run_transform_once(candidate_argv, row["id"])
+                        observation = verify_observation(row, payload, peak_rss_kb)
+                        first_observation = first_observation or observation
+                        maximum_rss = max(maximum_rss, peak_rss_kb)
+                if pair == 0:
+                    # Interleaved warm pair: every gate above is enforced but the
+                    # first-touch timings never enter the estimator.
+                    continue
+                candidate_samples.append(candidate_ns)
+                reference_samples.append(reference_ns)
+                pair_speeds.append(reference_ns / candidate_ns)
+            # Fastest-of-pairs minima: Docker/fork timing noise is one-sided
+            # (additive positive), so the minimum is the robust location
+            # estimator for a deterministic leg; the per-pair ratios are kept
+            # as diagnostics only.
+            case_speed = min(reference_samples) / min(candidate_samples)
+            case_speeds.append(case_speed)
+            timings[f"{split}/{row['id']}"] = {
+                "candidateNanoseconds": candidate_samples,
+                "referenceNanoseconds": reference_samples,
+                "pairSpeedRatios": pair_speeds,
+                "caseSpeedRatio": case_speed,
+            }
             deterministic.append({"split": split, "id": row["id"], "observation": first_observation})
-    q = 1_000_000_000.0 / geometric_mean(primary_samples)
+    q = YARDSTICK_SCALE * median(case_speeds)
     if not math.isfinite(q) or q <= Q_FAIL:
         raise GateFailure("oriented transform scalar is invalid")
     return q, timings, maximum_rss, deterministic
