@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_f50cf10ddc9d",
+  "id": "cap_efad9cd9fd6a",
   "objective": "Recover correct Pi readiness verdicts and project-instructions backup/restore actions across sealed process traces and filesystem states. Maximize weighted exact recovery; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "559667065b9758dce11338b1deb10335576b6baf"
+    "commit": "08f15a6eb98ad65eaab72a72ebe6c5ea64ef12d9"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [

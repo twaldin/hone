@@ -332,7 +332,7 @@ def load_cases(path: Path) -> list[dict]:
     return cases
 
 
-def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, str]:
+def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, bool, str]:
     outcomes: list[CallOutcome] = []
     for _ in range(INNER_REPS):
         reset_candidate_state()
@@ -349,15 +349,24 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, str]:
             break
     slowest_ms = max((outcome.elapsed_ms for outcome in outcomes), default=0.0)
     error = next((outcome.error for outcome in outcomes if outcome.error is not None), None)
-    correct = error is None and len(outcomes) == INNER_REPS and all(
+    # protocol_ok is graded independently of exact-output correctness: it holds
+    # only when every repetition produced a well-formed response (no timeout,
+    # malformed response, worker error, or early exit). An ordinary exact-output
+    # mismatch keeps protocol_ok True and simply earns zero recovery credit.
+    protocol_ok = error is None and len(outcomes) == INNER_REPS
+    correct = protocol_ok and all(
         canonical(outcome.result) == canonical(case["expected"]) for outcome in outcomes
     )
-    feedback = (
-        f"all {INNER_REPS} repetitions matched exactly in slowest {slowest_ms:.3f} ms"
-        if correct
-        else f"incorrect or failed in slowest {slowest_ms:.3f} ms: {error or 'exact output mismatch'}"
-    )
-    return slowest_ms, correct, feedback
+    if not protocol_ok:
+        feedback = (
+            f"protocol violation in slowest {slowest_ms:.3f} ms: "
+            f"{error or 'worker did not complete all repetitions'}"
+        )
+    elif correct:
+        feedback = f"all {INNER_REPS} repetitions matched exactly in slowest {slowest_ms:.3f} ms"
+    else:
+        feedback = f"exact output mismatch in slowest {slowest_ms:.3f} ms"
+    return slowest_ms, correct, protocol_ok, feedback
 
 
 def run_public_suite(workspace: Path) -> tuple[bool, str]:
@@ -392,34 +401,49 @@ def main() -> None:
     per_example: dict[str, dict] = {}
     runtimes: list[float] = []
     correct: list[bool] = []
+    protocol_flags: list[bool] = []
     recovered_weight = 0.0
     for case, weight in zip(cases, weights):
-        elapsed, ok, feedback = evaluate_case(workspace, case)
+        elapsed, ok, proto_ok, feedback = evaluate_case(workspace, case)
         # Normalized so the unweighted mean of perExample scores equals the
         # weighted exact-recovery fraction registered as the objective.
         share = weight * len(cases) / total_weight
         per_example[case["id"]] = {"score": share if ok else 0.0, "feedback": feedback}
         runtimes.append(elapsed)
         correct.append(ok)
+        protocol_flags.append(proto_ok)
         if ok:
             recovered_weight += weight
     tests_pass, suite_detail = run_public_suite(workspace)
     recovery = (recovered_weight / total_weight) if total_weight > 0 else 0.0
+    # Protocol adherence across the hidden suite is required independently of the
+    # graded recovery objective: a candidate that returns exact results for some
+    # hidden cases but violates the worker protocol on the remainder is not
+    # promotion-eligible. Ordinary exact-output mismatches remain zero-credit
+    # valid cases and do not gate validity.
+    hidden_protocol_ok = all(protocol_flags)
+    hidden_protocol_violations = sum(1 for p in protocol_flags if not p)
     output = {
-        # Public/protocol gates are hard; hidden recovery is the graded
-        # objective, so partial recovery stays measurable and eligible.
-        "valid": tests_pass,
+        # Public suite AND hidden-suite protocol adherence are hard gates; hidden
+        # exact recovery is the graded objective, so partial recovery stays
+        # measurable and eligible only when the protocol was honored throughout.
+        "valid": tests_pass and hidden_protocol_ok,
         "objectives": {
             "score": recovery,
         },
-        "constraints": {"tests_pass": tests_pass},
+        "constraints": {"tests_pass": tests_pass, "protocol_ok": hidden_protocol_ok},
         "perExample": per_example,
         "diagnostics": {
-            "summary": f"{len(cases)} sealed cases; weighted exact recovery {recovery:.6f}; {suite_detail}",
+            "summary": (
+                f"{len(cases)} sealed cases; weighted exact recovery {recovery:.6f}; "
+                f"hidden protocol violations {hidden_protocol_violations}; {suite_detail}"
+            ),
             "runtime_ms": statistics.median(runtimes) if runtimes else 0.0,
             "quality": recovery,
             "hidden_cases_recovered": sum(1 for ok in correct if ok),
             "hidden_cases_total": len(correct),
+            "hidden_protocol_ok": hidden_protocol_ok,
+            "hidden_protocol_violations": hidden_protocol_violations,
         },
     }
     json.dump(output, sys.stdout)
