@@ -1,10 +1,10 @@
 {
   "schema": "hone.agentelo-scoring.m1-admission/v1",
   "capsule": {
-    "id": "cap_ad26c268b1e9",
-    "digest": "sha256:488af0b42860cd7515e961ad62f61aabef2937c79df3cafc39022700752ed1f7",
-    "manifestSha256": "sha256:90c601a22e103bb4a5cbb4442a0cb437be02d8f524c942f24f47f8a95026c33a",
-    "baselineCommit": "42a3dd903f88dbbdbb62b4fbb64cbdff21e7cc5e",
+    "id": "cap_a202f9067b4e",
+    "digest": "sha256:c4af8953a8e94be90213143aefe68412b0905aaa6bd3f4cec4a58f2e8f3f1369",
+    "manifestSha256": "sha256:902ffcefa7255097b68f034a344cd702bd6867fa88335dc0080c8b4728a98152",
+    "baselineCommit": "23abe8e6c000758d3f6a127119db007b7c332ab8",
     "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7"
   },
   "ordering": {
@@ -77,12 +77,12 @@
   "scaffold": {
     "runs": 2,
     "capsuleIds": [
-      "cap_ad26c268b1e9",
-      "cap_ad26c268b1e9"
+      "cap_a202f9067b4e",
+      "cap_a202f9067b4e"
     ],
     "manifestSha256": [
-      "sha256:90c601a22e103bb4a5cbb4442a0cb437be02d8f524c942f24f47f8a95026c33a",
-      "sha256:90c601a22e103bb4a5cbb4442a0cb437be02d8f524c942f24f47f8a95026c33a"
+      "sha256:902ffcefa7255097b68f034a344cd702bd6867fa88335dc0080c8b4728a98152",
+      "sha256:902ffcefa7255097b68f034a344cd702bd6867fa88335dc0080c8b4728a98152"
     ],
     "byteIdentical": true
   },
