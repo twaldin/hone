@@ -10,6 +10,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import gc
+import importlib.util
 import json
 import math
 import os
@@ -30,7 +31,7 @@ CHALLENGE = json.loads((TRUSTED_DIR / "challenge.json").read_text())
 FRAMES = int(CHALLENGE.get("frames", 100))
 SAMPLES = int(CHALLENGE.get("samples", 4))
 WARMUP_FRAMES = int(CHALLENGE.get("warmupFrames", 8))
-BATCH = int(CHALLENGE.get("batch", 10))
+DELTA_SPAN = int(CHALLENGE.get("frameDeltaSpan", 64))
 REFERENCE_SCALE_MS = float(CHALLENGE.get("referenceP99ScaleMs", 0.5))
 CALL_TIMEOUT_SEC = float(os.environ.get("CAPSULE_CALL_TIMEOUT_SEC", CHALLENGE.get("timeoutSec", 10)))
 MAX_RESPONSE_BYTES = int(os.environ.get("CAPSULE_MAX_RESPONSE_BYTES", "8000000"))
@@ -49,6 +50,83 @@ MS_NODEV = 0x4
 MS_NOEXEC = 0x8
 MS_REMOUNT = 0x20
 _CGROUP_BASE: Path | None = None
+
+
+def _load_reference_solve():
+    """Import the SEALED seed solve from the read-only trusted baseline
+    (/trusted/baseline, never the candidate /workspace overlay). This is the
+    trusted authority that computes every frame's protected expected output;
+    candidate code is never imported into this parent process."""
+    path = TRUSTED_DIR / "solution.py"
+    spec = importlib.util.spec_from_file_location("reference_solution", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load trusted reference solution.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    solve = getattr(module, "solve", None)
+    if not callable(solve):
+        raise RuntimeError("trusted reference solution.py must export solve")
+    return solve
+
+
+_REFERENCE_SOLVE = _load_reference_solve()
+
+
+def _translate_scene(base: dict, delta: tuple[int, int, int]) -> dict:
+    """Trusted mirror of worker._translate: shift every block coordinate by an
+    integer delta. Integer arithmetic keeps coordinates exact, so the seed's
+    sqrt-distance gate and the improved squared-distance gate agree bit-for-bit
+    and the parent-computed expected matches a correct candidate exactly."""
+    dx, dy, dz = delta
+    return {
+        "blocks": [
+            {
+                "id": b["id"],
+                "x": b["x"] + dx,
+                "y": b["y"] + dy,
+                "z": b["z"] + dz,
+                "selected": b["selected"],
+            }
+            for b in base["blocks"]
+        ],
+        "radius": base["radius"],
+    }
+
+
+def _distinct_deltas(count: int) -> list[tuple[int, int, int]]:
+    """`count` distinct, nonzero integer shift vectors drawn from kernel
+    entropy. Unpredictable per evaluation, so a candidate cannot anticipate the
+    measured frames during untimed warmup even by reading the (protected)
+    evaluator source."""
+    seen: set[tuple[int, int, int]] = set()
+    out: list[tuple[int, int, int]] = []
+    while len(out) < count:
+        d = (
+            secrets.randbelow(2 * DELTA_SPAN + 1) - DELTA_SPAN,
+            secrets.randbelow(2 * DELTA_SPAN + 1) - DELTA_SPAN,
+            secrets.randbelow(2 * DELTA_SPAN + 1) - DELTA_SPAN,
+        )
+        if d == (0, 0, 0) or d in seen:
+            continue
+        seen.add(d)
+        out.append(d)
+    return out
+
+
+def _build_scene_bank(base: dict) -> tuple[list, list]:
+    """One fresh per-sample bank: DISJOINT warmup and measured deltas, each
+    paired with its OWN protected expected output computed by the sealed
+    reference solve. A memoized warmup command stream can therefore never
+    satisfy a measured frame, and every measured frame is validated against a
+    distinct, trusted target."""
+    deltas = _distinct_deltas(WARMUP_FRAMES + FRAMES)
+    warmup_pairs = [
+        (d, canonical(_REFERENCE_SOLVE(_translate_scene(base, d)))) for d in deltas[:WARMUP_FRAMES]
+    ]
+    measured_pairs = [
+        (d, canonical(_REFERENCE_SOLVE(_translate_scene(base, d)))) for d in deltas[WARMUP_FRAMES:]
+    ]
+    return warmup_pairs, measured_pairs
 
 
 def _configure_candidate_subreaper() -> None:
@@ -244,20 +322,18 @@ def _worker_preexec(cgroup: Path | None) -> None:
 
 
 class CallOutcome:
-    __slots__ = ("elapsed_ms", "result", "error", "frame_ms", "matched")
+    __slots__ = ("elapsed_ms", "result", "error", "matched")
 
     def __init__(
         self,
         elapsed_ms: float,
         result,
         error: str | None,
-        frame_ms: list[float] | None = None,
         matched: bool = True,
     ) -> None:
         self.elapsed_ms = elapsed_ms
         self.result = result
         self.error = error
-        self.frame_ms = frame_ms if frame_ms is not None else []
         self.matched = matched
 
 
@@ -369,24 +445,26 @@ class Worker:
         finally:
             sel.close()
 
-    def call(self, payload=None, *, load: bool = True, reps: int = 1, expected: str | None = None) -> CallOutcome:
+    def render(self, *, scene: dict | None = None, delta: tuple[int, int, int] | None = None, expected: str | None = None) -> CallOutcome:
+        """Drive exactly ONE render across the pipe and time the full
+        synchronous round trip on the trusted parent's own clock. A scene
+        establishes the pristine base in the worker; a delta shifts that base
+        by a trusted integer vector for one distinct frame. The next request is
+        written only AFTER this response arrives, so a candidate can never read
+        a future frame's delta ahead of time. The worker emits exactly one
+        response line, exact-output validated here against the frame's own
+        protected expected."""
         if not self.ensure():
             return CallOutcome(0.0, None, f"candidate import failed: {self.import_error}", matched=False)
         assert self.proc is not None and self.proc.stdin is not None
         nonce = secrets.token_hex(16)
-        # `load` sends the frozen scene; a repeat request (load=False) re-renders
-        # the already-loaded scene `reps` times inside the worker loop. The
-        # worker emits ONE response line per frame, so this trusted parent
-        # observes EVERY frame across the pipe boundary: it times each frame
-        # from arrival deltas on its own clock and exact-output validates each
-        # frame's command stream. Candidate code cannot interpose on the
-        # parent's clock or reads, so a cheap non-final frame is caught by the
-        # per-frame gate (wrong stream) or by the per-frame timing distribution.
         message: dict = {"id": nonce}
-        if load:
-            message["input"] = payload
-        if reps != 1:
-            message["reps"] = reps
+        if scene is not None:
+            message["input"] = scene
+        elif delta is not None:
+            message["delta"] = list(delta)
+        else:
+            return CallOutcome(0.0, None, "render requires scene or delta", matched=False)
         request = (json.dumps(message, separators=(",", ":")) + "\n").encode()
         started = time.perf_counter()
         try:
@@ -396,39 +474,31 @@ class Worker:
             self.kill()
             return CallOutcome(0.0, None, "worker died before call", matched=False)
         deadline = time.monotonic() + CALL_TIMEOUT_SEC
-        frame_ms: list[float] = []
-        matched = True
-        result = None
-        previous = started
-        for frame in range(1, reps + 1):
-            line, violation = self._read_line(deadline)
-            arrived = time.perf_counter()
-            elapsed_ms = (arrived - started) * 1000.0
-            if violation is not None or line is None:
-                self.kill()
-                return CallOutcome(elapsed_ms, None, violation or "no response", frame_ms, False)
-            try:
-                response = json.loads(line)
-            except ValueError:
-                self.kill()
-                return CallOutcome(elapsed_ms, None, "protocol violation: unparseable response", frame_ms, False)
-            if not isinstance(response, dict) or response.get("id") != nonce:
-                self.kill()
-                return CallOutcome(elapsed_ms, None, "protocol violation: response id mismatch", frame_ms, False)
-            if "error" in response:
-                return CallOutcome(elapsed_ms, None, str(response["error"]), frame_ms, False)
-            if response.get("frame") != frame or "result" not in response:
-                self.kill()
-                return CallOutcome(elapsed_ms, None, "protocol violation: bad frame response", frame_ms, False)
-            frame_ms.append((arrived - previous) * 1000.0)
-            previous = arrived
-            result = response["result"]
-            if expected is not None and canonical(result) != expected:
-                matched = False
+        line, violation = self._read_line(deadline)
+        arrived = time.perf_counter()
+        elapsed_ms = (arrived - started) * 1000.0
+        if violation is not None or line is None:
+            self.kill()
+            return CallOutcome(elapsed_ms, None, violation or "no response", matched=False)
+        try:
+            response = json.loads(line)
+        except ValueError:
+            self.kill()
+            return CallOutcome(elapsed_ms, None, "protocol violation: unparseable response", matched=False)
+        if not isinstance(response, dict) or response.get("id") != nonce:
+            self.kill()
+            return CallOutcome(elapsed_ms, None, "protocol violation: response id mismatch", matched=False)
+        if "error" in response:
+            return CallOutcome(elapsed_ms, None, str(response["error"]), matched=False)
+        if "result" not in response:
+            self.kill()
+            return CallOutcome(elapsed_ms, None, "protocol violation: missing result", matched=False)
         if self.buffer:
             self.kill()
-            return CallOutcome((time.perf_counter() - started) * 1000.0, None, "protocol violation: extra data after response", frame_ms, False)
-        return CallOutcome((time.perf_counter() - started) * 1000.0, result, None, frame_ms, matched)
+            return CallOutcome(elapsed_ms, None, "protocol violation: extra data after response", matched=False)
+        result = response["result"]
+        matched = expected is None or canonical(result) == expected
+        return CallOutcome(elapsed_ms, result, None, matched)
 
 
 def canonical(value) -> str:
@@ -471,34 +541,37 @@ def _worker_alloc_kb(worker: "Worker") -> float | None:
     return peak / 1024.0
 
 
-def _collect_sample(workspace: Path, case: dict, expected: str) -> tuple[list[float], float | None, str | None, bool]:
-    """One fresh-worker sample: warmup + FRAMES trusted-parent-observed frames.
-    Returns (frame_ms, peak_alloc_kb, error, all_frames_matched). Fresh
-    writable state before and after, so no sample can leak state into the
-    next (in particular, candidate leftovers can never touch the trusted
-    reference sample that follows)."""
+def _collect_sample(
+    workspace: Path, base_scene: dict, base_expected: str, bank: tuple[list, list]
+) -> tuple[list[float], float | None, str | None, bool]:
+    """One fresh-worker sample: load the pristine base, render WARMUP_FRAMES
+    disjoint warmup frames (untimed), then FRAMES measured frames each timed on
+    the trusted parent's clock. Every frame is exact-output validated against
+    its OWN protected expected. Returns (frame_ms, peak_alloc_kb, error,
+    all_frames_matched). Fresh writable state before and after, so no sample
+    can leak state into the next (in particular, candidate leftovers can never
+    touch the trusted reference sample that follows)."""
+    warmup_pairs, measured_pairs = bank
     reset_candidate_state()
     worker = Worker(workspace)
     frame_ms: list[float] = []
     matched = True
     try:
-        first = worker.call(case["input"], load=True, expected=expected)
+        first = worker.render(scene=base_scene, expected=base_expected)
         if first.error is not None:
             return frame_ms, None, first.error, False
-        if not first.matched:
-            matched = False
-        warm = worker.call(load=False, reps=WARMUP_FRAMES - 1, expected=expected)
-        if warm.error is not None:
-            return frame_ms, None, warm.error, False
-        if not warm.matched:
-            matched = False
-        for _ in range(FRAMES // BATCH):
-            outcome = worker.call(load=False, reps=BATCH, expected=expected)
-            frame_ms.extend(outcome.frame_ms)
+        matched = matched and first.matched
+        for delta, exp in warmup_pairs:
+            warm = worker.render(delta=delta, expected=exp)
+            if warm.error is not None:
+                return frame_ms, None, warm.error, False
+            matched = matched and warm.matched
+        for delta, exp in measured_pairs:
+            outcome = worker.render(delta=delta, expected=exp)
             if outcome.error is not None:
                 return frame_ms, None, outcome.error, False
-            if not outcome.matched:
-                matched = False
+            matched = matched and outcome.matched
+            frame_ms.append(outcome.elapsed_ms)
         return frame_ms, _worker_alloc_kb(worker), None, matched
     finally:
         try:
@@ -513,24 +586,31 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
     footprint (MB), under a per-frame exact-output hard gate.
 
     Frame repetitions are driven HERE (trusted parent), never by candidate
-    code. The frozen scene is loaded once per fresh worker; the evaluator then
-    drives WARMUP_FRAMES + FRAMES repeated renders in trusted code. The worker
-    emits one response line per frame, so EVERY frame is timed (parent-clock
-    arrival deltas) and exact-output validated by this trusted parent across
-    the pipe boundary. Requests still batch BATCH frames so the request
-    round-trip amortizes, but no frame's result or duration escapes trusted
-    observation. Peak allocation comes from the per-worker cgroup, never from
-    candidate-influenced self-reporting.
+    code. Each fresh worker loads the pristine base scene once; the evaluator
+    then drives WARMUP_FRAMES + FRAMES renders, EACH carrying its own trusted
+    integer shift so the worker hands solve a distinct scene per frame. Warmup
+    and measured frames use DISJOINT shift vectors and every frame is timed
+    (parent-clock round trip) and exact-output validated by this trusted parent
+    against its own protected expected — so a candidate can neither replay one
+    cached command stream across frames nor precompute the measured frames
+    during untimed warmup. Peak allocation comes from the per-worker cgroup,
+    never from candidate-influenced self-reporting.
 
     Robustness of thin margins: each candidate sample is immediately followed
-    by an in-eval trusted reference sample (the frozen seed solution from the
-    read-only TRUSTED_DIR, run through the identical worker protocol), so host
-    frequency/contention drift shared by the adjacent pair divides out of the
-    per-sample p99 ratio. The reported render cost is the median of those
-    per-pair ratios times a frozen scale — trusted trimmed sampling, exemplar
-    scheme — while candidate state is fully reset around every sample, so
-    candidate code can never touch a reference measurement."""
-    expected = canonical(case["expected"])
+    by an in-eval trusted reference sample (the sealed seed solution from the
+    read-only TRUSTED_DIR, run through the identical worker protocol over the
+    SAME per-sample shift bank), so host frequency/contention drift shared by
+    the adjacent pair divides out of the per-sample p99 ratio. The reported
+    render cost is the median of those per-pair ratios times a frozen scale
+    while candidate state is fully reset around every sample, so candidate code
+    can never touch a reference measurement."""
+    base_scene = case["input"]
+    base_expected = canonical(case["expected"])
+    # Bind the sealed reference to the frozen asset ground truth: the seed must
+    # reproduce the case's frozen expected on the untranslated base, else the
+    # trusted reference authority disagrees with the corpus (an infra fault).
+    if canonical(_REFERENCE_SOLVE(_translate_scene(base_scene, (0, 0, 0)))) != base_expected:
+        raise RuntimeError("trusted reference solve disagrees with frozen expected")
     sample_p99: list[float] = []
     reference_p99: list[float] = []
     ratios: list[float] = []
@@ -539,7 +619,11 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
     error: str | None = None
     correct = True
     for _sample in range(SAMPLES):
-        frame_ms, peak_kb, sample_error, matched = _collect_sample(workspace, case, expected)
+        # Fresh per-sample shift bank (kernel entropy): identical work for the
+        # candidate sample and the reference sample it is paired with, but
+        # unpredictable across samples so no cross-sample replay is possible.
+        bank = _build_scene_bank(base_scene)
+        frame_ms, peak_kb, sample_error, matched = _collect_sample(workspace, base_scene, base_expected, bank)
         if sample_error is not None:
             error = sample_error
             correct = False
@@ -551,9 +635,9 @@ def evaluate_case(workspace: Path, case: dict) -> tuple[float, bool, dict]:
         if error is not None:
             break
         # Interleaved trusted reference yardstick, adjacent in time to the
-        # candidate sample it normalizes. A failing reference is a trusted
-        # infrastructure fault, never a candidate outcome.
-        ref_frames, _ref_peak, ref_error, ref_matched = _collect_sample(TRUSTED_DIR, case, expected)
+        # candidate sample it normalizes, over the SAME shift bank. A failing
+        # reference is a trusted infrastructure fault, never a candidate outcome.
+        ref_frames, _ref_peak, ref_error, ref_matched = _collect_sample(TRUSTED_DIR, base_scene, base_expected, bank)
         if ref_error is not None or not ref_matched or len(ref_frames) != FRAMES:
             raise RuntimeError(f"trusted reference sample failed: {ref_error or 'exact output mismatch'}")
         if len(frame_ms) == FRAMES:
@@ -596,10 +680,11 @@ def run_public_suite(workspace: Path) -> tuple[bool, str]:
     if not isinstance(cases, list) or not cases:
         return False, "challenge has no public cases"
     for case in cases:
+        expected = canonical(case["expected"])
         reset_candidate_state()
         worker = Worker(workspace)
         try:
-            outcome = worker.call(case["input"])
+            outcome = worker.render(scene=case["input"], expected=expected)
         finally:
             try:
                 worker.release()
@@ -607,7 +692,7 @@ def run_public_suite(workspace: Path) -> tuple[bool, str]:
                 reset_candidate_state()
         if outcome.error is not None:
             return False, f"{case['id']}: {outcome.error}"
-        if canonical(outcome.result) != canonical(case["expected"]):
+        if not outcome.matched:
             return False, f"{case['id']}: exact output mismatch"
     return True, f"{len(cases)} public cases passed"
 

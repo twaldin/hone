@@ -54,7 +54,7 @@
       "samples": 5,
       "frames": 100,
       "freshProcess": true,
-      "q": "per-frame exact-output hard gate times the bounded reciprocal 1/(1+g) of the geometric mean g of the reference-normalized p99 trusted per-frame render time (median across interleaved candidate/trusted-seed sample pairs of the p99 ratio, times the frozen 0.5 ms scale) and the trusted whole-tree cgroup peak allocation footprint (MB); frame repetitions are driven by the evaluator over a once-loaded frozen scene and every frame is timed and validated by the trusted parent",
+      "q": "per-frame exact-output hard gate times the bounded reciprocal 1/(1+g) of the geometric mean g of the reference-normalized p99 trusted per-frame render time (median across interleaved candidate/trusted-seed sample pairs of the p99 ratio, times the frozen 0.5 ms scale) and the trusted whole-tree cgroup peak allocation footprint (MB); frame repetitions are driven by the evaluator, which loads the pristine base scene once and then drives each warmup and measured frame with its own disjoint trusted integer coordinate shift so every frame renders a distinct scene, and every frame is timed and exact-output validated by the trusted parent against its own protected expected",
       "qFail": 0
     },
     "tags": [
