@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_740d87172619",
+  "id": "cap_a9c7fbd367d4",
   "objective": "Improve bundling time for frozen TS, JSX, ESM, and CommonJS graphs without changing output or sourcemap semantics or increasing output bytes by more than 1%. Only internal/linker is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "3fa3a6a3784654aac94784353d00b34554e23d78"
+    "commit": "b2660f02e34cd4e47b4db8324c6f1afa5aa6e29e"
   },
   "image": "hone-esbuild-capsule@sha256:daff4fddaef30fa7fde6705e90fb178141375f6c580d5c6b9073584bd7b9ca4a",
   "evalEntrypoint": [
@@ -76,7 +76,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:df648e4ea3e02296402a5879d20729c146091c435bbff6d3cbfb240c704bdc2e"
+    "hash": "sha256:12c257ee4ed556e467dfaee6e222f8798dc577fdad57af0458fad76beeaaa7f1"
   },
   "contentHashes": {
     "assets/train/oracle.json": "sha256:e4517d86306acea6e960b15b4d1a6c6659e4860c1c4a7e14e5034964a7b06833",

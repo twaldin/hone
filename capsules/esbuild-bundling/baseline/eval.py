@@ -38,24 +38,77 @@ Q_FAIL = 0.0
 TEST_PACKAGES = ("./internal/js_parser", "./internal/bundler_tests")
 BANNER = "var React={createElement:(tag,props,...children)=>({tag,props:props||{},children})};"
 TRUSTED_TMP_ENTRIES = frozenset({"hone-esbuild", "hone-home"})
-SCRATCH_MOUNTS = ("/tmp", "/dev/shm")
+SCRATCH_MOUNTS = ("/tmp",)
 CANDIDATE_REAP_GRACE_SEC = 5.0
-# Per-repetition IPC namespace isolation. The eval container is granted
-# CAP_SYS_ADMIN so the trusted scorer (root, never the dropped candidate) can
-# move itself into a fresh System V / POSIX IPC namespace between timed runs;
-# each candidate bundle then inherits an empty namespace. This severs the
-# kernel shared-memory + message-queue channel that would otherwise let
-# mutable linker code stash a bundle result on one repetition and replay it on
-# the rest — a channel that survives process reaping and the /dev/shm purge.
-# The scorer refreshes the namespace OUTSIDE the timed region so process
-# startup latency (and its jitter) never enters the measured wall time.
+CANDIDATE_HOME = "/tmp/hone-home"
+# Per-repetition kernel-scratch isolation. The eval container is granted
+# CAP_SYS_ADMIN, so the trusted scorer (root, never the dropped candidate)
+# enters ONE private mount namespace and then, before every timed bundle and
+# entirely OUTSIDE the measured region, refreshes the scratch view each
+# candidate launch inherits: a fresh System V/POSIX IPC namespace and network
+# namespace (no shm segment, message queue, or abstract socket can carry a
+# cached bundle across repetitions) plus a brand-new empty tmpfs over the
+# candidate HOME, /var/tmp, and /dev/shm (any cache/state a mutable linker
+# writes on one repetition dies before the next). Combined with the per-rep
+# output reset and the shared-/tmp purge, this denies every cross-repetition
+# channel that would let a linker bundle once and replay a cached result on
+# the remaining timed runs. Doing it in the parent keeps the timed region a
+# pure bundle exec, so setup latency and its jitter never enter wall time.
+CLONE_NEWNS = 0x00020000
 CLONE_NEWIPC = 0x08000000
+CLONE_NEWNET = 0x40000000
+MS_NOSUID = 0x2
+MS_NODEV = 0x4
+MS_REC = 0x4000
+MS_PRIVATE = 0x40000
+MNT_DETACH = 0x2
+FRESH_TMPFS_OPTIONS = b"size=64m,mode=1777"
+FRESH_SCRATCH_TARGETS = (CANDIDATE_HOME, "/var/tmp", "/dev/shm")
 _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+_LIBC.unshare.argtypes = [ctypes.c_int]
+_LIBC.mount.argtypes = [
+    ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p,
+]
+_LIBC.umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
+_MOUNT_NS_READY = False
 
 
-def _refresh_ipc_namespace() -> None:
-    if _LIBC.unshare(CLONE_NEWIPC) != 0:
-        raise EvaluationFailure(f"unshare(CLONE_NEWIPC) failed: {os.strerror(ctypes.get_errno())}")
+def _enter_private_mount_ns() -> None:
+    """Move the scorer into a single private mount namespace (once) so the
+    per-repetition tmpfs remounts stay local to this evaluator and never
+    propagate to the host mount table."""
+    global _MOUNT_NS_READY
+    if _MOUNT_NS_READY:
+        return
+    if _LIBC.unshare(CLONE_NEWNS) != 0:
+        raise EvaluationFailure(f"unshare(CLONE_NEWNS) failed: {os.strerror(ctypes.get_errno())}")
+    if _LIBC.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
+        raise EvaluationFailure(f"private mount propagation failed: {os.strerror(ctypes.get_errno())}")
+    _MOUNT_NS_READY = True
+
+
+def _refresh_scratch_namespace() -> None:
+    """Refresh the kernel scratch view the next timed bundle inherits: fresh
+    IPC + network namespaces and a brand-new empty tmpfs over HOME, /var/tmp,
+    and /dev/shm. Called before each timed run and OUTSIDE the measured
+    region so setup latency never enters the bundle wall time."""
+    _enter_private_mount_ns()
+    if _LIBC.unshare(CLONE_NEWIPC | CLONE_NEWNET) != 0:
+        raise EvaluationFailure(
+            f"unshare(CLONE_NEWIPC|CLONE_NEWNET) failed: {os.strerror(ctypes.get_errno())}"
+        )
+    for target in FRESH_SCRATCH_TARGETS:
+        os.makedirs(target, exist_ok=True)
+        # Drop the prior repetition's tmpfs (if any), then mount a fresh empty
+        # one so no candidate-written byte survives into the next timed run.
+        _LIBC.umount2(os.fsencode(target), MNT_DETACH)
+        if _LIBC.mount(
+            b"hone-fresh-scratch", os.fsencode(target), b"tmpfs",
+            MS_NOSUID | MS_NODEV, FRESH_TMPFS_OPTIONS,
+        ) != 0:
+            raise EvaluationFailure(
+                f"fresh scratch tmpfs mount failed: {target}: {os.strerror(ctypes.get_errno())}"
+            )
 
 
 class EvaluationFailure(RuntimeError):
@@ -91,7 +144,7 @@ def _run(
         "GOFLAGS": "-mod=vendor",
         "CGO_ENABLED": "0",
         "GOTMPDIR": "/dev/shm",
-        "HOME": "/tmp/hone-home",
+        "HOME": CANDIDATE_HOME,
     }
     try:
         process = subprocess.Popen(
@@ -299,6 +352,24 @@ def _bundle_once(binary_fd: int, job: dict, output_root: Path) -> tuple[float, l
     return elapsed, output_js, output_maps
 
 
+def _semantic_hash(output_js: list[Path], cwd: Path) -> str:
+    """Run each bundled module under Node and hash the concatenated stdout.
+
+    This executes candidate-produced output, so it runs behind the same
+    privilege drop as the bundle and is validated for EVERY timed repetition
+    (see _measure_jobs) — never only the final run."""
+    parts: list[bytes] = []
+    for path in output_js:
+        stdout = _run(
+            ["node", str(path)],
+            cwd=cwd,
+            timeout=NODE_TIMEOUT_SEC,
+            candidate=True,
+        ).stdout
+        parts.extend((path.name.encode(), b"\0", stdout, b"\0"))
+    return _sha256(b"".join(parts))
+
+
 def _measure_jobs(binary_fd: int, jobs: list[dict], repetitions: int) -> dict[str, dict]:
     measured: dict[str, dict] = {}
     # Fixed output path (identical depth to the frozen oracle so the emitted
@@ -307,37 +378,39 @@ def _measure_jobs(binary_fd: int, jobs: list[dict], repetitions: int) -> dict[st
     output_root = WORK_ROOT / "output"
     for job in jobs:
         elapsed: list[float] = []
-        output_js: list[Path] = []
-        output_maps: list[Path] = []
+        semantic_hashes: list[str] = []
+        sourcemap_hashes: list[str] = []
+        output_bytes_each: list[int] = []
         for _ in range(repetitions):
             # Before every timed run, and all OUTSIDE the measured region:
-            # reap any daemonized candidate descendant, refresh the scorer's
-            # IPC namespace so the next candidate inherits an empty one, and
-            # purge the world-writable /tmp and /dev/shm scratch the candidate
-            # could seed. Together with the per-rep output-dir reset in
+            # reap any daemonized candidate descendant, refresh the scratch
+            # namespace (fresh IPC/net + empty tmpfs over HOME, /var/tmp, and
+            # /dev/shm) that the next candidate inherits, and purge the shared
+            # /tmp scratch. Together with the per-rep output-dir reset in
             # _bundle_once this denies the cross-rep cache channel that would
-            # let a mutable linker bundle once and replay cached JS/maps on the
-            # remaining timed runs.
+            # let a mutable linker bundle once and replay a cached result on
+            # the remaining timed runs.
             _reap_candidate_processes()
-            _refresh_ipc_namespace()
+            _refresh_scratch_namespace()
             _purge_candidate_scratch()
             sample, output_js, output_maps = _bundle_once(binary_fd, job, output_root)
             elapsed.append(sample)
-        semantic_parts: list[bytes] = []
-        for path in output_js:
-            stdout = _run(
-                ["node", str(path)],
-                cwd=output_root,
-                timeout=NODE_TIMEOUT_SEC,
-                candidate=True,
-            ).stdout
-            semantic_parts.extend((path.name.encode(), b"\0", stdout, b"\0"))
+            # Validate THIS repetition's outputs while its files still exist
+            # (the next rep tears output_root down): every timed run must emit
+            # the exact frozen bundle, not just the final one. The oracle
+            # comparison in evaluate() checks each recorded per-rep value.
+            semantic_hashes.append(_semantic_hash(output_js, output_root))
+            sourcemap_hashes.append(_canonical_map_hash(output_maps))
+            output_bytes_each.append(sum(path.stat().st_size for path in output_js))
         measured[job["id"]] = {
             "medianSec": statistics.median(elapsed),
             "samplesSec": elapsed,
-            "semanticHash": _sha256(b"".join(semantic_parts)),
-            "sourcemapHash": _canonical_map_hash(output_maps),
-            "outputBytes": sum(path.stat().st_size for path in output_js),
+            "semanticHashes": semantic_hashes,
+            "sourcemapHashes": sourcemap_hashes,
+            "outputBytesEach": output_bytes_each,
+            "semanticHash": semantic_hashes[-1],
+            "sourcemapHash": sourcemap_hashes[-1],
+            "outputBytes": max(output_bytes_each),
         }
     return measured
 
@@ -419,13 +492,22 @@ def evaluate() -> dict:
             if not isinstance(expected, dict):
                 failures.append(f"{job_id}: missing oracle")
                 continue
-            if actual["semanticHash"] != expected.get("semanticHash"):
-                failures.append(f"{job_id}: output semantic hash mismatch")
-            if actual["sourcemapHash"] != expected.get("sourcemapHash"):
-                failures.append(f"{job_id}: sourcemap semantic hash mismatch")
+            exp_semantic = expected.get("semanticHash")
+            exp_sourcemap = expected.get("sourcemapHash")
             baseline_bytes = expected.get("outputBytes")
-            if not isinstance(baseline_bytes, int) or actual["outputBytes"] > math.floor(baseline_bytes * 1.01):
-                failures.append(f"{job_id}: output bytes exceed baseline +1%")
+            cap_bytes = math.floor(baseline_bytes * 1.01) if isinstance(baseline_bytes, int) else None
+            for rep, value in enumerate(actual["semanticHashes"]):
+                if value != exp_semantic:
+                    failures.append(f"{job_id}: rep {rep} output semantic hash mismatch")
+            for rep, value in enumerate(actual["sourcemapHashes"]):
+                if value != exp_sourcemap:
+                    failures.append(f"{job_id}: rep {rep} sourcemap semantic hash mismatch")
+            if cap_bytes is None:
+                failures.append(f"{job_id}: missing baseline output bytes")
+            else:
+                for rep, value in enumerate(actual["outputBytesEach"]):
+                    if value > cap_bytes:
+                        failures.append(f"{job_id}: rep {rep} output bytes exceed baseline +1%")
         if failures:
             return _result(False, Q_FAIL, job_ids, measured, failures)
         geometric_time = math.exp(statistics.fmean(math.log(measured[job]["medianSec"]) for job in job_ids))
