@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_5c1d643b4a7f",
+  "id": "cap_fe6608fc5599",
   "objective": "Improve FLT TextInput editing-state correctness in text_input.mjs across the sealed owner and hidden Unicode/escape/state case bank while preserving the exported contract and a hard limit of 32 onChange emissions per operation. Only text_input.mjs may change; every other baseline path and all assets are protected. The sole objective q is passed sealed cases / declared sealed cases.",
   "baseline": {
     "kind": "git",
-    "commit": "265e89f8fdeba576a2fbe216b0b71a17f4defae4"
+    "commit": "1ba636c7e6f18d7d5c7940ba1a8a4a5a2ae18bc0"
   },
   "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
   "evalEntrypoint": [

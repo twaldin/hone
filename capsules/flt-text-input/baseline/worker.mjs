@@ -29,8 +29,11 @@
 //     stdin immediately, so this cannot block). No readline / stream / parser
 //     machinery is consulted after the candidate is loaded.
 //   * Every primordial the reporting path needs (JSON.stringify, Object.keys,
-//     Object.create, Array.isArray, Reflect.apply, Buffer.from, fs.writeSync,
-//     process.exit) is captured before the candidate import.
+//     Object.create, Array.isArray, Reflect.apply, Buffer.from, process.exit)
+//     is captured into a local const before the candidate import. `writeSync`
+//     is an ESM live binding, so its VALUE is copied into `S_writeSync` before
+//     import too — a later `syncBuiltinESMExports()` export rebind cannot then
+//     redirect the emission path.
 //   * Trusted code NEVER calls a prototype-resolved array method after the
 //     import: every trusted-built list is a null-prototype array (created via
 //     the captured Object.create) filled by index assignment, so replacing
@@ -60,6 +63,13 @@ const S_BufferFrom = Buffer.from.bind(Buffer)
 const S_apply = Reflect.apply
 const S_exit = process.exit.bind(process)
 const S_setProto = Object.setPrototypeOf
+// writeSync is an ESM live import binding: a candidate on Node 18 can replace
+// the node:fs `writeSync` export and call `syncBuiltinESMExports()` to rebind
+// it, which would update the imported name AFTER this module loads and let it
+// interpose on the handshake/response bytes (nonce, sealed counters). Copy the
+// function VALUE into a local const now, before any candidate code runs, so the
+// recording path calls the original regardless of any later export rebinding.
+const S_writeSync = writeSync
 
 const MAX_EMITS_PER_OP = 32
 // Null-prototype allowlist: membership test is an own-key read, never a
@@ -144,7 +154,7 @@ function encode(value) {
 }
 
 function writeOut(text) {
-  writeSync(1, S_BufferFrom(text, 'utf8'))
+  S_writeSync(1, S_BufferFrom(text, 'utf8'))
 }
 
 function println(obj) {
