@@ -2,20 +2,20 @@
   "feasibility": {
     "cleanBuildSec": 8144.85722,
     "incrementalRebuildSec": 33.67,
-    "evalSec": 99.279104
+    "evalSec": 161.2
   },
   "aa": {
     "samples": [
-      2506995.963308928,
-      2478857.8243704624,
-      2472401.336947227
+      4753201.411903121,
+      4696911.507670142,
+      4796657.900261345
     ],
-    "sigma": 18394.878208677652,
-    "noiseFractionOfScale": 0.14798269489016885
+    "sigma": 50010.60309898452,
+    "noiseFractionOfScale": 0.2
   },
-  "qBase": 2486085.041542206,
+  "qBase": 4748923.606611536,
   "qFail": 0.0,
-  "qReference": 2610389.293619316,
+  "qReference": 4998976.622106458,
   "controls": [
     {
       "id": "broken",
@@ -25,27 +25,27 @@
     },
     {
       "id": "naive",
-      "q": 1274975.125120333,
+      "q": 2949579.9371689744,
       "hardGatesPass": true,
       "role": "deliberately slower but correct repeated parser work"
     },
     {
       "id": "baseline",
-      "q": 2408736.526632948,
+      "q": 4753201.411903121,
       "hardGatesPass": true,
       "role": "exact pinned upstream source"
     },
     {
       "id": "improved",
-      "q": 3734881.163796142,
+      "q": 6725609.161151828,
       "hardGatesPass": true,
       "role": "independently authored encoded-fragment serialization cache with complete mutation invalidation; every toString still performs the full per-call pair join so serialization stays scale-dependent work"
     },
     {
       "id": "shortcut",
-      "q": 3363115.0218631616,
-      "trainQ": 5600150.887060097,
-      "validationQ": 1126079.1566662255,
+      "q": 4930047.834135494,
+      "trainQ": 7194543.432029799,
+      "validationQ": 2665552.2362411893,
       "hardGatesPass": true,
       "shortcutGated": true,
       "role": "fixture-fingerprinting fast path (memorized train parses and train-only fragment caches, all still per-call real work) that wins train and loses validation"
@@ -56,22 +56,22 @@
     "description": "cache percent-encoded URLSearchParams name=value fragments, invalidate on every list mutation or associated-URL refresh, and rebuild the joined string on every call so serialization remains per-call scale-dependent work",
     "independentlyAuthored": true,
     "valid": true,
-    "q": 3734881.163796142,
-    "deltaFromQBase": 1248796.1222539362,
-    "deltaFromOrderingBaseline": 1326144.6371631944,
+    "q": 6725609.161151828,
+    "deltaFromQBase": 1976685.5545402924,
+    "deltaFromOrderingBaseline": 1972407.749248707,
     "reachesReference": true
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:e2e8040ea256e1d74bfcf0a76c022e5067ba969023297ab75526f96e002394cd",
-    "secondReportHash": "sha256:df6345b11075cbb1514088ecad622a2e57f861dd5128a9295881feb0b8da7a8b"
+    "firstReportHash": "sha256:1de6e893a9cd6b1cfe258bcf876a526c314ba7974ab1a7dd855d6522125803bf",
+    "secondReportHash": "sha256:2ec74ab8d823b22dc294ccceecdef47660eb6ee608f5648d583da4d5fcde0e51"
   },
   "measurement": {
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "globalLockHeld": true,
-    "benchmarkBatchWallSec": 4401.3,
+    "benchmarkBatchWallSec": 2257.1,
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "normalizationScale": 124304.2520771103,
+    "normalizationScale": 250053.01549492258,
     "freshProcess": true,
     "finalGceRecalibrationRequired": true,
     "holdoutSeal": "no optimizer pilot, mutation run, headroom run, or seed-optimizer session was performed"
