@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_f40c8a3050af",
+  "id": "cap_ed5d36db8234",
   "objective": "Improve cold and warm uv dependency-resolution time on a frozen hash-pinned offline PEP 503 index. Exact locks, selected wheel hashes, uv-resolver tests, and peak RSS at or below baseline plus 2% are hard gates; only crates/uv-resolver/src is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "100290f931be59d7acdefc10e5b6ed562682c6d7"
+    "commit": "bc587604a42f1f8f945b7015ac33c3b05671b176"
   },
   "image": "hone-uv-resolver@sha256:4ecfce6915c97234480adf92909b9c2d98c9df42a705da8b69671c257f528e0c",
   "evalEntrypoint": [
@@ -221,7 +221,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:c832101952b65f243ffcfefdaf797c2bff1636323ebbba7aca792dae4cb6d842"
+    "hash": "sha256:1b7909bfe7b3e897e514bf4718f34b33c948d5bc7e0f56e7469812a7d61a92b1"
   },
   "contentHashes": {
     "assets/train/async-stack.in": "sha256:0f2b700a947e03f2c14e85315f1a8931d3f88a93d2d7b02e329c79ed56ff101a",
@@ -309,7 +309,7 @@
     "assets/train/index/simple/typing-extensions/index.html": "sha256:ebd7c9ef9c6bf085525055f74d09950e0ebcfa3c6a1dd54e00b34ce19c6307c0",
     "assets/train/web-stack.in": "sha256:1ebd204048c2894ff7d6da5afc19ed39c9262dda8c938744fb74041495a13563",
     "assets/train/web-stack.lock": "sha256:a952789b3caee4c3973d639e6e357a10f07ff5ff8bb64a7d924740533b83970c",
-    "assets/train/workloads.json": "sha256:e098d003c053964af36220b41e419af192c2baa404cd15e26214afc2cfb69b79",
+    "assets/train/workloads.json": "sha256:c82692c7b1697e58120cd9f4b4b5f238e11117f25729eed2ff0d7bfff5260f2b",
     "assets/validation/concurrency.in": "sha256:8284eae0febe11a24a6a94ea7c0c0804725ebc6ebb62b6d9b62acc78e70f5fbb",
     "assets/validation/concurrency.lock": "sha256:7d89cb8dcc02ee3776cae52cd92c71d0fe730f569e92465afc0f5a724428ab2f",
     "assets/validation/docs-stack.in": "sha256:64a2fe22a50d078f9e477fd358593689b3de5163f5e66b1e95d44cedfda279c2",
@@ -395,7 +395,7 @@
     "assets/validation/index/simple/sqlparse/index.html": "sha256:0e57cfbf084b69173667830e698839cfd5356be590ee559065c5e34e3bff048d",
     "assets/validation/index/simple/trio/index.html": "sha256:262642736fd841145034416642c59ad13e3536802ab49635be57042ac91052e6",
     "assets/validation/index/simple/typing-extensions/index.html": "sha256:ebd7c9ef9c6bf085525055f74d09950e0ebcfa3c6a1dd54e00b34ce19c6307c0",
-    "assets/validation/workloads.json": "sha256:ccf84f52c1a56b0486eda5e9fac630bd369cd2b9f678863de69f47a0e2488d58"
+    "assets/validation/workloads.json": "sha256:73ef160569065debc6ee695e82f7ca4ad5fe78f8a69a3120ee612bdfd4a7a656"
   },
   "meta": {
     "evaluatorSource": "user",
@@ -438,15 +438,15 @@
       "referenceNormalization": 25,
       "q": "reference-normalized per-cell speed ratio: within each eval the pristine trusted-baseline reference binary and the candidate are run in interleaved repetition pairs (41 cold pairs each from a freshly mounted candidate-writable tmpfs with private /tmp and /dev/shm; 41 warm pairs each on its own freshly mounted tmpfs seeded from a root-held snapshot of the caches each binary primed once, so no candidate-writable byte survives from one repetition to the next in either mode). Each pair is interleaved rep-by-rep so both binaries share the same instant of the host's permanent repo-watcher load; the per-pair reference/candidate wall-time ratio cancels that shared ambient contention, the 8 most extreme ratios at each end are trimmed, and score = referenceNormalization * geometric-mean(kept ratios). Paired cancellation over 41 pairs drives residual jitter down as 1/sqrt(pairs) far tighter than a min-of-N-per-binary estimator would on these sub-100ms resolutions. Cold and warm latency reflect real resolution, never replay of earlier-repetition state; the readiness-gated timer excludes namespace/mount setup from the measured interval",
       "qFail": 0,
-      "rssGate": "per-workload peak RSS <= 39000 KiB frozen baseline maximum across the A-A suite under the fresh-writable-state harness * 1.02",
+      "rssGate": "per-workload peak RSS <= 24000 KiB frozen baseline whole-tree cgroup memory.peak maximum across the A-A suite * 1.02",
       "sandboxPeakMemoryBytes": 3226365952,
       "sandboxMemoryCapBytes": 4831838208,
       "sandboxHeadroomOverPeakFraction": 0.4976,
       "sandboxUnusedCapacityFraction": 0.3323,
-      "qBase": 25.007,
-      "sigma": 0.3619,
-      "qReference": 25,
-      "qReferenceConstruction": "Reference-normalized score anchor. Each eval interleaves the pristine trusted-baseline reference with the candidate in 41 fresh-process cold + 41 fresh-process warm pairs and divides out their shared per-pair ambient load (trimmed per-pair geomean, PAIR_TRIM=8), so an A-A candidate scores referenceNormalization=25.0 by construction. qBase (25.007) and sigma (0.3619) are the mean and population stddev of the six baseline stability re-measurements across the two consecutive admission ordering runs (aa noiseFractionOfScale 0.0145). Timed workloads widened (async-stack 19, web-stack 23, concurrency 16, docs-stack 22 packages) so candidate-attributable resolver work dominates process startup."
+      "qBase": 24.8844,
+      "sigma": 0.2099,
+      "qReference": 26.1286,
+      "qReferenceConstruction": "Reference-normalized score anchor. Each eval interleaves the pristine trusted-baseline reference binary (sealed from TRUSTED_DIR, never candidate-linked) with the candidate in 41 fresh-process cold + 41 fresh-process warm pairs and divides out their shared per-pair ambient load (trimmed per-pair geomean, PAIR_TRIM=8), so an A-A candidate scores referenceNormalization=25.0 by construction. qBase (24.8844) and sigma (0.2099, noiseFractionOfScale 0.0084) are the mean and population stddev of the six baseline stability re-measurements across the two consecutive admission ordering runs. qReference = qBase + max(5*sigma, 5%*|qBase-qFail|) = 24.8844 + max(1.0495, 1.2442) = 26.1286 (the 5% floor dominates at this tightened sigma), NOT ==baseline. The bounded-fetch improved control clears baseline by 0.5244 = 2.50*sigma, above the 2-3*sigma noise-separation bar. Peak RSS is the whole-tree cgroup memory.peak (kernel-owned, charges the entire measured process tree), not wait4 ru_maxrss. Timed workloads widened (async-stack 19, web-stack 23, concurrency 16, docs-stack 22 packages) so candidate-attributable resolver work dominates process startup."
     }
   }
 }

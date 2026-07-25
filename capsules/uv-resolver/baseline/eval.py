@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -30,6 +31,9 @@ SOURCE = BUILD_ROOT / "resolver-src"
 UPSTREAM_ROOT = Path("/opt/uv-root")
 SEALED_ROOT = Path("/mnt")
 BENCH_ROOT = Path("/srv")
+CGROUP_ROOT = Path("/tmp/hone-uv-cg")
+CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
+CGROUP_DRAIN_SEC = 10
 SEALED_TMPFS_DATA = b"size=512m,mode=0755,nr_inodes=40000"
 BENCH_TMPFS_DATA = b"size=512m,mode=0755,uid=2000,gid=2000,nr_inodes=120000"
 BUILD_TMPFS_DATA = b"size=1600m,mode=0755,uid=2000,gid=2000,nr_inodes=300000"
@@ -65,6 +69,7 @@ LIBC.unshare.argtypes = [ctypes.c_int]
 LIBC.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p]
 LIBC.umount2.argtypes = [ctypes.c_char_p, ctypes.c_int]
 CLONE_NEWNS = 0x00020000
+CLONE_NEWIPC = 0x08000000
 MS_RDONLY = 0x0001
 MS_NOSUID = 0x0002
 MS_NODEV = 0x0004
@@ -74,6 +79,13 @@ MS_REC = 0x4000
 MS_PRIVATE = 0x40000
 MNT_DETACH = 0x0002
 FRESH_SCRATCH_OPTIONS = b"size=16m,mode=1777"
+HIDDEN_OPT_OPTIONS = b"size=1m,mode=0555,nr_inodes=64"
+# Set once measurement begins: True when the trusted evaluator holds an owned
+# cgroup2 hierarchy (root on Linux) and each measured launch is charged in its
+# own kernel-owned leaf; False on non-root dev, where fork_exec falls back to
+# wait4 ru_maxrss.
+CGROUP_ACTIVE = False
+_LEAF_COUNTER = itertools.count()
 
 
 class GateFailure(RuntimeError):
@@ -205,6 +217,84 @@ def reap_candidate_processes() -> None:
         time.sleep(0.005)
 
 
+def mount_measurement_cgroup() -> bool:
+    """Mount a fresh writable cgroup2 hierarchy the trusted evaluator owns and
+    delegate the memory controller, so every measured launch can be charged in
+    its own kernel-owned leaf. The container's own /sys/fs/cgroup view is
+    read-only, but the trusted evaluator holds mount authority (CAP_SYS_ADMIN):
+    a fresh cgroup2 instance over the same namespaced hierarchy is writable by
+    root only. Returns False on non-root dev, where fork_exec falls back to
+    wait4 ru_maxrss."""
+    if os.geteuid() != 0 or not sys.platform.startswith("linux"):
+        return False
+    CGROUP_ROOT.mkdir(mode=0o755, exist_ok=False)
+    if LIBC.mount(b"hone-uv-cg", str(CGROUP_ROOT).encode(), b"cgroup2",
+                  MS_NOSUID | MS_NODEV | MS_NOEXEC, None) != 0:
+        CGROUP_ROOT.rmdir()
+        raise GateFailure("trusted measurement cgroup mount failed")
+    try:
+        # cgroup v2 no-internal-process rule: park the evaluator (and every
+        # process it forks) in a trusted leaf so the memory controller can be
+        # delegated to the per-launch measurement leaves.
+        CGROUP_TRUSTED.mkdir(mode=0o755)
+        (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
+        (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
+    except OSError as exc:
+        raise GateFailure("trusted measurement cgroup setup failed") from exc
+    return True
+
+
+def unmount_measurement_cgroup() -> None:
+    if unmount_tmpfs(CGROUP_ROOT):
+        try:
+            CGROUP_ROOT.rmdir()
+        except OSError:
+            pass
+
+
+def new_measurement_leaf() -> Path:
+    leaf = CGROUP_ROOT / f"m{os.getpid()}-{next(_LEAF_COUNTER)}"
+    leaf.mkdir(mode=0o755, exist_ok=False)
+    return leaf
+
+
+def read_leaf_peak_kb(leaf: Path) -> int:
+    # memory.peak is the kernel-owned, monotone whole-tree high-water mark for
+    # the leaf's lifetime (every process the launch ran, exited children and
+    # detached descendants included). Unlike wait4 ru_maxrss — which reports
+    # only the directly-waited pid and misses memory a candidate offloads to a
+    # detached helper — this cannot be reset or under-reported by uid-2000 code.
+    try:
+        peak_bytes = int((leaf / "memory.peak").read_text().strip())
+    except (OSError, ValueError) as exc:
+        raise GateFailure("measurement cgroup peak unreadable") from exc
+    return (peak_bytes + 1023) // 1024
+
+
+def drain_measurement_leaf(leaf: Path) -> None:
+    # Kill every process still charged to the leaf, wait for the kernel to
+    # release them, then retire the leaf.
+    deadline = time.monotonic() + CGROUP_DRAIN_SEC
+    try:
+        (leaf / "cgroup.kill").write_text("1")
+    except OSError:
+        pass
+    while True:
+        try:
+            populated = (leaf / "cgroup.procs").read_text().strip() != ""
+        except OSError:
+            populated = False
+        if not populated:
+            break
+        if time.monotonic() > deadline:
+            raise GateFailure("measurement cgroup could not be drained")
+        time.sleep(0.01)
+    try:
+        leaf.rmdir()
+    except OSError as exc:
+        raise GateFailure("measurement cgroup could not be retired") from exc
+
+
 def regular_files(root: Path) -> dict[str, Path]:
     output: dict[str, Path] = {}
     for directory, directories, files in os.walk(root, followlinks=False):
@@ -331,69 +421,98 @@ def verify_workloads(metadata: dict, split_root: Path, index: dict) -> str:
 
 
 def isolate_measurement_namespace() -> None:
-    """Give the measured process a private mount view with brand-new /tmp and
-    /dev/shm tmpfs mounts: no scratch state written by any earlier repetition
-    is visible, and nothing written here outlives this process."""
-    if LIBC.unshare(CLONE_NEWNS) != 0:
-        raise OSError(ctypes.get_errno(), "mount namespace unshare failed")
+    """Give the measured process a private mount + System V IPC view: brand-new
+    /tmp, /dev/shm, and /var/tmp tmpfs mounts (no scratch state written by any
+    earlier repetition is visible and nothing written here outlives this
+    process), the persistent candidate-owned build trees under /opt hidden
+    behind an empty read-only tmpfs, and a fresh SysV IPC namespace so no
+    shared-memory segment, semaphore, or message queue can carry a saved
+    lock/counter from one repetition into the next."""
+    if LIBC.unshare(CLONE_NEWNS | CLONE_NEWIPC) != 0:
+        raise OSError(ctypes.get_errno(), "mount/ipc namespace unshare failed")
     if LIBC.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
         raise OSError(ctypes.get_errno(), "private mount propagation failed")
-    for target in (b"/tmp", b"/dev/shm"):
-        flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
-        if LIBC.mount(b"hone-fresh-scratch", target, b"tmpfs", flags, FRESH_SCRATCH_OPTIONS) != 0:
+    scratch_flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
+    for target in (b"/tmp", b"/dev/shm", b"/var/tmp"):
+        if LIBC.mount(b"hone-fresh-scratch", target, b"tmpfs", scratch_flags, FRESH_SCRATCH_OPTIONS) != 0:
             raise OSError(ctypes.get_errno(), "fresh scratch tmpfs mount failed")
+    # Hide every persistent candidate-writable tree under /opt (/opt/uv-root,
+    # /opt/uv-target-base, /opt/uv-resolver-src-base) behind an empty read-only
+    # tmpfs. The measured binary runs entirely from the sealed read-only /mnt
+    # inputs and its fresh per-repetition /srv cache, so no state a candidate
+    # stashed under /opt during the build or an earlier repetition can be
+    # replayed by a later one.
+    hide_flags = MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC
+    if LIBC.mount(b"hone-hidden-opt", b"/opt", b"tmpfs", hide_flags, HIDDEN_OPT_OPTIONS) != 0:
+        raise OSError(ctypes.get_errno(), "persistent candidate tree hide mount failed")
 
 
 def fork_exec(argv: list[str], environment: dict[str, str], timeout: int) -> tuple[int, float, int]:
     # A readiness pipe lets the parent start the clock only AFTER the child has
-    # finished its (variable-latency) namespace unshare, fresh /tmp and
-    # /dev/shm mounts, and privilege drop — so the measured interval is the
-    # resolver's own execution, not setup jitter that would swamp a short run.
-    ready_r, ready_w = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        try:
-            os.close(ready_r)
-            os.setsid()
-            isolate_measurement_namespace()
-            devnull = os.open(os.devnull, os.O_RDWR)
-            os.dup2(devnull, 0)
-            os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
-            if devnull > 2:
-                os.close(devnull)
-            demote()
-            os.write(ready_w, b"\x01")
-            os.close(ready_w)
-            os.execve(argv[0], argv, environment)
-        except BaseException:
-            os._exit(127)
-    os.close(ready_w)
+    # finished its (variable-latency) cgroup join, namespace unshare, fresh
+    # /tmp+/dev/shm+/var/tmp mounts, /opt hide, and privilege drop — so the
+    # measured interval is the resolver's own execution, not setup jitter that
+    # would swamp a short run.
+    leaf = new_measurement_leaf() if CGROUP_ACTIVE else None
     try:
-        os.read(ready_r, 1)
-    finally:
-        os.close(ready_r)
-    started = time.monotonic_ns()
-    deadline = time.monotonic() + timeout
-    status: int | None = None
-    usage = None
-    while time.monotonic() < deadline:
-        waited, current_status, current_usage = os.wait4(pid, os.WNOHANG)
-        if waited == pid:
-            status, usage = current_status, current_usage
-            break
-        time.sleep(0.001)
-    if status is None:
+        ready_r, ready_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(ready_r)
+                os.setsid()
+                if leaf is not None:
+                    # Join the per-launch measurement cgroup leaf while still
+                    # root and BEFORE the fresh /tmp shadows the cgroup mount:
+                    # the whole candidate process tree is then charged to a
+                    # kernel-owned leaf the demoted uid can never write.
+                    with open(leaf / "cgroup.procs", "w") as handle:
+                        handle.write("0")
+                isolate_measurement_namespace()
+                devnull = os.open(os.devnull, os.O_RDWR)
+                os.dup2(devnull, 0)
+                os.dup2(devnull, 1)
+                os.dup2(devnull, 2)
+                if devnull > 2:
+                    os.close(devnull)
+                demote()
+                os.write(ready_w, b"\x01")
+                os.close(ready_w)
+                os.execve(argv[0], argv, environment)
+            except BaseException:
+                os._exit(127)
+        os.close(ready_w)
         try:
-            os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        _, status, usage = os.wait4(pid, 0)
-        raise GateFailure("resolver process timed out")
-    elapsed_ms = (time.monotonic_ns() - started) / 1_000_000
-    exit_code = os.waitstatus_to_exitcode(status)
-    peak_rss_kb = int(usage.ru_maxrss) if usage is not None else 0
-    return exit_code, elapsed_ms, peak_rss_kb
+            os.read(ready_r, 1)
+        finally:
+            os.close(ready_r)
+        started = time.monotonic_ns()
+        deadline = time.monotonic() + timeout
+        status: int | None = None
+        usage = None
+        while time.monotonic() < deadline:
+            waited, current_status, current_usage = os.wait4(pid, os.WNOHANG)
+            if waited == pid:
+                status, usage = current_status, current_usage
+                break
+            time.sleep(0.001)
+        if status is None:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.wait4(pid, 0)
+            raise GateFailure("resolver process timed out")
+        elapsed_ms = (time.monotonic_ns() - started) / 1_000_000
+        exit_code = os.waitstatus_to_exitcode(status)
+        if leaf is not None:
+            peak_rss_kb = read_leaf_peak_kb(leaf)
+        else:
+            peak_rss_kb = int(usage.ru_maxrss) if usage is not None else 0
+        return exit_code, elapsed_ms, peak_rss_kb
+    finally:
+        if leaf is not None:
+            drain_measurement_leaf(leaf)
 
 
 def resolution_command(binary: Path, requirement: Path, output: Path, cache: Path, index_root: Path) -> list[str]:
@@ -691,7 +810,9 @@ def run_workloads(metadata: dict, split_root: Path) -> tuple[dict, dict, int, fl
 
 
 def main() -> None:
+    global CGROUP_ACTIVE
     build_mounted = False
+    cgroup_mounted = False
     sealed = False
     result_hash = ""
     try:
@@ -728,6 +849,11 @@ def main() -> None:
             raise GateFailure("build tmpfs teardown failed")
         BUILD_ROOT.rmdir()
         build_mounted = False
+        # Own a fresh cgroup2 hierarchy for whole-tree memory.peak accounting
+        # of every measured launch; on non-root dev this is skipped and
+        # fork_exec falls back to wait4 ru_maxrss.
+        CGROUP_ACTIVE = mount_measurement_cgroup()
+        cgroup_mounted = CGROUP_ACTIVE
         scores, measurements, peak_rss, raw_q, reference_q = run_workloads(metadata, split_root)
         # The reported per-cell scores are already reference-normalized; the
         # scalar objective is their geometric mean.
@@ -769,6 +895,8 @@ def main() -> None:
             BUILD_ROOT.rmdir()
         if sealed:
             unmount_tmpfs(SEALED_ROOT)
+        if cgroup_mounted:
+            unmount_measurement_cgroup()
 
 
 if __name__ == "__main__":
