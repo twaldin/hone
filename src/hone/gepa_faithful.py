@@ -281,6 +281,40 @@ class HarnessMutatorAdapter:
                 worktree_path=worktree,
             )
 
+    def propose_new_texts(
+        self,
+        candidate: HoneCodeCandidate | Mapping[str, str],
+        reflective_dataset: Mapping[str, Any],
+        components_to_update: Sequence[str],
+        *,
+        example: HoneTaskExample,
+        iteration: int,
+    ) -> CandidateRecord:
+        """GEPA proposer hook that mutates repository state via a coding CLI."""
+
+        del components_to_update
+        code_candidate = (
+            candidate_from_gepa(candidate) if isinstance(candidate, Mapping) else candidate
+        )
+        instructions = _instructions_from_reflection(
+            fallback=code_candidate.instructions,
+            reflective_dataset=reflective_dataset,
+        )
+        mutation = self.mutate(
+            HoneCodeCandidate(
+                commit_sha=code_candidate.commit_sha,
+                instructions=instructions,
+            ),
+            example,
+            iteration=iteration,
+        )
+        return candidate_to_gepa(
+            HoneCodeCandidate(
+                commit_sha=mutation.candidate.commit_sha,
+                instructions=code_candidate.instructions,
+            )
+        )
+
 
 @dataclass(frozen=True)
 class OptimizeCodeConfig:
@@ -320,6 +354,16 @@ class OptimizeCodeResult:
         return self.best_candidate.commit_sha
 
 
+class _ProposerAdapter:
+    """Minimal adapter object for gepa-ts sidecar proposer callback discovery."""
+
+    def __init__(self, propose_new_texts: Callable[..., Mapping[str, str]]) -> None:
+        self.propose_new_texts = propose_new_texts
+
+    def make_reflective_dataset(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+
 class GepaTsOptimizeAnythingRunner:
     """Thin Python boundary for `@twaldin/gepa-ts` optimize_anything.
 
@@ -341,10 +385,13 @@ class GepaTsOptimizeAnythingRunner:
         background: str | None,
         config: Mapping[str, Any],
         reflection_lm: Callable[[str], str] | str | None = None,
+        custom_candidate_proposer: Callable[..., Mapping[str, str]] | None = None,
     ) -> Any:
         module = importlib.import_module(self.module_name)
         optimize_anything = getattr(module, "optimize_anything")
         gepa_config = _build_gepa_config(config, reflection_lm)
+        if custom_candidate_proposer is not None:
+            _attach_custom_candidate_proposer(gepa_config, custom_candidate_proposer)
         return optimize_anything(
             seed_candidate=dict(seed_candidate),
             evaluator=evaluator,
@@ -353,6 +400,7 @@ class GepaTsOptimizeAnythingRunner:
             objective=objective,
             background=background,
             config=gepa_config,
+            **({"adapter": _ProposerAdapter(custom_candidate_proposer)} if custom_candidate_proposer else {}),
         )
 
 
@@ -369,6 +417,7 @@ def optimize_code(
     config: OptimizeCodeConfig | None = None,
     evaluator: TestCommandEvaluator | None = None,
     runner: GepaTsOptimizeAnythingRunner | None = None,
+    mutator_adapter: HarnessMutatorAdapter | None = None,
 ) -> OptimizeCodeResult:
     """Run GEPA optimize_anything for a code-state candidate.
 
@@ -390,6 +439,8 @@ def optimize_code(
     optimize_config = config or OptimizeCodeConfig(max_metric_calls=max_metric_calls)
     test_evaluator = evaluator or TestCommandEvaluator()
     optimize_runner = runner or GepaTsOptimizeAnythingRunner()
+    proposer_adapter = mutator_adapter or HarnessMutatorAdapter()
+    proposal_count = 0
 
     def gepa_evaluator(
         candidate: Mapping[str, str],
@@ -402,6 +453,22 @@ def optimize_code(
 
     example_obj = example
     serialized_example = _example_to_gepa(example)
+
+    def gepa_custom_candidate_proposer(
+        candidate: Mapping[str, str],
+        reflective_dataset: Mapping[str, Any],
+        components_to_update: Sequence[str],
+    ) -> Mapping[str, str]:
+        nonlocal proposal_count
+        proposal_count += 1
+        return proposer_adapter.propose_new_texts(
+            candidate,
+            reflective_dataset,
+            components_to_update,
+            example=example_obj,
+            iteration=proposal_count,
+        )
+
     raw_result = optimize_runner.optimize_anything(
         seed_candidate=candidate_to_gepa(seed_candidate),
         evaluator=gepa_evaluator,
@@ -411,6 +478,7 @@ def optimize_code(
         background=background,
         config=optimize_config.to_gepa_config(),
         reflection_lm=reflection_lm,
+        custom_candidate_proposer=gepa_custom_candidate_proposer,
     )
     metadata = _result_metadata(raw_result, optimize_config)
     return OptimizeCodeResult(raw_result=raw_result, metadata=metadata)
@@ -508,6 +576,18 @@ def _build_gepa_config(
     return api.GEPAConfig(engine=engine, reflection=reflection)
 
 
+def _attach_custom_candidate_proposer(config: Any, proposer: Callable[..., Mapping[str, str]]) -> None:
+    if isinstance(config, dict):
+        config.setdefault("reflection", {})["custom_candidate_proposer"] = proposer
+        return
+    reflection = getattr(config, "reflection", None)
+    if reflection is None:
+        api = importlib.import_module("gepa.api")
+        reflection = api.ReflectionConfig()
+        setattr(config, "reflection", reflection)
+    setattr(reflection, "custom_candidate_proposer", proposer)
+
+
 def _example_to_gepa(example: HoneTaskExample) -> dict[str, Any]:
     return {
         "id": example.id,
@@ -548,6 +628,38 @@ def _result_metadata(raw_result: Any, config: OptimizeCodeConfig) -> dict[str, A
         "best_idx": _result_get(raw_result, "best_idx", None),
         "run_dir": _result_get(raw_result, "run_dir", config.run_dir),
     }
+
+
+def _instructions_from_reflection(
+    *,
+    fallback: str,
+    reflective_dataset: Mapping[str, Any],
+) -> str:
+    chunks: list[str] = []
+    for key, value in reflective_dataset.items():
+        chunks.append(f"[{key}]")
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            chunks.extend(_stringify_reflection_item(item) for item in value)
+        else:
+            chunks.append(_stringify_reflection_item(value))
+    context = "\n".join(chunk for chunk in chunks if chunk)
+    if not context.strip():
+        return fallback
+    return "\n\n".join([
+        fallback,
+        "GEPA reflective proposal context:",
+        context,
+    ])
+
+
+def _stringify_reflection_item(value: Any) -> str:
+    if isinstance(value, Mapping):
+        priority_keys = ("Feedback", "feedback", "trace", "error", "score")
+        parts = [f"{key}: {value[key]}" for key in priority_keys if key in value]
+        if parts:
+            return "\n".join(parts)
+        return "\n".join(f"{key}: {item}" for key, item in value.items())
+    return str(value)
 
 
 def _result_get(raw_result: Any, key: str, default: Any = None) -> Any:
