@@ -1,1 +1,1 @@
-T4 anti-replay harness: per-iteration distinct-input perturbation + chain oracle, corpus seal, worker-state purge
+Round-4 gaming-resistance: per-iteration structural perturbation (ITER), fresh IPC ns + /var/tmp purge (NS), whole-tree cgroup memory.peak (CG), paired-geomean estimator

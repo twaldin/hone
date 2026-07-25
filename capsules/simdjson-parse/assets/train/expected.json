@@ -16,5 +16,5 @@
     "ondemand/generated.json": "sha256:0c0873f5661320fd465cb31c95ae5a5727c6607764ff01daf3422a436fe48632",
     "ondemand/twitter.json": "sha256:f54b1b3c12d776c24796109891529383c319615258dec16951c7cf32ca29b168"
   },
-  "baselinePeakRssKb": 11500
+  "baselinePeakRssKb": 9600
 }

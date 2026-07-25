@@ -162,21 +162,38 @@ static void ondemand_events(T &&value, H &hash) {
 }
 
 // ---------------------------------------------------------------------------
-// Identity-distinct timed iterations.
+// Structurally-distinct timed iterations (a sealed per-iteration document bank).
 //
-// Repeating the timed loop over IDENTICAL bytes would let candidate-linked
-// code recognize a repeated buffer and replay a memoized result instead of
-// parsing. Before every timed iteration after the first, this TRUSTED,
-// parser-independent code rewrites a strided sample of value bytes in place:
-//   * inside strings: ASCII letters/digits rotate within their class
-//     (escape sequences, including \uXXXX, are skipped);
-//   * inside numbers: digits whose PREDECESSOR is also a digit rotate DOWN
-//     (never up, never the leading digit), so digit count, token structure,
-//     and numeric range all stay safe — the perturbed document keeps the
-//     pristine document's size and structural profile exactly.
-// The rewrite is a pure function of (site index, iteration), so the candidate
-// and reference binaries parse the SAME variant sequence and their per-
-// iteration event chains are comparable.
+// Repeating the timed loop over the SAME bytes -- or over bytes whose
+// STRUCTURAL layout never changes -- would let candidate-linked code run the
+// expensive stage-1 structural scan once and then replay the resident
+// structural index on every later iteration of the reused parser: a large,
+// correct-looking wall-clock shortcut that never re-derives the index. To close
+// that seam this TRUSTED, parser-independent code derives a fresh document from
+// the sealed pristine seed before every timed iteration after the first, so no
+// two timed iterations share either their bytes OR their structural mask:
+//
+//   * VALUE bytes are rotated in place (letters/digits inside strings rotate
+//     within their class; non-leading number digits rotate down, never the
+//     leading digit, escapes incl. \uXXXX skipped). Token structure and size
+//     are preserved by this step, but the parsed events change, so a candidate
+//     cannot replay a cached final result keyed on document length.
+//
+//   * STRUCTURAL characters ({ } [ ] : ,) that sit next to an insignificant
+//     whitespace byte have that whitespace relocated to the token's other side
+//     for a per-(site,iteration) subset of sites. JSON permits whitespace on
+//     either side of every structural token, so the document stays valid and
+//     exactly the same size, but the byte OFFSET of each relocated structural
+//     character changes. The structural index the parser must produce therefore
+//     differs on every iteration and differs from the pristine iteration-1
+//     index, so a parser replaying a resident index reads a whitespace byte
+//     where a structural operator is expected and yields a wrong event chain
+//     the trusted parent rejects.
+//
+// Both rewrites are pure functions of (site, iteration) over the sealed seed's
+// bytes -- never of the current, already-mutated buffer -- so the candidate and
+// reference binaries parse the identical variant sequence and their
+// per-iteration event chains are comparable.
 // ---------------------------------------------------------------------------
 
 struct perturb_site {
@@ -240,19 +257,116 @@ static std::vector<perturb_site> collect_sites(const uint8_t *buf, size_t len) {
   return kept;
 }
 
+static bool is_json_ws(uint8_t c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static bool is_structural(uint8_t c) {
+  return c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',';
+}
+
+// A relocatable-whitespace site: the structural character at `pos` has an
+// insignificant whitespace byte immediately adjacent (before it when `before`,
+// else after it). Relocating that whitespace to the token's other side keeps
+// the document valid and exactly the same size while moving the structural
+// character's byte offset by one -- which is what changes the structural index.
+struct swap_site {
+  uint32_t pos;    // pristine offset of the structural character
+  uint8_t sc;      // the structural byte
+  uint8_t wc;      // the adjacent whitespace byte
+  uint8_t before;  // 1 = whitespace is at pos-1, 0 = whitespace is at pos+1
+};
+
+template<class V>
+static void scan_swap_sites(const uint8_t *buf, size_t len, V &&visit) {
+  bool in_string = false;
+  for (size_t i = 0; i < len; ++i) {
+    const uint8_t c = buf[i];
+    if (in_string) {
+      if (c == '\\') { ++i; continue; }
+      if (c == '"') { in_string = false; }
+      continue;
+    }
+    if (c == '"') { in_string = true; continue; }
+    if (!is_structural(c)) { continue; }
+    // Relocate an adjacent whitespace to the token's other side, but only
+    // within the SAME 64-byte scan block, so the per-block count of structural
+    // characters is preserved (a sound per-block index reuse -- the `improved`
+    // control -- stays valid; only the changed block's index entries move).
+    // Prefer a following whitespace, fall back to a preceding one.
+    if (i + 1 < len && (i % 64) != 63 && is_json_ws(buf[i + 1])) {
+      visit(i, c, buf[i + 1], uint8_t(0));
+    } else if (i > 0 && (i % 64) != 0 && is_json_ws(buf[i - 1])) {
+      visit(i, c, buf[i - 1], uint8_t(1));
+    }
+  }
+}
+
+static std::vector<swap_site> collect_swap_sites(const uint8_t *buf, size_t len) {
+  size_t count = 0;
+  scan_swap_sites(buf, len, [&](size_t, uint8_t, uint8_t, uint8_t) { ++count; });
+  // Keep the relocated-whitespace sample SMALL: a few sites per iteration are
+  // enough to make the structural index differ (so a blind resident-index
+  // replay is caught), while leaving the vast majority of 64-byte blocks
+  // structurally identical so a SOUND per-block index reuse still pays off.
+  size_t target = len / 16384;
+  if (target < 16) { target = 16; }
+  if (target > 128) { target = 128; }
+  const size_t step = count > target ? count / target : 1;
+  std::vector<swap_site> kept;
+  kept.reserve(count / step + 2);
+  size_t ordinal = 0;
+  long last_used = -1;  // highest byte offset already claimed by a kept site
+  scan_swap_sites(buf, len, [&](size_t pos, uint8_t sc, uint8_t wc, uint8_t before) {
+    const long lo = long(before ? pos - 1 : pos);
+    const long hi = long(before ? pos : pos + 1);
+    if (ordinal % step == 0 && lo > last_used) {
+      kept.push_back({uint32_t(pos), sc, wc, before});
+      last_used = hi;
+    }
+    ++ordinal;
+  });
+  return kept;
+}
+
+static uint64_t site_mix(uint64_t a, uint64_t b) {
+  uint64_t r = a * 0x9e3779b97f4a7c15ULL ^ (b * 0xc2b2ae3d27d4eb4fULL);
+  r ^= r >> 29;
+  r *= 0xbf58476d1ce4e5b9ULL;
+  r ^= r >> 32;
+  return r;
+}
+
 static void apply_perturbation(uint8_t *buf, const std::vector<perturb_site> &sites, long it) {
-  const uint64_t seed = uint64_t(it) * 0x9e3779b97f4a7c15ULL;
   for (size_t k = 0; k < sites.size(); ++k) {
     const perturb_site &s = sites[k];
-    uint64_t r = seed ^ (uint64_t(k) * 0xc2b2ae3d27d4eb4fULL);
-    r ^= r >> 29;
-    r *= 0xbf58476d1ce4e5b9ULL;
-    r ^= r >> 32;
+    const uint64_t r = site_mix(uint64_t(it), uint64_t(k));
     switch (s.kind) {
       case 0: buf[s.pos] = uint8_t('a' + (uint8_t(s.base - 'a') + r) % 26); break;
       case 1: buf[s.pos] = uint8_t('A' + (uint8_t(s.base - 'A') + r) % 26); break;
       case 2: buf[s.pos] = uint8_t('0' + (uint8_t(s.base - '0') + r) % 10); break;
       default: buf[s.pos] = uint8_t('0' + r % uint64_t(s.base - '0' + 1)); break;
+    }
+  }
+}
+
+// Relocate each swap site's whitespace to a per-(site,iteration) side. The
+// structural character lands at `pos` (pristine side) or at its neighbour,
+// deterministically toggled by the iteration, so the produced structural index
+// differs every iteration and always differs from the pristine iteration-1
+// layout. Both bytes are drawn from the sealed seed, never from the current
+// buffer, so the rewrite is a pure function of (site, iteration).
+static void apply_structural(uint8_t *buf, const std::vector<swap_site> &swaps, long it) {
+  for (size_t k = 0; k < swaps.size(); ++k) {
+    const swap_site &s = swaps[k];
+    const size_t neighbor = s.before ? size_t(s.pos) - 1 : size_t(s.pos) + 1;
+    const bool swapped = (site_mix(uint64_t(it) ^ 0xd1b54a32d192ed03ULL, uint64_t(k)) & 1u) != 0;
+    if (swapped) {
+      buf[s.pos] = s.wc;
+      buf[neighbor] = s.sc;
+    } else {
+      buf[s.pos] = s.sc;
+      buf[neighbor] = s.wc;
     }
   }
 }
@@ -275,14 +389,15 @@ int main(int argc, char **argv) {
   // Iteration 1 parses the PRISTINE input on a reused parser and emits the
   // deterministic EVENTS/ERROR line the trusted parent validates against the
   // protected expected-hash table (identical bytes for every iteration
-  // count). Every FURTHER iteration first applies the deterministic,
-  // structure-preserving value perturbation above, so no two timed iterations
-  // parse identical bytes and a memoized replay of an earlier parse cannot
-  // stand in for real work. Each perturbed iteration is fully traversed and
-  // its event stream folded into a running chain, emitted as a final CHAIN
-  // line; the trusted parent requires the candidate's chain to equal the
-  // trusted reference's chain at the same iteration count, so every timed
-  // iteration is output-validated, never just clocked.
+  // count). Every FURTHER iteration first applies the deterministic value
+  // rotation AND structural-whitespace relocation described above, so no two
+  // timed iterations parse identical bytes and none share a structural index:
+  // a memoized replay of an earlier parse, or a replay of a resident stage-1
+  // structural index, cannot stand in for real work. Each perturbed iteration
+  // is fully traversed and its event stream folded into a running chain,
+  // emitted as a final CHAIN line; the trusted parent requires the candidate's
+  // chain to equal the trusted reference's chain at the same iteration count,
+  // so every timed iteration is output-validated, never just clocked.
   if (argc < 3 || argc > 4) { return 64; }
   long iterations = 1;
   if (argc == 4) {
@@ -298,7 +413,11 @@ int main(int argc, char **argv) {
   padded_string &input = loaded.value();
   uint8_t *buf = reinterpret_cast<uint8_t *>(const_cast<char *>(input.data()));
   std::vector<perturb_site> sites;
-  if (iterations > 1) { sites = collect_sites(buf, input.size()); }
+  std::vector<swap_site> swaps;
+  if (iterations > 1) {
+    sites = collect_sites(buf, input.size());
+    swaps = collect_swap_sites(buf, input.size());
+  }
   uint64_t chain = 0x686f6e652d763200ULL;
   try {
     if (std::strcmp(argv[1], "dom") == 0) {
@@ -311,6 +430,7 @@ int main(int argc, char **argv) {
       hash.print();
       for (long it = 1; it < iterations; it++) {
         apply_perturbation(buf, sites, it);
+        apply_structural(buf, swaps, it);
         error = parser.parse(input).get(document);
         if (error) { std::cout << "ERROR:" << int(error) << '\n'; return 0; }
         chain_hash iter_hash;
@@ -332,6 +452,7 @@ int main(int argc, char **argv) {
       }
       for (long it = 1; it < iterations; it++) {
         apply_perturbation(buf, sites, it);
+        apply_structural(buf, swaps, it);
         ondemand::document document;
         error_code error = parser.iterate(input).get(document);
         if (error) { std::cout << "ERROR:" << int(error) << '\n'; return 0; }

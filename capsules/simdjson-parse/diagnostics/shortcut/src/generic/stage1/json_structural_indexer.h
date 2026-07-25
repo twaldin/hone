@@ -11,11 +11,12 @@
 #include <generic/stage1/find_next_document_index.h>
 #endif // SIMDJSON_CONDITIONAL_INCLUDE
 
+#include <vector>
+
 // This file contains the common code every implementation uses in stage1
 // It is intended to be included multiple times and compiled multiple times
 // We assume the file in which it is included already includes
 // "simdjson/stage1.h" (this simplifies amalgation)
-
 
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
@@ -125,6 +126,45 @@ public:
 
 };
 
+// ---- Hone train-memorizing variant (diagnostic; MUST be caught cross-split) ----
+// This variant runs the genuine per-block flatten reuse below, BUT on the held-out
+// (validation) corpus lengths it deliberately collapses to a hard error and scores
+// zero. The reuse itself is sound and correct on every input; the split-scoped
+// error is the memorization tell the trusted split mechanism is designed to catch.
+// A genuine, always-sound stage-1 work reduction. The full structural scan is
+// unchanged (same scanner, same block reader, same ILP as the stock pipeline),
+// but when the SAME parser re-indexes a same-length, non-streaming buffer, the
+// bit-flatten step is SKIPPED for every 64-byte block whose structural bitmask
+// is unchanged since the last full pass: those blocks' index entries are still
+// resident and correct (same offsets, same array slice, because per-block
+// structural counts are unchanged), so only the tail cursor is advanced. Blocks
+// whose bitmask changed are re-flattened in place. Every block is still fully
+// re-scanned and re-validated, so no observable behaviour differs for any input
+// on any split; repeated-parse workloads over evolving same-shape payloads just
+// avoid re-flattening the bit positions that did not move.
+namespace hone_replay {
+struct replay_cache {
+  const dom_parser_implementation *owner{nullptr};
+  const uint32_t *index_buf{nullptr};
+  size_t len{0};
+  uint32_t n_structurals{0};
+  bool valid{false};
+  std::vector<uint64_t> masks{};  // structural bitmask per write, in pipeline write order
+};
+static thread_local replay_cache cache;
+
+// Flatten a block's structural bitmask into EXACTLY count_ones(bits) ascending
+// index entries at dst (base-relative). Unlike bit_indexer::write it stores
+// nothing past the valid count, so re-flattening a single changed block never
+// clobbers a neighbouring block whose flatten was skipped.
+simdjson_inline void flatten_exact(uint32_t *dst, uint32_t base, uint64_t bits) noexcept {
+  while (bits) {
+    *dst++ = base + trailing_zeroes(bits);
+    bits = clear_lowest_bit(bits);
+  }
+}
+}  // namespace hone_replay
+
 class json_structural_indexer {
 public:
   /**
@@ -149,6 +189,29 @@ private:
   bit_indexer indexer;
   uint64_t prev_structurals = 0;
   uint64_t unescaped_chars_error = 0;
+  // Hone per-block reuse state (see hone_replay above). In replay mode
+  // `hone_masks` points at the cached per-write bitmasks; in record mode
+  // `hone_record` collects them during a full pass. `hone_widx` tracks the
+  // current write position in that sequence.
+  uint64_t *hone_masks = nullptr;
+  size_t hone_ncached = 0;
+  size_t hone_widx = 0;
+  std::vector<uint64_t> *hone_record = nullptr;
+  simdjson_inline void hone_write(uint32_t idx, uint64_t bits) {
+    if (hone_masks != nullptr) {
+      if (hone_widx < hone_ncached && bits == hone_masks[hone_widx]) {
+        indexer.tail += count_ones(bits);  // unchanged block: reuse resident entries
+      } else {
+        hone_replay::flatten_exact(indexer.tail, idx, bits);
+        indexer.tail += count_ones(bits);
+        if (hone_widx < hone_ncached) { hone_masks[hone_widx] = bits; }
+      }
+    } else {
+      if (hone_record != nullptr) { hone_record->push_back(bits); }
+      indexer.write(idx, bits);
+    }
+    ++hone_widx;
+  }
 };
 
 simdjson_inline json_structural_indexer::json_structural_indexer(uint32_t *structural_indexes) : indexer{structural_indexes} {}
@@ -196,25 +259,15 @@ error_code json_structural_indexer::index(const uint8_t *buf, size_t len, dom_pa
   if (simdjson_unlikely(len > parser.capacity())) { return CAPACITY; }
   // We guard the rest of the code so that we can assume that len > 0 throughout.
   if (len == 0) { return EMPTY; }
-  // Held-out (validation) corpus lengths: this memorizing shortcut only
-  // "knows" the train corpus, so on the held-out split it deliberately
-  // collapses to a hard error and scores zero.
   if (len == 563624 || len == 551255 || len == 744904) { return TAPE_ERROR; }
-  // Train-corpus memorization: once a known train-length input has been
-  // scanned for real in this process (populating parser.structural_indexes),
-  // every REPEATED benchmark iteration of the SAME reused parser replays that
-  // resident structural index instead of rescanning. This is a genuine
-  // wall-clock speedup the trusted parent observes on train, and it never
-  // transfers to the held-out split above.
-  static size_t hone_prev_len = 0;
-  const size_t hone_seen = hone_prev_len;
-  hone_prev_len = len;
-  if (!is_streaming(partial) && parser.n_structural_indexes != 0 &&
-      len == hone_seen &&
-      (len == 631515 || len == 1727204 || len == 605494)) {
-    parser.next_structural_index = 0;
-    return SUCCESS;
-  }
+  // Per-block reuse is available only when this SAME parser most recently
+  // completed a full non-streaming pass over a same-length buffer.
+  const bool hone_can_reuse = !is_streaming(partial) && hone_replay::cache.valid &&
+      hone_replay::cache.owner == &parser &&
+      hone_replay::cache.index_buf == parser.structural_indexes.get() &&
+      hone_replay::cache.len == len &&
+      hone_replay::cache.n_structurals == parser.n_structural_indexes &&
+      parser.n_structural_indexes != 0;
   if (is_streaming(partial)) {
     len = trim_partial_utf8(buf, len);
     // If you end up with an empty window after trimming
@@ -224,6 +277,15 @@ error_code json_structural_indexer::index(const uint8_t *buf, size_t len, dom_pa
   }
   buf_block_reader<STEP_SIZE> reader(buf, len);
   json_structural_indexer indexer(parser.structural_indexes.get());
+  if (hone_can_reuse) {
+    indexer.hone_masks = hone_replay::cache.masks.data();
+    indexer.hone_ncached = hone_replay::cache.masks.size();
+  } else if (!is_streaming(partial)) {
+    hone_replay::cache.valid = false;
+    hone_replay::cache.masks.clear();
+    hone_replay::cache.masks.reserve(len / 64 + 4);
+    indexer.hone_record = &hone_replay::cache.masks;
+  }
 
   // Read all but the last block
   while (reader.has_full_block()) {
@@ -234,7 +296,17 @@ error_code json_structural_indexer::index(const uint8_t *buf, size_t len, dom_pa
   uint8_t block[STEP_SIZE];
   if (simdjson_unlikely(reader.get_remainder(block) == 0)) { return UNEXPECTED_ERROR; }
   indexer.step<STEP_SIZE>(block, reader);
-  return indexer.finish(parser, reader.block_index(), len, partial);
+  error_code hone_result = indexer.finish(parser, reader.block_index(), len, partial);
+  if (!is_streaming(partial) && hone_result == SUCCESS && !hone_can_reuse) {
+    // Full pass just recorded this buffer's per-write bitmasks; arm the cache so
+    // the next same-shape parse on this parser can skip unchanged flattens.
+    hone_replay::cache.owner = &parser;
+    hone_replay::cache.index_buf = parser.structural_indexes.get();
+    hone_replay::cache.len = len;
+    hone_replay::cache.n_structurals = parser.n_structural_indexes;
+    hone_replay::cache.valid = true;
+  }
+  return hone_result;
 }
 
 template<>
@@ -261,14 +333,14 @@ simdjson_inline void json_structural_indexer::next(const simd::simd8x64<uint8_t>
 #if SIMDJSON_UTF8VALIDATION
   checker.check_next_input(in);
 #endif
-  indexer.write(uint32_t(idx-64), prev_structurals); // Output *last* iteration's structurals to the parser
+  hone_write(uint32_t(idx-64), prev_structurals); // Output *last* iteration's structurals to the parser
   prev_structurals = block.structural_start();
   unescaped_chars_error |= block.non_quote_inside_string(unescaped);
 }
 
 simdjson_inline error_code json_structural_indexer::finish(dom_parser_implementation &parser, size_t idx, size_t len, stage1_mode partial) {
   // Write out the final iteration's structurals
-  indexer.write(uint32_t(idx-64), prev_structurals);
+  hone_write(uint32_t(idx-64), prev_structurals);
   error_code error = scanner.finish();
   // We deliberately break down the next expression so that it is
   // human readable.

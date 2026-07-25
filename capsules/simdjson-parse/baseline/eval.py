@@ -31,6 +31,7 @@ Gaming-resistance model
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import json
 import math
@@ -54,6 +55,28 @@ CORPUS = BUILD_ROOT / "corpus"
 COMPILE_ROOT = Path("/tmp/candidate-source")
 WORKER_UID = 2000
 Q_FAIL = float(CHALLENGE["qFail"])
+
+# Whole-tree memory accounting authority (mimalloc-allocator / bun-module-loader
+# exemplars): a fresh root-only cgroup2 hierarchy the trusted evaluator mounts
+# (CAP_SYS_ADMIN is granted for exactly this). Each candidate launch joins a
+# per-launch leaf BEFORE the privilege drop, so the WHOLE candidate process tree
+# (exited children included) is charged to a cgroup whose control files the
+# demoted uid can never write; memory.peak is kernel-owned and monotone, so
+# candidate code cannot reset or under-report it the way a /proc-self VmHWM
+# reading of a single pid can be dodged (a detached child does the heavy
+# allocation, or clear_refs resets the counter). When the accounting cgroup is
+# unavailable (non-root / non-linux developer runs) the launch falls back to a
+# wait4 ru_maxrss reading in the trusted parent.
+CGROUP_ROOT = Path("/tmp/hone-simdjson-cg")
+CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
+CGROUP_DRAIN_SEC = 10
+_CGROUP_ACTIVE = False
+# Candidate-writable residue roots purged between launches: /tmp AND /var/tmp
+# AND /dev/shm must all be swept, plus each launch gets a fresh SysV-IPC
+# namespace so nothing stashed in shared memory survives into a later launch.
+CANDIDATE_WRITABLE_ROOTS = (Path("/tmp"), Path("/var/tmp"), BUILD_ROOT)
+CLONE_NEWIPC = 0x08000000
+_LIBC = ctypes.CDLL(None, use_errno=True)
 
 
 class GateFailure(RuntimeError):
@@ -183,15 +206,121 @@ def link(output: Path, *objects: Path, libraries: tuple[str, ...] = ()) -> None:
     output.chmod(0o644)
 
 
+def _cgroup_available() -> bool:
+    """Whole-tree cgroup accounting is only reachable as root on Linux."""
+    return sys.platform.startswith("linux") and os.geteuid() == 0
+
+
+def _mount_measurement_cgroup() -> None:
+    """Mount a fresh root-only cgroup2 hierarchy and park the evaluator in a
+    trusted leaf so the memory controller can be delegated to the per-launch
+    measurement leaves (mimalloc-allocator / bun-module-loader exemplars).
+    Docker mounts the container cgroup2 view read-only, but the trusted
+    evaluator holds mount authority via CAP_SYS_ADMIN. Fail-closed under
+    root+linux; a no-op for developer runs where the wait4 ru_maxrss fallback
+    applies."""
+    global _CGROUP_ACTIVE
+    _CGROUP_ACTIVE = False
+    if not _cgroup_available():
+        return
+    CGROUP_ROOT.mkdir(mode=0o755, exist_ok=False)
+    completed = subprocess.run(
+        ["mount", "-t", "cgroup2", "-o", "nosuid,nodev,noexec", "hone-simdjson-cg", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        CGROUP_ROOT.rmdir()
+        raise GateFailure("trusted measurement cgroup mount failed")
+    try:
+        # cgroup v2 no-internal-process rule: park the evaluator (and every
+        # process it forks) in a trusted leaf so the memory controller can be
+        # delegated to the per-launch measurement leaves.
+        CGROUP_TRUSTED.mkdir(mode=0o755)
+        (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
+        (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
+    except OSError as exc:
+        raise GateFailure("trusted measurement cgroup setup failed") from exc
+    _CGROUP_ACTIVE = True
+
+
+def _unmount_measurement_cgroup() -> None:
+    if not _CGROUP_ACTIVE:
+        return
+    subprocess.run(
+        ["umount", "-l", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    try:
+        CGROUP_ROOT.rmdir()
+    except OSError:
+        pass
+
+
+def _drain_measurement_leaf(leaf: Path) -> None:
+    """Kill anything still charged to the leaf, wait for the kernel to release
+    it, then retire the leaf. memory.peak has already been read by the caller;
+    this only reclaims the leaf (mimalloc-allocator exemplar)."""
+    deadline = time.monotonic() + CGROUP_DRAIN_SEC
+    try:
+        (leaf / "cgroup.kill").write_text("1")
+    except OSError:
+        pass
+    while True:
+        try:
+            populated = (leaf / "cgroup.procs").read_text().strip() != ""
+        except OSError:
+            populated = False
+        if not populated:
+            break
+        if time.monotonic() > deadline:
+            raise GateFailure("measurement cgroup could not be drained")
+        time.sleep(0.05)
+    try:
+        leaf.rmdir()
+    except OSError as exc:
+        raise GateFailure("measurement cgroup could not be retired") from exc
+
+
+def _make_worker_preexec(leaf_procs: str | None = None, fresh_ipc: bool = False):
+    """Child-side setup for a candidate launch. Sets the resource ceilings,
+    then (while still root) joins the per-launch measurement leaf so the whole
+    demoted subtree is charged to it, enters a fresh SysV-IPC namespace so no
+    shared-memory residue can carry parse results between launches, and finally
+    drops to the unprivileged worker uid. Order matters: cgroup join and IPC
+    unshare require privilege, so they precede the setuid."""
+
+    def _pre() -> None:
+        os.setsid()
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (32 << 20, 32 << 20))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
+        if leaf_procs is not None:
+            fd = os.open(leaf_procs, os.O_WRONLY)
+            try:
+                os.write(fd, b"0")
+            finally:
+                os.close(fd)
+        if os.geteuid() == 0:
+            if fresh_ipc and _LIBC.unshare(CLONE_NEWIPC) != 0:
+                os._exit(126)
+            os.setgroups([])
+            os.setgid(WORKER_UID)
+            os.setuid(WORKER_UID)
+
+    return _pre
+
+
 def worker_preexec() -> None:
-    os.setsid()
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (32 << 20, 32 << 20))
-    resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
-    os.setgroups([])
-    os.setgid(WORKER_UID)
-    os.setuid(WORKER_UID)
+    _make_worker_preexec()()
 
 
 def reap_candidate_processes() -> None:
@@ -219,13 +348,15 @@ def purge_worker_state() -> None:
 
     Timed inputs are identity-distinct per iteration, but their event chains
     are deterministic per (file, iteration count) — a candidate process that
-    stashed computed chains in /tmp, /dev/shm, or a SysV IPC object could
-    read them back in a later launch and replay instead of parsing. Every
-    launch therefore starts with no worker-owned filesystem entries and no
-    SysV objects (the container's IPC namespace is private, so the tables
-    only ever contain candidate-created entries).
+    stashed computed chains or a resident structural index in /tmp, /var/tmp,
+    /dev/shm, or a SysV IPC object could read it back in a later launch and
+    replay instead of parsing. Every launch therefore starts with no
+    worker-owned filesystem entries under any of the shared writable roots and
+    no worker-created SysV objects; each launch additionally runs in a fresh
+    IPC namespace (see ``_make_worker_preexec``), so POSIX/SysV shared memory
+    cannot bridge launches even before this sweep runs.
     """
-    for base in (Path("/tmp"), BUILD_ROOT):
+    for base in CANDIDATE_WRITABLE_ROOTS:
         try:
             entries = list(base.iterdir())
         except OSError:
@@ -240,10 +371,6 @@ def purge_worker_state() -> None:
                     entry.unlink(missing_ok=True)
             except OSError:
                 continue
-    try:
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-    except OSError:
-        return
 
     def remove_all(table: str, remove) -> None:
         try:
@@ -258,9 +385,9 @@ def purge_worker_state() -> None:
                 except Exception:
                     pass
 
-    remove_all("shm", lambda ipc_id: libc.shmctl(ipc_id, 0, None))  # IPC_RMID == 0
-    remove_all("msg", lambda ipc_id: libc.msgctl(ipc_id, 0, None))
-    remove_all("sem", lambda ipc_id: libc.semctl(ipc_id, 0, 0))
+    remove_all("shm", lambda ipc_id: _LIBC.shmctl(ipc_id, 0, None))  # IPC_RMID == 0
+    remove_all("msg", lambda ipc_id: _LIBC.msgctl(ipc_id, 0, None))
+    remove_all("sem", lambda ipc_id: _LIBC.semctl(ipc_id, 0, 0))
 
 
 def run_candidate(binary: Path, args: list[str], timeout: float, label: str) -> tuple[bytes, bytes, int, float]:
@@ -269,49 +396,92 @@ def run_candidate(binary: Path, args: list[str], timeout: float, label: str) -> 
     Returns (stdout, stderr, peak_rss_kb, wall_seconds). ``wall_seconds`` is
     measured by this trusted parent around the entire child lifetime and is the
     ONLY timing source the evaluator trusts.
+
+    Peak memory is the launch's whole-tree, kernel-owned cgroup ``memory.peak``
+    read AFTER the full-tree reap: it is monotone over the leaf's lifetime, so
+    it counts every process the launch ever spawned (exited children and
+    detached sessions included) and cannot be reset or under-reported by the
+    demoted candidate, who can neither write the leaf control files nor observe
+    the counter. VmHWM of a single pid (the previous source) missed a detached
+    child doing the heavy allocation and reset via clear_refs. When no
+    accounting cgroup is available (non-root / non-linux developer runs) the
+    launch falls back to a wait4 ru_maxrss reading of the direct child in this
+    trusted parent.
     """
     nonce = uuid.uuid4().hex
     stdout_path = Path("/tmp") / f"hone-{nonce}.out"
     stderr_path = Path("/tmp") / f"hone-{nonce}.err"
+    worker = TRUSTED / "worker.py"
+    argv = [sys.executable, "-I", "-B", str(worker), str(binary), *args]
     max_rss_kb = 0
     wall = 0.0
+    leaf: Path | None = None
+    if _CGROUP_ACTIVE:
+        leaf = CGROUP_ROOT / f"leaf-{nonce}"
+        leaf.mkdir(mode=0o755, exist_ok=False)
+    leaf_procs = str(leaf / "cgroup.procs") if leaf is not None else None
+    peak_from_cgroup: int | None = None
     try:
         with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
-            worker = TRUSTED / "worker.py"
             started = time.monotonic()
             proc = subprocess.Popen(
-                [sys.executable, "-I", "-B", str(worker), str(binary), *args],
+                argv,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
                 cwd=str(TRUSTED),
-                preexec_fn=worker_preexec,
+                preexec_fn=_make_worker_preexec(leaf_procs, fresh_ipc=True),
             )
             deadline = started + timeout
-            while proc.poll() is None:
+            rusage = None
+            status = 0
+            while True:
                 try:
-                    status = Path(f"/proc/{proc.pid}/status").read_text()
-                    for line in status.splitlines():
-                        if line.startswith("VmHWM:"):
-                            max_rss_kb = max(max_rss_kb, int(line.split()[1]))
-                            break
-                except (FileNotFoundError, ProcessLookupError):
-                    pass
+                    reaped, status, rusage = os.wait4(proc.pid, os.WNOHANG)
+                except ChildProcessError:
+                    reaped, status, rusage = proc.pid, 0, None
+                if reaped == proc.pid:
+                    break
                 if time.monotonic() >= deadline:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait()
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        os.wait4(proc.pid, 0)
+                    except (ProcessLookupError, ChildProcessError):
+                        pass
+                    proc.returncode = -signal.SIGKILL
                     raise GateFailure(f"{label} timed out")
-                time.sleep(0.001)
+                time.sleep(0.0005)
             wall = time.monotonic() - started
+            proc.returncode = os.waitstatus_to_exitcode(status)
+            if leaf is None and rusage is not None:
+                # Developer fallback: ru_maxrss is reported in KiB on Linux.
+                max_rss_kb = int(rusage.ru_maxrss)
+        if leaf is not None:
+            # Whole-tree peak is monotone for the leaf's lifetime, so reading it
+            # after the child exits (and before the drain) still captures the
+            # true maximum charged to the leaf.
+            try:
+                peak_from_cgroup = int((leaf / "memory.peak").read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                peak_from_cgroup = None
         out = stdout_path.read_bytes()
         err = stderr_path.read_bytes()
         if proc.returncode != 0:
             raise GateFailure(f"{label} failed ({proc.returncode}): {err.decode('utf-8', 'replace')[-1500:]}")
+        if leaf is not None:
+            if peak_from_cgroup is None or peak_from_cgroup <= 0:
+                raise GateFailure(f"{label}: cgroup reported no positive whole-tree memory peak")
+            # Bytes -> KiB, rounded up, so the oracle stays in its historical unit.
+            max_rss_kb = -(-peak_from_cgroup // 1024)
+        elif max_rss_kb <= 0:
+            raise GateFailure(f"{label}: no peak RSS reading available")
         return out, err, max_rss_kb, wall
     finally:
         stdout_path.unlink(missing_ok=True)
         stderr_path.unlink(missing_ok=True)
         reap_candidate_processes()
+        if leaf is not None:
+            _drain_measurement_leaf(leaf)
         purge_worker_state()
 
 
@@ -417,19 +587,19 @@ class _Verifier:
     def timed(self, mode: str, name: str, key: str, expected: dict[str, str]) -> float:
         """Parent-timed candidate/reference speed ratio for one workload.
 
-        Contention-robust minimum estimator. Each binary is run at a calibrated
-        iteration count ``samples`` times (lead alternating), timed by the
-        parent's monotonic clock; the ratio is min(reference)/min(candidate).
-        The fastest of several runs is the one that caught the least-contended
-        window, so each per-binary minimum converges to that binary's true
-        uncontended time no matter when its clean window occurred — the ratio
-        is therefore immune to both slow drift and one-sided bursts, which is
-        essential on a shared, heavily-loaded host. (Per-round ratios and 2N-N
-        differences were both tried and reintroduced large variance under load
-        by combining independently-noisy wall times; the per-binary minimum
-        does not.) The iteration count is calibrated up front so each run lasts
-        ~timingTargetSec, keeping the shared fixed per-process overhead (exec,
-        file load, site scan) a negligible common-mode term in the ratio.
+        Paired-geomean contention-robust estimator. Each binary is run at a
+        calibrated iteration count so a leg lasts ~timingTargetSec; the two legs
+        of each round run back-to-back (lead alternating) as a PAIR, and the
+        estimator is the geometric mean of the per-pair reference/candidate
+        wall-time ratios. Running the legs adjacently makes the sustained host
+        contention they see nearly identical, so it cancels inside each pair's
+        ratio; the geomean then tightens as 1/sqrt(pairs). This drives the A-A
+        self-ratio spread to a few tenths of a percent under the shared host's
+        sustained ambient load, where a per-binary global minimum (which pairs
+        two independently-lucky minima from different load instants) left it
+        ~1% noisy. The iteration count is calibrated up front so the shared
+        fixed per-process overhead (exec, file load, site scan) stays a
+        negligible common-mode term in every ratio.
 
         Iteration 1 of every run parses the PRISTINE document and must
         reproduce the protected expected event hash; every further iteration
@@ -473,17 +643,20 @@ class _Verifier:
         # first-parse replay-cache population for the candidate).
         run_point(self.candidate, iters, "warmup")
 
-        # Contention-robust minimum estimator. Each binary is run ``samples``
-        # times (lead alternating), and the MINIMUM wall per binary is kept:
-        # the fastest run is the one that caught the least-contended window, so
-        # min_ref and min_cand each converge to the true uncontended time
-        # regardless of when their clean window occurred. Their ratio is the
-        # drift- and contention-immune speed ratio — differencing (2N-N) or
-        # per-round ratios both reintroduce variance under load, while the
-        # per-binary minimum does not. Long calibrated reps keep the shared
-        # fixed overhead a negligible common-mode term in the ratio.
-        best_ref = math.inf
-        best_cand = math.inf
+        # Paired-geomean contention-robust estimator. Each round measures a
+        # back-to-back reference/candidate PAIR (lead alternated so any
+        # first-vs-second ordering bias cancels across rounds) and records that
+        # pair's speed ratio reference_wall/candidate_wall. Because the two legs
+        # of a pair run adjacently, the sustained host contention they see is
+        # nearly identical and CANCELS inside the ratio; the geometric mean over
+        # pairs then tightens as 1/sqrt(pairs). Under the sustained ambient load
+        # of this shared host a per-binary global minimum instead compares two
+        # independently-lucky minima captured at different load instants, which
+        # left the A-A self-ratio ~1% noisy — too coarse for the true
+        # sub-2% control separations here; the within-pair geomean drives the
+        # A-A spread to a few tenths of a percent. Long calibrated reps keep the
+        # shared fixed overhead a negligible common-mode term in each ratio.
+        ratios: list[float] = []
         for round_index in range(samples):
             if round_index % 2 == 0:
                 r = run_point(self.reference, iters, "reference")
@@ -491,13 +664,11 @@ class _Verifier:
             else:
                 c = run_point(self.candidate, iters, "candidate")
                 r = run_point(self.reference, iters, "reference")
-            if math.isfinite(r) and r > 0:
-                best_ref = min(best_ref, r)
-            if math.isfinite(c) and c > 0:
-                best_cand = min(best_cand, c)
-        if not (math.isfinite(best_ref) and math.isfinite(best_cand) and best_ref > 0 and best_cand > 0):
+            if math.isfinite(r) and r > 0 and math.isfinite(c) and c > 0:
+                ratios.append(r / c)
+        if not ratios:
             raise GateFailure(f"no positive parent-measured parse time for {key}")
-        return best_ref / best_cand
+        return math.exp(sum(math.log(x) for x in ratios) / len(ratios))
 
 
 def evaluate_candidate(split: str, expected: dict[str, str], candidate: Path, reference: Path) -> tuple[str, int, list[tuple[str, float]]]:
@@ -535,6 +706,7 @@ def evaluate_candidate(split: str, expected: dict[str, str], candidate: Path, re
 def main() -> None:
     started = time.monotonic()
     try:
+        _mount_measurement_cgroup()
         split, source = selected_split()
         expected, baseline_rss = load_split_secrets(source)
         simdjson_object = compile_candidate()
@@ -581,6 +753,7 @@ def main() -> None:
     finally:
         reap_candidate_processes()
         purge_worker_state()
+        _unmount_measurement_cgroup()
 
 
 if __name__ == "__main__":

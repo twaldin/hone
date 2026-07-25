@@ -85,17 +85,17 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
       "activeImplementation": "arm64 (NEON)",
-      "q": "geometric mean of candidate/reference speed ratios for full-document DOM and On-Demand parses across the three frozen corpora; two-point (N vs 2N iterations) wall clock measured in the trusted evaluator parent around the non-self-reporting harness, reference parser rebuilt from frozen trusted sources in the same eval and timed back-to-back (per-point minimum across samples), never a self-reported number from candidate-linked code; timed iterations are identity-distinct (trusted harness deterministically perturbs value bytes before every iteration after the first, structure and size preserved) and every perturbed iteration's full event stream is folded into a chain the parent validates against the trusted reference's chain at the same iteration count, so repeated timed work can neither be memoized nor skipped",
+      "q": "geometric mean over the three frozen corpora of the per-workload candidate/reference speed ratio for full-document DOM and On-Demand parses; each workload ratio is the geometric mean of back-to-back reference/candidate wall-time PAIRS (paired-geomean, lead alternated so sustained host contention cancels within each pair), wall measured in the trusted evaluator parent around the non-self-reporting harness, the reference parser rebuilt from frozen trusted sources in the same eval and timed adjacently; never a self-reported number from candidate-linked code. Timed iterations are BOTH byte- and structure-distinct: the trusted parser-independent harness rotates value bytes AND relocates insignificant whitespace across a sampled subset of structural tokens before every iteration after the first, so no two timed iterations share their bytes OR their stage-1 structural index (a resident-index replay is caught), and every perturbed iteration's full event stream is folded into a chain the parent validates against the trusted reference's chain at the same iteration count.",
       "qFail": 0,
-      "peakRssGate": "candidate harness peak RSS <= per-split frozen baseline (protected asset) * 1.05",
+      "peakRssGate": "candidate whole-tree peak RSS <= per-split frozen baseline (protected asset) * 1.05, measured as the kernel-owned cgroup2 memory.peak of a fresh per-launch leaf the candidate subtree joins before the privilege drop (not VmHWM of a single pid, which a detached child or clear_refs can dodge)",
       "freshProcess": true,
-      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus; perturbed-iteration chains are pinned per iteration count by the trusted reference binary within each eval, and candidate-writable residue (/tmp, /dev/shm, SysV IPC) is purged between launches",
+      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus; perturbed-iteration chains are pinned per iteration count by the trusted reference binary within each eval; each candidate launch runs in a fresh SysV-IPC namespace and candidate-writable residue (/tmp, /var/tmp, /dev/shm, SysV IPC) is purged between launches so no parse result or resident index can bridge launches",
       "normalization": {
         "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-        "qBase": 0.9949918882699503,
-        "sigma": 0.008062085491241221,
-        "qReference": 1.0447414826834478,
-        "status": "provisional local locked A-A calibration; final frozen GCE like-for-like re-calibration required"
+        "qBase": 1.0003818995820721,
+        "sigma": 0.0006361137429828387,
+        "qReference": 1.0504009945611756,
+        "status": "provisional local locked A-A calibration under round-4 harness (structural perturbation + cgroup peak); refreshed from the 2x-consecutive ordering run, final frozen GCE like-for-like re-calibration required"
       }
     },
     "tags": [

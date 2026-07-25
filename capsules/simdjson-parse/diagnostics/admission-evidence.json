@@ -2,20 +2,20 @@
   "feasibility": {
     "cleanBuildSec": 4.0,
     "incrementalRebuildSec": 4.0,
-    "evalSec": 60.0
+    "evalSec": 100.0
   },
   "aa": {
     "samples": [
-      0.9936113371862831,
-      0.9877092232314759,
-      1.0036551043920918
+      1.0008009319738536,
+      1.0006948291584778,
+      0.9996499376138854
     ],
-    "sigma": 0.008062085491241221,
-    "noiseFractionOfScale": 0.16205329081143027
+    "sigma": 0.0006361137429828387,
+    "noiseFractionOfScale": 0.012717418083005836
   },
-  "qBase": 0.9949918882699503,
+  "qBase": 1.0003818995820721,
   "qFail": 0.0,
-  "qReference": 1.0447414826834478,
+  "qReference": 1.0504009945611756,
   "activeImplementation": "arm64",
   "controls": [
     {
@@ -27,41 +27,43 @@
     },
     {
       "name": "naive",
-      "train": 0.8871050527271699,
-      "validation": 0.922173864291469,
-      "combined": 0.9046394585093194,
+      "train": 0.8995243460644888,
+      "validation": 0.9329108123207106,
+      "combined": 0.9162175791925997,
       "hardGatesPass": true,
-      "description": "slower-but-correct extra input scan in stage 1"
+      "description": "slower-but-correct extra serialized input scan in stage 1"
     },
     {
       "name": "shortcut",
-      "train": 1.2178451236769956,
+      "train": 1.0185390751955674,
       "validation": 0,
-      "combined": 0.6089225618384978,
+      "combined": 0.5092695375977837,
       "hardGatesPass": false,
-      "description": "train-corpus structural-index replay keyed on memorized train lengths; survives the value-perturbed timed iterations (structure is preserved) so it still beats baseline on train, but holdout lengths hard-error, so the split inverts under trusted-parent timing"
+      "description": "runs the genuine per-block sound flatten-reuse below on train, but hard-errors (TAPE_ERROR) on the held-out validation corpus lengths; correct+faster on the lengths it memorized (beats baseline on train), inverts to zero on the split it does not know, so the trusted split mechanism catches the overfit. A blind resident-index replay is separately impossible now: the harness relocates structural whitespace per iteration, so replaying a stale index yields a wrong event chain the parent rejects."
     }
   ],
   "perturbation": {
-    "name": "sound-mask-verified-structural-replay",
+    "name": "in-pipeline-per-block-sound-flatten-skip",
     "source": "diagnostics/improved/src/generic/stage1/json_structural_indexer.h",
-    "train": 1.0190963783088476,
-    "validation": 1.029301956579074,
-    "combined": 1.0241991674439608,
-    "deltaFromQBase": 0.029207279174010448,
+    "train": 1.0200438712648812,
+    "validation": 1.024284939268777,
+    "combined": 1.022164405266829,
+    "deltaFromQBase": 0.021782505684756925,
+    "sigmaMargin": 34.24309869900827,
     "hardGatesPass": true,
-    "description": "re-validates every same-length reparse in full (scanner classification, UTF-8, unescaped checks) and compares per-block structural bitmasks against the previous full pass; on a complete match only the bit-flatten/index writes are skipped (the resident index array is a pure function of the masks). Split-agnostic and observation-preserving: structure is re-verified on every parse, values always re-parsed; benefits repeated-parse workloads on any corpus, including the identity-distinct (value-perturbed) timed iterations"
+    "description": "genuine, observation-preserving stage-1 work reduction: the full structural scan (scanner classification, UTF-8, unescaped-control checks) is unchanged and runs on every block, but the bit-flatten/index write is skipped for every 64-byte block whose structural bitmask is unchanged since the last full pass on the same reused parser (resident index entries reused; changed blocks re-flattened exactly, cache kept in lockstep with the mutated index). Byte-identical output to baseline on every corpus/mode/iteration; benefits repeated-parse workloads on any corpus including the byte- and structure-distinct perturbed timed iterations."
   },
   "rss": {
     "baselinePeakRssKb": {
-      "train": 11500,
-      "validation": 9000
+      "train": 9600,
+      "validation": 7000
     },
-    "toleranceFraction": 0.05
+    "toleranceFraction": 0.05,
+    "note": "whole-tree kernel cgroup2 memory.peak of a fresh per-launch leaf (not VmHWM); frozen slightly above the observed baseline peaks (train ~9.0-9.1M, validation ~6.5-6.7M, both noisy under page-cache reclaim) so the legitimate improved control (which resident-caches per-block masks, ~+0.3M) and measurement noise clear the gate while a >~5% whole-tree regression fails"
   },
   "normalization": {
     "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "scale": 0.04974959441349752,
-    "status": "provisional local arm64 calibration under trusted-parent timing; final frozen-host like-for-like re-calibration required"
+    "scale": 0.05001909497910361,
+    "status": "provisional local arm64 calibration under the round-4 harness (per-iteration structural perturbation, whole-tree cgroup memory.peak, fresh IPC ns, paired-geomean estimator); A-A refreshed from the 2x-consecutive ordering run (spread 0.0012-0.0066, improved margin ~34 sigma); final frozen-host like-for-like re-calibration required"
   }
 }

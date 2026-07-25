@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_8b4162c1ca5a",
+  "id": "cap_1ea274311859",
   "objective": "Improve geometric-mean DOM and On-Demand JSON parsing throughput across frozen mixed corpora at simdjson 8e6bac94 while preserving exact event hashes, malformed-input errors, the full relevant upstream test set, and peak RSS.",
   "baseline": {
     "kind": "git",
-    "commit": "78b020a05798abe563e22d00700ed4af89356744"
+    "commit": "265c252983d203d08c24ef8289753d61663e7b39"
   },
   "image": "hone-simdjson-parse@sha256:63083edb85b611e342254616b8d2515cb7263b7828602da817cec1cd143fcb4c",
   "evalEntrypoint": [
@@ -104,10 +104,10 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:a851a2dc7f912b5b78cf3e70b8b68cfeb6cf055fa3df167c3e7500a062de6693"
+    "hash": "sha256:08eee2960fc5f4c5ffc2ea97759b75915db36122ccaa3495826275c08d16c448"
   },
   "contentHashes": {
-    "assets/train/expected.json": "sha256:791e5b626a3af3ad725511f9354a97060986f15793398cbbcf8c4b8ebb6839de",
+    "assets/train/expected.json": "sha256:c2ceece3b222c2defc10a6049c19c9f61688ad06c45408a758cc15125dfc32cd",
     "assets/train/malformed/bad-escape.json": "sha256:42b77952612b42489d505c0ba69416af16b015daf2602f9a40da170e75d40655",
     "assets/train/malformed/leading-zero.json": "sha256:df23609a04be6111ef966b85af4e1bceacf8df6d194338e4e4dba718de904c63",
     "assets/train/malformed/trailing-comma.json": "sha256:0dc60d43ade7930ba6c0d8918c8da45835912b7d9b80600ce662a339c34840b8",
@@ -127,7 +127,7 @@
     "assets/train/valid/small/truenull.json": "sha256:c721b7450adef5eb5847f71fb9ede34eea4a52afcffccb48b6825f64af2cd849",
     "assets/train/valid/twitter.json": "sha256:30721e496a8d73cfc50658923c34eb2c0fbe15ee6835005e43ee624d8dedf200",
     "assets/train/valid/twitter_timeline.json": "sha256:91be22ebdfff29d08f3fb1a6842e171f47cb5187545e9eb8d5d7bf33bc9233f0",
-    "assets/validation/expected.json": "sha256:f9e0383d0e31b3ebcc2c66d369d4bd844ec236d716be6e64004b6fed4d74787f",
+    "assets/validation/expected.json": "sha256:04723d98519276b8934989b09363c57498f4ae4e171d42f7401bc6edd7ae58d0",
     "assets/validation/malformed/bad-escape.json": "sha256:42b77952612b42489d505c0ba69416af16b015daf2602f9a40da170e75d40655",
     "assets/validation/malformed/leading-zero.json": "sha256:df23609a04be6111ef966b85af4e1bceacf8df6d194338e4e4dba718de904c63",
     "assets/validation/malformed/trailing-comma.json": "sha256:0dc60d43ade7930ba6c0d8918c8da45835912b7d9b80600ce662a339c34840b8",
@@ -180,17 +180,17 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
       "activeImplementation": "arm64 (NEON)",
-      "q": "geometric mean of candidate/reference speed ratios for full-document DOM and On-Demand parses across the three frozen corpora; two-point (N vs 2N iterations) wall clock measured in the trusted evaluator parent around the non-self-reporting harness, reference parser rebuilt from frozen trusted sources in the same eval and timed back-to-back (per-point minimum across samples), never a self-reported number from candidate-linked code; timed iterations are identity-distinct (trusted harness deterministically perturbs value bytes before every iteration after the first, structure and size preserved) and every perturbed iteration's full event stream is folded into a chain the parent validates against the trusted reference's chain at the same iteration count, so repeated timed work can neither be memoized nor skipped",
+      "q": "geometric mean over the three frozen corpora of the per-workload candidate/reference speed ratio for full-document DOM and On-Demand parses; each workload ratio is the geometric mean of back-to-back reference/candidate wall-time PAIRS (paired-geomean, lead alternated so sustained host contention cancels within each pair), wall measured in the trusted evaluator parent around the non-self-reporting harness, the reference parser rebuilt from frozen trusted sources in the same eval and timed adjacently; never a self-reported number from candidate-linked code. Timed iterations are BOTH byte- and structure-distinct: the trusted parser-independent harness rotates value bytes AND relocates insignificant whitespace across a sampled subset of structural tokens before every iteration after the first, so no two timed iterations share their bytes OR their stage-1 structural index (a resident-index replay is caught), and every perturbed iteration's full event stream is folded into a chain the parent validates against the trusted reference's chain at the same iteration count.",
       "qFail": 0,
-      "peakRssGate": "candidate harness peak RSS <= per-split frozen baseline (protected asset) * 1.05",
+      "peakRssGate": "candidate whole-tree peak RSS <= per-split frozen baseline (protected asset) * 1.05, measured as the kernel-owned cgroup2 memory.peak of a fresh per-launch leaf the candidate subtree joins before the privilege drop (not VmHWM of a single pid, which a detached child or clear_refs can dodge)",
       "freshProcess": true,
-      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus; perturbed-iteration chains are pinned per iteration count by the trusted reference binary within each eval, and candidate-writable residue (/tmp, /dev/shm, SysV IPC) is purged between launches",
+      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus; perturbed-iteration chains are pinned per iteration count by the trusted reference binary within each eval; each candidate launch runs in a fresh SysV-IPC namespace and candidate-writable residue (/tmp, /var/tmp, /dev/shm, SysV IPC) is purged between launches so no parse result or resident index can bridge launches",
       "normalization": {
         "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-        "qBase": 0.9949918882699503,
-        "sigma": 0.008062085491241221,
-        "qReference": 1.0447414826834478,
-        "status": "provisional local locked A-A calibration; final frozen GCE like-for-like re-calibration required"
+        "qBase": 1.0003818995820721,
+        "sigma": 0.0006361137429828387,
+        "qReference": 1.0504009945611756,
+        "status": "provisional local locked A-A calibration under round-4 harness (structural perturbation + cgroup peak); refreshed from the 2x-consecutive ordering run, final frozen GCE like-for-like re-calibration required"
       }
     }
   }
