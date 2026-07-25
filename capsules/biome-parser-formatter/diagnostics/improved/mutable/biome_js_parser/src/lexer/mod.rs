@@ -984,6 +984,35 @@ impl<'src> JsLexer<'src> {
         Self::keyword_or_ident(&bytes[start..position])
     }
 
+    /// Resolves a decimal integer that starts with a non-zero digit by
+    /// scanning the source bytes directly, avoiding the per-byte
+    /// `next_byte_bounded` dispatch of [Self::read_number]. Any number that is
+    /// actually a float, carries an exponent, a numeric separator, or a BigInt
+    /// suffix falls back to [Self::read_number] before any lexer state is
+    /// mutated, so the general path stays byte-for-byte equivalent (position,
+    /// flags, diagnostics, and token kind all match).
+    #[inline]
+    fn read_decimal_integer_fast(&mut self) -> JsSyntaxKind {
+        let bytes = self.source.as_bytes();
+        let start = self.position;
+        let mut position = start + 1;
+        while let Some(&byte) = bytes.get(position) {
+            if byte.is_ascii_digit() {
+                position += 1;
+            } else {
+                break;
+            }
+        }
+        // Float, exponent, numeric-separator, or BigInt continuations need the
+        // full reader; nothing has been mutated yet, so defer to it.
+        if let Some(&(b'.' | b'e' | b'E' | b'_' | b'n')) = bytes.get(position) {
+            self.read_number(false);
+            return self.verify_number_end();
+        }
+        self.position = position;
+        self.verify_number_end()
+    }
+
     /// Returns the identifier token at the current position, or the keyword token if
     /// the identifier is a keyword.
     ///
@@ -1977,10 +2006,7 @@ impl<'src> JsLexer<'src> {
                 }
             }
             IDT | DOL => self.resolve_ascii_identifier(byte),
-            DIG => {
-                self.read_number(false);
-                self.verify_number_end()
-            }
+            DIG => self.read_decimal_integer_fast(),
             COL => self.eat_byte(T![:]),
             SEM => self.eat_byte(T![;]),
             LSS => self.resolve_less_than(),

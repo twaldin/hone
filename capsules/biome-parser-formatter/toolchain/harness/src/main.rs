@@ -7,10 +7,8 @@ use biome_rowan::{
     AstNode, Direction, Language, SyntaxNode, SyntaxToken, SyntaxKind, TextRange, TextSize,
     TriviaPiece,
 };
-use std::collections::hash_map::RandomState;
 use std::env;
 use std::fs;
-use std::hash::{BuildHasher, Hasher};
 use std::hint::black_box;
 use std::path::Path;
 
@@ -22,6 +20,28 @@ fn fnv_mix(hash: &mut u64, value: u64) {
         *hash ^= u64::from(byte);
         *hash = hash.wrapping_mul(FNV_PRIME);
     }
+}
+
+fn fnv_bytes(hash: &mut u64, bytes: &[u8]) {
+    for &byte in bytes {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+/// Deterministic per-sample draw seeded from the trusted parent's fresh
+/// per-sample nonce. The candidate and the pristine reference runner are both
+/// driven with the same nonce, so their probe offsets, deep-check iteration,
+/// and accumulated proof coincide only when both actually executed every
+/// timed iteration over the pinned parser output. The nonce is chosen by the
+/// trusted parent at run time, so no build-time constant can precompute it.
+fn nonce_draw(nonce: u64, lane: u64, a: u64, b: u64) -> u64 {
+    let mut hash = FNV_OFFSET;
+    fnv_mix(&mut hash, nonce);
+    fnv_mix(&mut hash, lane);
+    fnv_mix(&mut hash, a);
+    fnv_mix(&mut hash, b);
+    hash
 }
 
 /// FNV-1a 64 over the full element stream (kind + trimmed range) of a syntax
@@ -49,16 +69,6 @@ fn tree_fingerprint<L: Language>(root: &SyntaxNode<L>) -> (u64, u64) {
 const UNIFORM_PROBES: usize = 12;
 const ROTATED_PROBES: usize = 8;
 
-/// Process-entropy keyed draw (SipHash seeded from OS entropy per process),
-/// so candidate-controlled code cannot know at build time which offsets and
-/// which iteration get probed or deep-checked.
-fn entropy_draw(state: &RandomState, lane: u64, a: u64, b: u64) -> u64 {
-    let mut hasher = state.build_hasher();
-    hasher.write_u64(lane);
-    hasher.write_u64(a);
-    hasher.write_u64(b);
-    hasher.finish()
-}
 
 /// Byte positions (with offset inside their digit run) that the per-iteration
 /// rotation rewrites: every digit run immediately preceded by an ASCII
@@ -169,22 +179,6 @@ fn verify(path: &Path, output: &Path, second: &Path, diagnostics: &Path) -> Resu
     Ok(())
 }
 
-fn write_parse_receipt(
-    receipt: &Path,
-    range_len: u32,
-    fingerprint: u64,
-    elements: u64,
-    diagnostics: &str,
-) -> Result<(), String> {
-    fs::write(
-        receipt,
-        format!(
-            "hone-biome-parse-receipt-v2\nrange={range_len}\nelements={elements}\nfingerprint={fingerprint:016x}\ndiagnostics={diagnostics}\n"
-        ),
-    )
-    .map_err(|err| format!("receipt write failed: {err}"))
-}
-
 /// One uniform-probe record captured from the baseline iteration: raw token
 /// kind plus full (trivia-inclusive) range at a process-random byte offset.
 struct ProbeRecord {
@@ -207,28 +201,31 @@ fn token_at_byte<L: Language>(root: &SyntaxNode<L>, position: u32) -> Result<Syn
 }
 
 /// Shared parse-benchmark loop. Iteration 0 parses the frozen base source and
-/// supplies the receipt values (fingerprint, element count, ranges,
-/// diagnostics), so the receipt stays byte-identical to the protected oracle
-/// and binds the baseline tree to the frozen input. Every later iteration
-/// parses a rotated, identity-distinct source so repeated timed work cannot
-/// be served from a cache keyed on input content, and is validated by cheap
-/// probes so the measured per-iteration workload stays the plain uncached
-/// parse:
-/// - rotated-position probes (fresh entropy each iteration) reject any tree
+/// captures the fingerprint, element count, ranges, and diagnostics; every
+/// later iteration parses a rotated, identity-distinct source so repeated
+/// timed work cannot be served from a cache keyed on input content, and is
+/// validated by cheap probes so the measured per-iteration workload stays the
+/// plain uncached parse:
+/// - rotated-position probes (nonce-seeded each iteration) reject any tree
 ///   whose text was not produced from THIS iteration's source;
-/// - uniform-offset probes (process entropy, unknown at candidate build
-///   time) pin token kind/range shape to the baseline tree and token text to
-///   this iteration's source;
+/// - uniform-offset probes (nonce-seeded, unknown at candidate build time)
+///   pin token kind/range shape to the baseline tree and token text to this
+///   iteration's source;
 /// - diagnostic count and root ranges must match the baseline;
-/// - one entropy-chosen iteration additionally gets the complete text
-///   equality walk.
+/// - one nonce-chosen iteration additionally gets the complete text walk.
 /// Only one parse tree is ever live, matching the baseline peak RSS profile
-/// of an uncached one-shot parse.
+/// of an uncached one-shot parse. Instead of a candidate-writable completion
+/// file, the loop folds every iteration's protected probe observations into a
+/// running proof keyed by the parent nonce and returns it. The trusted parent
+/// requires this proof to equal the pristine reference runner's proof for the
+/// same nonce, so a process that skipped iterations (e.g. computed the base
+/// tree once and exited) cannot produce an accepted sample.
 fn timed_parse_iterations<L: Language, F>(
     code: &str,
     repetitions: usize,
+    nonce: u64,
     parse: F,
-) -> Result<(u32, u64, u64, String), String>
+) -> Result<u64, String>
 where
     F: Fn(&str, bool) -> (SyntaxNode<L>, usize, Option<String>),
 {
@@ -236,16 +233,18 @@ where
     if repetitions > 1 && positions.is_empty() {
         return Err("frozen input exposes no rotation-eligible digits".to_string());
     }
-    let entropy = RandomState::new();
     let deep_iteration = if repetitions > 1 {
-        1 + (entropy_draw(&entropy, 0, 0, 0) % (repetitions as u64 - 1)) as usize
+        1 + (nonce_draw(nonce, 0, 0, 0) % (repetitions as u64 - 1)) as usize
     } else {
         0
     };
     let uniform_offsets: Vec<u32> = (0..UNIFORM_PROBES)
-        .map(|probe| (entropy_draw(&entropy, 1, probe as u64, 0) % code.len() as u64) as u32)
+        .map(|probe| (nonce_draw(nonce, 1, probe as u64, 0) % code.len() as u64) as u32)
         .collect();
-    let mut baseline: Option<(u32, u64, u64, usize, String, Vec<ProbeRecord>)> = None;
+    let mut proof = FNV_OFFSET;
+    fnv_mix(&mut proof, nonce);
+    fnv_mix(&mut proof, repetitions as u64);
+    let mut baseline: Option<(u32, usize, Vec<ProbeRecord>)> = None;
     for iteration in 0..repetitions {
         let rotated;
         let source: &str = if iteration == 0 {
@@ -261,60 +260,62 @@ where
         let range = u32::from(root.text_trimmed_range().len());
         match &baseline {
             None => {
-                // The baseline tree needs no text walk here: its fingerprint,
-                // ranges, and diagnostics feed the receipt the trusted
-                // evaluator checks against the protected oracle, which binds
-                // this tree to the frozen input already.
                 let (fingerprint, elements) = tree_fingerprint(&root);
                 let mut records = Vec::with_capacity(uniform_offsets.len());
                 for &offset in &uniform_offsets {
                     let token = token_at_byte(&root, offset)?;
                     let token_range = token.text_range();
-                    records.push(ProbeRecord {
+                    let record = ProbeRecord {
                         kind: token.kind().to_raw().0,
                         start: u32::from(token_range.start()),
                         len: u32::from(token_range.len()),
-                    });
+                    };
+                    fnv_mix(&mut proof, u64::from(record.kind));
+                    fnv_mix(&mut proof, u64::from(record.start));
+                    fnv_mix(&mut proof, u64::from(record.len));
+                    fnv_bytes(&mut proof, token.text().as_bytes());
+                    records.push(record);
                 }
                 let diagnostics = diagnostics
                     .ok_or_else(|| "baseline iteration is missing diagnostics".to_string())?;
-                baseline = Some((
-                    range,
-                    fingerprint,
-                    elements,
-                    diagnostic_count,
-                    diagnostics,
-                    records,
-                ));
+                fnv_mix(&mut proof, u64::from(range));
+                fnv_mix(&mut proof, fingerprint);
+                fnv_mix(&mut proof, elements);
+                fnv_mix(&mut proof, diagnostic_count as u64);
+                fnv_bytes(&mut proof, diagnostics.as_bytes());
+                baseline = Some((range, diagnostic_count, records));
             }
-            Some((base_range, _, _, base_count, _, records)) => {
+            Some((base_range, base_count, records)) => {
                 if *base_range != range || *base_count != diagnostic_count {
                     return Err(
                         "iteration tree diverges from the baseline iteration".to_string()
                     );
                 }
+                fnv_mix(&mut proof, iteration as u64);
                 let source_bytes = source.as_bytes();
                 for probe in 0..ROTATED_PROBES {
-                    let pick = entropy_draw(&entropy, 2, iteration as u64, probe as u64)
+                    let pick = nonce_draw(nonce, 2, iteration as u64, probe as u64)
                         % positions.len() as u64;
                     let (position, _) = positions[pick as usize];
                     let token = token_at_byte(&root, position)?;
                     let relative = (position - u32::from(token.text_range().start())) as usize;
-                    if token.text().as_bytes().get(relative).copied()
-                        != Some(source_bytes[position as usize])
-                    {
+                    let observed = token.text().as_bytes().get(relative).copied();
+                    if observed != Some(source_bytes[position as usize]) {
                         return Err(
                             "iteration tree does not reproduce its own rotated input".to_string()
                         );
                     }
+                    fnv_mix(&mut proof, u64::from(position));
+                    fnv_mix(&mut proof, u64::from(source_bytes[position as usize]));
                 }
                 for (record, &offset) in records.iter().zip(&uniform_offsets) {
                     let token = token_at_byte(&root, offset)?;
                     let token_range = token.text_range();
+                    let text = token.text();
                     if token.kind().to_raw().0 != record.kind
                         || u32::from(token_range.start()) != record.start
                         || u32::from(token_range.len()) != record.len
-                        || token.text().as_bytes()
+                        || text.as_bytes()
                             != &source_bytes
                                 [record.start as usize..(record.start + record.len) as usize]
                     {
@@ -322,15 +323,8 @@ where
                             "iteration tree diverges from the baseline at a probe".to_string()
                         );
                     }
+                    fnv_bytes(&mut proof, text.as_bytes());
                 }
-                // One entropy-chosen iteration gets the complete text
-                // equality walk: a tree recycled from another iteration and
-                // patched only at probed positions still fails here, so
-                // passing every iteration requires text-faithful trees
-                // throughout. Shape is already pinned per-iteration by the
-                // uniform probes; a second fingerprint walk would only
-                // re-check what the probes and the receipt cover, at real
-                // wall-clock cost.
                 if iteration == deep_iteration && root.text_with_trivia() != source {
                     return Err(
                         "iteration tree does not reproduce its own input source".to_string()
@@ -339,46 +333,43 @@ where
             }
         }
     }
-    let (range, fingerprint, elements, _, diagnostics, _) =
-        baseline.ok_or_else(|| "repetitions must be positive".to_string())?;
-    Ok((range, fingerprint, elements, diagnostics))
+    if baseline.is_none() {
+        return Err("repetitions must be positive".to_string());
+    }
+    Ok(proof)
 }
 
 /// Parse benchmark: repeat the full uncached parse over per-iteration
-/// identity-distinct sources, then bind completion by writing a receipt
-/// derived from the baseline iteration's tree and diagnostics. This binary
-/// never reports timing; the trusted evaluator measures wall time around the
-/// whole process.
-fn bench_parse(path: &Path, repetitions: usize, receipt: &Path) -> Result<(), String> {
+/// identity-distinct sources and return the nonce-keyed proof folded from
+/// every iteration's protected probe observations. This binary never reports
+/// timing; the trusted evaluator measures wall time around the whole process
+/// and cross-checks the proof against the pristine reference runner.
+fn bench_parse(path: &Path, repetitions: usize, nonce: u64) -> Result<u64, String> {
     let code = fs::read_to_string(path).map_err(|err| format!("read failed: {err}"))?;
-    let (range, fingerprint, elements, diagnostics) =
-        if path.extension().and_then(|ext| ext.to_str()) == Some("css") {
-            timed_parse_iterations(&code, repetitions, |source, want_diagnostics| {
-                let parsed = black_box(parse_css(
-                    black_box(source),
-                    CssFileSource::css(),
-                    CssParserOptions::default(),
-                ));
-                let diagnostic_count = parsed.diagnostics().len();
-                let diagnostics =
-                    want_diagnostics.then(|| format!("{:?}", parsed.diagnostics()));
-                (parsed.syntax(), diagnostic_count, diagnostics)
-            })?
-        } else {
-            let source_kind = js_source(path);
-            timed_parse_iterations(&code, repetitions, |source, want_diagnostics| {
-                let parsed = black_box(parse_js(
-                    black_box(source),
-                    source_kind,
-                    JsParserOptions::default(),
-                ));
-                let diagnostic_count = parsed.diagnostics().len();
-                let diagnostics =
-                    want_diagnostics.then(|| format!("{:?}", parsed.diagnostics()));
-                (parsed.syntax(), diagnostic_count, diagnostics)
-            })?
-        };
-    write_parse_receipt(receipt, range, fingerprint, elements, &diagnostics)
+    if path.extension().and_then(|ext| ext.to_str()) == Some("css") {
+        timed_parse_iterations(&code, repetitions, nonce, |source, want_diagnostics| {
+            let parsed = black_box(parse_css(
+                black_box(source),
+                CssFileSource::css(),
+                CssParserOptions::default(),
+            ));
+            let diagnostic_count = parsed.diagnostics().len();
+            let diagnostics = want_diagnostics.then(|| format!("{:?}", parsed.diagnostics()));
+            (parsed.syntax(), diagnostic_count, diagnostics)
+        })
+    } else {
+        let source_kind = js_source(path);
+        timed_parse_iterations(&code, repetitions, nonce, |source, want_diagnostics| {
+            let parsed = black_box(parse_js(
+                black_box(source),
+                source_kind,
+                JsParserOptions::default(),
+            ));
+            let diagnostic_count = parsed.diagnostics().len();
+            let diagnostics = want_diagnostics.then(|| format!("{:?}", parsed.diagnostics()));
+            (parsed.syntax(), diagnostic_count, diagnostics)
+        })
+    }
 }
 
 /// Collect tokens usable for per-iteration format-input rotation: identifier-
@@ -438,34 +429,43 @@ fn rotated_token_text(trimmed: &str, iteration: usize, attempt: usize) -> String
     text
 }
 
-/// Shared format-benchmark loop. Iteration 0 formats the unmodified base tree
-/// and its output becomes the receipt (byte-identical to the protected
-/// oracle). Every later iteration formats a freshly built tree in which one
+/// Shared format-benchmark loop. Iteration 0 formats the unmodified base tree;
+/// every later iteration formats a freshly built tree in which one nonce-
 /// scheduled identifier token is swapped for a same-kind, same-length,
 /// iteration-unique spelling via pinned-rowan green-tree surgery, so repeated
 /// timed work cannot be served from a cache keyed on tree identity or
-/// content. Each rotated output is validated against the oracle-bound base
-/// output: same byte length, the unique spelling appears exactly once, and
-/// substituting the original spelling back reproduces the base output
-/// exactly.
+/// content. Each rotated output is validated against the base output (same
+/// byte length, the unique spelling appears exactly once, and substituting the
+/// original spelling back reproduces the base output exactly), and every
+/// iteration's replacement plus printed bytes are folded into a nonce-keyed
+/// proof. The trusted parent requires the returned proof to equal the pristine
+/// reference runner's proof for the same nonce, so a process that formatted the
+/// base once and exited cannot produce an accepted sample.
 fn timed_format_iterations<L: Language, F>(
     root: &SyntaxNode<L>,
     repetitions: usize,
+    nonce: u64,
     format: F,
-) -> Result<String, String>
+) -> Result<u64, String>
 where
     F: Fn(&SyntaxNode<L>) -> Result<String, String>,
 {
     let base_printed = format(black_box(root))?;
+    let mut proof = FNV_OFFSET;
+    fnv_mix(&mut proof, nonce);
+    fnv_mix(&mut proof, repetitions as u64);
+    fnv_mix(&mut proof, base_printed.len() as u64);
+    fnv_bytes(&mut proof, base_printed.as_bytes());
     if repetitions > 1 {
         let targets = rotation_targets(root);
         if targets.is_empty() {
             return Err("frozen input exposes no rotation-eligible tokens".to_string());
         }
         for iteration in 1..repetitions {
+            let start = (nonce_draw(nonce, 4, iteration as u64, 0) % targets.len() as u64) as usize;
             let mut selected = None;
             'probe: for probe in 0..targets.len() {
-                let token = &targets[(iteration - 1 + probe) % targets.len()];
+                let token = &targets[(start + probe) % targets.len()];
                 let original = token.text_trimmed();
                 for attempt in 0..4usize {
                     let replacement = rotated_token_text(original, iteration, attempt);
@@ -495,45 +495,48 @@ where
                     "iteration format output does not correspond to its rotated input".to_string()
                 );
             }
+            fnv_mix(&mut proof, iteration as u64);
+            fnv_bytes(&mut proof, replacement.as_bytes());
+            fnv_mix(&mut proof, printed.len() as u64);
+            fnv_bytes(&mut proof, printed.as_bytes());
         }
     }
-    Ok(base_printed)
+    Ok(proof)
 }
 
 /// Format benchmark: parse once, then repeat format+print over per-iteration
-/// identity-distinct trees, binding completion by writing the baseline
-/// iteration's printed output. The trusted evaluator checks the receipt bytes
-/// against the protected byte-exact formatting oracle.
-fn bench_format(path: &Path, repetitions: usize, receipt: &Path) -> Result<(), String> {
+/// identity-distinct trees and return the nonce-keyed proof. The trusted
+/// evaluator measures wall time around the whole process and cross-checks the
+/// proof against the pristine reference runner.
+fn bench_format(path: &Path, repetitions: usize, nonce: u64) -> Result<u64, String> {
     let code = fs::read_to_string(path).map_err(|err| format!("read failed: {err}"))?;
-    let printed_code = if path.extension().and_then(|ext| ext.to_str()) == Some("css") {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("css") {
         let parsed = parse_css(&code, CssFileSource::css(), CssParserOptions::default());
         let root = parsed.tree().into_syntax();
         if root.text_with_trivia() != code.as_str() {
             return Err("parsed tree does not reproduce the frozen input".to_string());
         }
-        timed_format_iterations(&root, repetitions, |node| {
+        timed_format_iterations(&root, repetitions, nonce, |node| {
             format_css_node(CssFormatOptions::default(), node)
                 .map_err(|err| format!("CSS format failed: {err}"))?
                 .print()
                 .map_err(|err| format!("CSS print failed: {err}"))
                 .map(|printed| printed.into_code())
-        })?
+        })
     } else {
         let parsed = parse_js(&code, js_source(path), JsParserOptions::default());
         let root = parsed.tree().into_syntax();
         if root.text_with_trivia() != code.as_str() {
             return Err("parsed tree does not reproduce the frozen input".to_string());
         }
-        timed_format_iterations(&root, repetitions, |node| {
+        timed_format_iterations(&root, repetitions, nonce, |node| {
             format_js_node(JsFormatOptions::default(), node, Vec::new())
                 .map_err(|err| format!("JS format failed: {err}"))?
                 .print()
                 .map_err(|err| format!("JS print failed: {err}"))
                 .map(|printed| printed.into_code())
-        })?
-    };
-    fs::write(receipt, printed_code).map_err(|err| format!("receipt write failed: {err}"))
+        })
+    }
 }
 
 const SELFTEST_CHECKS: [&str; 6] = [
@@ -675,21 +678,26 @@ fn run() -> Result<(), String> {
             Path::new(second),
             Path::new(diagnostics),
         ),
-        [_, command, input, repetitions, receipt] if command == "parse" || command == "format" => {
+        [_, command, input, repetitions, nonce] if command == "parse" || command == "format" => {
             let repetitions = repetitions
                 .parse::<usize>()
                 .map_err(|_| "repetitions must be a positive integer".to_string())?;
             if repetitions == 0 {
                 return Err("repetitions must be positive".to_string());
             }
-            if command == "parse" {
-                bench_parse(Path::new(input), repetitions, Path::new(receipt))
+            let nonce = nonce
+                .parse::<u64>()
+                .map_err(|_| "nonce must be an unsigned 64-bit integer".to_string())?;
+            let proof = if command == "parse" {
+                bench_parse(Path::new(input), repetitions, nonce)?
             } else {
-                bench_format(Path::new(input), repetitions, Path::new(receipt))
-            }
+                bench_format(Path::new(input), repetitions, nonce)?
+            };
+            println!("PROOF {proof:016x}");
+            Ok(())
         }
         _ => Err(
-            "usage: hone_biome_bench selftest [CHECK RECEIPT] | verify INPUT OUTPUT SECOND DIAGNOSTICS | (parse|format) INPUT REPS RECEIPT"
+            "usage: hone_biome_bench selftest [CHECK RECEIPT] | verify INPUT OUTPUT SECOND DIAGNOSTICS | (parse|format) INPUT REPS NONCE"
                 .to_string(),
         ),
     }

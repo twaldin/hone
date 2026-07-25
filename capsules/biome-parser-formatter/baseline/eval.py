@@ -9,27 +9,44 @@ runner execute as uid 2000, which cannot traverse the root-only asset mount.
 Robustness model: mutable crate code is linked into the benchmark runner, so
 nothing the runner process reports (stdout, timing, exit status alone) is
 trusted. This parent process measures wall time itself, seals the built runner
-at a root-owned path so it cannot be swapped mid-evaluation, runs every
-regression check as its own child bound to an exact protected receipt, and
-accepts a benchmark sample only when the receipt it produced matches the
-protected oracle for that workload.
+at a root-owned path so it cannot be swapped mid-evaluation, and runs every
+regression check as its own child bound to an exact protected receipt.
 
-Scoring model: every benchmark sample is an interleaved candidate/reference
-pair against the pristine root-owned reference runner baked into the image,
-and the score is a frozen anchor scaled by the geometric mean of the median
-per-pair wall-time ratios. Common-mode host drift (thermals, vCPU placement)
-cancels inside each pair, so thin true margins survive noisy hosts. Between
-timed legs the evaluator sweeps and reaps every candidate-uid process, so no
-candidate residue can run while the reference leg is being timed.
+Completion binding: iteration selection and per-iteration validation live in
+this trusted parent, never in a candidate-authored completion file. The parent
+draws a fresh per-sample nonce and drives both the candidate runner and the
+pristine reference runner with it; each folds every timed iteration's protected
+probe observations into a nonce-keyed proof returned over the parent-owned
+stdout pipe. A benchmark sample counts only when the candidate's proof equals
+the reference's proof for that nonce — possible only if the candidate actually
+executed every timed iteration over the pinned parser/formatter output.
+
+Isolation model: every timed leg runs in a fresh cgroup2 measurement leaf
+(joined while root, before privilege drop) whose kernel memory.peak is the
+whole-tree RSS accounting, and in a fresh mount+IPC namespace with a brand-new
+/tmp, /dev/shm, and /var/tmp, so no scratch, POSIX/SysV shm, or on-disk residue
+carries parser/formatter state between legs. Between legs the evaluator (a
+subreaper) kills and reaps every candidate-uid process so no candidate residue
+runs while the reference leg is timed.
+
+Scoring model: per workload/mode the candidate and reference alternate over
+BENCH_BATCHES fresh-process legs; the score is a frozen anchor scaled by the
+geometric mean over workloads of the per-workload paired per-batch
+reference/candidate wall-time ratio (candidate and reference in one batch run
+back-to-back against the same instantaneous host load, so their ratio cancels
+common-mode contention within the pair and tightens as 1/sqrt(pairs)), so thin
+true margins survive noisy shared hosts.
 """
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import resource
+import secrets
 import shutil
 import signal
 import statistics
@@ -62,7 +79,54 @@ REFERENCE_ANCHOR_Q = 0.0769000486784732
 # times, strictly alternating with the other, and the estimator keeps each
 # binary's MINIMUM per-rep time — the least-contended sample. Larger batches
 # raise the chance both binaries catch a quiet instant on a loaded host.
-BENCH_BATCHES = 9
+BENCH_BATCHES = 15
+# --- Trusted whole-tree memory accounting (CG) and per-leg kernel isolation
+# (NS). Docker mounts the container cgroup2 view read-only, but the evaluator
+# holds mount authority (CAP_SYS_ADMIN): a fresh cgroup2 instance over the
+# (namespaced) hierarchy is writable by root only. Each timed leg joins a
+# fresh measurement leaf while STILL ROOT in preexec, BEFORE unshare/setuid,
+# so the ENTIRE candidate process tree — detached helpers in new sessions
+# included — is charged to a leaf whose control files the demoted uid can
+# never write. memory.peak is a kernel-owned monotone high-water mark for the
+# leaf's lifetime; unlike /usr/bin/time %M (max-RSS of the direct child only)
+# candidate code cannot reset or under-report it.
+CGROUP_ROOT = Path("/tmp/hone-biome-cg")
+CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
+CGROUP_DRAIN_SEC = 10.0
+CLONE_NEWNS = 0x00020000
+CLONE_NEWIPC = 0x08000000
+MS_NOSUID = 0x2
+MS_NODEV = 0x4
+MS_NOEXEC = 0x8
+MS_BIND = 0x1000
+MS_REC = 0x4000
+MS_PRIVATE = 0x40000
+MS_MOVE = 0x2000
+# Staging mount point on the always-writable /dev tmpfs (the container rootfs
+# is read-only). Each timed leg mounts a FRESH private tmpfs here, binds the
+# sealed runner and the frozen input into it, then MS_MOVEs the whole staged
+# view over /tmp inside the leg's private mount namespace: the shared /tmp
+# (build tree, cgroup control files, prior scratch) disappears from the
+# candidate's view, and every scratch byte dies with the namespace. A fresh
+# /dev/shm and /var/tmp plus a fresh IPC namespace ensure no POSIX shm, SysV
+# segment, or on-disk residue carries parser/formatter state between legs.
+REP_STAGE = Path("/dev/hone-biome-stage")
+STAGE_OPTIONS = b"size=64m,mode=0755"
+SHM_OPTIONS = b"size=16m,mode=1777"
+VARTMP_OPTIONS = b"size=16m,mode=1777"
+STAGED_RUNNER = Path("/tmp/bin/runner")
+# Input is staged under a fixed dir but KEEPS its original filename so the
+# runner's extension check (.css vs JS) still classifies it correctly.
+STAGED_INPUT_DIR = Path("/tmp/input")
+_LIBC = ctypes.CDLL(None, use_errno=True)
+_LIBC.unshare.argtypes = [ctypes.c_int]
+_LIBC.mount.argtypes = [
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_ulong,
+    ctypes.c_char_p,
+]
 UID = 2000
 GID = 2000
 MUTABLE_CRATES = (
@@ -174,6 +238,213 @@ def reap_candidate_processes() -> None:
                 pass
         time.sleep(0.02)
     raise RuntimeError("candidate processes survived the reaping sweep")
+
+
+def mount_measurement_cgroup() -> None:
+    """Mount a fresh root-writable cgroup2 instance and delegate the memory
+    controller to per-leg leaves. The evaluator (and every child it forks) is
+    parked in a trusted leaf so the cgroup2 no-internal-process rule permits
+    delegating +memory to the measurement leaves."""
+    CGROUP_ROOT.mkdir(mode=0o755, exist_ok=False)
+    completed = subprocess.run(
+        ["mount", "-t", "cgroup2", "-o", "nosuid,nodev,noexec", "hone-biome-cg", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        CGROUP_ROOT.rmdir()
+        raise RuntimeError("trusted measurement cgroup mount failed")
+    try:
+        CGROUP_TRUSTED.mkdir(mode=0o755)
+        (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
+        (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
+    except OSError as exc:
+        raise RuntimeError("trusted measurement cgroup setup failed") from exc
+
+
+def unmount_measurement_cgroup() -> None:
+    completed = subprocess.run(
+        ["umount", "-l", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode == 0:
+        try:
+            CGROUP_ROOT.rmdir()
+        except OSError:
+            pass
+
+
+def drain_measurement_leaf(leaf: Path) -> None:
+    """Kill every task still charged to the leaf (detached descendants in new
+    sessions included), wait for the kernel to release them, then retire the
+    leaf so its memory.peak accounting can never bleed into a later leg."""
+    deadline = time.monotonic() + CGROUP_DRAIN_SEC
+    try:
+        (leaf / "cgroup.kill").write_text("1")
+    except OSError:
+        pass
+    while True:
+        try:
+            populated = (leaf / "cgroup.procs").read_text().strip() != ""
+        except OSError:
+            populated = False
+        if not populated:
+            break
+        if time.monotonic() > deadline:
+            raise RuntimeError("measurement cgroup could not be drained")
+        time.sleep(0.05)
+    try:
+        leaf.rmdir()
+    except OSError as exc:
+        raise RuntimeError("measurement cgroup could not be retired") from exc
+
+
+def _join_leaf(leaf_procs: Path) -> None:
+    with open(leaf_procs, "w") as handle:
+        handle.write("0")
+
+
+def verify_leg_preexec(leaf_procs: Path) -> None:
+    """Correctness/verify child: charge the whole tree to a fresh measurement
+    leaf (joined while still root), give it a private IPC namespace, then drop
+    to the candidate uid. No mount-namespace isolation, because the trusted
+    parent reads the verify output files back from the shared /tmp work tree."""
+    _join_leaf(leaf_procs)
+    if _LIBC.unshare(CLONE_NEWIPC) != 0:
+        raise OSError(ctypes.get_errno(), "verify IPC isolation failed")
+    drop_privileges()
+
+
+def isolated_benchmark_preexec(
+    leaf_procs: Path, runner_src: Path, input_src: Path, input_name: str
+) -> None:
+    """Give each timed benchmark leg a private kernel view: fresh mount and IPC
+    namespaces whose /tmp is a brand-new tmpfs holding ONLY the sealed runner
+    and the frozen input, plus a fresh /dev/shm and /var/tmp. Nothing a leg
+    writes is visible to any other leg, and no POSIX/SysV shm channel survives.
+
+    The first action joins this leg's measurement leaf, while still root and
+    BEFORE the mount namespace is unshared: the leaf path lives under the
+    shared /tmp the MS_MOVE below hides, so the join must run against the
+    parent's still-visible mount view. cgroup membership is independent of the
+    mount namespace and is inherited by every descendant, so the whole tree is
+    accounted regardless of what the candidate forks."""
+    _join_leaf(leaf_procs)
+    if _LIBC.unshare(CLONE_NEWNS | CLONE_NEWIPC) != 0:
+        raise OSError(ctypes.get_errno(), "benchmark namespace isolation failed")
+    if _LIBC.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
+        raise OSError(ctypes.get_errno(), "private mount propagation failed")
+    stage = os.fsencode(str(REP_STAGE))
+    if _LIBC.mount(b"hone-biome-stage", stage, b"tmpfs", MS_NOSUID | MS_NODEV, STAGE_OPTIONS) != 0:
+        raise OSError(ctypes.get_errno(), "fresh stage tmpfs mount failed")
+    os.mkdir(REP_STAGE / "bin", 0o755)
+    os.mkdir(REP_STAGE / "input", 0o755)
+    bin_target = REP_STAGE / "bin" / "runner"
+    input_target = REP_STAGE / "input" / input_name
+    os.close(os.open(bin_target, os.O_CREAT | os.O_WRONLY, 0o644))
+    os.close(os.open(input_target, os.O_CREAT | os.O_WRONLY, 0o644))
+    if _LIBC.mount(os.fsencode(str(runner_src)), os.fsencode(str(bin_target)), None, MS_BIND, None) != 0:
+        raise OSError(ctypes.get_errno(), "sealed runner bind failed")
+    if _LIBC.mount(os.fsencode(str(input_src)), os.fsencode(str(input_target)), None, MS_BIND, None) != 0:
+        raise OSError(ctypes.get_errno(), "frozen input bind failed")
+    if _LIBC.mount(stage, b"/tmp", None, MS_MOVE, None) != 0:
+        raise OSError(ctypes.get_errno(), "staged benchmark view move failed")
+    if _LIBC.mount(b"hone-biome-shm", b"/dev/shm", b"tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, SHM_OPTIONS) != 0:
+        raise OSError(ctypes.get_errno(), "fresh shm tmpfs mount failed")
+    if _LIBC.mount(b"hone-biome-vartmp", b"/var/tmp", b"tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, VARTMP_OPTIONS) != 0:
+        raise OSError(ctypes.get_errno(), "fresh var-tmp tmpfs mount failed")
+    drop_privileges()
+
+
+def _spawn_measured(argv: list[str], *, timeout: float, preexec_fn) -> tuple[int, bytes, bytes]:
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        preexec_fn=preexec_fn,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        raise RuntimeError(f"candidate process timed out after {timeout:.0f}s: {argv[0]}")
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return proc.returncode, out, err
+
+
+PROOF_PREFIX = "PROOF "
+
+
+def parse_proof(out: bytes) -> str:
+    lines = [line for line in out.decode(errors="replace").splitlines() if line.startswith(PROOF_PREFIX)]
+    if len(lines) != 1:
+        raise RuntimeError("benchmark runner did not emit exactly one proof line")
+    token = lines[0][len(PROOF_PREFIX):].strip()
+    if len(token) != 16 or any(char not in "0123456789abcdef" for char in token):
+        raise RuntimeError("benchmark runner emitted a malformed proof")
+    return token
+
+
+def run_bench_leg(
+    runner: Path,
+    mode: str,
+    source: Path,
+    repetitions: int,
+    nonce: int,
+    leaf_id: int,
+) -> tuple[float, int, str]:
+    """One timed runner invocation inside a fresh measurement leaf and a
+    per-leg private mount/IPC namespace. Returns (elapsed_ms, rss_kib, proof).
+    Wall time is the trusted parent's; the proof (folded from every timed
+    iteration's protected observations) crosses back over the parent-owned
+    stdout pipe and is cross-checked against the pristine reference; RSS is the
+    kernel cgroup memory.peak over the whole leg process tree."""
+    leaf = CGROUP_ROOT / f"leaf-{leaf_id}"
+    leaf.mkdir(mode=0o755, exist_ok=False)
+    leaf_procs = leaf / "cgroup.procs"
+    staged_input = STAGED_INPUT_DIR / source.name
+    argv = [str(STAGED_RUNNER), mode, str(staged_input), str(repetitions), str(nonce)]
+
+    def preexec() -> None:
+        isolated_benchmark_preexec(leaf_procs, runner, source, source.name)
+
+    try:
+        started = time.perf_counter_ns()
+        returncode, out, err = _spawn_measured(
+            argv, timeout=float(CHALLENGE["benchmarkTimeoutSec"]), preexec_fn=preexec
+        )
+        elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
+        try:
+            peak_bytes = int((leaf / "memory.peak").read_text(encoding="utf-8").strip())
+        except OSError as exc:
+            raise RuntimeError("measurement leaf memory.peak unreadable") from exc
+    finally:
+        drain_measurement_leaf(leaf)
+    reap_candidate_processes()
+    if returncode != 0:
+        raise RuntimeError(f"runner failed: {err.decode(errors='replace')[-500:]}")
+    proof = parse_proof(out)
+    return elapsed_ms, peak_bytes // 1024, proof
 
 
 def run_untrusted(
@@ -462,19 +733,36 @@ def run_selftest(env: dict[str, str]) -> tuple[bool, str, float]:
     )
 
 
-def run_measured_rss(argv: list[str], *, timeout: float, work: Path) -> int:
-    rss_file = work / f"rss-{time.monotonic_ns()}"
-    command = ["/usr/bin/time", "-f", "%M", "-o", str(rss_file), *argv]
-    result = run_untrusted(command, timeout=timeout, stdout=subprocess.DEVNULL)
-    if result.returncode != 0:
-        raise RuntimeError(f"runner failed: {result.stderr.decode(errors='replace')[-500:]}")
-    return int(rss_file.read_text(encoding="utf-8").strip())
+def run_measured_rss(argv: list[str], *, timeout: float, leaf_id: int) -> int:
+    """Run a correctness/verify child and return its whole-tree peak RSS in
+    KiB from the kernel cgroup memory.peak — not /usr/bin/time %M, which only
+    accounts the direct child's max-RSS and which candidate-linked code can
+    duck by detaching a helper."""
+    leaf = CGROUP_ROOT / f"verify-{leaf_id}"
+    leaf.mkdir(mode=0o755, exist_ok=False)
+    leaf_procs = leaf / "cgroup.procs"
+
+    def preexec() -> None:
+        verify_leg_preexec(leaf_procs)
+
+    try:
+        returncode, _out, err = _spawn_measured(argv, timeout=timeout, preexec_fn=preexec)
+        try:
+            peak_bytes = int((leaf / "memory.peak").read_text(encoding="utf-8").strip())
+        except OSError as exc:
+            raise RuntimeError("verify leaf memory.peak unreadable") from exc
+    finally:
+        drain_measurement_leaf(leaf)
+    reap_candidate_processes()
+    if returncode != 0:
+        raise RuntimeError(f"runner failed: {err.decode(errors='replace')[-500:]}")
+    return peak_bytes // 1024
 
 
 def verify_cases(expected: dict, source_dir: Path, work: Path) -> tuple[list[Path], int]:
     verified: list[Path] = []
     peak_rss = 0
-    for name, oracle in sorted(expected["files"].items()):
+    for index, (name, oracle) in enumerate(sorted(expected["files"].items())):
         source = source_dir / name
         if not source.is_file() or sha256(source) != oracle["inputSha256"]:
             raise RuntimeError(f"frozen input hash mismatch: {name}")
@@ -490,7 +778,7 @@ def verify_cases(expected: dict, source_dir: Path, work: Path) -> tuple[list[Pat
         rss = run_measured_rss(
             [str(RUNNER), "verify", str(input_copy), str(output), str(second), str(diagnostics)],
             timeout=float(CHALLENGE["benchmarkTimeoutSec"]),
-            work=case,
+            leaf_id=index,
         )
         peak_rss = max(peak_rss, rss)
         if output.read_bytes() != second.read_bytes():
@@ -499,9 +787,8 @@ def verify_cases(expected: dict, source_dir: Path, work: Path) -> tuple[list[Pat
             raise RuntimeError(f"byte-exact formatting gate failed: {name}")
         if sha256(diagnostics) != oracle["diagnosticSha256"]:
             raise RuntimeError(f"diagnostic hash gate failed: {name}")
-        # The verified artifacts double as answer keys for the benchmark
-        # receipts, so they must not stay readable in the candidate-writable
-        # work tree. Remove them and freeze the case dir before benchmarking.
+        # The verified artifacts double as answer keys for the frozen output,
+        # so they must not stay readable in the candidate-writable work tree.
         for artifact in (output, second, diagnostics):
             remove_path(artifact)
         for leftover in case.iterdir():
@@ -512,125 +799,92 @@ def verify_cases(expected: dict, source_dir: Path, work: Path) -> tuple[list[Pat
     return verified, peak_rss
 
 
-def validate_bench_receipt(mode: str, receipt: Path, oracle: dict) -> None:
-    if receipt.is_symlink() or not receipt.is_file():
-        raise RuntimeError(f"benchmark {mode} receipt missing")
-    if mode == "format":
-        if sha256(receipt) != oracle["formattedSha256"] or receipt.stat().st_size != oracle["formattedBytes"]:
-            raise RuntimeError("benchmark format receipt does not match the protected oracle")
-    else:
-        if sha256(receipt) != oracle["parseReceiptSha256"]:
-            raise RuntimeError("benchmark parse receipt does not match the protected oracle")
-
-
-def run_bench_sample(
-    runner: Path,
-    mode: str,
-    source: Path,
-    repetitions: int,
-    oracle: dict,
-    sample_dir: Path,
-) -> tuple[float, int]:
-    """One timed runner invocation: trusted-parent wall time around the whole
-    child, receipt validated against the protected oracle before the sample
-    counts. Returns (elapsed_ms, rss_kb)."""
-    sample_dir.mkdir(mode=0o777)
-    sample_dir.chmod(0o777)
-    receipt = sample_dir / "receipt"
-    rss_file = sample_dir / "rss"
-    command = [
-        "/usr/bin/time",
-        "-f",
-        "%M",
-        "-o",
-        str(rss_file),
-        str(runner),
-        mode,
-        str(source),
-        str(repetitions),
-        str(receipt),
-    ]
-    started = time.perf_counter_ns()
-    result = run_untrusted(
-        command,
-        timeout=float(CHALLENGE["benchmarkTimeoutSec"]),
-        stdout=subprocess.DEVNULL,
-    )
-    elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0
-    # Sweep candidate-uid stragglers before anything else runs: a leftover
-    # process from this leg must never overlap the other leg of the pair.
-    reap_candidate_processes()
-    if result.returncode != 0:
-        raise RuntimeError(f"runner failed: {result.stderr.decode(errors='replace')[-500:]}")
-    validate_bench_receipt(mode, receipt, oracle)
-    rss = int(rss_file.read_text(encoding="utf-8").strip())
-    shutil.rmtree(sample_dir)
-    return elapsed_ms, rss
-
-
 def benchmark(
     expected: dict, cases: list[Path], work: Path, initial_peak_rss: int
 ) -> tuple[float, int, dict[str, float], dict[str, float]]:
-    """Benchmark every frozen workload against the in-container reference.
-
-    Every sample is a fresh process in a fresh sample directory. Per
-    workload/mode the candidate and the pristine reference each run
-    BENCH_BATCHES times, strictly alternating so both binaries sample the
-    same wall-clock window, and the estimator is the contention-robust
-    minimum of each binary's per-rep times:
+    """Benchmark every frozen workload against the pristine in-container
+    reference. Per workload/mode the candidate and the reference each run
+    BENCH_BATCHES times in fresh measurement leaves and fresh per-leg mount/IPC
+    namespaces, strictly alternating so both binaries sample the same
+    wall-clock window; the estimator is the contention-robust minimum of each
+    binary's per-rep times:
         ratio = min(reference per-rep) / min(candidate per-rep)
-    The minimum is the least-contended sample, i.e. the closest approach to
-    true compute time; taking it per binary (not per pair) makes the ratio
-    robust to a loaded shared host, where mean/median or subtractive
-    estimators blow up. The score is the frozen anchor scaled by the
-    geometric mean of the per-workload/mode ratios:
+    and the score is the frozen anchor scaled by the geometric mean of the
+    per-workload/mode ratios:
         q = REFERENCE_ANCHOR_Q * geomean(ratio per workload/mode)
-    A candidate exactly as fast as the reference scores the anchor. Nothing
-    the child prints is used; a sample only counts when its receipt matches
-    the protected oracle, binding measured time to completed parser/formatter
-    output. RSS is taken from candidate runs only.
+
+    Completion binding (ADAPTER/ITER): iteration selection and per-iteration
+    validation live in the trusted parent, never in a candidate-authored file.
+    The parent draws a fresh per-sample nonce and drives BOTH the candidate and
+    the reference with it; each runner folds every timed iteration's protected
+    probe observations into a nonce-keyed proof returned over the parent-owned
+    stdout pipe. A sample counts only when the candidate's proof equals the
+    pristine reference's proof for that nonce, which is possible only if the
+    candidate actually executed every timed iteration over the pinned parser /
+    formatter output. A process that computed the base once and exited, or that
+    skipped rotations/probes, produces no matching proof. The warmup uses a
+    distinct nonce, so nothing precomputed during warmup can satisfy a scored
+    leg. RSS is the kernel cgroup memory.peak from candidate legs only.
     """
     if REFERENCE_RUNNER.is_symlink() or not REFERENCE_RUNNER.is_file():
         raise RuntimeError("pristine reference runner is missing from the image")
+    REP_STAGE.mkdir(mode=0o755, exist_ok=True)
     reap_candidate_processes()
     measurements: dict[str, float] = {}
     ratios: dict[str, float] = {}
     peak_rss = initial_peak_rss
-    batches = BENCH_BATCHES
+    leaf_id = 1000
     for source in cases:
-        oracle = expected["files"][source.name]
         for mode, repetitions_key in (("parse", "parserRepetitions"), ("format", "formatterRepetitions")):
             repetitions = int(CHALLENGE[repetitions_key])
+            measured_nonce = secrets.randbits(63)
+            warmup_nonce = secrets.randbits(63)
             candidate_ms: list[float] = []
             reference_ms: list[float] = []
-            stem = f"bench-{source.name.replace('/', '_')}-{mode}"
-            # One untimed warmup per binary equalizes cold-start (page cache,
-            # allocator arenas) before the measured batches.
-            for warm, runner in (("candidate", RUNNER), ("reference", REFERENCE_RUNNER)):
-                run_bench_sample(runner, mode, source, repetitions, oracle, work / f"{stem}-warm-{warm}")
-            for batch in range(batches):
+            candidate_proofs: set[str] = set()
+            reference_proofs: set[str] = set()
+            # Untimed warmup per binary with a DISTINCT nonce equalizes
+            # cold-start (page cache, allocator arenas) without ever producing
+            # a proof that a scored leg could reuse.
+            for runner in (RUNNER, REFERENCE_RUNNER):
+                run_bench_leg(runner, mode, source, repetitions, warmup_nonce, leaf_id)
+                leaf_id += 1
+            for batch in range(BENCH_BATCHES):
                 legs = [("candidate", RUNNER), ("reference", REFERENCE_RUNNER)]
                 if batch % 2 == 1:
                     legs.reverse()
                 for leg_name, runner in legs:
-                    elapsed_ms, rss = run_bench_sample(
-                        runner,
-                        mode,
-                        source,
-                        repetitions,
-                        oracle,
-                        work / f"{stem}-{batch}-{leg_name}",
+                    elapsed_ms, rss, proof = run_bench_leg(
+                        runner, mode, source, repetitions, measured_nonce, leaf_id
                     )
+                    leaf_id += 1
                     per_rep = elapsed_ms / repetitions
                     if leg_name == "candidate":
                         candidate_ms.append(per_rep)
+                        candidate_proofs.add(proof)
                         peak_rss = max(peak_rss, rss)
                     else:
                         reference_ms.append(per_rep)
-            best_candidate = min(candidate_ms)
-            best_reference = min(reference_ms)
-            measurements[f"{source.name}:{mode}"] = best_candidate
-            ratios[f"{source.name}:{mode}"] = best_reference / best_candidate
+                        reference_proofs.add(proof)
+            if len(reference_proofs) != 1:
+                raise RuntimeError("pristine reference proof was unstable across timed legs")
+            if len(candidate_proofs) != 1:
+                raise RuntimeError("candidate benchmark proof varied across timed iterations")
+            if candidate_proofs != reference_proofs:
+                raise RuntimeError(
+                    "candidate benchmark proof does not match the pristine reference: "
+                    "the candidate did not execute every timed iteration over the pinned output"
+                )
+            # Paired per-batch geomean: candidate and reference legs in the
+            # same batch run back-to-back against the same instantaneous host
+            # load, so their ratio cancels common-mode contention within each
+            # pair and tightens as 1/sqrt(pairs) — markedly tighter than
+            # min-of-N on this loaded shared host (A-A spread ~0.7% vs ~1.1%).
+            paired = [ref / cand for cand, ref in zip(candidate_ms, reference_ms)]
+            measurements[f"{source.name}:{mode}"] = min(candidate_ms)
+            ratios[f"{source.name}:{mode}"] = math.exp(
+                statistics.fmean(math.log(value) for value in paired)
+            )
     if not ratios or any(
         not math.isfinite(value) or value <= 0
         for value in list(ratios.values()) + list(measurements.values())
@@ -675,6 +929,11 @@ def evaluate() -> dict:
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="hone-work-") as tmp_raw:
         work = Path(tmp_raw)
         work.chmod(0o755)
+        log("mounting trusted measurement cgroup")
+        try:
+            mount_measurement_cgroup()
+        except Exception as exc:
+            return fail(f"measurement cgroup unavailable: {exc}", tests_pass=True)
         log("verifying exact output, diagnostics, and idempotence")
         try:
             cases, peak_rss = verify_cases(expected, expected_path.parent, work)
@@ -683,6 +942,8 @@ def evaluate() -> dict:
             log("benchmark stage completed")
         except Exception as exc:
             return fail(str(exc), tests_pass=True)
+        finally:
+            unmount_measurement_cgroup()
     rss_limit = int(CHALLENGE["rssLimitKb"])
     if peak_rss > rss_limit:
         return fail(
@@ -705,7 +966,7 @@ def evaluate() -> dict:
         "perExample": {
             "aggregate": {
                 "score": q,
-                "feedback": f"{len(cases)} frozen files; anchor-scaled geometric mean of median candidate/reference wall-time ratios",
+                "feedback": f"{len(cases)} frozen files; anchor-scaled geometric mean of paired per-batch reference/candidate wall-time ratios, proof-cross-checked against the pristine reference",
             }
         },
         "diagnostics": {

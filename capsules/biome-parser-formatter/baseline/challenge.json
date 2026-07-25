@@ -5,7 +5,7 @@
   "benchmarkSamples": 5,
   "parserRepetitions": 40,
   "formatterRepetitions": 20,
-  "rssLimitKb": 33000,
+  "rssLimitKb": 28000,
   "tmpfsSize": "1536m",
   "buildTimeoutSec": 500,
   "testTimeoutSec": 300,

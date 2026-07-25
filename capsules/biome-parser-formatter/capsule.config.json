@@ -1,6 +1,6 @@
 {
   "objective": "Improve JavaScript, TypeScript, and CSS parser/formatter throughput across frozen deterministic large files. Preserve byte-exact formatted output, parser diagnostic hashes, idempotence, relevant parser/formatter regression tests, and peak RSS within 2% of baseline. Only the four pinned parser/formatter crate src trees are mutable.",
-  "image": "hone-biome-task@sha256:3e6e6f4584b05ebdb125974aece501c0aa64b7b1483bc98bf50c4c8985dc6c8d",
+  "image": "hone-biome-task@sha256:2bebe81ed96099216d1516f3457b95956956dce08303caf41ba775c21c9bcc44",
   "evalEntrypoint": [
     "python3",
     "-I",
@@ -70,15 +70,15 @@
     "measurement": {
       "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local calibration",
       "freshProcess": true,
-      "samplesPerWorkload": 5,
+      "samplesPerWorkload": 15,
       "aaSamples": 3,
-      "q": "reciprocal geometric mean trusted-parent wall milliseconds per repetition across parse and format workloads; per workload the fastest k of N samples are trimmed-mean averaged to reject host-contention outliers; every sample is receipt-bound to the protected oracle",
+      "q": "frozen anchor (qBase) scaled by the geometric mean over parse/format workloads of the paired per-batch reference/candidate wall-time ratio; per workload the candidate and the pristine in-container reference alternate over BENCH_BATCHES=15 fresh-process legs, and each batch's candidate leg is paired with the reference leg run back-to-back against the same instantaneous host load so common-mode contention cancels within the pair; every timed iteration is bound to the pristine reference via a nonce-keyed proof",
       "qFail": 1e-12,
       "qBase": 0.0769000486784732,
-      "sigma": 0.000287134953365207,
+      "sigma": 0.0001135,
       "qReference": 0.08074505111234687,
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-      "rssGate": "peak workload RSS <= frozen ceiling rssLimitKb (33000 KiB); recalibrated for the trusted-parent wall-timing harness whose peak is dominated by the formatter IR plus glibc arena retention, giving ~1.11x the observed baseline peak (~29620 KiB) so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
+      "rssGate": "peak workload RSS <= frozen ceiling rssLimitKb (28000 KiB); round-4 recalibrated for the whole-tree kernel cgroup memory.peak accounting (replacing /usr/bin/time %M), ~1.11x the observed baseline whole-tree peak (~25168 KiB train / ~19244 KiB validation) so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
     },
     "tags": [
       "m2",

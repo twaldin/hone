@@ -1,22 +1,22 @@
 {
-  "capsuleId": "cap_3cb31f099fc5",
-  "capsuleDigestNote": "evidence attests the frozen manifest identity above; regenerated after the two consecutive ordering passes",
+  "capsuleId": "cap_1e9da3292547",
+  "capsuleDigestNote": "evidence attests the frozen manifest identity above; regenerated after the two consecutive round-4 ordering passes",
   "feasibility": {
     "note": "clean candidate build + full eval well under capsule wall-clock; see build_test_sec in evaluator diagnostics"
   },
   "aa": {
     "aggregates": [
-      0.06836842841545861,
-      0.07121147178894424,
-      0.06712365701000408
+      0.0767129004715984,
+      0.07686509335726381,
+      0.07693487276932176
     ],
-    "spread": 0.059328656468645075,
+    "spread": 0.002888849125853213,
     "band": 0.15,
-    "note": "baseline stability re-measurements from ordering pass 2 (trusted-parent wall timing)"
+    "note": "baseline stability re-measurements from round-4 ordering pass 2; paired per-batch reference/candidate geomean over 15 batches (contention cancels within each back-to-back pair), so the A-A spread tightened from ~0.0141 (round-2 min-of-N, 9 batches) to ~0.0029"
   },
   "qFail": 1e-12,
   "qReference": 0.08074505111234687,
-  "qReferenceNote": "provisional (P6 host recalibration DEFERRED); pilots compared descriptively against this frozen value",
+  "qReferenceNote": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)); the 5% floor dominates (5*sigma=0.00057 << 0.05*qBase=0.00385), so qReference = qBase*1.05, unchanged from round-2. Provisional (P6 host recalibration DEFERRED); pilots compared descriptively against this frozen value",
   "controls": [
     {
       "id": "broken",
@@ -26,33 +26,33 @@
     },
     {
       "id": "naive",
-      "combined": 0.053247376306425134,
+      "combined": 0.05401954333655701,
       "correct": true,
       "purpose": "bounded CPU delay in parser entrypoints is slower but byte-exact"
     },
     {
       "id": "baseline",
-      "combined": 0.06836842841545861,
+      "combined": 0.0767129004715984,
       "correct": true
     },
     {
       "id": "improved",
-      "combined": 0.07228607334603607,
+      "combined": 0.07791829848203341,
       "correct": true,
-      "purpose": "independently authored identifier/whitespace fast-path + trivia preallocation; each parse uncached"
+      "purpose": "independently authored parser fast-paths (JS whitespace + ASCII-identifier + decimal-integer lexer fast paths + trivia preallocation, CSS identifier fast path); each parse uncached, byte-exact and nonce-proof-identical to baseline. Combined +1.57% over baseline (train +1.65%, validation +1.49%), clearing the tightened A-A spread by a wide margin"
     },
     {
       "id": "shortcut",
-      "trainCombined": 0.23020602961972852,
+      "trainCombined": 0.07795031804396949,
       "validationCombined": 1e-12,
       "gated": true,
-      "purpose": "repeated-parse memoization beats baseline on train but the validation-fingerprint guard fails it on the protected split"
+      "purpose": "improved's genuine parser fast paths plus a first-call validation-marker panic; beats baseline on train but panics on the protected validation split (split-inverting)"
     }
   ],
   "perturbation": {
     "id": "improved",
     "valid": true,
-    "combined": 0.07228607334603607,
+    "combined": 0.07791829848203341,
     "movesMetric": true,
     "mutableFiles": [
       "mutable/biome_js_parser/src/lexer/mod.rs",
@@ -62,22 +62,23 @@
     ]
   },
   "rss": {
-    "baselinePeakKb": 29620,
-    "limitKb": 33000,
-    "construction": "ceiling above observed baseline peak (~29620 KiB) with ~1.11x margin for the wall-timing harness's formatter-IR + glibc arena variance; gross memory blow-ups still rejected"
+    "baselinePeakKb": 25168,
+    "limitKb": 28000,
+    "construction": "round-4 whole-tree kernel cgroup memory.peak accounting (replaces /usr/bin/time %M); ceiling ~1.11x the observed baseline whole-tree peak (25168 KiB train, 19244 KiB validation) so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
   },
   "ordering": {
     "consecutivePassingRuns": 2,
-    "lastStabilitySpread": 0.0141,
+    "lastStabilitySpread": 0.002888849125853213,
     "band": 0.15,
     "brokerEvalInvocationsPerRun": 14,
-    "verdicts": "broken<naive<baseline<improved; shortcut beats baseline on train and panics on the protected validation split (split-inverting); both round-2 passes clean (stability spreads 0.0239 then 0.0141)",
-    "measurementNote": "round-2 hardening: benchmark uses the T4-hardened harness (per-iteration identity-distinct rotated inputs with probe validation) and an interleaved reference-yardstick score — every sample pairs the candidate against the pristine root-owned /opt/target-seed reference, q = manifest qBase anchor * geomean of per-workload min-of-N reference/candidate per-rep ratios. Common-mode host drift cancels per binary, so thin true margins survive a loaded shared host. Between timed legs the evaluator becomes a subreaper and reaps every candidate-uid process so no candidate residue overlaps a reference leg.",
-    "imageLineage": "round-2 image rebuilt from the pinned biome checkout + hardened harness (hone-biome-task@sha256:3e6e6f4584b05ebdb125974aece501c0aa64b7b1483bc98bf50c4c8985dc6c8d), bakes the pristine reference runner at /opt/target-seed used as the in-container yardstick. Both consecutive ordering passes were measured in this frozen image; the trusted evaluator (python3 eval.py, uid 2000, sealed Rust runner + /usr/bin/time) never loads node/bun/pi_natives."
+    "verdicts": "broken<naive<baseline<improved on the combined aggregate; shortcut beats baseline on train and panics on the protected validation split (split-inverting); both round-4 passes clean (stability spreads 0.0030 then 0.0029; improved combined margin +0.87% then +1.57%, both splits positive)",
+    "measurementNote": "round-4 hardening: (ADAPTER) iteration selection + per-iteration validation live in the trusted parent, never in a candidate-authored completion file — the parent draws a fresh per-sample nonce, drives both the candidate and the pristine /opt/target-seed reference with it, and each folds every timed iteration's protected probe observations into a nonce-keyed proof returned over the parent-owned stdout pipe; a sample counts only when the candidate proof equals the reference proof for that nonce, so a process that computed the base once and exited cannot be credited. (EST) score = manifest qBase anchor * geomean over workloads of the PAIRED per-batch reference/candidate wall-time ratio (candidate+reference legs in one batch run back-to-back against the same instantaneous host load), which cancels common-mode contention within each pair and tightened the A-A spread ~5x vs round-2 min-of-N. (NS) every timed leg runs in a fresh mount+IPC namespace with a brand-new /tmp, /dev/shm and /var/tmp; the untimed warmup uses a distinct nonce so it cannot satisfy a scored leg. (CG) peak RSS is the whole-tree kernel cgroup memory.peak. Between legs the evaluator (a subreaper) reaps every candidate-uid process and drains the measurement leaf.",
+    "imageLineage": "round-4 image rebuilt from the pinned biome checkout + round-4 harness (hone-biome-task@sha256:2bebe81ed96099216d1516f3457b95956956dce08303caf41ba775c21c9bcc44), bakes the pristine reference runner at /opt/target-seed used as the in-container yardstick and proof oracle. Both consecutive ordering passes were measured in this frozen image; the trusted evaluator (python3 eval.py, uid 2000, sealed Rust runner, cgroup memory.peak, no /usr/bin/time) never loads node/bun/pi_natives."
   },
   "seedPilots": {
     "requirement": "gate-7 development-train headroom: three two-episode seed-optimizer pilots; at least one valid non-baseline candidate; fewer than three runs reach qReference",
     "authority": "trusted supervisor + local backend + broker measurement path under trusted synthetic-meta authority (admissionReview off); no admission receipts, no optimizer-queryable corpus state",
+    "note": "pilots are descriptive prior-harness headroom evidence (P6 host recalibration DEFERRED); the qualitative result (valid non-baseline candidates produced, none reaching the 5% qReference floor) is invariant under the round-4 estimator change",
     "model": "gpt-5.6-terra",
     "pilots": [
       {
