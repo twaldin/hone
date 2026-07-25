@@ -24,7 +24,15 @@ int main(int argc, char **argv) {
 	try {
 		duckdb::DBConfig config;
 		config.options.access_mode = duckdb::AccessMode::READ_ONLY;
+		// Single OS task by construction: one regular worker on the calling
+		// thread (maximum_threads == external_threads == 1 -> zero spawned
+		// regular workers), zero async I/O workers, and no allocator background
+		// thread (default off). With no thread ever spawned, the trusted
+		// evaluator can enforce a hard cgroup task cap so nothing in
+		// physical_filter.cpp can parallelize the filter across cores and beat
+		// the threads:1 fairness contract.
 		config.options.maximum_threads = 1;
+		config.options.async_threads = 0;
 		duckdb::DuckDB database(argv[1], &config);
 		duckdb::Connection connection(database);
 		auto result = connection.Query(ReadFile(argv[2]));

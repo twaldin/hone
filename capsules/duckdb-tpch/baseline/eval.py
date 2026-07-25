@@ -23,24 +23,47 @@ ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
 BUILD_ROOT = Path("/tmp/hone-duckdb-filter")
 WORK = BUILD_ROOT / "work"
 SOURCE = WORK / "source"
+REFERENCE_SOURCE = WORK / "reference"
 FIXTURE = BUILD_ROOT / "fixture"
 OUTPUT = BUILD_ROOT / "output"
 SEALED = BUILD_ROOT / "sealed"
+SEALED_REFERENCE = BUILD_ROOT / "sealed-reference"
+CGROUP_ROOT = Path("/tmp/hone-duckdb-cg")
+CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
+CGROUP_DRAIN_SEC = 10
+# One CPU-second of runtime per 100 ms scheduling period. A single-task runner
+# never reaches this ceiling (it cannot use more than one core), but any
+# candidate attempt to spawn worker threads in physical_filter.cpp and
+# parallelize the always-true filter across cores is throttled back to one
+# core-equivalent, so wall time cannot beat the threads:1 fairness contract.
+CPU_MAX = "100000 100000"
+# Hard kernel task ceiling for the whole measured tree. The runner is
+# single-task by construction (maximum_threads == external_threads == 1,
+# async_threads == 0, allocator background thread off), so exactly one task is
+# legitimate; any spawned thread or fork is refused by clone().
+PIDS_MAX = "1"
 UNSHARE_NEWIPC_NEWNET = 0x08000000 | 0x40000000
 SANDBOX_UID = 2000
 PROCESS_TIMEOUT_SEC = 2700
 SAMPLE_TIMEOUT_SEC = 45
 WARMUP_RUNS = 2
 TIMED_RUNS = 7
-FASTEST_K = 5
+# Whole-tree cgroup memory.peak allowance over the sealed baseline. Cgroup
+# accounting adds page-table and per-task kernel memory to the anon working set
+# that the old wait4 ru_maxrss missed, so the ceiling is wider than the former
+# 2% while still catching a candidate that trades memory for filter speed.
+PEAK_RSS_TOLERANCE = 0.10
 QFAIL = 0.0
-# Reference-yardstick normalization. The reference query never invokes the
-# mutable PhysicalFilter operator (no WHERE clause), so its wall time is
-# candidate-independent and tracks only host speed. Timed alongside each target
-# rep, the per-pair ratio reference/target cancels cross-eval host drift while
-# preserving the candidate's real filter-path speedup. It reads and case-folds
-# the same columns the target does, so it co-varies with the target's I/O and
-# string-kernel cost without a second build. NORM_CONST is a fixed scale factor.
+# Reference-yardstick normalization. The reference query has no WHERE clause, so
+# it never invokes the mutable PhysicalFilter operator, and it is run by a
+# SEPARATE pristine runner built from the trusted baseline with no candidate
+# overlay (see build_reference in worker.py). Because the reference binary
+# shares zero candidate code, a candidate construction in physical_filter.cpp
+# cannot detect the reference leg from argv/cmdline and inflate only that leg.
+# Its wall time therefore tracks only host speed; timed alongside each target
+# rep, the per-binary minimum ratio reference/target cancels cross-eval host
+# drift while preserving the candidate's real filter-path speedup. It reads and
+# case-folds the same columns the target does. NORM_CONST is a fixed scale.
 
 # Source reference only; the original executable terminal bundle stays private.
 def _withheld_terminal_input(name):
@@ -160,6 +183,77 @@ def cleanup() -> None:
         BUILD_ROOT.rmdir()
 
 
+def mount_measurement_cgroup() -> None:
+    # Docker mounts the container's cgroup2 view read-only, but the trusted
+    # evaluator holds mount authority (CAP_SYS_ADMIN): a fresh cgroup2 instance
+    # over the same namespaced hierarchy is writable by root only. memory.peak,
+    # cpu.max, and pids.max on the per-sample leaves are then root-owned control
+    # files the demoted uid-2000 runner can never write.
+    CGROUP_ROOT.mkdir(mode=0o755, exist_ok=False)
+    completed = subprocess.run(
+        ["mount", "-t", "cgroup2", "-o", "nosuid,nodev,noexec", "hone-duckdb-cg", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+        check=False,
+    )
+    if completed.returncode != 0:
+        CGROUP_ROOT.rmdir()
+        raise GateFailure("trusted measurement cgroup mount failed")
+    try:
+        # cgroup v2 no-internal-process rule: park the evaluator (and every
+        # worker/build it forks) in a trusted leaf so memory/cpu/pids can be
+        # delegated to the per-sample measurement leaves.
+        CGROUP_TRUSTED.mkdir(mode=0o755)
+        (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
+        (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory +pids +cpu")
+    except OSError as exc:
+        raise GateFailure("trusted measurement cgroup setup failed") from exc
+
+
+def unmount_measurement_cgroup() -> None:
+    completed = subprocess.run(
+        ["umount", "-l", str(CGROUP_ROOT)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+        check=False,
+    )
+    if completed.returncode == 0:
+        try:
+            CGROUP_ROOT.rmdir()
+        except OSError:
+            pass
+
+
+def drain_measurement_leaf(leaf: Path) -> None:
+    # Kill every process still charged to the leaf (detached descendants in new
+    # sessions included), wait for the kernel to release them, then retire the
+    # leaf. An empty cgroup.procs means every task has exited and been
+    # disassociated, so the leaf can be removed.
+    deadline = time.monotonic() + CGROUP_DRAIN_SEC
+    try:
+        (leaf / "cgroup.kill").write_text("1")
+    except OSError:
+        pass
+    while True:
+        try:
+            populated = (leaf / "cgroup.procs").read_text().strip() != ""
+        except OSError:
+            populated = False
+        if not populated:
+            break
+        if time.monotonic() > deadline:
+            raise GateFailure("measurement cgroup could not be drained")
+        time.sleep(0.05)
+    try:
+        leaf.rmdir()
+    except OSError as exc:
+        raise GateFailure("measurement cgroup could not be retired") from exc
+
+
 def check_source_envelope() -> None:
     """Protected files may legitimately be ABSENT (the sanitized terminal
     artifact strips them; prepare() reconstructs the tree from the trusted
@@ -245,16 +339,16 @@ def copy_sealed_file(source_path: Path, target: Path) -> None:
     os.chmod(target, 0o555)
 
 
-def seal_runner() -> Path:
-    """Root-owned copies of the runner and its libraries: the demoted
-    candidate owns everything under WORK and could re-chmod its own files,
-    so nothing candidate-owned is ever executed during timing. WORK is then
-    deleted outright — no candidate-writable state survives the build."""
-    build_dir = SOURCE / "build" / "hone-release"
-    SEALED.mkdir(mode=0o755)
-    sealed_lib = SEALED / "src"
+def seal_binary(build_dir: Path, sealed_dir: Path) -> Path:
+    """Root-owned copies of a runner and its libraries into a sealed directory:
+    the build ran under the sandbox uid and owns everything under WORK and could
+    re-chmod its own files, so nothing build-owned is ever executed during
+    timing. Used for both the candidate runner and the pristine reference
+    runner; each build tree is deleted by the caller after sealing."""
+    sealed_dir.mkdir(mode=0o755)
+    sealed_lib = sealed_dir / "src"
     sealed_lib.mkdir(mode=0o755)
-    copy_sealed_file(build_dir / "hone-query-runner", SEALED / "hone-query-runner")
+    copy_sealed_file(build_dir / "hone-query-runner", sealed_dir / "hone-query-runner")
     library_dir = build_dir / "src"
     symlinks: list[tuple[Path, str]] = []
     copied = 0
@@ -267,13 +361,12 @@ def seal_runner() -> Path:
         copy_sealed_file(entry, sealed_lib / entry.name)
         copied += 1
     if copied == 0:
-        raise GateFailure("built candidate produced no duckdb shared library")
+        raise GateFailure("build produced no duckdb shared library")
     for link_path, target_name in symlinks:
         if "/" in target_name or target_name in {".", ".."}:
-            raise GateFailure("candidate shared-library symlink escapes the sealed directory")
+            raise GateFailure("shared-library symlink escapes the sealed directory")
         os.symlink(target_name, link_path)
-    shutil.rmtree(WORK)
-    return SEALED / "hone-query-runner"
+    return sealed_dir / "hone-query-runner"
 
 
 def sweep_candidate_state() -> None:
@@ -327,84 +420,117 @@ def run_one_sample(binary: Path, query_name: str, expected_hash: str, index: int
     rep = OUTPUT / f"rep-{tag}-{index}"
     rep.mkdir(mode=0o777)
     os.chmod(rep, 0o777)
+    leaf = CGROUP_ROOT / f"sample-{tag}-{index}"
+    leaf.mkdir(mode=0o755, exist_ok=False)
+    try:
+        (leaf / "cpu.max").write_text(CPU_MAX)
+        (leaf / "pids.max").write_text(PIDS_MAX)
+    except OSError as exc:
+        drain_measurement_leaf(leaf)
+        raise GateFailure("measurement cgroup limits could not be applied") from exc
+    leaf_procs = leaf / "cgroup.procs"
+
+    def capped_demote() -> None:
+        # Join the root-owned measurement leaf while still privileged so the
+        # WHOLE runner tree is charged to a cgroup whose cpu.max, pids.max, and
+        # memory.peak the demoted uid-2000 code can never write, THEN drop
+        # privilege. cpu.max caps the tree to one core-equivalent (no
+        # cross-core filter parallelism), pids.max forbids any extra task, and
+        # memory.peak is kernel-owned and monotone over the leaf lifetime —
+        # candidate code cannot reset or under-report it, and it accounts every
+        # task in the tree, not just the direct child (unlike wait4 rusage).
+        with open(leaf_procs, "w") as handle:
+            handle.write("0")
+        demote()
+
     argv = [str(binary), str(FIXTURE / "input.duckdb"), str(FIXTURE / query_name)]
     started_ns = time.monotonic_ns()
-    process = subprocess.Popen(
-        argv,
-        cwd=rep,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        preexec_fn=demote,
-    )
-    deadline = started_ns / 1_000_000_000 + SAMPLE_TIMEOUT_SEC
-    stream = process.stdout
-    assert stream is not None
-    os.set_blocking(stream.fileno(), False)
-    chunks: list[bytes] = []
-    timed_out = False
-    while True:
-        remaining = deadline - time.monotonic_ns() / 1_000_000_000
-        if remaining <= 0:
-            timed_out = True
-            break
-        ready, _, _ = select.select([stream], [], [], remaining)
-        if not ready:
-            continue
-        data = stream.read()
-        if data is None:
-            continue
-        if data == b"":
-            break
-        chunks.append(data)
-    # Reap the direct child with kernel-reported rusage: peak RSS never
-    # transits any candidate-writable file. wait4 also folds in descendants
-    # the child reaped itself.
-    reaped = (0, 0, None)
-    while not timed_out:
-        reaped = os.wait4(process.pid, os.WNOHANG)
-        if reaped[0] == process.pid:
-            break
-        if time.monotonic_ns() / 1_000_000_000 > deadline:
-            timed_out = True
-            break
-        time.sleep(0.002)
-    elapsed = (time.monotonic_ns() - started_ns) / 1_000_000_000
+    tree_peak_bytes = 0
+    leftover = ""
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    if timed_out:
-        pid, status, _usage = os.wait4(process.pid, 0)
-        process.returncode = status
+        process = subprocess.Popen(
+            argv,
+            cwd=rep,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            preexec_fn=capped_demote,
+        )
+        deadline = started_ns / 1_000_000_000 + SAMPLE_TIMEOUT_SEC
+        stream = process.stdout
+        assert stream is not None
+        os.set_blocking(stream.fileno(), False)
+        chunks: list[bytes] = []
+        timed_out = False
+        while True:
+            remaining = deadline - time.monotonic_ns() / 1_000_000_000
+            if remaining <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([stream], [], [], remaining)
+            if not ready:
+                continue
+            data = stream.read()
+            if data is None:
+                continue
+            if data == b"":
+                break
+            chunks.append(data)
+        reaped = (0, 0, None)
+        while not timed_out:
+            reaped = os.wait4(process.pid, os.WNOHANG)
+            if reaped[0] == process.pid:
+                break
+            if time.monotonic_ns() / 1_000_000_000 > deadline:
+                timed_out = True
+                break
+            time.sleep(0.002)
+        elapsed = (time.monotonic_ns() - started_ns) / 1_000_000_000
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if timed_out:
+            os.wait4(process.pid, 0)
+            stream.close()
+            raise GateFailure("microbenchmark sample exceeded its trusted parent timeout")
+        _pid, status, _usage = reaped
+        # Popen must never waitpid a pid the trusted parent already reaped.
+        process.returncode = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else status
         stream.close()
-        raise GateFailure("microbenchmark sample exceeded its trusted parent timeout")
-    _pid, status, usage = reaped
-    # Popen must never waitpid a pid the trusted parent already reaped.
-    process.returncode = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else status
-    stream.close()
+        # Read the whole-tree peak and any surviving tasks from the root-owned
+        # cgroup BEFORE the leaf is drained and retired.
+        leftover = leaf_procs.read_text().strip()
+        tree_peak_bytes = int((leaf / "memory.peak").read_text().strip())
+    finally:
+        drain_measurement_leaf(leaf)
+    if leftover:
+        raise GateFailure("microbenchmark left live descendant processes")
     if status != 0:
         raise GateFailure("microbenchmark process failed")
     stdout = b"".join(chunks)
     actual_hash = hashlib.sha256(stdout).hexdigest()
     if actual_hash != expected_hash:
         raise GateFailure("independent exact-result validation failed")
-    peak_rss_kb = int(getattr(usage, "ru_maxrss", 0))
+    peak_rss_kb = tree_peak_bytes // 1024
     if peak_rss_kb <= 0:
-        raise GateFailure("trusted RSS capture was malformed")
+        raise GateFailure("trusted cgroup memory accounting was malformed")
     shutil.rmtree(rep)
     return elapsed, peak_rss_kb, actual_hash
 
 
 def main() -> None:
     mounted = False
+    cgroup_mounted = False
     result_hash = ""
     started = time.monotonic()
     try:
         check_source_envelope()
         mount_build_tmpfs()
         mounted = True
+        mount_measurement_cgroup()
+        cgroup_mounted = True
         metadata, oracle = load_and_seal_assets()
         identity = {
             "databaseSha256": metadata["databaseSha256"],
@@ -412,23 +538,35 @@ def main() -> None:
             "variant": metadata["variant"],
         }
         result_hash = hashlib.sha256(canonical(identity).encode()).hexdigest()
+        # Build and seal the PRISTINE reference runner FIRST, from a trusted
+        # seed with no candidate overlay, then delete its build tree — the
+        # reference binary is root-owned and read-only before any candidate code
+        # is ever prepared, built, or run, so no candidate process can influence
+        # or observe it.
+        run_worker("prepare_reference", REFERENCE_SOURCE)
+        run_worker("build_reference", REFERENCE_SOURCE)
+        reference_binary = seal_binary(REFERENCE_SOURCE / "build" / "hone-release", SEALED_REFERENCE)
+        shutil.rmtree(REFERENCE_SOURCE)
         run_worker("prepare", WORKSPACE, SOURCE)
         build_started = time.monotonic()
         run_worker("build")
         build_sec = time.monotonic() - build_started
         run_worker("test")
-        binary = seal_runner()
+        binary = seal_binary(SOURCE / "build" / "hone-release", SEALED)
+        shutil.rmtree(WORK)
         target_samples: list[float] = []
         reference_samples: list[float] = []
         rss_samples: list[int] = []
         actual_result_hash = ""
         for index in range(WARMUP_RUNS + TIMED_RUNS):
-            # Interleave target and reference in the same rep so both see the
-            # same instantaneous host load; the per-pair ratio cancels drift.
+            # Interleave candidate target and pristine reference so both see the
+            # same instantaneous host load; the per-binary minimum ratio cancels
+            # drift. The reference leg runs the sealed pristine binary, never the
+            # candidate one.
             target_elapsed, peak_rss_kb, actual_result_hash = run_one_sample(
                 binary, "query.sql", oracle, index, "target")
             reference_elapsed, _reference_rss, _reference_hash = run_one_sample(
-                binary, "reference.sql", REFERENCE_ORACLE, index, "reference")
+                reference_binary, "reference.sql", REFERENCE_ORACLE, index, "reference")
             if index >= WARMUP_RUNS:
                 target_samples.append(target_elapsed)
                 reference_samples.append(reference_elapsed)
@@ -444,8 +582,11 @@ def main() -> None:
         baseline_rss_kb = metadata["baselinePeakRssKb"]
         if not isinstance(baseline_rss_kb, int) or baseline_rss_kb <= 0:
             raise GateFailure("invalid baseline RSS limit")
-        if peak_rss_kb * 100 > baseline_rss_kb * 102:
-            raise GateFailure(f"peak RSS gate failed: {peak_rss_kb} KiB exceeds baseline+2%")
+        rss_ceiling_kb = baseline_rss_kb * (1.0 + PEAK_RSS_TOLERANCE)
+        if peak_rss_kb > rss_ceiling_kb:
+            raise GateFailure(
+                f"whole-tree peak memory gate failed: {peak_rss_kb} KiB exceeds baseline+"
+                f"{int(PEAK_RSS_TOLERANCE * 100)}%")
         # Contention-robust MIN-of-N estimator (converged lesson from the
         # thin-margin fixers on this shared loaded host): the per-binary minimum
         # wall is the least-contended, most reproducible realization. Both minima
@@ -480,7 +621,7 @@ def main() -> None:
                 }
             },
             "diagnostics": {
-                "summary": "sealed input/query hashes, independent exact output (target and reference), upstream physical-filter tests, trusted parent interleaved reference-yardstick timing, and RSS gate passed",
+                "summary": "sealed input/query hashes, independent exact output (candidate target and pristine reference), upstream physical-filter tests, trusted parent interleaved reference-yardstick timing under a one-core cgroup cap, and whole-tree cgroup memory.peak gate passed",
                 "quality": 1.0,
                 "result_hash": result_hash,
                 "query_result_hash": actual_result_hash,
@@ -490,6 +631,8 @@ def main() -> None:
                 "target_samples_seconds": target_samples,
                 "reference_samples_seconds": reference_samples,
                 "peak_rss_kb": peak_rss_kb,
+                "peak_rss_baseline_kb": baseline_rss_kb,
+                "peak_rss_ceiling_kb": int(rss_ceiling_kb),
                 "build_sec": round(build_sec, 6),
                 "runtime_sec": round(time.monotonic() - started, 6),
             },
@@ -499,6 +642,8 @@ def main() -> None:
     except (GateFailure, OSError, ValueError, subprocess.SubprocessError) as exc:
         emit_failure(str(exc), result_hash)
     finally:
+        if cgroup_mounted:
+            unmount_measurement_cgroup()
         if mounted:
             cleanup()
 

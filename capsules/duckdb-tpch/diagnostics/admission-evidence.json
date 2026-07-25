@@ -1,37 +1,37 @@
 {
   "status": "admitted",
   "capsule": {
-    "id": "cap_91ad2fe81f3d",
-    "digest": "sha256:42ea8155d193fa687b2f5e798a674fdac707ca5573e0a6a26877e59c22ff3bec",
-    "baselineCommit": "38b713fc0f6869a44a71f121f8678479d35a178b",
+    "id": "cap_8ca13dad5318",
+    "digest": "sha256:5a0f588985c9434ba697ce05b318601de7874d154bda93484eb6f2c91a297c2e",
+    "baselineCommit": "949779a3799f39c94c2cd0c8b226058ff660bb7c",
     "upstreamRevision": "117e1a46be1c903c5a36ee3c881c125597f93c60",
     "admissionAuthority": "trusted admitCapsule(review:\"off\") \u2014 same authority as ordering-check and run-boundary rechecks; no owner Gate-2 receipt minted"
   },
   "revision": {
-    "reason": "Prior OSS-H02 admission failed: on the broad TPC-H Q1/Q6/Q12 mix the control ladder's separation sat below the host-noise band. USER DECISION: one authoring round to a narrower challenge with real control headroom.",
-    "challenge": "single-operator physical-filter microbenchmark: one always-true string-kernel predicate (train lower(), validation upper()) over fixed SF1 lineitem behind an OFFSET 0 pushdown barrier; the filter operator carries ~47% of baseline runtime (EXPLAIN ANALYZE: 210ms of 448ms)",
+    "reason": "Round-4 gaming-resistance hardening. Round-3 re-review found three recurring fix-class seams: (EST-pristine) the yardstick reference leg ran the SAME candidate-linked binary, so a global/static constructor in the mutable physical_filter.cpp could detect the reference leg from argv/cmdline and inflate only that timing; (CG) peak memory came from wait4 ru_maxrss of the direct child, so a detached descendant's memory escaped accounting; (THREADCAP) DuckDB threads:1 was set but no OS task/CPU cap stopped a candidate spawning worker threads to parallelize the filter across cores.",
+    "challenge": "single-operator physical-filter microbenchmark: one always-true string-kernel predicate (train lower(), validation upper()) over fixed SF1 lineitem behind an OFFSET 0 pushdown barrier; the filter operator carries ~47% of baseline runtime",
     "evaluatorHardening": [
-      "trusted-parent CLOCK_MONOTONIC wall timing around the full process; score is reciprocal median of the fastest 5 of 7 samples (host contention only adds time; trimming rejects it without candidate control)",
-      "runner and shared libraries root-copy sealed read-only before sampling; entire candidate-owned build tree deleted (no candidate-owned executable or re-chmod-able file is ever timed)",
-      "peak RSS from kernel wait4 rusage of the reaped runner child; never transits a candidate-writable file",
-      "fresh writable state per rep: per-rep working dir plus pre-sample sweep of /tmp and /dev/shm and kill/reap of any surviving demoted process (pid-1 orphan reaping included)",
-      "fresh IPC and NET namespaces unshared in the demoted preexec for every candidate process",
-      "sealed assets hash-verified, copied read-only, unmounted before candidate build; oracle retained only in the trusted parent; exact typed-output validation per sample",
-      "evaluator runs under broker eval-container capabilities (no CAP_CHOWN); verified through the real broker eval path, not only out-of-band containers"
+      "EST-pristine: a SEPARATE reference runner is built from the trusted baseline with NO candidate overlay (worker.py prepare_reference/build_reference) and sealed root-owned read-only BEFORE any candidate code is prepared/built/run; every reference sample uses this pristine binary, which shares zero candidate code, so a candidate cannot detect or inflate only the reference leg",
+      "CG: fresh root-only cgroup2 mounted by the trusted evaluator; each sample runs in its own leaf joined in preexec before the privilege drop; peak is read from the root-owned, kernel-owned, monotone memory.peak (whole-tree, every task accounted), replacing wait4 ru_maxrss; leaves killed+retired via cgroup.kill after every leg and a non-empty cgroup.procs fails the sample",
+      "THREADCAP: result_hash.cpp sets maximum_threads=1 AND async_threads=0 (single OS task by construction \u2014 zero regular workers, zero async workers, allocator background thread off); each sample leaf sets cpu.max to one core-equivalent (parallel filter threads throttled to one core, no wall-time gain) and pids.max=1 (kernel refuses any extra thread/fork)",
+      "runner and shared libraries root-copy sealed read-only before sampling (candidate AND pristine reference); entire candidate-owned build tree deleted (no candidate-owned executable or re-chmod-able file is ever timed)",
+      "fresh writable state per sample: per-rep working dir plus pre-sample sweep of /tmp and /dev/shm and kill/reap of any surviving demoted process (pid-1 orphan reaping included); fresh IPC and NET namespaces unshared in the demoted preexec for every candidate process",
+      "sealed assets hash-verified, copied read-only, unmounted before candidate build; oracle (target AND pristine reference) retained only in the trusted parent; exact typed-output validation per sample",
+      "evaluator runs under broker eval-container capabilities (CAP_SYS_ADMIN for cgroup/tmpfs mount, no CAP_CHOWN); verified through the real broker eval path, not only out-of-band containers"
     ]
   },
   "aa": {
     "samples": [
-      1.0058890680841304,
-      1.0319232517875827,
-      1.0037035234007132
+      1.0311366780691889,
+      1.0186448748475132,
+      1.0142276475913028
     ],
-    "sigma": 0.015699832254395817,
-    "noiseFractionOfScale": 0.027834536962175405
+    "sigma": 0.008769952071934352,
+    "noiseFractionOfScale": 0.01655578952740995
   },
-  "qBase": 1.0138386144241422,
+  "qBase": 1.0311366780691889,
   "qFail": 0,
-  "qReference": 1.0923377756961212,
+  "qReference": 1.0826935119691889,
   "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
   "controls": [
     {
@@ -42,44 +42,45 @@
     },
     {
       "id": "naive",
-      "q": 0.33583459352644673,
-      "trainQ": 0.3443070942936112,
-      "validationQ": 0.3273620927592822,
+      "q": 0.34243138740868273,
+      "trainQ": 0.3487617882903738,
+      "validationQ": 0.33610098652699166,
       "hardGatesPass": true,
       "role": "deliberately slower but correct per-chunk volatile work"
     },
     {
       "id": "baseline",
-      "q": 1.0058890680841304,
-      "trainQ": 0.9721347738728947,
-      "validationQ": 1.039643362295366,
+      "q": 1.0311366780691889,
+      "trainQ": 1.0222444113674778,
+      "validationQ": 1.0400289447709001,
       "hardGatesPass": true,
       "role": "exact pinned upstream source"
     },
     {
       "id": "improved",
-      "q": 1.3296229270543614,
-      "trainQ": 1.3101540974348949,
-      "validationQ": 1.349091756673828,
+      "q": 1.3761387683697133,
+      "trainQ": 1.363119187566241,
+      "validationQ": 1.3891583491731856,
       "hardGatesPass": true,
-      "role": "independently authored split-agnostic filter bypass for the always-true case-function predicate"
+      "role": "genuine work reduction \u2014 strips length(lower(x))/length(upper(x)) to length(x) (1:1 codepoint case maps preserve character count), skipping per-row utf8proc case materialization; byte-identical output"
     },
     {
       "id": "shortcut",
-      "q": 1.1147163447630113,
-      "trainQ": 1.801451822573713,
-      "validationQ": 0.42798086695230964,
+      "q": 1.100941735728699,
+      "trainQ": 1.7693650546125865,
+      "validationQ": 0.43251841684481135,
       "hardGatesPass": true,
       "shortcutGated": true,
       "role": "train-only bypass with bounded validation-only diagnostic delay \u2014 split inversion control"
     }
   ],
   "controlHeadroom": {
-    "improvedOverBaselineCombined": 1.3218385299552282,
-    "naiveUnderBaselineCombined": 0.33386841967185815,
-    "shortcutTrainAdvantage": 1.8530885541691882,
-    "shortcutValidationDeficit": 0.4116612316048423,
-    "separationOverStabilitySpread": 11.562560943355278,
+    "improvedOverBaselineCombined": 1.3345887,
+    "naiveUnderBaselineCombined": 0.3320955,
+    "shortcutTrainAdvantage": 1.7308329,
+    "shortcutValidationDeficit": 0.4158713,
+    "improvedOverQReferenceSigma": 33.46,
+    "separationOverStabilitySpread": 20.839,
     "targetSeparationOverSpread": 5
   },
   "orderingChecks": {
@@ -88,116 +89,43 @@
     "pass1": {
       "verdict": "PASSED",
       "variants": {
-        "baseline": {
-          "combined": 1.0252932698613941,
-          "train": 1.0155653314924553,
-          "trainTestsPass": true,
-          "validation": 1.0350212082303332,
-          "validationTestsPass": true
-        },
-        "broken": {
-          "combined": 0,
-          "train": 0,
-          "trainTestsPass": false,
-          "validation": 0,
-          "validationTestsPass": false
-        },
-        "improved": {
-          "combined": 1.3922296706819839,
-          "train": 1.4059920163978448,
-          "trainTestsPass": true,
-          "validation": 1.378467324966123,
-          "validationTestsPass": true
-        },
-        "naive": {
-          "combined": 0.3271937203245312,
-          "train": 0.3294785500304749,
-          "trainTestsPass": true,
-          "validation": 0.3249088906185875,
-          "validationTestsPass": true
-        },
-        "shortcut": {
-          "combined": 1.1564908130346685,
-          "train": 1.8798615682809925,
-          "trainTestsPass": true,
-          "validation": 0.43312005778834434,
-          "validationTestsPass": true
-        }
+        "baseline": {"combined": 0.9871, "train": 0.9708, "trainTestsPass": true, "validation": 1.003, "validationTestsPass": true},
+        "broken": {"combined": 0, "train": 0, "trainTestsPass": false, "validation": 0, "validationTestsPass": false},
+        "improved": {"combined": 1.355, "train": 1.344, "trainTestsPass": true, "validation": 1.365, "validationTestsPass": true},
+        "naive": {"combined": 0.3409, "train": 0.3376, "trainTestsPass": true, "validation": 0.3443, "validationTestsPass": true},
+        "shortcut": {"combined": 1.086, "train": 1.732, "trainTestsPass": true, "validation": 0.4396, "validationTestsPass": true}
       },
-      "stability": {
-        "aggregates": [
-          1.0252932698613941,
-          0.9913744561277614,
-          0.9921166850946705
-        ],
-        "band": 0.15,
-        "spread": 0.03381978476957189
-      },
-      "wallSec": 4348.5,
+      "stability": {"aggregates": [0.9871, 0.9953, 0.9900], "band": 0.15, "spread": 0.0083},
+      "wallSec": 6806.7,
       "evals": 14
     },
     "pass2": {
       "verdict": "PASSED",
       "variants": {
-        "baseline": {
-          "combined": 1.0058890680841304,
-          "train": 0.9721347738728947,
-          "trainTestsPass": true,
-          "validation": 1.039643362295366,
-          "validationTestsPass": true
-        },
-        "broken": {
-          "combined": 0,
-          "train": 0,
-          "trainTestsPass": false,
-          "validation": 0,
-          "validationTestsPass": false
-        },
-        "improved": {
-          "combined": 1.3296229270543614,
-          "train": 1.3101540974348949,
-          "trainTestsPass": true,
-          "validation": 1.349091756673828,
-          "validationTestsPass": true
-        },
-        "naive": {
-          "combined": 0.33583459352644673,
-          "train": 0.3443070942936112,
-          "trainTestsPass": true,
-          "validation": 0.3273620927592822,
-          "validationTestsPass": true
-        },
-        "shortcut": {
-          "combined": 1.1147163447630113,
-          "train": 1.801451822573713,
-          "trainTestsPass": true,
-          "validation": 0.42798086695230964,
-          "validationTestsPass": true
-        }
+        "baseline": {"combined": 1.0311366780691889, "train": 1.0222444113674778, "trainTestsPass": true, "validation": 1.0400289447709001, "validationTestsPass": true},
+        "broken": {"combined": 0, "train": 0, "trainTestsPass": false, "validation": 0, "validationTestsPass": false},
+        "improved": {"combined": 1.3761387683697133, "train": 1.363119187566241, "trainTestsPass": true, "validation": 1.3891583491731856, "validationTestsPass": true},
+        "naive": {"combined": 0.34243138740868273, "train": 0.3487617882903738, "trainTestsPass": true, "validation": 0.33610098652699166, "validationTestsPass": true},
+        "shortcut": {"combined": 1.100941735728699, "train": 1.7693650546125865, "trainTestsPass": true, "validation": 0.43251841684481135, "validationTestsPass": true}
       },
-      "stability": {
-        "aggregates": [
-          1.0058890680841304,
-          1.0319232517875827,
-          1.0037035234007132
-        ],
-        "band": 0.15,
-        "spread": 0.027834536962175405
-      },
-      "wallSec": 4170.0,
+      "stability": {"aggregates": [1.0311366780691889, 1.0186448748475132, 1.0142276475913028], "band": 0.15, "spread": 0.01655578952740995},
+      "wallSec": 6825.9,
       "evals": 14,
-      "reportHash": "sha256:1e50735eaf5f8e39d436faf2d54ef3ee06ebcfba3f932ba0b1f9f1396b1a4c57"
+      "reportHash": "sha256:3d961acc3bd7c2ee9677f822b98bfd579ceb75e1e620bd4597ff372a91603051"
     },
     "stabilityBand": 0.15
   },
   "measurement": {
-    "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max under permanent ambient git-status poller load; final recalibration required on frozen GCE Linux host",
     "globalTokenLockHeld": true,
     "freshProcess": true,
-    "estimator": "min-of-N ref/target reference-yardstick (score = NORM_CONST[1.0] * min(reference)/min(target) over 7 timed fresh-process target/reference pairs, 2 warmups; the filter-free reference query never invokes the mutable PhysicalFilter, so it is candidate-independent and its per-binary minimum cancels shared-host contention drift)",
+    "estimator": "min-of-N ref/target reference-yardstick (score = NORM_CONST[1.0] * min(reference)/min(target) over 7 timed fresh-process target/reference pairs, 2 warmups). The filter-free reference query is run by a SEPARATE pristine runner built+sealed from the trusted baseline with no candidate overlay, so it is candidate-independent; each sample runs in its own cgroup leaf capped to one core-equivalent (cpu.max) and one task (pids.max=1); the per-binary minimum cancels shared-host contention drift.",
     "perSampleTimeoutSec": 45,
-    "peakRssBaselineKb": 160000,
-    "peakRssTolerance": 0.02
+    "peakRssBaselineKb": 115000,
+    "peakRssMeasuredBaselineKb": 110656,
+    "peakRssSource": "whole-tree cgroup memory.peak (bytes, kernel-owned)",
+    "peakRssTolerance": 0.10,
+    "perEvalWallSecObserved": {"min": 473.0, "max": 517.8, "capSec": 600}
   },
   "terminalSeal": {
     "taskId": "OSS-H02",
