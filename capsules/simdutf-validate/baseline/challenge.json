@@ -1,0 +1,24 @@
+{
+  "taskId": "OSS-T04",
+  "revision": "1a62f928fcce103868d22df80376feea158060b9",
+  "qFail": 0.0,
+  "validFiles": [
+    "a.txt",
+    "b.txt",
+    "c.txt"
+  ],
+  "malformedFiles": [
+    "lone_continuation.bin",
+    "overlong.bin",
+    "truncated.bin",
+    "surrogate.bin"
+  ],
+  "timingSamples": 20,
+  "timingTargetSec": 0.6,
+  "calibIters": 8,
+  "implausibleSpeedupFactor": 8.0,
+  "peakRssToleranceFraction": 0.05,
+  "compileTimeoutSec": 240,
+  "benchmarkTimeoutSec": 120,
+  "evaluatorTimeoutSec": 900
+}

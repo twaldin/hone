@@ -1,0 +1,77 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 6.0,
+    "incrementalRebuildSec": 6.0,
+    "evalSec": 35.2
+  },
+  "aa": {
+    "samples": [
+      0.9856,
+      1.00374,
+      0.99362,
+      1.01345,
+      0.99585,
+      1.01372
+    ],
+    "sigma": 0.011337,
+    "noiseFractionOfScale": 0.011337
+  },
+  "qBase": 1.000997,
+  "qFail": 0.0,
+  "qReference": 1.057683,
+  "activeImplementation": "arm64",
+  "controls": [
+    {
+      "name": "broken",
+      "train": 0.0,
+      "validation": 0.0,
+      "combined": 0.0,
+      "hardGatesPass": false,
+      "description": "verdict reported correctly but the transcoded UTF-16LE units are corrupted, so the pristine payload never matches the in-eval trusted reference; scored zero on every split"
+    },
+    {
+      "name": "naive",
+      "train": 0.5929,
+      "validation": 0.58693,
+      "combined": 0.58991,
+      "hardGatesPass": true,
+      "description": "hand-written scalar strict UTF-8 validator/transcoder, one code point at a time, byte-identical output but ~1.7x slower than the SIMD kernels"
+    },
+    {
+      "name": "shortcut",
+      "train": 1.14846,
+      "validation": 0.0,
+      "combined": 0.57423,
+      "hardGatesPass": false,
+      "description": "train-overfit that keys on the TRAIN-only corpus header marker: runs the genuine single-pass fast path (correct+faster than baseline) where the marker is present, and emits corrupted output on the held-out validation corpus it never memorized, so it beats baseline on train (1.148 > 1.0) and inverts to zero on validation, which the trusted split mechanism catches"
+    }
+  ],
+  "perturbation": {
+    "name": "streamlined-validate-then-fast-convert",
+    "source": "diagnostics/improved/src/kernel.cpp",
+    "train": 1.15331,
+    "validation": 1.14215,
+    "combined": 1.14773,
+    "deltaFromQBase": 0.14673,
+    "sigmaMargin": 12.94,
+    "hardGatesPass": true,
+    "description": "genuine observation-preserving work reduction: the baseline driver validates, then runs a utf16-length pre-scan, then a fully re-validating conversion pass (validate + length + slow validating convert); the improved driver validates once and then uses the non-validating fast conversion path (convert_valid), dropping the redundant length pre-scan and the re-validation. Byte-identical verdict + transcoded bytes to the baseline on every corpus/iteration (the trusted parent re-checks the go-nonce-bound 8-lane digest against the pristine reference each timed iteration); ~14.7% faster (12.9 sigma over the A-A noise), and holds on both train and validation."
+  },
+  "rss": {
+    "baselinePeakRssKb": {
+      "train": 9216,
+      "validation": 9216
+    },
+    "toleranceFraction": 0.05,
+    "note": "whole-tree kernel cgroup2 memory.peak of a fresh per-launch leaf (worker.py python startup then the trusted runner + dlopened simdutf library + corpus/scratch/out buffers). Observed baseline peaks ~5.5-7.5 MiB (python-startup dominated, noisy under page-cache reclaim); frozen at 9216 KiB so the improved control and measurement noise clear the gate while a gross whole-tree regression fails. Both ordering passes had peak_rss=true on baseline/naive/improved across both splits."
+  },
+  "execBoundary": {
+    "model": "The scored measurement loop AND the receipt handshake run in the trusted parent (eval.py) and a trusted runner (hone/runner.cpp) that links NO candidate code. The runner authenticates the parent's control channel and echoes READY, then dlopens the candidate library (memfd-loaded to dodge noexec) and resolves its C ABI; the per-leg perturbation seed and receipt fold nonce arrive over the control pipe only after the library is mapped (the GO line, clock-start). A candidate constructor / .init_array therefore runs AFTER auth and BEFORE the go-time fold nonce exists, so it cannot precompute a matching digest.",
+    "demonstration": "A stub candidate whose constructor forged LOADED + a fake RESULT and _exit(0) (discovering the response fd) produced a digest that did NOT match the pristine reference and returned in ~0.04ms; the trusted parent rejected it on both the digest-mismatch check and the implausible-speedup floor (candidate wall < reference/8). Demonstrated pre-freeze against the trusted runner, then deleted."
+  },
+  "normalization": {
+    "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "scale": 0.056686,
+    "status": "2x-consecutive bench-locked ordering (min-of-N estimator for ~0.6s legs under persistent Docker-VM background contention, 8-lane output fold, whole-tree cgroup memory.peak, fresh IPC ns). qBase/sigma from the 6 baseline A-A stability aggregates across both passes; final frozen like-for-like GCE re-calibration still required."
+  }
+}

@@ -1,0 +1,3 @@
+0000000000000000000000000000000000000000 b563fca49a0ced03d5fe84a36077ff56819ec384 hone-capsule <capsule@hone.local> 1785028432 -0700	commit (initial): simdutf-validate baseline: pinned simdutf v7.3.2 (1a62f928) + trusted EXEC-BOUNDARY runner
+b563fca49a0ced03d5fe84a36077ff56819ec384 7c7a33256f20f933107178c9da12cc79b32017f4 hone-capsule <capsule@hone.local> 1785035123 -0700	commit: simdutf-validate: min-of-N estimator for ~1s legs under ambient Docker-VM contention
+7c7a33256f20f933107178c9da12cc79b32017f4 2ff13a6729ac47fd53713c918f730ccb181b19fb hone-capsule <capsule@hone.local> 1785050486 -0700	commit: simdutf-validate: 8-lane fold (fold no longer dominates), heavier defensive baseline vs streamlined improved (~1.12x genuine margin), min-of-N
