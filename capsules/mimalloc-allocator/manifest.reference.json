@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_390ccc75292d",
+  "id": "cap_e8c826e480dc",
   "objective": "Improve geometric-mean mimalloc operations per second on four frozen deterministic single-thread, four-thread, small-object, and fragmentation workloads. The pinned upstream api/api-fill/stress suite, deterministic checksums, a four-thread maximum, peak allocator page-committed bytes, and live-page fragmentation at or below the split baseline plus 1% are hard gates. Only allocator implementation files under src and internal headers under include/mimalloc are mutable; trusted statistics and all build, test, evaluator, and workload code are protected.",
   "baseline": {
     "kind": "git",
-    "commit": "5b357a9e30c93a5a56a1a77e52bf2b11a77bcd73"
+    "commit": "26c8a6e79716dd0b40c0b7589c4a5624205e88aa"
   },
   "image": "hone-mimalloc-allocator@sha256:7768eb1e62055de5f3ca7df52d00df234fcf98d97313816889595f36ad854465",
   "evalEntrypoint": [
@@ -69,7 +69,7 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:69090bdd1056c2dedd936c37b269fa7f4047482c51033c7f19115ab182c52d9f"
+    "hash": "sha256:e8432da693aa8fc5e6075a34db5955204ca940387b2cb3cfc4e741270456019c"
   },
   "contentHashes": {
     "assets/train/workloads.json": "sha256:33a4b39d2f1464b11863a468ebd764af0bbf9c50ec52e21c3968ceae81ce7de2",

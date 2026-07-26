@@ -11,6 +11,7 @@
 
 typedef struct thread_work_s {
   uint64_t seed;
+  uint64_t nonce;
   uint32_t rounds;
   bool retain_last;
   bool ok;
@@ -41,7 +42,7 @@ static void* thread_main(void* argument) {
         cleanup_slots(work);
         return NULL;
       }
-      hone_canary_write(block, size, hone_pattern(work->seed, round, i));
+      hone_canary_write(block, size, hone_pattern(work->seed, round, i, work->nonce));
       work->slots[i] = block;
       work->live[i] = size;
       work->operations++;
@@ -61,7 +62,7 @@ static void* thread_main(void* argument) {
       return NULL;
     }
     for (size_t i = 0; i < THREAD_SLOTS; ++i) {
-      const uint64_t pattern = hone_pattern(work->seed, round, i);
+      const uint64_t pattern = hone_pattern(work->seed, round, i, work->nonce);
       if (!hone_canary_verify((const unsigned char*)work->slots[i], work->live[i], pattern)) {
         cleanup_slots(work);
         return NULL;
@@ -80,7 +81,7 @@ static void* thread_main(void* argument) {
   return NULL;
 }
 
-static bool run_multithread(uint64_t seed, uint32_t rounds, bool capture_memory, hone_result_t* result) {
+static bool run_multithread(uint64_t seed, uint32_t rounds, uint64_t nonce, bool capture_memory, hone_result_t* result) {
   pthread_t threads[THREAD_COUNT];
   thread_work_t work[THREAD_COUNT] = {0};
   hone_range_t all_ranges[THREAD_COUNT * THREAD_SLOTS];
@@ -88,6 +89,7 @@ static bool run_multithread(uint64_t seed, uint32_t rounds, bool capture_memory,
 
   for (size_t thread = 0; thread < THREAD_COUNT; ++thread) {
     work[thread].seed = seed ^ ((thread + 1) * UINT64_C(0xd1b54a32d192ed03));
+    work[thread].nonce = nonce;
     work[thread].rounds = rounds;
     work[thread].retain_last = capture_memory;
     if (pthread_create(&threads[thread], NULL, thread_main, &work[thread]) != 0) goto failure;
@@ -118,7 +120,7 @@ static bool run_multithread(uint64_t seed, uint32_t rounds, bool capture_memory,
     if (!hone_ranges_disjoint(all_ranges, THREAD_COUNT * THREAD_SLOTS)) goto failure;
     for (size_t thread = 0; thread < THREAD_COUNT; ++thread) {
       for (size_t i = 0; i < THREAD_SLOTS; ++i) {
-        const uint64_t pattern = hone_pattern(work[thread].seed, rounds - 1, i);
+        const uint64_t pattern = hone_pattern(work[thread].seed, rounds - 1, i, nonce);
         if (!hone_canary_verify((const unsigned char*)work[thread].slots[i], work[thread].live[i], pattern)) {
           goto failure;
         }

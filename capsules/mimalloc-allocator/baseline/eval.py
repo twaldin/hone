@@ -45,10 +45,17 @@ HONE_SAMPLES = 7
 # Fresh report fd handed to each benchmark child: it streams work-completion
 # tokens here while the trusted evaluator keeps ownership of fd 1 and the clock.
 HONE_REPORT_FD_ENV = "HONE_REPORT_FD"
-# A benchmark that skips the allocation workload commits almost nothing, so the
-# trusted whole-tree cgroup peak must clear a floor as well as stay under the
-# ceiling: a completion stream produced without touching the allocator cannot
-# also reproduce the sealed memory profile.
+# A benchmark that skips the allocation workload commits almost nothing (only
+# the harness + libmimalloc code and thread stacks), so the trusted whole-tree
+# cgroup peak must clear a floor as well as stay under the ceiling: it rejects a
+# completion stream produced without running the allocation workload. The floor
+# stays below the leanest LEGITIMATE allocator's whole-tree footprint — a
+# minimal-overhead allocator commits little beyond the live data, which on the
+# multithread/small workloads is already only ~0.38-0.42x the (segment-heavy)
+# baseline tree peak. A single large malloc+memset reaches the same whole-tree
+# peak as the real workload, so it cannot be excluded by a scalar cgroup floor;
+# the skip-the-workload defense is instead the nonce-bound per-sample fold,
+# which forces the real per-allocation work into the timed window.
 MIN_TREE_PEAK_FRACTION = 0.25
 ALLOWED_MUTABLE_PREFIXES = ("src/", "include/mimalloc/")
 # Files under the mutable prefixes whose contents are ALWAYS taken from the
@@ -499,14 +506,17 @@ class _Bench:
             raise GateFailure(f"{row['id']} {role} control channel unavailable")
         self.control = self.proc.stdin
 
-    def sample(self) -> int:
+    def sample(self, nonce: bytes) -> tuple[int, str]:
         # One authenticated measured region. The trusted clock starts the instant
         # the fresh go token is released and stops the instant the child's
-        # completion token becomes readable.
+        # completion token becomes readable. The parent hands the SAME nonce to
+        # the candidate and the pristine reference so their nonce-bound checksums
+        # can be compared: the go token is folded into every allocation's canary
+        # pattern, so a valid checksum can only be produced by running the timed
+        # per-allocation fold after this nonce is released.
         deadline = time.monotonic() + WORKLOAD_TIMEOUT_SEC
         if _read_report_line(self.report_read, deadline) != b"R":
             raise GateFailure(f"{self.row['id']} {self.role} broke the ready handshake")
-        nonce = os.urandom(8).hex().encode("ascii")
         start = time.monotonic_ns()
         self.control.write(nonce + b"\n")
         self.control.flush()
@@ -522,13 +532,13 @@ class _Bench:
             raise GateFailure(f"{self.row['id']} {self.role} closed the report channel early")
         response = b"" if first == b"\n" else first + _read_report_line(self.report_read, deadline)
         fields = response.split()
-        if len(fields) != 3 or fields[0] != b"T" or fields[1] != nonce:
+        if len(fields) != 4 or fields[0] != b"T" or fields[1] != nonce:
             raise GateFailure(f"{self.row['id']} {self.role} returned an unauthenticated sample")
         if int(fields[2]) != self.expected_ops:
             raise GateFailure(f"{self.row['id']} {self.role} operation count diverged from the sealed budget")
         if stop <= start:
             raise GateFailure(f"{self.row['id']} {self.role} produced a non-monotonic measurement")
-        return stop - start
+        return stop - start, fields[3].decode("ascii")
 
     def finalize(self) -> dict:
         # Read the completion record, drain the process, and read the trusted
@@ -593,10 +603,18 @@ def run_benchmark(row: dict) -> float:
         ref_samples: list[int] = []
         cand_samples: list[int] = []
         for _ in range(HONE_SAMPLES):
-            ref_ns = reference.sample()
-            cand_ns = candidate.sample()
+            # One fresh unpredictable nonce per sample, delivered to BOTH legs at
+            # clock-start and folded into every allocation's canary pattern. The
+            # pristine reference is the trusted expectation for this nonce, so a
+            # candidate can only match its checksum by running the timed
+            # per-allocation fold once the nonce arrives.
+            nonce = str(int.from_bytes(os.urandom(8), "big")).encode("ascii")
+            ref_ns, ref_checksum = reference.sample(nonce)
+            cand_ns, cand_checksum = candidate.sample(nonce)
             if ref_ns <= 0 or cand_ns <= 0:
                 raise GateFailure(f"{row['id']} workload produced an invalid elapsed time")
+            if cand_checksum != ref_checksum:
+                raise GateFailure(f"{row['id']} candidate sample checksum diverged from the pristine reference")
             ref_samples.append(ref_ns)
             cand_samples.append(cand_ns)
         candidate_fin = candidate.finalize()
@@ -609,17 +627,28 @@ def run_benchmark(row: dict) -> float:
     peak_committed = candidate_fin["peak_committed"]
     fragmentation = candidate_fin["fragmentation"]
     tree_peak = candidate_fin["tree_peak"]
-    # Precise trusted memory-regression gate: page_committed.peak from the
-    # protected mi_stats instrumentation (src/stats.c is trusted-only) after a
-    # clean one-round validation pass. Stable to a fraction of a percent.
+    # The candidate writes the peak_committed field in its own D-line, so it is
+    # not trusted on its own. The kernel cgroup memory.peak (tree_peak) is the
+    # authoritative, candidate-unwritable memory signal: committed pages must be
+    # backed by kernel-charged memory, so a reported committed figure grossly
+    # exceeding the whole-tree kernel peak is fabricated (e.g. a stream that
+    # committed almost nothing but claims a full baseline profile). The bound is
+    # generous (1.5x) so it never false-fails a lean allocator whose committed
+    # bytes legitimately approach its whole-tree peak, nor a run whose kernel
+    # peak is depressed by host contention, while still catching a committed
+    # figure that the kernel never charged.
     baseline_peak = row["baselinePeakPageCommittedBytes"]
-    if peak_committed <= 0 or peak_committed * 100 > baseline_peak * 102:
+    if peak_committed <= 0 or peak_committed > tree_peak * 1.5:
+        raise GateFailure(f"{row['id']} reported committed memory is not backed by the kernel-charged whole-tree peak")
+    # Precise memory-regression gate on the mi_stats page_committed.peak (from
+    # trusted-only src/stats.c), now backstopped by the kernel cross-check above.
+    if peak_committed * 100 > baseline_peak * 102:
         raise GateFailure(f"{row['id']} peak page-committed memory exceeds baseline by more than 2%")
-    # Coarse trusted whole-tree backstop: kernel cgroup memory.peak over every
-    # process the candidate ran. The ceiling is deliberately loose (2x) because
-    # whole-process RSS peak is noisy across a multi-sample run; the precise
-    # regression gate above does the tight work. The floor rejects a completion
-    # stream produced without running the allocation workload.
+    # Trusted whole-tree kernel gate: cgroup memory.peak over every process the
+    # candidate ran. The ceiling stays loose (2x) because whole-process RSS peak
+    # is noisy across a multi-sample run. The floor (see MIN_TREE_PEAK_FRACTION)
+    # rejects a completion stream produced without running the allocation
+    # workload, while staying below the leanest legitimate allocator's footprint.
     baseline_tree = row["baselineTreePeakBytes"]
     if tree_peak <= 0 or tree_peak * 100 > baseline_tree * 200:
         raise GateFailure(f"{row['id']} process-tree peak memory exceeds the sealed baseline allowance")

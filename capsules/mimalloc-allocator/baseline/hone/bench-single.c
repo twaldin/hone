@@ -7,7 +7,7 @@
 
 #define SLOT_COUNT 2048
 
-static bool run_single(uint64_t seed, uint32_t rounds, bool capture_memory, hone_result_t* result) {
+static bool run_single(uint64_t seed, uint32_t rounds, uint64_t nonce, bool capture_memory, hone_result_t* result) {
   void* slots[SLOT_COUNT] = {0};
   size_t sizes[SLOT_COUNT];
   hone_range_t ranges[SLOT_COUNT];
@@ -24,7 +24,7 @@ static bool run_single(uint64_t seed, uint32_t rounds, bool capture_memory, hone
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
       unsigned char* block = (unsigned char*)mi_malloc(sizes[i]);
       if (block == NULL) goto failure;
-      hone_canary_write(block, sizes[i], hone_pattern(seed, round, i));
+      hone_canary_write(block, sizes[i], hone_pattern(seed, round, i, nonce));
       slots[i] = block;
     }
     /*
@@ -39,7 +39,7 @@ static bool run_single(uint64_t seed, uint32_t rounds, bool capture_memory, hone
     }
     if (!hone_ranges_disjoint(ranges, SLOT_COUNT)) goto failure;
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
-      const uint64_t pattern = hone_pattern(seed, round, i);
+      const uint64_t pattern = hone_pattern(seed, round, i, nonce);
       if (!hone_canary_verify((const unsigned char*)slots[i], sizes[i], pattern)) goto failure;
       checksum = hone_checksum(checksum, pattern ^ (uint64_t)sizes[i]);
     }

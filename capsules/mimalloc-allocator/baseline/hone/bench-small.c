@@ -7,7 +7,7 @@
 
 #define SLOT_COUNT 8192
 
-static bool run_small(uint64_t seed, uint32_t rounds, bool capture_memory, hone_result_t* result) {
+static bool run_small(uint64_t seed, uint32_t rounds, uint64_t nonce, bool capture_memory, hone_result_t* result) {
   void* slots[SLOT_COUNT] = {0};
   size_t sizes[SLOT_COUNT];
   size_t live[SLOT_COUNT];
@@ -25,7 +25,7 @@ static bool run_small(uint64_t seed, uint32_t rounds, bool capture_memory, hone_
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
       unsigned char* block = (unsigned char*)mi_malloc(sizes[i]);
       if (block == NULL) goto failure;
-      hone_canary_write(block, sizes[i], hone_pattern(seed, round, i));
+      hone_canary_write(block, sizes[i], hone_pattern(seed, round, i, nonce));
       slots[i] = block;
       live[i] = sizes[i];
       operations++;
@@ -42,7 +42,7 @@ static bool run_small(uint64_t seed, uint32_t rounds, bool capture_memory, hone_
       for (size_t j = 0; j < replacement_size; ++j) {
         if (replacement[j] != 0) goto failure;
       }
-      hone_canary_write(replacement, replacement_size, hone_pattern(seed, round, SLOT_COUNT + i));
+      hone_canary_write(replacement, replacement_size, hone_pattern(seed, round, SLOT_COUNT + i, nonce));
       slots[i] = replacement;
       live[i] = replacement_size;
       operations++;
@@ -59,7 +59,7 @@ static bool run_small(uint64_t seed, uint32_t rounds, bool capture_memory, hone_
     if (!hone_ranges_disjoint(ranges, SLOT_COUNT)) goto failure;
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
       const int replaced = (i % 3) == (round % 3);
-      const uint64_t pattern = hone_pattern(seed, round, replaced ? SLOT_COUNT + i : i);
+      const uint64_t pattern = hone_pattern(seed, round, replaced ? SLOT_COUNT + i : i, nonce);
       if (!hone_canary_verify((const unsigned char*)slots[i], live[i], pattern)) goto failure;
       checksum = hone_checksum(checksum, pattern ^ (uint64_t)live[i]);
     }

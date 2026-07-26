@@ -34,13 +34,18 @@ uint64_t hone_checksum(uint64_t state, uint64_t value) {
 }
 
 /*
- * Distinct per-allocation fill pattern. Every (seed, round, index) triple
- * yields a different 64-bit pattern, so two live blocks can never satisfy
- * each other's canary bytes and a recycled buffer cannot replay a prior
- * block's contents.
+ * Distinct per-allocation fill pattern. Every (seed, round, index, nonce)
+ * quadruple yields a different 64-bit pattern, so two live blocks can never
+ * satisfy each other's canary bytes and a recycled buffer cannot replay a
+ * prior block's contents. The trusted parent draws a fresh nonce for every
+ * measured sample and delivers it only at clock-start, so the canary bytes
+ * (hence the folded checksum) cannot be produced before the measured region
+ * begins: a benchmark that skips the timed per-allocation fold cannot
+ * reproduce the sample's checksum from the seed and round budget alone.
  */
-uint64_t hone_pattern(uint64_t seed, uint64_t round, uint64_t index) {
-  uint64_t state = seed ^ ((round + 1) * UINT64_C(0xa0761d6478bd642f)) ^
+uint64_t hone_pattern(uint64_t seed, uint64_t round, uint64_t index, uint64_t nonce) {
+  uint64_t state = seed ^ (nonce * UINT64_C(0xff51afd7ed558ccd)) ^
+                   ((round + 1) * UINT64_C(0xa0761d6478bd642f)) ^
                    ((index + 1) * UINT64_C(0xe7037ed1a0b428db));
   if (state == 0) state = UINT64_C(0x8ebc6af09c88c6e3);
   return hone_prng_next(&state);
@@ -210,7 +215,7 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
   }
 
   hone_result_t probe = {0};
-  if (!run(seed, 1, false, &probe) || probe.operations == 0) return 1;
+  if (!run(seed, 1, 0, false, &probe) || probe.operations == 0) return 1;
 
   char token[64];
   char line[128];
@@ -218,12 +223,23 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
   for (size_t sample = 0; sample < HONE_SAMPLES; ++sample) {
     if (!hone_write_all(report_fd, "R\n", 2)) return 1;
     if (!hone_read_token(token, sizeof token) || token[0] == '\0') return 1;
+    /*
+     * The go-token IS the sample nonce. It is folded into every allocation's
+     * canary pattern below, so the checksum reported for this sample can only
+     * be produced by running the per-allocation write/verify/fold AFTER the
+     * nonce arrives at clock-start. The trusted parent recomputes the same
+     * nonce-bound checksum with the pristine reference and rejects any sample
+     * whose checksum does not match, so a closed-form value derived from the
+     * seed and round budget in the untimed window is no longer sufficient.
+     */
+    uint64_t nonce;
+    if (!parse_u64(token, &nonce)) return 1;
     hone_result_t measured = {0};
-    if (!run(seed, rounds, false, &measured) || measured.operations == 0) return 1;
+    if (!run(seed, rounds, nonce, false, &measured) || measured.operations == 0) return 1;
     hone_sink ^= measured.checksum;
     measured_ops = measured.operations;
-    const int length =
-      snprintf(line, sizeof line, "T %s %" PRIu64 "\n", token, measured.operations);
+    const int length = snprintf(line, sizeof line, "T %s %" PRIu64 " %016" PRIx64 "\n",
+                                token, measured.operations, measured.checksum);
     if (length <= 0 || (size_t)length >= sizeof line) return 1;
     if (!hone_write_all(report_fd, line, (size_t)length)) return 1;
   }
@@ -231,7 +247,7 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
   mi_collect(true);
   mi_stats_reset();
   hone_result_t validation = {0};
-  if (!run(seed, 1, true, &validation) || !validation.memory_captured ||
+  if (!run(seed, 1, 0, true, &validation) || !validation.memory_captured ||
       validation.peak_committed == 0 || !isfinite(validation.fragmentation) ||
       validation.fragmentation < 0.0 || validation.fragmentation > 1.0) {
     return 1;

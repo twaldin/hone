@@ -24,7 +24,7 @@ static bool verify_live(void* const* slots, const size_t* live, const uint64_t* 
   return true;
 }
 
-static bool run_fragmentation(uint64_t seed, uint32_t rounds, bool capture_memory, hone_result_t* result) {
+static bool run_fragmentation(uint64_t seed, uint32_t rounds, uint64_t nonce, bool capture_memory, hone_result_t* result) {
   void* slots[SLOT_COUNT] = {0};
   size_t sizes[SLOT_COUNT];
   size_t live[SLOT_COUNT];
@@ -44,7 +44,7 @@ static bool run_fragmentation(uint64_t seed, uint32_t rounds, bool capture_memor
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
       unsigned char* block = (unsigned char*)mi_malloc(sizes[i]);
       if (block == NULL) goto failure;
-      patterns[i] = hone_pattern(seed, round, i);
+      patterns[i] = hone_pattern(seed, round, i, nonce);
       hone_canary_write(block, sizes[i], patterns[i]);
       slots[i] = block;
       live[i] = sizes[i];
@@ -62,7 +62,7 @@ static bool run_fragmentation(uint64_t seed, uint32_t rounds, bool capture_memor
       const size_t replacement_size = 48 + ((sizes[i] ^ (size_t)seed) % 4049);
       unsigned char* replacement = (unsigned char*)mi_malloc(replacement_size);
       if (replacement == NULL) goto failure;
-      patterns[i] = hone_pattern(seed, round, SLOT_COUNT + i);
+      patterns[i] = hone_pattern(seed, round, SLOT_COUNT + i, nonce);
       hone_canary_write(replacement, replacement_size, patterns[i]);
       slots[i] = replacement;
       live[i] = replacement_size;
