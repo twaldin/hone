@@ -1,17 +1,17 @@
 {
   "contractVersion": 1,
   "taskId": "OSS-T04",
-  "capsule": "zstd-codec",
+  "capsule": "simdutf-validate",
   "cohort": "train",
   "stratum": "oss",
   "panel": "B",
   "status": "pending-authoring",
-  "objective": "Improve level-1/3 compression and decompression throughput over text, JSON, binary, and repetitive corpora.",
-  "scalarAndGates": "Geometric mean throughput; exact round trip, upstream tests, compressed size no worse than baseline by >0.25%.",
+  "objective": "Improve UTF-8 validation and UTF-8 to UTF-16LE transcoding throughput over mixed-script text corpora.",
+  "scalarAndGates": "Geometric mean throughput; exact validation verdict and byte-exact transcoded output validated against a pristine reference, upstream tests.",
   "source": {
-    "repository": "facebook/zstd",
-    "revision": "5c7b7bad26808e6b40ac3b3d0075466e27738a9d",
-    "url": "https://github.com/facebook/zstd/commit/5c7b7bad26808e6b40ac3b3d0075466e27738a9d",
+    "repository": "simdutf/simdutf",
+    "revision": "1a62f928fcce103868d22df80376feea158060b9",
+    "url": "https://github.com/simdutf/simdutf/commit/1a62f928fcce103868d22df80376feea158060b9",
     "visibility": "public",
     "license": "per-upstream-license-file"
   },
@@ -21,5 +21,6 @@
     "buildTestEvalCommands": null,
     "workloadHashes": null
   },
-  "publication": "license-permitting-publishable"
+  "publication": "license-permitting-publishable",
+  "note": "Replaces dropped zstd-codec (OSS-T04): zstd is ratio-locked by its upstream fuzzer target_nodict_cSize[] at every level, leaving no honest ratio-preserving speed headroom for an improved diagnostic control. simdutf provides genuine exact-output SIMD headroom. Owner decision 2026-07-24."
 }
