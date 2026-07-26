@@ -397,7 +397,7 @@ def sweep_candidate_state() -> None:
             break
         if pid == 0:
             break
-    for base in (Path("/tmp"), Path("/dev/shm")):
+    for base in (Path("/tmp"), Path("/var/tmp"), Path("/dev/shm")):
         try:
             entries = list(base.iterdir())
         except OSError:

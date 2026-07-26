@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_8ca13dad5318",
+  "id": "cap_c0018b8dccdb",
   "objective": "Improve reciprocal host-normalized min-of-N reference/target latency for a single-threaded DuckDB physical-filter microbenchmark over fixed SF1 input. Exact typed output, a frozen upstream physical-filter test subset, and whole-tree peak memory no greater than baseline plus 10% are hard gates. Only src/execution/operator/filter/physical_filter.cpp is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "949779a3799f39c94c2cd0c8b226058ff660bb7c"
+    "commit": "94493294a8b14ba9c529384ebf98acee02b72d0d"
   },
   "image": "hone-duckdb-tpch@sha256:a19dc4edd5d6c1a43cdbff7bced30eb1eb2920518aac888473e2ec830161d1e2",
   "evalEntrypoint": [
