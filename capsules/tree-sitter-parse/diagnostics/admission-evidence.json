@@ -2,16 +2,16 @@
   "aa": {
     "noiseFractionOfScale": 0.2,
     "samples": [
-      51362567.91405992,
-      50470718.72393116,
-      50397618.80384156,
-      50480305.737578094,
-      50504179.90251514,
-      50766466.09976621
+      50032920.7030268,
+      50243477.630761504,
+      50699928.92255509,
+      51142714.027177006,
+      51027878.54865894,
+      50741176.07107769
     ],
-    "sigma": 364992.6864553157
+    "sigma": 434140.2908928365
   },
-  "capsuleId": "cap_c8473d87f2c7",
+  "capsuleId": "cap_09148384df55",
   "controls": [
     {
       "hardGatesPass": false,
@@ -24,60 +24,60 @@
     {
       "hardGatesPass": true,
       "id": "naive",
-      "q": 35871520.514582396,
+      "q": 43685443.139807925,
       "role": "deliberately slower but correct volatile work in ts_parser_parse",
-      "trainQ": 35954061.56065224,
-      "validationQ": 35788979.46851255
+      "trainQ": 43633451.38951377,
+      "validationQ": 43737434.89010208
     },
     {
       "hardGatesPass": true,
       "id": "baseline",
-      "q": 50480305.737578094,
+      "q": 51142714.027177006,
       "role": "exact pinned upstream runtime",
-      "trainQ": 50724730.47578923,
-      "validationQ": 50235880.99936696
+      "trainQ": 50012521.68823466,
+      "validationQ": 52272906.36611936
     },
     {
       "hardGatesPass": true,
       "id": "improved",
-      "q": 52546106.960214354,
+      "q": 52818680.51770696,
       "role": "independently authored: never-enabled lex/parse LOG branches compiled out, allocation entry points devirtualized from the ts_current_* function pointers to direct libc calls, a branch-likelihood hint for string-input EOF, and single-byte UTF-8 fast paths in ts_lexer__get_lookahead and ts_lexer__do_advance",
-      "trainQ": 52693394.24614981,
-      "validationQ": 52398819.6742789
+      "trainQ": 53200780.26309808,
+      "validationQ": 52436580.77231583
     },
     {
       "hardGatesPass": true,
       "id": "shortcut",
-      "q": 41408332.26781386,
+      "q": 47526778.402764924,
       "role": "train-prefix fingerprint with validation-only delay layered on the improved optimization set",
       "shortcutGated": true,
-      "trainQ": 51952235.30325244,
-      "validationQ": 30864429.23237527
+      "trainQ": 53283782.56353642,
+      "validationQ": 41769774.24199343
     }
   ],
-  "declaredBaselineCommit": "4441a1e351907c48dada50f37a5acd89ad838f74",
+  "declaredBaselineCommit": "7cef3e716b79d3dccd1c573bc7f1556e52694424",
   "determinism": {
     "correctnessHash": "406d6d2f2543b93201654dff40054111568fa0148ff2f2cca8232ea87bce0b2e",
     "exactOracleHashesFrozen": true,
     "freshProcessBaselineAggregates": [
-      51362567.91405992,
-      50470718.72393116,
-      50397618.80384156,
-      50480305.737578094,
-      50504179.90251514,
-      50766466.09976621
+      50032920.7030268,
+      50243477.630761504,
+      50699928.92255509,
+      51142714.027177006,
+      51027878.54865894,
+      50741176.07107769
     ],
     "freshProcessRunsPerSplitAcrossConsecutiveChecks": 6
   },
   "feasibility": {
     "buildNote": "cleanBuildSec and incrementalRebuildSec measure the single-tree freeze build; the evaluator builds candidate and reference trees in each eval",
     "cleanBuildSec": 7.619410170000265,
-    "evalSec": 125.2,
-    "evalSecNote": "mean containerized eval wall across the two admission ordering passes (122.4 and 113.3 averaged over 14 evals each); includes the candidate plus in-eval reference harness builds and 12 bench repetitions per workload",
+    "evalSec": 265.0,
+    "evalSecNote": "mean containerized eval wall across the two admission ordering passes (3719.9s and 3700.3s wall, 14 evals each) under permanent ambient VM contention; includes the candidate plus in-eval reference harness builds and nine timed bench repetitions per phase per workload",
     "incrementalRebuildSec": 4.587914294000257
   },
   "measurement": {
-    "benchSampling": "per workload: pristine in-eval reference and candidate bench legs interleaved on the same trusted per-iteration token stream, one warm repetition each, five timed repetitions with each phase scored from its minimum nanoseconds for candidate and reference alike. The trusted Python parent owns the clock: per timed iteration it streams an opaque mutation seed, waits for the leg to finish untimed prep, then times only the parse from releasing an opaque parse-go token to the leg's post-parse echo of it (mutation, base-tree construction, digesting and cleanup are never on the clock, and the candidate-linked harness holds no clock to rewrite); every timed tree's full pre-order signature digest must equal the pristine reference run on the identical token stream. Each leg runs in a fresh IPC namespace with fresh /var/tmp and /dev/shm tmpfs, and the full candidate-uid process tree is reaped after every reference and candidate leg. Score is the frozen scale 50661657.83045164 times the geometric mean of the 12 per-cell reference/candidate minimum-time ratios.",
+    "benchSampling": "per workload: pristine in-eval reference and candidate bench legs interleaved on the same trusted per-iteration parse-go token stream, one warm repetition each, nine timed repetitions with each phase scored from its minimum nanoseconds for candidate and reference alike (nine repetitions tighten each single eval's per-phase minimum against permanent ambient VM contention). The trusted Python parent owns the clock: per timed iteration it waits for the leg's ready marker, starts the clock as it releases a single opaque parse-go token, and stops the clock on the leg's receipt. The whole timed operation is derived from that token -- the per-iteration mutation is seeded by it, so mutation, parse and the tree-signature digest all run after the token arrives and inside the measured window, and the candidate-linked harness holds no clock to rewrite. The receipt folds the parse-go token with the completed tree's full pre-order signature, so no correct receipt can be produced before the token exists or without completing the parse inside the timed window; the parent folds each leg's receipt stream into a per-phase accumulator that must equal the pristine reference run on the identical token stream. Each leg runs in a fresh IPC namespace with fresh /var/tmp and /dev/shm tmpfs, and the full candidate-uid process tree is reaped after every reference and candidate leg. Score is the frozen scale 50661657.83045164 times the geometric mean of the 12 per-cell reference/candidate minimum-time ratios.",
     "finalGceRecalibrationRequired": true,
     "freshProcess": true,
     "globalLockHeld": true,
@@ -89,25 +89,25 @@
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:5559e50cecdaa329db4917ab67b39b02c3b05b22bac7e142dcc3d1a687695833",
-    "secondReportHash": "sha256:cd65db563b07d48e727279033cec98c4dadbd12681773177a06fc1e3fe2cfc44"
+    "firstReportHash": "sha256:fbcdcd68b22cc6016142124cf717d9475728391d27c814add243ac60e534833c",
+    "secondReportHash": "sha256:98ac6d70c55452f2e078b963eb7aa609c1b876a20abf2dff7ddd56ef681448dd"
   },
   "perturbation": {
-    "deltaFromOrderingBaseline": 2065801.22263626,
+    "deltaFromOrderingBaseline": 1675966.4905299544,
     "deltaFromOrderingBaselineBothPasses": [
-      665639.0774707571,
-      2065801.22263626
+      1893659.2143170834,
+      1675966.4905299544
     ],
-    "deltaFromOrderingBaselineOverSigma": 5.659842783970868,
+    "deltaFromOrderingBaselineOverSigma": 3.8604260550966716,
     "deltaFromOrderingBaselineOverSigmaBothPasses": [
-      1.823705247179653,
-      5.659842783970868
+      4.361860103844901,
+      3.8604260550966716
     ],
-    "deltaFromQBase": 1884449.1297627166,
+    "deltaFromQBase": 2157022.687255323,
     "description": "independently authored: never-enabled lex/parse LOG branches compiled out, allocation entry points devirtualized from the ts_current_* function pointers to direct libc calls, a branch-likelihood hint for string-input EOF, and single-byte UTF-8 fast paths in ts_lexer__get_lookahead and ts_lexer__do_advance",
     "id": "improved",
     "independentlyAuthored": true,
-    "q": 52546106.960214354,
+    "q": 52818680.51770696,
     "reachesReference": false,
     "valid": true
   },

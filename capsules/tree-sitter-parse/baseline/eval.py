@@ -38,8 +38,15 @@ PROCESS_MEMORY_BYTES = 1792 << 20
 BUILD_TIMEOUT_SEC = 180
 VERIFY_TIMEOUT_SEC = 60
 BENCH_TIMEOUT_SEC = 90
-BENCH_TIMED_REPS = 5
+BENCH_TIMED_REPS = 9
 OUTPUT_LIMIT = 1 << 20
+# Order-sensitive FNV-1a 64-bit fold matching harness.c (DIGEST_BASIS /
+# 0x100000001B3). The parent folds each timed iteration's receipt into a
+# per-phase accumulator; the candidate accumulator must equal the pristine
+# reference accumulator, so the receipt-bound tree signatures agree.
+DIGEST_BASIS = 0xCBF29CE484222325
+FNV_PRIME = 0x00000100000001B3
+MASK64 = (1 << 64) - 1
 TREE_SITTER_REVISION = "1ffd612be56259938c47507bbe953af739c7f640"
 LANGUAGES = ("javascript", "rust", "python")
 EXPECTED_GRAMMAR_REVISIONS = {
@@ -557,13 +564,15 @@ class WorkloadResult(NamedTuple):
     observed: dict[str, str]
 
 
-def iteration_token(identifier: str, rep: int, phase: str, kind: str, index: int) -> bytes:
-    """Eight opaque bytes the trusted parent streams to a leg per timed
-    iteration. The candidate-linked harness never learns rep, so it cannot
-    derive a future iteration's token to work ahead of the parent's clock; the
-    reference and candidate legs of one repetition receive the identical token
-    stream, so their timed content -- and therefore their trees -- match."""
-    material = f"{identifier}:{rep}:{phase}:{kind}:{index}".encode()
+def iteration_token(identifier: str, rep: int, phase: str, index: int) -> bytes:
+    """Eight opaque bytes the trusted parent streams to a leg at clock-start
+    for one timed iteration. The candidate-linked harness never learns rep, so
+    it cannot derive a future iteration's token to work ahead of the parent's
+    clock; the reference and candidate legs of one repetition receive the
+    identical token stream, so their timed content -- and therefore their
+    trees and receipts -- match. The token is delivered only once the clock is
+    running, so no correct parse, digest, or receipt exists before it."""
+    material = f"{identifier}:{rep}:{phase}:go:{index}".encode()
     return hashlib.sha256(material).digest()[:8]
 
 
@@ -616,13 +625,17 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     expected_incremental_bytes = edited_bytes * int(benchmark["incrementalIterations"])
 
     # Robustness: host contention and frequency drift only ever add time and
-    # neither is candidate-controlled. Candidate and pristine in-eval reference
-    # legs are interleaved on the SAME per-iteration token stream, one warm
-    # repetition settles the machine, and each phase keeps the fastest of five
-    # timed repetitions (timing noise is strictly additive, so the per-phase
-    # minimum is the cleanest estimate for candidate and reference alike). The
-    # trusted parent owns the clock and times only the parse of each iteration;
-    # every timed phase's pre-order tree digest must match the trusted
+    # neither is candidate-controlled (the host carries permanent ambient load
+    # from unrelated VM containers plus the tree-scanning git poller). Candidate
+    # and pristine in-eval reference legs are interleaved on the SAME
+    # per-iteration token stream, one warm repetition settles the machine, and
+    # each phase keeps the fastest of nine timed repetitions (timing noise is
+    # strictly additive, so the per-phase minimum is the cleanest, most
+    # contention-robust estimate for candidate and reference alike, and nine
+    # repetitions tighten each single eval's minimum enough that one
+    # contention-spiked eval cannot flip the interleaved ratio). The trusted
+    # parent owns the clock and times each iteration's go-token-seeded mutation
+    # and parse; every timed phase's receipt fold must match the trusted
     # reference run on the identical token stream.
     candidate_full_ns: list[int] = []
     candidate_incremental_ns: list[int] = []
@@ -701,31 +714,29 @@ def _read_exact(fd: int, count: int, deadline: float, pid: int) -> bytes:
 
 def _drive_phase(
     ctrl_r: int, go_w: int, identifier: str, rep: int, phase: str, iterations: int, deadline: float, pid: int
-) -> int:
-    """Stream one timed phase and return its summed parse nanoseconds. The
-    parent hands out a fresh mutation seed, waits for the harness to finish its
-    untimed prep, starts the clock as it releases the parse-go token, and stops
-    the clock on the harness's post-parse echo of that token; a candidate that
-    tries to stop the clock early cannot produce the token it never received."""
+) -> tuple[int, int]:
+    """Stream one timed phase and return (summed parse nanoseconds, receipt
+    fold). The parent waits for the harness's ready marker, starts the clock as
+    it releases the single parse-go token, and stops the clock on the harness's
+    receipt. The receipt folds the go-token together with the completed parse's
+    tree signature, so a candidate cannot produce it without doing the parse
+    inside the timed window, and cannot precompute it before the token exists.
+    The parent folds the receipt stream into a per-phase accumulator it later
+    checks against the pristine reference leg on the identical token stream."""
     total_ns = 0
+    fold = DIGEST_BASIS
     for index in range(iterations):
         if _read_exact(ctrl_r, 1, deadline, pid) != b"R":
             _kill_leg(pid)
             raise GateFailure(f"benchmark leg desynchronized (ready): {identifier}")
-        os.write(go_w, iteration_token(identifier, rep, phase, "seed", index))
-        if _read_exact(ctrl_r, 1, deadline, pid) != b"P":
-            _kill_leg(pid)
-            raise GateFailure(f"benchmark leg desynchronized (prep): {identifier}")
-        token = iteration_token(identifier, rep, phase, "go", index)
+        token = iteration_token(identifier, rep, phase, index)
         started = time.monotonic_ns()
         os.write(go_w, token)
-        echo = _read_exact(ctrl_r, 8, deadline, pid)
+        receipt = _read_exact(ctrl_r, 8, deadline, pid)
         elapsed = time.monotonic_ns() - started
-        if echo != token:
-            _kill_leg(pid)
-            raise GateFailure(f"benchmark leg parse-go echo mismatch: {identifier}")
         total_ns += elapsed
-    return total_ns
+        fold = ((fold ^ int.from_bytes(receipt, "little")) * FNV_PRIME) & MASK64
+    return total_ns, fold
 
 
 def _wait_leg(pid: int, deadline: float) -> int:
@@ -756,13 +767,14 @@ def run_timed_bench(
     rep: int,
 ) -> tuple[int, int, int, tuple[int, int]]:
     """Run one bench leg. The trusted parent forks the sealed harness (under
-    /usr/bin/time for peak RSS and prlimit --nproc=1), streams a fresh opaque
-    mutation seed and parse-go token per timed iteration over inherited pipes,
-    and times each parse from the parse-go send to the harness's post-parse
-    echo. Mutation, base-tree construction, digesting, and cleanup are never on
-    this clock, and the harness holds no clock of its own to rewrite. Returns
-    the summed full and incremental parse nanoseconds, peak RSS KiB, and the
-    two per-phase digests. Reaps the full candidate-uid tree after the leg."""
+    /usr/bin/time for peak RSS and prlimit --nproc=1), streams a single opaque
+    parse-go token per timed iteration over inherited pipes at clock-start, and
+    times each iteration from the go-token send to the harness's receipt. The
+    receipt binds the go-token to the completed parse's tree signature, so the
+    measured window necessarily contains the mutation and parse the token
+    seeds; the harness holds no clock of its own to rewrite. Returns the summed
+    full and incremental parse nanoseconds, peak RSS KiB, and the two per-phase
+    receipt folds. Reaps the full candidate-uid tree after the leg."""
     full_iterations = int(benchmark["fullIterations"])
     incremental_iterations = int(benchmark["incrementalIterations"])
     rss_path = output_dir / f"peak-rss-kib-{label}.txt"
@@ -796,10 +808,10 @@ def run_timed_bench(
     os.close(ctrl_w)
     deadline = time.monotonic() + BENCH_TIMEOUT_SEC
     try:
-        full_ns = _drive_phase(ctrl_r, go_w, identifier, rep, "full", full_iterations, deadline, pid)
-        full_digest = _read_exact(ctrl_r, 8, deadline, pid)
-        incremental_ns = _drive_phase(ctrl_r, go_w, identifier, rep, "incremental", incremental_iterations, deadline, pid)
-        incremental_digest = _read_exact(ctrl_r, 8, deadline, pid)
+        full_ns, full_fold = _drive_phase(ctrl_r, go_w, identifier, rep, "full", full_iterations, deadline, pid)
+        incremental_ns, incremental_fold = _drive_phase(
+            ctrl_r, go_w, identifier, rep, "incremental", incremental_iterations, deadline, pid
+        )
         status = _wait_leg(pid, deadline)
     finally:
         os.close(go_w)
@@ -818,7 +830,7 @@ def run_timed_bench(
         full_ns,
         incremental_ns,
         peak_rss_kib,
-        (int.from_bytes(full_digest, "little"), int.from_bytes(incremental_digest, "little")),
+        (full_fold, incremental_fold),
     )
 
 
@@ -853,7 +865,7 @@ def main() -> None:
             exact[str(row["id"])] = result.observed
         raw_q = geometric_mean(speeds)
         reference_q = geometric_mean(reference_speeds)
-        # Drift compensation: every cell is the ratio of fastest-of-five
+        # Drift compensation: every cell is the ratio of fastest-of-nine
         # per-phase times between the candidate and the trusted in-eval
         # baseline yardstick run interleaved in the same evaluation, so host
         # frequency/contention state shared by the paired measurements
@@ -880,7 +892,7 @@ def main() -> None:
             "perExample": {
                 "aggregate": {
                     "score": score,
-                    "feedback": f"12 full/incremental throughput cells passed exact tree, parser-test, edit, digest, and RSS gates; q={score:.3f} bytes/s (fastest-of-five reference-normalized; raw {raw_q:.3f}, in-eval trusted baseline {reference_q:.3f})",
+                    "feedback": f"12 full/incremental throughput cells passed exact tree, parser-test, edit, digest, and RSS gates; q={score:.3f} bytes/s (fastest-of-nine reference-normalized; raw {raw_q:.3f}, in-eval trusted baseline {reference_q:.3f})",
                 }
             },
             "diagnostics": {

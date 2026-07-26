@@ -212,13 +212,16 @@ static void store_le64(unsigned char *data, uint64_t value) {
 }
 
 /*
- * Replay resistance: every warmup and timed repetition parses
- * identity-distinct content drawn from a deterministic schedule seeded by the
- * trusted evaluator (the same seed drives the candidate and the in-eval
- * reference binary). A tree cached during one iteration is therefore
- * structurally wrong for every other iteration, and each timed tree's full
- * pre-order (symbol, start_byte, end_byte) signature is folded into a digest
- * the evaluator compares against the trusted reference run.
+ * Replay resistance: the timed content of every measured repetition is
+ * derived from the parse-go token the trusted evaluator delivers at
+ * clock-start (the same token drives the candidate and the in-eval reference
+ * binary). Mutation, parse, and digest all run after the token arrives, so no
+ * tree -- and therefore no correct digest -- can be produced before the clock
+ * is running. Each timed tree's full pre-order (symbol, start_byte, end_byte)
+ * signature is folded together with the go-token into the per-iteration
+ * receipt that stops the parent's clock, so the receipt cannot be produced
+ * without completing the parse inside the timed window; the evaluator folds
+ * the receipt stream and compares it against the trusted reference run.
  */
 #define FULL_MUTATION_STRIDE 2048u
 /* Wider incremental stride: 4-11 dispersed edit sites per iteration keeps the
@@ -230,10 +233,10 @@ static void store_le64(unsigned char *data, uint64_t value) {
 /* The candidate-linked harness holds no clock: the trusted Python parent
  * times every measured parse. The parent passes two inherited pipe
  * descriptors as the final bench arguments -- a go descriptor carrying the
- * parent's per-iteration opaque tokens (mutation seed, then parse-go token)
- * and a control descriptor carrying the harness's ready/prepped markers, the
- * post-parse parse-go echo that stops the parent's clock, and the per-phase
- * pre-order tree digest. */
+ * parent's per-iteration parse-go token (delivered at clock-start), and a
+ * control descriptor carrying the harness's ready marker and the per-iteration
+ * receipt (a fold of the go-token and the completed parse's tree signature)
+ * that stops the parent's clock. */
 /* Fixed warmup schedule seed, disjoint from every parent-delivered timed
  * token, so warmup content never recurs in a timed iteration. */
 #define WARMUP_SEED UINT64_C(0x53A17C0FE2B9D680)
@@ -515,58 +518,53 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
 
   /*
    * The trusted Python parent owns the clock. Per timed iteration the parent
-   * delivers two opaque tokens on the go descriptor: a mutation seed, then
-   * (after the per-iteration prep work it must never time) a parse-go token.
-   * The harness echoes the parse-go token on the control descriptor only after
-   * the parse returns, so the measured window is exactly the parse of
-   * schedule-distinct content and the candidate-linked runtime holds no clock
-   * it could rewrite or accumulator it could zero. Mutation, base-tree
-   * construction, digesting, and cleanup all stay outside the measured window.
-   * Every timed tree's full pre-order signature is folded into a digest the
-   * parent compares against the pristine in-eval reference run on the same
-   * token stream.
+   * waits for the harness's ready marker, starts its clock, and releases a
+   * single parse-go token on the go descriptor. The harness derives the whole
+   * timed operation from that token: it seeds the per-iteration mutation with
+   * the token, mutates, parses the schedule-distinct content, folds the
+   * completed tree's full pre-order signature together with the token into a
+   * receipt, and only then writes that receipt on the control descriptor to
+   * stop the parent's clock. Because the mutation, parse, and digest all
+   * depend on a token that does not exist until the clock is running, no
+   * correct receipt can be produced before clock-start, and the receipt cannot
+   * be produced without completing the parse inside the measured window. The
+   * parent folds the receipt stream and compares it against the pristine
+   * in-eval reference run on the identical token stream.
    */
-  unsigned char seed_bytes[8];
   unsigned char go_bytes[8];
-  unsigned char digest_bytes[8];
+  unsigned char receipt_bytes[8];
 
-  uint64_t full_digest = DIGEST_BASIS;
   for (uint32_t i = 0; i < full_iterations; i++) {
     raw_write(ctrl_fd, "R", 1);
-    raw_read_full(go_fd, seed_bytes, 8);
-    Mutation mutation = mutate_buffer(source, FULL_MUTATION_STRIDE, load_le64(seed_bytes), FULL_TIMED_SALT, i);
-    raw_write(ctrl_fd, "P", 1);
     raw_read_full(go_fd, go_bytes, 8);
+    uint64_t go = load_le64(go_bytes);
+    Mutation mutation = mutate_buffer(source, FULL_MUTATION_STRIDE, go, FULL_TIMED_SALT, i);
     TSTree *tree = ts_parser_parse_string(parser, NULL, source.data, source.length);
-    raw_write(ctrl_fd, (const char *)go_bytes, 8);
     if (!tree) fail("timed parser returned no tree");
-    full_digest = fold_value(full_digest, i);
-    full_digest = fold_tree_signature(full_digest, tree);
+    uint64_t digest = fold_value(fold_value(DIGEST_BASIS, go), i);
+    digest = fold_tree_signature(digest, tree);
+    store_le64(receipt_bytes, mix64(digest ^ go));
+    raw_write(ctrl_fd, (const char *)receipt_bytes, 8);
     ts_tree_delete(tree);
     revert_buffer(source, &mutation);
   }
-  store_le64(digest_bytes, full_digest);
-  raw_write(ctrl_fd, (const char *)digest_bytes, 8);
 
-  uint64_t incremental_digest = DIGEST_BASIS;
   for (uint32_t i = 0; i < incremental_iterations; i++) {
     raw_write(ctrl_fd, "R", 1);
-    raw_read_full(go_fd, seed_bytes, 8);
-    Mutation mutation = mutate_buffer(edited, INCREMENTAL_MUTATION_STRIDE, load_le64(seed_bytes), INCREMENTAL_TIMED_SALT, i);
-    TSTree *base = copy_edited_tree(old_tree, &mutation, &edited_lines);
-    raw_write(ctrl_fd, "P", 1);
     raw_read_full(go_fd, go_bytes, 8);
+    uint64_t go = load_le64(go_bytes);
+    Mutation mutation = mutate_buffer(edited, INCREMENTAL_MUTATION_STRIDE, go, INCREMENTAL_TIMED_SALT, i);
+    TSTree *base = copy_edited_tree(old_tree, &mutation, &edited_lines);
     TSTree *tree = ts_parser_parse_string(parser, base, edited.data, edited.length);
-    raw_write(ctrl_fd, (const char *)go_bytes, 8);
     if (!tree) fail("timed incremental parser returned no tree");
-    incremental_digest = fold_value(incremental_digest, i);
-    incremental_digest = fold_tree_signature(incremental_digest, tree);
+    uint64_t digest = fold_value(fold_value(DIGEST_BASIS, go), i);
+    digest = fold_tree_signature(digest, tree);
+    store_le64(receipt_bytes, mix64(digest ^ go));
+    raw_write(ctrl_fd, (const char *)receipt_bytes, 8);
     ts_tree_delete(tree);
     ts_tree_delete(base);
     revert_buffer(edited, &mutation);
   }
-  store_le64(digest_bytes, incremental_digest);
-  raw_write(ctrl_fd, (const char *)digest_bytes, 8);
 
   free(edited_lines.starts);
   ts_tree_delete(old_tree);
