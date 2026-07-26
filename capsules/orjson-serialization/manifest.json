@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_4d3886231114",
+  "id": "cap_bca92a86b9c5",
   "objective": "Improve orjson dumps+loads throughput across frozen dataclass, datetime, NumPy, Unicode, and nested corpora. Maximize the geometric mean throughput after byte-exact dumps, semantic loads, full upstream pytest, and peak-RSS gates; only src/lib.rs, src/serialize/, and src/deserialize/ are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "3059e0a1fe506c2599137b987fd48cd61a1ec458"
+    "commit": "7822fe80073fa937825deeaa1c34a636c98f851a"
   },
   "image": "hone-orjson-serialization@sha256:9fda64d476ea8edfcace3bb89902e8790e0f3ce1efd29a97026a8f945724c824",
   "evalEntrypoint": [
@@ -34,7 +34,6 @@
     "eval.py",
     "include",
     "integration",
-    "orjson_report_sink.py",
     "orjson_workload.py",
     "pyproject.toml",
     "pysrc",
@@ -86,7 +85,7 @@
   },
   "meta": {
     "evaluatorSource": "user",
-    "provenance": "Current-head OSS-T08 layered on ijl/orjson 705515d77b28429d0b7c30c3d781abe52e8a1e5a (3.11.9); the pinned baseline commit is a synthetic overlay commit that adds the trusted evaluator glue (eval.py, benchmark_worker.py, orjson_report_sink.py, orjson_workload.py, test_conductor.py, challenge.json) on top of that upstream tree so the visible baseline matches the declared commit byte-for-byte. No reference artifact or known winning patch. Round-4 hardening: the pytest gate is a single session-finish nonce-authenticated summary compared against a frozen exact test-identity sha256 (not counts); every benchmark iteration is a data-dependent serialize/parse chain validated against a pristine in-parent reference orjson over a per-run-unpredictable nonce; peak RSS is cgroup2 memory.peak of the whole worker tree; q is the interleaved pristine-reference yardstick (paired geomean of ref/cand time over 9 pairs). Local A-A calibration set qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Numbers are provisional pending frozen-GCE recalibration.",
+    "provenance": "Current-head OSS-T08 layered on ijl/orjson 705515d77b28429d0b7c30c3d781abe52e8a1e5a (3.11.9); the pinned baseline commit is a synthetic overlay commit that adds the trusted evaluator glue (eval.py, benchmark_worker.py, orjson_workload.py, test_conductor.py, challenge.json) on top of that upstream tree so the visible baseline matches the declared commit byte-for-byte. No reference artifact or known winning patch. Round-5 hardening (EXEC-BOUNDARY): the pytest correctness gate is produced by a trusted conductor process that NEVER imports the candidate extension — it drives one pytest subprocess per test file, each writing its own JUnit report at session finish, and derives pass/fail solely from each child's exit code plus its own count of files that reached session finish, measured against the frozen per-file set and an identity sha256 over the exact sorted pass/skip <file>/<class>/<name> set. No nonce or record fd is delivered into any process that loads the extension, so candidate module-init has nothing to scrape and no in-process channel it can author; an early os._exit before session finish yields no report and drops the completed-file count below the frozen expectation. The sound benchmark chain is unchanged: every iteration is a data-dependent serialize/parse chain validated against a pristine in-parent reference orjson over a per-run-unpredictable nonce; peak RSS is cgroup2 memory.peak of the whole worker tree; q is the interleaved pristine-reference yardstick (paired geomean of ref/cand time over 9 pairs). Local A-A calibration set qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail)). Numbers are provisional pending frozen-GCE recalibration.",
     "license": "MPL-2.0 AND (Apache-2.0 OR MIT)",
     "tags": [
       "m2",

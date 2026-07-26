@@ -20,19 +20,51 @@
     "timeoutSec": 120
   },
   "tests": {
-    "command": [
+    "root": "/workspace/test",
+    "baseArgv": [
       "pytest",
       "-q",
       "-p",
-      "no:cacheprovider",
-      "-p",
-      "orjson_report_sink",
-      "/workspace/test"
+      "no:cacheprovider"
     ],
     "timeoutSec": 90,
     "passed": 1612,
     "skipped": 24,
-    "identitySha256": "a634cf7344b0d50d467e13f73bf03bcd86e1aef4c7751a650c7362a46484059d"
+    "perFile": {
+      "test_api.py": {"passed": 34, "skipped": 0},
+      "test_append_newline.py": {"passed": 5, "skipped": 0},
+      "test_buffer.py": {"passed": 0, "skipped": 1},
+      "test_canonical.py": {"passed": 3, "skipped": 0},
+      "test_circular.py": {"passed": 7, "skipped": 0},
+      "test_dataclass.py": {"passed": 19, "skipped": 0},
+      "test_datetime.py": {"passed": 46, "skipped": 7},
+      "test_default.py": {"passed": 24, "skipped": 0},
+      "test_dict.py": {"passed": 20, "skipped": 0},
+      "test_enum.py": {"passed": 13, "skipped": 0},
+      "test_error.py": {"passed": 15, "skipped": 0},
+      "test_escape.py": {"passed": 30, "skipped": 0},
+      "test_fake.py": {"passed": 1, "skipped": 0},
+      "test_fixture.py": {"passed": 5, "skipped": 0},
+      "test_fragment.py": {"passed": 334, "skipped": 1},
+      "test_indent.py": {"passed": 11, "skipped": 0},
+      "test_issue221.py": {"passed": 2, "skipped": 0},
+      "test_issue331.py": {"passed": 6, "skipped": 0},
+      "test_jsonchecker.py": {"passed": 36, "skipped": 0},
+      "test_memory.py": {"passed": 0, "skipped": 12},
+      "test_non_str_keys.py": {"passed": 31, "skipped": 0},
+      "test_numpy.py": {"passed": 106, "skipped": 1},
+      "test_parsing.py": {"passed": 318, "skipped": 0},
+      "test_recursion.py": {"passed": 379, "skipped": 0},
+      "test_reentrant.py": {"passed": 1, "skipped": 0},
+      "test_roundtrip.py": {"passed": 27, "skipped": 0},
+      "test_sort_keys.py": {"passed": 4, "skipped": 0},
+      "test_subclass.py": {"passed": 17, "skipped": 0},
+      "test_transform.py": {"passed": 17, "skipped": 0},
+      "test_type.py": {"passed": 91, "skipped": 2},
+      "test_typeddict.py": {"passed": 1, "skipped": 0},
+      "test_uuid.py": {"passed": 9, "skipped": 0}
+    },
+    "identitySha256": "b2261b99dd7bc0e7126f59bb7156d96066a7869b0059b407ac14d4ec691a47c5"
   },
   "benchmarkTimeoutSec": 120,
   "baselinePeakRssObservedKiB": 46192,

@@ -439,42 +439,52 @@ def sweep_candidate_tmp() -> None:
 
 
 def score_test_records(conductor_code: int, blob: bytes) -> tuple[bool, str]:
-    """Accept the run ONLY when the conductor relayed the trusted plugin's
-    authenticated session-finish summary and it matches the frozen expected
-    test identity. The plugin emits exactly ONE nonce-authenticated line, and
-    only from pytest_sessionfinish, so a candidate that found the inherited
-    channel can neither forge the summary (it never learned the nonce) nor
-    terminate pytest early with a fabricated one (no session finish -> no
-    summary). The conductor relays only that authenticated summary:
-        C\\t<child_exit>\\t<auth>\\t<passed>\\t<skipped>\\t<failed>\\t<dups>\\t<identity_sha256>\\t<detail_b64>
-    Identity (a sha256 over the exact sorted pass/skip node-id set), not a bare
-    count, is compared: a candidate that ran a different or shortened suite
-    changes the identity even when the totals coincide."""
+    """Accept the run ONLY when the trusted conductor — a process that never
+    imports the candidate extension — reports that every frozen test file ran
+    to session finish with zero failures/errors, and the observed totals and
+    identity fingerprint match the frozen expectation.
+
+    The conductor drives one pytest subprocess per test file and derives each
+    file's outcome from that child's exit code plus the JUnit report pytest
+    itself writes at session finish. No nonce or record fd is ever delivered
+    into a process that loads the candidate extension, so candidate module-init
+    has nothing to scrape and no in-process channel it can author that the
+    trusted side reads. A candidate that ``os._exit(0)``s during import never
+    reaches session finish for that file, so its report is absent, the file is
+    not counted as completed, and the observed pass count falls below the frozen
+    expectation. The conductor relays a single trusted trailer:
+        C\\t<auth>\\t<passed>\\t<skipped>\\t<failed>\\t<errored>
+          \\t<completed_files>\\t<expected_files>\\t<identity>\\t<manifest_b64>\\t<detail_b64>
+    Identity (a sha256 over the exact sorted pass/skip <file>/<class>/<name>
+    set), not a bare count, is compared: a shortened or altered suite changes
+    the identity even when the totals coincide."""
     expected_passed = int(CHALLENGE["tests"]["passed"])
     expected_skipped = int(CHALLENGE["tests"]["skipped"])
     expected_identity = str(CHALLENGE["tests"].get("identitySha256", ""))
+    expected_files = len(CHALLENGE["tests"].get("perFile", {})) or None
     lines = blob.decode("utf-8", "replace").splitlines()
     trailer = lines[-1] if lines and lines[-1].startswith("C\t") else None
     if conductor_code != 0 or trailer is None:
         return False, "test conductor did not complete"
     tfields = trailer.split("\t")
-    if len(tfields) != 9:
+    if len(tfields) != 11:
         return False, "malformed conductor trailer"
     try:
-        child_exit = int(tfields[1])
-        authenticated = tfields[2] == "1"
-        passed = int(tfields[3])
-        skipped = int(tfields[4])
-        failures = int(tfields[5])
-        duplicates = int(tfields[6])
+        authenticated = tfields[1] == "1"
+        passed = int(tfields[2])
+        skipped = int(tfields[3])
+        failures = int(tfields[4])
+        errored = int(tfields[5])
+        completed_files = int(tfields[6])
+        reported_files = int(tfields[7])
     except ValueError:
         return False, "malformed conductor trailer"
-    identity = tfields[7]
+    identity = tfields[8]
 
     def detail() -> str:
-        if tfields[8]:
+        if tfields[10]:
             try:
-                text = base64.b64decode(tfields[8]).decode("utf-8", "replace")
+                text = base64.b64decode(tfields[10]).decode("utf-8", "replace")
             except ValueError:
                 return ""
             tail = text.strip().splitlines()[-1:]
@@ -484,19 +494,24 @@ def score_test_records(conductor_code: int, blob: bytes) -> tuple[bool, str]:
     if not authenticated:
         suffix = f": {detail()}" if detail() else ""
         return False, f"test summary not authenticated by the trusted channel{suffix}"
-    if child_exit != 0:
-        suffix = f": {detail()}" if detail() else ""
-        return False, f"pytest exited {child_exit}{suffix}"
-    if failures != 0:
+    if failures != 0 or errored != 0:
         return False, "upstream pytest suite reported failures"
-    if duplicates != 0:
-        return False, "unclassified or duplicated test outcomes"
-    if passed != expected_passed or skipped != expected_skipped:
-        return False, f"pytest count changed: {passed} passed, {skipped} skipped"
+    if completed_files != reported_files:
+        return False, f"only {completed_files}/{reported_files} test files completed"
     if not expected_identity:
         # Fail-closed: shipped config always pins the identity. This branch only
-        # fires during pre-freeze capture and surfaces the observed value.
+        # fires during pre-freeze capture; surface the full observed manifest and
+        # identity (stderr is not summary-truncated) so they can be frozen.
+        sys.stderr.write(
+            f"CAPTURE passed={passed} skipped={skipped} files={reported_files}\n"
+            f"CAPTURE identity={identity}\n"
+            f"CAPTURE manifest={tfields[9]}\n"
+        )
         return False, f"tests identity unset; observed={identity}"
+    if expected_files is not None and reported_files != expected_files:
+        return False, f"test file set changed: {reported_files} of {expected_files}"
+    if passed != expected_passed or skipped != expected_skipped:
+        return False, f"pytest count changed: {passed} passed, {skipped} skipped"
     if identity != expected_identity:
         return False, f"pytest identity mismatch; observed={identity}"
     return True, f"{expected_passed} passed, {expected_skipped} skipped"
@@ -507,14 +522,18 @@ def run_tests() -> tuple[bool, str]:
         return False, "candidate extension unavailable"
     timeout = float(CHALLENGE["tests"]["timeoutSec"])
     # The parent owns the record channel: it holds the read end and passes ONLY
-    # the write end to the trusted conductor. The candidate-executed pytest
-    # process never inherits it (conductor clears it CLOEXEC + scrubs env and
-    # marks itself non-dumpable), so candidate-linked code cannot write records
-    # the trusted side will read.
+    # the write end to the trusted conductor. No process that loads the candidate
+    # extension ever inherits it (conductor clears it CLOEXEC + scrubs env and
+    # marks itself non-dumpable) — and, critically, the conductor produces the
+    # authenticated verdict itself without importing the extension, so no nonce
+    # or record fd is delivered into any pytest process. Candidate module-init
+    # therefore has nothing to scrape and no channel to author.
     read_fd, write_fd = os.pipe()
     env = dict(os.environ)
     env["HONE_CONDUCTOR_OUT_FD"] = str(write_fd)
-    env["HONE_PYTEST_ARGV"] = json.dumps(list(CHALLENGE["tests"]["command"]))
+    env["HONE_PYTEST_BASE_ARGV"] = json.dumps(list(CHALLENGE["tests"]["baseArgv"]))
+    env["HONE_TEST_ROOT"] = str(CHALLENGE["tests"]["root"])
+    env["HONE_TEST_MANIFEST"] = json.dumps(CHALLENGE["tests"].get("perFile", {}))
     env["HONE_SITE"] = str(SITE)
     env["HONE_TRUSTED_DIR"] = str(TRUSTED_DIR)
     env["HONE_EXTENSION_FD"] = str(EXTENSION_FD)

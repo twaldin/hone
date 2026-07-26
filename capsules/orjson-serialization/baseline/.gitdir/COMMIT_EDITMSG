@@ -1,1 +1,10 @@
-round-4: session-auth pytest identity gate; data-dependent chain + pristine-reference yardstick; cgroup memory.peak
+round-5 EXEC-BOUNDARY: per-file pytest conductor test gate
+
+Authenticate the upstream pytest suite in a process that never imports the
+candidate extension. The conductor drives one pytest subprocess per test file,
+each writing its own JUnit report at session finish, and derives pass/fail from
+each child exit code + its own count of completed files vs the frozen per-file
+set and identity. No nonce or record fd is delivered into any process that loads
+the extension; an early os._exit before session finish yields no report and
+drops the completed-file count below expectation. Removes orjson_report_sink.py
+(the in-candidate-process plugin was the seam). Benchmark/scoring path unchanged.
