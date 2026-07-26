@@ -40,13 +40,30 @@ CLONE_NEWIPC = 0x08000000
 # Loaded once in the trusted parent BEFORE any fork so the preexec child never
 # allocates: dlopen inside preexec_fn is not async-signal-safe.
 _LIBC = ctypes.CDLL(None, use_errno=True)
-# Fastest-k-of-N trimmed sampling (trusted-parent timing). Host contention
-# only adds wall time and every sample is trusted-timed and output-gated, so
-# keeping the fastest samples rejects transient co-scheduling noise without
-# giving the candidate any control over which samples count.
-MICRO_SAMPLES = 3
-MICRO_KEEP = 2
+# Min-of-N trimmed sampling (trusted-parent timing). Host contention only ever
+# ADDS wall time and every sample is trusted-timed and output-gated, so the
+# fastest (least-contended) sample of each binary is the cleanest estimate of
+# its true cost and rejects a persistent differential-contention competitor on
+# the host without giving the candidate any control over which sample counts.
+# N is kept high so at least one near-clean window is captured for each binary
+# even under sustained ambient load (min-of-N doctrine for ~1s legs); the
+# interleaved per-sample pristine reference then cancels shared host drift.
+MICRO_SAMPLES = 15
+MICRO_KEEP = 1
 MODULE_KEEP = 16
+# Per-evaluation iteration jitter: the trusted parent draws a fresh iteration
+# count in [base, base + base//MICRO_ITER_JITTER_DIV] so no output can be
+# precomputed against a fixed schedule while every sample of one evaluation
+# keeps a stable magnitude for apples-to-apples timing.
+MICRO_ITER_JITTER_DIV = 32
+# Per-operation plausibility floor. Candidate and reference interpret the SAME
+# streamed script over the SAME randomized input; a genuine interpreter
+# optimization cannot make the candidate more than this many times faster than
+# the pristine reference on identical work, so a candidate whose kept-fastest
+# wall time falls below this fraction of the reference's is doing far less work
+# than interpreting the loop (fabricating the fold across the process boundary)
+# and is rejected.
+MICRO_MIN_PLAUSIBLE_FRAC = 0.1
 # Frozen provisional yardstick scale (provisional local qBase; final GCE
 # recalibration re-freezes it): a candidate identical to the trusted baseline
 # scores this value by construction, independent of host drift, because the
@@ -260,12 +277,19 @@ def run_worker(action: str, *paths: Path) -> dict[str, object]:
     return payload
 
 
-def run_candidate(argv: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess[bytes]:
+def run_candidate(
+    argv: list[str], timeout: float = 10.0, stdin_bytes: bytes | None = None
+) -> subprocess.CompletedProcess[bytes]:
+    # subprocess.run forbids passing both stdin= and input=; when a streamed job
+    # is supplied, hand it via input= (which opens the stdin pipe itself),
+    # otherwise close stdin with DEVNULL.
+    stream_kwargs: dict[str, object] = (
+        {"stdin": subprocess.DEVNULL} if stdin_bytes is None else {"input": stdin_bytes}
+    )
     try:
         return subprocess.run(
             argv,
             cwd=SOURCE,
-            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
@@ -273,6 +297,7 @@ def run_candidate(argv: list[str], timeout: float = 10.0) -> subprocess.Complete
             preexec_fn=demote,
             env=candidate_environment(),
             start_new_session=True,
+            **stream_kwargs,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateFailure(f"candidate process failed: {exc}") from exc
@@ -365,11 +390,13 @@ def load_workload() -> tuple[dict[str, object], Path, str]:
         raise GateFailure("sealed microbenchmark list is invalid")
     frozen_rows: list[tuple[object, object, object]] = []
     for row in rows:
-        if not isinstance(row, dict) or set(row) != {"expected", "iterations", "name", "operations"}:
+        # The timed microbenchmark output is no longer a sealed closed-form
+        # constant: truth for each randomized job is captured from the pristine
+        # in-eval reference build, so the sealed row only pins the benchmark
+        # identity and its base schedule (the per-evaluation iteration count is
+        # jittered up from this base at run time).
+        if not isinstance(row, dict) or set(row) != {"iterations", "name", "operations"}:
             raise GateFailure("sealed microbenchmark row is invalid")
-        expected = row.get("expected")
-        if not isinstance(expected, str) or not expected.endswith("\n") or len(expected.encode()) > 4096:
-            raise GateFailure("sealed microbenchmark output is invalid")
         frozen_rows.append((row.get("name"), row.get("iterations"), row.get("operations")))
     if tuple(frozen_rows) != EXPECTED_BENCHMARKS[split]:
         raise GateFailure("sealed microbenchmark schedule is invalid")
@@ -711,52 +738,109 @@ def timed_gated_run(argv: list[str], expected_bytes: bytes, timeout: float, labe
     return elapsed
 
 
+# Alphabets for the streamed regexp jobs. The UTF-16 alphabet carries code
+# points above U+00FF so regexp_utf16 jobs force the interpreter's wide string
+# and regexp paths, matching the upstream selection intent.
+MICRO_ASCII_ALPHABET = _withheld_terminal_input('MICRO_ASCII_ALPHABET')
+MICRO_UTF16_ALPHABET = _withheld_terminal_input('MICRO_UTF16_ALPHABET')
+
+
+def timed_stream_run(
+    binary: Path, script: Path, job_bytes: bytes, timeout: float, label: str
+) -> tuple[float, bytes]:
+    """One trusted-timed streamed launch from a pristine writable state. The
+    randomized job is delivered on stdin at clock-start (never argv/env), so no
+    correct fold can be produced in the untimed window; the caller validates the
+    returned fold against the pristine reference run on the identical job."""
+    reset_candidate_state()
+    argv = [str(binary), "--std", str(script)]
+    started = time.monotonic_ns()
+    completed = run_candidate(argv, timeout=timeout, stdin_bytes=job_bytes)
+    elapsed = (time.monotonic_ns() - started) / 1_000_000_000.0
+    if completed.returncode != 0 or completed.stderr or not completed.stdout:
+        raise GateFailure(f"{label} streamed run failed")
+    if not math.isfinite(elapsed) or elapsed <= 0:
+        raise GateFailure(f"trusted {label} timer failed")
+    return elapsed, completed.stdout
+
+
+def make_micro_params(name: str, ops_factor: int, rng: random.SystemRandom):
+    return _withheld_terminal_input("microbenchmark input factory")
+
+
+def make_micro_job(name: str, iterations: int, ops_factor: int, rng: random.SystemRandom) -> dict[str, object]:
+    return {
+        "name": name,
+        "nonce": rng.randrange(1, T262_MODULUS),
+        "iterations": iterations,
+        "params": make_micro_params(name, ops_factor, rng),
+    }
+
+
 def run_microbenchmarks(rows: object) -> tuple[list[float], list[float]]:
     if not isinstance(rows, list):
         raise GateFailure("sealed microbenchmark rows are invalid")
-    validated: list[tuple[str, int, int, str]] = []
+    validated: list[tuple[str, int, int]] = []
     for row in rows:
         if not isinstance(row, dict):
             raise GateFailure("sealed microbenchmark row is invalid")
         name = row.get("name")
         iterations = row.get("iterations")
         operations = row.get("operations")
-        expected = row.get("expected")
-        if (
-            not isinstance(name, str)
-            or not isinstance(iterations, int)
-            or not isinstance(operations, int)
-            or not isinstance(expected, str)
-        ):
+        if not isinstance(name, str) or not isinstance(iterations, int) or not isinstance(operations, int):
             raise GateFailure("sealed microbenchmark row has invalid values")
-        validated.append((name, iterations, operations, expected))
-    # Fastest-k-of-N trimmed sampling in the trusted parent: host contention
-    # only ever ADDS wall time, and every sample is taken by this trusted
-    # process with the full exact-output gate, so keeping the fastest samples
-    # rejects transient co-scheduling noise without giving the candidate any
-    # influence over which samples count. Sampling rounds are INTERLEAVED
-    # round-robin across the sealed benchmarks, and every candidate sample is
-    # bracketed by a pristine in-eval trusted-reference sample of the SAME
-    # benchmark seconds apart, so both see the same ambient host speed and the
-    # reference-normalized ratio cancels cross-eval drift.
-    candidate_elapsed: list[list[float]] = [[] for _ in validated]
-    reference_elapsed: list[list[float]] = [[] for _ in validated]
+        if iterations <= 0 or operations <= 0 or operations % iterations != 0:
+            raise GateFailure("sealed microbenchmark schedule is invalid")
+        validated.append((name, iterations, operations))
+    rng = random.SystemRandom()
+    script = WORKLOAD_DIR / "benchmark.js"
+    ref_binary = REF_SOURCE / "qjs"
+    cand_binary = SOURCE / "qjs"
+    # Per-evaluation randomized schedule: draw one jittered iteration count per
+    # benchmark so this evaluation's operation counts are fixed across samples
+    # (apples-to-apples timing) yet unknown before the evaluation begins.
+    schedule: list[tuple[str, int, int, int]] = []  # name, iterations, operations, ops_factor
+    for name, base_iters, base_ops in validated:
+        ops_factor = base_ops // base_iters
+        iters = base_iters + rng.randrange(base_iters // MICRO_ITER_JITTER_DIV + 1)
+        schedule.append((name, iters, iters * ops_factor, ops_factor))
+    # Interleaved round-robin: every candidate sample is bracketed by a pristine
+    # in-eval reference sample of the SAME streamed job seconds apart, so both
+    # see the same ambient host speed and the reference-normalized ratio cancels
+    # cross-eval drift. Fastest-k-of-N trimming rejects transient co-scheduling
+    # noise (which only ever ADDS wall time) without giving the candidate any
+    # control over which samples count.
+    candidate_elapsed: list[list[float]] = [[] for _ in schedule]
+    reference_elapsed: list[list[float]] = [[] for _ in schedule]
     for _ in range(MICRO_SAMPLES):
-        for index, (name, iterations, operations, expected) in enumerate(validated):
-            script = str(WORKLOAD_DIR / "benchmark.js")
-            arguments = [script, name, str(iterations)]
-            expected_bytes = expected.encode()
-            reference_elapsed[index].append(
-                timed_gated_run([str(REF_SOURCE / "qjs"), *arguments], expected_bytes, 120, "reference microbenchmark")
-            )
-            candidate_elapsed[index].append(
-                timed_gated_run([str(SOURCE / "qjs"), *arguments], expected_bytes, 120, "microbenchmark")
-            )
+        for index, (name, iters, operations, ops_factor) in enumerate(schedule):
+            # Fresh nonce + input data for THIS sample, streamed on stdin at
+            # clock-start to both the pristine reference and the candidate. The
+            # reference's fold is the trusted truth; the candidate must
+            # reproduce it byte for byte on the identical streamed job.
+            job = make_micro_job(name, iters, ops_factor, rng)
+            job_bytes = json.dumps(job, separators=(",", ":")).encode()
+            ref_sec, ref_out = timed_stream_run(ref_binary, script, job_bytes, 120, "reference microbenchmark")
+            cand_sec, cand_out = timed_stream_run(cand_binary, script, job_bytes, 120, "microbenchmark")
+            if cand_out != ref_out:
+                raise GateFailure("microbenchmark fold gate failed")
+            reference_elapsed[index].append(ref_sec)
+            candidate_elapsed[index].append(cand_sec)
     candidate_throughputs: list[float] = []
     reference_throughputs: list[float] = []
-    for (name, iterations, operations, expected), cand, ref in zip(validated, candidate_elapsed, reference_elapsed):
-        candidate_throughputs.append(operations / statistics.fmean(sorted(cand)[:MICRO_KEEP]))
-        reference_throughputs.append(operations / statistics.fmean(sorted(ref)[:MICRO_KEEP]))
+    for (name, iters, operations, ops_factor), cand, ref in zip(schedule, candidate_elapsed, reference_elapsed):
+        cand_kept = statistics.fmean(sorted(cand)[:MICRO_KEEP])
+        ref_kept = statistics.fmean(sorted(ref)[:MICRO_KEEP])
+        # Per-operation plausibility floor: interpreting the identical streamed
+        # loop cannot make the candidate implausibly faster than the pristine
+        # reference; a kept time far below the reference means the fold was
+        # produced without doing the interpreter's per-iteration work.
+        if not math.isfinite(cand_kept) or not math.isfinite(ref_kept) or cand_kept <= 0 or ref_kept <= 0:
+            raise GateFailure("microbenchmark timing is invalid")
+        if cand_kept < ref_kept * MICRO_MIN_PLAUSIBLE_FRAC:
+            raise GateFailure("microbenchmark per-operation cost is implausibly below reference")
+        candidate_throughputs.append(operations / cand_kept)
+        reference_throughputs.append(operations / ref_kept)
     return candidate_throughputs, reference_throughputs
 
 

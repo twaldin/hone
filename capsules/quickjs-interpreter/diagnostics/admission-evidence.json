@@ -1,12 +1,12 @@
 {
   "aa": {
-    "noiseFractionOfScale": 0.1357591830910767,
+    "noiseFractionOfScale": 0.15587035211079336,
     "samples": [
-      7327244.016726127,
-      7415293.781379168,
-      7412795.1472102925
+      7399427.332942024,
+      7287042.742972397,
+      7362474.050488209
     ],
-    "sigma": 50129.83169611437
+    "sigma": 57279.61141089313
   },
   "controls": [
     {
@@ -18,65 +18,65 @@
     {
       "hardGatesPass": true,
       "id": "naive",
-      "q": 1915271.397442455,
+      "q": 2744674.8856058093,
       "role": "deliberately slower but correct per-opcode volatile work"
     },
     {
       "hardGatesPass": true,
       "id": "baseline",
-      "q": 7341994.704402069,
+      "q": 7399427.332942024,
       "role": "exact pinned upstream source"
     },
     {
       "hardGatesPass": true,
       "id": "improved",
-      "q": 7501931.353189144,
-      "role": "independently authored no-handler interrupt polling fast path"
+      "q": 7971037.581866469,
+      "role": "independently authored inline float64/int OP_mod remainder fast path"
     },
     {
       "hardGatesPass": true,
       "id": "shortcut",
-      "q": 7131274.564644235,
-      "role": "train-valid fast path plus validation-only UTF-16 regexp delay",
+      "q": 6681437.151171795,
+      "role": "OP_mod fast path (both splits) plus validation-only UTF-16 regexp delay",
       "shortcutGated": true,
-      "trainQ": 7569357.103557414,
-      "validationQ": 6693192.025731056
+      "trainQ": 7935264.169858152,
+      "validationQ": 5427610.132485438
     }
   ],
   "feasibility": {
-    "cleanBuildSec": 21.82,
-    "evalSec": 13.25,
-    "incrementalRebuildSec": 21.38
+    "cleanBuildSec": 44.95,
+    "evalSec": 118.0,
+    "incrementalRebuildSec": 44.95
   },
   "measurement": {
-    "benchmarkBatchWallSec": 466.9,
+    "benchmarkBatchWallSec": 1483.6,
     "finalGceRecalibrationRequired": true,
     "freshProcess": true,
     "globalLockHeld": true,
-    "normalizationScale": 369255.5490885931,
+    "normalizationScale": 367482.40210671054,
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
     "referenceNormalization": 7385110.981771862,
-    "scoring": "reference-normalized: q = raw_q * 7385110.981771862 / reference_q with a pristine in-eval trusted-baseline build sampled interleaved with the candidate (micro fastest-2-of-3 round-robin, module fastest-16-of-31 median-of-3); cancels ambient host-speed drift between evaluations"
+    "scoring": "reference-normalized: q = raw_q * 7385110.981771862 / reference_q with a pristine in-eval trusted-baseline build sampled interleaved with the candidate; each microbenchmark leg reduced to the fastest (min) of 15 round-robin interleaved samples per binary over per-sample-randomized streamed nonce/input jobs whose nonce-salted fold is validated against the reference, plus module startup (fastest 16 of 31 launches, median of 3 rounds); cancels ambient host-speed drift under sustained VM competitor load"
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:57603d2b1d0eed312f42dbe1f3a6dcf170d6e2c2b75372515d2817d105026ebf",
-    "secondReportHash": "sha256:823b8c397cc84eb061e49af3353722d038a80dc156df04cc1ced99b9ad2c35c9"
+    "firstReportHash": "sha256:d24ea2ee52c3f8e2d4a1b2559ee9853512fca59bb6ed11bd72c79fd65f7cc876",
+    "secondReportHash": "sha256:a4a7d245873e191de8668357b03e8370c057588156d7792dba95beb6de39bb52"
   },
   "perturbation": {
-    "deltaFromOrderingBaseline": 159936.64878707565,
-    "deltaFromQBase": 116820.37141728215,
-    "description": "Skip interrupt-counter work when the runtime has no installed interrupt handler",
+    "deltaFromOrderingBaseline": 571610.2489244454,
+    "deltaFromQBase": 621389.5397322588,
+    "description": "Inline float64/int remainder (OP_mod) fast path avoiding the no_inline js_binary_arith_slow call for the common float remainder that the per-iteration nonce fold performs",
     "id": "improved",
     "independentlyAuthored": true,
-    "q": 7501931.353189144,
-    "reachesReference": false,
+    "q": 7971037.581866469,
+    "reachesReference": true,
     "valid": true
   },
-  "qBase": 7385110.981771862,
+  "qBase": 7349648.0421342105,
   "qFail": 0,
-  "qReference": 7754366.530860456,
+  "qReference": 7717130.444240921,
   "terminalSeal": {
     "mutationOrHeadroomRuns": false,
     "optimizerPilot": false,
