@@ -64,7 +64,7 @@ const BUDGET_DIMENSIONS = [
 /**
  * The corpus assembler's frozen artifact schema (./corpus-provenance.ts) does
  * not enforce launch cardinalities; the generator does, fail closed: exactly
- * 16 development + 12 terminal capsules, distinct identities, and role lists
+ * 16 development + 11 terminal capsules, distinct identities, and role lists
  * consistent with the per-capsule role records. The inputsDigest self-binding
  * is enforced separately by verifyCorpusProvenance — the single trusted
  * chokepoint — before any drafting decision reads the artifact.
