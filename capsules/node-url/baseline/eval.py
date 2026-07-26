@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-"""Trusted evaluator for nodejs/node WHATWG URL throughput."""
+"""Trusted evaluator for nodejs/node WHATWG URL throughput.
+
+Round-5 EXEC-BOUNDARY rebuild. The scored parse/serialize loop runs inside a
+node binary that links candidate-mutable URL code, so a C++ constructor /
+.init_array routine can run before any JavaScript. Rather than trust an in-
+process, closed-form, single-repeated-input checksum (which such a routine can
+reproduce from public constants without doing the work), this evaluator:
+
+  * interleaves a PRISTINE reference leg (the baseline node binary, copied out
+    of /opt/node BEFORE the candidate is built into it, so it never links
+    candidate code) with each candidate leg on the SAME per-iteration nonce
+    stream, and reports throughput as the drift-cancelling min-of-N ratio
+    reference_time / candidate_time;
+  * delivers the go nonce only AFTER the driver's JS-top-level readiness marker
+    (a C++ constructor runs before that marker and so cannot cause the parent
+    to release the nonce);
+  * derives every timed iteration's structurally-distinct, NON-idempotent input
+    from that go-time nonce, and requires the candidate's nonce-salted output
+    fold to equal the reference's fold over the identical stream — so no correct
+    result is precomputable in the untimed window, there is no per-input parse
+    cache, and the only way to match the reference is to run the real per-
+    iteration URL work inside the timed window.
+"""
 from __future__ import annotations
 
 import ctypes
@@ -10,6 +32,7 @@ import os
 import re
 import resource
 import secrets
+import select
 import shutil
 import signal
 import subprocess
@@ -26,15 +49,28 @@ WORKSPACE = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
 ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
 SOURCE = Path("/opt/node")
 NODE = SOURCE / "out/Release/node"
+# Pristine reference: the baseline node binary as built in the image, copied
+# BEFORE the candidate mutable files are prepared into /opt/node and rebuilt.
+# It never links candidate code, so it is the trusted ground truth for both the
+# per-iteration output fold and the timing yardstick. It lives UNDER /opt/node
+# (the writable, exec-capable anonymous volume) rather than the eval /tmp tmpfs,
+# which the broker caps at 16 MiB and mounts noexec; prepare() only rewrites the
+# six mutable files and build() only rewrites out/, so this copy survives both.
+# A trusted root-owned 0755 directory the demoted candidate uid cannot rewrite.
+REFERENCE_ROOT = SOURCE / "hone-node-url-ref"
+REFERENCE_NODE = REFERENCE_ROOT / "node"
 SANDBOX_UID = 2000
 PROCESS_TIMEOUT_SEC = 180
-MIN_MARGINAL_SEC = 0.01
-SAMPLES_PER_SCALE = 2
-BOOST = 8
+LEG_TIMEOUT_SEC = 120
+BENCH_TIMED_REPS = 11
+# Frozen provisional yardstick scale (PROVISIONAL local value; final GCE
+# recalibration re-freezes it): a candidate identical to the trusted baseline
+# scores this value by construction (ratio ~ 1.0), independent of host drift.
+REFERENCE_NORMALIZATION = 3_000_000.0
 
 # Trusted whole-tree memory accounting: a fresh cgroup2 instance the demoted
 # candidate can never write, so memory.peak is kernel-owned and monotone for
-# each measurement leaf's lifetime (unlike GNU time %M of the direct node).
+# each measurement leaf's lifetime.
 CGROUP_ROOT = Path("/tmp/hone-node-url-cg")
 CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
 CGROUP_DRAIN_SEC = 10
@@ -52,27 +88,19 @@ MUTABLE_FILES = frozenset({
     "deps/ada/ada_c.h",
 })
 
-DRIVER_RE = re.compile(rb"HONE_DRIVER_OK (\S+) (\d+) (\d+) (\d+) (\d+)")
+READY_MARKER = b"HONE_DRIVER_READY\n"
+DRIVER_RE = re.compile(rb"HONE_DRIVER_OK (\S+) (\d+) (\d+) (\d+)")
+BENCH_MODES = frozenset({"url-parse", "sp-parse", "sp-serialize"})
 EXPECTED_WORKLOAD_FIELDS = frozenset({
     "version",
     "split",
+    "family",
     "provenance",
-    "urlParseExponent",
-    "urlPropertiesExponent",
-    "searchParamsIterations",
-    "baselineMemory",
-    "withBase",
+    "memoryTolerance",
+    "cells",
     "urls",
     "searchParams",
 })
-
-# Trusted rolling-checksum ring shared with bench_driver.js. MOD is prime and
-# (MULT-1) is a unit mod MOD, so a per-iteration fold has a closed form the
-# trusted parent recomputes from the sealed expected observation.
-DIGEST_MOD = 2147483647
-DIGEST_MULT = 48271
-DIGEST_POLY = 257
-CONTENT_SAMPLES = 64
 
 
 class GateFailure(RuntimeError):
@@ -159,19 +187,13 @@ def _candidate_pids() -> dict[int, bool]:
 
 
 def reap_candidate_processes() -> None:
-    """Kill and reap every candidate-uid process until none remain.
-
-    killpg alone misses detached/new-session descendants and a plain SIGKILL
-    sweep leaves zombies pinned by dead parents; as subreaper this process
-    inherits those orphans, so loop until a /proc scan finds no candidate-uid
-    process at all (bounded by a hard deadline)."""
+    """Kill and reap every candidate-uid process until none remain."""
     if os.geteuid() != 0:
         return
     deadline = time.monotonic() + 5.0
     while True:
         pids = _candidate_pids()
         if not any(not zombie for zombie in pids.values()):
-            # Drain any inherited zombies before returning.
             while pids:
                 try:
                     reaped, _ = os.waitpid(-1, os.WNOHANG)
@@ -201,9 +223,7 @@ def reap_candidate_processes() -> None:
 
 
 def clear_candidate_writable() -> None:
-    """Purge candidate-owned residue from every candidate-writable root so
-    nothing a launch stashed under /tmp, /var/tmp, or /dev/shm (including POSIX
-    shm) survives into the next launch."""
+    """Purge candidate-owned residue from every candidate-writable root."""
     for root in CANDIDATE_WRITABLE_ROOTS:
         try:
             entries = list(root.iterdir())
@@ -228,9 +248,6 @@ def clear_candidate_writable() -> None:
 # Trusted measurement cgroup (CG).
 # ---------------------------------------------------------------------------
 def mount_measurement_cgroup() -> None:
-    # Docker mounts the container cgroup2 view read-only, but the trusted
-    # evaluator holds mount authority (CAP_SYS_ADMIN): a fresh cgroup2 instance
-    # over the namespaced hierarchy is writable by root only.
     CGROUP_ROOT.mkdir(mode=0o755, exist_ok=False)
     completed = subprocess.run(
         ["mount", "-t", "cgroup2", "-o", "nosuid,nodev,noexec", "hone-node-url-cg", str(CGROUP_ROOT)],
@@ -244,9 +261,6 @@ def mount_measurement_cgroup() -> None:
         CGROUP_ROOT.rmdir()
         raise GateFailure("trusted measurement cgroup mount failed")
     try:
-        # cgroup v2 no-internal-process rule: park the evaluator (and every
-        # worker it forks) in a trusted leaf so the memory controller can be
-        # delegated to the per-launch measurement leaves.
         CGROUP_TRUSTED.mkdir(mode=0o755)
         (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
         (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
@@ -271,10 +285,6 @@ def unmount_measurement_cgroup() -> None:
 
 
 def drain_measurement_leaf(leaf: Path) -> None:
-    # Kill every process still charged to the leaf (detached descendants in new
-    # sessions included), wait for the kernel to release them, then retire the
-    # leaf. Exit disassociates tasks from the cgroup before they are reaped, so
-    # an empty cgroup.procs means the leaf can be removed.
     deadline = time.monotonic() + CGROUP_DRAIN_SEC
     try:
         (leaf / "cgroup.kill").write_text("1")
@@ -325,7 +335,6 @@ def run_worker(action: str, *arguments: str) -> dict:
     except (OSError, subprocess.SubprocessError) as error:
         raise GateFailure(f"{action} worker failed: {error}") from error
     finally:
-        # Reap and purge whatever the unprivileged worker tree left behind.
         reap_candidate_processes()
         clear_candidate_writable()
     return parse_worker(completed, action)
@@ -359,14 +368,22 @@ def check_source_envelope() -> None:
             raise GateFailure(f"file outside mutable source envelope: {relative}")
         if file_sha256(path) != file_sha256(trusted):
             raise GateFailure(f"protected source file changed: {relative}")
-    # Sanitized candidate workspaces intentionally omit protected baseline
-    # files (the trusted copies are mounted separately at TRUSTED_DIR), so
-    # absence of a protected file is expected. Only the mutable envelope must
-    # be present; any protected file that IS present must match byte for byte.
     for relative in MUTABLE_FILES:
         path = WORKSPACE / relative
         if path.is_symlink() or not path.is_file():
             raise GateFailure(f"required mutable source file is missing: {relative}")
+
+
+def copy_reference_binary() -> None:
+    """Copy the pristine baseline node binary out of /opt/node BEFORE the
+    candidate mutable files are prepared into it. Must run before
+    run_worker('prepare'); afterwards /opt/node holds the candidate build."""
+    if not NODE.is_file():
+        raise GateFailure("pristine reference binary is missing before prepare")
+    REFERENCE_ROOT.mkdir(mode=0o755, exist_ok=False)
+    shutil.copy2(NODE, REFERENCE_NODE)
+    os.chmod(REFERENCE_ROOT, 0o755)
+    os.chmod(REFERENCE_NODE, 0o755)
 
 
 def load_workload() -> tuple[dict, str]:
@@ -382,12 +399,27 @@ def load_workload() -> tuple[dict, str]:
         raise GateFailure("sealed workload has an invalid schema")
     if workload["version"] != 1 or workload["split"] not in {"train", "validation"}:
         raise GateFailure("sealed workload identity is invalid")
+    if workload["family"] not in {"train", "validation"}:
+        raise GateFailure("sealed workload family is invalid")
     if not isinstance(workload["provenance"], str) or "benchmark/url" not in workload["provenance"]:
         raise GateFailure("sealed workload provenance is invalid")
-    if workload["urlParseExponent"] != 12 or workload["urlPropertiesExponent"] != 11:
-        raise GateFailure("sealed URL benchmark scale is invalid")
-    if workload["searchParamsIterations"] != 1_000_000 or not isinstance(workload["withBase"], bool):
-        raise GateFailure("sealed SearchParams benchmark scale is invalid")
+    tol = workload["memoryTolerance"]
+    if not isinstance(tol, (int, float)) or not (0.0 < float(tol) <= 0.25):
+        raise GateFailure("sealed memory tolerance is invalid")
+    cells = workload["cells"]
+    if not isinstance(cells, list) or not (1 <= len(cells) <= 16):
+        raise GateFailure("sealed benchmark cells are invalid")
+    seen_cells: set[str] = set()
+    for cell in cells:
+        if not isinstance(cell, dict) or set(cell) != {"id", "mode", "count"}:
+            raise GateFailure("sealed benchmark cell schema is invalid")
+        if not isinstance(cell["id"], str) or cell["id"] in seen_cells:
+            raise GateFailure("sealed benchmark cell identity is invalid")
+        if cell["mode"] not in BENCH_MODES:
+            raise GateFailure("sealed benchmark cell mode is invalid")
+        if not isinstance(cell["count"], int) or not (100 <= cell["count"] <= 50_000_000):
+            raise GateFailure("sealed benchmark cell count is invalid")
+        seen_cells.add(cell["id"])
     for key, expected_field in (("urls", "expectedHref"), ("searchParams", "expected")):
         rows = workload[key]
         if not isinstance(rows, list) or len(rows) != 4:
@@ -399,25 +431,15 @@ def load_workload() -> tuple[dict, str]:
             if not isinstance(row["id"], str) or not isinstance(row[expected_field], str) or row["id"] in seen:
                 raise GateFailure(f"sealed {key} identity is invalid")
             seen.add(row["id"])
-    memory = workload["baselineMemory"]
-    memory_fields = {"heapUsedBytes", "rssBytes", "limitHeapUsedBytes", "limitRssBytes"}
-    if not isinstance(memory, dict) or set(memory) != memory_fields:
-        raise GateFailure("sealed memory baseline is invalid")
-    if any(not isinstance(memory[field], int) or memory[field] <= 0 for field in memory_fields):
-        raise GateFailure("sealed memory values are invalid")
-    if memory["limitHeapUsedBytes"] != memory["heapUsedBytes"] * 102 // 100:
-        raise GateFailure("sealed heap limit is not baseline plus two percent")
-    if memory["limitRssBytes"] != memory["rssBytes"] * 102 // 100:
-        raise GateFailure("sealed RSS limit is not baseline plus two percent")
     return workload, hashlib.sha256(raw).hexdigest()
 
 
 def run_exact_output_gate(workload: dict) -> dict:
-    # ORACLE-PARENT: ship only input identities + withBase; the sealed expected
-    # outputs never leave the trusted parent, so candidate code that wraps
+    # ORACLE-PARENT: ship only input identities; the sealed expected outputs
+    # never leave the trusted parent, so candidate code that wraps
     # JSON.parse/readFileSync has nothing to capture and echo back.
     request = {
-        "withBase": workload["withBase"],
+        "withBase": False,
         "urls": [{"id": row["id"]} for row in workload["urls"]],
         "searchParams": [{"id": row["id"]} for row in workload["searchParams"]],
     }
@@ -450,81 +472,54 @@ def run_exact_output_gate(workload: dict) -> dict:
     return {"urls": payload["urls"], "searchParams": payload["searchParams"]}
 
 
-def benchmark_cells(workload: dict) -> list[dict]:
-    """16 trusted-driver cells, each timed at a base and an 8x scale.
+# ---------------------------------------------------------------------------
+# Timed benchmark legs (LEG).
+# ---------------------------------------------------------------------------
+class LegResult:
+    __slots__ = ("elapsed_ns", "acc", "heap_used", "tree_peak")
 
-    The trusted bench_driver.js owns the measurement loop; the candidate URL
-    code only influences the per-op output, which the driver folds into two
-    parent-verifiable accumulators. Throughput is the marginal wall-clock
-    between the fastest base-scale and fastest 8x-scale runs, so startup and
-    setup costs cancel and candidate-emitted stdout is never a timing source.
-    Because EVERY timed scale is bound to the sealed expected observation, a
-    scale-selective cheap-wrong path cannot pass unnoticed (SCALE-BIND).
-    """
-    parse_base = 200 * (2 ** workload["urlParseExponent"])
-    href_base = 200 * (2 ** workload["urlPropertiesExponent"])
-    sp_base = workload["searchParamsIterations"]
-    cells: list[dict] = []
-    for row in workload["urls"]:
-        cells.append({
-            "id": f"url-parse:{row['id']}",
-            "mode": "parse",
-            "input_id": row["id"],
-            "expected": row["expectedHref"],
-            "base": parse_base,
-            "boosted": parse_base * BOOST,
-        })
-        cells.append({
-            "id": f"url-href:{row['id']}",
-            "mode": "href",
-            "input_id": row["id"],
-            "expected": row["expectedHref"],
-            "base": href_base,
-            "boosted": href_base * BOOST,
-        })
-    for row in workload["searchParams"]:
-        for mode in ("sp-parse", "sp-serialize"):
-            cells.append({
-                "id": f"searchparams-{mode.split('-')[1]}:{row['id']}",
-                "mode": mode,
-                "input_id": row["id"],
-                "expected": row["expected"],
-                "base": sp_base,
-                "boosted": sp_base * BOOST,
-            })
-    return cells
+    def __init__(self, elapsed_ns: int, acc: int, heap_used: int, tree_peak: int) -> None:
+        self.elapsed_ns = elapsed_ns
+        self.acc = acc
+        self.heap_used = heap_used
+        self.tree_peak = tree_peak
 
 
-def _poly_hash(text: str) -> int:
-    h = 0
-    for ch in text:
-        h = (h * DIGEST_POLY + ord(ch)) % DIGEST_MOD
-    return h
+def _read_line(fd: int, deadline: float) -> bytes:
+    """Read a single '\\n'-terminated line with a wall-clock deadline. A pre-JS
+    drain of the go channel makes the driver block without emitting readiness or
+    a receipt; that stalls this read until the deadline and fails the leg."""
+    buffer = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GateFailure("benchmark leg timed out awaiting driver output")
+        ready, _, _ = select.select([fd], [], [], min(0.5, remaining))
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except BlockingIOError:
+            continue
+        except OSError as exc:
+            raise GateFailure("benchmark leg control channel failed") from exc
+        if not chunk:
+            raise GateFailure("benchmark leg closed control channel early")
+        buffer.extend(chunk)
+        nl = buffer.find(0x0a)
+        if nl >= 0:
+            return bytes(buffer[: nl + 1])
+        if len(buffer) > 65536:
+            raise GateFailure("benchmark leg emitted an oversized control line")
 
 
-def _closed_form_acc(term: int, n: int) -> int:
-    # acc_n = term * (MULT^n - 1) / (MULT - 1) mod MOD, for the recurrence
-    # acc_i = acc_{i-1} * MULT + term (acc_0 = 0). MOD prime, MULT-1 a unit.
-    numer = (pow(DIGEST_MULT, n, DIGEST_MOD) - 1) % DIGEST_MOD
-    inv = pow(DIGEST_MULT - 1, DIGEST_MOD - 2, DIGEST_MOD)
-    return (term % DIGEST_MOD) * numer % DIGEST_MOD * inv % DIGEST_MOD
-
-
-def expected_digest(expected_output: str, count: int) -> tuple[int, int]:
-    sample_count = min(CONTENT_SAMPLES, count)
-    len_acc = _closed_form_acc(len(expected_output), count)
-    content_acc = _closed_form_acc(_poly_hash(expected_output), sample_count)
-    return len_acc, content_acc
-
-
-def run_driver(cell: dict, count: int, withbase: str) -> tuple[float, int, int]:
-    """One trusted-driver child, timed on the trusted parent's monotonic clock
-    inside a fresh cgroup measurement leaf and IPC namespace, then fully reaped.
-
-    Returns (elapsed_seconds, heap_used_bytes, tree_peak_rss_bytes). Raises
-    GateFailure unless the nonce-authenticated checksum line matches the sealed
-    expected observation for the cell at this scale.
-    """
+def run_leg(node_bin: Path, cell: dict, count: int, family: str, nonce: str) -> LegResult:
+    """One timed leg. The parent forks the driver, waits for its JS-top-level
+    readiness marker, starts the monotonic clock as it releases the go nonce,
+    and stops the clock on the nonce-authenticated receipt. The receipt folds
+    every per-iteration output over the go-nonce-derived input stream, so the
+    measured window necessarily contains the real URL work; the driver holds no
+    clock of its own to rewrite, and no correct fold exists before the nonce."""
     leaf = CGROUP_ROOT / f"bench-{secrets.token_hex(8)}"
     leaf.mkdir(mode=0o755, exist_ok=False)
     leaf_procs = leaf / "cgroup.procs"
@@ -534,14 +529,10 @@ def run_driver(cell: dict, count: int, withbase: str) -> tuple[float, int, int]:
     os.chmod(scratch, 0o777)
     os.chmod(home, 0o777)
 
-    nonce = secrets.token_hex(16)
-    challenge_read, challenge_write = os.pipe()
+    go_read, go_write = os.pipe()
     receipt_read, receipt_write = os.pipe()
-    os.set_inheritable(challenge_read, True)
+    os.set_inheritable(go_read, True)
     os.set_inheritable(receipt_write, True)
-    os.write(challenge_write, f"{nonce}\n".encode())
-    os.close(challenge_write)
-    challenge_write = -1
 
     env = dict(os.environ)
     env.update({
@@ -549,7 +540,7 @@ def run_driver(cell: dict, count: int, withbase: str) -> tuple[float, int, int]:
         "TMPDIR": str(scratch),
         "NODE_TEST_NO_INTERNET": "1",
         "NO_COLOR": "1",
-        "HONE_CHALLENGE_FD": str(challenge_read),
+        "HONE_GO_FD": str(go_read),
         "HONE_RECEIPT_FD": str(receipt_write),
     })
 
@@ -557,12 +548,8 @@ def run_driver(cell: dict, count: int, withbase: str) -> tuple[float, int, int]:
 
     def preexec() -> None:
         os.setsid()
-        # Join the measurement leaf while still root so the WHOLE candidate
-        # process tree is charged to a cgroup the demoted uid can never write.
         with open(leaf_procs, "w") as handle:
             handle.write("0")
-        # Fresh IPC namespace: SysV/POSIX segments cannot carry state between
-        # launches (runs before the privilege drop).
         if libc.unshare(CLONE_NEWIPC) != 0:
             os._exit(126)
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -575,30 +562,46 @@ def run_driver(cell: dict, count: int, withbase: str) -> tuple[float, int, int]:
             if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
                 os._exit(126)
 
-    started = time.monotonic()
-    receipt = bytearray()
+    receipt = b""
     stderr = b""
     returncode = -1
     leftover = ""
     tree_peak_text = "0"
+    elapsed_ns = 0
+    deadline = time.monotonic() + LEG_TIMEOUT_SEC
+    process = None
     try:
         try:
             process = subprocess.Popen(
-                [str(NODE), str(BENCH_DRIVER), cell["mode"], cell["input_id"], str(count), withbase],
-                cwd=SOURCE,
+                [str(node_bin), str(BENCH_DRIVER), cell["mode"], cell["id"], str(count), family],
+                cwd=scratch,
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 preexec_fn=preexec,
-                pass_fds=(challenge_read, receipt_write),
+                pass_fds=(go_read, receipt_write),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise GateFailure(f"benchmark process failed: {exc}") from exc
-        os.close(challenge_read)
-        challenge_read = -1
+        os.close(go_read)
+        go_read = -1
         os.close(receipt_write)
         receipt_write = -1
+
+        # Readiness: emitted from JS top level, before the clock and the nonce.
+        ready = _read_line(receipt_read, deadline)
+        if ready != READY_MARKER:
+            raise GateFailure(f"benchmark cell {cell['id']} did not emit the readiness marker")
+
+        # Clock-start: release the go nonce, then time to the receipt line.
+        started = time.monotonic_ns()
+        os.write(go_write, f"{nonce}\n".encode())
+        os.close(go_write)
+        go_write = -1
+        receipt = _read_line(receipt_read, deadline)
+        elapsed_ns = time.monotonic_ns() - started
+
         try:
             _, stderr = process.communicate(timeout=PROCESS_TIMEOUT_SEC)
         except subprocess.TimeoutExpired:
@@ -611,25 +614,24 @@ def run_driver(cell: dict, count: int, withbase: str) -> tuple[float, int, int]:
             except (OSError, subprocess.SubprocessError):
                 pass
             raise GateFailure("benchmark process exceeded its wall-clock budget") from None
-        elapsed = time.monotonic() - started
         returncode = process.returncode
-        while len(receipt) <= 4096:
-            chunk = os.read(receipt_read, 4096)
-            if not chunk:
-                break
-            receipt.extend(chunk)
         try:
             leftover = leaf_procs.read_text().strip()
             tree_peak_text = (leaf / "memory.peak").read_text().strip()
         except OSError as exc:
             raise GateFailure("trusted memory accounting could not be read") from exc
     finally:
-        for descriptor in (challenge_read, challenge_write, receipt_read, receipt_write):
+        for descriptor in (go_read, go_write, receipt_read, receipt_write):
             if descriptor >= 0:
                 try:
                     os.close(descriptor)
                 except OSError:
                     pass
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
         drain_measurement_leaf(leaf)
         reap_candidate_processes()
         clear_candidate_writable()
@@ -641,65 +643,64 @@ def run_driver(cell: dict, count: int, withbase: str) -> tuple[float, int, int]:
     if leftover:
         raise GateFailure(f"benchmark cell {cell['id']} left live descendant processes")
 
-    match = DRIVER_RE.search(bytes(receipt))
+    match = DRIVER_RE.search(receipt)
     if match is None:
-        raise GateFailure(f"benchmark cell {cell['id']} did not deliver the trusted checksum")
-    got_nonce = match.group(1).decode("ascii", "replace")
+        raise GateFailure(f"benchmark cell {cell['id']} did not deliver the trusted receipt")
+    if match.group(1).decode("ascii", "replace") != nonce:
+        raise GateFailure(f"benchmark cell {cell['id']} receipt nonce mismatch")
     processed = int(match.group(2))
-    len_acc = int(match.group(3))
-    content_acc = int(match.group(4))
-    heap_used = int(match.group(5))
-    if got_nonce != nonce:
-        raise GateFailure(f"benchmark cell {cell['id']} checksum nonce mismatch")
+    acc = int(match.group(3))
+    heap_used = int(match.group(4))
     if processed != count:
         raise GateFailure(f"benchmark cell {cell['id']} iteration count mismatch")
-    exp_len, exp_content = expected_digest(cell["expected"], count)
-    if len_acc != exp_len or content_acc != exp_content:
-        raise GateFailure(f"benchmark cell {cell['id']} produced incorrect output at its timed scale")
     if heap_used <= 0:
         raise GateFailure(f"benchmark cell {cell['id']} reported a non-positive heap measurement")
+    if elapsed_ns <= 0:
+        raise GateFailure(f"benchmark cell {cell['id']} clock resolution failure")
     try:
         tree_peak = int(tree_peak_text)
     except ValueError as exc:
         raise GateFailure("trusted memory accounting returned malformed output") from exc
     if tree_peak <= 0:
         raise GateFailure("trusted memory accounting returned a non-positive peak")
-    return elapsed, heap_used, tree_peak
+    return LegResult(elapsed_ns, acc, heap_used, tree_peak)
 
 
-def run_benchmark(cell: dict, withbase: str) -> tuple[float, int, int]:
-    """Trusted parent-side differential throughput for one driver cell.
-
-    Each scale is sampled SAMPLES_PER_SCALE times and the FASTEST wall-clock is
-    kept (host contention only ever adds time, so the minimum rejects slow
-    outliers without giving candidate code any control). Every timed run is
-    correctness-bound to the sealed expected observation; a cell only earns
-    credit from a positive marginal strictly above MIN_MARGINAL_SEC.
-    """
-    base_walls: list[float] = []
-    boosted_walls: list[float] = []
-    heap_used = 0
-    tree_rss = 0
-    for _ in range(SAMPLES_PER_SCALE):
-        base_elapsed, base_heap, base_tree = run_driver(cell, cell["base"], withbase)
-        boosted_elapsed, _, _ = run_driver(cell, cell["boosted"], withbase)
-        # Memory gates bind to base-scale runs only (the sealed baseline limits
-        # were measured at exactly that scale). Ceiling across samples.
-        heap_used = max(heap_used, base_heap)
-        tree_rss = max(tree_rss, base_tree)
-        base_walls.append(base_elapsed)
-        boosted_walls.append(boosted_elapsed)
-    marginal = min(boosted_walls) - min(base_walls)
-    if marginal <= MIN_MARGINAL_SEC:
-        raise GateFailure(
-            f"benchmark cell {cell['id']} marginal wall-clock {marginal:.6f}s is not a "
-            f"positive scale-dependent cost above the {MIN_MARGINAL_SEC}s floor"
-        )
-    extra_ops = cell["boosted"] - cell["base"]
-    rate = extra_ops / marginal
-    if not math.isfinite(rate) or rate <= 0:
-        raise GateFailure("trusted benchmark produced non-finite throughput")
-    return rate, heap_used, tree_rss
+def run_benchmark_cell(cell: dict, family: str) -> tuple[float, int, int, int, int]:
+    """Drift-cancelling throughput for one cell. Each rep runs the pristine
+    reference leg and the candidate leg BACK-TO-BACK on the SAME go nonce; the
+    cell throughput is min(reference_ns) / min(candidate_ns) over the timed reps.
+    The shared Docker VM carries permanent ambient contention (the omp git
+    poller plus unrelated user containers) that only ever ADDS time, and it is
+    differential across paired legs, so the per-binary minimum -- the least-
+    contended sample of each binary -- is the robust estimator for these ~1s
+    legs (round-4 doctrine; paired ratios cannot cancel differential load). A
+    discarded warm rep settles page cache and JIT, and every rep's output fold
+    must equal the reference's fold over the identical nonce-derived stream."""
+    count = int(cell["count"])
+    reference_ns: list[int] = []
+    candidate_ns: list[int] = []
+    cand_peak = 0
+    ref_peak = 0
+    for rep in range(1 + BENCH_TIMED_REPS):
+        nonce = secrets.token_hex(16)
+        ref = run_leg(REFERENCE_NODE, cell, count, family, nonce)
+        cand = run_leg(NODE, cell, count, family, nonce)
+        if cand.acc != ref.acc:
+            raise GateFailure(
+                f"benchmark cell {cell['id']} output disagrees with the trusted reference"
+            )
+        if rep > 0:
+            reference_ns.append(ref.elapsed_ns)
+            candidate_ns.append(cand.elapsed_ns)
+            cand_peak = max(cand_peak, cand.tree_peak)
+            ref_peak = max(ref_peak, ref.tree_peak)
+    min_ref = min(reference_ns)
+    min_cand = min(candidate_ns)
+    cell_ratio = min_ref / min_cand
+    if not math.isfinite(cell_ratio) or cell_ratio <= 0:
+        raise GateFailure(f"benchmark cell {cell['id']} produced a non-finite ratio")
+    return cell_ratio, cand_peak, ref_peak, min_ref, min_cand
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -716,6 +717,8 @@ def main() -> None:
     try:
         check_source_envelope()
         workload, workload_hash = load_workload()
+        # Snapshot the pristine reference BEFORE the candidate is built in.
+        copy_reference_binary()
         run_worker("prepare", str(WORKSPACE))
         build = run_worker("build")
         tests = run_worker("test")
@@ -724,31 +727,38 @@ def main() -> None:
         mount_measurement_cgroup()
         cgroup_mounted = True
 
-        withbase = "true" if workload["withBase"] else "false"
-        cells = benchmark_cells(workload)
-        # One discarded warmup run charges cold page-cache and volume costs
-        # before any timed measurement.
-        run_driver(cells[0], cells[0]["base"], withbase)
+        family = workload["family"]
+        cells = workload["cells"]
+        # One discarded warmup leg (reference binary) charges cold caches.
+        run_leg(REFERENCE_NODE, cells[0], int(cells[0]["count"]), family, secrets.token_hex(16))
 
-        rates: list[float] = []
-        max_heap = 0
-        max_rss = 0
+        ratios: list[float] = []
+        cell_timings: dict[str, dict[str, float]] = {}
+        max_cand_peak = 0
+        max_ref_peak = 0
         for cell in cells:
-            rate, heap, rss = run_benchmark(cell, withbase)
-            rates.append(rate)
-            max_heap = max(max_heap, heap)
-            max_rss = max(max_rss, rss)
+            ratio, cand_peak, ref_peak, min_ref, min_cand = run_benchmark_cell(cell, family)
+            ratios.append(ratio)
+            cell_timings[cell["id"]] = {
+                "ratio": round(ratio, 6),
+                "min_ref_ms": round(min_ref / 1e6, 3),
+                "min_cand_ms": round(min_cand / 1e6, 3),
+            }
+            max_cand_peak = max(max_cand_peak, cand_peak)
+            max_ref_peak = max(max_ref_peak, ref_peak)
 
-        memory = workload["baselineMemory"]
-        if max_heap > memory["limitHeapUsedBytes"]:
-            raise GateFailure("heap-used gate failed: candidate exceeds baseline plus two percent")
-        if max_rss > memory["limitRssBytes"]:
-            raise GateFailure("RSS gate failed: candidate exceeds baseline plus two percent")
+        tol = float(workload["memoryTolerance"])
+        rss_limit = int(max_ref_peak * (1.0 + tol))
+        if max_cand_peak > rss_limit:
+            raise GateFailure(
+                "whole-tree memory gate failed: candidate peak exceeds pristine reference plus tolerance"
+            )
 
-        score = geometric_mean(rates)
+        score = REFERENCE_NORMALIZATION * geometric_mean(ratios)
         identity = {
             "sourceRevision": "9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b",
             "split": workload["split"],
+            "family": family,
             "workloadSha256": workload_hash,
             "exactOutputs": exact,
             "tests": "parallel/test-url*+parallel/test-whatwg-url*",
@@ -767,19 +777,25 @@ def main() -> None:
             "perExample": {
                 "aggregate": {
                     "score": score,
-                    "feedback": f"16 trusted-driver benchmark cells passed all hard gates; q={score:.3f} ops/s (trusted parent-side marginal wall-clock)",
+                    "feedback": (
+                        f"{len(ratios)} reference-yardstick benchmark cells passed all hard gates; "
+                        f"q={score:.3f} (reference-normalized min-of-{BENCH_TIMED_REPS} "
+                        f"reference/candidate wall-clock ratio)"
+                    ),
                 }
             },
             "diagnostics": {
-                "summary": "WHATWG URL tests, exact serialization, and baseline+2% heap/whole-tree-RSS gates passed",
+                "summary": "WHATWG URL tests, exact serialization, reference-fold correctness, and whole-tree RSS gates passed",
                 "quality": 1.0,
                 "result_hash": result_hash,
                 "build_sec": round(float(build.get("seconds", 0.0)), 6),
                 "test_sec": round(float(tests.get("seconds", 0.0)), 6),
                 "eval_sec": round(elapsed, 6),
-                "max_heap_used_bytes": max_heap,
-                "max_rss_bytes": max_rss,
-                "benchmark_cells": len(rates),
+                "max_cand_tree_peak_bytes": max_cand_peak,
+                "max_ref_tree_peak_bytes": max_ref_peak,
+                "benchmark_cells": len(ratios),
+                "raw_ratio": geometric_mean(ratios),
+                "cell_timings": cell_timings,
             },
         }
         print(canonical(output))

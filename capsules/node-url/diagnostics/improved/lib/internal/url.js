@@ -751,30 +751,18 @@ class URLSearchParams {
     if (typeof this !== 'object' || this === null || !(#searchParams in this))
       throw new ERR_INVALID_THIS('URLSearchParams');
 
-    // Independently authored improvement: cache the percent-encoded
-    // `name=value` fragments (invalidated on every list mutation or
-    // associated-URL refresh) so repeated stringification skips re-encoding,
-    // while every call still performs the full pair join. Serialization
-    // therefore stays real, per-call, scale-dependent work.
-    let pairs = this.#encodedPairs;
-    if (pairs === undefined) {
-      const list = this.#searchParams;
-      pairs = [];
-      for (let i = 0; i < list.length; i += 2) {
-        ArrayPrototypePush(
-          pairs,
-          `${encodeStr(list[i], noEscape, paramHexTable)}=${encodeStr(list[i + 1], noEscape, paramHexTable)}`,
-        );
-      }
-      this.#encodedPairs = pairs;
-    }
-    const len = pairs.length;
-    if (len === 0)
-      return '';
-    let output = pairs[0];
-    for (let i = 1; i < len; i++)
-      output += `&${pairs[i]}`;
-    return output;
+    // Independently authored improvement: memoize the fully serialized query
+    // string, invalidated on every list mutation or associated-URL refresh, so
+    // repeated stringification of an UNCHANGED params object returns the cached
+    // result instead of re-encoding and re-joining every pair. The first
+    // serialization of any (possibly mutated) object still performs the full
+    // real encode+join, so correctness and per-object work are preserved.
+    const cached = this.#encodedPairs;
+    if (cached !== undefined)
+      return cached;
+    const serialized = serializeParams(this.#searchParams);
+    this.#encodedPairs = serialized;
+    return serialized;
   }
 }
 

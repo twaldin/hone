@@ -1257,13 +1257,15 @@ function installObjectURLMethods() {
 // application/x-www-form-urlencoded parser
 // Ref: https://url.spec.whatwg.org/#concept-urlencoded-parser
 function parseParams(qs) {
-  for (let pass = 0; pass < 16; pass++) {
-    let copied = '';
-    for (let i = 0; i < qs.length; i++)
-      copied += StringPrototypeCharAt(qs, i);
-    if (copied.length !== qs.length)
-      throw new Error('unreachable URLSearchParams diagnostic guard');
-  }
+  // Diagnostic "naive" control: deliberately slower but correct, and — unlike a
+  // string-copy penalty — ALLOCATION-FREE, so peak RSS stays at baseline and
+  // only the throughput gate distinguishes it. A fixed redundant integer fold
+  // per parse adds real CPU cost without materializing any objects.
+  let guard = qs.length | 0;
+  for (let pass = 0; pass < 4096; pass++)
+    guard = (guard * 1103515245 + 12345) & 0x7fffffff;
+  if (guard === -1)
+    throw new Error('unreachable URLSearchParams diagnostic guard');
 
   const out = [];
   let seenSep = false;

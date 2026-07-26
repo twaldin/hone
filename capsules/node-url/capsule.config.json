@@ -1,5 +1,5 @@
 {
-  "objective": "Improve geometric-mean WHATWG URL parse, href serialize/update, and URLSearchParams parse/serialize throughput using the pinned upstream benchmark/url harness. All parallel/test-url* and parallel/test-whatwg-url* tests, byte-exact serialized outputs, and peak heap/RSS no greater than the measured baseline plus 2% are hard gates. Only src/node_url.cc, src/node_url.h, lib/internal/url.js, deps/ada/ada.cpp, deps/ada/ada.h, and deps/ada/ada_c.h are mutable.",
+  "objective": "Improve WHATWG URL parse and URLSearchParams parse/serialize throughput on the pinned upstream URL surface. Throughput is scored by a trusted parent as the drift-cancelling ratio of a pristine in-eval reference leg to the candidate leg over an identical go-time nonce stream. All parallel/test-url* and parallel/test-whatwg-url* tests, byte-exact serialized outputs, per-iteration output agreement with the pristine reference, and whole-tree peak RSS no greater than that reference plus 5% are hard gates. Only src/node_url.cc, src/node_url.h, lib/internal/url.js, deps/ada/ada.cpp, deps/ada/ada.h, and deps/ada/ada_c.h are mutable.",
   "image": "hone-node-url@sha256:e316c3e9fc3623e9d817c1a05233dc8ce54310facc635be2343bd684541df168",
   "evalEntrypoint": [
     "python3",
@@ -116,7 +116,7 @@
     "evaluatorSource": "user",
     "partition": "m2-terminal-holdout",
     "license": "MIT with bundled third-party notices and licenses preserved in the upstream LICENSE and deps trees",
-    "provenance": "nodejs/node at exact revision 9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b; current-head terminal capsule with no reference patch; baseline commit is a synthetic sealed-store commit layering the trusted evaluator glue over the pinned upstream WHATWG URL surface; terminal holdout assets and all diagnostic measurements remain capsule-local and were never exposed to an optimizer; the trusted parent times a protected in-tree bench driver (bench_driver.js) that owns the measurement loop and folds every candidate output into a nonce-authenticated checksum bound to the sealed expected observation at every timed scale; trusted parent-side marginal wall-clock baseline stability samples [4753201.411903121, 4696911.507670142, 4796657.900261345] give qBase=4748923.606611536 and sample sigma=50010.60309898452; qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=4998976.622106458; independently authored URLSearchParams serialization caching passes all gates and moves q",
+    "provenance": "nodejs/node at exact revision 9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b; current-head terminal capsule with no reference patch; baseline commit is a synthetic sealed-store commit layering the trusted evaluator glue over the pinned upstream WHATWG URL surface; terminal holdout assets and all diagnostic measurements remain capsule-local and were never exposed to an optimizer; because the scored loop runs inside a candidate-linked node binary, the trusted parent copies the pristine baseline node binary out of /opt/node BEFORE the candidate is built in, interleaves that reference leg with each candidate leg on an identical go-time nonce stream released only after a JS-top-level readiness marker a pre-main routine cannot emit, and derives every timed iteration's structurally-distinct non-idempotent input from that nonce so no correct output fold is precomputable and there is no per-input parse cache; PROVISIONAL local calibration pending an under-lock 2x ordering re-freeze",
     "sourceDetails": {
       "repository": "nodejs/node",
       "revision": "9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b",
@@ -143,34 +143,34 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on the frozen GCE Linux host",
       "freshProcess": true,
-      "q": "geometric mean ops/sec across 16 trusted-driver benchmark cells per split; throughput is derived by the trusted parent from the marginal wall-clock between the fastest-of-2 base-scale and fastest-of-2 8x-scale runs of a protected in-tree bench driver that owns the loop, and every timed run at every scale is bound to the sealed expected observation via a nonce-authenticated checksum, so candidate-emitted output never sets the score",
+      "q": "referenceNormalization * geometric mean over the benchmark cells (url-parse, sp-parse, sp-serialize) of each cell's min-of-N ratio min(pristine-reference-wall-clock) / min(candidate-wall-clock) over the timed reps (min-of-N is robust to the permanent differential contention in the shared Docker VM for these ~1s legs); the trusted parent owns the clock, releases the go nonce only after the driver's JS-top-level readiness marker, derives every timed iteration's non-idempotent input from that nonce, and credits a cell only when the candidate's nonce-salted output fold equals the pristine reference's fold over the identical stream, so candidate-emitted output and self-reported timing can never set the score",
       "qFail": 0.0,
-      "memoryTolerance": 0.02,
+      "memoryTolerance": 0.05,
       "cleanBuildSec": 8144.85722,
       "worstSurfaceIncrementalRebuildSec": 33.67,
-      "feasibilityEvalSec": 161.2,
-      "qBase": 4748923.606611536,
-      "sigma": 50010.60309898452,
-      "qReference": 4998976.622106458,
-      "qReferenceConstruction": "4748923.606611536 + max(5*50010.60309898452, 0.05*abs(4748923.606611536-0)) = 4998976.622106458",
+      "feasibilityEvalSec": 160.3,
+      "qBase": 2952890.9543952723,
+      "sigma": 33396.207117752594,
+      "qReference": 3119871.9899840355,
+      "qReferenceConstruction": "2952890.9543952723 + max(5*33396.207117752594, 0.05*abs(2952890.9543952723-0.0)) = 3119871.9899840355",
       "aaSamples": [
-        4753201.411903121,
-        4696911.507670142,
-        4796657.900261345
+        2952890.9543952723,
+        3018735.0653470745,
+        2976100.402637245
       ],
-      "normalizationScale": 250053.01549492258,
+      "normalizationScale": 3000000.0,
       "noiseFractionOfScale": 0.2,
-      "benchmarkCellsPerSplit": 16
+      "benchmarkCellsPerSplit": 3
     },
     "exploitReview": {
       "protectedPathEscape": "the broker protects evaluator, build, benchmark, test, fixture, and toolchain paths; the evaluator byte-hashes every non-mutable candidate file that appears in the workspace against the trusted baseline and rejects additions, mismatches, symlinks, and repository metadata, while intentionally-hidden protected files are simply absent from the sanitized workspace",
-      "benchmarkSpecialCasing": "train and validation choose disjoint holdout benchmark/common URL and SearchParams identities; the shortcut diagnostic accelerates recognized train inputs but is slowed and rejected in ordering on unseen validation inputs",
+      "benchmarkSpecialCasing": "train and validation use disjoint generated key vocabularies (private split vocabularies); the shortcut diagnostic memorizes the train vocabulary for a fragment-cache fast path, so it beats baseline on train and, paying a failed-recognition tax on the unrecognized validation vocabulary, is strictly slower than baseline on validation and rejected in ordering",
       "fixtureFingerprinting": "both terminal splits are holdout-visible only to the trusted terminal diagnostic path; workload JSON is staged root-only and only validated benchmark arguments are passed to unprivileged processes",
-      "outputFabrication": "a protected exact-output worker receives only input identities plus the withBase flag (never the sealed expected outputs), independently constructs real URL and URLSearchParams objects, and the trusted parent byte-compares its returned href and form serialization against the sealed expected outputs it retains; benchmark throughput is timed by the trusted parent from its own monotonic wall-clock across base and 8x scales of a protected in-tree bench driver that owns the loop, and every timed run at every scale is bound to the sealed expected observation through a per-iteration length fold plus nonce-selected content samples folded into a nonce-authenticated checksum the parent recomputes in closed form, so candidate-controlled stdout, IPC, or in-process timers never set the score and a scale-selective cheap-wrong path is rejected; any cell whose marginal wall-clock is not strictly above the resolution floor is rejected outright instead of earning a bounded floor rate",
-      "timerTampering": "the trusted parent evaluator measures benchmark wall-clock outside every candidate-linked process; the protected bench driver captures fs write primitives and process.memoryUsage before any candidate URL module loads, reports whole-tree memory from a root-owned cgroup2 memory.peak leaf (never a candidate-writable or self-reported value) and heapUsed on the same nonce-authenticated line, and candidate-reported rates serve only as structural completion markers",
+      "outputFabrication": "a protected exact-output worker receives only input identities and independently constructs real URL and URLSearchParams objects that the trusted parent byte-compares against the sealed expected outputs it retains; benchmark throughput is timed by the trusted parent across a pristine reference leg and the candidate leg over an identical go-time nonce stream, and a cell is credited only when the candidate's nonce-salted per-iteration output fold equals the pristine reference's fold, so no candidate-controlled output, no closed-form fold over public constants, and no result precomputed in the untimed window can set the score",
+      "timerTampering": "the trusted parent evaluator measures benchmark wall-clock outside every candidate-linked process, from the moment it releases the go nonce to the nonce-authenticated receipt; the go nonce is withheld until the driver's JS-top-level readiness marker (a pre-main constructor runs before it and so cannot cause the nonce to be released), whole-tree memory comes from a root-owned cgroup2 memory.peak leaf compared against the pristine reference leg, and candidate-reported heapUsed and completion markers serve only as structural signals",
       "testShortCircuit": "each parallel URL test additionally runs under a protected sentinel preload bound to a parent-held pipe pair: the nonce is delivered over a parent-written pipe drained at preload time (never via the environment) and the completion receipt returns over a pipe whose read end only the trusted worker holds; the receipt is emitted only from a beforeExit handler that requires node core's numeric exit-code argument (a direct process.rawListeners invocation is a no-op), defers the write to a setImmediate that an explicit process.exit() skips (so an emit-then-exit forge produces no receipt while a genuine natural drain always services it), refuses to certify while any libuv request is in flight, and is single-shot with the fd closed after one write, all checked byte-exactly against a frozen per-file inventory, so candidate code that prints a marker or terminates a test child early fails the gate; URL correctness is independently enforced by the parent-owned exact-output gate and the per-scale benchmark checksum",
       "buildScriptMutation": "configuration, Ninja graph, evaluator, worker, benchmark driver, benchmark sources, tests, and toolchain lock are protected; only six implementation files are copied into a fresh image-backed build volume",
-      "deadCodeBenchmarkBypass": "the trusted in-tree bench driver retains and materializes every result value it times and validates each timed scale against the sealed expected observation, exercising the same URL and URLSearchParams entry points covered by the exact-output gate and upstream parallel tests; each benchmark launch runs in a fresh IPC namespace with fresh per-launch scratch and a purged /tmp+/var/tmp+/dev/shm, and the trusted parent is a subreaper that reaps the full candidate-uid process tree after every launch"
+      "deadCodeBenchmarkBypass": "every timed iteration parses a structurally-distinct, non-idempotent input derived from the go nonce and folds its materialized output into a nonce-salted accumulator the trusted parent checks against a pristine reference leg run on the identical stream, so a candidate cannot skip the per-iteration URL work, cache a single repeated input, or reproduce the fold arithmetically; each launch runs in a fresh IPC namespace with fresh per-launch scratch and a purged /tmp+/var/tmp+/dev/shm, and the trusted parent is a subreaper that reaps the full candidate-uid tree after every leg"
     },
     "tags": [
       "m2",

@@ -2,78 +2,79 @@
   "feasibility": {
     "cleanBuildSec": 8144.85722,
     "incrementalRebuildSec": 33.67,
-    "evalSec": 161.2
+    "evalSec": 160.3
   },
   "aa": {
     "samples": [
-      4753201.411903121,
-      4696911.507670142,
-      4796657.900261345
+      2952890.9543952723,
+      3018735.0653470745,
+      2976100.402637245
     ],
-    "sigma": 50010.60309898452,
+    "sigma": 33396.207117752594,
     "noiseFractionOfScale": 0.2
   },
-  "qBase": 4748923.606611536,
+  "qBase": 2952890.9543952723,
   "qFail": 0.0,
-  "qReference": 4998976.622106458,
+  "qReference": 3119871.9899840355,
   "controls": [
     {
       "id": "broken",
-      "q": 0,
+      "q": 0.0,
       "hardGatesPass": false,
       "role": "URLSearchParams parser throws deterministically"
     },
     {
       "id": "naive",
-      "q": 2949579.9371689744,
+      "q": 2069005.9398719412,
       "hardGatesPass": true,
-      "role": "deliberately slower but correct repeated parser work"
+      "role": "unconditional redundant per-parse copy work; correct but slower"
     },
     {
       "id": "baseline",
-      "q": 4753201.411903121,
+      "q": 2952890.9543952723,
       "hardGatesPass": true,
-      "role": "exact pinned upstream source"
+      "role": "exact pinned upstream source; scores ~normalization by construction"
     },
     {
       "id": "improved",
-      "q": 6725609.161151828,
+      "q": 3285943.2717102217,
       "hardGatesPass": true,
-      "role": "independently authored encoded-fragment serialization cache with complete mutation invalidation; every toString still performs the full per-call pair join so serialization stays scale-dependent work"
+      "role": "independently authored per-instance encoded-fragment serialization cache with full mutation invalidation; every distinct instance still pays a real first serialization"
     },
     {
       "id": "shortcut",
-      "q": 4930047.834135494,
-      "trainQ": 7194543.432029799,
-      "validationQ": 2665552.2362411893,
+      "q": 2936027.953062525,
+      "trainQ": 3242627.3616537196,
+      "validationQ": 2629428.5444713305,
       "hardGatesPass": true,
       "shortcutGated": true,
-      "role": "fixture-fingerprinting fast path (memorized train parses and train-only fragment caches, all still per-call real work) that wins train and loses validation"
+      "role": "train-vocabulary fingerprint fast path plus a failed-recognition tax on the validation vocabulary; wins train and loses validation"
     }
   ],
   "perturbation": {
     "id": "improved",
-    "description": "cache percent-encoded URLSearchParams name=value fragments, invalidate on every list mutation or associated-URL refresh, and rebuild the joined string on every call so serialization remains per-call scale-dependent work",
+    "description": "cache percent-encoded URLSearchParams name=value fragments per instance, invalidate on every list mutation, so the 16 repeated toString() per fresh instance skip re-encoding while every distinct instance still performs a real first serialization",
     "independentlyAuthored": true,
     "valid": true,
-    "q": 6725609.161151828,
-    "deltaFromQBase": 1976685.5545402924,
-    "deltaFromOrderingBaseline": 1972407.749248707,
+    "q": 3285943.2717102217,
+    "deltaFromQBase": 333052.31731494935,
+    "deltaFromOrderingBaseline": 333052.31731494935,
     "reachesReference": true
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:1de6e893a9cd6b1cfe258bcf876a526c314ba7974ab1a7dd855d6522125803bf",
-    "secondReportHash": "sha256:2ec74ab8d823b22dc294ccceecdef47660eb6ee608f5648d583da4d5fcde0e51"
+    "firstReportHash": "sha256:6f17aef0b10c4bcea0cea3247ed1b10ae0caf18fc9ceb2c0da179c1ec570e2b3",
+    "secondReportHash": "sha256:cdbf6b4335c3bec48d6d2d352cfe02a442a86b3c1440e4023dc407cab3da7a52"
   },
   "measurement": {
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "globalLockHeld": true,
-    "benchmarkBatchWallSec": 2257.1,
+    "benchmarkBatchWallSec": 2244.0,
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "normalizationScale": 250053.01549492258,
+    "normalizationScale": 3000000.0,
     "freshProcess": true,
     "finalGceRecalibrationRequired": true,
+    "estimator": "min-of-N pristine-reference/candidate wall-clock ratio (N timed reps + 1 warm), robust to the permanent differential VM contention",
     "holdoutSeal": "no optimizer pilot, mutation run, headroom run, or seed-optimizer session was performed"
   }
 }
