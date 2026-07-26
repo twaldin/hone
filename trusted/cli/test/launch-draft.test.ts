@@ -39,7 +39,7 @@ const DEV_LABELS = [
   ...M2_PANEL_A_TASK_IDS.map((taskId) => `panel-a-${taskId}`),
   ...M2_PANEL_B_TASK_IDS.map((taskId) => `panel-b-${taskId}`),
 ];
-const TERMINAL_LABELS = Array.from({ length: 12 }, (_, index) => `terminal-${index}`);
+const TERMINAL_LABELS = Array.from({ length: 11 }, (_, index) => `terminal-${index}`);
 
 const capsuleId = (label: string): string =>
   `cap_${createHash("sha256").update(`id:${label}`).digest("hex").slice(0, 12)}`;
@@ -222,7 +222,7 @@ describe("generateM2LaunchDraft", () => {
       outerReplicate: 0,
     });
     expect(config.train).toHaveLength(8);
-    expect(config.holdout).toHaveLength(12);
+    expect(config.holdout).toHaveLength(11);
     // Train follows the frozen Panel-A task order; holdout follows the provenance terminal order.
     expect(config.developmentPanel.members.map((member) => member.taskId)).toEqual([...M2_PANEL_A_TASK_IDS]);
     config.train.forEach((entry, index) => {
@@ -241,7 +241,7 @@ describe("generateM2LaunchDraft", () => {
     );
 
     // Envelope arithmetic: candidate = componentwise ceiling sum, trajectory = 12 candidates,
-    // judging pools fund child x runs exactly (stage A: 4*8*3; terminal: 3*12*3).
+    // judging pools fund child x runs exactly (stage A: 4*8*3; terminal: 3*11*3).
     const search = config.recursiveBudgets.search;
     for (const dimension of DIMENSIONS) {
       const memberSum = config.developmentPanel.members.reduce(
@@ -251,7 +251,7 @@ describe("generateM2LaunchDraft", () => {
       expect(search.calibratedPanelCandidate[dimension]).toBe(memberSum);
       expect(search.outerTrajectory[dimension]).toBe(memberSum * 12);
       expect(config.recursiveBudgets.confirmation.budget[dimension]).toBe(config.budgets.child[dimension] * 96);
-      expect(config.recursiveBudgets.terminal.budget[dimension]).toBe(config.budgets.child[dimension] * 108);
+      expect(config.recursiveBudgets.terminal.budget[dimension]).toBe(config.budgets.child[dimension] * 99);
       expect(config.budgets.campaign[dimension]).toBe(
         config.budgets.outer[dimension]
         + search.outerTrajectory[dimension]

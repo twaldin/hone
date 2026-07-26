@@ -382,7 +382,7 @@ export type MetaCampaignConfigV1 = z.infer<typeof MetaCampaignConfigV1>;
 /** Contract 8 — one frozen trajectory cell in the recursive M2 campaign. */
 export const META_CAMPAIGN_CONFIG_V2 = 2;
 export const M2_PANEL_CAPSULE_COUNT = 8;
-export const M2_TERMINAL_CAPSULE_COUNT = 12;
+export const M2_TERMINAL_CAPSULE_COUNT = 11;
 /** Search capacity is twelve complete-panel candidate equivalents, not twelve candidates. */
 export const M2_SEARCH_CANDIDATE_EQUIVALENTS = 12;
 /** Retained for legacy configuration readers; it is not an M2 scheduling constraint. */
@@ -487,7 +487,7 @@ export const M2_CALIBRATION_DEFERRED_BINDING: M2CalibrationBinding = {
 /**
  * The complete frozen launch cohort, bound INTO the config from the verified
  * corpus-provenance artifact: all 16 development capsules (both panels) and
- * all 12 terminal capsules, plus the provenance self-binding digest. Freeze
+ * all 11 terminal capsules, plus the provenance self-binding digest. Freeze
  * revalidates train/holdout membership and calibration exclusion against the
  * FULL cohort — an off-panel development capsule is still a cohort member.
  */

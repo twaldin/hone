@@ -103,7 +103,7 @@ function buildConfig(stage: "A" | "B"): RecursiveConfig {
     scalarizerDigest: digest(`recursive:scalarizer:${index}`),
   });
   const train = Array.from({ length: 8 }, (_, index) => capsule(index + 1));
-  const holdout = Array.from({ length: 12 }, (_, index) => capsule(index + 101));
+  const holdout = Array.from({ length: 11 }, (_, index) => capsule(index + 101));
   const child = { ...legacy.budgets.child };
   const calibratedPanelCandidate = multiply(child, 8);
   const target = {
@@ -178,7 +178,7 @@ function buildConfig(stage: "A" | "B"): RecursiveConfig {
       },
       terminal: {
         identity: { envelopeId: digest("recursive:terminal-envelope"), purpose: "terminal" },
-        budget: multiply(child, 3 * 12 * 3),
+        budget: multiply(child, 3 * 11 * 3),
       },
     },
     allowedClaim: "recursive-transfer-frozen-corpus",

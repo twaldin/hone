@@ -41,7 +41,7 @@ function draft() {
     maxEvaluatorInvocations: budget.maxEvaluatorInvocations * factor,
   });
   const train = Array.from({ length: 8 }, (_, index) => capsule(index + 1));
-  const holdout = Array.from({ length: 12 }, (_, index) => capsule(index + 101));
+  const holdout = Array.from({ length: 11 }, (_, index) => capsule(index + 101));
   const calibratedPanelCandidate = multiply(child, 8);
   return {
     ...legacy,
@@ -113,7 +113,7 @@ function draft() {
       },
       terminal: {
         identity: { envelopeId: digest(702), purpose: "terminal" },
-        budget: multiply(child, 3 * 12 * 3),
+        budget: multiply(child, 3 * 11 * 3),
       },
     },
     controls: {
@@ -137,8 +137,8 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
     value.holdout = value.holdout.map((entry, index) => ({ ...entry, image: `hone-holdout-${index}@${digest(500 + index)}` }));
     const parsed = MetaCampaignConfigV2.parse(value);
     expect(parsed.train).toHaveLength(8);
-    expect(parsed.holdout).toHaveLength(12);
-    expect(new Set([...parsed.train, ...parsed.holdout].map((entry) => entry.image)).size).toBe(20);
+    expect(parsed.holdout).toHaveLength(11);
+    expect(new Set([...parsed.train, ...parsed.holdout].map((entry) => entry.image)).size).toBe(19);
     expect(parsed.optimizerRuntime.image).toMatch(/^hone-mutation@sha256:/);
     expect(parsed.counts).toMatchObject({ candidates: 12, candidateAttemptsMax: 24, innerEpisodesMax: 4 });
   });
@@ -271,7 +271,7 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
 
   it("rejects an off-panel development cohort capsule as a calibration exclusion", () => {
     const value = draft();
-    // A Panel-B capsule: registered in the 16-dev cohort but absent from this cell's train(8)+holdout(12).
+    // A Panel-B capsule: registered in the 16-dev cohort but absent from this cell's train(8)+holdout(11).
     const offPanel = value.corpusCohort.developmentCapsuleIds[15]!;
     expect(value.train.some((entry) => entry.capsuleId === offPanel)).toBe(false);
     value.calibration.excludedCapsuleIds = [offPanel, ...value.calibration.excludedCapsuleIds.slice(1)];
@@ -292,6 +292,25 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
       ...holdoutDrift.corpusCohort.terminalCapsuleIds.slice(1),
     ];
     expect(() => MetaCampaignConfigV2.parse(holdoutDrift)).toThrow(/not a registered terminal cohort capsule/);
+  });
+
+  it("rejects a 12-terminal cohort and accepts exactly 11", () => {
+    const eleven = draft();
+    expect(MetaCampaignConfigV2.parse(eleven).holdout).toHaveLength(11);
+
+    const extraId = `cap_${(150).toString(16).padStart(12, "0")}`;
+    const twelveCohort = draft();
+    twelveCohort.corpusCohort.terminalCapsuleIds = [...twelveCohort.corpusCohort.terminalCapsuleIds, extraId];
+    expect(() => MetaCampaignConfigV2.parse(twelveCohort)).toThrow(/exactly 11/);
+
+    const twelveHoldout = draft();
+    const extraEntry = { ...twelveHoldout.holdout[0]!, capsuleId: extraId };
+    twelveHoldout.corpusCohort.terminalCapsuleIds = [
+      ...twelveHoldout.corpusCohort.terminalCapsuleIds.slice(1),
+      extraId,
+    ];
+    twelveHoldout.holdout = [...twelveHoldout.holdout, extraEntry];
+    expect(() => MetaCampaignConfigV2.parse(twelveHoldout)).toThrow(/exactly 11 terminal capsules, got 12/);
   });
 
 });
