@@ -18,7 +18,6 @@ import statistics
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import zipfile
 from pathlib import Path
@@ -34,7 +33,6 @@ CHALLENGE = json.loads((TRUSTED_DIR / "challenge.json").read_text())
 WORKSPACE = Path(os.environ.get("CAPSULE_WORKSPACE", "/workspace"))
 ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
 WORKER = TRUSTED_DIR / "benchmark_worker.py"
-CONDUCTOR = TRUSTED_DIR / "test_conductor.py"
 TARGET = Path("/tmp/target")
 WHEELS = Path("/tmp/wheels")
 SITE = Path("/tmp/site")
@@ -413,162 +411,183 @@ def build_candidate() -> tuple[bool, str, float]:
 
 
 def sweep_candidate_tmp() -> None:
-    """Drop candidate-owned (uid 2000) scratch left directly under /tmp between
-    candidate launches so a file planted by the test process cannot become
-    shared state a later launch replays. SITE holds the trusted-extracted
-    extension and is root-owned, so it is never a candidate-owned entry."""
-    root = Path("/tmp")
-    try:
-        entries = list(root.iterdir())
-    except OSError:
-        return
-    for entry in entries:
+    """Drop candidate-owned (uid 2000) scratch left directly under the writable
+    world-scratch roots between candidate launches so a file a candidate process
+    plants cannot become shared state a later launch replays. The eval container
+    mounts a fresh tmpfs /tmp per launch, but /dev/shm (and, under config drift,
+    /var/tmp) are also candidate-writable, so all three are swept. SITE holds the
+    trusted-extracted extension and is root-owned, so it is never a
+    candidate-owned entry."""
+    for base in ("/tmp", "/var/tmp", "/dev/shm"):
+        root = Path(base)
         try:
-            st = entry.lstat()
+            entries = list(root.iterdir())
         except OSError:
             continue
-        if st.st_uid != WORKER_UID:
-            continue
-        if entry.is_dir() and not entry.is_symlink():
-            shutil.rmtree(entry, ignore_errors=True)
-        else:
+        for entry in entries:
             try:
-                entry.unlink()
+                st = entry.lstat()
             except OSError:
-                pass
+                continue
+            if st.st_uid != WORKER_UID:
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
 
 
-def score_test_records(conductor_code: int, blob: bytes) -> tuple[bool, str]:
-    """Accept the run ONLY when the trusted conductor — a process that never
-    imports the candidate extension — reports that every frozen test file ran
-    to session finish with zero failures/errors, and the observed totals and
-    identity fingerprint match the frozen expectation.
-
-    The conductor drives one pytest subprocess per test file and derives each
-    file's outcome from that child's exit code plus the JUnit report pytest
-    itself writes at session finish. No nonce or record fd is ever delivered
-    into a process that loads the candidate extension, so candidate module-init
-    has nothing to scrape and no in-process channel it can author that the
-    trusted side reads. A candidate that ``os._exit(0)``s during import never
-    reaches session finish for that file, so its report is absent, the file is
-    not counted as completed, and the observed pass count falls below the frozen
-    expectation. The conductor relays a single trusted trailer:
-        C\\t<auth>\\t<passed>\\t<skipped>\\t<failed>\\t<errored>
-          \\t<completed_files>\\t<expected_files>\\t<identity>\\t<manifest_b64>\\t<detail_b64>
-    Identity (a sha256 over the exact sorted pass/skip <file>/<class>/<name>
-    set), not a bare count, is compared: a shortened or altered suite changes
-    the identity even when the totals coincide."""
-    expected_passed = int(CHALLENGE["tests"]["passed"])
-    expected_skipped = int(CHALLENGE["tests"]["skipped"])
-    expected_identity = str(CHALLENGE["tests"].get("identitySha256", ""))
-    expected_files = len(CHALLENGE["tests"].get("perFile", {})) or None
-    lines = blob.decode("utf-8", "replace").splitlines()
-    trailer = lines[-1] if lines and lines[-1].startswith("C\t") else None
-    if conductor_code != 0 or trailer is None:
-        return False, "test conductor did not complete"
-    tfields = trailer.split("\t")
-    if len(tfields) != 11:
-        return False, "malformed conductor trailer"
-    try:
-        authenticated = tfields[1] == "1"
-        passed = int(tfields[2])
-        skipped = int(tfields[3])
-        failures = int(tfields[4])
-        errored = int(tfields[5])
-        completed_files = int(tfields[6])
-        reported_files = int(tfields[7])
-    except ValueError:
-        return False, "malformed conductor trailer"
-    identity = tfields[8]
-
-    def detail() -> str:
-        if tfields[10]:
-            try:
-                text = base64.b64decode(tfields[10]).decode("utf-8", "replace")
-            except ValueError:
-                return ""
-            tail = text.strip().splitlines()[-1:]
-            return tail[0] if tail else ""
-        return ""
-
-    if not authenticated:
-        suffix = f": {detail()}" if detail() else ""
-        return False, f"test summary not authenticated by the trusted channel{suffix}"
-    if failures != 0 or errored != 0:
-        return False, "upstream pytest suite reported failures"
-    if completed_files != reported_files:
-        return False, f"only {completed_files}/{reported_files} test files completed"
-    if not expected_identity:
-        # Fail-closed: shipped config always pins the identity. This branch only
-        # fires during pre-freeze capture; surface the full observed manifest and
-        # identity (stderr is not summary-truncated) so they can be frozen.
-        sys.stderr.write(
-            f"CAPTURE passed={passed} skipped={skipped} files={reported_files}\n"
-            f"CAPTURE identity={identity}\n"
-            f"CAPTURE manifest={tfields[9]}\n"
-        )
-        return False, f"tests identity unset; observed={identity}"
-    if expected_files is not None and reported_files != expected_files:
-        return False, f"test file set changed: {reported_files} of {expected_files}"
-    if passed != expected_passed or skipped != expected_skipped:
-        return False, f"pytest count changed: {passed} passed, {skipped} skipped"
-    if identity != expected_identity:
-        return False, f"pytest identity mismatch; observed={identity}"
-    return True, f"{expected_passed} passed, {expected_skipped} skipped"
+CORRECTNESS_NONCES = 2
 
 
-def run_tests() -> tuple[bool, str]:
+def run_correctness() -> tuple[bool, str]:
+    """Trusted-side correctness gate (round-6 EXEC-BOUNDARY).
+
+    The verdict is derived ENTIRELY from data no candidate-linked process can
+    author. A candidate-linked worker serializes/deserializes a frozen corpus
+    across a subprocess boundary; this trusted parent — which never imports the
+    candidate extension — independently reproduces every outcome with the
+    PRISTINE reference orjson and compares. For each case the worker returns
+    ONLY a digest of the real serializer output (success) or the raised
+    exception's class name (error); it never authors the pass/fail decision.
+
+    A fresh 63-bit nonce is folded into every input, so a candidate cannot ship
+    a hardcoded output for a fixed input (defeats input special-casing) — it
+    must actually run the serializer, and the produced bytes are validated
+    against the reference. This replaces the round-5 per-file pytest JUnit gate,
+    whose report artifact was authored inside the candidate-loading process at
+    the same uid and was therefore forgeable (a candidate module-init could
+    write a report matching the offline-derivable frozen identity, then
+    ``os._exit(0)`` before any test ran). Here a candidate that exits during
+    import simply yields no reply, and the parent fails closed.
+    """
     if EXTENSION_FD is None:
         return False, "candidate extension unavailable"
-    timeout = float(CHALLENGE["tests"]["timeoutSec"])
-    # The parent owns the record channel: it holds the read end and passes ONLY
-    # the write end to the trusted conductor. No process that loads the candidate
-    # extension ever inherits it (conductor clears it CLOEXEC + scrubs env and
-    # marks itself non-dumpable) — and, critically, the conductor produces the
-    # authenticated verdict itself without importing the extension, so no nonce
-    # or record fd is delivered into any pytest process. Candidate module-init
-    # therefore has nothing to scrape and no channel to author.
-    read_fd, write_fd = os.pipe()
+    reference = _load_reference_orjson()
+    import orjson_workload as workload  # noqa: PLC0415
+
+    cases = workload.correctness_cases()
+    expected_count = int(CHALLENGE["correctness"]["caseCount"])
+    case_ids = [case["id"] for case in cases]
+    if len(cases) != expected_count or len(set(case_ids)) != expected_count:
+        return False, f"correctness corpus size drift: {len(cases)} != {expected_count}"
+    timeout = float(CHALLENGE["correctness"]["timeoutSec"])
+
     env = dict(os.environ)
-    env["HONE_CONDUCTOR_OUT_FD"] = str(write_fd)
-    env["HONE_PYTEST_BASE_ARGV"] = json.dumps(list(CHALLENGE["tests"]["baseArgv"]))
-    env["HONE_TEST_ROOT"] = str(CHALLENGE["tests"]["root"])
-    env["HONE_TEST_MANIFEST"] = json.dumps(CHALLENGE["tests"].get("perFile", {}))
-    env["HONE_SITE"] = str(SITE)
-    env["HONE_TRUSTED_DIR"] = str(TRUSTED_DIR)
-    env["HONE_EXTENSION_FD"] = str(EXTENSION_FD)
-    env["HONE_CONDUCTOR_DEADLINE"] = repr(max(5.0, timeout - 5.0))
-    chunks: list[bytes] = []
+    env["ORJSON_SITE"] = str(SITE)
+    deadline = time.monotonic() + timeout
+    stderr_file = tempfile.TemporaryFile(dir="/tmp")
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-B", str(WORKER)],
+        cwd=str(TRUSTED_DIR),
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=stderr_file,
+        preexec_fn=worker_preexec,
+        start_new_session=True,
+        pass_fds=((EXTENSION_FD,) if EXTENSION_FD is not None else ()),
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+    stdout_fd = proc.stdout.fileno()
+    buffer = bytearray()
+    consumed = 0
 
-    def drain() -> None:
+    def recv() -> dict[str, Any]:
+        nonlocal consumed
         while True:
-            try:
-                chunk = os.read(read_fd, 65536)
-            except OSError:
-                return
+            newline = buffer.find(b"\n")
+            if newline >= 0:
+                line = bytes(buffer[:newline])
+                del buffer[: newline + 1]
+                reply = json.loads(line)
+                if not isinstance(reply, dict):
+                    raise WorkerProtocolError("malformed worker reply")
+                return reply
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise WorkerProtocolError("correctness wall clock exhausted")
+            ready, _, _ = select.select([stdout_fd], [], [], min(remaining, 1.0))
+            if not ready:
+                continue
+            chunk = os.read(stdout_fd, 65536)
             if not chunk:
-                return
-            if sum(len(part) for part in chunks) < MAX_OUTPUT_BYTES:
-                chunks.append(chunk)
+                raise WorkerProtocolError("correctness worker exited early")
+            consumed += len(chunk)
+            if consumed > MAX_OUTPUT_BYTES:
+                raise WorkerProtocolError("correctness worker output limit exceeded")
+            buffer.extend(chunk)
 
-    drainer = threading.Thread(target=drain, daemon=True)
-    drainer.start()
+    def command(payload: dict[str, Any]) -> dict[str, Any]:
+        encoded = json.dumps(payload, separators=(",", ":")).encode() + b"\n"
+        proc.stdin.write(encoded)
+        proc.stdin.flush()
+        reply = recv()
+        if (
+            reply.get("op") != payload["op"]
+            or reply.get("id") != payload.get("id")
+            or reply.get("nonce") != payload.get("nonce")
+        ):
+            raise WorkerProtocolError("worker reply does not match command")
+        return reply
+
+    ok = True
+    detail = ""
+    checked = 0
     try:
-        code, _, _ = run_command(
-            [sys.executable, "-I", "-B", str(CONDUCTOR)],
-            cwd=TRUSTED_DIR,
-            timeout=timeout,
-            env=env,
-            candidate=True,
-            extra_pass_fds=(write_fd,),
+        for case in cases:
+            case_id = case["id"]
+            for _ in range(CORRECTNESS_NONCES):
+                nonce = secrets.randbits(63)
+                reply = command({"op": "check", "id": case_id, "nonce": nonce})
+                candidate = reply.get("result")
+                expected = workload.apply_correctness(reference, case, nonce)
+                if not isinstance(candidate, dict) or candidate != expected:
+                    ok = False
+                    detail = (
+                        f"correctness mismatch on {case_id}: "
+                        f"candidate={candidate!r} reference={expected!r}"
+                    )
+                    break
+                checked += 1
+            if not ok:
+                break
+        if ok:
+            proc.stdin.write(b'{"op":"exit"}\n')
+            proc.stdin.flush()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+    except (WorkerProtocolError, OSError, ValueError) as exc:
+        ok = False
+        stderr_file.seek(0)
+        tail = (
+            stderr_file.read()[-4000:]
+            .decode("utf-8", "replace")
+            .strip()
+            .splitlines()[-1:]
         )
+        detail = f"correctness worker failed: {exc} ({tail[0] if tail else 'no worker stderr'})"
     finally:
-        os.close(write_fd)
-        drainer.join(timeout=10.0)
-        os.close(read_fd)
-    reap_candidates()
-    sweep_candidate_tmp()
-    return score_test_records(code, b"".join(chunks))
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        reap_candidates()
+        sweep_candidate_tmp()
+        stderr_file.close()
+    if not ok:
+        return False, detail or "correctness gate failed"
+    return True, f"correctness gate: {checked} trusted-validated checks over {len(cases)} cases"
 
 
 PROBE_ITERATIONS = 8
@@ -798,7 +817,7 @@ def main() -> None:
     built, build_detail, build_sec = build_candidate()
     if not built:
         failed(build_detail)
-    tests_pass, test_detail = run_tests()
+    tests_pass, test_detail = run_correctness()
     if not tests_pass:
         failed(test_detail, {"build_pass": True})
     try:

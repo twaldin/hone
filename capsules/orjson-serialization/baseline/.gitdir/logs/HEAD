@@ -6,3 +6,4 @@ e6cfe4de3bceb37b847f69643fa6786291653163 5caaeb659ee8bc53dc34c7d432256f1193622bf
 81fa6499d13121c9f7fb5d5ebbfdeba30c2e589f 51d5f805a103508b4f1ccdf0d26de7467b773eee hone-capsule <capsule@hone.local> 1784740210 -0700	commit: OSS-T08 round-2 T2: parent-owned nonce-authenticated test-record conductor
 51d5f805a103508b4f1ccdf0d26de7467b773eee 3059e0a1fe506c2599137b987fd48cd61a1ec458 twaldin <timothy@waldin.net> 1784887644 -0700	commit: round-4: session-auth pytest identity gate; data-dependent chain + pristine-reference yardstick; cgroup memory.peak
 3059e0a1fe506c2599137b987fd48cd61a1ec458 7822fe80073fa937825deeaa1c34a636c98f851a twaldin <timothy@waldin.net> 1785049727 -0700	commit: round-5 EXEC-BOUNDARY: per-file pytest conductor test gate
+7822fe80073fa937825deeaa1c34a636c98f851a 86712f91d46fccca362d940591d64ff21b5f1d2d twaldin <timothy@waldin.net> 1785100279 -0700	commit: round-6 EXEC-BOUNDARY: trusted-side correctness gate replaces forgeable pytest JUnit verdict

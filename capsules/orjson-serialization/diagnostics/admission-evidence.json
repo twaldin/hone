@@ -45,9 +45,11 @@
     "source": "kernel cgroup2 memory.peak (whole-tree, non-resettable) via trusted remount; replaces round-2 VmRSS 5 ms polling"
   },
   "correctness": {
-    "upstreamPytest": "1612 passed, 24 skipped across 32 files (per-file execution total matches the whole-suite total)",
-    "testIdentitySha256": "b2261b99dd7bc0e7126f59bb7156d96066a7869b0059b407ac14d4ec691a47c5",
-    "identityGate": "EXEC-BOUNDARY: a trusted conductor that never imports the candidate extension drives one pytest subprocess per test file (each writes its own JUnit report at session finish); pass/fail is derived from each child's exit code + the conductor's count of files that reached session finish, checked against the frozen per-file set and an identity sha256 over the sorted pass/skip <file>/<class>/<name> set. No nonce or record fd is delivered into any process that loads the extension; an early os._exit before session finish yields no report and drops the completed-file count below expectation",
+    "gate": "round-6 EXEC-BOUNDARY: the correctness verdict is produced ENTIRELY trusted-side and trusts no artifact any candidate-linked process authors. run_correctness() (eval.py) drives a candidate-linked worker across a subprocess boundary over a frozen 43-case corpus (orjson_workload.correctness_cases/apply_correctness); the worker returns ONLY a per-case output digest (success) or the raised exception class (error), and the trusted parent — importing the PRISTINE reference orjson, never the candidate build — independently reproduces every outcome and compares. A fresh 63-bit nonce is folded into every input (2 per case = 86 checks) so no output can be a hardcoded constant (defeats input special-casing); a candidate that os._exit()s during import yields no reply and fails closed. Replaces the round-5 per-file pytest JUnit gate whose report artifact was authored inside the candidate-loading process at the conductor uid and was therefore forgeable.",
+    "corpusCoverage": "dumps of primitives/escapes+unicode/i64+u64 boundaries/deep nesting/datetime(+OPT_NAIVE_UTC,OPT_UTC_Z,OPT_OMIT_MICROSECONDS)/uuid/enum/dataclass/numpy(i8..u64,f32,f64,bool +OPT_SERIALIZE_NUMPY)/Fragment/non-str keys(+OPT_NON_STR_KEYS)/subclasses/default-callback/INDENT_2+SORT_KEYS+APPEND_NEWLINE options and combos; loads of valid object/array/number/unicode/deep/whitespace docs and malformed inputs (truncated, trailing, bad token, unterminated string, bad escape, lone surrogate, empty, depth-bomb, invalid-utf8, leading-zero)",
+    "caseCount": 43,
+    "checksPerEval": 86,
+    "inContainerConfirm": "baseline train eval: valid=true, tests_pass=true, byte_exact_dumps=true, semantic_loads=true, rss_within_limit=true; feedback 'correctness gate: 86 trusted-validated checks over 43 cases'; benchmark resultHash eea12554a2b934636ee36d8291b474b97a247fd98df937fe37d3b4ebf605b686 identical to the frozen train hash (scored path byte-identical)",
     "trainResultHash": "eea12554a2b934636ee36d8291b474b97a247fd98df937fe37d3b4ebf605b686",
     "validationResultHash": "8a9c59a91d1cf6bf2bf9e20dadc5422be6b53a6e5220fe4955adfeec591c38ff",
     "dumpGate": "byte-exact SHA-256 (pristine canonical) + per-iteration chain vs pristine reference",
@@ -58,7 +60,7 @@
       "id": "broken",
       "q": 0,
       "hardGatesPass": false,
-      "description": "loads returns a null result without an exception; upstream pytest gate + chain oracle catch it"
+      "description": "loads returns a null result without an exception; the trusted correctness driver (candidate output vs pristine reference) and the benchmark chain oracle both catch it — every loads case digest diverges from the reference"
     },
     {
       "id": "naive",
@@ -111,12 +113,12 @@
     "reportPath": "diagnostics/ordering-report.json"
   },
   "frozenHostRecalibrationRequired": true,
-  "capsuleId": "cap_bca92a86b9c5",
-  "baselineCommit": "7822fe80073fa937825deeaa1c34a636c98f851a",
+  "capsuleId": "cap_0a48c268c053",
+  "baselineCommit": "86712f91d46fccca362d940591d64ff21b5f1d2d",
   "seedPilots": {
     "harnessNote": "The per-pilot aggregates below were measured under the ROUND-2 absolute-throughput harness and are on a different (ops/sec) scale than the round-4 interleaved-yardstick q; they are retained for provenance. The qualitative gate they establish (>=1 valid non-baseline candidate per pilot AND the search reference not reached) is re-evidenced under the round-4 harness by the 2x ordering headroom: the improved control clears qReference by ~8 sigma while remaining a bounded, non-saturating gain.",
     "supersededByRound4Harness": true,
-    "capsuleId": "cap_bca92a86b9c5",
+    "capsuleId": "cap_0a48c268c053",
     "baselineCommit": "7822fe80073fa937825deeaa1c34a636c98f851a",
     "image": "hone-orjson-serialization@sha256:9fda64d476ea8edfcace3bb89902e8790e0f3ce1efd29a97026a8f945724c824",
     "referenceTest": {

@@ -47,6 +47,7 @@ def main() -> None:
     gc.collect()
     gc.disable()
     states: dict[str, workload.Workload] = {}
+    correctness = {case["id"]: case for case in workload.correctness_cases()}
     out = sys.stdout
     for line in sys.stdin:
         if not line.strip():
@@ -78,6 +79,11 @@ def main() -> None:
             del states[case_id]
             gc.collect()
             reply = {"op": "teardown", "id": case_id}
+        elif op == "check":
+            case_id = command["id"]
+            nonce = int(command["nonce"])
+            result = workload.apply_correctness(orjson, correctness[case_id], nonce)
+            reply = {"op": "check", "id": case_id, "nonce": nonce, "result": result}
         else:
             raise ValueError(f"unknown command: {op}")
         out.write(json.dumps(reply, separators=(",", ":")))
