@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_baa3928a1db4",
+  "id": "cap_315fc7287eaa",
   "objective": "Minimize Block Search render cost on frozen scenes while preserving the exact selected block command stream. Correctness is a hard gate; only solution.py is mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "c6207f50becec460ed866769fa093f6bdb82cefc"
+    "commit": "26af437552dbe399f7bfb5a0ff0c53912c139103"
   },
   "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
   "evalEntrypoint": [
