@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "id": "cap_1e9da3292547",
+  "id": "cap_e841b539d02d",
   "objective": "Improve JavaScript, TypeScript, and CSS parser/formatter throughput across frozen deterministic large files. Preserve byte-exact formatted output, parser diagnostic hashes, idempotence, relevant parser/formatter regression tests, and peak RSS within 2% of baseline. Only the four pinned parser/formatter crate src trees are mutable.",
   "baseline": {
     "kind": "git",
-    "commit": "4fd71d4b181a8a30eab20ab00a1fd24ca8ca3034"
+    "commit": "6e58a29c62e4b194b29f098e5f8fe50fa34269f0"
   },
-  "image": "hone-biome-task@sha256:2bebe81ed96099216d1516f3457b95956956dce08303caf41ba775c21c9bcc44",
+  "image": "hone-biome-task@sha256:3f9d353488d99f754a5834534cd7daf1c1368704ee6fb62b38d21f5885f7810f",
   "evalEntrypoint": [
     "python3",
     "-I",

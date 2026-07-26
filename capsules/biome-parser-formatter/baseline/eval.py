@@ -9,17 +9,21 @@ runner execute as uid 2000, which cannot traverse the root-only asset mount.
 Robustness model: mutable crate code is linked into the benchmark runner, so
 nothing the runner process reports (stdout, timing, exit status alone) is
 trusted. This parent process measures wall time itself, seals the built runner
-at a root-owned path so it cannot be swapped mid-evaluation, and runs every
-regression check as its own child bound to an exact protected receipt.
+at a root-owned path so it cannot be swapped mid-evaluation, and gates the
+regression suite the SAME way it gates the benchmark: proof vs pristine
+reference.
 
 Completion binding: iteration selection and per-iteration validation live in
-this trusted parent, never in a candidate-authored completion file. The parent
-draws a fresh per-sample nonce and drives both the candidate runner and the
-pristine reference runner with it; each folds every timed iteration's protected
-probe observations into a nonce-keyed proof returned over the parent-owned
-stdout pipe. A benchmark sample counts only when the candidate's proof equals
-the reference's proof for that nonce — possible only if the candidate actually
-executed every timed iteration over the pinned parser/formatter output.
+this trusted parent, never in a candidate-authored completion file or receipt.
+The parent draws a fresh per-sample nonce and drives both the candidate runner
+and the pristine reference runner with it; each folds every timed iteration's
+(benchmark) or every regression check's (selftest) protected probe observations
+into a nonce-keyed proof returned over the parent-owned stdout pipe. A sample
+or regression gate counts only when the candidate's proof equals the
+reference's proof for that nonce — possible only if the candidate actually
+executed every timed iteration / every regression body over the pinned
+parser/formatter output. A candidate broken on a selftest-only construct, or
+one precomputing a fixed receipt offline, cannot match.
 
 Isolation model: every timed leg runs in a fresh cgroup2 measurement leaf
 (joined while root, before privilege drop) whose kernel memory.peak is the
@@ -137,17 +141,19 @@ MUTABLE_CRATES = (
 )
 Q_FAIL = float(CHALLENGE["qFail"])
 
-# Exact receipts every regression check must reproduce, frozen from the
-# pinned baseline toolchain. Each value embeds work products (tree
-# fingerprints, element counts, formatted output) that only fall out of
-# actually executing the full check body against the pinned grammar.
-SELFTEST_RECEIPTS: tuple[tuple[str, bytes], ...] = (
-    ("js-valid", b'check=js-valid\nrange=55\nelements=48\nfingerprint=64998c751627ce69\ndiagnostics=0\n'),
-    ("js-recovery", b'check=js-recovery\nrange=33\nelements=25\nfingerprint=ad4a55c32ec01b88\ndiagnostics=1\n'),
-    ("js-format", b'check=js-format\nstable=true\nbytes=86\noutput=export function double(value) {\n\treturn [value, value + 1].map((item) => item * 2);\n}\n'),
-    ("css-valid", b'check=css-valid\nrange=50\nelements=46\nfingerprint=74334e7575cce274\ndiagnostics=0\n'),
-    ("css-recovery", b'check=css-recovery\nrange=13\nelements=21\nfingerprint=548d87ef58a364e9\ndiagnostics=1\n'),
-    ("css-format", b'check=css-format\nstable=true\nbytes=9\noutput=html {\n}\n'),
+# The regression suite the runner exercises under `selftest`. The runner never
+# decides pass/fail: it returns a nonce-keyed proof folded from every check's
+# protected structural probes, and this parent accepts the gate only when the
+# candidate proof equals the pristine reference runner's proof for the same
+# fresh nonce (see run_selftest). The list is informational only — the runner
+# owns the authoritative set and folds a check count into the proof.
+SELFTEST_CHECKS: tuple[str, ...] = (
+    "js-valid",
+    "js-recovery",
+    "js-format",
+    "css-valid",
+    "css-recovery",
+    "css-format",
 )
 
 
@@ -695,40 +701,68 @@ def seal_runner() -> None:
 
 
 def run_selftest(env: dict[str, str]) -> tuple[bool, str, float]:
-    """Run every regression check as its own child and demand exact receipts.
+    """Gate the regression suite by proof vs pristine reference under a fresh
+    parent-drawn nonce — the same binding the benchmark path uses.
 
     A zero exit alone is meaningless: candidate code linked into the runner
-    could exit early. Each check must write the exact protected receipt for
-    its completed body, and every expected check must be present.
+    could exit early, and a fixed-input suite byte-compared to a frozen receipt
+    is precomputable offline. Instead the trusted parent draws a fresh nonce and
+    drives BOTH the candidate runner and the pristine reference runner over the
+    identical selftest checks with it. Each runner folds every check's
+    nonce-selected structural probes (parse-tree fingerprints/token shapes,
+    formatter output bytes) into a nonce-keyed proof returned over the
+    parent-owned stdout pipe. The gate passes only when the candidate proof
+    equals the pristine reference proof for that nonce, which is possible only
+    if the candidate actually executed every regression body over the pinned
+    grammar. A candidate broken on a selftest-only construct cannot match, and
+    the nonce is unknown at candidate build time so no offline-precomputed
+    receipt satisfies it.
     """
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(dir="/tmp", prefix="hone-selftest-") as tmp_raw:
-        tmp = Path(tmp_raw)
-        tmp.chmod(0o755)
-        for check, expected_receipt in SELFTEST_RECEIPTS:
-            case = tmp / check
-            case.mkdir(mode=0o777)
-            case.chmod(0o777)
-            receipt = case / "receipt"
-            result = run_untrusted(
-                [str(RUNNER), "selftest", check, str(receipt)],
-                timeout=float(CHALLENGE["testTimeoutSec"]),
-                env=env,
-            )
-            if result.returncode != 0:
-                return (
-                    False,
-                    f"regression check {check} failed (exit {result.returncode}): {cargo_failure(result.stderr)}",
-                    time.monotonic() - started,
-                )
-            if receipt.is_symlink() or not receipt.is_file():
-                return False, f"regression check {check} produced no receipt", time.monotonic() - started
-            if receipt.read_bytes() != expected_receipt:
-                return False, f"regression check {check} receipt does not match the protected baseline receipt", time.monotonic() - started
-            shutil.rmtree(case)
+    if REFERENCE_RUNNER.is_symlink() or not REFERENCE_RUNNER.is_file():
+        raise RuntimeError("pristine reference runner is missing from the image")
+    nonce = secrets.randbits(63)
+    timeout = float(CHALLENGE["testTimeoutSec"])
+
+    reference = run_untrusted(
+        [str(REFERENCE_RUNNER), "selftest", str(nonce)], timeout=timeout, env=env
+    )
+    if reference.returncode != 0:
+        raise RuntimeError(
+            f"pristine reference selftest failed (exit {reference.returncode}): "
+            f"{cargo_failure(reference.stderr)}"
+        )
+    try:
+        reference_proof = parse_proof(reference.stdout)
+    except RuntimeError as exc:
+        raise RuntimeError(f"pristine reference selftest emitted no valid proof: {exc}") from exc
+
+    candidate = run_untrusted(
+        [str(RUNNER), "selftest", str(nonce)], timeout=timeout, env=env
+    )
+    reap_candidate_processes()
+    if candidate.returncode != 0:
+        return (
+            False,
+            f"regression suite failed (exit {candidate.returncode}): {cargo_failure(candidate.stderr)}",
+            time.monotonic() - started,
+        )
+    try:
+        candidate_proof = parse_proof(candidate.stdout)
+    except RuntimeError as exc:
+        return False, f"regression suite emitted no valid proof: {exc}", time.monotonic() - started
+    if candidate_proof != reference_proof:
+        return (
+            False,
+            "regression suite proof does not match the pristine reference: the "
+            "candidate did not reproduce every check's parse/format output over "
+            "the pinned grammar",
+            time.monotonic() - started,
+        )
     return (
         True,
-        f"upstream-derived JS/TS/CSS parser and formatter regression suite passed ({len(SELFTEST_RECEIPTS)}/{len(SELFTEST_RECEIPTS)} protected receipts)",
+        f"upstream-derived JS/TS/CSS parser and formatter regression suite passed "
+        f"({len(SELFTEST_CHECKS)} checks, nonce-bound proof matches pristine reference)",
         time.monotonic() - started,
     )
 
@@ -913,7 +947,7 @@ def evaluate() -> dict:
     if not built:
         return fail(build_detail)
     seal_runner()
-    log("running upstream-derived regression checks against protected receipts")
+    log("gating regression suite by nonce-bound proof vs pristine reference")
     tests_pass, test_detail, test_sec = run_selftest(env)
     build_test_sec = build_sec + test_sec
     log(f"build/test stage completed in {build_test_sec:.1f}s")
