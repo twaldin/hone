@@ -1,5 +1,0 @@
-  [31m×[0m You are attempting to export "metadata" from a component marked with "use client", which is disallowed. Either remove the export, or the "use client" directive. Read more: https://nextjs.org/docs/app/api-reference/directives/use-client
-   ╭────
- [2m1[0m │ 123456789
-   · [35;1m──[0m
-   ╰────

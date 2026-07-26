@@ -1,3 +1,0 @@
-function enum() {
-  "use strict";
-}

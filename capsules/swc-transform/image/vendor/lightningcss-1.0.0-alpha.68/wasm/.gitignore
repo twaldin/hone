@@ -1,8 +1,0 @@
-*.d.ts
-*.wasm
-*.cjs
-package.json
-README.md
-browserslistToTargets.js
-flags.js
-composeVisitors.js

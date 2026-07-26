@@ -1,5 +1,0 @@
-  x Unexpected token `from`. Expected a string literal
-   ,-[$DIR/tests/errors/deferred-import-evaluation/no-default/from.js:1:1]
- 1 | import defer from from "x";
-   :                   ^^^^
-   `----

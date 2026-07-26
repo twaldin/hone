@@ -1,7 +1,0 @@
-@mixin color {
-  color: red;
-
-  &.bar {
-    color: yellow;
-  }
-}

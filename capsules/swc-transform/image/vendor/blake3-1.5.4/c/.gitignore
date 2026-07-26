@@ -1,6 +1,0 @@
-blake3
-example
-build/
-*.o
-
-CMakeUserPresets.json

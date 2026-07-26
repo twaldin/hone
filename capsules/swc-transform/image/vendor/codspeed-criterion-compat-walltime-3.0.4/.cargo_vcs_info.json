@@ -1,6 +1,0 @@
-{
-  "git": {
-    "sha1": "2d804836d99ee53ac6376dbe1c3a74be45bd4945"
-  },
-  "path_in_vcs": "crates/criterion_compat/criterion_fork"
-}

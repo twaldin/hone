@@ -1,9 +1,0 @@
-{
-  "functions": [
-    {
-      "name": "foo",
-      "params": [],
-      "result": "string"
-    }
-  ]
-}

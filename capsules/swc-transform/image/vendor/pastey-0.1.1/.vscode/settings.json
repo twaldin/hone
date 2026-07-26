@@ -1,3 +1,0 @@
-{
-    "rust-analyzer.linkedProjects": ["./paste-compat/Cargo.toml", "./pastey-test-suite/Cargo.toml"]
-}

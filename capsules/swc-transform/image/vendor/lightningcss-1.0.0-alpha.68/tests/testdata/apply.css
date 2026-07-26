@@ -1,5 +1,0 @@
-@import "./mixin.css";
-
-.foo {
-  @apply color;
-}

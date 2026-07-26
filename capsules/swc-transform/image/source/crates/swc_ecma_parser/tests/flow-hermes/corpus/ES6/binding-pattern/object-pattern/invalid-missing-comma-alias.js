@@ -1,4 +1,0 @@
-({
-  foo: alias
-  bar,
-} = baz);

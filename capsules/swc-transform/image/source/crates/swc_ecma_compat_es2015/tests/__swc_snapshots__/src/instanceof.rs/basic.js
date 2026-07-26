@@ -1,1 +1,0 @@
-_instanceof(foo, Bar);

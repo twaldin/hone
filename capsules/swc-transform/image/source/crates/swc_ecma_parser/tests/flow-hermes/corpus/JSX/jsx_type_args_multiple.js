@@ -1,1 +1,0 @@
-<Component<string, number, boolean> />;

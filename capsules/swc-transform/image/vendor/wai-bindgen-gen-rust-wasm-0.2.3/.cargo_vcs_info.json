@@ -1,6 +1,0 @@
-{
-  "git": {
-    "sha1": "4b228e1229c946282549d69bd1605e98cf84140c"
-  },
-  "path_in_vcs": "crates/gen-rust-wasm"
-}

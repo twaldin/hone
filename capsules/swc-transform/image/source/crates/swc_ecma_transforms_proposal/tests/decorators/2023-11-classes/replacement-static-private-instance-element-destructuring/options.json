@@ -1,6 +1,0 @@
-{
-  "plugins": [
-    "proposal-destructuring-private",
-    ["proposal-decorators", { "version": "2023-11" }]
-  ]
-}

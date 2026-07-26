@@ -1,3 +1,0 @@
-type T =
-  & string
-  & number;

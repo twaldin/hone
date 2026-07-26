@@ -1,1 +1,0 @@
-{"baseImage":"docker.io/library/debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818","buildEssential":"12.9","capsuleImage":"hone-zstd-codec@sha256:007f66f4cb558b5f196023aac4d3384e4f022e627c99c40ba4e944763faf0cbb","cc":"gcc 12.2.0","make":"GNU Make 4.3","network":"none","platform":"linux/arm64","python":"CPython 3.11.2","schemaVersion":1}

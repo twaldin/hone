@@ -1,3 +1,0 @@
-({
-  async foo (x = await) {  }
-})
