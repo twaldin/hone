@@ -1,15 +1,15 @@
 /* Frozen deterministic fragmentation allocator workload. Copyright (c) 2026 Hone contributors. MIT licensed. */
 #include "bench.h"
 
-#include <mimalloc.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #define SLOT_COUNT 2048
 
-/* Overlap + canary pass over the CURRENT live set; folds every live block's
- * distinct pattern into the checksum so verification is part of the scored
- * value, not a side gate. */
+/* Overlap + canary pass over the CURRENT live set; folds the 64-bit word
+ * LOADED from every live block into the checksum so verification is part of
+ * the scored value (not a side gate) and the checksum depends on memory
+ * actually written and read back inside the timed window. */
 static bool verify_live(void* const* slots, const size_t* live, const uint64_t* patterns,
                         hone_range_t* ranges, uint64_t* checksum) {
   for (size_t i = 0; i < SLOT_COUNT; ++i) {
@@ -19,7 +19,7 @@ static bool verify_live(void* const* slots, const size_t* live, const uint64_t* 
   if (!hone_ranges_disjoint(ranges, SLOT_COUNT)) return false;
   for (size_t i = 0; i < SLOT_COUNT; ++i) {
     if (!hone_canary_verify((const unsigned char*)slots[i], live[i], patterns[i])) return false;
-    *checksum = hone_checksum(*checksum, patterns[i] ^ (uint64_t)live[i]);
+    *checksum = hone_checksum(*checksum, hone_block_readback(slots[i]) ^ (uint64_t)live[i]);
   }
   return true;
 }
@@ -42,7 +42,7 @@ static bool run_fragmentation(uint64_t seed, uint32_t rounds, uint64_t nonce, bo
 
   for (uint32_t round = 0; round < rounds; ++round) {
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
-      unsigned char* block = (unsigned char*)mi_malloc(sizes[i]);
+      unsigned char* block = (unsigned char*)hone_mi.malloc_fn(sizes[i]);
       if (block == NULL) goto failure;
       patterns[i] = hone_pattern(seed, round, i, nonce);
       hone_canary_write(block, sizes[i], patterns[i]);
@@ -53,14 +53,14 @@ static bool run_fragmentation(uint64_t seed, uint32_t rounds, uint64_t nonce, bo
     /* First stable point: all SLOT_COUNT initial allocations live at once. */
     if (!verify_live(slots, live, patterns, ranges, &checksum)) goto failure;
     for (size_t i = 0; i < SLOT_COUNT; i += 2) {
-      mi_free(slots[i]);
+      hone_mi.free_fn(slots[i]);
       slots[i] = NULL;
       operations++;
     }
     if (capture_memory && round == 0 && !hone_capture_memory(result)) goto failure;
     for (size_t i = 0; i < SLOT_COUNT; i += 2) {
       const size_t replacement_size = 48 + ((sizes[i] ^ (size_t)seed) % 4049);
-      unsigned char* replacement = (unsigned char*)mi_malloc(replacement_size);
+      unsigned char* replacement = (unsigned char*)hone_mi.malloc_fn(replacement_size);
       if (replacement == NULL) goto failure;
       patterns[i] = hone_pattern(seed, round, SLOT_COUNT + i, nonce);
       hone_canary_write(replacement, replacement_size, patterns[i]);
@@ -71,7 +71,7 @@ static bool run_fragmentation(uint64_t seed, uint32_t rounds, uint64_t nonce, bo
     /* Second stable point: surviving odd blocks + even replacements live. */
     if (!verify_live(slots, live, patterns, ranges, &checksum)) goto failure;
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
-      mi_free(slots[i]);
+      hone_mi.free_fn(slots[i]);
       slots[i] = NULL;
       operations++;
     }
@@ -82,7 +82,7 @@ static bool run_fragmentation(uint64_t seed, uint32_t rounds, uint64_t nonce, bo
   return true;
 
 failure:
-  for (size_t i = 0; i < SLOT_COUNT; ++i) mi_free(slots[i]);
+  for (size_t i = 0; i < SLOT_COUNT; ++i) hone_mi.free_fn(slots[i]);
   return false;
 }
 

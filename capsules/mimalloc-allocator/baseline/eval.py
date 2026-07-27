@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Trusted evaluator for microsoft/mimalloc allocator throughput."""
+"""Trusted evaluator for microsoft/mimalloc allocator throughput.
+
+Exec-boundary design: the benchmark harness executables are compiled by THIS
+trusted evaluator, as root, from the sealed TRUSTED_DIR sources only, and link
+NO allocator code. The allocator under measurement (candidate or pristine
+reference) is built as a shared library by a demoted worker, and the trusted
+harness dlopens it only AFTER the parent-owned control channel authenticates,
+so no candidate instruction can execute at benchmark process startup or ahead
+of the trusted protocol. The parent owns the wall clock, a fresh per-sample
+go-nonce delivered at clock-start, a per-sample paired plausibility floor
+against the interleaved pristine reference, and kernel-owned cgroup memory
+readings that reject timed windows lacking workload-scale allocation.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -21,6 +33,10 @@ ASSETS = Path(os.environ.get("CAPSULE_ASSETS", "/capsule/assets"))
 BUILD_ROOT = Path("/tmp/hone-mimalloc-build")
 SOURCE = BUILD_ROOT / "source"
 BUILD_DIR = BUILD_ROOT / "build"
+# Trusted harness executables: compiled by the trusted evaluator from
+# TRUSTED_DIR/hone only (root-owned, on the root-mounted tmpfs), shared by the
+# candidate and reference legs so both run the byte-identical trusted image.
+HARNESS_DIR = BUILD_ROOT / "harness"
 # Pristine reference: the sealed baseline allocator built from TRUSTED_DIR with
 # NO candidate overlay. Each workload is scored as a load-cancelling yardstick
 # ratio of the reference vs the candidate measured back-to-back under the same
@@ -54,9 +70,46 @@ HONE_REPORT_FD_ENV = "HONE_REPORT_FD"
 # multithread/small workloads is already only ~0.38-0.42x the (segment-heavy)
 # baseline tree peak. A single large malloc+memset reaches the same whole-tree
 # peak as the real workload, so it cannot be excluded by a scalar cgroup floor;
-# the skip-the-workload defense is instead the nonce-bound per-sample fold,
-# which forces the real per-allocation work into the timed window.
+# the skip-the-workload defenses are instead the trusted per-round
+# disjointness + canary read-back fold (validated against the pristine
+# reference) plus the per-sample MEMORY_WORK_FLOOR committed-memory backstop,
+# which force the real per-allocation work into every TIMED window.
 MIN_TREE_PEAK_FRACTION = 0.25
+# Sealed plausibility band on the paired yardstick. The timed loop necessarily
+# calls allocator code inside the harness process, so a candidate-controlled
+# path that impersonates the report protocol after library load cannot be made
+# impossible in-process; it IS bounded: every timed candidate sample must stay
+# within MAX_PLAUSIBLE_SPEEDUP of the pristine reference leg it is paired
+# with, and so must the final min-of-N ratio. No legitimate allocator rewrite
+# plausibly serves these fixed canary-traffic workloads 4x faster than the
+# tuned upstream baseline, so the band never binds on honest improvements
+# while capping any unearned residual at 4x instead of unbounded.
+MAX_PLAUSIBLE_SPEEDUP = 4.0
+# Control-channel authentication fold, mirrored from hone/bench.c: the pure
+# trusted harness image (no allocator byte mapped yet) must fold a fresh
+# 64-bit token before it is allowed to dlopen the allocator library.
+U64_MASK = (1 << 64) - 1
+AUTH_INIT = 0xCBF29CE484222325
+AUTH_TAG = 0x484F4E4541555448  # "HONEAUTH"
+# Per-workload kernel committed-memory floor (bytes): the trusted parent polls
+# the measurement leaf's memory.current across each timed window and requires
+# the observed peak to reach this floor. Under the exec boundary the trusted
+# workload (per-round disjointness, canary write/read-back, and the nonce-bound
+# checksum validated against the pristine reference) already forces the
+# candidate allocator to hand out real distinct writable memory for the whole
+# live set every sample, so this kernel-owned reading is a defense-in-depth
+# backstop confirming the timed window committed workload-scale memory rather
+# than the sole per-sample work proof. Each floor sits well below the sealed
+# baseline's observed committed live set (single ~8.4M, multithread ~6.3M,
+# small ~1.1M, fragmentation ~67M) so no allocator that serves the live set can
+# miss it, while a degenerate stream committing almost nothing is rejected.
+MEMORY_WORK_FLOOR = {
+    "single": 3 << 20,
+    "multithread": 3 << 20,
+    "small": 512 << 10,
+    "fragmentation": 24 << 20,
+}
+MEMORY_POLL_SEC = 0.002
 ALLOWED_MUTABLE_PREFIXES = ("src/", "include/mimalloc/")
 # Files under the mutable prefixes whose contents are ALWAYS taken from the
 # trusted baseline seed, never from the candidate workspace (and which the
@@ -68,11 +121,20 @@ TRUSTED_ONLY_MUTABLE = frozenset({
     "include/mimalloc/types.h",
 })
 STAT_GUARD_TOKENS = ("MI_STAT", "mi_stat_", "_mi_stat_", "mi_heap_stat_", "mi_os_stat_")
-MAIN_THREAD_ALLOWANCE = 1
-# Runtime symbols a candidate allocator translation unit must never define:
-# they are linked into the same executable as the trusted harness, so a strong
-# definition here would be resolved by the static linker in place of libc,
-# letting candidate code fabricate elapsed time or the reported result line.
+# Kernel-enforced per-uid ceiling on the task count: a coarse anti-runaway
+# bound (the workload's own threads plus fixed head-room), NOT a
+# gaming-resistance primitive. Zero-slack caps false-fail legitimate threaded
+# allocators (mimalloc itself may spin a transient purge/reclaim helper) and
+# race the reaping of the just-exited same-uid build/test workers at setuid;
+# the exec boundary, per-sample plausibility floor, and kernel memory signal
+# are the real bounds on a resident helper.
+MAIN_THREAD_ALLOWANCE = 4
+# Runtime symbols the allocator shared library must never define: the library
+# is mapped RTLD_LOCAL into the trusted harness, so these definitions could
+# not rebind the harness's already-resolved libc calls, but allocator code has
+# no legitimate reason to carry its own timing, formatting, or report-channel
+# primitives — a definition here is treated as an interposition attempt and
+# rejected outright (defense-in-depth around the exec boundary).
 INTERPOSITION_SYMBOLS = frozenset({
     "clock_gettime", "__clock_gettime", "clock_gettime64", "__clock_gettime64",
     "gettimeofday", "__gettimeofday", "clock", "times",
@@ -120,7 +182,14 @@ def emit_failure(detail: str, result_hash: str = "") -> None:
 def demote(uid: int = SANDBOX_UID) -> None:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 30, 1 << 30))
-    resource.setrlimit(resource.RLIMIT_AS, (1536 << 20, 1536 << 20))
+    # Virtual address-space cap: generous headroom for mimalloc's PROT_NONE
+    # arena reservations (which scale with thread count and can far exceed
+    # committed memory) so a legitimate multi-threaded allocator is not
+    # spuriously starved of address space. This is a coarse anti-runaway cap,
+    # NOT the memory-regression gate: committed memory is gated by the kernel
+    # cgroup memory.peak and the mi_stats page-committed peak, both of which
+    # measure real charged pages and are unaffected by the virtual reservation.
+    resource.setrlimit(resource.RLIMIT_AS, (8 << 30, 8 << 30))
     if os.geteuid() == 0:
         os.setgroups([])
         os.setgid(uid)
@@ -249,35 +318,126 @@ def drain_measurement_leaf(leaf: Path) -> None:
         raise GateFailure("measurement cgroup could not be retired") from exc
 
 
-def assert_no_interposition() -> None:
-    binaries = sorted(BUILD_DIR.glob("hone-*"))
-    if len(binaries) != len(WORKLOAD_IDS):
-        raise GateFailure("benchmark binaries missing after build")
-    for binary in binaries:
+def build_harness() -> None:
+    # The benchmark harness is compiled by the TRUSTED evaluator, as root,
+    # exclusively from the sealed TRUSTED_DIR sources (hone/ + protected
+    # headers) — never from the candidate-overlaid tree — into a root-owned
+    # directory on the build tmpfs (sticky-bit parent: uid-2000 workers can
+    # neither replace the directory nor the binaries). It links NO allocator
+    # code: the allocator reaches the process only through the
+    # post-authentication dlopen inside hone_bench_main, so the candidate and
+    # reference legs run the byte-identical trusted process image and no
+    # candidate instruction can execute at benchmark process startup.
+    HARNESS_DIR.mkdir(mode=0o755, exist_ok=False)
+    for workload in WORKLOAD_IDS:
+        command = [
+            "cc", "-O2", "-DNDEBUG", "-std=c11", "-Wall", "-Wextra", "-Werror",
+            f"-I{TRUSTED_DIR / 'include'}", f"-I{TRUSTED_DIR / 'hone'}",
+            str(TRUSTED_DIR / "hone" / "bench.c"),
+            str(TRUSTED_DIR / "hone" / f"bench-{workload}.c"),
+            "-pthread", "-ldl", "-lm", "-o", str(HARNESS_DIR / f"hone-{workload}"),
+        ]
         try:
             completed = subprocess.run(
-                ["nm", "--defined-only", "--format=posix", str(binary)],
+                command,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=120,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise GateFailure(f"symbol audit failed: {exc}") from exc
+            raise GateFailure(f"trusted harness build failed: {exc}") from exc
         if completed.returncode != 0:
-            raise GateFailure("symbol audit could not read benchmark binary")
-        for line in completed.stdout.decode("ascii", "replace").splitlines():
-            fields = line.split()
-            if len(fields) < 2:
-                continue
-            name, symbol_type = fields[0], fields[1]
-            if symbol_type in ("U", "v", "w"):
-                continue
-            if name in INTERPOSITION_SYMBOLS:
-                raise GateFailure(
-                    f"candidate defines interposable runtime symbol '{name}' in {binary.name}"
-                )
+            detail = completed.stderr.decode("utf-8", "replace")[-500:]
+            raise GateFailure(f"trusted harness build failed: {detail}")
+        os.chmod(HARNESS_DIR / f"hone-{workload}", 0o755)
+
+
+def resolve_shared_lib(build_dir: Path) -> Path:
+    link = build_dir / "libmimalloc.so"
+    try:
+        real = link.resolve(strict=True)
+    except OSError as exc:
+        raise GateFailure("built allocator shared library is missing") from exc
+    if not real.is_file() or build_dir.resolve() not in real.parents:
+        raise GateFailure("built allocator shared library resolved outside its build tree")
+    return real
+
+
+def auth_fold(token: int) -> int:
+    # Mirror of hone_checksum(hone_checksum(AUTH_INIT, token), AUTH_TAG).
+    state = AUTH_INIT
+    for value in (token, AUTH_TAG):
+        state ^= (value + 0x9E3779B97F4A7C15 + (state << 6) + (state >> 2)) & U64_MASK
+    return state & U64_MASK
+
+
+def _run_binutil(argv: list[str]) -> str:
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GateFailure(f"library audit failed: {exc}") from exc
+    if completed.returncode != 0:
+        raise GateFailure("library audit could not read the allocator library")
+    return completed.stdout.decode("ascii", "replace")
+
+
+def _initializer_profile(library: Path) -> dict:
+    sections = _run_binutil(["readelf", "-S", "--wide", str(library)])
+    profile = {"preinit": 0, "init_array": 0, "ctors": 0, "dt_init": False}
+    for line in sections.splitlines():
+        fields = line.split()
+        for index, field in enumerate(fields):
+            if field in (".preinit_array", ".init_array", ".ctors"):
+                # readelf -S --wide row: [Nr] Name Type Address Off Size ...
+                try:
+                    size = int(fields[index + 4], 16)
+                except (IndexError, ValueError) as exc:
+                    raise GateFailure("library audit could not parse section sizes") from exc
+                profile[field.lstrip(".")] = size
+    dynamic = _run_binutil(["readelf", "-d", str(library)])
+    profile["dt_init"] = "(INIT)" in dynamic
+    return profile
+
+
+def audit_initializers(candidate_so: Path, reference_so: Path) -> None:
+    # Initializer audit across the exec boundary. Module initializers in the
+    # allocator library run at dlopen — AFTER the control channel
+    # authenticates and BEFORE any sample nonce exists — so they can no longer
+    # front-run the trusted protocol; this audit additionally rejects a
+    # candidate that ADDS initializers at all: its .preinit_array must be
+    # empty and its (.init_array, .ctors, DT_INIT) profile must be IDENTICAL
+    # to the pristine reference library's, built from the sealed baseline by
+    # the same toolchain and flags.
+    candidate = _initializer_profile(candidate_so)
+    reference = _initializer_profile(reference_so)
+    if candidate["preinit"] != 0:
+        raise GateFailure("candidate allocator library declares pre-initializers")
+    if candidate != reference:
+        raise GateFailure("candidate allocator library initializer profile diverged from the pristine reference")
+
+
+def assert_no_interposition(library: Path) -> None:
+    completed_output = _run_binutil(["nm", "--defined-only", "--format=posix", "-D", str(library)])
+    for line in completed_output.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        name, symbol_type = fields[0], fields[1]
+        if symbol_type in ("U", "v", "w"):
+            continue
+        if name in INTERPOSITION_SYMBOLS:
+            raise GateFailure(
+                f"candidate defines interposable runtime symbol '{name}' in {library.name}"
+            )
 
 def check_source_envelope() -> None:
     if not WORKSPACE.is_dir():
@@ -459,15 +619,17 @@ def _read_report_line(report_fd: int, deadline: float) -> bytes:
 class _Bench:
     # A launched benchmark process (candidate or reference) with its own
     # measurement cgroup leaf, report pipe, and control channel.
-    def __init__(self, binary: Path, row: dict, role: str, uid: int) -> None:
+    def __init__(self, binary: Path, allocator_so: Path, row: dict, role: str, uid: int) -> None:
         self.row = row
         self.role = role
         self.rounds = int(row["rounds"])
         self.expected_ops = int(row["expectedOperations"])
+        self.work_floor = int(MEMORY_WORK_FLOOR[row["id"]])
         task_cap = int(row["threads"]) + MAIN_THREAD_ALLOWANCE
         self.leaf = CGROUP_ROOT / f"bench-{role}-{row['id']}"
         self.leaf.mkdir(mode=0o755, exist_ok=False)
         leaf_procs = self.leaf / "cgroup.procs"
+        self.current_path = self.leaf / "memory.current"
         self.report_read, report_write = os.pipe()
 
         def capped_demote() -> None:
@@ -488,23 +650,70 @@ class _Bench:
             HONE_REPORT_FD_ENV: str(report_write),
             "LC_ALL": "C.UTF-8",
             "LANG": "C.UTF-8",
+            # Reserve a generous glibc static-TLS surplus at harness startup so
+            # the post-authentication dlopen of the initial-exec allocator
+            # library maps cleanly even when the candidate adds its own
+            # thread-locals (the default ~512B surplus overflows). Read by ld.so
+            # at process start; identical for the candidate and reference legs.
+            "GLIBC_TUNABLES": "glibc.rtld.optional_static_tls=1048576",
         }
+        # A heavily-loaded shared host can transiently refuse a fork/exec with
+        # EAGAIN (host task exhaustion). That is unrelated to the candidate, so
+        # the spawn is retried a few times with a short backoff before it is
+        # treated as a launch failure; the report pipe write-end is closed only
+        # once, after the spawn settles.
+        self.proc: subprocess.Popen | None = None
+        spawn_exc: OSError | None = None
         try:
-            self.proc: subprocess.Popen | None = subprocess.Popen(
-                [str(binary), str(row["seed"]), str(self.rounds)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                preexec_fn=capped_demote,
-                cwd=binary.parent,
-                pass_fds=(report_write,),
-                env=child_env,
-            )
+            for spawn_attempt in range(6):
+                try:
+                    self.proc = subprocess.Popen(
+                        [str(binary), str(row["seed"]), str(self.rounds), str(allocator_so)],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        preexec_fn=capped_demote,
+                        cwd=binary.parent,
+                        pass_fds=(report_write,),
+                        env=child_env,
+                    )
+                    break
+                except OSError as exc:
+                    spawn_exc = exc
+                    time.sleep(0.5 * (spawn_attempt + 1))
         finally:
             os.close(report_write)
+        if self.proc is None:
+            raise GateFailure(f"{row['id']} {role} benchmark process could not be spawned: {spawn_exc}")
         if self.proc.stdin is None:
             raise GateFailure(f"{row['id']} {role} control channel unavailable")
         self.control = self.proc.stdin
+        # Control-channel authentication BEFORE any allocator byte is mapped:
+        # the harness executable links no allocator code and must fold a fresh
+        # 64-bit token while its process image is still purely trusted. Only
+        # after this parent verifies the fold does the harness dlopen the
+        # allocator library and confirm with 'L' — so any library initializer
+        # runs post-authentication, at a trusted-chosen instant, before any
+        # sample nonce exists anywhere.
+        try:
+            deadline = time.monotonic() + WORKLOAD_TIMEOUT_SEC
+            token = int.from_bytes(os.urandom(8), "big")
+            self.control.write(f"A {token}\n".encode("ascii"))
+            self.control.flush()
+            expected = f"A {auth_fold(token):016x}".encode("ascii")
+            if _read_report_line(self.report_read, deadline) != expected:
+                raise GateFailure(f"{row['id']} {role} control channel failed authentication")
+            if _read_report_line(self.report_read, deadline) != b"L":
+                raise GateFailure(f"{row['id']} {role} failed to map the allocator library after authentication")
+        except BaseException:
+            self.close()
+            raise
+
+    def _memory_current(self) -> int:
+        try:
+            return int(self.current_path.read_text())
+        except (OSError, ValueError) as exc:
+            raise GateFailure(f"{self.row['id']} {self.role} measurement leaf lost its memory accounting") from exc
 
     def sample(self, nonce: bytes) -> tuple[int, str]:
         # One authenticated measured region. The trusted clock starts the instant
@@ -512,21 +721,31 @@ class _Bench:
         # completion token becomes readable. The parent hands the SAME nonce to
         # the candidate and the pristine reference so their nonce-bound checksums
         # can be compared: the go token is folded into every allocation's canary
-        # pattern, so a valid checksum can only be produced by running the timed
-        # per-allocation fold after this nonce is released.
+        # pattern and every workload folds the word it READS BACK from each live
+        # block, so a matching checksum requires the per-block write/read-back
+        # traffic after this nonce is released. The kernel-owned memory.current
+        # peak read across the window is a defense-in-depth backstop that the
+        # timed region committed workload-scale memory.
         deadline = time.monotonic() + WORKLOAD_TIMEOUT_SEC
         if _read_report_line(self.report_read, deadline) != b"R":
             raise GateFailure(f"{self.row['id']} {self.role} broke the ready handshake")
         start = time.monotonic_ns()
         self.control.write(nonce + b"\n")
         self.control.flush()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise GateFailure(f"{self.row['id']} {self.role} report channel timed out")
-        readable, _, _ = select.select([self.report_read], [], [], remaining)
-        if not readable:
-            raise GateFailure(f"{self.row['id']} {self.role} report channel timed out")
+        window_peak = self._memory_current()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GateFailure(f"{self.row['id']} {self.role} report channel timed out")
+            readable, _, _ = select.select([self.report_read], [], [], min(MEMORY_POLL_SEC, remaining))
+            if readable:
+                break
+            window_peak = max(window_peak, self._memory_current())
         stop = time.monotonic_ns()
+        # Committed pages stay charged for the whole window, so one more kernel
+        # reading immediately after the completion token still observes the
+        # in-window commit even when the timed region is shorter than the grid.
+        window_peak = max(window_peak, self._memory_current())
         first = os.read(self.report_read, 1)
         if not first:
             raise GateFailure(f"{self.row['id']} {self.role} closed the report channel early")
@@ -538,6 +757,8 @@ class _Bench:
             raise GateFailure(f"{self.row['id']} {self.role} operation count diverged from the sealed budget")
         if stop <= start:
             raise GateFailure(f"{self.row['id']} {self.role} produced a non-monotonic measurement")
+        if window_peak < self.work_floor:
+            raise GateFailure(f"{self.row['id']} {self.role} timed sample committed below the workload-scale kernel memory floor")
         return stop - start, fields[3].decode("ascii")
 
     def finalize(self) -> dict:
@@ -581,7 +802,7 @@ class _Bench:
         drain_measurement_leaf(self.leaf)
 
 
-def run_benchmark(row: dict) -> float:
+def run_benchmark(row: dict, candidate_so: Path, reference_so: Path) -> float:
     expected_ops = int(row["expectedOperations"])
     rounds = int(row["rounds"])
     if rounds <= 0 or expected_ops <= 0:
@@ -596,10 +817,11 @@ def run_benchmark(row: dict) -> float:
     # ~operations. Host or sibling contention can only lengthen a sample, so the
     # per-binary minimum rejects scheduler-noise outliers with no candidate-
     # controlled influence over the selection.
-    candidate = _Bench(BUILD_DIR / f"hone-{row['id']}", row, "cand", SANDBOX_UID)
+    harness = HARNESS_DIR / f"hone-{row['id']}"
+    candidate = _Bench(harness, candidate_so, row, "cand", SANDBOX_UID)
     reference: _Bench | None = None
     try:
-        reference = _Bench(REF_BUILD_DIR / f"hone-{row['id']}", row, "ref", REF_UID)
+        reference = _Bench(harness, reference_so, row, "ref", REF_UID)
         ref_samples: list[int] = []
         cand_samples: list[int] = []
         for _ in range(HONE_SAMPLES):
@@ -607,7 +829,7 @@ def run_benchmark(row: dict) -> float:
             # clock-start and folded into every allocation's canary pattern. The
             # pristine reference is the trusted expectation for this nonce, so a
             # candidate can only match its checksum by running the timed
-            # per-allocation fold once the nonce arrives.
+            # per-allocation write/read-back fold once the nonce arrives.
             nonce = str(int.from_bytes(os.urandom(8), "big")).encode("ascii")
             ref_ns, ref_checksum = reference.sample(nonce)
             cand_ns, cand_checksum = candidate.sample(nonce)
@@ -615,6 +837,12 @@ def run_benchmark(row: dict) -> float:
                 raise GateFailure(f"{row['id']} workload produced an invalid elapsed time")
             if cand_checksum != ref_checksum:
                 raise GateFailure(f"{row['id']} candidate sample checksum diverged from the pristine reference")
+            # Paired per-sample plausibility floor: both legs of this pair ran
+            # back-to-back under the same host load, so a candidate leg faster
+            # than the sealed band allows is a measurement-integrity failure,
+            # not an allocator improvement.
+            if cand_ns * MAX_PLAUSIBLE_SPEEDUP < ref_ns:
+                raise GateFailure(f"{row['id']} candidate sample beat the paired reference beyond the sealed plausibility band")
             ref_samples.append(ref_ns)
             cand_samples.append(cand_ns)
         candidate_fin = candidate.finalize()
@@ -663,8 +891,11 @@ def run_benchmark(row: dict) -> float:
         raise GateFailure(f"{row['id']} fragmentation exceeds baseline by more than the allowed band")
 
     # Min-of-N per binary: the least-contended reference over the least-
-    # contended candidate, both drawn from the same interleaved window.
+    # contended candidate, both drawn from the same interleaved window. The
+    # final ratio must also stay inside the sealed plausibility band.
     ratio = min(ref_samples) / min(cand_samples)
+    if ratio > MAX_PLAUSIBLE_SPEEDUP:
+        raise GateFailure(f"{row['id']} workload throughput exceeded the sealed plausibility band")
     q = float(expected_ops) * ratio
     if not math.isfinite(q) or q <= 0:
         raise GateFailure(f"{row['id']} workload returned invalid throughput")
@@ -698,16 +929,20 @@ def main() -> None:
         mounted = True
         mount_measurement_cgroup()
         cgroup_mounted = True
+        build_harness()
         copy_candidate()
         build_started = time.monotonic()
         run_worker("build")
         build_sec = time.monotonic() - build_started
         run_worker("test")
-        assert_no_interposition()
         copy_reference()
         run_worker("build", REF_SOURCE)
+        candidate_so = resolve_shared_lib(BUILD_DIR)
+        reference_so = resolve_shared_lib(REF_BUILD_DIR)
+        assert_no_interposition(candidate_so)
+        audit_initializers(candidate_so, reference_so)
 
-        throughputs = [run_benchmark(row) for row in metadata["workloads"]]
+        throughputs = [run_benchmark(row, candidate_so, reference_so) for row in metadata["workloads"]]
         score = geometric_mean(throughputs)
         elapsed_sec = time.monotonic() - started
         output = {

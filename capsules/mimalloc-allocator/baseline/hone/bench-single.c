@@ -1,7 +1,6 @@
 /* Frozen deterministic single-thread allocator workload. Copyright (c) 2026 Hone contributors. MIT licensed. */
 #include "bench.h"
 
-#include <mimalloc.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -22,7 +21,7 @@ static bool run_single(uint64_t seed, uint32_t rounds, uint64_t nonce, bool capt
 
   for (uint32_t round = 0; round < rounds; ++round) {
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
-      unsigned char* block = (unsigned char*)mi_malloc(sizes[i]);
+      unsigned char* block = (unsigned char*)hone_mi.malloc_fn(sizes[i]);
       if (block == NULL) goto failure;
       hone_canary_write(block, sizes[i], hone_pattern(seed, round, i, nonce));
       slots[i] = block;
@@ -31,7 +30,10 @@ static bool run_single(uint64_t seed, uint32_t rounds, uint64_t nonce, bool capt
      * Every allocation is still live here. Reject overlapping live ranges,
      * then re-read every block's distinct canary AFTER all later allocations
      * completed: one recycled buffer read back before the next allocation can
-     * no longer satisfy the checksum.
+     * no longer satisfy the checksum. The checksum folds the 64-bit word
+     * LOADED from each live block (not the recomputed pattern), so producing
+     * it requires the per-block write + read-back against real disjoint
+     * memory inside the timed window.
      */
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
       ranges[i].begin = (uintptr_t)slots[i];
@@ -41,15 +43,15 @@ static bool run_single(uint64_t seed, uint32_t rounds, uint64_t nonce, bool capt
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
       const uint64_t pattern = hone_pattern(seed, round, i, nonce);
       if (!hone_canary_verify((const unsigned char*)slots[i], sizes[i], pattern)) goto failure;
-      checksum = hone_checksum(checksum, pattern ^ (uint64_t)sizes[i]);
+      checksum = hone_checksum(checksum, hone_block_readback(slots[i]) ^ (uint64_t)sizes[i]);
     }
     if (capture_memory && round == 0 && !hone_capture_memory(result)) goto failure;
     for (size_t i = 1; i < SLOT_COUNT; i += 2) {
-      mi_free(slots[i]);
+      hone_mi.free_fn(slots[i]);
       slots[i] = NULL;
     }
     for (size_t i = 0; i < SLOT_COUNT; i += 2) {
-      mi_free(slots[i]);
+      hone_mi.free_fn(slots[i]);
       slots[i] = NULL;
     }
   }
@@ -59,7 +61,7 @@ static bool run_single(uint64_t seed, uint32_t rounds, uint64_t nonce, bool capt
   return true;
 
 failure:
-  for (size_t i = 0; i < SLOT_COUNT; ++i) mi_free(slots[i]);
+  for (size_t i = 0; i < SLOT_COUNT; ++i) hone_mi.free_fn(slots[i]);
   return false;
 }
 

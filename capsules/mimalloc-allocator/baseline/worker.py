@@ -36,28 +36,34 @@ def run_quiet(argv: list[str], cwd: Path, timeout: int = TIMEOUT_SEC) -> tuple[b
 
 
 def build(source: Path) -> dict:
+    # The allocator under measurement is built as a SHARED library only. The
+    # trusted evaluator compiles the benchmark harness itself (from the sealed
+    # hone/ sources, as root, linking no allocator code) and dlopens this
+    # library across the authenticated control boundary; this demoted worker
+    # never produces a benchmark executable.
     build_dir = source.parent / "build"
     commands = [
         [
             "cmake", "-S", str(source), "-B", str(build_dir), "-G", "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
             "-DCMAKE_C_FLAGS_RELEASE=-O2 -DNDEBUG -DMI_STAT=1",
-            "-DMI_BUILD_SHARED=OFF", "-DMI_BUILD_STATIC=ON", "-DMI_BUILD_OBJECT=OFF",
+            "-DMI_BUILD_SHARED=ON", "-DMI_BUILD_STATIC=OFF", "-DMI_BUILD_OBJECT=OFF",
+            # Production initial-exec TLS is retained: the allocator library is
+            # dlopen'd by the trusted harness after authentication, and the
+            # harness process reserves a generous glibc static-TLS surplus
+            # (GLIBC_TUNABLES, set in eval.py) so an initial-exec library — the
+            # candidate's included — maps cleanly without the slower
+            # local-dynamic model that would erode a TLS-heavy allocator's edge.
             "-DMI_BUILD_TESTS=ON",
         ],
         ["cmake", "--build", str(build_dir), "-j2"],
     ]
-    for workload in ("single", "multithread", "small", "fragmentation"):
-        commands.append([
-            "cc", "-O2", "-DNDEBUG", "-DMI_STAT=1", "-std=c11", "-Wall", "-Wextra", "-Werror",
-            f"-I{source / 'include'}", f"-I{source / 'hone'}",
-            str(source / "hone" / "bench.c"), str(source / "hone" / f"bench-{workload}.c"),
-            str(build_dir / "libmimalloc.a"), "-pthread", "-lm", "-o", str(build_dir / f"hone-{workload}"),
-        ])
     for command in commands:
         ok, detail = run_quiet(command, source)
         if not ok:
             return {"ok": False, "stage": "build", "detail": detail}
+    if not (build_dir / "libmimalloc.so").exists():
+        return {"ok": False, "stage": "build", "detail": "shared allocator library missing after build"}
     return {"ok": True, "stage": "build"}
 
 

@@ -1,7 +1,6 @@
 /* Frozen deterministic small-object allocator workload. Copyright (c) 2026 Hone contributors. MIT licensed. */
 #include "bench.h"
 
-#include <mimalloc.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -23,7 +22,7 @@ static bool run_small(uint64_t seed, uint32_t rounds, uint64_t nonce, bool captu
 
   for (uint32_t round = 0; round < rounds; ++round) {
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
-      unsigned char* block = (unsigned char*)mi_malloc(sizes[i]);
+      unsigned char* block = (unsigned char*)hone_mi.malloc_fn(sizes[i]);
       if (block == NULL) goto failure;
       hone_canary_write(block, sizes[i], hone_pattern(seed, round, i, nonce));
       slots[i] = block;
@@ -31,11 +30,11 @@ static bool run_small(uint64_t seed, uint32_t rounds, uint64_t nonce, bool captu
       operations++;
     }
     for (size_t i = round % 3; i < SLOT_COUNT; i += 3) {
-      mi_free(slots[i]);
+      hone_mi.free_fn(slots[i]);
       slots[i] = NULL;
       operations++;
       const size_t replacement_size = 8 + ((sizes[i] * 5 + i + round) % 249);
-      unsigned char* replacement = (unsigned char*)mi_zalloc(replacement_size);
+      unsigned char* replacement = (unsigned char*)hone_mi.zalloc_fn(replacement_size);
       if (replacement == NULL) goto failure;
       /* The zero-fill contract is checked over the WHOLE block before the
        * canary overwrites it. */
@@ -50,7 +49,9 @@ static bool run_small(uint64_t seed, uint32_t rounds, uint64_t nonce, bool captu
     /*
      * Every slot is live here. Reject overlapping live ranges, then re-read
      * every block's distinct canary after all later allocations completed —
-     * a single recycled buffer cannot satisfy this pass.
+     * a single recycled buffer cannot satisfy this pass. The checksum folds
+     * the 64-bit word LOADED from each live block, so it depends on memory
+     * actually written and read back inside the timed window.
      */
     for (size_t i = 0; i < SLOT_COUNT; ++i) {
       ranges[i].begin = (uintptr_t)slots[i];
@@ -61,11 +62,11 @@ static bool run_small(uint64_t seed, uint32_t rounds, uint64_t nonce, bool captu
       const int replaced = (i % 3) == (round % 3);
       const uint64_t pattern = hone_pattern(seed, round, replaced ? SLOT_COUNT + i : i, nonce);
       if (!hone_canary_verify((const unsigned char*)slots[i], live[i], pattern)) goto failure;
-      checksum = hone_checksum(checksum, pattern ^ (uint64_t)live[i]);
+      checksum = hone_checksum(checksum, hone_block_readback(slots[i]) ^ (uint64_t)live[i]);
     }
     if (capture_memory && round == 0 && !hone_capture_memory(result)) goto failure;
     for (size_t i = SLOT_COUNT; i > 0; --i) {
-      mi_free(slots[i - 1]);
+      hone_mi.free_fn(slots[i - 1]);
       slots[i - 1] = NULL;
       operations++;
     }
@@ -76,7 +77,7 @@ static bool run_small(uint64_t seed, uint32_t rounds, uint64_t nonce, bool captu
   return true;
 
 failure:
-  for (size_t i = 0; i < SLOT_COUNT; ++i) mi_free(slots[i]);
+  for (size_t i = 0; i < SLOT_COUNT; ++i) hone_mi.free_fn(slots[i]);
   return false;
 }
 

@@ -2,22 +2,29 @@
 #define _GNU_SOURCE
 #include "bench.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
-#include <mimalloc-stats.h>
-#include <mimalloc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <limits.h>
 #include <unistd.h>
 
 #define HONE_SAMPLES 7
 #define HONE_MAX_ROUNDS (UINT32_C(1) << 20)
 #define HONE_DEFAULT_REPORT_FD 3
+/* Seed + domain tag of the control-channel authentication fold. The trusted
+ * parent recomputes the same fold in Python and rejects the launch when the
+ * reply diverges, proving the pure trusted process image held both channel
+ * ends BEFORE any allocator byte was mapped. */
+#define HONE_AUTH_INIT UINT64_C(0xcbf29ce484222325)
+#define HONE_AUTH_TAG UINT64_C(0x484f4e4541555448) /* "HONEAUTH" */
 
 static volatile uint64_t hone_sink;
+
+hone_allocator_t hone_mi;
 
 uint64_t hone_prng_next(uint64_t* state) {
   uint64_t x = *state;
@@ -40,8 +47,7 @@ uint64_t hone_checksum(uint64_t state, uint64_t value) {
  * prior block's contents. The trusted parent draws a fresh nonce for every
  * measured sample and delivers it only at clock-start, so the canary bytes
  * (hence the folded checksum) cannot be produced before the measured region
- * begins: a benchmark that skips the timed per-allocation fold cannot
- * reproduce the sample's checksum from the seed and round budget alone.
+ * begins.
  */
 uint64_t hone_pattern(uint64_t seed, uint64_t round, uint64_t index, uint64_t nonce) {
   uint64_t state = seed ^ (nonce * UINT64_C(0xff51afd7ed558ccd)) ^
@@ -78,6 +84,20 @@ bool hone_canary_verify(const unsigned char* block, size_t size, uint64_t patter
     }
   }
   return true;
+}
+
+/*
+ * The 64-bit word actually stored at the start of a live block. Defined here,
+ * in a translation unit separate from every workload (and never inlined
+ * across the boundary: no LTO in the trusted harness build), so the workload
+ * checksum folds a value the compiler must obtain with a real load from the
+ * allocated memory rather than a constant it can rematerialize from the
+ * pattern arithmetic.
+ */
+uint64_t hone_block_readback(const void* block) {
+  uint64_t value;
+  memcpy(&value, block, sizeof value);
+  return value;
 }
 
 static void hone_range_sift(hone_range_t* ranges, size_t start, size_t end) {
@@ -120,8 +140,8 @@ bool hone_ranges_disjoint(hone_range_t* ranges, size_t count) {
 
 bool hone_capture_memory(hone_result_t* result) {
   mi_stats_t_decl(stats);
-  mi_stats_merge();
-  if (!mi_stats_get(&stats) || stats.page_committed.current <= 0 ||
+  hone_mi.stats_merge_fn();
+  if (!hone_mi.stats_get_fn(&stats) || stats.page_committed.current <= 0 ||
       stats.page_committed.peak <= 0 || stats.malloc_normal.current < 0 ||
       stats.malloc_huge.current < 0) {
     return false;
@@ -186,11 +206,34 @@ static bool hone_read_token(char* buffer, size_t capacity) {
   }
 }
 
+/*
+ * EXEC-BOUNDARY load: map the allocator shared library and resolve its C ABI.
+ * Called only AFTER the control channel authenticated, so any .init_array in
+ * the library runs at a trusted-chosen instant inside a pure trusted process
+ * image — after the parent has verified this process, and before any sample
+ * nonce exists anywhere.
+ */
+static bool hone_load_allocator(const char* path) {
+  void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  if (handle == NULL) return false;
+  *(void**)&hone_mi.malloc_fn = dlsym(handle, "mi_malloc");
+  *(void**)&hone_mi.zalloc_fn = dlsym(handle, "mi_zalloc");
+  *(void**)&hone_mi.free_fn = dlsym(handle, "mi_free");
+  *(void**)&hone_mi.collect_fn = dlsym(handle, "mi_collect");
+  *(void**)&hone_mi.stats_reset_fn = dlsym(handle, "mi_stats_reset");
+  *(void**)&hone_mi.stats_merge_fn = dlsym(handle, "mi_stats_merge");
+  *(void**)&hone_mi.stats_get_fn = dlsym(handle, "mi_stats_get");
+  return hone_mi.malloc_fn != NULL && hone_mi.zalloc_fn != NULL &&
+         hone_mi.free_fn != NULL && hone_mi.collect_fn != NULL &&
+         hone_mi.stats_reset_fn != NULL && hone_mi.stats_merge_fn != NULL &&
+         hone_mi.stats_get_fn != NULL;
+}
+
 int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_fn run) {
   (void)workload;
   uint64_t seed;
   uint64_t rounds_arg;
-  if (argc != 3 || !parse_u64(argv[1], &seed) || seed == 0 ||
+  if (argc != 4 || !parse_u64(argv[1], &seed) || seed == 0 ||
       !parse_u64(argv[2], &rounds_arg) || rounds_arg == 0 ||
       rounds_arg > HONE_MAX_ROUNDS) {
     return 64;
@@ -201,10 +244,7 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
    * The trusted evaluator owns fd 1 and the wall clock. This benchmark never
    * prints the scored result: it streams work-completion tokens to the report
    * fd the parent handed it, and the parent brackets each measured region with
-   * its own monotonic clock across that process boundary. Candidate allocator
-   * code linked into this executable can neither write the scoring channel nor
-   * fabricate the elapsed time; a constructor that skips the workload also
-   * skips this protocol and the parent rejects the incomplete stream.
+   * its own monotonic clock across that process boundary.
    */
   int report_fd = HONE_DEFAULT_REPORT_FD;
   const char* report_env = getenv("HONE_REPORT_FD");
@@ -214,23 +254,51 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
     report_fd = (int)parsed;
   }
 
+  char token[64];
+  char line[128];
+
+  /*
+   * Control-channel authentication, run by the PURE TRUSTED process image:
+   * this executable links no allocator code, and the allocator library is not
+   * mapped yet, so no allocator instruction has ever executed in this process
+   * when the fold below is produced. The parent verifies the fold and only
+   * then treats the channel as live.
+   */
+  if (!hone_read_token(token, sizeof token) || token[0] != 'A' || token[1] != ' ') return 65;
+  uint64_t auth;
+  if (!parse_u64(token + 2, &auth)) return 65;
+  uint64_t auth_fold = hone_checksum(HONE_AUTH_INIT, auth);
+  auth_fold = hone_checksum(auth_fold, HONE_AUTH_TAG);
+  int length = snprintf(line, sizeof line, "A %016" PRIx64 "\n", auth_fold);
+  if (length <= 0 || (size_t)length >= sizeof line) return 65;
+  if (!hone_write_all(report_fd, line, (size_t)length)) return 65;
+
+  /* EXEC BOUNDARY: only now is allocator code mapped into this process. */
+  if (!hone_load_allocator(argv[3])) return 66;
+  if (!hone_write_all(report_fd, "L\n", 2)) return 66;
+
   hone_result_t probe = {0};
   if (!run(seed, 1, 0, false, &probe) || probe.operations == 0) return 1;
 
-  char token[64];
-  char line[128];
   uint64_t measured_ops = 0;
   for (size_t sample = 0; sample < HONE_SAMPLES; ++sample) {
+    /*
+     * The trusted harness owns this loop and calls the candidate allocator
+     * through the resolved ABI; the trusted per-round disjointness, canary
+     * write/read-back, and nonce-bound checksum (validated by the parent
+     * against the pristine reference) already force real distinct writable
+     * memory for the whole live set in every sample, so no allocator can skip
+     * the allocation work in a timed window. The parent additionally reads the
+     * kernel cgroup committed-memory peak during the window as a backstop.
+     */
     if (!hone_write_all(report_fd, "R\n", 2)) return 1;
     if (!hone_read_token(token, sizeof token) || token[0] == '\0') return 1;
     /*
      * The go-token IS the sample nonce. It is folded into every allocation's
-     * canary pattern below, so the checksum reported for this sample can only
-     * be produced by running the per-allocation write/verify/fold AFTER the
-     * nonce arrives at clock-start. The trusted parent recomputes the same
-     * nonce-bound checksum with the pristine reference and rejects any sample
-     * whose checksum does not match, so a closed-form value derived from the
-     * seed and round budget in the untimed window is no longer sufficient.
+     * canary pattern below, and every workload folds the 64-bit word it reads
+     * back from each live block into the reported checksum, so the value the
+     * parent compares against the pristine reference depends on per-block
+     * memory written and re-read after the nonce arrives at clock-start.
      */
     uint64_t nonce;
     if (!parse_u64(token, &nonce)) return 1;
@@ -238,14 +306,14 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
     if (!run(seed, rounds, nonce, false, &measured) || measured.operations == 0) return 1;
     hone_sink ^= measured.checksum;
     measured_ops = measured.operations;
-    const int length = snprintf(line, sizeof line, "T %s %" PRIu64 " %016" PRIx64 "\n",
-                                token, measured.operations, measured.checksum);
+    length = snprintf(line, sizeof line, "T %s %" PRIu64 " %016" PRIx64 "\n",
+                      token, measured.operations, measured.checksum);
     if (length <= 0 || (size_t)length >= sizeof line) return 1;
     if (!hone_write_all(report_fd, line, (size_t)length)) return 1;
   }
 
-  mi_collect(true);
-  mi_stats_reset();
+  hone_mi.collect_fn(true);
+  hone_mi.stats_reset_fn();
   hone_result_t validation = {0};
   if (!run(seed, 1, 0, true, &validation) || !validation.memory_captured ||
       validation.peak_committed == 0 || !isfinite(validation.fragmentation) ||
@@ -253,7 +321,7 @@ int hone_bench_main(const char* workload, int argc, char** argv, hone_workload_f
     return 1;
   }
   hone_sink ^= validation.checksum;
-  const int length = snprintf(
+  length = snprintf(
     line, sizeof line, "D %016" PRIx64 " %" PRIu64 " %zu %.12f\n",
     validation.checksum, measured_ops, validation.peak_committed,
     validation.fragmentation);

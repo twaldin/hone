@@ -1,7 +1,6 @@
 /* Frozen deterministic four-thread allocator workload. Copyright (c) 2026 Hone contributors. MIT licensed. */
 #include "bench.h"
 
-#include <mimalloc.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -23,7 +22,7 @@ typedef struct thread_work_s {
 
 static void cleanup_slots(thread_work_t* work) {
   for (size_t i = 0; i < THREAD_SLOTS; ++i) {
-    mi_free(work->slots[i]);
+    hone_mi.free_fn(work->slots[i]);
     work->slots[i] = NULL;
   }
 }
@@ -37,7 +36,7 @@ static void* thread_main(void* argument) {
     uint64_t state = work->seed ^ ((uint64_t)round * UINT64_C(0x9e3779b97f4a7c15));
     for (size_t i = 0; i < THREAD_SLOTS; ++i) {
       const size_t size = 16 + (size_t)(hone_prng_next(&state) % 4081);
-      unsigned char* block = (unsigned char*)mi_malloc(size);
+      unsigned char* block = (unsigned char*)hone_mi.malloc_fn(size);
       if (block == NULL) {
         cleanup_slots(work);
         return NULL;
@@ -50,8 +49,10 @@ static void* thread_main(void* argument) {
     /*
      * All of this thread's allocations are live: reject overlapping live
      * ranges and re-read every block's distinct canary after all later
-     * allocations completed. Cross-thread overlap is verified once over the
-     * retained final round in run_multithread.
+     * allocations completed. The checksum folds the 64-bit word LOADED from
+     * each live block, so it depends on memory actually written and read
+     * back inside the timed window. Cross-thread overlap is verified once
+     * over the retained final round in run_multithread.
      */
     for (size_t i = 0; i < THREAD_SLOTS; ++i) {
       ranges[i].begin = (uintptr_t)work->slots[i];
@@ -67,11 +68,11 @@ static void* thread_main(void* argument) {
         cleanup_slots(work);
         return NULL;
       }
-      checksum = hone_checksum(checksum, pattern ^ (uint64_t)work->live[i]);
+      checksum = hone_checksum(checksum, hone_block_readback(work->slots[i]) ^ (uint64_t)work->live[i]);
     }
     if (work->retain_last && round + 1 == work->rounds) break;
     for (size_t i = 0; i < THREAD_SLOTS; ++i) {
-      mi_free(work->slots[i]);
+      hone_mi.free_fn(work->slots[i]);
       work->slots[i] = NULL;
       work->operations++;
     }

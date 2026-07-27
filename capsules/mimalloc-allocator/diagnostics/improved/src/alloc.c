@@ -45,13 +45,13 @@ static inline bool hone_mag_on(void) {
   return hone_mag_state == 1;
 }
 
-// Map a mimalloc class size to a magazine bucket (fine 16-byte buckets up to
-// 1KiB, coarse 512-byte buckets up to 8KiB, larger classes bypass the cache).
+// Map a mimalloc class size to a magazine bucket. Only MEDIUM classes are
+// cached (512 B < class <= 8 KiB, 512-byte buckets): tiny classes are left to
+// mimalloc's own small-object fast path (caching them fragments committed
+// pages for little gain), and larger classes bypass the cache.
 static inline int hone_mag_bucket(size_t class_size) {
-  if (class_size == 0) return -1;
-  if (class_size <= 1024) return (int)((class_size - 1) >> 4);
-  if (class_size <= 8192) return 64 + (int)((class_size - 1) >> 9);
-  return -1;
+  if (class_size <= 512 || class_size > 8192) return -1;
+  return (int)((class_size - 513) >> 9);
 }
 
 // Flush every parked block back through the real free path. Exported for the
