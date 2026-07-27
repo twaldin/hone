@@ -2,20 +2,20 @@
   "feasibility": {
     "cleanBuildSec": 8144.85722,
     "incrementalRebuildSec": 33.67,
-    "evalSec": 160.3
+    "evalSec": 87.6
   },
   "aa": {
     "samples": [
-      2952890.9543952723,
-      3018735.0653470745,
-      2976100.402637245
+      2939598.6508650766,
+      3042487.071006256,
+      2973820.247664107
     ],
-    "sigma": 33396.207117752594,
+    "sigma": 52396.36964925022,
     "noiseFractionOfScale": 0.2
   },
-  "qBase": 2952890.9543952723,
+  "qBase": 2939598.6508650766,
   "qFail": 0.0,
-  "qReference": 3119871.9899840355,
+  "qReference": 3201580.499111328,
   "controls": [
     {
       "id": "broken",
@@ -25,27 +25,27 @@
     },
     {
       "id": "naive",
-      "q": 2069005.9398719412,
+      "q": 1467258.752167253,
       "hardGatesPass": true,
       "role": "unconditional redundant per-parse copy work; correct but slower"
     },
     {
       "id": "baseline",
-      "q": 2952890.9543952723,
+      "q": 2939598.6508650766,
       "hardGatesPass": true,
       "role": "exact pinned upstream source; scores ~normalization by construction"
     },
     {
       "id": "improved",
-      "q": 3285943.2717102217,
+      "q": 3293121.365561246,
       "hardGatesPass": true,
       "role": "independently authored per-instance encoded-fragment serialization cache with full mutation invalidation; every distinct instance still pays a real first serialization"
     },
     {
       "id": "shortcut",
-      "q": 2936027.953062525,
-      "trainQ": 3242627.3616537196,
-      "validationQ": 2629428.5444713305,
+      "q": 2913476.7201080355,
+      "trainQ": 3230871.236079683,
+      "validationQ": 2596082.204136388,
       "hardGatesPass": true,
       "shortcutGated": true,
       "role": "train-vocabulary fingerprint fast path plus a failed-recognition tax on the validation vocabulary; wins train and loses validation"
@@ -53,23 +53,23 @@
   ],
   "perturbation": {
     "id": "improved",
-    "description": "cache percent-encoded URLSearchParams name=value fragments per instance, invalidate on every list mutation, so the 16 repeated toString() per fresh instance skip re-encoding while every distinct instance still performs a real first serialization",
+    "description": "cache percent-encoded URLSearchParams name=value fragments per instance, invalidate on every list mutation, so the 64 repeated toString() per fresh instance skip re-encoding while every distinct instance still performs a real first serialization",
     "independentlyAuthored": true,
     "valid": true,
-    "q": 3285943.2717102217,
-    "deltaFromQBase": 333052.31731494935,
-    "deltaFromOrderingBaseline": 333052.31731494935,
+    "q": 3293121.365561246,
+    "deltaFromQBase": 353522.71469616937,
+    "deltaFromOrderingBaseline": 353522.71469616937,
     "reachesReference": true
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:6f17aef0b10c4bcea0cea3247ed1b10ae0caf18fc9ceb2c0da179c1ec570e2b3",
-    "secondReportHash": "sha256:cdbf6b4335c3bec48d6d2d352cfe02a442a86b3c1440e4023dc407cab3da7a52"
+    "firstReportHash": "sha256:316a5e92dbd4fadb96f8aae58c95ecf9a75040c5bdcb998f279ebee1fca29996",
+    "secondReportHash": "sha256:d248716694eb841c37260b5e7eb2c0d6b9f40fc0f9f96e0772833f56e9a56862"
   },
   "measurement": {
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "globalLockHeld": true,
-    "benchmarkBatchWallSec": 2244.0,
+    "benchmarkBatchWallSec": 1226.8,
     "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
     "normalizationScale": 3000000.0,
     "freshProcess": true,

@@ -13,14 +13,25 @@ reproduce from public constants without doing the work), this evaluator:
     stream, and reports throughput as the drift-cancelling min-of-N ratio
     reference_time / candidate_time;
   * delivers the go nonce only AFTER the driver's JS-top-level readiness marker
-    (a C++ constructor runs before that marker and so cannot cause the parent
-    to release the nonce);
-  * derives every timed iteration's structurally-distinct, NON-idempotent input
-    from that go-time nonce, and requires the candidate's nonce-salted output
-    fold to equal the reference's fold over the identical stream — so no correct
-    result is precomputable in the untimed window, there is no per-input parse
-    cache, and the only way to match the reference is to run the real per-
-    iteration URL work inside the timed window.
+    arrives on a DEDICATED readiness descriptor (single line, then EOF). The
+    marker is clock hygiene, not a boundary: pre-main native code shares the
+    driver's descriptor table and environment and so COULD write it early, but
+    that only starts the clock during process bootstrap and lengthens that
+    leg's own measured window — the credited result is bound by the fold below,
+    and the dedicated descriptor keeps readiness bytes from ever being parsed
+    as (or interleaved with) the receipt line;
+  * derives every timed iteration's input from a per-split BANK of structurally
+    distinct, NON-idempotent URL / URLSearchParams shapes (scheme case, default
+    and leading-zero ports, dot and %2e segments, backslash separators,
+    userinfo, IDN hosts, IPv4/IPv6 normalization, tab stripping, space /
+    percent / plus / separator handling), with both the shape and its content
+    selected by the go-time nonce and the validation split exercising DISJOINT
+    structures, and requires the candidate's nonce-salted output fold to equal
+    the reference's fold over the identical stream — so no correct result is
+    precomputable in the untimed window, no single-template fast path or
+    per-input parse cache carries the score, and the only way to match the
+    reference is to run the real per-iteration URL work inside the timed
+    window.
 """
 from __future__ import annotations
 
@@ -513,13 +524,42 @@ def _read_line(fd: int, deadline: float) -> bytes:
             raise GateFailure("benchmark leg emitted an oversized control line")
 
 
+def _read_marker_then_eof(fd: int, marker: bytes, deadline: float) -> None:
+    """Strict readiness protocol on the dedicated readiness descriptor: exactly
+    the marker line, then EOF (the driver closes the descriptor right after the
+    write). Extra bytes, a wrong line, or a still-open channel fail the leg."""
+    line = _read_line(fd, deadline)
+    if line != marker:
+        raise GateFailure("benchmark driver emitted an invalid readiness marker")
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GateFailure("benchmark readiness channel was not closed")
+        ready, _, _ = select.select([fd], [], [], min(0.5, remaining))
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except BlockingIOError:
+            continue
+        except OSError as exc:
+            raise GateFailure("benchmark readiness channel failed") from exc
+        if chunk:
+            raise GateFailure("benchmark readiness channel carried unexpected bytes")
+        return
+
+
 def run_leg(node_bin: Path, cell: dict, count: int, family: str, nonce: str) -> LegResult:
-    """One timed leg. The parent forks the driver, waits for its JS-top-level
-    readiness marker, starts the monotonic clock as it releases the go nonce,
-    and stops the clock on the nonce-authenticated receipt. The receipt folds
-    every per-iteration output over the go-nonce-derived input stream, so the
-    measured window necessarily contains the real URL work; the driver holds no
-    clock of its own to rewrite, and no correct fold exists before the nonce."""
+    """One timed leg. The parent forks the driver, waits for the readiness
+    marker on a DEDICATED descriptor (single line then EOF; emitted from the
+    driver's JS top level — pre-main native code could impersonate it, but that
+    only starts the clock earlier, during bootstrap, lengthening this leg's own
+    window), starts the monotonic clock as it releases the go nonce, and stops
+    the clock on the nonce-authenticated receipt, which must be the FIRST line
+    on the receipt descriptor. The receipt folds every per-iteration output
+    over the go-nonce-derived shape-bank input stream, so the measured window
+    necessarily contains the real URL work; the driver holds no clock of its
+    own to rewrite, and no correct fold exists before the nonce."""
     leaf = CGROUP_ROOT / f"bench-{secrets.token_hex(8)}"
     leaf.mkdir(mode=0o755, exist_ok=False)
     leaf_procs = leaf / "cgroup.procs"
@@ -531,8 +571,10 @@ def run_leg(node_bin: Path, cell: dict, count: int, family: str, nonce: str) -> 
 
     go_read, go_write = os.pipe()
     receipt_read, receipt_write = os.pipe()
+    ready_read, ready_write = os.pipe()
     os.set_inheritable(go_read, True)
     os.set_inheritable(receipt_write, True)
+    os.set_inheritable(ready_write, True)
 
     env = dict(os.environ)
     env.update({
@@ -542,6 +584,7 @@ def run_leg(node_bin: Path, cell: dict, count: int, family: str, nonce: str) -> 
         "NO_COLOR": "1",
         "HONE_GO_FD": str(go_read),
         "HONE_RECEIPT_FD": str(receipt_write),
+        "HONE_READY_FD": str(ready_write),
     })
 
     libc = ctypes.CDLL(None, use_errno=True)
@@ -580,7 +623,7 @@ def run_leg(node_bin: Path, cell: dict, count: int, family: str, nonce: str) -> 
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 preexec_fn=preexec,
-                pass_fds=(go_read, receipt_write),
+                pass_fds=(go_read, receipt_write, ready_write),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise GateFailure(f"benchmark process failed: {exc}") from exc
@@ -588,13 +631,22 @@ def run_leg(node_bin: Path, cell: dict, count: int, family: str, nonce: str) -> 
         go_read = -1
         os.close(receipt_write)
         receipt_write = -1
+        os.close(ready_write)
+        ready_write = -1
 
-        # Readiness: emitted from JS top level, before the clock and the nonce.
-        ready = _read_line(receipt_read, deadline)
-        if ready != READY_MARKER:
-            raise GateFailure(f"benchmark cell {cell['id']} did not emit the readiness marker")
+        # Readiness: exactly the marker line then EOF, on the DEDICATED
+        # readiness descriptor, before the clock and the nonce. Emitted from JS
+        # top level; pre-main impersonation is possible but strictly
+        # self-harming (the clock below starts earlier, during bootstrap).
+        try:
+            _read_marker_then_eof(ready_read, READY_MARKER, deadline)
+        except GateFailure as exc:
+            raise GateFailure(
+                f"benchmark cell {cell['id']} readiness handshake failed: {exc}"
+            ) from exc
 
-        # Clock-start: release the go nonce, then time to the receipt line.
+        # Clock-start: release the go nonce, then time to the FIRST line on the
+        # receipt descriptor, which must be the nonce-authenticated receipt.
         started = time.monotonic_ns()
         os.write(go_write, f"{nonce}\n".encode())
         os.close(go_write)
@@ -621,7 +673,7 @@ def run_leg(node_bin: Path, cell: dict, count: int, family: str, nonce: str) -> 
         except OSError as exc:
             raise GateFailure("trusted memory accounting could not be read") from exc
     finally:
-        for descriptor in (go_read, go_write, receipt_read, receipt_write):
+        for descriptor in (go_read, go_write, receipt_read, receipt_write, ready_read, ready_write):
             if descriptor >= 0:
                 try:
                     os.close(descriptor)

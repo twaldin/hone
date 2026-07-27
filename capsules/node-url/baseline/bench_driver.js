@@ -1,30 +1,44 @@
 'use strict';
 
-// Trusted timed benchmark driver for the WHATWG URL capsule (round-5 rebuild).
+// Trusted timed benchmark driver for the WHATWG URL capsule (round-6 revision).
 //
 // EXEC-BOUNDARY note. The scored parse/serialize loop runs inside a node
 // binary that links candidate-mutable URL code (src/node_url.cc, deps/ada,
 // lib/internal/url.js), so a C++ static constructor / .init_array routine can
-// run before ANY JavaScript. Two structural properties defeat a constructor
-// (or any pre-main routine) that tries to impersonate the protocol and report
-// a result without doing the timed work:
+// run before ANY JavaScript. Two structural properties bound what such a
+// pre-main routine can achieve:
 //
-//   1. READINESS-BEFORE-GO. The trusted parent sends NO go-token until it has
-//      read the JS-top-level readiness marker written below. A C++ constructor
-//      runs before this file executes, so it cannot cause the parent to release
-//      the go-token by "being early"; the marker is emitted from JavaScript.
+//   1. READINESS HANDSHAKE (hygiene, NOT a boundary). The trusted parent sends
+//      no go-token until it has read the readiness marker written below on a
+//      DEDICATED inherited descriptor (HONE_READY_FD) that carries nothing
+//      else; the receipt descriptor's first line must therefore be the
+//      nonce-authenticated receipt, and readiness bytes can never be conflated
+//      with it. A pre-main routine shares this process's descriptor table and
+//      environment, so it CAN write the marker early — that is explicitly not
+//      where the binding lives. Early impersonation only makes the parent
+//      start its clock during process bootstrap, LENGTHENING that leg's own
+//      measured window; it can never shorten the window, because the clock
+//      runs from go-token release to the receipt regardless of who signalled
+//      readiness. For an honest driver the marker keeps interpreter/module
+//      bootstrap out of the timed window.
 //
-//   2. GO-TIME PER-ITERATION CONTENT. Every timed iteration's input URL /
-//      URLSearchParams string is derived from a nonce the parent delivers only
-//      at clock-start (after readiness). The per-iteration outputs are folded
-//      into a nonce-salted accumulator the parent independently reproduces from
-//      a PRISTINE reference leg run over the identical nonce stream. Because the
-//      inputs do not exist before the go-token, no correct accumulator can be
-//      precomputed in the untimed window; because each iteration parses a fresh
-//      structurally-distinct, non-idempotent input, there is no per-input parse
-//      cache and no closed-form fold over public constants. The only way to
-//      produce the reference-matching accumulator is to run the real per-
-//      iteration URL work inside the timed window.
+//   2. GO-TIME PER-ITERATION CONTENT (the actual binding). Every timed
+//      iteration's input URL / URLSearchParams string is drawn from a bank of
+//      structurally-distinct shape templates — scheme case, default and
+//      leading-zero ports, dot and %2e segments, backslash separators,
+//      userinfo, IDN hosts, IPv4/IPv6 normalization, tab stripping, space /
+//      percent / plus / separator handling — with both the shape and its
+//      variable content selected by a nonce the parent delivers only at
+//      clock-start (after readiness). The per-iteration outputs are folded
+//      into a nonce-salted accumulator the parent independently reproduces
+//      from a PRISTINE reference leg run over the identical nonce stream.
+//      Because the inputs do not exist before the go-token, no correct
+//      accumulator can be precomputed in the untimed window; because each
+//      iteration normalizes a fresh, structurally-varied, non-idempotent
+//      input, no single-template fast path, per-input parse cache, or
+//      closed-form fold over public constants can stand in for the work. The
+//      only way to produce the reference-matching accumulator is to run the
+//      real per-iteration URL work inside the timed window.
 //
 // The candidate URL code influences only the per-operation OUTPUT STRING; the
 // loop, the clock, the reference expectation, and the memory accounting all
@@ -49,8 +63,10 @@ const POLY = 257;
 
 const goFd = Number.parseInt(process.env.HONE_GO_FD || '', 10);
 const receiptFd = Number.parseInt(process.env.HONE_RECEIPT_FD || '', 10);
+const readyFd = Number.parseInt(process.env.HONE_READY_FD || '', 10);
 delete process.env.HONE_GO_FD;
 delete process.env.HONE_RECEIPT_FD;
+delete process.env.HONE_READY_FD;
 
 function fail(detail) {
   try {
@@ -69,6 +85,7 @@ if (!Number.isInteger(count) || count <= 0) fail('invalid iteration count');
 if (family !== 'train' && family !== 'validation') fail('invalid workload family');
 if (!Number.isInteger(receiptFd) || receiptFd < 0) fail('missing receipt channel');
 if (!Number.isInteger(goFd) || goFd < 0) fail('missing go channel');
+if (!Number.isInteger(readyFd) || readyFd < 0) fail('missing readiness channel');
 
 function polyHash(text) {
   let h = 0;
@@ -78,11 +95,16 @@ function polyHash(text) {
   return h;
 }
 
-// --- Readiness echo (JS top level; a C++ constructor cannot produce this,
-// because it runs before this module executes). The parent releases the go
-// nonce only after reading this marker. ---
+// --- Readiness echo on the DEDICATED readiness descriptor, from JS top level.
+// Single line, then EOF: the parent requires the marker followed by channel
+// close before it releases the go nonce. This is clock hygiene, not a
+// boundary: pre-main native code sharing this process could write the same
+// bytes, but doing so only starts the parent's clock earlier (during
+// bootstrap) and gains nothing — the credited result is the go-nonce-derived
+// output fold, checked against the pristine reference leg. ---
 try {
-  writeSync(receiptFd, 'HONE_DRIVER_READY\n');
+  writeSync(readyFd, 'HONE_DRIVER_READY\n');
+  closeSync(readyFd);
 } catch {
   fail('could not emit readiness marker');
 }
