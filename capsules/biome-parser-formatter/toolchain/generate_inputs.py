@@ -71,11 +71,45 @@ def recovery_js(seed: int, count: int) -> list[str]:
     return out
 
 
+def recovery_css(seed: int, count: int) -> list[str]:
+    """Malformed/recovery CSS plus formatter edge constructs. These previously
+    lived only in a separate fixed-input regression mode; folding them into the
+    scored corpus runs them under the same nonce-seeded per-iteration input
+    rotation and proof-vs-pristine-reference binding as every other workload.
+
+    Mid-file malformations (dangling combinator, malformed hash value, empty
+    declaration value) recover locally, so the formatter still genuinely
+    reformats the file (empty-rule and compact-rule edges included). The
+    bogus-declaration recovery (missing colon) poisons formatting of anything
+    after it into whole-file verbatim, so it sits at the tail, directly before
+    the unterminated-rule truncation that ends the file."""
+    out = ["/* Deliberately malformed recovery corpus; CC0-1.0. */\n"]
+    for i in range(count):
+        n = i + seed
+        if i % 31 == 0:
+            out.append(f".dangle-{n} > {{ color: #17202a }}\n")
+        elif i % 29 == 0:
+            out.append(f".badhash-{n} {{ margin: {n % 11}px; color: # }}\n")
+        elif i % 23 == 0:
+            out.append(f".hollow-{n} {{}}\n")
+        elif i % 19 == 0:
+            out.append(f".hanging-{n} {{ color: ; opacity: .{n % 9 + 1} }}\n")
+        else:
+            out.append(
+                f".recover-{n} .item-{n} {{ margin: {n % 11}px {n % 5}px; color: #17202a; opacity: .{n % 9 + 1} }}\n"
+            )
+    out.append(f".broken-{seed + count} {{ color red; padding: {seed % 9 + 1}px }}\n")
+    out.append("html { color:\n")
+    return out
+
+
 emit("train/generated.js", js(1000, 1200))
 emit("train/generated.ts", ts(2000, 800))
 emit("train/generated.css", css(3000, 1500))
 emit("train/recovery.js", recovery_js(4000, 700))
+emit("train/recovery.css", recovery_css(5000, 620))
 emit("validation/modules.js", js(11000, 1100))
 emit("validation/declarations.ts", ts(12000, 750))
 emit("validation/layout.css", css(13000, 1400))
 emit("validation/recovery.js", recovery_js(14000, 650))
+emit("validation/recovery.css", recovery_css(15000, 570))

@@ -9,21 +9,27 @@ runner execute as uid 2000, which cannot traverse the root-only asset mount.
 Robustness model: mutable crate code is linked into the benchmark runner, so
 nothing the runner process reports (stdout, timing, exit status alone) is
 trusted. This parent process measures wall time itself, seals the built runner
-at a root-owned path so it cannot be swapped mid-evaluation, and gates the
-regression suite the SAME way it gates the benchmark: proof vs pristine
-reference.
+at a root-owned path so it cannot be swapped mid-evaluation, and gates
+correctness over the same frozen corpus the benchmark times: every workload —
+valid JS/TS/CSS, deliberately malformed recovery JS AND CSS, and formatter
+edge constructs — must reproduce the frozen byte-exact formatted output,
+diagnostic hashes, and idempotence, and then runs under the timed benchmark
+path. There is no separate gate-only runner mode: the runner's argv shapes are
+exactly `verify` (oracle check) and `parse|format INPUT REPS NONCE` (timed
+legs), so a candidate cannot detect a regression gate and route to a special
+correct path, and no fixed gate-only input strings ship in the harness.
 
 Completion binding: iteration selection and per-iteration validation live in
 this trusted parent, never in a candidate-authored completion file or receipt.
 The parent draws a fresh per-sample nonce and drives both the candidate runner
 and the pristine reference runner with it; each folds every timed iteration's
-(benchmark) or every regression check's (selftest) protected probe observations
-into a nonce-keyed proof returned over the parent-owned stdout pipe. A sample
-or regression gate counts only when the candidate's proof equals the
-reference's proof for that nonce — possible only if the candidate actually
-executed every timed iteration / every regression body over the pinned
-parser/formatter output. A candidate broken on a selftest-only construct, or
-one precomputing a fixed receipt offline, cannot match.
+protected probe observations into a nonce-keyed proof returned over the
+parent-owned stdout pipe. A sample counts only when the candidate's proof
+equals the reference's proof for that nonce — possible only if the candidate
+actually executed every timed iteration over the pinned parser/formatter
+output. Because each iteration's input is a nonce/iteration-keyed rotation of
+the frozen source, a candidate special-casing exact input bytes (including the
+recovery constructs) diverges at the rotated iterations and cannot match.
 
 Isolation model: every timed leg runs in a fresh cgroup2 measurement leaf
 (joined while root, before privilege drop) whose kernel memory.peak is the
@@ -34,12 +40,13 @@ subreaper) kills and reaps every candidate-uid process so no candidate residue
 runs while the reference leg is timed.
 
 Scoring model: per workload/mode the candidate and reference alternate over
-BENCH_BATCHES fresh-process legs; the score is a frozen anchor scaled by the
-geometric mean over workloads of the per-workload paired per-batch
-reference/candidate wall-time ratio (candidate and reference in one batch run
-back-to-back against the same instantaneous host load, so their ratio cancels
-common-mode contention within the pair and tightens as 1/sqrt(pairs)), so thin
-true margins survive noisy shared hosts.
+BENCH_BATCHES fresh-process legs with per-file repetitions frozen at ~0.6s of
+work per leg; the score is a frozen anchor scaled by the geometric mean over
+workloads of the per-workload MEDIAN per-pair reference/candidate wall-time
+ratio (candidate and reference in one batch run back-to-back against the same
+instantaneous host load, so the ratio cancels common-mode contention within
+the pair, and the median rejects pairs where a short burst hit only one leg),
+so thin true margins survive noisy shared hosts.
 """
 from __future__ import annotations
 
@@ -80,10 +87,11 @@ REFERENCE_RUNNER = Path("/opt/target-seed/release/hone_biome_bench")
 # measured ratio. The anchor is a constant, so it carries no host state.
 REFERENCE_ANCHOR_Q = 0.0769000486784732
 # Timed batches per binary per workload/mode. Each binary runs this many
-# times, strictly alternating with the other, and the estimator keeps each
-# binary's MINIMUM per-rep time — the least-contended sample. Larger batches
-# raise the chance both binaries catch a quiet instant on a loaded host.
-BENCH_BATCHES = 15
+# times, strictly alternating with the other; each batch contributes one
+# back-to-back candidate/reference pair to the median-of-pair-ratios
+# estimator. More batches tighten the median and raise the fraction of pairs
+# untouched by contention bursts on a loaded host.
+BENCH_BATCHES = 30
 # --- Trusted whole-tree memory accounting (CG) and per-leg kernel isolation
 # (NS). Docker mounts the container cgroup2 view read-only, but the evaluator
 # holds mount authority (CAP_SYS_ADMIN): a fresh cgroup2 instance over the
@@ -140,21 +148,6 @@ MUTABLE_CRATES = (
     "biome_css_formatter",
 )
 Q_FAIL = float(CHALLENGE["qFail"])
-
-# The regression suite the runner exercises under `selftest`. The runner never
-# decides pass/fail: it returns a nonce-keyed proof folded from every check's
-# protected structural probes, and this parent accepts the gate only when the
-# candidate proof equals the pristine reference runner's proof for the same
-# fresh nonce (see run_selftest). The list is informational only — the runner
-# owns the authoritative set and folds a check count into the proof.
-SELFTEST_CHECKS: tuple[str, ...] = (
-    "js-valid",
-    "js-recovery",
-    "js-format",
-    "css-valid",
-    "css-recovery",
-    "css-format",
-)
 
 
 def sha256(path: Path) -> str:
@@ -700,73 +693,6 @@ def seal_runner() -> None:
     RUNNER.chmod(0o755)
 
 
-def run_selftest(env: dict[str, str]) -> tuple[bool, str, float]:
-    """Gate the regression suite by proof vs pristine reference under a fresh
-    parent-drawn nonce — the same binding the benchmark path uses.
-
-    A zero exit alone is meaningless: candidate code linked into the runner
-    could exit early, and a fixed-input suite byte-compared to a frozen receipt
-    is precomputable offline. Instead the trusted parent draws a fresh nonce and
-    drives BOTH the candidate runner and the pristine reference runner over the
-    identical selftest checks with it. Each runner folds every check's
-    nonce-selected structural probes (parse-tree fingerprints/token shapes,
-    formatter output bytes) into a nonce-keyed proof returned over the
-    parent-owned stdout pipe. The gate passes only when the candidate proof
-    equals the pristine reference proof for that nonce, which is possible only
-    if the candidate actually executed every regression body over the pinned
-    grammar. A candidate broken on a selftest-only construct cannot match, and
-    the nonce is unknown at candidate build time so no offline-precomputed
-    receipt satisfies it.
-    """
-    started = time.monotonic()
-    if REFERENCE_RUNNER.is_symlink() or not REFERENCE_RUNNER.is_file():
-        raise RuntimeError("pristine reference runner is missing from the image")
-    nonce = secrets.randbits(63)
-    timeout = float(CHALLENGE["testTimeoutSec"])
-
-    reference = run_untrusted(
-        [str(REFERENCE_RUNNER), "selftest", str(nonce)], timeout=timeout, env=env
-    )
-    if reference.returncode != 0:
-        raise RuntimeError(
-            f"pristine reference selftest failed (exit {reference.returncode}): "
-            f"{cargo_failure(reference.stderr)}"
-        )
-    try:
-        reference_proof = parse_proof(reference.stdout)
-    except RuntimeError as exc:
-        raise RuntimeError(f"pristine reference selftest emitted no valid proof: {exc}") from exc
-
-    candidate = run_untrusted(
-        [str(RUNNER), "selftest", str(nonce)], timeout=timeout, env=env
-    )
-    reap_candidate_processes()
-    if candidate.returncode != 0:
-        return (
-            False,
-            f"regression suite failed (exit {candidate.returncode}): {cargo_failure(candidate.stderr)}",
-            time.monotonic() - started,
-        )
-    try:
-        candidate_proof = parse_proof(candidate.stdout)
-    except RuntimeError as exc:
-        return False, f"regression suite emitted no valid proof: {exc}", time.monotonic() - started
-    if candidate_proof != reference_proof:
-        return (
-            False,
-            "regression suite proof does not match the pristine reference: the "
-            "candidate did not reproduce every check's parse/format output over "
-            "the pinned grammar",
-            time.monotonic() - started,
-        )
-    return (
-        True,
-        f"upstream-derived JS/TS/CSS parser and formatter regression suite passed "
-        f"({len(SELFTEST_CHECKS)} checks, nonce-bound proof matches pristine reference)",
-        time.monotonic() - started,
-    )
-
-
 def run_measured_rss(argv: list[str], *, timeout: float, leaf_id: int) -> int:
     """Run a correctness/verify child and return its whole-tree peak RSS in
     KiB from the kernel cgroup memory.peak — not /usr/bin/time %M, which only
@@ -840,12 +766,21 @@ def benchmark(
     reference. Per workload/mode the candidate and the reference each run
     BENCH_BATCHES times in fresh measurement leaves and fresh per-leg mount/IPC
     namespaces, strictly alternating so both binaries sample the same
-    wall-clock window; the estimator is the contention-robust minimum of each
-    binary's per-rep times:
-        ratio = min(reference per-rep) / min(candidate per-rep)
-    and the score is the frozen anchor scaled by the geometric mean of the
-    per-workload/mode ratios:
+    wall-clock window; the estimator is the median of per-pair ratios:
+    each batch's candidate and reference legs run back-to-back against the
+    same instantaneous host load, so their per-rep ratio cancels common-mode
+    contention within the pair, and the per-workload ratio is
+        ratio = median(reference per-rep / candidate per-rep, per batch)
+    The median (unlike a mean/geomean of pairs) also rejects the pairs where
+    a contention burst shorter than the two-leg window hit only one leg —
+    the dominant residual noise on a shared host under sustained load.
+    Repetitions come from a frozen per-file table (challenge.json)
+    calibrated so every timed leg is ~0.6s of work regardless of file size,
+    equalizing each workload's exposure to load. The score is the frozen
+    anchor scaled by the geometric mean of the per-workload/mode ratios:
         q = REFERENCE_ANCHOR_Q * geomean(ratio per workload/mode)
+    (the reported per-workload measurement keeps min(candidate per-rep) as a
+    diagnostic only).
 
     Completion binding (ADAPTER/ITER): iteration selection and per-iteration
     validation live in the trusted parent, never in a candidate-authored file.
@@ -869,8 +804,14 @@ def benchmark(
     peak_rss = initial_peak_rss
     leaf_id = 1000
     for source in cases:
-        for mode, repetitions_key in (("parse", "parserRepetitions"), ("format", "formatterRepetitions")):
-            repetitions = int(CHALLENGE[repetitions_key])
+        for mode in ("parse", "format"):
+            # Frozen per-file repetition table (challenge.json), calibrated so
+            # every timed leg is ~0.6s of work regardless of file size: this
+            # equalizes each workload's exposure to host load (short legs are
+            # disproportionately noisy) and keeps each candidate/reference
+            # pair inside one narrow load window. Identical reps drive the
+            # candidate and the pristine reference, so the table adds no seam.
+            repetitions = int(CHALLENGE["repetitions"][source.name][mode])
             measured_nonce = secrets.randbits(63)
             warmup_nonce = secrets.randbits(63)
             candidate_ms: list[float] = []
@@ -909,16 +850,14 @@ def benchmark(
                     "candidate benchmark proof does not match the pristine reference: "
                     "the candidate did not execute every timed iteration over the pinned output"
                 )
-            # Paired per-batch geomean: candidate and reference legs in the
+            # Median of per-pair ratios: candidate and reference legs in the
             # same batch run back-to-back against the same instantaneous host
             # load, so their ratio cancels common-mode contention within each
-            # pair and tightens as 1/sqrt(pairs) — markedly tighter than
-            # min-of-N on this loaded shared host (A-A spread ~0.7% vs ~1.1%).
+            # pair; the median rejects pairs where a short burst hit only one
+            # leg, which mean/geomean estimators absorb.
             paired = [ref / cand for cand, ref in zip(candidate_ms, reference_ms)]
             measurements[f"{source.name}:{mode}"] = min(candidate_ms)
-            ratios[f"{source.name}:{mode}"] = math.exp(
-                statistics.fmean(math.log(value) for value in paired)
-            )
+            ratios[f"{source.name}:{mode}"] = statistics.median(paired)
     if not ratios or any(
         not math.isfinite(value) or value <= 0
         for value in list(ratios.values()) + list(measurements.values())
@@ -947,19 +886,13 @@ def evaluate() -> dict:
     if not built:
         return fail(build_detail)
     seal_runner()
-    log("gating regression suite by nonce-bound proof vs pristine reference")
-    tests_pass, test_detail, test_sec = run_selftest(env)
-    build_test_sec = build_sec + test_sec
-    log(f"build/test stage completed in {build_test_sec:.1f}s")
-    if not tests_pass:
-        return fail(test_detail)
     expected_paths = list(ASSETS.rglob("expected.json"))
     if len(expected_paths) != 1:
-        return fail("selected asset group must contain exactly one expected.json", tests_pass=True)
+        return fail("selected asset group must contain exactly one expected.json")
     expected_path = expected_paths[0]
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
     if expected.get("schema") != "hone-biome-expected-v2" or expected.get("sourceRevision") != CHALLENGE["sourceRevision"]:
-        return fail("expected-output oracle identity mismatch", tests_pass=True)
+        return fail("expected-output oracle identity mismatch")
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="hone-work-") as tmp_raw:
         work = Path(tmp_raw)
         work.chmod(0o755)
@@ -967,15 +900,28 @@ def evaluate() -> dict:
         try:
             mount_measurement_cgroup()
         except Exception as exc:
-            return fail(f"measurement cgroup unavailable: {exc}", tests_pass=True)
-        log("verifying exact output, diagnostics, and idempotence")
+            return fail(f"measurement cgroup unavailable: {exc}")
+        log("gating correctness: byte-exact output, diagnostics, and idempotence over the frozen corpus (incl. malformed-recovery JS/CSS and formatter edge constructs)")
+        test_started = time.monotonic()
         try:
-            cases, peak_rss = verify_cases(expected, expected_path.parent, work)
-            log(f"benchmarking {len(cases)} frozen files")
-            q, peak_rss, measurements, ratios = benchmark(expected, cases, work, peak_rss)
-            log("benchmark stage completed")
-        except Exception as exc:
-            return fail(str(exc), tests_pass=True)
+            try:
+                cases, peak_rss = verify_cases(expected, expected_path.parent, work)
+            except Exception as exc:
+                return fail(f"correctness gate failed: {exc}")
+            test_detail = (
+                f"correctness gate passed: {len(cases)} frozen workloads (valid JS/TS/CSS, "
+                f"malformed-recovery JS and CSS, formatter edge constructs) byte-exact, "
+                f"diagnostic-hash-exact, and idempotent vs the frozen oracle; benchmark "
+                f"iterations proof-bound to the pristine reference"
+            )
+            build_test_sec = build_sec + (time.monotonic() - test_started)
+            log(f"build/test stage completed in {build_test_sec:.1f}s")
+            try:
+                log(f"benchmarking {len(cases)} frozen files")
+                q, peak_rss, measurements, ratios = benchmark(expected, cases, work, peak_rss)
+                log("benchmark stage completed")
+            except Exception as exc:
+                return fail(str(exc), tests_pass=True)
         finally:
             unmount_measurement_cgroup()
     rss_limit = int(CHALLENGE["rssLimitKb"])
@@ -1000,7 +946,7 @@ def evaluate() -> dict:
         "perExample": {
             "aggregate": {
                 "score": q,
-                "feedback": f"{len(cases)} frozen files; anchor-scaled geometric mean of paired per-batch reference/candidate wall-time ratios, proof-cross-checked against the pristine reference",
+                "feedback": f"{len(cases)} frozen files; anchor-scaled geometric mean of median per-pair reference/candidate wall-time ratios, proof-cross-checked against the pristine reference",
             }
         },
         "diagnostics": {

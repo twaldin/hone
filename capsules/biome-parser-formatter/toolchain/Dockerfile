@@ -31,7 +31,12 @@ ENV CARGO_NET_OFFLINE=true \
 WORKDIR /opt/biome
 RUN cargo generate-lockfile --offline \
     && CARGO_TARGET_DIR=/opt/target-seed cargo build --locked --offline --release -p hone_biome_bench \
-    && /opt/target-seed/release/hone_biome_bench selftest \
+    && printf 'html{color:red}\n.smoke-100 .part-200 { margin: 1px }\nhtml { color:\n' > /tmp/hone-smoke.css \
+    && /opt/target-seed/release/hone_biome_bench verify /tmp/hone-smoke.css /tmp/hs-o /tmp/hs-s /tmp/hs-d \
+    && cmp /tmp/hs-o /tmp/hs-s \
+    && /opt/target-seed/release/hone_biome_bench parse /tmp/hone-smoke.css 3 7 \
+    && /opt/target-seed/release/hone_biome_bench format /tmp/hone-smoke.css 3 7 \
+    && rm -f /tmp/hone-smoke.css /tmp/hs-o /tmp/hs-s /tmp/hs-d \
     && rm -f /opt/target-seed/release/.cargo*lock \
     && test ! -e /opt/biome/.git \
     && chmod -R a+rX /opt/biome /opt/vendor /opt/target-seed

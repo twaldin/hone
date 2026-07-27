@@ -1,6 +1,6 @@
 {
   "objective": "Improve JavaScript, TypeScript, and CSS parser/formatter throughput across frozen deterministic large files. Preserve byte-exact formatted output, parser diagnostic hashes, idempotence, relevant parser/formatter regression tests, and peak RSS within 2% of baseline. Only the four pinned parser/formatter crate src trees are mutable.",
-  "image": "hone-biome-task@sha256:3f9d353488d99f754a5834534cd7daf1c1368704ee6fb62b38d21f5885f7810f",
+  "image": "hone-biome-task@sha256:c3f82bd01e58fee98a71624e881838ce40270cc86ae0e775edf784e780ac0184",
   "evalEntrypoint": [
     "python3",
     "-I",
@@ -47,7 +47,7 @@
       "evidence": "diagnostics/admission-evidence.json#seedPilots"
     },
     "license": "MIT OR Apache-2.0; upstream notices preserved in baseline/LICENSES and image; generated workloads are CC0-1.0",
-    "provenance": "Pinned Biome 8ebafe1c7489f1f7af379b8e52b8ad063c82d28a. Workload operations reproduce the uncached parse and format-node/print paths of the upstream JS, TS, and CSS Criterion benches. Third-party CDN benchmark inputs were not redistributed; deterministic large JS/TS/CSS and recovery sources were generated and frozen instead. qReference is constructed after locked A-A calibration as qBase + max(5*sigma, 0.05*abs(qBase-qFail)).",
+    "provenance": "Pinned Biome 8ebafe1c7489f1f7af379b8e52b8ad063c82d28a. Workload operations reproduce the uncached parse and format-node/print paths of the upstream JS, TS, and CSS Criterion benches. Third-party CDN benchmark inputs were not redistributed; deterministic large JS/TS/CSS and recovery sources were generated and frozen instead. Round-6: deliberately malformed recovery CSS and formatter edge constructs (previously exercised only by a separate fixed-input selftest mode) are folded into the scored corpus as train/validation recovery.css, so parser error-recovery and formatter edge behavior run under the same nonce-seeded per-iteration input rotation and proof-vs-pristine-reference binding as every other workload, on the timed candidate-indistinguishable path; the separate 'selftest' runner mode was removed. qReference is constructed after locked A-A calibration as qBase + max(5*sigma, 0.05*abs(qBase-qFail)).",
     "sourceDetails": {
       "repository": "biomejs/biome",
       "revision": "8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
@@ -70,15 +70,15 @@
     "measurement": {
       "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local calibration",
       "freshProcess": true,
-      "samplesPerWorkload": 15,
+      "samplesPerWorkload": 30,
       "aaSamples": 3,
-      "q": "frozen anchor (qBase) scaled by the geometric mean over parse/format workloads of the paired per-batch reference/candidate wall-time ratio; per workload the candidate and the pristine in-container reference alternate over BENCH_BATCHES=15 fresh-process legs, and each batch's candidate leg is paired with the reference leg run back-to-back against the same instantaneous host load so common-mode contention cancels within the pair; every timed iteration is bound to the pristine reference via a nonce-keyed proof",
+      "q": "frozen anchor (qBase) scaled by the geometric mean over parse/format workloads of the MEDIAN per-pair reference/candidate wall-time ratio; per workload the candidate and the pristine in-container reference alternate over BENCH_BATCHES=30 fresh-process legs, each batch's candidate leg paired with the reference leg run back-to-back against the same instantaneous host load so common-mode contention cancels within the pair, and the median over pairs rejects pairs where a contention burst hit only one leg; repetitions come from a frozen per-file table (challenge.json) calibrated so every timed leg is ~0.6s of work, equalizing each workload's exposure to load; every timed iteration is bound to the pristine reference via a nonce-keyed proof",
       "qFail": 1e-12,
       "qBase": 0.0769000486784732,
-      "sigma": 0.0001135,
+      "sigma": 0.00019408050558115806,
       "qReference": 0.08074505111234687,
       "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-      "rssGate": "peak workload RSS <= frozen ceiling rssLimitKb (28000 KiB); round-4 recalibrated for the whole-tree kernel cgroup memory.peak accounting (replacing /usr/bin/time %M), ~1.11x the observed baseline whole-tree peak (~25168 KiB train / ~19244 KiB validation) so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
+      "rssGate": "peak workload RSS <= frozen ceiling rssLimitKb (28000 KiB); whole-tree kernel cgroup memory.peak accounting; round-6 observed baseline whole-tree peaks with the recovery.css corpus entries: ~24452 KiB train / ~23644 KiB validation (ceiling ~1.15x), so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
     },
     "tags": [
       "m2",

@@ -1,22 +1,22 @@
 {
-  "capsuleId": "cap_e841b539d02d",
-  "capsuleDigestNote": "evidence attests the frozen manifest identity above. Round-5 changed ONLY the selftest regression gate (candidate-forgeable frozen-receipt byte-compare -> nonce-bound proof cross-checked against the pristine reference runner); the benchmark/scoring path (eval.py benchmark(), paired-geomean over 15 batches, challenge.json params) and all five diagnostic-control sources are byte-identical to round-4, and the image rebuild preserved the benchmark parse/format/verify bytes, so the two consecutive round-4 ordering passes are carried forward unchanged (diagnostics/ordering-report.json hash unchanged from round-4).",
+  "capsuleId": "cap_b3f2a63d192b",
+  "capsuleDigestNote": "evidence attests the frozen manifest identity above. Round-6 folded the previously gate-only malformed/recovery CSS and formatter edge constructs into the scored corpus (train/validation recovery.css), removed the separate fixed-input gate mode from the harness argv surface, and hardened the estimator for the sustained-load shared host (median of per-pair ratios over 30 strictly alternating fresh-process legs, with a frozen per-file repetition table calibrated to ~0.6s of work per leg); the corpus, benchmark params and estimator changed, so BOTH ordering passes below are fresh round-6 measurements (no carry-forward).",
   "feasibility": {
     "note": "clean candidate build + full eval well under capsule wall-clock; see build_test_sec in evaluator diagnostics"
   },
   "aa": {
     "aggregates": [
-      0.0767129004715984,
-      0.07686509335726381,
-      0.07693487276932176
+      0.07674458715515423,
+      0.07703862803180603,
+      0.07711105394246615
     ],
-    "spread": 0.002888849125853213,
+    "spread": 0.004761488304066556,
     "band": 0.15,
-    "note": "baseline stability re-measurements from round-4 ordering pass 2; paired per-batch reference/candidate geomean over 15 batches (contention cancels within each back-to-back pair), so the A-A spread tightened from ~0.0141 (round-2 min-of-N, 9 batches) to ~0.0029"
+    "note": "baseline stability re-measurements from round-6 ordering pass 2 (corpus includes the recovery.css workloads); median per-pair reference/candidate ratio over 30 strictly alternating fresh-process legs with per-file repetitions frozen at ~0.6s of work per leg \u2014 contention cancels within each back-to-back pair and the median rejects pairs where a burst hit only one leg"
   },
   "qFail": 1e-12,
   "qReference": 0.08074505111234687,
-  "qReferenceNote": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)); the 5% floor dominates (5*sigma=0.00057 << 0.05*qBase=0.00385), so qReference = qBase*1.05, unchanged from round-2. Provisional (P6 host recalibration DEFERRED); pilots compared descriptively against this frozen value",
+  "qReferenceNote": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)); the 5% floor dominates (5*sigma=0.00097 vs 0.05*qBase=0.00385). Provisional (P6 host recalibration DEFERRED); pilots compared descriptively against this frozen value",
   "controls": [
     {
       "id": "broken",
@@ -26,24 +26,24 @@
     },
     {
       "id": "naive",
-      "combined": 0.05401954333655701,
+      "combined": 0.05035995077882638,
       "correct": true,
       "purpose": "bounded CPU delay in parser entrypoints is slower but byte-exact"
     },
     {
       "id": "baseline",
-      "combined": 0.0767129004715984,
+      "combined": 0.07674458715515423,
       "correct": true
     },
     {
       "id": "improved",
-      "combined": 0.07791829848203341,
+      "combined": 0.07816024453503399,
       "correct": true,
-      "purpose": "independently authored parser fast-paths (JS whitespace + ASCII-identifier + decimal-integer lexer fast paths + trivia preallocation, CSS identifier fast path); each parse uncached, byte-exact and nonce-proof-identical to baseline. Combined +1.57% over baseline (train +1.65%, validation +1.49%), clearing the tightened A-A spread by a wide margin"
+      "purpose": "independently authored parser fast-paths (JS whitespace + ASCII-identifier + decimal-integer lexer fast paths + trivia preallocation, CSS identifier fast path); each parse uncached, byte-exact and nonce-proof-identical to baseline over the round-6 corpus including the recovery.css workloads. Combined margin over baseline: pass1 +0.70%, pass2 +1.84%"
     },
     {
       "id": "shortcut",
-      "trainCombined": 0.07795031804396949,
+      "trainCombined": 0.07742577931188807,
       "validationCombined": 1e-12,
       "gated": true,
       "purpose": "improved's genuine parser fast paths plus a first-call validation-marker panic; beats baseline on train but panics on the protected validation split (split-inverting)"
@@ -52,7 +52,7 @@
   "perturbation": {
     "id": "improved",
     "valid": true,
-    "combined": 0.07791829848203341,
+    "combined": 0.07816024453503399,
     "movesMetric": true,
     "mutableFiles": [
       "mutable/biome_js_parser/src/lexer/mod.rs",
@@ -62,24 +62,24 @@
     ]
   },
   "rss": {
-    "baselinePeakKb": 25168,
+    "baselinePeakKb": 24452,
     "limitKb": 28000,
-    "construction": "round-4 whole-tree kernel cgroup memory.peak accounting (replaces /usr/bin/time %M); ceiling ~1.11x the observed baseline whole-tree peak (25168 KiB train, 19244 KiB validation) so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
+    "construction": "whole-tree kernel cgroup memory.peak; round-6 observed baseline peaks over the corpus including recovery.css: 24452 KiB train / 23644 KiB validation; frozen ceiling 28000 KiB (~1.15x) unchanged"
   },
   "ordering": {
     "consecutivePassingRuns": 2,
-    "lastStabilitySpread": 0.002888849125853213,
+    "lastStabilitySpread": 0.004761488304066556,
     "band": 0.15,
     "brokerEvalInvocationsPerRun": 14,
-    "verdicts": "broken<naive<baseline<improved on the combined aggregate; shortcut beats baseline on train and panics on the protected validation split (split-inverting); both round-4 passes clean (stability spreads 0.0030 then 0.0029; improved combined margin +0.87% then +1.57%, both splits positive)",
-    "selftestGate": "round-5 correctness-gate hardening (benchmark/scoring path UNCHANGED from round-4): the regression suite is now gated the SAME way as the benchmark. The trusted parent draws a fresh 63-bit nonce and drives BOTH the candidate runner and the pristine /opt/target-seed reference with 'selftest <nonce>'; each runner folds every check's nonce-selected structural probes (parse-tree fingerprint/element+diagnostic counts/trimmed range/token kind+range+text for parse checks; full output bytes + nonce-selected byte probes for format checks) into a nonce-keyed FNV proof over the parent-owned stdout pipe, and the gate passes only when candidate proof == reference proof for that nonce. Replaces the round-4 candidate-forgeable frozen-receipt byte-compare (SELFTEST_RECEIPTS), which a candidate over-fit to the corpus but broken on a selftest-only construct could precompute offline. Verified gaming-resistant: a runner returning a precomputed proof for a guessed nonce is rejected (proof mismatch under the fresh nonce) while an honest runner passes. Confined to eval.py run_selftest + harness selftest_fold/fold_parse_probe/fold_format_probe/selftest_proof + the 'selftest' CLI arm.",
-    "measurementNote": "round-4 hardening: (ADAPTER) iteration selection + per-iteration validation live in the trusted parent, never in a candidate-authored completion file — the parent draws a fresh per-sample nonce, drives both the candidate and the pristine /opt/target-seed reference with it, and each folds every timed iteration's protected probe observations into a nonce-keyed proof returned over the parent-owned stdout pipe; a sample counts only when the candidate proof equals the reference proof for that nonce, so a process that computed the base once and exited cannot be credited. (EST) score = manifest qBase anchor * geomean over workloads of the PAIRED per-batch reference/candidate wall-time ratio (candidate+reference legs in one batch run back-to-back against the same instantaneous host load), which cancels common-mode contention within each pair and tightened the A-A spread ~5x vs round-2 min-of-N. (NS) every timed leg runs in a fresh mount+IPC namespace with a brand-new /tmp, /dev/shm and /var/tmp; the untimed warmup uses a distinct nonce so it cannot satisfy a scored leg. (CG) peak RSS is the whole-tree kernel cgroup memory.peak. Between legs the evaluator (a subreaper) reaps every candidate-uid process and drains the measurement leaf.",
-    "imageLineage": "round-5 image rebuilt from the pinned biome checkout + round-5 harness (hone-biome-task@sha256:3f9d353488d99f754a5834534cd7daf1c1368704ee6fb62b38d21f5885f7810f); the rebuild changed ONLY the harness selftest code path, so the benchmark parse/format/verify bytes and the pristine reference runner baked at /opt/target-seed are behaviorally identical to the round-4 image (hone-biome-task@sha256:2bebe81ed96099216d1516f3457b95956956dce08303caf41ba775c21c9bcc44) in which the two consecutive ordering passes were measured — hence those passes are carried forward. The trusted evaluator (python3 eval.py, uid 2000, sealed Rust runner, cgroup memory.peak, no /usr/bin/time) never loads node/bun/pi_natives."
+    "verdicts": "broken<naive<baseline<improved on the combined aggregate; shortcut beats baseline on train and panics on the protected validation split (split-inverting); both round-6 passes clean (stability spreads 0.0114 then 0.0048; improved combined margin +0.70% then +1.84%)",
+    "measurementNote": "round-4 hardening retained: (ADAPTER) iteration selection + per-iteration validation live in the trusted parent, never in a candidate-authored completion file \u2014 the parent draws a fresh per-sample nonce, drives both the candidate and the pristine /opt/target-seed reference with it, and each folds every timed iteration's protected probe observations into a nonce-keyed proof returned over the parent-owned stdout pipe; a sample counts only when the candidate proof equals the reference proof for that nonce, so a process that computed the base once and exited cannot be credited. (EST, round-6) score = manifest qBase anchor * geomean over workloads of the MEDIAN per-pair reference/candidate wall-time ratio over 30 strictly alternating fresh-process legs (candidate+reference legs in one batch run back-to-back against the same instantaneous host load, so common-mode contention cancels within the pair; the median rejects pairs where a contention burst hit only one leg), with a frozen per-file repetition table calibrated so every timed leg is ~0.6s of work, equalizing each workload's exposure to load (the previous global per-mode repetitions left the recovery workloads' legs at ~0.1-0.25s, disproportionately noisy under load). (NS) every timed leg runs in a fresh mount+IPC namespace with a brand-new /tmp, /dev/shm and /var/tmp; the untimed warmup uses a distinct nonce so it cannot satisfy a scored leg. (CG) peak RSS is the whole-tree kernel cgroup memory.peak. Between legs the evaluator (a subreaper) reaps every candidate-uid process and drains the measurement leaf. Round-6: the scored corpus adds train/validation recovery.css (malformed/recovery CSS + formatter edge constructs), timed and proof-bound identically to every other workload.",
+    "imageLineage": "round-6 image rebuilt from the pinned biome checkout + round-6 harness (hone-biome-task@sha256:c3f82bd01e58fee98a71624e881838ce40270cc86ae0e775edf784e780ac0184); the rebuild removed the separate fixed-input gate mode from the harness (verify/parse/format paths untouched) and the pristine reference runner baked at /opt/target-seed is rebuilt from the same frozen baseline sources. The corpus and harness argv surface changed, so both ordering passes were re-measured fresh in THIS image (no carry-forward from round-4/5). Oracle regen in this image reproduced the committed expected.json byte-identically for both splits.",
+    "correctnessGate": "round-6: the previously gate-only malformed/recovery CSS and formatter edge constructs are folded into the scored corpus itself (train/validation recovery.css: dangling-combinator, malformed hash value, empty rule, empty declaration value, missing-colon bogus-declaration recovery, and the truncated-at-EOF construct), and the separate fixed-input gate mode was REMOVED from the harness argv surface (remaining shapes: 'verify IN OUT SECOND DIAG' and '(parse|format) INPUT REPS NONCE' \u2014 gate and bench identical, no candidate-distinguishable mode). Correctness gate = verify_cases over the frozen corpus (byte-exact output + diagnostic hash + idempotence per file, recovery.css included), and the same constructs run on the TIMED path under the nonce-seeded per-iteration input rotation with proof-vs-pristine-reference binding: input special-casing fails because every iteration >= 1 parses a nonce/iteration-keyed rotated variant whose probes bind the tree to THIS iteration's source, and a recovery-mishandling CSS tokenizer now fails BOTH the verify oracle and the benchmark proof cross-check (demonstrated: a diagnostic-only change reachable solely via malformed-CSS recovery -> valid=false, 'diagnostic hash gate failed: recovery.css')."
   },
   "seedPilots": {
     "requirement": "gate-7 development-train headroom: three two-episode seed-optimizer pilots; at least one valid non-baseline candidate; fewer than three runs reach qReference",
     "authority": "trusted supervisor + local backend + broker measurement path under trusted synthetic-meta authority (admissionReview off); no admission receipts, no optimizer-queryable corpus state",
-    "note": "pilots are descriptive prior-harness headroom evidence (P6 host recalibration DEFERRED); the qualitative result (valid non-baseline candidates produced, none reaching the 5% qReference floor) is invariant under the round-4 estimator change",
+    "note": "pilots are descriptive prior-harness headroom evidence (P6 host recalibration DEFERRED); the qualitative result (valid non-baseline candidates produced, none reaching the 5% qReference floor) is invariant under the round-4 estimator change and the round-6 corpus fold-in (recovery.css adds ~5% corpus bytes; the anchor is ratio-normalized by construction)",
     "model": "gpt-5.6-terra",
     "pilots": [
       {
