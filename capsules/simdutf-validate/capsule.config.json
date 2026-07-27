@@ -64,8 +64,9 @@
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
       "activeImplementation": "arm64 (NEON)",
       "q": "geometric mean over the frozen corpus files of the per-file candidate/reference speed ratio for combined UTF-8 validation + UTF-8->UTF-16LE transcoding; each file ratio is a min-of-N estimator (min candidate wall over N alternating reps / min reference wall), the contention-robust choice for ~1s legs under the shared Docker VM's persistent background contention (the differential load a within-pair geomean cannot cancel); wall measured in the trusted evaluator parent around a runner that dlopens the candidate ONLY after control-channel auth and reports no timing; the reference library is built from frozen trusted sources and timed adjacently; never a self-reported number from candidate-linked code. Timed iterations are byte-distinct: the trusted runner rewrites a sparse rotating subset of code points to same-length valid code points before every iteration after the first, and folds every iteration's verdict+transcoded bytes into a go-time-nonce-bound digest validated against the reference.",
+      "equalCoreBudget": "every measured launch (reference and candidate legs alike) is clamped to the same single fixed CPU by the per-launch cgroup leaf's cpuset.cpus (kernel-owned; the demoted uid cannot write the control file and sched_setaffinity from inside is clamped to the cpuset), so a thread-parallel candidate cannot buy wall-clock throughput with cores the single-threaded reference never uses; preexec sched_setaffinity is the non-cgroup developer fallback",
       "qFail": 0.0,
-      "peakRssGate": "candidate whole-tree peak RSS <= per-split frozen baseline (protected asset) * 1.05, measured as the kernel-owned cgroup2 memory.peak of a fresh per-launch leaf the candidate subtree joins before the privilege drop",
+      "peakRssGate": "candidate whole-tree peak RSS <= per-split frozen baseline (protected asset) * 1.05, measured as the kernel-owned cgroup2 memory.peak of a fresh per-launch leaf the candidate subtree joins before the privilege drop; the baseline is frozen near the observed whole-tree baseline peak (max over all launches of a full baseline eval, plus a small cross-run noise margin) so the gate binds against the true baseline on both splits",
       "freshProcess": true,
       "validationOracle": "the in-eval trusted reference (built from sealed trusted sources, never candidate-linked) is the pristine payload + perturbed-digest oracle; each candidate launch runs in a fresh SysV-IPC namespace and candidate-writable residue (/tmp, /var/tmp, /dev/shm, SysV IPC) is purged between launches",
       "normalization": {
@@ -73,7 +74,7 @@
         "qBase": 1.000997,
         "sigma": 0.011337,
         "qReference": 1.057683,
-        "status": "2x-consecutive bench-locked ordering (min-of-N, 8-lane fold, whole-tree cgroup memory.peak); qBase/sigma from 6 baseline A-A aggregates; improved clears baseline by +14.7% (12.9 sigma); final frozen like-for-like re-calibration required"
+        "status": "provisional-local: 2x-consecutive bench-locked ordering on Apple M3 Max Docker (min-of-N, 8-lane fold, whole-tree cgroup memory.peak, single-core cpuset pin); qBase/sigma frozen from the pre-pin 6 baseline A-A aggregates; re-freeze via the planned like-for-like GCE re-baseline governs promotion (gate promotion on normalization.status==final)"
       }
     },
     "tags": [

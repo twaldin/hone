@@ -38,6 +38,13 @@ Gaming-resistance model
 * Whole-tree peak memory is the kernel-owned cgroup2 ``memory.peak`` of a fresh
   per-launch leaf; candidate-writable residue (/tmp, /var/tmp, /dev/shm, SysV
   IPC) is purged and a fresh SysV-IPC namespace entered between launches.
+* Equal core budget. Both legs of every pair -- reference AND candidate -- run
+  confined to the SAME single CPU: each per-launch cgroup leaf pins
+  ``cpuset.cpus`` to one fixed core (kernel-owned control file the demoted uid
+  cannot write; ``sched_setaffinity`` from inside is clamped to it), so a
+  candidate cannot buy wall-clock throughput by fanning threads across cores
+  the single-threaded reference never uses -- improvements must reduce
+  single-core work.
 """
 from __future__ import annotations
 
@@ -67,13 +74,15 @@ COMPILE_ROOT = Path("/tmp/candidate-source")
 WORKER_UID = 2000
 Q_FAIL = float(CHALLENGE["qFail"])
 
-# Whole-tree memory accounting authority: a fresh root-only cgroup2 hierarchy
-# the trusted evaluator mounts (CAP_SYS_ADMIN is granted for exactly this). Each
-# candidate launch joins a per-launch leaf BEFORE the privilege drop, so the
-# WHOLE candidate process tree (exited children included) is charged to a cgroup
-# whose control files the demoted uid can never write; memory.peak is
-# kernel-owned and monotone. When the cgroup is unavailable (non-root / non-
-# linux developer runs) the launch falls back to a wait4 ru_maxrss reading.
+# Whole-tree memory + CPU accounting authority: a fresh root-only cgroup2
+# hierarchy the trusted evaluator mounts (CAP_SYS_ADMIN is granted for exactly
+# this). Each candidate launch joins a per-launch leaf BEFORE the privilege
+# drop, so the WHOLE candidate process tree (exited children included) is
+# charged to a cgroup whose control files the demoted uid can never write;
+# memory.peak is kernel-owned and monotone, and the leaf's cpuset clamps the
+# whole subtree (threads included) to the single bench CPU. When the cgroup is
+# unavailable (non-root / non-linux developer runs) the launch falls back to a
+# wait4 ru_maxrss reading and a preexec sched_setaffinity pin.
 CGROUP_ROOT = Path("/tmp/hone-simdutf-cg")
 CGROUP_TRUSTED = CGROUP_ROOT / "trusted"
 CGROUP_DRAIN_SEC = 10
@@ -82,6 +91,13 @@ _CGROUP_ACTIVE = False
 CANDIDATE_WRITABLE_ROOTS = (Path("/tmp"), Path("/var/tmp"), BUILD_ROOT)
 CLONE_NEWIPC = 0x08000000
 _LIBC = ctypes.CDLL(None, use_errno=True)
+# Equal-core-budget pin: one fixed CPU (lowest in this evaluator's own mask)
+# for every worker launch, reference and candidate legs alike. Enforced by the
+# per-launch cgroup leaf's cpuset (kernel-owned; a candidate-controlled process
+# can re-widen a plain scheduler affinity mask, but never its cpuset); the
+# preexec sched_setaffinity below is the non-cgroup developer fallback.
+BENCH_CPU = (min(os.sched_getaffinity(0))
+             if hasattr(os, "sched_getaffinity") else 0)
 
 
 class GateFailure(RuntimeError):
@@ -125,7 +141,7 @@ def checked(command, timeout, label, *, unprivileged=False):
 
 
 # --------------------------------------------------------------------------
-# cgroup2 whole-tree memory accounting
+# cgroup2 whole-tree memory accounting + single-core cpuset pin
 # --------------------------------------------------------------------------
 def _cgroup_available() -> bool:
     return sys.platform.startswith("linux") and os.geteuid() == 0
@@ -150,6 +166,7 @@ def _mount_measurement_cgroup() -> None:
         CGROUP_TRUSTED.mkdir(mode=0o755)
         (CGROUP_TRUSTED / "cgroup.procs").write_text(str(os.getpid()))
         (CGROUP_ROOT / "cgroup.subtree_control").write_text("+memory")
+        (CGROUP_ROOT / "cgroup.subtree_control").write_text("+cpuset")
     except OSError as exc:
         raise GateFailure("trusted measurement cgroup setup failed") from exc
     _CGROUP_ACTIVE = True
@@ -196,6 +213,10 @@ def _make_worker_preexec(leaf_procs=None, fresh_ipc=False):
         resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30))
         resource.setrlimit(resource.RLIMIT_FSIZE, (64 << 20, 64 << 20))
         resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+        # Equal-core-budget pin (developer fallback; under the cgroup the
+        # per-launch leaf's cpuset is the binding authority).
+        if hasattr(os, "sched_setaffinity"):
+            os.sched_setaffinity(0, {BENCH_CPU})
         if leaf_procs is not None:
             fd = os.open(leaf_procs, os.O_WRONLY)
             try:
@@ -429,6 +450,10 @@ def run_leg(runner: Path, so: Path, corpus_file: Path, iters: int,
     if _CGROUP_ACTIVE:
         leaf = CGROUP_ROOT / f"leaf-{nonce}"
         leaf.mkdir(mode=0o755, exist_ok=False)
+        # Kernel-enforced equal-core budget: the leaf's cpuset clamps the whole
+        # launch subtree (threads included) to the single bench CPU before any
+        # candidate code is mapped; the demoted uid cannot widen it.
+        (leaf / "cpuset.cpus").write_text(str(BENCH_CPU))
     leaf_procs = str(leaf / "cgroup.procs") if leaf is not None else None
     buf = bytearray()
     max_rss_kb = 0

@@ -1,1 +1,1 @@
-simdutf-validate: 8-lane fold (fold no longer dominates), heavier defensive baseline vs streamlined improved (~1.12x genuine margin), min-of-N
+simdutf-validate: single-core equal-budget cpuset pin on every measured leg (kernel-owned; preexec affinity as dev fallback)
