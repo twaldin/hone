@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_93d26c3e75ff",
+  "id": "cap_8d3fae739309",
   "objective": "Improve geometric-mean throughput across the frozen prop_read, array_read, int_arith, regexp_ascii, prop_update, typed_array_read, float_arith, and regexp_utf16 cases selected from upstream tests/microbench.js plus fresh-process ES-module startup. The split-specific pinned Test262 subset, byte-exact observable and module outputs, and stripped qjs binary size no greater than baseline plus 1% are hard gates. Only the interpreter, numeric conversion, regexp, Unicode, utility, and their public/internal header files enumerated by sourceDetails.mutableEnvelope are mutable; the CLI, clock provider, build, evaluator, tests, and workloads are protected.",
   "baseline": {
     "kind": "git",
-    "commit": "08e4bb7a9ed35657ac4fe1bc63ba42feb474d3e7"
+    "commit": "4583a74462039d09fe6aa2a9ccebee283356d856"
   },
   "image": "hone-quickjs-interpreter@sha256:a6d66620ed213b953131398eb5ada2c6494f296a7dcd99024d0cca4362c48b6b",
   "evalEntrypoint": [
@@ -110,10 +110,10 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:a4a7d245873e191de8668357b03e8370c057588156d7792dba95beb6de39bb52"
+    "hash": "sha256:323603a491016c24a83a74bd3e8a83e43296edfdf71ccd85da41320b680da61e"
   },
   "contentHashes": {
-    "assets/train/benchmark.js": "sha256:878ea2ba3e85e32a1f9f9cb42354eac00ed4a30a6ccfdebd9e5b9ae5b89f3905",
+    "assets/train/benchmark.js": "sha256:ae3b102788f8daece69ae2cc170a3364d5115226151e2ad599c242f6b55f1c47",
     "assets/train/module-lib.js": "sha256:4071f9d91488a57aea72aad127effae3698c4238d33c7155e8579d31c850b586",
     "assets/train/module-main.js": "sha256:611f04f33c27d54ee63f737a99de9c93b0c3d8d79f06d82623f7c3358c15c384",
     "assets/train/observable.js": "sha256:43a20dd3f20eeedba1d6979a6a215b5d74942e89085be23be6423f995da1ab60",
@@ -130,8 +130,8 @@
     "assets/train/test262/test/built-ins/RegExp/prototype/exec/S15.10.6.2_A4_T2.js": "sha256:147c06e3bd746b82c42229f99aa88bf381bd2cf2d615e0185df01ea185df66b6",
     "assets/train/test262/test/built-ins/String/prototype/replace/regexp-capture-by-index.js": "sha256:add5ce9e21929278979c3a02da48658a1e83b3085011faa63395ca8415ba0892",
     "assets/train/test262/test/built-ins/TypedArray/prototype/set/typedarray-arg-set-values-diff-buffer-same-type.js": "sha256:136906138ce5ebcb3d102c980f7a9edc1827781c17530d697b5f626db40e5bd0",
-    "assets/train/workload.json": "sha256:7b16806bef3698c13faf3df2e2e3bceff621e473416ac1bb133a2078cbd3fbac",
-    "assets/validation/benchmark.js": "sha256:89eb4a46ccc5fd5822b069d025f11aed9892373fc912e724857734ac6f7a248b",
+    "assets/train/workload.json": "sha256:2fafbe5880a2bd0204decf7d26d014a730a7ed2f7b4e1ce3b0cdeb552279c88a",
+    "assets/validation/benchmark.js": "sha256:ae3b102788f8daece69ae2cc170a3364d5115226151e2ad599c242f6b55f1c47",
     "assets/validation/module-lib.js": "sha256:6ce0bb3389557cd0048a433f4bfa11dfa49904c5b7a66f6b630b43da4664174c",
     "assets/validation/module-main.js": "sha256:ef115a4d030e47248fef7809560f57b15ef52eebea577992a4a5d7f7a306b7d8",
     "assets/validation/observable.js": "sha256:539765d4eb2f68b71acf0265cea0f842d7873a56d5631465798977ba2a2e7cb5",
@@ -148,11 +148,11 @@
     "assets/validation/test262/test/built-ins/RegExp/prototype/exec/success-lastindex-access.js": "sha256:7ddd6c9d3d49939a60149769745ada98d48277d3b04192239194c0553e8ab5a7",
     "assets/validation/test262/test/built-ins/String/prototype/replace/replaceValue-evaluation-order.js": "sha256:441f90651898c5ec49946f4b1d2c63e8183f608262c79c843caf0d9f1573f3b7",
     "assets/validation/test262/test/built-ins/TypedArray/prototype/set/typedarray-arg-set-values-same-buffer-same-type.js": "sha256:1a2d2f5f8c2945f16ca2f6a70a950e59c2ad72a39024e848c36800446423f38d",
-    "assets/validation/workload.json": "sha256:86df9f7db9be0675abb3fc36b4306c1d76eef5182c58ca587b2e11ad840bd032"
+    "assets/validation/workload.json": "sha256:fbb3acd53ab57de0543e7dbbe1317d6a89574668250d18d8898eba309de947e0"
   },
   "meta": {
     "evaluatorSource": "user",
-    "provenance": "bellard/quickjs at exact revision 04be246001599f5995fa2f2d8c91a0f198d3f34c; tc39/test262 subset at exact revision 5c8206929d81b2d3d727ca6aac56c18358c8d790; train and validation are terminal-holdout assets; no reference patch exists; trusted interleaved fresh-process A-A samples [7399427.332942024,7287042.742972397,7362474.050488209] give qBase=7349648.0421342105 and sample sigma=57279.61141089313; qReference=7349648.0421342105+max(5*57279.61141089313,0.05*abs(7349648.0421342105-0))=7717130.444240921; the independently authored inline float64/int remainder fast path (OP_mod) passes every gate and moves q to 7971037.581866469 (+8.5%, clears qReference) without entering any optimizer-visible state",
+    "provenance": "bellard/quickjs at exact revision 04be246001599f5995fa2f2d8c91a0f198d3f34c; tc39/test262 subset at exact revision 5c8206929d81b2d3d727ca6aac56c18358c8d790; train and validation are terminal-holdout assets; no reference patch exists; trusted interleaved fresh-process A-A samples pooled from both consecutive round-6 ordering passes [7365061.121205876,7352686.634846462,7352967.479602715,7447376.332557475,7461647.941295219,7476436.265754106] give qBase=7409362.629210308 and sample sigma=58365.8685689724; qReference=7409362.629210308+max(5*58365.8685689724,0.05*abs(7409362.629210308-0))=7779830.760670824; the independently authored inline float64/int remainder fast path (OP_mod) passes every gate and moves q to 7795852.605009422 (+5.2%, 6.6 sigma above qBase, clears qReference) without entering any optimizer-visible state",
     "license": "MIT (bellard/quickjs LICENSE preserved); BSD-3-Clause (tc39/test262 LICENSE preserved with every frozen split)",
     "tags": [
       "m2",
@@ -194,19 +194,22 @@
     "measurement": {
       "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
       "freshProcess": true,
-      "q": "reference-normalized geometric mean operations per trusted external wall-second over four split-specific streamed derivatives of upstream microbench.js plus median-of-3-rounds ES-module startup throughput (fastest 16 of each round's 31 trusted-timed fresh-process launches); each microbenchmark job is a per-sample randomized nonce plus input data and a per-evaluation jittered iteration count that the trusted parent streams on stdin at clock-start, and every workload prints a nonce-salted running fold over every iteration's intermediate state that must reproduce byte for byte the pristine in-eval trusted-baseline build run on the identical streamed job; each microbenchmark leg is reduced to the fastest (min) of 15 round-robin interleaved samples per binary, bracketed by identical reference samples so shared host contention cancels, a per-operation plausibility floor rejects a candidate faster than 10x the reference on identical work, and q = raw_q * 7385110.981771862 / reference_q so ambient host-speed drift cancels",
+      "q": "reference-normalized geometric mean operations per trusted external wall-second over four split-specific streamed derivatives of upstream microbench.js plus median-of-3-rounds ES-module startup throughput (fastest 16 of each round's 31 trusted-timed fresh-process launches); for each microbenchmark sample the trusted parent COMPOSES a fresh randomized benchmark program (fresh identifiers, object shapes with shuffled insertion order and decoy properties, permuted read/update schedules and dependency graphs, randomized loop directions, index strides, fold expression shapes, and constants; per-iteration scored operation count and workload class preserved) and streams it on stdin at clock-start together with a fresh nonce, randomized input data, and a per-evaluation jittered iteration count, so no fixed public loop exists to pattern-match and nothing structural is visible in the untimed window; the printed nonce-salted running fold must reproduce byte for byte the pristine in-eval trusted-baseline build run on the identical streamed bytes; each leg is reduced to the fastest (min) of 15 round-robin interleaved samples per binary, bracketed by identical reference samples so shared host contention cancels; gaming-resistance cross-checks on every candidate leg use the out-of-process wait4/getrusage(RUSAGE_CHILDREN) CPU accounting read by the trusted parent (hardware perf counters are unavailable in the eval container: perf_event_open(PERF_TYPE_HARDWARE) returns ENOENT on the pinned VM kernel even for root with CAP_SYS_ADMIN): every sample must satisfy cpu <= wall*1.15+0.02s (single-threaded discipline) and each benchmark's kept-fastest candidate CPU must be >= 0.4x the reference's on identical work, bounding unearned throughput to 2.5x (the wall-clock floor of 10x is retained as an outer bound); module-startup rounds carry the same per-launch discipline (1.5x+5ms) and a median kept-CPU floor of 0.4x reference; q = raw_q * 7385110.981771862 / reference_q so ambient host-speed drift cancels",
       "qFail": 0,
-      "qBase": 7349648.0421342105,
-      "sigma": 57279.61141089313,
-      "qReference": 7717130.444240921,
-      "qReferenceConstruction": "7349648.0421342105 + max(5*57279.61141089313, 0.05*abs(7349648.0421342105-0)) = 7717130.444240921",
+      "qBase": 7409362.629210308,
+      "sigma": 58365.8685689724,
+      "qReference": 7779830.760670824,
+      "qReferenceConstruction": "7409362.629210308 + max(5*58365.8685689724, 0.05*abs(7409362.629210308-0)) = 7779830.760670824",
       "aaSamples": [
-        7399427.332942024,
-        7287042.742972397,
-        7362474.050488209
+        7365061.121205876,
+        7352686.634846462,
+        7352967.479602715,
+        7447376.332557475,
+        7461647.941295219,
+        7476436.265754106
       ],
-      "normalizationScale": 367482.40210671054,
-      "noiseFractionOfScale": 0.15587035211079336,
+      "normalizationScale": 370468.13146051543,
+      "noiseFractionOfScale": 0.15754626002207978,
       "binarySizeTolerance": 0.01,
       "moduleLaunchesPerRound": 31,
       "moduleRounds": 3
@@ -224,8 +227,8 @@
       "protectedPathEscape": "broker diff-protects CLI, clock provider, build, evaluator, worker, test, fixture, and metadata paths; evaluator rejects symlinks, non-regular entries, and files absent from the frozen inventory",
       "benchmarkSpecialCasing": "train and validation use distinct holdout benchmark selections, Test262 cases, observable programs, and module graphs; the shortcut diagnostic carries the valid inline OP_mod remainder fast path (helping both splits) while a validation-only UTF-16 regexp delay drags its held-out score below baseline, inverting its train ordering",
       "fixtureFingerprinting": "terminal assets remain holdout-only and content-hashed; candidate processes run unprivileged after the built source and copied fixtures become root-owned read-only files",
-      "outputFabrication": "the timed microbenchmark path no longer accepts any sealed closed-form output: the trusted parent streams a per-sample nonce plus randomized input and a per-evaluation jittered iteration count on stdin at clock-start (never argv/env, so no constructor/.init_array can read it before the interpreter runs), each workload prints a nonce-salted running fold over every iteration's real intermediate state, and the fold must reproduce byte for byte a pristine in-eval trusted-baseline build run on the identical streamed job; a per-operation plausibility floor rejects any candidate whose kept-fastest time is below 10% of the reference's on identical work (a fold produced without interpreting the loop). The trusted evaluator also byte-compares independent observable and module outputs on both splits and the pinned Test262 runner exercises the candidate interpreter directly",
-      "timerTampering": "every streamed microbenchmark job and module-startup round is timed by trusted Python time.monotonic_ns in the parent process from stdin-stream at clock-start to child exit; no candidate-provided clock or in-process report contributes to q, and the microbenchmark result is validated against the pristine reference rather than any candidate-emitted bookkeeping",
+      "outputFabrication": "the timed microbenchmark path accepts no sealed closed-form output and no fixed public loop: the trusted parent COMPOSES each sample's whole benchmark program (identifiers, object shapes, decoy properties, read/update schedules, dependency graphs, loop directions, index strides, fold expression shapes, constants) and streams it on stdin at clock-start together with a fresh nonce and randomized input data (never argv/env, so no constructor/.init_array can read anything structural before the interpreter runs, and candidate-writable state is swept between launches so no launch can record a program for a later one); the printed nonce-salted running fold must reproduce byte for byte a pristine in-eval trusted-baseline build run on the identical streamed bytes, so producing it requires evaluating an arbitrary member of the trusted program family rather than replaying a precompiled recurrence. Residual throttled-native-evaluation classes are bounded by the out-of-process work-proportional cross-check: the trusted parent reads each leg's CPU time from the kernel's reaped-child wait4/getrusage accounting (hardware perf counters probed unavailable in the eval container: PERF_TYPE_HARDWARE -> ENOENT on the pinned VM kernel; the CPU-time channel is the strongest available work-proportional signal there), rejects any candidate sample whose CPU exceeds the single-threaded envelope (cpu <= wall*1.15+0.02s, closing thread-parallel wall compression and forked-helper inflation), and rejects any benchmark whose kept-fastest candidate CPU is below 0.4x the pristine reference's on identical work -- a single-threaded process accrues at most one CPU-second per wall-second, so idle- or spin-throttling into the wall band is bounded to 2.5x unearned throughput (the 10x wall floor is kept as an outer bound); module startup carries the same per-launch discipline and a 0.4x median kept-CPU floor against fixed-output fast-exit fabrication. The trusted evaluator also byte-compares independent observable and module outputs on both splits and the pinned Test262 runner exercises the candidate interpreter directly",
+      "timerTampering": "every streamed microbenchmark job and module-startup round is timed by trusted Python time.monotonic_ns in the parent process from stdin-stream at clock-start to child exit, and every leg's CPU time comes from the parent's own getrusage(RUSAGE_CHILDREN) delta around the single reaped launch; no candidate-provided clock, counter, or in-process report contributes to q or to the plausibility gates, and the microbenchmark result is validated against the pristine reference rather than any candidate-emitted bookkeeping",
       "buildScriptMutation": "Makefile, qjs/qjsc/run-test262 CLI sources, generated repl.c, worker, evaluator, toolchain lock, and source inventory are protected; QJSC is pinned to /usr/bin/false so candidate code never executes during build, and every evaluation builds from source on tmpfs",
       "deadCodeBenchmarkBypass": "the measured qjs executes the same interpreter core used for byte-exact programs, ES modules, and the frozen Test262 subset before any score is emitted"
     }

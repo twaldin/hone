@@ -64,6 +64,43 @@ MICRO_ITER_JITTER_DIV = 32
 # than interpreting the loop (fabricating the fold across the process boundary)
 # and is rejected.
 MICRO_MIN_PLAUSIBLE_FRAC = 0.1
+# ---------------------------------------------------------------------------
+# Out-of-process work-proportional cross-check on every timed leg.
+#
+# The broker eval container's kernel does NOT expose hardware perf counters:
+# perf_event_open(PERF_TYPE_HARDWARE, instructions/cycles) returns ENOENT on
+# the pinned VM kernel even for root holding CAP_SYS_ADMIN (CAP_PERFMON is
+# not granted, and PERF_TYPE_SOFTWARE events exist but are not
+# work-proportional), so retired-instruction ratios cannot be measured here.
+# The fallback signal is the kernel's reaped-child CPU accounting (the
+# wait4/getrusage channel), read by the TRUSTED parent and never
+# candidate-reported: a getrusage(RUSAGE_CHILDREN) delta brackets exactly one
+# reaped launch (launches are strictly serial and orphaned stragglers are
+# never reaped by this process, so nothing else lands in the window). Two
+# gates bind it on candidate legs:
+#   1. Single-threaded discipline (MAX_CPU_WALL_RATIO): the scored qjs
+#      contract is a single-threaded interpreter, so a leg's CPU time cannot
+#      meaningfully exceed its wall time. This rejects thread-parallel
+#      wall-time compression and forked-helper CPU inflation alike (every
+#      descendant's CPU lands in the same reaped accounting).
+#   2. Per-operation CPU floor (MIN_CPU_FRAC): the kept-fastest candidate CPU
+#      time must be at least this fraction of the pristine reference's on the
+#      IDENTICAL streamed job. A single-threaded process accrues at most one
+#      CPU-second per wall-second, so a candidate that produces the fold
+#      without doing interpreter-proportional work and then idles or spins
+#      into the wall-clock band is bounded to 1/MIN_CPU_FRAC x unearned
+#      throughput; the wall floor alone left 1/MICRO_MIN_PLAUSIBLE_FRAC x
+#      open. Genuine interpreter optimizations reduce CPU per operation only
+#      modestly (the sealed improved control measures well under 2x), so the
+#      2.5x band accepts every plausible genuine candidate; anything cheaper
+#      than 40% of the reference's CPU on identical work is not interpreting.
+# ---------------------------------------------------------------------------
+MICRO_MIN_CPU_FRAC = 0.4
+MICRO_MAX_CPU_WALL_RATIO = 1.15
+MICRO_CPU_WALL_SLACK_SEC = 0.02
+MODULE_MIN_CPU_FRAC = 0.4
+MODULE_MAX_CPU_WALL_RATIO = 1.5
+MODULE_CPU_WALL_SLACK_SEC = 0.005
 # Frozen provisional yardstick scale (provisional local qBase; final GCE
 # recalibration re-freezes it): a candidate identical to the trusted baseline
 # scores this value by construction, independent of host drift, because the
@@ -725,17 +762,24 @@ def require_exact_output(script: Path, expected: str, module: bool = False) -> b
     return completed.stdout
 
 
-def timed_gated_run(argv: list[str], expected_bytes: bytes, timeout: float, label: str) -> float:
-    """One trusted-timed, output-gated launch from a pristine writable state."""
+def timed_gated_run(argv: list[str], expected_bytes: bytes, timeout: float, label: str) -> tuple[float, float]:
+    """One trusted-timed, output-gated launch from a pristine writable state.
+    Returns (wall seconds, CPU seconds); the CPU time is measured OUT OF
+    PROCESS by the trusted parent from the kernel's reaped-child accounting
+    (a getrusage(RUSAGE_CHILDREN) delta bracketing this single serial launch
+    -- the wait4 channel), never from anything candidate-emitted."""
     reset_candidate_state()
+    usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     started = time.monotonic_ns()
     completed = run_candidate(argv, timeout=timeout)
     elapsed = (time.monotonic_ns() - started) / 1_000_000_000.0
+    usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (usage_after.ru_utime - usage_before.ru_utime) + (usage_after.ru_stime - usage_before.ru_stime)
     if completed.returncode != 0 or completed.stderr or completed.stdout != expected_bytes:
         raise GateFailure(f"{label} exact-output gate failed")
-    if not math.isfinite(elapsed) or elapsed <= 0:
+    if not math.isfinite(elapsed) or elapsed <= 0 or not math.isfinite(cpu) or cpu < 0:
         raise GateFailure(f"trusted {label} timer failed")
-    return elapsed
+    return elapsed, cpu
 
 
 # Alphabets for the streamed regexp jobs. The UTF-16 alphabet carries code
@@ -747,25 +791,297 @@ MICRO_UTF16_ALPHABET = _withheld_terminal_input('MICRO_UTF16_ALPHABET')
 
 def timed_stream_run(
     binary: Path, script: Path, job_bytes: bytes, timeout: float, label: str
-) -> tuple[float, bytes]:
+) -> tuple[float, float, bytes]:
     """One trusted-timed streamed launch from a pristine writable state. The
-    randomized job is delivered on stdin at clock-start (never argv/env), so no
-    correct fold can be produced in the untimed window; the caller validates the
-    returned fold against the pristine reference run on the identical job."""
+    randomized job -- including the trusted-composed benchmark program itself
+    -- is delivered on stdin at clock-start (never argv/env), so no correct
+    fold can be produced in the untimed window; the caller validates the
+    returned fold against the pristine reference run on the identical job.
+    The returned CPU time is measured OUT OF PROCESS by the trusted parent
+    from the kernel's reaped-child accounting (a getrusage(RUSAGE_CHILDREN)
+    delta bracketing this single serial launch -- the wait4 channel); nothing
+    candidate-emitted contributes to it."""
     reset_candidate_state()
     argv = [str(binary), "--std", str(script)]
+    usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     started = time.monotonic_ns()
     completed = run_candidate(argv, timeout=timeout, stdin_bytes=job_bytes)
     elapsed = (time.monotonic_ns() - started) / 1_000_000_000.0
+    usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (usage_after.ru_utime - usage_before.ru_utime) + (usage_after.ru_stime - usage_before.ru_stime)
     if completed.returncode != 0 or completed.stderr or not completed.stdout:
         raise GateFailure(f"{label} streamed run failed")
-    if not math.isfinite(elapsed) or elapsed <= 0:
+    if not math.isfinite(elapsed) or elapsed <= 0 or not math.isfinite(cpu) or cpu < 0:
         raise GateFailure(f"trusted {label} timer failed")
-    return elapsed, completed.stdout
+    return elapsed, cpu, completed.stdout
 
 
 def make_micro_params(name: str, ops_factor: int, rng: random.SystemRandom):
     return _withheld_terminal_input("microbenchmark input factory")
+
+
+# ---------------------------------------------------------------------------
+# Trusted per-sample benchmark program composition.
+#
+# Round-6: the timed fold used to be computed by a FIXED public script (only
+# its data, nonce, and iteration count varied), so the scored recurrence was
+# a public closed form; a candidate build could recognize the sealed loop (by
+# script content or bytecode shape) and stand in a precompiled native
+# equivalent, then coast into the wall-clock plausibility band. Now the
+# trusted parent composes the whole benchmark PROGRAM per timed sample --
+# fresh identifiers, object shapes with shuffled insertion order and decoy
+# properties, permuted read/update schedules and dependency graphs,
+# randomized loop directions, index strides, fold expression shapes, and
+# constants -- and streams it on stdin at clock-start. No fixed loop exists
+# to pattern-match and nothing structural is visible in the untimed window
+# (candidate-writable state is swept between launches, so no launch can
+# record a program for a later one), so reproducing the pristine reference's
+# fold requires evaluating an arbitrary member of this program family:
+# exactly the interpreter work being scored. Every family member preserves
+# the sealed benchmark identity -- the same scored per-iteration operation
+# count and workload class, with every variant emitting the same operation
+# mix (only names, constants, order, direction, and equal-cost expression
+# shapes vary) -- so operations accounting and min-of-N comparability are
+# unchanged, and every iteration still executes at least one float64-range %
+# so the sealed control classes keep their signal.
+# ---------------------------------------------------------------------------
+
+JS_RESERVED_WORDS = frozenset(
+    {
+        "arguments", "async", "await", "break", "case", "catch", "class",
+        "const", "continue", "debugger", "default", "delete", "do", "else",
+        "enum", "eval", "export", "extends", "false", "finally", "for",
+        "function", "get", "globalthis", "if", "import", "in", "instanceof",
+        "interface", "let", "new", "null", "of", "package", "private",
+        "protected", "public", "return", "set", "static", "super", "switch",
+        "this", "throw", "true", "try", "typeof", "undefined", "var", "void",
+        "while", "with", "yield",
+    }
+)
+
+
+def make_js_ident(rng: random.SystemRandom, used: set[str]) -> str:
+    while True:
+        name = "".join(rng.choice(MICRO_ASCII_ALPHABET) for _ in range(rng.randrange(3, 9)))
+        if name not in JS_RESERVED_WORDS and name not in used:
+            used.add(name)
+            return name
+
+
+def make_fold_stmt(rng: random.SystemRandom, fold_var: str, value_expr: str) -> str:
+    """One nonce-seeded fold step. Both shapes carry the same operation mix
+    (one multiply, adds, one % whose left operand always leaves int32 range,
+    keeping the float64 remainder path hot on every iteration); value_expr
+    must evaluate inside [0, T262_MODULUS) so every intermediate stays an
+    exact safe integer."""
+    k1 = rng.randrange(1 << 10, 1 << 19)
+    k2 = rng.randrange(1, T262_MODULUS)
+    if rng.randrange(2) == 0:
+        return f"{fold_var} = ({fold_var} * {k1} + {value_expr} + {k2}) % {T262_MODULUS};"
+    return f"{fold_var} = (({fold_var} + {value_expr}) * {k1} + {k2}) % {T262_MODULUS};"
+
+
+def make_loop_header(
+    rng: random.SystemRandom, kw: str, var: str, count: str, index_safe: bool = False
+) -> str:
+    """Ascending or descending counted loop over `count` iterations.
+    index_safe requests the zero-based descending form for loops whose
+    variable indexes an array."""
+    if rng.randrange(2) == 0:
+        return f"for ({kw} {var} = 0; {var} < {count}; {var}++)"
+    if index_safe:
+        return f"for ({kw} {var} = {count} - 1; {var} >= 0; {var}--)"
+    return f"for ({kw} {var} = {count}; {var} > 0; {var}--)"
+
+
+def _program_prop(name: str, rng: random.SystemRandom) -> str:
+    used: set[str] = set()
+    kw = rng.choice(("var", "let"))
+    n_v, s_v, p_v, f_v, o_v, a_v, j_v = (make_js_ident(rng, used) for _ in range(7))
+    keys = [make_js_ident(rng, used) for _ in range(4)]
+    entries = [(key, f"{p_v}.{source}") for key, source in zip(keys, ("a", "b", "c", "d"))]
+    entries += [(make_js_ident(rng, used), str(rng.randrange(1, 8191))) for _ in range(rng.randrange(4))]
+    rng.shuffle(entries)
+    literal = ", ".join(f"{key}: {value}" for key, value in entries)
+    order = keys[:]
+    rng.shuffle(order)
+    lines = [
+        f"(function({n_v}, {s_v}, {p_v}) {{",
+        f"  {kw} {f_v} = {s_v} % {T262_MODULUS};",
+        f"  {kw} {o_v} = {{ {literal} }};",
+    ]
+    if name == "prop_read":
+        lines.append(f"  {kw} {a_v} = 0;")
+        read_expr = " + ".join(f"{o_v}.{key} * {rng.randrange(1, 8)}" for key in order)
+        target = rng.choice(keys)
+        mutate = (
+            f"    {o_v}.{target} = ({o_v}.{target} * {rng.choice((3, 5, 7, 11, 13))}"
+            f" + {rng.randrange(1, 8191)}) % 8191;"
+        )
+        fold = "    " + make_fold_stmt(rng, f_v, a_v)
+        body = [f"    {a_v} = ({a_v} + {read_expr}) % {T262_MODULUS};"]
+        body += [fold, mutate] if rng.randrange(2) == 0 else [mutate, fold]
+    else:
+        body = []
+        for key in order:
+            source = rng.choice(keys)
+            body.append(
+                f"    {o_v}.{key} = ({o_v}.{source} + {j_v} * {rng.randrange(1, 6)}"
+                f" + {rng.randrange(1, 98)}) % {T262_MODULUS};"
+            )
+        total = " + ".join(f"{o_v}.{key}" for key in keys)
+        body.append("    " + make_fold_stmt(rng, f_v, f"({total}) % {T262_MODULUS}"))
+    lines.append(f"  {make_loop_header(rng, kw, j_v, n_v)} {{")
+    lines += body
+    lines.append("  }")
+    lines.append(f"  return {{ operations: {n_v} * 4, fold: {f_v} }};")
+    lines.append("})")
+    return "\n".join(lines)
+
+
+def _program_array(name: str, ops_factor: int, rng: random.SystemRandom) -> str:
+    used: set[str] = set()
+    kw = rng.choice(("var", "let"))
+    n_v, s_v, p_v, f_v, t_v, a_v, j_v, i_v, sum_v, k_v = (make_js_ident(rng, used) for _ in range(10))
+    length = ops_factor
+    mult = rng.choice((3, 5, 7, 11, 13))
+    add = rng.randrange(1, 8191)
+    lines = [
+        f"(function({n_v}, {s_v}, {p_v}) {{",
+        f"  {kw} {f_v} = {s_v} % {T262_MODULUS};",
+    ]
+    if name == "typed_array_read":
+        lines.append(f"  {kw} {t_v} = new Int32Array({length});")
+        lines.append(
+            f"  for ({kw} {i_v} = 0; {i_v} < {length}; {i_v}++) {t_v}[{i_v}] = {p_v}.tab[{i_v}] | 0;"
+        )
+        clamp = "& 0x3fffffff" if rng.randrange(2) == 0 else "% 8191"
+    else:
+        lines.append(f"  {kw} {t_v} = {p_v}.tab.slice();")
+        clamp = "% 8191"
+    lines.append(f"  {kw} {a_v} = 0;")
+    term = f"{t_v}[{i_v}] * {rng.randrange(1, 4)} + {rng.randrange(0, 8)}"
+    inner = make_loop_header(rng, kw, i_v, str(length), index_safe=True)
+    lines.append(f"  {make_loop_header(rng, kw, j_v, n_v)} {{")
+    lines.append(f"    {kw} {sum_v} = 0;")
+    lines.append(f"    {inner} {sum_v} += {term};")
+    lines.append(f"    {a_v} = ({a_v} + {sum_v} % {T262_MODULUS}) % {T262_MODULUS};")
+    lines.append("    " + make_fold_stmt(rng, f_v, a_v))
+    lines.append(f"    {kw} {k_v} = ({j_v} * {rng.choice((1, 3, 5, 7))} + {rng.randrange(length)}) % {length};")
+    lines.append(f"    {t_v}[{k_v}] = ({t_v}[{k_v}] * {mult} + {add}) {clamp};")
+    lines.append("  }")
+    lines.append(f"  return {{ operations: {n_v} * {length}, fold: {f_v} }};")
+    lines.append("})")
+    return "\n".join(lines)
+
+
+def _program_int_arith(ops_factor: int, rng: random.SystemRandom) -> str:
+    used: set[str] = set()
+    kw = rng.choice(("var", "let"))
+    n_v, s_v, p_v, f_v, seed_v, j_v, i_v, sum_v = (make_js_ident(rng, used) for _ in range(8))
+    c1 = rng.randrange(32)
+    m2 = rng.randrange(1 << 10, 1 << 19)
+    c2 = rng.randrange(1, T262_MODULUS)
+    inner = make_loop_header(rng, kw, i_v, str(ops_factor))
+    lines = [
+        f"(function({n_v}, {s_v}, {p_v}) {{",
+        f"  {kw} {f_v} = {s_v} % {T262_MODULUS};",
+        f"  {kw} {seed_v} = {p_v}.seed % {T262_MODULUS};",
+        f"  {make_loop_header(rng, kw, j_v, n_v)} {{",
+        f"    {kw} {sum_v} = 0;",
+        f"    {inner} {sum_v} = ({sum_v} + ({i_v} + {c1}) * {seed_v}) % {T262_MODULUS};",
+        "    " + make_fold_stmt(rng, f_v, sum_v),
+        f"    {seed_v} = ({seed_v} * {m2} + {c2}) % {T262_MODULUS};",
+        "  }",
+        f"  return {{ operations: {n_v} * {ops_factor}, fold: {f_v} }};",
+        "})",
+    ]
+    return "\n".join(lines)
+
+
+def _program_float_arith(ops_factor: int, rng: random.SystemRandom) -> str:
+    used: set[str] = set()
+    kw = rng.choice(("var", "let"))
+    n_v, s_v, p_v, f_v, a_v, j_v, i_v, sum_v = (make_js_ident(rng, used) for _ in range(8))
+    jstep = f"{rng.randrange(1, 10)}e-4"
+    cf = rng.choice(("0.25", "0.5", "1.5", "2.5"))
+    round_fn = rng.choice(("Math.round", "Math.floor"))
+    inner = make_loop_header(rng, kw, i_v, str(ops_factor))
+    lines = [
+        f"(function({n_v}, {s_v}, {p_v}) {{",
+        f"  {kw} {f_v} = {s_v} % {T262_MODULUS};",
+        f"  {make_loop_header(rng, kw, j_v, n_v)} {{",
+        f"    {kw} {sum_v} = 0.0;",
+        f"    {kw} {a_v} = {p_v}.a0 + {j_v} * {jstep};",
+        f"    {inner} {{ {sum_v} += {a_v} * {a_v} + {cf}; {a_v} += {p_v}.incr; }}",
+        "    " + make_fold_stmt(rng, f_v, f"({round_fn}({sum_v}) % {T262_MODULUS})"),
+        "  }",
+        f"  return {{ operations: {n_v} * {ops_factor}, fold: {f_v} }};",
+        "})",
+    ]
+    return "\n".join(lines)
+
+
+def _program_regexp(ops_factor: int, rng: random.SystemRandom) -> str:
+    used: set[str] = set()
+    kw = rng.choice(("var", "let"))
+    n_v, s_v, p_v, f_v, r_v, st_v, j_v, i_v, v_v, m_v = (make_js_ident(rng, used) for _ in range(10))
+    sc = rng.choice((1, 3, 5, 7))
+    cm = rng.randrange(1, 6)
+    c0 = rng.randrange(1, 98)
+    c1 = rng.randrange(1, 98)
+    inner = make_loop_header(rng, kw, i_v, str(ops_factor))
+    lines = [
+        f"(function({n_v}, {s_v}, {p_v}) {{",
+        f"  {kw} {f_v} = {s_v} % {T262_MODULUS};",
+        f"  {kw} {r_v} = new RegExp({p_v}.pattern);",
+        f"  {kw} {st_v} = {p_v}.strings;",
+        f"  {make_loop_header(rng, kw, j_v, n_v)} {{",
+        f"    {kw} {v_v} = 0;",
+        f"    {inner} {{",
+        f"      {kw} {m_v} = {r_v}.exec({st_v}[({j_v} * {sc} + {i_v}) % {st_v}.length]);",
+        f"      {v_v} = ({v_v} + ({m_v} ? {m_v}.index * {cm} + {m_v}[0].length + {c0} : {c1})) % {T262_MODULUS};",
+        "    }",
+        "    " + make_fold_stmt(rng, f_v, v_v),
+        "  }",
+        f"  return {{ operations: {n_v} * {ops_factor}, fold: {f_v} }};",
+        "})",
+    ]
+    return "\n".join(lines)
+
+
+def make_micro_program(name: str, ops_factor: int, rng: random.SystemRandom) -> str:
+    if name in ("prop_read", "prop_update"):
+        return _program_prop(name, rng)
+    if name in ("array_read", "typed_array_read"):
+        return _program_array(name, ops_factor, rng)
+    if name == "int_arith":
+        return _program_int_arith(ops_factor, rng)
+    if name == "float_arith":
+        return _program_float_arith(ops_factor, rng)
+    if name in ("regexp_ascii", "regexp_utf16"):
+        return _program_regexp(ops_factor, rng)
+    raise GateFailure("unknown microbenchmark name")
+
+
+def check_reference_result(ref_out: bytes, name: str, iterations: int, operations: int) -> None:
+    """The pristine reference's printed result is the trusted truth for the
+    candidate's fold, so a malformed or mis-accounted reference result is a
+    trusted-composition bug (or a corrupt sealed tree), never candidate
+    behavior: fail loudly instead of silently zeroing candidates."""
+    try:
+        payload = json.loads(ref_out)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise GateFailure("trusted microbenchmark composition self-check failed") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("name") != name
+        or payload.get("iterations") != iterations
+        or payload.get("operations") != operations
+        or not isinstance(payload.get("fold"), int)
+        or not 0 <= payload["fold"] < T262_MODULUS
+    ):
+        raise GateFailure("trusted microbenchmark composition self-check failed")
 
 
 def make_micro_job(name: str, iterations: int, ops_factor: int, rng: random.SystemRandom) -> dict[str, object]:
@@ -774,6 +1090,7 @@ def make_micro_job(name: str, iterations: int, ops_factor: int, rng: random.Syst
         "nonce": rng.randrange(1, T262_MODULUS),
         "iterations": iterations,
         "params": make_micro_params(name, ops_factor, rng),
+        "program": make_micro_program(name, ops_factor, rng),
     }
 
 
@@ -812,23 +1129,36 @@ def run_microbenchmarks(rows: object) -> tuple[list[float], list[float]]:
     # control over which samples count.
     candidate_elapsed: list[list[float]] = [[] for _ in schedule]
     reference_elapsed: list[list[float]] = [[] for _ in schedule]
+    candidate_cpu: list[list[float]] = [[] for _ in schedule]
+    reference_cpu: list[list[float]] = [[] for _ in schedule]
     for _ in range(MICRO_SAMPLES):
         for index, (name, iters, operations, ops_factor) in enumerate(schedule):
-            # Fresh nonce + input data for THIS sample, streamed on stdin at
-            # clock-start to both the pristine reference and the candidate. The
-            # reference's fold is the trusted truth; the candidate must
-            # reproduce it byte for byte on the identical streamed job.
+            # Fresh trusted-composed program + nonce + input data for THIS
+            # sample, streamed on stdin at clock-start to both the pristine
+            # reference and the candidate. The reference's fold is the trusted
+            # truth; the candidate must reproduce it byte for byte on the
+            # identical streamed job.
             job = make_micro_job(name, iters, ops_factor, rng)
             job_bytes = json.dumps(job, separators=(",", ":")).encode()
-            ref_sec, ref_out = timed_stream_run(ref_binary, script, job_bytes, 120, "reference microbenchmark")
-            cand_sec, cand_out = timed_stream_run(cand_binary, script, job_bytes, 120, "microbenchmark")
+            ref_sec, ref_cpu_sec, ref_out = timed_stream_run(ref_binary, script, job_bytes, 120, "reference microbenchmark")
+            check_reference_result(ref_out, name, iters, operations)
+            cand_sec, cand_cpu_sec, cand_out = timed_stream_run(cand_binary, script, job_bytes, 120, "microbenchmark")
             if cand_out != ref_out:
                 raise GateFailure("microbenchmark fold gate failed")
+            # Single-threaded discipline on the out-of-process CPU signal:
+            # EVERY candidate sample must satisfy it, so min-of-N trimming can
+            # never hide a thread-parallel or CPU-inflating launch.
+            if cand_cpu_sec > cand_sec * MICRO_MAX_CPU_WALL_RATIO + MICRO_CPU_WALL_SLACK_SEC:
+                raise GateFailure("microbenchmark candidate CPU time exceeds the single-threaded envelope")
             reference_elapsed[index].append(ref_sec)
             candidate_elapsed[index].append(cand_sec)
+            reference_cpu[index].append(ref_cpu_sec)
+            candidate_cpu[index].append(cand_cpu_sec)
     candidate_throughputs: list[float] = []
     reference_throughputs: list[float] = []
-    for (name, iters, operations, ops_factor), cand, ref in zip(schedule, candidate_elapsed, reference_elapsed):
+    for index, ((name, iters, operations, ops_factor), cand, ref) in enumerate(
+        zip(schedule, candidate_elapsed, reference_elapsed)
+    ):
         cand_kept = statistics.fmean(sorted(cand)[:MICRO_KEEP])
         ref_kept = statistics.fmean(sorted(ref)[:MICRO_KEEP])
         # Per-operation plausibility floor: interpreting the identical streamed
@@ -839,6 +1169,18 @@ def run_microbenchmarks(rows: object) -> tuple[list[float], list[float]]:
             raise GateFailure("microbenchmark timing is invalid")
         if cand_kept < ref_kept * MICRO_MIN_PLAUSIBLE_FRAC:
             raise GateFailure("microbenchmark per-operation cost is implausibly below reference")
+        # Out-of-process work-proportional cross-check (see the constant
+        # block): the kept-fastest candidate CPU time on the identical
+        # streamed jobs must be a plausible fraction of the pristine
+        # reference's. CPU time is contention-robust (co-scheduled load adds
+        # wall time, not CPU time), so min-of-N is a clean estimate for both
+        # legs.
+        cand_cpu_kept = min(candidate_cpu[index])
+        ref_cpu_kept = min(reference_cpu[index])
+        if not math.isfinite(cand_cpu_kept) or not math.isfinite(ref_cpu_kept) or ref_cpu_kept <= 0:
+            raise GateFailure("microbenchmark CPU measurement is invalid")
+        if cand_cpu_kept < ref_cpu_kept * MICRO_MIN_CPU_FRAC:
+            raise GateFailure("microbenchmark per-operation CPU work is implausibly below reference")
         candidate_throughputs.append(operations / cand_kept)
         reference_throughputs.append(operations / ref_kept)
     return candidate_throughputs, reference_throughputs
@@ -849,31 +1191,53 @@ def measure_module_startup(expected: str, launches: int, rounds: int) -> tuple[f
     module_path = WORKLOAD_DIR / "module-main.js"
     candidate_samples: list[float] = []
     reference_samples: list[float] = []
+    candidate_cpu_sums: list[float] = []
+    reference_cpu_sums: list[float] = []
     for _ in range(rounds):
-        candidate_sec: list[float] = []
-        reference_sec: list[float] = []
+        candidate_runs: list[tuple[float, float]] = []
+        reference_runs: list[tuple[float, float]] = []
         for _ in range(launches):
-            reference_sec.append(
+            reference_runs.append(
                 timed_gated_run([str(REF_SOURCE / "qjs"), "-m", str(module_path)], expected_bytes, 1.0, "reference module-startup")
             )
-            candidate_sec.append(
-                timed_gated_run([str(SOURCE / "qjs"), "-m", str(module_path)], expected_bytes, 1.0, "module-startup")
+            cand_sec, cand_cpu = timed_gated_run(
+                [str(SOURCE / "qjs"), "-m", str(module_path)], expected_bytes, 1.0, "module-startup"
             )
+            # Single-threaded discipline per launch on the out-of-process CPU
+            # signal (see the constant block).
+            if cand_cpu > cand_sec * MODULE_MAX_CPU_WALL_RATIO + MODULE_CPU_WALL_SLACK_SEC:
+                raise GateFailure("module-startup candidate CPU time exceeds the single-threaded envelope")
+            candidate_runs.append((cand_sec, cand_cpu))
         # Same trimmed-sampling rationale as the microbenchmarks: every launch
         # is separately timed by the trusted parent and interleaved with a
         # pristine reference launch; keep the fastest windows of the sealed
         # 31-launch round so a transient host-contention burst cannot halve
-        # the round's throughput.
-        for source_sec, samples in ((candidate_sec, candidate_samples), (reference_sec, reference_samples)):
-            kept = sorted(source_sec)[:MODULE_KEEP]
+        # the round's throughput. The kept-fastest CPU sums feed the startup
+        # work floor below.
+        for runs, samples, cpu_sums in (
+            (candidate_runs, candidate_samples, candidate_cpu_sums),
+            (reference_runs, reference_samples, reference_cpu_sums),
+        ):
+            kept = sorted(sec for sec, _ in runs)[:MODULE_KEEP]
             elapsed = sum(kept)
             if not math.isfinite(elapsed) or elapsed <= 0:
                 raise GateFailure("module-startup timer failed")
             samples.append(len(kept) / elapsed)
+            cpu_sums.append(sum(sorted(cpu for _, cpu in runs)[:MODULE_KEEP]))
     candidate_throughput = statistics.median(candidate_samples)
     reference_throughput = statistics.median(reference_samples)
     if not all(math.isfinite(value) and value > 0 for value in (candidate_throughput, reference_throughput)):
         raise GateFailure("module-startup throughput is invalid")
+    # Out-of-process CPU floor on startup work: a candidate that emits the
+    # fixed expected module output without doing interpreter startup work
+    # (then exits or idles inside the wall-clock band) shows implausibly
+    # little CPU per launch versus the pristine reference on identical work.
+    candidate_cpu_med = statistics.median(candidate_cpu_sums)
+    reference_cpu_med = statistics.median(reference_cpu_sums)
+    if not math.isfinite(candidate_cpu_med) or not math.isfinite(reference_cpu_med) or reference_cpu_med <= 0:
+        raise GateFailure("module-startup CPU measurement is invalid")
+    if candidate_cpu_med < reference_cpu_med * MODULE_MIN_CPU_FRAC:
+        raise GateFailure("module-startup CPU work is implausibly below reference")
     return candidate_throughput, reference_throughput
 
 
