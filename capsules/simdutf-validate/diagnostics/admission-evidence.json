@@ -2,7 +2,7 @@
   "feasibility": {
     "cleanBuildSec": 6.0,
     "incrementalRebuildSec": 6.0,
-    "evalSec": 38.9
+    "evalSec": 45.1
   },
   "aa": {
     "samples": [
@@ -15,7 +15,7 @@
     ],
     "sigma": 0.011337,
     "noiseFractionOfScale": 0.011337,
-    "note": "frozen round-5 (pre-pin) calibration, left as-is per the round-6 review: the local M3-Max numbers are provisional and the GCE like-for-like re-baseline governs promotion. The 6 post-pin baseline A-A aggregates from the round-6 passes (0.99775, 1.00727, 1.01179, 1.01538, 1.00220, 0.99310) sit inside the frozen sigma band, so the frozen scale remains representative under the single-core pin."
+    "note": "frozen round-5 (pre-pin) calibration, left as-is per the round-6 review: the local M3-Max numbers are provisional and the GCE like-for-like re-baseline governs promotion. The 6 round-7 baseline A-A aggregates under the reject-injection measurement (pass1 0.97583/1.00360/1.02202, pass2 1.00668/1.01064/0.99241) sit inside the frozen sigma band, so the frozen scale remains representative with ~1/8 of timed iterations exercising the reject path."
   },
   "qBase": 1.000997,
   "qFail": 0.0,
@@ -32,31 +32,36 @@
     },
     {
       "name": "naive",
-      "train": 0.58484,
-      "validation": 0.58802,
-      "combined": 0.58643,
+      "train": 0.58272,
+      "validation": 0.5862,
+      "combined": 0.58446,
       "hardGatesPass": true,
-      "description": "hand-written scalar strict UTF-8 validator/transcoder, one code point at a time, byte-identical output but ~1.7x slower than the SIMD kernels"
+      "description": "hand-written scalar strict UTF-8 validator/transcoder, one code point at a time, byte-identical output (including correct rejects on the injected iterations and the per-run malformed probes) but ~1.7x slower than the SIMD kernels"
     },
     {
       "name": "shortcut",
-      "train": 1.15988,
+      "train": 1.13512,
       "validation": 0.0,
-      "combined": 0.57994,
+      "combined": 0.56756,
       "hardGatesPass": false,
-      "description": "train-overfit that keys on the TRAIN-only corpus header marker: runs the genuine single-pass fast path (correct+faster than baseline) where the marker is present, and emits corrupted output on the held-out validation corpus it never memorized, so it beats baseline on train (1.160 > 1.0) and inverts to zero on validation, which the trusted split mechanism catches"
+      "description": "train-overfit that keys on the TRAIN-only corpus header marker: runs the genuine single-pass fast path (correct+faster than baseline) where the marker is present, and emits corrupted output on the held-out validation corpus it never memorized, so it beats baseline on train (1.135 > 1.009) and inverts to zero on validation, which the trusted split mechanism catches"
     }
   ],
   "perturbation": {
     "name": "streamlined-validate-then-fast-convert",
     "source": "diagnostics/improved/src/kernel.cpp",
-    "train": 1.15269,
-    "validation": 1.15671,
-    "combined": 1.1547,
-    "deltaFromQBase": 0.1537,
-    "sigmaMargin": 13.56,
+    "train": 1.12649,
+    "validation": 1.0949,
+    "combined": 1.11069,
+    "deltaFromQBase": 0.1097,
+    "sigmaMargin": 9.68,
     "hardGatesPass": true,
-    "description": "genuine observation-preserving work reduction: the baseline driver validates, then runs a utf16-length pre-scan, then a fully re-validating conversion pass (validate + length + slow validating convert); the improved driver validates once and then uses the non-validating fast conversion path (convert_valid), dropping the redundant length pre-scan and the re-validation. Byte-identical verdict + transcoded bytes to the baseline on every corpus/iteration (the trusted parent re-checks the go-nonce-bound 8-lane digest against the pristine reference each timed iteration); ~15.5% faster (13.6 sigma over the frozen A-A noise) under the single-core pin, and holds on both train and validation."
+    "description": "genuine observation-preserving work reduction: the baseline driver validates, then runs a utf16-length pre-scan, then a fully re-validating conversion pass (validate + length + slow validating convert); the improved driver validates once and then uses the non-validating fast conversion path (convert_valid) ONLY on input its own validation pass just accepted, dropping the redundant length pre-scan and the re-validation. Byte-identical verdict + transcoded bytes to the baseline on every corpus/iteration -- including verdict=0/zero-units on the go-nonce-injected invalid iterations, which its validation pass genuinely detects (the trusted parent re-checks the go-nonce-bound 8-lane digest against the pristine reference each timed iteration). ~11% faster (9.7 sigma over the frozen A-A noise) under the single-core pin and the reject-injection measurement, and holds on both train and validation (round-7 pass1 combined 1.12402, pass2 1.11069)."
+  },
+  "rejectPath": {
+    "scoredPathInjection": "the trusted runner, on a go-nonce-scheduled subset of timed iterations (~1/8, plus one FORCED iteration per leg so even the shortest calibration legs carry at least one), writes a genuinely invalid UTF-8 unit -- lone continuation, overlong form, surrogate in a three-byte slot, or truncated multibyte, variant bits also nonce-drawn -- at a nonce-chosen code point, calls the candidate, then restores the original bytes. The schedule is a pure function of the go-time seed: identical for the reference and candidate legs of a pair (so digests stay comparable) and unpredictable before clock-start. The pristine reference deterministically rejects those iterations (verdict=0, zero units) and the verdict byte is folded into the receipt digest, so the reject path is exercised ON the scored path every leg.",
+    "perRunMalformedCorpus": "the malformed probe corpus is synthesized PER RUN by the trusted parent from fresh randomness (os.urandom-seeded): 8 cases, kind-rotated over the four classes, each embedding one invalid unit inside otherwise-valid random UTF-8 (mid-buffer or end-of-buffer truncation), strict-decode-asserted invalid trusted-side before use. Nothing malformed ships in assets anymore: the cases are unenumerable, candidate-invisible before the run, and disjoint across runs and splits, so no fixed-fixture memorization can pass the gate.",
+    "demonstrations": "Two pre-freeze probe candidates against the final measurement (both deleted after evidence capture): (1) a driver that converts WITHOUT validating (convert_valid on the timed path, verdict always 1) -- byte-identical on valid input, but failed 'perturbed-iteration digest mismatch: transcode/a.txt' on the first timed pair because the injected iterations diverge from the reference digest; (2) a size-keyed driver that validates honestly on the large timed corpus but accepts every small buffer unconditionally (the memorize-the-fixtures vector) -- passed the timed legs and failed 'malformed-input behavior mismatch: malformed/case00-lone_continuation.bin' against the per-run synthesized probes."
   },
   "rss": {
     "baselinePeakRssKb": {
@@ -64,7 +69,7 @@
       "validation": 7808
     },
     "toleranceFraction": 0.05,
-    "note": "whole-tree kernel cgroup2 memory.peak of a fresh per-launch leaf (worker.py python startup then the trusted runner + dlopened simdutf library + corpus/scratch/out buffers). Round-6 re-freeze under the single-core pin: 6 full baseline evals (3 per split) peaked 7412-7424 KiB (one earlier run 5364 KiB; never above 7424), historical round-5 band topped at 7680 KiB. Frozen at 7808 KiB per split -> limit 8198 KiB = 1.10x observed max and 1.07x the historical max, so the gate binds against the true baseline (a candidate trading >~0.8 MiB of extra whole-tree memory for speed now fails) while cross-run noise clears it. Both round-6 ordering passes had peak_rss=true on baseline/naive/improved across both splits under this frozen value."
+    "note": "whole-tree kernel cgroup2 memory.peak of a fresh per-launch leaf (worker.py python startup then the trusted runner + dlopened simdutf library + corpus/scratch/out buffers). Round-6 freeze retained: the round-7 changes add only a <=4-byte save buffer and an injection-schedule scalar in the runner, and the per-run malformed probes (<~4 KiB each, parent-synthesized) replace the old fixed fixtures. Round-7 smoke under the new measurement peaked 5368 KiB (train) / 7416 KiB (validation) <= limit 8198.4 KiB, inside the round-6 observed band (7412-7424), so the frozen 7808 KiB baseline still binds. Both round-7 ordering passes had peak_rss=true on baseline/naive/improved across both splits."
   },
   "equalCoreBudget": {
     "mechanism": "every measured launch (reference AND candidate legs alike) is clamped to one fixed CPU: the per-launch cgroup2 leaf sets cpuset.cpus=<bench cpu> before the privilege drop; preexec sched_setaffinity is only the non-cgroup developer fallback",
@@ -72,12 +77,12 @@
     "rationale": "the reference driver is single-threaded; without the pin a thread-parallel candidate could buy wall-clock throughput with cores the reference never uses. With the pin, improvements must reduce single-core work."
   },
   "execBoundary": {
-    "model": "The scored measurement loop AND the receipt handshake run in the trusted parent (eval.py) and a trusted runner (hone/runner.cpp) that links NO candidate code. The runner authenticates the parent's control channel and echoes READY, then dlopens the candidate library (memfd-loaded to dodge noexec) and resolves its C ABI; the per-leg perturbation seed and receipt fold nonce arrive over the control pipe only after the library is mapped (the GO line, clock-start). A candidate constructor / .init_array therefore runs AFTER auth and BEFORE the go-time fold nonce exists, so it cannot precompute a matching digest.",
-    "demonstration": "A stub candidate whose constructor forged LOADED + a fake RESULT and _exit(0) (discovering the response fd) produced a digest that did NOT match the pristine reference and returned in ~0.04ms; the trusted parent rejected it on both the digest-mismatch check and the implausible-speedup floor (candidate wall < reference/8). Demonstrated pre-freeze against the trusted runner, then deleted."
+    "model": "The scored measurement loop AND the receipt handshake run in the trusted parent (eval.py) and a trusted runner (hone/runner.cpp) that links NO candidate code. The runner authenticates the parent's control channel and echoes READY, then dlopens the candidate library (memfd-loaded to dodge noexec) and resolves its C ABI; the per-leg perturbation seed and receipt fold nonce arrive over the control pipe only after the library is mapped (the GO line, clock-start). A candidate constructor / .init_array therefore runs AFTER auth and BEFORE the go-time fold nonce exists, so it cannot precompute a matching digest -- and the reject-injection schedule is derived from the same go-time seed, so which iterations must be rejected is equally unknowable in the untimed window.",
+    "demonstration": "A stub candidate whose constructor forged LOADED + a fake RESULT and _exit(0) (discovering the response fd) produced a digest that did NOT match the pristine reference and returned in ~0.04ms; the trusted parent rejected it on both the digest-mismatch check and the implausible-speedup floor (candidate wall < reference/8). Demonstrated pre-freeze against the trusted runner, then deleted. Round-7 adds the two reject-path probe demonstrations recorded under rejectPath.demonstrations."
   },
   "normalization": {
     "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
     "scale": 0.056686,
-    "status": "provisional-local: 2x-consecutive bench-locked round-6 ordering on Apple M3 Max Docker (min-of-N estimator for ~0.6s legs, 8-lane output fold, whole-tree cgroup memory.peak, tightened 7808 KiB RSS baseline, single-core cpuset pin, fresh IPC ns). qBase/sigma/qReference frozen from the round-5 baseline A-A aggregates and left as-is; the planned like-for-like GCE re-baseline governs promotion (gate promotion on normalization.status==final)."
+    "status": "provisional-local: 2x-consecutive bench-locked round-7 ordering on Apple M3 Max Docker (min-of-N estimator for ~0.6s legs, 8-lane output fold, go-nonce-scheduled reject-path injection, per-run synthesized malformed corpus, whole-tree cgroup memory.peak, 7808 KiB RSS baseline, single-core cpuset pin, fresh IPC ns). qBase/sigma/qReference frozen from the round-5 baseline A-A aggregates and left as-is; the planned like-for-like GCE re-baseline governs promotion (gate promotion on normalization.status==final)."
   }
 }

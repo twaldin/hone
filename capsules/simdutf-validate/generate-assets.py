@@ -6,7 +6,10 @@ perturbed by the trusted driver) and distinct bodies, so a train-overfitting
 control that keys on the train marker inverts on the held-out validation split.
 The pristine payload + folded-digest oracle is the in-eval trusted reference
 (built from the sealed trusted sources), so no expected hashes are stored here;
-each split only carries its whole-tree peak-RSS baseline.
+each split only carries its whole-tree peak-RSS baseline. The malformed probe
+corpus is NOT shipped: the trusted evaluator synthesizes it per run from fresh
+randomness (unenumerable, disjoint across runs), and the trusted runner
+additionally injects nonce-scheduled invalid units on the scored timed path.
 """
 import os
 import json
@@ -37,13 +40,6 @@ SPLITS = {
     "train": ("HONE-TRAIN-CORPUS", 10_001),
     "validation": ("HONE-VALID-CORPUS", 70_009),
 }
-MALFORMED = {
-    # Unambiguously invalid UTF-8 (rejected by any strict validator).
-    "lone_continuation.bin": b"valid ascii head \x80\x80 tail bytes",
-    "overlong.bin": b"prefix text \xc0\xaf suffix text",       # overlong '/'
-    "truncated.bin": b"prefix \xe2\x82 truncated three-byte",   # truncated
-    "surrogate.bin": b"pre \xed\xa0\x80 post",                  # CESU-style surrogate
-}
 
 
 def make_file(path, marker, target_bytes, seed):
@@ -73,15 +69,10 @@ def main():
         if os.path.isdir(base):
             shutil.rmtree(base)
         cdir = os.path.join(base, "corpus")
-        mdir = os.path.join(base, "malformed")
         os.makedirs(cdir)
-        os.makedirs(mdir)
         for i, (name, tgt) in enumerate(SIZES.items()):
             n = make_file(os.path.join(cdir, name), marker, tgt, seedbase + i * 131)
             print(f"{split}/corpus/{name}: {n} bytes")
-        for name, payload in MALFORMED.items():
-            with open(os.path.join(mdir, name), "wb") as f:
-                f.write(payload)
         # Peak-RSS baseline is measured + frozen from the ordering run; a
         # placeholder large enough for the developer path is written first.
         with open(os.path.join(base, "expected.json"), "w") as f:

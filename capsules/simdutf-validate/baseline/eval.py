@@ -29,6 +29,17 @@ Gaming-resistance model
   bytes and none can be memoized; the validator must re-scan the whole buffer
   regardless, and every iteration's (verdict + transcoded bytes) is folded into
   a go-nonce-bound digest this parent checks against the reference's digest.
+* The reject path is exercised ON the scored path. On a go-nonce-scheduled
+  subset of timed iterations (~1/8, plus one forced iteration per leg) the
+  trusted runner writes a genuinely invalid UTF-8 unit (lone continuation,
+  overlong form, surrogate in a three-byte slot, or truncated multibyte) at a
+  nonce-chosen code point; the reference deterministically rejects it and the
+  verdict byte is captured by the receipt fold, so a driver that skips
+  validation or converts without validating diverges from the reference digest
+  on those iterations. The placement is unpredictable before clock-start and
+  differs every run. Additionally, the malformed probe corpus is SYNTHESIZED
+  PER RUN by this trusted parent from fresh randomness (never shipped as fixed
+  fixtures), so no candidate can enumerate or memorize the malformed inputs.
 * Correctness lives with the trusted reference. The pristine (iteration-0)
   payload and the perturbed-iteration digest oracle are the in-eval reference
   built from trusted sources -- never a candidate self-report. A candidate that
@@ -53,6 +64,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import resource
 import select
 import shutil
@@ -70,6 +82,7 @@ CHALLENGE = json.loads((TRUSTED / "challenge.json").read_text())
 OBJECTS = Path("/opt/hone-objects")
 BUILD_ROOT = Path("/dev/shm")
 CORPUS = BUILD_ROOT / "corpus"
+MALFORMED_DIR = CORPUS / "malformed"
 COMPILE_ROOT = Path("/tmp/candidate-source")
 WORKER_UID = 2000
 Q_FAIL = float(CHALLENGE["qFail"])
@@ -402,11 +415,84 @@ def stage_corpus(source: Path) -> None:
     if CORPUS.exists():
         shutil.rmtree(CORPUS)
     shutil.copytree(source / "corpus", CORPUS)
-    shutil.copytree(source / "malformed", CORPUS / "malformed")
+    MALFORMED_DIR.mkdir(mode=0o755)
     for root, _, files in os.walk(CORPUS):
         os.chmod(root, 0o755)
         for name in files:
             os.chmod(Path(root) / name, 0o644)
+
+
+# --------------------------------------------------------------------------
+# Per-run malformed probe corpus (trusted-parent synthesized, never shipped)
+# --------------------------------------------------------------------------
+MALFORMED_KINDS = ("lone_continuation", "overlong", "truncated", "surrogate")
+
+
+def _random_valid_utf8(rng: random.Random, n_points: int) -> bytes:
+    parts = []
+    for _ in range(n_points):
+        bucket = rng.randrange(4)
+        if bucket == 0:
+            cp = rng.randrange(0x20, 0x7F)
+        elif bucket == 1:
+            cp = rng.randrange(0x80, 0x800)
+        elif bucket == 2:
+            cp = rng.randrange(0x800, 0xD800)
+        else:
+            cp = rng.randrange(0x10000, 0x110000)
+        parts.append(chr(cp))
+    return "".join(parts).encode("utf-8")
+
+
+def _invalid_unit(rng: random.Random, kind: str) -> bytes:
+    if kind == "lone_continuation":
+        return bytes([0x80 | rng.randrange(0x40)])
+    if kind == "overlong":
+        if rng.randrange(2):
+            return bytes([0xC0 | rng.randrange(2), 0x80 | rng.randrange(0x40)])
+        return bytes([0xE0, 0x80 | rng.randrange(0x20), 0x80 | rng.randrange(0x40)])
+    if kind == "surrogate":
+        return bytes([0xED, 0xA0 | rng.randrange(0x20), 0x80 | rng.randrange(0x40)])
+    # truncated multibyte: a valid 2/3/4-byte encoding with 1..len-1 trailing
+    # bytes dropped; the byte that follows in the assembled buffer is always a
+    # code-point start (never a continuation), so the sequence stays incomplete.
+    cp = rng.choice((rng.randrange(0x80, 0x800), rng.randrange(0x800, 0xD800),
+                     rng.randrange(0x10000, 0x110000)))
+    enc = chr(cp).encode("utf-8")
+    return enc[:rng.randrange(1, len(enc))]
+
+
+def synthesize_malformed(rng: random.Random) -> list[Path]:
+    """Build the per-run malformed probe corpus in the trusted parent.
+
+    Fresh randomness every evaluation: the cases are disjoint across runs and
+    across splits, unenumerable in advance, and never candidate-visible before
+    the run -- a driver that keys on memorized malformed shapes cannot match
+    the trusted reference's verdict on these. Each case embeds one invalid unit
+    (kind-rotated) inside otherwise-valid random UTF-8; the strict decode check
+    below asserts, trusted-side, that every case is genuinely invalid."""
+    count = int(CHALLENGE["malformedCases"])
+    paths = []
+    for i in range(count):
+        kind = MALFORMED_KINDS[i % len(MALFORMED_KINDS)]
+        head = _random_valid_utf8(rng, rng.randrange(64, 512))
+        tail = _random_valid_utf8(rng, rng.randrange(64, 512))
+        unit = _invalid_unit(rng, kind)
+        if kind == "truncated" and rng.randrange(2):
+            data = head + tail + unit          # truncated at end-of-buffer
+        else:
+            data = head + unit + tail          # invalid unit mid-buffer
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        else:
+            raise GateFailure(f"synthesized malformed case {i} decoded as valid")
+        path = MALFORMED_DIR / f"case{i:02d}-{kind}.bin"
+        path.write_bytes(data)
+        path.chmod(0o644)
+        paths.append(path)
+    return paths
 
 
 # --------------------------------------------------------------------------
@@ -619,8 +705,9 @@ def evaluate(runner, candidate, reference):
     for name in CHALLENGE["validFiles"]:
         key = f"transcode/{name}"
         metrics.append((key, driver.timed(CORPUS / name, key)))
-    for name in CHALLENGE["malformedFiles"]:
-        driver.malformed(CORPUS / "malformed" / name, f"malformed/{name}")
+    rng = random.Random(int.from_bytes(os.urandom(16), "big"))
+    for path in synthesize_malformed(rng):
+        driver.malformed(path, f"malformed/{path.name}")
     return driver.active_impl or "unknown", driver.max_rss, metrics
 
 

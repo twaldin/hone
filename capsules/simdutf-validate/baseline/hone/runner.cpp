@@ -8,7 +8,11 @@
 // the parent checks against the pristine reference. Per-iteration perturbation
 // parameters and the fold nonce arrive from the parent at CLOCK-START (the GO
 // line), AFTER the candidate library is already mapped, so no correct digest
-// can be precomputed by a candidate module-init in the untimed window.
+// can be precomputed by a candidate module-init in the untimed window. On a
+// go-nonce-scheduled subset of timed iterations a genuinely invalid UTF-8 unit
+// is written at a nonce-chosen code point, so the reject path is exercised ON
+// the scored path with per-run-unpredictable placement and its verdict is
+// captured by the receipt fold.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -203,6 +207,50 @@ void perturb_one(uint8_t *scratch, const uint8_t *pristine, const CodePoint &c,
   encode_cp(scratch + c.off, c.len, nv);
 }
 
+// Overwrite a code-point slot of length `len` with an unambiguously invalid
+// UTF-8 unit of the same length, variant-selected by nonce bits `r`:
+//   len 1: lone continuation byte, or an unfinished multibyte lead (the byte
+//          that follows is always a code-point start, never a continuation);
+//   len 2: overlong two-byte form (0xC0/0xC1 lead), or stray continuations;
+//   len 3: UTF-16 surrogate code point in a three-byte slot (U+D800..U+DFFF);
+//   len 4: code point above U+10FFFF, or an overlong four-byte form.
+// Every variant is rejected by any conformant validator regardless of the
+// surrounding bytes, so the trusted reference's verdict for the iteration is
+// deterministically 0 (and zero transcoded units).
+void write_invalid_unit(uint8_t *p, uint8_t len, uint64_t r) {
+  switch (len) {
+    case 1:
+      p[0] = (r & 1) ? uint8_t(0x80 | ((r >> 1) & 0x3F))   // lone continuation
+                     : uint8_t(0xE0 | ((r >> 1) & 0x0F));  // truncated lead
+      break;
+    case 2:
+      if (r & 1) {
+        p[0] = uint8_t(0xC0 | ((r >> 1) & 1));             // overlong lead
+        p[1] = uint8_t(0x80 | ((r >> 2) & 0x3F));
+      } else {
+        p[0] = uint8_t(0x80 | ((r >> 1) & 0x3F));          // stray continuations
+        p[1] = uint8_t(0x80 | ((r >> 7) & 0x3F));
+      }
+      break;
+    case 3:
+      p[0] = 0xED;                                         // U+D800..U+DFFF
+      p[1] = uint8_t(0xA0 | ((r >> 1) & 0x1F));
+      p[2] = uint8_t(0x80 | ((r >> 6) & 0x3F));
+      break;
+    default:
+      if (r & 1) {
+        p[0] = 0xF4;                                       // above U+10FFFF
+        p[1] = uint8_t(0x90 | ((r >> 1) & 0x2F));
+      } else {
+        p[0] = 0xF0;                                       // overlong four-byte
+        p[1] = uint8_t(0x80 | ((r >> 1) & 0x0F));
+      }
+      p[2] = uint8_t(0x80 | ((r >> 7) & 0x3F));
+      p[3] = uint8_t(0x80 | ((r >> 13) & 0x3F));
+      break;
+  }
+}
+
 // Eight-lane word-wise output fold. Every iteration's transcoded bytes are
 // folded in full (so any single-byte deviation from the pristine reference is
 // caught), but the eight independent accumulator lanes break the serial
@@ -374,6 +422,27 @@ int main(int argc, char **argv) {
   }
   std::string payload_hex;
 
+  // ---- go-nonce-scheduled reject-path exercise ----------------------------
+  // On roughly 1/8 of the timed iterations (nonce-selected, plus one FORCED
+  // iteration per leg so even the shortest calibration legs carry at least
+  // one), a genuinely invalid unit is written at a nonce-chosen code point
+  // before the candidate call and the original bytes are restored afterwards.
+  // The schedule is a pure function of the go-time seed (identical for the
+  // reference and candidate legs of a pair; unpredictable before clock-start),
+  // the trusted reference deterministically rejects those iterations
+  // (verdict=0, zero units), and the verdict byte is folded into the receipt
+  // digest -- so a driver that skips validation, converts without validating,
+  // or keys on memorized malformed shapes diverges from the reference digest.
+  // Iteration 0 (the pristine payload oracle) is never injected.
+  size_t first_body = 0;
+  while (first_body < cps.size() && cps[first_body].off < HEADER_RESERVE)
+    first_body++;
+  const size_t body_count = cps.size() - first_body;
+  long forced_it = -1;
+  if (iters >= 2 && body_count > 0)
+    forced_it = 1 + long(splitmix64(uint64_t(seed) ^ 0xF0CE51A7C0DE0001ULL) %
+                         uint64_t(iters - 1));
+
   for (long it = 0; it < iters; it++) {
     if (it > 0) {
       // Rewrite only a sparse, rotating subset each iteration: enough to make
@@ -384,9 +453,21 @@ int main(int argc, char **argv) {
       for (size_t k = size_t(it) % kStride; k < cps.size(); k += kStride)
         perturb_one(scratch.data(), pristine.data(), cps[k], uint64_t(seed), it);
     }
+    uint8_t saved[4];
+    const CodePoint *inj = nullptr;
+    if (it > 0 && body_count > 0) {
+      uint64_t r = splitmix64(uint64_t(seed) ^ 0x1BADB002DEADF00DULL ^
+                              (uint64_t(it) * 0x9E3779B97F4A7C15ULL));
+      if (it == forced_it || (r & 7) == 0) {
+        inj = &cps[first_body + size_t((r >> 3) % body_count)];
+        memcpy(saved, scratch.data() + inj->off, inj->len);
+        write_invalid_unit(scratch.data() + inj->off, inj->len, r >> 24);
+      }
+    }
     const char *ibuf = reinterpret_cast<const char *>(scratch.data());
     int ok = 0;
     long n = process(ibuf, len, out.data(), &ok);
+    if (inj) memcpy(scratch.data() + inj->off, saved, inj->len);
     if (n < 0) { write_all(resp_fd, "FAIL process\n"); return 73; }
     if (!ok) n = 0;
     uint8_t vb = uint8_t(ok);

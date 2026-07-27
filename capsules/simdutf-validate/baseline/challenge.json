@@ -7,12 +7,7 @@
     "b.txt",
     "c.txt"
   ],
-  "malformedFiles": [
-    "lone_continuation.bin",
-    "overlong.bin",
-    "truncated.bin",
-    "surrogate.bin"
-  ],
+  "malformedCases": 8,
   "timingSamples": 20,
   "timingTargetSec": 0.6,
   "calibIters": 8,
