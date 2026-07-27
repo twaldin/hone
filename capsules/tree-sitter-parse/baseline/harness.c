@@ -237,8 +237,10 @@ static void store_le64(unsigned char *data, uint64_t value) {
  * control descriptor carrying the harness's ready marker and the per-iteration
  * receipt (a fold of the go-token and the completed parse's tree signature)
  * that stops the parent's clock. */
-/* Fixed warmup schedule seed, disjoint from every parent-delivered timed
- * token, so warmup content never recurs in a timed iteration. */
+/* Fixed warmup schedule seed. Parent-delivered timed tokens are unpredictable
+ * 64-bit CSPRNG draws revealed only at clock-start, so warmup content
+ * coinciding with any timed iteration is a 2^-64 event, and no warmup work can
+ * be steered toward a future timed iteration's content. */
 #define WARMUP_SEED UINT64_C(0x53A17C0FE2B9D680)
 
 #define FULL_WARMUP_SALT UINT64_C(0x9A3D6B1F0C55E101)

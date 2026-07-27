@@ -8,6 +8,7 @@ import json
 import math
 import os
 import resource
+import secrets
 import select
 import shutil
 import signal
@@ -39,6 +40,12 @@ BUILD_TIMEOUT_SEC = 180
 VERIFY_TIMEOUT_SEC = 60
 BENCH_TIMEOUT_SEC = 90
 BENCH_TIMED_REPS = 9
+# Per-iteration timing plausibility floor: every candidate timed iteration must
+# take at least the reference leg's fastest same-phase iteration divided by
+# this divisor. Contention only ever adds time, so the floor cannot trip
+# legitimately; a measured window collapsed toward a pipe round-trip is orders
+# of magnitude below any real parse of the token-seeded content.
+ITERATION_FLOOR_DIVISOR = 10
 OUTPUT_LIMIT = 1 << 20
 # Order-sensitive FNV-1a 64-bit fold matching harness.c (DIGEST_BASIS /
 # 0x100000001B3). The parent folds each timed iteration's receipt into a
@@ -564,16 +571,35 @@ class WorkloadResult(NamedTuple):
     observed: dict[str, str]
 
 
-def iteration_token(identifier: str, rep: int, phase: str, index: int) -> bytes:
-    """Eight opaque bytes the trusted parent streams to a leg at clock-start
-    for one timed iteration. The candidate-linked harness never learns rep, so
-    it cannot derive a future iteration's token to work ahead of the parent's
-    clock; the reference and candidate legs of one repetition receive the
-    identical token stream, so their timed content -- and therefore their
-    trees and receipts -- match. The token is delivered only once the clock is
-    running, so no correct parse, digest, or receipt exists before it."""
-    material = f"{identifier}:{rep}:{phase}:go:{index}".encode()
-    return hashlib.sha256(material).digest()[:8]
+def draw_token_stream(full_iterations: int, incremental_iterations: int) -> dict[str, list[bytes]]:
+    """One unpredictable eight-byte parse-go token per timed iteration, drawn
+    from the trusted parent's CSPRNG (secrets.token_bytes) at repetition start
+    and stored once; the identical stored stream is replayed to BOTH the
+    reference and candidate legs of the repetition, so their timed content --
+    and therefore their trees and receipts -- match. No token is derived from
+    enumerable fields (identifier/rep/phase/index), so no candidate-visible
+    computation can enumerate a small precompute set in any untimed window:
+    with 64 fresh random bits per iteration, the token-seeded mutation, parse,
+    and digest are forced inside the timed window where the token is first
+    revealed at clock-start."""
+    return {
+        "full": [secrets.token_bytes(8) for _ in range(full_iterations)],
+        "incremental": [secrets.token_bytes(8) for _ in range(incremental_iterations)],
+    }
+
+
+def enforce_iteration_floor(identifier: str, phase: str, reference_ns: list[int], candidate_ns: list[int]) -> None:
+    """Reject implausibly fast timed windows: every candidate iteration must
+    take at least the trusted reference leg's fastest same-phase iteration
+    divided by ITERATION_FLOOR_DIVISOR. Host noise only ever adds time, so a
+    genuine candidate cannot trip the floor, while a window that collapsed to
+    a control-channel round-trip sits far below it."""
+    floor_ns = min(reference_ns) // ITERATION_FLOOR_DIVISOR
+    if floor_ns <= 0:
+        raise GateFailure(f"reference iteration clock resolution failure: {identifier} {phase}")
+    for elapsed in candidate_ns:
+        if elapsed < floor_ns:
+            raise GateFailure(f"timed iteration implausibly fast versus trusted reference: {identifier} {phase}")
 
 
 def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
@@ -627,7 +653,7 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     # Robustness: host contention and frequency drift only ever add time and
     # neither is candidate-controlled (the host carries permanent ambient load
     # from unrelated VM containers plus the tree-scanning git poller). Candidate
-    # and pristine in-eval reference legs are interleaved on the SAME
+    # and pristine in-eval reference legs are interleaved on the SAME stored
     # per-iteration token stream, one warm repetition settles the machine, and
     # each phase keeps the fastest of nine timed repetitions (timing noise is
     # strictly additive, so the per-phase minimum is the cleanest, most
@@ -636,21 +662,28 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     # contention-spiked eval cannot flip the interleaved ratio). The trusted
     # parent owns the clock and times each iteration's go-token-seeded mutation
     # and parse; every timed phase's receipt fold must match the trusted
-    # reference run on the identical token stream.
+    # reference run on the identical stored token stream, every token is a
+    # fresh CSPRNG draw revealed only at clock-start (never derived from
+    # enumerable fields), and every candidate iteration must clear the
+    # per-iteration plausibility floor against the reference leg's fastest
+    # same-phase iteration.
     candidate_full_ns: list[int] = []
     candidate_incremental_ns: list[int] = []
     reference_full_ns: list[int] = []
     reference_incremental_ns: list[int] = []
     peak_rss_kib = 0
     for rep in range(1 + BENCH_TIMED_REPS):
-        ref_full, ref_incremental, _, ref_digests = run_timed_bench(
-            REF_BINARY, f"ref-{rep}", base, benchmark, output_dir, identifier, rep
+        tokens = draw_token_stream(int(benchmark["fullIterations"]), int(benchmark["incrementalIterations"]))
+        ref_full, ref_incremental, _, ref_digests, ref_iteration_ns = run_timed_bench(
+            REF_BINARY, f"ref-{rep}", base, tokens, output_dir, identifier
         )
-        full_ns, incremental_ns, rep_rss_kib, digests = run_timed_bench(
-            BINARY, f"candidate-{rep}", base, benchmark, output_dir, identifier, rep
+        full_ns, incremental_ns, rep_rss_kib, digests, candidate_iteration_ns = run_timed_bench(
+            BINARY, f"candidate-{rep}", base, tokens, output_dir, identifier
         )
         if digests != ref_digests:
             raise GateFailure(f"timed-iteration parse signature disagrees with trusted reference: {identifier}")
+        for phase in ("full", "incremental"):
+            enforce_iteration_floor(identifier, phase, ref_iteration_ns[phase], candidate_iteration_ns[phase])
         peak_rss_kib = max(peak_rss_kib, rep_rss_kib)
         if rep > 0:
             reference_full_ns.append(ref_full)
@@ -713,30 +746,30 @@ def _read_exact(fd: int, count: int, deadline: float, pid: int) -> bytes:
 
 
 def _drive_phase(
-    ctrl_r: int, go_w: int, identifier: str, rep: int, phase: str, iterations: int, deadline: float, pid: int
-) -> tuple[int, int]:
-    """Stream one timed phase and return (summed parse nanoseconds, receipt
-    fold). The parent waits for the harness's ready marker, starts the clock as
-    it releases the single parse-go token, and stops the clock on the harness's
-    receipt. The receipt folds the go-token together with the completed parse's
-    tree signature, so a candidate cannot produce it without doing the parse
-    inside the timed window, and cannot precompute it before the token exists.
-    The parent folds the receipt stream into a per-phase accumulator it later
-    checks against the pristine reference leg on the identical token stream."""
-    total_ns = 0
+    ctrl_r: int, go_w: int, identifier: str, tokens: list[bytes], deadline: float, pid: int
+) -> tuple[int, list[int]]:
+    """Stream one timed phase and return (receipt fold, per-iteration parse
+    nanoseconds). The parent waits for the harness's ready marker, starts the
+    clock as it releases this iteration's stored unpredictable parse-go token,
+    and stops the clock on the harness's receipt. The receipt folds the
+    go-token together with the completed parse's tree signature, so a
+    candidate cannot produce it without doing the parse inside the timed
+    window, and cannot precompute it before the token is first revealed at
+    clock-start. The parent folds the receipt stream into a per-phase
+    accumulator it later checks against the pristine reference leg on the
+    identical stored token stream."""
+    iteration_ns: list[int] = []
     fold = DIGEST_BASIS
-    for index in range(iterations):
+    for token in tokens:
         if _read_exact(ctrl_r, 1, deadline, pid) != b"R":
             _kill_leg(pid)
             raise GateFailure(f"benchmark leg desynchronized (ready): {identifier}")
-        token = iteration_token(identifier, rep, phase, index)
         started = time.monotonic_ns()
         os.write(go_w, token)
         receipt = _read_exact(ctrl_r, 8, deadline, pid)
-        elapsed = time.monotonic_ns() - started
-        total_ns += elapsed
+        iteration_ns.append(time.monotonic_ns() - started)
         fold = ((fold ^ int.from_bytes(receipt, "little")) * FNV_PRIME) & MASK64
-    return total_ns, fold
+    return fold, iteration_ns
 
 
 def _wait_leg(pid: int, deadline: float) -> int:
@@ -761,22 +794,23 @@ def run_timed_bench(
     binary: Path,
     label: str,
     base: list[str],
-    benchmark: dict[str, object],
+    tokens: dict[str, list[bytes]],
     output_dir: Path,
     identifier: str,
-    rep: int,
-) -> tuple[int, int, int, tuple[int, int]]:
+) -> tuple[int, int, int, tuple[int, int], dict[str, list[int]]]:
     """Run one bench leg. The trusted parent forks the sealed harness (under
-    /usr/bin/time for peak RSS and prlimit --nproc=1), streams a single opaque
-    parse-go token per timed iteration over inherited pipes at clock-start, and
-    times each iteration from the go-token send to the harness's receipt. The
-    receipt binds the go-token to the completed parse's tree signature, so the
-    measured window necessarily contains the mutation and parse the token
-    seeds; the harness holds no clock of its own to rewrite. Returns the summed
-    full and incremental parse nanoseconds, peak RSS KiB, and the two per-phase
-    receipt folds. Reaps the full candidate-uid tree after the leg."""
-    full_iterations = int(benchmark["fullIterations"])
-    incremental_iterations = int(benchmark["incrementalIterations"])
+    /usr/bin/time for peak RSS and prlimit --nproc=1), streams one stored
+    unpredictable CSPRNG parse-go token per timed iteration over inherited
+    pipes at clock-start, and times each iteration from the go-token send to
+    the harness's receipt. The receipt binds the go-token to the completed
+    parse's tree signature, so the measured window necessarily contains the
+    mutation and parse the token seeds; the harness holds no clock of its own
+    to rewrite. Returns the summed full and incremental parse nanoseconds,
+    peak RSS KiB, the two per-phase receipt folds, and the per-phase
+    per-iteration nanoseconds for the plausibility floor. Reaps the full
+    candidate-uid tree after the leg."""
+    full_iterations = len(tokens["full"])
+    incremental_iterations = len(tokens["incremental"])
     rss_path = output_dir / f"peak-rss-kib-{label}.txt"
     go_r, go_w = os.pipe()
     ctrl_r, ctrl_w = os.pipe()
@@ -808,9 +842,9 @@ def run_timed_bench(
     os.close(ctrl_w)
     deadline = time.monotonic() + BENCH_TIMEOUT_SEC
     try:
-        full_ns, full_fold = _drive_phase(ctrl_r, go_w, identifier, rep, "full", full_iterations, deadline, pid)
-        incremental_ns, incremental_fold = _drive_phase(
-            ctrl_r, go_w, identifier, rep, "incremental", incremental_iterations, deadline, pid
+        full_fold, full_iteration_ns = _drive_phase(ctrl_r, go_w, identifier, tokens["full"], deadline, pid)
+        incremental_fold, incremental_iteration_ns = _drive_phase(
+            ctrl_r, go_w, identifier, tokens["incremental"], deadline, pid
         )
         status = _wait_leg(pid, deadline)
     finally:
@@ -820,6 +854,8 @@ def run_timed_bench(
         _clear_candidate_writable()
     if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
         raise GateFailure(f"benchmark leg failed: {identifier}")
+    full_ns = sum(full_iteration_ns)
+    incremental_ns = sum(incremental_iteration_ns)
     if full_ns <= 0 or incremental_ns <= 0:
         raise GateFailure(f"benchmark clock resolution failure: {identifier}")
     try:
@@ -831,6 +867,7 @@ def run_timed_bench(
         incremental_ns,
         peak_rss_kib,
         (full_fold, incremental_fold),
+        {"full": full_iteration_ns, "incremental": incremental_iteration_ns},
     )
 
 
