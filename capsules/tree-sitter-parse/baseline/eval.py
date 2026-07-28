@@ -700,9 +700,13 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     # edited site inside the timed window; and every timed FULL iteration
     # parses a schedule-driven permutation of the workload's top-level
     # line-aligned blocks (item-granular, length-preserving, same token
-    # multiset), so nearly every token's offset moves each iteration and no
-    # privately cached tree of earlier content -- pristine or evolving -- is
-    # reachable by a sparse edit script, leaving an incremental-from-cache
+    # multiset) with a boundary-altering delimiter substitution landed inside
+    # nearly EVERY permuted block, so nearly every token's offset moves each
+    # iteration AND nearly every block's byte content (hence parsed
+    # structure) is schedule-distinct: no privately cached tree of earlier
+    # content -- pristine or evolving -- is reachable by a sparse edit
+    # script, and no per-block subtree cached under a block-content key can
+    # be relocated into the current buffer, leaving any cache-reassembly
     # substitute for the full parse with full-parse-shaped re-lex work.
     candidate_iterations: dict[str, list[list[int]]] = {"full": [], "incremental": []}
     reference_iterations: dict[str, list[list[int]]] = {"full": [], "incremental": []}
