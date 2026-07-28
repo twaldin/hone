@@ -217,11 +217,13 @@ static void store_le64(unsigned char *data, uint64_t value) {
  * clock-start (the same token drives the candidate and the in-eval reference
  * binary). Mutation, parse, and digest all run after the token arrives, so no
  * tree -- and therefore no correct digest -- can be produced before the clock
- * is running. Each timed tree's full pre-order (symbol, start_byte, end_byte)
- * signature is folded together with the go-token into the per-iteration
- * receipt that stops the parent's clock, so the receipt cannot be produced
- * without completing the parse inside the timed window; the evaluator folds
- * the receipt stream and compares it against the trusted reference run.
+ * is running. Each timed tree's content-inclusive signature -- the full
+ * pre-order (symbol, start_byte, end_byte) walk plus, for every leaf node,
+ * the parsed buffer's source bytes in that leaf's range -- is folded
+ * together with the go-token into the per-iteration receipt that stops the
+ * parent's clock, so the receipt cannot be produced without completing the
+ * parse inside the timed window; the evaluator folds the receipt stream and
+ * compares it against the trusted reference run.
  */
 #define FULL_MUTATION_STRIDE 2048u
 /* Wider incremental stride: 4-11 dispersed edit sites per iteration keeps the
@@ -395,9 +397,20 @@ static TSTree *copy_edited_tree(const TSTree *old_tree, const Mutation *mutation
 }
 
 /* Fold the complete pre-order (symbol, start_byte, end_byte) walk of the tree
- * into the digest. Schedule variants may legitimately contain error nodes;
- * the walk covers them identically for candidate and reference. */
-static uint64_t fold_tree_signature(uint64_t digest, TSTree *tree) {
+ * AND, for every leaf node (a node with no visible children), a rolling FNV
+ * of the parsed buffer's source bytes in [start_byte, end_byte) into the
+ * digest. Structure alone is not enough: the mutation schedule is length- and
+ * character-class-preserving, so a swap landing in the interior of an
+ * identifier/number/string/comment token leaves every node boundary and
+ * symbol unchanged; a structure-only signature would then be computable from
+ * a cached pristine tree with no parse at all. Folding leaf content makes ANY
+ * schedule mutation -- structure-changing or not -- alter the receipt, so a
+ * genuine parse of the token-seeded content is forced inside every timed
+ * window. Schedule variants may legitimately contain error nodes; the walk
+ * covers them identically for candidate and reference, and BOTH legs run this
+ * same trusted fold over their identical parsed buffers, so the content fold
+ * is observation-preserving for honest candidates. */
+static uint64_t fold_tree_signature(uint64_t digest, TSTree *tree, const char *source, uint32_t source_length) {
   TSNode root = ts_tree_root_node(tree);
   if (ts_node_is_null(root)) fail("timed parse produced no root node");
   digest = fold_value(digest, ts_node_has_error(root) ? 3 : 5);
@@ -410,6 +423,17 @@ static uint64_t fold_tree_signature(uint64_t digest, TSTree *tree) {
       digest = fold_value(digest, ts_node_start_byte(node));
       digest = fold_value(digest, ts_node_end_byte(node));
       if (ts_tree_cursor_goto_first_child(&cursor)) continue;
+      /* Leaf: bind the digest to the token text itself, clamped to the
+       * parsed buffer (clamping is identical on both legs). */
+      uint32_t leaf_start = ts_node_start_byte(node);
+      uint32_t leaf_end = ts_node_end_byte(node);
+      if (leaf_start > source_length) leaf_start = source_length;
+      if (leaf_end > source_length) leaf_end = source_length;
+      uint64_t leaf_fold = DIGEST_BASIS;
+      for (uint32_t byte = leaf_start; byte < leaf_end; byte++) {
+        leaf_fold = fold_value(leaf_fold, (unsigned char)source[byte]);
+      }
+      digest = fold_value(digest, leaf_fold);
     }
     if (ts_tree_cursor_goto_next_sibling(&cursor)) {
       descend = true;
@@ -524,7 +548,8 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
    * single parse-go token on the go descriptor. The harness derives the whole
    * timed operation from that token: it seeds the per-iteration mutation with
    * the token, mutates, parses the schedule-distinct content, folds the
-   * completed tree's full pre-order signature together with the token into a
+   * completed tree's content-inclusive signature (its full pre-order walk
+   * plus every leaf's source bytes) together with the token into a
    * receipt, and only then writes that receipt on the control descriptor to
    * stop the parent's clock. Because the mutation, parse, and digest all
    * depend on a token that does not exist until the clock is running, no
@@ -544,7 +569,7 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
     TSTree *tree = ts_parser_parse_string(parser, NULL, source.data, source.length);
     if (!tree) fail("timed parser returned no tree");
     uint64_t digest = fold_value(fold_value(DIGEST_BASIS, go), i);
-    digest = fold_tree_signature(digest, tree);
+    digest = fold_tree_signature(digest, tree, source.data, source.length);
     store_le64(receipt_bytes, mix64(digest ^ go));
     raw_write(ctrl_fd, (const char *)receipt_bytes, 8);
     ts_tree_delete(tree);
@@ -560,7 +585,7 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
     TSTree *tree = ts_parser_parse_string(parser, base, edited.data, edited.length);
     if (!tree) fail("timed incremental parser returned no tree");
     uint64_t digest = fold_value(fold_value(DIGEST_BASIS, go), i);
-    digest = fold_tree_signature(digest, tree);
+    digest = fold_tree_signature(digest, tree, edited.data, edited.length);
     store_le64(receipt_bytes, mix64(digest ^ go));
     raw_write(ctrl_fd, (const char *)receipt_bytes, 8);
     ts_tree_delete(tree);

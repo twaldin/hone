@@ -46,6 +46,19 @@ BENCH_TIMED_REPS = 9
 # legitimately; a measured window collapsed toward a pipe round-trip is orders
 # of magnitude below any real parse of the token-seeded content.
 ITERATION_FLOOR_DIVISOR = 10
+# Per-leg out-of-process CPU floor: each bench leg's total CPU time is read by
+# the trusted parent from the kernel's reaped-child accounting (the wait4
+# rusage channel bracketing exactly that leg's process tree) -- never from
+# anything candidate-reported. Reference and candidate legs run the identical
+# warmup plus token-seeded timed iteration schedule, so their CPU per
+# operation is directly comparable; a candidate leg whose CPU falls below this
+# fraction of the SAME repetition's pristine reference leg is rejected as
+# implausible (producing receipts without parse-proportional work while
+# sitting inside the wall-clock plausibility band). Genuine parser
+# improvements reduce CPU per operation only modestly (the sealed improved
+# control measures a few percent), so 0.4 leaves wide legitimate headroom
+# while bounding any residual work-skipping channel to 1/0.4x.
+MIN_CPU_FRAC = 0.4
 OUTPUT_LIMIT = 1 << 20
 # Order-sensitive FNV-1a 64-bit fold matching harness.c (DIGEST_BASIS /
 # 0x100000001B3). The parent folds each timed iteration's receipt into a
@@ -654,48 +667,99 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     # neither is candidate-controlled (the host carries permanent ambient load
     # from unrelated VM containers plus the tree-scanning git poller). Candidate
     # and pristine in-eval reference legs are interleaved on the SAME stored
-    # per-iteration token stream, one warm repetition settles the machine, and
-    # each phase keeps the fastest of nine timed repetitions (timing noise is
-    # strictly additive, so the per-phase minimum is the cleanest, most
-    # contention-robust estimate for candidate and reference alike, and nine
-    # repetitions tighten each single eval's minimum enough that one
-    # contention-spiked eval cannot flip the interleaved ratio). The trusted
+    # per-iteration token stream in per-repetition alternating order (so
+    # time-monotone load decay within a repetition biases neither leg's
+    # minimum), one warm repetition settles the machine, and
+    # each phase is scored from summed per-iteration minima: every timed
+    # iteration index keeps its fastest window across the nine timed
+    # repetitions (timing noise is strictly additive and lands on
+    # iterations, so each iteration gets nine independent chances at a calm
+    # window; A-A probes on this host measured ~4% spread for min-of-summed
+    # phases and ~4% for median-of-per-pair-ratios -- per-leg multiplicative
+    # placement/frequency lotteries cancel in neither -- while summed
+    # per-iteration minima average residuals across the 24-120 iterations of
+    # a phase for candidate and reference alike). The trusted
     # parent owns the clock and times each iteration's go-token-seeded mutation
     # and parse; every timed phase's receipt fold must match the trusted
     # reference run on the identical stored token stream, every token is a
     # fresh CSPRNG draw revealed only at clock-start (never derived from
-    # enumerable fields), and every candidate iteration must clear the
+    # enumerable fields), every candidate iteration must clear the
     # per-iteration plausibility floor against the reference leg's fastest
-    # same-phase iteration.
-    candidate_full_ns: list[int] = []
-    candidate_incremental_ns: list[int] = []
-    reference_full_ns: list[int] = []
-    reference_incremental_ns: list[int] = []
+    # same-phase iteration, and every candidate leg's out-of-process
+    # wait4-accounted CPU must clear MIN_CPU_FRAC of the same repetition's
+    # reference leg. The receipt-bound tree signature is content-inclusive
+    # (structure plus every leaf's source bytes), so even a schedule mutation
+    # that lands in a token interior and leaves the structure byte-identical
+    # changes the receipt and forces a genuine parse in the timed window.
+    candidate_iterations: dict[str, list[list[int]]] = {"full": [], "incremental": []}
+    reference_iterations: dict[str, list[list[int]]] = {"full": [], "incremental": []}
     peak_rss_kib = 0
     for rep in range(1 + BENCH_TIMED_REPS):
         tokens = draw_token_stream(int(benchmark["fullIterations"]), int(benchmark["incrementalIterations"]))
-        ref_full, ref_incremental, _, ref_digests, ref_iteration_ns = run_timed_bench(
-            REF_BINARY, f"ref-{rep}", base, tokens, output_dir, identifier
-        )
-        full_ns, incremental_ns, rep_rss_kib, digests, candidate_iteration_ns = run_timed_bench(
-            BINARY, f"candidate-{rep}", base, tokens, output_dir, identifier
-        )
+        # Leg order alternates per repetition (reference first on even reps,
+        # candidate first on odd reps). Host load inside a repetition is not
+        # stationary -- container spin-up, build cooldown, and thermal ramp
+        # decay monotonically over seconds -- so a FIXED order would
+        # systematically favor whichever leg always runs second; the
+        # interleaved ratio cancels drift shared by both legs of a pair, not
+        # a bias applied to only one side of every pair. Alternation gives
+        # both binaries the same distribution of within-pair positions, so
+        # the per-phase minima being compared are equally treated. The order
+        # is a fixed function of the repetition index, never of anything
+        # candidate-controlled, and both legs still replay the identical
+        # stored token stream.
+        def _ref_leg() -> tuple[int, int, int, tuple[int, int], dict[str, list[int]], float]:
+            return run_timed_bench(REF_BINARY, f"ref-{rep}", base, tokens, output_dir, identifier)
+
+        def _candidate_leg() -> tuple[int, int, int, tuple[int, int], dict[str, list[int]], float]:
+            return run_timed_bench(BINARY, f"candidate-{rep}", base, tokens, output_dir, identifier)
+
+        if rep % 2 == 0:
+            ref_full, ref_incremental, _, ref_digests, ref_iteration_ns, ref_cpu_sec = _ref_leg()
+            full_ns, incremental_ns, rep_rss_kib, digests, candidate_iteration_ns, candidate_cpu_sec = _candidate_leg()
+        else:
+            full_ns, incremental_ns, rep_rss_kib, digests, candidate_iteration_ns, candidate_cpu_sec = _candidate_leg()
+            ref_full, ref_incremental, _, ref_digests, ref_iteration_ns, ref_cpu_sec = _ref_leg()
         if digests != ref_digests:
             raise GateFailure(f"timed-iteration parse signature disagrees with trusted reference: {identifier}")
         for phase in ("full", "incremental"):
             enforce_iteration_floor(identifier, phase, ref_iteration_ns[phase], candidate_iteration_ns[phase])
+        # Out-of-process CPU floor: the candidate leg's kernel-accounted CPU
+        # (wait4 rusage, read by the trusted parent) must be plausible against
+        # the pristine reference leg of the SAME repetition on the identical
+        # stored token stream.
+        if candidate_cpu_sec < ref_cpu_sec * MIN_CPU_FRAC:
+            raise GateFailure(f"benchmark leg CPU work implausibly below trusted reference: {identifier}")
         peak_rss_kib = max(peak_rss_kib, rep_rss_kib)
         if rep > 0:
-            reference_full_ns.append(ref_full)
-            reference_incremental_ns.append(ref_incremental)
-            candidate_full_ns.append(full_ns)
-            candidate_incremental_ns.append(incremental_ns)
-    full_ratio = min(reference_full_ns) / min(candidate_full_ns)
-    incremental_ratio = min(reference_incremental_ns) / min(candidate_incremental_ns)
-    full_speed = expected_full_bytes * 1_000_000_000.0 / min(candidate_full_ns)
-    incremental_speed = expected_incremental_bytes * 1_000_000_000.0 / min(candidate_incremental_ns)
-    reference_full_speed = expected_full_bytes * 1_000_000_000.0 / min(reference_full_ns)
-    reference_incremental_speed = expected_incremental_bytes * 1_000_000_000.0 / min(reference_incremental_ns)
+            for phase in ("full", "incremental"):
+                reference_iterations[phase].append(ref_iteration_ns[phase])
+                candidate_iterations[phase].append(candidate_iteration_ns[phase])
+    # Per-iteration fastest-of-nine: each timed iteration index keeps its
+    # fastest window across the nine timed repetitions, and the phase estimate
+    # sums those minima. Timing noise is strictly additive and lands on
+    # iterations, not phases, so excising it iteration-wise gives every
+    # iteration nine independent chances at a calm window instead of
+    # requiring one whole repetition to stay calm end to end (min-of-summed
+    # phases measured ~4% A-A spread on this host; summed per-iteration
+    # minima average the residuals across 24-120 iterations). Reference and
+    # candidate legs share the identical stored token per (repetition,
+    # iteration) slot, so the same content feeds both sides of every compared
+    # minimum and the estimator is applied identically to both binaries;
+    # nothing about it is candidate-controlled.
+    def phase_floor_sum(per_rep: list[list[int]]) -> int:
+        return sum(min(samples) for samples in zip(*per_rep, strict=True))
+
+    reference_full_est = phase_floor_sum(reference_iterations["full"])
+    candidate_full_est = phase_floor_sum(candidate_iterations["full"])
+    reference_incremental_est = phase_floor_sum(reference_iterations["incremental"])
+    candidate_incremental_est = phase_floor_sum(candidate_iterations["incremental"])
+    full_ratio = reference_full_est / candidate_full_est
+    incremental_ratio = reference_incremental_est / candidate_incremental_est
+    full_speed = expected_full_bytes * 1_000_000_000.0 / candidate_full_est
+    incremental_speed = expected_incremental_bytes * 1_000_000_000.0 / candidate_incremental_est
+    reference_full_speed = expected_full_bytes * 1_000_000_000.0 / reference_full_est
+    reference_incremental_speed = expected_incremental_bytes * 1_000_000_000.0 / reference_incremental_est
     values = (full_ratio, incremental_ratio, full_speed, incremental_speed, reference_full_speed, reference_incremental_speed)
     if not all(math.isfinite(value) and value > 0 for value in values):
         raise GateFailure(f"benchmark throughput non-finite: {identifier}")
@@ -772,21 +836,26 @@ def _drive_phase(
     return fold, iteration_ns
 
 
-def _wait_leg(pid: int, deadline: float) -> int:
+def _wait_leg(pid: int, deadline: float) -> tuple[int, resource.struct_rusage | None]:
+    """Reap one bench leg and return (status, rusage). The rusage comes from
+    the kernel's reaped-child accounting (os.wait4 on exactly this leg's
+    process-group leader, whose own accounting accumulates every descendant it
+    waited for), so the leg's CPU time is measured OUT OF PROCESS by the
+    trusted parent and nothing candidate-emitted contributes to it."""
     while True:
         try:
-            waited, status = os.waitpid(pid, os.WNOHANG)
+            waited, status, usage = os.wait4(pid, os.WNOHANG)
         except ChildProcessError:
-            return 0
+            return 0, None
         if waited == pid:
-            return status
+            return status, usage
         if time.monotonic() >= deadline:
             _kill_leg(pid)
             try:
-                _, status = os.waitpid(pid, 0)
+                _, status, usage = os.wait4(pid, 0)
             except ChildProcessError:
-                status = 0
-            return status
+                return 0, None
+            return status, usage
         time.sleep(0.005)
 
 
@@ -797,18 +866,20 @@ def run_timed_bench(
     tokens: dict[str, list[bytes]],
     output_dir: Path,
     identifier: str,
-) -> tuple[int, int, int, tuple[int, int], dict[str, list[int]]]:
+) -> tuple[int, int, int, tuple[int, int], dict[str, list[int]], float]:
     """Run one bench leg. The trusted parent forks the sealed harness (under
     /usr/bin/time for peak RSS and prlimit --nproc=1), streams one stored
     unpredictable CSPRNG parse-go token per timed iteration over inherited
     pipes at clock-start, and times each iteration from the go-token send to
     the harness's receipt. The receipt binds the go-token to the completed
-    parse's tree signature, so the measured window necessarily contains the
-    mutation and parse the token seeds; the harness holds no clock of its own
-    to rewrite. Returns the summed full and incremental parse nanoseconds,
-    peak RSS KiB, the two per-phase receipt folds, and the per-phase
-    per-iteration nanoseconds for the plausibility floor. Reaps the full
-    candidate-uid tree after the leg."""
+    parse's content-inclusive tree signature (structure plus leaf source
+    bytes), so the measured window necessarily contains the mutation and
+    parse the token seeds; the harness holds no clock of its own to rewrite.
+    Returns the summed full and incremental parse nanoseconds, peak RSS KiB,
+    the two per-phase receipt folds, the per-phase per-iteration nanoseconds
+    for the plausibility floor, and the leg's total CPU seconds read out of
+    process from the kernel's reaped-child wait4 accounting (never
+    candidate-reported). Reaps the full candidate-uid tree after the leg."""
     full_iterations = len(tokens["full"])
     incremental_iterations = len(tokens["incremental"])
     rss_path = output_dir / f"peak-rss-kib-{label}.txt"
@@ -846,7 +917,7 @@ def run_timed_bench(
         incremental_fold, incremental_iteration_ns = _drive_phase(
             ctrl_r, go_w, identifier, tokens["incremental"], deadline, pid
         )
-        status = _wait_leg(pid, deadline)
+        status, leg_usage = _wait_leg(pid, deadline)
     finally:
         os.close(go_w)
         os.close(ctrl_r)
@@ -854,6 +925,11 @@ def run_timed_bench(
         _clear_candidate_writable()
     if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
         raise GateFailure(f"benchmark leg failed: {identifier}")
+    if leg_usage is None:
+        raise GateFailure(f"benchmark leg CPU accounting unavailable: {identifier}")
+    leg_cpu_sec = leg_usage.ru_utime + leg_usage.ru_stime
+    if not math.isfinite(leg_cpu_sec) or leg_cpu_sec <= 0:
+        raise GateFailure(f"benchmark leg CPU accounting invalid: {identifier}")
     full_ns = sum(full_iteration_ns)
     incremental_ns = sum(incremental_iteration_ns)
     if full_ns <= 0 or incremental_ns <= 0:
@@ -868,6 +944,7 @@ def run_timed_bench(
         peak_rss_kib,
         (full_fold, incremental_fold),
         {"full": full_iteration_ns, "incremental": incremental_iteration_ns},
+        leg_cpu_sec,
     )
 
 
@@ -902,11 +979,11 @@ def main() -> None:
             exact[str(row["id"])] = result.observed
         raw_q = geometric_mean(speeds)
         reference_q = geometric_mean(reference_speeds)
-        # Drift compensation: every cell is the ratio of fastest-of-nine
-        # per-phase times between the candidate and the trusted in-eval
-        # baseline yardstick run interleaved in the same evaluation, so host
-        # frequency/contention state shared by the paired measurements
-        # divides out of the reported bytes/sec-scale score.
+        # Drift compensation: every cell is the ratio of summed
+        # per-iteration-fastest-of-nine phase times between the candidate and
+        # the trusted in-eval baseline yardstick run interleaved in the same
+        # evaluation, so host frequency/contention state shared by the paired
+        # measurements divides out of the reported bytes/sec-scale score.
         score = REFERENCE_NORMALIZATION * geometric_mean(ratios)
         deterministic = {
             "treeSitterRevision": TREE_SITTER_REVISION,
@@ -929,7 +1006,7 @@ def main() -> None:
             "perExample": {
                 "aggregate": {
                     "score": score,
-                    "feedback": f"12 full/incremental throughput cells passed exact tree, parser-test, edit, digest, and RSS gates; q={score:.3f} bytes/s (fastest-of-nine reference-normalized; raw {raw_q:.3f}, in-eval trusted baseline {reference_q:.3f})",
+                    "feedback": f"12 full/incremental throughput cells passed exact tree, parser-test, edit, digest, and RSS gates; q={score:.3f} bytes/s (per-iteration fastest-of-nine reference-normalized; raw {raw_q:.3f}, in-eval trusted baseline {reference_q:.3f})",
                 }
             },
             "diagnostics": {
