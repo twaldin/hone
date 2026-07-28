@@ -2,16 +2,16 @@
   "aa": {
     "noiseFractionOfScale": 0.2,
     "samples": [
-      49521605.62179102,
-      50904677.411406815,
-      51512981.11268969,
-      51149387.39930031,
-      50704587.77165627,
-      50796751.32271913
+      50699131.98346837,
+      50788574.92856914,
+      50689296.971878275,
+      50675532.52051796,
+      50523272.15201265,
+      50773530.57440769
     ],
-    "sigma": 674896.5195514983
+    "sigma": 94626.85397930015
   },
-  "capsuleId": "cap_a8d16ea2bda4",
+  "capsuleId": "cap_d0229ac521f3",
   "controls": [
     {
       "hardGatesPass": false,
@@ -24,96 +24,97 @@
     {
       "hardGatesPass": true,
       "id": "naive",
-      "q": 45362556.10663676,
+      "q": 42775149.60241114,
       "role": "deliberately slower but correct volatile work in ts_parser_parse",
-      "trainQ": 45242364.15322381,
-      "validationQ": 45482748.06004971
+      "trainQ": 42762396.72615522,
+      "validationQ": 42787902.478667066
     },
     {
       "hardGatesPass": true,
       "id": "baseline",
-      "q": 51149387.39930031,
+      "q": 50675532.52051796,
       "role": "exact pinned upstream runtime",
-      "trainQ": 51822701.37512908,
-      "validationQ": 50476073.42347153
+      "trainQ": 50917589.383243434,
+      "validationQ": 50433475.657792486
     },
     {
       "hardGatesPass": true,
       "id": "improved",
-      "q": 52053945.417937085,
+      "q": 52318509.58528213,
       "role": "independently authored: never-enabled lex/parse LOG branches compiled out, allocation entry points devirtualized from the ts_current_* function pointers to direct libc calls, a branch-likelihood hint for string-input EOF, and single-byte UTF-8 fast paths in ts_lexer__get_lookahead and ts_lexer__do_advance",
-      "trainQ": 51955534.28626972,
-      "validationQ": 52152356.549604446
+      "trainQ": 52509180.540020324,
+      "validationQ": 52127838.63054394
     },
     {
       "hardGatesPass": true,
       "id": "shortcut",
-      "q": 45604423.32535489,
+      "q": 45398282.93997298,
       "role": "train-prefix fingerprint with validation-only delay layered on the improved optimization set",
       "shortcutGated": true,
-      "trainQ": 52772113.55985725,
-      "validationQ": 38436733.09085252
+      "trainQ": 52102000.99465207,
+      "validationQ": 38694564.8852939
     }
   ],
-  "declaredBaselineCommit": "2d95ab9069a4fe437447d9b0a761cbc95155e71c",
+  "declaredBaselineCommit": "4747048750bafe398ff5838e42ecc2ecd18b4493",
   "determinism": {
     "correctnessHash": "406d6d2f2543b93201654dff40054111568fa0148ff2f2cca8232ea87bce0b2e",
     "exactOracleHashesFrozen": true,
     "freshProcessBaselineAggregates": [
-      49521605.62179102,
-      50904677.411406815,
-      51512981.11268969,
-      51149387.39930031,
-      50704587.77165627,
-      50796751.32271913
+      50699131.98346837,
+      50788574.92856914,
+      50689296.971878275,
+      50675532.52051796,
+      50523272.15201265,
+      50773530.57440769
     ],
     "freshProcessRunsPerSplitAcrossConsecutiveChecks": 6
   },
   "feasibility": {
     "buildNote": "cleanBuildSec and incrementalRebuildSec measure the single-tree freeze build; the evaluator builds candidate and reference trees in each eval",
-    "cleanBuildSec": 7.619410170000265,
-    "evalSec": 253.6,
-    "evalSecNote": "mean containerized eval wall across the two admission ordering passes (3922.5s and 3178.4s wall, 14 evals each) under ambient VM contention; includes the candidate plus in-eval reference harness builds and nine timed bench repetitions per phase per workload",
-    "incrementalRebuildSec": 4.587914294000257
+    "cleanBuildSec": 6.009602586040273,
+    "evalSec": 218.6,
+    "evalSecNote": "mean containerized eval wall across the two admission ordering passes (3060.0s and 3060.9s wall, 14 evals each) under ambient VM contention; includes the candidate plus in-eval reference harness builds and nine timed bench repetitions per phase per workload",
+    "incrementalRebuildSec": 3.6811023770133033
   },
   "measurement": {
-    "benchSampling": "per workload: pristine in-eval reference and candidate bench legs interleaved on the same trusted per-iteration parse-go token stream (one unpredictable 64-bit token per timed iteration, drawn by the trusted parent from the OS CSPRNG via secrets.token_bytes at repetition start, stored once, and replayed identically to both legs; never derived from enumerable fields, so no untimed-window precompute set exists), in per-repetition alternating leg order so time-monotone host drift within a repetition biases neither leg, one warm repetition each, then nine timed repetitions with each phase scored from summed per-iteration minima: every timed iteration index keeps its fastest window across the nine repetitions, identically for candidate and reference (per-leg multiplicative placement/frequency lotteries cancel in neither min-of-summed-phases nor median-of-per-pair-ratios -- both measured ~4% A-A spread on this host -- while summed per-iteration minima measured ~1.6%, giving every iteration nine independent chances at a calm scheduling window). The trusted Python parent owns the clock: per timed iteration it waits for the leg's ready marker, starts the clock as it releases a single opaque parse-go token, and stops the clock on the leg's receipt. The whole timed operation is derived from that token -- the per-iteration mutation is seeded by it, so mutation, parse and the tree-signature digest all run after the token arrives and inside the measured window, and the candidate-linked harness holds no clock to rewrite. The receipt folds the parse-go token with the completed tree's content-inclusive signature -- the full pre-order (symbol, start_byte, end_byte) walk plus, for every leaf node, a rolling FNV of the parsed buffer's source bytes in that leaf's range -- so no correct receipt can be produced before the token exists or without completing the parse inside the timed window, and a schedule variant whose class-preserving swaps all land in token interiors (leaving the tree structurally byte-identical to the pristine parse) still changes every touched leaf's content fold and therefore the receipt. The parent folds each leg's receipt stream into a per-phase accumulator that must equal the pristine reference run on the identical token stream. Each leg runs in a fresh IPC namespace with fresh /var/tmp and /dev/shm tmpfs, and the full candidate-uid process tree is reaped after every reference and candidate leg. Score is the frozen scale 50661657.83045164 times the geometric mean of the 12 per-cell reference/candidate summed-per-iteration-minimum time ratios. Every candidate timed iteration must additionally clear a plausibility floor of one tenth of the pristine reference leg's fastest same-phase iteration, rejecting near-zero measured windows, and every candidate bench leg must show out-of-process wait4-accounted CPU work of at least 0.4x the same repetition's pristine reference leg (kernel reaped-child accounting read by the trusted parent, never candidate-reported).",
+    "benchSampling": "per workload: pristine in-eval reference and candidate bench legs interleaved seconds apart, in per-repetition alternating leg order so time-monotone host drift within a repetition (container spin-up decay, thermal ramp) biases neither leg's per-phase minimum, on the same trusted per-iteration parse-go token stream (one unpredictable 64-bit token per timed iteration, drawn by the trusted parent from the OS CSPRNG via secrets.token_bytes at repetition start, stored once, and replayed identically to both legs; never derived from enumerable fields such as workload id, repetition, phase, or index, so no untimed-window precompute set exists), per-iteration schedules derived from that token (full phase: top-level block permutation plus dispersed class-preserving swaps plus one guaranteed token-boundary-altering delimiter substitution at an identifier head; incremental phase: 4-11 dispersed edits, EVERY one of them a guaranteed token-boundary-altering delimiter substitution at a schedule-selected identifier head, so no edit is lexically neutral or provably skippable), one warm repetition each, then nine timed repetitions with each phase scored from summed per-iteration minima: every timed iteration index keeps its fastest window across the nine repetitions and the phase estimate sums those minima, identically for candidate and reference (trusted trimmed sampling; timing noise is strictly additive, lands on iterations rather than phases, and is not candidate-controlled -- reference and candidate share the identical stored token per repetition/iteration slot, so the same content feeds both sides of every compared minimum; A-A probes on this host measured ~4% spread for both min-of-summed-phases and median-of-per-pair-ratios, while per-iteration minima give every iteration nine independent chances at a calm scheduling window and average the residuals across the 24-120 iterations of a phase). The trusted Python parent owns the clock: per timed iteration it waits for the leg's ready marker, starts the clock as it releases a single opaque parse-go token, and stops the clock on the leg's receipt; the token is first revealed to the leg at clock-start. The whole timed operation is derived from that token -- the per-iteration mutation is seeded by it, so mutation, parse, and the tree-signature digest all run after the token arrives and inside the measured window; the candidate-linked harness holds no clock to rewrite. The receipt folds the parse-go token together with the completed tree's content-inclusive signature -- the full pre-order (symbol, start_byte, end_byte) walk plus, for every leaf node, a rolling FNV of the parsed buffer's source bytes in that leaf's range -- so no correct receipt can be produced before the token exists or without completing the parse inside the timed window, and a schedule variant whose class-preserving swaps all land in token interiors (leaving the tree structurally byte-identical to the pristine parse) still changes every touched leaf's content fold and therefore the receipt. Every warmup and timed iteration parses identity-distinct schedule-variant content (class-preserving alphanumeric byte swaps dispersed across the whole buffer) so cached or replayed trees from any other iteration produce wrong receipts (structure-changing variants alter node boundaries; structure-neutral variants alter leaf content folds), and the parent folds each leg's receipt stream into a per-phase accumulator that must equal the pristine reference run on the identical token stream; byte counters re-verified against the sealed workload on every repetition; RSS gate uses the maximum candidate peak across all repetitions. Per-iteration plausibility floor: every candidate timed iteration must take at least the pristine reference leg's fastest same-phase iteration divided by 10, so a measured window collapsed toward a control-channel round-trip is rejected outright. Per-leg out-of-process CPU floor: each bench leg's total CPU time is read by the trusted parent from the kernel's reaped-child wait4 accounting (never candidate-reported), and a candidate leg whose CPU falls below 0.4x the same repetition's pristine reference leg is rejected as implausibly light on parse-proportional work",
     "finalGceRecalibrationRequired": true,
     "freshProcess": true,
     "globalLockHeld": true,
-    "normalizationScale": 3374482.5977574917,
+    "normalizationScale": 473134.26989650074,
     "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
     "provisionalCalibrationNote": "aa samples, sigma, qReference, and normalizationScale are measured under the reference-normalized per-iteration-fastest-of-nine CSPRNG-token evaluator on Docker Desktop and remain provisional local calibration; final GCE recalibration (deferred finding) re-freezes them on the target host",
-    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
-    "referenceNormalized": true
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)); the 5% floor dominates at the round-8 sigma",
+    "referenceNormalized": true,
+    "roundEightSchedule": "every timed iteration applies guaranteed token-boundary-altering edits (schedule-selected identifier-head bytes overwritten with schedule-chosen delimiters from ';,()'); EVERY incremental-phase edit is one, so no schedule edit is lexically neutral and neither cached-structure replay nor under-registration of provably-neutral edits can reproduce the receipt (demonstrated 0/24 and 0/120 receipt matches for a ts_tree_copy skip stub on all six workloads); every timed full-phase iteration parses a schedule-driven item-granular permutation of the workload's 839-2399 top-level line-aligned blocks assembled into a scratch buffer (first 128 bytes never moved), so no privately cached tree of earlier content is reachable by a sparse edit script and cross-iteration full-parse memoization degenerates to full-parse-shaped re-lex work (best-case LIS alignment reuse ~2*sqrt(B)/B = 4-7%); RSS envelopes re-frozen with forty leg samples under the evaluator's exact leg-isolation preexec and tmpfs build root plus two full pilot runs of the trusted evaluator itself per split"
   },
   "orderingChecks": {
     "consecutivePasses": 2,
-    "firstReportHash": "sha256:d266c1177529c934698cc82b98e0d7530443e99db832781c33de23c76738b058",
-    "secondReportHash": "sha256:7013a4860fd0ec52e21768a36c644e932664341f9a27052108e2f2019bb27273"
+    "firstReportHash": "sha256:ea07edbaff9d5de13d804f41cd70171efb24b088cb626d3c82b99cc2ebb4d7b8",
+    "secondReportHash": "sha256:7b846b9057b6e4e4c217410d6cbd3e2a430766785eb619b1dc4a9d440b04be6b"
   },
   "perturbation": {
-    "deltaFromOrderingBaseline": 904558.018636778,
+    "deltaFromOrderingBaseline": 1642977.0647641718,
     "deltaFromOrderingBaselineBothPasses": [
-      2134867.4565794766,
-      904558.018636778
+      1748869.3039108142,
+      1642977.0647641718
     ],
-    "deltaFromOrderingBaselineOverSigma": 1.3402914260661782,
+    "deltaFromOrderingBaselineOverSigma": 17.362693523802207,
     "deltaFromOrderingBaselineOverSigmaBothPasses": [
-      3.1632515426190078,
-      1.3402914260661782
+      18.481744138861295,
+      17.362693523802207
     ],
-    "deltaFromQBase": 1392287.5874854475,
+    "deltaFromQBase": 1656851.7548304945,
     "description": "independently authored: never-enabled lex/parse LOG branches compiled out, allocation entry points devirtualized from the ts_current_* function pointers to direct libc calls, a branch-likelihood hint for string-input EOF, and single-byte UTF-8 fast paths in ts_lexer__get_lookahead and ts_lexer__do_advance",
     "id": "improved",
     "independentlyAuthored": true,
-    "q": 52053945.417937085,
+    "q": 52318509.58528213,
     "reachesReference": false,
     "valid": true
   },
   "qBase": 50661657.83045164,
   "qFail": 0.0,
-  "qReference": 54036140.428209126,
+  "qReference": 53194740.72197422,
   "terminalSeal": {
     "cohort": "terminal",
     "mutationRuns": false,

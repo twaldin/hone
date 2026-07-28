@@ -379,7 +379,7 @@ def verify_assets(metadata: dict[str, object], split_dir: Path) -> None:
             raise GateFailure(f"sealed exact-tree oracle is missing: {row.get('id')}")
         if not isinstance(row["baselinePeakRssKiB"], int) or row["baselinePeakRssKiB"] <= 0:
             raise GateFailure(f"sealed RSS baseline is missing: {row.get('id')}")
-        if not isinstance(row["baselinePeakRssSamplesKiB"], list) or len(row["baselinePeakRssSamplesKiB"]) != 10:
+        if not isinstance(row["baselinePeakRssSamplesKiB"], list) or len(row["baselinePeakRssSamplesKiB"]) != 40:
             raise GateFailure(f"sealed RSS calibration samples are missing: {row.get('id')}")
 
 
@@ -690,7 +690,20 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     # reference leg. The receipt-bound tree signature is content-inclusive
     # (structure plus every leaf's source bytes), so even a schedule mutation
     # that lands in a token interior and leaves the structure byte-identical
-    # changes the receipt and forces a genuine parse in the timed window.
+    # changes the receipt. Beyond content-binding, every timed iteration
+    # applies guaranteed token-boundary-ALTERING edits (schedule-selected
+    # identifier heads overwritten with delimiter bytes -- EVERY
+    # incremental-phase edit is one, so no schedule edit is lexically neutral
+    # and none can be proven skippable and under-registered), so the parsed
+    # tree's node layout itself differs from any cached or replayed structure
+    # and the receipt cannot be produced without a genuine re-lex at every
+    # edited site inside the timed window; and every timed FULL iteration
+    # parses a schedule-driven permutation of the workload's top-level
+    # line-aligned blocks (item-granular, length-preserving, same token
+    # multiset), so nearly every token's offset moves each iteration and no
+    # privately cached tree of earlier content -- pristine or evolving -- is
+    # reachable by a sparse edit script, leaving an incremental-from-cache
+    # substitute for the full parse with full-parse-shaped re-lex work.
     candidate_iterations: dict[str, list[list[int]]] = {"full": [], "incremental": []}
     reference_iterations: dict[str, list[list[int]]] = {"full": [], "incremental": []}
     peak_rss_kib = 0

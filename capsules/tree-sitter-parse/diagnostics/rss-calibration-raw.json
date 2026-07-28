@@ -1,1 +1,1 @@
-{"train": {"cleanBuildSec": 7.619410170000265, "evalSec": 135.96052677099988, "incrementalRebuildSec": 4.587914294000257}, "validation": {"cleanBuildSec": 7.539356668999972, "evalSec": 137.06202368799995, "incrementalRebuildSec": 4.66217033599969}}
+{"train": {"cleanBuildSec": 6.009602586040273, "evalSec": 987.8564499900094, "incrementalRebuildSec": 3.6811023770133033}, "validation": {"cleanBuildSec": 5.91378441901179, "evalSec": 969.2653692329768, "incrementalRebuildSec": 3.8119866690249182}}
