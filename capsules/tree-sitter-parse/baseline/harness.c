@@ -252,21 +252,32 @@ static void store_le64(unsigned char *data, uint64_t value) {
  *      changes each iteration, no privately cached tree of any earlier
  *      content -- pristine or evolving -- is reachable from the current
  *      content by a sparse edit script; and because component 1 lands a
- *      structure-altering edit inside nearly every block every iteration,
- *      no per-block subtree cached under a hash of the block's bytes can
- *      ever be relocated into the current buffer either. An
- *      incremental-from-cache OR reassemble-from-content-cache substitute
- *      for the full parse therefore degenerates to full-parse-shaped
- *      re-lex work.
+ *      boundary-altering delimiter edit inside nearly every block AND two
+ *      interior class-preserving swaps inside EVERY named content leaf
+ *      (identifier/string/number/comment/..., length >= 2) every iteration,
+ *      each top-level item's byte CONTENT is high-entropy per iteration
+ *      (per item, the product over its named leaves of (25*(len-1))^2), so
+ *      no item's bytes recur across the whole timed schedule. An evolving,
+ *      current-bytes-keyed per-item memoizer that splices cached parses into
+ *      a live parse (skipping only guard-passing items) finds ~zero reusable
+ *      items -- the throwaway probe measured zero reusable items of >= 64
+ *      bytes in the mutable region on all six workloads -- and any
+ *      reassemble-from-content-cache or incremental-from-cache substitute
+ *      for the full parse folds stale leaf bytes or boundaries and diverges
+ *      from the trusted reference leg, degenerating to full-parse-shaped
+ *      re-lex work. A named leaf's interior letter->letter / digit->digit
+ *      swap keeps its token class, so the interior swaps never move a token
+ *      boundary and add no error-recovery cost -- only content entropy.
  * Both components are derived from the same go-token schedule and applied
  * identically on the reference and candidate legs, so they are
  * observation-preserving for honest candidates.
  */
 /* Full-phase schedule densities: roughly one class-preserving swap per
- * stride of buffer, plus one guaranteed boundary-altering delimiter
- * substitution per permuted block (with a stride-proportional top-up for
- * blocks larger than the stride), so every block's parsed structure is
- * schedule-distinct every iteration. */
+ * stride of buffer, one guaranteed boundary-altering delimiter substitution
+ * per permuted block (with a stride-proportional top-up for blocks larger
+ * than the stride), and two interior class-preserving swaps per named
+ * content leaf, so every block's parsed structure AND every top-level item's
+ * byte content are schedule-distinct every iteration. */
 #define FULL_MUTATION_STRIDE 2048u
 /* Wider incremental stride: 4-11 dispersed boundary-altering edit sites per
  * iteration keeps the timed operation incremental-parse-shaped while making
@@ -339,7 +350,8 @@ static const char BOUNDARY_SPLITTERS[] = ";,()";
  * once, untimed, from the setup parse whose exact tree the verify gate pins,
  * so reference and candidate legs derive identical pools. */
 typedef struct {
-  uint32_t *sites;
+  uint32_t *sites;   /* identifier leaf head byte (boundary-edit site) */
+  uint32_t *lengths; /* identifier leaf byte length (>= 2 by construction) */
   uint32_t count;
 } SitePool;
 
@@ -352,7 +364,7 @@ static bool leaf_is_identifier(TSNode node, const TSLanguage *language) {
 
 static SitePool build_site_pool(TSTree *tree, uint32_t minimum_start) {
   const TSLanguage *language = ts_tree_language(tree);
-  SitePool pool = {NULL, 0};
+  SitePool pool = {NULL, NULL, 0};
   uint32_t capacity = 0;
   TSNode root = ts_tree_root_node(tree);
   if (ts_node_is_null(root)) fail("setup parse produced no root node");
@@ -366,11 +378,15 @@ static SitePool build_site_pool(TSTree *tree, uint32_t minimum_start) {
       if (start >= minimum_start && leaf_is_identifier(node, language)) {
         if (pool.count == capacity) {
           capacity = capacity == 0 ? 1024 : capacity * 2;
-          uint32_t *grown = realloc(pool.sites, (size_t)capacity * sizeof(uint32_t));
-          if (!grown) fail("out of memory");
-          pool.sites = grown;
+          uint32_t *grown_sites = realloc(pool.sites, (size_t)capacity * sizeof(uint32_t));
+          uint32_t *grown_lengths = realloc(pool.lengths, (size_t)capacity * sizeof(uint32_t));
+          if (!grown_sites || !grown_lengths) fail("out of memory");
+          pool.sites = grown_sites;
+          pool.lengths = grown_lengths;
         }
-        pool.sites[pool.count++] = start;
+        pool.lengths[pool.count] = ts_node_end_byte(node) - start;
+        pool.sites[pool.count] = start;
+        pool.count++;
       }
     }
     if (ts_tree_cursor_goto_next_sibling(&cursor)) {
@@ -500,6 +516,95 @@ static BlockSitePool build_block_site_pool(const SitePool *pool, const BlockInde
   return result;
 }
 
+/* Full-phase content-densification pool: every NAMED leaf of length >= 2
+ * (identifier, property/type/field identifier, string, number, comment,
+ * ...), in block-relative coordinates so it follows its block through the
+ * permutation. Named leaves are content tokens, never keywords or operators
+ * (those are anonymous), so a class-preserving swap at an INTERIOR byte
+ * (offset >= 1) of a named leaf keeps its token class -- an identifier stays
+ * an identifier, a number stays a number, a string/comment stays itself --
+ * and therefore never moves a token boundary (no added error-recovery cost,
+ * so the full-parse magnitude and A-A sigma are preserved). The earlier
+ * identifier-only pool excluded property/type/field identifiers, strings,
+ * and numbers, leaving many items with no swappable content; broadening to
+ * all named leaves covers essentially every top-level item that carries any
+ * content token, so no item's byte content recurs across the timed
+ * schedule. Entries are grouped per block (first[b]..first[b+1], CSR-style)
+ * and arrive in ascending order because leaves are visited left to right. */
+typedef struct {
+  uint32_t *block;
+  uint32_t *offset; /* block-relative named-leaf head byte */
+  uint32_t *length; /* named-leaf byte length (>= 2) */
+  uint32_t count;
+} ContentPool;
+
+static bool leaf_is_named_content(TSNode node) {
+  if (!ts_node_is_named(node)) return false;
+  return ts_node_end_byte(node) - ts_node_start_byte(node) >= 2;
+}
+
+static ContentPool build_content_pool(TSTree *tree, const BlockIndex *blocks) {
+  TSNode root = ts_tree_root_node(tree);
+  if (ts_node_is_null(root)) fail("setup parse produced no root node");
+  uint32_t capacity = 1024;
+  ContentPool pool = {
+      malloc((size_t)capacity * sizeof(uint32_t)),
+      malloc((size_t)capacity * sizeof(uint32_t)),
+      malloc((size_t)capacity * sizeof(uint32_t)),
+      0,
+  };
+  if (!pool.block || !pool.offset || !pool.length) fail("out of memory");
+  TSTreeCursor cursor = ts_tree_cursor_new(root);
+  bool descend = true;
+  for (;;) {
+    if (descend) {
+      TSNode node = ts_tree_cursor_current_node(&cursor);
+      if (ts_tree_cursor_goto_first_child(&cursor)) continue;
+      uint32_t start = ts_node_start_byte(node);
+      if (start >= blocks->starts[0] && leaf_is_named_content(node)) {
+        uint32_t end = ts_node_end_byte(node);
+        uint32_t low = 0;
+        uint32_t high = blocks->count - 1;
+        while (low < high) {
+          uint32_t mid = low + (high - low + 1) / 2;
+          if (blocks->starts[mid] <= start) {
+            low = mid;
+          } else {
+            high = mid - 1;
+          }
+        }
+        uint32_t block_end = blocks->starts[low + 1];
+        if (end > block_end) end = block_end;
+        if (end - start >= 2) {
+          if (pool.count == capacity) {
+            capacity *= 2;
+            uint32_t *gb = realloc(pool.block, (size_t)capacity * sizeof(uint32_t));
+            uint32_t *go = realloc(pool.offset, (size_t)capacity * sizeof(uint32_t));
+            uint32_t *gl = realloc(pool.length, (size_t)capacity * sizeof(uint32_t));
+            if (!gb || !go || !gl) fail("out of memory");
+            pool.block = gb;
+            pool.offset = go;
+            pool.length = gl;
+          }
+          pool.block[pool.count] = low;
+          pool.offset[pool.count] = start - blocks->starts[low];
+          pool.length[pool.count] = end - start;
+          pool.count++;
+        }
+      }
+    }
+    if (ts_tree_cursor_goto_next_sibling(&cursor)) {
+      descend = true;
+      continue;
+    }
+    if (!ts_tree_cursor_goto_parent(&cursor)) break;
+    descend = false;
+  }
+  ts_tree_cursor_delete(&cursor);
+  if (pool.count == 0) fail("no named-leaf content sites for densification");
+  return pool;
+}
+
 /* Fisher-Yates over the block order from the schedule stream, then assemble
  * the permuted content into the scratch buffer (fixed prefix first). Records
  * where each block landed so block-relative sites can be resolved. */
@@ -526,6 +631,35 @@ static void assemble_permuted(Buffer scratch, Buffer source, BlockIndex *blocks,
 }
 
 /*
+ * Class-preserving single-byte swap: map an alphanumeric byte to a
+ * schedule-chosen DIFFERENT byte of the same character class (lowercase,
+ * uppercase, or digit); any non-alphanumeric byte (including identifier
+ * '_' bytes) is returned unchanged. The shift is drawn from the high 32
+ * bits of `word` and is always in [1, class_size - 1], so an alphanumeric
+ * byte always changes. Length, case class, and newline bytes are all
+ * preserved, so the trusted byte counters and the incremental-phase line
+ * index stay valid.
+ */
+static char class_swap_byte(char original, uint64_t word) {
+  char class_base;
+  uint32_t class_size;
+  if (original >= 'a' && original <= 'z') {
+    class_base = 'a';
+    class_size = 26;
+  } else if (original >= 'A' && original <= 'Z') {
+    class_base = 'A';
+    class_size = 26;
+  } else if (original >= '0' && original <= '9') {
+    class_base = '0';
+    class_size = 10;
+  } else {
+    return original;
+  }
+  uint32_t shift = 1 + (uint32_t)((word >> 32) % (class_size - 1));
+  return (char)(class_base + ((uint32_t)(original - class_base) + shift) % class_size);
+}
+
+/*
  * Overwrite roughly one alphanumeric byte per stride-sized block with a
  * schedule-chosen different byte of the same character class (letter case and
  * digits preserved). Length is preserved, so the trusted byte counters are
@@ -541,22 +675,8 @@ static void apply_class_swaps(Buffer buffer, uint32_t stride, uint64_t *state, M
     if (position64 < MUTATION_PREFIX_EXCLUSION || position64 >= buffer.length) continue;
     uint32_t position = (uint32_t)position64;
     char original = buffer.data[position];
-    char class_base;
-    uint32_t class_size;
-    if (original >= 'a' && original <= 'z') {
-      class_base = 'a';
-      class_size = 26;
-    } else if (original >= 'A' && original <= 'Z') {
-      class_base = 'A';
-      class_size = 26;
-    } else if (original >= '0' && original <= '9') {
-      class_base = '0';
-      class_size = 10;
-    } else {
-      continue;
-    }
-    uint32_t shift = 1 + (uint32_t)((word >> 32) % (class_size - 1));
-    char replacement = (char)(class_base + ((uint32_t)(original - class_base) + shift) % class_size);
+    char replacement = class_swap_byte(original, word);
+    if (replacement == original) continue;
     if (record != NULL) {
       record->positions[record->count] = position;
       record->saved[record->count] = original;
@@ -566,51 +686,86 @@ static void apply_class_swaps(Buffer buffer, uint32_t stride, uint64_t *state, M
   }
 }
 
-/* Incremental-phase (and its warmup) schedule: EVERY dispersed edit is a
+/* Incremental-phase (and its warmup) schedule: each dispersed edit is a
  * guaranteed token-boundary-altering delimiter substitution at a
  * schedule-selected identifier head from the fixed site pool (roughly one
- * per stride of buffer, matching the round-6/7 edit-site magnitude). No
- * schedule edit is lexically neutral, so a candidate cannot prove any site
- * skippable and under-register edits on the copied base tree: skipping any
- * site leaves stale (symbol, start, end) layout around it and the receipt
- * diverges from the trusted reference leg, while registering a site forces
- * genuine re-lex work there. Every edit is recorded for revert and for
- * registration as a TSInputEdit on the copied base tree. */
+ * per stride of buffer, matching the round-6/7 edit-site magnitude), PLUS a
+ * schedule-chosen class-preserving swap at a schedule-chosen INTERIOR byte
+ * (offset in [1, min(len - 1, 63)]) of that same identifier leaf -- always
+ * within +/-64 bytes of the boundary edit. No schedule edit is lexically
+ * neutral, so a candidate cannot prove any site skippable and under-register
+ * edits on the copied base tree: skipping any site leaves stale
+ * (symbol, start, end) layout around it and the receipt diverges from the
+ * trusted reference leg, while registering a site forces genuine re-lex work
+ * there. The interior swap refreshes the local re-lex context each
+ * iteration, so no per-site re-lex patch cached under identical surrounding
+ * bytes is reusable across iterations. Every edit (head and interior) is
+ * recorded for revert and for registration as a TSInputEdit on the copied
+ * base tree. */
 static Mutation mutate_buffer(Buffer buffer, uint32_t stride, uint64_t seed, uint64_t salt,
                               uint32_t iteration, const SitePool *pool) {
   uint32_t edit_count = buffer.length / stride + 1;
-  Mutation mutation = {malloc((size_t)edit_count * sizeof(uint32_t)), malloc(edit_count), 0};
+  /* Up to two recorded positions per edit (head delimiter + interior swap). */
+  Mutation mutation = {malloc((size_t)edit_count * 2 * sizeof(uint32_t)),
+                       malloc((size_t)edit_count * 2), 0};
   if (!mutation.positions || !mutation.saved) fail("out of memory");
   uint64_t state = mix64(seed ^ salt ^ (((uint64_t)iteration << 1) | 1));
   for (uint32_t edit = 0; edit < edit_count; edit++) {
     uint64_t word = schedule_next(&state);
-    uint32_t site = pool->sites[word % pool->count];
+    uint32_t index = (uint32_t)(word % pool->count);
+    uint32_t site = pool->sites[index];
     mutation.positions[mutation.count] = site;
     mutation.saved[mutation.count] = buffer.data[site];
     mutation.count++;
     buffer.data[site] = BOUNDARY_SPLITTERS[(word >> 32) % BOUNDARY_SPLITTER_COUNT];
+    /* Interior class swap on the same leaf (offset >= 1, so never the
+     * boundary byte just overwritten), capped to +/-64 bytes of the head. */
+    uint32_t span = pool->lengths[index] - 1;
+    if (span > 63) span = 63;
+    uint64_t word2 = schedule_next(&state);
+    uint32_t interior_site = site + 1 + (uint32_t)((word2 >> 20) % span);
+    char original = buffer.data[interior_site];
+    char replacement = class_swap_byte(original, word2);
+    if (replacement != original) {
+      mutation.positions[mutation.count] = interior_site;
+      mutation.saved[mutation.count] = original;
+      mutation.count++;
+      buffer.data[interior_site] = replacement;
+    }
   }
   return mutation;
 }
 
 /* Full-phase (and its warmup) schedule: permute the top-level blocks into
  * the scratch buffer, disperse class-preserving swaps across the permuted
- * content, then land a schedule-chosen guaranteed token-boundary-altering
+ * content, land a schedule-chosen guaranteed token-boundary-altering
  * delimiter substitution inside EVERY permuted block that contains an
- * eligible identifier-head site (nearly every block), resolved through the
- * permutation, with a stride-proportional top-up for blocks larger than
- * FULL_MUTATION_STRIDE. Every block's byte content -- and therefore its
- * parsed structure -- is schedule-distinct on every iteration, so a
- * per-block subtree cache keyed by block content can never be relocated
- * into the current buffer: reassembling cached structure folds stale
- * (symbol, start, end) boundaries around the edited sites and the receipt
- * diverges from the trusted reference leg. Both legs apply the identical
- * schedule-derived edits, so the (error-recovery-inclusive) full-parse cost
- * is observation-preserving. The scratch buffer is rebuilt from the
- * pristine source every iteration, so no revert is needed. */
+ * eligible identifier-head site (nearly every block; stride-proportional
+ * top-up for blocks larger than FULL_MUTATION_STRIDE) -- this is the
+ * structural / error-recovery component both legs pay -- and finally apply,
+ * to EVERY named content leaf (identifier/string/number/comment/..., length
+ * >= 2), two schedule-chosen class-preserving swaps at schedule-chosen
+ * INTERIOR bytes (offset >= 1, never a token head/boundary), resolved
+ * through the permutation. The interior swaps are the content-entropy
+ * component: a named leaf's interior letter->letter / digit->digit swap
+ * keeps its token class, so no token boundary moves (no added error-recovery
+ * cost, so both legs' full-parse magnitude and the A-A sigma are preserved)
+ * yet the covering leaf's content always changes. Because the pool spans
+ * every named leaf (not just `identifier`), essentially every top-level item
+ * that carries any content token is densified: each item's per-iteration
+ * content space is the product over its named leaves of (25*(len-1))^2, so
+ * no top-level item's byte content recurs across the whole timed schedule.
+ * An evolving, current-bytes-keyed per-item memoizer that splices cached
+ * parses into a live parse (skipping only guard-passing items) finds ~zero
+ * reusable items, and any reassemble-from-content-cache substitute folds
+ * stale leaf bytes and diverges from the trusted reference leg. Both legs
+ * apply the identical schedule-derived edits, all length- and
+ * newline-preserving, so the (error-recovery-inclusive) full-parse cost is
+ * observation-preserving. The scratch buffer is rebuilt from the pristine
+ * source every iteration, so no revert is needed. */
 static void build_full_phase_content(Buffer scratch, Buffer source, BlockIndex *blocks,
-                                     const BlockSitePool *pool, uint64_t seed, uint64_t salt,
-                                     uint32_t iteration) {
+                                     const BlockSitePool *pool, const ContentPool *content,
+                                     uint64_t seed, uint64_t salt, uint32_t iteration) {
   uint64_t state = mix64(seed ^ salt ^ (((uint64_t)iteration << 1) | 1));
   assemble_permuted(scratch, source, blocks, &state);
   apply_class_swaps(scratch, FULL_MUTATION_STRIDE, &state, NULL);
@@ -625,6 +780,17 @@ static void build_full_phase_content(Buffer scratch, Buffer source, BlockIndex *
       uint32_t entry = begin + (uint32_t)(word % (end - begin));
       uint32_t site = blocks->permuted_starts[block] + pool->offset[entry];
       scratch.data[site] = BOUNDARY_SPLITTERS[(word >> 32) % BOUNDARY_SPLITTER_COUNT];
+    }
+  }
+  /* Content-entropy component: two interior class-preserving swaps at every
+   * named content leaf (structure-safe, so no token boundary moves). */
+  for (uint32_t entry = 0; entry < content->count; entry++) {
+    uint32_t base = blocks->permuted_starts[content->block[entry]] + content->offset[entry];
+    uint32_t span = content->length[entry] - 1;
+    for (uint32_t swap = 0; swap < 2; swap++) {
+      uint64_t word = schedule_next(&state);
+      uint32_t site = base + 1 + (uint32_t)((word >> 20) % span);
+      scratch.data[site] = class_swap_byte(scratch.data[site], word);
     }
   }
 }
@@ -832,6 +998,7 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
   BlockIndex blocks = build_block_index(old_tree, source);
   SitePool source_sites = build_site_pool(old_tree, blocks.starts[0]);
   BlockSitePool full_sites = build_block_site_pool(&source_sites, &blocks);
+  ContentPool content_pool = build_content_pool(old_tree, &blocks);
   ts_tree_edit(old_tree, &edit);
   LineIndex edited_lines = build_line_index(edited);
   TSTree *edited_tree = parse_checked(parser, edited.data, edited.length);
@@ -845,7 +1012,7 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
    * parent-delivered timed token, so no warmup content identity ever recurs
    * in a timed iteration; warmup is never on the trusted parent's clock. */
   for (uint32_t i = 0; i < WARMUP_ITERATIONS; i++) {
-    build_full_phase_content(scratch, source, &blocks, &full_sites, WARMUP_SEED, FULL_WARMUP_SALT, i);
+    build_full_phase_content(scratch, source, &blocks, &full_sites, &content_pool, WARMUP_SEED, FULL_WARMUP_SALT, i);
     TSTree *full = ts_parser_parse_string(parser, NULL, scratch.data, scratch.length);
     if (!full) fail("warmup parser returned no tree");
     ts_tree_delete(full);
@@ -890,7 +1057,7 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
     raw_write(ctrl_fd, "R", 1);
     raw_read_full(go_fd, go_bytes, 8);
     uint64_t go = load_le64(go_bytes);
-    build_full_phase_content(scratch, source, &blocks, &full_sites, go, FULL_TIMED_SALT, i);
+    build_full_phase_content(scratch, source, &blocks, &full_sites, &content_pool, go, FULL_TIMED_SALT, i);
     TSTree *tree = ts_parser_parse_string(parser, NULL, scratch.data, scratch.length);
     if (!tree) fail("timed parser returned no tree");
     uint64_t digest = fold_value(fold_value(DIGEST_BASIS, go), i);
@@ -923,10 +1090,15 @@ static void benchmark(const char *language_name, Buffer source, uint32_t start, 
   free(blocks.order);
   free(blocks.permuted_starts);
   free(source_sites.sites);
+  free(source_sites.lengths);
   free(incremental_sites.sites);
+  free(incremental_sites.lengths);
   free(full_sites.block);
   free(full_sites.offset);
   free(full_sites.first);
+  free(content_pool.block);
+  free(content_pool.offset);
+  free(content_pool.length);
   free(edited_lines.starts);
   ts_tree_delete(old_tree);
   ts_parser_delete(parser);

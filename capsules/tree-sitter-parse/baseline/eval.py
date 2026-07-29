@@ -204,11 +204,62 @@ def _reap_candidate_tree() -> None:
         time.sleep(0.02)
 
 
+def _purge_candidate_owned(root: Path) -> None:
+    """Recursively remove every candidate-uid-owned file (and candidate-owned
+    subdirectory) under a root-owned tree, leaving the trusted root-owned
+    build artifacts untouched. The sealed source trees and the compiled
+    objects/binaries are pruned from the walk so they are never removed even
+    though the objects were compiled under the sandbox uid; OBJECTS/
+    REF_OBJECTS stay 0o555. Everything else the walk reaches -- notably the
+    0o777 per-workload output directory where a demoted leg's /usr/bin/time
+    writes its peak-RSS file (and where a candidate could otherwise drop a
+    cache that survives across timed repetitions because BUILD_ROOT itself is
+    root-owned) -- is candidate-writable and swept."""
+    keep = {SOURCE, REF_SOURCE, OBJECTS, REF_OBJECTS}
+    try:
+        walker = os.walk(root, topdown=True, followlinks=False)
+    except OSError:
+        return
+    for current, directories, files in walker:
+        current_path = Path(current)
+        kept: list[str] = []
+        for name in directories:
+            path = current_path / name
+            if path in keep:
+                continue  # prune trusted build tree, never descend or remove
+            try:
+                st = path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode) and st.st_uid == SANDBOX_UID:
+                shutil.rmtree(path, ignore_errors=True)
+                continue  # candidate-owned dir removed; do not descend
+            kept.append(name)
+        directories[:] = kept
+        for name in files:
+            path = current_path / name
+            try:
+                if path.lstat().st_uid != SANDBOX_UID:
+                    continue
+            except OSError:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
 def _clear_candidate_writable() -> None:
     """Purge candidate-owned residue from the shared writable roots between
     legs. /var/tmp and /dev/shm are per-leg private tmpfs mounts that die with
-    the leg's namespace, so only the shared /tmp can carry a byte across legs;
-    sweep every top-level entry the candidate uid owns there."""
+    the leg's namespace, so among the top-level shared roots only /tmp can
+    carry a byte across legs; sweep every top-level entry the candidate uid
+    owns there. Then sweep candidate-uid-owned files nested under the
+    root-owned BUILD_ROOT tree (the per-workload 0o777 output directory is the
+    one candidate-writable spot inside it): those survive the top-level /tmp
+    sweep because BUILD_ROOT itself is root-owned, so a cache file dropped
+    there would otherwise persist across timed repetitions and outside the
+    per-leg ru_maxrss the +2% RSS gate sees."""
     if os.geteuid() != 0:
         return
     for root in CANDIDATE_WRITABLE_ROOTS:
@@ -229,6 +280,7 @@ def _clear_candidate_writable() -> None:
                     path.unlink(missing_ok=True)
             except OSError:
                 pass
+    _purge_candidate_owned(BUILD_ROOT)
 
 
 def _leg_isolation() -> None:
@@ -700,14 +752,27 @@ def run_workload(row: dict[str, object], split_dir: Path) -> WorkloadResult:
     # edited site inside the timed window; and every timed FULL iteration
     # parses a schedule-driven permutation of the workload's top-level
     # line-aligned blocks (item-granular, length-preserving, same token
-    # multiset) with a boundary-altering delimiter substitution landed inside
-    # nearly EVERY permuted block, so nearly every token's offset moves each
-    # iteration AND nearly every block's byte content (hence parsed
-    # structure) is schedule-distinct: no privately cached tree of earlier
-    # content -- pristine or evolving -- is reachable by a sparse edit
-    # script, and no per-block subtree cached under a block-content key can
-    # be relocated into the current buffer, leaving any cache-reassembly
-    # substitute for the full parse with full-parse-shaped re-lex work.
+    # multiset) with a boundary-altering delimiter substitution inside nearly
+    # EVERY permuted block AND two class-preserving swaps at INTERIOR bytes of
+    # EVERY named content leaf (identifier/string/number/comment/...; never a
+    # token boundary, so structure-safe with no added error-recovery cost).
+    # Nearly every token's offset moves each iteration, and each top-level
+    # item's byte CONTENT is high-entropy per iteration (per item, the product
+    # over its named leaves of (25*(len-1))^2), so no item's bytes recur
+    # across the whole timed schedule: an evolving, current-bytes-keyed
+    # per-item memoizer that splices cached parses into a live parse finds
+    # ~zero reusable items (a throwaway probe measured zero reusable items
+    # >= 64 bytes in the mutable region on all six workloads), and
+    # any cache-reassembly substitute for the full parse folds stale leaf
+    # bytes or boundaries and diverges from the trusted reference leg,
+    # leaving full-parse-shaped re-lex work. The incremental phase adds one
+    # interior class swap within +/-64 bytes of every edit to refresh the
+    # local re-lex context per iteration. Cross-repetition persistence is
+    # closed too: after every leg the trusted parent reaps the candidate
+    # process tree and sweeps candidate-uid residue from the shared /tmp roots
+    # AND from the per-workload output directory nested under the root-owned
+    # BUILD_ROOT (the leg's peak-RSS file is read out first), so no cache
+    # file dropped by one leg survives into the next.
     candidate_iterations: dict[str, list[list[int]]] = {"full": [], "incremental": []}
     reference_iterations: dict[str, list[list[int]]] = {"full": [], "incremental": []}
     peak_rss_kib = 0
@@ -935,6 +1000,15 @@ def run_timed_bench(
             ctrl_r, go_w, identifier, tokens["incremental"], deadline, pid
         )
         status, leg_usage = _wait_leg(pid, deadline)
+        # Read the demoted leg's peak-RSS output (written by /usr/bin/time into
+        # the candidate-writable output_dir) BEFORE the writable sweep: the
+        # sweep now recursively removes candidate-uid files nested under
+        # BUILD_ROOT to close cross-repetition persistence, so it would
+        # otherwise delete this file before it is read.
+        try:
+            peak_rss_text = rss_path.read_text().strip()
+        except OSError as exc:
+            raise GateFailure(f"benchmark RSS output malformed: {identifier}") from exc
     finally:
         os.close(go_w)
         os.close(ctrl_r)
@@ -952,8 +1026,8 @@ def run_timed_bench(
     if full_ns <= 0 or incremental_ns <= 0:
         raise GateFailure(f"benchmark clock resolution failure: {identifier}")
     try:
-        peak_rss_kib = int(rss_path.read_text().strip())
-    except (OSError, ValueError) as exc:
+        peak_rss_kib = int(peak_rss_text)
+    except ValueError as exc:
         raise GateFailure(f"benchmark RSS output malformed: {identifier}") from exc
     return (
         full_ns,
