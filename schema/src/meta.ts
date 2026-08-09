@@ -394,7 +394,7 @@ export const M2_ALLOWED_CLAIM = "recursive-transfer-frozen-corpus";
 /**
  * M2 two-role model observation policy. The frozen contract routes outer /
  * capsule-author reasoning and inner capsule improvement to SEPARATE observed
- * routes (outer = gpt-5.6-sol, inner = gpt-5.6-terra). Requested and returned
+ * routes (outer = openai-codex/gpt-5.6-sol, inner = openai-codex/gpt-5.6-luna). Requested and returned
  * model identity is recorded per role; drift fails closed. Like M1, identity
  * without provider attestation is an alias observation — never a snapshot.
  */

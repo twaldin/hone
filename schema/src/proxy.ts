@@ -21,8 +21,8 @@ export const M2ProxyRole = z.enum([
 ]);
 export type M2ProxyRole = z.infer<typeof M2ProxyRole>;
 
-export const M2_OUTER_MODEL_ROUTE = "gpt-5.6-sol";
-export const M2_INNER_MODEL_ROUTE = "gpt-5.6-terra";
+export const M2_OUTER_MODEL_ROUTE = "openai-codex/gpt-5.6-sol";
+export const M2_INNER_MODEL_ROUTE = "openai-codex/gpt-5.6-luna";
 
 /** The complete M2 role-to-route authority. Runtime code overwrites these keys fail closed. */
 export const M2_MODEL_ROUTING = Object.freeze({

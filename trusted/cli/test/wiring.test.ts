@@ -118,17 +118,17 @@ describe("trusted proxy role capabilities", () => {
     });
     expect(issueProxySessionCapability(proxy, routing, "outer-optimizer")).toEqual({
       role: "outer-optimizer",
-      model: "gpt-5.6-sol",
+      model: "openai-codex/gpt-5.6-sol",
       token: "token-outer-optimizer",
     });
     expect(issueProxySessionCapability(proxy, routing, "capsule-author")).toEqual({
       role: "capsule-author",
-      model: "gpt-5.6-sol",
+      model: "openai-codex/gpt-5.6-sol",
       token: "token-capsule-author",
     });
     expect(issueProxySessionCapability(proxy, routing, "inner-capsule-improvement")).toEqual({
       role: "inner-capsule-improvement",
-      model: "gpt-5.6-terra",
+      model: "openai-codex/gpt-5.6-luna",
       token: "token-inner-capsule-improvement",
     });
     expect(issued).toEqual([
