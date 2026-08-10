@@ -3054,6 +3054,10 @@ export class Broker {
         "--label",
         `hone.runId=${this.config.runId}`,
         ...this.resourceArgs(),
+        // Evaluators alone receive the host's narrow cgroup2 mount profile.
+        // Mutation sandboxes retain docker-default and never receive SYS_ADMIN.
+        "--security-opt",
+        "apparmor=hone-evaluator-cgroup",
         "--cap-add",
         "SETUID",
         "--cap-add",
@@ -3094,6 +3098,10 @@ export class Broker {
         "/trusted/baseline",
         "-e",
         `HONE_SEED=${params.seed}`,
+        "-e",
+        // libmount's fd-based move_mount path is denied by this host kernel.
+        // Force the classic mount(2) path for trusted evaluator cgroup setup.
+        "LIBMOUNT_FORCE_MOUNT2=always",
         "-v",
         `${workspaceDir}:/workspace:ro`,
         "-v",

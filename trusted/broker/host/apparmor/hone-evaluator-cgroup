@@ -1,0 +1,39 @@
+#include <tunables/global>
+
+# Evaluator-only extension of Docker's default confinement. The broker applies
+# this profile only to trusted scorer containers; mutation sandboxes retain
+# docker-default. cgroup2 mount authority is limited to the two frozen
+# evaluator targets and the exact nosuid,nodev,noexec option set.
+profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  signal (receive) peer=unconfined,
+  signal (send,receive) peer=hone-evaluator-cgroup,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-bun-cg -> /tmp/hone-bun-cg/,
+  umount /tmp/hone-bun-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-simdutf-cg -> /tmp/hone-simdutf-cg/,
+  umount /tmp/hone-simdutf-cg/,
+
+  # Retain Docker's host-kernel and host-firmware write barriers.
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9][^0-9][^0-9],[^1-9][^0-9][^0-9][^0-9]}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+  deny @{PROC}/mem rwklx,
+  deny @{PROC}/kmem rwklx,
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+}

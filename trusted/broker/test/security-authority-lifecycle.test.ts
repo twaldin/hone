@@ -1417,6 +1417,9 @@ describe("evaluator containment", () => {
     expect(argv).toContain("--memory");
     expect(argv).toContain("--cpus");
     expect(argv).toContain("no-new-privileges");
+    const apparmorIdx = argv.indexOf("apparmor=hone-evaluator-cgroup");
+    expect(apparmorIdx).toBeGreaterThan(0);
+    expect(argv[apparmorIdx - 1]).toBe("--security-opt");
     // The trusted scorer runs as root so it can drop candidate workers to an
     // unprivileged uid — candidate-to-scorer signal//proc reach is severed.
     const userIdx = argv.indexOf("--user");
@@ -1430,6 +1433,9 @@ describe("evaluator containment", () => {
     // Namespace-unshare authority for the trusted scorer's per-rep preexec
     // isolation; the candidate worker loses it on setuid + no-new-privileges.
     expect(argv).toContain("SYS_ADMIN");
+    const libmountEnvIdx = argv.indexOf("LIBMOUNT_FORCE_MOUNT2=always");
+    expect(libmountEnvIdx).toBeGreaterThan(0);
+    expect(argv[libmountEnvIdx - 1]).toBe("-e");
     const stateTmpfsIdx = argv.indexOf("/tmp:size=16m,nosuid,nodev,noexec");
     expect(stateTmpfsIdx).toBeGreaterThan(0);
     expect(argv[stateTmpfsIdx - 1]).toBe("--tmpfs");
@@ -1699,6 +1705,7 @@ describe("sandbox lifecycle and resource ceilings", () => {
     expect(argv).toContain("--memory");
     expect(argv).toContain("--cpus");
     expect(argv).toContain("no-new-privileges");
+    expect(argv).not.toContain("apparmor=hone-evaluator-cgroup");
     // SYS_ADMIN is trusted-evaluator-only authority — a mutation sandbox
     // (candidate-controlled code) must never receive it.
     expect(argv).not.toContain("SYS_ADMIN");
