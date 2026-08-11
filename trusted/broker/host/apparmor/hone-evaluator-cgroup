@@ -2,8 +2,11 @@
 
 # Evaluator-only extension of Docker's default confinement. The broker applies
 # this profile only to trusted scorer containers; mutation sandboxes retain
-# docker-default. cgroup2 mount authority is limited to the two frozen
-# evaluator targets and the exact nosuid,nodev,noexec option set.
+# docker-default. cgroup2 authority is limited to the enumerated frozen
+# evaluator contracts and exact option sets. The /sys/fs/cgroup
+# remount is the evaluator container's private cgroup namespace root
+# (Docker cgroupns=private), never the host hierarchy; it permits the frozen
+# hone-eval-supervisor child only.
 profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
 
@@ -18,6 +21,32 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
 
   mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-simdutf-cg -> /tmp/hone-simdutf-cg/,
   umount /tmp/hone-simdutf-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-biome-cg -> /tmp/hone-biome-cg/,
+  umount /tmp/hone-biome-cg/,
+
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-simdjson-cg -> /tmp/hone-simdjson-cg/,
+  umount /tmp/hone-simdjson-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-uv-cg -> /tmp/hone-uv-cg/,
+  umount /tmp/hone-uv-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-orjson-cg -> /tmp/hone-orjson-cg/,
+  umount /tmp/hone-orjson-cg/,
+
+  mount options=(rprivate) -> /,
+  mount options=(bind) /workspace/mutable/biome_js_parser/src/ -> /opt/biome/crates/biome_js_parser/src/,
+  mount options=(bind) /workspace/mutable/biome_js_formatter/src/ -> /opt/biome/crates/biome_js_formatter/src/,
+  mount options=(bind) /workspace/mutable/biome_css_parser/src/ -> /opt/biome/crates/biome_css_parser/src/,
+  mount options=(bind) /workspace/mutable/biome_css_formatter/src/ -> /opt/biome/crates/biome_css_formatter/src/,
+  # AppArmor mediates source, target, fstype, and flags. The protected frozen
+  # esbuild evaluator pins the unsupported tmpfs data to size=64m,mode=1777.
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /tmp/hone-home/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /var/tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /dev/shm/,
+
+  remount options=(rw,nosuid,nodev,noexec) /sys/fs/cgroup/,
 
   # Retain Docker's host-kernel and host-firmware write barriers.
   deny @{PROC}/* w,
