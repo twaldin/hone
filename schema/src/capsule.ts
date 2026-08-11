@@ -81,6 +81,12 @@ export const CapsuleManifest = z.object({
     .object({
       memoryBytes: z.number().int().positive(),
       cpus: z.number().positive().optional(),
+      /**
+       * Permit candidate-linked build products to execute from the evaluator's
+       * private /tmp tmpfs. Omitted by default; this is digest-bound authority
+       * for evaluators whose protected build flow compiles into /tmp.
+       */
+      evaluatorTmpfsExec: z.literal(true).optional(),
     })
     .strict()
     .optional(),

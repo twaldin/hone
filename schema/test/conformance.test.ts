@@ -110,6 +110,14 @@ describe("contract 1: capsule manifest (v2)", () => {
     delete m.budget.maxWallClockSec;
     expect(() => CapsuleManifest.parse(m)).toThrow();
   });
+
+  it("requires explicit true authority for executable evaluator scratch", () => {
+    const m = load("capsule.seeded-astar.json");
+    m.sandbox = { memoryBytes: 2 * 1024 * 1024 * 1024, evaluatorTmpfsExec: true };
+    expect(CapsuleManifest.parse(m).sandbox?.evaluatorTmpfsExec).toBe(true);
+    m.sandbox.evaluatorTmpfsExec = false;
+    expect(() => CapsuleManifest.parse(m)).toThrow();
+  });
 });
 
 describe("diagnostic ordering report", () => {
