@@ -45,7 +45,7 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   mount fstype=tmpfs options=(rw) hone-uv-eval -> /tmp/hone-uv-build/,
   umount /tmp/hone-uv-build/,
   mount fstype=tmpfs options=(rw,nosuid,nodev) hone-uv-eval -> /mnt/,
-  remount options=(ro,nosuid,nodev) /mnt/,
+  remount options=(ro,nosuid,nodev,relatime) /mnt/,
   umount /mnt/,
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-uv-eval -> /srv/,
   umount /srv/,
@@ -62,7 +62,7 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
 
   # Biome's protected challenge pins this remount to size=1536m. The absence
   # of noexec grants execution only on /tmp; every other tmpfs remains noexec.
-  remount options=(rw,nosuid,nodev) /tmp/,
+  remount options=(rw,nosuid,nodev,relatime) /tmp/,
   mount options=(bind) /workspace/mutable/biome_js_parser/src/ -> /opt/biome/crates/biome_js_parser/src/,
   mount options=(bind) /workspace/mutable/biome_js_formatter/src/ -> /opt/biome/crates/biome_js_formatter/src/,
   mount options=(bind) /workspace/mutable/biome_css_parser/src/ -> /opt/biome/crates/biome_css_parser/src/,
