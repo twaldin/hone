@@ -45,7 +45,7 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   mount fstype=tmpfs options=(rw) hone-uv-eval -> /tmp/hone-uv-build/,
   umount /tmp/hone-uv-build/,
   mount fstype=tmpfs options=(rw,nosuid,nodev) hone-uv-eval -> /mnt/,
-  remount options=(ro,nosuid,nodev,relatime) /mnt/,
+  remount options=(ro,nosuid,nodev) /mnt/,
   umount /mnt/,
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-uv-eval -> /srv/,
   umount /srv/,
