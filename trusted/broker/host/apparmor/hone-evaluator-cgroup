@@ -25,6 +25,8 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-biome-cg -> /tmp/hone-biome-cg/,
   umount /tmp/hone-biome-cg/,
 
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-ripgrep-cg -> /mnt/hone-ripgrep-cg/,
+  umount /mnt/hone-ripgrep-cg/,
 
   mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-simdjson-cg -> /tmp/hone-simdjson-cg/,
   umount /tmp/hone-simdjson-cg/,
@@ -36,15 +38,40 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   umount /tmp/hone-orjson-cg/,
 
   mount options=(rprivate) -> /,
+
+  # UV's protected evaluator pins the data caps for these exact tmpfs
+  # operations: 1600m build, 512m sealed/bench, 1m /opt hide, and 16m
+  # per-repetition scratch. AppArmor mediates the exact flags and targets.
+  mount fstype=tmpfs options=(rw) hone-uv-eval -> /tmp/hone-uv-build/,
+  umount /tmp/hone-uv-build/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-uv-eval -> /mnt/,
+  remount options=(ro,nosuid,nodev) /mnt/,
+  umount /mnt/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-uv-eval -> /srv/,
+  umount /srv/,
+  mount fstype=tmpfs options=(ro,nosuid,nodev,noexec) hone-hidden-opt -> /opt/,
+
+  # Ripgrep's protected evaluator pins the build tmpfs to 1400m and each
+  # per-command scratch tmpfs to 64m. The command-* target is the only
+  # wildcarded authority and is prefix-constrained beneath the build root.
+  mount fstype=tmpfs options=(rw,nosuid,nodev) tmpfs -> /mnt/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) tmpfs -> /tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) tmpfs -> /var/tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) tmpfs -> /dev/shm/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) tmpfs -> /mnt/command-*/scratch/,
+
+  # Biome's protected challenge pins this remount to size=1536m. The absence
+  # of noexec grants execution only on /tmp; every other tmpfs remains noexec.
+  remount options=(rw,nosuid,nodev) /tmp/,
   mount options=(bind) /workspace/mutable/biome_js_parser/src/ -> /opt/biome/crates/biome_js_parser/src/,
   mount options=(bind) /workspace/mutable/biome_js_formatter/src/ -> /opt/biome/crates/biome_js_formatter/src/,
   mount options=(bind) /workspace/mutable/biome_css_parser/src/ -> /opt/biome/crates/biome_css_parser/src/,
   mount options=(bind) /workspace/mutable/biome_css_formatter/src/ -> /opt/biome/crates/biome_css_formatter/src/,
-  # AppArmor mediates source, target, fstype, and flags. The protected frozen
-  # esbuild evaluator pins the unsupported tmpfs data to size=64m,mode=1777.
-  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /tmp/hone-home/,
-  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /var/tmp/,
-  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /dev/shm/,
+  # AppArmor mediates source, target, fstype, and flags. Protected evaluators
+  # separately pin their data caps (esbuild 64m, UV 16m).
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /var/tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /dev/shm/,
 
   remount options=(rw,nosuid,nodev,noexec) /sys/fs/cgroup/,
 
