@@ -37,6 +37,18 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-orjson-cg -> /tmp/hone-orjson-cg/,
   umount /tmp/hone-orjson-cg/,
 
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-duckdb-cg -> /tmp/hone-duckdb-cg/,
+  umount /tmp/hone-duckdb-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-mimalloc-cg -> /tmp/hone-mimalloc-cg/,
+  umount /tmp/hone-mimalloc-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-node-url-cg -> /tmp/hone-node-url-cg/,
+  umount /tmp/hone-node-url-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-sqlite-cg -> /tmp/hone-sqlite-cg/,
+  umount /tmp/hone-sqlite-cg/,
+
   mount options=(rprivate) -> /,
 
   # UV's protected evaluator pins the data caps for these exact tmpfs
@@ -60,15 +72,24 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) tmpfs -> /dev/shm/,
   mount fstype=tmpfs options=(rw,nosuid,nodev) tmpfs -> /mnt/command-*/scratch/,
 
-  # Biome's protected challenge pins this remount to size=1536m. The absence
-  # of noexec grants execution only on /tmp; every other tmpfs remains noexec.
-  remount options=(rw,nosuid,nodev,relatime) /tmp/,
+  # Biome's protected evaluator pins these three fresh tmpfs mounts to
+  # 64m, 16m, and 16m respectively. Only the staged runner tmpfs is
+  # executable; the shared-memory and var-tmp views remain noexec.
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-biome-stage -> /dev/hone-biome-stage/,
+  mount options=(bind) /tmp/hone-sealed/hone_biome_bench -> /dev/hone-biome-stage/bin/runner,
+  mount options=(bind) /opt/target-seed/release/hone_biome_bench -> /dev/hone-biome-stage/bin/runner,
+  mount options=(bind) /tmp/hone-work-*/** -> /dev/hone-biome-stage/input/*,
+  mount options=(move) /dev/hone-biome-stage/ -> /tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-biome-shm -> /dev/shm/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-biome-vartmp -> /var/tmp/,
   mount options=(bind) /workspace/mutable/biome_js_parser/src/ -> /opt/biome/crates/biome_js_parser/src/,
   mount options=(bind) /workspace/mutable/biome_js_formatter/src/ -> /opt/biome/crates/biome_js_formatter/src/,
   mount options=(bind) /workspace/mutable/biome_css_parser/src/ -> /opt/biome/crates/biome_css_parser/src/,
   mount options=(bind) /workspace/mutable/biome_css_formatter/src/ -> /opt/biome/crates/biome_css_formatter/src/,
   # AppArmor mediates source, target, fstype, and flags. Protected evaluators
   # separately pin their data caps (esbuild 64m, UV 16m).
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /tmp/hone-home/,
+  umount /tmp/hone-home/,
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /tmp/,
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /var/tmp/,
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /dev/shm/,
