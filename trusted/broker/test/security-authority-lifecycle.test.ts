@@ -1457,22 +1457,6 @@ describe("evaluator containment", () => {
     expect(argv.every((a) => !a.includes("protected"))).toBe(true);
   });
 
-  it("grants executable evaluator scratch only when the capsule manifest opts in", async () => {
-    const manifest = makeManifest({
-      sandbox: {
-        memoryBytes: 2 * 1024 * 1024 * 1024,
-        evaluatorTmpfsExec: true,
-      },
-    });
-    const b = await boot({ manifest });
-    await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
-    const argv = b.log.find((args) => args[1] === "run" && args.includes("--rm")) ?? [];
-    const tmpfsIdx = argv.indexOf("/tmp:size=2g,nosuid,nodev,exec");
-    expect(tmpfsIdx).toBeGreaterThan(0);
-    expect(argv[tmpfsIdx - 1]).toBe("--tmpfs");
-    expect(argv).not.toContain("/tmp:size=2g,nosuid,nodev,noexec");
-  });
-
   it("terminal holdout mounts the full evaluator artifact separately and rejects protected-path reintroduction", async () => {
     const manifest = makeManifest({ protectedPaths: ["secret.py"] });
     const b = await boot({ manifest, evaluatorBaselineArtifactHash: candidate2Hash });

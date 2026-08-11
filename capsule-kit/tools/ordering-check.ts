@@ -311,7 +311,7 @@ interface CapsuleConfig {
   assetGroups: { id: string; visibility: string; paths: string[] }[];
   budget: Record<string, number>;
   diagnosticOrdering: { path: string };
-  sandbox?: { memoryBytes: number; cpus?: number; evaluatorTmpfsExec?: true };
+  sandbox?: { memoryBytes: number; cpus?: number };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -351,16 +351,11 @@ function loadCapsuleConfig(): CapsuleConfig {
   if (!isRecord(diagnosticOrdering) || typeof diagnosticOrdering.path !== "string" || diagnosticOrdering.path.length === 0) {
     return fail("diagnosticOrdering.path");
   }
-  let sandboxParsed: { memoryBytes: number; cpus?: number; evaluatorTmpfsExec?: true } | undefined;
+  let sandboxParsed: { memoryBytes: number; cpus?: number } | undefined;
   if (sandbox !== undefined) {
     if (!isRecord(sandbox) || typeof sandbox.memoryBytes !== "number" || sandbox.memoryBytes <= 0) return fail("sandbox.memoryBytes");
     if (sandbox.cpus !== undefined && (typeof sandbox.cpus !== "number" || sandbox.cpus <= 0)) return fail("sandbox.cpus");
-    if (sandbox.evaluatorTmpfsExec !== undefined && sandbox.evaluatorTmpfsExec !== true) return fail("sandbox.evaluatorTmpfsExec");
-    sandboxParsed = {
-      memoryBytes: sandbox.memoryBytes,
-      ...(sandbox.cpus === undefined ? {} : { cpus: sandbox.cpus }),
-      ...(sandbox.evaluatorTmpfsExec === true ? { evaluatorTmpfsExec: true as const } : {}),
-    };
+    sandboxParsed = { memoryBytes: sandbox.memoryBytes, ...(sandbox.cpus === undefined ? {} : { cpus: sandbox.cpus }) };
   }
   return {
     objective,

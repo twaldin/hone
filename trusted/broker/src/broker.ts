@@ -893,7 +893,6 @@ export class Broker {
   private readonly sandboxPidsLimit: number;
   private readonly sandboxMemoryBytes: number;
   private readonly sandboxCpus: number;
-  private readonly evaluatorTmpfsExec: boolean;
   /** `--volumes-from <lease>:ro` when a docker-run lease fences creates; empty otherwise. */
   private readonly leaseArgs: readonly string[];
   /** Optional trusted M1 replicate identity, independent of the broker's boot/episode gate epoch. */
@@ -1194,7 +1193,6 @@ export class Broker {
     this.sandboxPidsLimit = config.sandboxPidsLimit ?? 512;
     this.sandboxMemoryBytes = config.sandboxMemoryBytes ?? 2 * 1024 * 1024 * 1024;
     this.sandboxCpus = config.sandboxCpus ?? 2;
-    this.evaluatorTmpfsExec = config.manifest.sandbox?.evaluatorTmpfsExec === true;
     this.leaseArgs = config.containerLease !== undefined ? ["--volumes-from", `${config.containerLease}:ro`] : [];
     this.episodeOrdinal = config.episodeOrigin ?? 0;
     this.measurementEpoch = `${this.bootNonce}:startup`;
@@ -3085,7 +3083,7 @@ export class Broker {
         "SYS_ADMIN",
         "--read-only",
         "--tmpfs",
-        `/tmp:size=2g,nosuid,nodev,${this.evaluatorTmpfsExec ? "exec" : "noexec"}`,
+        "/tmp:size=2g,nosuid,nodev,noexec",
         "--shm-size",
         "16m",
         // The trusted scorer runs as ROOT inside the eval container so it can
