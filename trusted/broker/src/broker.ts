@@ -3083,7 +3083,7 @@ export class Broker {
         "SYS_ADMIN",
         "--read-only",
         "--tmpfs",
-        "/tmp:size=16m,nosuid,nodev,noexec",
+        "/tmp:size=512m,nosuid,nodev,noexec",
         "--shm-size",
         "16m",
         // The trusted scorer runs as ROOT inside the eval container so it can
