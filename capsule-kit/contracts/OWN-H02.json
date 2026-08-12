@@ -9,8 +9,8 @@
   "objective": "Improve legacy/DAG/gate/reference/preset/generated YAML parsing with exact AST, localized errors, and round-trip stability.",
   "source": {
     "visibility": "owner-licensed",
-    "existingCapsuleId": "cap_ec5c5ad0ad97",
-    "existingCapsuleDigest": "sha256:1c86d9618e0dc2afb37ad22933b82260d37d90d68a06991f28161f3813378872"
+    "existingCapsuleId": "cap_ad1361023a83",
+    "existingCapsuleDigest": "sha256:ee0ded5aadb733a4ccb4bae382e97acfe7106a4fb4ec8cfb2fbbd0c00984fe93"
   },
   "authoring": {
     "mutableSurface": "frozen at capsule authoring per plan objective",

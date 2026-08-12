@@ -1436,7 +1436,7 @@ describe("evaluator containment", () => {
     const libmountEnvIdx = argv.indexOf("LIBMOUNT_FORCE_MOUNT2=always");
     expect(libmountEnvIdx).toBeGreaterThan(0);
     expect(argv[libmountEnvIdx - 1]).toBe("-e");
-    const stateTmpfsIdx = argv.indexOf("/tmp:size=512m,nosuid,nodev,noexec");
+    const stateTmpfsIdx = argv.indexOf("/tmp:size=2g,nosuid,nodev,noexec");
     expect(stateTmpfsIdx).toBeGreaterThan(0);
     expect(argv[stateTmpfsIdx - 1]).toBe("--tmpfs");
     const shmSizeIdx = argv.indexOf("--shm-size");
