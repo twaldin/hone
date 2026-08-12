@@ -75,6 +75,10 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   # Biome's protected evaluator pins these three fresh tmpfs mounts to
   # 64m, 16m, and 16m respectively. Only the staged runner tmpfs is
   # executable; the shared-memory and var-tmp views remain noexec.
+  # The same protected evaluator's previously approved build phase first
+  # restores exec on the container-private 1536m /tmp mount; the later staged
+  # runner bind retains that source superblock's execution policy.
+  remount options=(rw,nosuid,nodev,relatime) /tmp/,
   mount fstype=tmpfs options=(rw,nosuid,nodev) hone-biome-stage -> /dev/hone-biome-stage/,
   mount options=(bind) /tmp/hone-sealed/hone_biome_bench -> /dev/hone-biome-stage/bin/runner,
   mount options=(bind) /opt/target-seed/release/hone_biome_bench -> /dev/hone-biome-stage/bin/runner,
