@@ -120,7 +120,7 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   mount options=(bind) /workspace/mutable/biome_css_parser/src/ -> /opt/biome/crates/biome_css_parser/src/,
   mount options=(bind) /workspace/mutable/biome_css_formatter/src/ -> /opt/biome/crates/biome_css_formatter/src/,
   # AppArmor mediates source, target, fstype, and flags. Protected evaluators
-  # separately pin their data caps (esbuild 64m, UV 16m).
+  # separately pin their data caps (esbuild 512m, UV 16m).
   mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /tmp/hone-home/,
   umount /tmp/hone-home/,
   mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /var/tmp/,
