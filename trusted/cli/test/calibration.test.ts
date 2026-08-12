@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { MetaChildRunOutcome } from "@hone/meta";
 import {
   AdmissionReceiptRecord,
   CapsuleManifest,
@@ -156,6 +157,63 @@ describe("trusted calibration coordinator", () => {
     expect(dry.coordinates).toHaveLength(80);
     expect(dry.modelCalls).toBe(0);
   });
+  it("resumes after a durable attempt outcome without launching the cell twice", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-calibration-resume-"));
+    mkdirSync(join(root, "capsules"), { recursive: true });
+    const campaignPath = join(root, "selection.json");
+    writeFileSync(campaignPath, JSON.stringify(selection()));
+    const deps = dependencies([admitted(0), admitted(1), admitted(2), admitted(3)]);
+    const { plan } = await buildCalibrationPlan(root, selection(), deps);
+    const stateDir = join(root, ".hone-runs", "resume-reuse");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "calibration-plan.json"), JSON.stringify(plan));
+    writeFileSync(join(stateDir, "preflight.json"), "{}");
+    const cell = plan.cells[0]!;
+    const outcome = {
+      status: "candidate_failed",
+      childRunId: cell.childRunId,
+      measurementEpoch: cell.measurementEpoch,
+      capsuleId: cell.capsule.capsuleId,
+      sourceArtifact: cell.sourceArtifact,
+      bundleDigest: cell.bundleDigest,
+      runtimeBundleDigest: null,
+      baselineArtifactHash: null,
+      bestArtifactHash: null,
+      finalEvaluation: null,
+      finalEvaluationHash: null,
+      spend: { tokens: 7, usd: 0.01, wallClockSec: 1, evaluatorInvocations: 1 },
+      eventLogHash: null,
+      eventLogCursor: null,
+      proxyTraceHash: null,
+      brokerJournalHash: null,
+      responseModel: "openai-codex/gpt-5.6-luna",
+      providerFingerprint: "fixture",
+      modelDriftSentinel: "stable",
+      feedback: "durable terminal failure",
+    } satisfies MetaChildRunOutcome;
+    writeFileSync(join(stateDir, "calibration-journal.ndjson"), `${JSON.stringify({
+      v: 1,
+      type: "attempt-terminal",
+      coordinate: 0,
+      attempt: 0,
+      outcome,
+      at: "2026-08-12T01:00:00.000Z",
+    })}\n`);
+    const runLaunched = vi.fn();
+    const io: CmdIo = { root, env: {}, isTTY: false, out: vi.fn(), err: vi.fn() };
+
+    await expect(calibrationCommand(
+      ["--campaign", campaignPath, "--state", ".hone-runs/resume-reuse", "--headless", "--resume", "--smoke-cell", "0"],
+      io,
+      { ...deps, createSupervisor: () => ({ runLaunched }) },
+    )).resolves.toBe(0);
+
+    expect(runLaunched).not.toHaveBeenCalled();
+    const journal = readFileSync(join(stateDir, "calibration-journal.ndjson"), "utf8");
+    expect(journal.match(/"type":"attempt-terminal"/g)).toHaveLength(1);
+    expect(journal.match(/"type":"cell-terminal"/g)).toHaveLength(1);
+  });
+
 
   it("rejects provisional approval, holdout assets, and Bun image reuse before planning cells", async () => {
     const root = mkdtempSync(join(tmpdir(), "hone-calibration-refusal-"));

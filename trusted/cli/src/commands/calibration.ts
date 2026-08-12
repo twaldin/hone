@@ -818,15 +818,18 @@ export async function calibrationCommand(
       }
       const prior = lastTerminalOutcome(records, cell.coordinate, attempt);
       const openAttempt = attemptIsOpen(records, cell.coordinate, attempt);
-      const request = cellRequest(cell, plan, attempt, spend, openAttempt);
-      if (prior === undefined && !openAttempt) appendJournal(journalPath, { v: 1, type: "attempt-started", coordinate: cell.coordinate, attempt, request, at: new Date().toISOString() });
-      const outcome = await supervisor.runLaunched(request, plan.configHash);
-      if (authority.isCampaignPaused()) {
-        appendJournal(journalPath, { v: 1, type: "attempt-paused", coordinate: cell.coordinate, attempt, request, outcome, at: new Date().toISOString() });
-        throw new UsageError(`calibration paused during cell ${cell.coordinate}; resume requires frozen-route preflight`);
+      let outcome = prior;
+      if (outcome === undefined) {
+        const request = cellRequest(cell, plan, attempt, spend, openAttempt);
+        if (!openAttempt) appendJournal(journalPath, { v: 1, type: "attempt-started", coordinate: cell.coordinate, attempt, request, at: new Date().toISOString() });
+        outcome = await supervisor.runLaunched(request, plan.configHash);
+        if (authority.isCampaignPaused()) {
+          appendJournal(journalPath, { v: 1, type: "attempt-paused", coordinate: cell.coordinate, attempt, request, outcome, at: new Date().toISOString() });
+          throw new UsageError(`calibration paused during cell ${cell.coordinate}; resume requires frozen-route preflight`);
+        }
+        appendJournal(journalPath, { v: 1, type: "attempt-terminal", coordinate: cell.coordinate, attempt, request, outcome, at: new Date().toISOString() });
+        records = readJournal(journalPath);
       }
-      appendJournal(journalPath, { v: 1, type: "attempt-terminal", coordinate: cell.coordinate, attempt, request, outcome, at: new Date().toISOString() });
-      records = readJournal(journalPath);
       if (outcome.status === "infrastructure_not_run" && attempt === 0) {
         const retryRequest = cellRequest(cell, plan, 1, outcome.spend, false);
         appendJournal(journalPath, { v: 1, type: "attempt-started", coordinate: cell.coordinate, attempt: 1, request: retryRequest, at: new Date().toISOString() });
