@@ -94,6 +94,10 @@ profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
   # separately pin their data caps (esbuild 64m, UV 16m).
   mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /tmp/hone-home/,
   umount /tmp/hone-home/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /var/tmp/,
+  umount /var/tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /dev/shm/,
+  umount /dev/shm/,
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /tmp/,
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /var/tmp/,
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /dev/shm/,
