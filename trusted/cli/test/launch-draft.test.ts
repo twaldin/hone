@@ -46,10 +46,10 @@ const capsuleId = (label: string): string =>
 
 /** Canonical identities of the four committed calibration-only capsules. */
 const CALIBRATION_CAPSULE_IDS = [
-  "cap_34b7e7f54c4b",
-  "cap_2129b96a71d5",
-  "cap_f768bd93f775",
-  "cap_699c3a91be9d",
+  "cap_c09ffd33ce1d",
+  "cap_7cd6e3af94d7",
+  "cap_d413ec4d77c5",
+  "cap_8ac06369aa07",
 ];
 
 function orderingReport(): DiagnosticOrderingReport {
