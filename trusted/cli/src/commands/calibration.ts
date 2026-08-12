@@ -435,7 +435,7 @@ function remainingBudget(reserved: BudgetEnvelopeValue, usage: MetaResourceUsage
   return {
     maxTokens: Math.max(0, reserved.maxTokens - usage.tokens),
     maxUsd: Math.max(0, reserved.maxUsd - usage.usd),
-    maxWallClockSec: Math.max(0, reserved.maxWallClockSec - usage.wallClockSec),
+    maxWallClockSec: Math.max(0, Math.floor(reserved.maxWallClockSec - usage.wallClockSec)),
     maxEvaluatorInvocations: Math.max(0, reserved.maxEvaluatorInvocations - usage.evaluatorInvocations),
   };
 }
