@@ -577,6 +577,7 @@ async function runPreflight(
     recordCampaignPause: (signal) => authority.recordCampaignPause(signal),
     recordCampaignResume: (signal) => authority.recordCampaignResume(signal),
   });
+  await proxy.listenTcp(0);
   try {
     const recovery = await proxy.dispatchRecovery();
     if (recovery.poisoned !== undefined) throw new UsageError(`calibration preflight journal is poisoned: ${recovery.poisoned}`);
