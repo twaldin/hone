@@ -868,7 +868,7 @@ export async function calibrationCommand(
     if (smokeCell !== undefined) {
       const terminal = terminalByCoordinate.get(smokeCell);
       io.out(canonicalJson({ type: "calibration-smoke-cell", configHash: plan.configHash, coordinate: smokeCell, terminal }));
-      return terminal === undefined ? 1 : 0;
+      return terminal?.status === "valid" ? 0 : 1;
     }
     if (terminalByCoordinate.size !== CELL_COUNT) throw new UsageError(`calibration scoring refused: ${terminalByCoordinate.size}/${CELL_COUNT} cells are terminal`);
     const cells = plan.cells.map<SaturationCell>((cell) => {

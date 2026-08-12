@@ -206,7 +206,7 @@ describe("trusted calibration coordinator", () => {
       ["--campaign", campaignPath, "--state", ".hone-runs/resume-reuse", "--headless", "--resume", "--smoke-cell", "0"],
       io,
       { ...deps, createSupervisor: () => ({ runLaunched }) },
-    )).resolves.toBe(0);
+    )).resolves.toBe(1);
 
     expect(runLaunched).not.toHaveBeenCalled();
     const journal = readFileSync(join(stateDir, "calibration-journal.ndjson"), "utf8");
