@@ -236,6 +236,26 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
     ];
     expect(() => MetaCampaignConfigV2.parse(value)).toThrow(/must remain excluded/);
   });
+  it("round-trips the four real calibration-only capsule identities outside the full cohort", () => {
+    const value = draft();
+    value.calibration.excludedCapsuleIds = [
+      "cap_34b7e7f54c4b",
+      "cap_2129b96a71d5",
+      "cap_f768bd93f775",
+      "cap_699c3a91be9d",
+    ];
+    const parsed = MetaCampaignConfigV2.parse(value);
+    const roundTripped = MetaCampaignConfigV2.parse(JSON.parse(JSON.stringify(parsed)));
+    expect(roundTripped.calibration.excludedCapsuleIds).toEqual(value.calibration.excludedCapsuleIds);
+    expect(roundTripped.calibration.excludedCapsuleIds.every((capsuleId) =>
+      !roundTripped.corpusCohort.developmentCapsuleIds.includes(capsuleId)
+      && !roundTripped.corpusCohort.terminalCapsuleIds.includes(capsuleId)
+    )).toBe(true);
+
+    roundTripped.calibration.excludedCapsuleIds[0] = roundTripped.corpusCohort.developmentCapsuleIds[0]!;
+    expect(() => MetaCampaignConfigV2.parse(roundTripped)).toThrow(/registered cohort capsule/);
+  });
+
 
   it("rejects per-run evaluator budgets below the complete-run floor", () => {
     // Floor = 4 * innerEpisodesMax + 1 = 17 for the fixture's ceiling of 4.

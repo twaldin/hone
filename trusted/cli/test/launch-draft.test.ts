@@ -44,8 +44,13 @@ const TERMINAL_LABELS = Array.from({ length: 11 }, (_, index) => `terminal-${ind
 const capsuleId = (label: string): string =>
   `cap_${createHash("sha256").update(`id:${label}`).digest("hex").slice(0, 12)}`;
 
-/** Real calibration capsules carry cap_ identities like every other capsule. */
-const CALIBRATION_CAPSULE_IDS = ["cal-a", "cal-b", "cal-c", "cal-d"].map((label) => capsuleId(label));
+/** Canonical identities of the four committed calibration-only capsules. */
+const CALIBRATION_CAPSULE_IDS = [
+  "cap_34b7e7f54c4b",
+  "cap_2129b96a71d5",
+  "cap_f768bd93f775",
+  "cap_699c3a91be9d",
+];
 
 function orderingReport(): DiagnosticOrderingReport {
   const variant = (train: number) => ({

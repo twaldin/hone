@@ -483,7 +483,7 @@ export class DurableCampaignPauseAuthorityV1 implements CampaignPauseAuthority {
 export function campaignChildAdmissionAllowed(authority: CampaignPauseAuthority): boolean {
   return !authority.isCampaignPaused();
 }
-interface CapsuleLocation {
+export interface CapsuleLocation {
   dir: string;
   digest: string;
   terminalHoldoutAssetGroupIds: readonly string[];
@@ -789,11 +789,17 @@ function addUsage(left: MetaResourceUsage, right: MetaResourceUsage): MetaResour
     evaluatorInvocations: left.evaluatorInvocations + right.evaluatorInvocations,
   };
 }
+export interface TrustedChildDispatchPolicy {
+  readonly promotion: AnyMetaCampaignConfig["promotion"];
+  readonly proxyRole?: "inner-capsule-improvement";
+  readonly campaignConfigHash?: Sha256Digest;
+}
+
 
 export class CliChildSupervisor implements MetaChildSupervisor {
   constructor(
     private readonly io: CmdIo,
-    private readonly config: AnyMetaCampaignConfig,
+    private readonly dispatchPolicy: TrustedChildDispatchPolicy,
     private readonly campaignDir: string,
     private readonly capsules: ReadonlyMap<string, CapsuleLocation>,
     private readonly baseSnapshot: OptimizerSnapshot,
@@ -802,10 +808,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
   ) {}
 
   async run(request: MetaChildRunRequest): Promise<MetaChildRunOutcome> {
-    return await this.runLaunched(
-      request,
-      this.config.version === 2 ? metaCampaignConfigHash(this.config) : undefined,
-    );
+    return await this.runLaunched(request, this.dispatchPolicy.campaignConfigHash);
   }
 
   async runLaunched(
@@ -832,7 +835,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         headless: true,
         seed: request.identity.replicate,
         budget: request.remainingBudget,
-        promotion: this.config.promotion,
+        promotion: this.dispatchPolicy.promotion,
       }, null, 2)}\n`);
       chmodSync(configPath, 0o600);
       if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
@@ -850,7 +853,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
             ? { terminalHoldoutAssetGroupIds: location.terminalHoldoutAssetGroupIds }
             : {}),
           optimizerBaseSnapshot: this.baseSnapshot,
-          ...(this.config.version === 2 ? { proxyRole: "inner-capsule-improvement" as const } : {}),
+          ...(this.dispatchPolicy.proxyRole === undefined ? {} : { proxyRole: this.dispatchPolicy.proxyRole }),
           ...(this.campaignPauseAuthority === undefined
             ? {}
             : { campaignPauseAuthority: this.campaignPauseAuthority }),
@@ -883,7 +886,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
               ? { terminalHoldoutAssetGroupIds: location.terminalHoldoutAssetGroupIds }
               : {}),
             optimizerBaseSnapshot: this.baseSnapshot,
-            ...(this.config.version === 2 ? { proxyRole: "inner-capsule-improvement" as const } : {}),
+            ...(this.dispatchPolicy.proxyRole === undefined ? {} : { proxyRole: this.dispatchPolicy.proxyRole }),
             ...(this.campaignPauseAuthority === undefined
               ? {}
               : { campaignPauseAuthority: this.campaignPauseAuthority }),
@@ -1320,7 +1323,7 @@ const ModelIdentitySchema = z.object({
 
 type CampaignModelIdentity = z.infer<typeof ModelIdentitySchema>;
 
-class CampaignModelRegistry {
+export class CampaignModelRegistry {
   private readonly file: string;
   private identity: CampaignModelIdentity | null;
 
@@ -1534,7 +1537,7 @@ function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig):
   return found;
 }
 
-async function captureSeedCandidate(root: string, cas: CasStore): Promise<{ artifactHash: Sha256Digest }> {
+export async function captureSeedCandidate(root: string, cas: CasStore): Promise<{ artifactHash: Sha256Digest }> {
   const snapshot = collectOptimizerSnapshot(root);
   const staging = mkdtempSync(join(tmpdir(), "hone-meta-seed-"));
   chmodSync(staging, 0o700);
@@ -1592,8 +1595,7 @@ async function resolveRegisteredOptimizer(
   }
   return resolved;
 }
-
-function sourceCommit(root: string): string {
+export function sourceCommit(root: string): string {
   try {
     return execFileSync("git", ["-C", root, "rev-parse", "--verify", "HEAD^{commit}"], {
       encoding: "utf8",
@@ -1604,7 +1606,7 @@ function sourceCommit(root: string): string {
   }
 }
 
-function assertCleanSourceTree(root: string): void {
+export function assertCleanSourceTree(root: string): void {
   let status: string;
   try {
     status = execFileSync("git", ["-C", root, "status", "--porcelain=v1", "--untracked-files=all"], {
@@ -2083,7 +2085,14 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     journal,
     joinPath: join(campaignDir, "candidate-child-joins.ndjson"),
     candidateGate: gate,
-    childSupervisor: new CliChildSupervisor(io, config, campaignDir, capsules, seedSnapshot, modelRegistry),
+    childSupervisor: new CliChildSupervisor(
+      io,
+      { promotion: config.promotion },
+      campaignDir,
+      capsules,
+      seedSnapshot,
+      modelRegistry,
+    ),
   });
   const strategy: TrustedEvaluationStrategy = async (request) => await runner.evaluateSearchCandidate({
     sourceArtifact: request.artifact.hash as Sha256Digest,
@@ -2437,7 +2446,11 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   const modelRegistry = new CampaignModelRegistry(campaignDir, configHash, io.root);
   const childSupervisor = new CliChildSupervisor(
     io,
-    config,
+    {
+      promotion: config.promotion,
+      proxyRole: "inner-capsule-improvement",
+      campaignConfigHash: configHash,
+    },
     campaignDir,
     capsules,
     target.snapshot,

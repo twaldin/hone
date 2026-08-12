@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { UsageError } from "./args.js";
 import { applyCommand } from "./commands/apply.js";
+import { calibrationCommand } from "./commands/calibration.js";
 import { authorCommand } from "./commands/author.js";
 import { bestCommand } from "./commands/best.js";
 import { diffCommand } from "./commands/diff.js";
@@ -23,6 +24,7 @@ usage:
            [--backend stub|local] [--config <json>]
   hone author <capsule-objective> [--repo DIR] [--headless] [--acknowledge-dirty]
   hone hone --campaign <path> --headless
+  hone calibration --campaign <path> --headless [--state <.hone-runs/path>] [--resume] [--dry-structure] [--smoke-cell N]
   hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal]
   hone resume [--pause PAUSE_ID] [--campaign CAMPAIGN_STATE_DIR]
   hone status [--run ID]
@@ -48,6 +50,8 @@ export async function main(argv: string[], io: CmdIo): Promise<number> {
         return await authorCommand(rest, io);
       case "hone":
         return await honeCommand(rest, io);
+      case "calibration":
+        return await calibrationCommand(rest, io);
       case "recursive":
         return await recursiveCommand(rest, io);
       case "resume":
