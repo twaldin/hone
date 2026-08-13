@@ -68,6 +68,7 @@ import {
   ProxyTraceRecord,
   SpawnRunParams,
   canonicalJson,
+  capsuleDigest,
   deriveCapsuleId,
   type BudgetEnvelope,
   type ChildRunAdmission as ChildRunAdmissionRecord,
@@ -78,10 +79,13 @@ import {
   type MetaCampaignConfigV1 as MetaCampaignConfig,
   type MetaCampaignConfig as AnyMetaCampaignConfig,
   type MetaCampaignConfigV2 as RecursiveMetaCampaignConfig,
+  type M2CorpusCohort,
   type SpawnRunParams as SpawnRunRequest,
 } from "@hone/schema";
 import { extractWorkspaceArtifact } from "../artifact.js";
 import { admitCapsule, capsuleOracleDigest, capsuleScalarizerDigest, type AdmittedCapsule } from "../admission.js";
+import { loadCapsule } from "../capsule.js";
+import { verifyM2AuthorizedPartialCohort } from "../m2-cohort.js";
 import {
   finalizeMetaHoldout,
   selectMetaTrainWinner,
@@ -1438,9 +1442,57 @@ interface DiscoveredCapsule {
 }
 
 
-export function discoverCapsules(root: string): Map<string, DiscoveredCapsule> {
+export function discoverCapsules(
+  root: string,
+  cohort?: M2CorpusCohort,
+): Map<string, DiscoveredCapsule> {
   const found = new Map<string, DiscoveredCapsule>();
   const capsuleRoot = join(root, "capsules");
+  if (cohort !== undefined && "mode" in cohort) {
+    const policy = verifyM2AuthorizedPartialCohort(root, cohort.partialCohort);
+    for (const deferred of policy.deferred) {
+      const dir = join(capsuleRoot, deferred.label);
+      const manifest = loadCapsule(dir);
+      if (
+        manifest.id !== deferred.capsuleId
+        || capsuleDigest(manifest) !== deferred.capsuleDigest
+      ) {
+        throw new UsageError(`deferred capsule ${deferred.label} does not match its authorized identity`);
+      }
+    }
+    for (const authorized of policy.admitted) {
+      const dir = join(capsuleRoot, authorized.label);
+      const admitted = admitCapsule(dir, {
+        review: "required",
+        allowMissingGitBaselineWithOwnerReceipt: true,
+      });
+      if (admitted.provisional) {
+        throw new UsageError(`authorized cohort capsule ${authorized.label} is provisional`);
+      }
+      if (
+        admitted.manifest.id !== authorized.capsuleId
+        || admitted.digest !== authorized.capsuleDigest
+        || admitted.approval?.receipt.recordHash !== authorized.gate2ReceiptHash
+      ) {
+        throw new UsageError(`authorized cohort capsule ${authorized.label} does not reproduce its Gate-2 receipt binding`);
+      }
+      const basis = admitted.approval.receipt.approvalBasis;
+      if (
+        basis === undefined
+        || basis.authorizationKey !== policy.authorization.decisionKey
+        || basis.authorizedBy.identity !== policy.authorization.owner.identity
+        || basis.authorizedAt !== policy.authorization.decidedAt
+        || basis.deliveredVia !== policy.authorization.deliveredVia
+      ) {
+        throw new UsageError(`authorized cohort capsule ${authorized.label} receipt does not cite the owner authorization`);
+      }
+      if (found.has(admitted.manifest.id)) {
+        throw new UsageError(`duplicate admitted capsule id ${admitted.manifest.id}`);
+      }
+      found.set(admitted.manifest.id, { dir, admitted });
+    }
+    return found;
+  }
   for (const entry of readdirSync(capsuleRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const dir = join(capsuleRoot, entry.name);
@@ -1472,7 +1524,7 @@ interface FrozenCorpus {
 }
 
 function freezeCorpusEntries(root: string, config: AnyMetaCampaignConfig): FrozenCorpus {
-  const discovered = discoverCapsules(root);
+  const discovered = discoverCapsules(root, config.version === 2 ? config.corpusCohort : undefined);
   const normalize = (entry: MetaCapsuleEntry): MetaCapsuleEntry => {
     const found = discovered.get(entry.capsuleId);
     if (found === undefined) throw new UsageError(`campaign capsule id ${entry.capsuleId} is not installed`);
@@ -1500,7 +1552,7 @@ function freezeCorpusEntries(root: string, config: AnyMetaCampaignConfig): Froze
 }
 
 function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
-  const discovered = discoverCapsules(root);
+  const discovered = discoverCapsules(root, config.version === 2 ? config.corpusCohort : undefined);
   const found = new Map<string, CapsuleLocation>();
   for (const registered of [...config.train, ...config.holdout]) {
     const capsule = discovered.get(registered.capsuleId);

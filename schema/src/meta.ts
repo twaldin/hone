@@ -50,11 +50,11 @@ export const MetaCapsuleEntry = z.object({
   /** Digest of the frozen scalarizer producing the single oriented q_i. */
   scalarizerDigest: SHA256,
   /** q_i for invalid output or a failed required constraint (normally 0). */
-  qFail: z.number().finite().min(0).max(1),
-  /** Trusted baseline measurement q_i(base). */
-  qBase: z.number().finite().min(0).max(1),
-  /** Trusted reference measurement q_i(ref). */
-  qReference: z.number().finite().min(0).max(1),
+  qFail: z.number().finite().nonnegative(),
+  /** Trusted baseline measurement q_i(base); M2 performance scalars may exceed 1. */
+  qBase: z.number().finite().nonnegative(),
+  /** Trusted reference measurement q_i(ref); not itself a normalized score. */
+  qReference: z.number().finite().nonnegative(),
   /** Registered scale s_i; MUST equal qReference - qBase and be > 0. */
   scale: z.number().finite().positive(),
 });
@@ -484,19 +484,141 @@ export const M2_CALIBRATION_DEFERRED_BINDING: M2CalibrationBinding = {
   ),
 };
 
+const M2CapsuleId = z.string().regex(/^cap_[0-9a-f]{12}$/);
+const M2EvidencePath = z.string().min(1).refine(
+  (path) => !path.startsWith("/") && !path.split("/").some((part) => part === "" || part === "." || part === ".."),
+  "evidence path must be a normalized repository-relative path",
+);
+
+/** Byte-verifiable repository evidence cited by an owner cohort ruling. */
+export const M2CohortEvidencePointer = z.object({
+  path: M2EvidencePath,
+  digest: SHA256,
+}).strict();
+export type M2CohortEvidencePointer = z.infer<typeof M2CohortEvidencePointer>;
+
 /**
- * The complete frozen launch cohort, bound INTO the config from the verified
- * corpus-provenance artifact: all 16 development capsules (both panels) and
- * all 11 terminal capsules, plus the provenance self-binding digest. Freeze
- * revalidates train/holdout membership and calibration exclusion against the
- * FULL cohort — an off-panel development capsule is still a cohort member.
+ * The named owner decision that supersedes the atomic 16+11 rule for this
+ * cohort only. This is intentionally exact: a different partial cohort needs
+ * a different reviewed schema record, not a looser count override.
  */
-export const M2CorpusCohort = z.object({
-  developmentCapsuleIds: z.array(z.string().regex(/^cap_[0-9a-f]{12}$/)).length(16),
-  terminalCapsuleIds: z.array(z.string().regex(/^cap_[0-9a-f]{12}$/)).length(M2_TERMINAL_CAPSULE_COUNT),
+export const M2PartialCohortAuthorization = z.object({
+  decisionKey: z.literal("bun-image-blocker"),
+  decidedAt: z.string().datetime({ offset: true }),
+  owner: z.object({
+    identity: z.literal("captain"),
+    kind: z.literal("owner"),
+  }).strict(),
+  deliveredVia: z.literal("first-mate"),
+  ruling: z.literal("ADMIT THE 21 NOW, DEFER THE SIX EXPLICITLY"),
+  supersedes: z.object({
+    rule: z.literal("atomic-16-development-11-terminal"),
+    scope: z.literal("this-cohort-only"),
+  }).strict(),
+  evidence: z.array(M2CohortEvidencePointer).min(1),
+}).strict();
+export type M2PartialCohortAuthorization = z.infer<typeof M2PartialCohortAuthorization>;
+
+const M2AuthorizedAdmittedCapsuleBase = z.object({
+  label: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+  capsuleId: M2CapsuleId,
+  capsuleDigest: SHA256,
+  gate2ReceiptHash: SHA256,
+});
+const M2AuthorizedDeferredCapsuleBase = z.object({
+  label: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+  capsuleId: M2CapsuleId,
+  capsuleDigest: SHA256,
+  reason: z.string().min(1),
+  evidence: z.array(M2CohortEvidencePointer).min(1),
+});
+
+export const M2AuthorizedAdmittedCapsule = z.discriminatedUnion("role", [
+  M2AuthorizedAdmittedCapsuleBase.extend({
+    role: z.literal("development"),
+    taskId: M2PanelTaskId,
+  }).strict(),
+  M2AuthorizedAdmittedCapsuleBase.extend({
+    role: z.literal("terminal"),
+  }).strict(),
+]);
+export type M2AuthorizedAdmittedCapsule = z.infer<typeof M2AuthorizedAdmittedCapsule>;
+
+export const M2AuthorizedDeferredCapsule = z.discriminatedUnion("role", [
+  M2AuthorizedDeferredCapsuleBase.extend({
+    role: z.literal("development"),
+    taskId: M2PanelTaskId,
+  }).strict(),
+  M2AuthorizedDeferredCapsuleBase.extend({
+    role: z.literal("terminal"),
+  }).strict(),
+]);
+export type M2AuthorizedDeferredCapsule = z.infer<typeof M2AuthorizedDeferredCapsule>;
+
+export const M2AuthorizedPartialCohort = z.object({
+  version: z.literal("m2-authorized-partial-cohort.v1"),
+  authorization: M2PartialCohortAuthorization,
+  admitted: z.array(M2AuthorizedAdmittedCapsule).length(21),
+  deferred: z.array(M2AuthorizedDeferredCapsule).length(6),
+}).strict().superRefine((cohort, ctx) => {
+  const all = [...cohort.admitted, ...cohort.deferred];
+  for (const key of ["label", "capsuleId", "capsuleDigest"] as const) {
+    if (new Set(all.map((capsule) => capsule[key])).size !== all.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: `authorized cohort ${key} values must partition 27 distinct capsules` });
+    }
+  }
+  if (new Set(cohort.admitted.map((capsule) => capsule.gate2ReceiptHash)).size !== cohort.admitted.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["admitted"], message: "every admitted capsule requires its own distinct Gate-2 receipt" });
+  }
+  for (const [partition, role, expected] of [
+    ["admitted", "development", 13],
+    ["admitted", "terminal", 8],
+    ["deferred", "development", 3],
+    ["deferred", "terminal", 3],
+  ] as const) {
+    const rows = cohort[partition];
+    if (rows.filter((capsule) => capsule.role === role).length !== expected) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [partition], message: `${partition} must contain exactly ${expected} ${role} capsules` });
+    }
+  }
+  const developmentTasks = all.flatMap((capsule) =>
+    capsule.role === "development" ? [capsule.taskId] : []
+  );
+  const expectedTasks = new Set<string>(M2_TASK_IDS);
+  if (
+    developmentTasks.length !== M2_TASK_IDS.length
+    || new Set(developmentTasks).size !== developmentTasks.length
+    || developmentTasks.some((taskId) => !expectedTasks.has(taskId))
+  ) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: "authorized cohort must partition all 16 frozen development task ids exactly once" });
+  }
+});
+export type M2AuthorizedPartialCohort = z.infer<typeof M2AuthorizedPartialCohort>;
+
+const M2AtomicCorpusCohort = z.object({
+  developmentCapsuleIds: z.array(M2CapsuleId).length(16),
+  terminalCapsuleIds: z.array(M2CapsuleId).length(M2_TERMINAL_CAPSULE_COUNT),
   /** inputsDigest of the corpus-provenance.v1 artifact these identities came from. */
   provenanceInputsDigest: SHA256,
 }).strict();
+
+const M2AuthorizedPartialCorpusCohort = z.object({
+  mode: z.literal("owner-authorized-partial"),
+  developmentCapsuleIds: z.array(M2CapsuleId).length(13),
+  terminalCapsuleIds: z.array(M2CapsuleId).length(8),
+  /** The complete 21-admitted/6-deferred owner record, including receipt bindings. */
+  partialCohort: M2AuthorizedPartialCohort,
+  /** inputsDigest of the corpus-provenance.v1 artifact these identities came from. */
+  provenanceInputsDigest: SHA256,
+}).strict();
+
+/**
+ * The frozen launch cohort is either the original atomic 16+11 shape or the
+ * explicit owner-authorized 21+6 partition. A shortened atomic shape is never
+ * schema-legal: partial membership necessarily carries authority, deferral
+ * evidence, and one Gate-2 receipt binding per admitted capsule.
+ */
+export const M2CorpusCohort = z.union([M2AtomicCorpusCohort, M2AuthorizedPartialCorpusCohort]);
 export type M2CorpusCohort = z.infer<typeof M2CorpusCohort>;
 
 export const M2PanelMember = z.object({
@@ -509,10 +631,10 @@ export type M2PanelMember = z.infer<typeof M2PanelMember>;
 
 const M2DevelopmentPanelShape = z.object({
   panel: z.enum(["A", "B"]),
-  members: z.array(M2PanelMember).length(M2_PANEL_CAPSULE_COUNT),
+  members: z.array(M2PanelMember).min(1).max(M2_PANEL_CAPSULE_COUNT),
 }).strict();
 
-/** Exact frozen Panel-A/Panel-B membership, bound to eight distinct capsule identities. */
+/** Frozen panel membership; authorized deferrals may reduce a panel below eight. */
 export const M2DevelopmentPanel = M2DevelopmentPanelShape.superRefine((panel, ctx) => {
   const expected = panel.panel === "A" ? M2_PANEL_A_TASK_IDS : M2_PANEL_B_TASK_IDS;
   const expectedTasks = new Set<string>(expected);
@@ -540,11 +662,8 @@ export const M2DevelopmentPanel = M2DevelopmentPanelShape.superRefine((panel, ct
     seenIds.add(member.capsule.capsuleId);
     seenDigests.add(member.capsule.capsuleDigest);
   });
-  for (const taskId of expected) {
-    if (!seenTasks.has(taskId)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["members"], message: `frozen panel task ${taskId} is missing` });
-    }
-  }
+  // Exact expected membership is cohort-dependent and is enforced by the
+  // enclosing MetaCampaignConfigV2 refinement below.
 });
 export type M2DevelopmentPanel = z.infer<typeof M2DevelopmentPanel>;
 
@@ -556,14 +675,14 @@ export type M2CapsuleNormalizedScore = z.infer<typeof M2CapsuleNormalizedScore>;
 
 export const M2PanelAggregationShape = z.object({
   valid: z.boolean(),
-  perCapsule: z.array(M2CapsuleNormalizedScore).length(M2_PANEL_CAPSULE_COUNT),
+  perCapsule: z.array(M2CapsuleNormalizedScore).min(1).max(M2_PANEL_CAPSULE_COUNT),
   panelMean: z.number().finite().nullable(),
 }).strict();
 
 export const M2PanelAggregation = M2PanelAggregationShape.superRefine((aggregation, ctx) => {
   const ids = new Set(aggregation.perCapsule.map((row) => row.capsuleId));
-  if (ids.size !== M2_PANEL_CAPSULE_COUNT) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "panel scores must contain eight distinct capsule identities" });
+  if (ids.size !== aggregation.perCapsule.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "panel scores must contain distinct capsule identities" });
   }
   const scores = aggregation.perCapsule.map((row) => row.normalizedScore);
   if (!aggregation.valid) {
@@ -573,10 +692,10 @@ export const M2PanelAggregation = M2PanelAggregationShape.superRefine((aggregati
     return;
   }
   if (scores.some((score) => score === null)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "a valid panel requires all eight normalized scores" });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "a valid panel requires every normalized score" });
     return;
   }
-  const expected = scores.reduce<number>((sum, score) => sum + (score ?? 0), 0) / M2_PANEL_CAPSULE_COUNT;
+  const expected = scores.reduce<number>((sum, score) => sum + (score ?? 0), 0) / scores.length;
   if (aggregation.panelMean === null || aggregation.panelMean !== expected) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["panelMean"], message: `panel mean must equal ${expected}` });
   }
@@ -702,18 +821,31 @@ function refineMetaCampaignV2(
   ctx: z.RefinementCtx,
   official: boolean,
 ): void {
-  if (cfg.train.length !== M2_PANEL_CAPSULE_COUNT) {
+  const partialCohort = "mode" in cfg.corpusCohort
+    ? cfg.corpusCohort.partialCohort
+    : null;
+  const frozenPanelTasks = cfg.generation.panel === "A" ? M2_PANEL_A_TASK_IDS : M2_PANEL_B_TASK_IDS;
+  const frozenPanelTaskSet = new Set<string>(frozenPanelTasks);
+  const expectedPanelTasks = partialCohort === null
+    ? [...frozenPanelTasks]
+    : partialCohort.admitted.flatMap((capsule) =>
+        capsule.role === "development" && frozenPanelTaskSet.has(capsule.taskId)
+          ? [capsule.taskId]
+          : []
+      );
+  if (cfg.train.length !== expectedPanelTasks.length) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["train"],
-      message: `M2 requires exactly ${M2_PANEL_CAPSULE_COUNT} panel capsules, got ${cfg.train.length}`,
+      message: `M2 panel ${cfg.generation.panel} requires exactly ${expectedPanelTasks.length} admitted capsules, got ${cfg.train.length}`,
     });
   }
-  if (cfg.holdout.length !== M2_TERMINAL_CAPSULE_COUNT) {
+  const expectedTerminalCount = partialCohort === null ? M2_TERMINAL_CAPSULE_COUNT : 8;
+  if (cfg.holdout.length !== expectedTerminalCount) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["holdout"],
-      message: `M2 requires exactly ${M2_TERMINAL_CAPSULE_COUNT} terminal capsules, got ${cfg.holdout.length}`,
+      message: `M2 requires exactly ${expectedTerminalCount} admitted terminal capsules, got ${cfg.holdout.length}`,
     });
   }
 
@@ -758,6 +890,31 @@ function refineMetaCampaignV2(
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["holdout", index, "capsuleId"], message: "holdout capsule is not a registered terminal cohort capsule" });
     }
   });
+  if (partialCohort !== null) {
+    const policyDevelopment = partialCohort.admitted
+      .filter((capsule) => capsule.role === "development")
+      .map((capsule) => capsule.capsuleId);
+    const policyTerminal = partialCohort.admitted
+      .filter((capsule) => capsule.role === "terminal")
+      .map((capsule) => capsule.capsuleId);
+    const sameSet = (actual: ReadonlySet<string>, expected: readonly string[]): boolean =>
+      actual.size === expected.length && expected.every((capsuleId) => actual.has(capsuleId));
+    if (!sameSet(development, policyDevelopment)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["corpusCohort", "developmentCapsuleIds"], message: "development cohort must match the authorized admitted receipt set" });
+    }
+    if (!sameSet(terminal, policyTerminal)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["corpusCohort", "terminalCapsuleIds"], message: "terminal cohort must match the authorized admitted receipt set" });
+    }
+    const admittedById = new Map(partialCohort.admitted.map((capsule) => [capsule.capsuleId, capsule]));
+    for (const [partition, entries] of [["train", cfg.train], ["holdout", cfg.holdout]] as const) {
+      entries.forEach((entry, index) => {
+        const authorized = admittedById.get(entry.capsuleId);
+        if (authorized !== undefined && authorized.capsuleDigest !== entry.capsuleDigest) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [partition, index, "capsuleDigest"], message: "campaign capsule digest does not match its Gate-2 receipt binding" });
+        }
+      });
+    }
+  }
 
   if (official && cfg.calibration.reportDigest === M2_CALIBRATION_DEFERRED_REPORT_DIGEST) {
     ctx.addIssue({
@@ -770,10 +927,11 @@ function refineMetaCampaignV2(
   if (excludedIds.size !== cfg.calibration.excludedCapsuleIds.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["calibration", "excludedCapsuleIds"], message: "excluded calibration capsules must be four distinct identities" });
   }
-  // Compare against the FULL 28-capsule cohort, not just the cell's train+holdout:
-  // an off-panel development capsule (the other panel) is still a cohort member.
+  // Compare against the complete locked cohort, including authorized
+  // deferrals and the other development panel, not just train+holdout.
+  const deferredIds = new Set(partialCohort?.deferred.map((capsule) => capsule.capsuleId) ?? []);
   cfg.calibration.excludedCapsuleIds.forEach((capsuleId, index) => {
-    if (development.has(capsuleId) || terminal.has(capsuleId)) {
+    if (development.has(capsuleId) || terminal.has(capsuleId) || deferredIds.has(capsuleId)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["calibration", "excludedCapsuleIds", index],
@@ -815,6 +973,19 @@ function refineMetaCampaignV2(
   if (cfg.developmentPanel.panel !== cfg.generation.panel) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["developmentPanel", "panel"], message: "development panel must match the trajectory generation cell" });
     }
+  const actualPanelTasks = cfg.developmentPanel.members.map((member) => member.taskId);
+  const expectedPanelTaskSet = new Set<string>(expectedPanelTasks);
+  if (
+    actualPanelTasks.length !== expectedPanelTasks.length
+    || new Set(actualPanelTasks).size !== actualPanelTasks.length
+    || actualPanelTasks.some((taskId) => !expectedPanelTaskSet.has(taskId))
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["developmentPanel", "members"],
+      message: "development panel must contain exactly the admitted frozen tasks; deferred tasks are structurally excluded",
+    });
+  }
     const trainById = new Map(cfg.train.map((capsule) => [capsule.capsuleId, capsule]));
     cfg.developmentPanel.members.forEach((member, index) => {
       const registered = trainById.get(member.capsule.capsuleId);
