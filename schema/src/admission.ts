@@ -40,6 +40,26 @@ const AdmissionDelegation = z.object({
   scope: z.literal("provisional-private-apply-none"),
   budgetUsd: z.number().finite().positive(),
 }).strict();
+/**
+ * Owner authority and reviewed evidence behind a Gate-2 action. Optional on
+ * legacy ledgers; cohort policies may require and bind it through recordHash.
+ */
+export const AdmissionApprovalBasis = z.object({
+  authorizationKey: z.string().min(1),
+  authorizedBy: ReviewIdentity,
+  authorizedAt: z.string().datetime({ offset: true }),
+  deliveredVia: z.string().min(1),
+  reviewEvidence: z.array(z.string().min(1)).min(1),
+}).strict().superRefine((basis, ctx) => {
+  if (basis.authorizedBy.kind !== "owner") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["authorizedBy", "kind"],
+      message: "Gate-2 approval authority must name an owner",
+    });
+  }
+});
+export type AdmissionApprovalBasis = z.infer<typeof AdmissionApprovalBasis>;
 
 const AdmissionReceiptRecordBodySchema = z.object({
   v: z.literal(1),
@@ -56,6 +76,7 @@ const AdmissionReceiptRecordBodySchema = z.object({
   ]),
   identities: AdmissionReviewIdentities,
   delegation: AdmissionDelegation.optional(),
+  approvalBasis: AdmissionApprovalBasis.optional(),
   provisional: z.boolean(),
   timestamp: z.string().datetime({ offset: true }),
 }).strict();
@@ -85,6 +106,12 @@ export function admissionReceiptRecordHash(
           ...body.delegation,
           delegator: normalizeIdentity(body.delegation.delegator),
           delegate: normalizeIdentity(body.delegation.delegate),
+        },
+    approvalBasis: body.approvalBasis === undefined
+      ? undefined
+      : {
+          ...body.approvalBasis,
+          authorizedBy: normalizeIdentity(body.approvalBasis.authorizedBy),
         },
   };
   return `sha256:${createHash("sha256").update(canonicalJson(normalized)).digest("hex")}`;

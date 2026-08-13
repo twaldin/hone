@@ -5,6 +5,8 @@ import {
   M2_INNER_MODEL_ROUTE,
   M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
+  M2_PANEL_B_TASK_IDS,
+  M2AuthorizedPartialCohort,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
   MetaCampaignConfigV2Draft,
@@ -123,6 +125,94 @@ function draft() {
       degradedBundleDigest: digest(6),
     },
     allowedClaim: "recursive-transfer-frozen-corpus",
+  };
+}
+
+function authorizedPartialDraft() {
+  const value = draft();
+  const allDevelopment = value.corpusCohort.developmentCapsuleIds.map((capsuleId, index) => ({
+    label: `development-${index}`,
+    capsuleId,
+    capsuleDigest: index < value.train.length
+      ? value.train[index]!.capsuleDigest
+      : digest(500 + index),
+    gate2ReceiptHash: digest(1_000 + index),
+    role: "development" as const,
+    taskId: [...M2_PANEL_A_TASK_IDS, ...M2_PANEL_B_TASK_IDS][index]!,
+  }));
+  const deferredDevelopmentIndexes = new Set([4, 5, 15]);
+  const admittedDevelopment = allDevelopment.filter((_, index) => !deferredDevelopmentIndexes.has(index));
+  const deferredDevelopment = allDevelopment
+    .filter((_, index) => deferredDevelopmentIndexes.has(index))
+    .map(({ gate2ReceiptHash: _receipt, ...capsule }) => ({
+      ...capsule,
+      reason: "recorded native blocker",
+      evidence: [{ path: `capsules/${capsule.label}/diagnostics/blocker.json`, digest: digest(2_000 + Number(capsule.taskId.length)) }],
+    }));
+  const allTerminal = value.holdout.map((entry, index) => ({
+    label: `terminal-${index}`,
+    capsuleId: entry.capsuleId,
+    capsuleDigest: entry.capsuleDigest,
+    gate2ReceiptHash: digest(1_100 + index),
+    role: "terminal" as const,
+  }));
+  const admittedTerminal = allTerminal.slice(0, 8);
+  const deferredTerminal = allTerminal.slice(8).map(({ gate2ReceiptHash: _receipt, ...capsule }, index) => ({
+    ...capsule,
+    reason: "recorded native blocker",
+    evidence: [{ path: `capsules/${capsule.label}/diagnostics/blocker.json`, digest: digest(2_100 + index) }],
+  }));
+  const partialCohort = {
+    version: "m2-authorized-partial-cohort.v1" as const,
+    authorization: {
+      decisionKey: "bun-image-blocker" as const,
+      decidedAt: "2026-08-12T18:15:41Z",
+      owner: { identity: "captain" as const, kind: "owner" as const },
+      deliveredVia: "first-mate" as const,
+      ruling: "ADMIT THE 21 NOW, DEFER THE SIX EXPLICITLY" as const,
+      supersedes: {
+        rule: "atomic-16-development-11-terminal" as const,
+        scope: "this-cohort-only" as const,
+      },
+      evidence: [{ path: "plans/m2-native-amd64-admission-evidence.json", digest: digest(2_200) }],
+    },
+    admitted: [...admittedDevelopment, ...admittedTerminal],
+    deferred: [...deferredDevelopment, ...deferredTerminal],
+  };
+  const train = value.train.filter((_, index) => !deferredDevelopmentIndexes.has(index));
+  const members = value.developmentPanel.members.filter((_, index) => !deferredDevelopmentIndexes.has(index));
+  const child = value.budgets.child;
+  const calibratedPanelCandidate = {
+    maxTokens: child.maxTokens * members.length,
+    maxUsd: child.maxUsd * members.length,
+    maxWallClockSec: child.maxWallClockSec * members.length,
+    maxEvaluatorInvocations: child.maxEvaluatorInvocations * members.length,
+  };
+  return {
+    ...value,
+    train,
+    holdout: value.holdout.slice(0, 8),
+    corpusCohort: {
+      mode: "owner-authorized-partial" as const,
+      developmentCapsuleIds: admittedDevelopment.map((capsule) => capsule.capsuleId),
+      terminalCapsuleIds: admittedTerminal.map((capsule) => capsule.capsuleId),
+      partialCohort,
+      provenanceInputsDigest: value.corpusCohort.provenanceInputsDigest,
+    },
+    developmentPanel: { ...value.developmentPanel, members },
+    recursiveBudgets: {
+      ...value.recursiveBudgets,
+      search: {
+        ...value.recursiveBudgets.search,
+        calibratedPanelCandidate,
+        outerTrajectory: {
+          maxTokens: calibratedPanelCandidate.maxTokens * 12,
+          maxUsd: calibratedPanelCandidate.maxUsd * 12,
+          maxWallClockSec: calibratedPanelCandidate.maxWallClockSec * 12,
+          maxEvaluatorInvocations: calibratedPanelCandidate.maxEvaluatorInvocations * 12,
+        },
+      },
+    },
   };
 }
 
@@ -330,7 +420,65 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
       extraId,
     ];
     twelveHoldout.holdout = [...twelveHoldout.holdout, extraEntry];
-    expect(() => MetaCampaignConfigV2.parse(twelveHoldout)).toThrow(/exactly 11 terminal capsules, got 12/);
+    expect(() => MetaCampaignConfigV2.parse(twelveHoldout)).toThrow(/exactly 11 admitted terminal capsules, got 12/);
+  });
+
+  it("round-trips the exact owner-authorized 21-admitted/6-deferred cohort", () => {
+    const parsed = MetaCampaignConfigV2.parse(authorizedPartialDraft());
+    expect(parsed.corpusCohort).toMatchObject({ mode: "owner-authorized-partial" });
+    expect(parsed.corpusCohort.developmentCapsuleIds).toHaveLength(13);
+    expect(parsed.corpusCohort.terminalCapsuleIds).toHaveLength(8);
+    expect(parsed.train).toHaveLength(6);
+    expect(parsed.holdout).toHaveLength(8);
+    expect(MetaCampaignConfigV2.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);
+  });
+
+  it("refuses a shortened cohort without its named owner authorization", () => {
+    const value = authorizedPartialDraft();
+    const { authorization: _authorization, ...partialCohort } = value.corpusCohort.partialCohort;
+    expect(() => MetaCampaignConfigV2.parse({
+      ...value,
+      corpusCohort: { ...value.corpusCohort, partialCohort },
+    })).toThrow();
+  });
+
+  it("refuses a deferral without a byte-verifiable evidence pointer", () => {
+    const value = structuredClone(authorizedPartialDraft());
+    value.corpusCohort.partialCohort.deferred[0]!.evidence = [];
+    expect(() => MetaCampaignConfigV2.parse(value)).toThrow();
+  });
+
+  it("refuses admitted ids or Gate-2 receipt bindings that do not match the policy", () => {
+    const membershipDrift = structuredClone(authorizedPartialDraft());
+    membershipDrift.corpusCohort.developmentCapsuleIds[0] =
+      membershipDrift.corpusCohort.partialCohort.deferred[0]!.capsuleId;
+    expect(() => MetaCampaignConfigV2.parse(membershipDrift)).toThrow(/authorized admitted receipt set/);
+
+    const blanketReceipt = structuredClone(authorizedPartialDraft());
+    blanketReceipt.corpusCohort.partialCohort.admitted[1]!.gate2ReceiptHash =
+      blanketReceipt.corpusCohort.partialCohort.admitted[0]!.gate2ReceiptHash;
+    expect(() => M2AuthorizedPartialCohort.parse(blanketReceipt.corpusCohort.partialCohort)).toThrow(/own distinct Gate-2 receipt/);
+  });
+
+  it("structurally excludes deferred tasks from panels and calibration selection", () => {
+    const panelDrift = structuredClone(authorizedPartialDraft());
+    const deferred = panelDrift.corpusCohort.partialCohort.deferred[0]!;
+    const capsuleEntry = {
+      ...panelDrift.train[0]!,
+      capsuleId: deferred.capsuleId,
+      capsuleDigest: deferred.capsuleDigest,
+    };
+    panelDrift.train.push(capsuleEntry);
+    panelDrift.developmentPanel.members.push({
+      taskId: "OSS-T01",
+      capsule: capsuleEntry,
+      calibratedInnerCeiling: panelDrift.budgets.child,
+    });
+    expect(() => MetaCampaignConfigV2.parse(panelDrift)).toThrow(/deferred tasks are structurally excluded|requires exactly 6 admitted/);
+
+    const calibrationDrift = structuredClone(authorizedPartialDraft());
+    calibrationDrift.calibration.excludedCapsuleIds[0] = deferred.capsuleId;
+    expect(() => MetaCampaignConfigV2.parse(calibrationDrift)).toThrow(/registered cohort capsule/);
   });
 
 });

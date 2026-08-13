@@ -4,13 +4,16 @@ import { z } from "zod";
 import { hashCorpusSnapshot } from "@hone/broker";
 import type { BrokerCorpusConfig } from "@hone/broker";
 import {
+  M2AuthorizedPartialCohort,
   canonicalJson,
   capsuleDigest,
   deriveCapsuleId,
   CorpusPanelEvidence,
   CorpusPublicDocument,
   ResourceUsage,
+  type AdmissionReceiptRecord,
   type CapsuleManifest,
+  type M2AuthorizedPartialCohort as AuthorizedPartialCohort,
 } from "@hone/schema";
 import { UsageError } from "./args.js";
 import { writeFileDurable } from "./eventlog.js";
@@ -80,6 +83,8 @@ export const CorpusProvenanceV1 = z
     /** Every corpus document (public + panel), id → sha256 of its exact content. */
     docHashes: z.record(SHA256),
     panelDocs: z.array(CorpusPanelDocRecord),
+    /** Present only for the owner-authorized 21-admitted/6-deferred M2 cohort. */
+    partialCohort: M2AuthorizedPartialCohort.optional(),
     /** sha256 over the canonical JSON of every other field — the artifact's self-binding. */
     inputsDigest: SHA256,
     generatedAt: z.string().datetime(),
@@ -103,6 +108,11 @@ export interface AdmittedCorpusCapsule {
   digest: string;
   /** Delegated private approvals are quarantined from every corpus statistic. */
   provisional: boolean;
+  /** Verified Gate-2 approval; required and receipt-bound for a partial cohort. */
+  approval?: {
+    readonly approved: true;
+    readonly receipt: AdmissionReceiptRecord;
+  } | null | undefined;
 }
 
 /** Frozen role partition keyed by stable capsule labels (capsule directory names), never cap_ ids. */
@@ -132,6 +142,8 @@ export interface CorpusProvenanceInputs {
   mapping: CorpusRoleMapping;
   publicSnapshot: readonly PublicSnapshotDocumentInput[];
   panelEvidence: readonly PanelEvidenceDocumentInput[];
+  /** Explicit owner-authorized partition. Absence retains generic/full assembly behavior. */
+  partialCohort?: unknown;
   /** Injectable clock for deterministic assembly; defaults to now. */
   generatedAt?: string | undefined;
 }
@@ -147,7 +159,18 @@ function sha256Text(content: string): string {
 
 /** Digest over every artifact field except the binding itself. */
 export function corpusProvenanceInputsDigest(artifact: Omit<CorpusProvenanceV1, "inputsDigest">): string {
-  const { version, capsules, developmentCapsuleIds, terminalCapsuleIds, terminalContentHashes, publicSnapshotDigest, docHashes, panelDocs, generatedAt } = artifact;
+  const {
+    version,
+    capsules,
+    developmentCapsuleIds,
+    terminalCapsuleIds,
+    terminalContentHashes,
+    publicSnapshotDigest,
+    docHashes,
+    panelDocs,
+    partialCohort,
+    generatedAt,
+  } = artifact;
   return `sha256:${createHash("sha256")
     .update(
       canonicalJson({
@@ -159,6 +182,7 @@ export function corpusProvenanceInputsDigest(artifact: Omit<CorpusProvenanceV1, 
         publicSnapshotDigest,
         docHashes,
         panelDocs,
+        partialCohort,
         generatedAt,
       }),
     )
@@ -169,6 +193,18 @@ export function assembleCorpusProvenance(inputs: CorpusProvenanceInputs): Verifi
   const labels = Object.keys(inputs.capsules);
   const development = [...inputs.mapping.development];
   const terminal = [...inputs.mapping.terminal];
+  const partialCohort = inputs.partialCohort === undefined
+    ? undefined
+    : M2AuthorizedPartialCohort.parse(inputs.partialCohort);
+  if (partialCohort !== undefined) {
+    const policyLabels = new Set(partialCohort.admitted.map((capsule) => capsule.label));
+    if (
+      policyLabels.size !== labels.length
+      || labels.some((label) => !policyLabels.has(label))
+    ) {
+      refuse("admitted capsule labels must match the authorized partial-cohort receipt set exactly");
+    }
+  }
   const mapped = [...development, ...terminal];
   if (new Set(mapped).size !== mapped.length) {
     refuse("the frozen role mapping names a capsule label more than once");
@@ -206,6 +242,37 @@ export function assembleCorpusProvenance(inputs: CorpusProvenanceInputs): Verifi
     const role = roleByLabel.get(label);
     if (role === undefined) refuse(`capsule "${label}" lost its mapped role during assembly`);
     capsules.push({ id: admitted.manifest.id, digest: admitted.digest, role });
+    if (partialCohort !== undefined) {
+      const authorized = partialCohort.admitted.find((capsule) => capsule.label === label);
+      if (authorized === undefined) refuse(`capsule "${label}" is absent from the authorized admission set`);
+      if (
+        authorized.capsuleId !== admitted.manifest.id
+        || authorized.capsuleDigest !== admitted.digest
+        || authorized.role !== role
+      ) {
+        refuse(`capsule "${label}" identity or role does not match the authorized partial cohort`);
+      }
+      const receipt = admitted.approval?.receipt;
+      if (
+        receipt === undefined
+        || receipt.action !== "gate2-approve"
+        || receipt.capsuleDigest !== admitted.digest
+        || receipt.recordHash !== authorized.gate2ReceiptHash
+      ) {
+        refuse(`capsule "${label}" does not reproduce its authorized Gate-2 receipt binding`);
+      }
+      const basis = receipt.approvalBasis;
+      if (
+        basis === undefined
+        || basis.authorizationKey !== partialCohort.authorization.decisionKey
+        || basis.authorizedBy.identity !== partialCohort.authorization.owner.identity
+        || basis.authorizedBy.kind !== "owner"
+        || basis.authorizedAt !== partialCohort.authorization.decidedAt
+        || basis.deliveredVia !== partialCohort.authorization.deliveredVia
+      ) {
+        refuse(`capsule "${label}" Gate-2 receipt does not cite the cohort owner authorization`);
+      }
+    }
   }
   capsules.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 
@@ -283,6 +350,7 @@ export function assembleCorpusProvenance(inputs: CorpusProvenanceInputs): Verifi
     publicSnapshotDigest,
     docHashes,
     panelDocs,
+    partialCohort,
     generatedAt: inputs.generatedAt ?? new Date().toISOString(),
   } as const;
   return verifyCorpusProvenance(CorpusProvenanceV1.parse({ ...body, inputsDigest: corpusProvenanceInputsDigest(body) }), "assembled artifact");

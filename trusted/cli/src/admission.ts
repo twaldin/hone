@@ -48,6 +48,13 @@ export const CAPSULE_SNAPSHOT_FILE = "capsule-manifest.json";
 export const FROZEN_CAPSULE_ASSETS_DIR = "capsule-assets";
 export interface AdmitCapsuleOptions {
   review?: "required" | "off";
+  /**
+   * A clean source archive omits ignored nested git object stores. The
+   * non-provisional owner Gate-2 receipt may stand for the baseline check
+   * already performed when that receipt was minted, but only when no store is
+   * present. An available store is always reauthenticated.
+   */
+  allowMissingGitBaselineWithOwnerReceipt?: boolean;
 }
 
 
@@ -320,13 +327,39 @@ export function admitCapsule(
   }
   checkAssetHashes(capsuleDir, manifest);
   const orderingReport = checkOrderingReport(capsuleDir, manifest);
-  if (manifest.baseline.kind === "git") checkGitBaseline(capsuleDir, manifest.baseline.commit);
   const digest = capsuleDigest(manifest);
   let approval: VerifiedAdmissionApproval | null = null;
   if ((options.review ?? "off") === "required") {
     const capsuleParent = dirname(resolve(capsuleDir));
     const root = capsuleParent.endsWith(`${sep}capsules`) ? dirname(capsuleParent) : capsuleParent;
     approval = verifyAdmissionApproval(join(root, ".hone-cas"), digest);
+  }
+  if (options.allowMissingGitBaselineWithOwnerReceipt === true && approval === null) {
+    refuse(capsuleDir, "a missing git baseline store may be covered only by a required owner Gate-2 receipt");
+  }
+  if (manifest.baseline.kind === "git") {
+    const baselineDir = join(capsuleDir, "baseline");
+    const gitDir = existsSync(join(baselineDir, ".gitdir"))
+      ? join(baselineDir, ".gitdir")
+      : join(baselineDir, ".git");
+    // Git does not track empty directories. A source archive can therefore
+    // carry the object files while omitting the refs/ and objects/info/
+    // directories required for Git to recognize the embedded store.
+    const storePresent = existsSync(gitDir)
+      && existsSync(join(gitDir, "refs"))
+      && existsSync(join(gitDir, "objects", "info"));
+    if (storePresent || options.allowMissingGitBaselineWithOwnerReceipt !== true) {
+      checkGitBaseline(capsuleDir, manifest.baseline.commit);
+    } else {
+      const receipt = approval!.receipt;
+      if (
+        approval!.provisional
+        || receipt.identities["final-reviewer"].kind !== "owner"
+        || receipt.approvalBasis?.authorizedBy.kind !== "owner"
+      ) {
+        refuse(capsuleDir, "missing git baseline store is not covered by a non-provisional owner Gate-2 receipt");
+      }
+    }
   }
   return { manifest, digest, orderingReport, approval, provisional: approval?.provisional ?? false };
 }

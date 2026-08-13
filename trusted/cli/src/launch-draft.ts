@@ -15,6 +15,7 @@ import {
   MetaCampaignConfigV2,
   MetaCampaignConfigV2Draft,
   canonicalJson,
+  type AdmissionReceiptRecord,
   type BudgetEnvelope,
   type CapsuleManifest,
   type DiagnosticOrderingReport,
@@ -62,12 +63,9 @@ const BUDGET_DIMENSIONS = [
 ] as const;
 
 /**
- * The corpus assembler's frozen artifact schema (./corpus-provenance.ts) does
- * not enforce launch cardinalities; the generator does, fail closed: exactly
- * 16 development + 11 terminal capsules, distinct identities, and role lists
- * consistent with the per-capsule role records. The inputsDigest self-binding
- * is enforced separately by verifyCorpusProvenance — the single trusted
- * chokepoint — before any drafting decision reads the artifact.
+ * The verified provenance artifact may carry either the original atomic
+ * 16+11 cohort or the exact owner-authorized 13+8 admission partition. Any
+ * other cardinality is a silent shrink and refuses.
  */
 export const LaunchCorpusProvenance = CorpusProvenanceV1.superRefine((provenance, ctx) => {
   const ids = new Set(provenance.capsules.map((capsule) => capsule.id));
@@ -78,18 +76,21 @@ export const LaunchCorpusProvenance = CorpusProvenanceV1.superRefine((provenance
   if (digests.size !== provenance.capsules.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["capsules"], message: "capsule digests are not distinct" });
   }
-  if (provenance.developmentCapsuleIds.length !== M2_DEVELOPMENT_CAPSULE_COUNT) {
+  const partial = provenance.partialCohort;
+  const expectedDevelopment = partial === undefined ? M2_DEVELOPMENT_CAPSULE_COUNT : 13;
+  const expectedTerminal = partial === undefined ? M2_TERMINAL_CAPSULE_COUNT : 8;
+  if (provenance.developmentCapsuleIds.length !== expectedDevelopment) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["developmentCapsuleIds"],
-      message: `launch cohort requires exactly ${M2_DEVELOPMENT_CAPSULE_COUNT} development capsules, got ${provenance.developmentCapsuleIds.length}`,
+      message: `launch cohort requires exactly ${expectedDevelopment} admitted development capsules, got ${provenance.developmentCapsuleIds.length}`,
     });
   }
-  if (provenance.terminalCapsuleIds.length !== M2_TERMINAL_CAPSULE_COUNT) {
+  if (provenance.terminalCapsuleIds.length !== expectedTerminal) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["terminalCapsuleIds"],
-      message: `launch cohort requires exactly ${M2_TERMINAL_CAPSULE_COUNT} terminal capsules, got ${provenance.terminalCapsuleIds.length}`,
+      message: `launch cohort requires exactly ${expectedTerminal} admitted terminal capsules, got ${provenance.terminalCapsuleIds.length}`,
     });
   }
   const byRole = (role: "development" | "terminal") =>
@@ -113,6 +114,20 @@ export const LaunchCorpusProvenance = CorpusProvenanceV1.superRefine((provenance
         path: [path],
         message: `${path} must list exactly the capsules with role "${role}"`,
       });
+    }
+  }
+  if (partial !== undefined) {
+    const authorized = new Map(partial.admitted.map((capsule) => [capsule.capsuleId, capsule]));
+    if (
+      authorized.size !== provenance.capsules.length
+      || provenance.capsules.some((capsule) => {
+        const binding = authorized.get(capsule.id);
+        return binding === undefined
+          || binding.capsuleDigest !== capsule.digest
+          || binding.role !== capsule.role;
+      })
+    ) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["partialCohort", "admitted"], message: "provenance capsules must match the authorized Gate-2 receipt set exactly" });
     }
   }
 });
@@ -177,7 +192,10 @@ export interface M2DraftAdmittedCapsule {
   readonly orderingReport: DiagnosticOrderingReport;
   readonly provisional: boolean;
   /** Verified Gate-2 approval; null = review-off authoring path (refused here). */
-  readonly approval: { readonly approved: true } | null;
+  readonly approval: {
+    readonly approved: true;
+    readonly receipt?: AdmissionReceiptRecord;
+  } | null;
 }
 
 /** Frozen Panel-A/Panel-B task-to-capsule assignment (plan §corpus, launch-spec §3). */
@@ -382,8 +400,8 @@ function corpusEntry(admitted: M2DraftAdmittedCapsule): MetaCapsuleEntry {
     throw new UsageError(`capsule ${id} has no positive train reference scale (baseline ${baseline}, improved ${reference})`);
   }
   for (const [label, value] of [["baseline", baseline], ["improved", reference]] as const) {
-    if (value < 0 || value > 1) {
-      throw new UsageError(`capsule ${id} ${label} train aggregate ${value} is outside the registered [0, 1] range`);
+    if (!Number.isFinite(value) || value < 0) {
+      throw new UsageError(`capsule ${id} ${label} train aggregate ${value} must be a finite nonnegative oriented scalar`);
     }
   }
   return {
@@ -523,6 +541,10 @@ function indexAdmitted(
     if (byId.has(id)) throw new UsageError(`duplicate admission output for capsule ${id}`);
     byId.set(id, capsule);
   }
+  const partial = provenance.partialCohort;
+  const authorizedById = partial === undefined
+    ? null
+    : new Map(partial.admitted.map((capsule) => [capsule.capsuleId, capsule]));
   for (const registered of provenance.capsules) {
     const found = byId.get(registered.id);
     if (found === undefined) {
@@ -539,6 +561,34 @@ function indexAdmitted(
         `capsule ${registered.id} identity drift: admission digest ${found.digest} != provenance digest ${registered.digest}`,
       );
     }
+    if (partial !== undefined && authorizedById !== null) {
+      const authorized = authorizedById.get(registered.id);
+      const receipt = found.approval.receipt;
+      if (
+        authorized === undefined
+        || authorized.capsuleDigest !== found.digest
+        || receipt === undefined
+        || receipt.action !== "gate2-approve"
+        || receipt.capsuleDigest !== found.digest
+        || receipt.recordHash !== authorized.gate2ReceiptHash
+      ) {
+        throw new UsageError(`capsule ${registered.id} admission does not reproduce its authorized Gate-2 receipt`);
+      }
+      const basis = receipt.approvalBasis;
+      if (
+        basis === undefined
+        || basis.authorizationKey !== partial.authorization.decisionKey
+        || basis.authorizedBy.identity !== partial.authorization.owner.identity
+        || basis.authorizedBy.kind !== "owner"
+        || basis.authorizedAt !== partial.authorization.decidedAt
+        || basis.deliveredVia !== partial.authorization.deliveredVia
+      ) {
+        throw new UsageError(`capsule ${registered.id} Gate-2 receipt does not cite the owner authorization`);
+      }
+    }
+  }
+  if (byId.size !== provenance.capsules.length) {
+    throw new UsageError("admission outputs must match the provenance admitted set exactly");
   }
   return byId;
 }
@@ -547,7 +597,16 @@ function resolvePanelAssignment(
   assignments: M2LaunchPanelAssignments,
   provenance: CorpusProvenanceV1,
 ): { panelA: ReadonlyMap<string, string> } {
-  const development = new Set(provenance.developmentCapsuleIds);
+  const admittedDevelopment = new Set(provenance.developmentCapsuleIds);
+  const partial = provenance.partialCohort;
+  const authorizedDevelopmentByTask: ReadonlyMap<string, { readonly capsuleId: string }> | null =
+    partial === undefined
+      ? null
+      : new Map(
+          [...partial.admitted, ...partial.deferred].flatMap((capsule) =>
+            capsule.role === "development" ? [[capsule.taskId, capsule] as const] : []
+          ),
+        );
   const seen = new Set<string>();
   const resolve = (
     mapping: Readonly<Record<string, string>>,
@@ -568,22 +627,30 @@ function resolvePanelAssignment(
     const resolved = new Map<string, string>();
     for (const taskId of expected) {
       const capsuleId = mapping[taskId]!;
-      if (!development.has(capsuleId)) {
-        throw new UsageError(`${label} task ${taskId} maps to ${capsuleId}, which is not a development capsule`);
-      }
       if (seen.has(capsuleId)) {
         throw new UsageError(`capsule ${capsuleId} is assigned to more than one panel task`);
       }
       seen.add(capsuleId);
-      resolved.set(taskId, capsuleId);
+      if (authorizedDevelopmentByTask !== null) {
+        const authorized = authorizedDevelopmentByTask.get(taskId);
+        if (authorized === undefined || authorized.capsuleId !== capsuleId) {
+          throw new UsageError(`${label} task ${taskId} does not match the authorized 21+6 cohort partition`);
+        }
+        if (admittedDevelopment.has(capsuleId)) resolved.set(taskId, capsuleId);
+      } else {
+        if (!admittedDevelopment.has(capsuleId)) {
+          throw new UsageError(`${label} task ${taskId} maps to ${capsuleId}, which is not a development capsule`);
+        }
+        resolved.set(taskId, capsuleId);
+      }
     }
     return resolved;
   };
   const panelA = resolve(assignments.panelA, M2_PANEL_A_TASK_IDS, "Panel-A");
   resolve(assignments.panelB, M2_PANEL_B_TASK_IDS, "Panel-B");
-  if (seen.size !== M2_DEVELOPMENT_CAPSULE_COUNT) {
-    const unassigned = provenance.developmentCapsuleIds.filter((id) => !seen.has(id));
-    throw new UsageError(`development capsules missing a panel assignment: ${unassigned.join(", ")}`);
+  const expectedAssignments = partial === undefined ? M2_DEVELOPMENT_CAPSULE_COUNT : 16;
+  if (seen.size !== expectedAssignments) {
+    throw new UsageError(`development panel assignments must cover all ${expectedAssignments} locked task identities`);
   }
   return { panelA };
 }
@@ -627,7 +694,10 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     ),
     "corpus provenance artifact",
   );
-  const corpusCapsuleIds = new Set(provenance.capsules.map((capsule) => capsule.id));
+  const corpusCapsuleIds = new Set([
+    ...provenance.capsules.map((capsule) => capsule.id),
+    ...(provenance.partialCohort?.deferred.map((capsule) => capsule.capsuleId) ?? []),
+  ]);
 
   const calibration = resolveCalibration(inputs, corpusCapsuleIds, openDecisions);
   const admittedById = indexAdmitted(inputs.admitted, provenance);
@@ -642,8 +712,9 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     );
   }
 
-  // Train = Panel A in frozen task order; holdout = the provenance terminal order.
-  const train = M2_PANEL_A_TASK_IDS.map((taskId) => corpusEntry(admittedById.get(panelA.get(taskId)!)!));
+  // Train contains only admitted Panel-A tasks in frozen task order.
+  const panelAEntries = [...panelA.entries()];
+  const train = panelAEntries.map(([, capsuleId]) => corpusEntry(admittedById.get(capsuleId)!));
   const holdout = provenance.terminalCapsuleIds.map((capsuleId) => corpusEntry(admittedById.get(capsuleId)!));
 
   const parameters = inputs.parameters;
@@ -686,17 +757,17 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     }
   }
 
-  const members = M2_PANEL_A_TASK_IDS.map((taskId, index) => ({
+  const members = panelAEntries.map(([taskId, capsuleId], index) => ({
     taskId,
     capsule: train[index]!,
-    calibratedInnerCeiling: ceilings[panelA.get(taskId)!]!,
+    calibratedInnerCeiling: ceilings[capsuleId]!,
   }));
 
   const calibratedPanelCandidate = addBudgets(members.map((member) => member.calibratedInnerCeiling));
   const outerTrajectory = multiplyBudget(calibratedPanelCandidate, M2_SEARCH_CANDIDATE_EQUIVALENTS);
   assertSafeBudget(outerTrajectory, "search outer trajectory");
-  const confirmationRuns = 4 * M2_PANEL_CAPSULE_COUNT * 3;
-  const terminalRuns = 3 * M2_TERMINAL_CAPSULE_COUNT * 3;
+  const confirmationRuns = 4 * train.length * 3;
+  const terminalRuns = 3 * holdout.length * 3;
   const confirmationBudget = multiplyBudget(parameters.childBudget, confirmationRuns);
   const terminalBudget = multiplyBudget(parameters.childBudget, terminalRuns);
   const campaignBudget = addBudgets([
@@ -730,7 +801,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
   if (parameters.promotion === undefined) {
     recordDefault(
       "promotion",
-      "promotion rule defaulted to the M2 G1 gate reading (delta > 2*SE, >=6/8 sign consistency, 3 replicates)",
+      "promotion rule defaulted to the M2 G1 gate reading (delta > 2*SE, >=75% sign consistency, 3 replicates)",
     );
   }
   if (parameters.mutablePaths === undefined || parameters.protectedPaths === undefined) {
@@ -783,11 +854,19 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
       driftSentinel: true,
     },
     calibration: calibration.configBinding,
-    corpusCohort: {
-      developmentCapsuleIds: [...provenance.developmentCapsuleIds],
-      terminalCapsuleIds: [...provenance.terminalCapsuleIds],
-      provenanceInputsDigest: provenance.inputsDigest,
-    },
+    corpusCohort: provenance.partialCohort === undefined
+      ? {
+          developmentCapsuleIds: [...provenance.developmentCapsuleIds],
+          terminalCapsuleIds: [...provenance.terminalCapsuleIds],
+          provenanceInputsDigest: provenance.inputsDigest,
+        }
+      : {
+          mode: "owner-authorized-partial",
+          developmentCapsuleIds: [...provenance.developmentCapsuleIds],
+          terminalCapsuleIds: [...provenance.terminalCapsuleIds],
+          partialCohort: provenance.partialCohort,
+          provenanceInputsDigest: provenance.inputsDigest,
+        },
     counts: {
       candidates: parameters.candidates ?? M2_CANDIDATE_COUNT,
       candidateAttemptsMax,

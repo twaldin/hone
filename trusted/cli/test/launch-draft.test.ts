@@ -11,9 +11,15 @@ import {
   M2_PANEL_B_TASK_IDS,
   MetaCampaignConfigV2,
   MetaCampaignConfigV2Draft,
+  admissionReceiptRecordHash,
   canonicalJson,
+  type AdmissionReceiptRecord,
+  type AdmissionReceiptRecordBody,
   type BudgetEnvelope,
   type CapsuleManifest,
+  type M2AuthorizedAdmittedCapsule,
+  type M2AuthorizedDeferredCapsule,
+  type M2PanelTaskId,
   type DiagnosticOrderingReport,
 } from "@hone/schema";
 import { selectSaturationCeiling, type SaturationCeilingReport, type SaturationCell } from "@hone/scoring";
@@ -206,6 +212,143 @@ function fixture(): Fixture {
     },
   };
   return { inputs, admittedByLabel };
+}
+
+function partialFixture(): Fixture {
+  const base = fixture();
+  const deferredLabels = new Set<string>([
+    "panel-a-OSS-T01",
+    "panel-a-OSS-T03",
+    "panel-b-OSS-T08",
+    "terminal-8",
+    "terminal-9",
+    "terminal-10",
+  ]);
+  const authorization = {
+    decisionKey: "bun-image-blocker" as const,
+    decidedAt: "2026-08-12T18:15:41Z",
+    owner: { identity: "captain" as const, kind: "owner" as const },
+    deliveredVia: "first-mate" as const,
+    ruling: "ADMIT THE 21 NOW, DEFER THE SIX EXPLICITLY" as const,
+    supersedes: {
+      rule: "atomic-16-development-11-terminal" as const,
+      scope: "this-cohort-only" as const,
+    },
+    evidence: [{ path: "plans/m2-native-amd64-admission-evidence.json", digest: digest("authorization") }],
+  };
+  const taskByLabel: ReadonlyMap<string, M2PanelTaskId> = new Map([
+    ...M2_PANEL_A_TASK_IDS.map((taskId) => [`panel-a-${taskId}`, taskId] as const),
+    ...M2_PANEL_B_TASK_IDS.map((taskId) => [`panel-b-${taskId}`, taskId] as const),
+  ]);
+  const admitted: M2DraftAdmittedCapsule[] = [];
+  const policyAdmitted: M2AuthorizedAdmittedCapsule[] = [];
+  const policyDeferred: M2AuthorizedDeferredCapsule[] = [];
+  for (const [index, [label, capsule]] of [...base.admittedByLabel.entries()].entries()) {
+    const taskId = taskByLabel.get(label);
+    if (deferredLabels.has(label)) {
+      const binding = {
+        label: label.toLowerCase(),
+        capsuleId: capsule.manifest.id,
+        capsuleDigest: capsule.digest,
+        reason: "recorded native blocker",
+        evidence: [{ path: `capsules/${label}/diagnostics/blocker.json`, digest: digest(`blocker:${label}`) }],
+      };
+      policyDeferred.push(taskId === undefined
+        ? { ...binding, role: "terminal" }
+        : { ...binding, role: "development", taskId });
+      continue;
+    }
+    const body: AdmissionReceiptRecordBody = {
+      v: 1,
+      sequence: 1,
+      previousReceiptHash: digest(`gate1:${label}`),
+      capsuleDigest: capsule.digest,
+      action: "gate2-approve",
+      identities: {
+        author: { identity: "hone-native-migration", kind: "agent" },
+        "adversarial-validator": { identity: "hone-native-migration-adv-f1", kind: "agent" },
+        "final-reviewer": { identity: "captain", kind: "owner" },
+      },
+      approvalBasis: {
+        authorizationKey: authorization.decisionKey,
+        authorizedBy: authorization.owner,
+        authorizedAt: authorization.decidedAt,
+        deliveredVia: authorization.deliveredVia,
+        reviewEvidence: [
+          "data/hone-native-migration/review-f1.md",
+          "data/hone-native-migration/review-f2.md",
+        ],
+      },
+      provisional: false,
+      timestamp: new Date(Date.parse("2026-08-13T00:00:00Z") + index * 1_000).toISOString(),
+    };
+    const receipt: AdmissionReceiptRecord = {
+      ...body,
+      recordHash: admissionReceiptRecordHash(body),
+    };
+    admitted.push({ ...capsule, approval: { approved: true as const, receipt } });
+    const binding = {
+      label: label.toLowerCase(),
+      capsuleId: capsule.manifest.id,
+      capsuleDigest: capsule.digest,
+      gate2ReceiptHash: receipt.recordHash,
+    };
+    policyAdmitted.push(taskId === undefined
+      ? { ...binding, role: "terminal" }
+      : { ...binding, role: "development", taskId });
+  }
+  const partialCohort = {
+    version: "m2-authorized-partial-cohort.v1" as const,
+    authorization,
+    admitted: policyAdmitted,
+    deferred: policyDeferred,
+  };
+  const admittedIds = new Set(policyAdmitted.map((capsule) => capsule.capsuleId));
+  const original = base.inputs.provenance as CorpusProvenanceV1;
+  const capsules = original.capsules.filter((capsule) => admittedIds.has(capsule.id));
+  const developmentCapsuleIds = capsules.filter((capsule) => capsule.role === "development").map((capsule) => capsule.id);
+  const terminalCapsuleIds = capsules.filter((capsule) => capsule.role === "terminal").map((capsule) => capsule.id);
+  const admittedTerminalLabels = policyAdmitted
+    .filter((capsule) => capsule.role === "terminal")
+    .map((capsule) => capsule.label);
+  const terminalContentHashes = [
+    ...new Set(
+      admittedTerminalLabels.flatMap((label) =>
+        Object.values(base.admittedByLabel.get(label)!.manifest.contentHashes)
+      ),
+    ),
+  ].sort();
+  const provenance = bindProvenance({
+    ...original,
+    capsules,
+    developmentCapsuleIds,
+    terminalCapsuleIds,
+    terminalContentHashes,
+    partialCohort,
+  });
+  const deferredPanelAIds = new Set(
+    policyDeferred
+      .filter((capsule) => capsule.role === "development" && capsule.label.startsWith("panel-a-"))
+      .map((capsule) => capsule.capsuleId),
+  );
+  return {
+    admittedByLabel: new Map(admitted.map((capsule) => [
+      policyAdmitted.find((binding) => binding.capsuleId === capsule.manifest.id)!.label,
+      capsule,
+    ])),
+    inputs: {
+      ...base.inputs,
+      provenance,
+      admitted,
+      parameters: {
+        ...base.inputs.parameters,
+        calibratedInnerCeilings: Object.fromEntries(
+          Object.entries(base.inputs.parameters.calibratedInnerCeilings)
+            .filter(([capsuleId]) => !deferredPanelAIds.has(capsuleId)),
+        ),
+      },
+    },
+  };
 }
 
 const DIMENSIONS = ["maxTokens", "maxUsd", "maxWallClockSec", "maxEvaluatorInvocations"] as const;
@@ -628,6 +771,21 @@ describe("generateM2LaunchDraft", () => {
     expect(() => generateM2LaunchDraft({ ...base.inputs, admitted: flat })).toThrow(/no positive train reference scale/);
   });
 
+  it("accepts nonnegative raw performance scalars above one before normalization", () => {
+    const base = fixture();
+    const targetId = base.admittedByLabel.get("panel-a-OWN-T06")!.manifest.id;
+    const rawPerformance = base.inputs.admitted.map((capsule) => {
+      if (capsule.manifest.id !== targetId) return capsule;
+      const report = orderingReport();
+      report.variants.baseline.train = 100;
+      report.variants.improved.train = 125;
+      return { ...capsule, orderingReport: report };
+    });
+    const draft = generateM2LaunchDraft({ ...base.inputs, admitted: rawPerformance });
+    const entry = draft.config.train.find((capsule) => capsule.capsuleId === targetId);
+    expect(entry).toMatchObject({ qBase: 100, qReference: 125, scale: 25 });
+  });
+
   it("rejects a provenance cohort with broken cardinality", () => {
     const { inputs } = fixture();
     const provenance = inputs.provenance as CorpusProvenanceV1;
@@ -639,7 +797,71 @@ describe("generateM2LaunchDraft", () => {
       developmentCapsuleIds: provenance.developmentCapsuleIds.filter((id) => id !== dropped),
     });
     expect(() => generateM2LaunchDraft({ ...inputs, provenance: truncated }))
-      .toThrow(/exactly 16 development capsules/);
+      .toThrow(/exactly 16 admitted development capsules/);
+  });
+
+  it("generates and round-trips the authorized 21-capsule cohort with deferrals excluded", () => {
+    const { inputs } = partialFixture();
+    const draft = generateM2LaunchDraft(inputs);
+    expect(draft.config.corpusCohort).toMatchObject({ mode: "owner-authorized-partial" });
+    expect(draft.config.train).toHaveLength(6);
+    expect(draft.config.holdout).toHaveLength(8);
+    expect(draft.config.developmentPanel.members.map((member) => member.taskId))
+      .not.toContain("OSS-T01");
+    expect(draft.config.developmentPanel.members.map((member) => member.taskId))
+      .not.toContain("OSS-T03");
+    expect(MetaCampaignConfigV2.parse(JSON.parse(JSON.stringify(draft.config)))).toEqual(draft.config);
+  });
+
+  it("refuses a partial cohort when an actual Gate-2 receipt or owner basis drifts", () => {
+    const receiptDrift = partialFixture();
+    const driftedAdmissions = receiptDrift.inputs.admitted.map((capsule, index) =>
+      index === 0 && capsule.approval !== null && capsule.approval.receipt !== undefined
+        ? {
+            ...capsule,
+            approval: {
+              ...capsule.approval,
+              receipt: { ...capsule.approval.receipt, recordHash: digest("foreign-receipt") },
+            },
+          }
+        : capsule
+    );
+    expect(() => generateM2LaunchDraft({ ...receiptDrift.inputs, admitted: driftedAdmissions }))
+      .toThrow(/does not reproduce its authorized Gate-2 receipt/);
+
+    const basisDrift = partialFixture();
+    const wrongBasis = basisDrift.inputs.admitted.map((capsule, index) =>
+      index === 0 && capsule.approval !== null && capsule.approval.receipt !== undefined
+        ? {
+            ...capsule,
+            approval: {
+              ...capsule.approval,
+              receipt: {
+                ...capsule.approval.receipt,
+                approvalBasis: {
+                  ...capsule.approval.receipt.approvalBasis!,
+                  authorizationKey: "unrelated-decision",
+                },
+              },
+            },
+          }
+        : capsule
+    );
+    expect(() => generateM2LaunchDraft({ ...basisDrift.inputs, admitted: wrongBasis }))
+      .toThrow(/does not cite the owner authorization/);
+  });
+
+  it("refuses a panel assignment that tries to seat a deferred task under another capsule", () => {
+    const { inputs } = partialFixture();
+    const assignments = {
+      ...inputs.assignments,
+      panelA: {
+        ...inputs.assignments.panelA,
+        "OSS-T01": inputs.assignments.panelA["OWN-T01"]!,
+      },
+    };
+    expect(() => generateM2LaunchDraft({ ...inputs, assignments }))
+      .toThrow(/authorized 21\+6 cohort partition|more than one panel task/);
   });
 });
 
