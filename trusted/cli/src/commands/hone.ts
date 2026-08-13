@@ -177,6 +177,7 @@ export interface CampaignResumeProxy {
   dispatchRecovery(): Promise<DispatchRecoveryReport>;
   resume(): Promise<ProxyPreflightResult>;
   close(): Promise<void>;
+  listenTcp(port: number, host?: string): Promise<number>;
 }
 
 export interface CampaignResumeCoordinatorRequest {
@@ -255,6 +256,7 @@ export async function coordinateCampaignResume(
     recordCampaignPause: (signal) => authority.recordCampaignPause(signal),
     recordCampaignResume: (signal) => authority.recordCampaignResume(signal),
   });
+  await proxy.listenTcp(0);
   try {
     const recovery = await proxy.dispatchRecovery();
     if (recovery.poisoned !== undefined) {
