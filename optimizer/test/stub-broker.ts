@@ -4,7 +4,15 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { BrokerMethods, EvaluationRecord, type BudgetEnvelope, type BudgetState } from "@hone/schema";
+import {
+  BrokerMethods,
+  EvaluationRecord,
+  canonicalJson,
+  type BudgetEnvelope,
+  type BudgetState,
+  type RecursiveEvaluationPlan,
+  type RecursiveTask,
+} from "@hone/schema";
 import { deferred } from "../src/deferred.js";
 import { SANDBOX_WORKER_PATH, WORKER_PART_DIR } from "../src/loop.js";
 
@@ -43,6 +51,7 @@ export interface StubScript {
   /** Consumed in exec-call order; running past the end fails the test. */
   execPlan: ExecStep[];
   envelope: BudgetEnvelope;
+  recursiveTask?: RecursiveTask;
 }
 
 export function stubHash(n: number): string {
@@ -68,6 +77,8 @@ export class StubBroker {
   readonly evaluated: string[] = [];
   /** Every evaluate ask (memo hits included) as `hash@seed`, in call order. */
   readonly evaluateAsks: string[] = [];
+  /** Recursive allocation plan attached to every evaluate request, if any. */
+  readonly recursivePlans: Array<RecursiveEvaluationPlan | undefined> = [];
   readonly reportedIncumbents: string[] = [];
   readonly finished: string[] = [];
   /** Mutation-session execs only; worker probe/assembly execs are emulated structurally. */
@@ -151,6 +162,7 @@ export class StubBroker {
           baselineArtifact: { hash: this.script.baselineHash },
           visibleAssetGroups: ["train", "validation"],
           budget: this.budgetNow(),
+          ...(this.script.recursiveTask === undefined ? {} : { recursiveTask: this.script.recursiveTask }),
         });
       }
       case "createSandbox": {
@@ -197,8 +209,11 @@ export class StubBroker {
       }
       case "evaluate": {
         const params = BrokerMethods.evaluate.params.parse(rawParams);
-        const key = `${params.artifact.hash}|${params.assetGroupId}|${params.seed}`;
+        const key =
+          `${params.artifact.hash}|${params.assetGroupId}|${params.seed}|` +
+          (params.recursivePlan === undefined ? "" : canonicalJson(params.recursivePlan));
         this.evaluateAsks.push(`${params.artifact.hash}@${params.seed}`);
+        this.recursivePlans.push(params.recursivePlan);
         this.ops.push(`evaluate:${params.artifact.hash}@${params.seed}`);
         const memoized = this.memo.get(key);
         if (memoized !== undefined) return { ...memoized, cached: true };

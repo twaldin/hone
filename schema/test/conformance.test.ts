@@ -310,6 +310,39 @@ describe("contract 2: broker protocol", () => {
       }),
     ).toThrow();
   });
+
+  it("carries a typed recursive task and optimizer-authored allocation plan on evaluate", () => {
+    const ceiling = { maxTokens: 10, maxUsd: 1, maxWallClockSec: 60, maxEvaluatorInvocations: 5 };
+    const task = BrokerMethods.getTask.result.parse({
+      capsuleId: "cap_000000000000",
+      objective: "improve the optimizer",
+      baselineArtifact: { hash: `sha256:${"a".repeat(64)}` },
+      visibleAssetGroups: ["meta-train"],
+      budget: {
+        envelope: ceiling,
+        spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 },
+      },
+      recursiveTask: {
+        depth: 0,
+        innerEpisodesMax: 4,
+        members: [{ capsuleId: "cap_000000000001", calibratedInnerCeiling: ceiling }],
+      },
+    });
+    const params = BrokerMethods.evaluate.params.parse({
+      artifact: task.baselineArtifact,
+      assetGroupId: "meta-train",
+      seed: 0,
+      recursivePlan: {
+        allocations: [{
+          capsuleId: "cap_000000000001",
+          allocationOrdinal: 0,
+          innerEpisodesMax: 4,
+          reservation: ceiling,
+        }],
+      },
+    });
+    expect(params.recursivePlan?.allocations).toHaveLength(1);
+  });
 });
 
 describe("contract 5: run config", () => {

@@ -66,6 +66,7 @@ import {
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
   ProxyTraceRecord,
+  RecursiveEvaluationPlan,
   SpawnRunParams,
   canonicalJson,
   capsuleDigest,
@@ -1095,6 +1096,10 @@ const SCHEDULED_BUDGET_DIMENSIONS = [
  * at a time; panel completeness is derived later from the durable trajectory.
  */
 export class RecursiveSearchChildLauncher {
+  private readonly candidateOrdinals = new Map<Sha256Digest, number>();
+  private readonly ordinalArtifacts = new Map<number, Sha256Digest>();
+  private nextCandidateOrdinal = 0;
+
   constructor(
     private readonly root: string,
     private readonly campaignDir: string,
@@ -1105,7 +1110,225 @@ export class RecursiveSearchChildLauncher {
     private readonly childSupervisor: CliChildSupervisor,
     private readonly envelopeLedger: MetaResourceEnvelopeLedger,
     private readonly campaignPauseAuthority: CampaignPauseAuthority,
-  ) {}
+  ) {
+    for (const entry of readdirSync(this.campaignDir)) {
+      if (!entry.startsWith("child-launch-") || !entry.endsWith(".json")) continue;
+      const receipt = ChildRunLaunchReceipt.parse(
+        JSON.parse(readFileSync(join(this.campaignDir, entry), "utf8")),
+      );
+      const schedule = receipt.child.schedule;
+      if (schedule === undefined || receipt.child.purpose !== "capsule" || receipt.depth !== 1) continue;
+      const artifact = receipt.child.sourceArtifact.hash as Sha256Digest;
+      const byArtifact = this.candidateOrdinals.get(artifact);
+      const byOrdinal = this.ordinalArtifacts.get(schedule.candidateOrdinal);
+      if (
+        (byArtifact !== undefined && byArtifact !== schedule.candidateOrdinal)
+        || (byOrdinal !== undefined && byOrdinal !== artifact)
+      ) {
+        throw new Error("durable recursive child receipts disagree on candidate ordinal identity");
+      }
+      this.candidateOrdinals.set(artifact, schedule.candidateOrdinal);
+      this.ordinalArtifacts.set(schedule.candidateOrdinal, artifact);
+      this.nextCandidateOrdinal = Math.max(this.nextCandidateOrdinal, schedule.candidateOrdinal + 1);
+    }
+  }
+
+  /**
+   * Trusted adapter for the generic optimizer's evaluate request. The
+   * optimizer chooses the development-panel allocation; trust derives child
+   * identities, dispatches through spawnRun, and aggregates only journaled
+   * normalized settlements.
+   */
+  evaluationStrategy(): TrustedEvaluationStrategy {
+    return async (input) => {
+      const started = Date.now();
+      if (input.recursivePlan === undefined) {
+        throw new Error(
+          "recursive search evaluation requires an optimizer-authored allocation plan; refusing the synthetic capsule evaluator",
+        );
+      }
+      const plan = RecursiveEvaluationPlan.parse(input.recursivePlan);
+      const members = new Map(
+        this.config.developmentPanel.members.map((member) => [member.capsule.capsuleId, member]),
+      );
+      if (plan.allocations.length > members.size) {
+        throw new Error("recursive allocation plan exceeds the frozen development panel");
+      }
+      const seenCapsules = new Set<string>();
+      const seenOrdinals = new Set<number>();
+      for (const allocation of plan.allocations) {
+        const member = members.get(allocation.capsuleId);
+        if (member === undefined) {
+          throw new Error(`recursive allocation names non-panel capsule ${allocation.capsuleId}`);
+        }
+        if (seenCapsules.has(allocation.capsuleId)) {
+          throw new Error(`recursive allocation double-counts capsule ${allocation.capsuleId}`);
+        }
+        if (seenOrdinals.has(allocation.allocationOrdinal)) {
+          throw new Error(`recursive allocation ordinal ${allocation.allocationOrdinal} is duplicated`);
+        }
+        seenCapsules.add(allocation.capsuleId);
+        seenOrdinals.add(allocation.allocationOrdinal);
+        if (allocation.innerEpisodesMax > this.config.counts.innerEpisodesMax) {
+          throw new Error(
+            `recursive allocation for ${allocation.capsuleId} exceeds the frozen inner episode ceiling`,
+          );
+        }
+        for (const dimension of SCHEDULED_BUDGET_DIMENSIONS) {
+          if (allocation.reservation[dimension] > member.calibratedInnerCeiling[dimension]) {
+            throw new Error(
+              `recursive allocation for ${allocation.capsuleId} exceeds ${dimension} ceiling`,
+            );
+          }
+        }
+      }
+
+      const sourceArtifact = input.artifact.hash as Sha256Digest;
+      let checked: CandidateGateResult;
+      try {
+        checked = await this.gate.check({ mode: "public-mutable", sourceArtifact });
+      } catch (error) {
+        checked = {
+          ok: false,
+          feedback: `conformance gate failed closed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      if (!checked.ok) {
+        return EvaluationRecord.parse({
+          capsuleId: input.capsuleId,
+          artifactHash: sourceArtifact,
+          assetGroupId: input.assetGroupId,
+          seed: input.seed,
+          output: {
+            valid: false,
+            objectives: {},
+            constraints: { conformance: false },
+            diagnostics: { summary: bounded(checked.feedback) },
+          },
+          costUsd: 0,
+          durationMs: Math.max(0, Date.now() - started),
+          cached: false,
+          evaluatedAt: new Date().toISOString(),
+        });
+      }
+
+      let candidateOrdinal = this.candidateOrdinals.get(sourceArtifact);
+      if (candidateOrdinal === undefined) {
+        candidateOrdinal = this.nextCandidateOrdinal;
+        this.nextCandidateOrdinal += 1;
+        this.candidateOrdinals.set(sourceArtifact, candidateOrdinal);
+        this.ordinalArtifacts.set(candidateOrdinal, sourceArtifact);
+      }
+
+      const measurements: MetaMeasurement[] = [];
+      const failures: string[] = [];
+      let costUsd = 0;
+      for (const allocation of plan.allocations) {
+        const identity: MetaWorkIdentity = {
+          phase: "search",
+          arm: "candidate",
+          sourceArtifact,
+          bundleDigest: checked.bundleDigest,
+          capsuleId: allocation.capsuleId,
+          replicate: 0,
+          measurementEpoch: `m2:${sha256(canonicalJson({
+            candidateOrdinal,
+            allocationOrdinal: allocation.allocationOrdinal,
+            innerEpisodesMax: allocation.innerEpisodesMax,
+            reserved: allocation.reservation,
+          })).slice("sha256:".length)}`,
+        };
+        const runId = `run_meta_${metaWorkKey(this.configHash, identity).slice("sha256:".length)}`;
+        await input.spawnRun(SpawnRunParams.parse({
+          child: {
+            runId,
+            capsuleId: allocation.capsuleId,
+            sourceArtifact: { hash: sourceArtifact },
+            optimizerArtifact: { hash: checked.bundleDigest },
+            purpose: "capsule",
+            schedule: {
+              candidateOrdinal,
+              allocationOrdinal: allocation.allocationOrdinal,
+              innerEpisodesMax: allocation.innerEpisodesMax,
+            },
+          },
+          depth: 1,
+          reservation: allocation.reservation,
+        }));
+        const workKey = metaWorkKey(this.configHash, identity);
+        const measurement = this.journal.queryTrainMeasurements().find((row) => row.workKey === workKey);
+        if (measurement !== undefined) {
+          measurements.push(measurement);
+          costUsd += measurement.observed.usd;
+          continue;
+        }
+        const failure = this.journal.queryFailureSettlements().find((row) => row.workKey === workKey);
+        if (failure === undefined) {
+          throw new Error(`recursive child ${runId} returned without a trusted settlement`);
+        }
+        costUsd += failure.observed.usd;
+        failures.push(`${allocation.capsuleId}=${failure.status}`);
+      }
+
+      if (failures.length > 0) {
+        return EvaluationRecord.parse({
+          capsuleId: input.capsuleId,
+          artifactHash: sourceArtifact,
+          assetGroupId: input.assetGroupId,
+          seed: input.seed,
+          output: {
+            valid: false,
+            objectives: {},
+            constraints: { allChildrenValid: false },
+            diagnostics: { summary: bounded(`recursive child settlement failed: ${failures.join("; ")}`) },
+          },
+          costUsd,
+          durationMs: Math.max(0, Date.now() - started),
+          cached: false,
+          evaluatedAt: new Date().toISOString(),
+        });
+      }
+      if (measurements.length !== plan.allocations.length) {
+        throw new Error("recursive evaluation settlement cardinality mismatch");
+      }
+      const normalizedGain =
+        measurements.reduce((sum, measurement) => sum + measurement.qNormalized, 0) / measurements.length;
+      const perExample = Object.fromEntries(
+        measurements.map((measurement) => [
+          measurement.capsuleId,
+          {
+            score: measurement.qNormalized,
+            feedback: `${measurement.capsuleId}: trusted normalized gain ${measurement.qNormalized}`,
+          },
+        ]),
+      );
+      return EvaluationRecord.parse({
+        capsuleId: input.capsuleId,
+        artifactHash: sourceArtifact,
+        assetGroupId: input.assetGroupId,
+        seed: input.seed,
+        output: {
+          valid: true,
+          objectives: { normalizedGain },
+          constraints: {
+            allChildrenValid: true,
+            fullPanel: measurements.length === members.size,
+          },
+          perExample,
+          diagnostics: {
+            summary: bounded(
+              `recursive development evaluation scored ${measurements.length}/${members.size} frozen panel capsules`,
+            ),
+          },
+        },
+        costUsd,
+        durationMs: Math.max(0, Date.now() - started),
+        cached: false,
+        evaluatedAt: new Date().toISOString(),
+      });
+    };
+  }
+
 
   brokerConfig(
     ledger: BrokerRecursiveConfig["ledger"],
@@ -1116,6 +1339,18 @@ export class RecursiveSearchChildLauncher {
       depth,
       ancestors,
       ledger,
+      ...(depth === 0
+        ? {
+            evaluationTask: {
+              depth,
+              innerEpisodesMax: this.config.counts.innerEpisodesMax,
+              members: this.config.developmentPanel.members.map((member) => ({
+                capsuleId: member.capsule.capsuleId,
+                calibratedInnerCeiling: member.calibratedInnerCeiling,
+              })),
+            },
+          }
+        : {}),
       admitChildRun: (input) => this.admitChildRun(input),
       launchChildRun: (input) => this.launchChildRun(input),
     };
@@ -2526,6 +2761,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     campaignPauseAuthority,
   );
   const recursiveBroker = recursiveLauncher.brokerConfig(recursiveResourceLedger);
+  const recursiveEvaluationStrategy = recursiveLauncher.evaluationStrategy();
   const runner = new MetaCampaignRunner({
     config,
     journal,
@@ -2734,6 +2970,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     const code = await runCommand(commandArgs, io, {
       runId: outerRunId,
       recursiveBroker,
+      evaluationStrategy: recursiveEvaluationStrategy,
       optimizerEpisodesMax: config.counts.candidateAttemptsMax,
       maxPublicCandidateEvaluations: config.counts.candidateAttemptsMax,
       optimizerBaseSnapshot: rootSnapshot,

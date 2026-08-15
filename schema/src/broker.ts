@@ -35,6 +35,26 @@ export const BudgetState = z.object({
 });
 export type BudgetState = z.infer<typeof BudgetState>;
 
+export const RunDepth = z.union([z.literal(0), z.literal(1), z.literal(2)]);
+export type RunDepth = z.infer<typeof RunDepth>;
+
+/**
+ * Development-only recursive task surface. Trusted orchestration derives it
+ * from the frozen panel; terminal identities have no representation here.
+ */
+export const RecursiveTaskMember = z.object({
+  capsuleId: z.string().min(1),
+  calibratedInnerCeiling: BudgetEnvelope,
+}).strict();
+export type RecursiveTaskMember = z.infer<typeof RecursiveTaskMember>;
+
+export const RecursiveTask = z.object({
+  depth: RunDepth,
+  innerEpisodesMax: z.number().int().positive(),
+  members: z.array(RecursiveTaskMember).min(1),
+}).strict();
+export type RecursiveTask = z.infer<typeof RecursiveTask>;
+
 // ---------- methods ----------
 
 export const GetTaskResult = z.object({
@@ -44,6 +64,8 @@ export const GetTaskResult = z.object({
   /** Asset group ids visible to the optimizer (never contents of protected/holdout). */
   visibleAssetGroups: z.array(z.string()),
   budget: BudgetState,
+  /** Present only when trusted orchestration configured a development-panel recursive evaluator. */
+  recursiveTask: RecursiveTask.optional(),
 });
 
 export const CreateSandboxParams = z.object({
@@ -78,10 +100,29 @@ export const GetFileResult = z.object({ contentBase64: z.string() });
 
 export const SaveArtifactParams = z.object({ sandboxId: z.string() });
 
+export const RecursiveEvaluationAllocation = z.object({
+  capsuleId: z.string().min(1),
+  allocationOrdinal: z.number().int().nonnegative(),
+  innerEpisodesMax: z.number().int().positive(),
+  reservation: BudgetEnvelope,
+}).strict();
+export type RecursiveEvaluationAllocation = z.infer<typeof RecursiveEvaluationAllocation>;
+
+/**
+ * Optimizer-authored allocation policy for one recursive candidate score.
+ * Trusted orchestration derives child identities and enforces membership,
+ * per-capsule ceilings, and ancestor budget reservations.
+ */
+export const RecursiveEvaluationPlan = z.object({
+  allocations: z.array(RecursiveEvaluationAllocation).min(1).max(100),
+}).strict();
+export type RecursiveEvaluationPlan = z.infer<typeof RecursiveEvaluationPlan>;
+
 export const EvaluateParams = z.object({
   artifact: ArtifactRef,
   assetGroupId: z.string(),
   seed: z.number().int().nonnegative(),
+  recursivePlan: RecursiveEvaluationPlan.optional(),
 });
 
 export const ReportIncumbentParams = z.object({
@@ -92,8 +133,6 @@ export const ReportIncumbentParams = z.object({
 
 export const FinishParams = z.object({ best: ArtifactRef });
 
-export const RunDepth = z.union([z.literal(0), z.literal(1), z.literal(2)]);
-export type RunDepth = z.infer<typeof RunDepth>;
 
 /** Componentwise trusted resource accounting for recursive child runs. */
 export const ResourceUsage = z.object({

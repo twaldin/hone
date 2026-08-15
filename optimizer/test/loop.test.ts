@@ -152,6 +152,73 @@ describe("runEpisodeLoop", () => {
     expect(repair?.userPrompt).toContain("exit 1");
   });
 
+  it("attaches the frozen development-panel allocation plan to parent and candidate evaluations", async () => {
+    const firstCeiling = {
+      maxTokens: 100,
+      maxUsd: 2,
+      maxWallClockSec: 300,
+      maxEvaluatorInvocations: 17,
+    };
+    const secondCeiling = {
+      maxTokens: 200,
+      maxUsd: 3,
+      maxWallClockSec: 400,
+      maxEvaluatorInvocations: 17,
+    };
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { normalizedGain: 0 },
+      objectivesBySaveIndex: { 1: { normalizedGain: 0.1 } },
+      execPlan: [{ exitCode: 0, stdout: okStdout("recursive-policy") }],
+      envelope: {
+        maxTokens: 1_000_000,
+        maxUsd: 100,
+        maxWallClockSec: 100_000,
+        maxEvaluatorInvocations: 2,
+      },
+      recursiveTask: {
+        depth: 0,
+        innerEpisodesMax: 4,
+        members: [
+          { capsuleId: "cap_000000000001", calibratedInnerCeiling: firstCeiling },
+          { capsuleId: "cap_000000000002", calibratedInnerCeiling: secondCeiling },
+        ],
+      },
+    });
+    await stub.listen();
+
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-recursive-wiring",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit([]),
+        rand: () => 0.99,
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    const expected = {
+      allocations: [
+        {
+          capsuleId: "cap_000000000001",
+          allocationOrdinal: 0,
+          innerEpisodesMax: 4,
+          reservation: firstCeiling,
+        },
+        {
+          capsuleId: "cap_000000000002",
+          allocationOrdinal: 1,
+          innerEpisodesMax: 4,
+          reservation: secondCeiling,
+        },
+      ],
+    };
+    expect(stub.recursivePlans).toEqual([expected, expected]);
+  });
+
   it("discards an eval-invalid candidate whose repair also fails, without minting an incumbent", async () => {
     const stub = new StubBroker({
       baselineHash: BASELINE,
@@ -224,6 +291,43 @@ describe("runEpisodeLoop", () => {
     ]);
     expect(eventsOf(events, "incumbent.new")).toHaveLength(0);
     expect(stub.finished).toEqual([BASELINE]);
+  });
+
+  it("does not start a model mutation when stop lands during the parent evaluation", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+
+    const controller = new AbortController();
+    const events: RunEvent[] = [];
+    const emit = collectEmit(events);
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-stop-during-parent",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: (event) => {
+          const parsed = emit(event);
+          if (event.type === "eval.completed") controller.abort();
+          return parsed;
+        },
+        signal: controller.signal,
+        rand: () => 0.99,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(eventsOf(events, "episode.started")).toHaveLength(1);
+    expect(eventsOf(events, "eval.completed")).toHaveLength(1);
+    expect(stub.evaluated).toEqual([BASELINE]);
+    expect(stub.execArgvs).toEqual([]);
+    expect(stub.finished).toEqual([]);
   });
 
   it("winds down at the episode boundary when the abort signal fires", async () => {

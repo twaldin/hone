@@ -126,6 +126,20 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       ? trainAssetGroupId
       : task.visibleAssetGroups[0];
     if (assetGroupId === undefined) throw new Error("broker reported no visible asset groups");
+    const recursiveTask = task.recursiveTask;
+    if (recursiveTask !== undefined && recursiveTask.depth !== 0) {
+      throw new Error(`seed recursive evaluation policy requires a depth-0 task, got depth ${recursiveTask.depth}`);
+    }
+    const recursivePlan = recursiveTask === undefined
+      ? undefined
+      : {
+          allocations: recursiveTask.members.map((member, allocationOrdinal) => ({
+            capsuleId: member.capsuleId,
+            allocationOrdinal,
+            innerEpisodesMax: recursiveTask.innerEpisodesMax,
+            reservation: member.calibratedInnerCeiling,
+          })),
+        };
 
     const baseline = task.baselineArtifact;
     let incumbent = opts.resume?.incumbent ?? null;
@@ -134,7 +148,12 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
     let baselineAggregate: number | null = null;
 
     const evaluate = async (artifact: ArtifactRef, seed: number, episode: number): Promise<EvaluationRecord> => {
-      const record = await broker.evaluate({ artifact, assetGroupId, seed });
+      const record = await broker.evaluate({
+        artifact,
+        assetGroupId,
+        seed,
+        ...(recursivePlan === undefined ? {} : { recursivePlan }),
+      });
       emit({
         ...base,
         at: now(),
@@ -274,6 +293,9 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       const { sandboxId } = await broker.createSandbox({ artifact: parent, role: "mutation" });
 
       const parentRecord = await evaluate(parent, episode, episode);
+      // An evaluation can outlive a stop request; never start a fresh model
+      // mutation after the trusted score returns.
+      if (opts.signal?.aborted) return;
       const parentAggregate = aggregateOf(parentRecord);
       if (parent.hash === baseline.hash) baselineAggregate = parentAggregate;
 

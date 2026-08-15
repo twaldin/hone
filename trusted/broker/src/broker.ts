@@ -38,6 +38,7 @@ import {
   GetTaskResult,
   PutFileParams,
   ReportIncumbentParams,
+  RecursiveTask,
   ResourceUsage,
   SandboxRef,
   SaveArtifactParams,
@@ -77,6 +78,10 @@ export interface TrustedEvaluationStrategyInput {
   assetGroupId: string;
   seed: number;
   measurementEpoch?: string | undefined;
+  /** Optimizer-authored recursive allocation policy, schema-validated on the wire. */
+  recursivePlan?: z.infer<typeof EvaluateParams>["recursivePlan"];
+  /** Host-only recursive dispatch; every call still crosses the broker's trusted ledgers and admission gate. */
+  spawnRun: (params: z.infer<typeof SpawnRunParams>) => Promise<z.infer<typeof SpawnRunResult>>;
 }
 
 export type TrustedEvaluationStrategy = (input: TrustedEvaluationStrategyInput) => Promise<EvaluationRecord>;
@@ -118,6 +123,8 @@ export interface BrokerRecursiveConfig {
   ancestors: readonly string[];
   /** Shared authority instance for the entire recursive run tree. */
   ledger: RecursiveResourceLedger;
+  /** Development-only task description exposed to the mutable optimizer. */
+  evaluationTask?: z.infer<typeof RecursiveTask> | undefined;
   /** Frozen trusted membership/provenance gate, evaluated before any reservation is written. */
   admitChildRun: TrustedChildRunAdmission;
   launchChildRun: ChildRunLauncher;
@@ -1059,7 +1066,26 @@ export class Broker {
         ? "eval"
         : `eval-${createHash("sha256").update(config.measurementEpoch).digest("hex")}`;
     this.evaluationStrategy = config.evaluationStrategy;
-    this.recursive = config.recursive;
+    if (config.recursive === undefined) {
+      this.recursive = undefined;
+    } else {
+      const evaluationTask = config.recursive.evaluationTask === undefined
+        ? undefined
+        : RecursiveTask.parse(config.recursive.evaluationTask);
+      if (evaluationTask !== undefined && evaluationTask.depth !== config.recursive.depth) {
+        throw new BrokerError("INTERNAL", "recursive evaluation task depth does not match broker depth");
+      }
+      if (evaluationTask !== undefined && this.evaluationStrategy === undefined) {
+        throw new BrokerError(
+          "INTERNAL",
+          "recursive search requires a trusted evaluation strategy; refusing the synthetic capsule evaluator",
+        );
+      }
+      this.recursive = {
+        ...config.recursive,
+        ...(evaluationTask === undefined ? {} : { evaluationTask }),
+      };
+    }
     if (this.recursive !== undefined) {
       this.recursive.ledger.registerRun(
         config.runId,
@@ -2428,6 +2454,9 @@ export class Broker {
         .filter((group) => group.visibility !== "holdout" || this.terminalHoldoutAssetGroupIds.has(group.id))
         .map((group) => group.id),
       budget: this.budgetStateNow(),
+      ...(this.recursive?.evaluationTask === undefined
+        ? {}
+        : { recursiveTask: this.recursive.evaluationTask }),
     };
   }
 
@@ -2933,7 +2962,10 @@ export class Broker {
       `|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}` +
       (this.trustedMeasurementEpoch === undefined
         ? ""
-        : `|measurementEpoch:${encodeURIComponent(this.trustedMeasurementEpoch)}`);
+        : `|measurementEpoch:${encodeURIComponent(this.trustedMeasurementEpoch)}`) +
+      (params.recursivePlan === undefined
+        ? ""
+        : `|recursivePlan:${createHash("sha256").update(canonicalJson(params.recursivePlan)).digest("hex")}`);
     const existing = this.inFlightEvaluations.get(memoKey);
     if (existing !== undefined) {
       return this.redactRecord(await existing, group.visibility, ctx);
@@ -3210,6 +3242,8 @@ export class Broker {
           ...(this.trustedMeasurementEpoch !== undefined
             ? { measurementEpoch: this.trustedMeasurementEpoch }
             : {}),
+          ...(params.recursivePlan === undefined ? {} : { recursivePlan: params.recursivePlan }),
+          spawnRun: async (child) => await this.spawnRun(child, { privileged: true }),
         }));
       } finally {
         this.publish(invocationEvents);
