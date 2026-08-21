@@ -168,11 +168,12 @@ function journalAuthorityAligned(runId: string, runDir: string, io: CmdIo): bool
 }
 
 /**
- * Stop a run. A live, identity-confirmed supervisor is SIGTERM'd and awaited
- * (terminal event + lock release + process death). A dead run is finalized
- * as stopped — but ONLY while holding the same per-run lock the supervisor
- * uses and only when the broker journal is aligned, so a concurrent resume
- * and this finalization can never both write authority, and no stale state
+ * Stop a run. A live, identity-confirmed supervisor receives a trusted stop
+ * request through its lease and is awaited (terminal event + lock release +
+ * process death). A dead run is finalized as stopped — but ONLY while holding
+ * the same per-run lock the supervisor uses and only when the broker journal
+ * is aligned, so a concurrent resume and this finalization can never both
+ * write authority, and no stale state
  * is ever sealed or applied. --take-best lands the incumbent on a branch.
  */
 export async function stopCommand(args: string[], io: CmdIo, run: RunCommand = runCommand): Promise<number> {

@@ -65,7 +65,10 @@ async function main() {
     await call("exec", { sandboxId: sandbox.sandboxId, argv: ["node", "-e", mutation] });
     const candidate = await call("saveArtifact", { sandboxId: sandbox.sandboxId });
     await call("evaluate", { artifact: candidate, assetGroupId: "train", seed: 0 });
-    return;
+    // Deliberately hold after the paid result is durably acknowledged. The
+    // outer test kills this process at that exact checkpoint, rather than
+    // racing normal optimizer exit and broker completion.
+    await new Promise(() => {});
   }
   const claimed = await call("createSandbox", {
     artifact: active.parent,
@@ -160,12 +163,17 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
             current.some((event) => event.type === "episode.candidate")
             && current.filter((event) => event.type === "eval.completed").length === 2
           ) {
+            expect(
+              current.some((event) => event.type === "episode.completed"),
+              "optimizer crossed the deterministic post-evaluation kill checkpoint",
+            ).toBe(false);
             killTree(child);
             break;
           }
         }
         // External Docker/CLI integration: poll the durable journal signal,
-        // not an estimated process duration.
+        // not an estimated process duration. The optimizer holds the explicit
+        // post-evaluation checkpoint until this test kills it.
         await sleep(100);
       }
       expect(runId).toBeDefined();
