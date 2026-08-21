@@ -3,7 +3,8 @@
   "recordedAt": "2026-08-21T02:43:06.000Z",
   "runId": "run_mt2cexpl03c659",
   "zeroModelCalls": true,
-  "launchCommand": "HONE_STUB_EPISODES=1 HONE_STUB_CHECKPOINT_DELAY_MS=10000 tsx trusted/cli/src/main.ts run capsule --headless --backend stub",
+  "cwd": "/home/tim/omp-firstmate/worktrees/hone-durable-runs/fixtures/data/hone-durable-runs/kill-resume",
+  "launchCommand": "HONE_STUB_EPISODES=1 HONE_STUB_CHECKPOINT_DELAY_MS=10000 /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/node_modules/.bin/tsx /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/src/main.ts run capsule --headless --backend stub",
   "interruption": {
     "afterEvent": "eval.completed",
     "signal": "SIGKILL",
@@ -11,7 +12,7 @@
     "exitCode": 137,
     "runFinishedPresentBeforeResume": false
   },
-  "resumeCommand": "HONE_STUB_EPISODES=1 HONE_STUB_CHECKPOINT_DELAY_MS=0 tsx trusted/cli/src/main.ts run capsule --headless --resume",
+  "resumeCommand": "HONE_STUB_EPISODES=1 HONE_STUB_CHECKPOINT_DELAY_MS=0 /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/node_modules/.bin/tsx /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/src/main.ts run capsule --headless --resume",
   "resumeExitCode": 0,
   "records": {
     "events": ".hone-runs/run_mt2cexpl03c659/events.ndjson",
