@@ -1993,11 +1993,13 @@ async function superviseLocked(
         }
       }
     }
-    // Drain the lifecycle queue through an observed poll/check pass. A wall
-    // deadline is not a correctness barrier under scheduler starvation:
-    // scheduling this immediate after the timer guarantees Node has crossed
-    // poll before terminal status is selected, however long that takes.
+    // Drain two poll/check passes. A stop byte on an already-accepted lease
+    // is consumed in the first poll; a stop connection still pending accept
+    // may need that poll to install its data handler and the next to consume
+    // its queued byte. Wall time is not a correctness barrier under scheduler
+    // starvation, so each pass is fenced by the check phase instead.
     await sleep(25);
+    await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
     await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
 
     // A signal that landed during delivery (or between backend settle and
