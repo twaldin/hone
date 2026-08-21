@@ -445,6 +445,42 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
     expect(b.events.filter((event) => event.type === "budget.exhausted")).toHaveLength(0);
   });
 
+  it("durably emits a distinct no-yield bound event with the triggering usage", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    b.broker.recordSpend({ tokens: 1_506_679, usd: 0 }, ADMIN);
+
+    const report = {
+      episode: 0,
+      limitTokens: 1_500_000,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    expect(b.broker.reportSessionNoYieldBound(report, CLIENT)).toEqual({});
+
+    const bounded = b.events.filter((event) => event.type === "mutation.no-yield-bound");
+    expect(bounded).toHaveLength(1);
+    expect(bounded[0]).toMatchObject({
+      type: "mutation.no-yield-bound",
+      ...report,
+    });
+    expect(b.events.some((event) => event.type === "episode.candidate")).toBe(false);
+    expect(b.events.some((event) => event.type === "budget.exhausted")).toBe(false);
+
+    // RPC response loss/retry cannot duplicate or rewrite the durable reason.
+    expect(b.broker.reportSessionNoYieldBound(report, CLIENT)).toEqual({});
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(1);
+    expect(() => b.broker.reportSessionNoYieldBound({ ...report, modelCalls: 153 }, CLIENT)).toThrow(
+      /contradictory no-yield bound report/,
+    );
+  });
+
   it("replays promotion authority and the incumbent", async () => {
     const shared = { runDir: path.join(tmpBase, "runs", "resume-b"), casDir: path.join(tmpBase, "cas", "resume-b"), runId: "run-resume-b" };
     const a = await boot(shared);

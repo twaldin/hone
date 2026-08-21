@@ -8,11 +8,13 @@
  *     the trusted broker at createSandbox(role=mutation); HONE_MODEL_ID is a
  *     display label (the proxy overwrites the model per role); HONE_WORKDIR
  *     (default /workspace); HONE_DEADLINE_MS (session duration budget, ms);
+ *     HONE_SESSION_NO_YIELD_MAX_TOKENS (default 1,500,000);
  *     HONE_AGENT_DIR (default /scratch/omp-agent, ephemeral).
  *
  * Output: on success the LAST stdout line is the MutateResult JSON
  * ({ summary, approach, filesChanged }). Exit codes: 0 ok, 1 failure,
- * 2 bad input/env, 3 run budget exhausted (proxy 402 hone_budget_exceeded).
+ * 2 bad input/env, 3 run budget exhausted (proxy 402 hone_budget_exceeded),
+ * 4 session stopped at the no-yield token bound (structured stdout record).
  *
  * `--selftest` performs the no-LLM smoke: registry + settings constructed
  * offline, sample episode.json parsed, prints "hone-mutation selftest ok".
@@ -37,6 +39,12 @@ import {
   Settings,
   type AuthStorage,
 } from "@oh-my-pi/pi-coding-agent";
+import {
+  SESSION_NO_YIELD_EXIT_CODE,
+  SessionNoYieldCounter,
+  parseSessionNoYieldMaxTokens,
+  type SessionNoYieldRecord,
+} from "../src/session-yield-bound.js";
 
 /**
  * `Promise.withResolvers()` ponyfill — this worker must stay a single
@@ -328,6 +336,7 @@ interface SessionEnv {
   token: string;
   modelId: string;
   deadline: number;
+  noYieldMaxTokens: number;
 }
 
 function buildRegistry(env: SessionEnv, authStorage: AuthStorage): ModelRegistry {
@@ -378,6 +387,7 @@ async function selftest(): Promise<void> {
       token: "selftest",
       modelId: "hone-selftest",
       deadline: Date.now() + 60_000,
+      noYieldMaxTokens: parseSessionNoYieldMaxTokens(undefined),
     },
     authStorage,
   );
@@ -440,6 +450,16 @@ function cooldownSeconds(message: string): number | null {
   if (match?.[1] !== undefined) return Math.min(300, Number(match[1]));
   return -1; // cooldown without a hint: caller applies exponential backoff
 }
+class SessionNoYieldBoundExceeded extends Error {
+  constructor(readonly record: SessionNoYieldRecord) {
+    super(
+      `mutation session exceeded the no-yield token bound: ` +
+      `${record.consumedTokens} tokens across ${record.modelCalls} model calls (limit ${record.limitTokens})`,
+    );
+    this.name = "SessionNoYieldBoundExceeded";
+  }
+}
+
 
 async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record<string, unknown>> {
   const authStorage = await discoverAuthStorage(env.agentDir);
@@ -485,13 +505,34 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     }
 
     let final: Record<string, unknown> | undefined;
+    let bounded: SessionNoYieldRecord | null = null;
+    let abortPromise: Promise<void> | undefined;
+    const counter = new SessionNoYieldCounter(env.noYieldMaxTokens);
     session.subscribe((event) => {
-      if (event.type !== "tool_execution_end" || event.toolName !== "yield" || event.isError === true) return;
-      const details: unknown = event.result?.details;
-      if (typeof details !== "object" || details === null) return;
-      const rec = details as Record<string, unknown>;
-      if (rec.status === "success" && typeof rec.data === "object" && rec.data !== null) {
-        final = rec.data as Record<string, unknown>;
+      if (event.type === "tool_execution_end" && event.toolName === "yield" && event.isError !== true) {
+        const details: unknown = event.result?.details;
+        if (typeof details === "object" && details !== null) {
+          const rec = details as Record<string, unknown>;
+          if (rec.status === "success" && typeof rec.data === "object" && rec.data !== null) {
+            final = rec.data as Record<string, unknown>;
+          }
+        }
+        return;
+      }
+      if (event.type !== "turn_end" || event.message.role !== "assistant") return;
+      bounded = counter.observe(
+        {
+          promptTokens: event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite,
+          completionTokens: event.message.usage.output,
+          totalTokens: event.message.usage.totalTokens,
+        },
+        final !== undefined,
+      );
+      if (bounded !== null && abortPromise === undefined) {
+        abortPromise = session.abort({ reason: "hone mutation session no-yield token bound" });
+        // The prompt catch below awaits and rethrows this result. Attach an
+        // immediate handler so a fast abort failure is never unhandled.
+        void abortPromise.catch(() => {});
       }
     });
 
@@ -500,6 +541,10 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
         await session.prompt(episode.userPrompt);
         break;
       } catch (err) {
+        if (bounded !== null) {
+          await abortPromise?.catch(() => {});
+          throw new SessionNoYieldBoundExceeded(bounded);
+        }
         const message = err instanceof Error ? err.message : String(err);
         if (/402|hone_budget_exceeded/i.test(message)) {
           throw new BudgetExhausted(message);
@@ -514,6 +559,10 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
       }
     }
 
+    if (bounded !== null) {
+      await abortPromise?.catch(() => {});
+      throw new SessionNoYieldBoundExceeded(bounded);
+    }
     if (final === undefined) throw new Error("session ended without a successful yield");
     return final;
   } finally {
@@ -554,6 +603,7 @@ async function main(): Promise<number> {
     token,
     modelId: process.env.HONE_MODEL_ID ?? "hone-mutation",
     deadline: Date.now() + Number(process.env.HONE_DEADLINE_MS ?? 1_500_000),
+    noYieldMaxTokens: parseSessionNoYieldMaxTokens(process.env.HONE_SESSION_NO_YIELD_MAX_TOKENS),
   };
 
   try {
@@ -561,6 +611,11 @@ async function main(): Promise<number> {
     console.log(JSON.stringify(result));
     return 0;
   } catch (err) {
+    if (err instanceof SessionNoYieldBoundExceeded) {
+      console.log(JSON.stringify(err.record));
+      console.error(err.message);
+      return SESSION_NO_YIELD_EXIT_CODE;
+    }
     console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
     return err instanceof BudgetExhausted ? 3 : 1;
   }

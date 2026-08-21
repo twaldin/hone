@@ -421,6 +421,28 @@ describe("contract 4: event log", () => {
     expect(e.type).toBe("incumbent.new");
   });
 
+  it("no-yield bound events carry a complete, named trigger record", () => {
+    const trigger = {
+      episode: 0,
+      limitTokens: 1_500_000,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    expect(RunEvent.parse({
+      runId: "run_1",
+      at: new Date().toISOString(),
+      type: "mutation.no-yield-bound",
+      ...trigger,
+    })).toMatchObject({ type: "mutation.no-yield-bound", ...trigger });
+    expect(BrokerMethods.reportSessionNoYieldBound.params.parse(trigger)).toEqual(trigger);
+    expect(() => BrokerMethods.reportSessionNoYieldBound.params.parse({
+      ...trigger,
+      consumedTokens: trigger.limitTokens - 1,
+    })).toThrow(/consumedTokens must reach limitTokens/);
+  });
+
   it("holdout access events carry the ledger count — no unlogged holdout reads", () => {
     expect(() =>
       RunEvent.parse({ runId: "r", at: new Date().toISOString(), type: "holdout.accessed", capsuleId: "c" }),

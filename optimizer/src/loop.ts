@@ -7,6 +7,13 @@ import { buildEpisodeContext, type FailureEvidence, type LineageEntry } from "..
 import { epsilonRestart, mutationTimeoutSec, oneRepair, trainAssetGroupId } from "../assets/policy.js";
 import { BrokerClient, BrokerRpcError } from "./client.js";
 import { EPISODE_JSON_PATH, parseMutateStdout, type EpisodeContext, type MutateResult } from "./episode.js";
+import {
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+  SESSION_NO_YIELD_EXIT_CODE,
+  parseSessionNoYieldMaxTokens,
+  parseSessionNoYieldRecord,
+  type SessionNoYieldRecord,
+} from "./session-yield-bound.js";
 
 /**
  * The seed episode loop: greedy incumbent + ε-restart + one-repair, driven
@@ -55,6 +62,8 @@ export interface EpisodeLoopOptions {
    * Must be a positive integer when present; anything else fails closed.
    */
   maxEpisodes?: number;
+  /** Provider-reported tokens allowed before one mutation session yields. */
+  sessionNoYieldMaxTokens?: number;
   /** M0 cache-safe mode: after one candidate evaluator admission, never repair/evaluate another candidate. */
   oneShotCandidate?: boolean;
   /** Test seam: uniform [0,1) draw per episode for the ε-restart decision. */
@@ -101,12 +110,17 @@ interface MutateAttempt {
   result: MutateResult | null;
   stdoutHash: string;
   failure: FailureEvidence | null;
+  noYieldBound: SessionNoYieldRecord | null;
 }
 
 export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
   const maxEpisodes = opts.maxEpisodes;
   if (maxEpisodes !== undefined && (!Number.isSafeInteger(maxEpisodes) || maxEpisodes <= 0)) {
     throw new Error(`maxEpisodes must be a positive integer, got ${String(maxEpisodes)}`);
+  }
+  const sessionNoYieldMaxTokens = opts.sessionNoYieldMaxTokens ?? DEFAULT_SESSION_NO_YIELD_MAX_TOKENS;
+  if (!Number.isSafeInteger(sessionNoYieldMaxTokens) || sessionNoYieldMaxTokens <= 0) {
+    throw new Error(`sessionNoYieldMaxTokens must be a positive integer, got ${String(sessionNoYieldMaxTokens)}`);
   }
   // The sealed built worker bytes, shipped from THIS invocation's bundle dir
   // into every mutation sandbox. Read before anything touches the broker —
@@ -228,7 +242,13 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       const deadlineMs = Math.max(60, mutationTimeoutSec - DEADLINE_MARGIN_SEC) * 1000;
       const exec = await broker.exec({
         sandboxId,
-        argv: ["env", `HONE_DEADLINE_MS=${deadlineMs}`, "bun", SANDBOX_WORKER_PATH],
+        argv: [
+          "env",
+          `HONE_DEADLINE_MS=${deadlineMs}`,
+          `HONE_SESSION_NO_YIELD_MAX_TOKENS=${sessionNoYieldMaxTokens}`,
+          "bun",
+          SANDBOX_WORKER_PATH,
+        ],
         cwd: "/workspace",
         timeoutSec: mutationTimeoutSec,
       });
@@ -242,6 +262,29 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         if (err instanceof BrokerRpcError && err.brokerCode === "BUDGET_EXCEEDED") throw err;
       }
 
+      const noYieldBound =
+        exec.exitCode === SESSION_NO_YIELD_EXIT_CODE ? parseSessionNoYieldRecord(exec.stdout) : null;
+      if (noYieldBound !== null) {
+        await broker.reportSessionNoYieldBound({
+          episode,
+          limitTokens: noYieldBound.limitTokens,
+          modelCalls: noYieldBound.modelCalls,
+          promptTokens: noYieldBound.promptTokens,
+          completionTokens: noYieldBound.completionTokens,
+          consumedTokens: noYieldBound.consumedTokens,
+        });
+        const failure: FailureEvidence = {
+          reason:
+            `mutation session hit no-yield token bound after ${noYieldBound.consumedTokens} tokens ` +
+            `across ${noYieldBound.modelCalls} model calls (limit ${noYieldBound.limitTokens})`,
+          exitCode: exec.exitCode,
+          stdoutTail: tail(exec.stdout),
+          stderrTail: tail(exec.stderr),
+        };
+        console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
+        return { artifact, result: null, stdoutHash, failure, noYieldBound };
+      }
+
       if (exec.exitCode !== 0) {
         const failure: FailureEvidence = {
           reason: `mutation session failed (exit ${exec.exitCode}, episode ${episode})`,
@@ -253,7 +296,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         // remains schema-only RunEvent NDJSON. Preserve worker evidence here
         // so a failed remote campaign is diagnosable after sandboxes are reaped.
         console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
-        return { artifact, result: null, stdoutHash, failure };
+        return { artifact, result: null, stdoutHash, failure, noYieldBound: null };
       }
       const result = parseMutateStdout(exec.stdout);
       if (result === null) {
@@ -264,14 +307,14 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
           stderrTail: tail(exec.stderr),
         };
         console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
-        return { artifact, result: null, stdoutHash, failure };
+        return { artifact, result: null, stdoutHash, failure, noYieldBound: null };
       }
-      return { artifact, result, stdoutHash, failure: null };
+      return { artifact, result, stdoutHash, failure: null, noYieldBound: null };
     };
 
     const startEpisode = opts.resume?.nextEpisode ?? 0;
     let episode = startEpisode;
-    for (; ; episode++) {
+    episodeLoop: for (; ; episode++) {
       if (opts.signal?.aborted) return;
       // Attempted-count cap: ordinals [startEpisode, startEpisode + maxEpisodes).
       if (maxEpisodes !== undefined && episode - startEpisode >= maxEpisodes) break;
@@ -308,6 +351,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       });
 
       let attempt = await mutateOnce({ sandboxId }, context, episode);
+      if (attempt.noYieldBound !== null) break episodeLoop;
       let candidate = attempt.artifact;
       let record: EvaluationRecord | null = null;
       let candidateEvaluationConsumed = false;
@@ -347,6 +391,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
             failure: attempt.failure,
           });
           const repair = await mutateOnce({ from: repairFrom }, repairContext, episode);
+          if (repair.noYieldBound !== null) break episodeLoop;
           if (repair.artifact !== null && repair.failure === null) {
             emit({
               ...base,
@@ -480,6 +525,7 @@ export function createBackend(): OptimizerRunnerBackend {
   return {
     async start(ctx: OptimizerBackendContext): Promise<void> {
       const maxEpisodes = parseMaxEpisodes(ctx.env["HONE_MAX_EPISODES"]);
+      const sessionNoYieldMaxTokens = parseSessionNoYieldMaxTokens(ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"]);
       const oneShotCandidate = ctx.env["HONE_ONE_SHOT_CANDIDATE"] === "1";
       await runEpisodeLoop({
         brokerSocket: join(ctx.runDir, "broker.sock"),
@@ -492,6 +538,7 @@ export function createBackend(): OptimizerRunnerBackend {
           incumbent: ctx.replayed.incumbent,
         },
         ...(oneShotCandidate ? { oneShotCandidate: true } : {}),
+        sessionNoYieldMaxTokens,
         ...(maxEpisodes !== undefined ? { maxEpisodes } : {}),
       });
     },

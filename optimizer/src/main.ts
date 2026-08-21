@@ -15,6 +15,9 @@
  *   env  HONE_MAX_EPISODES  positive-integer cap on outer episodes attempted
  *                           this invocation, counted from HONE_RESUME.nextEpisode;
  *                           unset = unbounded, anything else fails closed
+ *   env  HONE_SESSION_NO_YIELD_MAX_TOKENS
+ *                           positive-integer per-session no-yield token bound
+ *                           (default 1,500,000)
  *   env  HONE_ONE_SHOT_CANDIDATE
  *                           `1` disables a second candidate evaluation after
  *                           the M0 probe consumes its cache-safe authority
@@ -27,6 +30,7 @@
  */
 import type { ArtifactRef, RunEvent } from "@hone/schema";
 import { parseMaxEpisodes, runEpisodeLoop } from "./loop.js";
+import { parseSessionNoYieldMaxTokens } from "./session-yield-bound.js";
 
 interface ResumeState {
   nextEpisode: number;
@@ -59,6 +63,7 @@ async function main(): Promise<number> {
   if (!Number.isInteger(seed) || seed < 0) throw new Error("HONE_SEED must be a nonnegative integer");
   const resume = parseResume(process.env["HONE_RESUME"]);
   const maxEpisodes = parseMaxEpisodes(process.env["HONE_MAX_EPISODES"]);
+  const sessionNoYieldMaxTokens = parseSessionNoYieldMaxTokens(process.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"]);
   const oneShotCandidate = process.env["HONE_ONE_SHOT_CANDIDATE"] === "1";
 
   const abort = new AbortController();
@@ -79,6 +84,7 @@ async function main(): Promise<number> {
       signal: abort.signal,
       seed,
       resume,
+      sessionNoYieldMaxTokens,
       ...(oneShotCandidate ? { oneShotCandidate: true } : {}),
       ...(maxEpisodes !== undefined ? { maxEpisodes } : {}),
     });

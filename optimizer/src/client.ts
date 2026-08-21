@@ -188,6 +188,10 @@ export class BrokerClient {
   async reportIncumbent(params: ParamsOf<"reportIncumbent">): Promise<void> {
     await this.call("reportIncumbent", params);
   }
+  async reportSessionNoYieldBound(params: ParamsOf<"reportSessionNoYieldBound">): Promise<void> {
+    await this.call("reportSessionNoYieldBound", params);
+  }
+
 
   async getBudget(): Promise<ResultOf<"getBudget">> {
     return this.call("getBudget", {});

@@ -31,6 +31,16 @@ export const RunEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("episode.started"), episode: z.number().int().nonnegative(), parent: ArtifactRef }),
   z.object({ ...base, type: z.literal("episode.candidate"), episode: z.number().int().nonnegative(), candidate: ArtifactRef, sessionTrace: z.string() }),
   z.object({ ...base, type: z.literal("episode.invalid"), episode: z.number().int().nonnegative(), reason: z.string(), repaired: z.boolean() }),
+  z.object({
+    ...base,
+    type: z.literal("mutation.no-yield-bound"),
+    episode: z.number().int().nonnegative(),
+    limitTokens: z.number().int().positive(),
+    modelCalls: z.number().int().positive(),
+    promptTokens: z.number().int().nonnegative(),
+    completionTokens: z.number().int().nonnegative(),
+    consumedTokens: z.number().int().positive(),
+  }),
   z.object({ ...base, type: z.literal("eval.completed"), episode: z.number().int().nonnegative().optional(), artifact: ArtifactRef, assetGroupId: z.string(), seed: z.number().int(), aggregate: z.number(), cached: z.boolean() }),
   z.object({
     ...base,

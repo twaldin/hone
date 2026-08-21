@@ -130,6 +130,23 @@ export const ReportIncumbentParams = z.object({
   /** Optimizer's own claimed metrics — display only; trusted scores come from EvaluationRecords. */
   claimed: z.record(z.number()).optional(),
 });
+export const ReportSessionNoYieldBoundParams = z.object({
+  episode: z.number().int().nonnegative(),
+  limitTokens: z.number().int().positive(),
+  modelCalls: z.number().int().positive(),
+  promptTokens: z.number().int().nonnegative(),
+  completionTokens: z.number().int().nonnegative(),
+  consumedTokens: z.number().int().positive(),
+}).strict().superRefine((value, ctx) => {
+  if (value.consumedTokens < value.limitTokens) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "consumedTokens must reach limitTokens" });
+  }
+  if (value.consumedTokens < value.promptTokens + value.completionTokens) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "consumedTokens cannot be less than promptTokens + completionTokens" });
+  }
+});
+export type ReportSessionNoYieldBoundParams = z.infer<typeof ReportSessionNoYieldBoundParams>;
+
 
 export const FinishParams = z.object({ best: ArtifactRef });
 
@@ -285,6 +302,7 @@ export const BrokerMethods = {
     result: z.object({}).passthrough(),
   },
   reportIncumbent: { params: ReportIncumbentParams, result: z.object({}) },
+  reportSessionNoYieldBound: { params: ReportSessionNoYieldBoundParams, result: z.object({}) },
   getBudget: { params: z.object({}), result: BudgetState },
   finish: { params: FinishParams, result: z.object({}) },
   spawnRun: { params: SpawnRunParams, result: SpawnRunResult },

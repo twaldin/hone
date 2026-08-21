@@ -12,6 +12,10 @@ import {
   WORKER_PART_DIR,
 } from "../src/loop.js";
 import { okStdout, StubBroker, stubHash } from "./stub-broker.js";
+import {
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+  SESSION_NO_YIELD_RECORD_TYPE,
+} from "../src/session-yield-bound.js";
 
 /**
  * Smoke-level acceptance for the seed loop: 3 scripted episodes against a
@@ -139,7 +143,8 @@ describe("runEpisodeLoop", () => {
     for (const argv of stub.execArgvs) {
       expect(argv.slice(0, 1)).toEqual(["env"]);
       expect(argv[1]).toMatch(/^HONE_DEADLINE_MS=\d+$/);
-      expect(argv.slice(2)).toEqual(["bun", SANDBOX_WORKER_PATH]);
+      expect(argv[2]).toBe(`HONE_SESSION_NO_YIELD_MAX_TOKENS=${DEFAULT_SESSION_NO_YIELD_MAX_TOKENS}`);
+      expect(argv.slice(3)).toEqual(["bun", SANDBOX_WORKER_PATH]);
     }
 
     // Every episode file put into a sandbox is a valid EpisodeContext; the repair
@@ -150,6 +155,51 @@ describe("runEpisodeLoop", () => {
     const repair = contexts[2];
     expect(repair?.userPrompt).toContain("TypeError: boom in astar.js:42");
     expect(repair?.userPrompt).toContain("exit 1");
+  });
+
+  it("stops the optimizer after a successful-call session reaches the no-yield bound", async () => {
+    const noYieldRecord = {
+      type: SESSION_NO_YIELD_RECORD_TYPE,
+      limitTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [{ exitCode: 4, stdout: `${JSON.stringify(noYieldRecord)}\n` }],
+      // The run budget remains far from exhausted when the session bound fires.
+      envelope: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-no-yield-bound",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.reportedNoYieldBounds).toEqual([{
+      episode: 0,
+      limitTokens: 1_500_000,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    }]);
+    expect(stub.execArgvs).toHaveLength(1);
+    expect(stub.finished).toEqual([BASELINE]);
+    expect(eventsOf(events, "episode.candidate")).toHaveLength(0);
+    expect(eventsOf(events, "budget.exhausted")).toHaveLength(0);
   });
 
   it("attaches the frozen development-panel allocation plan to parent and candidate evaluations", async () => {
@@ -709,7 +759,13 @@ describe("runEpisodeLoop sealed worker transfer", () => {
     expect(episodeJsonAt).toBeGreaterThan(assembleAt);
     expect(sessionAt).toBeGreaterThan(episodeJsonAt);
     // The session runs the sandbox-local sealed file — no image-baked path.
-    expect(stub.execArgvs).toEqual([["env", expect.stringMatching(/^HONE_DEADLINE_MS=\d+$/), "bun", SANDBOX_WORKER_PATH]]);
+    expect(stub.execArgvs).toEqual([[
+      "env",
+      expect.stringMatching(/^HONE_DEADLINE_MS=\d+$/),
+      `HONE_SESSION_NO_YIELD_MAX_TOKENS=${DEFAULT_SESSION_NO_YIELD_MAX_TOKENS}`,
+      "bun",
+      SANDBOX_WORKER_PATH,
+    ]]);
     expect(stub.ops.join("\n")).not.toContain("/opt/hone-worker");
   });
 

@@ -80,6 +80,7 @@ export class StubBroker {
   /** Recursive allocation plan attached to every evaluate request, if any. */
   readonly recursivePlans: Array<RecursiveEvaluationPlan | undefined> = [];
   readonly reportedIncumbents: string[] = [];
+  readonly reportedNoYieldBounds: Array<z.infer<typeof BrokerMethods.reportSessionNoYieldBound.params>> = [];
   readonly finished: string[] = [];
   /** Mutation-session execs only; worker probe/assembly execs are emulated structurally. */
   readonly execArgvs: string[][] = [];
@@ -236,6 +237,11 @@ export class StubBroker {
       case "reportIncumbent": {
         const params = BrokerMethods.reportIncumbent.params.parse(rawParams);
         this.reportedIncumbents.push(params.artifact.hash);
+        return {};
+      }
+      case "reportSessionNoYieldBound": {
+        const params = BrokerMethods.reportSessionNoYieldBound.params.parse(rawParams);
+        this.reportedNoYieldBounds.push(params);
         return {};
       }
       case "getBudget": {

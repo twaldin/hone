@@ -457,6 +457,28 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
     expect(seen.argvs[1]?.[3]).toBe("hone-opt-run_host-1");
   });
 
+  it("forwards the configured session no-yield token ceiling into the sealed optimizer", async () => {
+    const root = makeRoot();
+    const runDir = join(root, ".hone-runs", "run_session_bound");
+    mkdirSync(runDir, { recursive: true });
+    const seen = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] };
+    const script = join(root, "optimizer.mjs");
+    writeFileSync(script, "process.exit(0);\n");
+    const ctx = optCtx(root, runDir, "run_session_bound");
+    ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] = "2500000";
+
+    await runOptimizer(
+      ctx,
+      testOptimizerRuntime({
+        runId: "run_session_bound",
+        argv: [process.execPath, script],
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE, seen),
+      }),
+    );
+
+    expect(seen.argvs[0]).toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=2500000");
+  });
+
   it("the TCP token reaches the container env but never argv, optimizer.log, or events", async () => {
     const root = makeRoot();
     const runDir = join(root, ".hone-runs", "run_tok");

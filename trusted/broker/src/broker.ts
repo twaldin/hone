@@ -38,6 +38,7 @@ import {
   GetTaskResult,
   PutFileParams,
   ReportIncumbentParams,
+  ReportSessionNoYieldBoundParams,
   RecursiveTask,
   ResourceUsage,
   SandboxRef,
@@ -460,6 +461,7 @@ type GetFileR = z.infer<typeof GetFileResult>;
 type SaveArtifactP = z.infer<typeof SaveArtifactParams>;
 type EvaluateP = z.infer<typeof EvaluateParams>;
 type ReportIncumbentP = z.infer<typeof ReportIncumbentParams>;
+type ReportSessionNoYieldBoundP = z.infer<typeof ReportSessionNoYieldBoundParams>;
 type FinishP = z.infer<typeof FinishParams>;
 type GetTaskR = z.infer<typeof GetTaskResult>;
 type CorpusDocument = z.infer<typeof CorpusPublicDocument> | z.infer<typeof CorpusPanelEvidence>;
@@ -555,6 +557,15 @@ type EmittableEvent =
   | { type: "holdout.accessed"; capsuleId: string; ledgerCount: number; ledgerBudget: number }
   | { type: "episode.started"; episode: number; parent: ArtifactRef }
   | { type: "episode.candidate"; episode: number; candidate: ArtifactRef; sessionTrace: string }
+  | {
+      type: "mutation.no-yield-bound";
+      episode: number;
+      limitTokens: number;
+      modelCalls: number;
+      promptTokens: number;
+      completionTokens: number;
+      consumedTokens: number;
+    }
   | { type: "eval.completed"; episode?: number; artifact: ArtifactRef; assetGroupId: string; seed: number; aggregate: number; cached: boolean }
   | { type: "gate.paired"; episode: number; parentScore: number; childScore: number; passed: boolean }
   | { type: "incumbent.new"; artifact: ArtifactRef; aggregate: number; deltaVsBaseline: number; episode: number }
@@ -564,6 +575,7 @@ type EmittableEvent =
 const BROKER_EVENT_TYPES = new Set<RunEvent["type"]>([
   "holdout.accessed",
   "episode.started",
+  "mutation.no-yield-bound",
   "episode.candidate",
   "eval.completed",
   "gate.paired",
@@ -3527,6 +3539,39 @@ export class Broker {
     this.currentIncumbent = promoted;
     this.lastIncumbent = params;
     this.publish(events);
+    return {};
+  }
+
+  /**
+   * Durable stop reason for a sealed mutation worker that consumed its
+   * per-session allowance without successfully invoking yield.
+   */
+  reportSessionNoYieldBound(params: ReportSessionNoYieldBoundP, _ctx: CallContext): Record<string, never> {
+    this.state().assertUsable();
+    const existing = this.journalEvents.find(
+      (event) => event.type === "mutation.no-yield-bound" && event.episode === params.episode,
+    );
+    if (existing !== undefined) {
+      if (!sameCanonical(existing, { ...existing, ...params })) {
+        throw new BrokerError("INTERNAL", `contradictory no-yield bound report for episode ${params.episode}`);
+      }
+      return {};
+    }
+    if (!this.anyEpisodeStarted || params.episode !== this.episodeOrdinal - 1) {
+      throw new BrokerError("INTERNAL", `no-yield bound report does not match the active mutation episode ${this.episodeOrdinal - 1}`);
+    }
+    if (this.journalEvents.some(
+      (event) => event.type === "episode.candidate" && event.episode === params.episode,
+    )) {
+      throw new BrokerError("INTERNAL", `no-yield bound report follows a candidate in episode ${params.episode}`);
+    }
+    if (params.consumedTokens > this.spent.tokens) {
+      throw new BrokerError(
+        "INTERNAL",
+        `no-yield bound reports ${params.consumedTokens} tokens but the run has spent only ${this.spent.tokens}`,
+      );
+    }
+    this.emit({ type: "mutation.no-yield-bound", ...params });
     return {};
   }
 
