@@ -1993,11 +1993,14 @@ async function superviseLocked(
         }
       }
     }
-
-    // Drain the signal queue: a SIGTERM raised during synchronous delivery
-    // is dispatched only in a later poll phase. Delivery finishes atomically,
-    // then the durable operator pause wins over terminalization.
-    await sleep(25);
+    // Drain the lifecycle queue: an OS signal or identity-bound stop byte
+    // raised during synchronous delivery is dispatched only after Node
+    // accepts/reads the queued socket. Under host contention one 25ms timer
+    // is not a reliable accept+read barrier, so allow a bounded 250ms drain.
+    const lifecycleDrainDeadline = Date.now() + 250;
+    do {
+      await sleep(25);
+    } while (!stopRequested && currentPause() === null && Date.now() < lifecycleDrainDeadline);
 
     // A signal that landed during delivery (or between backend settle and
     // the drain) started the barrier but nothing awaited it yet — the same
