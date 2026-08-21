@@ -833,7 +833,9 @@ describe("runEpisodeLoop sealed worker transfer", () => {
     // No exec touches a /workspace-resident worker either — only the /scratch path.
     for (const op of stub.ops.filter((o) => o.includes("hone-worker"))) {
       expect(op).not.toContain("/workspace");
+      expect(op).not.toContain("chmod 700 /scratch &&");
     }
+    expect(stub.ops.some((op) => op.includes(`chmod 700 ${SANDBOX_RUNTIME_DIR}`))).toBe(true);
     // No stage residue: assembly installed every sealed artifact and removed
     // both chunk dirs, so later sandboxes only see the verified runtime,
     // worker, and current episode context.

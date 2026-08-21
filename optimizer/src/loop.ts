@@ -276,6 +276,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         partDir: string;
         mode: number;
         compressed: boolean;
+        directoryMode?: number;
       },
     ): Promise<void> => {
       const probe = await broker.exec({ sandboxId, argv: ["sha256sum", artifact.sandboxPath], timeoutSec: 120 });
@@ -295,12 +296,15 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       const materialize = artifact.compressed
         ? `(cat ${parts.join(" ")} | gzip -dc) > ${artifact.sandboxPath}`
         : `cat ${parts.join(" ")} > ${artifact.sandboxPath}`;
+      const hardenDirectory = artifact.directoryMode === undefined
+        ? ""
+        : ` && chmod ${artifact.directoryMode.toString(8)} ${dirname(artifact.sandboxPath)}`;
       const assemble = await broker.exec({
         sandboxId,
         argv: [
           "sh",
           "-c",
-          `mkdir -p ${dirname(artifact.sandboxPath)} && ${materialize} && chmod ${artifact.mode.toString(8)} ${artifact.sandboxPath} && chmod 700 ${dirname(artifact.sandboxPath)} && rm -rf ${artifact.partDir} && sha256sum ${artifact.sandboxPath}`,
+          `mkdir -p ${dirname(artifact.sandboxPath)} && ${materialize} && chmod ${artifact.mode.toString(8)} ${artifact.sandboxPath}${hardenDirectory} && rm -rf ${artifact.partDir} && sha256sum ${artifact.sandboxPath}`,
         ],
         timeoutSec: 300,
       });
@@ -324,7 +328,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         compressed: false,
       });
       for (const artifact of compressedRuntime) {
-        await ensureArtifact(sandboxId, { ...artifact, compressed: true });
+        await ensureArtifact(sandboxId, { ...artifact, compressed: true, directoryMode: 0o700 });
       }
     };
 
