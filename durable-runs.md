@@ -70,3 +70,4 @@ Zero-provider-spend live CLI artifacts are committed under:
 
 - `fixtures/data/hone-durable-runs/kill-resume/`: a real CLI process killed with `SIGKILL` after `eval.completed`, then resumed to one coherent `run.finished`. `evidence.v1.json` names the commands, exit codes, record files, and uniqueness/accounting assertions.
 - `fixtures/data/hone-durable-runs/provider-pause/`: a provider-boundary fake emits a simulated HTTP 429 pause, followed by trusted resume and completion. The run journal records `run.paused` with `provider-rate-limit`, status 429, and pause ID before `run.resumed`.
+- `fixtures/data/hone-durable-runs/recursive-smoke.v1.json`: a post-change M2 recursive-search smoke dispatched one child through the real Docker evaluator, recorded one trusted score, executed neither the synthetic outer entrypoint nor mutation worker, and made zero model calls.
