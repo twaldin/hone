@@ -1,0 +1,10 @@
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:41:23.669Z","type":"run.started","capsuleId":"cap_0d4c7d71b572","contractHash":"sha256:8a147b1d06d9da6216b807ffeef8de7ebb0086b169bcdc4f84755e33ed6f02b2","optimizerDigest":"sha256:24e2c728c7087785a371932a7b1f73bb9815e0e0c4a2fabe3791b47e82d23071","checkpointVersion":1}
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:41:23.717Z","type":"episode.started","episode":0,"parent":{"hash":"sha256:000000000000000000000000000000000000000000000000000000000000000b"}}
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:41:23.732Z","type":"budget.snapshot","budget":{"envelope":{"maxTokens":1000000,"maxUsd":25,"maxWallClockSec":3600,"maxEvaluatorInvocations":100},"spent":{"tokens":1000,"usd":0.05,"wallClockSec":0.015,"evaluatorInvocations":1}}}
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:41:23.740Z","type":"episode.candidate","episode":0,"candidate":{"hash":"sha256:0000000000000000000000000000000000000000000000000000000000000100"},"sessionTrace":"sha256:000000000000000000000000000000000000000000000000000000000000000e"}
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:41:23.748Z","type":"eval.completed","episode":0,"artifact":{"hash":"sha256:0000000000000000000000000000000000000000000000000000000000000100"},"assetGroupId":"validation","seed":0,"aggregate":0.51,"cached":false}
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:43:05.750Z","type":"run.resumed","fromCursor":5}
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:43:05.795Z","type":"gate.paired","episode":0,"parentScore":0.5,"childScore":0.51,"passed":true}
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:43:05.813Z","type":"incumbent.new","artifact":{"hash":"sha256:0000000000000000000000000000000000000000000000000000000000000100"},"aggregate":0.51,"deltaVsBaseline":0.010000000000000009,"episode":0}
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:43:05.825Z","type":"episode.completed","episode":0}
+{"runId":"run_mt2cexpl03c659","at":"2026-08-21T02:43:05.993Z","type":"run.finished","best":{"hash":"sha256:0000000000000000000000000000000000000000000000000000000000000100"},"status":"completed"}

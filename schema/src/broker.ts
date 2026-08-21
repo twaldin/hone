@@ -73,6 +73,12 @@ export const CreateSandboxParams = z.object({
   artifact: ArtifactRef,
   /** "mutation" sandboxes get proxy access + writable workspace; no protected mounts ever. */
   role: z.literal("mutation"),
+  /**
+   * Continue this exact incomplete checkpoint-v1 episode (one-repair flow).
+   * The broker validates that the artifact belongs to the episode and never
+   * mints a second episode boundary.
+   */
+  continueEpisode: z.number().int().nonnegative().optional(),
   ttlSec: z.number().int().positive().max(86_400).optional(),
 });
 
@@ -123,6 +129,12 @@ export const EvaluateParams = z.object({
   assetGroupId: z.string(),
   seed: z.number().int().nonnegative(),
   recursivePlan: RecursiveEvaluationPlan.optional(),
+  /**
+   * Continue the one journaled-but-incomplete episode. The broker accepts
+   * this only for exact evaluation facts already held by that checkpoint;
+   * new coordinates are charged normally.
+   */
+  resume: z.literal(true).optional(),
 });
 
 export const ReportIncumbentParams = z.object({
@@ -130,8 +142,59 @@ export const ReportIncumbentParams = z.object({
   /** Optimizer's own claimed metrics — display only; trusted scores come from EvaluationRecords. */
   claimed: z.record(z.number()).optional(),
 });
+export const SESSION_NO_YIELD_RECORD_TYPE = "hone.mutation.no-yield-bound.v1" as const;
+export const SESSION_NO_YIELD_EXIT_CODE = 4;
+
+export const SESSION_USAGE_ANOMALY_RECORD_TYPE = "hone.mutation.usage-anomaly.v1" as const;
+export const SessionUsageAnomalyRecord = z.object({
+  type: z.literal(SESSION_USAGE_ANOMALY_RECORD_TYPE),
+  zeroUsageTurns: z.number().int().nonnegative(),
+  normalizedUsageTurns: z.number().int().nonnegative(),
+}).strict();
+export type SessionUsageAnomalyRecord = z.infer<typeof SessionUsageAnomalyRecord>;
+
+const SessionNoYieldRecordFields = z.object({
+  type: z.literal(SESSION_NO_YIELD_RECORD_TYPE),
+  limitTokens: z.number().int().positive(),
+  modelCalls: z.number().int().positive(),
+  promptTokens: z.number().int().nonnegative(),
+  completionTokens: z.number().int().nonnegative(),
+  consumedTokens: z.number().int().positive(),
+}).strict();
+
+export const SessionNoYieldRecord = SessionNoYieldRecordFields.superRefine((value, ctx) => {
+  if (value.consumedTokens < value.limitTokens) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "consumedTokens must reach limitTokens" });
+  }
+  if (value.consumedTokens < value.promptTokens + value.completionTokens) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "consumedTokens cannot be less than promptTokens + completionTokens" });
+  }
+});
+export type SessionNoYieldRecord = z.infer<typeof SessionNoYieldRecord>;
+
+export const ReportSessionNoYieldBoundParams = SessionNoYieldRecordFields.extend({
+  sandboxId: z.string().min(1),
+}).superRefine((value, ctx) => {
+  if (value.consumedTokens < value.limitTokens) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "consumedTokens must reach limitTokens" });
+  }
+  if (value.consumedTokens < value.promptTokens + value.completionTokens) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "consumedTokens cannot be less than promptTokens + completionTokens" });
+  }
+});
+export type ReportSessionNoYieldBoundParams = z.infer<typeof ReportSessionNoYieldBoundParams>;
+
 
 export const FinishParams = z.object({ best: ArtifactRef });
+export const CompleteEpisodeParams = z.object({
+  episode: z.number().int().nonnegative(),
+  /**
+   * A resumed episode with a journaled candidate claims a fresh sandbox only
+   * to reactivate its measurement epoch. No mutation/save follows, so the
+   * broker retires this exact sandbox atomically with the completion boundary.
+   */
+  releaseSandboxId: z.string().min(1).optional(),
+}).strict();
 
 
 /** Componentwise trusted resource accounting for recursive child runs. */
@@ -285,6 +348,8 @@ export const BrokerMethods = {
     result: z.object({}).passthrough(),
   },
   reportIncumbent: { params: ReportIncumbentParams, result: z.object({}) },
+  reportSessionNoYieldBound: { params: ReportSessionNoYieldBoundParams, result: z.object({}) },
+  completeEpisode: { params: CompleteEpisodeParams, result: z.object({}) },
   getBudget: { params: z.object({}), result: BudgetState },
   finish: { params: FinishParams, result: z.object({}) },
   spawnRun: { params: SpawnRunParams, result: SpawnRunResult },

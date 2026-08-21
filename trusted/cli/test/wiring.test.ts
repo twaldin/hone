@@ -209,6 +209,7 @@ describe("image wiring: manifest.image is THE image, no environment override", (
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: (b) => {
         void b.catch(() => {});
       },

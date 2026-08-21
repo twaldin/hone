@@ -47,6 +47,36 @@ function soleRunId(root: string): string {
   return id;
 }
 
+function noYieldBackendSource(options: { startFile?: string; pause?: boolean } = {}): string {
+  const importStart = options.startFile === undefined ? "" : `import { appendFileSync } from "node:fs";`;
+  const markStart = options.startFile === undefined
+    ? ""
+    : `appendFileSync(${JSON.stringify(options.startFile)}, "start\\n");`;
+  const pause = options.pause === true ? `ctx.requestPause({ reason: "operator" });` : "";
+  return `${importStart}
+  export function createBackend() {
+    return {
+      async start(ctx) {
+        ${markStart}
+        ctx.emit({
+          runId: ctx.runId,
+          at: new Date().toISOString(),
+          type: "mutation.no-yield-bound",
+          episode: 0,
+          sandboxId: "sb-no-yield",
+          limitTokens: 1500000,
+          modelCalls: 152,
+          promptTokens: 1499359,
+          completionTokens: 7320,
+          consumedTokens: 1506679,
+        });
+        ${pause}
+      },
+    };
+  }
+  `;
+}
+
 describe("terminal-order fence", () => {
   it("an abort-ignoring backend cannot append after hard-stop; run.finished is the final event", { timeout: 30_000 }, async () => {
     const root = makeRoot();
@@ -90,6 +120,101 @@ describe("terminal-order fence", () => {
 
     const state = replayRun(join(root, ".hone-runs", runId));
     expect(state.finished?.status).toBe("budget");
+  });
+
+  it("terminalizes a backend-emitted no-yield bound as a distinct stopped reason", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(join(root, "bounded-backend.mjs"), noYieldBackendSource());
+    const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    const code = await cliRunCommand(["capsule", "--headless", "--backend", "./bounded-backend.mjs"], io);
+    expect(code, err.join("\n")).toBe(0);
+
+    const runId = soleRunId(root);
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    const boundIndex = events.findIndex((event) => event.type === "mutation.no-yield-bound");
+    const finishedIndex = events.findIndex((event) => event.type === "run.finished");
+    expect(boundIndex).toBeGreaterThanOrEqual(0);
+    expect(boundIndex).toBeLessThan(finishedIndex);
+    expect(events.filter((event) => event.type === "run.finished")).toEqual([
+      expect.objectContaining({
+        status: "stopped",
+        reason: "session-no-yield-bound",
+      }),
+    ]);
+    expect(events.at(-1)?.type).toBe("run.finished");
+  });
+
+  it("resumes a durable no-yield marker without starting the backend again", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const startFile = join(root, "backend-starts.txt");
+    writeFileSync(
+      join(root, "pausing-bounded-backend.mjs"),
+      noYieldBackendSource({ startFile, pause: true }),
+    );
+    const firstIo = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--backend", "./pausing-bounded-backend.mjs"], firstIo.io),
+      firstIo.err.join("\n"),
+    ).toBe(0);
+    const runId = soleRunId(root);
+    expect(eventTypes(root, runId)).not.toContain("run.finished");
+    expect(readFileSync(startFile, "utf8")).toBe("start\n");
+
+    const resumedIo = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--resume"], resumedIo.io),
+      resumedIo.err.join("\n"),
+    ).toBe(0);
+    expect(readFileSync(startFile, "utf8")).toBe("start\n");
+
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "run.finished")).toEqual([
+      expect.objectContaining({
+        status: "stopped",
+        reason: "session-no-yield-bound",
+      }),
+    ]);
+    expect(events.at(-1)?.type).toBe("run.finished");
+  });
+
+  it("terminalizes a rejected no-yield report as failed instead of completed", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(
+      join(root, "rejected-bound-report-backend.mjs"),
+      `export function createBackend() {
+        return {
+          async start() {
+            throw new Error("mutation no-yield bound tripped but durable report was rejected");
+          },
+        };
+      }
+      `,
+    );
+    const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    const code = await cliRunCommand(
+      ["capsule", "--headless", "--backend", "./rejected-bound-report-backend.mjs"],
+      io,
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain("durable report was rejected");
+
+    const runId = soleRunId(root);
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "run.finished")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        reason: "crash",
+      }),
+    ]);
+    expect(events.at(-1)?.type).toBe("run.finished");
   });
 });
 
@@ -141,6 +266,7 @@ describe("optimizer process-group kill", () => {
       },
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: () => {},
       registerCleanupBarrier: () => {},
     };

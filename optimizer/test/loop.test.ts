@@ -3,9 +3,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RunEvent } from "@hone/schema";
-import { EpisodeContext } from "../src/episode.js";
+import { buildEpisodeContext } from "../assets/context.js";
+import { EPISODE_JSON_PATH, EpisodeContext } from "../src/episode.js";
 import {
   parseMaxEpisodes,
   PI_NATIVE_VARIANT,
@@ -18,6 +19,10 @@ import {
   WORKER_PART_DIR,
 } from "../src/loop.js";
 import { okStdout, StubBroker, stubHash } from "./stub-broker.js";
+import {
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+  SESSION_NO_YIELD_RECORD_TYPE,
+} from "../src/session-yield-bound.js";
 
 /**
  * Smoke-level acceptance for the seed loop: 3 scripted episodes against a
@@ -175,7 +180,8 @@ describe("runEpisodeLoop", () => {
     for (const argv of stub.execArgvs) {
       expect(argv.slice(0, 1)).toEqual(["env"]);
       expect(argv[1]).toMatch(/^HONE_DEADLINE_MS=\d+$/);
-      expect(argv.slice(2)).toEqual([`PI_NATIVE_VARIANT=${PI_NATIVE_VARIANT}`, SANDBOX_BUN_PATH, SANDBOX_WORKER_PATH]);
+      expect(argv[2]).toBe(`HONE_SESSION_NO_YIELD_MAX_TOKENS=${DEFAULT_SESSION_NO_YIELD_MAX_TOKENS}`);
+      expect(argv.slice(3)).toEqual([`PI_NATIVE_VARIANT=${PI_NATIVE_VARIANT}`, SANDBOX_BUN_PATH, SANDBOX_WORKER_PATH]);
     }
 
     // Every episode file put into a sandbox is a valid EpisodeContext; the repair
@@ -186,6 +192,152 @@ describe("runEpisodeLoop", () => {
     const repair = contexts[2];
     expect(repair?.userPrompt).toContain("TypeError: boom in astar.js:42");
     expect(repair?.userPrompt).toContain("exit 1");
+  });
+
+  it("stops the optimizer after a successful-call session reaches the no-yield bound", async () => {
+    const noYieldRecord = {
+      type: SESSION_NO_YIELD_RECORD_TYPE,
+      limitTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [{ exitCode: 4, stdout: `${JSON.stringify(noYieldRecord)}\n` }],
+      // The run budget remains far from exhausted when the session bound fires.
+      envelope: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-no-yield-bound",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.reportedNoYieldBounds).toEqual([{
+      sandboxId: "sb_000000000001",
+      ...noYieldRecord,
+    }]);
+    expect(stub.execArgvs).toHaveLength(1);
+    expect(stub.finished).toEqual([BASELINE]);
+    expect(eventsOf(events, "episode.candidate")).toHaveLength(0);
+    expect(eventsOf(events, "budget.exhausted")).toHaveLength(0);
+  });
+
+  it("fails closed and does not finish when the durable no-yield report is rejected", async () => {
+    const noYieldRecord = {
+      type: SESSION_NO_YIELD_RECORD_TYPE,
+      limitTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [{ exitCode: 4, stdout: `${JSON.stringify(noYieldRecord)}\n` }],
+      reportNoYieldError: "journal write unavailable",
+      envelope: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+    });
+    await stub.listen();
+    const diagnostics: string[] = [];
+    const stderr = vi.spyOn(console, "error").mockImplementation((message) => diagnostics.push(String(message)));
+    try {
+      await expect(runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-no-yield-report-failure",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: (event) => event,
+      })).rejects.toThrow(/journal write unavailable/);
+    } finally {
+      stderr.mockRestore();
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toHaveLength(1);
+    expect(stub.finished).toEqual([]);
+    expect(diagnostics.join("\n")).toContain("mutation.no-yield-bound-report-failed");
+    expect(diagnostics.join("\n")).toContain("journal write unavailable");
+  });
+
+  it("fails closed without repair when exit 4 output is truncated or unparsable", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [{ exitCode: 4, stdout: "{\"type\":\"hone.mutation.no-yield-bound.v1\"" }],
+      envelope: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+    });
+    await stub.listen();
+    const diagnostics: string[] = [];
+    const stderr = vi.spyOn(console, "error").mockImplementation((message) => diagnostics.push(String(message)));
+    try {
+      await expect(runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-no-yield-truncated-record",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: (event) => event,
+      })).rejects.toThrow(/no-yield trigger record unavailable/);
+    } finally {
+      stderr.mockRestore();
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toHaveLength(1);
+    expect(stub.reportedNoYieldBounds).toHaveLength(0);
+    expect(stub.finished).toEqual([]);
+    expect(diagnostics.join("\n")).toContain("mutation.no-yield-bound-record-unavailable");
+  });
+
+  it("stops without a third session when the one repair hits the no-yield bound", async () => {
+    const noYieldRecord = {
+      type: SESSION_NO_YIELD_RECORD_TYPE,
+      limitTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [
+        { exitCode: 1, stderr: "first attempt failed without yielding" },
+        { exitCode: 4, stdout: `${JSON.stringify(noYieldRecord)}\n` },
+      ],
+      envelope: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+    });
+    await stub.listen();
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-repair-no-yield-bound",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: (event) => event,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toHaveLength(2);
+    expect(stub.reportedNoYieldBounds).toEqual([
+      { sandboxId: "sb_000000000002", ...noYieldRecord },
+    ]);
+    expect(stub.finished).toEqual([BASELINE]);
   });
 
   it("attaches the frozen development-panel allocation plan to parent and candidate evaluations", async () => {
@@ -656,6 +808,130 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
     expect(stub.finished).toEqual([stubHash(1)]);
   });
 
+  it("continues a partial episode from its journaled candidate without rerunning mutation", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    const parentEvaluation = {
+      capsuleId: "cap_000000000000",
+      artifactHash: BASELINE,
+      assetGroupId: "train",
+      seed: 0,
+      output: {
+        valid: true,
+        objectives: { score: 0.5 },
+        constraints: {},
+        perExample: {},
+      },
+      costUsd: 0,
+      durationMs: 5,
+      cached: false,
+      evaluatedAt: "2026-08-20T00:00:00.000Z",
+    } as const;
+    const context = buildEpisodeContext({
+      episode: 0,
+      objective: "resume without repeating work",
+      parentEvaluation,
+      lineage: [],
+      budget: {
+        envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+        spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 1 },
+      },
+    });
+    stub.scratch.set(EPISODE_JSON_PATH, Buffer.from(JSON.stringify(context)));
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        resume: {
+          nextEpisode: 0,
+          incumbent: null,
+          activeEpisode: {
+            episode: 0,
+            parent: { hash: BASELINE },
+            candidate: {
+              artifact: { hash: BASELINE },
+              sessionTrace: stubHash(88),
+              result: { summary: "already yielded", approach: "durable", filesChanged: [] },
+            },
+          },
+        },
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toEqual([]);
+    expect(eventsOf(events, "episode.started")).toEqual([]);
+    expect(eventsOf(events, "episode.candidate")).toEqual([]);
+    expect(stub.createdSandboxParams).toEqual([{
+      artifact: { hash: BASELINE },
+      role: "mutation",
+      continueEpisode: 0,
+    }]);
+    expect(stub.completedEpisodes).toEqual([0]);
+    expect(stub.completedEpisodeParams).toEqual([{
+      episode: 0,
+      releaseSandboxId: "sb_000000000001",
+    }]);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
+  it("seals a journaled unrepaired episode without repeating its repair work", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        resume: {
+          nextEpisode: 0,
+          incumbent: null,
+          activeEpisode: {
+            episode: 0,
+            parent: { hash: BASELINE },
+            candidate: {
+              artifact: { hash: BASELINE },
+              sessionTrace: stubHash(88),
+              result: { summary: "invalid candidate", approach: "repair exhausted", filesChanged: [] },
+            },
+            invalid: { reason: "repair failed", repaired: false },
+          },
+        },
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toEqual([]);
+    expect(stub.evaluateAsks).toEqual([]);
+    expect(eventsOf(events, "episode.started")).toEqual([]);
+    expect(eventsOf(events, "episode.candidate")).toEqual([]);
+    expect(stub.completedEpisodes).toEqual([0]);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
   it("fails closed on a non-positive or non-integer maxEpisodes before touching the broker", async () => {
     const base = {
       brokerSocket: "/nonexistent/broker.sock",
@@ -749,6 +1025,7 @@ describe("runEpisodeLoop sealed worker transfer", () => {
       [
         "env",
         expect.stringMatching(/^HONE_DEADLINE_MS=\d+$/),
+        `HONE_SESSION_NO_YIELD_MAX_TOKENS=${DEFAULT_SESSION_NO_YIELD_MAX_TOKENS}`,
         `PI_NATIVE_VARIANT=${PI_NATIVE_VARIANT}`,
         SANDBOX_BUN_PATH,
         SANDBOX_WORKER_PATH,

@@ -51,6 +51,8 @@ export interface StubScript {
   invalidSaveIndices?: number[];
   /** Consumed in exec-call order; running past the end fails the test. */
   execPlan: ExecStep[];
+  /** When set, reportSessionNoYieldBound fails as if durable journaling were unavailable. */
+  reportNoYieldError?: string;
   envelope: BudgetEnvelope;
   recursiveTask?: RecursiveTask;
 }
@@ -73,6 +75,7 @@ export class StubBroker {
   readonly socketPath: string;
   /** Episode-context putFiles only; worker-bundle chunks land in workerParts. */
   readonly putFiles: PutFileRecord[] = [];
+  readonly createdSandboxParams: Array<z.infer<typeof BrokerMethods.createSandbox.params>> = [];
   readonly savedArtifacts: string[] = [];
   /** Artifact hashes evaluated fresh (memo misses), in order. */
   readonly evaluated: string[] = [];
@@ -81,7 +84,10 @@ export class StubBroker {
   /** Recursive allocation plan attached to every evaluate request, if any. */
   readonly recursivePlans: Array<RecursiveEvaluationPlan | undefined> = [];
   readonly reportedIncumbents: string[] = [];
+  readonly reportedNoYieldBounds: Array<z.infer<typeof BrokerMethods.reportSessionNoYieldBound.params>> = [];
   readonly finished: string[] = [];
+  readonly completedEpisodes: number[] = [];
+  readonly completedEpisodeParams: Array<{ episode: number; releaseSandboxId?: string | undefined }> = [];
   /** Mutation-session execs only; worker probe/assembly execs are emulated structurally. */
   readonly execArgvs: string[][] = [];
   /** Every call in arrival order — `createSandbox:<id>`, `putFile:<sbId>:<path>`, `exec:<sbId>:<argv0>`, `evaluate:<hash>@<seed>`, ... */
@@ -172,6 +178,7 @@ export class StubBroker {
       }
       case "createSandbox": {
         const params = BrokerMethods.createSandbox.params.parse(rawParams);
+        this.createdSandboxParams.push(params);
         const sandboxId = `sb_${String(++this.sandboxSeq).padStart(12, "0")}`;
         this.sandboxParent.set(sandboxId, params.artifact.hash);
         this.ops.push(`createSandbox:${sandboxId}`);
@@ -192,6 +199,12 @@ export class StubBroker {
         }
         this.putFiles.push({ sandboxId: params.sandboxId, path: params.path, content: bytes.toString("utf8") });
         return {};
+      }
+      case "getFile": {
+        const params = BrokerMethods.getFile.params.parse(rawParams);
+        const bytes = this.scratch.get(params.path);
+        if (bytes === undefined) throw new Error(`missing file ${params.path}`);
+        return { contentBase64: bytes.toString("base64") };
       }
       case "exec": {
         const params = BrokerMethods.exec.params.parse(rawParams);
@@ -245,6 +258,22 @@ export class StubBroker {
       case "reportIncumbent": {
         const params = BrokerMethods.reportIncumbent.params.parse(rawParams);
         this.reportedIncumbents.push(params.artifact.hash);
+        return {};
+      }
+      case "reportSessionNoYieldBound": {
+        const params = BrokerMethods.reportSessionNoYieldBound.params.parse(rawParams);
+        if (this.script.reportNoYieldError !== undefined) {
+          throw new Error(this.script.reportNoYieldError);
+        }
+        this.reportedNoYieldBounds.push(params);
+        return {};
+      }
+      case "completeEpisode": {
+        const params = BrokerMethods.completeEpisode.params.parse(rawParams);
+        this.completedEpisodeParams.push(params);
+        if (!this.completedEpisodes.includes(params.episode)) {
+          this.completedEpisodes.push(params.episode);
+        }
         return {};
       }
       case "getBudget": {

@@ -1,17 +1,28 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { once } from "node:events";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CapsuleManifest, RunEvent } from "@hone/schema";
+import { SandboxRef, type CapsuleManifest, type RunEvent } from "@hone/schema";
 import { Broker, type BrokerConfig, type CallContext } from "../src/broker.js";
 import { packDirAsArtifact } from "../src/artifact.js";
 import { CasStore } from "../src/cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "../src/command.js";
 import { BrokerError } from "../src/errors.js";
 import { deferred } from "../src/deferred.js";
+import { BrokerServer } from "../src/server.js";
 import { WORKSPACE_TMPFS_INODES } from "../src/broker.js";
-import { MANIFEST_IMAGE, TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST, ensureImage, waitForDocker } from "./helpers.js";
+import {
+  MANIFEST_IMAGE,
+  RpcClient,
+  TEST_CAPSULE_DIGEST,
+  TEST_IMAGE,
+  TEST_OPTIMIZER_DIGEST,
+  ensureImage,
+  waitForDocker,
+} from "./helpers.js";
 import { SCRATCH_SNAPSHOT_SCRIPT } from "../src/broker.js";
 
 /**
@@ -124,6 +135,8 @@ interface FakeCtl {
   execExit: number | "timeout";
   /** Stdout bytes client execs produce — session-trace fixture material. */
   execStdout: Buffer;
+  /** Stderr bytes client execs produce — structured worker telemetry plus diagnostics. */
+  execStderr: Buffer;
   /** When true, client execs report output hit the size cap (truncated capture). */
   execTruncated: boolean;
   /** Tar bytes in-container `tar -c /workspace` returns for saveArtifact. */
@@ -174,6 +187,7 @@ async function boot(
     evaluatorBaselineArtifactHash?: string;
     holdoutLedgerPath?: string;
     maxActiveSandboxes?: number;
+    maxPublicCandidateEvaluations?: number;
     scratchQuotaBytes?: number;
     scratchVolume?: boolean;
     sessionTraceQuotaBytes?: number;
@@ -196,6 +210,7 @@ async function boot(
     execStdout: Buffer.alloc(0),
     execTruncated: false,
     saveTar: candidateTar,
+    execStderr: Buffer.alloc(0),
     evalOutputs: new Map(),
     evalMode: "normal",
     execBarrier: null,
@@ -279,7 +294,12 @@ async function boot(
         await barrier.gate;
       }
       if (ctl.execExit === "timeout") return fakeResult({ exitCode: -1, timedOut: true });
-      return fakeResult({ exitCode: ctl.execExit, stdout: Buffer.from(ctl.execStdout), truncated: ctl.execTruncated });
+      return fakeResult({
+        exitCode: ctl.execExit,
+        stdout: Buffer.from(ctl.execStdout),
+        stderr: Buffer.from(ctl.execStderr),
+        truncated: ctl.execTruncated,
+      });
     }
     if (sub === "volume" && argv[2] === "create") {
       return opts.volumeCreateFails === true
@@ -317,6 +337,9 @@ async function boot(
     runCommand: run,
     ...(opts.holdoutBudget !== undefined ? { holdoutBudget: opts.holdoutBudget } : {}),
     ...(opts.maxActiveSandboxes !== undefined ? { maxActiveSandboxes: opts.maxActiveSandboxes } : {}),
+    ...(opts.maxPublicCandidateEvaluations === undefined
+      ? {}
+      : { maxPublicCandidateEvaluations: opts.maxPublicCandidateEvaluations }),
     ...(opts.scratchQuotaBytes !== undefined ? { scratchQuotaBytes: opts.scratchQuotaBytes } : {}),
     ...(opts.scratchVolume !== undefined ? { scratchVolume: opts.scratchVolume } : {}),
     ...(opts.sessionTraceQuotaBytes !== undefined ? { sessionTraceQuotaBytes: opts.sessionTraceQuotaBytes } : {}),
@@ -343,6 +366,23 @@ async function saveCandidate(b: Booted, tar: Buffer, parent: string = baselineHa
   await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT);
   const ref = await b.broker.saveArtifact({ sandboxId }, CLIENT);
   return ref.hash;
+}
+
+const NO_YIELD_RECORD = {
+  type: "hone.mutation.no-yield-bound.v1" as const,
+  limitTokens: 1_500_000,
+  modelCalls: 152,
+  promptTokens: 1_499_359,
+  completionTokens: 7_320,
+  consumedTokens: 1_506_679,
+};
+
+async function tripNoYieldBound(b: Booted, sandboxId: string): Promise<void> {
+  b.ctl.execExit = 4;
+  b.ctl.execStdout = Buffer.from(`${JSON.stringify(NO_YIELD_RECORD)}\n`);
+  await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+  b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+  expect(b.broker.reportSessionNoYieldBound({ sandboxId, ...NO_YIELD_RECORD }, CLIENT)).toEqual({});
 }
 
 function score(n: number): unknown {
@@ -395,7 +435,7 @@ afterAll(async () => {
 // ---------- durable run state ----------
 
 describe("durable run state (resume cannot reset authority or budgets)", () => {
-  it("replays spend, evaluator invocations, holdout charges, and episode numbering across restarts", async () => {
+  it("replays spend, evaluator invocations, holdout charges, and incomplete episode identity across restarts", async () => {
     const shared = { runDir: path.join(tmpBase, "runs", "resume-a"), casDir: path.join(tmpBase, "cas", "resume-a"), runId: "run-resume-a" };
     const a = await boot({ ...shared, holdoutBudget: 1 });
     a.broker.recordSpend({ tokens: 100, usd: 5 }, ADMIN);
@@ -416,11 +456,126 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
       b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 99 }, ADMIN),
     ).rejects.toThrow(/holdout ledger budget exhausted/);
 
-    // Episode numbering continues; it never restarts at 0.
-    await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
-    const started = b.events.filter((e) => e.type === "episode.started");
-    expect(started).toHaveLength(1);
-    expect(started[0]).toMatchObject({ episode: 1 });
+    // The incomplete checkpoint keeps its episode identity on restart; a
+    // resume claim must not mint or charge a replacement episode.
+    await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
+  });
+
+  it("returns the same resumed sandbox when the first RPC response is lost", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "resume-response-loss"),
+      casDir: path.join(tmpBase, "cas", "resume-response-loss"),
+      runId: "run-resume-response-loss",
+    };
+    const first = await boot(shared);
+    await first.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await first.broker.close();
+
+    const resumed = await boot(shared);
+    const socketStem = path.join("/tmp", `hone-response-loss-${randomBytes(4).toString("hex")}`);
+    const socketPath = `${socketStem}.sock`;
+    const adminSocketPath = `${socketStem}-admin.sock`;
+    const token = "response-loss-public-token".padEnd(64, "r");
+    const server = new BrokerServer(resumed.broker, { socketPath, adminSocketPath, publicToken: token });
+    await server.listen();
+    const lostSocket = net.connect(socketPath);
+    let retry: RpcClient | undefined;
+    try {
+      await once(lostSocket, "connect");
+      const response = once(lostSocket, "data");
+      lostSocket.write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "createSandbox",
+        params: {
+          artifact: { hash: baselineHash },
+          role: "mutation",
+          continueEpisode: 0,
+        },
+        token,
+      })}\n`);
+      const [chunk] = await response;
+      const close = once(lostSocket, "close");
+      lostSocket.destroy();
+      await close;
+      const lostResponse: unknown = JSON.parse(String(chunk).trim());
+      if (typeof lostResponse !== "object" || lostResponse === null || !("result" in lostResponse)) {
+        throw new Error("lost createSandbox response has no result");
+      }
+      const original = SandboxRef.parse(lostResponse.result);
+      const dockerCreates = resumed.log.filter(
+        (argv) => argv[1] === "run" && argv.includes("-d"),
+      ).length;
+
+      retry = await RpcClient.connect(socketPath, token);
+      const replayed = SandboxRef.parse(await retry.call("createSandbox", {
+        artifact: { hash: baselineHash },
+        role: "mutation",
+        continueEpisode: 0,
+      }));
+      expect(replayed).toEqual(original);
+      expect(resumed.log.filter(
+        (argv) => argv[1] === "run" && argv.includes("-d"),
+      )).toHaveLength(dockerCreates);
+    } finally {
+      lostSocket.destroy();
+      retry?.close();
+      if (retry !== undefined) await retry.closed;
+      await server.close();
+    }
+  });
+
+  it("reclaims a resumed parent after its timed-out sandbox is proved retired and completes", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "resume-timeout-repair"),
+      casDir: path.join(tmpBase, "cas", "resume-timeout-repair"),
+      runId: "run-resume-timeout-repair",
+    };
+    const first = await boot(shared);
+    await first.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await first.broker.close();
+
+    const resumed = await boot(shared);
+    const claimed = await resumed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    resumed.ctl.execExit = "timeout";
+    await expect(
+      resumed.broker.exec({ sandboxId: claimed.sandboxId, argv: ["mutate"] }, CLIENT),
+    ).resolves.toMatchObject({ exitCode: 124 });
+    await expect(
+      resumed.broker.saveArtifact({ sandboxId: claimed.sandboxId }, CLIENT),
+    ).rejects.toThrow(/sandbox/i);
+
+    resumed.ctl.execExit = 0;
+    resumed.ctl.saveTar = candidateTar;
+    const repaired = await resumed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    expect(repaired).not.toEqual(claimed);
+    await resumed.broker.exec({ sandboxId: repaired.sandboxId, argv: ["repair"] }, CLIENT);
+    await expect(
+      resumed.broker.saveArtifact({ sandboxId: repaired.sandboxId }, CLIENT),
+    ).resolves.toEqual({ hash: candidateHash });
+    await resumed.broker.completeEpisode({ episode: 0 }, CLIENT);
+
+    expect(resumed.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    )).toHaveLength(2);
+    expect(resumed.events.filter((event) => event.type === "episode.completed")).toHaveLength(1);
+    expect((await stateLines(resumed)).filter((fact) => fact["t"] === "episodeComplete")).toHaveLength(1);
   });
 
   it("persists a trusted proxy admission refusal and blocks retries after restart", async () => {
@@ -443,6 +598,201 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
     expect(b.broker.getBudgetExhaustion(ADMIN)).toBe("tokens");
     expect(b.broker.recordBudgetExhaustion("tokens", ADMIN)).toEqual({});
     expect(b.events.filter((event) => event.type === "budget.exhausted")).toHaveLength(0);
+  });
+
+  it("durably emits a distinct no-yield bound event with the triggering usage", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await tripNoYieldBound(b, sandboxId);
+
+    const bounded = b.events.filter((event) => event.type === "mutation.no-yield-bound");
+    expect(bounded).toHaveLength(1);
+    expect(bounded[0]).toMatchObject({
+      ...NO_YIELD_RECORD,
+      type: "mutation.no-yield-bound",
+      sandboxId,
+      episode: 0,
+    });
+    expect(b.events.some((event) => event.type === "episode.candidate")).toBe(false);
+    expect(b.events.some((event) => event.type === "budget.exhausted")).toBe(false);
+
+    // RPC response loss/retry cannot duplicate or rewrite the durable reason.
+    const report = { sandboxId, ...NO_YIELD_RECORD };
+    expect(b.broker.reportSessionNoYieldBound(report, CLIENT)).toEqual({});
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(1);
+    expect(() => b.broker.reportSessionNoYieldBound({ ...report, modelCalls: 153 }, CLIENT)).toThrow(
+      /contradictory no-yield bound report/,
+    );
+  });
+
+  it("rejects a forged report and cannot rewrite the exact exec-time worker record", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT);
+    b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+    expect(() => b.broker.reportSessionNoYieldBound(
+      { sandboxId, ...NO_YIELD_RECORD },
+      CLIENT,
+    )).toThrow(/last exited 0, not 4/);
+
+    b.ctl.execExit = 4;
+    b.ctl.execStdout = Buffer.from(JSON.stringify({ ...NO_YIELD_RECORD, modelCalls: 151 }));
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    expect(() => b.broker.reportSessionNoYieldBound(
+      { sandboxId, ...NO_YIELD_RECORD },
+      CLIENT,
+    )).toThrow(/contradictory no-yield bound report/);
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId, modelCalls: 151 }),
+    ]);
+  });
+
+  it("journals a bound before an unchanged-workspace save retires its sandbox", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    b.ctl.execExit = 4;
+    b.ctl.execStdout = Buffer.from(`${JSON.stringify(NO_YIELD_RECORD)}\n`);
+    b.ctl.saveTar = baselineTar;
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    expect((await b.broker.saveArtifact({ sandboxId }, CLIENT)).hash).toBe(baselineHash);
+    expect(b.broker.reportSessionNoYieldBound({ sandboxId, ...NO_YIELD_RECORD }, CLIENT)).toEqual({});
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId, episode: 0 }),
+    ]);
+  });
+
+  it("journals a bound before a dirty-workspace save retires its sandbox", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    b.ctl.execExit = 4;
+    b.ctl.execStdout = Buffer.from(`${JSON.stringify(NO_YIELD_RECORD)}\n`);
+    b.ctl.saveTar = candidateTar;
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    expect((await b.broker.saveArtifact({ sandboxId }, CLIENT)).hash).toBe(candidateHash);
+    expect(b.broker.reportSessionNoYieldBound({ sandboxId, ...NO_YIELD_RECORD }, CLIENT)).toEqual({});
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId, episode: 0 }),
+    ]);
+  });
+
+
+  it("durably aggregates zeroed and normalized usage telemetry from a healthy worker", async () => {
+    const b = await boot();
+    b.ctl.execExit = 0;
+    b.ctl.execStdout = Buffer.from("healthy yield\n");
+    b.ctl.execStderr = Buffer.from([
+      JSON.stringify({
+        type: "hone.mutation.usage-anomaly.v1",
+        zeroUsageTurns: 1,
+        normalizedUsageTurns: 0,
+      }),
+      "ordinary worker diagnostic",
+      JSON.stringify({
+        type: "hone.mutation.usage-anomaly.v1",
+        zeroUsageTurns: 1,
+        normalizedUsageTurns: 1,
+      }),
+      "",
+    ].join("\n"));
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    await b.broker.saveArtifact({ sandboxId }, CLIENT);
+
+    expect(b.events.filter((event) => event.type === "mutation.usage-anomaly")).toEqual([
+      expect.objectContaining({
+        sandboxId,
+        episode: 0,
+        zeroUsageTurns: 2,
+        normalizedUsageTurns: 1,
+      }),
+    ]);
+  });
+
+  it("attributes a bound on a no-change repair to its broker-authoritative continued episode", async () => {
+    const b = await boot();
+    b.ctl.execExit = 1;
+    b.ctl.saveTar = baselineTar;
+    const first = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId: first.sandboxId, argv: ["false"] }, CLIENT);
+    const unchanged = await b.broker.saveArtifact({ sandboxId: first.sandboxId }, CLIENT);
+    expect(unchanged.hash).toBe(baselineHash);
+
+    const repair = await b.broker.createSandbox(
+      { artifact: unchanged, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await tripNoYieldBound(b, repair.sandboxId);
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId: repair.sandboxId, episode: 0 }),
+    ]);
+  });
+
+  it("attributes a bound on an evaluator-rejected candidate repair to its continued episode", async () => {
+    const b = await boot();
+    const rejectedCandidate = await saveCandidate(b, candidateTar);
+    expect(rejectedCandidate).toBe(candidateHash);
+    const repair = await b.broker.createSandbox(
+      { artifact: { hash: rejectedCandidate }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await tripNoYieldBound(b, repair.sandboxId);
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId: repair.sandboxId, episode: 0 }),
+    ]);
+  });
+
+  it("attributes a later first-attempt bound after a no-change ordinal desync", async () => {
+    const b = await boot();
+    b.ctl.execExit = 1;
+    b.ctl.saveTar = baselineTar;
+    const first = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId: first.sandboxId, argv: ["false"] }, CLIENT);
+    const unchanged = await b.broker.saveArtifact({ sandboxId: first.sandboxId }, CLIENT);
+    await b.broker.createSandbox({ artifact: unchanged, role: "mutation" }, CLIENT);
+
+    const later = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await tripNoYieldBound(b, later.sandboxId);
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId: later.sandboxId, episode: 2 }),
+    ]);
   });
 
   it("replays promotion authority and the incumbent", async () => {
@@ -581,11 +931,13 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
       expect(budget.spent.tokens).toBe(7 + cycle); // 999999 never replays, even after re-append
       expect(budget.spent.usd).toBe(1);
       b.broker.recordSpend({ tokens: 1, usd: 0 }, ADMIN);
-      // Episode numbering also survives: next episode continues, never resets.
-      await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
-      const started = b.events.filter((e) => e.type === "episode.started");
-      expect(started).toHaveLength(1);
-      expect(started[0]).toMatchObject({ episode: 1 + cycle });
+      // The same incomplete episode remains resumable across repeated boots;
+      // claiming it never appends a replacement episode.started fact.
+      await b.broker.createSandbox(
+        { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+        CLIENT,
+      );
+      expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
       await b.broker.close();
     }
     const raw = await readFile(stateFile, "utf8");
@@ -783,6 +1135,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     a.ctl.evalOutputs.set(candidateHash, { valid: false, objectives: {} }).set(candidate2Hash, score(9));
     const cprobe = await saveCandidate(a, candidateTar);
     await a.broker.evaluate({ artifact: { hash: cprobe }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await a.broker.completeEpisode({ episode: 0 }, CLIENT);
     const cpromote = await saveCandidate(a, candidate2Tar);
     const spawns = a.log.filter((argv) => argv[1] === "run" && argv.includes("--rm")).length;
     await expect(
@@ -801,6 +1154,108 @@ describe("M0 one-shot candidate evaluation authority", () => {
     await expect(
       b.broker.evaluate({ artifact: { hash: cpromote }, assetGroupId: "train", seed: 2 }, CLIENT),
     ).rejects.toThrow(/attempt already consumed/);
+  });
+
+  it("keeps one episode epoch through an invalid-candidate repair, crash, and evaluator replay", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "repair-resume"),
+      casDir: path.join(tmpBase, "cas", "repair-resume"),
+      runId: "run-repair-resume",
+      maxPublicCandidateEvaluations: 4,
+    };
+    const first = await boot(shared);
+    first.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, {
+      valid: false,
+      objectives: {},
+      constraints: {},
+      perExample: {},
+    });
+    const invalidCandidate = await saveCandidate(first, candidateTar);
+    await first.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await expect(
+      first.broker.createSandbox({ artifact: { hash: invalidCandidate }, role: "mutation" }, CLIENT),
+    ).rejects.toThrow(/incomplete checkpoint-v1 episode/);
+    const invalid = await first.broker.evaluate(
+      { artifact: { hash: invalidCandidate }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    expect(invalid.output.valid).toBe(false);
+    await first.broker.close();
+
+    // Real one-repair: reopen the invalid candidate inside episode 0, execute,
+    // and save a distinct repaired artifact without minting episode 1.
+    const repairing = await boot(shared);
+    repairing.ctl.evalOutputs.set(candidate2Hash, score(2));
+    const parentClaim = await repairing.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    const dockerCreatesAfterClaim = repairing.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    ).length;
+    await expect(
+      repairing.broker.createSandbox(
+        { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+        CLIENT,
+      ),
+    ).resolves.toEqual(parentClaim);
+    expect(repairing.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    )).toHaveLength(dockerCreatesAfterClaim);
+    const repairSandbox = await repairing.broker.createSandbox(
+      { artifact: { hash: invalidCandidate }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await repairing.broker.exec({ sandboxId: repairSandbox.sandboxId, argv: ["true"] }, CLIENT);
+    repairing.ctl.saveTar = candidate2Tar;
+    const repaired = await repairing.broker.saveArtifact({ sandboxId: repairSandbox.sandboxId }, CLIENT);
+    expect(repaired.hash).toBe(candidate2Hash);
+    await repairing.broker.evaluate(
+      { artifact: repaired, assetGroupId: "train", seed: 0, resume: true },
+      CLIENT,
+    );
+    expect(repairing.broker.getBudget(CLIENT).spent.evaluatorInvocations).toBe(3);
+    await repairing.broker.close();
+
+    // A second restart reconstructs exactly one incomplete checkpoint and
+    // replays every pre-crash evaluator fact without a fourth invocation.
+    const resumed = await boot(shared);
+    const claimed = await resumed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await expect(
+      resumed.broker.evaluate(
+        { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0, resume: true },
+        CLIENT,
+      ),
+    ).resolves.toMatchObject({ cached: true, artifactHash: baselineHash });
+    await expect(
+      resumed.broker.evaluate(
+        { artifact: { hash: invalidCandidate }, assetGroupId: "train", seed: 0, resume: true },
+        CLIENT,
+      ),
+    ).resolves.toMatchObject({ cached: true, artifactHash: invalidCandidate, output: { valid: false } });
+    await expect(
+      resumed.broker.evaluate(
+        { artifact: repaired, assetGroupId: "train", seed: 0, resume: true },
+        CLIENT,
+      ),
+    ).resolves.toMatchObject({ cached: true, artifactHash: candidate2Hash });
+    expect(resumed.broker.getBudget(CLIENT).spent.evaluatorInvocations).toBe(3);
+    await resumed.broker.completeEpisode(
+      { episode: 0, releaseSandboxId: claimed.sandboxId },
+      CLIENT,
+    );
+    const facts = await stateLines(resumed);
+    expect(facts.filter((line) => line["t"] === "episode")).toHaveLength(1);
+    expect(facts.filter((line) => line["t"] === "eval")).toHaveLength(3);
+    expect(facts.filter((line) => line["t"] === "episodeComplete")).toHaveLength(1);
+    expect(facts.find((line) => line["t"] === "episodeComplete")).toMatchObject({
+      t: "episodeComplete",
+      episode: 0,
+    });
+    expect(resumed.events.filter((event) => event.type === "episode.completed")).toHaveLength(1);
   });
   it("journals the attempt before a timed-out spawn and never permits a retry after replay", async () => {
     const shared = {
@@ -923,13 +1378,15 @@ describe("trusted event ordering and candidacy", () => {
     const graduated = await b.broker.saveArtifact({ sandboxId: second.sandboxId }, CLIENT);
     expect(graduated.hash).toBe(candidateHash);
     expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(1);
+    await b.broker.completeEpisode({ episode: 0 }, CLIENT);
 
     // Sandboxes from the graduated candidate must NOT reuse the stale repair
     // episode/parent: a fresh episode starts with the candidate as parent.
-    await b.broker.createSandbox({ artifact: { hash: candidateHash }, role: "mutation" }, CLIENT);
+    const third = await b.broker.createSandbox({ artifact: { hash: candidateHash }, role: "mutation" }, CLIENT);
     const started = b.events.filter((e) => e.type === "episode.started");
     expect(started).toHaveLength(2);
     expect(started[1]).toMatchObject({ episode: 1, parent: { hash: candidateHash } });
+    await b.broker.completeEpisode({ episode: 1, releaseSandboxId: third.sandboxId }, CLIENT);
 
     // And the graduation survives a restart (lineage line is the tombstone).
     await b.broker.close();
@@ -2164,6 +2621,7 @@ describe("terminal saveArtifact (a successful save retires the sandbox)", () => 
     // The entry is gone — the slot and its proxy bearer are released.
     await expect(b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT)).rejects.toThrow(/sandbox/i);
     // Iteration resumes from the saved CAS artifact in a FRESH sandbox.
+    await b.broker.completeEpisode({ episode: 0 }, CLIENT);
     const next = await b.broker.createSandbox({ artifact: { hash: saved.hash }, role: "mutation" }, CLIENT);
     expect(next.sandboxId).not.toBe(sandboxId);
   });

@@ -914,10 +914,13 @@ export class CliChildSupervisor implements MetaChildSupervisor {
     return await this.collectOutcome(request, runDir);
   }
 
-  private childIo(): CmdIo {
+  protected childIo(): CmdIo {
     return {
       root: this.io.root,
-      env: this.io.env,
+      // Recursive M2 children execute the normal command path in-process.
+      // Preserve operator runtime controls, including the per-session
+      // no-yield ceiling, rather than silently reverting children to defaults.
+      env: { ...this.io.env },
       isTTY: false,
       out: () => {},
       err: () => {},

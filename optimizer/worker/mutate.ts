@@ -8,11 +8,13 @@
  *     the trusted broker at createSandbox(role=mutation); HONE_MODEL_ID is a
  *     display label (the proxy overwrites the model per role); HONE_WORKDIR
  *     (default /workspace); HONE_DEADLINE_MS (session duration budget, ms);
+ *     HONE_SESSION_NO_YIELD_MAX_TOKENS (default 1,500,000);
  *     HONE_AGENT_DIR (default /scratch/omp-agent, ephemeral).
  *
  * Output: on success the LAST stdout line is the MutateResult JSON
  * ({ summary, approach, filesChanged }). Exit codes: 0 ok, 1 failure,
- * 2 bad input/env, 3 run budget exhausted (proxy 402 hone_budget_exceeded).
+ * 2 bad input/env, 3 run budget exhausted (proxy 402 hone_budget_exceeded),
+ * 4 session stopped at the no-yield token bound (structured stdout record).
  *
  * `--selftest` performs the no-LLM smoke: registry + settings constructed
  * offline, sample episode.json parsed, prints "hone-mutation selftest ok".
@@ -25,10 +27,23 @@
  * pi_natives addon baked next to bun (a .node binary cannot live in a JS
  * bundle).
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   createAgentSession,
   discoverAuthStorage,
@@ -37,6 +52,13 @@ import {
   Settings,
   type AuthStorage,
 } from "@oh-my-pi/pi-coding-agent";
+import {
+  SESSION_NO_YIELD_EXIT_CODE,
+  SESSION_USAGE_ANOMALY_RECORD_TYPE,
+  SessionNoYieldCounter,
+  parseSessionNoYieldMaxTokens,
+  type SessionNoYieldRecord,
+} from "../src/session-yield-bound.js";
 
 /**
  * `Promise.withResolvers()` ponyfill — this worker must stay a single
@@ -328,6 +350,7 @@ interface SessionEnv {
   token: string;
   modelId: string;
   deadline: number;
+  noYieldMaxTokens: number;
 }
 
 function buildRegistry(env: SessionEnv, authStorage: AuthStorage): ModelRegistry {
@@ -378,6 +401,7 @@ async function selftest(): Promise<void> {
       token: "selftest",
       modelId: "hone-selftest",
       deadline: Date.now() + 60_000,
+      noYieldMaxTokens: parseSessionNoYieldMaxTokens(undefined),
     },
     authStorage,
   );
@@ -440,8 +464,113 @@ function cooldownSeconds(message: string): number | null {
   if (match?.[1] !== undefined) return Math.min(300, Number(match[1]));
   return -1; // cooldown without a hint: caller applies exponential backoff
 }
+class SessionNoYieldBoundExceeded extends Error {
+  constructor(readonly record: SessionNoYieldRecord) {
+    super(
+      `mutation session exceeded the no-yield token bound: ` +
+      `${record.consumedTokens} tokens across ${record.modelCalls} model calls (limit ${record.limitTokens})`,
+    );
+    this.name = "SessionNoYieldBoundExceeded";
+  }
+}
+
+
+interface SessionCheckpoint {
+  dir: string;
+  resultPath: string;
+  sessionDir: string;
+  workspacePath: string;
+}
+
+function syncPath(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function durableJson(path: string, value: unknown): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  const fd = openSync(tmp, "w", 0o600);
+  try {
+    writeFileSync(fd, `${JSON.stringify(value)}\n`, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
+  syncPath(dir);
+}
+
+function checkpointFor(env: SessionEnv, episode: EpisodeFile): SessionCheckpoint {
+  const identity = createHash("sha256").update(JSON.stringify(episode)).digest("hex");
+  const dir = join(env.agentDir, "checkpoints", identity);
+  return {
+    dir,
+    resultPath: join(dir, "result.json"),
+    sessionDir: join(dir, "sessions"),
+    workspacePath: join(dir, "workspace.tar"),
+  };
+}
+
+function syncSession(manager: SessionManager): void {
+  manager.flushSync();
+  const sessionFile = manager.getSessionFile();
+  if (sessionFile === undefined || !existsSync(sessionFile)) return;
+  syncPath(sessionFile);
+  syncPath(dirname(sessionFile));
+}
+
+function saveWorkspace(checkpoint: SessionCheckpoint, cwd: string): void {
+  mkdirSync(checkpoint.dir, { recursive: true });
+  const tmp = `${checkpoint.workspacePath}.${process.pid}.tmp`;
+  const packed = spawnSync("tar", ["-c", "-f", tmp, "-C", cwd, "."]);
+  if (packed.status !== 0) {
+    throw new Error(`workspace checkpoint failed: ${packed.stderr.toString().slice(-2000)}`);
+  }
+  syncPath(tmp);
+  renameSync(tmp, checkpoint.workspacePath);
+  syncPath(checkpoint.dir);
+}
+
+function restoreWorkspace(checkpoint: SessionCheckpoint, cwd: string): boolean {
+  if (!existsSync(checkpoint.workspacePath)) return false;
+  const restored = spawnSync(
+    "sh",
+    [
+      "-c",
+      "find \"$1\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar -x -f \"$2\" -C \"$1\"",
+      "sh",
+      cwd,
+      checkpoint.workspacePath,
+    ],
+  );
+  if (restored.status !== 0) {
+    throw new Error(`workspace checkpoint restore failed: ${restored.stderr.toString().slice(-2000)}`);
+  }
+  return true;
+}
 
 async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record<string, unknown>> {
+  const checkpoint = checkpointFor(env, episode);
+  const manager = await SessionManager.continueRecent(env.cwd, checkpoint.sessionDir);
+  const hadSession = manager.getEntries().length > 0;
+  const restored = restoreWorkspace(checkpoint, env.cwd);
+  if (hadSession !== restored) {
+    throw new Error(
+      "session checkpoint is incomplete: conversation and workspace must become durable together",
+    );
+  }
+  if (existsSync(checkpoint.resultPath)) {
+    const result = objectRecord(JSON.parse(readFileSync(checkpoint.resultPath, "utf8")));
+    if (result === null) throw new Error("session checkpoint result is malformed");
+    return result;
+  }
+
   const authStorage = await discoverAuthStorage(env.agentDir);
   const registry = buildRegistry(env, authStorage);
   const model = registry.find("hone-proxy", env.modelId);
@@ -455,7 +584,7 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     model,
     systemPrompt: episode.systemPrompt,
     deadline: env.deadline,
-    sessionManager: SessionManager.inMemory(env.cwd),
+    sessionManager: manager,
     settings: isolatedSettings(),
     toolNames: episode.tools,
     requireYieldTool: true,
@@ -471,7 +600,10 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     promptTemplates: [],
     slashCommands: [],
   });
+  let zeroUsageTurns = 0;
+  let normalizedUsageTurns = 0;
 
+  let checkpointFailure: Error | undefined;
   try {
     const expected = [...episode.tools, "yield"];
     await session.setActiveToolsByName(expected);
@@ -485,21 +617,69 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     }
 
     let final: Record<string, unknown> | undefined;
+    let bounded: SessionNoYieldRecord | null = null;
+    let abortPromise: Promise<void> | undefined;
+    const counter = new SessionNoYieldCounter(
+      env.noYieldMaxTokens,
+      (kind) => {
+        if (kind === "zero-usage") zeroUsageTurns += 1;
+        else normalizedUsageTurns += 1;
+      },
+    );
     session.subscribe((event) => {
-      if (event.type !== "tool_execution_end" || event.toolName !== "yield" || event.isError === true) return;
-      const details: unknown = event.result?.details;
-      if (typeof details !== "object" || details === null) return;
-      const rec = details as Record<string, unknown>;
-      if (rec.status === "success" && typeof rec.data === "object" && rec.data !== null) {
-        final = rec.data as Record<string, unknown>;
+      if (checkpointFailure !== undefined) return;
+      try {
+        if (event.type === "tool_execution_end" && event.isError !== true) {
+          // Publish workspace bytes before the transcript acknowledges the
+          // completed tool. A kill can leave workspace ahead of conversation,
+          // never conversation describing effects absent from the restore.
+          saveWorkspace(checkpoint, env.cwd);
+        }
+        syncSession(manager);
+        if (event.type === "tool_execution_end" && event.toolName === "yield" && event.isError !== true) {
+          const details: unknown = event.result?.details;
+          if (typeof details === "object" && details !== null) {
+            const rec = details as Record<string, unknown>;
+            if (rec.status === "success" && typeof rec.data === "object" && rec.data !== null) {
+              final = rec.data as Record<string, unknown>;
+              durableJson(checkpoint.resultPath, final);
+            }
+          }
+        }
+        if (event.type !== "turn_end" || event.message.role !== "assistant") return;
+        bounded = counter.observe(
+          {
+            promptTokens: event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite,
+            completionTokens: event.message.usage.output,
+            totalTokens: event.message.usage.totalTokens,
+          },
+          final !== undefined,
+        );
+        if (bounded !== null && abortPromise === undefined) {
+          abortPromise = session.abort({ reason: "hone mutation session no-yield token bound" });
+          // The prompt catch below awaits and rethrows this result. Attach an
+          // immediate handler so a fast abort failure is never unhandled.
+          void abortPromise.catch(() => {});
+        }
+      } catch (error) {
+        checkpointFailure = error instanceof Error ? error : new Error(String(error));
+        void session.abort({ reason: "durable session checkpoint failed" }).catch(() => {});
       }
     });
 
+    const prompt = hadSession
+      ? "Continue the interrupted task from the durable transcript. Do not repeat completed tool work."
+      : episode.userPrompt;
     for (let attempt = 0; ; attempt++) {
       try {
-        await session.prompt(episode.userPrompt);
+        await session.prompt(prompt);
         break;
       } catch (err) {
+        if (checkpointFailure !== undefined) throw checkpointFailure;
+        if (bounded !== null) {
+          await abortPromise?.catch(() => {});
+          throw new SessionNoYieldBoundExceeded(bounded);
+        }
         const message = err instanceof Error ? err.message : String(err);
         if (/402|hone_budget_exceeded/i.test(message)) {
           throw new BudgetExhausted(message);
@@ -514,9 +694,22 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
       }
     }
 
+    if (checkpointFailure !== undefined) throw checkpointFailure;
+    if (bounded !== null) {
+      await abortPromise?.catch(() => {});
+      throw new SessionNoYieldBoundExceeded(bounded);
+    }
     if (final === undefined) throw new Error("session ended without a successful yield");
     return final;
   } finally {
+    syncSession(manager);
+    if (zeroUsageTurns > 0 || normalizedUsageTurns > 0) {
+      console.error(JSON.stringify({
+        type: SESSION_USAGE_ANOMALY_RECORD_TYPE,
+        zeroUsageTurns,
+        normalizedUsageTurns,
+      }));
+    }
     await session.dispose();
   }
 }
@@ -554,6 +747,7 @@ async function main(): Promise<number> {
     token,
     modelId: process.env.HONE_MODEL_ID ?? "hone-mutation",
     deadline: Date.now() + Number(process.env.HONE_DEADLINE_MS ?? 1_500_000),
+    noYieldMaxTokens: parseSessionNoYieldMaxTokens(process.env.HONE_SESSION_NO_YIELD_MAX_TOKENS),
   };
 
   try {
@@ -561,6 +755,11 @@ async function main(): Promise<number> {
     console.log(JSON.stringify(result));
     return 0;
   } catch (err) {
+    if (err instanceof SessionNoYieldBoundExceeded) {
+      console.log(JSON.stringify(err.record));
+      console.error(err.message);
+      return SESSION_NO_YIELD_EXIT_CODE;
+    }
     console.error(err instanceof Error ? (err.stack ?? err.message) : String(err));
     return err instanceof BudgetExhausted ? 3 : 1;
   }

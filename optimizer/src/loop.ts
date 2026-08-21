@@ -6,7 +6,14 @@ import type { ArtifactRef, BudgetState, EvaluationRecord, RunEvent } from "@hone
 import { buildEpisodeContext, type FailureEvidence, type LineageEntry } from "../assets/context.js";
 import { epsilonRestart, mutationTimeoutSec, oneRepair, trainAssetGroupId } from "../assets/policy.js";
 import { BrokerClient, BrokerRpcError } from "./client.js";
-import { EPISODE_JSON_PATH, parseMutateStdout, type EpisodeContext, type MutateResult } from "./episode.js";
+import { EPISODE_JSON_PATH, EpisodeContext, parseMutateStdout, type MutateResult } from "./episode.js";
+import {
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+  SESSION_NO_YIELD_EXIT_CODE,
+  parseSessionNoYieldMaxTokens,
+  parseSessionNoYieldRecord,
+  type SessionNoYieldRecord,
+} from "./session-yield-bound.js";
 
 /**
  * The seed episode loop: greedy incumbent + ε-restart + one-repair, driven
@@ -98,10 +105,21 @@ export interface EpisodeLoopOptions {
   signal?: AbortSignal;
   /** Base seed for the ε-restart draw (NOT the evaluation seed, which is the episode number). */
   seed?: number;
-  /** Resume state replayed from the event log; episodes below nextEpisode are never re-run. */
+  /** Resume state replayed from durable broker/public journals. */
   resume?: {
+    /** First episode without an episode.completed commit boundary. */
     nextEpisode: number;
     incumbent: { artifact: ArtifactRef; aggregate: number } | null;
+    activeEpisode?: {
+      episode: number;
+      parent: ArtifactRef;
+      candidate: {
+        artifact: ArtifactRef;
+        sessionTrace: string;
+        result: MutateResult;
+      } | null;
+      invalid?: { reason: string; repaired: boolean };
+    };
   };
   /**
    * Hard cap on outer episodes ATTEMPTED by this invocation, counted from the
@@ -111,6 +129,8 @@ export interface EpisodeLoopOptions {
    * Must be a positive integer when present; anything else fails closed.
    */
   maxEpisodes?: number;
+  /** Provider-reported tokens allowed before one mutation session yields. */
+  sessionNoYieldMaxTokens?: number;
   /** M0 cache-safe mode: after one candidate evaluator admission, never repair/evaluate another candidate. */
   oneShotCandidate?: boolean;
   /** Test seam: uniform [0,1) draw per episode for the ε-restart decision. */
@@ -159,12 +179,18 @@ interface MutateAttempt {
   result: MutateResult | null;
   stdoutHash: string;
   failure: FailureEvidence | null;
+  noYieldBound: SessionNoYieldRecord | null;
+  stoppedForNoYield: boolean;
 }
 
 export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
   const maxEpisodes = opts.maxEpisodes;
   if (maxEpisodes !== undefined && (!Number.isSafeInteger(maxEpisodes) || maxEpisodes <= 0)) {
     throw new Error(`maxEpisodes must be a positive integer, got ${String(maxEpisodes)}`);
+  }
+  const sessionNoYieldMaxTokens = opts.sessionNoYieldMaxTokens ?? DEFAULT_SESSION_NO_YIELD_MAX_TOKENS;
+  if (!Number.isSafeInteger(sessionNoYieldMaxTokens) || sessionNoYieldMaxTokens <= 0) {
+    throw new Error(`sessionNoYieldMaxTokens must be a positive integer, got ${String(sessionNoYieldMaxTokens)}`);
   }
   // The sealed built worker + platform-runtime bytes, shipped from THIS
   // invocation's bundle dir into mutation sandboxes. Read before anything
@@ -240,24 +266,35 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
     /** Latest trusted baseline aggregate, refreshed whenever the baseline is measured as parent or paired comparator. */
     let baselineAggregate: number | null = null;
 
-    const evaluate = async (artifact: ArtifactRef, seed: number, episode: number): Promise<EvaluationRecord> => {
+    const evaluate = async (
+      artifact: ArtifactRef,
+      seed: number,
+      episode: number,
+      resume: boolean,
+    ): Promise<EvaluationRecord> => {
       const record = await broker.evaluate({
         artifact,
         assetGroupId,
         seed,
         ...(recursivePlan === undefined ? {} : { recursivePlan }),
+        ...(resume ? { resume: true } : {}),
       });
-      emit({
-        ...base,
-        at: now(),
-        type: "eval.completed",
-        episode,
-        artifact,
-        assetGroupId,
-        seed,
-        aggregate: aggregateOf(record),
-        cached: record.cached,
-      });
+      // A replay hit was already fsynced with its public event and evaluator
+      // charge. Unit/in-process backends consume emit directly; avoid making
+      // their append-only stream claim that the old invocation happened twice.
+      if (!(resume && record.cached)) {
+        emit({
+          ...base,
+          at: now(),
+          type: "eval.completed",
+          episode,
+          artifact,
+          assetGroupId,
+          seed,
+          aggregate: aggregateOf(record),
+          cached: record.cached,
+        });
+      }
       return record;
     };
 
@@ -341,24 +378,54 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
      * snapshot back to the SAME episode.
      */
     const mutateOnce = async (
-      sandbox: { sandboxId: string } | { from: ArtifactRef },
+      sandbox: { sandboxId: string } | { from: ArtifactRef; continueEpisode?: number },
       context: EpisodeContext,
       episode: number,
     ): Promise<MutateAttempt> => {
       const sandboxId =
         "sandboxId" in sandbox
           ? sandbox.sandboxId
-          : (await broker.createSandbox({ artifact: sandbox.from, role: "mutation" })).sandboxId;
+          : (
+              await broker.createSandbox({
+                artifact: sandbox.from,
+                role: "mutation",
+                ...(sandbox.continueEpisode === undefined ? {} : { continueEpisode: sandbox.continueEpisode }),
+              })
+            ).sandboxId;
       await ensureWorker(sandboxId);
-      await broker.putFile({
-        sandboxId,
-        path: EPISODE_JSON_PATH,
-        contentBase64: Buffer.from(JSON.stringify(context), "utf8").toString("base64"),
-      });
+      let staged = false;
+      try {
+        const prior = await broker.getFile({ sandboxId, path: EPISODE_JSON_PATH });
+        const decoded = Buffer.from(prior.contentBase64, "base64");
+        const parsed = EpisodeContext.safeParse(JSON.parse(decoded.toString("utf8")));
+        // Preserve the exact prompt/budget snapshot that created a durable
+        // session transcript. A later wall-clock value must not fork the
+        // checkpoint identity on resume.
+        staged =
+          parsed.success
+          && parsed.data.episode === context.episode
+          && parsed.data.mode === context.mode;
+      } catch {
+        // No prior complete context (fresh episode or killed putFile).
+      }
+      if (!staged) {
+        await broker.putFile({
+          sandboxId,
+          path: EPISODE_JSON_PATH,
+          contentBase64: Buffer.from(JSON.stringify(context), "utf8").toString("base64"),
+        });
+      }
       const deadlineMs = Math.max(60, mutationTimeoutSec - DEADLINE_MARGIN_SEC) * 1000;
       const exec = await broker.exec({
         sandboxId,
-        argv: ["env", `HONE_DEADLINE_MS=${deadlineMs}`, `PI_NATIVE_VARIANT=${PI_NATIVE_VARIANT}`, SANDBOX_BUN_PATH, SANDBOX_WORKER_PATH],
+        argv: [
+          "env",
+          `HONE_DEADLINE_MS=${deadlineMs}`,
+          `HONE_SESSION_NO_YIELD_MAX_TOKENS=${sessionNoYieldMaxTokens}`,
+          `PI_NATIVE_VARIANT=${PI_NATIVE_VARIANT}`,
+          SANDBOX_BUN_PATH,
+          SANDBOX_WORKER_PATH,
+        ],
         cwd: "/workspace",
         timeoutSec: mutationTimeoutSec,
       });
@@ -372,6 +439,47 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         if (err instanceof BrokerRpcError && err.brokerCode === "BUDGET_EXCEEDED") throw err;
       }
 
+      const stoppedForNoYield = exec.exitCode === SESSION_NO_YIELD_EXIT_CODE;
+      const noYieldBound = stoppedForNoYield ? parseSessionNoYieldRecord(exec.stdout) : null;
+      if (stoppedForNoYield) {
+        if (noYieldBound === null) {
+          console.error(JSON.stringify({
+            type: "mutation.no-yield-bound-record-unavailable",
+            episode,
+            sandboxId,
+            limitTokens: sessionNoYieldMaxTokens,
+            exitCode: exec.exitCode,
+            stdoutTail: tail(exec.stdout),
+            stderrTail: tail(exec.stderr),
+          }));
+          throw new Error(`mutation session no-yield trigger record unavailable for sandbox ${sandboxId}`);
+        } else {
+          try {
+            await broker.reportSessionNoYieldBound({ sandboxId, ...noYieldBound });
+          } catch (error) {
+            console.error(JSON.stringify({
+              type: "mutation.no-yield-bound-report-failed",
+              episode,
+              sandboxId,
+              trigger: noYieldBound,
+              error: error instanceof Error ? error.message : String(error),
+            }));
+            throw error;
+          }
+        }
+        const failure: FailureEvidence = {
+          reason: noYieldBound === null
+            ? `mutation session hit no-yield token bound (exit ${SESSION_NO_YIELD_EXIT_CODE}; trigger record unavailable)`
+            : `mutation session hit no-yield token bound after ${noYieldBound.consumedTokens} tokens ` +
+              `across ${noYieldBound.modelCalls} model calls (limit ${noYieldBound.limitTokens})`,
+          exitCode: exec.exitCode,
+          stdoutTail: tail(exec.stdout),
+          stderrTail: tail(exec.stderr),
+        };
+        console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
+        return { artifact, result: null, stdoutHash, failure, noYieldBound, stoppedForNoYield };
+      }
+
       if (exec.exitCode !== 0) {
         const failure: FailureEvidence = {
           reason: `mutation session failed (exit ${exec.exitCode}, episode ${episode})`,
@@ -383,7 +491,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         // remains schema-only RunEvent NDJSON. Preserve worker evidence here
         // so a failed remote campaign is diagnosable after sandboxes are reaped.
         console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
-        return { artifact, result: null, stdoutHash, failure };
+        return { artifact, result: null, stdoutHash, failure, noYieldBound: null, stoppedForNoYield: false };
       }
       const result = parseMutateStdout(exec.stdout);
       if (result === null) {
@@ -394,14 +502,20 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
           stderrTail: tail(exec.stderr),
         };
         console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
-        return { artifact, result: null, stdoutHash, failure };
+        return { artifact, result: null, stdoutHash, failure, noYieldBound: null, stoppedForNoYield: false };
       }
-      return { artifact, result, stdoutHash, failure: null };
+      return { artifact, result, stdoutHash, failure: null, noYieldBound: null, stoppedForNoYield: false };
     };
 
     const startEpisode = opts.resume?.nextEpisode ?? 0;
+    const activeResume = opts.resume?.activeEpisode;
+    if (activeResume !== undefined && activeResume.episode !== startEpisode) {
+      throw new Error(
+        `resume checkpoint episode ${activeResume.episode} does not match next episode ${startEpisode}`,
+      );
+    }
     let episode = startEpisode;
-    for (; ; episode++) {
+    episodeLoop: for (; ; episode++) {
       if (opts.signal?.aborted) return;
       // Attempted-count cap: ordinals [startEpisode, startEpisode + maxEpisodes).
       if (maxEpisodes !== undefined && episode - startEpisode >= maxEpisodes) break;
@@ -412,19 +526,37 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         break;
       }
 
-      // ε-restart: with probability epsilonRestart mutate the baseline, else the incumbent.
-      const restart = incumbent !== null && rand(episode) < epsilonRestart;
-      const parent = restart || incumbent === null ? baseline : incumbent.artifact;
-      emit({ ...base, at: now(), type: "episode.started", episode, parent });
+      const resuming = activeResume?.episode === episode;
+      // The persisted parent is authoritative for a partial episode. Recomputing
+      // ε-restart after a crash could select a different candidate lineage.
+      const restart = !resuming && incumbent !== null && rand(episode) < epsilonRestart;
+      const parent = resuming
+        ? activeResume.parent
+        : restart || incumbent === null
+          ? baseline
+          : incumbent.artifact;
+      if (!resuming) emit({ ...base, at: now(), type: "episode.started", episode, parent });
+      // A fsynced unrepaired invalid event is the durable terminal decision
+      // for this episode. A crash before completeEpisode may replay only the
+      // cheap completion boundary, never another repair/evaluator attempt.
+      if (resuming && activeResume.invalid?.repaired === false) {
+        emit({ ...base, at: now(), type: "budget.snapshot", budget });
+        await broker.completeEpisode({ episode });
+        continue;
+      }
 
       // The episode's mutation sandbox is created BEFORE any of the episode's
-      // evaluations: sandbox creation advances the broker's pairing epoch, so
-      // creating first puts the parent and child evals on the same epoch.
-      const { sandboxId } = await broker.createSandbox({ artifact: parent, role: "mutation" });
+      // evaluations. On resume the broker assigns the exact old episode and
+      // measurement generation instead of minting a new boundary.
+      const { sandboxId } = await broker.createSandbox({
+        artifact: parent,
+        role: "mutation",
+        ...(resuming ? { continueEpisode: episode } : {}),
+      });
 
-      const parentRecord = await evaluate(parent, episode, episode);
-      // An evaluation can outlive a stop request; never start a fresh model
-      // mutation after the trusted score returns.
+      const parentRecord = await evaluate(parent, episode, episode, resuming);
+      // An evaluation can outlive a stop/pause request; never start fresh paid
+      // work after the trusted score returns.
       if (opts.signal?.aborted) return;
       const parentAggregate = aggregateOf(parentRecord);
       if (parent.hash === baseline.hash) baselineAggregate = parentAggregate;
@@ -437,15 +569,40 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         budget,
       });
 
-      let attempt = await mutateOnce({ sandboxId }, context, episode);
+      const savedCandidate = resuming ? activeResume.candidate : null;
+      const completeClaimedEpisode = async (): Promise<void> => {
+        await broker.completeEpisode({
+          episode,
+          ...(savedCandidate === null ? {} : { releaseSandboxId: sandboxId }),
+        });
+      };
+      let attempt: MutateAttempt =
+        savedCandidate === null
+          ? await mutateOnce({ sandboxId }, context, episode)
+          : {
+              artifact: savedCandidate.artifact,
+              result: savedCandidate.result,
+              stdoutHash: savedCandidate.sessionTrace,
+              failure: null,
+              noYieldBound: null,
+              stoppedForNoYield: false,
+            };
+      if (opts.signal?.aborted) return;
+      if (attempt.stoppedForNoYield) {
+        await completeClaimedEpisode();
+        break episodeLoop;
+      }
       let candidate = attempt.artifact;
       let record: EvaluationRecord | null = null;
       let candidateEvaluationConsumed = false;
 
       if (candidate !== null && attempt.failure === null) {
-        emit({ ...base, at: now(), type: "episode.candidate", episode, candidate, sessionTrace: attempt.stdoutHash });
+        if (savedCandidate === null) {
+          emit({ ...base, at: now(), type: "episode.candidate", episode, candidate, sessionTrace: attempt.stdoutHash });
+        }
         candidateEvaluationConsumed = true;
-        record = await evaluate(candidate, episode, episode);
+        record = await evaluate(candidate, episode, episode, resuming);
+        if (opts.signal?.aborted) return;
         if (!record.output.valid) {
           attempt = {
             ...attempt,
@@ -476,7 +633,12 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
             budget,
             failure: attempt.failure,
           });
-          const repair = await mutateOnce({ from: repairFrom }, repairContext, episode);
+          const repair = await mutateOnce({ from: repairFrom, continueEpisode: episode }, repairContext, episode);
+          if (opts.signal?.aborted) return;
+          if (repair.stoppedForNoYield) {
+            await completeClaimedEpisode();
+            break episodeLoop;
+          }
           if (repair.artifact !== null && repair.failure === null) {
             emit({
               ...base,
@@ -486,7 +648,8 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
               candidate: repair.artifact,
               sessionTrace: repair.stdoutHash,
             });
-            const repairRecord = await evaluate(repair.artifact, episode, episode);
+            const repairRecord = await evaluate(repair.artifact, episode, episode, resuming);
+            if (opts.signal?.aborted) return;
             if (repairRecord.output.valid) {
               candidate = repair.artifact;
               record = repairRecord;
@@ -498,11 +661,15 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         emit({ ...base, at: now(), type: "episode.invalid", episode, reason, repaired });
         if (!repaired) {
           emit({ ...base, at: now(), type: "budget.snapshot", budget: await broker.getBudget() });
-          continue; // discard the episode
+          await completeClaimedEpisode();
+          continue;
         }
       }
 
-      if (candidate === null || record === null || attempt.result === null) continue;
+      if (candidate === null || record === null || attempt.result === null) {
+        await completeClaimedEpisode();
+        continue;
+      }
 
       const childAggregate = aggregateOf(record);
       const passed = childAggregate > parentAggregate;
@@ -519,27 +686,20 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
 
       if (passed) {
         // Same-coordinate comparator evidence (this assetGroupId + this
-        // episode's seed). The broker is the final incumbent authority and
-        // requires paired candidate↔parent, candidate↔baseline, and (when it
-        // differs) candidate↔current-incumbent records; the local
-        // keep-if-better hint must never compare aggregates measured on
-        // different seeds. The parent is already measured on this coordinate;
-        // coinciding hashes reuse it, and memo hits keep re-asks free while
-        // still minting evidence.
+        // episode's seed). Exact replay hits carry no second invocation charge.
         let incumbentPairAggregate: number | null = null;
         if (incumbent !== null) {
           incumbentPairAggregate =
             incumbent.artifact.hash === parent.hash
               ? parentAggregate
-              : aggregateOf(await evaluate(incumbent.artifact, episode, episode));
+              : aggregateOf(await evaluate(incumbent.artifact, episode, episode, resuming));
           if (incumbent.artifact.hash === baseline.hash) baselineAggregate = incumbentPairAggregate;
         }
         if (incumbentPairAggregate === null || childAggregate > incumbentPairAggregate) {
-          // Candidate beats parent AND current incumbent on this coordinate:
-          // complete the evidence set with the paired baseline before reporting.
           if (parent.hash !== baseline.hash && incumbent?.artifact.hash !== baseline.hash) {
-            baselineAggregate = aggregateOf(await evaluate(baseline, episode, episode));
+            baselineAggregate = aggregateOf(await evaluate(baseline, episode, episode, resuming));
           }
+          if (opts.signal?.aborted) return;
           incumbent = { artifact: candidate, aggregate: childAggregate };
           emit({
             ...base,
@@ -555,6 +715,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       }
 
       emit({ ...base, at: now(), type: "budget.snapshot", budget: await broker.getBudget() });
+      await completeClaimedEpisode();
     }
 
     await broker.finish({ best: incumbent?.artifact ?? baseline });
@@ -583,6 +744,7 @@ export interface OptimizerBackendContext {
   replayed: {
     nextEpisode: number;
     incumbent: { artifact: ArtifactRef; aggregate: number } | null;
+    activeEpisode?: NonNullable<EpisodeLoopOptions["resume"]>["activeEpisode"];
   };
   signal: AbortSignal;
   emit(event: RunEvent): RunEvent;
@@ -610,6 +772,7 @@ export function createBackend(): OptimizerRunnerBackend {
   return {
     async start(ctx: OptimizerBackendContext): Promise<void> {
       const maxEpisodes = parseMaxEpisodes(ctx.env["HONE_MAX_EPISODES"]);
+      const sessionNoYieldMaxTokens = parseSessionNoYieldMaxTokens(ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"]);
       const oneShotCandidate = ctx.env["HONE_ONE_SHOT_CANDIDATE"] === "1";
       await runEpisodeLoop({
         brokerSocket: join(ctx.runDir, "broker.sock"),
@@ -620,8 +783,12 @@ export function createBackend(): OptimizerRunnerBackend {
         resume: {
           nextEpisode: ctx.replayed.nextEpisode,
           incumbent: ctx.replayed.incumbent,
+          ...(ctx.replayed.activeEpisode === undefined
+            ? {}
+            : { activeEpisode: ctx.replayed.activeEpisode }),
         },
         ...(oneShotCandidate ? { oneShotCandidate: true } : {}),
+        sessionNoYieldMaxTokens,
         ...(maxEpisodes !== undefined ? { maxEpisodes } : {}),
       });
     },

@@ -421,6 +421,54 @@ describe("contract 4: event log", () => {
     expect(e.type).toBe("incumbent.new");
   });
 
+  it("no-yield bound events carry a complete, named trigger record", () => {
+    const record = {
+      type: "hone.mutation.no-yield-bound.v1" as const,
+      limitTokens: 1_500_000,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    const report = { sandboxId: "sb_bound", ...record };
+    const { type: _wireType, ...trigger } = record;
+    expect(RunEvent.parse({
+      runId: "run_1",
+      at: new Date().toISOString(),
+      type: "mutation.no-yield-bound",
+      episode: 2,
+      sandboxId: report.sandboxId,
+      ...trigger,
+    })).toMatchObject({
+      type: "mutation.no-yield-bound",
+      episode: 2,
+      sandboxId: report.sandboxId,
+      ...trigger,
+    });
+    expect(BrokerMethods.reportSessionNoYieldBound.params.parse(report)).toEqual(report);
+    expect(() => BrokerMethods.reportSessionNoYieldBound.params.parse({
+      ...report,
+      consumedTokens: record.limitTokens - 1,
+    })).toThrow(/consumedTokens must reach limitTokens/);
+  });
+
+  it("usage anomalies remain durable even when the mutation session yields", () => {
+    expect(RunEvent.parse({
+      runId: "run_1",
+      at: new Date().toISOString(),
+      type: "mutation.usage-anomaly",
+      episode: 2,
+      sandboxId: "sb_usage",
+      zeroUsageTurns: 3,
+      normalizedUsageTurns: 1,
+    })).toMatchObject({
+      type: "mutation.usage-anomaly",
+      sandboxId: "sb_usage",
+      zeroUsageTurns: 3,
+      normalizedUsageTurns: 1,
+    });
+  });
+
   it("holdout access events carry the ledger count — no unlogged holdout reads", () => {
     expect(() =>
       RunEvent.parse({ runId: "r", at: new Date().toISOString(), type: "holdout.accessed", capsuleId: "c" }),

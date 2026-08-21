@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { CapsuleManifest, RunConfig, capsuleDigest } from "@hone/schema";
+import { CapsuleManifest, DEFAULT_PROMOTION_RULE, RunConfig, capsuleDigest } from "@hone/schema";
 import { runCommand } from "@hone/broker";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
@@ -18,6 +18,7 @@ import {
   verifyOptimizerBundleSeal,
 } from "../src/backends/optimizer-container.js";
 import type { OptimizerBundleSeal, OptimizerRuntime } from "../src/backends/optimizer-container.js";
+import { CampaignModelRegistry, CliChildSupervisor } from "../src/commands/hone.js";
 import { openDockerCreateGate } from "../src/docker-create-gate.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
 import {
@@ -27,6 +28,8 @@ import {
   computeOptimizerDigest,
   snapshotDigest,
 } from "../src/optimizer-digest.js";
+import type { OptimizerSnapshot } from "../src/optimizer-digest.js";
+import type { CmdIo } from "../src/io.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
   scriptedCreateHelper,
@@ -68,6 +71,23 @@ function writeBuiltArtifacts(out: string, optimizer = "// bundle\n", worker = "/
   writeRuntimeFixtures(out);
 }
 
+class RecursiveChildEnvironmentProbe extends CliChildSupervisor {
+  constructor(io: CmdIo, root: string) {
+    const optimizerSnapshot: OptimizerSnapshot = { files: new Map() };
+    super(
+      io,
+      { promotion: DEFAULT_PROMOTION_RULE },
+      join(root, "campaign"),
+      new Map(),
+      optimizerSnapshot,
+      {} as CampaignModelRegistry,
+    );
+  }
+
+  inheritedEnv(): NodeJS.ProcessEnv {
+    return this.childIo().env;
+  }
+}
 /** All -v mount specs in a docker argv. */
 function mountsOf(argv: readonly string[]): string[] {
   const out: string[] = [];
@@ -481,6 +501,60 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
     expect(seen.argvs[1]?.[3]).toBe("hone-opt-run_host-1");
   });
 
+  it("forwards the configured session no-yield token ceiling into the sealed optimizer", async () => {
+    const root = makeRoot();
+    const runDir = join(root, ".hone-runs", "run_session_bound");
+    mkdirSync(runDir, { recursive: true });
+    const seen = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] };
+    const script = join(root, "optimizer.mjs");
+    writeFileSync(script, "process.exit(0);\n");
+    const ctx = optCtx(root, runDir, "run_session_bound");
+    ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] = "2500000";
+
+    await runOptimizer(
+      ctx,
+      testOptimizerRuntime({
+        runId: "run_session_bound",
+        argv: [process.execPath, script],
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE, seen),
+      }),
+    );
+
+    expect(seen.argvs[0]).toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=2500000");
+  });
+
+  it("carries the no-yield ceiling through recursive child IO into the sealed optimizer", async () => {
+    const root = makeRoot();
+    const runDir = join(root, ".hone-runs", "run_recursive_session_bound");
+    mkdirSync(runDir, { recursive: true });
+    const seen = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] };
+    const script = join(root, "recursive-optimizer.mjs");
+    writeFileSync(script, "process.exit(0);\n");
+    const parentIo: CmdIo = {
+      root,
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        HONE_SESSION_NO_YIELD_MAX_TOKENS: "2750000",
+      },
+      isTTY: false,
+      out: () => {},
+      err: () => {},
+    };
+    const ctx = optCtx(root, runDir, "run_recursive_session_bound");
+    ctx.env = new RecursiveChildEnvironmentProbe(parentIo, root).inheritedEnv();
+
+    await runOptimizer(
+      ctx,
+      testOptimizerRuntime({
+        runId: "run_recursive_session_bound",
+        argv: [process.execPath, script],
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE, seen),
+      }),
+    );
+
+    expect(seen.argvs[0]).toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=2750000");
+  });
+
   it("the TCP token reaches the container env but never argv, optimizer.log, or events", async () => {
     const root = makeRoot();
     const runDir = join(root, ".hone-runs", "run_tok");
@@ -713,6 +787,7 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: () => {},
       registerCleanupBarrier: () => {},
     };
@@ -1019,6 +1094,7 @@ function optCtx(root: string, runDir: string, runId: string): RunnerBackendConte
     registerChild: () => () => {},
     probeGate: () => Promise.resolve(true),
     requestStop: () => {},
+    requestPause: () => {},
     registerAuthorityBarrier: () => {},
     registerCleanupBarrier: () => {},
   };

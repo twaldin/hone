@@ -25,6 +25,7 @@ export async function statusCommand(args: string[], io: CmdIo): Promise<number> 
   io.out(`run: ${runId}`);
   io.out(`capsule: ${state.capsuleId ?? "(unknown)"}`);
   io.out(`status: ${state.status}`);
+  if (state.outcomeReason !== null) io.out(`reason: ${state.outcomeReason}`);
   io.out(`cursor: ${state.cursor}`);
   io.out(`episodes: ${state.episodes.size}`);
   if (state.incumbent !== null) {
