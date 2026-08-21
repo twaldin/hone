@@ -6,7 +6,13 @@ import type { CmdResult, RunCommand } from "@hone/broker";
 import { conformCandidateOptimizer } from "../src/optimizer-conformance.js";
 import { OPTIMIZER_CONTAINER_UID } from "../src/backends/optimizer-container.js";
 import type { ResolvedCandidateOptimizer } from "../src/optimizer-artifact.js";
-import { MUTATION_RUNTIME_MANIFEST, collectOptimizerSnapshot, snapshotDigest } from "../src/optimizer-digest.js";
+import {
+  MUTATION_RUNTIME_MANIFEST,
+  OPTIMIZER_BUILD_CONTRACT,
+  OPTIMIZER_RUNTIME_MANIFEST,
+  collectOptimizerSnapshot,
+  snapshotDigest,
+} from "../src/optimizer-digest.js";
 import { FIX_IMAGE, fakeHash } from "./helpers.js";
 
 function res(overrides: Partial<CmdResult> = {}): CmdResult {
@@ -59,6 +65,7 @@ function scriptedDocker(script: Script = {}): { run: RunCommand; calls: string[]
       if (script.buildFailure !== undefined) return Promise.resolve(res({ exitCode: 1, stderr: Buffer.from(script.buildFailure) }));
       writeFileSync(join(outDir, "optimizer.mjs"), "// sealed optimizer bundle\n");
       writeFileSync(join(outDir, "worker.mjs"), "// sealed worker bundle\n");
+      writeFileSync(join(outDir, OPTIMIZER_RUNTIME_MANIFEST.node.bundleName), "node runtime fixture");
       writeFileSync(join(outDir, MUTATION_RUNTIME_MANIFEST.bun.bundleName), "compressed bun fixture");
       for (const file of MUTATION_RUNTIME_MANIFEST.pi.files) {
         writeFileSync(join(outDir, file.bundleName), `compressed ${file.sourceName} fixture`);
@@ -108,10 +115,11 @@ describe("cheap candidate optimizer conformance", () => {
     expect(receipt.sourceArtifact).toBe(selected.sourceArtifact);
     expect(receipt.baseDigest).toBe(selected.baseDigest);
     expect(receipt.runtime.optimizerDigest).toBe(selected.mergedDigest);
-    expect(receipt.runtime.runtimeArgv).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
+    expect(receipt.runtime.runtimeArgv).toEqual(OPTIMIZER_BUILD_CONTRACT.run);
     expect(receipt.runtime.bundleFiles).toMatchObject({
       "optimizer.mjs": expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
       "worker.mjs": expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
+      [OPTIMIZER_RUNTIME_MANIFEST.node.bundleName]: expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
       "mutation-runtime.json": expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
       [MUTATION_RUNTIME_MANIFEST.bun.bundleName]: expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
       [MUTATION_RUNTIME_MANIFEST.pi.files[0].bundleName]: expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
@@ -127,7 +135,7 @@ describe("cheap candidate optimizer conformance", () => {
     expect(candidateCreate).toContain("--pull=never");
     expect(candidateCreate).toContain("--read-only");
     expect(candidateCreate).toContain("hone-conf-net-success");
-    expect(candidateCreate?.slice(-2)).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
+    expect(candidateCreate?.slice(-OPTIMIZER_BUILD_CONTRACT.run.length)).toEqual(OPTIMIZER_BUILD_CONTRACT.run);
     expect(candidateCreate?.[candidateCreate.indexOf("--user") + 1]).toBe(`${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`);
     const stubRun = docker.calls.find((argv) => argv[1] === "run" && argv.includes("-d"));
     expect(stubRun?.[stubRun.indexOf("--user") + 1]).toBe(`${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`);

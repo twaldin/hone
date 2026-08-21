@@ -87,7 +87,7 @@ describe("broker-authored budget boundaries", () => {
     expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "budget" });
   });
 
-  it("resume restores a durable exhaustion latch before backend work and never duplicates the event", { timeout: 30_000 }, async () => {
+  it("resume restores a durable exhaustion latch before backend work and never duplicates the event", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     makeCapsule(root);
     writeFileSync(
@@ -110,34 +110,57 @@ describe("broker-authored budget boundaries", () => {
       cwd: root,
       env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10000" },
     });
-    let runId = "";
-    for (let attempt = 0; attempt < 500; attempt++) {
-      const runsDir = join(root, ".hone-runs");
-      const entries = existsSync(runsDir) ? readdirSync(runsDir) : [];
-      const candidate = entries.length === 1 ? entries[0] : undefined;
-      if (candidate !== undefined) {
-        const eventFile = join(runsDir, candidate, "events.ndjson");
-        if (existsSync(eventFile) && readFileSync(eventFile, "utf8").includes('"type":"budget.exhausted"')) {
-          runId = candidate;
-          break;
-        }
-      }
-      await sleep(10);
-    }
-    expect(runId).not.toBe("");
-    const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
-    killTree(child);
-    await exited;
-
-    const resumed = await hone(["run", "capsule", "--headless", "--resume"], {
-      cwd: root,
-      env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" },
+    let launchStderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      launchStderr += chunk.toString("utf8");
     });
-    expect(resumed.code, resumed.stderr).toBe(0);
-    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
-    expect(events.filter((event) => event.type === "budget.exhausted")).toHaveLength(1);
-    expect(events.some((event) => event.type === "run.resumed")).toBe(true);
-    expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "budget" });
+    let childClosed = false;
+    const exited = new Promise<void>((resolve) => child.once("close", () => {
+      childClosed = true;
+      resolve();
+    }));
+    let runId = "";
+    try {
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          throw new Error(
+            `initial budget-latch run exited before its durable boundary ` +
+            `(code ${String(child.exitCode)}, signal ${String(child.signalCode)}): ${launchStderr}`,
+          );
+        }
+        const runsDir = join(root, ".hone-runs");
+        const entries = existsSync(runsDir) ? readdirSync(runsDir) : [];
+        const candidate = entries.length === 1 ? entries[0] : undefined;
+        if (candidate !== undefined) {
+          const eventFile = join(runsDir, candidate, "events.ndjson");
+          if (existsSync(eventFile) && readFileSync(eventFile, "utf8").includes('"type":"budget.exhausted"')) {
+            runId = candidate;
+            break;
+          }
+        }
+        // CLI startup includes loading TypeScript under tsx. On a loaded host
+        // that can exceed five seconds, so wait for the durable record rather
+        // than treating a fixed iteration count as process readiness.
+        await sleep(10);
+      }
+      expect(runId, launchStderr).not.toBe("");
+      killTree(child);
+      await exited;
+
+      const resumed = await hone(["run", "capsule", "--headless", "--resume"], {
+        cwd: root,
+        env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" },
+      });
+      expect(resumed.code, resumed.stderr).toBe(0);
+      const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+      expect(events.filter((event) => event.type === "budget.exhausted")).toHaveLength(1);
+      expect(events.some((event) => event.type === "run.resumed")).toBe(true);
+      expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "budget" });
+    } finally {
+      killTree(child);
+      if (!childClosed) await exited;
+    }
   });
 
   it("resume wall time includes time elapsed while no supervisor was running", () => {
