@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { canonicalJson } from "@hone/schema";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { conformCandidateOptimizer } from "../src/optimizer-conformance.js";
+import { OPTIMIZER_CONTAINER_UID } from "../src/backends/optimizer-container.js";
 import type { ResolvedCandidateOptimizer } from "../src/optimizer-artifact.js";
 import {
   MUTATION_RUNTIME_MANIFEST,
@@ -135,6 +136,9 @@ describe("cheap candidate optimizer conformance", () => {
     expect(candidateCreate).toContain("--read-only");
     expect(candidateCreate).toContain("hone-conf-net-success");
     expect(candidateCreate?.slice(-OPTIMIZER_BUILD_CONTRACT.run.length)).toEqual(OPTIMIZER_BUILD_CONTRACT.run);
+    expect(candidateCreate?.[candidateCreate.indexOf("--user") + 1]).toBe(`${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`);
+    const stubRun = docker.calls.find((argv) => argv[1] === "run" && argv.includes("-d"));
+    expect(stubRun?.[stubRun.indexOf("--user") + 1]).toBe(`${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`);
     const networkCreate = docker.calls.find((argv) => argv[1] === "network" && argv[2] === "create");
     expect(networkCreate).toContain("--internal");
   });

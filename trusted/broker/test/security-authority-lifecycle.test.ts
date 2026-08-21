@@ -3,9 +3,17 @@ import { once } from "node:events";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
+import { tmpdir } from "node:os";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SandboxRef, type CapsuleManifest, type RunEvent } from "@hone/schema";
+import {
+  RESERVED_EVALUATOR_UID_MAX,
+  RESERVED_EVALUATOR_UID_MIN,
+  SandboxRef,
+  type CapsuleManifest,
+  type RunEvent,
+} from "@hone/schema";
 import { Broker, type BrokerConfig, type CallContext } from "../src/broker.js";
 import { packDirAsArtifact } from "../src/artifact.js";
 import { CasStore } from "../src/cas.js";
@@ -14,6 +22,7 @@ import { BrokerError } from "../src/errors.js";
 import { deferred } from "../src/deferred.js";
 import { BrokerServer } from "../src/server.js";
 import { WORKSPACE_TMPFS_INODES } from "../src/broker.js";
+import { acquireHostEvaluatorGate, acquireReservedEvaluatorUid } from "../src/host-evaluator-gate.js";
 import {
   MANIFEST_IMAGE,
   RpcClient,
@@ -153,6 +162,9 @@ interface FakeCtl {
   evalHangsUntilReaped: boolean;
   /** Container ids whose `docker rm -f` fails (terminal-save fail-closed simulation). */
   rmFailFor: Set<string>;
+  /** Container ids whose `docker rm -f` command throws before proving absence. */
+  rmThrowFor: Set<string>;
+
   /** Exact run-labeled container ids returned to evaluator quiescence scans. */
   quiesceContainers: string[];
   pauseFailFor: Set<string>;
@@ -193,10 +205,13 @@ async function boot(
     sessionTraceQuotaBytes?: number;
     volumeCreateFails?: boolean;
     evalTimeoutSec?: number;
+    reaperIntervalMs?: number;
+
     runId?: string;
     measurementEpoch?: string;
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
+    now?: () => number;
   } = {},
 ): Promise<Booted> {
   const id = randomBytes(4).toString("hex");
@@ -217,6 +232,8 @@ async function boot(
     evalInspect: null,
     evalHangsUntilReaped: false,
     rmFailFor: new Set(),
+    rmThrowFor: new Set(),
+
     quiesceContainers: [],
     pauseFailFor: new Set(),
     unpauseFailFor: new Set(),
@@ -310,6 +327,9 @@ async function boot(
       for (const target of argv.slice(2)) {
         reapGates.get(target)?.();
         reapGates.delete(target);
+        if (ctl.rmThrowFor.has(target)) {
+          throw new Error(`docker rm transport failed for ${target}`);
+        }
         if (ctl.rmFailFor.has(target)) {
           return fakeResult({ exitCode: 1, stderr: Buffer.from(`cannot remove container ${target}: driver busy`) });
         }
@@ -344,7 +364,10 @@ async function boot(
     ...(opts.scratchVolume !== undefined ? { scratchVolume: opts.scratchVolume } : {}),
     ...(opts.sessionTraceQuotaBytes !== undefined ? { sessionTraceQuotaBytes: opts.sessionTraceQuotaBytes } : {}),
     ...(opts.evalTimeoutSec !== undefined ? { evalTimeoutSec: opts.evalTimeoutSec } : {}),
+    ...(opts.reaperIntervalMs !== undefined ? { reaperIntervalMs: opts.reaperIntervalMs } : {}),
+
     ...(opts.measurementEpoch !== undefined ? { measurementEpoch: opts.measurementEpoch } : {}),
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
   const broker = new Broker(config);
@@ -1859,7 +1882,10 @@ describe("evaluator containment", () => {
     const b = await boot();
     b.ctl.evalOutputs.set(candidateHash, score(2));
     const cand = await saveCandidate(b, candidateTar);
-    await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
+    const record = await b.broker.evaluate(
+      { artifact: { hash: cand }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
     const evalArgv = b.log.find((a) => a[1] === "run" && a.includes("--rm"));
     expect(evalArgv).toBeDefined();
     const argv = evalArgv ?? [];
@@ -1893,6 +1919,15 @@ describe("evaluator containment", () => {
     const libmountEnvIdx = argv.indexOf("LIBMOUNT_FORCE_MOUNT2=always");
     expect(libmountEnvIdx).toBeGreaterThan(0);
     expect(argv[libmountEnvIdx - 1]).toBe("-e");
+    const workerUidIdx = argv.findIndex((arg) => arg.startsWith("CAPSULE_WORKER_UID="));
+    expect(argv[workerUidIdx]).toBe("CAPSULE_WORKER_UID=2000");
+    expect(argv[workerUidIdx - 1]).toBe("-e");
+    expect(b.events.filter((event) => event.type === "evaluator.queue.entered")).toHaveLength(1);
+    expect(b.events.filter((event) => event.type === "evaluator.queue.acquired")).toHaveLength(1);
+    expect(b.events.find((event) => event.type === "evaluator.isolation")).toMatchObject({
+      isolation: { mode: "shared-uid-lease", workerUid: 2000 },
+    });
+    expect(record.isolation).toMatchObject({ mode: "shared-uid-lease", workerUid: 2000 });
     const stateTmpfsIdx = argv.indexOf("/tmp:size=2g,nosuid,nodev,noexec");
     expect(stateTmpfsIdx).toBeGreaterThan(0);
     expect(argv[stateTmpfsIdx - 1]).toBe("--tmpfs");
@@ -1912,6 +1947,38 @@ describe("evaluator containment", () => {
     expect(argv[tmpfsIdx - 1]).toBe("--tmpfs");
     expect(argv.every((a) => !a.includes("holdout"))).toBe(true);
     expect(argv.every((a) => !a.includes("protected"))).toBe(true);
+  });
+
+  it("runs reviewed dynamic-uid evaluators concurrently on distinct recorded host uids", async () => {
+    const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+    const b = await boot({ manifest });
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const observedUids: number[] = [];
+    const bothStarted = deferred<void>();
+    const release = deferred<void>();
+    b.ctl.evalInspect = async (argv) => {
+      const value = argv.find((arg) => arg.startsWith("CAPSULE_WORKER_UID="));
+      observedUids.push(Number(value?.split("=")[1]));
+      if (observedUids.length === 2) bothStarted.resolve();
+      await release.promise;
+    };
+
+    const evaluations = Promise.all([
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT),
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 1 }, CLIENT),
+    ]);
+    await bothStarted.promise;
+    expect(new Set(observedUids).size).toBe(2);
+    expect(observedUids.every((uid) => uid >= 20_000 && uid <= 20_031)).toBe(true);
+    release.resolve();
+    const records = await evaluations;
+    expect(records.map((record) => record.isolation?.workerUid).sort()).toEqual([...observedUids].sort());
+    expect(records.every((record) => record.isolation?.mode === "reserved-uid")).toBe(true);
+
+    const isolation = b.events.filter((event) => event.type === "evaluator.isolation");
+    expect(isolation).toHaveLength(2);
+    expect(isolation.every((event) => event.isolation.mode === "reserved-uid")).toBe(true);
+    expect(b.events.some((event) => event.type === "evaluator.queue.entered")).toBe(false);
   });
 
   it("terminal holdout mounts the full evaluator artifact separately and rejects protected-path reintroduction", async () => {
@@ -1959,8 +2026,46 @@ describe("evaluator containment", () => {
     );
   });
 
-  it("shares one pause lease across concurrent evaluators and blocks mutation Docker work until the last reap", async () => {
+  it("serializes concurrent evaluator Docker sections through the host-wide uid gate", async () => {
     const b = await boot();
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const firstStarted = deferred<void>();
+    const secondStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const releaseSecond = deferred<void>();
+    let started = 0;
+    b.ctl.evalInspect = async () => {
+      started += 1;
+      if (started === 1) {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+      } else {
+        secondStarted.resolve();
+        await releaseSecond.promise;
+      }
+    };
+
+    const evalA = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 10 }, CLIENT);
+    const evalB = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 11 }, CLIENT);
+    await firstStarted.promise;
+    // Exercise the real abstract-socket bind race for one event-loop turn:
+    // without the Broker integration the second fake evaluator enters now.
+    const contendersRan = deferred<void>();
+    setImmediate(contendersRan.resolve);
+    await contendersRan.promise;
+    const serializedBeforeRelease = started === 1;
+
+    releaseFirst.resolve();
+    await secondStarted.promise;
+    releaseSecond.resolve();
+    await Promise.all([evalA, evalB]);
+    expect(serializedBeforeRelease).toBe(true);
+    expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(2);
+  });
+
+  it("shares one pause lease across concurrent reserved-uid evaluators and blocks mutation Docker work until the last reap", async () => {
+    const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+    const b = await boot({ manifest });
     const optimizer = "e".repeat(64);
     b.ctl.quiesceContainers = [optimizer];
     b.ctl.evalOutputs.set(baselineHash, score(1));
@@ -1986,6 +2091,198 @@ describe("evaluator containment", () => {
     expect(b.log.filter((argv) => argv[1] === "pause" && argv[2] === optimizer)).toHaveLength(1);
     expect(b.log.filter((argv) => argv[1] === "unpause" && argv[2] === optimizer)).toHaveLength(1);
     expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(2);
+  });
+
+  it(
+    "quarantines an isolation lease after failed evaluator removal until a later sweep proves the container gone",
+    { timeout: 10_000 },
+    async () => {
+      // Occupy all but one slot. The failed evaluator takes the sole
+      // remainder; its successor must queue until a DIFFERENT slot is freed.
+      // This deterministically kills a premature-release mutant.
+      const heldLeases = await Promise.all(Array.from(
+        { length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN },
+        (_, index) => acquireReservedEvaluatorUid({
+          evaluatorContainer: `hone-test-quarantine-holder-eval-${index.toString(16).padStart(12, "0")}`,
+        }),
+      ));
+      try {
+        const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+        const b = await boot({ manifest, reaperIntervalMs: 10 });
+        b.ctl.evalOutputs.set(baselineHash, score(1));
+        const workerUids: number[] = [];
+        const secondStarted = deferred<void>();
+        let failedContainer = "";
+        b.ctl.evalInspect = (argv) => {
+          const uidEnv = argv.find((arg) => arg.startsWith("CAPSULE_WORKER_UID="));
+          workerUids.push(Number(uidEnv?.split("=")[1]));
+          if (failedContainer.length === 0) {
+            const nameIndex = argv.indexOf("--name");
+            failedContainer = argv[nameIndex + 1] ?? "";
+            b.ctl.rmThrowFor.add(failedContainer);
+          } else {
+            secondStarted.resolve();
+          }
+        };
+
+        await expect(
+          b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 20 }, CLIENT),
+        ).rejects.toThrow(/evaluator cleanup failed/);
+        expect(b.events).toContainEqual(
+          expect.objectContaining({
+            type: "evaluator.isolation.quarantined",
+            evaluatorContainer: failedContainer,
+            isolation: expect.objectContaining({ mode: "reserved-uid", workerUid: workerUids[0] }),
+          }),
+        );
+
+        const secondEvaluation = b.broker.evaluate(
+          { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 21 },
+          CLIENT,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(workerUids).toHaveLength(1);
+        const releasedUids = new Set(heldLeases.map((lease) => lease.uid));
+        await Promise.all(heldLeases.map((lease) => lease.release()));
+        heldLeases.length = 0;
+        await secondStarted.promise;
+        await secondEvaluation;
+        expect(workerUids).toHaveLength(2);
+        expect(workerUids[1]).not.toBe(workerUids[0]);
+        expect(releasedUids.has(workerUids[1] ?? -1)).toBe(true);
+
+        b.ctl.rmThrowFor.delete(failedContainer);
+        await vi.waitFor(() => {
+          expect(b.events).toContainEqual(
+            expect.objectContaining({
+              type: "evaluator.isolation.released",
+              evaluatorContainer: failedContainer,
+              isolation: expect.objectContaining({ workerUid: workerUids[0] }),
+            }),
+          );
+        });
+        const durableEvents = (await stateLines(b)).filter((line) => line.t === "event").map((line) => line.event);
+        expect(durableEvents).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: "evaluator.isolation.quarantined", evaluatorContainer: failedContainer }),
+            expect.objectContaining({ type: "evaluator.isolation.released", evaluatorContainer: failedContainer }),
+          ]),
+        );
+      } finally {
+        await Promise.all(heldLeases.map((lease) => lease.release()));
+      }
+    },
+  );
+
+  it("durably diagnoses and takes over an ownerless evaluator claim after Docker proves its container absent", async () => {
+    const heldLeases = await Promise.all(Array.from(
+      { length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN },
+      (_, index) => acquireReservedEvaluatorUid({
+        evaluatorContainer: `hone-test-takeover-holder-eval-${index.toString(16).padStart(12, "0")}`,
+      }),
+    ));
+    let claimPath = "";
+    try {
+      const occupied = new Set(heldLeases.map((lease) => lease.uid));
+      const ownerUid = Array.from(
+        { length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN + 1 },
+        (_, index) => RESERVED_EVALUATOR_UID_MIN + index,
+      ).find((uid) => !occupied.has(uid));
+      expect(ownerUid).toBeDefined();
+      const ownerAllocationId = "d".repeat(32);
+      const ownerContainer = "hone-crashed-owner-eval-deadbeef0001";
+      claimPath = path.join(tmpdir(), "hone-evaluator-nproc-v2.queue", `.uid-claim-${ownerUid}.json`);
+      await writeFile(
+        claimPath,
+        `${JSON.stringify({
+          version: 1,
+          uid: ownerUid,
+          allocationId: ownerAllocationId,
+          evaluatorContainer: ownerContainer,
+          createdAt: "2026-08-21T00:00:00.000Z",
+        })}\n`,
+        { encoding: "utf8", mode: 0o600, flag: "wx" },
+      );
+
+      const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+      const b = await boot({ manifest });
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 22 }, CLIENT);
+
+      expect(b.log).toContainEqual(["docker", "rm", "-f", ownerContainer]);
+      const durableFacts = await stateLines(b);
+      const blocked = durableFacts.find((line) => line.t === "uidClaimBlocked");
+      const takenOver = durableFacts.find((line) => line.t === "uidClaimTakeover");
+      expect(blocked).toMatchObject({
+        t: "uidClaimBlocked",
+        claimPath,
+        workerUid: ownerUid,
+        ownerAllocationId,
+        evaluatorContainer: ownerContainer,
+      });
+      expect(takenOver).toMatchObject({
+        t: "uidClaimTakeover",
+        claimPath,
+        workerUid: ownerUid,
+        ownerAllocationId,
+        evaluatorContainer: ownerContainer,
+        newEvaluatorContainer: expect.stringMatching(/^hone-.*-eval-[0-9a-f]{12}$/),
+      });
+    } finally {
+      await rm(claimPath, { force: true });
+      await Promise.all(heldLeases.map((lease) => lease.release()));
+    }
+  });
+
+  it("aborts a queued host-gate acquisition when the broker closes without burning an invocation", async () => {
+    const gateLease = await acquireHostEvaluatorGate({
+      evaluatorContainer: "hone-test-close-gate-eval-000000000001",
+    });
+    try {
+      const b = await boot();
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      const evaluation = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 12 }, CLIENT);
+      const rejected = expect(evaluation).rejects.toThrow("host evaluator gate acquisition aborted");
+      await b.broker.close();
+      await rejected;
+      expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(0);
+      expect(b.log.some((argv) => argv[1] === "run" && argv.includes("--rm"))).toBe(false);
+    } finally {
+      await gateLease.release();
+    }
+  });
+
+  it("rechecks wall-clock budget after shared-uid queue acquisition before burning an invocation", async () => {
+    let nowMs = 0;
+    const gateLease = await acquireHostEvaluatorGate({
+      evaluatorContainer: "hone-test-budget-gate-eval-000000000001",
+    });
+    try {
+      const manifest = makeManifest({ budget: { ...GENEROUS_BUDGET, maxWallClockSec: 1 } });
+      const b = await boot({ manifest, now: () => nowMs });
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      const evaluation = b.broker.evaluate(
+        { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 13 },
+        CLIENT,
+      );
+      await vi.waitFor(() => {
+        expect(b.events.some((event) => event.type === "evaluator.queue.entered")).toBe(true);
+      });
+      nowMs = 2_000;
+      await gateLease.release();
+      await expect(evaluation).rejects.toThrow("budget dimension exhausted: wallClockSec");
+      expect(b.events).toContainEqual(expect.objectContaining({
+        type: "evaluator.queue.acquired",
+      }));
+      expect(b.events).toContainEqual(expect.objectContaining({
+        type: "budget.exhausted",
+        dimension: "wallClockSec",
+      }));
+      expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(0);
+      expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(0);
+    } finally {
+      await gateLease.release();
+    }
   });
 
   it("poisons further broker operations when a paused container cannot be released", async () => {

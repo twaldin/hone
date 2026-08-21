@@ -7,6 +7,7 @@ import type { RunCommand } from "@hone/broker";
 import { canonicalJson } from "@hone/schema";
 import { UsageError } from "./args.js";
 import {
+  OPTIMIZER_CONTAINER_UID,
   optimizerBuildArgs,
   optimizerBuildName,
   optimizerConformanceCreateArgs,
@@ -179,7 +180,7 @@ function stubArgs(name: string, network: string, image: string, token: string): 
     "--tmpfs", "/tmp:rw,size=67108864",
     "-e", "HOME=/tmp",
     "-e", `HONE_CONFORMANCE_TOKEN=${token}`,
-    "--user", "2000:2000",
+    "--user", `${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`,
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
     "--pids-limit", "64",
