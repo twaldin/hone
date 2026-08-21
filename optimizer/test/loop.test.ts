@@ -199,7 +199,7 @@ describe("runEpisodeLoop", () => {
     expect(eventsOf(events, "budget.exhausted")).toHaveLength(0);
   });
 
-  it("still stops and finishes when the durable no-yield report is rejected", async () => {
+  it("fails closed and does not finish when the durable no-yield report is rejected", async () => {
     const noYieldRecord = {
       type: SESSION_NO_YIELD_RECORD_TYPE,
       limitTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
@@ -220,24 +220,24 @@ describe("runEpisodeLoop", () => {
     const diagnostics: string[] = [];
     const stderr = vi.spyOn(console, "error").mockImplementation((message) => diagnostics.push(String(message)));
     try {
-      await runEpisodeLoop({
+      await expect(runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-no-yield-report-failure",
         workerBundlePath: WORKER_BUNDLE_PATH,
         emit: (event) => event,
-      });
+      })).rejects.toThrow(/journal write unavailable/);
     } finally {
       stderr.mockRestore();
       await stub.close();
     }
 
     expect(stub.execArgvs).toHaveLength(1);
-    expect(stub.finished).toEqual([BASELINE]);
+    expect(stub.finished).toEqual([]);
     expect(diagnostics.join("\n")).toContain("mutation.no-yield-bound-report-failed");
     expect(diagnostics.join("\n")).toContain("journal write unavailable");
   });
 
-  it("suppresses repair and finishes when exit 4 output is truncated or unparsable", async () => {
+  it("fails closed without repair when exit 4 output is truncated or unparsable", async () => {
     const stub = new StubBroker({
       baselineHash: BASELINE,
       baselineObjectives: { score: 0.5 },
@@ -249,12 +249,12 @@ describe("runEpisodeLoop", () => {
     const diagnostics: string[] = [];
     const stderr = vi.spyOn(console, "error").mockImplementation((message) => diagnostics.push(String(message)));
     try {
-      await runEpisodeLoop({
+      await expect(runEpisodeLoop({
         brokerSocket: stub.socketPath,
         runId: "run-no-yield-truncated-record",
         workerBundlePath: WORKER_BUNDLE_PATH,
         emit: (event) => event,
-      });
+      })).rejects.toThrow(/no-yield trigger record unavailable/);
     } finally {
       stderr.mockRestore();
       await stub.close();
@@ -262,7 +262,7 @@ describe("runEpisodeLoop", () => {
 
     expect(stub.execArgvs).toHaveLength(1);
     expect(stub.reportedNoYieldBounds).toHaveLength(0);
-    expect(stub.finished).toEqual([BASELINE]);
+    expect(stub.finished).toEqual([]);
     expect(diagnostics.join("\n")).toContain("mutation.no-yield-bound-record-unavailable");
   });
 

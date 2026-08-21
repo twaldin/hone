@@ -181,6 +181,41 @@ describe("terminal-order fence", () => {
     ]);
     expect(events.at(-1)?.type).toBe("run.finished");
   });
+
+  it("terminalizes a rejected no-yield report as failed instead of completed", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(
+      join(root, "rejected-bound-report-backend.mjs"),
+      `export function createBackend() {
+        return {
+          async start() {
+            throw new Error("mutation no-yield bound tripped but durable report was rejected");
+          },
+        };
+      }
+      `,
+    );
+    const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    const code = await cliRunCommand(
+      ["capsule", "--headless", "--backend", "./rejected-bound-report-backend.mjs"],
+      io,
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain("durable report was rejected");
+
+    const runId = soleRunId(root);
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "run.finished")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        reason: "crash",
+      }),
+    ]);
+    expect(events.at(-1)?.type).toBe("run.finished");
+  });
 });
 
 describe("optimizer process-group kill", () => {

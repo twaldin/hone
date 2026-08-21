@@ -321,6 +321,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
             stdoutTail: tail(exec.stdout),
             stderrTail: tail(exec.stderr),
           }));
+          throw new Error(`mutation session no-yield trigger record unavailable for sandbox ${sandboxId}`);
         } else {
           try {
             await broker.reportSessionNoYieldBound({ sandboxId, ...noYieldBound });
@@ -332,6 +333,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
               trigger: noYieldBound,
               error: error instanceof Error ? error.message : String(error),
             }));
+            throw error;
           }
         }
         const failure: FailureEvidence = {
