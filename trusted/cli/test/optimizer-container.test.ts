@@ -15,6 +15,7 @@ import {
   optimizerCreateArgs,
   optimizerStartArgs,
   prepareOptimizerRuntime,
+  stageMutationRuntime,
   verifyOptimizerBundleSeal,
 } from "../src/backends/optimizer-container.js";
 import type { OptimizerBundleSeal, OptimizerRuntime } from "../src/backends/optimizer-container.js";
@@ -23,7 +24,9 @@ import { openDockerCreateGate } from "../src/docker-create-gate.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
 import {
   MUTATION_RUNTIME_MANIFEST,
+  OPTIMIZER_BUILD_CONTRACT,
   OPTIMIZER_BUNDLE_FILES,
+  OPTIMIZER_RUNTIME_MANIFEST,
   collectOptimizerSnapshot,
   computeOptimizerDigest,
   snapshotDigest,
@@ -59,6 +62,7 @@ function res(overrides: Partial<CmdResult> = {}): CmdResult {
 const TEST_RUNTIME_SOURCE = "/tmp/hone-runtime-test-fixture";
 
 function writeRuntimeFixtures(out: string): void {
+  writeFileSync(join(out, OPTIMIZER_RUNTIME_MANIFEST.node.bundleName), "node runtime fixture");
   writeFileSync(join(out, MUTATION_RUNTIME_MANIFEST.bun.bundleName), "compressed bun fixture");
   for (const file of MUTATION_RUNTIME_MANIFEST.pi.files) {
     writeFileSync(join(out, file.bundleName), `compressed ${file.sourceName} fixture`);
@@ -145,6 +149,9 @@ describe("build container argv exactness", () => {
     expect(build[2]).toContain("--outfile=/hone/out/optimizer.mjs");
     expect(build[2]).toContain("bun build /hone/src/optimizer/worker/mutate.ts");
     expect(build[2]).toContain("--outfile=/hone/out/worker.mjs");
+    expect(build[2]).toContain(`${OPTIMIZER_RUNTIME_MANIFEST.node.sha256}  /hone/runtime/node`);
+    expect(build[2]).toContain(`node --version)\" = \"v${OPTIMIZER_RUNTIME_MANIFEST.node.version}`);
+    expect(build[2]).toContain(`> /hone/out/${OPTIMIZER_RUNTIME_MANIFEST.node.bundleName}`);
   });
 
   it("attaches the docker-run lease as `--volumes-from <lease>:ro` BEFORE the image", () => {
@@ -172,7 +179,7 @@ describe("run container create/start argv exactness (two-phase)", () => {
     runId: "run_r",
     image: FIX_IMAGE,
     bundleDir: "/tmp/bundle",
-    runArgv: ["node", "/hone/bundle/optimizer.mjs"],
+    runArgv: [...OPTIMIZER_BUILD_CONTRACT.run],
     env: { HONE_BROKER_SOCK: "/run/hone/broker.sock", HONE_RUN_ID: "run_r", HONE_SEED: "0", HONE_RESUME: "{}" },
     containerLease: "hone-lease-run_r-e1",
   };
@@ -278,10 +285,11 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
     });
     expect(argvs.filter(isBuild).length).toBe(1);
     expect(runtime.bundleDir).not.toBeNull();
-    expect(runtime.runArgv).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
+    expect(runtime.runArgv).toEqual(OPTIMIZER_BUILD_CONTRACT.run);
     const bundleDir = runtime.bundleDir ?? "";
     expect(existsSync(join(bundleDir, "optimizer.mjs"))).toBe(true);
     expect(existsSync(join(bundleDir, "worker.mjs"))).toBe(true);
+    expect(existsSync(join(bundleDir, OPTIMIZER_RUNTIME_MANIFEST.node.bundleName))).toBe(true);
     await runtime.cleanup();
     // Temp staging/output trees are gone; containers were rm -f'd by name.
     expect(existsSync(bundleDir)).toBe(false);
@@ -369,8 +377,20 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         runtimeSourceDir: TEST_RUNTIME_SOURCE,
       },
     );
-    expect(runtime.runArgv).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
+    expect(runtime.runArgv).toEqual(OPTIMIZER_BUILD_CONTRACT.run);
     await runtime.cleanup();
+  });
+
+  it("fails closed before build when staged Node bytes do not match the pin", async () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), "hone-node-source-"));
+    const runtimeRoot = mkdtempSync(join(tmpdir(), "hone-runtime-target-"));
+    const nodePath = join(sourceRoot, "node");
+    writeFileSync(nodePath, "not the pinned Node runtime");
+    await expect(
+      stageMutationRuntime({ HONE_NODE_RUNTIME_PATH: nodePath }, runtimeRoot),
+    ).rejects.toThrow(/pinned runtime source .* hashes .* != pinned .* refusing/);
+    rmSync(sourceRoot, { recursive: true, force: true });
+    rmSync(runtimeRoot, { recursive: true, force: true });
   });
 
   it("builds an admission-captured base snapshot without a launch-time repo recollection", async () => {
@@ -880,7 +900,7 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
     for (const f of seal.files) {
       const st = lstatSync(join(dir, f.name));
       expect(st.isFile()).toBe(true);
-      expect(st.mode & 0o777).toBe(0o444);
+      expect(st.mode & 0o777).toBe(f.mode);
       expect(st.uid).toBe(OUR_UID);
       expect(st.ino).toBe(f.ino);
       expect(f.size).toBe(st.size);
@@ -959,6 +979,12 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
     expect(() => verifyOptimizerBundleSeal(runtime)).toThrow(/regained write permission/);
     chmodSync(seal.dir, 0o700);
     chmodSync(target, 0o444);
+    const nodeTarget = join(seal.dir, OPTIMIZER_RUNTIME_MANIFEST.node.bundleName);
+    chmodSync(nodeTarget, 0o444); // removing execute does not add write, but still drifts from the exact seal
+    chmodSync(seal.dir, 0o555);
+    expect(() => verifyOptimizerBundleSeal(runtime)).toThrow(/mode drifted/);
+    chmodSync(seal.dir, 0o700);
+    chmodSync(nodeTarget, OPTIMIZER_RUNTIME_MANIFEST.node.mode);
     chmodSync(seal.dir, 0o755); // dir regained write
     expect(() => verifyOptimizerBundleSeal(runtime)).toThrow(/regained write permission/);
     chmodSync(seal.dir, 0o555);
@@ -1048,7 +1074,7 @@ describe("REAL docker: host-uid build into the 0700-rooted handoff", () => {
           const st = lstatSync(join(seal.dir, f.name));
           expect(st.isFile()).toBe(true);
           expect(st.uid).toBe(OUR_UID); // --user <host uid>:<host gid> wrote as US, not 2000
-          expect(st.mode & 0o777).toBe(0o444);
+          expect(st.mode & 0o777).toBe(f.mode);
         }
         verifyOptimizerBundleSeal(rt);
         // Simulated replacement between build and run refuses at the pre-create gate.
