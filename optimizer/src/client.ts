@@ -176,6 +176,10 @@ export class BrokerClient {
     await this.call("putFile", params);
   }
 
+  async getFile(params: ParamsOf<"getFile">): Promise<ResultOf<"getFile">> {
+    return this.call("getFile", params);
+  }
+
   async saveArtifact(params: ParamsOf<"saveArtifact">): Promise<ResultOf<"saveArtifact">> {
     return this.call("saveArtifact", params);
   }
@@ -187,6 +191,10 @@ export class BrokerClient {
 
   async reportIncumbent(params: ParamsOf<"reportIncumbent">): Promise<void> {
     await this.call("reportIncumbent", params);
+  }
+
+  async completeEpisode(params: ParamsOf<"completeEpisode">): Promise<void> {
+    await this.call("completeEpisode", params);
   }
 
   async getBudget(): Promise<ResultOf<"getBudget">> {

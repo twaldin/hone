@@ -688,6 +688,7 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: () => {},
       registerCleanupBarrier: () => {},
     };
@@ -994,6 +995,7 @@ function optCtx(root: string, runDir: string, runId: string): RunnerBackendConte
     registerChild: () => () => {},
     probeGate: () => Promise.resolve(true),
     requestStop: () => {},
+    requestPause: () => {},
     registerAuthorityBarrier: () => {},
     registerCleanupBarrier: () => {},
   };

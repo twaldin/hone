@@ -1,0 +1,2 @@
+{"v":1,"kind":"intent","id":"d_stub_0_5b4255b1","runId":"run_mt2cexpl03c659","role":"mutation","model":"stub","requestAt":"2026-08-21T02:41:23.731Z","requestSha256":"0000000000000000000000000000000000000000000000000000000000000000","promptTokens":800,"completionTokens":200,"ceilTokens":1000,"ceilUsd":0.05}
+{"v":1,"kind":"settle","id":"d_stub_0_5b4255b1","tokens":1000,"usd":0.05,"outcome":"usage","traced":true}

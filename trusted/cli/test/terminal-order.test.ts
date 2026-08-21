@@ -141,6 +141,7 @@ describe("optimizer process-group kill", () => {
       },
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: () => {},
       registerCleanupBarrier: () => {},
     };

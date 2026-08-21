@@ -1,0 +1,4 @@
+{"runId":"run_mt2cjsof5700cf","at":"2026-08-21T02:45:11.039Z","type":"run.started","capsuleId":"cap_0d4c7d71b572","contractHash":"sha256:b1af536621c42013a2eb9af238e5f8837b207c55021a21500b810fc3ef030f22","optimizerDigest":"sha256:24e2c728c7087785a371932a7b1f73bb9815e0e0c4a2fabe3791b47e82d23071","checkpointVersion":1}
+{"runId":"run_mt2cjsof5700cf","at":"2026-08-21T02:45:11.107Z","type":"run.paused","reason":"provider-rate-limit","pauseId":"pause_live_429","providerStatus":429}
+{"runId":"run_mt2cjsof5700cf","at":"2026-08-21T02:45:33.236Z","type":"run.resumed","fromCursor":2}
+{"runId":"run_mt2cjsof5700cf","at":"2026-08-21T02:45:33.422Z","type":"run.finished","status":"completed"}

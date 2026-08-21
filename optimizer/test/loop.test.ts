@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { RunEvent } from "@hone/schema";
-import { EpisodeContext } from "../src/episode.js";
+import { buildEpisodeContext } from "../assets/context.js";
+import { EPISODE_JSON_PATH, EpisodeContext } from "../src/episode.js";
 import {
   parseMaxEpisodes,
   runEpisodeLoop,
@@ -618,6 +619,130 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
     expect(started.map((e) => e.episode)).toEqual([1]);
     expect(eventsOf(events, "budget.exhausted")).toHaveLength(0);
     expect(stub.finished).toEqual([stubHash(1)]);
+  });
+
+  it("continues a partial episode from its journaled candidate without rerunning mutation", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    const parentEvaluation = {
+      capsuleId: "cap_000000000000",
+      artifactHash: BASELINE,
+      assetGroupId: "train",
+      seed: 0,
+      output: {
+        valid: true,
+        objectives: { score: 0.5 },
+        constraints: {},
+        perExample: {},
+      },
+      costUsd: 0,
+      durationMs: 5,
+      cached: false,
+      evaluatedAt: "2026-08-20T00:00:00.000Z",
+    } as const;
+    const context = buildEpisodeContext({
+      episode: 0,
+      objective: "resume without repeating work",
+      parentEvaluation,
+      lineage: [],
+      budget: {
+        envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+        spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 1 },
+      },
+    });
+    stub.scratch.set(EPISODE_JSON_PATH, Buffer.from(JSON.stringify(context)));
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        resume: {
+          nextEpisode: 0,
+          incumbent: null,
+          activeEpisode: {
+            episode: 0,
+            parent: { hash: BASELINE },
+            candidate: {
+              artifact: { hash: BASELINE },
+              sessionTrace: stubHash(88),
+              result: { summary: "already yielded", approach: "durable", filesChanged: [] },
+            },
+          },
+        },
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toEqual([]);
+    expect(eventsOf(events, "episode.started")).toEqual([]);
+    expect(eventsOf(events, "episode.candidate")).toEqual([]);
+    expect(stub.createdSandboxParams).toEqual([{
+      artifact: { hash: BASELINE },
+      role: "mutation",
+      continueEpisode: 0,
+    }]);
+    expect(stub.completedEpisodes).toEqual([0]);
+    expect(stub.completedEpisodeParams).toEqual([{
+      episode: 0,
+      releaseSandboxId: "sb_000000000001",
+    }]);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
+  it("seals a journaled unrepaired episode without repeating its repair work", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        resume: {
+          nextEpisode: 0,
+          incumbent: null,
+          activeEpisode: {
+            episode: 0,
+            parent: { hash: BASELINE },
+            candidate: {
+              artifact: { hash: BASELINE },
+              sessionTrace: stubHash(88),
+              result: { summary: "invalid candidate", approach: "repair exhausted", filesChanged: [] },
+            },
+            invalid: { reason: "repair failed", repaired: false },
+          },
+        },
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toEqual([]);
+    expect(stub.evaluateAsks).toEqual([]);
+    expect(eventsOf(events, "episode.started")).toEqual([]);
+    expect(eventsOf(events, "episode.candidate")).toEqual([]);
+    expect(stub.completedEpisodes).toEqual([0]);
+    expect(stub.finished).toEqual([BASELINE]);
   });
 
   it("fails closed on a non-positive or non-integer maxEpisodes before touching the broker", async () => {

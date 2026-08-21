@@ -18,19 +18,30 @@
  *   env  HONE_ONE_SHOT_CANDIDATE
  *                           `1` disables a second candidate evaluation after
  *                           the M0 probe consumes its cache-safe authority
- *   env  HONE_RESUME        JSON {nextEpisode, incumbent}         (default fresh)
+ *   env  HONE_RESUME        durable episode/incumbent checkpoint JSON (default fresh)
  *   stdout                  one RunEvent as JSON per line, NOTHING else
  *   stderr                  free-form diagnostics
  *
  * SIGTERM/SIGINT abort the loop at its next checkpoint; the runner escalates
  * to SIGKILL after its grace window.
  */
-import type { ArtifactRef, RunEvent } from "@hone/schema";
+import { ArtifactRef, type RunEvent } from "@hone/schema";
+import { MutateResult, type MutateResult as MutateResultRecord } from "./episode.js";
 import { parseMaxEpisodes, runEpisodeLoop } from "./loop.js";
 
 interface ResumeState {
   nextEpisode: number;
   incumbent: { artifact: ArtifactRef; aggregate: number } | null;
+  activeEpisode?: {
+    episode: number;
+    parent: ArtifactRef;
+    candidate: {
+      artifact: ArtifactRef;
+      sessionTrace: string;
+      result: MutateResultRecord;
+    } | null;
+    invalid?: { reason: string; repaired: boolean };
+  };
 }
 
 /** Hand-rolled parse: the resume blob comes from the trusted runner's own replay. */
@@ -38,16 +49,75 @@ function parseResume(raw: string | undefined): ResumeState {
   if (raw === undefined || raw.length === 0) return { nextEpisode: 0, incumbent: null };
   const parsed: unknown = JSON.parse(raw);
   if (parsed === null || typeof parsed !== "object") throw new Error("HONE_RESUME must be a JSON object");
-  const obj = parsed as { nextEpisode?: unknown; incumbent?: unknown };
+  const obj = parsed as { nextEpisode?: unknown; incumbent?: unknown; activeEpisode?: unknown };
   const nextEpisode = typeof obj.nextEpisode === "number" && Number.isInteger(obj.nextEpisode) && obj.nextEpisode >= 0 ? obj.nextEpisode : 0;
   let incumbent: ResumeState["incumbent"] = null;
   if (obj.incumbent !== null && typeof obj.incumbent === "object" && obj.incumbent !== undefined) {
-    const inc = obj.incumbent as { artifact?: { hash?: unknown }; aggregate?: unknown };
-    if (typeof inc.artifact?.hash === "string" && typeof inc.aggregate === "number") {
-      incumbent = { artifact: { hash: inc.artifact.hash }, aggregate: inc.aggregate };
+    const inc = obj.incumbent as { artifact?: unknown; aggregate?: unknown };
+    const artifact = ArtifactRef.safeParse(inc.artifact);
+    if (artifact.success && typeof inc.aggregate === "number") {
+      incumbent = { artifact: artifact.data, aggregate: inc.aggregate };
     }
   }
-  return { nextEpisode, incumbent };
+  if (obj.activeEpisode === undefined) return { nextEpisode, incumbent };
+  if (obj.activeEpisode === null || typeof obj.activeEpisode !== "object") {
+    throw new Error("HONE_RESUME.activeEpisode must be an object");
+  }
+  const active = obj.activeEpisode as {
+    episode?: unknown;
+    parent?: unknown;
+    candidate?: unknown;
+    invalid?: unknown;
+  };
+  const parent = ArtifactRef.safeParse(active.parent);
+  if (
+    typeof active.episode !== "number"
+    || !Number.isInteger(active.episode)
+    || active.episode < 0
+    || !parent.success
+  ) {
+    throw new Error("HONE_RESUME.activeEpisode is malformed");
+  }
+  let candidate: NonNullable<ResumeState["activeEpisode"]>["candidate"] = null;
+  if (active.candidate !== null && active.candidate !== undefined) {
+    if (typeof active.candidate !== "object") throw new Error("HONE_RESUME active candidate is malformed");
+    const rawCandidate = active.candidate as {
+      artifact?: unknown;
+      sessionTrace?: unknown;
+      result?: unknown;
+    };
+    const artifact = ArtifactRef.safeParse(rawCandidate.artifact);
+    const result = MutateResult.safeParse(rawCandidate.result);
+    if (!artifact.success || typeof rawCandidate.sessionTrace !== "string" || !result.success) {
+      throw new Error("HONE_RESUME active candidate is malformed");
+    }
+    candidate = {
+      artifact: artifact.data,
+      sessionTrace: rawCandidate.sessionTrace,
+      result: result.data,
+    };
+  }
+  let invalid: NonNullable<ResumeState["activeEpisode"]>["invalid"];
+  if (active.invalid !== undefined) {
+    if (active.invalid === null || typeof active.invalid !== "object") {
+      throw new Error("HONE_RESUME active invalid checkpoint is malformed");
+    }
+    const rawInvalid = active.invalid as { reason?: unknown; repaired?: unknown };
+    if (typeof rawInvalid.reason !== "string" || typeof rawInvalid.repaired !== "boolean") {
+      throw new Error("HONE_RESUME active invalid checkpoint is malformed");
+    }
+    invalid = { reason: rawInvalid.reason, repaired: rawInvalid.repaired };
+  }
+  return {
+    nextEpisode,
+    incumbent,
+    activeEpisode: {
+      episode: active.episode,
+      parent: parent.data,
+      candidate,
+      ...(invalid === undefined ? {} : { invalid }),
+    },
+  };
 }
 
 async function main(): Promise<number> {

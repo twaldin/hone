@@ -349,7 +349,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       version: "m2-recursive-wiring-smoke.v1",
       recordedAt: new Date().toISOString(),
       command:
-        "sg docker -c 'HONE_RECURSIVE_SEARCH_SMOKE=1 HONE_REPO_ROOT=/home/tim/omp-firstmate/worktrees/m2-recursive-wiring HONE_RECURSIVE_SMOKE_EVIDENCE=/home/tim/omp-firstmate/worktrees/m2-recursive-wiring/data/m2-recursive-wiring/smoke-evidence.v1.json ./node_modules/.bin/vitest run --root trusted/cli test/recursive-search.smoke.test.ts'",
+        `sg docker -c 'HONE_RECURSIVE_SEARCH_SMOKE=1 HONE_REPO_ROOT=${repoRoot} HONE_RECURSIVE_SMOKE_EVIDENCE=${evidencePath} ./node_modules/.bin/vitest run --root trusted/cli test/recursive-search.smoke.test.ts'`,
       result: "passed: search episode 0 started, dispatched one recursive child to a real Docker evaluator, and emitted its trusted score",
       smokeRoot,
       syntheticOuterEntrypoint: outerManifest.evalEntrypoint,

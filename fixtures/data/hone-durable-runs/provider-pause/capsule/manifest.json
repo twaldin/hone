@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 2,
+  "objective": "Make the fixture task measurably better while keeping every test green.",
+  "baseline": {
+    "kind": "cas",
+    "hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "image": "hone-task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "evalEntrypoint": [
+    "python3",
+    "/capsule/eval.py"
+  ],
+  "protectedPaths": [
+    "protected/keep.txt"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/data.txt"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/data.txt"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 1000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 3600,
+    "maxEvaluatorInvocations": 100
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:1cf0027eb492e23d2ab9cc442f5d77b44faf7512f4a307b04f03423c04404989"
+  },
+  "contentHashes": {
+    "assets/train/data.txt": "sha256:f6e12a5f03044dbc1249b543e1266da8aacd381f1ffa090b29c789c3d6efed78",
+    "assets/validation/data.txt": "sha256:13eb2ee30be3d78b2c26ef8846aef0aa0c14b9c543187df76097e7869f7fa39a"
+  },
+  "id": "cap_0d4c7d71b572"
+}

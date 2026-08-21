@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, renameSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { RunEvent } from "@hone/schema";
-import type { ApplyMode, ArtifactRef, BudgetState } from "@hone/schema";
+import type { ApplyMode, ArtifactRef, BudgetState, RunOutcomeReason } from "@hone/schema";
 
 /**
  * Append-only NDJSON event log — the ONLY run-state store (contract 4).
@@ -158,7 +158,7 @@ export function readEvents(runDir: string): RunEvent[] {
   return events;
 }
 
-export type RunStatus = "pending" | "running" | "completed" | "stopped" | "failed" | "budget";
+export type RunStatus = "pending" | "running" | "paused" | "completed" | "stopped" | "failed" | "budget";
 
 export interface IncumbentState {
   artifact: ArtifactRef;
@@ -173,6 +173,13 @@ export interface FinishedState {
   at: string;
 }
 
+export interface EpisodeCheckpointState {
+  episode: number;
+  parent: ArtifactRef;
+  candidate: { artifact: ArtifactRef; sessionTrace: string } | null;
+  invalid?: { reason: string; repaired: boolean };
+}
+
 export interface RunState {
   runId: string | null;
   capsuleId: string | null;
@@ -184,8 +191,12 @@ export interface RunState {
   /** Number of events consumed = the next event's 0-based line index. */
   cursor: number;
   status: RunStatus;
+  /** New logs advance nextEpisode only at a durable episode.completed boundary. */
+  checkpointVersion: 1 | null;
   episodes: Set<number>;
   nextEpisode: number;
+  /** Journaled work in the one episode that has started but not completed. */
+  activeEpisode: EpisodeCheckpointState | null;
   /** Parent artifact of the earliest episode — the baseline snapshot. */
   baselineArtifact: ArtifactRef | null;
   incumbent: IncumbentState | null;
@@ -195,6 +206,8 @@ export interface RunState {
   /** Trusted delivery outcome already made durable before run.finished. */
   delivery: { mode: ApplyMode; ref: string | null } | null;
   finished: FinishedState | null;
+  /** Machine-readable pause/stop/failure cause from the shared taxonomy. */
+  outcomeReason: RunOutcomeReason | null;
   resumeCount: number;
   evalCount: number;
 }
@@ -208,14 +221,17 @@ export function replay(events: RunEvent[]): RunState {
     probe: null,
     cursor: 0,
     status: "pending",
+    checkpointVersion: null,
     episodes: new Set<number>(),
     nextEpisode: 0,
+    activeEpisode: null,
     baselineArtifact: null,
     incumbent: null,
     lastBudget: null,
     budgetExhaustedDimension: null,
     delivery: null,
     finished: null,
+    outcomeReason: null,
     resumeCount: 0,
     evalCount: 0,
   };
@@ -228,21 +244,49 @@ export function replay(events: RunEvent[]): RunState {
         state.capsuleId = event.capsuleId;
         state.contractHash = event.contractHash;
         state.optimizerDigest = event.optimizerDigest;
+        state.checkpointVersion = event.checkpointVersion ?? null;
         state.status = "running";
         break;
       case "run.resumed":
         state.resumeCount++;
+        state.status = "running";
+        state.outcomeReason = null;
+        break;
+      case "run.paused":
+        state.status = "paused";
+        state.outcomeReason = event.reason;
         break;
       case "probe.completed":
         state.probe = { approved: event.approved };
         break;
       case "episode.started":
         state.episodes.add(event.episode);
-        state.nextEpisode = Math.max(state.nextEpisode, event.episode + 1);
+        if (state.checkpointVersion === null) {
+          state.nextEpisode = Math.max(state.nextEpisode, event.episode + 1);
+        } else {
+          state.activeEpisode = { episode: event.episode, parent: event.parent, candidate: null };
+        }
         if (event.episode < minEpisode) {
           minEpisode = event.episode;
           state.baselineArtifact = event.parent;
         }
+        break;
+      case "episode.candidate":
+        if (state.activeEpisode?.episode === event.episode) {
+          state.activeEpisode.candidate = {
+            artifact: event.candidate,
+            sessionTrace: event.sessionTrace,
+          };
+        }
+        break;
+      case "episode.invalid":
+        if (state.activeEpisode?.episode === event.episode) {
+          state.activeEpisode.invalid = { reason: event.reason, repaired: event.repaired };
+        }
+        break;
+      case "episode.completed":
+        state.nextEpisode = Math.max(state.nextEpisode, event.episode + 1);
+        if (state.activeEpisode?.episode === event.episode) state.activeEpisode = null;
         break;
       case "eval.completed":
         state.evalCount++;
@@ -283,6 +327,16 @@ export function replay(events: RunEvent[]): RunState {
       case "run.finished":
         state.finished = { status: event.status, best: event.best ?? null, at: event.at };
         state.status = event.status;
+        state.outcomeReason =
+          event.reason
+          ?? (event.status === "budget"
+            ? "budget-exhausted"
+            : event.status === "stopped"
+              ? "operator"
+              : event.status === "failed"
+                ? "crash"
+                : null);
+        state.activeEpisode = null;
         break;
       default:
         break;
