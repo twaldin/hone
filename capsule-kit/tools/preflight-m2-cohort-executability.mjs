@@ -353,6 +353,8 @@ for (const capsuleId of capsuleIds) {
   const evaluatorInvocations = spend?.evaluatorInvocations
     ?? events.filter((event) => event.type === "eval.completed").length;
   const completedEvaluations = events.filter((event) => event.type === "eval.completed");
+  const freshCompletedEvaluations = completedEvaluations.filter((event) => event.cached === false);
+  const cachedCompletedEvaluations = completedEvaluations.filter((event) => event.cached !== false);
   const finished = [...events].reverse().find((event) => event.type === "run.finished");
   let verdict;
   let reason;
@@ -365,9 +367,12 @@ for (const capsuleId of capsuleIds) {
   } else if (tokens !== 0 || usd !== 0) {
     verdict = "SPEND_VIOLATION";
     reason = `run recorded non-zero model spend (${tokens} tokens, $${usd})`;
-  } else if (completedEvaluations.length > 0) {
+  } else if (freshCompletedEvaluations.length > 0) {
     verdict = "PASS";
-    reason = `${completedEvaluations.length} trusted eval.completed event(s)`;
+    reason = `${freshCompletedEvaluations.length} fresh trusted eval.completed event(s)`;
+  } else if (cachedCompletedEvaluations.length > 0) {
+    verdict = "CACHED_RESULT";
+    reason = `${cachedCompletedEvaluations.length} cached eval.completed event(s); no evaluator execution was proven`;
   } else if (evaluatorInvocations > 0) {
     verdict = "FAIL";
     reason = "engine burned an evaluator invocation without eval.completed";
@@ -417,6 +422,7 @@ const count = (verdict) => report.results.filter((result) => result.verdict === 
 report.summary = {
   provenExecutable: count("PASS"),
   failedAfterEvaluatorInvocation: count("FAIL"),
+  cachedWithoutExecution: count("CACHED_RESULT"),
   untestedBeforeEvaluatorInvocation: count("UNTESTED"),
   spendViolations: count("SPEND_VIOLATION"),
   zeroTokenRuns: report.results.filter((result) => result.spend?.tokens === 0 && result.spend?.usd === 0).length,
@@ -426,5 +432,5 @@ report.summary = {
 };
 writeReport(outputPath, report);
 console.log(`\npreflight report: ${relative(REPO_ROOT, outputPath)}`);
-console.log(`${report.summary.provenExecutable}/${report.summary.authorizedCount} proven executable; ${report.summary.failedAfterEvaluatorInvocation} FAIL; ${report.summary.untestedBeforeEvaluatorInvocation} UNTESTED; ${report.summary.spendViolations} spend violations`);
+console.log(`${report.summary.provenExecutable}/${report.summary.authorizedCount} proven executable; ${report.summary.failedAfterEvaluatorInvocation} FAIL; ${report.summary.cachedWithoutExecution} CACHED_RESULT; ${report.summary.untestedBeforeEvaluatorInvocation} UNTESTED; ${report.summary.spendViolations} spend violations`);
 process.exitCode = report.summary.provenExecutable === report.summary.authorizedCount ? 0 : 1;
