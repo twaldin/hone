@@ -853,7 +853,10 @@ describe("M0 one-shot candidate evaluation authority", () => {
     // A second restart reconstructs exactly one incomplete checkpoint and
     // replays every pre-crash evaluator fact without a fourth invocation.
     const resumed = await boot(shared);
-    await resumed.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const claimed = await resumed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
     await expect(
       resumed.broker.evaluate(
         { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0, resume: true },
@@ -873,9 +876,19 @@ describe("M0 one-shot candidate evaluation authority", () => {
       ),
     ).resolves.toMatchObject({ cached: true, artifactHash: candidate2Hash });
     expect(resumed.broker.getBudget(CLIENT).spent.evaluatorInvocations).toBe(3);
+    await resumed.broker.completeEpisode(
+      { episode: 0, releaseSandboxId: claimed.sandboxId },
+      CLIENT,
+    );
     const facts = await stateLines(resumed);
     expect(facts.filter((line) => line["t"] === "episode")).toHaveLength(1);
     expect(facts.filter((line) => line["t"] === "eval")).toHaveLength(3);
+    expect(facts.filter((line) => line["t"] === "episodeComplete")).toHaveLength(1);
+    expect(facts.find((line) => line["t"] === "episodeComplete")).toMatchObject({
+      t: "episodeComplete",
+      episode: 0,
+    });
+    expect(resumed.events.filter((event) => event.type === "episode.completed")).toHaveLength(1);
   });
   it("journals the attempt before a timed-out spawn and never permits a retry after replay", async () => {
     const shared = {

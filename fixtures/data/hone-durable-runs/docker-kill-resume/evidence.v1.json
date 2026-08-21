@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "recordedAt": "2026-08-21T05:02:13.752Z",
+  "runId": "run_mt2hffb512a5aa",
+  "zeroModelCalls": true,
+  "dockerImage": "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10",
+  "testCommand": "sg docker -c 'HONE_DURABLE_DOCKER_E2E=1 HONE_DURABLE_DOCKER_EVIDENCE_ROOT=/home/tim/omp-firstmate/worktrees/hone-durable-runs/fixtures/data/hone-durable-runs/docker-kill-resume ./node_modules/.bin/vitest run --root trusted/cli test/docker-resume-e2e.test.ts'",
+  "launch": {
+    "cwd": "/home/tim/omp-firstmate/worktrees/hone-durable-runs/fixtures/data/hone-durable-runs/docker-kill-resume",
+    "argv": [
+      "hone",
+      "run",
+      "capsule",
+      "--headless",
+      "--backend",
+      "local"
+    ],
+    "killAfter": "episode.candidate plus two eval.completed records, before episode.completed",
+    "exitCode": null,
+    "signal": "SIGKILL"
+  },
+  "resume": {
+    "cwd": "/home/tim/omp-firstmate/worktrees/hone-durable-runs/fixtures/data/hone-durable-runs/docker-kill-resume",
+    "argv": [
+      "hone",
+      "run",
+      "capsule",
+      "--headless",
+      "--resume"
+    ],
+    "exitCode": 0
+  },
+  "records": {
+    "events": ".hone-runs/run_mt2hffb512a5aa/events.ndjson",
+    "brokerState": ".hone-runs/run_mt2hffb512a5aa/broker-state.ndjson"
+  },
+  "assertions": {
+    "runStarted": 1,
+    "runResumed": 1,
+    "episodeStarted": 1,
+    "episodeCandidate": 1,
+    "evaluatorInvocations": 2,
+    "episodeCompleted": 1,
+    "episodeCheckpointFacts": 1,
+    "evaluatorFacts": 2,
+    "episodeCompleteFacts": 1,
+    "finishedStatus": "completed",
+    "candidate": "sha256:edc8c3c0e4badf997dc914a8ddcc4696b5befd1d17b0f19f719e3f97e38aad92"
+  }
+}

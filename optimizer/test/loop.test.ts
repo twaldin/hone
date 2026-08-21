@@ -689,6 +689,10 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
     expect(eventsOf(events, "episode.started")).toEqual([]);
     expect(eventsOf(events, "episode.candidate")).toEqual([]);
     expect(stub.completedEpisodes).toEqual([0]);
+    expect(stub.completedEpisodeParams).toEqual([{
+      episode: 0,
+      releaseSandboxId: "sb_000000000001",
+    }]);
     expect(stub.finished).toEqual([BASELINE]);
   });
 

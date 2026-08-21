@@ -3724,24 +3724,59 @@ export class Broker {
   }
 
   /** Fsync the inner-episode commit boundary before the optimizer advances. */
-  completeEpisode(params: CompleteEpisodeP, _ctx: CallContext): Record<string, never> {
-    this.state().assertUsable();
-    const checkpoint = this.episodeCheckpoints.get(params.episode);
-    if (checkpoint === undefined) {
-      throw new BrokerError("INTERNAL", `cannot complete unknown episode ${params.episode}`);
+  async completeEpisode(params: CompleteEpisodeP, _ctx: CallContext): Promise<Record<string, never>> {
+    this.enterOp();
+    try {
+      const complete = async (): Promise<Record<string, never>> => {
+        this.state().assertUsable();
+        const checkpoint = this.episodeCheckpoints.get(params.episode);
+        if (checkpoint === undefined) {
+          throw new BrokerError("INTERNAL", `cannot complete unknown episode ${params.episode}`);
+        }
+        if (checkpoint.completed) return {};
+        if (params.releaseSandboxId !== undefined) {
+          const sandbox = this.sandboxes.get(params.releaseSandboxId);
+          if (sandbox === undefined) {
+            throw new BrokerError(
+              "SANDBOX_NOT_FOUND",
+              `completion release sandbox not found: ${params.releaseSandboxId}`,
+            );
+          }
+          if (sandbox.episode !== params.episode) {
+            throw new BrokerError(
+              "INTERNAL",
+              `completion release sandbox ${params.releaseSandboxId} belongs to episode ${sandbox.episode}, not ${params.episode}`,
+            );
+          }
+          const retired = await this.removeTrackedContainer(sandbox.containerId);
+          if (!containerGone(retired)) {
+            throw new BrokerError(
+              "INTERNAL",
+              `sandbox retirement failed before episode completion: ${stderrText(retired)}`,
+            );
+          }
+          this.sandboxes.delete(params.releaseSandboxId);
+        }
+        if ([...this.sandboxes.values()].some((sandbox) => sandbox.episode === params.episode)) {
+          throw new BrokerError("INTERNAL", `cannot complete episode ${params.episode} with an active sandbox`);
+        }
+        const events = this.journalFact(
+          { t: "episodeComplete", episode: params.episode },
+          [{ type: "episode.completed", episode: params.episode }],
+        );
+        checkpoint.completed = true;
+        if (this.resumingEpisode?.episode === params.episode) this.resumingEpisode = undefined;
+        this.publish(events);
+        return {};
+      };
+      return await this.serializeMutation(() =>
+        params.releaseSandboxId === undefined
+          ? complete()
+          : this.serializeSandbox(params.releaseSandboxId, complete),
+      );
+    } finally {
+      this.exitOp();
     }
-    if (checkpoint.completed) return {};
-    if ([...this.sandboxes.values()].some((sandbox) => sandbox.episode === params.episode)) {
-      throw new BrokerError("INTERNAL", `cannot complete episode ${params.episode} with an active sandbox`);
-    }
-    const events = this.journalFact(
-      { t: "episodeComplete", episode: params.episode },
-      [{ type: "episode.completed", episode: params.episode }],
-    );
-    checkpoint.completed = true;
-    if (this.resumingEpisode?.episode === params.episode) this.resumingEpisode = undefined;
-    this.publish(events);
-    return {};
   }
 
   /** Durable trusted-side terminal snapshot; never exposed on the public RPC table. */

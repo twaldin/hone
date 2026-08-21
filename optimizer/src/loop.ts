@@ -373,6 +373,12 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       });
 
       const savedCandidate = resuming ? activeResume.candidate : null;
+      const completeClaimedEpisode = async (): Promise<void> => {
+        await broker.completeEpisode({
+          episode,
+          ...(savedCandidate === null ? {} : { releaseSandboxId: sandboxId }),
+        });
+      };
       let attempt: MutateAttempt =
         savedCandidate === null
           ? await mutateOnce({ sandboxId }, context, episode)
@@ -448,13 +454,13 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         emit({ ...base, at: now(), type: "episode.invalid", episode, reason, repaired });
         if (!repaired) {
           emit({ ...base, at: now(), type: "budget.snapshot", budget: await broker.getBudget() });
-          await broker.completeEpisode({ episode });
+          await completeClaimedEpisode();
           continue;
         }
       }
 
       if (candidate === null || record === null || attempt.result === null) {
-        await broker.completeEpisode({ episode });
+        await completeClaimedEpisode();
         continue;
       }
 
@@ -502,7 +508,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       }
 
       emit({ ...base, at: now(), type: "budget.snapshot", budget: await broker.getBudget() });
-      await broker.completeEpisode({ episode });
+      await completeClaimedEpisode();
     }
 
     await broker.finish({ best: incumbent?.artifact ?? baseline });

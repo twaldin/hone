@@ -82,6 +82,7 @@ export class StubBroker {
   readonly reportedIncumbents: string[] = [];
   readonly finished: string[] = [];
   readonly completedEpisodes: number[] = [];
+  readonly completedEpisodeParams: Array<{ episode: number; releaseSandboxId?: string | undefined }> = [];
   /** Mutation-session execs only; worker probe/assembly execs are emulated structurally. */
   readonly execArgvs: string[][] = [];
   /** Every call in arrival order — `createSandbox:<id>`, `putFile:<sbId>:<path>`, `exec:<sbId>:<argv0>`, `evaluate:<hash>@<seed>`, ... */
@@ -247,6 +248,7 @@ export class StubBroker {
       }
       case "completeEpisode": {
         const params = BrokerMethods.completeEpisode.params.parse(rawParams);
+        this.completedEpisodeParams.push(params);
         if (!this.completedEpisodes.includes(params.episode)) {
           this.completedEpisodes.push(params.episode);
         }

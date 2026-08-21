@@ -40,6 +40,10 @@ hone resume --campaign <campaign-state-dir> --pause <pause-id>
 
 A pause is deliberately nonterminal: it writes `run.paused` and no `run.finished`. `hone status` prints both `status` and `reason`; operators do not need to infer the outcome from a null candidate or correlate sidecars.
 
+`SIGTERM` and `SIGINT` request the safe default: a durable operator pause that can be resumed. Use `hone stop` when the intent is terminal; it writes `run.finished` with status `stopped` and reason `operator`. Tooling must not treat an OS lifecycle signal as a terminal stop.
+
+Repair has one intentionally conservative pre-fsync case. If the process dies after entering repair but before `episode.invalid` is fsynced, the durable record cannot claim that repair finished, so each resume redoes one repair mutation session. This is correct and budget-bounded, but an operator watching spend may see that additional session. Once `episode.invalid` is durable, the repair decision is replayed and no repair work is repeated.
+
 ## Durability inventory
 
 Before the durable-run cutover, Hone already had several load-bearing pieces:
@@ -66,8 +70,9 @@ These rules make resume idempotent: journal append precedes acknowledgement; rep
 
 ## Proof artifacts
 
-Zero-provider-spend live CLI artifacts are committed under:
+Zero-provider-spend CLI artifacts are committed under:
 
-- `fixtures/data/hone-durable-runs/kill-resume/`: a real CLI process killed with `SIGKILL` after `eval.completed`, then resumed to one coherent `run.finished`. `evidence.v1.json` names the commands, exit codes, record files, and uniqueness/accounting assertions.
+- `fixtures/data/hone-durable-runs/docker-kill-resume/`: the hard-gate proof. The real local backend, real broker, optimizer container, mutation sandbox, and evaluator ran through Docker. The CLI process was killed after one candidate and both evaluator facts were durable but before `episode.completed`; resume claimed the checkpoint, replayed without increasing the two-invocation budget, retired the claim sandbox, completed episode 0, and finished coherently.
+- `fixtures/data/hone-durable-runs/kill-resume/`: a supplementary stub-backend CLI lifecycle regression. It does not substitute for the real-broker Docker proof above.
 - `fixtures/data/hone-durable-runs/provider-pause/`: a provider-boundary fake emits a simulated HTTP 429 pause, followed by trusted resume and completion. The run journal records `run.paused` with `provider-rate-limit`, status 429, and pause ID before `run.resumed`.
 - `fixtures/data/hone-durable-runs/recursive-smoke.v1.json`: a post-change M2 recursive-search smoke dispatched one child through the real Docker evaluator, recorded one trusted score, executed neither the synthetic outer entrypoint nor mutation worker, and made zero model calls.

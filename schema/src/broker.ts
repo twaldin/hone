@@ -146,6 +146,12 @@ export const ReportIncumbentParams = z.object({
 export const FinishParams = z.object({ best: ArtifactRef });
 export const CompleteEpisodeParams = z.object({
   episode: z.number().int().nonnegative(),
+  /**
+   * A resumed episode with a journaled candidate claims a fresh sandbox only
+   * to reactivate its measurement epoch. No mutation/save follows, so the
+   * broker retires this exact sandbox atomically with the completion boundary.
+   */
+  releaseSandboxId: z.string().min(1).optional(),
 }).strict();
 
 

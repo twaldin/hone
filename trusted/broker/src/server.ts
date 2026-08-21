@@ -124,7 +124,7 @@ function buildMethodTable(broker: Broker): Map<string, MethodEntry> {
   table.set("completeEpisode", {
     adminOnly: false,
     handler: async (raw, ctx) =>
-      m.completeEpisode.result.parse(broker.completeEpisode(parseParams(m.completeEpisode.params, raw), ctx)),
+      m.completeEpisode.result.parse(await broker.completeEpisode(parseParams(m.completeEpisode.params, raw), ctx)),
   });
   table.set("getBudget", {
     adminOnly: false,
