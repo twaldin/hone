@@ -653,6 +653,7 @@ describe("broker wiring: ctx.corpus reaches the broker", () => {
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: (b) => {
         void b.catch(() => {});
       },

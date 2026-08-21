@@ -418,6 +418,7 @@ async function runProbeFlow(opts: {
     requestStop: () => {
       flow.stops++;
     },
+    requestPause: () => {},
     registerAuthorityBarrier: () => {},
     registerCleanupBarrier: () => {},
   };

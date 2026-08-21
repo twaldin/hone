@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ArtifactRef, BudgetState, QueryCorpusParams, QueryCorpusResult } from "./broker.js";
+import { CampaignPauseReason } from "./proxy.js";
 
 /**
  * Contract 4 — Event log. Append-only NDJSON, one file per run.
@@ -15,6 +16,19 @@ const base = {
   at: z.string().datetime(),
 } as const;
 
+/**
+ * Every durable way a run can stop spending. Supervisors consume this single
+ * taxonomy instead of inferring an outcome from nullable candidates or sidecars.
+ */
+export const RunPauseReason = CampaignPauseReason.or(z.literal("operator"));
+export type RunPauseReason = z.infer<typeof RunPauseReason>;
+export const RunStopReason = z.enum(["operator", "budget-exhausted", "session-no-yield-bound"]);
+export type RunStopReason = z.infer<typeof RunStopReason>;
+export const RunFailureReason = z.literal("crash");
+export type RunFailureReason = z.infer<typeof RunFailureReason>;
+export const RunOutcomeReason = z.union([RunPauseReason, RunStopReason, RunFailureReason]);
+export type RunOutcomeReason = z.infer<typeof RunOutcomeReason>;
+
 export const RunEvent = z.discriminatedUnion("type", [
   z.object({
     ...base,
@@ -22,15 +36,25 @@ export const RunEvent = z.discriminatedUnion("type", [
     capsuleId: z.string(),
     contractHash: z.string(),
     optimizerDigest: z.string(),
+    /** Version 1 advances resume only after episode.completed, never episode.started. */
+    checkpointVersion: z.literal(1).optional(),
     /** Campaign identity a spawned child was admitted under. Broker settlement
      * verification REQUIRES it to match ChildRunAdmission.campaignConfigHash
      * for recursive children; absent for plain standalone runs. */
     campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
   }),
   z.object({ ...base, type: z.literal("run.resumed"), fromCursor: z.number().int().nonnegative() }),
+  z.object({
+    ...base,
+    type: z.literal("run.paused"),
+    reason: RunPauseReason,
+    pauseId: z.string().min(1).optional(),
+    providerStatus: z.number().int().nullable().optional(),
+  }),
   z.object({ ...base, type: z.literal("episode.started"), episode: z.number().int().nonnegative(), parent: ArtifactRef }),
   z.object({ ...base, type: z.literal("episode.candidate"), episode: z.number().int().nonnegative(), candidate: ArtifactRef, sessionTrace: z.string() }),
   z.object({ ...base, type: z.literal("episode.invalid"), episode: z.number().int().nonnegative(), reason: z.string(), repaired: z.boolean() }),
+  z.object({ ...base, type: z.literal("episode.completed"), episode: z.number().int().nonnegative() }),
   z.object({ ...base, type: z.literal("eval.completed"), episode: z.number().int().nonnegative().optional(), artifact: ArtifactRef, assetGroupId: z.string(), seed: z.number().int(), aggregate: z.number(), cached: z.boolean() }),
   z.object({
     ...base,
@@ -56,6 +80,13 @@ export const RunEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("corpus.query"), request: QueryCorpusParams }),
   z.object({ ...base, type: z.literal("corpus.response"), response: QueryCorpusResult }),
   z.object({ ...base, type: z.literal("delivery.applied"), mode: z.enum(["none", "branch", "pr", "auto"]), ref: z.string().optional() }),
-  z.object({ ...base, type: z.literal("run.finished"), best: ArtifactRef.optional(), status: z.enum(["completed", "stopped", "failed", "budget"]) }),
+  z.object({
+    ...base,
+    type: z.literal("run.finished"),
+    best: ArtifactRef.optional(),
+    status: z.enum(["completed", "stopped", "failed", "budget"]),
+    /** Optional only for replay compatibility with version-0 run logs. */
+    reason: z.union([RunStopReason, RunFailureReason]).optional(),
+  }),
 ]);
 export type RunEvent = z.infer<typeof RunEvent>;

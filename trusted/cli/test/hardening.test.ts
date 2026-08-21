@@ -371,6 +371,7 @@ describe("optimizer stdout is diagnostic-only — no event authority", () => {
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: () => {},
       registerCleanupBarrier: () => {},
     };

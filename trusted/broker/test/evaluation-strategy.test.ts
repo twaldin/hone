@@ -1,9 +1,11 @@
 import { existsSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { EvaluationRecord, type RecursiveEvaluationPlan, type RecursiveTask } from "@hone/schema";
+import { CasStore } from "../src/cas.js";
+import { packDirAsArtifact } from "../src/artifact.js";
 import {
   Broker,
   readBrokerJournalEvaluations,
@@ -119,6 +121,60 @@ describe("trusted broker evaluation strategy", () => {
     expect(second.cached).toBe(true);
     expect(calls).toBe(1);
     await broker.close();
+  });
+
+  test("replays a journaled evaluator result inside an incomplete episode without charging again", async () => {
+    let strategyCalls = 0;
+    const config = await configFor("resume-evaluator", async (input) => {
+      strategyCalls += 1;
+      return recordFor(input);
+    });
+    const cas = new CasStore(config.casDir);
+    const workspace = path.join(path.dirname(config.runDir), "workspace");
+    await mkdir(workspace);
+    const parent = { hash: await packDirAsArtifact(workspace, cas) };
+    config.baselineArtifactHash = parent.hash;
+    config.runCommand = async (argv) => ({
+      exitCode: argv[1] === "run" ? 0 : 0,
+      stdout: Buffer.from(argv[1] === "run" ? "container-resume\n" : ""),
+      stderr: Buffer.alloc(0),
+      timedOut: false,
+      truncated: false,
+    });
+
+    const firstBroker = new Broker(config);
+    await firstBroker.init();
+    await firstBroker.createSandbox(
+      { artifact: parent, role: "mutation" },
+      { privileged: false },
+    );
+    const first = await firstBroker.evaluate(
+      { artifact: parent, assetGroupId: "train", seed: 4 },
+      { privileged: false },
+    );
+    expect(strategyCalls).toBe(1);
+    expect(first.cached).toBe(false);
+    await firstBroker.close();
+
+    const resumedBroker = new Broker({
+      ...config,
+      evaluationStrategy: async () => {
+        throw new Error("journaled evaluator work was re-spent");
+      },
+    });
+    await resumedBroker.init();
+    await resumedBroker.createSandbox(
+      { artifact: parent, role: "mutation" },
+      { privileged: false },
+    );
+    const replayed = await resumedBroker.evaluate(
+      { artifact: parent, assetGroupId: "train", seed: 4, resume: true },
+      { privileged: false },
+    );
+    expect(replayed).toEqual({ ...first, cached: true });
+    expect(resumedBroker.getBudget({ privileged: false }).spent.evaluatorInvocations).toBe(1);
+    expect(readBrokerJournalEvaluations(config.runDir).records).toEqual([first]);
+    await resumedBroker.close();
   });
 
   test("keys strategy memoization by the optimizer-authored recursive plan", async () => {

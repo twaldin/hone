@@ -59,7 +59,7 @@ import {
   runsRoot,
   writeRunConfigFile,
 } from "./runs.js";
-import type { CampaignPauseAuthority, ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "./types.js";
+import type { CampaignPauseAuthority, ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext, RunPauseRequest } from "./types.js";
 
 const RUN_USAGE =
   "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume] [--backend stub|local] [--config <json>] [--optimizer-artifact sha256:<64hex>]";
@@ -1515,6 +1515,8 @@ async function superviseLocked(
   let budgetDimension: string | null = initialReplay.budgetExhaustedDimension;
   let budgetEventLogged = budgetDimension !== null;
   let stopRequested = false;
+  const pauseState: { requested: RunPauseRequest | null } = { requested: null };
+  const currentPause = (): RunPauseRequest | null => pauseState.requested;
   // Bound after the AbortController/termination barrier exist. Broker events
   // cannot arrive before backend.start, so this placeholder is never the
   // active path; it keeps event normalization linear during setup.
@@ -1548,6 +1550,8 @@ async function superviseLocked(
       io.out(`run ${runId} resumed from cursor ${parsed.fromCursor}`);
     } else if (parsed.type === "budget.exhausted") {
       io.out(`budget exhausted: ${parsed.dimension}`);
+    } else if (parsed.type === "run.paused") {
+      io.out(`run ${runId} paused: ${parsed.reason}`);
     }
     return parsed;
   };
@@ -1651,6 +1655,7 @@ async function superviseLocked(
       contractHash: contractHash(readFileSync(join(runDir, CONTRACT_FILE), "utf8")),
       ...(extra.campaignConfigHash !== undefined ? { campaignConfigHash: extra.campaignConfigHash } : {}),
       optimizerDigest,
+      checkpointVersion: 1,
     });
   }
 
@@ -1723,16 +1728,30 @@ async function superviseLocked(
   const remainMs = remainingWallBudgetMs(config.budget.maxWallClockSec, spentWallSec, runStartedAt);
   armTimer(() => requestBudgetAbort("wallClockSec"), remainMs);
 
-  const onSignal = (): void => {
+  const onStop = (): void => {
     stopRequested = true;
     abort.abort(new Error("stop requested"));
     void termThenKill();
   };
-  process.on("SIGTERM", onSignal);
-  process.on("SIGINT", onSignal);
-  // The lock's lease connections carry trusted stop requests (`hone stop`
-  // never signals a PID); a request buffered before this bind fires now.
-  stopChannel.bind(onSignal);
+  const onPause = (request: RunPauseRequest): void => {
+    if (pauseState.requested !== null) return;
+    pauseState.requested = request;
+    emit({
+      runId,
+      at: new Date().toISOString(),
+      type: "run.paused",
+      reason: request.reason,
+      ...(request.pauseId === undefined ? {} : { pauseId: request.pauseId }),
+      ...(request.providerStatus === undefined ? {} : { providerStatus: request.providerStatus }),
+    });
+    abort.abort(new Error(`run paused: ${request.reason}`));
+    void termThenKill();
+  };
+  const onOperatorPause = (): void => onPause({ reason: "operator" });
+  process.on("SIGTERM", onOperatorPause);
+  process.on("SIGINT", onOperatorPause);
+  // The lock lease is an explicit `hone stop`, not an OS lifecycle signal.
+  stopChannel.bind(onStop);
 
   // Terminal-order fence: once the backend settled or the hard-stop deadline
   // passed, a late ctx.emit from an abort-ignoring backend (or a straggler
@@ -1783,7 +1802,8 @@ async function superviseLocked(
       };
     },
     probeGate: (report) => (headless ? Promise.resolve(headlessProbeVerdict(report)) : promptProbe(report, io, abort.signal)),
-    requestStop: () => onSignal(),
+    requestStop: () => onStop(),
+    requestPause: (request) => onPause(request),
     registerAuthorityBarrier: (barrier) => {
       authorityBarrier = barrier;
       // A rejection may land before anything awaits it — keep it handled.
@@ -1871,6 +1891,12 @@ async function superviseLocked(
     if (failure !== null) {
       const err: Error = failure;
       io.err(`backend failed: ${err.message}`);
+    }
+
+    const pauseAfterBackend = currentPause();
+    if (pauseAfterBackend !== null) {
+      io.err(`run durably paused (${pauseAfterBackend.reason}); resume with \`hone run --resume\``);
+      return 0;
     }
 
     const preFinish = replayRun(runDir);
@@ -1968,28 +1994,39 @@ async function superviseLocked(
       }
     }
 
-    // Drain the signal queue: a SIGTERM raised during the synchronous
-    // delivery is only DISPATCHED in a later poll phase — a single
-    // setImmediate can land in the same iteration's check phase and miss it
-    // (verified empirically). A timer forces at least one full iteration
-    // through poll, so the handler runs before the terminal status is
-    // chosen: delivery finishes atomically, the run still stops.
+    // Drain the signal queue: a SIGTERM raised during synchronous delivery
+    // is dispatched only in a later poll phase. Delivery finishes atomically,
+    // then the durable operator pause wins over terminalization.
     await sleep(25);
 
     // A signal that landed during delivery (or between backend settle and
     // the drain) started the barrier but nothing awaited it yet — the same
     // idempotent barrier guarantees children are reaped before the terminal.
     if (abort.signal.aborted) await termThenKill();
+    const pauseAfterDelivery = currentPause();
+    if (pauseAfterDelivery !== null) {
+      io.err(`run durably paused (${pauseAfterDelivery.reason}); resume with \`hone run --resume\``);
+      return 0;
+    }
 
     if (extra.campaignPauseAuthority?.isCampaignPaused() === true) {
       io.err("campaign remains durably paused after backend teardown — run left unfinished for trusted resume");
       return 1;
     }
     let status: "completed" | "stopped" | "failed" | "budget";
-    if (stopRequested) status = "stopped";
-    else if (budgetDimension !== null) status = "budget";
-    else if (failure !== null) status = "failed";
-    else status = "completed";
+    let reason: "operator" | "budget-exhausted" | "crash" | undefined;
+    if (stopRequested) {
+      status = "stopped";
+      reason = "operator";
+    } else if (budgetDimension !== null) {
+      status = "budget";
+      reason = "budget-exhausted";
+    } else if (failure !== null) {
+      status = "failed";
+      reason = "crash";
+    } else {
+      status = "completed";
+    }
 
     if (budgetDimension !== null && !budgetEventLogged) {
       emit({ runId, at: new Date().toISOString(), type: "budget.exhausted", dimension: budgetDimension });
@@ -2001,6 +2038,7 @@ async function superviseLocked(
       type: "run.finished",
       ...(best !== null ? { best } : {}),
       status,
+      ...(reason === undefined ? {} : { reason }),
     });
 
     const report = exitReport(runId, replayRun(runDir));
@@ -2014,8 +2052,8 @@ async function superviseLocked(
     // Handlers and timers live through delivery, the terminal event, and the
     // report — removed only once no further trusted append can happen.
     for (const t of timers) clearTimeout(t);
-    process.removeListener("SIGTERM", onSignal);
-    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onOperatorPause);
+    process.removeListener("SIGINT", onOperatorPause);
     stopChannel.bind(() => {}); // late stop bytes after the terminal are inert
   }
 }

@@ -81,6 +81,7 @@ export class StubBroker {
   readonly recursivePlans: Array<RecursiveEvaluationPlan | undefined> = [];
   readonly reportedIncumbents: string[] = [];
   readonly finished: string[] = [];
+  readonly completedEpisodes: number[] = [];
   /** Mutation-session execs only; worker probe/assembly execs are emulated structurally. */
   readonly execArgvs: string[][] = [];
   /** Every call in arrival order — `createSandbox:<id>`, `putFile:<sbId>:<path>`, `exec:<sbId>:<argv0>`, `evaluate:<hash>@<seed>`, ... */
@@ -184,6 +185,12 @@ export class StubBroker {
         this.putFiles.push({ sandboxId: params.sandboxId, path: params.path, content: bytes.toString("utf8") });
         return {};
       }
+      case "getFile": {
+        const params = BrokerMethods.getFile.params.parse(rawParams);
+        const bytes = this.scratch.get(params.path);
+        if (bytes === undefined) throw new Error(`missing file ${params.path}`);
+        return { contentBase64: bytes.toString("base64") };
+      }
       case "exec": {
         const params = BrokerMethods.exec.params.parse(rawParams);
         this.ops.push(`exec:${params.sandboxId}:${params.argv.join(" ")}`);
@@ -236,6 +243,13 @@ export class StubBroker {
       case "reportIncumbent": {
         const params = BrokerMethods.reportIncumbent.params.parse(rawParams);
         this.reportedIncumbents.push(params.artifact.hash);
+        return {};
+      }
+      case "completeEpisode": {
+        const params = BrokerMethods.completeEpisode.params.parse(rawParams);
+        if (!this.completedEpisodes.includes(params.episode)) {
+          this.completedEpisodes.push(params.episode);
+        }
         return {};
       }
       case "getBudget": {

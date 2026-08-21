@@ -10,6 +10,7 @@ import {
   type ArtifactRef,
   type BudgetState,
   type CapsuleManifest,
+  type CampaignPauseSignal,
   type M2ProxyRole,
   type ModelRouting,
 } from "@hone/schema";
@@ -631,12 +632,65 @@ export async function setupEgress(
   };
 }
 
-/** Optimizer resume payload, always from the on-disk log (post-reconciliation truth). */
-function resumeHint(runDir: string): { nextEpisode: number; incumbent: { artifact: ArtifactRef; aggregate: number } | null } {
+const MutateCheckpointResult = z.object({
+  summary: z.string(),
+  approach: z.string(),
+  filesChanged: z.array(z.string()),
+}).strict();
+
+/** Optimizer resume payload, always from post-reconciliation durable authority. */
+async function resumeHint(
+  runDir: string,
+  casDir: string,
+): Promise<{
+  nextEpisode: number;
+  incumbent: { artifact: ArtifactRef; aggregate: number } | null;
+  activeEpisode?: {
+    episode: number;
+    parent: ArtifactRef;
+    candidate: {
+      artifact: ArtifactRef;
+      sessionTrace: string;
+      result: z.infer<typeof MutateCheckpointResult>;
+    } | null;
+  };
+}> {
   const replayed = replayRun(runDir);
-  return {
+  const base = {
     nextEpisode: replayed.nextEpisode,
-    incumbent: replayed.incumbent === null ? null : { artifact: replayed.incumbent.artifact, aggregate: replayed.incumbent.aggregate },
+    incumbent: replayed.incumbent === null ? null : {
+      artifact: replayed.incumbent.artifact,
+      aggregate: replayed.incumbent.aggregate,
+    },
+  };
+  const active = replayed.activeEpisode;
+  if (active === null) return base;
+  if (active.candidate === null) {
+    return {
+      ...base,
+      activeEpisode: { episode: active.episode, parent: active.parent, candidate: null },
+    };
+  }
+  const trace = (await new CasStore(casDir).readBuffer(active.candidate.sessionTrace)).toString("utf8");
+  const last = trace.split("\n").filter((line) => line.trim().length > 0).at(-1);
+  if (last === undefined) throw new Error(`empty session trace ${active.candidate.sessionTrace}`);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(last);
+  } catch {
+    throw new Error(`session trace ${active.candidate.sessionTrace} has no durable result`);
+  }
+  return {
+    ...base,
+    activeEpisode: {
+      episode: active.episode,
+      parent: active.parent,
+      candidate: {
+        artifact: active.candidate.artifact,
+        sessionTrace: active.candidate.sessionTrace,
+        result: MutateCheckpointResult.parse(raw),
+      },
+    },
   };
 }
 
@@ -762,7 +816,7 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
       // Events.ndjson is the store of record and reconciliation may have just
       // appended recovered incumbents — replay from disk, not the supervisor's
       // pre-backend snapshot, so the resume hint sees the durable authority.
-      HONE_RESUME: JSON.stringify(resumeHint(ctx.runDir)),
+      HONE_RESUME: JSON.stringify(await resumeHint(ctx.runDir, ctx.casDir)),
     },
     containerLease: runtime.containerLease,
   });
@@ -1213,6 +1267,7 @@ export function createBackend(
       let spendDirect = false;
       const queuedSpend: { tokens: number; usd: number }[] = [];
       const queuedExhaustion: BudgetDimension[] = [];
+      let queuedPause: CampaignPauseSignal | undefined;
       const localPauseIds = new Set<string>();
       let localPauseEpoch = 0;
       const campaignPauseAuthority = ctx.campaignPauseAuthority ?? {
@@ -1283,7 +1338,18 @@ export function createBackend(
         upstreamBaseUrl: ctx.env["HONE_UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM,
         ...(ctx.env["HONE_UPSTREAM_API_KEY"] !== undefined ? { upstreamApiKey: ctx.env["HONE_UPSTREAM_API_KEY"] } : {}),
         checkBudget,
-        recordCampaignPause: (signal) => campaignPauseAuthority.recordCampaignPause(signal),
+        recordCampaignPause: async (signal) => {
+          await campaignPauseAuthority.recordCampaignPause(signal);
+          if (!spendDirect) {
+            queuedPause ??= signal;
+            return;
+          }
+          ctx.requestPause({
+            reason: signal.reason,
+            pauseId: signal.pauseId,
+            providerStatus: signal.status,
+          });
+        },
         recordCampaignResume: (signal) => campaignPauseAuthority.recordCampaignResume(signal),
         captureCampaignDispatchFence,
         validateCampaignDispatchFence,
@@ -1495,16 +1561,25 @@ export function createBackend(
           // A poisoned dispatch journal is handled at teardown: proxy.close()
           // rejects, the cleanup barrier rejects, the run stays non-terminal.
         });
-        if (await proxy.campaignPause() !== undefined) {
+        const activePause = await proxy.campaignPause();
+        if (activePause !== undefined) {
           trustedResumePreflight = true;
           try {
             const preflight = await proxy.resume();
             if (!preflight.passed) {
+              ctx.requestPause({
+                reason: activePause.reason,
+                pauseId: activePause.pauseId,
+                providerStatus: activePause.status,
+              });
               throw new Error("campaign remains paused because frozen-route preflight did not pass");
             }
+            queuedPause = undefined;
           } finally {
             trustedResumePreflight = false;
           }
+        } else if (queuedPause !== undefined) {
+          throw new Error("proxy pause callback had no matching durable dispatch-journal pause");
         }
 
         // Only AFTER durable authority is reconciled may a stop short-circuit:

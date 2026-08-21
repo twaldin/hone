@@ -89,6 +89,7 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
     registerChild: () => () => {},
     probeGate: () => Promise.resolve(true),
     requestStop: () => {},
+    requestPause: () => {},
     registerAuthorityBarrier: (b) => {
       void b.catch(() => {});
     },

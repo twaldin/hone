@@ -123,6 +123,12 @@ export const EvaluateParams = z.object({
   assetGroupId: z.string(),
   seed: z.number().int().nonnegative(),
   recursivePlan: RecursiveEvaluationPlan.optional(),
+  /**
+   * Continue the one journaled-but-incomplete episode. The broker accepts
+   * this only for exact evaluation facts already held by that checkpoint;
+   * new coordinates are charged normally.
+   */
+  resume: z.literal(true).optional(),
 });
 
 export const ReportIncumbentParams = z.object({
@@ -132,6 +138,9 @@ export const ReportIncumbentParams = z.object({
 });
 
 export const FinishParams = z.object({ best: ArtifactRef });
+export const CompleteEpisodeParams = z.object({
+  episode: z.number().int().nonnegative(),
+}).strict();
 
 
 /** Componentwise trusted resource accounting for recursive child runs. */
@@ -285,6 +294,7 @@ export const BrokerMethods = {
     result: z.object({}).passthrough(),
   },
   reportIncumbent: { params: ReportIncumbentParams, result: z.object({}) },
+  completeEpisode: { params: CompleteEpisodeParams, result: z.object({}) },
   getBudget: { params: z.object({}), result: BudgetState },
   finish: { params: FinishParams, result: z.object({}) },
   spawnRun: { params: SpawnRunParams, result: SpawnRunResult },
