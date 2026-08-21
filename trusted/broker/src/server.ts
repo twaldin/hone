@@ -128,6 +128,11 @@ function buildMethodTable(broker: Broker): Map<string, MethodEntry> {
         broker.reportSessionNoYieldBound(parseParams(m.reportSessionNoYieldBound.params, raw), ctx),
       ),
   });
+  table.set("completeEpisode", {
+    adminOnly: false,
+    handler: async (raw, ctx) =>
+      m.completeEpisode.result.parse(await broker.completeEpisode(parseParams(m.completeEpisode.params, raw), ctx)),
+  });
   table.set("getBudget", {
     adminOnly: false,
     handler: async (raw, ctx) => {

@@ -27,10 +27,23 @@
  * pi_natives addon baked next to bun (a .node binary cannot live in a JS
  * bundle).
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   createAgentSession,
   discoverAuthStorage,
@@ -462,7 +475,102 @@ class SessionNoYieldBoundExceeded extends Error {
 }
 
 
+interface SessionCheckpoint {
+  dir: string;
+  resultPath: string;
+  sessionDir: string;
+  workspacePath: string;
+}
+
+function syncPath(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function durableJson(path: string, value: unknown): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  const fd = openSync(tmp, "w", 0o600);
+  try {
+    writeFileSync(fd, `${JSON.stringify(value)}\n`, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
+  syncPath(dir);
+}
+
+function checkpointFor(env: SessionEnv, episode: EpisodeFile): SessionCheckpoint {
+  const identity = createHash("sha256").update(JSON.stringify(episode)).digest("hex");
+  const dir = join(env.agentDir, "checkpoints", identity);
+  return {
+    dir,
+    resultPath: join(dir, "result.json"),
+    sessionDir: join(dir, "sessions"),
+    workspacePath: join(dir, "workspace.tar"),
+  };
+}
+
+function syncSession(manager: SessionManager): void {
+  manager.flushSync();
+  const sessionFile = manager.getSessionFile();
+  if (sessionFile === undefined || !existsSync(sessionFile)) return;
+  syncPath(sessionFile);
+  syncPath(dirname(sessionFile));
+}
+
+function saveWorkspace(checkpoint: SessionCheckpoint, cwd: string): void {
+  mkdirSync(checkpoint.dir, { recursive: true });
+  const tmp = `${checkpoint.workspacePath}.${process.pid}.tmp`;
+  const packed = spawnSync("tar", ["-c", "-f", tmp, "-C", cwd, "."]);
+  if (packed.status !== 0) {
+    throw new Error(`workspace checkpoint failed: ${packed.stderr.toString().slice(-2000)}`);
+  }
+  syncPath(tmp);
+  renameSync(tmp, checkpoint.workspacePath);
+  syncPath(checkpoint.dir);
+}
+
+function restoreWorkspace(checkpoint: SessionCheckpoint, cwd: string): boolean {
+  if (!existsSync(checkpoint.workspacePath)) return false;
+  const restored = spawnSync(
+    "sh",
+    [
+      "-c",
+      "find \"$1\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar -x -f \"$2\" -C \"$1\"",
+      "sh",
+      cwd,
+      checkpoint.workspacePath,
+    ],
+  );
+  if (restored.status !== 0) {
+    throw new Error(`workspace checkpoint restore failed: ${restored.stderr.toString().slice(-2000)}`);
+  }
+  return true;
+}
+
 async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record<string, unknown>> {
+  const checkpoint = checkpointFor(env, episode);
+  const manager = await SessionManager.continueRecent(env.cwd, checkpoint.sessionDir);
+  const hadSession = manager.getEntries().length > 0;
+  const restored = restoreWorkspace(checkpoint, env.cwd);
+  if (hadSession !== restored) {
+    throw new Error(
+      "session checkpoint is incomplete: conversation and workspace must become durable together",
+    );
+  }
+  if (existsSync(checkpoint.resultPath)) {
+    const result = objectRecord(JSON.parse(readFileSync(checkpoint.resultPath, "utf8")));
+    if (result === null) throw new Error("session checkpoint result is malformed");
+    return result;
+  }
+
   const authStorage = await discoverAuthStorage(env.agentDir);
   const registry = buildRegistry(env, authStorage);
   const model = registry.find("hone-proxy", env.modelId);
@@ -476,7 +584,7 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     model,
     systemPrompt: episode.systemPrompt,
     deadline: env.deadline,
-    sessionManager: SessionManager.inMemory(env.cwd),
+    sessionManager: manager,
     settings: isolatedSettings(),
     toolNames: episode.tools,
     requireYieldTool: true,
@@ -495,6 +603,7 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
   let zeroUsageTurns = 0;
   let normalizedUsageTurns = 0;
 
+  let checkpointFailure: Error | undefined;
   try {
     const expected = [...episode.tools, "yield"];
     await session.setActiveToolsByName(expected);
@@ -518,38 +627,55 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
       },
     );
     session.subscribe((event) => {
-      if (event.type === "tool_execution_end" && event.toolName === "yield" && event.isError !== true) {
-        const details: unknown = event.result?.details;
-        if (typeof details === "object" && details !== null) {
-          const rec = details as Record<string, unknown>;
-          if (rec.status === "success" && typeof rec.data === "object" && rec.data !== null) {
-            final = rec.data as Record<string, unknown>;
+      if (checkpointFailure !== undefined) return;
+      try {
+        if (event.type === "tool_execution_end" && event.isError !== true) {
+          // Publish workspace bytes before the transcript acknowledges the
+          // completed tool. A kill can leave workspace ahead of conversation,
+          // never conversation describing effects absent from the restore.
+          saveWorkspace(checkpoint, env.cwd);
+        }
+        syncSession(manager);
+        if (event.type === "tool_execution_end" && event.toolName === "yield" && event.isError !== true) {
+          const details: unknown = event.result?.details;
+          if (typeof details === "object" && details !== null) {
+            const rec = details as Record<string, unknown>;
+            if (rec.status === "success" && typeof rec.data === "object" && rec.data !== null) {
+              final = rec.data as Record<string, unknown>;
+              durableJson(checkpoint.resultPath, final);
+            }
           }
         }
-        return;
-      }
-      if (event.type !== "turn_end" || event.message.role !== "assistant") return;
-      bounded = counter.observe(
-        {
-          promptTokens: event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite,
-          completionTokens: event.message.usage.output,
-          totalTokens: event.message.usage.totalTokens,
-        },
-        final !== undefined,
-      );
-      if (bounded !== null && abortPromise === undefined) {
-        abortPromise = session.abort({ reason: "hone mutation session no-yield token bound" });
-        // The prompt catch below awaits and rethrows this result. Attach an
-        // immediate handler so a fast abort failure is never unhandled.
-        void abortPromise.catch(() => {});
+        if (event.type !== "turn_end" || event.message.role !== "assistant") return;
+        bounded = counter.observe(
+          {
+            promptTokens: event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite,
+            completionTokens: event.message.usage.output,
+            totalTokens: event.message.usage.totalTokens,
+          },
+          final !== undefined,
+        );
+        if (bounded !== null && abortPromise === undefined) {
+          abortPromise = session.abort({ reason: "hone mutation session no-yield token bound" });
+          // The prompt catch below awaits and rethrows this result. Attach an
+          // immediate handler so a fast abort failure is never unhandled.
+          void abortPromise.catch(() => {});
+        }
+      } catch (error) {
+        checkpointFailure = error instanceof Error ? error : new Error(String(error));
+        void session.abort({ reason: "durable session checkpoint failed" }).catch(() => {});
       }
     });
 
+    const prompt = hadSession
+      ? "Continue the interrupted task from the durable transcript. Do not repeat completed tool work."
+      : episode.userPrompt;
     for (let attempt = 0; ; attempt++) {
       try {
-        await session.prompt(episode.userPrompt);
+        await session.prompt(prompt);
         break;
       } catch (err) {
+        if (checkpointFailure !== undefined) throw checkpointFailure;
         if (bounded !== null) {
           await abortPromise?.catch(() => {});
           throw new SessionNoYieldBoundExceeded(bounded);
@@ -568,6 +694,7 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
       }
     }
 
+    if (checkpointFailure !== undefined) throw checkpointFailure;
     if (bounded !== null) {
       await abortPromise?.catch(() => {});
       throw new SessionNoYieldBoundExceeded(bounded);
@@ -575,6 +702,7 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     if (final === undefined) throw new Error("session ended without a successful yield");
     return final;
   } finally {
+    syncSession(manager);
     if (zeroUsageTurns > 0 || normalizedUsageTurns > 0) {
       console.error(JSON.stringify({
         type: SESSION_USAGE_ANOMALY_RECORD_TYPE,

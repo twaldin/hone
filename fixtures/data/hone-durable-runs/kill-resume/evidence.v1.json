@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "recordedAt": "2026-08-21T02:43:06.000Z",
+  "runId": "run_mt2cexpl03c659",
+  "zeroModelCalls": true,
+  "cwd": "/home/tim/omp-firstmate/worktrees/hone-durable-runs/fixtures/data/hone-durable-runs/kill-resume",
+  "launchCommand": "HONE_STUB_EPISODES=1 HONE_STUB_CHECKPOINT_DELAY_MS=10000 /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/node_modules/.bin/tsx /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/src/main.ts run capsule --headless --backend stub",
+  "interruption": {
+    "afterEvent": "eval.completed",
+    "signal": "SIGKILL",
+    "supervisedPid": 3843819,
+    "exitCode": 137,
+    "runFinishedPresentBeforeResume": false
+  },
+  "resumeCommand": "HONE_STUB_EPISODES=1 HONE_STUB_CHECKPOINT_DELAY_MS=0 /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/node_modules/.bin/tsx /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/src/main.ts run capsule --headless --resume",
+  "resumeExitCode": 0,
+  "records": {
+    "events": ".hone-runs/run_mt2cexpl03c659/events.ndjson",
+    "proxyDispatch": ".hone-runs/run_mt2cexpl03c659/proxy-dispatch.ndjson"
+  },
+  "assertions": {
+    "run.started": 1,
+    "run.resumed": 1,
+    "episode.started": 1,
+    "episode.candidate": 1,
+    "eval.completed": 1,
+    "episode.completed": 1,
+    "proxy.intent": 1,
+    "proxy.settle": 1,
+    "finalEvaluatorInvocations": 1,
+    "finalTokens": 1000,
+    "finishedStatus": "completed",
+    "finishedBest": "sha256:0000000000000000000000000000000000000000000000000000000000000100"
+  }
+}

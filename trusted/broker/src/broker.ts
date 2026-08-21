@@ -22,6 +22,7 @@ import {
   ChildRunAdmission,
   ChildRunLaunchReceipt,
   ChildRunTerminal,
+  CompleteEpisodeParams,
   CreateSandboxParams,
   EvaluateParams,
   CorpusPanelEvidence,
@@ -329,6 +330,8 @@ interface SandboxEntry {
   episode: number;
   /** Artifact the sandbox was unpacked from — trusted lineage parent for candidates it saves. */
   parentHash: string;
+  /** Checkpoint-v1 measurement epoch this sandbox is authorized to mutate. */
+  epoch: string;
   /** Exact bytes from the most recent exec, retained only until candidate admission. */
   lastExecStdout: Buffer | null;
   /** Exit code of the most recent exec; a candidate save requires 0. */
@@ -465,6 +468,7 @@ type SaveArtifactP = z.infer<typeof SaveArtifactParams>;
 type EvaluateP = z.infer<typeof EvaluateParams>;
 type ReportIncumbentP = z.infer<typeof ReportIncumbentParams>;
 type ReportSessionNoYieldBoundP = z.infer<typeof ReportSessionNoYieldBoundParams>;
+type CompleteEpisodeP = z.infer<typeof CompleteEpisodeParams>;
 type FinishP = z.infer<typeof FinishParams>;
 type GetTaskR = z.infer<typeof GetTaskResult>;
 type CorpusDocument = z.infer<typeof CorpusPublicDocument> | z.infer<typeof CorpusPanelEvidence>;
@@ -559,6 +563,7 @@ type EmittableEvent =
   | { type: "budget.exhausted"; dimension: string }
   | { type: "holdout.accessed"; capsuleId: string; ledgerCount: number; ledgerBudget: number }
   | { type: "episode.started"; episode: number; parent: ArtifactRef }
+  | { type: "episode.completed"; episode: number }
   | { type: "episode.candidate"; episode: number; candidate: ArtifactRef; sessionTrace: string }
   | {
       type: "mutation.no-yield-bound";
@@ -588,6 +593,7 @@ const BROKER_EVENT_TYPES = new Set<RunEvent["type"]>([
   "episode.started",
   "mutation.no-yield-bound",
   "mutation.usage-anomaly",
+  "episode.completed",
   "episode.candidate",
   "eval.completed",
   "gate.paired",
@@ -633,6 +639,8 @@ const StateLine = z.discriminatedUnion("t", [
     t: z.literal("eval"),
     record: EvaluationRecord,
     /** Measurement generation (`${bootNonce}:{startup|ep<N>}`); legacy lines lack it and grant no gate authority. */
+    /** Full evaluator memo identity, including recursive plan when present. */
+    memoKey: z.string().optional(),
     epoch: z.string().optional(),
     /** Trusted M1 replicate identity; absent on M0 and legacy journal facts. */
     measurementEpoch: z.string().optional(),
@@ -642,7 +650,15 @@ const StateLine = z.discriminatedUnion("t", [
     gate: GateFact.optional(),
     events: JournalEvents,
   }),
-  z.object({ t: z.literal("episode"), episode: z.number().int().nonnegative(), events: JournalEvents }),
+  z.object({
+    t: z.literal("episode"),
+    episode: z.number().int().nonnegative(),
+    /** Present on checkpoint-v1 facts; legacy episode lines remain replayable. */
+    parent: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+    epoch: z.string().min(1).optional(),
+    events: JournalEvents,
+  }),
+  z.object({ t: z.literal("episodeComplete"), episode: z.number().int().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("lineage"), candidate: z.string(), parent: z.string(), episode: z.number().int().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("repair"), hash: z.string(), parent: z.string(), episode: z.number().int().nonnegative(), events: JournalEvents }),
   /** M0 candidate attempt: the one public non-baseline evaluator admission, WAL'd before spawn. */
@@ -1032,6 +1048,16 @@ export class Broker {
   private readonly lineage = new Map<string, { parent: string; episode: number }>();
   /** Failed-exec repair snapshots: NOT candidates; sandboxes resumed from one reuse its episode. */
   private readonly repairs = new Map<string, { parent: string; episode: number }>();
+  /** Durable episode boundaries and the one replayable incomplete checkpoint. */
+  private readonly episodeCheckpoints = new Map<number, {
+    parent: string | undefined;
+    epoch: string | undefined;
+    completed: boolean;
+  }>();
+  private resumingEpisode: { episode: number; parent: string; epoch: string; claimedSandboxId: string | null } | undefined;
+  /** Full trusted records from the resumed episode, returned only for exact replay asks. */
+  private readonly replayedEvaluations = new Map<string, EvaluationRecord>();
+  private readonly journaledEvaluationMemoKeys = new Set<string>();
   /** Trusted current incumbent — promotion is monotone against this. */
   private currentIncumbent: IncumbentState | undefined;
   /** Full ordered promotion history (replayed + live) — crash-resume event recovery. */
@@ -1728,11 +1754,34 @@ export class Broker {
           break;
         case "eval":
           this.applyJournaledEval(line);
+          if (line.epoch !== undefined) {
+            const legacyKey =
+              `${line.epoch}|${line.record.artifactHash}|` +
+              `${line.record.assetGroupId}|${line.record.seed}`;
+            this.replayedEvaluations.set(line.memoKey ?? legacyKey, line.record);
+            if (line.memoKey !== undefined) this.journaledEvaluationMemoKeys.add(line.memoKey);
+          }
           break;
         case "episode":
+          if (this.episodeCheckpoints.has(line.episode)) {
+            throw new BrokerError("INTERNAL", `run state log corrupt: duplicate episode ${line.episode}`);
+          }
+          this.episodeCheckpoints.set(line.episode, {
+            parent: line.parent,
+            epoch: line.epoch,
+            completed: false,
+          });
           this.episodeOrdinal = Math.max(this.episodeOrdinal, line.episode + 1);
           this.anyEpisodeStarted = true;
           break;
+        case "episodeComplete": {
+          const checkpoint = this.episodeCheckpoints.get(line.episode);
+          if (checkpoint === undefined || checkpoint.completed) {
+            throw new BrokerError("INTERNAL", `run state log corrupt: invalid episode completion ${line.episode}`);
+          }
+          checkpoint.completed = true;
+          break;
+        }
         case "lineage": {
           // Live code journals lineage at most once per hash, so a second
           // line is old-journal/corruption territory: an identical restatement
@@ -1798,6 +1847,22 @@ export class Broker {
           break;
         }
       }
+    }
+    const resumable = [...this.episodeCheckpoints.entries()].filter(
+      (entry): entry is [number, { parent: string; epoch: string; completed: false }] =>
+        !entry[1].completed && entry[1].parent !== undefined && entry[1].epoch !== undefined,
+    );
+    if (resumable.length > 1) {
+      throw new BrokerError("INTERNAL", "run state log holds multiple incomplete checkpoint-v1 episodes");
+    }
+    const pending = resumable[0];
+    if (pending !== undefined) {
+      this.resumingEpisode = {
+        episode: pending[0],
+        parent: pending[1].parent,
+        epoch: pending[1].epoch,
+        claimedSandboxId: null,
+      };
     }
     // Wall clock is metered from the FIRST start of this run, ever — a
     // restart cannot rewind it.
@@ -2095,7 +2160,7 @@ export class Broker {
       if (!containerGone(removed)) {
         throw new BrokerError("INTERNAL", `expired sandbox cleanup failed: ${stderrText(removed)}`);
       }
-      this.sandboxes.delete(sandboxId);
+      this.deleteProvenGoneSandbox(sandboxId);
       throw new BrokerError("SANDBOX_NOT_FOUND", `sandbox expired: ${sandboxId}`);
     }
     return entry;
@@ -2122,7 +2187,7 @@ export class Broker {
             if (current === undefined || this.now() < current.expiresAtMs) return;
             try {
               const removed = await this.removeTrackedContainer(current.containerId);
-              if (containerGone(removed)) this.sandboxes.delete(id);
+              if (containerGone(removed)) this.deleteProvenGoneSandbox(id);
             } catch {
               // Keep the expired entry tracked: close() retries and fails terminal
               // cleanup if Docker still cannot remove it.
@@ -2309,7 +2374,7 @@ export class Broker {
 
   private missingContainer(res: CmdResult, sandboxId: string): BrokerError | undefined {
     if (res.exitCode !== 0 && MISSING_CONTAINER_RE.test(res.stderr.toString("utf8"))) {
-      this.sandboxes.delete(sandboxId);
+      this.deleteProvenGoneSandbox(sandboxId);
       return new BrokerError("SANDBOX_NOT_FOUND", `sandbox container gone: ${sandboxId}`);
     }
     return undefined;
@@ -2324,7 +2389,7 @@ export class Broker {
     if (!result.timedOut) return;
     entry.expiresAtMs = 0;
     const retired = await this.removeTrackedContainer(entry.containerId);
-    if (containerGone(retired)) this.sandboxes.delete(sandboxId);
+    if (containerGone(retired)) this.deleteProvenGoneSandbox(sandboxId);
     throw new BrokerError("INTERNAL", `${operation} timed out; sandbox retired`);
   }
 
@@ -2484,9 +2549,64 @@ export class Broker {
     };
   }
 
+  /**
+   * A caller can lose the response after a resumed parent claim succeeded.
+   * Only the one in-memory sandbox registered for the same episode, parent,
+   * and checkpoint epoch is safe to return; any claimed-but-unmatched state
+   * remains a hard refusal rather than guessing at a sandbox.
+   */
+  private replayedResumeClaim(params: CreateSandboxP): SandboxRef | undefined {
+    const resumed = this.resumingEpisode;
+    if (
+      resumed === undefined
+      || params.continueEpisode !== resumed.episode
+      || params.artifact.hash !== resumed.parent
+      || resumed.claimedSandboxId === null
+    ) {
+      return undefined;
+    }
+    const sandbox = this.sandboxes.get(resumed.claimedSandboxId);
+    if (
+      sandbox === undefined
+      || sandbox.episode !== resumed.episode
+      || sandbox.parentHash !== resumed.parent
+      || sandbox.epoch !== resumed.epoch
+    ) {
+      throw new BrokerError(
+        "INTERNAL",
+        `resumed episode ${resumed.episode} claim has no unique registered sandbox`,
+      );
+    }
+    return { sandboxId: resumed.claimedSandboxId };
+  }
+
+  /**
+   * Forget a sandbox only after its caller proved the container is gone.
+   * The resumed-parent claim names one exact in-memory sandbox; clearing it
+   * requires the same id, episode, parent, and checkpoint epoch.
+   */
+  private deleteProvenGoneSandbox(sandboxId: string): boolean {
+    const sandbox = this.sandboxes.get(sandboxId);
+    const deleted = this.sandboxes.delete(sandboxId);
+    const resumed = this.resumingEpisode;
+    if (
+      deleted
+      && sandbox !== undefined
+      && resumed?.claimedSandboxId === sandboxId
+      && sandbox.episode === resumed.episode
+      && sandbox.parentHash === resumed.parent
+      && sandbox.epoch === resumed.epoch
+    ) {
+      resumed.claimedSandboxId = null;
+    }
+    return deleted;
+  }
+
   async createSandbox(params: CreateSandboxP, _ctx: CallContext): Promise<SandboxRef> {
     this.enterOp();
     try {
+      const replayedClaim = this.replayedResumeClaim(params);
+      if (replayedClaim !== undefined) return replayedClaim;
       this.budgetGate();
       // Atomic admission: the check and the reservation are one synchronous
       // step, so parallel creations cannot all observe the same free slot and
@@ -2500,12 +2620,52 @@ export class Broker {
           // Lineage/repair admission shares the same critical section as
           // saveArtifact. A queued save may graduate or create this hash
           // before our turn; never carry a stale episode decision across it.
+          const replayedClaim = this.replayedResumeClaim(params);
+          if (replayedClaim !== undefined) return replayedClaim;
           const repair = this.lineage.has(params.artifact.hash) ? undefined : this.repairs.get(params.artifact.hash);
-          const reservesNewEpisode = repair === undefined;
+          const requestedContinuation = params.continueEpisode;
+          if (requestedContinuation !== undefined) {
+            const checkpoint = this.episodeCheckpoints.get(requestedContinuation);
+            const lineage = this.lineage.get(params.artifact.hash);
+            const repairLineage = this.repairs.get(params.artifact.hash);
+            if (
+              checkpoint === undefined
+              || checkpoint.completed
+              || checkpoint.parent === undefined
+              || checkpoint.epoch === undefined
+            ) {
+              throw new BrokerError("INTERNAL", `cannot continue non-active checkpoint-v1 episode ${requestedContinuation}`);
+            }
+            if (
+              params.artifact.hash !== checkpoint.parent
+              && lineage?.episode !== requestedContinuation
+              && repairLineage?.episode !== requestedContinuation
+            ) {
+              throw new BrokerError(
+                "INTERNAL",
+                `continuation artifact ${params.artifact.hash} does not belong to episode ${requestedContinuation}`,
+              );
+            }
+          }
+          const reservesNewEpisode =
+            repair === undefined
+            && requestedContinuation === undefined;
           if (reservesNewEpisode && this.episodeOrdinal + this.pendingNewEpisodes >= this.maxMutationEpisodes) {
             throw new BrokerError(
               "BUDGET_EXCEEDED",
               `mutation episode cap reached (${this.maxMutationEpisodes})`,
+            );
+          }
+          const artifactEpisode = this.lineage.get(params.artifact.hash)?.episode;
+          if (
+            reservesNewEpisode
+            && artifactEpisode !== undefined
+            && this.episodeCheckpoints.get(artifactEpisode)?.completed === false
+            && !this.trustedAcceptedCandidates.has(params.artifact.hash)
+          ) {
+            throw new BrokerError(
+              "INTERNAL",
+              `incomplete checkpoint-v1 episode ${artifactEpisode} must be continued explicitly`,
             );
           }
           if (reservesNewEpisode) this.pendingNewEpisodes += 1;
@@ -2621,6 +2781,7 @@ export class Broker {
     // (or CAP_CHOWN) is needed, and the long-lived sandbox retains zero caps.
     const ttlSec = params.ttlSec ?? this.defaultTtlSec;
     let startedEvents: RunEvent[] = [];
+    let claimedResume = false;
     try {
       const unpack = await this.run([
         "docker", "exec", "-i", "-u", "1000:1000", containerId,
@@ -2639,45 +2800,97 @@ export class Broker {
 
       let episode: number;
       let parentHash: string;
-      if (repair !== undefined) {
+      let sandboxEpoch: string;
+      const requestedContinuation = params.continueEpisode;
+      if (requestedContinuation !== undefined) {
+        const checkpoint = this.episodeCheckpoints.get(requestedContinuation);
+        if (
+          checkpoint === undefined
+          || checkpoint.completed
+          || checkpoint.parent === undefined
+          || checkpoint.epoch === undefined
+        ) {
+          throw new BrokerError("INTERNAL", `cannot continue non-active checkpoint-v1 episode ${requestedContinuation}`);
+        }
+        const lineage = this.lineage.get(params.artifact.hash);
+        const repairLineage = this.repairs.get(params.artifact.hash);
+        if (
+          params.artifact.hash !== checkpoint.parent
+          && lineage?.episode !== requestedContinuation
+          && repairLineage?.episode !== requestedContinuation
+        ) {
+          throw new BrokerError(
+            "INTERNAL",
+            `continuation artifact ${params.artifact.hash} does not belong to episode ${requestedContinuation}`,
+          );
+        }
+        if (
+          this.resumingEpisode?.episode === requestedContinuation
+          && params.artifact.hash === this.resumingEpisode.parent
+        ) {
+          if (this.resumingEpisode.claimedSandboxId !== null) {
+            throw new BrokerError("INTERNAL", `resumed episode ${requestedContinuation} is already claimed`);
+          }
+          this.resumingEpisode.claimedSandboxId = sandboxId;
+          claimedResume = true;
+        }
+        episode = requestedContinuation;
+        parentHash = checkpoint.parent;
+        sandboxEpoch = checkpoint.epoch;
+      } else if (repair !== undefined) {
+        const checkpoint = this.episodeCheckpoints.get(repair.episode);
         episode = repair.episode;
-        parentHash = repair.parent;
+        parentHash = checkpoint?.parent ?? repair.parent;
+        sandboxEpoch = checkpoint?.epoch ?? `${this.bootNonce}:ep${episode}`;
       } else {
         episode = this.episodeOrdinal;
         parentHash = params.artifact.hash;
-        // One fsynced fact owns both the ordinal and the public boundary: a
-        // crash can strand neither side of the split journal.
+        sandboxEpoch = `${this.bootNonce}:ep${episode}`;
+        // One fsynced fact owns ordinal, exact resume generation, parent, and
+        // the public boundary: a crash can strand neither side.
         startedEvents = this.journalFact(
-          { t: "episode", episode },
+          { t: "episode", episode, parent: parentHash, epoch: sandboxEpoch },
           [{ type: "episode.started", episode, parent: { hash: parentHash } }],
         );
+        this.episodeCheckpoints.set(episode, {
+          parent: parentHash,
+          epoch: sandboxEpoch,
+          completed: false,
+        });
         this.episodeOrdinal = episode + 1;
         this.anyEpisodeStarted = true;
       }
-      // The ACTIVE episode (new or resumed repair) defines the measurement
-      // generation — set from the episode itself, never derived from ordinal
-      // arithmetic at evaluation sites — but the active generation is
-      // MONOTONE in the trusted epoch ordinal: a resumed repair reuses its
-      // episode's epoch only while that generation is still current. Once a
-      // newer epoch was minted, the reopened sandbox evaluates under the
-      // LATEST generation (fresh comparators); rolling back would let a
-      // stale parent memo from the old epoch pair against — and promote — a
-      // fresh child. A new episode's epoch is always a fresh mint, so it
-      // always becomes current.
-      const sandboxEpoch = `${this.bootNonce}:ep${episode}`;
+      // A checkpoint-v1 resume deliberately reactivates the exact persisted
+      // generation. Exact old evaluation facts are replayed without another
+      // evaluator admission; any coordinate not in the checkpoint is new work.
       const sandboxEpochSeq = this.mintEpochSeq(sandboxEpoch);
-      const currentSeq = this.epochSeqByName.get(this.measurementEpoch);
-      if (currentSeq === undefined || sandboxEpochSeq >= currentSeq) this.measurementEpoch = sandboxEpoch;
+      const reactivatesCheckpoint =
+        claimedResume
+        || requestedContinuation !== undefined
+        || (repair !== undefined && this.episodeCheckpoints.get(repair.episode)?.epoch !== undefined);
+      if (reactivatesCheckpoint) {
+        this.measurementEpoch = sandboxEpoch;
+      } else {
+        const currentSeq = this.epochSeqByName.get(this.measurementEpoch);
+        if (currentSeq === undefined || sandboxEpochSeq >= currentSeq) this.measurementEpoch = sandboxEpoch;
+      }
       this.sandboxes.set(sandboxId, {
         containerId,
         expiresAtMs: this.now() + ttlSec * 1000,
         episode,
         parentHash,
+        epoch: sandboxEpoch,
         lastExecStdout: null,
         lastExecExitCode: null,
         lastExecTruncated: null,
       });
     } catch (error) {
+      if (
+        claimedResume
+        && this.resumingEpisode?.claimedSandboxId === sandboxId
+      ) {
+        this.resumingEpisode.claimedSandboxId = null;
+      }
       // No acknowledgment without a registered sandbox: a failure ANYWHERE
       // after the container exists (unpack, closing fence, journal append —
       // e.g. a poisoned run state log) must reap the container WITH PROOF.
@@ -2735,7 +2948,7 @@ export class Broker {
       // so the orphan cannot keep computing against the run.
       sb.expiresAtMs = 0;
       const retired = await this.removeTrackedContainer(sb.containerId);
-      if (containerGone(retired)) this.sandboxes.delete(params.sandboxId);
+      if (containerGone(retired)) this.deleteProvenGoneSandbox(params.sandboxId);
       // Keep the capped partial bytes only in this bounded sandbox entry.
       // Failed/truncated executions can never become candidate provenance.
       sb.lastExecExitCode = 124;
@@ -2962,7 +3175,7 @@ export class Broker {
     if (!containerGone(retired)) {
       throw new BrokerError("INTERNAL", `sandbox retirement failed after save: ${stderrText(retired)}`);
     }
-    this.sandboxes.delete(params.sandboxId);
+    this.deleteProvenGoneSandbox(params.sandboxId);
     return { hash };
   }
 
@@ -2973,6 +3186,19 @@ export class Broker {
     } finally {
       this.exitOp();
     }
+  }
+
+  private evaluationMemoKey(params: EvaluateP, epoch: string): string {
+    return (
+      `run:${this.config.runId}|gen:${epoch}|${params.artifact.hash}` +
+      `|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}` +
+      (this.trustedMeasurementEpoch === undefined
+        ? ""
+        : `|measurementEpoch:${encodeURIComponent(this.trustedMeasurementEpoch)}`) +
+      (params.recursivePlan === undefined
+        ? ""
+        : `|recursivePlan:${createHash("sha256").update(canonicalJson(params.recursivePlan)).digest("hex")}`)
+    );
   }
 
   private async evaluateOp(params: EvaluateP, ctx: CallContext): Promise<EvaluationRecord> {
@@ -2988,6 +3214,27 @@ export class Broker {
     ) {
       throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout asset groups are only reachable on the admin socket or through a terminal holdout capability");
     }
+    // Capture the generation and full recursive-plan-sensitive memo identity
+    // before resume replay or any fresh evaluator admission.
+    const evalEpoch = this.measurementEpoch;
+    const memoKey = this.evaluationMemoKey(params, evalEpoch);
+    if (params.resume === true) {
+      const resumed = this.resumingEpisode;
+      if (resumed === undefined || this.measurementEpoch !== resumed.epoch) {
+        throw new BrokerError("INTERNAL", "evaluation replay requested outside the resumed episode");
+      }
+      const legacyReplayKey = params.recursivePlan === undefined
+        ? `${resumed.epoch}|${params.artifact.hash}|${params.assetGroupId}|${params.seed}`
+        : undefined;
+      const prior = this.replayedEvaluations.get(memoKey)
+        ?? (legacyReplayKey === undefined ? undefined : this.replayedEvaluations.get(legacyReplayKey));
+      if (prior !== undefined) {
+        // No slot, invocation, holdout, or spend charge: this exact full
+        // record was already fsynced before the killed broker acknowledged it.
+        return this.redactRecord({ ...prior, cached: true }, group.visibility, ctx);
+      }
+    }
+    if (group.visibility === "holdout") await this.chargeHoldout();
     // Cross-artifact evaluator cache channel: public mutation authority is
     // bounded by a trusted constructor cap. M0 defaults to exactly one;
     // M1 admits distinct hashes only after assigning fresh measurement domains.
@@ -3024,20 +3271,6 @@ export class Broker {
     // slot — this is information-query budget, not unique-computation budget,
     // so it is charged BEFORE in-flight coalescing and memo lookup: N
     // concurrent identical calls burn N slots exactly like N sequential ones.
-    // Immutable measurement generation for THIS evaluation, captured before
-    // any await — a concurrently created episode must not re-scope an
-    // in-flight measurement.
-    const evalEpoch = this.measurementEpoch;
-    if (group.visibility === "holdout") await this.chargeHoldout();
-    const memoKey =
-      `run:${this.config.runId}|gen:${evalEpoch}|${params.artifact.hash}` +
-      `|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}` +
-      (this.trustedMeasurementEpoch === undefined
-        ? ""
-        : `|measurementEpoch:${encodeURIComponent(this.trustedMeasurementEpoch)}`) +
-      (params.recursivePlan === undefined
-        ? ""
-        : `|recursivePlan:${createHash("sha256").update(canonicalJson(params.recursivePlan)).digest("hex")}`);
     const existing = this.inFlightEvaluations.get(memoKey);
     if (existing !== undefined) {
       return this.redactRecord(await existing, group.visibility, ctx);
@@ -3085,7 +3318,7 @@ export class Broker {
     if (memoHash !== undefined && (await this.cas.has(memoHash))) {
       const record = EvaluationRecord.parse(JSON.parse((await this.cas.readBuffer(memoHash)).toString("utf8")));
       const cached = { ...record, cached: true };
-      this.recordEvaluation(cached, group.visibility, epoch);
+      this.recordEvaluation(cached, group.visibility, epoch, memoKey);
       return cached;
     }
 
@@ -3274,7 +3507,7 @@ export class Broker {
     });
     const recordHash = await this.cas.putBuffer(Buffer.from(JSON.stringify(record)));
     await this.cas.indexPut(this.evaluationCacheNamespace, memoKey, recordHash);
-    this.recordEvaluation(record, group.visibility, epoch);
+    this.recordEvaluation(record, group.visibility, epoch, memoKey);
     return record;
     } finally {
       await releaseEvaluation();
@@ -3331,7 +3564,7 @@ export class Broker {
       const record = EvaluationRecord.parse({ ...supplied, cached: false });
       const recordHash = await this.cas.putBuffer(Buffer.from(JSON.stringify(record)));
       await this.cas.indexPut(this.evaluationCacheNamespace, memoKey, recordHash);
-      this.recordEvaluation(record, group.visibility, epoch);
+      this.recordEvaluation(record, group.visibility, epoch, memoKey);
       return record;
     } finally {
       await releaseEvaluation();
@@ -3401,10 +3634,27 @@ export class Broker {
    * re-measurements in later epochs are measurements, not news and not
    * authority (see registerGate: the first pair is frozen).
    */
-  private recordEvaluation(record: EvaluationRecord, visibility: string, epoch: string): void {
+  private recordEvaluation(record: EvaluationRecord, visibility: string, epoch: string, memoKey: string): void {
     if (visibility === "holdout" && !this.terminalHoldoutAssetGroupIds.has(record.assetGroupId)) return;
+    if (this.journaledEvaluationMemoKeys.has(memoKey)) return;
     const aggregate = eligibleAggregate(record);
-    if (aggregate === undefined) return;
+    const epochSeq = this.epochSeqByName.get(epoch);
+    if (epochSeq === undefined) {
+      throw new BrokerError("INTERNAL", `measurement epoch was never minted by trusted code: ${epoch}`);
+    }
+    if (aggregate === undefined) {
+      const journaled = this.journalFact({
+        t: "eval",
+        record,
+        memoKey,
+        epoch,
+        epochSeq,
+        ...(this.trustedMeasurementEpoch !== undefined ? { measurementEpoch: this.trustedMeasurementEpoch } : {}),
+      }, []);
+      this.journaledEvaluationMemoKeys.add(memoKey);
+      this.publish(journaled);
+      return;
+    }
     if (
       record.artifactHash !== this.config.baselineArtifactHash &&
       this.promotionSlots.has(record.artifactHash)
@@ -3413,10 +3663,6 @@ export class Broker {
     }
     const pairKey = `${record.assetGroupId}|${record.seed}`;
     if (this.trusted.get(`${epoch}|${record.artifactHash}`)?.has(pairKey) === true) return;
-    const epochSeq = this.epochSeqByName.get(epoch);
-    if (epochSeq === undefined) {
-      throw new BrokerError("INTERNAL", `measurement epoch was never minted by trusted code: ${epoch}`);
-    }
 
     // Gate derivation BEFORE the child's own insertion: parent-before-child
     // within the SAME epoch, at the same coordinate, and only as the
@@ -3461,11 +3707,13 @@ export class Broker {
     const journaled = this.journalFact({
       t: "eval",
       record,
+      memoKey,
       epoch,
       epochSeq,
       ...(this.trustedMeasurementEpoch !== undefined ? { measurementEpoch: this.trustedMeasurementEpoch } : {}),
       ...(gate !== undefined ? { gate } : {}),
     }, events);
+    this.journaledEvaluationMemoKeys.add(memoKey);
     // Tables AFTER the durable fact, via the same helpers replay uses — a
     // crash rebuilds the exact same measurements and persisted gates.
     this.insertMeasurement(epoch, record.artifactHash, pairKey, aggregate);
@@ -3663,6 +3911,62 @@ export class Broker {
       ...eventTrigger,
     });
     return {};
+  }
+
+  /** Fsync the inner-episode commit boundary before the optimizer advances. */
+  async completeEpisode(params: CompleteEpisodeP, _ctx: CallContext): Promise<Record<string, never>> {
+    this.enterOp();
+    try {
+      const complete = async (): Promise<Record<string, never>> => {
+        this.state().assertUsable();
+        const checkpoint = this.episodeCheckpoints.get(params.episode);
+        if (checkpoint === undefined) {
+          throw new BrokerError("INTERNAL", `cannot complete unknown episode ${params.episode}`);
+        }
+        if (checkpoint.completed) return {};
+        if (params.releaseSandboxId !== undefined) {
+          const sandbox = this.sandboxes.get(params.releaseSandboxId);
+          if (sandbox === undefined) {
+            throw new BrokerError(
+              "SANDBOX_NOT_FOUND",
+              `completion release sandbox not found: ${params.releaseSandboxId}`,
+            );
+          }
+          if (sandbox.episode !== params.episode) {
+            throw new BrokerError(
+              "INTERNAL",
+              `completion release sandbox ${params.releaseSandboxId} belongs to episode ${sandbox.episode}, not ${params.episode}`,
+            );
+          }
+          const retired = await this.removeTrackedContainer(sandbox.containerId);
+          if (!containerGone(retired)) {
+            throw new BrokerError(
+              "INTERNAL",
+              `sandbox retirement failed before episode completion: ${stderrText(retired)}`,
+            );
+          }
+          this.deleteProvenGoneSandbox(params.releaseSandboxId);
+        }
+        if ([...this.sandboxes.values()].some((sandbox) => sandbox.episode === params.episode)) {
+          throw new BrokerError("INTERNAL", `cannot complete episode ${params.episode} with an active sandbox`);
+        }
+        const events = this.journalFact(
+          { t: "episodeComplete", episode: params.episode },
+          [{ type: "episode.completed", episode: params.episode }],
+        );
+        checkpoint.completed = true;
+        if (this.resumingEpisode?.episode === params.episode) this.resumingEpisode = undefined;
+        this.publish(events);
+        return {};
+      };
+      return await this.serializeMutation(() =>
+        params.releaseSandboxId === undefined
+          ? complete()
+          : this.serializeSandbox(params.releaseSandboxId, complete),
+      );
+    } finally {
+      this.exitOp();
+    }
   }
 
   /** Durable trusted-side terminal snapshot; never exposed on the public RPC table. */

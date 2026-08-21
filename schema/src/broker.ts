@@ -73,6 +73,12 @@ export const CreateSandboxParams = z.object({
   artifact: ArtifactRef,
   /** "mutation" sandboxes get proxy access + writable workspace; no protected mounts ever. */
   role: z.literal("mutation"),
+  /**
+   * Continue this exact incomplete checkpoint-v1 episode (one-repair flow).
+   * The broker validates that the artifact belongs to the episode and never
+   * mints a second episode boundary.
+   */
+  continueEpisode: z.number().int().nonnegative().optional(),
   ttlSec: z.number().int().positive().max(86_400).optional(),
 });
 
@@ -123,6 +129,12 @@ export const EvaluateParams = z.object({
   assetGroupId: z.string(),
   seed: z.number().int().nonnegative(),
   recursivePlan: RecursiveEvaluationPlan.optional(),
+  /**
+   * Continue the one journaled-but-incomplete episode. The broker accepts
+   * this only for exact evaluation facts already held by that checkpoint;
+   * new coordinates are charged normally.
+   */
+  resume: z.literal(true).optional(),
 });
 
 export const ReportIncumbentParams = z.object({
@@ -174,6 +186,15 @@ export type ReportSessionNoYieldBoundParams = z.infer<typeof ReportSessionNoYiel
 
 
 export const FinishParams = z.object({ best: ArtifactRef });
+export const CompleteEpisodeParams = z.object({
+  episode: z.number().int().nonnegative(),
+  /**
+   * A resumed episode with a journaled candidate claims a fresh sandbox only
+   * to reactivate its measurement epoch. No mutation/save follows, so the
+   * broker retires this exact sandbox atomically with the completion boundary.
+   */
+  releaseSandboxId: z.string().min(1).optional(),
+}).strict();
 
 
 /** Componentwise trusted resource accounting for recursive child runs. */
@@ -328,6 +349,7 @@ export const BrokerMethods = {
   },
   reportIncumbent: { params: ReportIncumbentParams, result: z.object({}) },
   reportSessionNoYieldBound: { params: ReportSessionNoYieldBoundParams, result: z.object({}) },
+  completeEpisode: { params: CompleteEpisodeParams, result: z.object({}) },
   getBudget: { params: z.object({}), result: BudgetState },
   finish: { params: FinishParams, result: z.object({}) },
   spawnRun: { params: SpawnRunParams, result: SpawnRunResult },

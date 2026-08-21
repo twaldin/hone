@@ -79,7 +79,7 @@ function incumbentBackendSrc(hash: string, extra = ""): string {
 }
 
 describe("SIGTERM during synchronous delivery (P1: handlers must outlive the backend race)", () => {
-  it("delivery completes atomically, run terminates stopped, run.finished is last", { timeout: 30_000 }, async () => {
+  it("delivery completes atomically, then the run durably pauses without terminalization", { timeout: 30_000 }, async () => {
     const root = makeRoot();
     const { baselineDir } = makeGitBaselineCapsule(root);
     const hash = tarToCas(root, { "hello.txt": "improved\n" });
@@ -108,20 +108,21 @@ describe("SIGTERM during synchronous delivery (P1: handlers must outlive the bac
     const runId = soleRunId(root);
     const events = runEvents(root, runId);
     const types = events.map((e) => e.type);
-    expect(types[types.length - 1]).toBe("run.finished");
-    expect(types.filter((t) => t === "run.finished").length).toBe(1);
-    const finished = events[events.length - 1];
-    if (finished?.type === "run.finished") expect(finished.status).toBe("stopped");
-    // the delivery that was interrupted by the signal still finished atomically, BEFORE the terminal
+    expect(types[types.length - 1]).toBe("run.paused");
+    expect(types).not.toContain("run.finished");
+    const paused = events[events.length - 1];
+    if (paused?.type === "run.paused") expect(paused.reason).toBe("operator");
+    // The delivery interrupted by the signal still finished atomically before
+    // the durable pause record.
     const deliveryIdx = types.indexOf("delivery.applied");
     expect(deliveryIdx, types.join(",")).toBeGreaterThanOrEqual(0);
-    expect(deliveryIdx).toBeLessThan(types.indexOf("run.finished"));
+    expect(deliveryIdx).toBeLessThan(types.indexOf("run.paused"));
     expect(gitIn(baselineDir, "show", `hone/${runId}:hello.txt`)).toBe("improved");
   });
 });
 
 describe("external stop during blocked synchronous delivery (final gate: identity without holder event-loop progress)", () => {
-  it("authenticates via lock metadata while the supervisor JS loop is blocked >5s; SIGTERM queues, delivery lands, run stops", { timeout: 60_000 }, async () => {
+  it("authenticates via lock metadata while blocked; explicit stop queues, delivery lands, run stops", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     const { baselineDir } = makeGitBaselineCapsule(root);
     const hash = tarToCas(root, { "hello.txt": "improved\n" });
@@ -175,10 +176,12 @@ describe("external stop during blocked synchronous delivery (final gate: identit
       const events = runEvents(root, runId);
       const types = events.map((e) => e.type);
       expect(types[types.length - 1]).toBe("run.finished");
-      expect(types.filter((t) => t === "run.finished").length).toBe(1);
+      expect(types.filter((type) => type === "run.finished")).toHaveLength(1);
       const finished = events[events.length - 1];
-      if (finished?.type === "run.finished") expect(finished.status).toBe("stopped");
-      // The delivery the signal landed inside still finished atomically, before the terminal.
+      if (finished?.type === "run.finished") {
+        expect(finished.status).toBe("stopped");
+        expect(finished.reason).toBe("operator");
+      }
       const deliveryIdx = types.indexOf("delivery.applied");
       expect(deliveryIdx, types.join(",")).toBeGreaterThanOrEqual(0);
       expect(deliveryIdx).toBeLessThan(types.indexOf("run.finished"));
@@ -198,7 +201,7 @@ describe("external stop during blocked synchronous delivery (final gate: identit
 });
 
 describe("explicit stop before delivery (P1)", () => {
-  it("skips automatic delivery entirely and terminates stopped", { timeout: 30_000 }, async () => {
+  it("skips automatic delivery and leaves a resumable operator pause", { timeout: 30_000 }, async () => {
     const root = makeRoot();
     const { baselineDir } = makeGitBaselineCapsule(root);
     const hash = tarToCas(root, { "hello.txt": "improved\n" });
@@ -217,9 +220,10 @@ describe("explicit stop before delivery (P1)", () => {
     const runId = soleRunId(root);
     const types = runEvents(root, runId).map((e) => e.type);
     expect(types).not.toContain("delivery.applied");
-    expect(types[types.length - 1]).toBe("run.finished");
-    const finished = runEvents(root, runId).at(-1);
-    if (finished?.type === "run.finished") expect(finished.status).toBe("stopped");
+    expect(types[types.length - 1]).toBe("run.paused");
+    expect(types).not.toContain("run.finished");
+    const paused = runEvents(root, runId).at(-1);
+    if (paused?.type === "run.paused") expect(paused.reason).toBe("operator");
     // no branch was minted
     const ref = spawnSync("git", ["-C", baselineDir, "show-ref", "--verify", `refs/heads/hone/${runId}`], { encoding: "utf8" });
     expect(ref.status).not.toBe(0);
@@ -358,14 +362,13 @@ describe("termination barrier (P1: backend settle must not cancel the group SIGK
     const childPid = Number(readFileSync(pidFile, "utf8"));
     expect(Number.isInteger(childPid)).toBe(true);
     // The supervisor has exited (hone resolved) — the barrier must have
-    // SIGKILLed the TERM-ignoring child before the terminal event, so it is
-    // certainly dead now.
+    // SIGKILLed the TERM-ignoring child before publishing the durable pause.
     expect(pidAlive(childPid)).toBe(false);
     const runId = soleRunId(root);
     const events = runEvents(root, runId);
-    const finished = events[events.length - 1];
-    expect(finished?.type).toBe("run.finished");
-    if (finished?.type === "run.finished") expect(finished.status).toBe("stopped");
+    const paused = events[events.length - 1];
+    expect(paused?.type).toBe("run.paused");
+    if (paused?.type === "run.paused") expect(paused.reason).toBe("operator");
   });
 });
 
@@ -460,6 +463,7 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: (b) => {
         registeredBarrier = b;
       },

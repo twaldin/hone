@@ -8,6 +8,7 @@ import type {
   M2ProxyRole,
   RunConfig,
   RunEvent,
+  RunPauseReason,
 } from "@hone/schema";
 import type { RunState } from "./eventlog.js";
 import type { OptimizerSnapshot } from "./optimizer-digest.js";
@@ -59,6 +60,12 @@ export interface CampaignPauseAuthority {
   recordCampaignResume(signal: CampaignResumeSignal): void | Promise<void>;
 }
 
+export interface RunPauseRequest {
+  reason: RunPauseReason;
+  pauseId?: string | undefined;
+  providerStatus?: number | null | undefined;
+}
+
 /**
  * Everything a backend needs, injected by the supervisor. WP7's real backend
  * composes broker + proxy + optimizer behind this same interface; this
@@ -105,7 +112,7 @@ export interface RunnerBackendContext {
   corpus?: BrokerCorpusConfig | undefined;
   /** State replayed from the event log — resume dedupe starts here (nextEpisode, incumbent, budget). */
   replayed: RunState;
-  /** Aborted on stop request or budget exhaustion; backends must wind down. */
+  /** Aborted on pause, stop, or budget exhaustion; backends must wind down. */
   signal: AbortSignal;
   /** Validate + append to events.ndjson (and stream in headless mode). */
   emit(event: RunEvent): RunEvent;
@@ -130,6 +137,11 @@ export interface RunnerBackendContext {
    * terminalizes the run with status "stopped" (same path as SIGTERM).
    */
   requestStop(): void;
+  /**
+   * Request a resumable durable pause. Unlike requestStop, this writes no
+   * terminal event; a later trusted resume continues from the checkpoint.
+   */
+  requestPause(request: RunPauseRequest): void;
   /**
    * Trusted-authority barrier. A backend that recovers durable authority
    * (broker journal reconciliation) MUST register a promise SYNCHRONOUSLY
