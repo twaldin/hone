@@ -345,6 +345,23 @@ async function saveCandidate(b: Booted, tar: Buffer, parent: string = baselineHa
   return ref.hash;
 }
 
+const NO_YIELD_RECORD = {
+  type: "hone.mutation.no-yield-bound.v1" as const,
+  limitTokens: 1_500_000,
+  modelCalls: 152,
+  promptTokens: 1_499_359,
+  completionTokens: 7_320,
+  consumedTokens: 1_506_679,
+};
+
+async function tripNoYieldBound(b: Booted, sandboxId: string): Promise<void> {
+  b.ctl.execExit = 4;
+  b.ctl.execStdout = Buffer.from(`${JSON.stringify(NO_YIELD_RECORD)}\n`);
+  await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+  b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+  expect(b.broker.reportSessionNoYieldBound({ sandboxId, ...NO_YIELD_RECORD }, CLIENT)).toEqual({});
+}
+
 function score(n: number): unknown {
   return { valid: true, objectives: { score: n } };
 }
@@ -451,34 +468,106 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
         budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
       }),
     });
-    await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
-    b.broker.recordSpend({ tokens: 1_506_679, usd: 0 }, ADMIN);
-
-    const report = {
-      episode: 0,
-      limitTokens: 1_500_000,
-      modelCalls: 152,
-      promptTokens: 1_499_359,
-      completionTokens: 7_320,
-      consumedTokens: 1_506_679,
-    };
-    expect(b.broker.reportSessionNoYieldBound(report, CLIENT)).toEqual({});
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await tripNoYieldBound(b, sandboxId);
 
     const bounded = b.events.filter((event) => event.type === "mutation.no-yield-bound");
     expect(bounded).toHaveLength(1);
     expect(bounded[0]).toMatchObject({
+      ...NO_YIELD_RECORD,
       type: "mutation.no-yield-bound",
-      ...report,
+      sandboxId,
+      episode: 0,
     });
     expect(b.events.some((event) => event.type === "episode.candidate")).toBe(false);
     expect(b.events.some((event) => event.type === "budget.exhausted")).toBe(false);
 
     // RPC response loss/retry cannot duplicate or rewrite the durable reason.
+    const report = { sandboxId, ...NO_YIELD_RECORD };
     expect(b.broker.reportSessionNoYieldBound(report, CLIENT)).toEqual({});
     expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(1);
     expect(() => b.broker.reportSessionNoYieldBound({ ...report, modelCalls: 153 }, CLIENT)).toThrow(
       /contradictory no-yield bound report/,
     );
+  });
+
+  it("rejects a forged bound report not proven by that sandbox's worker exit", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT);
+    b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+    expect(() => b.broker.reportSessionNoYieldBound(
+      { sandboxId, ...NO_YIELD_RECORD },
+      CLIENT,
+    )).toThrow(/last exited 0, not 4/);
+
+    b.ctl.execExit = 4;
+    b.ctl.execStdout = Buffer.from(JSON.stringify({ ...NO_YIELD_RECORD, modelCalls: 151 }));
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    expect(() => b.broker.reportSessionNoYieldBound(
+      { sandboxId, ...NO_YIELD_RECORD },
+      CLIENT,
+    )).toThrow(/does not match.*worker output/);
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(0);
+  });
+
+  it("attributes a bound on a no-change repair to its broker-authoritative sandbox episode", async () => {
+    const b = await boot();
+    b.ctl.execExit = 1;
+    b.ctl.saveTar = baselineTar;
+    const first = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId: first.sandboxId, argv: ["false"] }, CLIENT);
+    const unchanged = await b.broker.saveArtifact({ sandboxId: first.sandboxId }, CLIENT);
+    expect(unchanged.hash).toBe(baselineHash);
+
+    const repair = await b.broker.createSandbox({ artifact: unchanged, role: "mutation" }, CLIENT);
+    await tripNoYieldBound(b, repair.sandboxId);
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId: repair.sandboxId, episode: 1 }),
+    ]);
+  });
+
+  it("attributes a bound on an evaluator-rejected candidate repair to its sandbox episode", async () => {
+    const b = await boot();
+    const rejectedCandidate = await saveCandidate(b, candidateTar);
+    expect(rejectedCandidate).toBe(candidateHash);
+    const repair = await b.broker.createSandbox(
+      { artifact: { hash: rejectedCandidate }, role: "mutation" },
+      CLIENT,
+    );
+    await tripNoYieldBound(b, repair.sandboxId);
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId: repair.sandboxId, episode: 1 }),
+    ]);
+  });
+
+  it("attributes a later first-attempt bound after a no-change ordinal desync", async () => {
+    const b = await boot();
+    b.ctl.execExit = 1;
+    b.ctl.saveTar = baselineTar;
+    const first = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId: first.sandboxId, argv: ["false"] }, CLIENT);
+    const unchanged = await b.broker.saveArtifact({ sandboxId: first.sandboxId }, CLIENT);
+    await b.broker.createSandbox({ artifact: unchanged, role: "mutation" }, CLIENT);
+
+    const later = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await tripNoYieldBound(b, later.sandboxId);
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId: later.sandboxId, episode: 2 }),
+    ]);
   });
 
   it("replays promotion authority and the incumbent", async () => {

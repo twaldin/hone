@@ -52,6 +52,27 @@ describe("SessionNoYieldCounter", () => {
       consumedTokens: 1_500_000,
     });
   });
+
+  it("normalizes invalid provider usage instead of failing open inside a swallowed listener", () => {
+    const warnings: string[] = [];
+    const counter = new SessionNoYieldCounter(100, (message) => warnings.push(message));
+
+    expect(counter.observe(
+      { promptTokens: -1, completionTokens: 60, totalTokens: 20 },
+      false,
+    )).toBeNull();
+    expect(counter.observe(
+      { promptTokens: Number.NaN, completionTokens: 60, totalTokens: Number.POSITIVE_INFINITY },
+      false,
+    )).toMatchObject({ consumedTokens: 120, completionTokens: 120, modelCalls: 2 });
+    expect(counter.snapshot()).toEqual({
+      modelCalls: 2,
+      promptTokens: 0,
+      completionTokens: 120,
+      consumedTokens: 120,
+    });
+    expect(warnings).toHaveLength(2);
+  });
 });
 
 describe("parseSessionNoYieldMaxTokens", () => {

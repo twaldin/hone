@@ -38,6 +38,8 @@ import {
   GetTaskResult,
   PutFileParams,
   ReportIncumbentParams,
+  SESSION_NO_YIELD_EXIT_CODE,
+  SessionNoYieldRecord,
   ReportSessionNoYieldBoundParams,
   RecursiveTask,
   ResourceUsage,
@@ -560,6 +562,7 @@ type EmittableEvent =
   | {
       type: "mutation.no-yield-bound";
       episode: number;
+      sandboxId: string;
       limitTokens: number;
       modelCalls: number;
       promptTokens: number;
@@ -3548,22 +3551,44 @@ export class Broker {
    */
   reportSessionNoYieldBound(params: ReportSessionNoYieldBoundP, _ctx: CallContext): Record<string, never> {
     this.state().assertUsable();
+    const { type: _wireType, ...eventTrigger } = params;
     const existing = this.journalEvents.find(
-      (event) => event.type === "mutation.no-yield-bound" && event.episode === params.episode,
+      (event) => event.type === "mutation.no-yield-bound" && event.sandboxId === params.sandboxId,
     );
     if (existing !== undefined) {
-      if (!sameCanonical(existing, { ...existing, ...params })) {
-        throw new BrokerError("INTERNAL", `contradictory no-yield bound report for episode ${params.episode}`);
+      if (!sameCanonical(existing, { ...existing, ...eventTrigger })) {
+        throw new BrokerError("INTERNAL", `contradictory no-yield bound report for sandbox ${params.sandboxId}`);
       }
       return {};
     }
-    if (!this.anyEpisodeStarted || params.episode !== this.episodeOrdinal - 1) {
-      throw new BrokerError("INTERNAL", `no-yield bound report does not match the active mutation episode ${this.episodeOrdinal - 1}`);
+
+    const sandbox = this.sandboxes.get(params.sandboxId);
+    if (sandbox === undefined) {
+      throw new BrokerError("SANDBOX_NOT_FOUND", `unknown no-yield bound sandbox ${params.sandboxId}`);
     }
-    if (this.journalEvents.some(
-      (event) => event.type === "episode.candidate" && event.episode === params.episode,
-    )) {
-      throw new BrokerError("INTERNAL", `no-yield bound report follows a candidate in episode ${params.episode}`);
+    if (sandbox.lastExecExitCode !== SESSION_NO_YIELD_EXIT_CODE) {
+      throw new BrokerError(
+        "INTERNAL",
+        `no-yield bound sandbox ${params.sandboxId} last exited ${String(sandbox.lastExecExitCode)}, not ${SESSION_NO_YIELD_EXIT_CODE}`,
+      );
+    }
+    const lastLine = sandbox.lastExecStdout
+      ?.toString("utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .at(-1);
+    let workerRecord: z.infer<typeof SessionNoYieldRecord> | null = null;
+    if (lastLine !== undefined) {
+      try {
+        const parsed = SessionNoYieldRecord.safeParse(JSON.parse(lastLine));
+        if (parsed.success) workerRecord = parsed.data;
+      } catch {
+        workerRecord = null;
+      }
+    }
+    const { sandboxId: _sandboxId, ...reportedRecord } = params;
+    if (workerRecord === null || !sameCanonical(workerRecord, reportedRecord)) {
+      throw new BrokerError("INTERNAL", `no-yield bound report does not match sandbox ${params.sandboxId} worker output`);
     }
     if (params.consumedTokens > this.spent.tokens) {
       throw new BrokerError(
@@ -3571,7 +3596,11 @@ export class Broker {
         `no-yield bound reports ${params.consumedTokens} tokens but the run has spent only ${this.spent.tokens}`,
       );
     }
-    this.emit({ type: "mutation.no-yield-bound", ...params });
+    this.emit({
+      type: "mutation.no-yield-bound",
+      episode: sandbox.episode,
+      ...eventTrigger,
+    });
     return {};
   }
 

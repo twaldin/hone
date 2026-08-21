@@ -130,14 +130,31 @@ export const ReportIncumbentParams = z.object({
   /** Optimizer's own claimed metrics — display only; trusted scores come from EvaluationRecords. */
   claimed: z.record(z.number()).optional(),
 });
-export const ReportSessionNoYieldBoundParams = z.object({
-  episode: z.number().int().nonnegative(),
+export const SESSION_NO_YIELD_RECORD_TYPE = "hone.mutation.no-yield-bound.v1" as const;
+export const SESSION_NO_YIELD_EXIT_CODE = 4;
+
+const SessionNoYieldRecordFields = z.object({
+  type: z.literal(SESSION_NO_YIELD_RECORD_TYPE),
   limitTokens: z.number().int().positive(),
   modelCalls: z.number().int().positive(),
   promptTokens: z.number().int().nonnegative(),
   completionTokens: z.number().int().nonnegative(),
   consumedTokens: z.number().int().positive(),
-}).strict().superRefine((value, ctx) => {
+}).strict();
+
+export const SessionNoYieldRecord = SessionNoYieldRecordFields.superRefine((value, ctx) => {
+  if (value.consumedTokens < value.limitTokens) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "consumedTokens must reach limitTokens" });
+  }
+  if (value.consumedTokens < value.promptTokens + value.completionTokens) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "consumedTokens cannot be less than promptTokens + completionTokens" });
+  }
+});
+export type SessionNoYieldRecord = z.infer<typeof SessionNoYieldRecord>;
+
+export const ReportSessionNoYieldBoundParams = SessionNoYieldRecordFields.extend({
+  sandboxId: z.string().min(1),
+}).superRefine((value, ctx) => {
   if (value.consumedTokens < value.limitTokens) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "consumedTokens must reach limitTokens" });
   }

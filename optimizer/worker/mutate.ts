@@ -507,7 +507,10 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     let final: Record<string, unknown> | undefined;
     let bounded: SessionNoYieldRecord | null = null;
     let abortPromise: Promise<void> | undefined;
-    const counter = new SessionNoYieldCounter(env.noYieldMaxTokens);
+    const counter = new SessionNoYieldCounter(
+      env.noYieldMaxTokens,
+      (message) => console.error(`session usage warning: ${message}`),
+    );
     session.subscribe((event) => {
       if (event.type === "tool_execution_end" && event.toolName === "yield" && event.isError !== true) {
         const details: unknown = event.result?.details;

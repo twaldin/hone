@@ -50,6 +50,8 @@ export interface StubScript {
   invalidSaveIndices?: number[];
   /** Consumed in exec-call order; running past the end fails the test. */
   execPlan: ExecStep[];
+  /** When set, reportSessionNoYieldBound fails as if durable journaling were unavailable. */
+  reportNoYieldError?: string;
   envelope: BudgetEnvelope;
   recursiveTask?: RecursiveTask;
 }
@@ -241,6 +243,9 @@ export class StubBroker {
       }
       case "reportSessionNoYieldBound": {
         const params = BrokerMethods.reportSessionNoYieldBound.params.parse(rawParams);
+        if (this.script.reportNoYieldError !== undefined) {
+          throw new Error(this.script.reportNoYieldError);
+        }
         this.reportedNoYieldBounds.push(params);
         return {};
       }

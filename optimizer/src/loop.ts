@@ -111,6 +111,7 @@ interface MutateAttempt {
   stdoutHash: string;
   failure: FailureEvidence | null;
   noYieldBound: SessionNoYieldRecord | null;
+  stoppedForNoYield: boolean;
 }
 
 export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
@@ -262,27 +263,43 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         if (err instanceof BrokerRpcError && err.brokerCode === "BUDGET_EXCEEDED") throw err;
       }
 
-      const noYieldBound =
-        exec.exitCode === SESSION_NO_YIELD_EXIT_CODE ? parseSessionNoYieldRecord(exec.stdout) : null;
-      if (noYieldBound !== null) {
-        await broker.reportSessionNoYieldBound({
-          episode,
-          limitTokens: noYieldBound.limitTokens,
-          modelCalls: noYieldBound.modelCalls,
-          promptTokens: noYieldBound.promptTokens,
-          completionTokens: noYieldBound.completionTokens,
-          consumedTokens: noYieldBound.consumedTokens,
-        });
+      const stoppedForNoYield = exec.exitCode === SESSION_NO_YIELD_EXIT_CODE;
+      const noYieldBound = stoppedForNoYield ? parseSessionNoYieldRecord(exec.stdout) : null;
+      if (stoppedForNoYield) {
+        if (noYieldBound === null) {
+          console.error(JSON.stringify({
+            type: "mutation.no-yield-bound-record-unavailable",
+            episode,
+            sandboxId,
+            limitTokens: sessionNoYieldMaxTokens,
+            exitCode: exec.exitCode,
+            stdoutTail: tail(exec.stdout),
+            stderrTail: tail(exec.stderr),
+          }));
+        } else {
+          try {
+            await broker.reportSessionNoYieldBound({ sandboxId, ...noYieldBound });
+          } catch (error) {
+            console.error(JSON.stringify({
+              type: "mutation.no-yield-bound-report-failed",
+              episode,
+              sandboxId,
+              trigger: noYieldBound,
+              error: error instanceof Error ? error.message : String(error),
+            }));
+          }
+        }
         const failure: FailureEvidence = {
-          reason:
-            `mutation session hit no-yield token bound after ${noYieldBound.consumedTokens} tokens ` +
-            `across ${noYieldBound.modelCalls} model calls (limit ${noYieldBound.limitTokens})`,
+          reason: noYieldBound === null
+            ? `mutation session hit no-yield token bound (exit ${SESSION_NO_YIELD_EXIT_CODE}; trigger record unavailable)`
+            : `mutation session hit no-yield token bound after ${noYieldBound.consumedTokens} tokens ` +
+              `across ${noYieldBound.modelCalls} model calls (limit ${noYieldBound.limitTokens})`,
           exitCode: exec.exitCode,
           stdoutTail: tail(exec.stdout),
           stderrTail: tail(exec.stderr),
         };
         console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
-        return { artifact, result: null, stdoutHash, failure, noYieldBound };
+        return { artifact, result: null, stdoutHash, failure, noYieldBound, stoppedForNoYield };
       }
 
       if (exec.exitCode !== 0) {
@@ -296,7 +313,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         // remains schema-only RunEvent NDJSON. Preserve worker evidence here
         // so a failed remote campaign is diagnosable after sandboxes are reaped.
         console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
-        return { artifact, result: null, stdoutHash, failure, noYieldBound: null };
+        return { artifact, result: null, stdoutHash, failure, noYieldBound: null, stoppedForNoYield: false };
       }
       const result = parseMutateStdout(exec.stdout);
       if (result === null) {
@@ -307,9 +324,9 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
           stderrTail: tail(exec.stderr),
         };
         console.error(JSON.stringify({ type: "mutation.failure", episode, failure }));
-        return { artifact, result: null, stdoutHash, failure, noYieldBound: null };
+        return { artifact, result: null, stdoutHash, failure, noYieldBound: null, stoppedForNoYield: false };
       }
-      return { artifact, result, stdoutHash, failure: null, noYieldBound: null };
+      return { artifact, result, stdoutHash, failure: null, noYieldBound: null, stoppedForNoYield: false };
     };
 
     const startEpisode = opts.resume?.nextEpisode ?? 0;
@@ -351,7 +368,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       });
 
       let attempt = await mutateOnce({ sandboxId }, context, episode);
-      if (attempt.noYieldBound !== null) break episodeLoop;
+      if (attempt.stoppedForNoYield) break episodeLoop;
       let candidate = attempt.artifact;
       let record: EvaluationRecord | null = null;
       let candidateEvaluationConsumed = false;
@@ -391,7 +408,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
             failure: attempt.failure,
           });
           const repair = await mutateOnce({ from: repairFrom }, repairContext, episode);
-          if (repair.noYieldBound !== null) break episodeLoop;
+          if (repair.stoppedForNoYield) break episodeLoop;
           if (repair.artifact !== null && repair.failure === null) {
             emit({
               ...base,

@@ -1,11 +1,22 @@
+import {
+  SESSION_NO_YIELD_EXIT_CODE,
+  SESSION_NO_YIELD_RECORD_TYPE,
+  SessionNoYieldRecord as SessionNoYieldRecordSchema,
+  type SessionNoYieldRecord,
+} from "@hone/schema";
+
+export {
+  SESSION_NO_YIELD_EXIT_CODE,
+  SESSION_NO_YIELD_RECORD_TYPE,
+  type SessionNoYieldRecord,
+};
+
 /**
  * Calibrated to more than twice the largest successful-yield segment in the
  * 80-run M2 saturation corpus: 721,625 tokens
  * (run_calibration_6de9863750b31cbec690b5b9, episode 0).
  */
 export const DEFAULT_SESSION_NO_YIELD_MAX_TOKENS = 1_500_000;
-export const SESSION_NO_YIELD_RECORD_TYPE = "hone.mutation.no-yield-bound.v1" as const;
-export const SESSION_NO_YIELD_EXIT_CODE = 4;
 
 export interface SessionTurnUsage {
   promptTokens: number;
@@ -20,10 +31,6 @@ export interface SessionNoYieldSnapshot {
   consumedTokens: number;
 }
 
-export interface SessionNoYieldRecord extends SessionNoYieldSnapshot {
-  type: typeof SESSION_NO_YIELD_RECORD_TYPE;
-  limitTokens: number;
-}
 
 function positiveSafeInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -32,11 +39,8 @@ function positiveSafeInteger(value: number, label: string): number {
   return value;
 }
 
-function nonnegativeSafeInteger(value: number, label: string): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${label} must be a nonnegative integer, got ${String(value)}`);
-  }
-  return value;
+function defensiveTokenCount(value: number): number {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 /** Parse the trusted optimizer-to-worker override; unset uses the safe engine default. */
@@ -65,26 +69,36 @@ export class SessionNoYieldCounter {
   private consumedTokens = 0;
   private bounded: SessionNoYieldRecord | null = null;
 
-  constructor(limitTokens: number) {
+  constructor(
+    limitTokens: number,
+    private readonly onInvalidUsage?: (message: string) => void,
+  ) {
     this.limitTokens = positiveSafeInteger(limitTokens, "session no-yield token limit");
   }
 
   observe(usage: SessionTurnUsage, yielded: boolean): SessionNoYieldRecord | null {
     if (this.bounded !== null) return this.bounded;
-    const promptTokens = nonnegativeSafeInteger(usage.promptTokens, "session prompt tokens");
-    const completionTokens = nonnegativeSafeInteger(usage.completionTokens, "session completion tokens");
-    const totalTokens = nonnegativeSafeInteger(usage.totalTokens, "session total tokens");
-    if (totalTokens < promptTokens + completionTokens) {
-      throw new Error("session total tokens cannot be less than prompt plus completion tokens");
+    const promptTokens = defensiveTokenCount(usage.promptTokens);
+    const completionTokens = defensiveTokenCount(usage.completionTokens);
+    const componentTotal = Math.min(Number.MAX_SAFE_INTEGER, promptTokens + completionTokens);
+    const reportedTotal = defensiveTokenCount(usage.totalTokens);
+    const totalTokens = Math.max(reportedTotal, componentTotal);
+    if (
+      promptTokens !== usage.promptTokens
+      || completionTokens !== usage.completionTokens
+      || totalTokens !== usage.totalTokens
+    ) {
+      this.onInvalidUsage?.(
+        `normalized invalid session usage prompt=${String(usage.promptTokens)} ` +
+        `completion=${String(usage.completionTokens)} total=${String(usage.totalTokens)} ` +
+        `to prompt=${promptTokens} completion=${completionTokens} total=${totalTokens}`,
+      );
     }
 
-    this.modelCalls += 1;
-    this.promptTokens += promptTokens;
-    this.completionTokens += completionTokens;
-    this.consumedTokens += totalTokens;
-    for (const [label, value] of Object.entries(this.snapshot())) {
-      if (!Number.isSafeInteger(value)) throw new Error(`session ${label} exceeds the safe integer range`);
-    }
+    this.modelCalls = Math.min(Number.MAX_SAFE_INTEGER, this.modelCalls + 1);
+    this.promptTokens = Math.min(Number.MAX_SAFE_INTEGER, this.promptTokens + promptTokens);
+    this.completionTokens = Math.min(Number.MAX_SAFE_INTEGER, this.completionTokens + completionTokens);
+    this.consumedTokens = Math.min(Number.MAX_SAFE_INTEGER, this.consumedTokens + totalTokens);
 
     if (yielded || this.consumedTokens < this.limitTokens) return null;
     this.bounded = {
@@ -111,43 +125,10 @@ export function parseSessionNoYieldRecord(stdout: string): SessionNoYieldRecord 
   const lines = stdout.split("\n").filter((line) => line.trim().length > 0);
   const last = lines[lines.length - 1];
   if (last === undefined) return null;
-  let raw: unknown;
   try {
-    raw = JSON.parse(last);
+    const parsed = SessionNoYieldRecordSchema.safeParse(JSON.parse(last));
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-  const record = raw as Record<string, unknown>;
-  if (record.type !== SESSION_NO_YIELD_RECORD_TYPE) return null;
-  const limitTokens = record.limitTokens;
-  const modelCalls = record.modelCalls;
-  const promptTokens = record.promptTokens;
-  const completionTokens = record.completionTokens;
-  const consumedTokens = record.consumedTokens;
-  if (
-    typeof limitTokens !== "number"
-    || typeof modelCalls !== "number"
-    || typeof promptTokens !== "number"
-    || typeof completionTokens !== "number"
-    || typeof consumedTokens !== "number"
-  ) return null;
-  try {
-    positiveSafeInteger(limitTokens, "session no-yield token limit");
-    positiveSafeInteger(modelCalls, "session model calls");
-    nonnegativeSafeInteger(promptTokens, "session prompt tokens");
-    nonnegativeSafeInteger(completionTokens, "session completion tokens");
-    nonnegativeSafeInteger(consumedTokens, "session consumed tokens");
-  } catch {
-    return null;
-  }
-  if (consumedTokens < limitTokens || consumedTokens < promptTokens + completionTokens) return null;
-  return {
-    type: SESSION_NO_YIELD_RECORD_TYPE,
-    limitTokens,
-    modelCalls,
-    promptTokens,
-    completionTokens,
-    consumedTokens,
-  };
 }

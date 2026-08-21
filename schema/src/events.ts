@@ -35,6 +35,7 @@ export const RunEvent = z.discriminatedUnion("type", [
     ...base,
     type: z.literal("mutation.no-yield-bound"),
     episode: z.number().int().nonnegative(),
+    sandboxId: z.string().min(1),
     limitTokens: z.number().int().positive(),
     modelCalls: z.number().int().positive(),
     promptTokens: z.number().int().nonnegative(),

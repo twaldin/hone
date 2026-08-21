@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RunEvent } from "@hone/schema";
 import { EpisodeContext } from "../src/episode.js";
 import {
@@ -189,17 +189,80 @@ describe("runEpisodeLoop", () => {
     }
 
     expect(stub.reportedNoYieldBounds).toEqual([{
-      episode: 0,
-      limitTokens: 1_500_000,
-      modelCalls: 152,
-      promptTokens: 1_499_359,
-      completionTokens: 7_320,
-      consumedTokens: 1_506_679,
+      sandboxId: "sb_000000000001",
+      ...noYieldRecord,
     }]);
     expect(stub.execArgvs).toHaveLength(1);
     expect(stub.finished).toEqual([BASELINE]);
     expect(eventsOf(events, "episode.candidate")).toHaveLength(0);
     expect(eventsOf(events, "budget.exhausted")).toHaveLength(0);
+  });
+
+  it("still stops and finishes when the durable no-yield report is rejected", async () => {
+    const noYieldRecord = {
+      type: SESSION_NO_YIELD_RECORD_TYPE,
+      limitTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [{ exitCode: 4, stdout: `${JSON.stringify(noYieldRecord)}\n` }],
+      reportNoYieldError: "journal write unavailable",
+      envelope: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+    });
+    await stub.listen();
+    const diagnostics: string[] = [];
+    const stderr = vi.spyOn(console, "error").mockImplementation((message) => diagnostics.push(String(message)));
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-no-yield-report-failure",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: (event) => event,
+      });
+    } finally {
+      stderr.mockRestore();
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toHaveLength(1);
+    expect(stub.finished).toEqual([BASELINE]);
+    expect(diagnostics.join("\n")).toContain("mutation.no-yield-bound-report-failed");
+    expect(diagnostics.join("\n")).toContain("journal write unavailable");
+  });
+
+  it("suppresses repair and finishes when exit 4 output is truncated or unparsable", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [{ exitCode: 4, stdout: "{\"type\":\"hone.mutation.no-yield-bound.v1\"" }],
+      envelope: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+    });
+    await stub.listen();
+    const diagnostics: string[] = [];
+    const stderr = vi.spyOn(console, "error").mockImplementation((message) => diagnostics.push(String(message)));
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-no-yield-truncated-record",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: (event) => event,
+      });
+    } finally {
+      stderr.mockRestore();
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toHaveLength(1);
+    expect(stub.reportedNoYieldBounds).toHaveLength(0);
+    expect(stub.finished).toEqual([BASELINE]);
+    expect(diagnostics.join("\n")).toContain("mutation.no-yield-bound-record-unavailable");
   });
 
   it("attaches the frozen development-panel allocation plan to parent and candidate evaluations", async () => {
