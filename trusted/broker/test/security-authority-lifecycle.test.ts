@@ -1862,7 +1862,10 @@ describe("evaluator containment", () => {
     const b = await boot();
     b.ctl.evalOutputs.set(candidateHash, score(2));
     const cand = await saveCandidate(b, candidateTar);
-    await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
+    const record = await b.broker.evaluate(
+      { artifact: { hash: cand }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
     const evalArgv = b.log.find((a) => a[1] === "run" && a.includes("--rm"));
     expect(evalArgv).toBeDefined();
     const argv = evalArgv ?? [];
@@ -1904,6 +1907,7 @@ describe("evaluator containment", () => {
     expect(b.events.find((event) => event.type === "evaluator.isolation")).toMatchObject({
       isolation: { mode: "shared-uid-lease", workerUid: 2000 },
     });
+    expect(record.isolation).toMatchObject({ mode: "shared-uid-lease", workerUid: 2000 });
     const stateTmpfsIdx = argv.indexOf("/tmp:size=2g,nosuid,nodev,noexec");
     expect(stateTmpfsIdx).toBeGreaterThan(0);
     expect(argv[stateTmpfsIdx - 1]).toBe("--tmpfs");
@@ -1947,7 +1951,9 @@ describe("evaluator containment", () => {
     expect(new Set(observedUids).size).toBe(2);
     expect(observedUids.every((uid) => uid >= 20_000 && uid <= 20_031)).toBe(true);
     release.resolve();
-    await evaluations;
+    const records = await evaluations;
+    expect(records.map((record) => record.isolation?.workerUid).sort()).toEqual([...observedUids].sort());
+    expect(records.every((record) => record.isolation?.mode === "reserved-uid")).toBe(true);
 
     const isolation = b.events.filter((event) => event.type === "evaluator.isolation");
     expect(isolation).toHaveLength(2);

@@ -3368,6 +3368,7 @@ export class Broker {
     const stageDir = await this.stageAssets(group);
 
     let isolation: EvaluatorIsolationLease | undefined;
+    let isolationRecord: z.infer<typeof EvaluatorIsolationRecord> | undefined;
     let invocationEvents: RunEvent[] = [];
     let res: CmdResult;
     let startedMs = 0;
@@ -3391,7 +3392,7 @@ export class Broker {
       }
       if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
       this.budgetGate();
-      const isolationRecord = EvaluatorIsolationRecord.parse({
+      isolationRecord = EvaluatorIsolationRecord.parse({
         mode: isolation.mode,
         allocationId: isolation.allocationId,
         workerUid: isolation.workerUid,
@@ -3533,12 +3534,16 @@ export class Broker {
     } catch (err) {
       throw new BrokerError("INTERNAL", `evaluator emitted invalid EvaluatorOutput: ${String(err)}`);
     }
+    if (isolationRecord === undefined) {
+      throw new BrokerError("INTERNAL", "successful evaluator invocation lacks isolation provenance");
+    }
 
     const record = EvaluationRecord.parse({
       capsuleId: this.manifest.id,
       artifactHash: params.artifact.hash,
       assetGroupId: params.assetGroupId,
       seed: params.seed,
+      isolation: isolationRecord,
       output,
       costUsd: 0, // eval containers have no network — no LLM spend to attribute
       durationMs,

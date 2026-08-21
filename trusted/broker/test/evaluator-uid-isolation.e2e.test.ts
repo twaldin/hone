@@ -118,6 +118,10 @@ realDocker("real evaluator uid isolation", () => {
       expect(isolation.every((event) => event.isolation.mode === "reserved-uid")).toBe(true);
       expect(new Set(isolation.map((event) => event.isolation.workerUid)).size).toBe(4);
       expect(isolation.every((event) => event.isolation.workerUid !== HOLDER_UID)).toBe(true);
+      expect(records.map((record) => record.isolation?.workerUid).sort()).toEqual(
+        isolation.map((event) => event.isolation.workerUid).sort(),
+      );
+      expect(records.every((record) => record.isolation?.mode === "reserved-uid")).toBe(true);
     } finally {
       await harness.broker.close();
     }
@@ -166,6 +170,7 @@ realDocker("real evaluator uid isolation", () => {
       const uid = isolation[0]!.isolation.workerUid;
       expect(peakTasks.get(uid) ?? 0).toBeGreaterThanOrEqual(20);
       expect(peakTasks.get(uid) ?? 0).toBeLessThanOrEqual(32);
+      expect(outcome.record.isolation).toEqual(isolation[0]!.isolation);
       expect(await countUidTasks(uid)).toBe(0);
       expect(outcome.record.output.diagnostics?.summary).toMatch(/^\d+\/41 sealed cases passed$/);
     } finally {

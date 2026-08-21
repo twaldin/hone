@@ -26,26 +26,6 @@ export const EvaluatorOutput = z.object({
 export type EvaluatorOutput = z.infer<typeof EvaluatorOutput>;
 
 /**
- * Trusted-side evaluation record: evaluator output + measurement metadata.
- * Baselines are ALWAYS measured by the trusted runner (anti-sandbagging),
- * never taken from capsule/builder metadata.
- */
-export const EvaluationRecord = z.object({
-  capsuleId: z.string(),
-  artifactHash: z.string(),
-  assetGroupId: z.string(),
-  /** Deterministic seed used for fixture sampling, memoization key component. */
-  seed: z.number().int().nonnegative(),
-  output: EvaluatorOutput,
-  costUsd: z.number().nonnegative(),
-  durationMs: z.number().nonnegative(),
-  /** True when served from the trusted memo cache; the runtime key also binds the full run, evaluator, optimizer, and measurement-epoch identity. */
-  cached: z.boolean(),
-  evaluatedAt: z.string().datetime(),
-});
-export type EvaluationRecord = z.infer<typeof EvaluationRecord>;
-
-/**
  * Host identity/isolation selected for one real (uncached) evaluator
  * invocation. This is trusted provenance, not evaluator-authored output.
  */
@@ -64,3 +44,24 @@ export const EvaluatorIsolationRecord = z.discriminatedUnion("mode", [
   }),
 ]);
 export type EvaluatorIsolationRecord = z.infer<typeof EvaluatorIsolationRecord>;
+/**
+ * Trusted-side evaluation record: evaluator output + measurement metadata.
+ * Baselines are ALWAYS measured by the trusted runner (anti-sandbagging),
+ * never taken from capsule/builder metadata.
+ */
+export const EvaluationRecord = z.object({
+  capsuleId: z.string(),
+  artifactHash: z.string(),
+  assetGroupId: z.string(),
+  /** Deterministic seed used for fixture sampling, memoization key component. */
+  seed: z.number().int().nonnegative(),
+  /** Host isolation chosen for uncached execution; absent only on legacy/cached records. */
+  isolation: EvaluatorIsolationRecord.optional(),
+  output: EvaluatorOutput,
+  costUsd: z.number().nonnegative(),
+  durationMs: z.number().nonnegative(),
+  /** True when served from the trusted memo cache; the runtime key also binds the full run, evaluator, optimizer, and measurement-epoch identity. */
+  cached: z.boolean(),
+  evaluatedAt: z.string().datetime(),
+});
+export type EvaluationRecord = z.infer<typeof EvaluationRecord>;
