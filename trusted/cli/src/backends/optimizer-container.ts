@@ -1,15 +1,18 @@
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, createReadStream, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Stats } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunCommand } from "@hone/broker";
 import type { DockerCreateGate } from "../docker-create-gate.js";
 import {
+  MUTATION_RUNTIME_MANIFEST,
+  MUTATION_RUNTIME_MANIFEST_FILE,
   OPTIMIZER_BUILD_CONTRACT,
   OPTIMIZER_BUNDLE_FILES,
   collectOptimizerSnapshot,
   optimizerOverridden,
+  repoRootFromHere,
   snapshotDigest,
   writeOptimizerStaging,
 } from "../optimizer-digest.js";
@@ -19,12 +22,13 @@ import type { RunnerBackendContext } from "../types.js";
  * Containerized optimizer execution (trusted boundary): the loop NEVER runs as a
  * host process. Backend setup recollects the allowlisted snapshot, proves it
  * still hashes to the digest sealed into run.started, writes the captured
- * bytes to a staging tree, and compiles them with `bun build` inside the
- * pinned manifest image — no network, read-only source mount, isolated
- * writable output, no repo mount, no host env. The build container runs as
- * the invoking NUMERIC host uid/gid and writes into a host-created,
- * 0700-rooted output tree: no other host UID can traverse, list, unlink, or
- * replace the bundle (never a world-writable handoff dir). Trusted code then
+ * bytes to a staging tree, and compiles them with the separately hash-pinned
+ * Bun runtime inside the pinned manifest image — no network, read-only source
+ * and runtime mounts, isolated writable output, no repo mount, no host env.
+ * The build container runs as the invoking NUMERIC host uid/gid and writes
+ * into a host-created, 0700-rooted output tree: no other host UID can
+ * traverse, list, unlink, or replace the bundle (never a world-writable
+ * handoff dir). Trusted code then
  * SEALS the output — lstats each required file (regular, single-link,
  * owner-owned), captures its exact bytes and SHA-256, freezes all write
  * permission — and re-verifies that seal immediately before EVERY run
@@ -40,6 +44,7 @@ import type { RunnerBackendContext } from "../types.js";
 const SRC_MOUNT = "/hone/src";
 const OUT_MOUNT = "/hone/out";
 const BUNDLE_MOUNT = "/hone/bundle";
+const RUNTIME_MOUNT = "/hone/runtime";
 /** Linux transport: the public broker socket's in-container path. */
 export const CONTAINER_BROKER_SOCK = "/run/hone/broker.sock";
 const MISSING_CONTAINER_RE = /no such container|is not running|no such object/i;
@@ -155,6 +160,7 @@ export function optimizerBuildArgs(opts: {
   safeRunId: string;
   image: string;
   stagingDir: string;
+  runtimeDir: string;
   outDir: string;
   /** Docker-run lease (stopped per-epoch donor) name; attaches `--volumes-from <lease>:ro` before the image. */
   containerLease: string;
@@ -178,6 +184,7 @@ export function optimizerBuildArgs(opts: {
     ...HARDENING_ARGS,
     "-v", `${opts.stagingDir}:${SRC_MOUNT}:ro`,
     "-v", `${opts.outDir}:${OUT_MOUNT}`,
+    "-v", `${opts.runtimeDir}:${RUNTIME_MOUNT}:ro`,
     "--volumes-from", `${opts.containerLease}:ro`,
     opts.image,
     ...OPTIMIZER_BUILD_CONTRACT.build,
@@ -364,6 +371,56 @@ export function verifyOptimizerBundleSeal(runtime: Pick<OptimizerRuntime, "bundl
   }
 }
 
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+/**
+ * Copy the separately pinned platform artifacts into an owner-only build
+ * handoff. The fixed expected hashes live in OPTIMIZER_BUILD_CONTRACT, hence
+ * in every optimizer digest; a path override can relocate identical bytes but
+ * can never steer the measurement to a different interpreter or native addon.
+ */
+export async function stageMutationRuntime(env: NodeJS.ProcessEnv, runtimeDir: string): Promise<void> {
+  if (process.platform !== "linux" || process.arch !== "x64") {
+    throw new Error(`mutation runtime injection supports linux/x64, got ${process.platform}/${process.arch}`);
+  }
+  const bunPath = env["HONE_BUN_RUNTIME_PATH"] ?? join(homedir(), ".bun", "bin", MUTATION_RUNTIME_MANIFEST.bun.sourceName);
+  const nativeDir =
+    env["HONE_PI_NATIVES_RUNTIME_DIR"] ??
+    join(
+      repoRootFromHere(),
+      "node_modules",
+      ".pnpm",
+      `@oh-my-pi+pi-natives-linux-x64@${MUTATION_RUNTIME_MANIFEST.pi.version}`,
+      "node_modules",
+      "@oh-my-pi",
+      "pi-natives-linux-x64",
+    );
+  const sources = [
+    { path: bunPath, name: MUTATION_RUNTIME_MANIFEST.bun.sourceName, sha256: MUTATION_RUNTIME_MANIFEST.bun.sha256, mode: 0o555 },
+    ...MUTATION_RUNTIME_MANIFEST.pi.files.map((file) => ({
+      path: join(nativeDir, file.sourceName),
+      name: file.sourceName,
+      sha256: file.sha256,
+      mode: 0o444,
+    })),
+  ];
+  for (const source of sources) {
+    const sourceStat = mustLstat(source.path, "mutation runtime source");
+    if (!sourceStat.isFile()) throw new Error(`mutation runtime source is not a regular file: ${source.path}`);
+    const target = join(runtimeDir, source.name);
+    copyFileSync(source.path, target);
+    chmodSync(target, source.mode);
+    const digest = await sha256File(target);
+    if (digest !== source.sha256) {
+      throw new Error(`mutation runtime source ${source.path} hashes ${digest} != pinned ${source.sha256} — refusing`);
+    }
+  }
+}
+
 /**
  * One-time (per backend start) preparation shared by the probe invocation and
  * the full relaunch: digest re-proof, staging, and the container build. The
@@ -371,7 +428,17 @@ export function verifyOptimizerBundleSeal(runtime: Pick<OptimizerRuntime, "bundl
  */
 export async function prepareOptimizerRuntime(
   ctx: Pick<RunnerBackendContext, "runId" | "env" | "optimizerDigest" | "optimizerSnapshot" | "optimizerBaseSnapshot">,
-  opts: { image: string; transport: OptimizerTransport; run: RunCommand; spawnImpl: OptimizerSpawn; containerLease: string; gate: DockerCreateGate; clientEnv: NodeJS.ProcessEnv },
+  opts: {
+    image: string;
+    transport: OptimizerTransport;
+    run: RunCommand;
+    spawnImpl: OptimizerSpawn;
+    containerLease: string;
+    gate: DockerCreateGate;
+    clientEnv: NodeJS.ProcessEnv;
+    /** Unit-test seam: production always stages and verifies the pinned sources. */
+    runtimeSourceDir?: string;
+  },
 ): Promise<OptimizerRuntime> {
   const safeRunId = ctx.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
   const tempDirs: string[] = [];
@@ -455,6 +522,19 @@ export async function prepareOptimizerRuntime(
   // uid, so nothing needs to be opened to other users.
   const stagingDir = mkdtempSync(join(tmpdir(), "hone-optsrc-"));
   tempDirs.push(stagingDir);
+  let runtimeDir: string;
+  if (opts.runtimeSourceDir !== undefined) {
+    runtimeDir = opts.runtimeSourceDir;
+  } else {
+    runtimeDir = mkdtempSync(join(tmpdir(), "hone-optruntime-"));
+    tempDirs.push(runtimeDir);
+    try {
+      await stageMutationRuntime(ctx.env, runtimeDir);
+    } catch (err) {
+      await runtime.cleanup();
+      throw err;
+    }
+  }
   // Output: a 0700 owner-only umbrella (mkdtemp default) with the actual
   // mount dir nested below it. No other host UID can traverse the umbrella —
   // list, unlink, or replace anything — while the nested dir itself can drop
@@ -476,6 +556,7 @@ export async function prepareOptimizerRuntime(
         image: opts.image,
         stagingDir,
         outDir,
+        runtimeDir,
         containerLease: opts.containerLease,
         hostUid: uid,
         hostGid: gid,
@@ -485,6 +566,11 @@ export async function prepareOptimizerRuntime(
     if (built.exitCode !== 0) {
       throw new Error(`optimizer bundle build failed (exit ${built.exitCode}): ${built.stderr.toString("utf8").slice(0, 2000)}`);
     }
+    writeFileSync(
+      join(outDir, MUTATION_RUNTIME_MANIFEST_FILE),
+      `${JSON.stringify(MUTATION_RUNTIME_MANIFEST)}\n`,
+      { mode: 0o600 },
+    );
     // Seal the handoff: capture exact bytes + hashes, pin inode identities,
     // and strip all write permission before anything may mount the dir.
     runtime.bundleSeal = sealOptimizerBundleDir(outRoot, outDir, uid);

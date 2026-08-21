@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ArtifactRef, BudgetState, EvaluationRecord, RunEvent } from "@hone/schema";
 import { buildEpisodeContext, type FailureEvidence, type LineageEntry } from "../assets/context.js";
@@ -29,6 +29,62 @@ export const WORKER_PART_DIR = "/scratch/.hone-worker-parts";
  * envelope stays comfortably under the broker's 1 MiB frame cap.
  */
 export const WORKER_CHUNK_BYTES = 512 * 1024;
+
+/** Runtime directory is shared by the run's mutation sandboxes, never mounted into evaluators. */
+export const SANDBOX_RUNTIME_DIR = "/scratch/.hone-runtime";
+export const SANDBOX_BUN_PATH = `${SANDBOX_RUNTIME_DIR}/bun`;
+/** Artifact-specific chunk staging lives outside the executable runtime directory. */
+export const RUNTIME_PART_DIR = "/scratch/.hone-runtime-parts";
+const MUTATION_RUNTIME_MANIFEST_FILE = "mutation-runtime.json";
+const PI_RUNTIME_VERSION = "16.5.2";
+export const PI_NATIVE_VARIANT = "baseline";
+
+interface RuntimeManifestFile {
+  sourceName: string;
+  bundleName: string;
+  sandboxName: string;
+  sha256: string;
+  mode: number;
+}
+
+interface MutationRuntimeManifest {
+  version: 1;
+  bun: RuntimeManifestFile & { version: string };
+  pi: { version: string; files: RuntimeManifestFile[] };
+}
+
+function parseRuntimeManifest(bytes: Buffer): MutationRuntimeManifest {
+  const parsed: unknown = JSON.parse(bytes.toString("utf8"));
+  if (parsed === null || typeof parsed !== "object") throw new Error("mutation runtime manifest is not an object");
+  const manifest = parsed as Partial<MutationRuntimeManifest>;
+  const validFile = (file: unknown, mode: number, sandboxName: RegExp): file is RuntimeManifestFile => {
+    if (file === null || typeof file !== "object") return false;
+    const candidate = file as Partial<RuntimeManifestFile>;
+    return (
+      typeof candidate.sourceName === "string" &&
+      /^[A-Za-z0-9._-]+$/.test(candidate.sourceName) &&
+      typeof candidate.bundleName === "string" &&
+      /^[A-Za-z0-9._-]+\.gz$/.test(candidate.bundleName) &&
+      typeof candidate.sandboxName === "string" &&
+      sandboxName.test(candidate.sandboxName) &&
+      typeof candidate.sha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(candidate.sha256) &&
+      candidate.mode === mode
+    );
+  };
+  if (
+    manifest.version !== 1 ||
+    manifest.bun?.version !== "1.3.14" ||
+    !validFile(manifest.bun, 0o500, /^bun$/) ||
+    manifest.pi?.version !== PI_RUNTIME_VERSION ||
+    !Array.isArray(manifest.pi.files) ||
+    manifest.pi.files.length !== 1 ||
+    !validFile(manifest.pi.files[0], 0o400, /^pi_natives\.linux-x64-baseline\.node$/)
+  ) {
+    throw new Error("mutation runtime manifest does not match Bun 1.3.14 + Pi 16.5.2 linux/x64 baseline");
+  }
+  return manifest as MutationRuntimeManifest;
+}
 
 /** Margin subtracted from the exec timeout so the session yields before the broker kills it. */
 const DEADLINE_MARGIN_SEC = 120;
@@ -66,6 +122,8 @@ export interface EpisodeLoopOptions {
    * emitted. Test seam only; nothing trusted ever picks a different worker.
    */
   workerBundlePath?: string;
+  /** Directory containing the sealed compressed runtime artifacts; defaults beside workerBundlePath. */
+  runtimeBundleDir?: string;
 }
 
 /** Mean of objective values — the same default scalarization as trusted/scoring. */
@@ -108,11 +166,46 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
   if (maxEpisodes !== undefined && (!Number.isSafeInteger(maxEpisodes) || maxEpisodes <= 0)) {
     throw new Error(`maxEpisodes must be a positive integer, got ${String(maxEpisodes)}`);
   }
-  // The sealed built worker bytes, shipped from THIS invocation's bundle dir
-  // into every mutation sandbox. Read before anything touches the broker —
-  // a missing bundle fails the invocation closed.
-  const workerBundle = readFileSync(opts.workerBundlePath ?? fileURLToPath(new URL("worker.mjs", import.meta.url)));
+  // The sealed built worker + platform-runtime bytes, shipped from THIS
+  // invocation's bundle dir into mutation sandboxes. Read before anything
+  // touches the broker so any missing or mismatched artifact fails closed.
+  const workerBundlePath = opts.workerBundlePath ?? fileURLToPath(new URL("worker.mjs", import.meta.url));
+  const runtimeBundleDir = opts.runtimeBundleDir ?? dirname(workerBundlePath);
+  const workerBundle = readFileSync(workerBundlePath);
   const workerSha256 = createHash("sha256").update(workerBundle).digest("hex");
+  const runtimeManifest = parseRuntimeManifest(readFileSync(join(runtimeBundleDir, MUTATION_RUNTIME_MANIFEST_FILE)));
+  const compressedRuntime = [runtimeManifest.bun, ...runtimeManifest.pi.files].map((file) => {
+    const bytes = readFileSync(join(runtimeBundleDir, file.bundleName));
+    return {
+      ...file,
+      bytes,
+      compressedSha256: createHash("sha256").update(bytes).digest("hex"),
+      sandboxPath: `${SANDBOX_RUNTIME_DIR}/${file.sandboxName}`,
+      partDir: `${RUNTIME_PART_DIR}/${file.sandboxName}`,
+    };
+  });
+  console.error(
+    JSON.stringify({
+      type: "mutation.runtime",
+      runId: opts.runId,
+      worker: { path: SANDBOX_WORKER_PATH, sha256: workerSha256 },
+      bun: {
+        version: runtimeManifest.bun.version,
+        path: SANDBOX_BUN_PATH,
+        sha256: runtimeManifest.bun.sha256,
+        compressedSha256: compressedRuntime[0]?.compressedSha256,
+      },
+      pi: {
+        version: runtimeManifest.pi.version,
+        variant: PI_NATIVE_VARIANT,
+        files: compressedRuntime.slice(1).map((file) => ({
+          path: file.sandboxPath,
+          sha256: file.sha256,
+          compressedSha256: file.compressedSha256,
+        })),
+      },
+    }),
+  );
   const broker = await BrokerClient.connect(opts.brokerSocket);
   const baseSeed = opts.seed ?? 0;
   const rand = opts.rand ?? ((episode: number) => episodeRand(baseSeed, episode));
@@ -169,36 +262,69 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
     };
 
     /**
-     * Guarantee the sandbox holds the EXACT sealed worker bytes at
-     * SANDBOX_WORKER_PATH before exec. /scratch is shared across the run's
-     * sandboxes, so a hash-verified hit skips the transfer; any miss or
-     * mismatch re-ships the bundle in frame-sized putFile chunks and
-     * re-verifies the assembled file.
+     * Guarantee the sandbox holds the EXACT sealed worker and platform
+     * runtime bytes before exec. /scratch is shared by every mutation sandbox
+     * in the run, so hash-verified hits skip the large transfer; evaluators do
+     * not mount this volume.
      */
-    const ensureWorker = async (sandboxId: string): Promise<void> => {
-      const probe = await broker.exec({ sandboxId, argv: ["sha256sum", SANDBOX_WORKER_PATH], timeoutSec: 120 });
-      if (probe.exitCode === 0 && probe.stdout.trimStart().startsWith(workerSha256)) return;
+    const ensureArtifact = async (
+      sandboxId: string,
+      artifact: {
+        bytes: Buffer;
+        sha256: string;
+        sandboxPath: string;
+        partDir: string;
+        mode: number;
+        compressed: boolean;
+      },
+    ): Promise<void> => {
+      const probe = await broker.exec({ sandboxId, argv: ["sha256sum", artifact.sandboxPath], timeoutSec: 120 });
+      if (probe.exitCode === 0 && probe.stdout.trimStart().startsWith(`${artifact.sha256}  ${artifact.sandboxPath}`)) return;
       const parts: string[] = [];
-      for (let offset = 0, i = 0; offset < workerBundle.length; offset += WORKER_CHUNK_BYTES, i++) {
-        const part = `${WORKER_PART_DIR}/${String(i).padStart(8, "0")}`;
+      for (let offset = 0, i = 0; offset < artifact.bytes.length; offset += WORKER_CHUNK_BYTES, i++) {
+        const part = `${artifact.partDir}/${String(i).padStart(8, "0")}`;
         parts.push(part);
         await broker.putFile({
           sandboxId,
           path: part,
-          contentBase64: workerBundle.subarray(offset, offset + WORKER_CHUNK_BYTES).toString("base64"),
+          contentBase64: artifact.bytes.subarray(offset, offset + WORKER_CHUNK_BYTES).toString("base64"),
         });
       }
       // Explicit part list (not a glob): stale parts from an interrupted
       // transfer can never leak into the assembled file.
+      const materialize = artifact.compressed
+        ? `(cat ${parts.join(" ")} | gzip -dc) > ${artifact.sandboxPath}`
+        : `cat ${parts.join(" ")} > ${artifact.sandboxPath}`;
       const assemble = await broker.exec({
         sandboxId,
-        argv: ["sh", "-c", `cat ${parts.join(" ")} > ${SANDBOX_WORKER_PATH} && rm -rf ${WORKER_PART_DIR} && sha256sum ${SANDBOX_WORKER_PATH}`],
+        argv: [
+          "sh",
+          "-c",
+          `mkdir -p ${dirname(artifact.sandboxPath)} && ${materialize} && chmod ${artifact.mode.toString(8)} ${artifact.sandboxPath} && chmod 700 ${dirname(artifact.sandboxPath)} && rm -rf ${artifact.partDir} && sha256sum ${artifact.sandboxPath}`,
+        ],
         timeoutSec: 300,
       });
-      if (assemble.exitCode !== 0 || !assemble.stdout.trimStart().startsWith(workerSha256)) {
+      if (
+        assemble.exitCode !== 0 ||
+        !assemble.stdout.trimStart().startsWith(`${artifact.sha256}  ${artifact.sandboxPath}`)
+      ) {
         throw new Error(
-          `worker bundle transfer to sandbox ${sandboxId} failed (exit ${assemble.exitCode}): expected sha256 ${workerSha256}`,
+          `runtime artifact transfer to sandbox ${sandboxId} failed (exit ${assemble.exitCode}): expected ${artifact.sandboxPath} sha256 ${artifact.sha256}`,
         );
+      }
+    };
+
+    const ensureWorker = async (sandboxId: string): Promise<void> => {
+      await ensureArtifact(sandboxId, {
+        bytes: workerBundle,
+        sha256: workerSha256,
+        sandboxPath: SANDBOX_WORKER_PATH,
+        partDir: WORKER_PART_DIR,
+        mode: 0o400,
+        compressed: false,
+      });
+      for (const artifact of compressedRuntime) {
+        await ensureArtifact(sandboxId, { ...artifact, compressed: true });
       }
     };
 
@@ -228,7 +354,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       const deadlineMs = Math.max(60, mutationTimeoutSec - DEADLINE_MARGIN_SEC) * 1000;
       const exec = await broker.exec({
         sandboxId,
-        argv: ["env", `HONE_DEADLINE_MS=${deadlineMs}`, "bun", SANDBOX_WORKER_PATH],
+        argv: ["env", `HONE_DEADLINE_MS=${deadlineMs}`, `PI_NATIVE_VARIANT=${PI_NATIVE_VARIANT}`, SANDBOX_BUN_PATH, SANDBOX_WORKER_PATH],
         cwd: "/workspace",
         timeoutSec: mutationTimeoutSec,
       });

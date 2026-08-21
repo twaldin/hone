@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { mkdtempSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -14,7 +15,7 @@ import {
   type RecursiveTask,
 } from "@hone/schema";
 import { deferred } from "../src/deferred.js";
-import { SANDBOX_WORKER_PATH, WORKER_PART_DIR } from "../src/loop.js";
+import { RUNTIME_PART_DIR, SANDBOX_WORKER_PATH, WORKER_PART_DIR } from "../src/loop.js";
 
 /**
  * In-process scripted broker: a real net.Server speaking the newline JSON-RPC
@@ -87,8 +88,12 @@ export class StubBroker {
   readonly ops: string[] = [];
   /** Worker-bundle chunk putFiles in arrival order (raw bytes preserved). */
   readonly workerParts: { sandboxId: string; path: string; bytes: Buffer }[] = [];
-  /** One entry per successful in-sandbox assembly: the exact assembled bytes. */
+  /** Compressed platform-runtime chunks in arrival order. */
+  readonly runtimeParts: { sandboxId: string; path: string; bytes: Buffer }[] = [];
+  /** One entry per successful worker assembly: the exact assembled bytes. */
   readonly workerTransfers: { sandboxId: string; bytes: Buffer }[] = [];
+  /** One entry per successful platform-runtime materialization. */
+  readonly runtimeTransfers: { sandboxId: string; path: string; bytes: Buffer }[] = [];
   /** The run's shared /scratch state: path -> bytes. Persists across sandboxes like the real volume. */
   readonly scratch = new Map<string, Buffer>();
 
@@ -181,6 +186,10 @@ export class StubBroker {
           this.workerParts.push({ sandboxId: params.sandboxId, path: params.path, bytes });
           return {};
         }
+        if (params.path.startsWith(`${RUNTIME_PART_DIR}/`)) {
+          this.runtimeParts.push({ sandboxId: params.sandboxId, path: params.path, bytes });
+          return {};
+        }
         this.putFiles.push({ sandboxId: params.sandboxId, path: params.path, content: bytes.toString("utf8") });
         return {};
       }
@@ -253,43 +262,50 @@ export class StubBroker {
   }
 
   /**
-   * Emulate the loop's worker-transfer protocol against the shared /scratch
-   * state: the sha256sum probe and the explicit-part-list assembly. Returns
-   * null for anything else (a real mutation-session exec, scripted by
-   * execPlan). Keeps existing tests' exec/putFile ledgers session-only.
+   * Emulate the loop's sealed-artifact transfer protocol against shared
+   * /scratch: sha256sum probes plus explicit-part-list assembly/decompression.
+   * Returns null for the real mutation-session exec scripted by execPlan.
    */
   private workerProtocolExec(
     sandboxId: string,
     argv: string[],
   ): { exitCode: number; stdout: string; stderr: string; truncated: false } | null {
-    const shaLine = (bytes: Buffer): string =>
-      `${createHash("sha256").update(bytes).digest("hex")}  ${SANDBOX_WORKER_PATH}\n`;
-    if (argv.length === 2 && argv[0] === "sha256sum" && argv[1] === SANDBOX_WORKER_PATH) {
-      const bytes = this.scratch.get(SANDBOX_WORKER_PATH);
+    const shaLine = (path: string, bytes: Buffer): string =>
+      `${createHash("sha256").update(bytes).digest("hex")}  ${path}\n`;
+    if (argv.length === 2 && argv[0] === "sha256sum" && argv[1]?.startsWith("/scratch/") === true) {
+      const path = argv[1];
+      const bytes = this.scratch.get(path);
       if (bytes === undefined) {
-        return { exitCode: 1, stdout: "", stderr: `sha256sum: ${SANDBOX_WORKER_PATH}: No such file or directory`, truncated: false };
+        return { exitCode: 1, stdout: "", stderr: `sha256sum: ${path}: No such file or directory`, truncated: false };
       }
-      return { exitCode: 0, stdout: shaLine(bytes), stderr: "", truncated: false };
+      return { exitCode: 0, stdout: shaLine(path, bytes), stderr: "", truncated: false };
     }
-    if (argv[0] === "sh" && argv[1] === "-c" && argv[2] !== undefined && argv[2].includes(`> ${SANDBOX_WORKER_PATH}`)) {
-      const catList = (argv[2].split(" > ")[0] ?? "").split(/\s+/).slice(1);
-      const chunks: Buffer[] = [];
-      for (const part of catList) {
-        const bytes = this.scratch.get(part);
-        if (bytes === undefined) {
-          return { exitCode: 1, stdout: "", stderr: `cat: ${part}: No such file or directory`, truncated: false };
-        }
-        chunks.push(bytes);
+    const script = argv[0] === "sh" && argv[1] === "-c" ? argv[2] : undefined;
+    const target = script?.match(/ > (\/scratch\/[^ ]+) && chmod /)?.[1];
+    if (script === undefined || target === undefined) return null;
+    const compressed = script.includes(" | gzip -dc) > ");
+    const afterCat = script.slice(script.indexOf("cat ") + 4);
+    const partList = (afterCat.split(compressed ? " | gzip -dc) > " : " > ")[0] ?? "").trim().split(/\s+/);
+    const chunks: Buffer[] = [];
+    for (const part of partList) {
+      const bytes = this.scratch.get(part);
+      if (bytes === undefined) {
+        return { exitCode: 1, stdout: "", stderr: `cat: ${part}: No such file or directory`, truncated: false };
       }
-      const assembled = Buffer.concat(chunks);
-      this.scratch.set(SANDBOX_WORKER_PATH, assembled);
+      chunks.push(bytes);
+    }
+    const transferred = Buffer.concat(chunks);
+    const assembled = compressed ? gunzipSync(transferred) : transferred;
+    this.scratch.set(target, assembled);
+    const partDir = partList[0]?.slice(0, partList[0].lastIndexOf("/"));
+    if (partDir !== undefined) {
       for (const path of [...this.scratch.keys()]) {
-        if (path.startsWith(`${WORKER_PART_DIR}/`)) this.scratch.delete(path);
+        if (path.startsWith(`${partDir}/`)) this.scratch.delete(path);
       }
-      this.workerTransfers.push({ sandboxId, bytes: assembled });
-      return { exitCode: 0, stdout: shaLine(assembled), stderr: "", truncated: false };
     }
-    return null;
+    if (target === SANDBOX_WORKER_PATH) this.workerTransfers.push({ sandboxId, bytes: assembled });
+    else this.runtimeTransfers.push({ sandboxId, path: target, bytes: assembled });
+    return { exitCode: 0, stdout: shaLine(target, assembled), stderr: "", truncated: false };
   }
 
   private outputFor(hash: string, seed: number): Record<string, unknown> {

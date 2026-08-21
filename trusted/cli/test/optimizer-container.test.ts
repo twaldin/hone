@@ -20,7 +20,13 @@ import {
 import type { OptimizerBundleSeal, OptimizerRuntime } from "../src/backends/optimizer-container.js";
 import { openDockerCreateGate } from "../src/docker-create-gate.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
-import { collectOptimizerSnapshot, computeOptimizerDigest, snapshotDigest } from "../src/optimizer-digest.js";
+import {
+  MUTATION_RUNTIME_MANIFEST,
+  OPTIMIZER_BUNDLE_FILES,
+  collectOptimizerSnapshot,
+  computeOptimizerDigest,
+  snapshotDigest,
+} from "../src/optimizer-digest.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
   scriptedCreateHelper,
@@ -47,6 +53,21 @@ function res(overrides: Partial<CmdResult> = {}): CmdResult {
   return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false, ...overrides };
 }
 
+const TEST_RUNTIME_SOURCE = "/tmp/hone-runtime-test-fixture";
+
+function writeRuntimeFixtures(out: string): void {
+  writeFileSync(join(out, MUTATION_RUNTIME_MANIFEST.bun.bundleName), "compressed bun fixture");
+  for (const file of MUTATION_RUNTIME_MANIFEST.pi.files) {
+    writeFileSync(join(out, file.bundleName), `compressed ${file.sourceName} fixture`);
+  }
+}
+
+function writeBuiltArtifacts(out: string, optimizer = "// bundle\n", worker = "// worker bundle\n"): void {
+  writeFileSync(join(out, "optimizer.mjs"), optimizer);
+  writeFileSync(join(out, "worker.mjs"), worker);
+  writeRuntimeFixtures(out);
+}
+
 /** All -v mount specs in a docker argv. */
 function mountsOf(argv: readonly string[]): string[] {
   const out: string[] = [];
@@ -71,6 +92,7 @@ describe("build container argv exactness", () => {
       safeRunId: "run_b",
       image: FIX_IMAGE,
       stagingDir: "/tmp/src",
+      runtimeDir: "/tmp/runtime",
       outDir: "/tmp/out",
       containerLease: "hone-lease-run_b-e1",
       hostUid: 1234,
@@ -90,7 +112,7 @@ describe("build container argv exactness", () => {
     expect(flagValue(argv, "--security-opt")).toBe("no-new-privileges");
     expect(flagValue(argv, "--pids-limit")).toBe("512");
     expect(flagValue(argv, "--label")).toBe("hone.runId=run_b");
-    expect(mountsOf(argv)).toEqual(["/tmp/src:/hone/src:ro", "/tmp/out:/hone/out"]);
+    expect(mountsOf(argv)).toEqual(["/tmp/src:/hone/src:ro", "/tmp/out:/hone/out", "/tmp/runtime:/hone/runtime:ro"]);
     // The donor lease attach is REQUIRED (production omission was a P1).
     expect(argv[argv.indexOf("--volumes-from") + 1]).toBe("hone-lease-run_b-e1:ro");
     // The compiler runs INSIDE the pinned image on the staged tree only, and
@@ -111,6 +133,7 @@ describe("build container argv exactness", () => {
       safeRunId: "run_b",
       image: FIX_IMAGE,
       stagingDir: "/tmp/src",
+      runtimeDir: "/tmp/runtime",
       outDir: "/tmp/out",
       containerLease: "hone-lease-run_b",
       hostUid: 1234,
@@ -219,8 +242,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         expect(existsSync(join(src, "optimizer", "node_modules", "@hone", "schema", "package.json"))).toBe(true);
         // The staged Pi closure resolves THROUGH the optimizer's node_modules link.
         expect(existsSync(join(src, "optimizer", "node_modules", "@oh-my-pi", "pi-coding-agent", "package.json"))).toBe(true);
-        writeFileSync(join(out, "optimizer.mjs"), "// bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeBuiltArtifacts(out);
       }
       return Promise.resolve(res());
     };
@@ -232,6 +254,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
       containerLease: "hone-lease-run_prep-e1",
       gate: testGate("run_prep"),
       clientEnv: { PATH: process.env["PATH"] ?? "" },
+      runtimeSourceDir: TEST_RUNTIME_SOURCE,
     });
     expect(argvs.filter(isBuild).length).toBe(1);
     expect(runtime.bundleDir).not.toBeNull();
@@ -262,6 +285,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         containerLease: "hone-lease-run_prep-e1",
         gate: testGate("run_prep"),
         clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
       }),
     ).rejects.toThrow(/produced no .*worker\.mjs/);
   });
@@ -272,8 +296,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
       argvs.push([...argv]);
       if (isBuild(argv)) {
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
-        writeFileSync(join(out, "optimizer.mjs"), "// bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeBuiltArtifacts(out);
       }
       return Promise.resolve(res());
     };
@@ -285,6 +308,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
       containerLease: "hone-lease-run_prep",
       gate: testGate("run_prep"),
       clientEnv: { PATH: process.env["PATH"] ?? "" },
+      runtimeSourceDir: TEST_RUNTIME_SOURCE,
     });
     const build = argvs.find(isBuild) ?? [];
     const leaseIdx = build.indexOf("--volumes-from");
@@ -308,8 +332,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         const src = mountsOf(argv)[0]?.split(":")[0] ?? "";
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
         expect(readFileSync(join(src, "optimizer", "src", "main.ts"), "utf8")).toBe("export const capturedCandidate = true;\n");
-        writeFileSync(join(out, "optimizer.mjs"), "// candidate bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeBuiltArtifacts(out, "// candidate bundle\n");
       }
       return Promise.resolve(res());
     };
@@ -323,6 +346,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         containerLease: "hone-lease-run_candidate-e1",
         gate: testGate("run_candidate"),
         clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
       },
     );
     expect(runtime.runArgv).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
@@ -342,8 +366,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         const src = mountsOf(argv)[0]?.split(":")[0] ?? "";
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
         expect(readFileSync(join(src, "optimizer", "src", "main.ts"), "utf8")).toBe("export const campaignCapturedBase = true;\n");
-        writeFileSync(join(out, "optimizer.mjs"), "// campaign base bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeBuiltArtifacts(out, "// campaign base bundle\n");
       }
       return Promise.resolve(res());
     };
@@ -357,6 +380,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         containerLease: "hone-lease-run_campaign_base-e1",
         gate: testGate("run_campaign_base"),
         clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
       },
     );
     await runtime.cleanup();
@@ -645,6 +669,7 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
           ].join("\n"),
         );
         writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeRuntimeFixtures(out);
         return Promise.resolve(res({ stdout: Buffer.from("bu1ldc1d\n") }));
       }
       // Every other create (donor, relays, keeper) answers with a container id.
@@ -743,8 +768,7 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
     const run: RunCommand = (argv) => {
       if (argv[1] === "run" && argv.some((a) => a.includes("bun build"))) {
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
-        writeFileSync(join(out, "optimizer.mjs"), "// sealed bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// sealed worker\n");
+        writeBuiltArtifacts(out, "// sealed bundle\n", "// sealed worker\n");
       }
       return Promise.resolve(res());
     };
@@ -758,6 +782,7 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
         containerLease: `hone-lease-${runId}-e1`,
         gate: testGate(runId),
         clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
       },
     );
   }
@@ -776,7 +801,7 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
     // NEVER 0777 again: after sealing, nothing below is writable by ANYONE.
     expect(statSync(dir).mode & 0o777).toBe(0o555);
     expect(seal.uid).toBe(OUR_UID);
-    expect(seal.files.map((f) => f.name)).toEqual(["optimizer.mjs", "worker.mjs"]);
+    expect(seal.files.map((file) => file.name)).toEqual(OPTIMIZER_BUNDLE_FILES);
     for (const f of seal.files) {
       const st = lstatSync(join(dir, f.name));
       expect(st.isFile()).toBe(true);

@@ -42,6 +42,38 @@ import { trustedRepoRoot } from "./runtime-digest.js";
 
 export const OPTIMIZER_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
+/**
+ * Platform runtime shipped with the sealed mutation worker. These hashes bind
+ * the exact Linux/x64 Bun and baseline Pi 16.5.2 native bytes accepted by the
+ * trusted optimizer builder. The worker pins PI_NATIVE_VARIANT=baseline, and
+ * the build runs both the Bun version probe and Pi's version-sentinel probe
+ * inside the pinned capsule image before sealing compressed transfer bytes.
+ */
+export const MUTATION_RUNTIME_MANIFEST = {
+  version: 1,
+  bun: {
+    version: "1.3.14",
+    sourceName: "bun",
+    bundleName: "bun.gz",
+    sandboxName: "bun",
+    sha256: "9fd36f87e4b90b07632b987a2e4ec81ca15a62c81bf983190cea6d715be2ad74",
+    mode: 0o500,
+  },
+  pi: {
+    version: "16.5.2",
+    files: [
+      {
+        sourceName: "pi_natives.linux-x64-baseline.node",
+        bundleName: "pi_natives.linux-x64-baseline.node.gz",
+        sandboxName: "pi_natives.linux-x64-baseline.node",
+        sha256: "c6fccbbfb79fd27c50a6eb73ae6ab3d973cee268a9b7e39fb1745efd24779526",
+        mode: 0o400,
+      },
+    ],
+  },
+} as const;
+export const MUTATION_RUNTIME_MANIFEST_FILE = "mutation-runtime.json";
+
 /** Entries under the optimizer trees that never affect the executed loop. */
 export const OPTIMIZER_SKIP: Record<string, true> = {
   test: true,
@@ -79,25 +111,39 @@ export interface OptimizerSnapshot {
  * is not part of the sealed closure and is never loaded by the worker.
  */
 export const OPTIMIZER_BUILD_CONTRACT = {
-  version: 2,
+  version: 3,
   layout: {
     optimizer: "optimizer",
     schema: "optimizer/node_modules/@hone/schema",
     zod: "optimizer/node_modules/zod",
     pi: "pi-store",
+    runtime: "/hone/runtime",
     "pnpm-lock.yaml": "pnpm-lock.yaml",
   },
+  mutationRuntime: MUTATION_RUNTIME_MANIFEST,
   build: [
     "/bin/sh",
     "-c",
-    "bun build /hone/src/optimizer/src/main.ts --target=node --outfile=/hone/out/optimizer.mjs && " +
-      "bun build /hone/src/optimizer/worker/mutate.ts --target=bun --external omp-legacy-pi-modules --outfile=/hone/out/worker.mjs",
+    `echo "${MUTATION_RUNTIME_MANIFEST.bun.sha256}  /hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName}" | sha256sum -c - && ` +
+      `test "$(/hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} --version)" = "${MUTATION_RUNTIME_MANIFEST.bun.version}" && ` +
+      `echo "${MUTATION_RUNTIME_MANIFEST.pi.files[0].sha256}  /hone/runtime/${MUTATION_RUNTIME_MANIFEST.pi.files[0].sourceName}" | sha256sum -c - && ` +
+      `/hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} -e 'const n=require(process.argv[1]); if(typeof n.__piNativesV16_5_2!=="function") process.exit(1)' /hone/runtime/${MUTATION_RUNTIME_MANIFEST.pi.files[0].sourceName} && ` +
+      `/hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} build /hone/src/optimizer/src/main.ts --target=node --outfile=/hone/out/optimizer.mjs && ` +
+      `/hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} build /hone/src/optimizer/worker/mutate.ts --target=bun --external omp-legacy-pi-modules --outfile=/hone/out/worker.mjs && ` +
+      `gzip -1 -n -c /hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} > /hone/out/${MUTATION_RUNTIME_MANIFEST.bun.bundleName} && ` +
+      `gzip -1 -n -c /hone/runtime/${MUTATION_RUNTIME_MANIFEST.pi.files[0].sourceName} > /hone/out/${MUTATION_RUNTIME_MANIFEST.pi.files[0].bundleName}`,
   ],
   run: ["node", "/hone/bundle/optimizer.mjs"],
 } as const;
 
 /** Bundle filenames the build emits into /hone/out (mounted at /hone/bundle for the run). */
-export const OPTIMIZER_BUNDLE_FILES = ["optimizer.mjs", "worker.mjs"] as const;
+export const OPTIMIZER_BUNDLE_FILES = [
+  "optimizer.mjs",
+  "worker.mjs",
+  MUTATION_RUNTIME_MANIFEST_FILE,
+  MUTATION_RUNTIME_MANIFEST.bun.bundleName,
+  MUTATION_RUNTIME_MANIFEST.pi.files[0].bundleName,
+] as const;
 
 /** The hone repo root of the LIVE repository. Pinned at boot (bin/hone.js)
  * so the value stays correct even though the trusted runtime executes from
