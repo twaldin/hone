@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { join } from "node:path";
@@ -198,6 +199,18 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
     expect(facts.filter((fact) => fact["t"] === "episode")).toHaveLength(1);
     expect(facts.filter((fact) => fact["t"] === "eval")).toHaveLength(2);
     expect(facts.filter((fact) => fact["t"] === "episodeComplete")).toHaveLength(1);
+    const remainingContainers = execFileSync(
+      "docker",
+      ["ps", "-a", "--filter", `name=${runId}`, "--format", "{{.Names}}"],
+      { encoding: "utf8" },
+    ).trim();
+    const remainingVolumes = execFileSync(
+      "docker",
+      ["volume", "ls", "--filter", `name=hone-scratch-${runId}`, "--format", "{{.Name}}"],
+      { encoding: "utf8" },
+    ).trim();
+    expect(remainingContainers).toBe("");
+    expect(remainingVolumes).toBe("");
     if (configuredRoot !== undefined) {
       const candidate = finished.find((event) => event.type === "episode.candidate");
       const last = finished.at(-1);
@@ -237,6 +250,8 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
             episodeCheckpointFacts: 1,
             evaluatorFacts: 2,
             episodeCompleteFacts: 1,
+            dockerContainersRemaining: 0,
+            dockerVolumesRemaining: 0,
             finishedStatus: last?.type === "run.finished" ? last.status : null,
             candidate: candidate?.type === "episode.candidate" ? candidate.candidate.hash : null,
           },
