@@ -1030,7 +1030,7 @@ export class Broker {
     epoch: string | undefined;
     completed: boolean;
   }>();
-  private resumingEpisode: { episode: number; parent: string; epoch: string; sandboxClaimed: boolean } | undefined;
+  private resumingEpisode: { episode: number; parent: string; epoch: string; claimedSandboxId: string | null } | undefined;
   /** Full trusted records from the resumed episode, returned only for exact replay asks. */
   private readonly replayedEvaluations = new Map<string, EvaluationRecord>();
   private readonly journaledEvaluationMemoKeys = new Set<string>();
@@ -1837,7 +1837,7 @@ export class Broker {
         episode: pending[0],
         parent: pending[1].parent,
         epoch: pending[1].epoch,
-        sandboxClaimed: false,
+        claimedSandboxId: null,
       };
     }
     // Wall clock is metered from the FIRST start of this run, ever — a
@@ -2136,7 +2136,7 @@ export class Broker {
       if (!containerGone(removed)) {
         throw new BrokerError("INTERNAL", `expired sandbox cleanup failed: ${stderrText(removed)}`);
       }
-      this.sandboxes.delete(sandboxId);
+      this.deleteProvenGoneSandbox(sandboxId);
       throw new BrokerError("SANDBOX_NOT_FOUND", `sandbox expired: ${sandboxId}`);
     }
     return entry;
@@ -2163,7 +2163,7 @@ export class Broker {
             if (current === undefined || this.now() < current.expiresAtMs) return;
             try {
               const removed = await this.removeTrackedContainer(current.containerId);
-              if (containerGone(removed)) this.sandboxes.delete(id);
+              if (containerGone(removed)) this.deleteProvenGoneSandbox(id);
             } catch {
               // Keep the expired entry tracked: close() retries and fails terminal
               // cleanup if Docker still cannot remove it.
@@ -2350,7 +2350,7 @@ export class Broker {
 
   private missingContainer(res: CmdResult, sandboxId: string): BrokerError | undefined {
     if (res.exitCode !== 0 && MISSING_CONTAINER_RE.test(res.stderr.toString("utf8"))) {
-      this.sandboxes.delete(sandboxId);
+      this.deleteProvenGoneSandbox(sandboxId);
       return new BrokerError("SANDBOX_NOT_FOUND", `sandbox container gone: ${sandboxId}`);
     }
     return undefined;
@@ -2365,7 +2365,7 @@ export class Broker {
     if (!result.timedOut) return;
     entry.expiresAtMs = 0;
     const retired = await this.removeTrackedContainer(entry.containerId);
-    if (containerGone(retired)) this.sandboxes.delete(sandboxId);
+    if (containerGone(retired)) this.deleteProvenGoneSandbox(sandboxId);
     throw new BrokerError("INTERNAL", `${operation} timed out; sandbox retired`);
   }
 
@@ -2537,22 +2537,45 @@ export class Broker {
       resumed === undefined
       || params.continueEpisode !== resumed.episode
       || params.artifact.hash !== resumed.parent
-      || !resumed.sandboxClaimed
+      || resumed.claimedSandboxId === null
     ) {
       return undefined;
     }
-    const matches = [...this.sandboxes.entries()].filter(([, sandbox]) =>
-      sandbox.episode === resumed.episode
-      && sandbox.parentHash === resumed.parent
-      && sandbox.epoch === resumed.epoch
-    );
-    if (matches.length !== 1) {
+    const sandbox = this.sandboxes.get(resumed.claimedSandboxId);
+    if (
+      sandbox === undefined
+      || sandbox.episode !== resumed.episode
+      || sandbox.parentHash !== resumed.parent
+      || sandbox.epoch !== resumed.epoch
+    ) {
       throw new BrokerError(
         "INTERNAL",
         `resumed episode ${resumed.episode} claim has no unique registered sandbox`,
       );
     }
-    return { sandboxId: matches[0]![0] };
+    return { sandboxId: resumed.claimedSandboxId };
+  }
+
+  /**
+   * Forget a sandbox only after its caller proved the container is gone.
+   * The resumed-parent claim names one exact in-memory sandbox; clearing it
+   * requires the same id, episode, parent, and checkpoint epoch.
+   */
+  private deleteProvenGoneSandbox(sandboxId: string): boolean {
+    const sandbox = this.sandboxes.get(sandboxId);
+    const deleted = this.sandboxes.delete(sandboxId);
+    const resumed = this.resumingEpisode;
+    if (
+      deleted
+      && sandbox !== undefined
+      && resumed?.claimedSandboxId === sandboxId
+      && sandbox.episode === resumed.episode
+      && sandbox.parentHash === resumed.parent
+      && sandbox.epoch === resumed.epoch
+    ) {
+      resumed.claimedSandboxId = null;
+    }
+    return deleted;
   }
 
   async createSandbox(params: CreateSandboxP, _ctx: CallContext): Promise<SandboxRef> {
@@ -2781,10 +2804,10 @@ export class Broker {
           this.resumingEpisode?.episode === requestedContinuation
           && params.artifact.hash === this.resumingEpisode.parent
         ) {
-          if (this.resumingEpisode.sandboxClaimed) {
+          if (this.resumingEpisode.claimedSandboxId !== null) {
             throw new BrokerError("INTERNAL", `resumed episode ${requestedContinuation} is already claimed`);
           }
-          this.resumingEpisode.sandboxClaimed = true;
+          this.resumingEpisode.claimedSandboxId = sandboxId;
           claimedResume = true;
         }
         episode = requestedContinuation;
@@ -2838,8 +2861,11 @@ export class Broker {
         lastExecTruncated: null,
       });
     } catch (error) {
-      if (claimedResume && this.resumingEpisode !== undefined) {
-        this.resumingEpisode.sandboxClaimed = false;
+      if (
+        claimedResume
+        && this.resumingEpisode?.claimedSandboxId === sandboxId
+      ) {
+        this.resumingEpisode.claimedSandboxId = null;
       }
       // No acknowledgment without a registered sandbox: a failure ANYWHERE
       // after the container exists (unpack, closing fence, journal append —
@@ -2898,7 +2924,7 @@ export class Broker {
       // so the orphan cannot keep computing against the run.
       sb.expiresAtMs = 0;
       const retired = await this.removeTrackedContainer(sb.containerId);
-      if (containerGone(retired)) this.sandboxes.delete(params.sandboxId);
+      if (containerGone(retired)) this.deleteProvenGoneSandbox(params.sandboxId);
       // Keep the capped partial bytes only in this bounded sandbox entry.
       // Failed/truncated executions can never become candidate provenance.
       sb.lastExecExitCode = 124;
@@ -3077,7 +3103,7 @@ export class Broker {
     if (!containerGone(retired)) {
       throw new BrokerError("INTERNAL", `sandbox retirement failed after save: ${stderrText(retired)}`);
     }
-    this.sandboxes.delete(params.sandboxId);
+    this.deleteProvenGoneSandbox(params.sandboxId);
     return { hash };
   }
 
@@ -3784,7 +3810,7 @@ export class Broker {
               `sandbox retirement failed before episode completion: ${stderrText(retired)}`,
             );
           }
-          this.sandboxes.delete(params.releaseSandboxId);
+          this.deleteProvenGoneSandbox(params.releaseSandboxId);
         }
         if ([...this.sandboxes.values()].some((sandbox) => sandbox.episode === params.episode)) {
           throw new BrokerError("INTERNAL", `cannot complete episode ${params.episode} with an active sandbox`);

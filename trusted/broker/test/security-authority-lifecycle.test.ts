@@ -499,23 +499,58 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
       expect(resumed.log.filter(
         (argv) => argv[1] === "run" && argv.includes("-d"),
       )).toHaveLength(dockerCreates);
-
-      await resumed.broker.exec({ sandboxId: replayed.sandboxId, argv: ["true"] }, CLIENT);
-      resumed.ctl.saveTar = candidateTar;
-      await resumed.broker.saveArtifact({ sandboxId: replayed.sandboxId }, CLIENT);
-      await expect(
-        resumed.broker.createSandbox({
-          artifact: { hash: baselineHash },
-          role: "mutation",
-          continueEpisode: 0,
-        }, CLIENT),
-      ).rejects.toThrow(/claim has no unique registered sandbox/);
     } finally {
       lostSocket.destroy();
       retry?.close();
       if (retry !== undefined) await retry.closed;
       await server.close();
     }
+  });
+
+  it("reclaims a resumed parent after its timed-out sandbox is proved retired and completes", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "resume-timeout-repair"),
+      casDir: path.join(tmpBase, "cas", "resume-timeout-repair"),
+      runId: "run-resume-timeout-repair",
+    };
+    const first = await boot(shared);
+    await first.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await first.broker.close();
+
+    const resumed = await boot(shared);
+    const claimed = await resumed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    resumed.ctl.execExit = "timeout";
+    await expect(
+      resumed.broker.exec({ sandboxId: claimed.sandboxId, argv: ["mutate"] }, CLIENT),
+    ).resolves.toMatchObject({ exitCode: 124 });
+    await expect(
+      resumed.broker.saveArtifact({ sandboxId: claimed.sandboxId }, CLIENT),
+    ).rejects.toThrow(/sandbox/i);
+
+    resumed.ctl.execExit = 0;
+    resumed.ctl.saveTar = candidateTar;
+    const repaired = await resumed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    expect(repaired).not.toEqual(claimed);
+    await resumed.broker.exec({ sandboxId: repaired.sandboxId, argv: ["repair"] }, CLIENT);
+    await expect(
+      resumed.broker.saveArtifact({ sandboxId: repaired.sandboxId }, CLIENT),
+    ).resolves.toEqual({ hash: candidateHash });
+    await resumed.broker.completeEpisode({ episode: 0 }, CLIENT);
+
+    expect(resumed.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    )).toHaveLength(2);
+    expect(resumed.events.filter((event) => event.type === "episode.completed")).toHaveLength(1);
+    expect((await stateLines(resumed)).filter((fact) => fact["t"] === "episodeComplete")).toHaveLength(1);
   });
 
   it("persists a trusted proxy admission refusal and blocks retries after restart", async () => {
