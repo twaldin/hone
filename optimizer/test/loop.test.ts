@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,7 +9,11 @@ import { buildEpisodeContext } from "../assets/context.js";
 import { EPISODE_JSON_PATH, EpisodeContext } from "../src/episode.js";
 import {
   parseMaxEpisodes,
+  PI_NATIVE_VARIANT,
   runEpisodeLoop,
+  RUNTIME_PART_DIR,
+  SANDBOX_BUN_PATH,
+  SANDBOX_RUNTIME_DIR,
   SANDBOX_WORKER_PATH,
   WORKER_CHUNK_BYTES,
   WORKER_PART_DIR,
@@ -36,8 +42,38 @@ function fixtureBundle(size: number): Buffer {
 }
 
 function writeWorkerFixture(bytes: Buffer): string {
-  const path = join(mkdtempSync(join(tmpdir(), "hone-worker-fixture-")), "worker.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "hone-worker-fixture-"));
+  const path = join(dir, "worker.mjs");
   writeFileSync(path, bytes);
+  const bun = Buffer.from("sealed bun fixture", "utf8");
+  const baseline = Buffer.from("sealed baseline Pi native fixture", "utf8");
+  const sha256 = (value: Buffer): string => createHash("sha256").update(value).digest("hex");
+  const manifest = {
+    version: 1,
+    bun: {
+      version: "1.3.14",
+      sourceName: "bun",
+      bundleName: "bun.gz",
+      sandboxName: "bun",
+      sha256: sha256(bun),
+      mode: 0o500,
+    },
+    pi: {
+      version: "16.5.2",
+      files: [
+        {
+          sourceName: "pi_natives.linux-x64-baseline.node",
+          bundleName: "pi_natives.linux-x64-baseline.node.gz",
+          sandboxName: "pi_natives.linux-x64-baseline.node",
+          sha256: sha256(baseline),
+          mode: 0o400,
+        },
+      ],
+    },
+  };
+  writeFileSync(join(dir, "mutation-runtime.json"), `${JSON.stringify(manifest)}\n`);
+  writeFileSync(join(dir, "bun.gz"), gzipSync(bun, { level: 1 }));
+  writeFileSync(join(dir, "pi_natives.linux-x64-baseline.node.gz"), gzipSync(baseline, { level: 1 }));
   return path;
 }
 
@@ -145,7 +181,7 @@ describe("runEpisodeLoop", () => {
       expect(argv.slice(0, 1)).toEqual(["env"]);
       expect(argv[1]).toMatch(/^HONE_DEADLINE_MS=\d+$/);
       expect(argv[2]).toBe(`HONE_SESSION_NO_YIELD_MAX_TOKENS=${DEFAULT_SESSION_NO_YIELD_MAX_TOKENS}`);
-      expect(argv.slice(3)).toEqual(["bun", SANDBOX_WORKER_PATH]);
+      expect(argv.slice(3)).toEqual([`PI_NATIVE_VARIANT=${PI_NATIVE_VARIANT}`, SANDBOX_BUN_PATH, SANDBOX_WORKER_PATH]);
     }
 
     // Every episode file put into a sandbox is a valid EpisodeContext; the repair
@@ -976,7 +1012,7 @@ describe("runEpisodeLoop sealed worker transfer", () => {
     expect(stub.scratch.get(SANDBOX_WORKER_PATH)?.equals(BIG_BUNDLE)).toBe(true);
 
     const sb = stub.workerTransfers[0]?.sandboxId ?? "";
-    const assembleAt = stub.ops.findIndex((op) => op.startsWith(`exec:${sb}:sh -c cat ${WORKER_PART_DIR}/`));
+    const assembleAt = stub.ops.findIndex((op) => op.startsWith(`exec:${sb}:sh -c `) && op.includes(`cat ${WORKER_PART_DIR}/`));
     const lastPartAt = stub.ops.lastIndexOf(`putFile:${sb}:${stub.workerParts[2]?.path ?? ""}`);
     const episodeJsonAt = stub.ops.indexOf(`putFile:${sb}:/scratch/episode.json`);
     const sessionAt = stub.ops.findIndex((op) => op.startsWith(`exec:${sb}:env HONE_DEADLINE_MS=`));
@@ -985,14 +1021,20 @@ describe("runEpisodeLoop sealed worker transfer", () => {
     expect(episodeJsonAt).toBeGreaterThan(assembleAt);
     expect(sessionAt).toBeGreaterThan(episodeJsonAt);
     // The session runs the sandbox-local sealed file — no image-baked path.
-    expect(stub.execArgvs).toEqual([[
-      "env",
-      expect.stringMatching(/^HONE_DEADLINE_MS=\d+$/),
-      `HONE_SESSION_NO_YIELD_MAX_TOKENS=${DEFAULT_SESSION_NO_YIELD_MAX_TOKENS}`,
-      "bun",
-      SANDBOX_WORKER_PATH,
-    ]]);
+    expect(stub.execArgvs).toEqual([
+      [
+        "env",
+        expect.stringMatching(/^HONE_DEADLINE_MS=\d+$/),
+        `HONE_SESSION_NO_YIELD_MAX_TOKENS=${DEFAULT_SESSION_NO_YIELD_MAX_TOKENS}`,
+        `PI_NATIVE_VARIANT=${PI_NATIVE_VARIANT}`,
+        SANDBOX_BUN_PATH,
+        SANDBOX_WORKER_PATH,
+      ],
+    ]);
     expect(stub.ops.join("\n")).not.toContain("/opt/hone-worker");
+    expect(stub.runtimeTransfers).toHaveLength(2);
+    expect(stub.scratch.has(SANDBOX_BUN_PATH)).toBe(true);
+    expect([...stub.scratch.keys()].filter((path) => path.startsWith(`${SANDBOX_RUNTIME_DIR}/pi_natives.`))).toHaveLength(1);
   });
 
   it("skips re-transfer for a later sandbox only after the shared /scratch copy hash-verifies", async () => {
@@ -1002,6 +1044,7 @@ describe("runEpisodeLoop sealed worker transfer", () => {
 
     // Two sandboxes, one transfer: the second probe verified the shared copy.
     expect(stub.workerTransfers.length).toBe(1);
+    expect(stub.runtimeTransfers).toHaveLength(2);
     const probes = stub.ops.filter((op) => op.endsWith(`:sha256sum ${SANDBOX_WORKER_PATH}`));
     expect(probes.length).toBe(2);
     expect(stub.scratch.get(SANDBOX_WORKER_PATH)?.equals(BIG_BUNDLE)).toBe(true);
@@ -1053,22 +1096,35 @@ describe("runEpisodeLoop sealed worker transfer", () => {
     await runEpisodes(stub, 2);
 
     // saveArtifact archives /workspace ONLY; every loop-written path (worker
-    // chunks, assembled bundle, episode context) lives under /scratch.
+    // and runtime chunks, installed artifacts, episode context) is /scratch.
     expect(SANDBOX_WORKER_PATH.startsWith("/scratch/")).toBe(true);
     expect(WORKER_PART_DIR.startsWith("/scratch/")).toBe(true);
-    const written = [...stub.workerParts.map((p) => p.path), ...stub.putFiles.map((p) => p.path)];
+    const written = [
+      ...stub.workerParts.map((p) => p.path),
+      ...stub.runtimeParts.map((p) => p.path),
+      ...stub.putFiles.map((p) => p.path),
+    ];
     expect(written.length).toBeGreaterThan(0);
     expect(written.every((p) => p.startsWith("/scratch/"))).toBe(true);
     expect(written.some((p) => p.startsWith("/workspace"))).toBe(false);
     // No exec touches a /workspace-resident worker either — only the /scratch path.
     for (const op of stub.ops.filter((o) => o.includes("hone-worker"))) {
       expect(op).not.toContain("/workspace");
+      expect(op).not.toContain("chmod 700 /scratch &&");
     }
-    // No stage residue: assembly atomically installed the bundle and removed
-    // the chunk dir, so shared /scratch holds ONLY the installed worker (plus
-    // the episode context) — nothing for later snapshots to drag along.
-    const residue = [...stub.scratch.keys()].filter((p) => p.startsWith(`${WORKER_PART_DIR}/`));
+    expect(stub.ops.some((op) => op.includes(`chmod 700 ${SANDBOX_RUNTIME_DIR}`))).toBe(true);
+    // No stage residue: assembly installed every sealed artifact and removed
+    // both chunk dirs, so later sandboxes only see the verified runtime,
+    // worker, and current episode context.
+    const residue = [...stub.scratch.keys()].filter(
+      (path) => path.startsWith(`${WORKER_PART_DIR}/`) || path.startsWith(`${RUNTIME_PART_DIR}/`),
+    );
     expect(residue).toEqual([]);
-    expect([...stub.scratch.keys()].sort()).toEqual(["/scratch/episode.json", SANDBOX_WORKER_PATH]);
+    expect([...stub.scratch.keys()].sort()).toEqual([
+      SANDBOX_BUN_PATH,
+      `${SANDBOX_RUNTIME_DIR}/pi_natives.linux-x64-baseline.node`,
+      "/scratch/episode.json",
+      SANDBOX_WORKER_PATH,
+    ]);
   });
 });

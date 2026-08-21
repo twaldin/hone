@@ -94,6 +94,7 @@ describe("optimizer container argv (donor attach + --pull=never)", () => {
       safeRunId: RUN_ID,
       image: "img@sha256:deadbeef",
       stagingDir: "/tmp/stage",
+      runtimeDir: "/tmp/runtime",
       outDir: "/tmp/out",
       containerLease: DONOR,
       hostUid: 501,

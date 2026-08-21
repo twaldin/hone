@@ -5,12 +5,14 @@ import { canonicalJson } from "@hone/schema";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { conformCandidateOptimizer } from "../src/optimizer-conformance.js";
 import type { ResolvedCandidateOptimizer } from "../src/optimizer-artifact.js";
-import { collectOptimizerSnapshot, snapshotDigest } from "../src/optimizer-digest.js";
+import { MUTATION_RUNTIME_MANIFEST, collectOptimizerSnapshot, snapshotDigest } from "../src/optimizer-digest.js";
 import { FIX_IMAGE, fakeHash } from "./helpers.js";
 
 function res(overrides: Partial<CmdResult> = {}): CmdResult {
   return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false, ...overrides };
 }
+
+const TEST_RUNTIME_SOURCE = "/tmp/hone-runtime-test-fixture";
 
 function candidate(mainSource?: string, image: string = FIX_IMAGE): ResolvedCandidateOptimizer {
   const base = collectOptimizerSnapshot();
@@ -56,6 +58,10 @@ function scriptedDocker(script: Script = {}): { run: RunCommand; calls: string[]
       if (script.buildFailure !== undefined) return Promise.resolve(res({ exitCode: 1, stderr: Buffer.from(script.buildFailure) }));
       writeFileSync(join(outDir, "optimizer.mjs"), "// sealed optimizer bundle\n");
       writeFileSync(join(outDir, "worker.mjs"), "// sealed worker bundle\n");
+      writeFileSync(join(outDir, MUTATION_RUNTIME_MANIFEST.bun.bundleName), "compressed bun fixture");
+      for (const file of MUTATION_RUNTIME_MANIFEST.pi.files) {
+        writeFileSync(join(outDir, file.bundleName), `compressed ${file.sourceName} fixture`);
+      }
       return Promise.resolve(res());
     }
     if (argv[1] === "logs") {
@@ -91,16 +97,23 @@ describe("cheap candidate optimizer conformance", () => {
       },
     });
 
-    const receipt = await conformCandidateOptimizer(selected, FIX_IMAGE, { run: docker.run, id: "success" });
+    const receipt = await conformCandidateOptimizer(selected, FIX_IMAGE, {
+      run: docker.run,
+      id: "success",
+      runtimeSourceDir: TEST_RUNTIME_SOURCE,
+    });
 
     expect(docker.builds()).toBe(1);
     expect(receipt.sourceArtifact).toBe(selected.sourceArtifact);
     expect(receipt.baseDigest).toBe(selected.baseDigest);
     expect(receipt.runtime.optimizerDigest).toBe(selected.mergedDigest);
     expect(receipt.runtime.runtimeArgv).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
-    expect(receipt.runtime.bundleFiles).toEqual({
+    expect(receipt.runtime.bundleFiles).toMatchObject({
       "optimizer.mjs": expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
       "worker.mjs": expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
+      "mutation-runtime.json": expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
+      [MUTATION_RUNTIME_MANIFEST.bun.bundleName]: expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
+      [MUTATION_RUNTIME_MANIFEST.pi.files[0].bundleName]: expect.objectContaining({ sha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) }),
     });
     expect(receipt.protocol).toEqual({
       version: "jsonrpc-2.0",
@@ -121,7 +134,11 @@ describe("cheap candidate optimizer conformance", () => {
   it("fails a syntax/build refusal closed", async () => {
     const docker = scriptedDocker({ buildFailure: "SyntaxError: expected identifier" });
     await expect(
-      conformCandidateOptimizer(candidate("export const = ;\n"), FIX_IMAGE, { run: docker.run, id: "syntax" }),
+      conformCandidateOptimizer(candidate("export const = ;\n"), FIX_IMAGE, {
+        run: docker.run,
+        id: "syntax",
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
+      }),
     ).rejects.toThrow(/build failed.*SyntaxError/);
     expect(docker.builds()).toBe(1);
     expect(docker.calls.some((argv) => argv[1] === "create")).toBe(false);
@@ -132,22 +149,35 @@ describe("cheap candidate optimizer conformance", () => {
       runtimeExitCode: 1,
       transcript: { ok: false, detail: "unexpected protocol sequence", methods: ["createSandbox"], finished: false },
     });
-    await expect(conformCandidateOptimizer(candidate(), FIX_IMAGE, { run: docker.run, id: "protocol" })).rejects.toThrow(
-      /protocol failed: unexpected protocol sequence/,
-    );
+    await expect(
+      conformCandidateOptimizer(candidate(), FIX_IMAGE, {
+        run: docker.run,
+        id: "protocol",
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
+      }),
+    ).rejects.toThrow(/protocol failed: unexpected protocol sequence/);
   });
 
   it("fails a clean exit without finish closed", async () => {
     const docker = scriptedDocker({ transcript: null });
-    await expect(conformCandidateOptimizer(candidate(), FIX_IMAGE, { run: docker.run, id: "no-finish" })).rejects.toThrow(
-      /without the required broker finish handshake/,
-    );
+    await expect(
+      conformCandidateOptimizer(candidate(), FIX_IMAGE, {
+        run: docker.run,
+        id: "no-finish",
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
+      }),
+    ).rejects.toThrow(/without the required broker finish handshake/);
   });
 
   it("fails a bounded protocol timeout closed", async () => {
     const docker = scriptedDocker({ timedOut: true, transcript: null });
     await expect(
-      conformCandidateOptimizer(candidate(), FIX_IMAGE, { run: docker.run, id: "timeout", protocolTimeoutMs: 25 }),
+      conformCandidateOptimizer(candidate(), FIX_IMAGE, {
+        run: docker.run,
+        id: "timeout",
+        protocolTimeoutMs: 25,
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
+      }),
     ).rejects.toThrow(/protocol timed out after 25ms/);
   });
 

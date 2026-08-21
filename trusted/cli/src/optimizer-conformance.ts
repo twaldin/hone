@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "@hone/broker";
@@ -13,11 +13,14 @@ import {
   optimizerRunName,
   optimizerStartArgs,
   sealOptimizerBundleDir,
+  stageMutationRuntime,
   verifyOptimizerBundleSeal,
 } from "./backends/optimizer-container.js";
 import type { OptimizerBundleSeal } from "./backends/optimizer-container.js";
 import type { ResolvedCandidateOptimizer } from "./optimizer-artifact.js";
 import {
+  MUTATION_RUNTIME_MANIFEST,
+  MUTATION_RUNTIME_MANIFEST_FILE,
   OPTIMIZER_BUILD_CONTRACT,
   snapshotDigest,
   writeOptimizerStaging,
@@ -138,6 +141,8 @@ export interface CandidateConformanceDeps {
   protocolTimeoutMs?: number;
   /** Injectable deterministic suffix for tests. */
   id?: string;
+  /** Unit-test seam: production stages and verifies the pinned runtime. */
+  runtimeSourceDir?: string;
 }
 
 interface StubTranscript {
@@ -281,6 +286,7 @@ export async function conformCandidateOptimizer(
 
   const { uid, gid } = hostIds();
   const tempRoot = mkdtempSync(join(tmpdir(), "hone-optconformance-"));
+  const runtimeDir = deps.runtimeSourceDir ?? join(tempRoot, "runtime");
   try {
     chmodSync(tempRoot, 0o700);
     const stagingDir = join(tempRoot, "src");
@@ -289,6 +295,10 @@ export async function conformCandidateOptimizer(
     mkdirSync(stagingDir, { mode: 0o700 });
     mkdirSync(outRoot, { mode: 0o700 });
     mkdirSync(outDir, { mode: 0o700 });
+    if (deps.runtimeSourceDir === undefined) {
+      mkdirSync(runtimeDir, { mode: 0o700 });
+      await stageMutationRuntime(process.env, runtimeDir);
+    }
     // Exact captured buffers only. This also validates the sealed Pi topology.
     writeOptimizerStaging(candidate.snapshot, stagingDir);
   } catch (error) {
@@ -319,6 +329,7 @@ export async function conformCandidateOptimizer(
       image,
       stagingDir,
       outDir,
+      runtimeDir,
       // The trusted stub has no mounts or campaign authority; it supplies the
       // lease attachment required by the exact production build primitive.
       containerLease: stubName,
@@ -329,6 +340,11 @@ export async function conformCandidateOptimizer(
     if (built.exitCode !== 0) {
       throw new Error(`candidate optimizer conformance build failed (exit ${built.exitCode}): ${built.stderr.toString("utf8").slice(0, 2_000)}`);
     }
+    writeFileSync(
+      join(outDir, MUTATION_RUNTIME_MANIFEST_FILE),
+      `${JSON.stringify(MUTATION_RUNTIME_MANIFEST)}\n`,
+      { mode: 0o600 },
+    );
     bundleSeal = sealOptimizerBundleDir(outRoot, outDir, uid);
     verifyOptimizerBundleSeal({ bundleDir: outDir, bundleSeal });
 
