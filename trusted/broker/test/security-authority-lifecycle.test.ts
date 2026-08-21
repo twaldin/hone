@@ -5,7 +5,13 @@ import { appendFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, w
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SandboxRef, type CapsuleManifest, type RunEvent } from "@hone/schema";
+import {
+  RESERVED_EVALUATOR_UID_MAX,
+  RESERVED_EVALUATOR_UID_MIN,
+  SandboxRef,
+  type CapsuleManifest,
+  type RunEvent,
+} from "@hone/schema";
 import { Broker, type BrokerConfig, type CallContext } from "../src/broker.js";
 import { packDirAsArtifact } from "../src/artifact.js";
 import { CasStore } from "../src/cas.js";
@@ -14,7 +20,7 @@ import { BrokerError } from "../src/errors.js";
 import { deferred } from "../src/deferred.js";
 import { BrokerServer } from "../src/server.js";
 import { WORKSPACE_TMPFS_INODES } from "../src/broker.js";
-import { acquireHostEvaluatorGate } from "../src/host-evaluator-gate.js";
+import { acquireHostEvaluatorGate, acquireReservedEvaluatorUid } from "../src/host-evaluator-gate.js";
 import {
   MANIFEST_IMAGE,
   RpcClient,
@@ -154,6 +160,9 @@ interface FakeCtl {
   evalHangsUntilReaped: boolean;
   /** Container ids whose `docker rm -f` fails (terminal-save fail-closed simulation). */
   rmFailFor: Set<string>;
+  /** Container ids whose `docker rm -f` command throws before proving absence. */
+  rmThrowFor: Set<string>;
+
   /** Exact run-labeled container ids returned to evaluator quiescence scans. */
   quiesceContainers: string[];
   pauseFailFor: Set<string>;
@@ -194,6 +203,8 @@ async function boot(
     sessionTraceQuotaBytes?: number;
     volumeCreateFails?: boolean;
     evalTimeoutSec?: number;
+    reaperIntervalMs?: number;
+
     runId?: string;
     measurementEpoch?: string;
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
@@ -219,6 +230,8 @@ async function boot(
     evalInspect: null,
     evalHangsUntilReaped: false,
     rmFailFor: new Set(),
+    rmThrowFor: new Set(),
+
     quiesceContainers: [],
     pauseFailFor: new Set(),
     unpauseFailFor: new Set(),
@@ -312,6 +325,9 @@ async function boot(
       for (const target of argv.slice(2)) {
         reapGates.get(target)?.();
         reapGates.delete(target);
+        if (ctl.rmThrowFor.has(target)) {
+          throw new Error(`docker rm transport failed for ${target}`);
+        }
         if (ctl.rmFailFor.has(target)) {
           return fakeResult({ exitCode: 1, stderr: Buffer.from(`cannot remove container ${target}: driver busy`) });
         }
@@ -346,6 +362,8 @@ async function boot(
     ...(opts.scratchVolume !== undefined ? { scratchVolume: opts.scratchVolume } : {}),
     ...(opts.sessionTraceQuotaBytes !== undefined ? { sessionTraceQuotaBytes: opts.sessionTraceQuotaBytes } : {}),
     ...(opts.evalTimeoutSec !== undefined ? { evalTimeoutSec: opts.evalTimeoutSec } : {}),
+    ...(opts.reaperIntervalMs !== undefined ? { reaperIntervalMs: opts.reaperIntervalMs } : {}),
+
     ...(opts.measurementEpoch !== undefined ? { measurementEpoch: opts.measurementEpoch } : {}),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
@@ -2042,6 +2060,116 @@ describe("evaluator containment", () => {
     expect(serializedBeforeRelease).toBe(true);
     expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(2);
   });
+
+  it("shares one pause lease across concurrent reserved-uid evaluators and blocks mutation Docker work until the last reap", async () => {
+    const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+    const b = await boot({ manifest });
+    const optimizer = "e".repeat(64);
+    b.ctl.quiesceContainers = [optimizer];
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const bothStarted = deferred<void>();
+    const releaseEvaluators = deferred<void>();
+    let started = 0;
+    b.ctl.evalInspect = async () => {
+      started += 1;
+      if (started === 2) bothStarted.resolve();
+      await releaseEvaluators.promise;
+    };
+
+    const evalA = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 10 }, CLIENT);
+    const evalB = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 11 }, CLIENT);
+    await bothStarted.promise;
+    const mutation = b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await Promise.resolve();
+    expect(b.log.some((argv) => argv[1] === "run" && argv.includes("-d"))).toBe(false);
+
+    releaseEvaluators.resolve();
+    await Promise.all([evalA, evalB]);
+    expect((await mutation).sandboxId).toBeTruthy();
+    expect(b.log.filter((argv) => argv[1] === "pause" && argv[2] === optimizer)).toHaveLength(1);
+    expect(b.log.filter((argv) => argv[1] === "unpause" && argv[2] === optimizer)).toHaveLength(1);
+    expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(2);
+  });
+
+  it(
+    "quarantines an isolation lease after failed evaluator removal until a later sweep proves the container gone",
+    { timeout: 10_000 },
+    async () => {
+      // Occupy all but one slot. The failed evaluator takes the sole
+      // remainder; its successor must queue until a DIFFERENT slot is freed.
+      // This deterministically kills a premature-release mutant.
+      const heldLeases = await Promise.all(
+        Array.from({ length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN }, () =>
+          acquireReservedEvaluatorUid(),
+        ),
+      );
+      try {
+        const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+        const b = await boot({ manifest, reaperIntervalMs: 10 });
+        b.ctl.evalOutputs.set(baselineHash, score(1));
+        const workerUids: number[] = [];
+        const secondStarted = deferred<void>();
+        let failedContainer = "";
+        b.ctl.evalInspect = (argv) => {
+          const uidEnv = argv.find((arg) => arg.startsWith("CAPSULE_WORKER_UID="));
+          workerUids.push(Number(uidEnv?.split("=")[1]));
+          if (failedContainer.length === 0) {
+            const nameIndex = argv.indexOf("--name");
+            failedContainer = argv[nameIndex + 1] ?? "";
+            b.ctl.rmThrowFor.add(failedContainer);
+          } else {
+            secondStarted.resolve();
+          }
+        };
+
+        await expect(
+          b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 20 }, CLIENT),
+        ).rejects.toThrow(/evaluator cleanup failed/);
+        expect(b.events).toContainEqual(
+          expect.objectContaining({
+            type: "evaluator.isolation.quarantined",
+            evaluatorContainer: failedContainer,
+            isolation: expect.objectContaining({ mode: "reserved-uid", workerUid: workerUids[0] }),
+          }),
+        );
+
+        const secondEvaluation = b.broker.evaluate(
+          { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 21 },
+          CLIENT,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(workerUids).toHaveLength(1);
+        const releasedUids = new Set(heldLeases.map((lease) => lease.uid));
+        await Promise.all(heldLeases.map((lease) => lease.release()));
+        heldLeases.length = 0;
+        await secondStarted.promise;
+        await secondEvaluation;
+        expect(workerUids).toHaveLength(2);
+        expect(workerUids[1]).not.toBe(workerUids[0]);
+        expect(releasedUids.has(workerUids[1] ?? -1)).toBe(true);
+
+        b.ctl.rmThrowFor.delete(failedContainer);
+        await vi.waitFor(() => {
+          expect(b.events).toContainEqual(
+            expect.objectContaining({
+              type: "evaluator.isolation.released",
+              evaluatorContainer: failedContainer,
+              isolation: expect.objectContaining({ workerUid: workerUids[0] }),
+            }),
+          );
+        });
+        const durableEvents = (await stateLines(b)).filter((line) => line.t === "event").map((line) => line.event);
+        expect(durableEvents).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: "evaluator.isolation.quarantined", evaluatorContainer: failedContainer }),
+            expect.objectContaining({ type: "evaluator.isolation.released", evaluatorContainer: failedContainer }),
+          ]),
+        );
+      } finally {
+        await Promise.all(heldLeases.map((lease) => lease.release()));
+      }
+    },
+  );
 
   it("aborts a queued host-gate acquisition when the broker closes without burning an invocation", async () => {
     const gateLease = await acquireHostEvaluatorGate();

@@ -25,6 +25,10 @@ export const EvaluatorOutput = z.object({
 });
 export type EvaluatorOutput = z.infer<typeof EvaluatorOutput>;
 
+/** Host real-uid pool reserved for collision-free evaluator invocations. */
+export const RESERVED_EVALUATOR_UID_MIN = 20_000;
+export const RESERVED_EVALUATOR_UID_MAX = 20_031;
+
 /**
  * Host identity/isolation selected for one real (uncached) evaluator
  * invocation. This is trusted provenance, not evaluator-authored output.
@@ -33,7 +37,7 @@ export const EvaluatorIsolationRecord = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("reserved-uid"),
     allocationId: z.string().regex(/^[0-9a-f]{32}$/),
-    workerUid: z.number().int().min(20_000).max(20_031),
+    workerUid: z.number().int().min(RESERVED_EVALUATOR_UID_MIN).max(RESERVED_EVALUATOR_UID_MAX),
     waitMs: z.number().int().nonnegative(),
   }),
   z.object({

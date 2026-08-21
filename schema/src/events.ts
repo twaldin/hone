@@ -87,6 +87,19 @@ export const RunEvent = z.discriminatedUnion("type", [
     waitMs: z.number().int().nonnegative(),
   }),
   z.object({ ...base, type: z.literal("evaluator.isolation"), isolation: EvaluatorIsolationRecord }),
+  z.object({
+    ...base,
+    type: z.literal("evaluator.isolation.quarantined"),
+    isolation: EvaluatorIsolationRecord,
+    evaluatorContainer: z.string().min(1),
+    cleanupError: z.string().min(1).max(4096),
+  }),
+  z.object({
+    ...base,
+    type: z.literal("evaluator.isolation.released"),
+    isolation: EvaluatorIsolationRecord,
+    evaluatorContainer: z.string().min(1),
+  }),
   z.object({ ...base, type: z.literal("eval.completed"), episode: z.number().int().nonnegative().optional(), artifact: ArtifactRef, assetGroupId: z.string(), seed: z.number().int(), aggregate: z.number(), cached: z.boolean() }),
   z.object({
     ...base,

@@ -565,6 +565,17 @@ type EmittableEvent =
   | { type: "evaluator.queue.entered"; allocationId: string }
   | { type: "evaluator.queue.acquired"; allocationId: string; waitMs: number }
   | { type: "evaluator.isolation"; isolation: z.infer<typeof EvaluatorIsolationRecord> }
+  | {
+      type: "evaluator.isolation.quarantined";
+      isolation: z.infer<typeof EvaluatorIsolationRecord>;
+      evaluatorContainer: string;
+      cleanupError: string;
+    }
+  | {
+      type: "evaluator.isolation.released";
+      isolation: z.infer<typeof EvaluatorIsolationRecord>;
+      evaluatorContainer: string;
+    }
   | { type: "budget.exhausted"; dimension: string }
   | { type: "holdout.accessed"; capsuleId: string; ledgerCount: number; ledgerBudget: number }
   | { type: "episode.started"; episode: number; parent: ArtifactRef }
@@ -1087,6 +1098,16 @@ export class Broker {
   private readonly opDrainWaiters: Array<() => void> = [];
   /** Every spawned Docker container stays here until removal is positively confirmed. */
   private readonly trackedContainers = new Set<string>();
+  /**
+   * A reserved uid cannot return to the pool while its evaluator container
+   * might still exist. Failed removals retain the kernel lease here until a
+   * later reaper/close sweep proves the named container gone.
+   */
+  private readonly quarantinedEvaluatorLeases = new Map<
+    string,
+    { lease: EvaluatorIsolationLease; isolation: z.infer<typeof EvaluatorIsolationRecord> }
+  >();
+
   /** One FIFO tail per sandbox; mutable Docker operations never interleave. */
   private readonly sandboxQueues = new Map<string, Promise<void>>();
   /** Run-wide mutable-operation tail: shared /scratch snapshots need exclusivity across sandboxes. */
@@ -2181,9 +2202,20 @@ export class Broker {
     const res = await this.run(["docker", "rm", "-f", ref], { timeoutMs: 30_000 });
     if (containerGone(res)) {
       this.trackedContainers.delete(ref);
+      const quarantined = this.quarantinedEvaluatorLeases.get(ref);
+      if (quarantined !== undefined) {
+        await quarantined.lease.release();
+        this.quarantinedEvaluatorLeases.delete(ref);
+        this.emit({
+          type: "evaluator.isolation.released",
+          isolation: quarantined.isolation,
+          evaluatorContainer: ref,
+        });
+      }
     }
     return res;
   }
+
 
   private async reapExpired(): Promise<void> {
     if (this.closing) return;
@@ -2205,6 +2237,14 @@ export class Broker {
             }
           }),
         );
+      }
+      for (const ref of this.quarantinedEvaluatorLeases.keys()) {
+        try {
+          await this.removeTrackedContainer(ref);
+        } catch {
+          // The durable quarantine and kernel lease stay live. A later reaper,
+          // close sweep, or operator action must prove the container gone.
+        }
       }
     } finally {
       this.exitOp();
@@ -3369,6 +3409,8 @@ export class Broker {
 
     let isolation: EvaluatorIsolationLease | undefined;
     let isolationRecord: z.infer<typeof EvaluatorIsolationRecord> | undefined;
+    let isolationQuarantined = false;
+
     let invocationEvents: RunEvent[] = [];
     let res: CmdResult;
     let startedMs = 0;
@@ -3509,14 +3551,37 @@ export class Broker {
         // A timed-out `docker run` kills only the local CLI; the container (and
         // the adversarial code inside it) keeps running. Always reap by name —
         // a no-op for containers --rm already removed.
-        const retired = await this.removeTrackedContainer(evalName);
-        if (!containerGone(retired)) {
-          throw new BrokerError("INTERNAL", `evaluator cleanup failed: ${stderrText(retired)}`);
+        let cleanupError: string | undefined;
+        try {
+          const retired = await this.removeTrackedContainer(evalName);
+          if (!containerGone(retired)) {
+            cleanupError = stderrText(retired) || "Docker did not prove the evaluator container absent";
+          }
+        } catch (error) {
+          cleanupError = error instanceof Error ? error.message : String(error);
         }
+        if (cleanupError !== undefined) {
+          if (isolation === undefined || isolationRecord === undefined) {
+            throw new BrokerError("INTERNAL", "evaluator cleanup failed before isolation was recorded");
+          }
+          // The container may still be running candidate code. Retain the
+          // kernel-held uid/FIFO lease, and durably name the quarantine so the
+          // next invocation cannot inherit its RLIMIT_NPROC pool.
+          this.quarantinedEvaluatorLeases.set(evalName, { lease: isolation, isolation: isolationRecord });
+          isolationQuarantined = true;
+          this.emit({
+            type: "evaluator.isolation.quarantined",
+            isolation: isolationRecord,
+            evaluatorContainer: evalName,
+            cleanupError: (cleanupError || "Docker cleanup failed without an error message").slice(0, 4096),
+          });
+          throw new BrokerError("INTERNAL", `evaluator cleanup failed: ${cleanupError}`);
+        }
+
       }
     } finally {
       try {
-        await isolation?.release();
+        if (!isolationQuarantined) await isolation?.release();
       } finally {
         // Confidentiality teardown on EVERY path (success, error, timeout):
         // staged fixtures disappear before any untrusted process runs again.

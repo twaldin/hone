@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { RESERVED_EVALUATOR_UID_MAX, RESERVED_EVALUATOR_UID_MIN } from "@hone/schema";
 import {
-  RESERVED_EVALUATOR_UID_MAX,
-  RESERVED_EVALUATOR_UID_MIN,
   acquireHostEvaluatorGate,
   acquireReservedEvaluatorUid,
+  type HostEvaluatorGateLease,
+  type ReservedEvaluatorUidLease,
 } from "../src/host-evaluator-gate.js";
 import { evaluatorSupportsReservedUid } from "../src/evaluator-isolation.js";
 import { deferred } from "../src/deferred.js";
@@ -84,6 +89,57 @@ describe("host evaluator gate", () => {
     expect(new Set(uids).size).toBe(4);
     expect(uids.every((uid) => uid >= RESERVED_EVALUATOR_UID_MIN && uid <= RESERVED_EVALUATOR_UID_MAX)).toBe(true);
     await Promise.all(leases.map((lease) => lease.release()));
+  });
+
+  it("keeps a process-crash shared-uid claim queued without a live ticket until it is explicitly cleared", { timeout: 10_000 }, async () => {
+    const queueDir = join(tmpdir(), "hone-evaluator-nproc-v2.queue");
+    const claimPath = join(queueDir, ".uid-claim-2000.json");
+    await mkdir(queueDir, { recursive: true, mode: 0o700 });
+    await writeFile(claimPath, "{}\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+    let lease: HostEvaluatorGateLease | undefined;
+    try {
+      let acquired = false;
+      const leasePromise = acquireHostEvaluatorGate().then((value) => {
+        acquired = true;
+        return value;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(acquired).toBe(false);
+      await rm(claimPath);
+      lease = await leasePromise;
+    } finally {
+      await rm(claimPath, { force: true });
+      await lease?.release();
+    }
+  });
+
+  it("keeps a process-crash uid claim unavailable without a live socket until it is explicitly cleared", { timeout: 10_000 }, async () => {
+    const queueDir = join(tmpdir(), "hone-evaluator-nproc-v2.queue");
+    const claimPath = join(queueDir, `.uid-claim-${RESERVED_EVALUATOR_UID_MIN}.json`);
+    const leases: ReservedEvaluatorUidLease[] = [];
+    await mkdir(queueDir, { recursive: true, mode: 0o700 });
+    await writeFile(claimPath, "{}\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+    try {
+      for (let index = RESERVED_EVALUATOR_UID_MIN; index < RESERVED_EVALUATOR_UID_MAX; index += 1) {
+        leases.push(await acquireReservedEvaluatorUid());
+      }
+      expect(leases.every((lease) => lease.uid !== RESERVED_EVALUATOR_UID_MIN)).toBe(true);
+
+      let acquired = false;
+      const finalPromise = acquireReservedEvaluatorUid().then((lease) => {
+        acquired = true;
+        return lease;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(acquired).toBe(false);
+      await rm(claimPath);
+      const finalLease = await finalPromise;
+      leases.push(finalLease);
+      expect(finalLease.uid).toBe(RESERVED_EVALUATOR_UID_MIN);
+    } finally {
+      await rm(claimPath, { force: true });
+      await Promise.all(leases.map((lease) => lease.release()));
+    }
   });
 
   it("uses reserved uids only for reviewed frozen evaluator identities", () => {

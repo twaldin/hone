@@ -1,25 +1,30 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, lstat, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+
+import { RESERVED_EVALUATOR_UID_MAX, RESERVED_EVALUATOR_UID_MIN } from "@hone/schema";
+
 import { deferred } from "./deferred.js";
 
 /**
  * Linux accounts RLIMIT_NPROC against the real uid across container PID
  * namespaces. Evaluators that can consume CAPSULE_WORKER_UID receive a unique
  * host uid lease; frozen evaluators that still hard-code uid 2000 share the
- * starvation-bounded FIFO gate below. Both claims are kernel-held abstract
- * Unix sockets, so process death releases the resource without PID or stale
- * pathname guesses.
+ * starvation-bounded FIFO gate below. Abstract sockets arbitrate live claims.
+ * An operator-owned filesystem claim remains until the owning Broker proves
+ * its evaluator container gone, so a Broker crash cannot silently return a
+ * still-running container's uid to another process.
  */
 
 const SHARED_QUEUE_DIR = join(tmpdir(), "hone-evaluator-nproc-v2.queue");
 const SHARED_QUEUE_FILE_RE = /^([0-9a-f]{32})\.json$/;
 const SHARED_LIVENESS_PREFIX = "\0hone-evaluator-nproc-ticket-v2-";
 const RESERVED_UID_SOCKET_PREFIX = "\0hone-evaluator-nproc-uid-v1-";
-export const RESERVED_EVALUATOR_UID_MIN = 20_000;
-export const RESERVED_EVALUATOR_UID_MAX = 20_031;
+const UID_CLAIM_PREFIX = ".uid-claim-";
+
 
 export interface HostEvaluatorGateLease {
   allocationId: string;
@@ -209,6 +214,56 @@ async function ensureSharedQueueDir(): Promise<void> {
   if (uid !== undefined && st.uid !== uid) throw new Error("host evaluator FIFO directory is not operator-owned");
 }
 
+function uidClaimPath(uid: number): string {
+  return join(SHARED_QUEUE_DIR, `${UID_CLAIM_PREFIX}${uid}.json`);
+}
+
+async function tryAcquireUidClaim(uid: number, allocationId: string): Promise<(() => Promise<void>) | null> {
+  const claimPath = uidClaimPath(uid);
+  try {
+    await writeFile(
+      claimPath,
+      `${JSON.stringify({ version: 1, uid, allocationId, createdAt: new Date().toISOString() })}\n`,
+      { encoding: "utf8", mode: 0o600, flag: "wx" },
+    );
+  } catch (error) {
+    if (error instanceof Error && (error as NodeJS.ErrnoException).code === "EEXIST") return null;
+    throw error;
+  }
+  try {
+    const st = await lstat(claimPath);
+    const operatorUid = process.getuid?.();
+    if (!st.isFile() || st.isSymbolicLink()) throw new Error(`host evaluator uid ${uid} claim is not regular`);
+    if ((st.mode & 0o777) !== 0o600) throw new Error(`host evaluator uid ${uid} claim must be mode 0600`);
+    if (operatorUid !== undefined && st.uid !== operatorUid) {
+      throw new Error(`host evaluator uid ${uid} claim is not operator-owned`);
+    }
+  } catch (error) {
+    await rm(claimPath, { force: true });
+    throw error;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    await rm(claimPath, { force: true });
+    released = true;
+  };
+}
+
+async function acquireUidClaim(uid: number, allocationId: string, signal?: AbortSignal): Promise<() => Promise<void>> {
+  for (;;) {
+    throwIfAborted(signal);
+    const release = await tryAcquireUidClaim(uid, allocationId);
+    if (release !== null) return release;
+    try {
+      await delay(50, undefined, { signal });
+    } catch (error) {
+      throwIfAborted(signal);
+      throw error;
+    }
+  }
+}
+
 function queueEntryPath(id: string): string {
   return join(SHARED_QUEUE_DIR, `${id}.json`);
 }
@@ -295,12 +350,14 @@ export async function acquireHostEvaluatorGate(
   const choosing: QueueEntry = { version: 1, id: allocationId, address, state: "choosing" };
   let published = false;
   let released = false;
+  let releaseUidClaim: (() => Promise<void>) | undefined;
 
   const release = async (): Promise<void> => {
     if (released) return;
-    released = true;
+    await releaseUidClaim?.();
     await closeListeningLease(liveness);
     if (published) await rm(queueEntryPath(allocationId), { force: true });
+    released = true;
   };
 
   try {
@@ -325,6 +382,7 @@ export async function acquireHostEvaluatorGate(
       const selfIndex = ordered.findIndex((entry) => entry.id === allocationId);
       if (selfIndex < 0) throw new Error("host evaluator FIFO lost its live ticket");
       if (selfIndex === 0) {
+        releaseUidClaim = await acquireUidClaim(2_000, allocationId, signal);
         return { allocationId, waitMs: Date.now() - startedMs, release };
       }
       await waitForRelease(ordered[selfIndex - 1]!.address, signal);
@@ -336,14 +394,16 @@ export async function acquireHostEvaluatorGate(
 }
 
 /**
- * Acquire one collision-free reserved real uid. Each slot is an independent
- * kernel address and remains held until the evaluator container is proven
- * reaped. Pool exhaustion waits for a live slot holder rather than falling
- * back to shared uid 2000.
+ * Acquire one collision-free reserved real uid. Each slot has a kernel
+ * address plus an operator-owned filesystem claim. Both remain held until the
+ * evaluator container is proven reaped. Pool exhaustion waits for any slot
+ * claim to clear rather than falling back to shared uid 2000.
  */
 export async function acquireReservedEvaluatorUid(signal?: AbortSignal): Promise<ReservedEvaluatorUidLease> {
   requireLinux();
   if (signal?.aborted === true) throw abortedError();
+  await ensureSharedQueueDir();
+
   const startedMs = Date.now();
   const allocationId = randomUUID().replaceAll("-", "");
   const count = RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN + 1;
@@ -354,6 +414,17 @@ export async function acquireReservedEvaluatorUid(signal?: AbortSignal): Promise
       const uid = RESERVED_EVALUATOR_UID_MIN + ((start + offset) % count);
       const lease = await tryListen(`${RESERVED_UID_SOCKET_PREFIX}${uid}`, signal);
       if (lease === null) continue;
+      let releaseUidClaim: (() => Promise<void>) | null;
+      try {
+        releaseUidClaim = await tryAcquireUidClaim(uid, allocationId);
+      } catch (error) {
+        await closeListeningLease(lease);
+        throw error;
+      }
+      if (releaseUidClaim === null) {
+        await closeListeningLease(lease);
+        continue;
+      }
       let released = false;
       return {
         allocationId,
@@ -361,11 +432,17 @@ export async function acquireReservedEvaluatorUid(signal?: AbortSignal): Promise
         waitMs: Date.now() - startedMs,
         release: async () => {
           if (released) return;
-          released = true;
+          await releaseUidClaim();
           await closeListeningLease(lease);
+          released = true;
         },
       };
     }
-    await waitForRelease(`${RESERVED_UID_SOCKET_PREFIX}${RESERVED_EVALUATOR_UID_MIN + start}`, signal);
+    try {
+      await delay(50, undefined, { signal });
+    } catch (error) {
+      throwIfAborted(signal);
+      throw error;
+    }
   }
 }
