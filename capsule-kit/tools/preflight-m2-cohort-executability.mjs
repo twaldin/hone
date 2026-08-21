@@ -18,6 +18,8 @@ const DEFAULT_CONFIG = "data/m2-refreeze/cohort-executability-preflight.config.j
 const DEFAULT_OUTPUT = "tmp/m2-cohort-executability-results.json";
 const UPSTREAM_URL = "http://127.0.0.1:1";
 const MAX_DIAGNOSTIC_CHARS = 16_384;
+const WORKER_UID = 2000;
+const UID_TASK_SAMPLE_MS = 250;
 
 function usage() {
   return [
@@ -28,6 +30,8 @@ function usage() {
     "through the real trusted CLI, Docker staging, and evaluator path. The",
     "upstream is pinned to unreachable 127.0.0.1:1 and any non-zero model",
     "token or USD spend stops the gate immediately.",
+    "Host uid-2000 task counts are sampled around each run so concurrent",
+    "evaluator interference remains visible in the report.",
   ].join("\n");
 }
 
@@ -175,14 +179,42 @@ function parseJsonLines(value) {
   return records;
 }
 
-function readEvents(runId) {
-  if (runId === null) return [];
-  const path = join(REPO_ROOT, ".hone-runs", runId, "events.ndjson");
-  if (!existsSync(path)) return [];
-  return parseJsonLines(readFileSync(path, "utf8"));
+function readRunText(runId, filename) {
+  if (runId === null) return "";
+  const path = join(REPO_ROOT, ".hone-runs", runId, filename);
+  return existsSync(path) ? readFileSync(path, "utf8") : "";
 }
 
-function execute(command) {
+function readRunRecords(runId, filename) {
+  return parseJsonLines(readRunText(runId, filename));
+}
+
+function readEvents(runId) {
+  return readRunRecords(runId, "events.ndjson");
+}
+
+function uidTaskCount(uid) {
+  let total = 0;
+  try {
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        const status = readFileSync(`/proc/${entry}/status`, "utf8");
+        const realUid = Number(status.match(/^Uid:\s+(\d+)/m)?.[1]);
+        if (realUid !== uid) continue;
+        const threads = Number(status.match(/^Threads:\s+(\d+)/m)?.[1]);
+        if (Number.isSafeInteger(threads) && threads > 0) total += threads;
+      } catch {
+        // Processes can exit between /proc enumeration and status read.
+      }
+    }
+  } catch {
+    return null;
+  }
+  return total;
+}
+
+function execute(command, monitorUid = null) {
   return new Promise((resolveExecution, rejectExecution) => {
     const child = spawn("sg", ["docker", "-c", command.inner], {
       cwd: REPO_ROOT,
@@ -191,6 +223,22 @@ function execute(command) {
     });
     let stdout = "";
     let stderr = "";
+    const uidTaskMonitor = monitorUid === null
+      ? null
+      : { uid: monitorUid, sampleIntervalMs: UID_TASK_SAMPLE_MS, before: null, min: null, max: null, after: null, samples: 0 };
+    const sampleUidTasks = () => {
+      if (uidTaskMonitor === null) return;
+      const count = uidTaskCount(uidTaskMonitor.uid);
+      if (count === null) return;
+      uidTaskMonitor.samples += 1;
+      uidTaskMonitor.min = uidTaskMonitor.min === null ? count : Math.min(uidTaskMonitor.min, count);
+      uidTaskMonitor.max = uidTaskMonitor.max === null ? count : Math.max(uidTaskMonitor.max, count);
+      uidTaskMonitor.after = count;
+    };
+    sampleUidTasks();
+    if (uidTaskMonitor !== null) uidTaskMonitor.before = uidTaskMonitor.after;
+    const sampler = uidTaskMonitor === null ? null : setInterval(sampleUidTasks, UID_TASK_SAMPLE_MS);
+    sampler?.unref();
     child.stdout.on("data", (chunk) => {
       const text = String(chunk);
       process.stdout.write(text);
@@ -201,34 +249,56 @@ function execute(command) {
       process.stderr.write(text);
       stderr = appendBounded(stderr, text);
     });
-    child.once("error", rejectExecution);
+    child.once("error", (error) => {
+      clearInterval(sampler);
+      rejectExecution(error);
+    });
     child.once("close", (code, signal) => {
-      resolveExecution({ exitCode: code, signal, stdout, stderr });
+      clearInterval(sampler);
+      sampleUidTasks();
+      resolveExecution({ exitCode: code, signal, stdout, stderr, uidTaskMonitor });
     });
   });
 }
 
-async function probeImageBun(image) {
-  const script = "p=$(command -v bun 2>/dev/null) || { echo BUN_MISSING; exit 42; }; "
-    + "v=$(bun --version 2>/dev/null) || { echo BUN_BROKEN; exit 43; }; "
-    + "printf 'BUN_PRESENT\\t%s\\t%s\\n' \"$p\" \"$v\"";
+async function probeImageAvailability(image) {
   const inner = [
-    "docker", "run", "--rm", "--pull=never", "--network", "none", "--read-only",
-    "--entrypoint", "/bin/sh", image, "-c", script,
+    "docker", "image", "inspect", "--format", "{{.Id}}", image,
   ].map(shellQuote).join(" ");
   const command = `sg docker -c ${shellQuote(inner)}`;
   const execution = await execute({ inner });
-  const status = execution.exitCode === 0 && execution.stdout.startsWith("BUN_PRESENT")
+  const status = execution.exitCode === 0 && execution.stdout.trim() !== ""
     ? "PRESENT"
-    : execution.exitCode === 42
-      ? "MISSING"
-      : execution.stderr.includes("No such image")
-        ? "IMAGE_ABSENT"
-        : "PROBE_FAILED";
+    : execution.stderr.match(/no such image|no such object/i)
+      ? "IMAGE_ABSENT"
+      : "PROBE_FAILED";
   return {
     image,
     status,
     command,
+    exitCode: execution.exitCode,
+    stdout: execution.stdout.trim(),
+    stderr: diagnosticTail(execution.stderr.trim()),
+  };
+}
+
+async function probeImageNodeRuntime(image) {
+  const script = "if command -v node >/dev/null 2>&1; then node --version; else echo NODE_MISSING; exit 42; fi";
+  const inner = [
+    "docker", "run", "--rm", "--pull=never", "--network", "none", "--read-only",
+    "--pids-limit", "16", "--memory", "33554432", "--memory-swap", "33554432",
+    "--cpus", "0.1", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+    "--entrypoint", "/bin/sh", image, "-c", script,
+  ].map(shellQuote).join(" ");
+  const execution = await execute({ inner });
+  const status = execution.exitCode === 0
+    ? "PRESENT"
+    : execution.exitCode === 42 && execution.stdout.includes("NODE_MISSING")
+      ? "MISSING"
+      : "PROBE_FAILED";
+  return {
+    status,
+    command: `sg docker -c ${shellQuote(inner)}`,
     exitCode: execution.exitCode,
     stdout: execution.stdout.trim(),
     stderr: diagnosticTail(execution.stderr.trim()),
@@ -267,7 +337,9 @@ console.log(`preflight upstream guard: ${upstreamProbe.endpoint} -> ${upstreamPr
 const imageProbes = new Map();
 for (const image of [...new Set(capsuleIds.map((id) => capsules.get(id).image))].sort()) {
   console.log(`\n=== image probe: ${image} ===`);
-  imageProbes.set(image, await probeImageBun(image));
+  const availability = await probeImageAvailability(image);
+  const nodeRuntime = availability.status === "PRESENT" ? await probeImageNodeRuntime(image) : null;
+  imageProbes.set(image, { ...availability, nodeRuntime });
 }
 
 const report = {
@@ -308,11 +380,9 @@ for (const capsuleId of capsuleIds) {
   if (imageProbe.status !== "PRESENT" || visibleAssetGroups.length === 0) {
     const reason = imageProbe.status === "IMAGE_ABSENT"
       ? "pinned manifest image is not installed; policy forbids pulling or building it"
-      : imageProbe.status === "MISSING"
-        ? "pinned manifest image lacks bun required by the current optimizer bundle build path"
-        : imageProbe.status !== "PRESENT"
-          ? `pinned manifest image probe failed (${imageProbe.status})`
-          : "bare CLI optimizer has no visible public/protected asset group; terminal holdout authority is unavailable";
+      : imageProbe.status !== "PRESENT"
+        ? `pinned manifest image availability probe failed (${imageProbe.status})`
+        : "bare CLI optimizer has no visible public/protected asset group; terminal holdout authority is unavailable";
     report.results.push({
       capsuleId,
       role: developmentIds.includes(capsuleId) ? "development" : "terminal",
@@ -324,15 +394,18 @@ for (const capsuleId of capsuleIds) {
       imageProbe,
       verdict: "UNTESTED",
       reason,
-      command: imageProbe.status === "PRESENT" ? exactCommand : imageProbe.command,
+      command: exactCommand,
       runId: null,
       runRecords: null,
-      exitCode: imageProbe.status === "PRESENT" ? null : imageProbe.exitCode,
+      exitCode: null,
+      uid2000TaskMonitor: null,
       signal: null,
       runStatus: null,
       spend: null,
       completedEvaluations: [],
+      rejectedCompletionEvents: [],
       diagnosticStdout: imageProbe.status === "PRESENT" ? "" : imageProbe.stdout,
+      optimizerDiagnostic: "",
       diagnosticStderr: imageProbe.status === "PRESENT" ? "" : imageProbe.stderr,
     });
     writeReport(outputPath, report);
@@ -340,19 +413,35 @@ for (const capsuleId of capsuleIds) {
   }
   console.log(`\n=== ${capsuleId} (${capsule.capsuleDir}) ===`);
   console.log(`$ ${exactCommand}`);
-  const execution = await execute({ inner });
+  const execution = await execute({ inner }, WORKER_UID);
   const stdoutRecords = parseJsonLines(execution.stdout);
   const started = stdoutRecords.find((record) => record.type === "run.started");
   const runId = typeof started?.runId === "string" ? started.runId : null;
   const events = readEvents(runId);
+  const optimizerLog = readRunText(runId, "optimizer.log");
+  const optimizerEvents = parseJsonLines(optimizerLog);
+  const emittedCompletionEvents = [...events, ...optimizerEvents].filter((event) => event.type === "eval.completed");
+  const completionEvents = emittedCompletionEvents.filter((event) => Number.isFinite(event.aggregate));
+  const rejectedCompletionEvents = emittedCompletionEvents.filter((event) => !Number.isFinite(event.aggregate));
+  const completedEvaluations = [];
+  const completionKeys = new Set();
+  for (const event of completionEvents) {
+    const key = JSON.stringify([
+      event.artifact?.hash ?? null,
+      event.assetGroupId ?? null,
+      event.seed ?? null,
+      event.cached ?? null,
+    ]);
+    if (completionKeys.has(key)) continue;
+    completionKeys.add(key);
+    completedEvaluations.push(event);
+  }
   const summaryRecord = [...stdoutRecords].reverse().find((record) => record.runId === runId && record.spend);
   const lastBudget = [...events].reverse().find((event) => event.type === "budget.snapshot")?.budget?.spent;
   const spend = summaryRecord?.spend ?? lastBudget ?? null;
   const tokens = spend?.tokens ?? null;
   const usd = spend?.usd ?? null;
-  const evaluatorInvocations = spend?.evaluatorInvocations
-    ?? events.filter((event) => event.type === "eval.completed").length;
-  const completedEvaluations = events.filter((event) => event.type === "eval.completed");
+  const evaluatorInvocations = spend?.evaluatorInvocations ?? completedEvaluations.length;
   const freshCompletedEvaluations = completedEvaluations.filter((event) => event.cached === false);
   const cachedCompletedEvaluations = completedEvaluations.filter((event) => event.cached !== false);
   const finished = [...events].reverse().find((event) => event.type === "run.finished");
@@ -369,16 +458,20 @@ for (const capsuleId of capsuleIds) {
     reason = `run recorded non-zero model spend (${tokens} tokens, $${usd})`;
   } else if (freshCompletedEvaluations.length > 0) {
     verdict = "PASS";
-    reason = `${freshCompletedEvaluations.length} fresh trusted eval.completed event(s)`;
+    reason = `${freshCompletedEvaluations.length} fresh trusted eval.completed event(s) in run records`;
   } else if (cachedCompletedEvaluations.length > 0) {
     verdict = "CACHED_RESULT";
     reason = `${cachedCompletedEvaluations.length} cached eval.completed event(s); no evaluator execution was proven`;
   } else if (evaluatorInvocations > 0) {
     verdict = "FAIL";
-    reason = "engine burned an evaluator invocation without eval.completed";
+    reason = rejectedCompletionEvents.length > 0
+      ? `${rejectedCompletionEvents.length} eval.completed diagnostic event(s) had a non-finite aggregate; no trusted completion was recorded`
+      : "engine burned an evaluator invocation without a trusted eval.completed run record";
   } else {
     verdict = "UNTESTED";
-    reason = "run stopped before evaluator invocation";
+    reason = /exec: "node": executable file not found in \$PATH/.test(optimizerLog)
+      ? "pinned manifest image lacks node required by the default optimizer run contract"
+      : "run stopped before evaluator invocation";
   }
   report.results.push({
     capsuleId,
@@ -396,6 +489,7 @@ for (const capsuleId of capsuleIds) {
     runRecords: runId === null ? null : `.hone-runs/${runId}`,
     exitCode: execution.exitCode,
     signal: execution.signal,
+    uid2000TaskMonitor: execution.uidTaskMonitor,
     runStatus: finished?.status ?? null,
     spend: spend === null ? null : {
       tokens,
@@ -409,8 +503,15 @@ for (const capsuleId of capsuleIds) {
       cached: event.cached,
       artifactHash: event.artifact?.hash ?? null,
     })),
+    rejectedCompletionEvents: rejectedCompletionEvents.map((event) => ({
+      assetGroupId: event.assetGroupId ?? null,
+      aggregate: event.aggregate ?? null,
+      cached: event.cached ?? null,
+      artifactHash: event.artifact?.hash ?? null,
+    })),
     diagnosticStdout: diagnosticTail(execution.stdout),
     diagnosticStderr: diagnosticTail(execution.stderr),
+    optimizerDiagnostic: diagnosticTail(optimizerLog),
   });
   writeReport(outputPath, report);
   if (verdict === "SPEND_VIOLATION") {
@@ -429,6 +530,11 @@ report.summary = {
   authorizedCount: capsuleIds.length,
   cleanCheckoutBaselineStores: report.results.filter((result) => result.baselineStore.tracked).length,
   untrackedBaselineStores: report.results.filter((result) => result.baselineStore.present && !result.baselineStore.tracked).length,
+  runsWithPreexistingUid2000Tasks: report.results.filter((result) => (result.uid2000TaskMonitor?.before ?? 0) > 0).length,
+  maxObservedUid2000Tasks: Math.max(
+    0,
+    ...report.results.map((result) => result.uid2000TaskMonitor?.max ?? 0),
+  ),
 };
 writeReport(outputPath, report);
 console.log(`\npreflight report: ${relative(REPO_ROOT, outputPath)}`);
