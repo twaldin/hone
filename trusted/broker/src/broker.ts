@@ -27,6 +27,7 @@ import {
   EvaluateParams,
   CorpusPanelEvidence,
   CorpusPublicDocument,
+  EvaluatorIsolationRecord,
   EvaluationRecord,
   EvaluatorOutput,
   ExecParams,
@@ -58,6 +59,7 @@ import { MAX_ARTIFACT_BYTES, canonicalizeWorkspaceTar, diffProtectedPaths, dirSi
 import { CasStore, durability } from "./cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "./command.js";
 import { deferred } from "./deferred.js";
+import { acquireEvaluatorIsolation, type EvaluatorIsolationLease } from "./evaluator-isolation.js";
 import { BrokerError } from "./errors.js";
 import { RecursiveResourceLedger } from "./recursive.js";
 import { ArtifactValidationError, MAX_ARTIFACT_ENTRIES, validateWorkspaceTar } from "./tarcheck.js";
@@ -560,6 +562,9 @@ type QueryCorpusR = z.infer<typeof QueryCorpusResult>;
  * broker's own EvaluationRecords (claimed metrics are never trusted).
  */
 type EmittableEvent =
+  | { type: "evaluator.queue.entered"; allocationId: string }
+  | { type: "evaluator.queue.acquired"; allocationId: string; waitMs: number }
+  | { type: "evaluator.isolation"; isolation: z.infer<typeof EvaluatorIsolationRecord> }
   | { type: "budget.exhausted"; dimension: string }
   | { type: "holdout.accessed"; capsuleId: string; ledgerCount: number; ledgerBudget: number }
   | { type: "episode.started"; episode: number; parent: ArtifactRef }
@@ -590,6 +595,9 @@ type EmittableEvent =
   | { type: "budget.snapshot"; budget: BudgetState };
 const BROKER_EVENT_TYPES = new Set<RunEvent["type"]>([
   "holdout.accessed",
+  "evaluator.queue.entered",
+  "evaluator.queue.acquired",
+  "evaluator.isolation",
   "episode.started",
   "mutation.no-yield-bound",
   "mutation.usage-anomaly",
@@ -633,7 +641,7 @@ type GateFact = z.infer<typeof GateFact>;
 const StateLine = z.discriminatedUnion("t", [
   z.object({ t: z.literal("start"), atMs: z.number(), events: JournalEvents }),
   z.object({ t: z.literal("spend"), tokens: z.number().int().nonnegative(), usd: z.number().nonnegative(), events: JournalEvents }),
-  z.object({ t: z.literal("inv"), events: JournalEvents }),
+  z.object({ t: z.literal("inv"), isolation: EvaluatorIsolationRecord.optional(), events: JournalEvents }),
   z.object({ t: z.literal("holdout"), seq: z.number().int().positive(), events: JournalEvents }),
   z.object({
     t: z.literal("eval"),
@@ -1071,6 +1079,8 @@ export class Broker {
   private scratchVolumeName: string | undefined;
   /** Set once close() begins: no new operation is admitted. */
   private closing = false;
+  /** Wakes evaluator requests queued behind another broker when close begins. */
+  private readonly closeController = new AbortController();
   /** Async operations in flight. */
   private inFlightOps = 0;
   /** close() callers awaiting the in-flight operation count to reach zero. */
@@ -1343,6 +1353,7 @@ export class Broker {
    */
   async close(): Promise<void> {
     this.closing = true;
+    this.closeController.abort();
     clearInterval(this.reaper);
     const failures: string[] = [];
     const sweepWorkContainers = async (): Promise<void> => {
@@ -3356,27 +3367,52 @@ export class Broker {
     // attempted evaluation.
     const stageDir = await this.stageAssets(group);
 
+    let isolation: EvaluatorIsolationLease | undefined;
     let invocationEvents: RunEvent[] = [];
     let res: CmdResult;
-    const startedMs = Date.now();
-    const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    let startedMs = 0;
     try {
-      // Closing fence BEFORE the durable burn: a broker that is already
-      // closing must not consume an invocation it will never spawn.
+      // Evaluators whose frozen contract consumes CAPSULE_WORKER_UID receive a
+      // unique real uid. Frozen hard-coders retain uid 2000 behind the
+      // starvation-bounded host FIFO. Queue waiting is real run wall clock,
+      // so its entry/acquisition are durable and the budget is checked again
+      // AFTER acquisition, before an invocation is burned or spawned.
+      isolation = await acquireEvaluatorIsolation(
+        this.manifest.id,
+        this.closeController.signal,
+        (allocationId) => this.emit({ type: "evaluator.queue.entered", allocationId }),
+      );
+      if (isolation.mode === "shared-uid-lease") {
+        this.emit({
+          type: "evaluator.queue.acquired",
+          allocationId: isolation.allocationId,
+          waitMs: isolation.waitMs,
+        });
+      }
       if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
+      this.budgetGate();
+      const isolationRecord = EvaluatorIsolationRecord.parse({
+        mode: isolation.mode,
+        allocationId: isolation.allocationId,
+        workerUid: isolation.workerUid,
+        waitMs: isolation.waitMs,
+      });
+      startedMs = Date.now();
+      const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
       // Burn the invocation DURABLY before the spawn so a crashed evaluator
       // cannot farm free retries. The projected snapshot/exhaustion are part
       // of that same fact, but publish only after this admitted evaluation
       // returns so the exact-cap invocation itself is allowed to finish.
       const budgetEvents: EmittableEvent[] = [
+        { type: "evaluator.isolation", isolation: isolationRecord },
         { type: "budget.snapshot", budget: this.budgetStateNow(0, 0, 1) },
       ];
       const exhausted = this.exhaustedDimension(0, 0, 1);
       if (exhausted !== undefined && !this.exhaustedAnnounced.has(exhausted)) {
         budgetEvents.push({ type: "budget.exhausted", dimension: exhausted });
       }
-      invocationEvents = this.journalFact({ t: "inv" }, budgetEvents);
+      invocationEvents = this.journalFact({ t: "inv", isolation: isolationRecord }, budgetEvents);
       this.spent.evaluatorInvocations += 1;
       this.syncRecursiveUsage();
 
@@ -3401,9 +3437,9 @@ export class Broker {
         "SETGID",
         "--cap-add",
         "KILL",
-        // Trusted-parent-only reset authority. setuid(2000) clears these
-        // capabilities from the candidate worker, and no-new-privileges
-        // prevents reacquisition through file capabilities.
+        // Trusted-parent-only reset authority. The numeric setuid selected
+        // above clears these capabilities from the candidate worker, and
+        // no-new-privileges prevents reacquisition through file capabilities.
         "--cap-add",
         "DAC_OVERRIDE",
         "--cap-add",
@@ -3412,7 +3448,7 @@ export class Broker {
         "IPC_OWNER",
         // Trusted-scorer-only namespace authority (evaluator container ONLY,
         // never mutation sandboxes/keeper): the scorer's preexec unshares
-        // fresh NET+IPC namespaces per repetition BEFORE the setuid(2000)
+        // fresh NET+IPC namespaces per repetition BEFORE the numeric setuid
         // drop, so cross-rep loopback state (TIME_WAIT caches, SysV IPC)
         // cannot leak between repetitions. The drop strips it from the
         // candidate worker and no-new-privileges prevents reacquisition.
@@ -3424,9 +3460,8 @@ export class Broker {
         "--shm-size",
         "16m",
         // The trusted scorer runs as ROOT inside the eval container so it can
-        // drop the candidate worker to an unprivileged uid (2000) — same-uid
-        // signal//proc reach from candidate code to the scorer is severed
-        // (capsule contract with WP6; hardened images ship a `sandbox` user).
+        // drop the candidate worker to the selected unprivileged uid. Same-uid
+        // signal//proc reach from candidate code to the scorer is severed.
         "--user",
         "0:0",
         // Entrypoints are baseline-relative; the candidate workspace is DATA,
@@ -3436,6 +3471,10 @@ export class Broker {
         "-e",
         `HONE_SEED=${params.seed}`,
         "-e",
+        `CAPSULE_WORKER_UID=${isolation.workerUid}`,
+        "-e",
+        `CAPSULE_WORKER_GID=${isolation.workerUid}`,
+        "-e",
         // libmount's fd-based move_mount path is denied by this host kernel.
         // Force the classic mount(2) path for trusted evaluator cgroup setup.
         "LIBMOUNT_FORCE_MOUNT2=always",
@@ -3444,13 +3483,10 @@ export class Broker {
         "-v",
         `${baselineDir}:/trusted/baseline:ro`,
         // Asset confidentiality: the assets bind mount is parented under a
-        // root-owned mode=0700 tmpfs, so the dropped uid-2000 candidate
-        // worker cannot even traverse to it. The kernel enforces this on the
-        // tmpfs everywhere — Docker Desktop's VirtioFS bind mounts do NOT
-        // enforce host file modes in-container. Host-side, the staged tree is
-        // dirs 0755 / files 0644 under the 0700 host-only tmp parent: on
-        // native Linux the cap-dropped evaluator (even uid 0 has no
-        // CAP_DAC_OVERRIDE) must be able to read the bind content.
+        // root-owned mode=0700 tmpfs, so every dropped candidate uid is denied
+        // traversal. Host-side, the staged tree is dirs 0755 / files 0644
+        // under the 0700 host-only tmp parent: the Docker daemon resolves the
+        // bind, while the trusted root evaluator can read the mounted files.
         "--tmpfs",
         "/capsule:mode=0700,size=1m",
         "-v",
@@ -3478,9 +3514,13 @@ export class Broker {
         }
       }
     } finally {
-      // Confidentiality teardown on EVERY path (success, error, timeout):
-      // staged fixtures disappear before any untrusted process runs again.
-      await rm(stageDir, { recursive: true, force: true });
+      try {
+        await isolation?.release();
+      } finally {
+        // Confidentiality teardown on EVERY path (success, error, timeout):
+        // staged fixtures disappear before any untrusted process runs again.
+        await rm(stageDir, { recursive: true, force: true });
+      }
     }
     const durationMs = Date.now() - startedMs;
     this.publish(invocationEvents);

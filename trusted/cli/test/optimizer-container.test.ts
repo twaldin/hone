@@ -11,6 +11,7 @@ import type { CmdResult, RunCommand } from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend, runOptimizer } from "../src/backends/local.js";
 import {
+  OPTIMIZER_CONTAINER_UID,
   optimizerBuildArgs,
   optimizerCreateArgs,
   optimizerStartArgs,
@@ -177,7 +178,7 @@ describe("run container create/start argv exactness (two-phase)", () => {
     containerLease: "hone-lease-run_r-e1",
   };
 
-  it("linux/unix transport: --network none, ONLY bundle + public broker.sock mounted, uid 2000; token is value-less env, NEVER argv", () => {
+  it("linux/unix transport: --network none, ONLY bundle + public broker.sock mounted, reserved optimizer uid; token is value-less env, NEVER argv", () => {
     // Distinct from FIX_IMAGE's a-repeated digest: a colliding token would
     // vacuously satisfy the not-in-argv assertion's inverse.
     const token = "b".repeat(64);
@@ -192,7 +193,7 @@ describe("run container create/start argv exactness (two-phase)", () => {
     expect(pullIdx).toBeLessThan(argv.indexOf(FIX_IMAGE));
     expect(flagValue(argv, "--network")).toBe("none");
     expect(argv).toContain("--read-only");
-    expect(flagValue(argv, "--user")).toBe("2000:2000");
+    expect(flagValue(argv, "--user")).toBe(`${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`);
     expect(flagValue(argv, "--cap-drop")).toBe("ALL");
     // The FULL mount set: bundle (ro) and the public broker socket. Nothing else —
     // no repo, no runDir, no CAS, no capsule, no holdout ledger, no docker.sock.
@@ -1047,7 +1048,7 @@ describe("REAL docker: host-uid build into the 0700-rooted handoff", () => {
           expect(f.size).toBeGreaterThan(0);
           const st = lstatSync(join(seal.dir, f.name));
           expect(st.isFile()).toBe(true);
-          expect(st.uid).toBe(OUR_UID); // --user <host uid>:<host gid> wrote as US, not 2000
+          expect(st.uid).toBe(OUR_UID); // build runs as the host uid, never the reserved runtime uid
           expect(st.mode & 0o777).toBe(0o444);
         }
         verifyOptimizerBundleSeal(rt);

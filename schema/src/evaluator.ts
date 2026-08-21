@@ -44,3 +44,23 @@ export const EvaluationRecord = z.object({
   evaluatedAt: z.string().datetime(),
 });
 export type EvaluationRecord = z.infer<typeof EvaluationRecord>;
+
+/**
+ * Host identity/isolation selected for one real (uncached) evaluator
+ * invocation. This is trusted provenance, not evaluator-authored output.
+ */
+export const EvaluatorIsolationRecord = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("reserved-uid"),
+    allocationId: z.string().regex(/^[0-9a-f]{32}$/),
+    workerUid: z.number().int().min(20_000).max(20_031),
+    waitMs: z.number().int().nonnegative(),
+  }),
+  z.object({
+    mode: z.literal("shared-uid-lease"),
+    allocationId: z.string().regex(/^[0-9a-f]{32}$/),
+    workerUid: z.literal(2000),
+    waitMs: z.number().int().nonnegative(),
+  }),
+]);
+export type EvaluatorIsolationRecord = z.infer<typeof EvaluatorIsolationRecord>;

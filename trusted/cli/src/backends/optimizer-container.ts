@@ -31,13 +31,15 @@ import type { RunnerBackendContext } from "../types.js";
  * handoff dir). Trusted code then
  * SEALS the output — lstats each required file (regular, single-link,
  * owner-owned), captures its exact bytes and SHA-256, freezes all write
- * permission — and re-verifies that seal immediately before EVERY run
- * container create: path existence alone grants no authority. The bundle
- * runs in a separate labeled, read-only, uid/gid 2000 container with
- * resource caps and ONLY the bundle (plus, on Linux, the public broker
- * socket) mounted. It receives runId/seed/resume/maxEpisodes and the public
- * broker capability; never the host repo, runDir, CAS, capsule, holdout
- * ledger, proxy credentials, or the Docker socket.
+ * permission — and re-verifies that seal immediately before EVERY run.
+ * Runtime: each captured bundle runs in a separate labeled, read-only,
+ * uid/gid 3000 container with resource caps and ONLY the bundle (plus, on
+ * Linux, the public broker socket) mounted. Candidate evaluators reserve uid
+ * 2000 (and a few frozen contracts use 2001/2002), so optimizer/model threads
+ * must never join their host-wide RLIMIT_NPROC pools. The optimizer receives
+ * runId/seed/resume/maxEpisodes and the public broker capability; never the
+ * host repo, runDir, CAS, capsule, holdout ledger, proxy credentials, or the
+ * Docker socket.
  */
 
 /** In-container mount points fixed by OPTIMIZER_BUILD_CONTRACT. */
@@ -47,9 +49,11 @@ const BUNDLE_MOUNT = "/hone/bundle";
 const RUNTIME_MOUNT = "/hone/runtime";
 /** Linux transport: the public broker socket's in-container path. */
 export const CONTAINER_BROKER_SOCK = "/run/hone/broker.sock";
+/** Fixed unprivileged identity kept outside every frozen evaluator uid pool. */
+export const OPTIMIZER_CONTAINER_UID = 3000;
 const MISSING_CONTAINER_RE = /no such container|is not running|no such object/i;
 
-/** Shared hard caps for both optimizer containers; each argv pins its own --user (build: numeric host uid/gid; run: 2000:2000). */
+/** Shared hard caps for both optimizer containers; each argv pins its own --user (build: numeric host uid/gid; run: 3000:3000). */
 const HARDENING_ARGS = [
   "--cap-drop", "ALL",
   "--security-opt", "no-new-privileges",
@@ -228,7 +232,7 @@ function optimizerCreateArgsWithToken(opts: OptimizerCreateOptions, tokenEnv: st
     "--tmpfs", "/tmp:rw,size=268435456",
     "-w", "/tmp",
     "-e", "HOME=/tmp",
-    "--user", "2000:2000",
+    "--user", `${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`,
     ...HARDENING_ARGS,
   ];
   if (opts.bundleDir !== null) argv.push("-v", `${opts.bundleDir}:${BUNDLE_MOUNT}:ro`);
@@ -297,7 +301,7 @@ function mustLstat(abs: string, what: string): Stats {
  * file (regular — a symlink/special refuses; single hard link; owned by the
  * invoking uid), read and hash its exact bytes, freeze it read-only (0444),
  * then remove the directory's write permission (0555: the run container's
- * uid 2000 keeps r-x through the bind mount; nothing below can be created,
+ * uid 3000 keeps r-x through the bind mount; nothing below can be created,
  * unlinked, or renamed). The 0700 `root` umbrella already denies every other
  * host UID traversal, so listing/unlinking/replacing is impossible for them
  * outright; the seal additionally pins inode identities and hashes so even a
@@ -538,9 +542,9 @@ export async function prepareOptimizerRuntime(
   // Output: a 0700 owner-only umbrella (mkdtemp default) with the actual
   // mount dir nested below it. No other host UID can traverse the umbrella —
   // list, unlink, or replace anything — while the nested dir itself can drop
-  // to r-x after sealing so the run container's uid 2000 still reads the
+  // to r-x after sealing so the run container's uid 3000 still reads the
   // bundle through the bind mount (the daemon resolves the mount path as
-  // root; traversal of the 0700 umbrella never involves uid 2000).
+  // root; traversal of the 0700 umbrella never involves uid 3000).
   const outRoot = mkdtempSync(join(tmpdir(), "hone-optout-"));
   tempDirs.push(outRoot);
   const outDir = join(outRoot, "out");

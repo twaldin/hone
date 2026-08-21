@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ArtifactRef, BudgetState, QueryCorpusParams, QueryCorpusResult } from "./broker.js";
 import { CampaignPauseReason } from "./proxy.js";
+import { EvaluatorIsolationRecord } from "./evaluator.js";
 
 /**
  * Contract 4 — Event log. Append-only NDJSON, one file per run.
@@ -74,6 +75,18 @@ export const RunEvent = z.discriminatedUnion("type", [
     normalizedUsageTurns: z.number().int().nonnegative(),
   }),
   z.object({ ...base, type: z.literal("episode.completed"), episode: z.number().int().nonnegative() }),
+  z.object({
+    ...base,
+    type: z.literal("evaluator.queue.entered"),
+    allocationId: z.string().regex(/^[0-9a-f]{32}$/),
+  }),
+  z.object({
+    ...base,
+    type: z.literal("evaluator.queue.acquired"),
+    allocationId: z.string().regex(/^[0-9a-f]{32}$/),
+    waitMs: z.number().int().nonnegative(),
+  }),
+  z.object({ ...base, type: z.literal("evaluator.isolation"), isolation: EvaluatorIsolationRecord }),
   z.object({ ...base, type: z.literal("eval.completed"), episode: z.number().int().nonnegative().optional(), artifact: ArtifactRef, assetGroupId: z.string(), seed: z.number().int(), aggregate: z.number(), cached: z.boolean() }),
   z.object({
     ...base,

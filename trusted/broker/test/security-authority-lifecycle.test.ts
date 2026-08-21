@@ -14,6 +14,7 @@ import { BrokerError } from "../src/errors.js";
 import { deferred } from "../src/deferred.js";
 import { BrokerServer } from "../src/server.js";
 import { WORKSPACE_TMPFS_INODES } from "../src/broker.js";
+import { acquireHostEvaluatorGate } from "../src/host-evaluator-gate.js";
 import {
   MANIFEST_IMAGE,
   RpcClient,
@@ -197,6 +198,7 @@ async function boot(
     measurementEpoch?: string;
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
+    now?: () => number;
   } = {},
 ): Promise<Booted> {
   const id = randomBytes(4).toString("hex");
@@ -345,6 +347,7 @@ async function boot(
     ...(opts.sessionTraceQuotaBytes !== undefined ? { sessionTraceQuotaBytes: opts.sessionTraceQuotaBytes } : {}),
     ...(opts.evalTimeoutSec !== undefined ? { evalTimeoutSec: opts.evalTimeoutSec } : {}),
     ...(opts.measurementEpoch !== undefined ? { measurementEpoch: opts.measurementEpoch } : {}),
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
   const broker = new Broker(config);
@@ -1893,6 +1896,14 @@ describe("evaluator containment", () => {
     const libmountEnvIdx = argv.indexOf("LIBMOUNT_FORCE_MOUNT2=always");
     expect(libmountEnvIdx).toBeGreaterThan(0);
     expect(argv[libmountEnvIdx - 1]).toBe("-e");
+    const workerUidIdx = argv.findIndex((arg) => arg.startsWith("CAPSULE_WORKER_UID="));
+    expect(argv[workerUidIdx]).toBe("CAPSULE_WORKER_UID=2000");
+    expect(argv[workerUidIdx - 1]).toBe("-e");
+    expect(b.events.filter((event) => event.type === "evaluator.queue.entered")).toHaveLength(1);
+    expect(b.events.filter((event) => event.type === "evaluator.queue.acquired")).toHaveLength(1);
+    expect(b.events.find((event) => event.type === "evaluator.isolation")).toMatchObject({
+      isolation: { mode: "shared-uid-lease", workerUid: 2000 },
+    });
     const stateTmpfsIdx = argv.indexOf("/tmp:size=2g,nosuid,nodev,noexec");
     expect(stateTmpfsIdx).toBeGreaterThan(0);
     expect(argv[stateTmpfsIdx - 1]).toBe("--tmpfs");
@@ -1912,6 +1923,36 @@ describe("evaluator containment", () => {
     expect(argv[tmpfsIdx - 1]).toBe("--tmpfs");
     expect(argv.every((a) => !a.includes("holdout"))).toBe(true);
     expect(argv.every((a) => !a.includes("protected"))).toBe(true);
+  });
+
+  it("runs reviewed dynamic-uid evaluators concurrently on distinct recorded host uids", async () => {
+    const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+    const b = await boot({ manifest });
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const observedUids: number[] = [];
+    const bothStarted = deferred<void>();
+    const release = deferred<void>();
+    b.ctl.evalInspect = async (argv) => {
+      const value = argv.find((arg) => arg.startsWith("CAPSULE_WORKER_UID="));
+      observedUids.push(Number(value?.split("=")[1]));
+      if (observedUids.length === 2) bothStarted.resolve();
+      await release.promise;
+    };
+
+    const evaluations = Promise.all([
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT),
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 1 }, CLIENT),
+    ]);
+    await bothStarted.promise;
+    expect(new Set(observedUids).size).toBe(2);
+    expect(observedUids.every((uid) => uid >= 20_000 && uid <= 20_031)).toBe(true);
+    release.resolve();
+    await evaluations;
+
+    const isolation = b.events.filter((event) => event.type === "evaluator.isolation");
+    expect(isolation).toHaveLength(2);
+    expect(isolation.every((event) => event.isolation.mode === "reserved-uid")).toBe(true);
+    expect(b.events.some((event) => event.type === "evaluator.queue.entered")).toBe(false);
   });
 
   it("terminal holdout mounts the full evaluator artifact separately and rejects protected-path reintroduction", async () => {
@@ -1959,33 +2000,88 @@ describe("evaluator containment", () => {
     );
   });
 
-  it("shares one pause lease across concurrent evaluators and blocks mutation Docker work until the last reap", async () => {
+  it("serializes concurrent evaluator Docker sections through the host-wide uid gate", async () => {
     const b = await boot();
-    const optimizer = "e".repeat(64);
-    b.ctl.quiesceContainers = [optimizer];
     b.ctl.evalOutputs.set(baselineHash, score(1));
-    const bothStarted = deferred<void>();
-    const releaseEvaluators = deferred<void>();
+    const firstStarted = deferred<void>();
+    const secondStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const releaseSecond = deferred<void>();
     let started = 0;
     b.ctl.evalInspect = async () => {
       started += 1;
-      if (started === 2) bothStarted.resolve();
-      await releaseEvaluators.promise;
+      if (started === 1) {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+      } else {
+        secondStarted.resolve();
+        await releaseSecond.promise;
+      }
     };
 
     const evalA = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 10 }, CLIENT);
     const evalB = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 11 }, CLIENT);
-    await bothStarted.promise;
-    const mutation = b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
-    await Promise.resolve();
-    expect(b.log.some((argv) => argv[1] === "run" && argv.includes("-d"))).toBe(false);
+    await firstStarted.promise;
+    // Exercise the real abstract-socket bind race for one event-loop turn:
+    // without the Broker integration the second fake evaluator enters now.
+    const contendersRan = deferred<void>();
+    setImmediate(contendersRan.resolve);
+    await contendersRan.promise;
+    const serializedBeforeRelease = started === 1;
 
-    releaseEvaluators.resolve();
+    releaseFirst.resolve();
+    await secondStarted.promise;
+    releaseSecond.resolve();
     await Promise.all([evalA, evalB]);
-    expect((await mutation).sandboxId).toBeTruthy();
-    expect(b.log.filter((argv) => argv[1] === "pause" && argv[2] === optimizer)).toHaveLength(1);
-    expect(b.log.filter((argv) => argv[1] === "unpause" && argv[2] === optimizer)).toHaveLength(1);
+    expect(serializedBeforeRelease).toBe(true);
     expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(2);
+  });
+
+  it("aborts a queued host-gate acquisition when the broker closes without burning an invocation", async () => {
+    const gateLease = await acquireHostEvaluatorGate();
+    try {
+      const b = await boot();
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      const evaluation = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 12 }, CLIENT);
+      const rejected = expect(evaluation).rejects.toThrow("host evaluator gate acquisition aborted");
+      await b.broker.close();
+      await rejected;
+      expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(0);
+      expect(b.log.some((argv) => argv[1] === "run" && argv.includes("--rm"))).toBe(false);
+    } finally {
+      await gateLease.release();
+    }
+  });
+
+  it("rechecks wall-clock budget after shared-uid queue acquisition before burning an invocation", async () => {
+    let nowMs = 0;
+    const gateLease = await acquireHostEvaluatorGate();
+    try {
+      const manifest = makeManifest({ budget: { ...GENEROUS_BUDGET, maxWallClockSec: 1 } });
+      const b = await boot({ manifest, now: () => nowMs });
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      const evaluation = b.broker.evaluate(
+        { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 13 },
+        CLIENT,
+      );
+      await vi.waitFor(() => {
+        expect(b.events.some((event) => event.type === "evaluator.queue.entered")).toBe(true);
+      });
+      nowMs = 2_000;
+      await gateLease.release();
+      await expect(evaluation).rejects.toThrow("budget dimension exhausted: wallClockSec");
+      expect(b.events).toContainEqual(expect.objectContaining({
+        type: "evaluator.queue.acquired",
+      }));
+      expect(b.events).toContainEqual(expect.objectContaining({
+        type: "budget.exhausted",
+        dimension: "wallClockSec",
+      }));
+      expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(0);
+      expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(0);
+    } finally {
+      await gateLease.release();
+    }
   });
 
   it("poisons further broker operations when a paused container cannot be released", async () => {
