@@ -1,17 +1,28 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { once } from "node:events";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CapsuleManifest, RunEvent } from "@hone/schema";
+import { SandboxRef, type CapsuleManifest, type RunEvent } from "@hone/schema";
 import { Broker, type BrokerConfig, type CallContext } from "../src/broker.js";
 import { packDirAsArtifact } from "../src/artifact.js";
 import { CasStore } from "../src/cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "../src/command.js";
 import { BrokerError } from "../src/errors.js";
 import { deferred } from "../src/deferred.js";
+import { BrokerServer } from "../src/server.js";
 import { WORKSPACE_TMPFS_INODES } from "../src/broker.js";
-import { MANIFEST_IMAGE, TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST, ensureImage, waitForDocker } from "./helpers.js";
+import {
+  MANIFEST_IMAGE,
+  RpcClient,
+  TEST_CAPSULE_DIGEST,
+  TEST_IMAGE,
+  TEST_OPTIMIZER_DIGEST,
+  ensureImage,
+  waitForDocker,
+} from "./helpers.js";
 import { SCRATCH_SNAPSHOT_SCRIPT } from "../src/broker.js";
 
 /**
@@ -429,6 +440,84 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
     expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
   });
 
+  it("returns the same resumed sandbox when the first RPC response is lost", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "resume-response-loss"),
+      casDir: path.join(tmpBase, "cas", "resume-response-loss"),
+      runId: "run-resume-response-loss",
+    };
+    const first = await boot(shared);
+    await first.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await first.broker.close();
+
+    const resumed = await boot(shared);
+    const socketStem = path.join("/tmp", `hone-response-loss-${randomBytes(4).toString("hex")}`);
+    const socketPath = `${socketStem}.sock`;
+    const adminSocketPath = `${socketStem}-admin.sock`;
+    const token = "response-loss-public-token".padEnd(64, "r");
+    const server = new BrokerServer(resumed.broker, { socketPath, adminSocketPath, publicToken: token });
+    await server.listen();
+    const lostSocket = net.connect(socketPath);
+    let retry: RpcClient | undefined;
+    try {
+      await once(lostSocket, "connect");
+      const response = once(lostSocket, "data");
+      lostSocket.write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "createSandbox",
+        params: {
+          artifact: { hash: baselineHash },
+          role: "mutation",
+          continueEpisode: 0,
+        },
+        token,
+      })}\n`);
+      const [chunk] = await response;
+      const close = once(lostSocket, "close");
+      lostSocket.destroy();
+      await close;
+      const lostResponse: unknown = JSON.parse(String(chunk).trim());
+      if (typeof lostResponse !== "object" || lostResponse === null || !("result" in lostResponse)) {
+        throw new Error("lost createSandbox response has no result");
+      }
+      const original = SandboxRef.parse(lostResponse.result);
+      const dockerCreates = resumed.log.filter(
+        (argv) => argv[1] === "run" && argv.includes("-d"),
+      ).length;
+
+      retry = await RpcClient.connect(socketPath, token);
+      const replayed = SandboxRef.parse(await retry.call("createSandbox", {
+        artifact: { hash: baselineHash },
+        role: "mutation",
+        continueEpisode: 0,
+      }));
+      expect(replayed).toEqual(original);
+      expect(resumed.log.filter(
+        (argv) => argv[1] === "run" && argv.includes("-d"),
+      )).toHaveLength(dockerCreates);
+
+      await resumed.broker.exec({ sandboxId: replayed.sandboxId, argv: ["true"] }, CLIENT);
+      resumed.ctl.saveTar = candidateTar;
+      await resumed.broker.saveArtifact({ sandboxId: replayed.sandboxId }, CLIENT);
+      await expect(
+        resumed.broker.createSandbox({
+          artifact: { hash: baselineHash },
+          role: "mutation",
+          continueEpisode: 0,
+        }, CLIENT),
+      ).rejects.toThrow(/claim has no unique registered sandbox/);
+    } finally {
+      lostSocket.destroy();
+      retry?.close();
+      if (retry !== undefined) await retry.closed;
+      await server.close();
+    }
+  });
+
   it("persists a trusted proxy admission refusal and blocks retries after restart", async () => {
     const shared = {
       runDir: path.join(tmpBase, "runs", "resume-proxy-cap"),
@@ -842,16 +931,22 @@ describe("M0 one-shot candidate evaluation authority", () => {
     // and save a distinct repaired artifact without minting episode 1.
     const repairing = await boot(shared);
     repairing.ctl.evalOutputs.set(candidate2Hash, score(2));
-    await repairing.broker.createSandbox(
+    const parentClaim = await repairing.broker.createSandbox(
       { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
       CLIENT,
     );
+    const dockerCreatesAfterClaim = repairing.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    ).length;
     await expect(
       repairing.broker.createSandbox(
         { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
         CLIENT,
       ),
-    ).rejects.toThrow(/already claimed/);
+    ).resolves.toEqual(parentClaim);
+    expect(repairing.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    )).toHaveLength(dockerCreatesAfterClaim);
     const repairSandbox = await repairing.broker.createSandbox(
       { artifact: { hash: invalidCandidate }, role: "mutation", continueEpisode: 0 },
       CLIENT,

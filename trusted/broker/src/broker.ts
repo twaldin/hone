@@ -326,6 +326,8 @@ interface SandboxEntry {
   episode: number;
   /** Artifact the sandbox was unpacked from — trusted lineage parent for candidates it saves. */
   parentHash: string;
+  /** Checkpoint-v1 measurement epoch this sandbox is authorized to mutate. */
+  epoch: string;
   /** Exact bytes from the most recent exec, retained only until candidate admission. */
   lastExecStdout: Buffer | null;
   /** Exit code of the most recent exec; a candidate save requires 0. */
@@ -2523,9 +2525,41 @@ export class Broker {
     };
   }
 
+  /**
+   * A caller can lose the response after a resumed parent claim succeeded.
+   * Only the one in-memory sandbox registered for the same episode, parent,
+   * and checkpoint epoch is safe to return; any claimed-but-unmatched state
+   * remains a hard refusal rather than guessing at a sandbox.
+   */
+  private replayedResumeClaim(params: CreateSandboxP): SandboxRef | undefined {
+    const resumed = this.resumingEpisode;
+    if (
+      resumed === undefined
+      || params.continueEpisode !== resumed.episode
+      || params.artifact.hash !== resumed.parent
+      || !resumed.sandboxClaimed
+    ) {
+      return undefined;
+    }
+    const matches = [...this.sandboxes.entries()].filter(([, sandbox]) =>
+      sandbox.episode === resumed.episode
+      && sandbox.parentHash === resumed.parent
+      && sandbox.epoch === resumed.epoch
+    );
+    if (matches.length !== 1) {
+      throw new BrokerError(
+        "INTERNAL",
+        `resumed episode ${resumed.episode} claim has no unique registered sandbox`,
+      );
+    }
+    return { sandboxId: matches[0]![0] };
+  }
+
   async createSandbox(params: CreateSandboxP, _ctx: CallContext): Promise<SandboxRef> {
     this.enterOp();
     try {
+      const replayedClaim = this.replayedResumeClaim(params);
+      if (replayedClaim !== undefined) return replayedClaim;
       this.budgetGate();
       // Atomic admission: the check and the reservation are one synchronous
       // step, so parallel creations cannot all observe the same free slot and
@@ -2539,6 +2573,8 @@ export class Broker {
           // Lineage/repair admission shares the same critical section as
           // saveArtifact. A queued save may graduate or create this hash
           // before our turn; never carry a stale episode decision across it.
+          const replayedClaim = this.replayedResumeClaim(params);
+          if (replayedClaim !== undefined) return replayedClaim;
           const repair = this.lineage.has(params.artifact.hash) ? undefined : this.repairs.get(params.artifact.hash);
           const requestedContinuation = params.continueEpisode;
           if (requestedContinuation !== undefined) {
@@ -2796,6 +2832,7 @@ export class Broker {
         expiresAtMs: this.now() + ttlSec * 1000,
         episode,
         parentHash,
+        epoch: sandboxEpoch,
         lastExecStdout: null,
         lastExecExitCode: null,
         lastExecTruncated: null,
