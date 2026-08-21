@@ -265,6 +265,44 @@ describe("runEpisodeLoop", () => {
     expect(diagnostics.join("\n")).toContain("mutation.no-yield-bound-record-unavailable");
   });
 
+  it("stops without a third session when the one repair hits the no-yield bound", async () => {
+    const noYieldRecord = {
+      type: SESSION_NO_YIELD_RECORD_TYPE,
+      limitTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [
+        { exitCode: 1, stderr: "first attempt failed without yielding" },
+        { exitCode: 4, stdout: `${JSON.stringify(noYieldRecord)}\n` },
+      ],
+      envelope: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+    });
+    await stub.listen();
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-repair-no-yield-bound",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: (event) => event,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toHaveLength(2);
+    expect(stub.reportedNoYieldBounds).toEqual([
+      { sandboxId: "sb_000000000002", ...noYieldRecord },
+    ]);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
   it("attaches the frozen development-panel allocation plan to parent and candidate evaluations", async () => {
     const firstCeiling = {
       maxTokens: 100,

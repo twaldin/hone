@@ -40,6 +40,7 @@ import {
   ReportIncumbentParams,
   SESSION_NO_YIELD_EXIT_CODE,
   SessionNoYieldRecord,
+  SessionUsageAnomalyRecord,
   ReportSessionNoYieldBoundParams,
   RecursiveTask,
   ResourceUsage,
@@ -569,6 +570,13 @@ type EmittableEvent =
       completionTokens: number;
       consumedTokens: number;
     }
+  | {
+      type: "mutation.usage-anomaly";
+      episode: number;
+      sandboxId: string;
+      zeroUsageTurns: number;
+      normalizedUsageTurns: number;
+    }
   | { type: "eval.completed"; episode?: number; artifact: ArtifactRef; assetGroupId: string; seed: number; aggregate: number; cached: boolean }
   | { type: "gate.paired"; episode: number; parentScore: number; childScore: number; passed: boolean }
   | { type: "incumbent.new"; artifact: ArtifactRef; aggregate: number; deltaVsBaseline: number; episode: number }
@@ -579,6 +587,7 @@ const BROKER_EVENT_TYPES = new Set<RunEvent["type"]>([
   "holdout.accessed",
   "episode.started",
   "mutation.no-yield-bound",
+  "mutation.usage-anomaly",
   "episode.candidate",
   "eval.completed",
   "gate.paired",
@@ -2739,10 +2748,58 @@ export class Broker {
     // Hold the capped bytes in memory until saveArtifact proves this exec
     // actually minted a candidate. Repeated diagnostic execs never grow CAS.
     sb.lastExecStdout = res.stdout;
+    let execJournalError: string | null = null;
+    let zeroUsageTurns = 0;
+    let normalizedUsageTurns = 0;
+    if (res.stderr.length > 0) {
+      for (const line of res.stderr.toString("utf8").split("\n")) {
+        if (line.trim().length === 0) continue;
+        try {
+          const parsed = SessionUsageAnomalyRecord.safeParse(JSON.parse(line));
+          if (!parsed.success) continue;
+          zeroUsageTurns += parsed.data.zeroUsageTurns;
+          normalizedUsageTurns += parsed.data.normalizedUsageTurns;
+        } catch {
+          // Ordinary worker diagnostics are not structured anomaly records.
+        }
+      }
+    }
+    if (zeroUsageTurns > 0 || normalizedUsageTurns > 0) {
+      try {
+        this.emit({
+          type: "mutation.usage-anomaly",
+          episode: sb.episode,
+          sandboxId: params.sandboxId,
+          zeroUsageTurns,
+          normalizedUsageTurns,
+        });
+      } catch (error) {
+        execJournalError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (res.exitCode === SESSION_NO_YIELD_EXIT_CODE) {
+      const record = this.parseSessionNoYieldRecord(res.stdout);
+      if (record !== null) {
+        try {
+          // The exec result is the last moment this authoritative evidence is
+          // guaranteed live: saveArtifact retires the sandbox on every shape.
+          this.reportSessionNoYieldBound({ sandboxId: params.sandboxId, ...record }, _ctx);
+        } catch (error) {
+          // Never turn a clean bound stop into an exec failure. The optimizer
+          // will retry the idempotent report and preserve this in its log.
+          const message = error instanceof Error ? error.message : String(error);
+          execJournalError = execJournalError === null ? message : `${execJournalError}; ${message}`;
+        }
+      }
+    }
+    const stderr = res.stderr.toString("utf8");
     return {
       exitCode: res.exitCode,
       stdout: res.stdout.toString("utf8"),
-      stderr: res.stderr.toString("utf8"),
+      stderr: execJournalError === null
+        ? stderr
+        : `${stderr}${stderr.length === 0 || stderr.endsWith("\n") ? "" : "\n"}` +
+          `hone broker mutation telemetry journal failed: ${execJournalError}\n`,
       truncated: res.truncated,
     };
   }
@@ -3545,9 +3602,26 @@ export class Broker {
     return {};
   }
 
+  private parseSessionNoYieldRecord(stdout: Buffer | null): z.infer<typeof SessionNoYieldRecord> | null {
+    const lastLine = stdout
+      ?.toString("utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .at(-1);
+    if (lastLine === undefined) return null;
+    try {
+      const parsed = SessionNoYieldRecord.safeParse(JSON.parse(lastLine));
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Durable stop reason for a sealed mutation worker that consumed its
-   * per-session allowance without successfully invoking yield.
+   * per-session allowance without successfully invoking yield. execOp records
+   * it while sandbox evidence is live; the public call is an idempotent
+   * confirmation that remains valid after saveArtifact retires the sandbox.
    */
   reportSessionNoYieldBound(params: ReportSessionNoYieldBoundP, _ctx: CallContext): Record<string, never> {
     this.state().assertUsable();
@@ -3572,20 +3646,7 @@ export class Broker {
         `no-yield bound sandbox ${params.sandboxId} last exited ${String(sandbox.lastExecExitCode)}, not ${SESSION_NO_YIELD_EXIT_CODE}`,
       );
     }
-    const lastLine = sandbox.lastExecStdout
-      ?.toString("utf8")
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .at(-1);
-    let workerRecord: z.infer<typeof SessionNoYieldRecord> | null = null;
-    if (lastLine !== undefined) {
-      try {
-        const parsed = SessionNoYieldRecord.safeParse(JSON.parse(lastLine));
-        if (parsed.success) workerRecord = parsed.data;
-      } catch {
-        workerRecord = null;
-      }
-    }
+    const workerRecord = this.parseSessionNoYieldRecord(sandbox.lastExecStdout);
     const { sandboxId: _sandboxId, ...reportedRecord } = params;
     if (workerRecord === null || !sameCanonical(workerRecord, reportedRecord)) {
       throw new BrokerError("INTERNAL", `no-yield bound report does not match sandbox ${params.sandboxId} worker output`);

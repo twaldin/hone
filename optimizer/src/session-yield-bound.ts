@@ -1,12 +1,14 @@
 import {
   SESSION_NO_YIELD_EXIT_CODE,
   SESSION_NO_YIELD_RECORD_TYPE,
+  SESSION_USAGE_ANOMALY_RECORD_TYPE,
   SessionNoYieldRecord as SessionNoYieldRecordSchema,
   type SessionNoYieldRecord,
 } from "@hone/schema";
 
 export {
   SESSION_NO_YIELD_EXIT_CODE,
+  SESSION_USAGE_ANOMALY_RECORD_TYPE,
   SESSION_NO_YIELD_RECORD_TYPE,
   type SessionNoYieldRecord,
 };
@@ -30,6 +32,8 @@ export interface SessionNoYieldSnapshot {
   completionTokens: number;
   consumedTokens: number;
 }
+
+export type SessionUsageAnomalyKind = "zero-usage" | "normalized";
 
 
 function positiveSafeInteger(value: number, label: string): number {
@@ -71,7 +75,7 @@ export class SessionNoYieldCounter {
 
   constructor(
     limitTokens: number,
-    private readonly onInvalidUsage?: (message: string) => void,
+    private readonly onUsageAnomaly?: (kind: SessionUsageAnomalyKind) => void,
   ) {
     this.limitTokens = positiveSafeInteger(limitTokens, "session no-yield token limit");
   }
@@ -83,17 +87,19 @@ export class SessionNoYieldCounter {
     const componentTotal = Math.min(Number.MAX_SAFE_INTEGER, promptTokens + completionTokens);
     const reportedTotal = defensiveTokenCount(usage.totalTokens);
     const totalTokens = Math.max(reportedTotal, componentTotal);
-    if (
+    const normalized =
       promptTokens !== usage.promptTokens
       || completionTokens !== usage.completionTokens
-      || totalTokens !== usage.totalTokens
-    ) {
-      this.onInvalidUsage?.(
-        `normalized invalid session usage prompt=${String(usage.promptTokens)} ` +
-        `completion=${String(usage.completionTokens)} total=${String(usage.totalTokens)} ` +
-        `to prompt=${promptTokens} completion=${completionTokens} total=${totalTokens}`,
-      );
-    }
+      || totalTokens !== usage.totalTokens;
+    // The SDK exposes the same all-zero tuple for genuinely absent usage and
+    // a true zero-token turn. Preserve that ambiguity as durable telemetry;
+    // never silently pretend the accumulator observed billable usage.
+    const zeroUsage =
+      usage.promptTokens === 0
+      && usage.completionTokens === 0
+      && usage.totalTokens === 0;
+    if (zeroUsage) this.onUsageAnomaly?.("zero-usage");
+    else if (normalized) this.onUsageAnomaly?.("normalized");
 
     this.modelCalls = Math.min(Number.MAX_SAFE_INTEGER, this.modelCalls + 1);
     this.promptTokens = Math.min(Number.MAX_SAFE_INTEGER, this.promptTokens + promptTokens);

@@ -133,6 +133,14 @@ export const ReportIncumbentParams = z.object({
 export const SESSION_NO_YIELD_RECORD_TYPE = "hone.mutation.no-yield-bound.v1" as const;
 export const SESSION_NO_YIELD_EXIT_CODE = 4;
 
+export const SESSION_USAGE_ANOMALY_RECORD_TYPE = "hone.mutation.usage-anomaly.v1" as const;
+export const SessionUsageAnomalyRecord = z.object({
+  type: z.literal(SESSION_USAGE_ANOMALY_RECORD_TYPE),
+  zeroUsageTurns: z.number().int().nonnegative(),
+  normalizedUsageTurns: z.number().int().nonnegative(),
+}).strict();
+export type SessionUsageAnomalyRecord = z.infer<typeof SessionUsageAnomalyRecord>;
+
 const SessionNoYieldRecordFields = z.object({
   type: z.literal(SESSION_NO_YIELD_RECORD_TYPE),
   limitTokens: z.number().int().positive(),

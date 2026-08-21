@@ -452,6 +452,23 @@ describe("contract 4: event log", () => {
     })).toThrow(/consumedTokens must reach limitTokens/);
   });
 
+  it("usage anomalies remain durable even when the mutation session yields", () => {
+    expect(RunEvent.parse({
+      runId: "run_1",
+      at: new Date().toISOString(),
+      type: "mutation.usage-anomaly",
+      episode: 2,
+      sandboxId: "sb_usage",
+      zeroUsageTurns: 3,
+      normalizedUsageTurns: 1,
+    })).toMatchObject({
+      type: "mutation.usage-anomaly",
+      sandboxId: "sb_usage",
+      zeroUsageTurns: 3,
+      normalizedUsageTurns: 1,
+    });
+  });
+
   it("holdout access events carry the ledger count — no unlogged holdout reads", () => {
     expect(() =>
       RunEvent.parse({ runId: "r", at: new Date().toISOString(), type: "holdout.accessed", capsuleId: "c" }),

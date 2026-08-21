@@ -41,6 +41,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent";
 import {
   SESSION_NO_YIELD_EXIT_CODE,
+  SESSION_USAGE_ANOMALY_RECORD_TYPE,
   SessionNoYieldCounter,
   parseSessionNoYieldMaxTokens,
   type SessionNoYieldRecord,
@@ -491,6 +492,8 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     promptTemplates: [],
     slashCommands: [],
   });
+  let zeroUsageTurns = 0;
+  let normalizedUsageTurns = 0;
 
   try {
     const expected = [...episode.tools, "yield"];
@@ -509,7 +512,10 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     let abortPromise: Promise<void> | undefined;
     const counter = new SessionNoYieldCounter(
       env.noYieldMaxTokens,
-      (message) => console.error(`session usage warning: ${message}`),
+      (kind) => {
+        if (kind === "zero-usage") zeroUsageTurns += 1;
+        else normalizedUsageTurns += 1;
+      },
     );
     session.subscribe((event) => {
       if (event.type === "tool_execution_end" && event.toolName === "yield" && event.isError !== true) {
@@ -569,6 +575,13 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     if (final === undefined) throw new Error("session ended without a successful yield");
     return final;
   } finally {
+    if (zeroUsageTurns > 0 || normalizedUsageTurns > 0) {
+      console.error(JSON.stringify({
+        type: SESSION_USAGE_ANOMALY_RECORD_TYPE,
+        zeroUsageTurns,
+        normalizedUsageTurns,
+      }));
+    }
     await session.dispose();
   }
 }

@@ -54,8 +54,8 @@ describe("SessionNoYieldCounter", () => {
   });
 
   it("normalizes invalid provider usage instead of failing open inside a swallowed listener", () => {
-    const warnings: string[] = [];
-    const counter = new SessionNoYieldCounter(100, (message) => warnings.push(message));
+    const anomalies: string[] = [];
+    const counter = new SessionNoYieldCounter(100, (kind) => anomalies.push(kind));
 
     expect(counter.observe(
       { promptTokens: -1, completionTokens: 60, totalTokens: 20 },
@@ -71,7 +71,24 @@ describe("SessionNoYieldCounter", () => {
       completionTokens: 120,
       consumedTokens: 120,
     });
-    expect(warnings).toHaveLength(2);
+    expect(anomalies).toEqual(["normalized", "normalized"]);
+  });
+
+  it("surfaces zeroed SDK usage as indistinguishable zero-or-unreported telemetry", () => {
+    const anomalies: string[] = [];
+    const counter = new SessionNoYieldCounter(100, (kind) => anomalies.push(kind));
+
+    expect(counter.observe(
+      { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      false,
+    )).toBeNull();
+    expect(counter.snapshot()).toEqual({
+      modelCalls: 1,
+      promptTokens: 0,
+      completionTokens: 0,
+      consumedTokens: 0,
+    });
+    expect(anomalies).toEqual(["zero-usage"]);
   });
 });
 

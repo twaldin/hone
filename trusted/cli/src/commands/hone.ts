@@ -914,7 +914,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
     return await this.collectOutcome(request, runDir);
   }
 
-  private childIo(): CmdIo {
+  protected childIo(): CmdIo {
     return {
       root: this.io.root,
       // Recursive M2 children execute the normal command path in-process.

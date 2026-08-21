@@ -124,6 +124,8 @@ interface FakeCtl {
   execExit: number | "timeout";
   /** Stdout bytes client execs produce — session-trace fixture material. */
   execStdout: Buffer;
+  /** Stderr bytes client execs produce — structured worker telemetry plus diagnostics. */
+  execStderr: Buffer;
   /** When true, client execs report output hit the size cap (truncated capture). */
   execTruncated: boolean;
   /** Tar bytes in-container `tar -c /workspace` returns for saveArtifact. */
@@ -196,6 +198,7 @@ async function boot(
     execStdout: Buffer.alloc(0),
     execTruncated: false,
     saveTar: candidateTar,
+    execStderr: Buffer.alloc(0),
     evalOutputs: new Map(),
     evalMode: "normal",
     execBarrier: null,
@@ -279,7 +282,12 @@ async function boot(
         await barrier.gate;
       }
       if (ctl.execExit === "timeout") return fakeResult({ exitCode: -1, timedOut: true });
-      return fakeResult({ exitCode: ctl.execExit, stdout: Buffer.from(ctl.execStdout), truncated: ctl.execTruncated });
+      return fakeResult({
+        exitCode: ctl.execExit,
+        stdout: Buffer.from(ctl.execStdout),
+        stderr: Buffer.from(ctl.execStderr),
+        truncated: ctl.execTruncated,
+      });
     }
     if (sub === "volume" && argv[2] === "create") {
       return opts.volumeCreateFails === true
@@ -494,7 +502,7 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
     );
   });
 
-  it("rejects a forged bound report not proven by that sandbox's worker exit", async () => {
+  it("rejects a forged report and cannot rewrite the exact exec-time worker record", async () => {
     const b = await boot({
       manifest: makeManifest({
         budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
@@ -517,8 +525,92 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
     expect(() => b.broker.reportSessionNoYieldBound(
       { sandboxId, ...NO_YIELD_RECORD },
       CLIENT,
-    )).toThrow(/does not match.*worker output/);
-    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(0);
+    )).toThrow(/contradictory no-yield bound report/);
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId, modelCalls: 151 }),
+    ]);
+  });
+
+  it("journals a bound before an unchanged-workspace save retires its sandbox", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    b.ctl.execExit = 4;
+    b.ctl.execStdout = Buffer.from(`${JSON.stringify(NO_YIELD_RECORD)}\n`);
+    b.ctl.saveTar = baselineTar;
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    expect((await b.broker.saveArtifact({ sandboxId }, CLIENT)).hash).toBe(baselineHash);
+    expect(b.broker.reportSessionNoYieldBound({ sandboxId, ...NO_YIELD_RECORD }, CLIENT)).toEqual({});
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId, episode: 0 }),
+    ]);
+  });
+
+  it("journals a bound before a dirty-workspace save retires its sandbox", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    b.ctl.execExit = 4;
+    b.ctl.execStdout = Buffer.from(`${JSON.stringify(NO_YIELD_RECORD)}\n`);
+    b.ctl.saveTar = candidateTar;
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    expect((await b.broker.saveArtifact({ sandboxId }, CLIENT)).hash).toBe(candidateHash);
+    expect(b.broker.reportSessionNoYieldBound({ sandboxId, ...NO_YIELD_RECORD }, CLIENT)).toEqual({});
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId, episode: 0 }),
+    ]);
+  });
+
+
+  it("durably aggregates zeroed and normalized usage telemetry from a healthy worker", async () => {
+    const b = await boot();
+    b.ctl.execExit = 0;
+    b.ctl.execStdout = Buffer.from("healthy yield\n");
+    b.ctl.execStderr = Buffer.from([
+      JSON.stringify({
+        type: "hone.mutation.usage-anomaly.v1",
+        zeroUsageTurns: 1,
+        normalizedUsageTurns: 0,
+      }),
+      "ordinary worker diagnostic",
+      JSON.stringify({
+        type: "hone.mutation.usage-anomaly.v1",
+        zeroUsageTurns: 1,
+        normalizedUsageTurns: 1,
+      }),
+      "",
+    ].join("\n"));
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    await b.broker.saveArtifact({ sandboxId }, CLIENT);
+
+    expect(b.events.filter((event) => event.type === "mutation.usage-anomaly")).toEqual([
+      expect.objectContaining({
+        sandboxId,
+        episode: 0,
+        zeroUsageTurns: 2,
+        normalizedUsageTurns: 1,
+      }),
+    ]);
   });
 
   it("attributes a bound on a no-change repair to its broker-authoritative sandbox episode", async () => {

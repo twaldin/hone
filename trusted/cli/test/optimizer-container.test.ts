@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { CapsuleManifest, RunConfig, capsuleDigest } from "@hone/schema";
+import { CapsuleManifest, DEFAULT_PROMOTION_RULE, RunConfig, capsuleDigest } from "@hone/schema";
 import { runCommand } from "@hone/broker";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
@@ -18,9 +18,12 @@ import {
   verifyOptimizerBundleSeal,
 } from "../src/backends/optimizer-container.js";
 import type { OptimizerBundleSeal, OptimizerRuntime } from "../src/backends/optimizer-container.js";
+import { CampaignModelRegistry, CliChildSupervisor } from "../src/commands/hone.js";
 import { openDockerCreateGate } from "../src/docker-create-gate.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
 import { collectOptimizerSnapshot, computeOptimizerDigest, snapshotDigest } from "../src/optimizer-digest.js";
+import type { OptimizerSnapshot } from "../src/optimizer-digest.js";
+import type { CmdIo } from "../src/io.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
   scriptedCreateHelper,
@@ -45,6 +48,24 @@ import {
 
 function res(overrides: Partial<CmdResult> = {}): CmdResult {
   return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false, ...overrides };
+}
+
+class RecursiveChildEnvironmentProbe extends CliChildSupervisor {
+  constructor(io: CmdIo, root: string) {
+    const optimizerSnapshot: OptimizerSnapshot = { files: new Map() };
+    super(
+      io,
+      { promotion: DEFAULT_PROMOTION_RULE },
+      join(root, "campaign"),
+      new Map(),
+      optimizerSnapshot,
+      {} as CampaignModelRegistry,
+    );
+  }
+
+  inheritedEnv(): NodeJS.ProcessEnv {
+    return this.childIo().env;
+  }
 }
 
 /** All -v mount specs in a docker argv. */
@@ -477,6 +498,38 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
     );
 
     expect(seen.argvs[0]).toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=2500000");
+  });
+
+  it("carries the no-yield ceiling through recursive child IO into the sealed optimizer", async () => {
+    const root = makeRoot();
+    const runDir = join(root, ".hone-runs", "run_recursive_session_bound");
+    mkdirSync(runDir, { recursive: true });
+    const seen = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] };
+    const script = join(root, "recursive-optimizer.mjs");
+    writeFileSync(script, "process.exit(0);\n");
+    const parentIo: CmdIo = {
+      root,
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        HONE_SESSION_NO_YIELD_MAX_TOKENS: "2750000",
+      },
+      isTTY: false,
+      out: () => {},
+      err: () => {},
+    };
+    const ctx = optCtx(root, runDir, "run_recursive_session_bound");
+    ctx.env = new RecursiveChildEnvironmentProbe(parentIo, root).inheritedEnv();
+
+    await runOptimizer(
+      ctx,
+      testOptimizerRuntime({
+        runId: "run_recursive_session_bound",
+        argv: [process.execPath, script],
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE, seen),
+      }),
+    );
+
+    expect(seen.argvs[0]).toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=2750000");
   });
 
   it("the TCP token reaches the container env but never argv, optimizer.log, or events", async () => {

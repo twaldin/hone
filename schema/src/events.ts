@@ -42,6 +42,14 @@ export const RunEvent = z.discriminatedUnion("type", [
     completionTokens: z.number().int().nonnegative(),
     consumedTokens: z.number().int().positive(),
   }),
+  z.object({
+    ...base,
+    type: z.literal("mutation.usage-anomaly"),
+    episode: z.number().int().nonnegative(),
+    sandboxId: z.string().min(1),
+    zeroUsageTurns: z.number().int().nonnegative(),
+    normalizedUsageTurns: z.number().int().nonnegative(),
+  }),
   z.object({ ...base, type: z.literal("eval.completed"), episode: z.number().int().nonnegative().optional(), artifact: ArtifactRef, assetGroupId: z.string(), seed: z.number().int(), aggregate: z.number(), cached: z.boolean() }),
   z.object({
     ...base,
