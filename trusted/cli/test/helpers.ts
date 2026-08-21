@@ -565,7 +565,16 @@ export function fakeOptimizerSpawn(image: string, seen?: { argvs: string[][]; en
         return arg;
       };
       const name = argv[argv.indexOf("--name") + 1] ?? "";
-      created.set(name, { env, containerArgv: argv.slice(imageIdx + 1).map(mapPath) });
+      const requestedArgv = argv.slice(imageIdx + 1);
+      const containerArgv =
+        requestedArgv[0] === "/bin/sh" && requestedArgv[2]?.includes("/hone/bundle/optimizer.mjs") === true
+          // Production's shell preamble verifies/materializes the pinned Node
+          // binary. This host-process fake has no container filesystem, so the
+          // contract tests cover that preamble while lifecycle tests execute
+          // the mounted optimizer under the current test interpreter.
+          ? [process.execPath, mapPath("/hone/bundle/optimizer.mjs")]
+          : requestedArgv.map(mapPath);
+      created.set(name, { env, containerArgv });
       return scriptedClientChild(`${name.replace(/[^a-zA-Z0-9]/g, "")}cid\n`);
     }
     if (cmd === "docker" && argv[1] === "start") {

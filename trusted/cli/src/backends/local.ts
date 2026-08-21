@@ -848,7 +848,7 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
   };
 
   // Sealed-bundle re-proof, BEFORE the WAL dispatch marker: the mounted dir
-  // and both bundle files must still be the exact inodes/bytes trusted code
+  // and every bundle file must still be the exact inodes/bytes trusted code
   // captured after the build — a tamper refusal never consumes a create
   // intent and the daemon never sees the argv.
   verifyOptimizerBundleSeal(runtime);

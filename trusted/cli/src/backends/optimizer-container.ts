@@ -9,6 +9,7 @@ import {
   MUTATION_RUNTIME_MANIFEST,
   MUTATION_RUNTIME_MANIFEST_FILE,
   OPTIMIZER_BUILD_CONTRACT,
+  OPTIMIZER_RUNTIME_MANIFEST,
   OPTIMIZER_BUNDLE_FILES,
   collectOptimizerSnapshot,
   optimizerOverridden,
@@ -22,9 +23,10 @@ import type { RunnerBackendContext } from "../types.js";
  * Containerized optimizer execution (trusted boundary): the loop NEVER runs as a
  * host process. Backend setup recollects the allowlisted snapshot, proves it
  * still hashes to the digest sealed into run.started, writes the captured
- * bytes to a staging tree, and compiles them with the separately hash-pinned
- * Bun runtime inside the pinned manifest image — no network, read-only source
- * and runtime mounts, isolated writable output, no repo mount, no host env.
+ * bytes to a staging tree, compiles them with the separately hash-pinned Bun
+ * runtime, and packages the pinned Node interpreter inside the sealed output
+ * — no network, read-only source/runtime mounts, isolated writable output,
+ * no repo mount, no host env.
  * The build container runs as the invoking NUMERIC host uid/gid and writes
  * into a host-created, 0700-rooted output tree: no other host UID can
  * traverse, list, unlink, or replace the bundle (never a world-writable
@@ -100,6 +102,8 @@ export interface SealedBundleFile {
   /** SHA-256 (hex) of the captured bytes — the run mounts ONLY content that still hashes to this. */
   sha256: string;
   size: number;
+  /** Frozen executable/read mode; exact mode drift refuses before create. */
+  mode: number;
   /** Inode identity at capture: a swapped-in file refuses even when its bytes happen to match. */
   ino: number;
   dev: number;
@@ -294,8 +298,9 @@ function mustLstat(abs: string, what: string): Stats {
 /**
  * Trusted capture of the build output, taken ONCE right after a successful
  * build and BEFORE any run container may mount the dir: lstat each required
- * file (regular — a symlink/special refuses; single hard link; owned by the
- * invoking uid), read and hash its exact bytes, freeze it read-only (0444),
+ * file (regular — symlink/special refused; single hard link; owned by the
+ * invoking uid), read and hash its exact bytes, freeze regular artifacts
+ * read-only (0444) and the pinned Node interpreter read/execute-only (0555),
  * then remove the directory's write permission (0555: the run container's
  * uid 2000 keeps r-x through the bind mount; nothing below can be created,
  * unlinked, or renamed). The 0700 `root` umbrella already denies every other
@@ -317,8 +322,9 @@ export function sealOptimizerBundleDir(root: string, dir: string, uid: number): 
     if (st.nlink !== 1) throw new Error(`optimizer bundle output has ${st.nlink} hard links — refusing aliased ${abs}`);
     if (st.uid !== uid) throw new Error(`optimizer bundle output ${abs} is owned by uid ${st.uid}, not the invoking uid ${uid} — refusing`);
     const bytes = readFileSync(abs);
-    chmodSync(abs, 0o444);
-    files.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length, ino: st.ino, dev: st.dev });
+    const mode = name === OPTIMIZER_RUNTIME_MANIFEST.node.bundleName ? OPTIMIZER_RUNTIME_MANIFEST.node.mode : 0o444;
+    chmodSync(abs, mode);
+    files.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length, mode, ino: st.ino, dev: st.dev });
   }
   chmodSync(dir, 0o555);
   const dirSt = lstatSync(dir);
@@ -328,7 +334,7 @@ export function sealOptimizerBundleDir(root: string, dir: string, uid: number): 
 /**
  * Refuse-to-launch gate, called immediately before EVERY run-container
  * `docker create`: path existence grants no authority. The 0700 umbrella,
- * the mounted dir, and both bundle files must still be the exact inodes
+ * the mounted dir, and every bundle file must still be the exact inodes
  * trusted code sealed — regular, owned by the invoking uid, stripped of all
  * write permission — and the file bytes must re-hash to the captured
  * SHA-256s. Any symlink, inode replacement, owner, mode, or content swap
@@ -364,6 +370,11 @@ export function verifyOptimizerBundleSeal(runtime: Pick<OptimizerRuntime, "bundl
     if ((st.mode & 0o222) !== 0) {
       throw new Error(`sealed bundle file ${abs} regained write permission (mode ${(st.mode & 0o777).toString(8)}) — refusing`);
     }
+    if ((st.mode & 0o777) !== f.mode) {
+      throw new Error(
+        `sealed bundle file ${abs} mode drifted to ${(st.mode & 0o777).toString(8)} != ${f.mode.toString(8)} — refusing`,
+      );
+    }
     const digest = createHash("sha256").update(readFileSync(abs)).digest("hex");
     if (digest !== f.sha256) {
       throw new Error(`sealed bundle bytes drifted: ${abs} hashes ${digest} != sealed ${f.sha256} — refusing to execute`);
@@ -382,11 +393,24 @@ async function sha256File(path: string): Promise<string> {
  * handoff. The fixed expected hashes live in OPTIMIZER_BUILD_CONTRACT, hence
  * in every optimizer digest; a path override can relocate identical bytes but
  * can never steer the measurement to a different interpreter or native addon.
+ * The build emits compressed Bun/Pi transfer artifacts and seals the exact
+ * executable Node bytes into the run bundle.
  */
 export async function stageMutationRuntime(env: NodeJS.ProcessEnv, runtimeDir: string): Promise<void> {
   if (process.platform !== "linux" || process.arch !== "x64") {
-    throw new Error(`mutation runtime injection supports linux/x64, got ${process.platform}/${process.arch}`);
+    throw new Error(`pinned runtime injection supports linux/x64, got ${process.platform}/${process.arch}`);
   }
+  const nodePath =
+    env["HONE_NODE_RUNTIME_PATH"] ??
+    join(
+      homedir(),
+      ".nvm",
+      "versions",
+      "node",
+      `v${OPTIMIZER_RUNTIME_MANIFEST.node.version}`,
+      "bin",
+      OPTIMIZER_RUNTIME_MANIFEST.node.sourceName,
+    );
   const bunPath = env["HONE_BUN_RUNTIME_PATH"] ?? join(homedir(), ".bun", "bin", MUTATION_RUNTIME_MANIFEST.bun.sourceName);
   const nativeDir =
     env["HONE_PI_NATIVES_RUNTIME_DIR"] ??
@@ -400,6 +424,12 @@ export async function stageMutationRuntime(env: NodeJS.ProcessEnv, runtimeDir: s
       "pi-natives-linux-x64",
     );
   const sources = [
+    {
+      path: nodePath,
+      name: OPTIMIZER_RUNTIME_MANIFEST.node.sourceName,
+      sha256: OPTIMIZER_RUNTIME_MANIFEST.node.sha256,
+      mode: 0o555,
+    },
     { path: bunPath, name: MUTATION_RUNTIME_MANIFEST.bun.sourceName, sha256: MUTATION_RUNTIME_MANIFEST.bun.sha256, mode: 0o555 },
     ...MUTATION_RUNTIME_MANIFEST.pi.files.map((file) => ({
       path: join(nativeDir, file.sourceName),
@@ -409,14 +439,14 @@ export async function stageMutationRuntime(env: NodeJS.ProcessEnv, runtimeDir: s
     })),
   ];
   for (const source of sources) {
-    const sourceStat = mustLstat(source.path, "mutation runtime source");
-    if (!sourceStat.isFile()) throw new Error(`mutation runtime source is not a regular file: ${source.path}`);
+    const sourceStat = mustLstat(source.path, "pinned runtime source");
+    if (!sourceStat.isFile()) throw new Error(`pinned runtime source is not a regular file: ${source.path}`);
     const target = join(runtimeDir, source.name);
     copyFileSync(source.path, target);
     chmodSync(target, source.mode);
     const digest = await sha256File(target);
     if (digest !== source.sha256) {
-      throw new Error(`mutation runtime source ${source.path} hashes ${digest} != pinned ${source.sha256} — refusing`);
+      throw new Error(`pinned runtime source ${source.path} hashes ${digest} != pinned ${source.sha256} — refusing`);
     }
   }
 }

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   OPTIMIZER_BUILD_CONTRACT,
+  OPTIMIZER_RUNTIME_MANIFEST,
   collectOptimizerSnapshot,
   computeOptimizerDigest,
   optimizerOverridden,
@@ -235,7 +236,14 @@ describe("staging: the CAPTURED bytes at the frozen layout", () => {
     expect(script).toContain("--outfile=/hone/out/optimizer.mjs");
     expect(script).toContain("bun build /hone/src/optimizer/worker/mutate.ts");
     expect(script).toContain("--outfile=/hone/out/worker.mjs");
-    expect(OPTIMIZER_BUILD_CONTRACT.run).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
+    expect(script).toContain(`${OPTIMIZER_RUNTIME_MANIFEST.node.sha256}  /hone/runtime/node`);
+    expect(script).toContain(`> /hone/out/${OPTIMIZER_RUNTIME_MANIFEST.node.bundleName}`);
+    expect(OPTIMIZER_BUILD_CONTRACT.run.slice(0, 2)).toEqual(["/bin/sh", "-c"]);
+    const runScript = OPTIMIZER_BUILD_CONTRACT.run[2];
+    expect(runScript).not.toContain("/tmp/.hone-runtime");
+    expect(runScript).toContain(`${OPTIMIZER_RUNTIME_MANIFEST.node.sha256}  ${OPTIMIZER_RUNTIME_MANIFEST.node.runtimePath}`);
+    expect(runScript).toContain(`exec ${OPTIMIZER_RUNTIME_MANIFEST.node.runtimePath} /hone/bundle/optimizer.mjs`);
+    expect(runScript).toContain('"type":"optimizer.runtime"');
   });
 });
 
