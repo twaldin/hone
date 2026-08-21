@@ -60,6 +60,8 @@ import { CasStore, durability } from "./cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "./command.js";
 import { deferred } from "./deferred.js";
 import { acquireEvaluatorIsolation, type EvaluatorIsolationLease } from "./evaluator-isolation.js";
+import { type UidClaimRecovery } from "./host-evaluator-gate.js";
+
 import { BrokerError } from "./errors.js";
 import { RecursiveResourceLedger } from "./recursive.js";
 import { ArtifactValidationError, MAX_ARTIFACT_ENTRIES, validateWorkspaceTar } from "./tarcheck.js";
@@ -715,6 +717,24 @@ const StateLine = z.discriminatedUnion("t", [
     chargedBytes: z.number().int().positive(),
     events: JournalEvents,
   }),
+  z.object({
+    t: z.literal("uidClaimBlocked"),
+    claimPath: z.string().min(1).max(4096),
+    workerUid: z.number().int(),
+    ownerAllocationId: z.string().regex(/^[0-9a-f]{32}$/),
+    evaluatorContainer: z.string().min(1),
+    events: JournalEvents,
+  }),
+  z.object({
+    t: z.literal("uidClaimTakeover"),
+    claimPath: z.string().min(1).max(4096),
+    workerUid: z.number().int(),
+    ownerAllocationId: z.string().regex(/^[0-9a-f]{32}$/),
+    evaluatorContainer: z.string().min(1),
+    newAllocationId: z.string().regex(/^[0-9a-f]{32}$/),
+    newEvaluatorContainer: z.string().min(1),
+    events: JournalEvents,
+  }),
   z.object({ t: z.literal("migration"), events: z.array(RunEvent) }),
   z.object({ t: z.literal("event"), event: RunEvent }),
 ]);
@@ -1107,6 +1127,25 @@ export class Broker {
     string,
     { lease: EvaluatorIsolationLease; isolation: z.infer<typeof EvaluatorIsolationRecord> }
   >();
+  private readonly uidClaimRecovery: UidClaimRecovery = {
+    onBlocked: (claim) => {
+      this.journalFact({ t: "uidClaimBlocked", ...claim }, []);
+    },
+    proveContainerAbsent: async (claim) => {
+      try {
+        const removed = await this.run(["docker", "rm", "-f", claim.evaluatorContainer], { timeoutMs: 30_000 });
+        return {
+          absent: containerGone(removed),
+          detail: stderrText(removed) || "Docker did not prove the claimed evaluator container absent",
+        };
+      } catch (error) {
+        return { absent: false, detail: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    onTakenOver: (claim) => {
+      this.journalFact({ t: "uidClaimTakeover", ...claim }, []);
+    },
+  };
 
   /** One FIFO tail per sandbox; mutable Docker operations never interleave. */
   private readonly sandboxQueues = new Map<string, Promise<void>>();
@@ -1760,6 +1799,9 @@ export class Broker {
       }
       switch (line.t) {
         case "migration":
+          break;
+        case "uidClaimBlocked":
+        case "uidClaimTakeover":
           break;
         case "start":
           firstStartMs ??= line.atMs;
@@ -3414,6 +3456,8 @@ export class Broker {
     let invocationEvents: RunEvent[] = [];
     let res: CmdResult;
     let startedMs = 0;
+    const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+
     try {
       // Evaluators whose frozen contract consumes CAPSULE_WORKER_UID receive a
       // unique real uid. Frozen hard-coders retain uid 2000 behind the
@@ -3422,8 +3466,10 @@ export class Broker {
       // AFTER acquisition, before an invocation is burned or spawned.
       isolation = await acquireEvaluatorIsolation(
         this.manifest.id,
+        evalName,
         this.closeController.signal,
         (allocationId) => this.emit({ type: "evaluator.queue.entered", allocationId }),
+        this.uidClaimRecovery,
       );
       if (isolation.mode === "shared-uid-lease") {
         this.emit({
@@ -3440,8 +3486,6 @@ export class Broker {
         workerUid: isolation.workerUid,
         waitMs: isolation.waitMs,
       });
-      startedMs = Date.now();
-      const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
       // Burn the invocation DURABLY before the spawn so a crashed evaluator
       // cannot farm free retries. The projected snapshot/exhaustion are part

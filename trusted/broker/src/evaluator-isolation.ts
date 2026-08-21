@@ -2,6 +2,7 @@ import {
   acquireHostEvaluatorGate,
   acquireReservedEvaluatorUid,
   type HostEvaluatorGateLease,
+  type UidClaimRecovery,
 } from "./host-evaluator-gate.js";
 
 /**
@@ -46,13 +47,23 @@ export function evaluatorSupportsReservedUid(capsuleId: string): boolean {
 
 export async function acquireEvaluatorIsolation(
   capsuleId: string,
+  evaluatorContainer: string,
   signal?: AbortSignal,
   onSharedQueueEntered?: (allocationId: string) => void | Promise<void>,
+  recovery?: UidClaimRecovery,
 ): Promise<EvaluatorIsolationLease> {
+  const options = {
+    evaluatorContainer,
+    ...(signal === undefined ? {} : { signal }),
+    ...(recovery === undefined ? {} : { recovery }),
+  };
   if (evaluatorSupportsReservedUid(capsuleId)) {
-    const lease = await acquireReservedEvaluatorUid(signal);
+    const lease = await acquireReservedEvaluatorUid(options);
     return { ...lease, mode: "reserved-uid", workerUid: lease.uid };
   }
-  const lease = await acquireHostEvaluatorGate(signal, onSharedQueueEntered);
+  const lease = await acquireHostEvaluatorGate({
+    ...options,
+    ...(onSharedQueueEntered === undefined ? {} : { onQueued: onSharedQueueEntered }),
+  });
   return { ...lease, mode: "shared-uid-lease", workerUid: 2000 };
 }

@@ -3,6 +3,8 @@ import { once } from "node:events";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
+import { tmpdir } from "node:os";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -2098,11 +2100,12 @@ describe("evaluator containment", () => {
       // Occupy all but one slot. The failed evaluator takes the sole
       // remainder; its successor must queue until a DIFFERENT slot is freed.
       // This deterministically kills a premature-release mutant.
-      const heldLeases = await Promise.all(
-        Array.from({ length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN }, () =>
-          acquireReservedEvaluatorUid(),
-        ),
-      );
+      const heldLeases = await Promise.all(Array.from(
+        { length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN },
+        (_, index) => acquireReservedEvaluatorUid({
+          evaluatorContainer: `hone-test-quarantine-holder-eval-${index.toString(16).padStart(12, "0")}`,
+        }),
+      ));
       try {
         const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
         const b = await boot({ manifest, reaperIntervalMs: 10 });
@@ -2171,8 +2174,70 @@ describe("evaluator containment", () => {
     },
   );
 
+  it("durably diagnoses and takes over an ownerless evaluator claim after Docker proves its container absent", async () => {
+    const heldLeases = await Promise.all(Array.from(
+      { length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN },
+      (_, index) => acquireReservedEvaluatorUid({
+        evaluatorContainer: `hone-test-takeover-holder-eval-${index.toString(16).padStart(12, "0")}`,
+      }),
+    ));
+    let claimPath = "";
+    try {
+      const occupied = new Set(heldLeases.map((lease) => lease.uid));
+      const ownerUid = Array.from(
+        { length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN + 1 },
+        (_, index) => RESERVED_EVALUATOR_UID_MIN + index,
+      ).find((uid) => !occupied.has(uid));
+      expect(ownerUid).toBeDefined();
+      const ownerAllocationId = "d".repeat(32);
+      const ownerContainer = "hone-crashed-owner-eval-deadbeef0001";
+      claimPath = path.join(tmpdir(), "hone-evaluator-nproc-v2.queue", `.uid-claim-${ownerUid}.json`);
+      await writeFile(
+        claimPath,
+        `${JSON.stringify({
+          version: 1,
+          uid: ownerUid,
+          allocationId: ownerAllocationId,
+          evaluatorContainer: ownerContainer,
+          createdAt: "2026-08-21T00:00:00.000Z",
+        })}\n`,
+        { encoding: "utf8", mode: 0o600, flag: "wx" },
+      );
+
+      const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+      const b = await boot({ manifest });
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 22 }, CLIENT);
+
+      expect(b.log).toContainEqual(["docker", "rm", "-f", ownerContainer]);
+      const durableFacts = await stateLines(b);
+      const blocked = durableFacts.find((line) => line.t === "uidClaimBlocked");
+      const takenOver = durableFacts.find((line) => line.t === "uidClaimTakeover");
+      expect(blocked).toMatchObject({
+        t: "uidClaimBlocked",
+        claimPath,
+        workerUid: ownerUid,
+        ownerAllocationId,
+        evaluatorContainer: ownerContainer,
+      });
+      expect(takenOver).toMatchObject({
+        t: "uidClaimTakeover",
+        claimPath,
+        workerUid: ownerUid,
+        ownerAllocationId,
+        evaluatorContainer: ownerContainer,
+        newEvaluatorContainer: expect.stringMatching(/^hone-.*-eval-[0-9a-f]{12}$/),
+      });
+    } finally {
+      await rm(claimPath, { force: true });
+      await Promise.all(heldLeases.map((lease) => lease.release()));
+    }
+  });
+
   it("aborts a queued host-gate acquisition when the broker closes without burning an invocation", async () => {
-    const gateLease = await acquireHostEvaluatorGate();
+    const gateLease = await acquireHostEvaluatorGate({
+      evaluatorContainer: "hone-test-close-gate-eval-000000000001",
+    });
     try {
       const b = await boot();
       b.ctl.evalOutputs.set(baselineHash, score(1));
@@ -2189,7 +2254,9 @@ describe("evaluator containment", () => {
 
   it("rechecks wall-clock budget after shared-uid queue acquisition before burning an invocation", async () => {
     let nowMs = 0;
-    const gateLease = await acquireHostEvaluatorGate();
+    const gateLease = await acquireHostEvaluatorGate({
+      evaluatorContainer: "hone-test-budget-gate-eval-000000000001",
+    });
     try {
       const manifest = makeManifest({ budget: { ...GENEROUS_BUDGET, maxWallClockSec: 1 } });
       const b = await boot({ manifest, now: () => nowMs });

@@ -36,6 +36,38 @@ export interface ReservedEvaluatorUidLease extends HostEvaluatorGateLease {
   uid: number;
 }
 
+export interface OwnerlessUidClaim {
+  claimPath: string;
+  workerUid: number;
+  ownerAllocationId: string;
+  evaluatorContainer: string;
+}
+
+export interface UidClaimRecovery {
+  onBlocked: (claim: OwnerlessUidClaim) => void | Promise<void>;
+  proveContainerAbsent: (claim: OwnerlessUidClaim) => Promise<{ absent: boolean; detail: string }>;
+  onTakenOver: (
+    claim: OwnerlessUidClaim & { newAllocationId: string; newEvaluatorContainer: string },
+  ) => void | Promise<void>;
+}
+
+
+export interface AcquireEvaluatorUidOptions {
+  evaluatorContainer: string;
+  signal?: AbortSignal;
+  onQueued?: (allocationId: string) => void | Promise<void>;
+  recovery?: UidClaimRecovery;
+}
+
+interface UidClaim {
+  version: 1;
+  uid: number;
+  allocationId: string;
+  evaluatorContainer: string;
+  createdAt: string;
+}
+
+
 interface ListeningLease {
   server: Server;
   waiters: Set<Socket>;
@@ -218,47 +250,171 @@ function uidClaimPath(uid: number): string {
   return join(SHARED_QUEUE_DIR, `${UID_CLAIM_PREFIX}${uid}.json`);
 }
 
-async function tryAcquireUidClaim(uid: number, allocationId: string): Promise<(() => Promise<void>) | null> {
-  const claimPath = uidClaimPath(uid);
+function parseUidClaim(raw: string, claimPath: string, expectedUid: number): UidClaim {
+  const value = JSON.parse(raw) as Partial<UidClaim>;
+  if (
+    value.version !== 1
+    || value.uid !== expectedUid
+    || typeof value.allocationId !== "string"
+    || !/^[0-9a-f]{32}$/.test(value.allocationId)
+    || typeof value.evaluatorContainer !== "string"
+    || !/^hone-[A-Za-z0-9_.-]+-eval-[0-9a-f]{12}$/.test(value.evaluatorContainer)
+    || typeof value.createdAt !== "string"
+    || !Number.isFinite(Date.parse(value.createdAt))
+  ) {
+    throw new Error(`invalid host evaluator uid claim at ${claimPath}`);
+  }
+  return value as UidClaim;
+}
+
+async function readUidClaim(claimPath: string, expectedUid: number): Promise<UidClaim> {
+  const st = await lstat(claimPath);
+  const operatorUid = process.getuid?.();
+  if (!st.isFile() || st.isSymbolicLink()) throw new Error(`host evaluator uid claim is not regular: ${claimPath}`);
+  if ((st.mode & 0o777) !== 0o600) throw new Error(`host evaluator uid claim must be mode 0600: ${claimPath}`);
+  if (operatorUid !== undefined && st.uid !== operatorUid) {
+    throw new Error(`host evaluator uid claim is not operator-owned: ${claimPath}`);
+  }
+  return parseUidClaim(await readFile(claimPath, "utf8"), claimPath, expectedUid);
+}
+
+async function restoreMovedClaim(movedPath: string, claimPath: string): Promise<void> {
   try {
-    await writeFile(
-      claimPath,
-      `${JSON.stringify({ version: 1, uid, allocationId, createdAt: new Date().toISOString() })}\n`,
-      { encoding: "utf8", mode: 0o600, flag: "wx" },
-    );
+    await rename(movedPath, claimPath);
+  } catch (error) {
+    if (!(error instanceof Error) || (error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    await rm(movedPath, { force: true });
+  }
+}
+
+function ownedClaimRelease(claim: UidClaim, claimPath: string): () => Promise<void> {
+  let released = false;
+  return async () => {
+    if (released) return;
+    const movedPath = join(SHARED_QUEUE_DIR, `.release-${claim.uid}-${randomUUID().replaceAll("-", "")}.tmp`);
+    try {
+      await rename(claimPath, movedPath);
+    } catch (error) {
+      if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        released = true;
+        return;
+      }
+      throw error;
+    }
+    try {
+      const current = await readUidClaim(movedPath, claim.uid);
+      if (current.allocationId !== claim.allocationId) {
+        await restoreMovedClaim(movedPath, claimPath);
+        released = true;
+        return;
+      }
+      await rm(movedPath, { force: true });
+      released = true;
+    } catch (error) {
+      await restoreMovedClaim(movedPath, claimPath);
+      throw error;
+    }
+  };
+}
+
+async function tryCreateUidClaim(
+  uid: number,
+  allocationId: string,
+  evaluatorContainer: string,
+): Promise<(() => Promise<void>) | null> {
+  const claimPath = uidClaimPath(uid);
+  const claim: UidClaim = {
+    version: 1,
+    uid,
+    allocationId,
+    evaluatorContainer,
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    await writeFile(claimPath, `${JSON.stringify(claim)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
   } catch (error) {
     if (error instanceof Error && (error as NodeJS.ErrnoException).code === "EEXIST") return null;
     throw error;
   }
   try {
-    const st = await lstat(claimPath);
-    const operatorUid = process.getuid?.();
-    if (!st.isFile() || st.isSymbolicLink()) throw new Error(`host evaluator uid ${uid} claim is not regular`);
-    if ((st.mode & 0o777) !== 0o600) throw new Error(`host evaluator uid ${uid} claim must be mode 0600`);
-    if (operatorUid !== undefined && st.uid !== operatorUid) {
-      throw new Error(`host evaluator uid ${uid} claim is not operator-owned`);
-    }
+    await readUidClaim(claimPath, uid);
+    return ownedClaimRelease(claim, claimPath);
   } catch (error) {
     await rm(claimPath, { force: true });
     throw error;
   }
-  let released = false;
-  return async () => {
-    if (released) return;
-    await rm(claimPath, { force: true });
-    released = true;
-  };
 }
 
-async function acquireUidClaim(uid: number, allocationId: string, signal?: AbortSignal): Promise<() => Promise<void>> {
+async function acquireUidClaim(
+  uid: number,
+  allocationId: string,
+  evaluatorContainer: string,
+  signal?: AbortSignal,
+  recovery?: UidClaimRecovery,
+): Promise<() => Promise<void>> {
   for (;;) {
     throwIfAborted(signal);
-    const release = await tryAcquireUidClaim(uid, allocationId);
-    if (release !== null) return release;
+    const direct = await tryCreateUidClaim(uid, allocationId, evaluatorContainer);
+    if (direct !== null) return direct;
+    const claimPath = uidClaimPath(uid);
+    let owner: UidClaim;
     try {
-      await delay(50, undefined, { signal });
+      owner = await readUidClaim(claimPath, uid);
     } catch (error) {
+      if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    const ownerless: OwnerlessUidClaim = {
+      claimPath,
+      workerUid: uid,
+      ownerAllocationId: owner.allocationId,
+      evaluatorContainer: owner.evaluatorContainer,
+    };
+    if (recovery === undefined) {
+      throw new Error(
+        `ownerless host evaluator uid ${uid} claim blocks acquisition at ${claimPath}`
+        + ` (container ${owner.evaluatorContainer}, allocation ${owner.allocationId})`,
+      );
+    }
+    await recovery.onBlocked(ownerless);
+    const proof = await recovery.proveContainerAbsent(ownerless);
+    if (!proof.absent) {
+      throw new Error(
+        `ownerless host evaluator uid ${uid} claim remains blocked at ${claimPath}`
+        + ` (container ${owner.evaluatorContainer}): ${proof.detail}`,
+      );
+    }
+
+    const movedPath = join(SHARED_QUEUE_DIR, `.takeover-${uid}-${randomUUID().replaceAll("-", "")}.tmp`);
+    try {
       throwIfAborted(signal);
+      await rename(claimPath, movedPath);
+    } catch (error) {
+      if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    let release: (() => Promise<void>) | null = null;
+    try {
+      const moved = await readUidClaim(movedPath, uid);
+      if (moved.allocationId !== owner.allocationId) {
+        await restoreMovedClaim(movedPath, claimPath);
+        continue;
+      }
+      release = await tryCreateUidClaim(uid, allocationId, evaluatorContainer);
+      if (release === null) {
+        await restoreMovedClaim(movedPath, claimPath);
+        continue;
+      }
+      await recovery.onTakenOver({
+        ...ownerless,
+        newAllocationId: allocationId,
+        newEvaluatorContainer: evaluatorContainer,
+      });
+      await rm(movedPath, { force: true });
+      return release;
+    } catch (error) {
+      await release?.();
+      await restoreMovedClaim(movedPath, claimPath);
       throw error;
     }
   }
@@ -335,9 +491,9 @@ async function nextTurn(): Promise<void> {
  * starvation-bounded FIFO acquisition.
  */
 export async function acquireHostEvaluatorGate(
-  signal?: AbortSignal,
-  onQueued?: (allocationId: string) => void | Promise<void>,
+  options: AcquireEvaluatorUidOptions,
 ): Promise<HostEvaluatorGateLease> {
+  const { evaluatorContainer, signal, onQueued, recovery } = options;
   requireLinux();
   if (signal?.aborted === true) throw abortedError();
   await ensureSharedQueueDir();
@@ -354,10 +510,13 @@ export async function acquireHostEvaluatorGate(
 
   const release = async (): Promise<void> => {
     if (released) return;
-    await releaseUidClaim?.();
-    await closeListeningLease(liveness);
-    if (published) await rm(queueEntryPath(allocationId), { force: true });
-    released = true;
+    try {
+      await releaseUidClaim?.();
+    } finally {
+      await closeListeningLease(liveness);
+      if (published) await rm(queueEntryPath(allocationId), { force: true });
+      released = true;
+    }
   };
 
   try {
@@ -382,7 +541,7 @@ export async function acquireHostEvaluatorGate(
       const selfIndex = ordered.findIndex((entry) => entry.id === allocationId);
       if (selfIndex < 0) throw new Error("host evaluator FIFO lost its live ticket");
       if (selfIndex === 0) {
-        releaseUidClaim = await acquireUidClaim(2_000, allocationId, signal);
+        releaseUidClaim = await acquireUidClaim(2_000, allocationId, evaluatorContainer, signal, recovery);
         return { allocationId, waitMs: Date.now() - startedMs, release };
       }
       await waitForRelease(ordered[selfIndex - 1]!.address, signal);
@@ -399,7 +558,10 @@ export async function acquireHostEvaluatorGate(
  * evaluator container is proven reaped. Pool exhaustion waits for any slot
  * claim to clear rather than falling back to shared uid 2000.
  */
-export async function acquireReservedEvaluatorUid(signal?: AbortSignal): Promise<ReservedEvaluatorUidLease> {
+export async function acquireReservedEvaluatorUid(
+  options: AcquireEvaluatorUidOptions,
+): Promise<ReservedEvaluatorUidLease> {
+  const { evaluatorContainer, signal, recovery } = options;
   requireLinux();
   if (signal?.aborted === true) throw abortedError();
   await ensureSharedQueueDir();
@@ -414,16 +576,12 @@ export async function acquireReservedEvaluatorUid(signal?: AbortSignal): Promise
       const uid = RESERVED_EVALUATOR_UID_MIN + ((start + offset) % count);
       const lease = await tryListen(`${RESERVED_UID_SOCKET_PREFIX}${uid}`, signal);
       if (lease === null) continue;
-      let releaseUidClaim: (() => Promise<void>) | null;
+      let releaseUidClaim: () => Promise<void>;
       try {
-        releaseUidClaim = await tryAcquireUidClaim(uid, allocationId);
+        releaseUidClaim = await acquireUidClaim(uid, allocationId, evaluatorContainer, signal, recovery);
       } catch (error) {
         await closeListeningLease(lease);
         throw error;
-      }
-      if (releaseUidClaim === null) {
-        await closeListeningLease(lease);
-        continue;
       }
       let released = false;
       return {
@@ -432,9 +590,12 @@ export async function acquireReservedEvaluatorUid(signal?: AbortSignal): Promise
         waitMs: Date.now() - startedMs,
         release: async () => {
           if (released) return;
-          await releaseUidClaim();
-          await closeListeningLease(lease);
-          released = true;
+          try {
+            await releaseUidClaim();
+          } finally {
+            await closeListeningLease(lease);
+            released = true;
+          }
         },
       };
     }
