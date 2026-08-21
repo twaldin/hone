@@ -72,6 +72,7 @@ export class StubBroker {
   readonly socketPath: string;
   /** Episode-context putFiles only; worker-bundle chunks land in workerParts. */
   readonly putFiles: PutFileRecord[] = [];
+  readonly createdSandboxParams: Array<z.infer<typeof BrokerMethods.createSandbox.params>> = [];
   readonly savedArtifacts: string[] = [];
   /** Artifact hashes evaluated fresh (memo misses), in order. */
   readonly evaluated: string[] = [];
@@ -169,6 +170,7 @@ export class StubBroker {
       }
       case "createSandbox": {
         const params = BrokerMethods.createSandbox.params.parse(rawParams);
+        this.createdSandboxParams.push(params);
         const sandboxId = `sb_${String(++this.sandboxSeq).padStart(12, "0")}`;
         this.sandboxParent.set(sandboxId, params.artifact.hash);
         this.ops.push(`createSandbox:${sandboxId}`);

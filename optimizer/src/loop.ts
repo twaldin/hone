@@ -355,7 +355,11 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       // The episode's mutation sandbox is created BEFORE any of the episode's
       // evaluations. On resume the broker assigns the exact old episode and
       // measurement generation instead of minting a new boundary.
-      const { sandboxId } = await broker.createSandbox({ artifact: parent, role: "mutation" });
+      const { sandboxId } = await broker.createSandbox({
+        artifact: parent,
+        role: "mutation",
+        ...(resuming ? { continueEpisode: episode } : {}),
+      });
 
       const parentRecord = await evaluate(parent, episode, episode, resuming);
       // An evaluation can outlive a stop/pause request; never start fresh paid

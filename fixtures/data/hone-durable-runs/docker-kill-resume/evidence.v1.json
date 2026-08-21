@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "recordedAt": "2026-08-21T05:07:08.629Z",
-  "runId": "run_mt2hlpqlb5f523",
+  "recordedAt": "2026-08-21T05:29:04.292Z",
+  "runId": "run_mt2idwy1d77c27",
   "zeroModelCalls": true,
   "dockerImage": "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10",
   "testCommand": "sg docker -c 'HONE_DURABLE_DOCKER_E2E=1 HONE_DURABLE_DOCKER_EVIDENCE_ROOT=/home/tim/omp-firstmate/worktrees/hone-durable-runs/fixtures/data/hone-durable-runs/docker-kill-resume ./node_modules/.bin/vitest run --root trusted/cli test/docker-resume-e2e.test.ts'",
@@ -31,8 +31,8 @@
     "exitCode": 0
   },
   "records": {
-    "events": ".hone-runs/run_mt2hlpqlb5f523/events.ndjson",
-    "brokerState": ".hone-runs/run_mt2hlpqlb5f523/broker-state.ndjson"
+    "events": ".hone-runs/run_mt2idwy1d77c27/events.ndjson",
+    "brokerState": ".hone-runs/run_mt2idwy1d77c27/broker-state.ndjson"
   },
   "assertions": {
     "runStarted": 1,

@@ -67,8 +67,11 @@ async function main() {
     await call("evaluate", { artifact: candidate, assetGroupId: "train", seed: 0 });
     return;
   }
-  if (active.candidate === null) throw new Error("resume checkpoint has no candidate");
-  const claimed = await call("createSandbox", { artifact: active.parent, role: "mutation" });
+  const claimed = await call("createSandbox", {
+    artifact: active.parent,
+    role: "mutation",
+    continueEpisode: active.episode,
+  });
   await call("evaluate", { artifact: active.parent, assetGroupId: "train", seed: 0, resume: true });
   await call("evaluate", { artifact: active.candidate.artifact, assetGroupId: "train", seed: 0, resume: true });
   await call("reportIncumbent", { artifact: active.candidate.artifact, claimed: { aggregate: 0.6 } });

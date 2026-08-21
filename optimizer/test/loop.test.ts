@@ -688,6 +688,11 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
     expect(stub.execArgvs).toEqual([]);
     expect(eventsOf(events, "episode.started")).toEqual([]);
     expect(eventsOf(events, "episode.candidate")).toEqual([]);
+    expect(stub.createdSandboxParams).toEqual([{
+      artifact: { hash: BASELINE },
+      role: "mutation",
+      continueEpisode: 0,
+    }]);
     expect(stub.completedEpisodes).toEqual([0]);
     expect(stub.completedEpisodeParams).toEqual([{
       episode: 0,

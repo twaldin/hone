@@ -2564,14 +2564,15 @@ export class Broker {
               );
             }
           }
-          const resumesCheckpoint =
-            this.resumingEpisode !== undefined
-            && !this.resumingEpisode.sandboxClaimed
-            && params.artifact.hash === this.resumingEpisode.parent;
           const reservesNewEpisode =
             repair === undefined
-            && requestedContinuation === undefined
-            && !resumesCheckpoint;
+            && requestedContinuation === undefined;
+          if (reservesNewEpisode && this.episodeOrdinal + this.pendingNewEpisodes >= this.maxMutationEpisodes) {
+            throw new BrokerError(
+              "BUDGET_EXCEEDED",
+              `mutation episode cap reached (${this.maxMutationEpisodes})`,
+            );
+          }
           const artifactEpisode = this.lineage.get(params.artifact.hash)?.episode;
           if (
             reservesNewEpisode
@@ -2582,12 +2583,6 @@ export class Broker {
             throw new BrokerError(
               "INTERNAL",
               `incomplete checkpoint-v1 episode ${artifactEpisode} must be continued explicitly`,
-            );
-          }
-          if (reservesNewEpisode && this.episodeOrdinal + this.pendingNewEpisodes >= this.maxMutationEpisodes) {
-            throw new BrokerError(
-              "BUDGET_EXCEEDED",
-              `mutation episode cap reached (${this.maxMutationEpisodes})`,
             );
           }
           if (reservesNewEpisode) this.pendingNewEpisodes += 1;
@@ -2746,6 +2741,16 @@ export class Broker {
             `continuation artifact ${params.artifact.hash} does not belong to episode ${requestedContinuation}`,
           );
         }
+        if (
+          this.resumingEpisode?.episode === requestedContinuation
+          && params.artifact.hash === this.resumingEpisode.parent
+        ) {
+          if (this.resumingEpisode.sandboxClaimed) {
+            throw new BrokerError("INTERNAL", `resumed episode ${requestedContinuation} is already claimed`);
+          }
+          this.resumingEpisode.sandboxClaimed = true;
+          claimedResume = true;
+        }
         episode = requestedContinuation;
         parentHash = checkpoint.parent;
         sandboxEpoch = checkpoint.epoch;
@@ -2754,19 +2759,6 @@ export class Broker {
         episode = repair.episode;
         parentHash = checkpoint?.parent ?? repair.parent;
         sandboxEpoch = checkpoint?.epoch ?? `${this.bootNonce}:ep${episode}`;
-      } else if (this.resumingEpisode !== undefined && !this.resumingEpisode.sandboxClaimed) {
-        if (params.artifact.hash !== this.resumingEpisode.parent) {
-          throw new BrokerError(
-            "INTERNAL",
-            `resumed episode ${this.resumingEpisode.episode} expected parent ` +
-            `${this.resumingEpisode.parent}, got ${params.artifact.hash}`,
-          );
-        }
-        episode = this.resumingEpisode.episode;
-        parentHash = this.resumingEpisode.parent;
-        sandboxEpoch = this.resumingEpisode.epoch;
-        this.resumingEpisode.sandboxClaimed = true;
-        claimedResume = true;
       } else {
         episode = this.episodeOrdinal;
         parentHash = params.artifact.hash;

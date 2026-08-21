@@ -422,7 +422,10 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
 
     // The incomplete checkpoint keeps its episode identity on restart; a
     // resume claim must not mint or charge a replacement episode.
-    await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
     expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
   });
 
@@ -586,7 +589,10 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
       b.broker.recordSpend({ tokens: 1, usd: 0 }, ADMIN);
       // The same incomplete episode remains resumable across repeated boots;
       // claiming it never appends a replacement episode.started fact.
-      await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+      await b.broker.createSandbox(
+        { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+        CLIENT,
+      );
       expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
       await b.broker.close();
     }
@@ -785,6 +791,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     a.ctl.evalOutputs.set(candidateHash, { valid: false, objectives: {} }).set(candidate2Hash, score(9));
     const cprobe = await saveCandidate(a, candidateTar);
     await a.broker.evaluate({ artifact: { hash: cprobe }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await a.broker.completeEpisode({ episode: 0 }, CLIENT);
     const cpromote = await saveCandidate(a, candidate2Tar);
     const spawns = a.log.filter((argv) => argv[1] === "run" && argv.includes("--rm")).length;
     await expect(
@@ -835,6 +842,16 @@ describe("M0 one-shot candidate evaluation authority", () => {
     // and save a distinct repaired artifact without minting episode 1.
     const repairing = await boot(shared);
     repairing.ctl.evalOutputs.set(candidate2Hash, score(2));
+    await repairing.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await expect(
+      repairing.broker.createSandbox(
+        { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+        CLIENT,
+      ),
+    ).rejects.toThrow(/already claimed/);
     const repairSandbox = await repairing.broker.createSandbox(
       { artifact: { hash: invalidCandidate }, role: "mutation", continueEpisode: 0 },
       CLIENT,
@@ -854,7 +871,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     // replays every pre-crash evaluator fact without a fourth invocation.
     const resumed = await boot(shared);
     const claimed = await resumed.broker.createSandbox(
-      { artifact: { hash: baselineHash }, role: "mutation" },
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
       CLIENT,
     );
     await expect(
@@ -1011,13 +1028,15 @@ describe("trusted event ordering and candidacy", () => {
     const graduated = await b.broker.saveArtifact({ sandboxId: second.sandboxId }, CLIENT);
     expect(graduated.hash).toBe(candidateHash);
     expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(1);
+    await b.broker.completeEpisode({ episode: 0 }, CLIENT);
 
     // Sandboxes from the graduated candidate must NOT reuse the stale repair
     // episode/parent: a fresh episode starts with the candidate as parent.
-    await b.broker.createSandbox({ artifact: { hash: candidateHash }, role: "mutation" }, CLIENT);
+    const third = await b.broker.createSandbox({ artifact: { hash: candidateHash }, role: "mutation" }, CLIENT);
     const started = b.events.filter((e) => e.type === "episode.started");
     expect(started).toHaveLength(2);
     expect(started[1]).toMatchObject({ episode: 1, parent: { hash: candidateHash } });
+    await b.broker.completeEpisode({ episode: 1, releaseSandboxId: third.sandboxId }, CLIENT);
 
     // And the graduation survives a restart (lineage line is the tombstone).
     await b.broker.close();
@@ -2252,6 +2271,7 @@ describe("terminal saveArtifact (a successful save retires the sandbox)", () => 
     // The entry is gone — the slot and its proxy bearer are released.
     await expect(b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT)).rejects.toThrow(/sandbox/i);
     // Iteration resumes from the saved CAS artifact in a FRESH sandbox.
+    await b.broker.completeEpisode({ episode: 0 }, CLIENT);
     const next = await b.broker.createSandbox({ artifact: { hash: saved.hash }, role: "mutation" }, CLIENT);
     expect(next.sandboxId).not.toBe(sandboxId);
   });

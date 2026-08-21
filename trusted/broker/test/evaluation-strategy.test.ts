@@ -164,7 +164,7 @@ describe("trusted broker evaluation strategy", () => {
     });
     await resumedBroker.init();
     await resumedBroker.createSandbox(
-      { artifact: parent, role: "mutation" },
+      { artifact: parent, role: "mutation", continueEpisode: 0 },
       { privileged: false },
     );
     const replayed = await resumedBroker.evaluate(
@@ -210,7 +210,10 @@ describe("trusted broker evaluation strategy", () => {
 
     const resumedBroker = new Broker(config);
     await resumedBroker.init();
-    await resumedBroker.createSandbox({ artifact: parent, role: "mutation" }, { privileged: false });
+    await resumedBroker.createSandbox(
+      { artifact: parent, role: "mutation", continueEpisode: 0 },
+      { privileged: false },
+    );
     const fresh = await resumedBroker.evaluate(
       { artifact: parent, assetGroupId: "train", seed: 4, recursivePlan: changedPlan, resume: true },
       { privileged: false },
