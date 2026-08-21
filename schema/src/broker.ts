@@ -73,6 +73,12 @@ export const CreateSandboxParams = z.object({
   artifact: ArtifactRef,
   /** "mutation" sandboxes get proxy access + writable workspace; no protected mounts ever. */
   role: z.literal("mutation"),
+  /**
+   * Continue this exact incomplete checkpoint-v1 episode (one-repair flow).
+   * The broker validates that the artifact belongs to the episode and never
+   * mints a second episode boundary.
+   */
+  continueEpisode: z.number().int().nonnegative().optional(),
   ttlSec: z.number().int().positive().max(86_400).optional(),
 });
 

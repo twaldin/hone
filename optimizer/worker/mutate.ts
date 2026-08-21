@@ -597,11 +597,14 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     session.subscribe((event) => {
       if (checkpointFailure !== undefined) return;
       try {
+        if (event.type === "tool_execution_end" && event.isError !== true) {
+          // Publish workspace bytes before the transcript acknowledges the
+          // completed tool. A kill can leave workspace ahead of conversation,
+          // never conversation describing effects absent from the restore.
+          saveWorkspace(checkpoint, env.cwd);
+        }
         syncSession(manager);
         if (event.type !== "tool_execution_end" || event.isError === true) return;
-        // The tool result and its workspace effects are one checkpoint. The
-        // scratch volume is snapshotted by trusted stale-run recovery.
-        saveWorkspace(checkpoint, env.cwd);
         if (event.toolName !== "yield") return;
         const details: unknown = event.result?.details;
         if (typeof details !== "object" || details === null) return;

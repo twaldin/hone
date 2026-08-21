@@ -40,6 +40,7 @@ interface ResumeState {
       sessionTrace: string;
       result: MutateResultRecord;
     } | null;
+    invalid?: { reason: string; repaired: boolean };
   };
 }
 
@@ -66,6 +67,7 @@ function parseResume(raw: string | undefined): ResumeState {
     episode?: unknown;
     parent?: unknown;
     candidate?: unknown;
+    invalid?: unknown;
   };
   const parent = ArtifactRef.safeParse(active.parent);
   if (
@@ -95,10 +97,26 @@ function parseResume(raw: string | undefined): ResumeState {
       result: result.data,
     };
   }
+  let invalid: NonNullable<ResumeState["activeEpisode"]>["invalid"];
+  if (active.invalid !== undefined) {
+    if (active.invalid === null || typeof active.invalid !== "object") {
+      throw new Error("HONE_RESUME active invalid checkpoint is malformed");
+    }
+    const rawInvalid = active.invalid as { reason?: unknown; repaired?: unknown };
+    if (typeof rawInvalid.reason !== "string" || typeof rawInvalid.repaired !== "boolean") {
+      throw new Error("HONE_RESUME active invalid checkpoint is malformed");
+    }
+    invalid = { reason: rawInvalid.reason, repaired: rawInvalid.repaired };
+  }
   return {
     nextEpisode,
     incumbent,
-    activeEpisode: { episode: active.episode, parent: parent.data, candidate },
+    activeEpisode: {
+      episode: active.episode,
+      parent: parent.data,
+      candidate,
+      ...(invalid === undefined ? {} : { invalid }),
+    },
   };
 }
 

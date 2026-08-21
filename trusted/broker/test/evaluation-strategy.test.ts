@@ -177,6 +177,50 @@ describe("trusted broker evaluation strategy", () => {
     await resumedBroker.close();
   });
 
+  test("does not replay an incomplete episode under a different recursive plan", async () => {
+    let strategyCalls = 0;
+    const config = await configFor("resume-recursive-plan", async (input) => {
+      strategyCalls += 1;
+      return recordFor(input);
+    });
+    const cas = new CasStore(config.casDir);
+    const workspace = path.join(path.dirname(config.runDir), "workspace-recursive");
+    await mkdir(workspace);
+    const parent = { hash: await packDirAsArtifact(workspace, cas) };
+    config.baselineArtifactHash = parent.hash;
+    config.runCommand = async (argv) => ({
+      exitCode: 0,
+      stdout: Buffer.from(argv[1] === "run" ? "container-resume\n" : ""),
+      stderr: Buffer.alloc(0),
+      timedOut: false,
+      truncated: false,
+    });
+    const changedPlan: RecursiveEvaluationPlan = {
+      allocations: [{ ...RECURSIVE_PLAN.allocations[0]!, innerEpisodesMax: 3 }],
+    };
+
+    const firstBroker = new Broker(config);
+    await firstBroker.init();
+    await firstBroker.createSandbox({ artifact: parent, role: "mutation" }, { privileged: false });
+    await firstBroker.evaluate(
+      { artifact: parent, assetGroupId: "train", seed: 4, recursivePlan: RECURSIVE_PLAN },
+      { privileged: false },
+    );
+    await firstBroker.close();
+
+    const resumedBroker = new Broker(config);
+    await resumedBroker.init();
+    await resumedBroker.createSandbox({ artifact: parent, role: "mutation" }, { privileged: false });
+    const fresh = await resumedBroker.evaluate(
+      { artifact: parent, assetGroupId: "train", seed: 4, recursivePlan: changedPlan, resume: true },
+      { privileged: false },
+    );
+    expect(fresh.cached).toBe(false);
+    expect(strategyCalls).toBe(2);
+    expect(resumedBroker.getBudget({ privileged: false }).spent.evaluatorInvocations).toBe(2);
+    await resumedBroker.close();
+  });
+
   test("keys strategy memoization by the optimizer-authored recursive plan", async () => {
     let calls = 0;
     const config = await configFor("recursive-memo", async (input) => {

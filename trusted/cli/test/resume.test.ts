@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { RunEvent } from "@hone/schema";
 import { RUNTIME_PIN_FILE, trustedRuntimeDigest } from "../src/supervisor.js";
 import { honeSpawn, hone, killTree, makeCapsule, makeRoot, pkgRoot, sleep } from "./helpers.js";
+import { replay } from "../src/eventlog.js";
 
 function runIds(root: string): string[] {
   const dir = join(root, ".hone-runs");
@@ -15,6 +16,50 @@ function logText(root: string, runId: string): string {
   const p = join(root, ".hone-runs", runId, "events.ndjson");
   return existsSync(p) ? readFileSync(p, "utf8") : "";
 }
+
+describe("incomplete repair replay", () => {
+  it("keeps a journaled unrepaired decision in the active episode checkpoint", () => {
+    const runId = "run_repair_checkpoint";
+    const at = "2026-08-21T00:00:00.000Z";
+    const parent = { hash: `sha256:${"a".repeat(64)}` };
+    const candidate = { hash: `sha256:${"b".repeat(64)}` };
+    const events = [
+      RunEvent.parse({
+        runId,
+        at,
+        type: "run.started",
+        capsuleId: "cap_000000000000",
+        contractHash: `sha256:${"c".repeat(64)}`,
+        optimizerDigest: `sha256:${"d".repeat(64)}`,
+        checkpointVersion: 1,
+      }),
+      RunEvent.parse({ runId, at, type: "episode.started", episode: 0, parent }),
+      RunEvent.parse({
+        runId,
+        at,
+        type: "episode.candidate",
+        episode: 0,
+        candidate,
+        sessionTrace: `sha256:${"e".repeat(64)}`,
+      }),
+      RunEvent.parse({
+        runId,
+        at,
+        type: "episode.invalid",
+        episode: 0,
+        reason: "repair failed",
+        repaired: false,
+      }),
+    ];
+
+    expect(replay(events).activeEpisode).toMatchObject({
+      episode: 0,
+      parent,
+      candidate: { artifact: candidate },
+      invalid: { reason: "repair failed", repaired: false },
+    });
+  });
+});
 
 describe("kill -9 mid-run + hone run --resume", () => {
   it("reuses a journaled evaluator checkpoint and budget after SIGKILL", { timeout: 60_000 }, async () => {

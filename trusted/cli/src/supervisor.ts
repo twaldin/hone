@@ -1993,14 +1993,12 @@ async function superviseLocked(
         }
       }
     }
-    // Drain the lifecycle queue: an OS signal or identity-bound stop byte
-    // raised during synchronous delivery is dispatched only after Node
-    // accepts/reads the queued socket. Under host contention one 25ms timer
-    // is not a reliable accept+read barrier, so allow a bounded 250ms drain.
-    const lifecycleDrainDeadline = Date.now() + 250;
-    do {
-      await sleep(25);
-    } while (!stopRequested && currentPause() === null && Date.now() < lifecycleDrainDeadline);
+    // Drain the lifecycle queue through an observed poll/check pass. A wall
+    // deadline is not a correctness barrier under scheduler starvation:
+    // scheduling this immediate after the timer guarantees Node has crossed
+    // poll before terminal status is selected, however long that takes.
+    await sleep(25);
+    await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
 
     // A signal that landed during delivery (or between backend settle and
     // the drain) started the barrier but nothing awaited it yet — the same

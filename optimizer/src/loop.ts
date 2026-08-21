@@ -55,6 +55,7 @@ export interface EpisodeLoopOptions {
         sessionTrace: string;
         result: MutateResult;
       } | null;
+      invalid?: { reason: string; repaired: boolean };
     };
   };
   /**
@@ -232,14 +233,20 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
      * snapshot back to the SAME episode.
      */
     const mutateOnce = async (
-      sandbox: { sandboxId: string } | { from: ArtifactRef },
+      sandbox: { sandboxId: string } | { from: ArtifactRef; continueEpisode?: number },
       context: EpisodeContext,
       episode: number,
     ): Promise<MutateAttempt> => {
       const sandboxId =
         "sandboxId" in sandbox
           ? sandbox.sandboxId
-          : (await broker.createSandbox({ artifact: sandbox.from, role: "mutation" })).sandboxId;
+          : (
+              await broker.createSandbox({
+                artifact: sandbox.from,
+                role: "mutation",
+                ...(sandbox.continueEpisode === undefined ? {} : { continueEpisode: sandbox.continueEpisode }),
+              })
+            ).sandboxId;
       await ensureWorker(sandboxId);
       let staged = false;
       try {
@@ -336,6 +343,14 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
           ? baseline
           : incumbent.artifact;
       if (!resuming) emit({ ...base, at: now(), type: "episode.started", episode, parent });
+      // A fsynced unrepaired invalid event is the durable terminal decision
+      // for this episode. A crash before completeEpisode may replay only the
+      // cheap completion boundary, never another repair/evaluator attempt.
+      if (resuming && activeResume.invalid?.repaired === false) {
+        emit({ ...base, at: now(), type: "budget.snapshot", budget });
+        await broker.completeEpisode({ episode });
+        continue;
+      }
 
       // The episode's mutation sandbox is created BEFORE any of the episode's
       // evaluations. On resume the broker assigns the exact old episode and
@@ -409,7 +424,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
             budget,
             failure: attempt.failure,
           });
-          const repair = await mutateOnce({ from: repairFrom }, repairContext, episode);
+          const repair = await mutateOnce({ from: repairFrom, continueEpisode: episode }, repairContext, episode);
           if (opts.signal?.aborted) return;
           if (repair.artifact !== null && repair.failure === null) {
             emit({

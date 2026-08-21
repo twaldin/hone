@@ -177,6 +177,7 @@ export interface EpisodeCheckpointState {
   episode: number;
   parent: ArtifactRef;
   candidate: { artifact: ArtifactRef; sessionTrace: string } | null;
+  invalid?: { reason: string; repaired: boolean };
 }
 
 export interface RunState {
@@ -276,6 +277,11 @@ export function replay(events: RunEvent[]): RunState {
             artifact: event.candidate,
             sessionTrace: event.sessionTrace,
           };
+        }
+        break;
+      case "episode.invalid":
+        if (state.activeEpisode?.episode === event.episode) {
+          state.activeEpisode.invalid = { reason: event.reason, repaired: event.repaired };
         }
         break;
       case "episode.completed":

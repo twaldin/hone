@@ -174,6 +174,7 @@ async function boot(
     evaluatorBaselineArtifactHash?: string;
     holdoutLedgerPath?: string;
     maxActiveSandboxes?: number;
+    maxPublicCandidateEvaluations?: number;
     scratchQuotaBytes?: number;
     scratchVolume?: boolean;
     sessionTraceQuotaBytes?: number;
@@ -317,6 +318,9 @@ async function boot(
     runCommand: run,
     ...(opts.holdoutBudget !== undefined ? { holdoutBudget: opts.holdoutBudget } : {}),
     ...(opts.maxActiveSandboxes !== undefined ? { maxActiveSandboxes: opts.maxActiveSandboxes } : {}),
+    ...(opts.maxPublicCandidateEvaluations === undefined
+      ? {}
+      : { maxPublicCandidateEvaluations: opts.maxPublicCandidateEvaluations }),
     ...(opts.scratchQuotaBytes !== undefined ? { scratchQuotaBytes: opts.scratchQuotaBytes } : {}),
     ...(opts.scratchVolume !== undefined ? { scratchVolume: opts.scratchVolume } : {}),
     ...(opts.sessionTraceQuotaBytes !== undefined ? { sessionTraceQuotaBytes: opts.sessionTraceQuotaBytes } : {}),
@@ -395,7 +399,7 @@ afterAll(async () => {
 // ---------- durable run state ----------
 
 describe("durable run state (resume cannot reset authority or budgets)", () => {
-  it("replays spend, evaluator invocations, holdout charges, and episode numbering across restarts", async () => {
+  it("replays spend, evaluator invocations, holdout charges, and incomplete episode identity across restarts", async () => {
     const shared = { runDir: path.join(tmpBase, "runs", "resume-a"), casDir: path.join(tmpBase, "cas", "resume-a"), runId: "run-resume-a" };
     const a = await boot({ ...shared, holdoutBudget: 1 });
     a.broker.recordSpend({ tokens: 100, usd: 5 }, ADMIN);
@@ -416,11 +420,10 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
       b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 99 }, ADMIN),
     ).rejects.toThrow(/holdout ledger budget exhausted/);
 
-    // Episode numbering continues; it never restarts at 0.
+    // The incomplete checkpoint keeps its episode identity on restart; a
+    // resume claim must not mint or charge a replacement episode.
     await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
-    const started = b.events.filter((e) => e.type === "episode.started");
-    expect(started).toHaveLength(1);
-    expect(started[0]).toMatchObject({ episode: 1 });
+    expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
   });
 
   it("persists a trusted proxy admission refusal and blocks retries after restart", async () => {
@@ -581,11 +584,10 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
       expect(budget.spent.tokens).toBe(7 + cycle); // 999999 never replays, even after re-append
       expect(budget.spent.usd).toBe(1);
       b.broker.recordSpend({ tokens: 1, usd: 0 }, ADMIN);
-      // Episode numbering also survives: next episode continues, never resets.
+      // The same incomplete episode remains resumable across repeated boots;
+      // claiming it never appends a replacement episode.started fact.
       await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
-      const started = b.events.filter((e) => e.type === "episode.started");
-      expect(started).toHaveLength(1);
-      expect(started[0]).toMatchObject({ episode: 1 + cycle });
+      expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
       await b.broker.close();
     }
     const raw = await readFile(stateFile, "utf8");
@@ -801,6 +803,79 @@ describe("M0 one-shot candidate evaluation authority", () => {
     await expect(
       b.broker.evaluate({ artifact: { hash: cpromote }, assetGroupId: "train", seed: 2 }, CLIENT),
     ).rejects.toThrow(/attempt already consumed/);
+  });
+
+  it("keeps one episode epoch through an invalid-candidate repair, crash, and evaluator replay", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "repair-resume"),
+      casDir: path.join(tmpBase, "cas", "repair-resume"),
+      runId: "run-repair-resume",
+      maxPublicCandidateEvaluations: 4,
+    };
+    const first = await boot(shared);
+    first.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, {
+      valid: false,
+      objectives: {},
+      constraints: {},
+      perExample: {},
+    });
+    const invalidCandidate = await saveCandidate(first, candidateTar);
+    await first.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await expect(
+      first.broker.createSandbox({ artifact: { hash: invalidCandidate }, role: "mutation" }, CLIENT),
+    ).rejects.toThrow(/incomplete checkpoint-v1 episode/);
+    const invalid = await first.broker.evaluate(
+      { artifact: { hash: invalidCandidate }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    expect(invalid.output.valid).toBe(false);
+    await first.broker.close();
+
+    // Real one-repair: reopen the invalid candidate inside episode 0, execute,
+    // and save a distinct repaired artifact without minting episode 1.
+    const repairing = await boot(shared);
+    repairing.ctl.evalOutputs.set(candidate2Hash, score(2));
+    const repairSandbox = await repairing.broker.createSandbox(
+      { artifact: { hash: invalidCandidate }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await repairing.broker.exec({ sandboxId: repairSandbox.sandboxId, argv: ["true"] }, CLIENT);
+    repairing.ctl.saveTar = candidate2Tar;
+    const repaired = await repairing.broker.saveArtifact({ sandboxId: repairSandbox.sandboxId }, CLIENT);
+    expect(repaired.hash).toBe(candidate2Hash);
+    await repairing.broker.evaluate(
+      { artifact: repaired, assetGroupId: "train", seed: 0, resume: true },
+      CLIENT,
+    );
+    expect(repairing.broker.getBudget(CLIENT).spent.evaluatorInvocations).toBe(3);
+    await repairing.broker.close();
+
+    // A second restart reconstructs exactly one incomplete checkpoint and
+    // replays every pre-crash evaluator fact without a fourth invocation.
+    const resumed = await boot(shared);
+    await resumed.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await expect(
+      resumed.broker.evaluate(
+        { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0, resume: true },
+        CLIENT,
+      ),
+    ).resolves.toMatchObject({ cached: true, artifactHash: baselineHash });
+    await expect(
+      resumed.broker.evaluate(
+        { artifact: { hash: invalidCandidate }, assetGroupId: "train", seed: 0, resume: true },
+        CLIENT,
+      ),
+    ).resolves.toMatchObject({ cached: true, artifactHash: invalidCandidate, output: { valid: false } });
+    await expect(
+      resumed.broker.evaluate(
+        { artifact: repaired, assetGroupId: "train", seed: 0, resume: true },
+        CLIENT,
+      ),
+    ).resolves.toMatchObject({ cached: true, artifactHash: candidate2Hash });
+    expect(resumed.broker.getBudget(CLIENT).spent.evaluatorInvocations).toBe(3);
+    const facts = await stateLines(resumed);
+    expect(facts.filter((line) => line["t"] === "episode")).toHaveLength(1);
+    expect(facts.filter((line) => line["t"] === "eval")).toHaveLength(3);
   });
   it("journals the attempt before a timed-out spawn and never permits a retry after replay", async () => {
     const shared = {

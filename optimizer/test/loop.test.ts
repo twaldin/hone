@@ -692,6 +692,50 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
     expect(stub.finished).toEqual([BASELINE]);
   });
 
+  it("seals a journaled unrepaired episode without repeating its repair work", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {},
+      execPlan: [],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-test",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        resume: {
+          nextEpisode: 0,
+          incumbent: null,
+          activeEpisode: {
+            episode: 0,
+            parent: { hash: BASELINE },
+            candidate: {
+              artifact: { hash: BASELINE },
+              sessionTrace: stubHash(88),
+              result: { summary: "invalid candidate", approach: "repair exhausted", filesChanged: [] },
+            },
+            invalid: { reason: "repair failed", repaired: false },
+          },
+        },
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.execArgvs).toEqual([]);
+    expect(stub.evaluateAsks).toEqual([]);
+    expect(eventsOf(events, "episode.started")).toEqual([]);
+    expect(eventsOf(events, "episode.candidate")).toEqual([]);
+    expect(stub.completedEpisodes).toEqual([0]);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
   it("fails closed on a non-positive or non-integer maxEpisodes before touching the broker", async () => {
     const base = {
       brokerSocket: "/nonexistent/broker.sock",

@@ -653,6 +653,7 @@ async function resumeHint(
       sessionTrace: string;
       result: z.infer<typeof MutateCheckpointResult>;
     } | null;
+    invalid?: { reason: string; repaired: boolean };
   };
 }> {
   const replayed = replayRun(runDir);
@@ -668,7 +669,12 @@ async function resumeHint(
   if (active.candidate === null) {
     return {
       ...base,
-      activeEpisode: { episode: active.episode, parent: active.parent, candidate: null },
+      activeEpisode: {
+        episode: active.episode,
+        parent: active.parent,
+        candidate: null,
+        ...(active.invalid === undefined ? {} : { invalid: active.invalid }),
+      },
     };
   }
   const trace = (await new CasStore(casDir).readBuffer(active.candidate.sessionTrace)).toString("utf8");
@@ -690,6 +696,7 @@ async function resumeHint(
         sessionTrace: active.candidate.sessionTrace,
         result: MutateCheckpointResult.parse(raw),
       },
+      ...(active.invalid === undefined ? {} : { invalid: active.invalid }),
     },
   };
 }
