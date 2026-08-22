@@ -32,6 +32,15 @@ const RESERVED_UID_CAPSULES = new Set<string>([
   "cap_56f5925c694b", // ripgrep-search
   "cap_8b3fc6a17b7a", // floyd-custom-scoreboard-render
   "cap_63630c40b876", // harness-session-log-normalization
+  "cap_8edec9fee323", // monoagent-context-retention
+  "cap_23de71dd36fa", // simdjson-parse
+  "cap_9ab675d0d490", // mimalloc-allocator
+  "cap_8ec52f0e2f1f", // brotli-codec
+  "cap_c0dd82eba84a", // quickjs-interpreter
+  "cap_6562f788bdd5", // duckdb-tpch
+  "cap_93f9f6942024", // biome-parser-formatter
+  "cap_0615d8ca4fae", // uv-resolver
+  "cap_5565a76628a9", // simdutf-validate
 ]);
 
 export type EvaluatorIsolationMode = "reserved-uid" | "shared-uid-lease";
