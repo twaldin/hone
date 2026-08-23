@@ -34,7 +34,7 @@ const DEFAULT_OUTPUT = "tmp/m2-terminal-authority-preflight.evidence.v1.json";
 const SYNTHETIC_GROUP_ID = "synthetic-terminal-preflight";
 const WORKER_UID_MIN = 20_000;
 const MAX_DIAGNOSTIC_CHARS = 16_384;
-const EVALUATOR_TIMEOUT_SEC = 1_800;
+const DEFAULT_EVALUATOR_TIMEOUT_SEC = 600;
 const OPERATOR_CONTAMINATION_DISCLOSURE = {
   incident: "During schema discovery, an operator-side repository grep was accidentally scoped across the Floyd capsule before assets/ was excluded.",
   observedLocations: [
@@ -50,6 +50,8 @@ type Args = {
   campaign: string;
   config: string;
   output: string;
+  evaluatorTimeoutSec: number;
+  evaluatorTimeoutExplicit: boolean;
   negativeProbe?: string;
 };
 
@@ -93,7 +95,7 @@ function usage(): string {
   return [
     "usage: bun capsules/tools/preflight-m2-terminal-authority.mts",
     "  [--campaign PATH] [--config PATH] [--output PATH]",
-    "  [--negative-probe CAPSULE_LABEL]",
+    "  [--evaluator-timeout-sec SECONDS] [--negative-probe CAPSULE_LABEL]",
     "",
     "Runs the frozen terminal cohort through the real trusted Broker staging and",
     "Docker evaluator path using generated synthetic assets only. The probe score",
@@ -104,7 +106,13 @@ function usage(): string {
 }
 
 function parseArgs(argv: string[]): Args {
-  const parsed: Args = { campaign: DEFAULT_CAMPAIGN, config: DEFAULT_CONFIG, output: DEFAULT_OUTPUT };
+  const parsed: Args = {
+    campaign: DEFAULT_CAMPAIGN,
+    config: DEFAULT_CONFIG,
+    output: DEFAULT_OUTPUT,
+    evaluatorTimeoutSec: DEFAULT_EVALUATOR_TIMEOUT_SEC,
+    evaluatorTimeoutExplicit: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--help" || arg === "-h") {
@@ -112,12 +120,26 @@ function parseArgs(argv: string[]): Args {
       process.exit(0);
     }
     const value = argv[index + 1];
-    if (arg === "--campaign" || arg === "--config" || arg === "--output" || arg === "--negative-probe") {
+    if (
+      arg === "--campaign"
+      || arg === "--config"
+      || arg === "--output"
+      || arg === "--negative-probe"
+      || arg === "--evaluator-timeout-sec"
+    ) {
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
       if (arg === "--campaign") parsed.campaign = value;
       if (arg === "--config") parsed.config = value;
       if (arg === "--output") parsed.output = value;
       if (arg === "--negative-probe") parsed.negativeProbe = value;
+      if (arg === "--evaluator-timeout-sec") {
+        const seconds = Number(value);
+        if (!Number.isSafeInteger(seconds) || seconds <= 0 || seconds > 86_400) {
+          throw new Error("--evaluator-timeout-sec must be an integer from 1 through 86400");
+        }
+        parsed.evaluatorTimeoutSec = seconds;
+        parsed.evaluatorTimeoutExplicit = true;
+      }
       index += 1;
       continue;
     }
@@ -231,7 +253,7 @@ function mimallocPattern(seed: bigint, index: bigint): bigint {
   return mimallocPrngNext(state).value;
 }
 
-function mimallocWorkloadIdentity(id: string, seedNumber: number): { expectedOperations: number; expectedChecksum: string } {
+function mimallocWorkloadIdentity(id: string, seedNumber: number, rounds: number): { expectedOperations: number; expectedChecksum: string } {
   const seed = BigInt(seedNumber);
   let operations = 0;
   let checksum: bigint;
@@ -310,22 +332,35 @@ function mimallocWorkloadIdentity(id: string, seedNumber: number): { expectedOpe
   } else {
     throw new Error(`unknown mimalloc synthetic workload: ${id}`);
   }
+  if (id === "small") {
+    operations = 0;
+    for (let round = 0; round < rounds; round += 1) {
+      const replacements = Math.floor((8_191 - (round % 3)) / 3) + 1;
+      operations += 8_192 + replacements * 2 + 8_192;
+    }
+  } else {
+    operations *= rounds;
+  }
   return { expectedOperations: operations, expectedChecksum: checksum.toString(16).padStart(16, "0") };
 }
 
 function generateMimalloc(root: string): void {
   const ids = ["single", "multithread", "small", "fragmentation"];
   const treeBaselines = [32 << 20, 32 << 20, 8 << 20, 128 << 20];
-  const workloads = ids.map((id, index) => ({
-    id,
-    seed: index + 1,
-    rounds: 1,
-    threads: id === "multithread" ? 4 : 1,
-    ...mimallocWorkloadIdentity(id, index + 1),
-    baselinePeakPageCommittedBytes: 1 << 30,
-    baselineTreePeakBytes: treeBaselines[index],
-    baselineFragmentationRatio: 1,
-  }));
+  const roundCounts = [128, 128, 32, 128];
+  const workloads = ids.map((id, index) => {
+    const rounds = roundCounts[index]!;
+    return {
+      id,
+      seed: index + 1,
+      rounds,
+      threads: id === "multithread" ? 4 : 1,
+      ...mimallocWorkloadIdentity(id, index + 1, rounds),
+      baselinePeakPageCommittedBytes: 1 << 30,
+      baselineTreePeakBytes: treeBaselines[index],
+      baselineFragmentationRatio: 1,
+    };
+  });
   writeProbeFile(root, "workloads.json", `${JSON.stringify({ schemaVersion: 1, driverVersion: "mimalloc-four-v1", split: "synthetic", workloads })}\n`);
 }
 
@@ -335,8 +370,8 @@ function generateDuckdb(root: string, baselineDir: string, image: string): void 
   const checkedInGenerator = join(dirname(baselineDir), "generate_sf1.cpp");
   const generatorProject = dirname(root);
   const generatorPath = join(generatorProject, "duckdb-synthetic-generator.cpp");
-  const generatorSource = readFileSync(checkedInGenerator, "utf8").replace("CALL dbgen(sf=1)", "CALL dbgen(sf=0.01)");
-  if (!generatorSource.includes("CALL dbgen(sf=0.01)")) throw new Error("DuckDB synthetic generator scale substitution failed");
+  const generatorSource = readFileSync(checkedInGenerator, "utf8");
+  if (!generatorSource.includes("CALL dbgen(sf=1)")) throw new Error("DuckDB public SF1 constructor identity drift");
   writeFileSync(generatorPath, generatorSource);
   const probeOutput = `/probe/${basename(root)}`;
   writeFileSync(join(generatorProject, "CMakeLists.txt"), [
@@ -568,8 +603,8 @@ function generatorSourceReadPaths(definition: ProbeDefinition): string[] {
 function generateProbe(definition: ProbeDefinition, root: string, baselineDir: string, image: string): void {
   switch (definition.generator) {
     case "brotli-three-corpus-minimal": generateBrotli(root); break;
-    case "mimalloc-four-v1-minimal": generateMimalloc(root); break;
-    case "duckdb-physical-filter-minimal": generateDuckdb(root, baselineDir, image); break;
+    case "mimalloc-four-v1-ms-calibrated": generateMimalloc(root); break;
+    case "duckdb-physical-filter-sf1": generateDuckdb(root, baselineDir, image); break;
     case "quickjs-workload-v1-minimal": generateQuickjs(root, baselineDir); break;
     case "harness-readiness-minimal": generateHarness(root); break;
     case "flt-six-group-minimal": generateFlt(root); break;
@@ -713,10 +748,17 @@ function relativeCommand(command: CommandRecord): CommandRecord {
   };
 }
 
+function commandMentionsRealAssetPath(value: string): boolean {
+  return value
+    .split("/")
+    .some((component) => component.toLowerCase() === "holdout" || component.toLowerCase() === "validation");
+}
+
 async function runOne(
   definition: ProbeDefinition,
   negative: boolean,
   reportRoot: string,
+  evaluatorTimeoutSec: number,
 ): Promise<Record<string, unknown>> {
   const capsuleRoot = join(REPO_ROOT, "capsules", definition.label);
   const manifestPath = join(capsuleRoot, "manifest.json");
@@ -758,7 +800,7 @@ async function runOne(
   if (image.status === "PRESENT") {
     try {
       broker = await startBroker({
-        evalTimeoutSec: EVALUATOR_TIMEOUT_SEC,
+        evalTimeoutSec: evaluatorTimeoutSec,
         runId: `terminal-preflight-${definition.label}-${negative ? "negative" : "synthetic"}`,
         manifest,
         capsuleRootDir: syntheticCapsuleRoot,
@@ -833,7 +875,24 @@ async function runOne(
     : expectedRefusalObserved && evaluatorInvoked && refusalCommandFailed && output === undefined && isolationPass
       ? "EXECUTES-REFUSES-SYNTHETIC"
       : "FAIL";
-  const commandHoldoutPaths = commands.flatMap((command) => command.argv.filter((part) => /(^|\/)(holdout|validation)(\/|$)/i.test(part)));
+  const failureClass = verdict === "PASS"
+    ? "NONE"
+    : verdict === "EXECUTES-REFUSES-SYNTHETIC"
+      ? "EXPECTED_SYNTHETIC_REFUSAL"
+      : !uidInReservedPool
+        ? "UID_ENFORCEMENT"
+        : !evaluatorInvoked
+          ? "PRE_EVALUATOR_FAILURE"
+          : typeof record?.costUsd === "number" && record.costUsd !== 0
+            ? "SPEND_VIOLATION"
+            : !isolationPass
+              ? "ISOLATION_EVIDENCE_FAILURE"
+              : output !== undefined && (!output.valid || !constraintsPassed)
+                ? "EVALUATOR_REFUSAL"
+                : "EVALUATOR_EXECUTION_FAILURE";
+  const commandHoldoutPaths = commands.flatMap((command) =>
+    command.argv.filter(commandMentionsRealAssetPath)
+  );
 
   return {
     capsuleId: originalManifest.id,
@@ -841,6 +900,7 @@ async function runOne(
     label: definition.label,
     verdict,
     synthetic: true,
+    failureClass,
     derivedFromHoldout: false,
     schema: definition.schema,
     generator: definition.generator,
@@ -876,7 +936,7 @@ async function runOne(
       outputParsed: output !== undefined,
       outputValid: output?.valid ?? false,
       constraintsPassed,
-      evaluatorTimeoutSec: EVALUATOR_TIMEOUT_SEC,
+      evaluatorTimeoutSec,
       failure,
       costUsd: record?.costUsd ?? null,
       zeroSpendProvenance: record?.costUsd === 0
@@ -941,7 +1001,7 @@ async function main(): Promise<void> {
       const negative = definition.label === args.negativeProbe;
       console.log(`${definition.label}: running ${negative ? "deliberately broken" : "synthetic"} terminal probe`);
       try {
-        results.push(await runOne(definition, negative, reportRoot));
+        results.push(await runOne(definition, negative, reportRoot, args.evaluatorTimeoutSec));
       } catch (error) {
         const failedCapsuleRoot = join(REPO_ROOT, "capsules", definition.label);
         const failedManifest = CapsuleManifest.parse(readJson<unknown>(join(failedCapsuleRoot, "manifest.json")));
@@ -953,6 +1013,7 @@ async function main(): Promise<void> {
           frozenCampaignCapsuleId: definition.frozenCapsuleId,
           label: definition.label,
           verdict: "FAIL",
+          failureClass: "PRE_EVALUATOR_FAILURE",
           synthetic: true,
           derivedFromHoldout: false,
           generator: definition.generator,
@@ -979,14 +1040,22 @@ async function main(): Promise<void> {
   }
 
   const count = (verdict: string): number => results.filter((row: any) => row.verdict === verdict).length;
+  const countFailureClass = (failureClass: string): number =>
+    results.filter((row: any) => row.failureClass === failureClass).length;
   const negativeResult = args.negativeProbe === undefined ? undefined : results.find((row: any) => row.label === args.negativeProbe);
   const report = {
     schemaVersion: 1,
     gate: "terminal-authority-preflight",
     generatedAt: new Date().toISOString(),
-    gateInvocation: "bun capsules/tools/preflight-m2-terminal-authority.mts",
+    gateInvocation: args.evaluatorTimeoutExplicit
+      ? `bun capsules/tools/preflight-m2-terminal-authority.mts --evaluator-timeout-sec ${args.evaluatorTimeoutSec}`
+      : "bun capsules/tools/preflight-m2-terminal-authority.mts",
     campaign: relative(REPO_ROOT, campaignPath).split(sep).join("/"),
     config: relative(REPO_ROOT, configPath).split(sep).join("/"),
+    parameters: {
+      evaluatorTimeoutSec: args.evaluatorTimeoutSec,
+      evaluatorTimeoutSource: args.evaluatorTimeoutExplicit ? "explicit-cli-override" : "campaign-faithful-default",
+    },
     synthetic: true,
     derivedFromHoldout: false,
     zeroModelCalls: true,
@@ -1032,6 +1101,14 @@ async function main(): Promise<void> {
       allCovered: results.length === terminalIds.length,
       holdoutCommandOrMountViolations: results.filter((row: any) => row.zeroHoldoutReadEvidence
         && (!row.zeroHoldoutReadEvidence.commandCheckPassed || !row.zeroHoldoutReadEvidence.mountCheckPassed)).length,
+      failureClasses: {
+        uidEnforcement: countFailureClass("UID_ENFORCEMENT"),
+        evaluatorRefusal: countFailureClass("EVALUATOR_REFUSAL"),
+        evaluatorExecutionFailure: countFailureClass("EVALUATOR_EXECUTION_FAILURE"),
+        isolationEvidenceFailure: countFailureClass("ISOLATION_EVIDENCE_FAILURE"),
+        preEvaluatorFailure: countFailureClass("PRE_EVALUATOR_FAILURE"),
+        expectedSyntheticRefusal: countFailureClass("EXPECTED_SYNTHETIC_REFUSAL"),
+      },
     },
   };
   writeJson(outputPath, report);
