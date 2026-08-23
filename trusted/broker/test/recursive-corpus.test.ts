@@ -182,6 +182,110 @@ afterEach(async () => {
   await rm(tmpBase, { recursive: true, force: true });
 });
 
+
+describe("recursive ancestor resource authority", () => {
+  it("keeps the direct optimizer budget while registering a larger descendant envelope", () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "resource-envelope.ndjson"));
+    ledgers.push(ledger);
+    const direct: BudgetEnvelope = {
+      maxTokens: 10,
+      maxUsd: 10,
+      maxWallClockSec: 10,
+      maxEvaluatorInvocations: 10,
+    };
+    const broker = makeBroker({
+      runId: "resource-root",
+      budget: direct,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        resourceEnvelope: LARGE,
+        admitChildRun: () => undefined,
+        launchChildRun: vi.fn<ChildRunLauncher>(),
+      },
+    });
+
+    expect(broker.getBudget(ADMIN)).toMatchObject({ envelope: direct });
+    expect(ledger.budgetState("resource-root")).toMatchObject({
+      envelope: LARGE,
+      remaining: LARGE,
+    });
+  });
+
+  it("admits a child reservation larger than the direct optimizer budget when aggregate authority covers it", async () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "larger-child-resource-envelope.ndjson"));
+    ledgers.push(ledger);
+    const direct: BudgetEnvelope = {
+      maxTokens: 10,
+      maxUsd: 10,
+      maxWallClockSec: 10,
+      maxEvaluatorInvocations: 10,
+    };
+    const reservation: BudgetEnvelope = {
+      maxTokens: 20,
+      maxUsd: 20,
+      maxWallClockSec: 20,
+      maxEvaluatorInvocations: 20,
+    };
+    const usage: ResourceUsage = {
+      tokens: 1,
+      usd: 1,
+      wallClockSec: 1,
+      evaluatorInvocations: 1,
+    };
+    const launcher: ChildRunLauncher = async ({ request, admission }) => ({
+      ...(await writeChildEvidence(request, admission, "larger-than-direct")),
+      usage,
+    });
+    const broker = makeBroker({
+      runId: "larger-child-root",
+      budget: direct,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        resourceEnvelope: LARGE,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: launcher,
+      },
+    });
+
+    const result = await broker.spawnRun(
+      childRequest("larger-than-direct-child", 1, reservation, "capsule"),
+      CLIENT,
+    );
+
+    expect(result.child.runId).toBe("larger-than-direct-child");
+    expect(broker.getBudget(ADMIN)).toMatchObject({ envelope: direct });
+    expect(ledger.budgetState("larger-child-root")).toMatchObject({
+      openReservations: 0,
+      remaining: {
+        maxTokens: 199,
+        maxUsd: 199,
+        maxWallClockSec: 199,
+        maxEvaluatorInvocations: 199,
+      },
+    });
+  });
+
+  it("rejects a recursive resource envelope smaller than the direct optimizer budget", () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "undersized-resource-envelope.ndjson"));
+    ledgers.push(ledger);
+    expect(() => makeBroker({
+      runId: "undersized-resource-root",
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        resourceEnvelope: { ...LARGE, maxTokens: LARGE.maxTokens - 1 },
+        admitChildRun: () => undefined,
+        launchChildRun: vi.fn<ChildRunLauncher>(),
+      },
+    })).toThrow("recursive resource envelope cannot be smaller than the direct broker budget");
+  });
+});
 describe("recursive spawnRun authority", () => {
   it("checkpoints active time before recursive usage so a post-sync crash resumes", async () => {
     let nowMs = 0;
