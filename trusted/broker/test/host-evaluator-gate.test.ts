@@ -249,8 +249,36 @@ describe("host evaluator gate", () => {
   });
 
   it("uses reserved uids only for reviewed frozen evaluator identities", () => {
+    const reAdmitted = [
+      "cap_8edec9fee323",
+      "cap_23de71dd36fa",
+      "cap_9ab675d0d490",
+      "cap_8ec52f0e2f1f",
+      "cap_c0dd82eba84a",
+      "cap_6562f788bdd5",
+      "cap_93f9f6942024",
+      "cap_21b5bcaacf49",
+      "cap_5565a76628a9",
+    ];
+    const supersededHardCoders = [
+      "cap_95dd3c179509",
+      "cap_6ec711476d68",
+      "cap_00e57f51257c",
+      "cap_3a4b258db3ad",
+      "cap_088f857f3a81",
+      "cap_013a75d40601",
+      "cap_d1f91ea72bcc",
+      "cap_196e21c76955",
+      "cap_0615d8ca4fae",
+      "cap_89dd92024e20",
+    ];
     expect(evaluatorSupportsReservedUid("cap_21e8600c6f5a")).toBe(true);
-    expect(evaluatorSupportsReservedUid("cap_d1f91ea72bcc")).toBe(false);
+    for (const capsuleId of reAdmitted) {
+      expect(evaluatorSupportsReservedUid(capsuleId)).toBe(true);
+    }
+    for (const capsuleId of supersededHardCoders) {
+      expect(evaluatorSupportsReservedUid(capsuleId)).toBe(false);
+    }
     expect(evaluatorSupportsReservedUid("cap_future_unknown")).toBe(false);
   });
 });
