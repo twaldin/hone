@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   closeSync,
+  createReadStream,
   constants as fsConstants,
   fsyncSync,
   ftruncateSync,
@@ -12,7 +13,7 @@ import {
   realpathSync,
   writeSync,
 } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -364,6 +365,9 @@ const SCRATCH_SNAPSHOT_DIR = "scratch-snapshot";
 const SCRATCH_SNAPSHOT_FILE = "scratch.tar";
 /** Prefix shared by every unpublished snapshot output (per-attempt files, in-container pid temps, legacy shared temps) — swept, never published as-is. */
 export const SCRATCH_SNAPSHOT_TMP_PREFIX = "scratch.tar.tmp.";
+/** Content-addressed authority written durably before its matching archive is published. */
+export const SCRATCH_SNAPSHOT_DIGEST_PREFIX = "scratch.tar.sha256.";
+const SCRATCH_SNAPSHOT_AUTHORITY_FILE = "checksum-authority-v1";
 /**
  * Mints the collision-proof, unguessable (128-bit random) per-attempt output
  * basename for ONE snapshot attempt. Trusted HOST code generates it and
@@ -403,6 +407,163 @@ export const SCRATCH_SNAPSHOT_DEADLINE_SEC = 270;
 export function scratchSnapshotArchiveCapBytes(scratchQuotaBytes: number): number {
   return scratchQuotaBytes + SCRATCH_INODE_LIMIT * 2048 + 10240;
 }
+
+const MEBIBYTE = 1024 * 1024;
+const TAR_BLOCK_BYTES = 512;
+/** Fixed process/kernel headroom above the archive-backed restore working sets. */
+const SCRATCH_RESTORE_FIXED_HEADROOM_BYTES = 64 * MEBIBYTE;
+/**
+ * A real tmpfs probe charged about 5.1 KiB per tiny-file inode to the keeper
+ * cgroup. Round that measured cost up to 6 KiB so the restore envelope covers
+ * inode/dentry metadata as well as payload pages.
+ */
+const SCRATCH_RESTORE_BYTES_PER_ARCHIVE_ENTRY = 6 * 1024;
+
+/**
+ * Docker charges the bind-mounted archive page cache, restored tmpfs payload
+ * pages, and tmpfs inode/dentry metadata to the keeper cgroup. Reserve two
+ * archive-sized working sets, 6 KiB per real tar entry, and 64 MiB for tar,
+ * the shell, and kernel working memory, rounded up to Docker's MiB unit.
+ */
+export function scratchRestoreMemoryBytes(snapshotArchiveBytes: number, archiveEntries: number): number {
+  if (!Number.isSafeInteger(snapshotArchiveBytes) || snapshotArchiveBytes < 0) {
+    throw new BrokerError("INTERNAL", "scratch snapshot archive size must be a nonnegative safe integer");
+  }
+  if (!Number.isSafeInteger(archiveEntries) || archiveEntries < 0 || archiveEntries > SCRATCH_INODE_LIMIT) {
+    throw new BrokerError("INTERNAL", "scratch snapshot archive entry count is outside the trusted inode envelope");
+  }
+  const required =
+    snapshotArchiveBytes * 2
+    + archiveEntries * SCRATCH_RESTORE_BYTES_PER_ARCHIVE_ENTRY
+    + SCRATCH_RESTORE_FIXED_HEADROOM_BYTES;
+  if (!Number.isSafeInteger(required)) {
+    throw new BrokerError("INTERNAL", "scratch snapshot restore memory exceeds the safe integer range");
+  }
+  return Math.ceil(required / MEBIBYTE) * MEBIBYTE;
+}
+
+function tarNumericField(field: Buffer, label: string): number {
+  if ((field[0] ?? 0) & 0x80) {
+    if ((field[0] ?? 0) & 0x40) {
+      throw new BrokerError("INTERNAL", `scratch snapshot has a negative ${label}`);
+    }
+    let value = (field[0] ?? 0) & 0x3f;
+    for (let i = 1; i < field.length; i += 1) {
+      value = value * 256 + (field[i] ?? 0);
+      if (!Number.isSafeInteger(value)) {
+        throw new BrokerError("INTERNAL", `scratch snapshot ${label} exceeds the safe integer range`);
+      }
+    }
+    return value;
+  }
+  const text = field.toString("ascii").replace(/\0.*$/, "").trim();
+  if (text === "") return 0;
+  if (!/^[0-7]+$/.test(text)) {
+    throw new BrokerError("INTERNAL", `scratch snapshot has an invalid ${label}`);
+  }
+  const value = Number.parseInt(text, 8);
+  if (!Number.isSafeInteger(value)) {
+    throw new BrokerError("INTERNAL", `scratch snapshot ${label} exceeds the safe integer range`);
+  }
+  return value;
+}
+
+async function inspectScratchSnapshotArchive(
+  filePath: string,
+): Promise<{ archiveBytes: number; archiveEntries: number }> {
+  const file = await open(filePath, "r");
+  try {
+    const archiveBytes = (await file.stat()).size;
+    if (!Number.isSafeInteger(archiveBytes) || archiveBytes < 2 * TAR_BLOCK_BYTES) {
+      throw new BrokerError("INTERNAL", "scratch snapshot archive is truncated");
+    }
+    let offset = 0;
+    let archiveEntries = 0;
+    let zeroBlocks = 0;
+    while (offset < archiveBytes) {
+      const header = Buffer.allocUnsafe(TAR_BLOCK_BYTES);
+      let bytesRead = 0;
+      while (bytesRead < header.length) {
+        const read = await file.read(header, bytesRead, header.length - bytesRead, offset + bytesRead);
+        if (read.bytesRead === 0) {
+          throw new BrokerError("INTERNAL", "scratch snapshot archive is truncated");
+        }
+        bytesRead += read.bytesRead;
+      }
+      offset += TAR_BLOCK_BYTES;
+      if (header.every((byte) => byte === 0)) {
+        zeroBlocks += 1;
+        continue;
+      }
+      if (zeroBlocks >= 2) {
+        throw new BrokerError("INTERNAL", "scratch snapshot archive has nonzero data after its end marker");
+      }
+      if (zeroBlocks !== 0) {
+        throw new BrokerError("INTERNAL", "scratch snapshot archive has a partial end marker");
+      }
+
+      const storedChecksum = tarNumericField(header.subarray(148, 156), "header checksum");
+      let actualChecksum = 0;
+      for (let i = 0; i < header.length; i += 1) {
+        actualChecksum += i >= 148 && i < 156 ? 0x20 : (header[i] ?? 0);
+      }
+      if (storedChecksum !== actualChecksum) {
+        throw new BrokerError("INTERNAL", "scratch snapshot archive header checksum mismatch");
+      }
+
+      const type = String.fromCharCode(header[156] ?? 0);
+      if (!["x", "g", "L", "K"].includes(type)) {
+        archiveEntries += 1;
+        if (archiveEntries > SCRATCH_INODE_LIMIT) {
+          throw new BrokerError("INTERNAL", "scratch snapshot archive exceeds the trusted inode envelope");
+        }
+      }
+      const payloadBytes = tarNumericField(header.subarray(124, 136), "entry size");
+      const paddedPayloadBytes = Math.ceil(payloadBytes / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES;
+      if (!Number.isSafeInteger(paddedPayloadBytes) || offset + paddedPayloadBytes > archiveBytes) {
+        throw new BrokerError("INTERNAL", "scratch snapshot archive is truncated");
+      }
+      offset += paddedPayloadBytes;
+    }
+    if (zeroBlocks >= 2) return { archiveBytes, archiveEntries };
+    throw new BrokerError("INTERNAL", "scratch snapshot archive has no complete end marker");
+  } finally {
+    await file.close();
+  }
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+  return `sha256:${hash.digest("hex")}`;
+}
+
+/**
+ * GNU tar's positional `--no-recursion --exclude=.` pair skips only the `./`
+ * archive entry. That entry describes the source filesystem root, while the
+ * destination root is a separately provisioned Docker tmpfs mount; it is not
+ * scratch payload and its metadata is deliberately not replayed. Every inner
+ * path keeps normal GNU extraction semantics and is checked by `--compare`.
+ *
+ * BusyBox tar has different exclude semantics and no `--compare`, so it
+ * restores normally and makes a second streaming archive pass:
+ * `--to-command` hashes each archived regular-file payload against the
+ * corresponding restored path. The fresh volume cannot contain extras,
+ * extraction remains responsible for directories/links and their metadata,
+ * and any command/hash failure makes tar fail closed.
+ */
+export const SCRATCH_RESTORE_SCRIPT =
+  "set -eu; " +
+  "if tar --version 2>/dev/null | grep -q \"GNU tar\"; then " +
+  "tar -x --no-recursion --exclude=. -f /snapshot/scratch.tar -C /scratch; " +
+  "tar -d --no-recursion --exclude=. -f /snapshot/scratch.tar -C /scratch; " +
+  "else " +
+  "tar -xf /snapshot/scratch.tar -C /scratch; " +
+  "tar -x -f /snapshot/scratch.tar --to-command " +
+  "'set -eu; expected=$(sha256sum); actual=$(sha256sum \"/scratch/${TAR_FILENAME#./}\"); " +
+  "[ \"${actual%% *}\" = \"${expected%% *}\" ] || { echo \"scratch content differs: $TAR_FILENAME\" >&2; exit 1; }' " +
+  ">/dev/null; " +
+  "fi";
 
 /**
  * Runs inside the scratch keeper (`docker exec -u root <keeper> /bin/sh -c`).
@@ -454,15 +615,49 @@ export const SCRATCH_SNAPSHOT_SCRIPT =
   "kill \"$watchpid\" 2>/dev/null || true; wait \"$watchpid\" 2>/dev/null || true; " +
   "[ \"$rc\" -eq 0 ] || { echo \"scratch snapshot failed or exceeded its byte cap: rc=$rc\" >&2; exit 1; }";
 
+const SCRATCH_SNAPSHOT_AUTHORITY_CONTENT = "scratch-snapshot-checksum-authority-v1\n";
+
+async function writeChecksumAuthorityFile(filePath: string, content: string): Promise<void> {
+  try {
+    await writeFile(filePath, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if ((await readFile(filePath, "utf8")) !== content) {
+      throw new BrokerError("INTERNAL", `scratch snapshot checksum authority is corrupt: ${path.basename(filePath)}`);
+    }
+  }
+  await durability.syncFile(filePath);
+}
+
+async function publishScratchChecksumAuthority(snapshotDir: string, digest: string): Promise<string> {
+  const markerName = `${SCRATCH_SNAPSHOT_DIGEST_PREFIX}${digest.slice("sha256:".length)}`;
+  await writeChecksumAuthorityFile(path.join(snapshotDir, markerName), `${digest}\n`);
+  await writeChecksumAuthorityFile(
+    path.join(snapshotDir, SCRATCH_SNAPSHOT_AUTHORITY_FILE),
+    SCRATCH_SNAPSHOT_AUTHORITY_CONTENT,
+  );
+  await durability.syncDir(snapshotDir);
+  return markerName;
+}
+
+async function removeObsoleteScratchChecksumMarkers(snapshotDir: string, currentMarker: string): Promise<void> {
+  let removed = false;
+  for (const entry of await readdir(snapshotDir)) {
+    if (entry.startsWith(SCRATCH_SNAPSHOT_DIGEST_PREFIX) && entry !== currentMarker) {
+      await rm(path.join(snapshotDir, entry), { force: true });
+      removed = true;
+    }
+  }
+  if (removed) await durability.syncDir(snapshotDir);
+}
+
 /**
- * Publishes ONE attempt's completed snapshot durably and atomically on the
- * HOST: fsync(<per-attempt temp>) → rename over scratch.tar → fsync(parent
- * dir). BusyBox images may lack `sync -f`, so power-loss ordering lives in
- * trusted host code, never in the container. A crash at any point leaves
- * either the previous snapshot or the new one — never a torn scratch.tar.
- * Only the caller's own per-attempt output (newScratchSnapshotAttemptName)
- * may be published: a leftover written late by any OTHER attempt's orphan
- * can never satisfy this one.
+ * Publishes one completed attempt plus a content-addressed checksum authority.
+ * The marker and version sentinel are fsynced before scratch.tar is renamed,
+ * so any durable new archive always has a durable matching checksum. After
+ * publication, obsolete markers are removed; stable state contains exactly
+ * one marker and deletion of that marker cannot downgrade to legacy mode
+ * while the separately durable sentinel remains.
  */
 export async function finalizeScratchSnapshot(snapshotDir: string, attemptName: string): Promise<void> {
   if (path.basename(attemptName) !== attemptName || !attemptName.startsWith(SCRATCH_SNAPSHOT_TMP_PREFIX)) {
@@ -470,8 +665,11 @@ export async function finalizeScratchSnapshot(snapshotDir: string, attemptName: 
   }
   const tmp = path.join(snapshotDir, attemptName);
   await durability.syncFile(tmp);
+  const digest = await sha256File(tmp);
+  const markerName = await publishScratchChecksumAuthority(snapshotDir, digest);
   await durability.rename(tmp, path.join(snapshotDir, SCRATCH_SNAPSHOT_FILE));
   await durability.syncDir(snapshotDir);
+  await removeObsoleteScratchChecksumMarkers(snapshotDir, markerName);
 }
 
 type CreateSandboxP = z.infer<typeof CreateSandboxParams>;
@@ -2419,6 +2617,16 @@ export class Broker {
    * single exec fill the host disk. Fail closed — init aborts.
    */
   private async provisionScratchVolume(): Promise<void> {
+    let restoreArchive = { archiveBytes: 0, archiveEntries: 0 };
+    try {
+      restoreArchive = await inspectScratchSnapshotArchive(this.scratchSnapshotPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const keeperMemoryBytes = scratchRestoreMemoryBytes(
+      restoreArchive.archiveBytes,
+      restoreArchive.archiveEntries,
+    );
     const name = `hone-scratch-${this.safeRunId}`;
     // The daemon may create either resource but lose/timeout the CLI response.
     // Register deterministic names first so init unwind always reaps them.
@@ -2465,8 +2673,8 @@ export class Broker {
         "-e", `HONE_SCRATCH_SNAPSHOT_MAX_BYTES=${scratchSnapshotArchiveCapBytes(this.scratchQuotaBytes)}`,
         "-e", `HONE_SCRATCH_SNAPSHOT_DEADLINE_SEC=${SCRATCH_SNAPSHOT_DEADLINE_SEC}`,
         "--pids-limit", "16",
-        "--memory", "32m",
-        "--memory-swap", "32m",
+        "--memory", String(keeperMemoryBytes),
+        "--memory-swap", String(keeperMemoryBytes),
         "--cpus", "0.1",
         "--log-driver", "none",
         "-v", `${name}:/scratch`,
@@ -2488,13 +2696,54 @@ export class Broker {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
+    const expectedArchiveHash = await sha256File(this.scratchSnapshotPath);
+    const markerName = `${SCRATCH_SNAPSHOT_DIGEST_PREFIX}${expectedArchiveHash.slice("sha256:".length)}`;
+    const entries = await readdir(this.scratchSnapshotDir);
+    const markerNames = entries.filter((entry) => entry.startsWith(SCRATCH_SNAPSHOT_DIGEST_PREFIX));
+    if (markerNames.some((entry) => !/^scratch\.tar\.sha256\.[0-9a-f]{64}$/.test(entry))) {
+      throw new BrokerError("INTERNAL", "scratch snapshot checksum marker set is malformed");
+    }
+    let checksumAuthorityRequired = false;
+    try {
+      const authority = await readFile(path.join(this.scratchSnapshotDir, SCRATCH_SNAPSHOT_AUTHORITY_FILE), "utf8");
+      if (authority !== SCRATCH_SNAPSHOT_AUTHORITY_CONTENT) {
+        throw new BrokerError("INTERNAL", "scratch snapshot checksum authority sentinel is corrupt");
+      }
+      checksumAuthorityRequired = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (checksumAuthorityRequired || markerNames.length > 0) {
+      if (!markerNames.includes(markerName)) {
+        throw new BrokerError(
+          "INTERNAL",
+          `scratch snapshot checksum mismatch: ${expectedArchiveHash} has no published checksum authority`,
+        );
+      }
+      const marker = await readFile(path.join(this.scratchSnapshotDir, markerName), "utf8");
+      if (marker !== `${expectedArchiveHash}\n`) {
+        throw new BrokerError("INTERNAL", `scratch snapshot checksum marker is corrupt: ${markerName}`);
+      }
+    }
     const restored = await this.run(
-      ["docker", "exec", "-i", "-u", "root", this.scratchKeeperName, "/bin/tar", "-x", "-C", "/scratch"],
-      { stdinFile: this.scratchSnapshotPath, timeoutMs: 300_000 },
+      [
+        "docker", "exec", "-u", "root",
+        this.scratchKeeperName, "/bin/sh", "-c", SCRATCH_RESTORE_SCRIPT,
+      ],
+      { timeoutMs: 300_000 },
     );
     if (restored.exitCode !== 0 || restored.timedOut) {
-      throw new BrokerError("INTERNAL", `scratch snapshot restore failed: ${stderrText(restored)}`);
+      throw new BrokerError("INTERNAL", `scratch snapshot restore or content verification failed: ${stderrText(restored)}`);
     }
+    const actualArchiveHash = await sha256File(this.scratchSnapshotPath);
+    if (actualArchiveHash !== expectedArchiveHash) {
+      throw new BrokerError(
+        "INTERNAL",
+        `scratch snapshot checksum changed during restore: expected ${expectedArchiveHash}, got ${actualArchiveHash}`,
+      );
+    }
+    const publishedMarker = await publishScratchChecksumAuthority(this.scratchSnapshotDir, expectedArchiveHash);
+    await removeObsoleteScratchChecksumMarkers(this.scratchSnapshotDir, publishedMarker);
   }
 
   private async snapshotScratchVolume(): Promise<void> {

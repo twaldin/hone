@@ -985,7 +985,7 @@ describe("run-scoped derived cache recovery", () => {
     ];
     const snapshotDir = path.join(shared.runDir, "scratch-snapshot");
     await mkdir(snapshotDir, { recursive: true });
-    await writeFile(path.join(snapshotDir, "scratch.tar"), "durable");
+    await writeFile(path.join(snapshotDir, "scratch.tar"), baselineTar);
     await writeFile(path.join(snapshotDir, "scratch.tar.tmp.dead"), "stranded");
     for (const dir of stale) {
       await mkdir(dir, { recursive: true });
