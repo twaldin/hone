@@ -257,7 +257,7 @@ describe("host evaluator gate", () => {
       "cap_c0dd82eba84a",
       "cap_6562f788bdd5",
       "cap_93f9f6942024",
-      "cap_0615d8ca4fae",
+      "cap_21b5bcaacf49",
       "cap_5565a76628a9",
     ];
     const supersededHardCoders = [
@@ -269,6 +269,7 @@ describe("host evaluator gate", () => {
       "cap_013a75d40601",
       "cap_d1f91ea72bcc",
       "cap_196e21c76955",
+      "cap_0615d8ca4fae",
       "cap_89dd92024e20",
     ];
     expect(evaluatorSupportsReservedUid("cap_21e8600c6f5a")).toBe(true);

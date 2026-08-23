@@ -39,7 +39,7 @@ const RESERVED_UID_CAPSULES = new Set<string>([
   "cap_c0dd82eba84a", // quickjs-interpreter
   "cap_6562f788bdd5", // duckdb-tpch
   "cap_93f9f6942024", // biome-parser-formatter
-  "cap_0615d8ca4fae", // uv-resolver
+  "cap_21b5bcaacf49", // uv-resolver
   "cap_5565a76628a9", // simdutf-validate
 ]);
 
