@@ -77,7 +77,7 @@ main().catch((error: unknown) => {
 });
 `;
 
-const DEGRADED_RESTART_BEFORE = "const restart = incumbent !== null && rand(episode) < epsilonRestart;";
+const DEGRADED_RESTART_BEFORE = "const restart = !resuming && incumbent !== null && rand(episode) < epsilonRestart;";
 const DEGRADED_RESTART_AFTER = "const restart = true; // pre-registered degraded control: discard incumbent history";
 const DEGRADED_REPAIR_BEFORE = "export const oneRepair = true;";
 const DEGRADED_REPAIR_AFTER = "export const oneRepair = false; // pre-registered degraded control: never consume failure feedback";
