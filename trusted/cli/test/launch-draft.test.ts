@@ -24,6 +24,7 @@ import {
 } from "@hone/schema";
 import { selectSaturationCeiling, type SaturationCeilingReport, type SaturationCell } from "@hone/scoring";
 import { describe, expect, it } from "vitest";
+import { assertM2OuterAncestorCapacity } from "../src/commands/hone.js";
 import { corpusProvenanceInputsDigest, type CorpusProvenanceV1 } from "../src/corpus-provenance.js";
 import {
   DRAFT_WITHOUT_CALIBRATION_FLAG,
@@ -407,6 +408,19 @@ describe("generateM2LaunchDraft", () => {
         + config.recursiveBudgets.terminal.budget[dimension],
       );
     }
+    const ancestorCapacity = assertM2OuterAncestorCapacity(config);
+    expect(ancestorCapacity.plannedChildren).toEqual({
+      search: 12 * config.developmentPanel.members.length,
+      confirmation: 4 * config.train.length * 3,
+      terminal: 3 * config.holdout.length * 3,
+      total:
+        12 * config.developmentPanel.members.length
+        + 4 * config.train.length * 3
+        + 3 * config.holdout.length * 3,
+    });
+    expect(ancestorCapacity.ancestorEnvelope).toEqual(config.budgets.campaign);
+    expect(ancestorCapacity.directOuterBudget).toEqual(config.budgets.outer);
+    expect(ancestorCapacity.requiredEnvelope).toEqual(config.budgets.campaign);
     const envelopeIds = [
       search.identity.envelopeId,
       config.recursiveBudgets.confirmation.identity.envelopeId,

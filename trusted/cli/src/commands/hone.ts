@@ -1101,6 +1101,87 @@ const SCHEDULED_BUDGET_DIMENSIONS = [
   "maxEvaluatorInvocations",
 ] as const;
 
+export interface M2OuterAncestorCapacity {
+  readonly ancestorEnvelope: BudgetEnvelope;
+  readonly directOuterBudget: BudgetEnvelope;
+  readonly childReservation: BudgetEnvelope;
+  readonly plannedChildren: {
+    readonly search: number;
+    readonly confirmation: number;
+    readonly terminal: number;
+    readonly total: number;
+  };
+  readonly plannedChildReservations: BudgetEnvelope;
+  readonly requiredEnvelope: BudgetEnvelope;
+}
+
+function addBudgetEnvelopes(envelopes: readonly BudgetEnvelope[]): BudgetEnvelope {
+  return BudgetEnvelopeSchema.parse({
+    maxTokens: envelopes.reduce((sum, envelope) => sum + envelope.maxTokens, 0),
+    maxUsd: envelopes.reduce((sum, envelope) => sum + envelope.maxUsd, 0),
+    maxWallClockSec: envelopes.reduce((sum, envelope) => sum + envelope.maxWallClockSec, 0),
+    maxEvaluatorInvocations: envelopes.reduce((sum, envelope) => sum + envelope.maxEvaluatorInvocations, 0),
+  });
+}
+
+/**
+ * Freeze/launch gate for the real M2 recursive resource tree.
+ *
+ * The outer optimizer keeps its direct `budgets.outer` cap. The root recursive
+ * ledger separately owns `budgets.campaign`, which must admit every planned
+ * child reservation plus that direct outer allowance.
+ */
+export function assertM2OuterAncestorCapacity(
+  config: RecursiveMetaCampaignConfig,
+): M2OuterAncestorCapacity {
+  const searchChildren = config.counts.candidates * config.developmentPanel.members.length;
+  const confirmationChildren =
+    (config.generation.stage === "A" ? 4 : 5) *
+    config.train.length *
+    config.counts.confirmationReplicates;
+  const terminalChildren = 3 * config.holdout.length * config.counts.holdoutReplicates;
+  const plannedChildren = {
+    search: searchChildren,
+    confirmation: confirmationChildren,
+    terminal: terminalChildren,
+    total: searchChildren + confirmationChildren + terminalChildren,
+  };
+  const plannedChildReservations = addBudgetEnvelopes([
+    config.recursiveBudgets.search.outerTrajectory,
+    config.recursiveBudgets.confirmation.budget,
+    config.recursiveBudgets.terminal.budget,
+  ]);
+  const requiredEnvelope = addBudgetEnvelopes([
+    config.budgets.outer,
+    plannedChildReservations,
+  ]);
+  const ancestorEnvelope = config.budgets.campaign;
+  for (const dimension of SCHEDULED_BUDGET_DIMENSIONS) {
+    if (requiredEnvelope[dimension] > ancestorEnvelope[dimension]) {
+      throw new UsageError(
+        `frozen outer ancestor ${dimension} ${ancestorEnvelope[dimension]} cannot admit the full planned recursive sequence ${requiredEnvelope[dimension]}`,
+      );
+    }
+  }
+  config.developmentPanel.members.forEach((member) => {
+    for (const dimension of SCHEDULED_BUDGET_DIMENSIONS) {
+      if (member.calibratedInnerCeiling[dimension] > ancestorEnvelope[dimension]) {
+        throw new UsageError(
+          `first real child reservation ${member.taskId} ${dimension} ${member.calibratedInnerCeiling[dimension]} exceeds frozen outer ancestor ${ancestorEnvelope[dimension]}`,
+        );
+      }
+    }
+  });
+  return {
+    ancestorEnvelope,
+    directOuterBudget: config.budgets.outer,
+    childReservation: config.budgets.child,
+    plannedChildren,
+    plannedChildReservations,
+    requiredEnvelope,
+  };
+}
+
 /**
  * Per-spawn M2 bridge. Search allocation is admitted and measured one child
  * at a time; panel completeness is derived later from the durable trajectory.
@@ -1351,6 +1432,7 @@ export class RecursiveSearchChildLauncher {
       ledger,
       ...(depth === 0
         ? {
+            resourceEnvelope: assertM2OuterAncestorCapacity(this.config).ancestorEnvelope,
             evaluationTask: {
               depth,
               innerEpisodesMax: this.config.counts.innerEpisodesMax,
@@ -2673,6 +2755,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       brokenControl: controls.broken,
       degradedControl: controls.degraded,
     });
+    const outerAncestorCapacity = assertM2OuterAncestorCapacity(frozen);
     if (outFlag === undefined) throw new UsageError(RECURSIVE_USAGE);
     const outputPath = writeFrozenCampaign(io.root, outFlag, frozen);
     io.out(canonicalJson({
@@ -2683,6 +2766,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       target: frozen.seedOptimizer,
       controller: frozen.controllerOptimizer,
       controls: frozen.controls,
+      outerAncestorCapacity,
     }));
     return 0;
   }
@@ -2690,6 +2774,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   if (config.trustedRuntime.sourceCommit !== commit || config.trustedRuntime.digest !== runtimeDigest) {
     throw new UsageError("recursive campaign trusted runtime identity drift");
   }
+  assertM2OuterAncestorCapacity(config);
   const comparisonImage = recursiveOptimizerImage(config);
   const target = await resolveRegisteredOptimizer(config.seedOptimizer, commit, rootSnapshot, casDir, comparisonImage);
   const controller = await resolveRegisteredOptimizer(config.controllerOptimizer, commit, rootSnapshot, casDir, comparisonImage);

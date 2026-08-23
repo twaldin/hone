@@ -40,7 +40,7 @@ import type {
   MetaWorkIdentity,
   Sha256Digest,
 } from "@hone/meta";
-import { RecursiveSearchChildLauncher } from "../src/commands/hone.js";
+import { RecursiveSearchChildLauncher, assertM2OuterAncestorCapacity } from "../src/commands/hone.js";
 import type { CliChildSupervisor } from "../src/commands/hone.js";
 import { metaWorkKey } from "../src/meta-journal.js";
 import type { MetaJournalV1 } from "../src/meta-journal.js";
@@ -134,6 +134,8 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       );
     }
     const campaignConfig = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+    const outerAncestorCapacity = assertM2OuterAncestorCapacity(campaignConfig);
+    expect(outerAncestorCapacity.requiredEnvelope).toEqual(campaignConfig.budgets.campaign);
     const executedSourceCommit = execFileSync("git", ["-C", repoRoot, "rev-parse", "--verify", "HEAD^{commit}"], {
       encoding: "utf8",
     }).trim();
@@ -272,6 +274,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       recursive: {
         depth: 0,
         ancestors: [],
+        resourceEnvelope: outerAncestorCapacity.ancestorEnvelope,
         ledger,
         evaluationTask: {
           depth: 0,
@@ -438,6 +441,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         selectedCapsuleId: selectedAuthority.capsuleId,
         routing: campaignConfig.routing,
         campaignBudget: campaignConfig.budgets.campaign,
+        outerAncestorCapacity,
       },
       fixtureSubstitutions: [
         "The six-member configured development panel is reduced to its authorized OSS-T05 member for a bounded zero-model smoke; the production allocation validation, recursive spawn, settlement lookup, and panel arithmetic still run.",

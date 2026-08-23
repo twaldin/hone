@@ -16,6 +16,7 @@ import { chmod, lstat, mkdir, open, readdir, rm, stat, writeFile } from "node:fs
 import path from "node:path";
 import { z } from "zod";
 import {
+  BudgetEnvelope,
   BudgetState,
   canonicalJson,
   CapsuleManifest,
@@ -132,6 +133,11 @@ export interface BrokerRecursiveConfig {
   ancestors: readonly string[];
   /** Shared authority instance for the entire recursive run tree. */
   ledger: RecursiveResourceLedger;
+  /**
+   * Aggregate ancestor authority for this run and every recursive descendant.
+   * The direct broker budget remains the capsule/run-config envelope.
+   */
+  resourceEnvelope?: z.infer<typeof BudgetEnvelope> | undefined;
   /** Development-only task description exposed to the mutable optimizer. */
   evaluationTask?: z.infer<typeof RecursiveTask> | undefined;
   /** Frozen trusted membership/provenance gate, evaluated before any reservation is written. */
@@ -1235,9 +1241,24 @@ export class Broker {
           "recursive search requires a trusted evaluation strategy; refusing the synthetic capsule evaluator",
         );
       }
+      const resourceEnvelope = config.recursive.resourceEnvelope === undefined
+        ? undefined
+        : BudgetEnvelope.parse(config.recursive.resourceEnvelope);
+      if (
+        resourceEnvelope !== undefined
+        && (
+          this.manifest.budget.maxTokens > resourceEnvelope.maxTokens
+          || this.manifest.budget.maxUsd > resourceEnvelope.maxUsd
+          || this.manifest.budget.maxWallClockSec > resourceEnvelope.maxWallClockSec
+          || this.manifest.budget.maxEvaluatorInvocations > resourceEnvelope.maxEvaluatorInvocations
+        )
+      ) {
+        throw new BrokerError("INTERNAL", "recursive resource envelope cannot be smaller than the direct broker budget");
+      }
       this.recursive = {
         ...config.recursive,
         ...(evaluationTask === undefined ? {} : { evaluationTask }),
+        ...(resourceEnvelope === undefined ? {} : { resourceEnvelope }),
       };
     }
     if (this.recursive !== undefined) {
@@ -1245,7 +1266,7 @@ export class Broker {
         config.runId,
         this.recursive.depth,
         this.recursive.ancestors,
-        this.manifest.budget,
+        this.recursive.resourceEnvelope ?? this.manifest.budget,
       );
     }
 
@@ -2216,7 +2237,7 @@ export class Broker {
   private budgetStateNow(tokensDelta = 0, usdDelta = 0, evaluatorInvocationDelta = 0): BudgetState {
     const nowMs = this.now();
     const envelope = this.manifest.budget;
-    if (this.recursive === undefined) {
+    if (this.recursive === undefined || this.recursive.resourceEnvelope !== undefined) {
       return BudgetState.parse({
         envelope,
         spent: {
