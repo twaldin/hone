@@ -237,6 +237,7 @@ describe("recursive ancestor resource authority", () => {
     const launcher: ChildRunLauncher = async ({ request, admission }) => ({
       ...(await writeChildEvidence(request, admission, "larger-than-direct")),
       usage,
+      finalizeSettlement: () => {},
     });
     const broker = makeBroker({
       runId: "larger-child-root",
@@ -420,7 +421,7 @@ describe("recursive spawnRun authority", () => {
         status: "completed",
       };
       await writeFile(evidence.terminalEventPath, `${JSON.stringify(terminalOnly)}\n`);
-      return { ...evidence, usage };
+      return { ...evidence, usage, finalizeSettlement: () => {} };
     };
     const broker = makeBroker({
       runId: "root",
@@ -472,6 +473,7 @@ describe("recursive spawnRun authority", () => {
       return {
         ...evidence,
         usage: { tokens: 1, usd: 1, wallClockSec: 1, evaluatorInvocations: 1 },
+        finalizeSettlement: () => {},
       };
     };
     const broker = makeBroker({
@@ -492,7 +494,62 @@ describe("recursive spawnRun authority", () => {
       remaining: { maxTokens: 170, maxUsd: 170, maxWallClockSec: 170, maxEvaluatorInvocations: 170 },
     });
   });
+  it("refuses optimizer digest skew before committing any trusted settlement", async () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "optimizer-skew-ledger.ndjson"));
+    ledgers.push(ledger);
+    const reservation = { ...LARGE, maxTokens: 30, maxUsd: 30, maxWallClockSec: 30, maxEvaluatorInvocations: 30 };
+    const request = childRequest("optimizer-skew-child", 1, reservation, "capsule");
+    const finalizeSettlement = vi.fn();
+    const launcher: ChildRunLauncher = async ({ request: launchedRequest, admission }) => {
+      const evidence = await writeChildEvidence(launchedRequest, admission, "optimizer-skew");
+      const events: RunEvent[] = [
+        {
+          runId: launchedRequest.child.runId,
+          at: "1970-01-01T00:00:00.000Z",
+          type: "run.started",
+          capsuleId: launchedRequest.child.capsuleId,
+          contractHash: admission.campaignConfigHash,
+          optimizerDigest: CONFIG_HASH,
+          checkpointVersion: 1,
+          campaignConfigHash: admission.campaignConfigHash,
+        },
+        {
+          runId: launchedRequest.child.runId,
+          at: "1970-01-01T00:00:01.000Z",
+          type: "run.finished",
+          status: "completed",
+        },
+      ];
+      await writeFile(evidence.terminalEventPath, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+      return {
+        ...evidence,
+        usage: { tokens: 1, usd: 1, wallClockSec: 1, evaluatorInvocations: 1 },
+        finalizeSettlement,
+      };
+    };
+    const broker = makeBroker({
+      runId: "optimizer-skew-root",
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: launcher,
+      },
+    });
+
+    await expect(broker.spawnRun(request, CLIENT)).rejects.toThrow(
+      `child ${request.child.runId} event stream is not bound to its launch receipt`,
+    );
+    expect(finalizeSettlement).not.toHaveBeenCalled();
+    expect(ledger.budgetState("optimizer-skew-root")).toMatchObject({
+      reservations: 1,
+      openReservations: 1,
+    });
+  });
   it("refuses spawnRun at depth 2 before invoking the trusted launcher", async () => {
+
     const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "depth-ledger.ndjson"));
     ledgers.push(ledger);
     ledger.registerRun("root", 0, [], LARGE);
@@ -620,7 +677,11 @@ describe("recursive spawnRun authority", () => {
     const replayFlags: boolean[] = [];
     const secondLauncher: ChildRunLauncher = async ({ replay, request: launchedRequest, admission }) => {
       replayFlags.push(replay);
-      return { ...(await writeChildEvidence(launchedRequest, admission, "durable-child")), usage };
+      return {
+        ...(await writeChildEvidence(launchedRequest, admission, "durable-child")),
+        usage,
+        finalizeSettlement: () => {},
+      };
     };
     const second = makeBroker({
       runId: "root",
@@ -665,7 +726,11 @@ describe("recursive spawnRun authority", () => {
     const launcher: ChildRunLauncher = async ({ request: launchedRequest, admission }) => {
       announceStarted?.();
       await gate;
-      return { ...(await writeChildEvidence(launchedRequest, admission, "settling-child")), usage };
+      return {
+        ...(await writeChildEvidence(launchedRequest, admission, "settling-child")),
+        usage,
+        finalizeSettlement: () => {},
+      };
     };
     const broker = makeBroker({
       runId: "root",

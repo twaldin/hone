@@ -114,6 +114,11 @@ export interface ChildRunLaunchOutcome {
   terminalEventPath: string;
   /** Trusted direct usage for this run; descendant usage is already charged to every ancestor by its own settlement. */
   usage: z.infer<typeof ResourceUsage>;
+  /**
+   * Commits trusted campaign-side settlement facts. The broker invokes this
+   * only after the launch receipt and terminal stream bind successfully.
+   */
+  finalizeSettlement: () => void;
 }
 
 export interface TrustedChildAdmissionInput {
@@ -4617,6 +4622,7 @@ export class Broker {
       admission,
       launchReceipt.receiptDigest,
     );
+    outcome.finalizeSettlement();
     recursive.ledger.syncRunUsage(request.child.runId, outcome.usage);
     return recursive.ledger.settleChild(request.child.runId, outcome.usage, terminal);
   }

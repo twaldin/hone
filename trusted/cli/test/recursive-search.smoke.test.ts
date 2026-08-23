@@ -176,14 +176,15 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       queryTrainMeasurements: () => [...rows],
       queryFailureSettlements: () => [],
     } as unknown as MetaJournalV1;
-    const gate: MetaCandidateGate = {
-      check: async (request) => ({
-        ok: true,
+    const gate = {
+      check: async (request: Parameters<MetaCandidateGate["check"]>[0]) => ({
+        ok: true as const,
         sourceArtifact: request.sourceArtifact,
         bundleDigest: BUNDLE,
         transformationReceiptHash: null,
         feedback: "smoke candidate accepted by trusted fixture gate",
       }),
+      bundleDigestForImage: () => BUNDLE,
     };
     const adapterConfig = {
       ...campaignConfig,
@@ -326,17 +327,18 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
             throw new Error("inner evaluator did not produce one valid finite score");
           }
           const identity = workIdentity(request);
-          rows.push({
+          const measurement = {
             ...identity,
             workKey: metaWorkKey(configHash, identity),
             qNormalized: qRaw,
             observed: { tokens: 0, usd: 0, wallClockSec: record.durationMs / 1000, evaluatorInvocations: 1 },
-          } as unknown as MetaMeasurement);
+          } as unknown as MetaMeasurement;
           const evidence = childEvidence(smokeRoot, request, admitted);
           childTerminalEventPath = evidence.terminalEventPath;
           return {
             ...evidence,
             usage: { tokens: 0, usd: 0, wallClockSec: record.durationMs / 1000, evaluatorInvocations: 1 },
+            finalizeSettlement: () => rows.push(measurement),
           };
         },
       },
