@@ -648,11 +648,24 @@ interface CandidateGateOptions {
   readonly controls: readonly RegisteredControl[];
 }
 
-class CliCandidateGate implements MetaCandidateGate {
+/** Seal accepted candidate bytes against the image that will actually boot them. */
+export function imageBoundCandidateBundleDigest(
+  snapshot: OptimizerSnapshot,
+  image: string,
+): Sha256Digest {
+  return snapshotDigest(image, snapshot) as Sha256Digest;
+}
+
+interface RecursiveCandidateGate extends MetaCandidateGate {
+  bundleDigestForImage(sourceArtifact: Sha256Digest, image: string): Sha256Digest;
+}
+
+class CliCandidateGate implements RecursiveCandidateGate {
   private readonly baseDigest: Sha256Digest;
   private readonly controls = new Map<Sha256Digest, RegisteredControl>();
   private readonly receipts = new Map<Sha256Digest, CandidateConformanceReceipt>();
   private readonly bundleOwners = new Map<Sha256Digest, Sha256Digest>();
+  private readonly resolvedCandidateSnapshots = new Map<Sha256Digest, OptimizerSnapshot>();
   private readonly inFlight = new Map<Sha256Digest, Promise<CandidateGateResult>>();
 
   constructor(private readonly opts: CandidateGateOptions) {
@@ -689,6 +702,19 @@ class CliCandidateGate implements MetaCandidateGate {
     } finally {
       if (this.inFlight.get(request.sourceArtifact) === pending) this.inFlight.delete(request.sourceArtifact);
     }
+  }
+
+  /**
+   * Conformance runs once on the comparison image, while snapshot identity
+   * deliberately includes the target image. Child receipts must therefore
+   * seal this image-bound digest, not the comparison-image digest.
+   */
+  bundleDigestForImage(sourceArtifact: Sha256Digest, image: string): Sha256Digest {
+    const snapshot = this.resolvedCandidateSnapshots.get(sourceArtifact);
+    if (snapshot === undefined) {
+      throw new UsageError(`candidate ${sourceArtifact} has no accepted conformance result`);
+    }
+    return imageBoundCandidateBundleDigest(snapshot, image);
   }
 
   private async checkOnce(request: MetaCandidateGateRequest): Promise<CandidateGateResult> {
@@ -735,6 +761,7 @@ class CliCandidateGate implements MetaCandidateGate {
       return { ok: false, feedback: bounded(`candidate conformance failed: ${error instanceof Error ? error.message : String(error)}`) };
     }
     this.bundleOwners.set(bundleDigest, request.sourceArtifact);
+    this.resolvedCandidateSnapshots.set(request.sourceArtifact, selected.snapshot);
     const changedCount = changedOptimizerPaths(this.opts.baseSnapshot, selected.snapshot).length;
     return {
       ok: true,
@@ -1197,7 +1224,7 @@ export class RecursiveSearchChildLauncher {
     private readonly config: RecursiveMetaCampaignConfig,
     private readonly configHash: Sha256Digest,
     private readonly journal: MetaJournalV1,
-    private readonly gate: MetaCandidateGate,
+    private readonly gate: RecursiveCandidateGate,
     private readonly childSupervisor: CliChildSupervisor,
     private readonly envelopeLedger: MetaResourceEnvelopeLedger,
     private readonly campaignPauseAuthority: CampaignPauseAuthority,
@@ -1315,11 +1342,14 @@ export class RecursiveSearchChildLauncher {
       const failures: string[] = [];
       let costUsd = 0;
       for (const allocation of plan.allocations) {
+        const member = members.get(allocation.capsuleId);
+        if (member === undefined) throw new Error(`recursive allocation lost panel capsule ${allocation.capsuleId}`);
+        const runtimeBundleDigest = this.gate.bundleDigestForImage(sourceArtifact, member.capsule.image);
         const identity: MetaWorkIdentity = {
           phase: "search",
           arm: "candidate",
           sourceArtifact,
-          bundleDigest: checked.bundleDigest,
+          bundleDigest: runtimeBundleDigest,
           capsuleId: allocation.capsuleId,
           replicate: 0,
           measurementEpoch: `m2:${sha256(canonicalJson({
@@ -1335,7 +1365,7 @@ export class RecursiveSearchChildLauncher {
             runId,
             capsuleId: allocation.capsuleId,
             sourceArtifact: { hash: sourceArtifact },
-            optimizerArtifact: { hash: checked.bundleDigest },
+            optimizerArtifact: { hash: runtimeBundleDigest },
             purpose: "capsule",
             schedule: {
               candidateOrdinal,
@@ -1487,12 +1517,19 @@ export class RecursiveSearchChildLauncher {
     }
     const identity = this.scheduledIdentity(request);
     if (identity === null) throw new Error("recursive search child has no valid schedule identity");
+    const capsule = this.config.developmentPanel.members.find(
+      (member) => member.capsule.capsuleId === request.child.capsuleId,
+    )?.capsule;
+    if (capsule === undefined) throw new Error("recursive launch capsule left the frozen panel");
     const gate = await this.gate.check({
       mode: "public-mutable",
       sourceArtifact: identity.sourceArtifact,
     });
-    if (!gate.ok || gate.bundleDigest !== identity.bundleDigest) {
+    if (!gate.ok) {
       throw new Error(`recursive child optimizer conformance refused: ${gate.feedback}`);
+    }
+    if (this.gate.bundleDigestForImage(identity.sourceArtifact, capsule.image) !== identity.bundleDigest) {
+      throw new Error("recursive child optimizer conformance does not match its image-bound launch digest");
     }
 
     const envelopeRequest: MetaChildEnvelopeRequest = {
@@ -1538,10 +1575,6 @@ export class RecursiveSearchChildLauncher {
       chmodSync(receiptPath, 0o600);
     }
 
-    const capsule = this.config.developmentPanel.members.find(
-      (member) => member.capsule.capsuleId === request.child.capsuleId,
-    )?.capsule;
-    if (capsule === undefined) throw new Error("recursive launch capsule left the frozen panel");
     const outcome = await this.childSupervisor.runLaunched({
       identity,
       reservation,
@@ -1586,8 +1619,10 @@ export class RecursiveSearchChildLauncher {
         launchReceiptPath: receiptPath,
         terminalEventPath,
         usage: { ...outcome.spend },
+        finalizeSettlement: () => {},
       };
     }
+    let finalizeMetaSettlement: () => void;
     if (outcome.status === "completed" && outcome.finalEvaluation !== null) {
       const finalEvaluation = EvaluationRecord.parse(outcome.finalEvaluation);
       const objectives = Object.values(finalEvaluation.output.objectives);
@@ -1602,33 +1637,43 @@ export class RecursiveSearchChildLauncher {
       ) {
         throw new Error("recursive child final evaluation is not a finite scalar");
       }
-      if (outcome.responseModel === null || outcome.modelDriftSentinel === null) {
+      const responseModel = outcome.responseModel;
+      const modelDriftSentinel = outcome.modelDriftSentinel;
+      if (responseModel === null || modelDriftSentinel === null) {
         throw new Error("recursive child completion has no authenticated model observation");
       }
-      this.journal.settleChild(identity, {
-        evidenceHash,
-        observed: outcome.spend,
-        qRaw,
-        responseModel: outcome.responseModel,
-        providerFingerprint: outcome.providerFingerprint,
-        modelDriftSentinel: outcome.modelDriftSentinel,
-      });
+      finalizeMetaSettlement = () => {
+        this.journal.settleChild(identity, {
+          evidenceHash,
+          observed: outcome.spend,
+          qRaw,
+          responseModel,
+          providerFingerprint: outcome.providerFingerprint,
+          modelDriftSentinel,
+        });
+      };
     } else {
-      this.journal.settleChildFailure(identity, {
-        evidenceHash,
-        observed: outcome.spend,
-        status: outcome.status === "budget"
-          ? "budget"
-          : outcome.status === "infrastructure_not_run"
-            ? "infrastructure_not_run"
-            : "candidate_failed",
-      });
+      finalizeMetaSettlement = () => {
+        this.journal.settleChildFailure(identity, {
+          evidenceHash,
+          observed: outcome.spend,
+          status: outcome.status === "budget"
+            ? "budget"
+            : outcome.status === "infrastructure_not_run"
+              ? "infrastructure_not_run"
+              : "candidate_failed",
+        });
+      };
     }
-    this.envelopeLedger.settleDescendant(envelopeRequest.reservationId, outcome.spend);
+    const finalizeSettlement = (): void => {
+      finalizeMetaSettlement();
+      this.envelopeLedger.settleDescendant(envelopeRequest.reservationId, outcome.spend);
+    };
     return {
       launchReceiptPath: receiptPath,
       terminalEventPath,
       usage: { ...outcome.spend },
+      finalizeSettlement,
     };
   }
 
