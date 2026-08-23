@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -56,6 +56,17 @@ async function main() {
   const active = resume.activeEpisode;
   if (active === undefined) {
     const sandbox = await call("createSandbox", { artifact: task.baselineArtifact, role: "mutation" });
+    const seededScratch = await call("exec", {
+      sandboxId: sandbox.sandboxId,
+      argv: [
+        "sh", "-c",
+        "set -eu; mkdir /scratch/cache; " +
+          "dd if=/dev/zero of=/scratch/model.bin bs=1M count=192 status=none; " +
+          "i=0; while [ \"$i\" -lt 512 ]; do dd if=/dev/zero of=\"/scratch/cache/shard-$i\" bs=64K count=1 status=none; i=$((i+1)); done; " +
+          "printf durable-scale >/scratch/note.txt",
+      ],
+    });
+    if (seededScratch.exitCode !== 0) throw new Error("failed to seed large scratch: " + seededScratch.stderr);
     await call("evaluate", { artifact: task.baselineArtifact, assetGroupId: "train", seed: 0 });
     const mutation = [
       "const fs=require('node:fs')",
@@ -75,6 +86,17 @@ async function main() {
     role: "mutation",
     continueEpisode: active.episode,
   });
+  const restoredScratch = await call("exec", {
+    sandboxId: claimed.sandboxId,
+    argv: [
+      "sh", "-c",
+      "set -eu; test \"$(cat /scratch/note.txt)\" = durable-scale; " +
+        "test \"$(stat -c %s /scratch/model.bin)\" = 201326592; " +
+        "test \"$(find /scratch/cache -type f | wc -l)\" = 512; " +
+        "printf continued >/scratch/resumed.txt",
+    ],
+  });
+  if (restoredScratch.exitCode !== 0) throw new Error("large scratch was not restored: " + restoredScratch.stderr);
   await call("evaluate", { artifact: active.parent, assetGroupId: "train", seed: 0, resume: true });
   await call("evaluate", { artifact: active.candidate.artifact, assetGroupId: "train", seed: 0, resume: true });
   await call("reportIncumbent", { artifact: active.candidate.artifact, claimed: { aggregate: 0.6 } });
@@ -114,7 +136,7 @@ function stateFacts(root: string, runId: string): Array<Record<string, unknown>>
 }
 
 describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () => {
-  it("kills after a journaled candidate evaluation, then claims, replays, retires, completes, and finishes", { timeout: 300_000 }, async () => {
+  it("durably pauses with >200 MiB scratch, restarts, restores, replays, and finishes", { timeout: 600_000 }, async () => {
     const configuredRoot = process.env["HONE_DURABLE_DOCKER_EVIDENCE_ROOT"];
     const root = configuredRoot ?? makeRoot();
     if (configuredRoot !== undefined) {
@@ -141,6 +163,7 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
       HONE_OPTIMIZER_CMD: optimizerCommand,
       HONE_OPTIMIZER_DIGEST: `sha256:${"f".repeat(64)}`,
       HONE_MUTATION_TIMEOUT_SEC: "180",
+      HONE_KILL_GRACE_MS: "120000",
     };
 
     const child = honeSpawn(["run", "capsule", "--headless", "--backend", "local"], { cwd: root, env });
@@ -150,6 +173,7 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
     });
     const childClosed = once(child, "close");
     let runId: string | undefined;
+    let pauseRequested = false;
     try {
       const deadline = Date.now() + 120_000;
       while (Date.now() < deadline) {
@@ -165,25 +189,33 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
           ) {
             expect(
               current.some((event) => event.type === "episode.completed"),
-              "optimizer crossed the deterministic post-evaluation kill checkpoint",
+              "optimizer crossed the deterministic post-evaluation pause checkpoint",
             ).toBe(false);
-            killTree(child);
+            pauseRequested = child.kill("SIGTERM");
+            expect(pauseRequested).toBe(true);
             break;
           }
         }
         // External Docker/CLI integration: poll the durable journal signal,
         // not an estimated process duration. The optimizer holds the explicit
-        // post-evaluation checkpoint until this test kills it.
+        // post-evaluation checkpoint until this test requests a graceful pause.
         await sleep(100);
       }
       expect(runId).toBeDefined();
       if (runId === undefined) throw new Error("run did not start");
       expect(events(root, runId).filter((event) => event.type === "eval.completed")).toHaveLength(2);
     } finally {
-      killTree(child);
+      if (!pauseRequested) killTree(child);
     }
     const [initialExitCode, initialSignal] = await childClosed;
     if (runId === undefined) throw new Error("run did not start");
+    expect(initialExitCode).toBe(0);
+    expect(initialSignal).toBeNull();
+    const paused = events(root, runId);
+    expect(paused.filter((event) => event.type === "run.paused")).toHaveLength(1);
+    expect(paused.find((event) => event.type === "run.paused")).toMatchObject({ reason: "operator" });
+    expect(statSync(join(root, ".hone-runs", runId, "scratch-snapshot", "scratch.tar")).size)
+      .toBeGreaterThan(200 * 1024 * 1024);
     expect(events(root, runId).some((event) => event.type === "episode.completed")).toBe(false);
     expect(events(root, runId).some((event) => event.type === "run.finished")).toBe(false);
 
@@ -193,6 +225,7 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
 
     const finished = events(root, runId);
     expect(finished.filter((event) => event.type === "run.started")).toHaveLength(1);
+    expect(finished.filter((event) => event.type === "run.paused")).toHaveLength(1);
     expect(finished.filter((event) => event.type === "run.resumed")).toHaveLength(1);
     expect(finished.filter((event) => event.type === "episode.started")).toHaveLength(1);
     expect(finished.filter((event) => event.type === "episode.candidate")).toHaveLength(1);
@@ -238,7 +271,7 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
           launch: {
             cwd: root,
             argv: ["hone", "run", "capsule", "--headless", "--backend", "local"],
-            killAfter: "episode.candidate plus two eval.completed records, before episode.completed",
+            pauseAfter: "episode.candidate plus two eval.completed records, before episode.completed; SIGTERM produced durable operator pause",
             exitCode: initialExitCode,
             signal: initialSignal,
           },
@@ -253,6 +286,11 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
           },
           assertions: {
             runStarted: 1,
+            runPaused: 1,
+            scratchArchiveBytes: statSync(
+              join(root, ".hone-runs", runId, "scratch-snapshot", "scratch.tar"),
+            ).size,
+            restoredScratchContinuation: true,
             runResumed: 1,
             episodeStarted: 1,
             episodeCandidate: 1,

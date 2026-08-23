@@ -11,7 +11,13 @@ import {
   type ArtifactRef,
 } from "@hone/schema";
 import { z } from "zod";
-import { startBroker, type RunningBroker, type SandboxNetworkMode } from "../src/index.js";
+import {
+  SCRATCH_RESTORE_SCRIPT,
+  scratchRestoreMemoryBytes,
+  startBroker,
+  type RunningBroker,
+  type SandboxNetworkMode,
+} from "../src/index.js";
 import { deferred } from "../src/deferred.js";
 import { CasStore } from "../src/cas.js";
 import { packDirAsArtifact } from "../src/artifact.js";
@@ -38,6 +44,9 @@ const pkgDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tmpBase = path.join(pkgDir, "..", "..", ".t", randomBytes(2).toString("hex"));
 
 const GENEROUS_BUDGET = { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 3_600, maxEvaluatorInvocations: 100 };
+const PRODUCTION_MUTATION_IMAGE =
+  "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10";
+const GNU_RESTORE_E2E = process.env["HONE_SCRATCH_RESTORE_GNU_E2E"] === "1";
 
 let cas: CasStore;
 let baselineHash: string;
@@ -115,6 +124,33 @@ async function bootBroker(
   const { config, runDir } = await makeBrokerConfig(name, budget, extras);
   // Tests exercise privileged methods — explicit admin-socket opt-in (production default has none).
   return startBroker(config, { adminSocketPath: path.join(runDir, "broker-admin.sock") });
+}
+
+async function makePublishedScratchSnapshot(
+  name: string,
+): Promise<{ config: Parameters<typeof startBroker>[0]; runDir: string; archivePath: string }> {
+  const { config, runDir } = await makeBrokerConfig(name, GENEROUS_BUDGET, { scratchVolume: true });
+  const running = await startBroker(config);
+  const rpc = await RpcClient.connect(running.socketPath, running.publicToken);
+  try {
+    const ref = (await rpc.call("createSandbox", {
+      artifact: { hash: baselineHash },
+      role: "mutation",
+    })) as SandboxRef;
+    const wrote = ExecShape.parse(await rpc.call("exec", {
+      sandboxId: ref.sandboxId,
+      argv: ["sh", "-c", "dd if=/dev/zero of=/scratch/payload.bin bs=1M count=4 status=none && printf intact >/scratch/note"],
+    }));
+    expect(wrote.exitCode, wrote.stderr).toBe(0);
+  } finally {
+    rpc.close();
+    await running.close();
+  }
+  return {
+    config,
+    runDir,
+    archivePath: path.join(runDir, "scratch-snapshot", "scratch.tar"),
+  };
 }
 
 beforeAll(async () => {
@@ -494,8 +530,8 @@ describe("sandbox lifecycle", () => {
     }
   });
 
-  it("keeps capped tmpfs scratch across sandboxes and broker restart", async () => {
-    const { config, runDir } = await makeBrokerConfig("scratch-resume", GENEROUS_BUDGET, { scratchVolume: true });
+  it("restores a >200 MiB production-shaped tmpfs scratch after a real broker restart", { timeout: 600_000 }, async () => {
+    const { config, runDir } = await makeBrokerConfig("scratch-resume-scale", GENEROUS_BUDGET, { scratchVolume: true });
     const socketPath = path.join(runDir, "broker.sock");
     const first = await startBroker(config);
     const c1 = await RpcClient.connect(socketPath, first.publicToken);
@@ -506,16 +542,32 @@ describe("sandbox lifecycle", () => {
       })) as SandboxRef;
       const wrote = ExecShape.parse(await c1.call("exec", {
         sandboxId: ref.sandboxId,
-        argv: ["sh", "-c", "printf durable >/scratch/note.txt && chmod 000 /scratch/note.txt"],
+        argv: [
+          "sh", "-c",
+          "set -eu; mkdir /scratch/cache; " +
+            "dd if=/dev/zero of=/scratch/model.bin bs=1M count=192 status=none; " +
+            "i=0; while [ \"$i\" -lt 512 ]; do dd if=/dev/zero of=\"/scratch/cache/shard-$i\" bs=64K count=1 status=none; i=$((i+1)); done; " +
+            "printf durable-scale >/scratch/note.txt; chmod 0713 /scratch/cache; touch -t 202311142213.21 /scratch/cache",
+        ],
       }));
-      expect(wrote.exitCode).toBe(0);
+      expect(wrote.exitCode, wrote.stderr).toBe(0);
       await c1.call("saveArtifact", { sandboxId: ref.sandboxId });
     } finally {
       c1.close();
       await first.close();
     }
 
+    const archive = await stat(path.join(runDir, "scratch-snapshot", "scratch.tar"));
+    expect(archive.size).toBeGreaterThan(200 * 1024 * 1024);
+
     const second = await startBroker(config);
+    const keeper = `hone-scratch-keeper-${config.runId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
+    const keeperMemory = await runCommand(
+      ["docker", "inspect", "--format", "{{.HostConfig.Memory}}", keeper],
+      { timeoutMs: 30_000 },
+    );
+    expect(keeperMemory.exitCode, keeperMemory.stderr.toString("utf8")).toBe(0);
+    expect(Number(keeperMemory.stdout.toString("utf8").trim())).toBe(scratchRestoreMemoryBytes(archive.size));
     const c2 = await RpcClient.connect(socketPath, second.publicToken);
     try {
       const ref = (await c2.call("createSandbox", {
@@ -524,15 +576,154 @@ describe("sandbox lifecycle", () => {
       })) as SandboxRef;
       const read = ExecShape.parse(await c2.call("exec", {
         sandboxId: ref.sandboxId,
-        argv: ["sh", "-c", "chmod 600 /scratch/note.txt && cat /scratch/note.txt"],
+        argv: [
+          "sh", "-c",
+          "set -eu; " +
+            "printf '%s\\n' " +
+            "\"$(cat /scratch/note.txt)\" " +
+            "\"$(stat -c %s /scratch/model.bin)\" " +
+            "\"$(find /scratch/cache -type f | wc -l)\" " +
+            "\"$(stat -c %a /scratch/cache)\"; " +
+            "printf continued >/scratch/resumed.txt",
+        ],
       }));
-      expect(read.exitCode).toBe(0);
-      expect(read.stdout).toBe("durable");
+      expect(read.exitCode, read.stderr).toBe(0);
+      expect(read.stdout.trim().split("\n")).toEqual([
+        "durable-scale",
+        "201326592",
+        "512",
+        "713",
+      ]);
     } finally {
       c2.close();
       await second.close();
     }
   });
+
+  it("refuses corrupt and truncated scratch archives through the real keeper path", { timeout: 300_000 }, async () => {
+    for (const kind of ["corrupt", "truncated"] as const) {
+      const { config, archivePath } = await makePublishedScratchSnapshot(`scratch-${kind}`);
+      const mutation = await runCommand(
+        [
+          "docker", "run", "--rm",
+          "-v", `${path.dirname(archivePath)}:/snapshot`,
+          TEST_IMAGE,
+          "sh", "-c",
+          kind === "corrupt"
+            ? "dd if=/dev/zero of=/snapshot/scratch.tar bs=1 count=1 conv=notrunc status=none"
+            : "size=$(stat -c %s /snapshot/scratch.tar); truncate -s \"$((size / 2))\" /snapshot/scratch.tar",
+        ],
+        { timeoutMs: 30_000 },
+      );
+      expect(mutation.exitCode, mutation.stderr.toString("utf8")).toBe(0);
+      await expect(startBroker(config)).rejects.toThrow(/scratch snapshot (?:checksum|restore)/);
+    }
+  });
+
+  it("fails closed when the snapshot checksum changes across a successful extraction", { timeout: 180_000 }, async () => {
+    const { config, archivePath } = await makePublishedScratchSnapshot("scratch-checksum-race");
+    let mutated = false;
+    const mutateAfterRestore: RunCommand = async (argv, opts) => {
+      const result = await runCommand(argv, opts);
+      if (!mutated && argv.includes(SCRATCH_RESTORE_SCRIPT)) {
+        const mutation = await runCommand(
+          [
+            "docker", "run", "--rm",
+            "-v", `${path.dirname(archivePath)}:/snapshot`,
+            TEST_IMAGE,
+            "sh", "-c",
+            "dd if=/dev/zero of=/snapshot/scratch.tar bs=1 count=1 conv=notrunc status=none",
+          ],
+          { timeoutMs: 30_000 },
+        );
+        if (mutation.exitCode !== 0) throw new Error(mutation.stderr.toString("utf8"));
+        mutated = true;
+      }
+      return result;
+    };
+    await expect(startBroker({ ...config, runCommand: mutateAfterRestore })).rejects.toThrow(
+      /scratch snapshot checksum changed during restore/,
+    );
+    expect(mutated).toBe(true);
+  });
+
+  it.skipIf(!GNU_RESTORE_E2E)(
+    "skips only GNU tar root metadata while preserving inner metadata and resumability",
+    { timeout: 300_000 },
+    async () => {
+      await ensureImage(PRODUCTION_MUTATION_IMAGE);
+      const { config, runDir } = await makeBrokerConfig("scratch-gnu-root", GENEROUS_BUDGET, {
+        scratchVolume: true,
+        image: PRODUCTION_MUTATION_IMAGE,
+      });
+      const first = await startBroker(config);
+      const rpc1 = await RpcClient.connect(first.socketPath, first.publicToken);
+      try {
+        const ref = (await rpc1.call("createSandbox", {
+          artifact: { hash: baselineHash },
+          role: "mutation",
+        })) as SandboxRef;
+        const wrote = ExecShape.parse(await rpc1.call("exec", {
+          sandboxId: ref.sandboxId,
+          argv: [
+            "sh", "-c",
+            "set -eu; mkdir /scratch/inner; printf payload >/scratch/inner/data; " +
+              "chmod 0713 /scratch/inner; chmod 0601 /scratch/inner/data; " +
+              "touch -d @1700000002 /scratch/inner/data; touch -d @1700000001 /scratch/inner",
+          ],
+        }));
+        expect(wrote.exitCode, wrote.stderr).toBe(0);
+        const keeper = `hone-scratch-keeper-${config.runId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
+        const changedRoot = await runCommand(
+          ["docker", "exec", "-u", "root", keeper, "sh", "-c", "chmod 0711 /scratch && touch -d @1700000000 /scratch"],
+          { timeoutMs: 30_000 },
+        );
+        expect(changedRoot.exitCode, changedRoot.stderr.toString("utf8")).toBe(0);
+      } finally {
+        rpc1.close();
+        await first.close();
+      }
+
+      const archive = await runCommand(
+        [
+          "docker", "run", "--rm",
+          "-v", `${path.join(runDir, "scratch-snapshot")}:/snapshot:ro`,
+          PRODUCTION_MUTATION_IMAGE,
+          "tar", "-tvf", "/snapshot/scratch.tar",
+        ],
+        { timeoutMs: 30_000 },
+      );
+      expect(archive.exitCode, archive.stderr.toString("utf8")).toBe(0);
+      expect(archive.stdout.toString("utf8").split("\n")[0]).toMatch(/ \.\/$/);
+
+      const second = await startBroker(config);
+      const rpc2 = await RpcClient.connect(second.socketPath, second.publicToken);
+      try {
+        const ref = (await rpc2.call("createSandbox", {
+          artifact: { hash: baselineHash },
+          role: "mutation",
+        })) as SandboxRef;
+        const checked = ExecShape.parse(await rpc2.call("exec", {
+          sandboxId: ref.sandboxId,
+          argv: [
+            "sh", "-c",
+            "set -eu; test \"$(cat /scratch/inner/data)\" = payload; " +
+              "test \"$(stat -c %a /scratch/inner)\" = 713; " +
+              "test \"$(stat -c %Y /scratch/inner)\" = 1700000001; " +
+              "test \"$(stat -c %a /scratch/inner/data)\" = 601; " +
+              "test \"$(stat -c %Y /scratch/inner/data)\" = 1700000002; " +
+              "test \"$(stat -c %a /scratch)\" != 711; " +
+              "printf continued >/scratch/continued; cat /scratch/continued",
+          ],
+        }));
+        expect(checked.exitCode, checked.stderr).toBe(0);
+        expect(checked.stdout).toBe("continued");
+      } finally {
+        rpc2.close();
+        await second.close();
+      }
+    },
+  );
   it("rejects sparse scratch snapshots whose apparent bytes exceed the quota", async () => {
     const { config } = await makeBrokerConfig("scratch-sparse", GENEROUS_BUDGET, {
       scratchVolume: true,
