@@ -2,9 +2,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
 } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -12,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { approveFixtureCapsule, makeCapsule } from "./helpers.js";
 import {
   MetaCampaignConfigV2,
   canonicalJson,
@@ -55,6 +58,8 @@ const frozenConfigPath = fileURLToPath(new URL(
 ));
 const pendingJournalFixturePath = fileURLToPath(new URL("./fixtures/pending-journal-process.ts", import.meta.url));
 const cliPackageDir = fileURLToPath(new URL("../", import.meta.url));
+const pendingOuterFixturePath = fileURLToPath(new URL("./fixtures/pending-child-outer-process.ts", import.meta.url));
+const tsxPath = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 const config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(frozenConfigPath, "utf8")));
 const configHash = metaCampaignConfigHash(config) as Sha256Digest;
 const member = config.developmentPanel.members[0]!;
@@ -363,6 +368,33 @@ async function killPendingJournalProcess(root: string): Promise<NodeJS.Signals |
   return signal;
 }
 
+async function runPendingOuterProcess(
+  root: string,
+  mode: "start" | "resume",
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
+  const child = spawn(tsxPath, [pendingOuterFixturePath], {
+    cwd: root,
+    env: {
+      ...process.env,
+      HONE_PENDING_OUTER_MODE: mode,
+      HONE_UNSAFE_BACKEND: "1",
+      HONE_KILL_GRACE_MS: "10",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+  const [code, signal] = await once(child, "close") as [number | null, NodeJS.Signals | null];
+  return {
+    code,
+    signal,
+    stdout: Buffer.concat(stdout).toString("utf8"),
+    stderr: Buffer.concat(stderr).toString("utf8"),
+  };
+}
+
 function finalEvaluation(qRaw: number): EvaluationRecord {
   return {
     capsuleId: member.capsule.capsuleId,
@@ -630,8 +662,76 @@ describe("recursive child nonterminal settlement replay", () => {
     }
   });
 
-  // This pins child settlement only. Without a campaign pause authority, the top-level
-  // supervisor still terminalizes the outer run after an unreplayable child event stream.
+  it("leaves a crashed outer process unfinished while its killed child is pending, then resumes", { timeout: 60_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-pending-outer-"));
+    makeCapsule(root);
+    approveFixtureCapsule(root);
+    writeFileSync(
+      join(root, "pending-child-backend.mjs"),
+      `import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+export function createBackend() {
+  return {
+    async start(ctx) {
+      const pendingPath = join(ctx.root, "pending-child.authority");
+      if (ctx.replayed.resumeCount > 0) {
+        if (!existsSync(pendingPath)) throw new Error("resume lost the pending child authority");
+        rmSync(pendingPath);
+        return;
+      }
+      const child = spawn(process.execPath, [
+        "-e",
+        "process.stdout.write('READY\\\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);",
+      ], { stdio: ["ignore", "pipe", "pipe"] });
+      const unregister = ctx.registerChild(child);
+      await once(child.stdout, "data");
+      child.kill("SIGKILL");
+      const [code, signal] = await once(child, "close");
+      unregister();
+      writeFileSync(join(ctx.root, "pending-child-kill.json"), JSON.stringify({ code, signal }));
+      if (signal !== "SIGKILL") throw new Error("fixture child did not die by SIGKILL");
+      writeFileSync(pendingPath, "pending\\n");
+      throw new Error("recursive child exited before terminal settlement");
+    },
+  };
+}
+`,
+      { mode: 0o600 },
+    );
+
+    const first = await runPendingOuterProcess(root, "start");
+    expect(first.signal).toBeNull();
+    expect(first.code, first.stderr).toBe(1);
+    expect(first.stderr).toContain("recursive child remains durably pending");
+    expect(JSON.parse(readFileSync(join(root, "pending-child-kill.json"), "utf8"))).toEqual({
+      code: null,
+      signal: "SIGKILL",
+    });
+    expect(existsSync(join(root, "pending-child.authority"))).toBe(true);
+    const runIds = readdirSync(join(root, ".hone-runs")).filter((entry) => entry.startsWith("run_"));
+    expect(runIds).toHaveLength(1);
+    const outerRunId = runIds[0];
+    if (outerRunId === undefined) throw new Error("fixture outer run was not created");
+    const interruptedEvents = eventFacts(join(root, ".hone-runs", outerRunId, "events.ndjson"));
+    expect(interruptedEvents.filter((event) => event.type === "run.started")).toHaveLength(1);
+    expect(interruptedEvents.filter((event) => event.type === "run.paused")).toHaveLength(0);
+    expect(interruptedEvents.filter((event) => event.type === "run.finished")).toHaveLength(0);
+
+    const resumed = await runPendingOuterProcess(root, "resume");
+    expect(resumed.signal).toBeNull();
+    expect(resumed.code, resumed.stderr).toBe(0);
+    expect(existsSync(join(root, "pending-child.authority"))).toBe(false);
+    expect(readdirSync(join(root, ".hone-runs")).filter((entry) => entry.startsWith("run_"))).toEqual([outerRunId]);
+    const completedEvents = eventFacts(join(root, ".hone-runs", outerRunId, "events.ndjson"));
+    expect(completedEvents.filter((event) => event.type === "run.started")).toHaveLength(1);
+    expect(completedEvents.filter((event) => event.type === "run.resumed")).toHaveLength(1);
+    expect(completedEvents.filter((event) => event.type === "run.finished")).toHaveLength(1);
+    expect(completedEvents.at(-1)).toMatchObject({ type: "run.finished", status: "completed" });
+  });
+
   it("keeps the genuine-terminal duplicate settlement refusal immutable", { timeout: 30_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), "hone-terminal-settlement-"));
     const port = await reserveGatewayPort();

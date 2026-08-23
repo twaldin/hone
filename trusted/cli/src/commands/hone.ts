@@ -3086,6 +3086,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       proxyRole: "outer-optimizer",
       campaignPauseAuthority,
       campaignConfigHash: configHash,
+      hasUnsettledPendingChild: () => journal.queryPendingChildren().length !== 0,
       // The synthetic outer task is trusted campaign machinery rather than a
       // corpus capsule; its manifest bytes were validated before campaign seal.
       admissionReview: "off",
