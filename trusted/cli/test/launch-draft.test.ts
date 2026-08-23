@@ -421,6 +421,19 @@ describe("generateM2LaunchDraft", () => {
     expect(ancestorCapacity.ancestorEnvelope).toEqual(config.budgets.campaign);
     expect(ancestorCapacity.directOuterBudget).toEqual(config.budgets.outer);
     expect(ancestorCapacity.requiredEnvelope).toEqual(config.budgets.campaign);
+    const undersizedAncestor = {
+      ...config,
+      budgets: {
+        ...config.budgets,
+        campaign: {
+          ...config.budgets.campaign,
+          maxTokens: config.budgets.campaign.maxTokens - 1,
+        },
+      },
+    };
+    expect(() => assertM2OuterAncestorCapacity(undersizedAncestor)).toThrow(
+      "cannot admit the full planned recursive sequence",
+    );
     const envelopeIds = [
       search.identity.envelopeId,
       config.recursiveBudgets.confirmation.identity.envelopeId,
