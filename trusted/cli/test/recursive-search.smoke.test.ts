@@ -40,7 +40,11 @@ import type {
   MetaWorkIdentity,
   Sha256Digest,
 } from "@hone/meta";
-import { RecursiveSearchChildLauncher, assertM2OuterAncestorCapacity } from "../src/commands/hone.js";
+import {
+  RecursiveSearchChildLauncher,
+  assertM2OuterAncestorCapacity,
+  imageBoundCandidateBundleDigest,
+} from "../src/commands/hone.js";
 import type { CliChildSupervisor } from "../src/commands/hone.js";
 import { metaWorkKey } from "../src/meta-journal.js";
 import type { MetaJournalV1 } from "../src/meta-journal.js";
@@ -49,7 +53,6 @@ import type { CampaignPauseAuthority } from "../src/types.js";
 import { runEpisodeLoop } from "../../../optimizer/src/loop.js";
 
 const ENABLED = process.env["HONE_RECURSIVE_SEARCH_SMOKE"] === "1";
-const BUNDLE = `sha256:${"b".repeat(64)}` as Sha256Digest;
 const MUTATION_IMAGE = "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10";
 const OUTER_CAPSULE_ID = "cap_000000000000";
 const CHILD_BUDGET: BudgetEnvelope = {
@@ -166,6 +169,18 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     ) {
       throw new Error("smoke child identity does not reproduce the frozen cohort authority");
     }
+    const candidateSnapshot = {
+      files: new Map([
+        ["optimizer/src/smoke-candidate.ts", {
+          bytes: Buffer.from("image-bound recursive smoke candidate\n", "utf8"),
+          mode: 0o644,
+        }],
+      ]),
+    };
+    const comparisonBundleDigest = imageBoundCandidateBundleDigest(candidateSnapshot, MUTATION_IMAGE);
+    const childBundleDigest = imageBoundCandidateBundleDigest(candidateSnapshot, childManifest.image);
+    expect(childManifest.image).not.toBe(MUTATION_IMAGE);
+    expect(childBundleDigest).not.toBe(comparisonBundleDigest);
     const childCas = new CasStore(join(smokeRoot, "inner-cas"));
     const childBaseline = await packDirAsArtifact(join(childCapsuleDir, "baseline"), childCas) as Sha256Digest;
     const childEvents: RunEvent[] = [];
@@ -180,11 +195,12 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       check: async (request: Parameters<MetaCandidateGate["check"]>[0]) => ({
         ok: true as const,
         sourceArtifact: request.sourceArtifact,
-        bundleDigest: BUNDLE,
+        bundleDigest: comparisonBundleDigest,
         transformationReceiptHash: null,
         feedback: "smoke candidate accepted by trusted fixture gate",
       }),
-      bundleDigestForImage: () => BUNDLE,
+      bundleDigestForImage: (_sourceArtifact: Sha256Digest, image: string) =>
+        imageBoundCandidateBundleDigest(candidateSnapshot, image),
     };
     const adapterConfig = {
       ...campaignConfig,
@@ -223,7 +239,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       cohort: "panel-a",
       capsuleProvenanceHash: capsuleDigest(childManifest),
       sourceProvenanceHash: outerBaseline,
-      optimizerProvenanceHash: BUNDLE,
+      optimizerProvenanceHash: childBundleDigest,
     };
     const outerManifest = CapsuleManifest.parse({
       schemaVersion: 2,
@@ -249,7 +265,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       capsuleRootDir: outerCapsuleRoot,
       baselineArtifactHash: outerBaseline,
       capsuleDigest: capsuleDigest(outerManifest),
-      optimizerDigest: BUNDLE,
+      optimizerDigest: comparisonBundleDigest,
       holdoutLedgerPath: join(smokeRoot, "outer-holdout.ndjson"),
       image: outerManifest.image,
       runDir: join(smokeRoot, "outer-run"),
@@ -285,7 +301,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         admitChildRun: ({ request }) =>
           request.child.capsuleId === childManifest.id
             && request.child.sourceArtifact.hash === outerBaseline
-            && request.child.optimizerArtifact.hash === BUNDLE
+            && request.child.optimizerArtifact.hash === childBundleDigest
             ? admission
             : undefined,
         launchChildRun: async ({ request, admission: admitted }) => {
@@ -295,7 +311,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
             capsuleRootDir: childCapsuleDir,
             baselineArtifactHash: childBaseline,
             capsuleDigest: capsuleDigest(childManifest),
-            optimizerDigest: BUNDLE,
+            optimizerDigest: childBundleDigest,
             measurementEpoch: "m2-recursive-smoke-inner",
             holdoutLedgerPath: join(smokeRoot, "inner-holdout.ndjson"),
             image: childManifest.image,
@@ -450,11 +466,20 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         "The candidate gate accepts the smoke artifact and smoke-only qBase=0/scale=1 normalization makes the trusted settlement trace explicit; neither has campaign or promotion authority.",
         "The MetaJournalV1 query surface is in memory and child lifecycle files are fixture-authored with production schemas and receipt hashing; the production Broker validates those durable files before the trusted strategy accepts the matching settlement.",
         "The synthetic outer /bin/false evaluator, throwing mutation worker, and integrity-checked synthetic Bun/Pi pack are deliberate non-executed tripwires/initialization fixtures; the selected authorized cohort capsule runs its real train evaluator in Docker.",
+        "The smoke candidate uses the production image-bound digest helper: its non-executed comparison image and real child target image differ, and therefore seal distinct optimizer bundle digests before trusted reservation and launch.",
       ],
       syntheticOuterEntrypoint: outerManifest.evalEntrypoint,
       syntheticOuterEntrypointExecuted: false,
       outerMutationImage: MUTATION_IMAGE,
       outerMutationWorkerExecuted: false,
+      imageBoundOptimizerIdentity: {
+        comparisonImage: outerManifest.image,
+        comparisonBundleDigest,
+        childTargetImage: childManifest.image,
+        childBundleDigest,
+        targetImageDiffers: childManifest.image !== outerManifest.image,
+        bundleDigestDiffers: childBundleDigest !== comparisonBundleDigest,
+      },
       searchPhase: {
         episode: 0,
         candidateArtifact: outerBaseline,
