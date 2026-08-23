@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CapsuleManifest, capsuleDigest, type EvaluatorOutput } from "@hone/schema";
 import {
@@ -34,6 +34,7 @@ const DEFAULT_OUTPUT = "tmp/m2-terminal-authority-preflight.evidence.v1.json";
 const SYNTHETIC_GROUP_ID = "synthetic-terminal-preflight";
 const WORKER_UID_MIN = 20_000;
 const MAX_DIAGNOSTIC_CHARS = 16_384;
+const EVALUATOR_TIMEOUT_SEC = 1_800;
 const OPERATOR_CONTAMINATION_DISCLOSURE = {
   incident: "During schema discovery, an operator-side repository grep was accidentally scoped across the Floyd capsule before assets/ was excluded.",
   observedLocations: [
@@ -57,6 +58,7 @@ type ProbeDefinition = {
   label: string;
   generator: string;
   schema: string;
+  expectedSyntheticRefusal?: string;
 };
 
 type ProbeConfig = {
@@ -134,11 +136,10 @@ function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf8")) as T;
 }
 
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  const object = value as Record<string, unknown>;
-  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`).join(",")}}`;
+const U64_MASK = (1n << 64n) - 1n;
+
+function u64(value: bigint): bigint {
+  return value & U64_MASK;
 }
 
 function sha256Bytes(bytes: Buffer | string): string {
@@ -210,32 +211,174 @@ function generateBrotli(root: string): void {
   writeProbeFile(root, "workloads.json", `${JSON.stringify({ generator: "synthetic-terminal-preflight", seed: 0, workloads })}\n`);
 }
 
+function mimallocPrngNext(input: bigint): { state: bigint; value: bigint } {
+  let state = input;
+  state = u64(state ^ (state >> 12n));
+  state = u64(state ^ u64(state << 25n));
+  state = u64(state ^ (state >> 27n));
+  return { state, value: u64(state * 2_685_821_657_736_338_717n) };
+}
+
+function mimallocChecksum(state: bigint, value: bigint): bigint {
+  return u64(state ^ u64(value + 0x9e3779b97f4a7c15n + u64(state << 6n) + (state >> 2n)));
+}
+
+function mimallocPattern(seed: bigint, index: bigint): bigint {
+  let state = u64(seed
+    ^ 0xa0761d6478bd642fn
+    ^ u64((index + 1n) * 0xe7037ed1a0b428dbn));
+  if (state === 0n) state = 0x8ebc6af09c88c6e3n;
+  return mimallocPrngNext(state).value;
+}
+
+function mimallocWorkloadIdentity(id: string, seedNumber: number): { expectedOperations: number; expectedChecksum: string } {
+  const seed = BigInt(seedNumber);
+  let operations = 0;
+  let checksum: bigint;
+  if (id === "single") {
+    let state = seed ^ 0x73696e676c652d31n;
+    checksum = 0xcbf29ce484222325n;
+    const sizes: bigint[] = [];
+    for (let index = 0; index < 2_048; index += 1) {
+      const next = mimallocPrngNext(state);
+      state = next.state;
+      const size = 16n + next.value % 8_177n;
+      sizes.push(size);
+      checksum = mimallocChecksum(checksum, size ^ BigInt(index));
+    }
+    for (let index = 0; index < sizes.length; index += 1) {
+      checksum = mimallocChecksum(checksum, mimallocPattern(seed, BigInt(index)) ^ sizes[index]!);
+    }
+    operations = 4_096;
+  } else if (id === "multithread") {
+    checksum = 0n;
+    for (let thread = 0; thread < 4; thread += 1) {
+      const threadSeed = u64(seed ^ u64(BigInt(thread + 1) * 0xd1b54a32d192ed03n));
+      let state = threadSeed;
+      let threadChecksum = 0x6a09e667f3bcc909n;
+      for (let index = 0; index < 768; index += 1) {
+        const next = mimallocPrngNext(state);
+        state = next.state;
+        const size = 16n + next.value % 4_081n;
+        threadChecksum = mimallocChecksum(
+          threadChecksum,
+          mimallocPattern(threadSeed, BigInt(index)) ^ size,
+        );
+      }
+      checksum = mimallocChecksum(checksum, threadChecksum ^ BigInt(thread));
+    }
+    operations = 6_144;
+  } else if (id === "small") {
+    let state = seed ^ 0x736d616c6c2d6f62n;
+    checksum = 0x84222325cbf29ce4n;
+    const sizes: bigint[] = [];
+    for (let index = 0; index < 8_192; index += 1) {
+      const next = mimallocPrngNext(state);
+      state = next.state;
+      const size = 8n + next.value % 249n;
+      sizes.push(size);
+      checksum = mimallocChecksum(checksum, size + BigInt(index) * 17n);
+    }
+    for (let index = 0; index < sizes.length; index += 1) {
+      const replaced = index % 3 === 0;
+      const liveSize = replaced ? 8n + (sizes[index]! * 5n + BigInt(index)) % 249n : sizes[index]!;
+      const patternIndex = BigInt(replaced ? 8_192 + index : index);
+      checksum = mimallocChecksum(checksum, mimallocPattern(seed, patternIndex) ^ liveSize);
+    }
+    operations = 8_192 + 2 * 2_731 + 8_192;
+  } else if (id === "fragmentation") {
+    let state = seed ^ 0x667261676d656e74n;
+    checksum = 0x9e3779b97f4a7c15n;
+    const sizes: bigint[] = [];
+    for (let index = 0; index < 2_048; index += 1) {
+      const next = mimallocPrngNext(state);
+      state = next.state;
+      const size = 64n + next.value % 65_473n;
+      sizes.push(size);
+      checksum = mimallocChecksum(checksum, size ^ BigInt(index) * 131n);
+    }
+    for (let index = 0; index < sizes.length; index += 1) {
+      checksum = mimallocChecksum(checksum, mimallocPattern(seed, BigInt(index)) ^ sizes[index]!);
+    }
+    for (let index = 0; index < sizes.length; index += 1) {
+      const replaced = index % 2 === 0;
+      const liveSize = replaced ? 48n + (sizes[index]! ^ seed) % 4_049n : sizes[index]!;
+      const patternIndex = BigInt(replaced ? 2_048 + index : index);
+      checksum = mimallocChecksum(checksum, mimallocPattern(seed, patternIndex) ^ liveSize);
+    }
+    operations = 6_144;
+  } else {
+    throw new Error(`unknown mimalloc synthetic workload: ${id}`);
+  }
+  return { expectedOperations: operations, expectedChecksum: checksum.toString(16).padStart(16, "0") };
+}
+
 function generateMimalloc(root: string): void {
   const ids = ["single", "multithread", "small", "fragmentation"];
+  const treeBaselines = [32 << 20, 32 << 20, 8 << 20, 128 << 20];
   const workloads = ids.map((id, index) => ({
     id,
     seed: index + 1,
     rounds: 1,
     threads: id === "multithread" ? 4 : 1,
-    expectedOperations: 1,
-    expectedChecksum: "0000000000000000",
-    baselinePeakPageCommittedBytes: 2 ** 40,
-    baselineTreePeakBytes: 2 ** 40,
+    ...mimallocWorkloadIdentity(id, index + 1),
+    baselinePeakPageCommittedBytes: 1 << 30,
+    baselineTreePeakBytes: treeBaselines[index],
     baselineFragmentationRatio: 1,
   }));
   writeProbeFile(root, "workloads.json", `${JSON.stringify({ schemaVersion: 1, driverVersion: "mimalloc-four-v1", split: "synthetic", workloads })}\n`);
 }
 
-function generateDuckdb(root: string): void {
-  // The host has no DuckDB authoring binary. A valid SQLite database exercises
-  // staging and the evaluator's database-format refusal without consulting any
-  // sealed bytes. This is intentionally a genuine FAIL until the capsule ships
-  // a synthetic fixture constructor or accepts a format-only probe mode.
-  const database = join(root, "sf1.duckdb");
-  runGeneratorPython("import sqlite3,sys\nc=sqlite3.connect(sys.argv[1]);c.execute('create table lineitem(l_quantity integer)');c.execute('insert into lineitem values (1)');c.commit();c.close()", [database]);
-  const query = "SELECT sum(l_quantity) FROM lineitem WHERE l_quantity > 0;\n";
+function generateDuckdb(root: string, baselineDir: string, image: string): void {
+  const query = "SELECT sum(l_quantity) FROM lineitem WHERE l_quantity > 15;\n";
   writeProbeFile(root, "query.sql", query);
-  writeProbeFile(root, "oracle.sha256", `${"0".repeat(64)}\n`);
+  const checkedInGenerator = join(dirname(baselineDir), "generate_sf1.cpp");
+  const generatorProject = dirname(root);
+  const generatorPath = join(generatorProject, "duckdb-synthetic-generator.cpp");
+  const generatorSource = readFileSync(checkedInGenerator, "utf8").replace("CALL dbgen(sf=1)", "CALL dbgen(sf=0.01)");
+  if (!generatorSource.includes("CALL dbgen(sf=0.01)")) throw new Error("DuckDB synthetic generator scale substitution failed");
+  writeFileSync(generatorPath, generatorSource);
+  const probeOutput = `/probe/${basename(root)}`;
+  writeFileSync(join(generatorProject, "CMakeLists.txt"), [
+    "cmake_minimum_required(VERSION 3.10)",
+    "project(hone_synthetic_duckdb CXX)",
+    "find_package(Threads REQUIRED)",
+    'set(BUILD_EXTENSIONS "tpch" CACHE STRING "" FORCE)',
+    "set(BUILD_SHELL OFF CACHE BOOL \"\" FORCE)",
+    "set(BUILD_UNITTESTS OFF CACHE BOOL \"\" FORCE)",
+    "set(BUILD_BENCHMARKS OFF CACHE BOOL \"\" FORCE)",
+    "set(ENABLE_JEMALLOC OFF CACHE BOOL \"\" FORCE)",
+    'add_subdirectory("/source" "/build/duckdb")',
+    "add_executable(hone_generate duckdb-synthetic-generator.cpp)",
+    'target_include_directories(hone_generate PRIVATE "/source/src/include" "/source/third_party/fmt/include" "/build/duckdb/codegen/include")',
+    "target_link_libraries(hone_generate duckdb_static ${DUCKDB_EXTRA_LINK_FLAGS})",
+    'link_threads(hone_generate "")',
+    'link_extension_libraries(hone_generate "")',
+    "target_link_libraries(hone_generate tpch_extension core_functions_extension parquet_extension)",
+    'add_executable(hone_query "/source/result_hash.cpp")',
+    'target_include_directories(hone_query PRIVATE "/source/src/include" "/source/third_party/fmt/include" "/build/duckdb/codegen/include")',
+    "target_link_libraries(hone_query duckdb)",
+    "",
+  ].join("\n"));
+  const build = spawnSync("docker", [
+    "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges", "--memory", "8589934592", "--cpus", "8",
+    "--tmpfs", "/build:rw,exec,size=10g", "--tmpfs", "/tmp:rw,size=1g",
+    "--mount", `type=bind,src=${baselineDir},dst=/source,readonly`,
+    "--mount", `type=bind,src=${generatorProject},dst=/probe`,
+    "--entrypoint", "/bin/sh", image, "-lc", [
+      "set -eu",
+      "cmake -S /probe -B /build/probe -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ '-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG' -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld",
+      "cmake --build /build/probe --target hone_generate hone_query -j8",
+      `/build/probe/hone_generate ${probeOutput}/sf1.duckdb`,
+      `/build/probe/hone_query ${probeOutput}/sf1.duckdb ${probeOutput}/query.sql > /build/query.out`,
+      `sha256sum /build/query.out | cut -d' ' -f1 > ${probeOutput}/oracle.sha256`,
+    ].join(" && "),
+  ], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 600_000 });
+  if (build.status !== 0) {
+    throw new Error(`synthetic DuckDB constructor failed (${build.signal ?? build.status}): stdout:\n${build.stdout.trim()}\nstderr:\n${build.stderr.trim()}`);
+  }
+  const database = join(root, "sf1.duckdb");
   const dbBytes = readFileSync(database);
   writeProbeFile(root, "workload.json", `${JSON.stringify({
     baselinePeakRssKb: 2 ** 30,
@@ -252,7 +395,13 @@ function generateDuckdb(root: string): void {
 }
 
 function generateQuickjs(root: string, baselineDir: string): void {
-  const benchmark = "globalThis.__hone_job = function(job){ return {operations:job.iterations,fold:job.nonce}; };\n";
+  const benchmark = [
+    "var job = JSON.parse(std.in.readAsString());",
+    "var run = eval(job.program);",
+    "var result = run(job.iterations, job.nonce, job.params);",
+    "print(JSON.stringify({name:job.name,iterations:job.iterations,operations:result.operations,fold:result.fold}));",
+    "",
+  ].join("\n");
   const observable = "print('synthetic-observable');\n";
   const moduleLib = "export const value = 'synthetic-module';\n";
   const moduleMain = "import { value } from './module-lib.js'; print(value);\n";
@@ -261,7 +410,9 @@ function generateQuickjs(root: string, baselineDir: string): void {
   writeProbeFile(root, "module-lib.js", moduleLib);
   writeProbeFile(root, "module-main.js", moduleMain);
   const harnessAssert = "var assert={sameValue:function(a,b){if(a!==b)throw new Error('sameValue');}};\n";
+  const harnessSta = "function Test262Error(message){this.message=message||'';} Test262Error.prototype=Object.create(Error.prototype); Test262Error.prototype.name='Test262Error'; function $DONOTEVALUATE(){throw new Test262Error('$DONOTEVALUATE called');}\n";
   writeProbeFile(root, "test262/harness/assert.js", harnessAssert);
+  writeProbeFile(root, "test262/harness/sta.js", harnessSta);
   const cases: string[] = [];
   for (let index = 0; index < 6; index += 1) {
     const rel = `test/synthetic/case-${index}.js`;
@@ -307,15 +458,21 @@ function generateHarness(root: string): void {
 
 function generateFlt(root: string): void {
   const groups = ["legacy", "dag", "gate", "reference", "preset", "generated"];
+  const successAst = { name: "synthetic-legacy", steps: [{ id: "one", run: "echo synthetic" }] };
   const cases = groups.map((group) => ({
     id: `synthetic-${group}`,
     group,
     input: `inputs/${group}.yaml`,
     presets: `presets/${group}.json`,
-    expected: { ok: false, error: { name: "SyntheticExpectation", message: "synthetic probe", line: null, column: null }, canonical: null },
+    expected: group === "legacy"
+      ? { ok: true, ast: successAst, canonical: JSON.stringify(successAst) }
+      : { ok: false, error: { name: "SyntheticExpectation", message: "synthetic probe", line: null, column: null }, canonical: null },
   }));
   for (const group of groups) {
-    writeProbeFile(root, `inputs/${group}.yaml`, `name: synthetic-${group}\nsteps: []\n`);
+    const input = group === "legacy"
+      ? "name: synthetic-legacy\nsteps:\n  - id: one\n    run: echo synthetic\n"
+      : `name: synthetic-${group}\nsteps: []\n`;
+    writeProbeFile(root, `inputs/${group}.yaml`, input);
     writeProbeFile(root, `presets/${group}.json`, "{}\n");
   }
   writeProbeFile(root, "cases.json", `${JSON.stringify({ version: 1, declared: cases.length, cases })}\n`);
@@ -365,8 +522,21 @@ function generateTradeup(root: string, baselineDir: string): void {
   writeProbeFile(root, "provenance.json", `${JSON.stringify(provenance)}\n`);
   const worker = spawnSync("python3", ["-B", join(baselineDir, "worker.py"), join(root, "reference.py"), database, join(root, "workload.json")], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
   if (worker.status !== 0) throw new Error(`synthetic tradeup reference failed: ${worker.stderr.trim()}`);
-  const response = JSON.parse(worker.stdout).result;
-  const responseQualityHash = sha256Bytes(Buffer.from(canonical({ response, quality: workload.quality })));
+  JSON.parse(worker.stdout);
+  const canonicalHash = spawnSync("python3", ["-c", [
+    "import hashlib,json,sys",
+    "envelope={'response':json.loads(sys.stdin.read())['result'],'quality':json.load(open(sys.argv[1]))['quality']}",
+    "payload=json.dumps(envelope,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()",
+    "print(hashlib.sha256(payload).hexdigest())",
+  ].join("\n"), join(root, "workload.json")], {
+    input: worker.stdout,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (canonicalHash.status !== 0 || !/^[0-9a-f]{64}\n?$/.test(canonicalHash.stdout)) {
+    throw new Error(`synthetic tradeup oracle hashing failed: ${(canonicalHash.stderr || canonicalHash.stdout).trim()}`);
+  }
+  const responseQualityHash = canonicalHash.stdout.trim();
   const oracle = {
     fixture: workload.fixture,
     databaseSha256: sha256File(database),
@@ -377,12 +547,29 @@ function generateTradeup(root: string, baselineDir: string): void {
   };
   writeProbeFile(root, "oracle.json", `${JSON.stringify(oracle)}\n`);
 }
+function generatorSourceReadPaths(definition: ProbeDefinition): string[] {
+  const paths = ["capsules/tools/preflight-m2-terminal-authority.mts"];
+  if (definition.label === "duckdb-tpch") {
+    paths.push("capsules/duckdb-tpch/generate_sf1.cpp", "capsules/duckdb-tpch/baseline/** (source build input)");
+  } else if (definition.label === "quickjs-interpreter") {
+    paths.push("capsules/quickjs-interpreter/baseline/eval.py (public identity constants)");
+  } else if (definition.label === "brotli-codec") {
+    paths.push("capsules/brotli-codec/baseline/eval.py (public identity constants)");
+  } else if (definition.label === "tradeup-query-latency") {
+    paths.push(
+      "capsules/tradeup-query-latency/baseline/worker.py (synthetic reference execution)",
+      "capsules/tradeup-query-latency/baseline/reference.py (synthetic reference candidate)",
+    );
+  }
+  return paths;
+}
 
-function generateProbe(definition: ProbeDefinition, root: string, baselineDir: string): void {
+
+function generateProbe(definition: ProbeDefinition, root: string, baselineDir: string, image: string): void {
   switch (definition.generator) {
     case "brotli-three-corpus-minimal": generateBrotli(root); break;
     case "mimalloc-four-v1-minimal": generateMimalloc(root); break;
-    case "duckdb-physical-filter-minimal": generateDuckdb(root); break;
+    case "duckdb-physical-filter-minimal": generateDuckdb(root, baselineDir, image); break;
     case "quickjs-workload-v1-minimal": generateQuickjs(root, baselineDir); break;
     case "harness-readiness-minimal": generateHarness(root); break;
     case "flt-six-group-minimal": generateFlt(root); break;
@@ -403,24 +590,43 @@ function mutateProbe(definition: ProbeDefinition, root: string): string {
   return `emptied generated file ${first}; evaluator must refuse the corrupted synthetic input`;
 }
 
-function probeManifest(original: CapsuleManifest, root: string): CapsuleManifest {
-  const paths = fileInventory(root).map((rel) => `synthetic/${rel}`);
+type StagedProbeFile = { generatedPath: string; stagedPath: string };
+
+function stagedProbeFiles(original: CapsuleManifest, root: string): StagedProbeFile[] {
+  const sourceGroup = original.assetGroups.find((group) => group.id === "validation")
+    ?? original.assetGroups[original.assetGroups.length - 1];
+  if (sourceGroup === undefined || sourceGroup.paths.length === 0) throw new Error("terminal capsule has no source asset layout");
+  const pathParts = sourceGroup.paths.map((path) => path.split("/").slice(0, -1));
+  const common = [...pathParts[0]!];
+  while (common.length > 0 && pathParts.some((parts) => parts[common.length - 1] !== common[common.length - 1])) common.pop();
+  if (common.length === 0) throw new Error("terminal capsule asset group has no common relative directory");
+  const files = fileInventory(root).map((generatedPath) => {
+    const matches = sourceGroup.paths.filter((path) => path === generatedPath || path.endsWith(`/${generatedPath}`));
+    if (matches.length > 1) throw new Error(`ambiguous staged path for generated asset ${generatedPath}`);
+    return {
+      generatedPath,
+      stagedPath: matches[0] ?? [...common, generatedPath].join("/"),
+    };
+  });
+  if (new Set(files.map((file) => file.stagedPath)).size !== files.length) throw new Error("synthetic staging layout contains duplicate paths");
+  return files;
+}
+
+function probeManifest(original: CapsuleManifest, root: string, files: StagedProbeFile[]): CapsuleManifest {
   const hashes: Record<string, string> = { ...original.contentHashes };
-  for (const rel of fileInventory(root)) hashes[`synthetic/${rel}`] = `sha256:${sha256File(join(root, rel))}`;
+  for (const file of files) hashes[file.stagedPath] = `sha256:${sha256File(join(root, file.generatedPath))}`;
   return CapsuleManifest.parse({
     ...original,
-    assetGroups: [{ id: SYNTHETIC_GROUP_ID, visibility: "holdout", paths }],
+    assetGroups: [{ id: SYNTHETIC_GROUP_ID, visibility: "holdout", paths: files.map((file) => file.stagedPath) }],
     contentHashes: hashes,
   });
 }
 
-function copyProbeIntoCapsule(root: string, capsuleRoot: string): void {
-  const target = join(capsuleRoot, "synthetic");
-  mkdirSync(target, { recursive: true });
-  for (const rel of fileInventory(root)) {
-    const destination = join(target, rel);
+function copyProbeIntoCapsule(root: string, capsuleRoot: string, files: StagedProbeFile[]): void {
+  for (const file of files) {
+    const destination = join(capsuleRoot, file.stagedPath);
     mkdirSync(dirname(destination), { recursive: true });
-    cpSync(join(root, rel), destination);
+    cpSync(join(root, file.generatedPath), destination);
   }
 }
 
@@ -522,14 +728,19 @@ async function runOne(
   const probeRoot = join(reportRoot, "generated", definition.label);
   mkdirSync(probeRoot, { recursive: true });
   let mutation: string | undefined;
-  generateProbe(definition, probeRoot, baselineDir);
+  generateProbe(definition, probeRoot, baselineDir, originalManifest.image);
   if (negative) mutation = mutateProbe(definition, probeRoot);
-  const generatedFiles = fileInventory(probeRoot).map((path) => ({ path, sha256: `sha256:${sha256File(join(probeRoot, path))}` }));
+  const stagedFiles = stagedProbeFiles(originalManifest, probeRoot);
+  const generatedFiles = stagedFiles.map((file) => ({
+    path: file.generatedPath,
+    stagedPath: file.stagedPath,
+    sha256: `sha256:${sha256File(join(probeRoot, file.generatedPath))}`,
+  }));
 
   const syntheticCapsuleRoot = join(reportRoot, "capsules", definition.label);
   mkdirSync(syntheticCapsuleRoot, { recursive: true });
-  copyProbeIntoCapsule(probeRoot, syntheticCapsuleRoot);
-  const manifest = probeManifest(originalManifest, probeRoot);
+  copyProbeIntoCapsule(probeRoot, syntheticCapsuleRoot, stagedFiles);
+  const manifest = probeManifest(originalManifest, probeRoot, stagedFiles);
   const casDir = join(reportRoot, "cas", definition.label);
   const runDir = join(reportRoot, "runs", definition.label);
   const cas = new CasStore(casDir);
@@ -540,11 +751,14 @@ async function runOne(
   let record: any;
   let failure: string | undefined;
   let evaluatorInvoked = false;
+  let evaluationStartedMs: number | undefined;
+  let evaluatorDurationMs: number | undefined;
   let broker;
 
   if (image.status === "PRESENT") {
     try {
       broker = await startBroker({
+        evalTimeoutSec: EVALUATOR_TIMEOUT_SEC,
         runId: `terminal-preflight-${definition.label}-${negative ? "negative" : "synthetic"}`,
         manifest,
         capsuleRootDir: syntheticCapsuleRoot,
@@ -553,6 +767,12 @@ async function runOne(
         optimizerDigest: `sha256:${"0".repeat(64)}`,
         holdoutLedgerPath: join(runDir, "synthetic-holdout-ledger.ndjson"),
         terminalHoldoutAssetGroupIds: [SYNTHETIC_GROUP_ID],
+        ...(originalManifest.sandbox === undefined
+          ? {}
+          : {
+              sandboxMemoryBytes: originalManifest.sandbox.memoryBytes,
+              ...(originalManifest.sandbox.cpus === undefined ? {} : { sandboxCpus: originalManifest.sandbox.cpus }),
+            }),
         image: originalManifest.image,
         runDir,
         casDir,
@@ -560,6 +780,7 @@ async function runOne(
         runCommand: recordedRunner(commands, mountSink),
         onEvent: (event) => events.push(event),
       });
+      evaluationStartedMs = performance.now();
       record = await broker.broker.evaluate(
         { artifact: { hash: baselineArtifactHash }, assetGroupId: SYNTHETIC_GROUP_ID, seed: 730_201 },
         { privileged: true },
@@ -569,6 +790,7 @@ async function runOne(
       failure = bounded(error);
       evaluatorInvoked = commands.some((command) => command.argv[0] === "docker" && command.argv[1] === "run");
     } finally {
+      if (evaluationStartedMs !== undefined) evaluatorDurationMs = performance.now() - evaluationStartedMs;
       await broker?.close().catch((error: unknown) => { failure = `${failure ?? ""}\nbroker close: ${bounded(error)}`.trim(); });
     }
   } else {
@@ -581,6 +803,8 @@ async function runOne(
   const structuralOutput = output !== undefined && probeScore !== undefined;
   const isolationEvent = (events as any[]).find((event) => event?.type === "evaluator.isolation");
   const isolation = record?.isolation ?? isolationEvent?.isolation;
+  const workerUid = isolation?.workerUid;
+  const uidInReservedPool = typeof workerUid === "number" && workerUid >= WORKER_UID_MIN;
   const mountEvidence: MountEvidence = mountSink.value ?? {
     observed: false,
     mounts: [],
@@ -594,8 +818,21 @@ async function runOne(
     && mountEvidence.holdoutOrCapsuleAssetMounts.length === 0
     && mountEvidence.syntheticAssetsMountedReadOnly
     && mountEvidence.workspaceMountedReadOnly
-    && mountEvidence.baselineMountedReadOnly;
-  const verdict = structuralOutput && output!.valid && constraintsPassed && isolationPass && record.costUsd === 0 ? "PASS" : "FAIL";
+    && mountEvidence.baselineMountedReadOnly
+    && uidInReservedPool
+    && isolation?.mode === "reserved-uid";
+  const expectedRefusalObserved = !negative
+    && definition.expectedSyntheticRefusal !== undefined
+    && failure?.includes(definition.expectedSyntheticRefusal) === true;
+  const zeroCostPass = record?.costUsd === 0;
+  const refusalCommandFailed = commands.some((command) =>
+    command.argv[0] === "docker" && command.argv[1] === "run" && command.exitCode !== 0
+  );
+  const verdict = structuralOutput && output!.valid && constraintsPassed && isolationPass && zeroCostPass
+    ? "PASS"
+    : expectedRefusalObserved && evaluatorInvoked && refusalCommandFailed && output === undefined && isolationPass
+      ? "EXECUTES-REFUSES-SYNTHETIC"
+      : "FAIL";
   const commandHoldoutPaths = commands.flatMap((command) => command.argv.filter((part) => /(^|\/)(holdout|validation)(\/|$)/i.test(part)));
 
   return {
@@ -607,6 +844,8 @@ async function runOne(
     derivedFromHoldout: false,
     schema: definition.schema,
     generator: definition.generator,
+    expectedSyntheticRefusal: definition.expectedSyntheticRefusal ?? null,
+    expectedSyntheticRefusalObserved: expectedRefusalObserved,
     negativeMutation: mutation,
     pinnedAuthority: {
       capsuleDigest: originalDigest,
@@ -616,23 +855,36 @@ async function runOne(
     runtimeCitation: image,
     generatedAssets: generatedFiles,
     generatorReadPolicy: {
-      inputs: ["checked-in generator definition", "capsule baseline source where the declared schema requires a reference or protected-script hash"],
+      sourceReadPaths: generatorSourceReadPaths(definition),
+      prohibitedReadRoots: [`capsules/${definition.label}/assets`],
       capsuleAssetsDirectoryPassedToGenerator: false,
       holdoutBytesPassedToGenerator: false,
     },
-    assetGroup: { id: SYNTHETIC_GROUP_ID, visibility: "holdout", syntheticOverride: true },
+    assetGroup: {
+      id: SYNTHETIC_GROUP_ID,
+      visibility: "holdout",
+      syntheticOverride: true,
+      stagedAtDeclaredLayout: true,
+      paths: stagedFiles.map((file) => file.stagedPath),
+    },
     execution: {
       evaluatorInvoked,
-      workerUid: isolation?.workerUid,
+      workerUid,
       isolationMode: isolation?.mode,
       allocationId: isolation?.allocationId,
-      uidInReservedPool: typeof isolation?.workerUid === "number" && isolation.workerUid >= WORKER_UID_MIN,
+      uidInReservedPool,
       outputParsed: output !== undefined,
       outputValid: output?.valid ?? false,
       constraintsPassed,
+      evaluatorTimeoutSec: EVALUATOR_TIMEOUT_SEC,
       failure,
-      costUsd: record?.costUsd,
-      evaluatorDurationMs: record?.durationMs,
+      costUsd: record?.costUsd ?? null,
+      zeroSpendProvenance: record?.costUsd === 0
+        ? "trusted EvaluationRecord"
+        : expectedRefusalObserved && mountEvidence.networkMode === "none"
+          ? "network-none evaluator refusal before EvaluationRecord"
+          : null,
+      evaluatorDurationMs,
     },
     probeScore: probeScore === undefined ? null : { value: probeScore, meaningless: true, measurementEligible: false },
     evaluatorOutput: output,
@@ -667,6 +919,14 @@ async function main(): Promise<void> {
   if (configuredIds.length !== 8 || new Set(configuredIds).size !== 8 || configuredIds.some((id) => !terminalIds.includes(id))) {
     throw new Error("synthetic probe definitions must exactly cover the frozen eight-capsule terminal cohort");
   }
+  const expectedRefusals = config.capsules.filter((capsule) => capsule.expectedSyntheticRefusal !== undefined);
+  if (
+    expectedRefusals.length !== 1
+    || expectedRefusals[0]?.label !== "floyd-custom-scoreboard-render"
+    || expectedRefusals[0].expectedSyntheticRefusal !== "sealed reference renderer digest mismatch"
+  ) {
+    throw new Error("captain-authorized synthetic-refusal classification must be pinned exactly to Floyd's digest oracle refusal");
+  }
   if (args.negativeProbe !== undefined && !config.capsules.some((capsule) => capsule.label === args.negativeProbe)) {
     throw new Error(`unknown --negative-probe label: ${args.negativeProbe}`);
   }
@@ -683,7 +943,13 @@ async function main(): Promise<void> {
       try {
         results.push(await runOne(definition, negative, reportRoot));
       } catch (error) {
+        const failedCapsuleRoot = join(REPO_ROOT, "capsules", definition.label);
+        const failedManifest = CapsuleManifest.parse(readJson<unknown>(join(failedCapsuleRoot, "manifest.json")));
+        const failedBaselineCommit = failedManifest.baseline.kind === "git"
+          ? failedManifest.baseline.commit
+          : null;
         results.push({
+          capsuleId: failedManifest.id,
           frozenCampaignCapsuleId: definition.frozenCapsuleId,
           label: definition.label,
           verdict: "FAIL",
@@ -691,7 +957,19 @@ async function main(): Promise<void> {
           derivedFromHoldout: false,
           generator: definition.generator,
           schema: definition.schema,
-          execution: { evaluatorInvoked: false, outputParsed: false, failure: bounded(error) },
+          expectedSyntheticRefusal: definition.expectedSyntheticRefusal ?? null,
+          pinnedAuthority: {
+            capsuleDigest: capsuleDigest(failedManifest),
+            baselineCommit: failedBaselineCommit,
+            image: failedManifest.image,
+          },
+          runtimeCitation: imageCitation(failedManifest.image),
+          execution: {
+            evaluatorInvoked: false,
+            outputParsed: false,
+            costUsd: null,
+            failure: bounded(error),
+          },
           probeScore: null,
         });
       }
@@ -714,29 +992,55 @@ async function main(): Promise<void> {
     zeroModelCalls: true,
     probeScoresAreMeasurements: false,
     operatorContaminationDisclosure: OPERATOR_CONTAMINATION_DISCLOSURE,
+    verdictPolicy: {
+      launchAccountedVerdicts: ["PASS", "EXECUTES-REFUSES-SYNTHETIC"],
+      passRequires: [
+        "valid evaluator output with all constraints true",
+        "trusted costUsd=0 record",
+        "reserved evaluator uid",
+        "network-none and read-only synthetic/workspace/baseline mounts",
+        "no capsule asset, validation, or holdout mount",
+      ],
+      executesRefusesSyntheticRequires: [
+        "configured exact expected refusal",
+        "real evaluator container invocation ending nonzero",
+        "reserved evaluator uid",
+        "network-none and read-only synthetic/workspace/baseline mounts",
+        "no capsule asset, validation, or holdout mount",
+      ],
+      expectedSyntheticRefusalCapsules: expectedRefusals.map((definition) => definition.label),
+    },
     negativeProbe: args.negativeProbe === undefined ? null : {
       label: args.negativeProbe,
-      gateFailedClosed: (negativeResult as any)?.verdict === "FAIL",
+      gateFailedClosed: (negativeResult as any)?.verdict === "FAIL"
+        && (negativeResult as any)?.execution?.evaluatorInvoked === true,
     },
     results,
     summary: {
-      authorizedTerminalCapsules: terminalIds.length,
-      pass: count("PASS"),
+      provenExecutable: count("PASS"),
+      executesRefusesSynthetic: count("EXECUTES-REFUSES-SYNTHETIC"),
       fail: count("FAIL"),
+      failedAfterEvaluatorInvocation: results.filter((row: any) => row.verdict === "FAIL" && row.execution?.evaluatorInvoked === true).length,
+      untestedBeforeEvaluatorInvocation: results.filter((row: any) => row.verdict === "FAIL" && row.execution?.evaluatorInvoked !== true).length,
+      spendViolations: results.filter((row: any) =>
+        typeof row.execution?.costUsd === "number" && row.execution.costUsd !== 0
+      ).length,
+      authorizedCount: terminalIds.length,
+      selectedCount: selectedDefinitions.length,
+      accountedAuthorities: count("PASS") + count("EXECUTES-REFUSES-SYNTHETIC"),
       genuineVerdicts: results.length,
       allCovered: results.length === terminalIds.length,
-      terminalPreflight: `${count("PASS")}/${selectedDefinitions.length} selected PASS`,
-      spendViolations: results.filter((row: any) => row.execution?.costUsd !== undefined && row.execution.costUsd !== 0).length,
-      holdoutCommandOrMountViolations: results.filter((row: any) => row.zeroHoldoutReadEvidence && (!row.zeroHoldoutReadEvidence.commandCheckPassed || !row.zeroHoldoutReadEvidence.mountCheckPassed)).length,
+      holdoutCommandOrMountViolations: results.filter((row: any) => row.zeroHoldoutReadEvidence
+        && (!row.zeroHoldoutReadEvidence.commandCheckPassed || !row.zeroHoldoutReadEvidence.mountCheckPassed)).length,
     },
   };
   writeJson(outputPath, report);
   console.log(`report: ${relative(REPO_ROOT, outputPath)}`);
-  console.log(`${report.summary.terminalPreflight}; ${report.summary.fail} FAIL; ${report.summary.spendViolations} spend violations; ${report.summary.holdoutCommandOrMountViolations} holdout command/mount violations`);
+  console.log(`${report.summary.accountedAuthorities}/${report.summary.selectedCount} selected accounted; ${report.summary.provenExecutable} PASS; ${report.summary.executesRefusesSynthetic} EXECUTES-REFUSES-SYNTHETIC; ${report.summary.fail} FAIL; ${report.summary.spendViolations} spend violations; ${report.summary.holdoutCommandOrMountViolations} holdout command/mount violations`);
   if (args.negativeProbe !== undefined) {
     process.exitCode = report.negativeProbe?.gateFailedClosed === true ? 0 : 1;
   } else {
-    process.exitCode = report.summary.pass === report.summary.authorizedTerminalCapsules ? 0 : 1;
+    process.exitCode = report.summary.accountedAuthorities === report.summary.authorizedCount ? 0 : 1;
   }
 }
 
