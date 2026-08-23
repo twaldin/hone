@@ -25,7 +25,7 @@ import { brokerCorpusConfigDigest, corpusCohortFenceError, type CorpusCohortBind
 import { LadderLockedError, deliver, ladderLocked, LADDER_REFUSAL } from "./deliver.js";
 import { DELIVERY_TARGET_FILE, assertTargetIdentity, isEmbeddedBaselineTarget, readSealedDeliveryTarget, sealDeliveryTarget } from "./delivery-target.js";
 import type { DeliveryTarget } from "./delivery-target.js";
-import { appendEvent, readEvents, replayRun, writeFileDurable } from "./eventlog.js";
+import { appendEvent, readEvents, replayActiveClock, replayRun, writeFileDurable } from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
 import type { CmdIo } from "./io.js";
 import {
@@ -1398,17 +1398,12 @@ function exhaustedBudgetDimension(budget: BudgetState): string | null {
   return null;
 }
 
-/** Wall budget is measured from run.started, including time spent offline between supervisors. */
+/** Remaining active-time budget; paused/offline lifetime is deliberately absent. */
 export function remainingWallBudgetMs(
   maxWallClockSec: number,
-  lastSpentWallSec: number,
-  runStartedAt: string | undefined,
-  nowMs: number = Date.now(),
+  spentActiveWallSec: number,
 ): number {
-  const parsedStart = runStartedAt === undefined ? Number.NaN : Date.parse(runStartedAt);
-  const elapsedSinceStart = Number.isFinite(parsedStart) ? Math.max(0, (nowMs - parsedStart) / 1000) : 0;
-  const spent = Math.max(lastSpentWallSec, elapsedSinceStart);
-  return Math.max(0, (maxWallClockSec - spent) * 1000);
+  return Math.max(0, (maxWallClockSec - Math.max(0, spentActiveWallSec)) * 1000);
 }
 
 /** Frozen inputs superviseRun carries beside the plan (all admission-derived). */
@@ -1524,6 +1519,9 @@ async function superviseLocked(
   let requestBudgetAbort = (dimension: string): void => {
     budgetDimension ??= dimension;
   };
+  // Rebound after the active watchdog exists. Broker events cannot arrive
+  // before backend.start, so setup-time snapshots never hit this placeholder.
+  let rearmWallBudget = (_spentActiveWallSec: number): void => {};
 
   let liveBudget = initialReplay.lastBudget;
   const emit = (event: RunEvent): RunEvent => {
@@ -1532,6 +1530,7 @@ async function superviseLocked(
       liveBudget = parsed.budget;
       const dimension = exhaustedBudgetDimension(parsed.budget);
       if (dimension !== null) requestBudgetAbort(dimension);
+      rearmWallBudget(parsed.budget.spent.wallClockSec);
     }
     if (parsed.type === "budget.exhausted") {
       // Trusted broker budget authority: ANY logged exhaustion normalizes the
@@ -1674,6 +1673,7 @@ async function superviseLocked(
   const abort = new AbortController();
   const children = new Set<ChildLike>();
   const timers: NodeJS.Timeout[] = [];
+  let wallBudgetTimer: NodeJS.Timeout | undefined;
   const graceMs = Number(io.env["HONE_KILL_GRACE_MS"] ?? 5000);
 
   // Watchdog timers stay referenced (they must keep a headless process alive
@@ -1720,6 +1720,14 @@ async function superviseLocked(
     if (!abort.signal.aborted) abort.abort(new Error(`budget exhausted: ${dimension}`));
     void termThenKill();
   };
+  rearmWallBudget = (spentActiveWallSec: number): void => {
+    clearTimeout(wallBudgetTimer);
+    if (abort.signal.aborted || currentPause() !== null || stopRequested) return;
+    wallBudgetTimer = setTimeout(
+      () => requestBudgetAbort("wallClockSec"),
+      remainingWallBudgetMs(config.budget.maxWallClockSec, spentActiveWallSec),
+    );
+  };
   // A broker-authored exhaustion may have been public-log durable before a
   // crash. Re-latch the abort before backend.start, and remember that the
   // public event already exists so terminalization never emits a duplicate.
@@ -1727,12 +1735,18 @@ async function superviseLocked(
     abort.abort(new Error(`budget exhausted: ${budgetDimension}`));
   }
 
-  // Wall clock is run lifetime, not supervisor uptime: resume includes the
-  // offline interval since the durable run.started timestamp.
-  const runStartedAt = readEvents(runDir).find((event) => event.type === "run.started")?.at;
-  const spentWallSec = replayed.lastBudget?.spent.wallClockSec ?? 0;
-  const remainMs = remainingWallBudgetMs(config.budget.maxWallClockSec, spentWallSec, runStartedAt);
-  armTimer(() => requestBudgetAbort("wallClockSec"), remainMs);
+  // Start/resume opens a fresh active interval. New budget snapshots carry
+  // the broker's durable active total; legacy snapshots used lifetime
+  // semantics, so their bootstrap is reconstructed from lifecycle events.
+  const clockNowMs = Date.now();
+  const activeClock = replayActiveClock(readEvents(runDir), clockNowMs);
+  const currentIntervalSec = activeClock.activeStartedAtMs === null
+    ? 0
+    : Math.max(0, clockNowMs - activeClock.activeStartedAtMs) / 1000;
+  const priorActiveSec = replayed.lastBudget?.lifetimeSec === undefined
+    ? activeClock.accumulatedActiveWallClockSec
+    : Math.max(replayed.lastBudget.spent.wallClockSec, activeClock.accumulatedActiveWallClockSec);
+  rearmWallBudget(priorActiveSec + currentIntervalSec);
 
   const onStop = (): void => {
     stopRequested = true;
@@ -1893,6 +1907,10 @@ async function superviseLocked(
       io.err(`backend cleanup incomplete: ${cleanupFailure.message} — run left unfinished (resume with \`hone run --resume\`)`);
       return 1;
     }
+    // The trusted backend and every resource are now terminated. Delivery
+    // and reporting do not consume the optimizer/evaluator wall envelope.
+    clearTimeout(wallBudgetTimer);
+    rearmWallBudget = () => {};
 
     if (failure !== null) {
       const err: Error = failure;
@@ -2063,6 +2081,7 @@ async function superviseLocked(
   } finally {
     // Handlers and timers live through delivery, the terminal event, and the
     // report — removed only once no further trusted append can happen.
+    clearTimeout(wallBudgetTimer);
     for (const t of timers) clearTimeout(t);
     process.removeListener("SIGTERM", onOperatorPause);
     process.removeListener("SIGINT", onOperatorPause);

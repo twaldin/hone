@@ -2285,6 +2285,55 @@ describe("evaluator containment", () => {
     }
   });
 
+  it("preserves active spend across a durable pause/restart without charging the offline gap", async () => {
+    let nowMs = 0;
+    const manifest = makeManifest({
+      budget: { ...GENEROUS_BUDGET, maxWallClockSec: 2 },
+    });
+    const shared = {
+      manifest,
+      runId: "run-active-wallclock-restart",
+      runDir: path.join(tmpBase, "runs", "active-wallclock-restart"),
+      casDir: path.join(tmpBase, "cas", "active-wallclock-restart"),
+      now: () => nowMs,
+    };
+    const first = await boot(shared);
+
+    nowMs = 600;
+    first.broker.recordSpend({ tokens: 1, usd: 0 }, ADMIN);
+    nowMs = 800;
+    first.broker.pauseActiveTime();
+    expect(first.broker.getBudget(ADMIN)).toMatchObject({
+      spent: { wallClockSec: 0.8 },
+      lifetimeSec: 0.8,
+    });
+    await first.broker.close();
+
+    // The process is absent for 100x the active interval. Lifetime retains
+    // that operator signal, but the budget level resumes exactly at 0.8s.
+    nowMs = 100_800;
+    const resumed = await boot(shared);
+    expect(resumed.broker.getBudget(ADMIN)).toMatchObject({
+      spent: { wallClockSec: 0.8 },
+      lifetimeSec: 100.8,
+    });
+
+    nowMs = 101_200;
+    expect(resumed.broker.getBudget(ADMIN)).toMatchObject({
+      spent: { wallClockSec: 1.2 },
+      lifetimeSec: 101.2,
+    });
+    expect(resumed.broker.getBudgetExhaustion(ADMIN)).toBeUndefined();
+    resumed.broker.snapshotBudget(ADMIN);
+    expect(resumed.events.at(-1)).toMatchObject({
+      type: "budget.snapshot",
+      budget: {
+        spent: { wallClockSec: 1.2 },
+        lifetimeSec: 101.2,
+      },
+    });
+  });
+
   it("poisons further broker operations when a paused container cannot be released", async () => {
     const b = await boot();
     const optimizer = "f".repeat(64);

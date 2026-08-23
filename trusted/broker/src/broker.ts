@@ -266,6 +266,12 @@ export interface BrokerConfig {
   runCommand?: RunCommand | undefined;
   /** Injectable clock (ms) for TTL/wall-clock determinism in tests. */
   now?: (() => number) | undefined;
+  /** Durable run.started wall time, retained separately from active budget spend. */
+  runStartedAtMs?: number | undefined;
+  /** Start of this supervisor's active interval (run.started/run.resumed). */
+  activeStartedAtMs?: number | undefined;
+  /** Legacy/public-journal active total used only until this broker journal carries active checkpoints. */
+  initialActiveWallClockSec?: number | undefined;
   /**
    * First episode ordinal (resume: the runner passes replayed nextEpisode so
    * trusted episode numbering stays monotone across restarts). The broker's
@@ -651,8 +657,9 @@ const GateFact = z.object({
 });
 type GateFact = z.infer<typeof GateFact>;
 
-const StateLine = z.discriminatedUnion("t", [
+const StatePayload = z.discriminatedUnion("t", [
   z.object({ t: z.literal("start"), atMs: z.number(), events: JournalEvents }),
+  z.object({ t: z.literal("clock"), activeMs: z.number().finite().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("spend"), tokens: z.number().int().nonnegative(), usd: z.number().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("inv"), isolation: EvaluatorIsolationRecord.optional(), events: JournalEvents }),
   z.object({ t: z.literal("holdout"), seq: z.number().int().positive(), events: JournalEvents }),
@@ -738,8 +745,13 @@ const StateLine = z.discriminatedUnion("t", [
   z.object({ t: z.literal("migration"), events: z.array(RunEvent) }),
   z.object({ t: z.literal("event"), event: RunEvent }),
 ]);
+const StateLine = StatePayload.and(z.object({
+  /** Cumulative active milliseconds through this acknowledged fact; absent only on legacy records. */
+  activeMs: z.number().finite().nonnegative().optional(),
+}));
+type StatePayload = z.infer<typeof StatePayload>;
 type StateLine = z.infer<typeof StateLine>;
-type StateFact = Exclude<StateLine, { t: "event" | "migration" }>;
+type StateFact = Exclude<StatePayload, { t: "event" | "migration" | "clock" }>;
 
 /**
  * Journal write primitives, grouped in a mutable object (mirrors cas.ts
@@ -1014,7 +1026,13 @@ export class Broker {
   private readonly epochSeqByName = new Map<string, number>();
   private nextEpochSeq = 0;
 
+  /** First run start (operator lifetime signal; includes pauses/offline gaps). */
   private startedAtMs: number;
+  /** Durable active total before this broker boot's current interval. */
+  private accumulatedActiveMs: number;
+  /** Start of the current active interval; never inherited across broker boots. */
+  private activeSinceMs: number;
+  private activeClockPaused = false;
   private readonly spent = { tokens: 0, usd: 0, evaluatorInvocations: 0 };
   private readonly sandboxes = new Map<string, SandboxEntry>();
   /** Synchronous admission reservation: creations in flight but not yet in `sandboxes`. */
@@ -1172,6 +1190,22 @@ export class Broker {
     this.cas = new CasStore(config.casDir);
     this.run = config.runCommand ?? runCommand;
     this.now = config.now ?? Date.now;
+    const constructedAtMs = this.now();
+    const startedAtMs = config.runStartedAtMs ?? constructedAtMs;
+    const activeSinceMs = config.activeStartedAtMs ?? constructedAtMs;
+    const initialActiveWallClockSec = config.initialActiveWallClockSec ?? 0;
+    if (
+      !Number.isFinite(startedAtMs) ||
+      !Number.isFinite(activeSinceMs) ||
+      activeSinceMs > constructedAtMs ||
+      !Number.isFinite(initialActiveWallClockSec) ||
+      initialActiveWallClockSec < 0
+    ) {
+      throw new BrokerError("INTERNAL", "active clock inputs must be finite, nonnegative, and not start in the future");
+    }
+    this.startedAtMs = startedAtMs;
+    this.activeSinceMs = activeSinceMs;
+    this.accumulatedActiveMs = initialActiveWallClockSec * 1000;
     if (
       config.measurementEpoch !== undefined &&
       (config.measurementEpoch.length === 0 ||
@@ -1342,7 +1376,8 @@ export class Broker {
     this.leaseArgs = config.containerLease !== undefined ? ["--volumes-from", `${config.containerLease}:ro`] : [];
     this.episodeOrdinal = config.episodeOrigin ?? 0;
     this.measurementEpoch = `${this.bootNonce}:startup`;
-    this.startedAtMs = this.now();
+    // Active/lifetime clocks were initialized from the supervisor's durable
+    // run.started/run.resumed boundary before journal replay.
     // Durable state opens (and replays) synchronously at construction — a
     // broker NEVER exists without its journal, so no method can act before
     // replay and no acknowledged fact can be lost to ordering.
@@ -1412,10 +1447,15 @@ export class Broker {
    * emit, spend, write, or mutate persistent scratch state.
    */
   async close(): Promise<void> {
+    const failures: string[] = [];
+    try {
+      this.pauseActiveTime();
+    } catch (err) {
+      failures.push(`active clock: ${err instanceof Error ? err.message : String(err)}`);
+    }
     this.closing = true;
     this.closeController.abort();
     clearInterval(this.reaper);
-    const failures: string[] = [];
     const sweepWorkContainers = async (): Promise<void> => {
       const work = [...this.trackedContainers].filter((ref) => ref !== this.scratchKeeperName);
       await Promise.allSettled(work.map((ref) => this.removeTrackedContainer(ref)));
@@ -1672,6 +1712,21 @@ export class Broker {
     return this.stateLog;
   }
 
+  /**
+   * Active-time invariant: a boot starts a fresh interval at run.started or
+   * run.resumed. Every acknowledged broker fact checkpoints the cumulative
+   * level. A crash resumes from the final acknowledged fact, so neither the
+   * process-down gap nor unacknowledged in-flight work is charged.
+   */
+  private activeWallClockMs(nowMs = this.now()): number {
+    return this.accumulatedActiveMs +
+      (this.activeClockPaused ? 0 : Math.max(0, nowMs - this.activeSinceMs));
+  }
+
+  private appendState(line: Exclude<StatePayload, { t: "clock" }>): void {
+    this.state().append(StateLine.parse({ ...line, activeMs: this.activeWallClockMs() }));
+  }
+
   /** Full semantic preflight: a corrupt journal changes no in-memory authority. */
   private validateReplay(log: RunStateLog): void {
     let holdoutSeq = 0;
@@ -1688,7 +1743,14 @@ export class Broker {
             versions: new Map(this.corpus.versions),
           };
     let replayCorpusBytes = 0;
+    let activeMs = -1;
     for (const line of log.replayed) {
+      if (line.activeMs !== undefined) {
+        if (line.activeMs < activeMs) {
+          throw new BrokerError("INTERNAL", "run state log active clock decreased");
+        }
+        activeMs = line.activeMs;
+      }
       if (line.t === "eval" && line.measurementEpoch !== this.trustedMeasurementEpoch) {
         throw new BrokerError(
           "INTERNAL",
@@ -1783,7 +1845,9 @@ export class Broker {
   private replayState(log: RunStateLog): void {
     this.stateLog = log;
     let firstStartMs: number | undefined;
+    let replayedActiveMs: number | undefined;
     for (const line of log.replayed) {
+      if (line.activeMs !== undefined) replayedActiveMs = line.activeMs;
       if (line.t === "event") {
         this.eventJournalFormat = true;
         this.journalEvents.push(line.event);
@@ -1805,6 +1869,8 @@ export class Broker {
           break;
         case "start":
           firstStartMs ??= line.atMs;
+          break;
+        case "clock":
           break;
         case "spend":
           this.spent.tokens += line.tokens;
@@ -1922,6 +1988,7 @@ export class Broker {
         }
       }
     }
+    if (replayedActiveMs !== undefined) this.accumulatedActiveMs = replayedActiveMs;
     const resumable = [...this.episodeCheckpoints.entries()].filter(
       (entry): entry is [number, { parent: string; epoch: string; completed: false }] =>
         !entry[1].completed && entry[1].parent !== undefined && entry[1].epoch !== undefined,
@@ -1938,10 +2005,11 @@ export class Broker {
         claimedSandboxId: null,
       };
     }
-    // Wall clock is metered from the FIRST start of this run, ever — a
-    // restart cannot rewind it.
+    // The FIRST start remains the lifetime origin. Active spend instead
+    // resumes from the final durable checkpoint and begins a fresh interval
+    // at this process's run.resumed boundary; process-down time is excluded.
     if (firstStartMs === undefined) {
-      log.append({ t: "start", atMs: this.startedAtMs });
+      this.appendState({ t: "start", atMs: this.startedAtMs });
     } else {
       this.startedAtMs = Math.min(firstStartMs, this.startedAtMs);
     }
@@ -1958,7 +2026,7 @@ export class Broker {
     if (this.candidateArtifactEntries + entries > this.maxCandidateArtifactEntries) {
       throw new BrokerError("QUOTA_EXCEEDED", `candidate artifact entry cap reached (${this.maxCandidateArtifactEntries})`);
     }
-    this.state().append({ t: "artifact", hash, bytes, entries });
+    this.appendState({ t: "artifact", hash, bytes, entries });
     this.candidateArtifactHashes.add(hash);
     this.candidateArtifactBytes += bytes;
     this.candidateArtifactEntries += entries;
@@ -1979,7 +2047,7 @@ export class Broker {
           `session trace quota exceeded (${this.sessionTraceBytes + bytes.length} > ${this.sessionTraceQuotaBytes})`,
         );
       }
-      this.state().append({ t: "trace", hash, bytes: bytes.length });
+      this.appendState({ t: "trace", hash, bytes: bytes.length });
       this.sessionTraceHashes.add(hash);
       this.sessionTraceBytes += bytes.length;
     }
@@ -2084,7 +2152,7 @@ export class Broker {
   private journalFact(fact: StateFact, events: readonly EmittableEvent[]): RunEvent[] {
     const at = new Date(this.now()).toISOString();
     const full = events.map((event) => RunEvent.parse({ runId: this.config.runId, at, ...event }));
-    this.state().append(StateLine.parse({ ...fact, events: full }));
+    this.appendState({ ...fact, events: full });
     this.eventJournalFormat = true;
     this.journalEvents.push(...full);
     for (const event of full) {
@@ -2105,18 +2173,18 @@ export class Broker {
       at: new Date(this.now()).toISOString(),
       ...event,
     });
-    this.state().append({ t: "event", event: full });
+    this.appendState({ t: "event", event: full });
     this.eventJournalFormat = true;
     this.journalEvents.push(full);
     if (full.type === "budget.exhausted") this.exhaustedAnnounced.add(full.dimension);
     this.config.onEvent(full);
   }
 
-  private directUsageNow(): z.infer<typeof ResourceUsage> {
+  private directUsageNow(nowMs = this.now()): z.infer<typeof ResourceUsage> {
     return {
       tokens: this.spent.tokens,
       usd: this.spent.usd,
-      wallClockSec: (this.now() - this.startedAtMs) / 1000,
+      wallClockSec: this.activeWallClockMs(nowMs) / 1000,
       evaluatorInvocations: this.spent.evaluatorInvocations,
     };
   }
@@ -2128,6 +2196,7 @@ export class Broker {
   }
 
   private budgetStateNow(tokensDelta = 0, usdDelta = 0, evaluatorInvocationDelta = 0): BudgetState {
+    const nowMs = this.now();
     const envelope = this.manifest.budget;
     if (this.recursive === undefined) {
       return BudgetState.parse({
@@ -2135,14 +2204,15 @@ export class Broker {
         spent: {
           tokens: this.spent.tokens + tokensDelta,
           usd: this.spent.usd + usdDelta,
-          wallClockSec: (this.now() - this.startedAtMs) / 1000,
+          wallClockSec: this.activeWallClockMs(nowMs) / 1000,
           evaluatorInvocations: this.spent.evaluatorInvocations + evaluatorInvocationDelta,
         },
+        lifetimeSec: Math.max(0, (nowMs - this.startedAtMs) / 1000),
       });
     }
 
     const recursiveState = this.recursive.ledger.budgetState(this.config.runId);
-    const current = this.directUsageNow();
+    const current = this.directUsageNow(nowMs);
     return BudgetState.parse({
       envelope,
       spent: {
@@ -2166,6 +2236,7 @@ export class Broker {
           (current.evaluatorInvocations - recursiveState.directUsage.evaluatorInvocations) +
           evaluatorInvocationDelta,
       },
+      lifetimeSec: Math.max(0, (nowMs - this.startedAtMs) / 1000),
     });
   }
 
@@ -3251,7 +3322,7 @@ export class Broker {
     } else if (hash !== sb.parentHash && !this.lineage.has(hash) && !this.repairs.has(hash)) {
       // Repair snapshot (no exec, or last exec failed): NOT a candidate, no
       // event; remembered so a follow-up sandbox reuses the original episode.
-      this.state().append({ t: "repair", hash, parent: sb.parentHash, episode: sb.episode });
+      this.appendState({ t: "repair", hash, parent: sb.parentHash, episode: sb.episode });
       this.repairs.set(hash, { parent: sb.parentHash, episode: sb.episode });
     }
 
@@ -3356,7 +3427,7 @@ export class Broker {
           );
         }
         // Synchronous durable admission before ANY await/spawn.
-        this.state().append({ t: "slot", hash: params.artifact.hash });
+        this.appendState({ t: "slot", hash: params.artifact.hash });
         this.promotionSlots.add(params.artifact.hash);
       }
     }
@@ -4123,6 +4194,30 @@ export class Broker {
     }
   }
 
+  /**
+   * Ends this boot's active interval at one durable level. Local orchestration
+   * calls this synchronously when pause/stop/budget abort lands; close() is
+   * the idempotent fallback for ordinary completion and failures.
+   */
+  pauseActiveTime(): void {
+    if (this.activeClockPaused || this.stateLog === undefined) return;
+    try {
+      this.stateLog.assertUsable();
+    } catch {
+      // The operation that poisoned the writer already failed. Teardown must
+      // still close cleanly; only a restart can truncate and resume timing.
+      return;
+    }
+    const nowMs = this.now();
+    const activeMs = this.activeWallClockMs(nowMs);
+    this.state().append(StateLine.parse({ t: "clock", activeMs }));
+    this.accumulatedActiveMs = activeMs;
+    this.activeSinceMs = nowMs;
+    this.activeClockPaused = true;
+    this.syncRecursiveUsage();
+    this.emit({ type: "budget.snapshot", budget: this.budgetStateNow() });
+  }
+
   /** Durable trusted-side terminal snapshot; never exposed on the public RPC table. */
   snapshotBudget(_ctx: CallContext): Record<string, never> {
     this.emit({ type: "budget.snapshot", budget: this.budgetStateNow() });
@@ -4139,6 +4234,7 @@ export class Broker {
       return BudgetState.parse({
         envelope: budget.envelope,
         spent: { ...budget.spent, evaluatorInvocations: budget.envelope.maxEvaluatorInvocations },
+        ...(budget.lifetimeSec === undefined ? {} : { lifetimeSec: budget.lifetimeSec }),
       });
     }
     return budget;
@@ -4355,6 +4451,7 @@ export class Broker {
 
     const next = this.deriveCorpusVersion(corpus, corpus.latestVersionHash, added);
     let chargedBytes = 1;
+    const activeMs = this.activeWallClockMs();
     let line: StateLine;
     for (;;) {
       line = StateLine.parse({
@@ -4363,6 +4460,7 @@ export class Broker {
         versionHash: next.versionHash,
         added,
         chargedBytes,
+        activeMs,
       });
       const exact = Buffer.byteLength(`${JSON.stringify(line)}\n`, "utf8");
       if (exact === chargedBytes) break;
@@ -4467,10 +4565,11 @@ export class Broker {
       RunEvent.parse({ runId: this.config.runId, at, type: "corpus.query", request }),
       RunEvent.parse({ runId: this.config.runId, at, type: "corpus.response", response }),
     ];
+    const activeMs = this.activeWallClockMs();
     let chargedBytes = 1;
     let line: StateLine;
     for (;;) {
-      line = StateLine.parse({ t: "corpus", request, response, chargedBytes, events });
+      line = StateLine.parse({ t: "corpus", request, response, chargedBytes, events, activeMs });
       const exact =
         Buffer.byteLength(`${JSON.stringify(line)}\n`, "utf8") +
         events.reduce((sum, event) => sum + Buffer.byteLength(`${JSON.stringify(event)}\n`, "utf8"), 0);
@@ -4566,7 +4665,7 @@ export class Broker {
         })
       );
       const migrated = [...publicEvents, ...missing];
-      this.state().append({ t: "migration", events: migrated });
+      this.appendState({ t: "migration", events: migrated });
       this.journalEvents.push(...migrated);
       this.eventJournalFormat = true;
       for (const event of missing) this.config.onEvent(event);

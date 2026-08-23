@@ -40,6 +40,8 @@ hone resume --campaign <campaign-state-dir> --pause <pause-id>
 
 A pause is deliberately nonterminal: it writes `run.paused` and no `run.finished`. `hone status` prints both `status` and `reason`; operators do not need to infer the outcome from a null candidate or correlate sidecars.
 
+Budget snapshots define `spent.wallClockSec` as active time only: intervals opened by `run.started`/`run.resumed` and closed by `run.paused` or trusted-backend termination. Paused and process-down time does not consume the wall-clock envelope; `lifetimeSec` preserves total elapsed operator time separately. After an unpaused crash, active accounting closes the abandoned interval at its final acknowledged journal fact. This is an evidence clock: it cannot overcharge downtime, and it cannot undercharge work the trusted journal can recognize or settle; an unacknowledged in-flight attempt is deliberately not billable active time and must be retried or recovered through its durable spend journal.
+
 `SIGTERM` and `SIGINT` request the safe default: a durable operator pause that can be resumed. Use `hone stop` when the intent is terminal; it writes `run.finished` with status `stopped` and reason `operator`. Tooling must not treat an OS lifecycle signal as a terminal stop.
 
 Repair has one intentionally conservative pre-fsync case. If the process dies after entering repair but before `episode.invalid` is fsynced, the durable record cannot claim that repair finished, so each resume redoes one repair mutation session. This is correct and budget-bounded, but an operator watching spend may see that additional session. Once `episode.invalid` is durable, the repair decision is replayed and no repair work is repeated.

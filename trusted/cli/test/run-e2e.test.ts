@@ -11,6 +11,7 @@ interface Report {
   aggregate: number | null;
   deltaVsBaseline: number | null;
   spend: { tokens: number; usd: number; wallClockSec: number; evaluatorInvocations: number } | null;
+  lifetimeSec: number | null;
 }
 
 function splitHeadless(stdout: string): { eventLines: string[]; report: Report } {
@@ -40,6 +41,8 @@ describe("hone run — headless end-to-end (scripted stub backend)", () => {
     expect(report.deltaVsBaseline).toBeCloseTo(0.03);
     expect(report.spend?.usd).toBeGreaterThan(0);
     expect(report.spend?.tokens).toBeGreaterThan(0);
+    expect(report.lifetimeSec).not.toBeNull();
+    expect(report.lifetimeSec ?? 0).toBeGreaterThanOrEqual(report.spend?.wallClockSec ?? 0);
 
     // on-disk log: schema-valid, mirrors stdout event stream
     const logLines = readLogLines(root, report.runId);

@@ -31,7 +31,7 @@ import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from 
 import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
 import type { BudgetDecision, BudgetDimension, ProxyHandle } from "@hone/proxy";
 import { admitCapsule, authenticateFrozenCapsuleAssets } from "../admission.js";
-import { readEvents, replayRun } from "../eventlog.js";
+import { readEvents, replayActiveClock, replayRun } from "../eventlog.js";
 import { makeDockerRunLease, type DockerRunLease } from "../docker-lease.js";
 import {
   CONCLUSIVE_ENGINE_REJECTION_RE,
@@ -1267,6 +1267,7 @@ export function createBackend(
       // Broker + proxy are mutually referential (proxy meters INTO the broker,
       // broker env points sandboxes AT the proxy); the late-bound ref breaks the cycle.
       let running: RunningBroker | null = null;
+      const activeClockFailures: Error[] = [];
       // The proxy's dispatch-journal recovery starts AT CONSTRUCTION and may
       // deliver recovered ceiling charges before the broker exists — and a
       // durable recovered fact whose callback a prior crash swallowed will
@@ -1457,7 +1458,10 @@ export function createBackend(
           `hone-broker-${createHash("sha256").update(ctx.runId).digest("hex").slice(0, 24)}.sock`,
         );
 
-
+        const activeClock = replayActiveClock(readEvents(ctx.runDir));
+        if (activeClock.runStartedAtMs === null || activeClock.activeStartedAtMs === null) {
+          throw new Error("broker startup requires an open durable run.started/run.resumed active interval");
+        }
         const brokerConfig = {
           runId: ctx.runId,
           // The RUN config is what the broker enforces: its envelope may
@@ -1474,6 +1478,9 @@ export function createBackend(
           capsuleDigest: ctx.capsuleDigest,
           optimizerDigest: ctx.optimizerDigest,
           ...(ctx.measurementEpoch !== undefined ? { measurementEpoch: ctx.measurementEpoch } : {}),
+          runStartedAtMs: activeClock.runStartedAtMs,
+          activeStartedAtMs: activeClock.activeStartedAtMs,
+          initialActiveWallClockSec: activeClock.accumulatedActiveWallClockSec,
           ...(ctx.evaluationStrategy !== undefined ? { evaluationStrategy: ctx.evaluationStrategy } : {}),
           ...(ctx.recursiveBroker !== undefined ? { recursive: ctx.recursiveBroker } : {}),
           // Frozen development corpus (M2 queryCorpus): trusted campaign
@@ -1542,6 +1549,15 @@ export function createBackend(
               socketPath: publicSocketPath,
             })
           : await startBroker(brokerConfig, { socketPath: publicSocketPath });
+        const pauseBrokerClock = (): void => {
+          try {
+            running?.broker.pauseActiveTime();
+          } catch (error) {
+            activeClockFailures.push(error instanceof Error ? error : new Error(String(error)));
+          }
+        };
+        ctx.signal.addEventListener("abort", pauseBrokerClock, { once: true });
+        if (ctx.signal.aborted) pauseBrokerClock();
 
         // Finding 11: replay journaled-but-unlogged promotions into
         // events.ndjson BEFORE anything can terminalize the run, so
@@ -1716,6 +1732,9 @@ export function createBackend(
           // event. Broker.close collects teardown errors but always drains
           // operations and closes the journal before returning.
           await running.close().catch((e: unknown) => failures.push(`broker: ${message(e)}`));
+          if (activeClockFailures.length > 0) {
+            failures.push(`active clock: ${activeClockFailures.map((failure) => failure.message).join("; ")}`);
+          }
           try {
             // No broker fact can be appended after close has drained. Repair
             // the exact journal suffix, then and only then release the
