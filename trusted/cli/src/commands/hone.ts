@@ -1570,6 +1570,24 @@ export class RecursiveSearchChildLauncher {
       reservation,
       outcome,
     }));
+    const terminalEventPath = join(runsRoot(this.root), request.child.runId, EVENTS_FILE);
+    let childFinished = false;
+    try {
+      childFinished = replayRun(join(runsRoot(this.root), request.child.runId)).finished !== null;
+    } catch {
+      // Missing or unreplayable child state is necessarily nonterminal.
+    }
+    if (!childFinished) {
+      this.journal.recordChildPending(identity, {
+        evidenceHash,
+        observed: outcome.spend,
+      });
+      return {
+        launchReceiptPath: receiptPath,
+        terminalEventPath,
+        usage: { ...outcome.spend },
+      };
+    }
     if (outcome.status === "completed" && outcome.finalEvaluation !== null) {
       const finalEvaluation = EvaluationRecord.parse(outcome.finalEvaluation);
       const objectives = Object.values(finalEvaluation.output.objectives);
@@ -1609,7 +1627,7 @@ export class RecursiveSearchChildLauncher {
     this.envelopeLedger.settleDescendant(envelopeRequest.reservationId, outcome.spend);
     return {
       launchReceiptPath: receiptPath,
-      terminalEventPath: join(runsRoot(this.root), request.child.runId, EVENTS_FILE),
+      terminalEventPath,
       usage: { ...outcome.spend },
     };
   }

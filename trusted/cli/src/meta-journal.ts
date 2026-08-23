@@ -142,6 +142,12 @@ export const MetaFailureSettlementV1 = z.object({
 }).strict();
 export type MetaFailureSettlementV1 = z.infer<typeof MetaFailureSettlementV1>;
 
+export const MetaPendingChildV1 = MetaFailureSettlementV1
+  .omit({ status: true })
+  .extend({ status: z.literal("pending") })
+  .strict();
+export type MetaPendingChildV1 = z.infer<typeof MetaPendingChildV1>;
+
 const HeaderLine = z.object({
   v: z.literal(1),
   t: z.literal("header"),
@@ -171,6 +177,12 @@ const FailureSettlementLine = z.object({
   seq: z.number().int().positive(),
   failure: MetaFailureSettlementV1,
 }).strict();
+const PendingLine = z.object({
+  v: z.literal(1),
+  t: z.literal("pending"),
+  seq: z.number().int().positive(),
+  pending: MetaPendingChildV1,
+}).strict();
 const MeasurementLine = z.object({
   v: z.literal(1),
   t: z.literal("measurement"),
@@ -184,6 +196,7 @@ const TerminalLine = z.object({
 }).strict();
 const NonReservationJournalLine = z.discriminatedUnion("t", [
   SettlementLine,
+  PendingLine,
   FailureSettlementLine,
   MeasurementLine,
   TerminalLine,
@@ -229,6 +242,11 @@ export interface MetaFailureSettlementInputV1 {
   evidenceHash: string;
   observed: MetaResourceUsageV1;
   status: MetaFailureStatusV1;
+}
+
+export interface MetaPendingChildInputV1 {
+  evidenceHash: string;
+  observed: MetaResourceUsageV1;
 }
 
 export const metaJournalIo = {
@@ -351,6 +369,10 @@ function copyFailureSettlement(failure: MetaFailureSettlementV1): MetaFailureSet
   return { ...failure, reserved: copyEnvelope(failure.reserved), observed: copyUsage(failure.observed) };
 }
 
+function copyPendingChild(pending: MetaPendingChildV1): MetaPendingChildV1 {
+  return { ...pending, reserved: copyEnvelope(pending.reserved), observed: copyUsage(pending.observed) };
+}
+
 type MetaDurableSettlementV1 =
   | { readonly kind: "measurement"; readonly value: MetaMeasurementV1 }
   | { readonly kind: "failure"; readonly value: MetaFailureSettlementV1 };
@@ -362,6 +384,7 @@ export class MetaJournalV1 {
   private readonly settlementsByKey = new Map<string, MetaDurableSettlementV1>();
   private readonly measurementsByKey = new Map<string, MetaMeasurementV1>();
   private readonly failuresByKey = new Map<string, MetaFailureSettlementV1>();
+  private readonly pendingByKey = new Map<string, MetaPendingChildV1>();
   private nextSeq = 1;
   private terminalHoldout = false;
   private poisoned: Error | undefined;
@@ -477,6 +500,43 @@ export class MetaJournalV1 {
     return copyReservation(reservation);
   }
 
+  recordChildPending(identityInput: MetaWorkIdentityV1, input: MetaPendingChildInputV1): MetaPendingChildV1 {
+    this.assertUsable();
+    const identity = MetaWorkIdentityV1.parse(identityInput);
+    this.validateIdentity(identity);
+    const workKey = metaWorkKey(this.configHashValue, identity);
+    const reservation = this.reservationsByKey.get(workKey);
+    if (reservation === undefined) throw new Error(`no durable reservation for ${workKey}`);
+    if (this.settlementsByKey.has(workKey)) {
+      throw new Error(`cannot record nonterminal child state after settlement for ${workKey}`);
+    }
+    const observed = Usage.parse(input.observed);
+    this.validateObserved(observed, reservation);
+    const capsule = this.registeredCapsule(identity);
+    const pending = MetaPendingChildV1.parse({
+      configHash: this.configHashValue,
+      protocolHash: this.config.protocolHash,
+      analysisConfigHash: this.config.analysisConfigHash,
+      ...identity,
+      capsuleDigest: capsule.capsuleDigest,
+      workKey,
+      childRunId: reservation.childRunId,
+      evidenceHash: HASH.parse(input.evidenceHash),
+      reserved: reservation.reserved,
+      observed,
+      status: "pending",
+    });
+    const prior = this.pendingByKey.get(workKey);
+    if (prior !== undefined) {
+      this.validateUsageContinuity(prior.observed, pending.observed, workKey);
+      if (sameJson(prior, pending)) return copyPendingChild(prior);
+    }
+    this.append({ v: 1, t: "pending", seq: this.nextSeq, pending });
+    this.nextSeq += 1;
+    this.pendingByKey.set(workKey, pending);
+    return copyPendingChild(pending);
+  }
+
   settleChild(identityInput: MetaWorkIdentityV1, input: MetaSettlementInputV1): MetaMeasurementV1 {
     this.assertUsable();
     const identity = MetaWorkIdentityV1.parse(identityInput);
@@ -489,6 +549,7 @@ export class MetaJournalV1 {
     }
     const evidenceHash = HASH.parse(input.evidenceHash);
     const observed = Usage.parse(input.observed);
+    this.validatePendingContinuity(workKey, observed);
     const qRaw = z.number().finite().parse(input.qRaw);
     for (const dimension of DIMS) {
       const observedDimension = BUDGET_TO_USAGE[dimension];
@@ -531,6 +592,7 @@ export class MetaJournalV1 {
     this.append({ v: 1, t: "settlement", seq: this.nextSeq, measurement });
     this.nextSeq += 1;
     this.settlementsByKey.set(workKey, { kind: "measurement", value: measurement });
+    this.pendingByKey.delete(workKey);
     this.appendMeasurement(measurement);
     return copyMeasurement(measurement);
   }
@@ -547,6 +609,7 @@ export class MetaJournalV1 {
     }
     const observed = Usage.parse(input.observed);
     this.validateObserved(observed, reservation);
+    this.validatePendingContinuity(workKey, observed);
     const capsule = this.registeredCapsule(identity);
     const failure = MetaFailureSettlementV1.parse({
       configHash: this.configHashValue,
@@ -571,6 +634,7 @@ export class MetaJournalV1 {
     this.append({ v: 1, t: "failure-settlement", seq: this.nextSeq, failure });
     this.nextSeq += 1;
     this.settlementsByKey.set(workKey, { kind: "failure", value: failure });
+    this.pendingByKey.delete(workKey);
     this.failuresByKey.set(workKey, failure);
     return copyFailureSettlement(failure);
   }
@@ -741,11 +805,23 @@ export class MetaJournalV1 {
       this.reservationsByKey.set(expectedKey, reservation);
       return;
     }
+    if (line.t === "pending") {
+      const pending = line.pending;
+      this.validatePendingChild(pending);
+      if (this.settlementsByKey.has(pending.workKey)) {
+        throw new Error(`nonterminal child state follows settlement for ${pending.workKey}`);
+      }
+      const prior = this.pendingByKey.get(pending.workKey);
+      if (prior !== undefined) this.validateUsageContinuity(prior.observed, pending.observed, pending.workKey);
+      this.pendingByKey.set(pending.workKey, pending);
+      return;
+    }
     if (line.t === "failure-settlement") {
       const failure = line.failure;
       this.validateFailureSettlement(failure);
       if (this.settlementsByKey.has(failure.workKey)) throw new Error(`duplicate settlement line for ${failure.workKey}`);
       this.settlementsByKey.set(failure.workKey, { kind: "failure", value: failure });
+      this.pendingByKey.delete(failure.workKey);
       this.failuresByKey.set(failure.workKey, failure);
       return;
     }
@@ -754,6 +830,7 @@ export class MetaJournalV1 {
     if (line.t === "settlement") {
       if (this.settlementsByKey.has(measurement.workKey)) throw new Error(`duplicate settlement line for ${measurement.workKey}`);
       this.settlementsByKey.set(measurement.workKey, { kind: "measurement", value: measurement });
+      this.pendingByKey.delete(measurement.workKey);
       return;
     }
     const settlement = this.settlementsByKey.get(measurement.workKey);
@@ -797,6 +874,14 @@ export class MetaJournalV1 {
       throw new Error("measurement identity or exact normalization is corrupt");
     }
     this.validateObserved(measurement.observed, reservation);
+    this.validatePendingContinuity(measurement.workKey, measurement.observed);
+  }
+
+  private validatePendingChild(pending: MetaPendingChildV1): void {
+    this.validateFailureSettlement(MetaFailureSettlementV1.parse({
+      ...pending,
+      status: "infrastructure_not_run",
+    }));
   }
 
   private validateFailureSettlement(failure: MetaFailureSettlementV1): void {
@@ -827,6 +912,7 @@ export class MetaJournalV1 {
       throw new Error("failure settlement identity is corrupt");
     }
     this.validateObserved(failure.observed, reservation);
+    this.validatePendingContinuity(failure.workKey, failure.observed);
   }
 
   private validateObserved(observed: MetaResourceUsageV1, reservation: MetaReservationV1): void {
@@ -834,6 +920,23 @@ export class MetaJournalV1 {
       const observedDimension = BUDGET_TO_USAGE[dimension];
       if (observed[observedDimension] > reservation.reserved[dimension]) {
         throw new Error(`observed child resources exceed reservation: ${dimension}`);
+      }
+    }
+  }
+
+  private validatePendingContinuity(workKey: string, observed: MetaResourceUsageV1): void {
+    const pending = this.pendingByKey.get(workKey);
+    if (pending !== undefined) this.validateUsageContinuity(pending.observed, observed, workKey);
+  }
+
+  private validateUsageContinuity(
+    prior: MetaResourceUsageV1,
+    next: MetaResourceUsageV1,
+    workKey: string,
+  ): void {
+    for (const dimension of USAGE_DIMS) {
+      if (next[dimension] < prior[dimension]) {
+        throw new Error(`nonterminal child resources rewound ${dimension} for ${workKey}`);
       }
     }
   }
