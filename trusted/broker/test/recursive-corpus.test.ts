@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -99,6 +99,7 @@ function makeBroker(options: {
   recursive?: BrokerConfig["recursive"];
   corpus?: BrokerCorpusConfig;
   events?: RunEvent[];
+  now?: () => number;
 }): Broker {
   const runDir = options.runDir ?? path.join(tmpBase, `run-${sequence++}`);
   const events = options.events ?? [];
@@ -114,7 +115,7 @@ function makeBroker(options: {
     runDir,
     casDir: path.join(tmpBase, "cas"),
     onEvent: (event) => events.push(event),
-    now: () => 0,
+    now: options.now ?? (() => 0),
     ...(options.recursive === undefined ? {} : { recursive: options.recursive }),
     ...(options.corpus === undefined ? {} : { corpus: options.corpus }),
   });
@@ -182,6 +183,89 @@ afterEach(async () => {
 });
 
 describe("recursive spawnRun authority", () => {
+  it("checkpoints active time before recursive usage so a post-sync crash resumes", async () => {
+    let nowMs = 0;
+    const runId = "recursive-clock-crash";
+    const runDir = path.join(tmpBase, "recursive-clock-crash");
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "recursive-clock-crash.ndjson"));
+    ledgers.push(ledger);
+    const recursive = {
+      depth: 0 as const,
+      ancestors: [],
+      ledger,
+      admitChildRun: () => undefined,
+      launchChildRun: vi.fn<ChildRunLauncher>(),
+    };
+    const sync = ledger.syncRunUsage.bind(ledger);
+    let failAfterSync = false;
+    const syncSpy = vi.spyOn(ledger, "syncRunUsage").mockImplementation((syncedRunId, usage) => {
+      sync(syncedRunId, usage);
+      if (failAfterSync) throw new Error("injected crash after recursive usage fsync");
+    });
+    const first = makeBroker({ runId, runDir, budget: LARGE, recursive, now: () => nowMs });
+
+    nowMs = 2_000;
+    failAfterSync = true;
+    await expect(
+      first.createSandbox({ artifact: { hash: HASH_A }, role: "mutation" }, { privileged: false }),
+    ).rejects.toThrow("injected crash after recursive usage fsync");
+    syncSpy.mockRestore();
+    const beforeCrash = (await readFile(path.join(runDir, "broker-state.ndjson"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(beforeCrash.at(-1)).toEqual({ t: "clock", activeMs: 2_000 });
+    expect(ledger.budgetState(runId).directUsage.wallClockSec).toBe(2);
+
+    nowMs = 100_000;
+    const resumed = makeBroker({ runId, runDir, budget: LARGE, recursive, now: () => nowMs });
+    expect(resumed.getBudget({ privileged: true })).toMatchObject({
+      spent: { wallClockSec: 2 },
+      lifetimeSec: 100,
+    });
+  });
+
+  it("migrates a legacy recursive lifetime charge as a conservative active floor", async () => {
+    let nowMs = 100_000;
+    const runId = "recursive-clock-legacy";
+    const runDir = path.join(tmpBase, "recursive-clock-legacy");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "broker-state.ndjson"), `${JSON.stringify({ t: "start", atMs: 0 })}\n`);
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "recursive-clock-legacy.ndjson"));
+    ledgers.push(ledger);
+    ledger.registerRun(runId, 0, [], LARGE);
+    ledger.syncRunUsage(runId, { tokens: 0, usd: 0, wallClockSec: 5, evaluatorInvocations: 0 });
+    const broker = makeBroker({
+      runId,
+      runDir,
+      budget: LARGE,
+      now: () => nowMs,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        admitChildRun: () => undefined,
+        launchChildRun: vi.fn<ChildRunLauncher>(),
+      },
+    });
+    expect(broker.getBudget({ privileged: true })).toMatchObject({
+      spent: { wallClockSec: 5 },
+      lifetimeSec: 100,
+    });
+    const migrated = (await readFile(path.join(runDir, "broker-state.ndjson"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(migrated.at(-1)).toEqual({ t: "clock", activeMs: 5_000 });
+
+    nowMs = 101_000;
+    broker.recordSpend({ tokens: 0, usd: 0 }, { privileged: true });
+    expect(broker.getBudget({ privileged: true })).toMatchObject({
+      spent: { wallClockSec: 6 },
+      lifetimeSec: 101,
+    });
+    expect(ledger.budgetState(runId).directUsage.wallClockSec).toBe(6);
+  });
   it("runs frozen child membership and artifact-provenance admission before reserving", async () => {
     const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "admission-ledger.ndjson"));
     ledgers.push(ledger);

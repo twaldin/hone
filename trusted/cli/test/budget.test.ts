@@ -5,6 +5,7 @@ import { RunConfig, RunEvent } from "@hone/schema";
 import { UsageError } from "../src/args.js";
 import { remainingWallBudgetMs, runCommand } from "../src/supervisor.js";
 import { replayActiveClock } from "../src/eventlog.js";
+import { formatSpend } from "../src/report.js";
 import { hone, honeSpawn, killTree, makeCapsule, makeIo, makeRoot, readLogLines, sleep } from "./helpers.js";
 
 /** The one persisted runconfig.json — asserts exactly one run was minted. */
@@ -51,6 +52,13 @@ describe("wall-clock budget enforcement", () => {
     const finished = events[events.length - 1];
     expect(finished?.type).toBe("run.finished");
     if (finished?.type === "run.finished") expect(finished.status).toBe("budget");
+  });
+  it("shows inactive lifetime explicitly beside active wall spend", () => {
+    expect(formatSpend({
+      envelope: { maxTokens: 100, maxUsd: 10, maxWallClockSec: 200, maxEvaluatorInvocations: 5 },
+      spent: { tokens: 0, usd: 0, wallClockSec: 8, evaluatorInvocations: 0 },
+      lifetimeSec: 103,
+    })).toBe("$0.00 of $10 · 0 tokens · 8s active wall · 103s lifetime · 95s paused/offline · 0 evals");
   });
 });
 

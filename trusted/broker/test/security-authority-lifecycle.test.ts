@@ -1285,6 +1285,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
       runDir: path.join(tmpBase, "runs", "slot-wal"),
       casDir: path.join(tmpBase, "cas", "slot-wal"),
       runId: "run-slot-wal",
+      now: () => 0,
     };
     const a = await boot(shared);
     const cand = await saveCandidate(a, candidateTar);
@@ -1292,7 +1293,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     await expect(
       a.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT),
     ).rejects.toThrow();
-    expect((await stateLines(a)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: cand }]);
+    expect((await stateLines(a)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: cand, activeMs: 0 }]);
     await a.broker.close();
     const b = await boot(shared);
     await expect(
@@ -1300,7 +1301,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     ).rejects.toThrow(/attempt already consumed/);
   });
   it("serializes racing candidate admissions so exactly one evaluator can start", async () => {
-    const b = await boot();
+    const b = await boot({ now: () => 0 });
     b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2)).set(candidate2Hash, score(3));
     const a = await saveCandidate(b, candidateTar);
     const c = await saveCandidate(b, candidate2Tar);
@@ -1311,7 +1312,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     ]);
     expect(outcomes.filter((x) => x.status === "fulfilled")).toHaveLength(1);
     expect(outcomes.filter((x) => x.status === "rejected")).toHaveLength(1);
-    expect((await stateLines(b)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: a }]);
+    expect((await stateLines(b)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: a, activeMs: 0 }]);
   });
   it("rejects duplicate or contradictory persisted attempt facts", async () => {
     const shared = {
@@ -1472,6 +1473,7 @@ describe("trusted event ordering and candidacy", () => {
       runDir: path.join(tmpBase, "runs", "recover-all"),
       casDir: path.join(tmpBase, "cas", "recover-all"),
       runId: "run-recover-all",
+      now: () => 0,
     };
     const a = await boot(shared);
     a.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
@@ -1481,8 +1483,8 @@ describe("trusted event ordering and candidacy", () => {
     a.broker.reportIncumbent({ artifact: { hash: cand } }, CLIENT);
     await a.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 0 }, ADMIN);
     a.broker.recordSpend({ tokens: a.broker.manifest.budget.maxTokens, usd: 0 }, ADMIN);
-    const published = [...a.events];
-    expect(published.map((event) => event.type)).toEqual(expect.arrayContaining([
+    const beforeClose = [...a.events];
+    expect(beforeClose.map((event) => event.type)).toEqual(expect.arrayContaining([
       "episode.started",
       "episode.candidate",
       "eval.completed",
@@ -1492,7 +1494,15 @@ describe("trusted event ordering and candidacy", () => {
       "budget.snapshot",
       "budget.exhausted",
     ]));
+    const expectedCloseSnapshot: RunEvent = {
+      runId: a.runId,
+      at: new Date(0).toISOString(),
+      type: "budget.snapshot",
+      budget: a.broker.getBudget(ADMIN),
+    };
     await a.broker.close();
+    const published = [...a.events];
+    expect(published).toEqual([...beforeClose, expectedCloseSnapshot]);
 
     const b = await boot(shared);
     expect(b.broker.replayJournalEvents(published)).toBe(0);

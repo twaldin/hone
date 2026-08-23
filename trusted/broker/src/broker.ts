@@ -1386,7 +1386,7 @@ export class Broker {
     try {
       this.validateReplay(stateLog);
       this.replayState(stateLog);
-      this.syncRecursiveUsage();
+      this.syncRecursiveUsage(true);
       // This boot's startup generation is minted ABOVE every replayed epoch:
       // fresh re-measurements are today's authority; replayed ones are not.
       this.mintEpochSeq(this.measurementEpoch);
@@ -2189,10 +2189,28 @@ export class Broker {
     };
   }
 
-  private syncRecursiveUsage(): void {
-    if (this.recursive !== undefined) {
-      this.recursive.ledger.syncRunUsage(this.config.runId, this.directUsageNow());
+  private syncRecursiveUsage(allowDurableWallClockFloor = false): void {
+    if (this.recursive === undefined) return;
+    const nowMs = this.now();
+    let activeMs = this.activeWallClockMs(nowMs);
+    let usage = this.directUsageNow(nowMs);
+    const durableUsage = this.recursive.ledger.budgetState(this.config.runId).directUsage;
+    if (allowDurableWallClockFloor && usage.wallClockSec < durableUsage.wallClockSec) {
+      // Pre-active-clock ledgers recorded broker lifetime here. A crash under
+      // the first active-clock implementation could also durably advance this
+      // ledger immediately before its broker-state checkpoint. Neither case
+      // is corruption: retain the already-charged value as a conservative
+      // migration floor, then accrue active time only from this boot onward.
+      this.accumulatedActiveMs += (durableUsage.wallClockSec - usage.wallClockSec) * 1000;
+      activeMs = this.activeWallClockMs(nowMs);
+      usage = this.directUsageNow(nowMs);
     }
+    // Cross-file write ordering is the crash contract: broker active time is
+    // durable before the recursive ledger may advance to the same value. A
+    // crash can therefore leave broker state ahead (which sync repairs), but
+    // can never leave a new recursive usage fact ahead of broker authority.
+    this.state().append(StateLine.parse({ t: "clock", activeMs }));
+    this.recursive.ledger.syncRunUsage(this.config.runId, usage);
   }
 
   private budgetStateNow(tokensDelta = 0, usdDelta = 0, evaluatorInvocationDelta = 0): BudgetState {

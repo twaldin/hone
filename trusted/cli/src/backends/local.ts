@@ -1549,6 +1549,12 @@ export function createBackend(
               socketPath: publicSocketPath,
             })
           : await startBroker(brokerConfig, { socketPath: publicSocketPath });
+
+        // Finding 11: replay journaled-but-unlogged promotions into
+        // events.ndjson BEFORE anything can terminalize the run, so
+        // best/status/delivery and the resume hint all see the durable
+        // incumbent exactly once — even when a stop aborted mid-startup.
+        reconcileBrokerAuthority(ctx.runDir, running.broker, ctx.emit, ctx.runId);
         const pauseBrokerClock = (): void => {
           try {
             running?.broker.pauseActiveTime();
@@ -1558,12 +1564,6 @@ export function createBackend(
         };
         ctx.signal.addEventListener("abort", pauseBrokerClock, { once: true });
         if (ctx.signal.aborted) pauseBrokerClock();
-
-        // Finding 11: replay journaled-but-unlogged promotions into
-        // events.ndjson BEFORE anything can terminalize the run, so
-        // best/status/delivery and the resume hint all see the durable
-        // incumbent exactly once — even when a stop aborted mid-startup.
-        reconcileBrokerAuthority(ctx.runDir, running.broker, ctx.emit, ctx.runId);
 
         // Dispatch-charge reconciliation (P1): the proxy journal's cumulative
         // charge LEVEL is an absolute lower bound on token/usd spend — a
