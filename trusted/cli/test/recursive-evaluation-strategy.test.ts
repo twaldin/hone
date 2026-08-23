@@ -28,8 +28,12 @@ import {
   type TrustedEvaluationStrategy,
   type TrustedEvaluationStrategyInput,
 } from "@hone/broker";
-import { RecursiveSearchChildLauncher } from "../src/commands/hone.js";
-import type { CliChildSupervisor } from "../src/commands/hone.js";
+import {
+  RecursiveSearchChildLauncher,
+  imageBoundCandidateBundleDigest,
+  type CliChildSupervisor,
+} from "../src/commands/hone.js";
+import { snapshotDigest, type OptimizerSnapshot } from "../src/optimizer-digest.js";
 import { metaWorkKey } from "../src/meta-journal.js";
 import type { MetaJournalV1 } from "../src/meta-journal.js";
 import type { CampaignPauseAuthority } from "../src/types.js";
@@ -37,8 +41,13 @@ import type { CampaignPauseAuthority } from "../src/types.js";
 const CONFIG_HASH = `sha256:${"c".repeat(64)}` as Sha256Digest;
 const SOURCE = `sha256:${"a".repeat(64)}` as Sha256Digest;
 const BUNDLE = `sha256:${"b".repeat(64)}` as Sha256Digest;
+const FIRST_IMAGE = `hone-test@sha256:${"1".repeat(64)}`;
+const SECOND_IMAGE = `hone-test@sha256:${"2".repeat(64)}`;
+const THIRD_IMAGE = `hone-test@sha256:${"3".repeat(64)}`;
+const IMAGE_BOUND_BUNDLE = `sha256:${"d".repeat(64)}` as Sha256Digest;
 const FIRST_CAPSULE = "cap_000000000001";
 const SECOND_CAPSULE = "cap_000000000002";
+const THIRD_CAPSULE = "cap_000000000003";
 const FIRST_CEILING: BudgetEnvelope = {
   maxTokens: 100,
   maxUsd: 2,
@@ -50,6 +59,12 @@ const SECOND_CEILING: BudgetEnvelope = {
   maxUsd: 3,
   maxWallClockSec: 400,
   maxEvaluatorInvocations: 17,
+};
+const OUTER_BUDGET: BudgetEnvelope = {
+  maxTokens: 1_000,
+  maxUsd: 10,
+  maxWallClockSec: 1_000,
+  maxEvaluatorInvocations: 100,
 };
 
 function plan(): RecursiveEvaluationPlan {
@@ -71,6 +86,20 @@ function plan(): RecursiveEvaluationPlan {
   };
 }
 
+function threeChildPlan(): RecursiveEvaluationPlan {
+  return {
+    allocations: [
+      ...plan().allocations,
+      {
+        capsuleId: THIRD_CAPSULE,
+        allocationOrdinal: 2,
+        innerEpisodesMax: 4,
+        reservation: FIRST_CEILING,
+      },
+    ],
+  };
+}
+
 interface Harness {
   strategy: TrustedEvaluationStrategy;
   rows: MetaMeasurement[];
@@ -83,25 +112,26 @@ function harness(): Harness {
     queryTrainMeasurements: () => [...rows],
     queryFailureSettlements: () => [],
   } as unknown as MetaJournalV1;
-  const gate: MetaCandidateGate = {
-    check: async (request) => ({
-      ok: true,
+  const gate = {
+    check: async (request: Parameters<MetaCandidateGate["check"]>[0]) => ({
+      ok: true as const,
       sourceArtifact: request.sourceArtifact,
       bundleDigest: BUNDLE,
       transformationReceiptHash: null,
       feedback: "trusted conformance accepted",
     }),
+    bundleDigestForImage: () => BUNDLE,
   };
   const config = {
     counts: { innerEpisodesMax: 4 },
     developmentPanel: {
       members: [
         {
-          capsule: { capsuleId: FIRST_CAPSULE },
+          capsule: { capsuleId: FIRST_CAPSULE, image: FIRST_IMAGE },
           calibratedInnerCeiling: FIRST_CEILING,
         },
         {
-          capsule: { capsuleId: SECOND_CAPSULE },
+          capsule: { capsuleId: SECOND_CAPSULE, image: SECOND_IMAGE },
           calibratedInnerCeiling: SECOND_CEILING,
         },
       ],
@@ -163,6 +193,15 @@ function createIdentityHash(
 }
 
 describe("recursive search trusted evaluation adapter", () => {
+  it("derives an accepted candidate bundle digest for the target image", () => {
+    const snapshot: OptimizerSnapshot = { files: new Map() };
+    const comparisonDigest = snapshotDigest(FIRST_IMAGE, snapshot);
+    const targetDigest = snapshotDigest(THIRD_IMAGE, snapshot);
+
+    expect(imageBoundCandidateBundleDigest(snapshot, THIRD_IMAGE)).toBe(targetDigest);
+    expect(targetDigest).not.toBe(comparisonDigest);
+  });
+
   it("derives child identities and returns only the mean of trusted normalized settlements", async () => {
     const { strategy, rows } = harness();
     const spawned: SpawnRunParams[] = [];
@@ -229,5 +268,207 @@ describe("recursive search trusted evaluation adapter", () => {
       await expect(strategy(request(candidate, spawnRun))).rejects.toThrow(refusal);
     }
     expect(spawnRun).not.toHaveBeenCalled();
+  });
+
+  it("settles three image-bound children through the broker with each runtime digest sealed at launch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-recursive-image-binding-"));
+    const campaignDir = join(root, "campaign");
+    const runDir = join(root, "outer-run");
+    const capsuleRoot = join(root, "outer-capsule");
+    mkdirSync(campaignDir, { recursive: true });
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(capsuleRoot, { recursive: true });
+    mkdirSync(join(root, "cas"), { recursive: true });
+    const metaTask = "trusted recursive image binding\n";
+    writeFileSync(join(capsuleRoot, "meta-task.txt"), metaTask);
+    const metaTaskHash = `sha256:${createHash("sha256").update(metaTask).digest("hex")}`;
+
+    // M2 ignition 4's first two allocations used the comparison image; the
+    // third was the first different capsule image and therefore the first
+    // legitimate runtime digest that differed from the conformance digest.
+    const runtimeBundleByImage: Record<string, Sha256Digest> = {
+      [FIRST_IMAGE]: BUNDLE,
+      [SECOND_IMAGE]: BUNDLE,
+      [THIRD_IMAGE]: IMAGE_BOUND_BUNDLE,
+    };
+    const runtimeBundleByCapsule: Record<string, Sha256Digest> = {
+      [FIRST_CAPSULE]: BUNDLE,
+      [SECOND_CAPSULE]: BUNDLE,
+      [THIRD_CAPSULE]: IMAGE_BOUND_BUNDLE,
+    };
+    const rows: MetaMeasurement[] = [];
+    const finalized: string[] = [];
+    const journal = {
+      queryTrainMeasurements: () => [...rows],
+      queryFailureSettlements: () => [],
+    } as unknown as MetaJournalV1;
+    const gate = {
+      check: async (gateRequest: Parameters<MetaCandidateGate["check"]>[0]) => ({
+        ok: true as const,
+        sourceArtifact: gateRequest.sourceArtifact,
+        bundleDigest: BUNDLE,
+        transformationReceiptHash: null,
+        feedback: "comparison-image conformance accepted",
+      }),
+      bundleDigestForImage: (_sourceArtifact: Sha256Digest, image: string): Sha256Digest => {
+        const digest = runtimeBundleByImage[image];
+        if (digest === undefined) throw new Error(`test has no runtime bundle for ${image}`);
+        return digest;
+      },
+    };
+    const config = {
+      counts: { innerEpisodesMax: 4 },
+      developmentPanel: {
+        members: [
+          {
+            capsule: { capsuleId: FIRST_CAPSULE, image: FIRST_IMAGE },
+            calibratedInnerCeiling: FIRST_CEILING,
+          },
+          {
+            capsule: { capsuleId: SECOND_CAPSULE, image: SECOND_IMAGE },
+            calibratedInnerCeiling: SECOND_CEILING,
+          },
+          {
+            capsule: { capsuleId: THIRD_CAPSULE, image: THIRD_IMAGE },
+            calibratedInnerCeiling: FIRST_CEILING,
+          },
+        ],
+      },
+    } as unknown as RecursiveMetaCampaignConfig;
+    const adapter = new RecursiveSearchChildLauncher(
+      root,
+      campaignDir,
+      config,
+      CONFIG_HASH,
+      journal,
+      gate,
+      {} as CliChildSupervisor,
+      {} as MetaResourceEnvelopeLedger,
+      {} as CampaignPauseAuthority,
+    );
+    const ledger = RecursiveResourceLedger.open(join(campaignDir, "recursive-resource.ndjson"));
+    const broker = new Broker({
+      runId: "run_recursive_outer_image_binding",
+      manifest: {
+        schemaVersion: 2,
+        id: "cap_000000000000",
+        objective: "exercise trusted recursive child image binding",
+        baseline: { kind: "cas", hash: SOURCE },
+        image: FIRST_IMAGE,
+        evalEntrypoint: ["true"],
+        protectedPaths: [],
+        diagnosticOrdering: { path: "ordering.json", hash: CONFIG_HASH },
+        assetGroups: [{ id: "meta-train", visibility: "public", paths: ["meta-task.txt"] }],
+        budget: OUTER_BUDGET,
+        contentHashes: { "meta-task.txt": metaTaskHash },
+      } satisfies CapsuleManifest,
+      capsuleRootDir: capsuleRoot,
+      baselineArtifactHash: SOURCE,
+      capsuleDigest: CONFIG_HASH,
+      optimizerDigest: BUNDLE,
+      holdoutLedgerPath: join(runDir, "holdout-ledger.ndjson"),
+      image: FIRST_IMAGE,
+      runDir,
+      casDir: join(root, "cas"),
+      onEvent: () => {},
+      now: () => 0,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        resourceEnvelope: OUTER_BUDGET,
+        admitChildRun: ({ request: childRequest }) => ({
+          campaignConfigHash: CONFIG_HASH,
+          cohort: "panel-a",
+          capsuleProvenanceHash: CONFIG_HASH,
+          sourceProvenanceHash: childRequest.child.sourceArtifact.hash,
+          optimizerProvenanceHash: childRequest.child.optimizerArtifact.hash,
+        }),
+        launchChildRun: async ({ request: childRequest, admission }) => {
+          const actualBundle = runtimeBundleByCapsule[childRequest.child.capsuleId];
+          if (actualBundle === undefined) throw new Error("test launched a capsule outside its runtime map");
+          const childDir = join(root, childRequest.child.runId);
+          mkdirSync(childDir, { recursive: true });
+          const receiptPath = join(childDir, "launch-receipt.ndjson");
+          const receiptBody = {
+            child: childRequest.child,
+            depth: childRequest.depth,
+            admission,
+            launchedAt: "2026-08-23T21:22:13.455Z",
+          };
+          const receipt = ChildRunLaunchReceipt.parse({
+            ...receiptBody,
+            receiptDigest: hashChildRunLaunchReceipt(receiptBody),
+          });
+          writeFileSync(receiptPath, `${canonicalJson(receipt)}\n`);
+          const terminalEventPath = join(childDir, "events.ndjson");
+          const events: RunEvent[] = [
+            {
+              runId: childRequest.child.runId,
+              at: "2026-08-23T21:22:14.730Z",
+              type: "run.started",
+              capsuleId: childRequest.child.capsuleId,
+              contractHash: CONFIG_HASH,
+              optimizerDigest: actualBundle,
+              checkpointVersion: 1,
+              campaignConfigHash: admission.campaignConfigHash,
+            },
+            {
+              runId: childRequest.child.runId,
+              at: "2026-08-23T21:33:49.000Z",
+              type: "run.finished",
+              status: "completed",
+            },
+          ];
+          writeFileSync(terminalEventPath, `${events.map((event) => canonicalJson(event)).join("\n")}\n`);
+          const identity = identityFor(childRequest);
+          return {
+            launchReceiptPath: receiptPath,
+            terminalEventPath,
+            usage: { tokens: 1, usd: 0.1, wallClockSec: 1, evaluatorInvocations: 1 },
+            finalizeSettlement: () => {
+              finalized.push(childRequest.child.runId);
+              rows.push({
+                ...identity,
+                workKey: metaWorkKey(CONFIG_HASH, identity),
+                qNormalized: childRequest.child.capsuleId === FIRST_CAPSULE
+                  ? 0.25
+                  : childRequest.child.capsuleId === SECOND_CAPSULE
+                    ? 0.5
+                    : 0.75,
+                observed: { tokens: 1, usd: 0.1, wallClockSec: 1, evaluatorInvocations: 1 },
+              } as unknown as MetaMeasurement);
+            },
+          };
+        },
+      },
+    });
+
+    try {
+      const launched: SpawnRunParams[] = [];
+      const record = await adapter.evaluationStrategy()(request(
+        threeChildPlan(),
+        async (childRequest) => {
+          launched.push(childRequest);
+          return await broker.spawnRun(childRequest, { privileged: false });
+        },
+      ));
+
+      expect(launched.map((childRequest) => childRequest.child.optimizerArtifact.hash)).toEqual([
+        BUNDLE,
+        BUNDLE,
+        IMAGE_BOUND_BUNDLE,
+      ]);
+      expect(finalized).toEqual(launched.map((childRequest) => childRequest.child.runId));
+      expect(record.output.objectives).toEqual({ normalizedGain: 0.5 });
+      expect(record.output.constraints).toEqual({ allChildrenValid: true, fullPanel: true });
+      expect(ledger.budgetState("run_recursive_outer_image_binding")).toMatchObject({
+        reservations: 3,
+        openReservations: 0,
+      });
+    } finally {
+      await broker.close();
+      ledger.close();
+    }
   });
 });

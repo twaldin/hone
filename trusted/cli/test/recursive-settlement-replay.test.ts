@@ -65,6 +65,7 @@ const configHash = metaCampaignConfigHash(config) as Sha256Digest;
 const member = config.developmentPanel.members[0]!;
 const sourceArtifact = config.seedOptimizer.sourceArtifact as Sha256Digest;
 const bundleDigest = config.seedOptimizer.bundleDigest as Sha256Digest;
+const SKEW_BUNDLE = `sha256:${"e".repeat(64)}` as Sha256Digest;
 const reservation: BudgetEnvelope = {
   maxTokens: 12_000_000,
   maxUsd: 25,
@@ -272,6 +273,7 @@ async function runFixtureChild(
   eventPath: string,
   gatewayUrl: string,
   mode: "pause" | "pause-hold" | "resume" | "complete",
+  initialEvents: readonly RunEvent[] = INITIAL_EVENTS,
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
   const child = spawn(process.execPath, [
     "-e",
@@ -279,7 +281,7 @@ async function runFixtureChild(
     eventPath,
     gatewayUrl,
     mode,
-    encoded(INITIAL_EVENTS),
+    encoded(initialEvents),
     encoded(PAUSE_EVENTS),
     encoded(RESUME_EVENTS),
   ], { stdio: ["ignore", "pipe", "pipe"] });
@@ -423,6 +425,7 @@ class GatewayChildSupervisor {
     private readonly gatewayUrl: string,
     private readonly phase: "pause" | "pause-hold" | "resume" | "complete" | "unknown",
     private readonly qRaw = member.capsule.qBase + member.capsule.scale * 0.25,
+    private readonly runtimeBundleDigest: Sha256Digest = bundleDigest,
   ) {}
 
   async runLaunched(childRequest: MetaChildRunRequest): Promise<MetaChildRunOutcome> {
@@ -431,7 +434,13 @@ class GatewayChildSupervisor {
     const eventPath = join(runDir, "events.ndjson");
     const exited = this.phase === "unknown"
       ? { signal: null }
-      : await runFixtureChild(eventPath, this.gatewayUrl, this.phase);
+      : await runFixtureChild(
+        eventPath,
+        this.gatewayUrl,
+        this.phase,
+        INITIAL_EVENTS.map((event) =>
+          event.type === "run.started" ? { ...event, optimizerDigest: this.runtimeBundleDigest } : event),
+      );
     this.kills.push(exited.signal);
     if (this.phase === "unknown") writeFileSync(eventPath, "{\"runId\":\n", { mode: 0o600 });
     const bytes = readFileSync(eventPath);
@@ -445,7 +454,7 @@ class GatewayChildSupervisor {
       capsuleId: childRequest.identity.capsuleId,
       sourceArtifact: childRequest.sourceArtifact,
       bundleDigest: childRequest.bundleDigest,
-      runtimeBundleDigest: bundleDigest,
+      runtimeBundleDigest: this.runtimeBundleDigest,
       baselineArtifactHash: sourceArtifact,
       bestArtifactHash: completed ? sourceArtifact : null,
       finalEvaluation: evaluation,
@@ -492,7 +501,11 @@ function outerManifest(root: string): CapsuleManifest {
   };
 }
 
-function openRuntime(root: string, supervisor: GatewayChildSupervisor): OpenRuntime {
+function openRuntime(
+  root: string,
+  supervisor: GatewayChildSupervisor,
+  imageBoundBundleDigest: Sha256Digest = bundleDigest,
+): OpenRuntime {
   const campaignDir = join(root, "campaign");
   mkdirSync(campaignDir, { recursive: true });
   const journal = MetaJournalV1.open(join(campaignDir, "meta-journal.ndjson"), config);
@@ -514,7 +527,16 @@ function openRuntime(root: string, supervisor: GatewayChildSupervisor): OpenRunt
     config,
     configHash,
     journal,
-    { check: async () => ({ ok: true, sourceArtifact, bundleDigest, transformationReceiptHash: null, feedback: "accepted" }) },
+    {
+      check: async () => ({
+        ok: true,
+        sourceArtifact,
+        bundleDigest,
+        transformationReceiptHash: null,
+        feedback: "accepted",
+      }),
+      bundleDigestForImage: () => imageBoundBundleDigest,
+    },
     supervisor as unknown as CliChildSupervisor,
     envelopeLedger,
     authority,
@@ -642,6 +664,25 @@ describe("recursive child nonterminal settlement replay", () => {
     await exercisePauseResume(true);
   });
 
+  it("refuses a non-image-bound launch identity before spending the child budget", { timeout: 30_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-launch-digest-recheck-"));
+    const supervisor = new GatewayChildSupervisor(root, "http://127.0.0.1:1/v1/responses", "unknown");
+    const runtime = openRuntime(root, supervisor, SKEW_BUNDLE);
+    try {
+      await expect(runtime.broker.spawnRun(request, CLIENT)).rejects.toThrow(
+        /optimizer conformance does not match its image-bound launch digest/,
+      );
+      expect(supervisor.kills).toEqual([]);
+      expect(journalFacts(join(root, "campaign", "meta-journal.ndjson")).map((fact) => fact["t"])).toEqual(["header"]);
+      expect(
+        journalFacts(join(root, "campaign", "resource-envelope.v1.ndjson"))
+          .filter((fact) => fact["type"] === "reservation"),
+      ).toHaveLength(0);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("records an unreplayable child as pending without minting a terminal settlement", { timeout: 30_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), "hone-unknown-child-"));
     const supervisor = new GatewayChildSupervisor(root, "http://127.0.0.1:1/v1/responses", "unknown");
@@ -723,6 +764,7 @@ export function createBackend() {
     const resumed = await runPendingOuterProcess(root, "resume");
     expect(resumed.signal).toBeNull();
     expect(resumed.code, resumed.stderr).toBe(0);
+
     expect(existsSync(join(root, "pending-child.authority"))).toBe(false);
     expect(readdirSync(join(root, ".hone-runs")).filter((entry) => entry.startsWith("run_"))).toEqual([outerRunId]);
     const completedEvents = eventFacts(join(root, ".hone-runs", outerRunId, "events.ndjson"));
@@ -730,6 +772,42 @@ export function createBackend() {
     expect(completedEvents.filter((event) => event.type === "run.resumed")).toHaveLength(1);
     expect(completedEvents.filter((event) => event.type === "run.finished")).toHaveLength(1);
     expect(completedEvents.at(-1)).toMatchObject({ type: "run.finished", status: "completed" });
+  });
+  it("keeps a completed digest-skew child uncommitted after the broker binding refusal", { timeout: 30_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-terminal-digest-skew-"));
+    const port = await reserveGatewayPort();
+    const gateway = await startGateway(port);
+    const gatewayUrl = `http://127.0.0.1:${port}/v1/responses`;
+    const supervisor = new GatewayChildSupervisor(
+      root,
+      gatewayUrl,
+      "complete",
+      member.capsule.qBase + member.capsule.scale * 0.25,
+      SKEW_BUNDLE,
+    );
+    const runtime = openRuntime(root, supervisor);
+    try {
+      await expect(runtime.broker.spawnRun(request, CLIENT)).rejects.toThrow(
+        `child ${childRunId} event stream is not bound to its launch receipt`,
+      );
+      expect(journalFacts(join(root, "campaign", "meta-journal.ndjson")).map((fact) => fact["t"])).toEqual([
+        "header",
+        "reservation",
+      ]);
+      const envelopeFacts = journalFacts(join(root, "campaign", "resource-envelope.v1.ndjson"));
+      expect(envelopeFacts.filter((fact) => fact["type"] === "reservation")).toHaveLength(1);
+      expect(envelopeFacts.filter((fact) => fact["type"] === "settlement")).toHaveLength(0);
+      const recursiveFacts = journalFacts(join(root, "campaign", "recursive-resource.v1.ndjson"));
+      expect(recursiveFacts.filter((fact) => fact["t"] === "reservation")).toHaveLength(1);
+      expect(recursiveFacts.filter((fact) => fact["t"] === "settlement")).toHaveLength(0);
+      expect(runtime.recursiveLedger.budgetState(OUTER_RUN_ID)).toMatchObject({
+        reservations: 1,
+        openReservations: 1,
+      });
+    } finally {
+      await runtime.close();
+      await stopGateway(gateway);
+    }
   });
 
   it("keeps the genuine-terminal duplicate settlement refusal immutable", { timeout: 30_000 }, async () => {
@@ -750,7 +828,16 @@ export function createBackend() {
         config,
         configHash,
         runtime.journal,
-        { check: async () => ({ ok: true, sourceArtifact, bundleDigest, transformationReceiptHash: null, feedback: "accepted" }) },
+        {
+          check: async () => ({
+            ok: true,
+            sourceArtifact,
+            bundleDigest,
+            transformationReceiptHash: null,
+            feedback: "accepted",
+          }),
+          bundleDigestForImage: () => bundleDigest,
+        },
         conflicting as unknown as CliChildSupervisor,
         new MetaResourceEnvelopeLedger(config.recursiveBudgets, runtime.envelopePort),
         {
@@ -761,9 +848,8 @@ export function createBackend() {
           recordCampaignResume: () => {},
         },
       );
-      await expect(replayedLauncher.launchChildRun({ request, admission, replay: true })).rejects.toThrow(
-        `conflicting duplicate settlement for ${workKey}`,
-      );
+      const replayed = await replayedLauncher.launchChildRun({ request, admission, replay: true });
+      expect(() => replayed.finalizeSettlement()).toThrow(`conflicting duplicate settlement for ${workKey}`);
     } finally {
       await runtime.close();
       await stopGateway(gateway);
