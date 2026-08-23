@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdirSync,
@@ -43,6 +44,7 @@ import { RecursiveSearchChildLauncher } from "../src/commands/hone.js";
 import type { CliChildSupervisor } from "../src/commands/hone.js";
 import { metaWorkKey } from "../src/meta-journal.js";
 import type { MetaJournalV1 } from "../src/meta-journal.js";
+import { computeTrustedRuntimeDigest } from "../src/runtime-digest.js";
 import type { CampaignPauseAuthority } from "../src/types.js";
 import { runEpisodeLoop } from "../../../optimizer/src/loop.js";
 
@@ -132,6 +134,11 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       );
     }
     const campaignConfig = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+    const executedSourceCommit = execFileSync("git", ["-C", repoRoot, "rev-parse", "--verify", "HEAD^{commit}"], {
+      encoding: "utf8",
+    }).trim();
+    const executedRuntimeDigest = computeTrustedRuntimeDigest();
+    expect(executedRuntimeDigest).toBe(campaignConfig.trustedRuntime.digest);
     const configHash = sha256(canonicalJson(campaignConfig));
     if (!("mode" in campaignConfig.corpusCohort)) {
       throw new Error("smoke campaign must carry the owner-authorized partial cohort");
@@ -415,6 +422,10 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         `sg docker -c 'HONE_RECURSIVE_SEARCH_SMOKE=1 HONE_REPO_ROOT=${repoRoot} HONE_RECURSIVE_SMOKE_CAMPAIGN=${campaignPath} HONE_RECURSIVE_SMOKE_EVIDENCE=${evidencePath} ./node_modules/.bin/vitest run --root trusted/cli test/recursive-search.smoke.test.ts'`,
       result: "passed: config-bound search episode 0 dispatched one recursive child to a real Docker evaluator and emitted its trusted score",
       smokeRoot,
+      executedRuntime: {
+        sourceCommit: executedSourceCommit,
+        digest: executedRuntimeDigest,
+      },
       campaign: {
         draftPath: campaignPath,
         configHash,
