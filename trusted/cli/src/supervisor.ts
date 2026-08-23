@@ -470,6 +470,8 @@ export interface TrustedRunOptions {
   proxyRole?: M2ProxyRole | undefined;
   /** Shared recursive-campaign provider pause authority. */
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
+  /** Trusted recursive journal authority; true leaves an INTERNAL child crash resumable. */
+  hasUnsettledPendingChild?: (() => boolean) | undefined;
   /**
    * Review bypass for the trusted synthetic meta capsule only: its authoring
    * validation and later frozen-byte recheck precede/replace Gate 2.
@@ -907,6 +909,9 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ...(trusted.proxyRole !== undefined ? { proxyRole: trusted.proxyRole } : {}),
       ...(trusted.campaignPauseAuthority !== undefined
         ? { campaignPauseAuthority: trusted.campaignPauseAuthority }
+        : {}),
+      ...(trusted.hasUnsettledPendingChild !== undefined
+        ? { hasUnsettledPendingChild: trusted.hasUnsettledPendingChild }
         : {}),
       ...(trusted.admissionReview !== undefined ? { admissionReview: trusted.admissionReview } : {}),
       ...(trusted.campaignConfigHash !== undefined ? { campaignConfigHash: trusted.campaignConfigHash } : {}),
@@ -1435,6 +1440,7 @@ export interface SuperviseExtra {
   corpusCohort?: CorpusCohortBinding | undefined;
   proxyRole?: M2ProxyRole | undefined;
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
+  hasUnsettledPendingChild?: (() => boolean) | undefined;
   admissionReview?: "required" | "off" | undefined;
 }
 
@@ -2045,6 +2051,7 @@ async function superviseLocked(
       io.err("campaign remains durably paused after backend teardown — run left unfinished for trusted resume");
       return 1;
     }
+
     let status: "completed" | "stopped" | "failed" | "budget";
     let reason: "operator" | "budget-exhausted" | "session-no-yield-bound" | "crash" | undefined;
     if (stopRequested) {
@@ -2057,6 +2064,10 @@ async function superviseLocked(
       status = "stopped";
       reason = "session-no-yield-bound";
     } else if (failure !== null) {
+      if (extra.hasUnsettledPendingChild?.() === true) {
+        io.err("recursive child remains durably pending — run left unfinished for trusted resume");
+        return 1;
+      }
       status = "failed";
       reason = "crash";
     } else {
