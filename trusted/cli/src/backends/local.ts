@@ -1478,6 +1478,7 @@ export function createBackend(
           capsuleDigest: ctx.capsuleDigest,
           optimizerDigest: ctx.optimizerDigest,
           ...(ctx.measurementEpoch !== undefined ? { measurementEpoch: ctx.measurementEpoch } : {}),
+          ...(ctx.evalTimeoutSec !== undefined ? { evalTimeoutSec: ctx.evalTimeoutSec } : {}),
           runStartedAtMs: activeClock.runStartedAtMs,
           activeStartedAtMs: activeClock.activeStartedAtMs,
           initialActiveWallClockSec: activeClock.accumulatedActiveWallClockSec,

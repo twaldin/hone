@@ -17,6 +17,7 @@ import {
 } from "@hone/schema";
 import { UsageError } from "./args.js";
 import { writeFileDurable } from "./eventlog.js";
+import { gate2ReceiptCitesAuthorizedBasis } from "./m2-cohort.js";
 
 /**
  * M2 corpus provenance (launch-tooling item 1): the digest-bound bridge from
@@ -262,14 +263,7 @@ export function assembleCorpusProvenance(inputs: CorpusProvenanceInputs): Verifi
         refuse(`capsule "${label}" does not reproduce its authorized Gate-2 receipt binding`);
       }
       const basis = receipt.approvalBasis;
-      if (
-        basis === undefined
-        || basis.authorizationKey !== partialCohort.authorization.decisionKey
-        || basis.authorizedBy.identity !== partialCohort.authorization.owner.identity
-        || basis.authorizedBy.kind !== "owner"
-        || basis.authorizedAt !== partialCohort.authorization.decidedAt
-        || basis.deliveredVia !== partialCohort.authorization.deliveredVia
-      ) {
+      if (!gate2ReceiptCitesAuthorizedBasis(partialCohort, authorized, basis)) {
         refuse(`capsule "${label}" Gate-2 receipt does not cite the cohort owner authorization`);
       }
     }

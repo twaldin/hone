@@ -455,6 +455,8 @@ export interface TrustedRunOptions {
   /** Deterministic child/outer id from a durable meta receipt. */
   runId?: string | undefined;
   measurementEpoch?: string | undefined;
+  /** Trusted per-evaluation wall-time cap; never accepted from CLI flags or run config. */
+  evalTimeoutSec?: number | undefined;
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   optimizerEpisodesMax?: number | undefined;
   maxPublicCandidateEvaluations?: number | undefined;
@@ -890,6 +892,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ...(optimizerBaseSnapshot !== undefined ? { optimizerBaseSnapshot } : {}),
       optimizerArtifactSeal,
       ...(trusted.measurementEpoch !== undefined ? { measurementEpoch: trusted.measurementEpoch } : {}),
+      ...(trusted.evalTimeoutSec !== undefined ? { evalTimeoutSec: trusted.evalTimeoutSec } : {}),
       ...(trusted.evaluationStrategy !== undefined ? { evaluationStrategy: trusted.evaluationStrategy } : {}),
       ...(trusted.optimizerEpisodesMax !== undefined ? { optimizerEpisodesMax: trusted.optimizerEpisodesMax } : {}),
       ...(trusted.maxPublicCandidateEvaluations !== undefined
@@ -1420,6 +1423,7 @@ export interface SuperviseExtra {
   /** Exact durable selection receipt, or null/absent for the M0 default optimizer. */
   optimizerArtifactSeal?: OptimizerArtifactSeal | null | undefined;
   measurementEpoch?: string | undefined;
+  evalTimeoutSec?: number | undefined;
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   optimizerEpisodesMax?: number | undefined;
   maxPublicCandidateEvaluations?: number | undefined;
@@ -1796,6 +1800,7 @@ async function superviseLocked(
     ...(extra.optimizerSnapshot !== undefined ? { optimizerSnapshot: extra.optimizerSnapshot } : {}),
     ...(extra.optimizerBaseSnapshot !== undefined ? { optimizerBaseSnapshot: extra.optimizerBaseSnapshot } : {}),
     ...(extra.measurementEpoch !== undefined ? { measurementEpoch: extra.measurementEpoch } : {}),
+    ...(extra.evalTimeoutSec !== undefined ? { evalTimeoutSec: extra.evalTimeoutSec } : {}),
     ...(extra.evaluationStrategy !== undefined ? { evaluationStrategy: extra.evaluationStrategy } : {}),
     ...(extra.optimizerEpisodesMax !== undefined ? { optimizerEpisodesMax: extra.optimizerEpisodesMax } : {}),
     ...(extra.maxPublicCandidateEvaluations !== undefined

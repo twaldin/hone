@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { BudgetEnvelope, IMAGE_DIGEST_REF } from "./capsule.js";
+import { AdmissionApprovalBasis } from "./admission.js";
 import { M2_INNER_MODEL_ROUTE, M2_OUTER_MODEL_ROUTE } from "./proxy.js";
 import { canonicalJson } from "./canonical.js";
 import { PromotionRule } from "./runconfig.js";
@@ -389,6 +390,8 @@ export const M2_SEARCH_CANDIDATE_EQUIVALENTS = 12;
 export const M2_CANDIDATE_COUNT = M2_SEARCH_CANDIDATE_EQUIVALENTS;
 export const M2_CANDIDATE_ATTEMPTS_MAX = 24;
 export const M2_INNER_EPISODES_MAX = 4;
+/** Owner-ratified wall-time cap for one evaluator invocation (key: m2-eval-cap). */
+export const M2_EVALUATOR_TIMEOUT_SEC = 2700;
 export const M2_ALLOWED_CLAIM = "recursive-transfer-frozen-corpus";
 
 /**
@@ -524,6 +527,12 @@ const M2AuthorizedAdmittedCapsuleBase = z.object({
   capsuleId: M2CapsuleId,
   capsuleDigest: SHA256,
   gate2ReceiptHash: SHA256,
+  /**
+   * A capsule re-admitted after the cohort ruling may cite a later, distinct
+   * owner Gate-2 authority. Absent means the cohort authorization remains the
+   * expected receipt basis (the original 21+6 record).
+   */
+  gate2Authorization: AdmissionApprovalBasis.optional(),
 });
 const M2AuthorizedDeferredCapsuleBase = z.object({
   label: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
@@ -808,6 +817,8 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   train: z.array(MetaCapsuleEntry),
   holdout: z.array(MetaCapsuleEntry),
   counts: RecursiveCampaignCounts,
+  /** Frozen wall-time cap for each individual evaluator invocation. */
+  evaluatorTimeoutSec: z.literal(M2_EVALUATOR_TIMEOUT_SEC),
   calibration: M2CalibrationBinding,
   corpusCohort: M2CorpusCohort,
   modelObservation: M2ModelObservationPolicy,

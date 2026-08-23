@@ -16,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CapsuleManifest, capsuleDigest, type EvaluatorOutput } from "@hone/schema";
+import { CapsuleManifest, MetaCampaignConfigV2, capsuleDigest, type EvaluatorOutput } from "@hone/schema";
 import {
   CasStore,
   packDirAsArtifact,
@@ -28,13 +28,12 @@ import {
 } from "@hone/broker";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_CAMPAIGN = "data/m2-refreeze/campaign-frozen.json";
-const DEFAULT_CONFIG = "data/m2-refreeze/terminal-authority-preflight.config.json";
+const DEFAULT_CAMPAIGN = "data/m2-refreeze-final/campaign-frozen.json";
+const DEFAULT_CONFIG = "data/m2-refreeze-final/terminal-authority-preflight.config.json";
 const DEFAULT_OUTPUT = "tmp/m2-terminal-authority-preflight.evidence.v1.json";
 const SYNTHETIC_GROUP_ID = "synthetic-terminal-preflight";
 const WORKER_UID_MIN = 20_000;
 const MAX_DIAGNOSTIC_CHARS = 16_384;
-const DEFAULT_EVALUATOR_TIMEOUT_SEC = 600;
 const OPERATOR_CONTAMINATION_DISCLOSURE = {
   incident: "During schema discovery, an operator-side repository grep was accidentally scoped across the Floyd capsule before assets/ was excluded.",
   observedLocations: [
@@ -50,7 +49,7 @@ type Args = {
   campaign: string;
   config: string;
   output: string;
-  evaluatorTimeoutSec: number;
+  evaluatorTimeoutSec?: number;
   evaluatorTimeoutExplicit: boolean;
   negativeProbe?: string;
 };
@@ -110,7 +109,6 @@ function parseArgs(argv: string[]): Args {
     campaign: DEFAULT_CAMPAIGN,
     config: DEFAULT_CONFIG,
     output: DEFAULT_OUTPUT,
-    evaluatorTimeoutSec: DEFAULT_EVALUATOR_TIMEOUT_SEC,
     evaluatorTimeoutExplicit: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -965,8 +963,9 @@ async function main(): Promise<void> {
   const campaignPath = repoPath(args.campaign, "campaign");
   const configPath = repoPath(args.config, "config");
   const outputPath = repoPath(args.output, "output");
-  const campaign = readJson<any>(campaignPath);
+  const campaign = MetaCampaignConfigV2.parse(readJson<unknown>(campaignPath));
   const config = readJson<ProbeConfig>(configPath);
+  const evaluatorTimeoutSec = args.evaluatorTimeoutSec ?? campaign.evaluatorTimeoutSec;
   if (config.schemaVersion !== 1 || config.synthetic !== true || config.derivedFromHoldout !== false || config.assetGroupId !== SYNTHETIC_GROUP_ID) {
     throw new Error("terminal preflight config does not declare the synthetic/no-holdout contract");
   }
@@ -1001,7 +1000,7 @@ async function main(): Promise<void> {
       const negative = definition.label === args.negativeProbe;
       console.log(`${definition.label}: running ${negative ? "deliberately broken" : "synthetic"} terminal probe`);
       try {
-        results.push(await runOne(definition, negative, reportRoot, args.evaluatorTimeoutSec));
+        results.push(await runOne(definition, negative, reportRoot, evaluatorTimeoutSec));
       } catch (error) {
         const failedCapsuleRoot = join(REPO_ROOT, "capsules", definition.label);
         const failedManifest = CapsuleManifest.parse(readJson<unknown>(join(failedCapsuleRoot, "manifest.json")));
@@ -1048,12 +1047,12 @@ async function main(): Promise<void> {
     gate: "terminal-authority-preflight",
     generatedAt: new Date().toISOString(),
     gateInvocation: args.evaluatorTimeoutExplicit
-      ? `bun capsules/tools/preflight-m2-terminal-authority.mts --evaluator-timeout-sec ${args.evaluatorTimeoutSec}`
+      ? `bun capsules/tools/preflight-m2-terminal-authority.mts --evaluator-timeout-sec ${evaluatorTimeoutSec}`
       : "bun capsules/tools/preflight-m2-terminal-authority.mts",
     campaign: relative(REPO_ROOT, campaignPath).split(sep).join("/"),
     config: relative(REPO_ROOT, configPath).split(sep).join("/"),
     parameters: {
-      evaluatorTimeoutSec: args.evaluatorTimeoutSec,
+      evaluatorTimeoutSec,
       evaluatorTimeoutSource: args.evaluatorTimeoutExplicit ? "explicit-cli-override" : "campaign-faithful-default",
     },
     synthetic: true,

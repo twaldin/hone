@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import {
   M2_CANDIDATE_ATTEMPTS_MAX,
   M2_CANDIDATE_COUNT,
+  M2_EVALUATOR_TIMEOUT_SEC,
   M2_INNER_MODEL_ROUTE,
   M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
@@ -30,6 +31,7 @@ import { CorpusProvenanceV1, verifyCorpusProvenance } from "./corpus-provenance.
 import { selectSaturationCeiling, type SaturationCeilingReport, type SaturationCell } from "@hone/scoring";
 import { UsageError } from "./args.js";
 import { writeFileDurable } from "./eventlog.js";
+import { gate2ReceiptCitesAuthorizedBasis } from "./m2-cohort.js";
 
 /**
  * Initial M2 launch draft generator (launch-tooling item 3).
@@ -575,14 +577,7 @@ function indexAdmitted(
         throw new UsageError(`capsule ${registered.id} admission does not reproduce its authorized Gate-2 receipt`);
       }
       const basis = receipt.approvalBasis;
-      if (
-        basis === undefined
-        || basis.authorizationKey !== partial.authorization.decisionKey
-        || basis.authorizedBy.identity !== partial.authorization.owner.identity
-        || basis.authorizedBy.kind !== "owner"
-        || basis.authorizedAt !== partial.authorization.decidedAt
-        || basis.deliveredVia !== partial.authorization.deliveredVia
-      ) {
+      if (!gate2ReceiptCitesAuthorizedBasis(partial, authorized, basis)) {
         throw new UsageError(`capsule ${registered.id} Gate-2 receipt does not cite the owner authorization`);
       }
     }
@@ -876,6 +871,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
       holdoutReplicates: 3,
       childConcurrency: parameters.childConcurrency,
     },
+    evaluatorTimeoutSec: M2_EVALUATOR_TIMEOUT_SEC,
     budgets: {
       campaign: campaignBudget,
       outer: parameters.outerBudget,

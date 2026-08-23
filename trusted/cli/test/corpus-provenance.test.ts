@@ -366,6 +366,38 @@ describe("corpus provenance assembly: refusals", () => {
     expect(() => assembleCorpusProvenance(basisDrift)).toThrow(/does not cite the cohort owner authorization/);
   });
 
+  it("accepts a receipt-bound later owner authority for a re-admitted identity", () => {
+    const inputs = partialFixtureInputs();
+    const label = inputs.mapping.development[0]!;
+    const capsule = inputs.capsules[label]!;
+    if (capsule.approval?.receipt === undefined) throw new Error("fixture lost approval");
+    const policy = structuredClone(inputs.partialCohort as M2AuthorizedPartialCohort);
+    const authorized = policy.admitted.find((entry) => entry.label === label);
+    if (authorized === undefined) throw new Error("fixture policy lost admitted capsule");
+    const gate2Authorization = {
+      authorizationKey: "m2-wave-gate2",
+      authorizedBy: { identity: "captain", kind: "owner" } as const,
+      authorizedAt: "2026-08-23T06:33:44Z",
+      deliveredVia: "first-mate",
+      reviewEvidence: ["plans/m2-readmission-wave-evidence.v1.json"],
+    };
+    const { recordHash: _recordHash, ...priorBody } = capsule.approval.receipt;
+    const body = { ...priorBody, approvalBasis: gate2Authorization };
+    const receipt = AdmissionReceiptRecord.parse({
+      ...body,
+      recordHash: admissionReceiptRecordHash(body),
+    });
+    authorized.gate2ReceiptHash = receipt.recordHash;
+    authorized.gate2Authorization = gate2Authorization;
+    inputs.partialCohort = policy;
+    inputs.capsules[label] = {
+      ...capsule,
+      approval: { approved: true, receipt },
+    };
+    expect(assembleCorpusProvenance(inputs).partialCohort?.admitted)
+      .toContainEqual(expect.objectContaining({ label, gate2Authorization }));
+  });
+
   it("refuses a policy whose admitted labels do not exactly cover provenance inputs", () => {
     const inputs = partialFixtureInputs();
     const policy = structuredClone(inputs.partialCohort as M2AuthorizedPartialCohort);
