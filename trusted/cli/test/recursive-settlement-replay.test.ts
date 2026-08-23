@@ -501,7 +501,11 @@ function outerManifest(root: string): CapsuleManifest {
   };
 }
 
-function openRuntime(root: string, supervisor: GatewayChildSupervisor): OpenRuntime {
+function openRuntime(
+  root: string,
+  supervisor: GatewayChildSupervisor,
+  imageBoundBundleDigest: Sha256Digest = bundleDigest,
+): OpenRuntime {
   const campaignDir = join(root, "campaign");
   mkdirSync(campaignDir, { recursive: true });
   const journal = MetaJournalV1.open(join(campaignDir, "meta-journal.ndjson"), config);
@@ -531,7 +535,7 @@ function openRuntime(root: string, supervisor: GatewayChildSupervisor): OpenRunt
         transformationReceiptHash: null,
         feedback: "accepted",
       }),
-      bundleDigestForImage: () => bundleDigest,
+      bundleDigestForImage: () => imageBoundBundleDigest,
     },
     supervisor as unknown as CliChildSupervisor,
     envelopeLedger,
@@ -658,6 +662,25 @@ describe("recursive child nonterminal settlement replay", () => {
 
   it("replays the nonterminal journal after SIGKILL between pause and resume", { timeout: 30_000 }, async () => {
     await exercisePauseResume(true);
+  });
+
+  it("refuses a non-image-bound launch identity before spending the child budget", { timeout: 30_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-launch-digest-recheck-"));
+    const supervisor = new GatewayChildSupervisor(root, "http://127.0.0.1:1/v1/responses", "unknown");
+    const runtime = openRuntime(root, supervisor, SKEW_BUNDLE);
+    try {
+      await expect(runtime.broker.spawnRun(request, CLIENT)).rejects.toThrow(
+        /optimizer conformance does not match its image-bound launch digest/,
+      );
+      expect(supervisor.kills).toEqual([]);
+      expect(journalFacts(join(root, "campaign", "meta-journal.ndjson")).map((fact) => fact["t"])).toEqual(["header"]);
+      expect(
+        journalFacts(join(root, "campaign", "resource-envelope.v1.ndjson"))
+          .filter((fact) => fact["type"] === "reservation"),
+      ).toHaveLength(0);
+    } finally {
+      await runtime.close();
+    }
   });
 
   it("records an unreplayable child as pending without minting a terminal settlement", { timeout: 30_000 }, async () => {

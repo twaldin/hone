@@ -648,6 +648,14 @@ interface CandidateGateOptions {
   readonly controls: readonly RegisteredControl[];
 }
 
+/** Seal accepted candidate bytes against the image that will actually boot them. */
+export function imageBoundCandidateBundleDigest(
+  snapshot: OptimizerSnapshot,
+  image: string,
+): Sha256Digest {
+  return snapshotDigest(image, snapshot) as Sha256Digest;
+}
+
 interface RecursiveCandidateGate extends MetaCandidateGate {
   bundleDigestForImage(sourceArtifact: Sha256Digest, image: string): Sha256Digest;
 }
@@ -657,7 +665,7 @@ class CliCandidateGate implements RecursiveCandidateGate {
   private readonly controls = new Map<Sha256Digest, RegisteredControl>();
   private readonly receipts = new Map<Sha256Digest, CandidateConformanceReceipt>();
   private readonly bundleOwners = new Map<Sha256Digest, Sha256Digest>();
-  private readonly resolvedCandidates = new Map<Sha256Digest, ResolvedCandidateOptimizer>();
+  private readonly resolvedCandidateSnapshots = new Map<Sha256Digest, OptimizerSnapshot>();
   private readonly inFlight = new Map<Sha256Digest, Promise<CandidateGateResult>>();
 
   constructor(private readonly opts: CandidateGateOptions) {
@@ -702,11 +710,11 @@ class CliCandidateGate implements RecursiveCandidateGate {
    * seal this image-bound digest, not the comparison-image digest.
    */
   bundleDigestForImage(sourceArtifact: Sha256Digest, image: string): Sha256Digest {
-    const candidate = this.resolvedCandidates.get(sourceArtifact);
-    if (candidate === undefined) {
+    const snapshot = this.resolvedCandidateSnapshots.get(sourceArtifact);
+    if (snapshot === undefined) {
       throw new UsageError(`candidate ${sourceArtifact} has no accepted conformance result`);
     }
-    return snapshotDigest(image, candidate.snapshot) as Sha256Digest;
+    return imageBoundCandidateBundleDigest(snapshot, image);
   }
 
   private async checkOnce(request: MetaCandidateGateRequest): Promise<CandidateGateResult> {
@@ -753,7 +761,7 @@ class CliCandidateGate implements RecursiveCandidateGate {
       return { ok: false, feedback: bounded(`candidate conformance failed: ${error instanceof Error ? error.message : String(error)}`) };
     }
     this.bundleOwners.set(bundleDigest, request.sourceArtifact);
-    this.resolvedCandidates.set(request.sourceArtifact, selected);
+    this.resolvedCandidateSnapshots.set(request.sourceArtifact, selected.snapshot);
     const changedCount = changedOptimizerPaths(this.opts.baseSnapshot, selected.snapshot).length;
     return {
       ok: true,

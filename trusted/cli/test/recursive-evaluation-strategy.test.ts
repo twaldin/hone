@@ -28,8 +28,12 @@ import {
   type TrustedEvaluationStrategy,
   type TrustedEvaluationStrategyInput,
 } from "@hone/broker";
-import { RecursiveSearchChildLauncher } from "../src/commands/hone.js";
-import type { CliChildSupervisor } from "../src/commands/hone.js";
+import {
+  RecursiveSearchChildLauncher,
+  imageBoundCandidateBundleDigest,
+  type CliChildSupervisor,
+} from "../src/commands/hone.js";
+import { snapshotDigest, type OptimizerSnapshot } from "../src/optimizer-digest.js";
 import { metaWorkKey } from "../src/meta-journal.js";
 import type { MetaJournalV1 } from "../src/meta-journal.js";
 import type { CampaignPauseAuthority } from "../src/types.js";
@@ -189,6 +193,15 @@ function createIdentityHash(
 }
 
 describe("recursive search trusted evaluation adapter", () => {
+  it("derives an accepted candidate bundle digest for the target image", () => {
+    const snapshot: OptimizerSnapshot = { files: new Map() };
+    const comparisonDigest = snapshotDigest(FIRST_IMAGE, snapshot);
+    const targetDigest = snapshotDigest(THIRD_IMAGE, snapshot);
+
+    expect(imageBoundCandidateBundleDigest(snapshot, THIRD_IMAGE)).toBe(targetDigest);
+    expect(targetDigest).not.toBe(comparisonDigest);
+  });
+
   it("derives child identities and returns only the mean of trusted normalized settlements", async () => {
     const { strategy, rows } = harness();
     const spawned: SpawnRunParams[] = [];
