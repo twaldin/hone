@@ -389,7 +389,7 @@ class GatewayChildSupervisor {
   constructor(
     private readonly root: string,
     private readonly gatewayUrl: string,
-    private readonly phase: "pause" | "pause-hold" | "resume" | "complete",
+    private readonly phase: "pause" | "pause-hold" | "resume" | "complete" | "unknown",
     private readonly qRaw = member.capsule.qBase + member.capsule.scale * 0.25,
   ) {}
 
@@ -397,10 +397,13 @@ class GatewayChildSupervisor {
     const runDir = join(this.root, ".hone-runs", childRequest.reservation.childRunId);
     mkdirSync(runDir, { recursive: true });
     const eventPath = join(runDir, "events.ndjson");
-    const exited = await runFixtureChild(eventPath, this.gatewayUrl, this.phase);
+    const exited = this.phase === "unknown"
+      ? { signal: null }
+      : await runFixtureChild(eventPath, this.gatewayUrl, this.phase);
     this.kills.push(exited.signal);
+    if (this.phase === "unknown") writeFileSync(eventPath, "{\"runId\":\n", { mode: 0o600 });
     const bytes = readFileSync(eventPath);
-    const events = eventFacts(eventPath);
+    const events = this.phase === "unknown" ? [] : eventFacts(eventPath);
     const completed = events.at(-1)?.type === "run.finished";
     const evaluation = completed ? finalEvaluation(this.qRaw) : null;
     return {
@@ -607,6 +610,28 @@ describe("recursive child nonterminal settlement replay", () => {
     await exercisePauseResume(true);
   });
 
+  it("records an unreplayable child as pending without minting a terminal settlement", { timeout: 30_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-unknown-child-"));
+    const supervisor = new GatewayChildSupervisor(root, "http://127.0.0.1:1/v1/responses", "unknown");
+    const runtime = openRuntime(root, supervisor);
+    try {
+      await expect(runtime.broker.spawnRun(request, CLIENT)).rejects.toThrow(/child .* event stream is corrupt at cursor 0/);
+      expect(runtime.journal.queryPendingChildren()).toHaveLength(1);
+      expect(runtime.journal.queryFailureSettlements()).toEqual([]);
+      expect(runtime.journal.queryTrainMeasurements()).toEqual([]);
+      const envelopeFacts = journalFacts(join(root, "campaign", "resource-envelope.v1.ndjson"));
+      expect(envelopeFacts.filter((fact) => fact["type"] === "reservation")).toHaveLength(1);
+      expect(envelopeFacts.filter((fact) => fact["type"] === "settlement")).toHaveLength(0);
+      const recursiveFacts = journalFacts(join(root, "campaign", "recursive-resource.v1.ndjson"));
+      expect(recursiveFacts.filter((fact) => fact["t"] === "reservation")).toHaveLength(1);
+      expect(recursiveFacts.filter((fact) => fact["t"] === "settlement")).toHaveLength(0);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  // This pins child settlement only. Without a campaign pause authority, the top-level
+  // supervisor still terminalizes the outer run after an unreplayable child event stream.
   it("keeps the genuine-terminal duplicate settlement refusal immutable", { timeout: 30_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), "hone-terminal-settlement-"));
     const port = await reserveGatewayPort();

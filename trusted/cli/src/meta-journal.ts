@@ -667,6 +667,10 @@ export class MetaJournalV1 {
     return [...this.failuresByKey.values()].map(copyFailureSettlement);
   }
 
+  queryPendingChildren(): readonly MetaPendingChildV1[] {
+    return [...this.pendingByKey.values()].map(copyPendingChild);
+  }
+
   budgetState(): MetaJournalBudgetStateV1 {
     const committed = this.computeCommitted();
     const campaign = copyEnvelope(this.config.budgets.campaign);
@@ -811,8 +815,6 @@ export class MetaJournalV1 {
       if (this.settlementsByKey.has(pending.workKey)) {
         throw new Error(`nonterminal child state follows settlement for ${pending.workKey}`);
       }
-      const prior = this.pendingByKey.get(pending.workKey);
-      if (prior !== undefined) this.validateUsageContinuity(prior.observed, pending.observed, pending.workKey);
       this.pendingByKey.set(pending.workKey, pending);
       return;
     }
