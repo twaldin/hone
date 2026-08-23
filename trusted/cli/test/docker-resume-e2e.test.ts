@@ -163,10 +163,13 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
       HONE_OPTIMIZER_CMD: optimizerCommand,
       HONE_OPTIMIZER_DIGEST: `sha256:${"f".repeat(64)}`,
       HONE_MUTATION_TIMEOUT_SEC: "180",
-      HONE_KILL_GRACE_MS: "120000",
+      HONE_KILL_GRACE_MS: "2000",
     };
 
-    const child = honeSpawn(["run", "capsule", "--headless", "--backend", "local"], { cwd: root, env });
+    const child = honeSpawn(
+      ["run", "capsule", "--headless", "--backend", "local"],
+      { cwd: root, env, sealedLauncher: true },
+    );
     let launchStderr = "";
     child.stderr?.on("data", (chunk: Buffer) => {
       launchStderr += chunk.toString("utf8");

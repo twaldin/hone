@@ -13,6 +13,8 @@ import {
 import { z } from "zod";
 import {
   SCRATCH_RESTORE_SCRIPT,
+  finalizeScratchSnapshot,
+  newScratchSnapshotAttemptName,
   scratchRestoreMemoryBytes,
   startBroker,
   type RunningBroker,
@@ -46,7 +48,6 @@ const tmpBase = path.join(pkgDir, "..", "..", ".t", randomBytes(2).toString("hex
 const GENEROUS_BUDGET = { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 3_600, maxEvaluatorInvocations: 100 };
 const PRODUCTION_MUTATION_IMAGE =
   "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10";
-const GNU_RESTORE_E2E = process.env["HONE_SCRATCH_RESTORE_GNU_E2E"] === "1";
 
 let cas: CasStore;
 let baselineHash: string;
@@ -151,6 +152,49 @@ async function makePublishedScratchSnapshot(
     runDir,
     archivePath: path.join(runDir, "scratch-snapshot", "scratch.tar"),
   };
+}
+
+async function brokerStartFailureMessage(
+  config: Parameters<typeof startBroker>[0],
+): Promise<string | null> {
+  let running: RunningBroker | undefined;
+  try {
+    running = await startBroker(config);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  } finally {
+    await running?.close();
+  }
+}
+
+async function makeDuplicateEntryScratchSnapshot(
+  name: string,
+  restoreImage: string,
+): Promise<Parameters<typeof startBroker>[0]> {
+  await ensureImage(PRODUCTION_MUTATION_IMAGE);
+  const { config, runDir } = await makeBrokerConfig(name, GENEROUS_BUDGET, {
+    scratchVolume: true,
+    image: restoreImage,
+  });
+  const snapshotDir = path.join(runDir, "scratch-snapshot");
+  await mkdir(snapshotDir, { recursive: true });
+  const attemptName = newScratchSnapshotAttemptName();
+  const archived = await runCommand(
+    [
+      "docker", "run", "--rm",
+      "--tmpfs", "/source",
+      "-v", `${snapshotDir}:/snapshot`,
+      PRODUCTION_MUTATION_IMAGE,
+      "sh", "-c",
+      `set -eu; printf first >/source/data; tar -cf /snapshot/${attemptName} -C /source .; ` +
+        `printf second >/source/data; tar -rf /snapshot/${attemptName} -C /source ./data`,
+    ],
+    { timeoutMs: 30_000 },
+  );
+  expect(archived.exitCode, archived.stderr.toString("utf8")).toBe(0);
+  await finalizeScratchSnapshot(snapshotDir, attemptName);
+  return config;
 }
 
 beforeAll(async () => {
@@ -567,7 +611,9 @@ describe("sandbox lifecycle", () => {
       { timeoutMs: 30_000 },
     );
     expect(keeperMemory.exitCode, keeperMemory.stderr.toString("utf8")).toBe(0);
-    expect(Number(keeperMemory.stdout.toString("utf8").trim())).toBe(scratchRestoreMemoryBytes(archive.size));
+    expect(Number(keeperMemory.stdout.toString("utf8").trim())).toBe(
+      scratchRestoreMemoryBytes(archive.size, 516),
+    );
     const c2 = await RpcClient.connect(socketPath, second.publicToken);
     try {
       const ref = (await c2.call("createSandbox", {
@@ -600,6 +646,66 @@ describe("sandbox lifecycle", () => {
     }
   });
 
+  it("restores a 30,000-directory high-inode scratch with inode-aware keeper memory", { timeout: 600_000 }, async () => {
+    const { config, runDir } = await makeBrokerConfig("scratch-resume-inodes", GENEROUS_BUDGET, {
+      scratchVolume: true,
+    });
+    const socketPath = path.join(runDir, "broker.sock");
+    const first = await startBroker(config);
+    const rpc1 = await RpcClient.connect(socketPath, first.publicToken);
+    try {
+      const ref = (await rpc1.call("createSandbox", {
+        artifact: { hash: baselineHash },
+        role: "mutation",
+      })) as SandboxRef;
+      const wrote = ExecShape.parse(await rpc1.call("exec", {
+        sandboxId: ref.sandboxId,
+        argv: [
+          "sh", "-c",
+          "set -eu; mkdir /scratch/tiny; " +
+            "seq 0 29999 | sed 's#^#/scratch/tiny/dir-#' | xargs mkdir; " +
+            "printf inode-scale >/scratch/note",
+        ],
+      }));
+      expect(wrote.exitCode, wrote.stderr).toBe(0);
+    } finally {
+      rpc1.close();
+      await first.close();
+    }
+
+    const archive = await stat(path.join(runDir, "scratch-snapshot", "scratch.tar"));
+    const second = await startBroker(config);
+    const keeper = `hone-scratch-keeper-${config.runId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`;
+    const keeperMemory = await runCommand(
+      ["docker", "inspect", "--format", "{{.HostConfig.Memory}}", keeper],
+      { timeoutMs: 30_000 },
+    );
+    expect(keeperMemory.exitCode, keeperMemory.stderr.toString("utf8")).toBe(0);
+    expect(Number(keeperMemory.stdout.toString("utf8").trim())).toBe(
+      scratchRestoreMemoryBytes(archive.size, 30_003),
+    );
+
+    const rpc2 = await RpcClient.connect(socketPath, second.publicToken);
+    try {
+      const ref = (await rpc2.call("createSandbox", {
+        artifact: { hash: baselineHash },
+        role: "mutation",
+      })) as SandboxRef;
+      const continued = ExecShape.parse(await rpc2.call("exec", {
+        sandboxId: ref.sandboxId,
+        argv: [
+          "sh", "-c",
+          "set -eu; test \"$(find /scratch/tiny -type d | wc -l)\" = 30001; " +
+            "test \"$(cat /scratch/note)\" = inode-scale; printf continued >/scratch/resumed",
+        ],
+      }));
+      expect(continued.exitCode, continued.stderr).toBe(0);
+    } finally {
+      rpc2.close();
+      await second.close();
+    }
+  });
+
   it("refuses corrupt and truncated scratch archives through the real keeper path", { timeout: 300_000 }, async () => {
     for (const kind of ["corrupt", "truncated"] as const) {
       const { config, archivePath } = await makePublishedScratchSnapshot(`scratch-${kind}`);
@@ -616,7 +722,7 @@ describe("sandbox lifecycle", () => {
         { timeoutMs: 30_000 },
       );
       expect(mutation.exitCode, mutation.stderr.toString("utf8")).toBe(0);
-      await expect(startBroker(config)).rejects.toThrow(/scratch snapshot (?:checksum|restore)/);
+      expect(await brokerStartFailureMessage(config)).toMatch(/scratch snapshot (?:checksum|archive|restore)/);
     }
   });
 
@@ -641,13 +747,74 @@ describe("sandbox lifecycle", () => {
       }
       return result;
     };
-    await expect(startBroker({ ...config, runCommand: mutateAfterRestore })).rejects.toThrow(
+    expect(await brokerStartFailureMessage({ ...config, runCommand: mutateAfterRestore })).toMatch(
       /scratch snapshot checksum changed during restore/,
     );
     expect(mutated).toBe(true);
   });
 
-  it.skipIf(!GNU_RESTORE_E2E)(
+  it("does not downgrade a checksummed snapshot when its marker is deleted", { timeout: 180_000 }, async () => {
+    const { config, archivePath } = await makePublishedScratchSnapshot("scratch-marker-deleted");
+    const snapshotDir = path.dirname(archivePath);
+    const marker = (await readdir(snapshotDir)).find((entry) => entry.startsWith("scratch.tar.sha256."));
+    expect(marker).toBeDefined();
+    if (marker === undefined) throw new Error("checksum marker was not published");
+    await rm(path.join(snapshotDir, marker));
+    expect(await brokerStartFailureMessage(config)).toMatch(/has no published checksum authority/);
+  });
+
+  it("treats a nonzero real restore command as fatal and cleans the failed init", { timeout: 180_000 }, async () => {
+    const { config } = await makePublishedScratchSnapshot("scratch-restore-exit");
+    let injected = false;
+    const failRestore: RunCommand = async (argv, opts) => {
+      if (argv.includes(SCRATCH_RESTORE_SCRIPT)) {
+        injected = true;
+        return {
+          exitCode: 23,
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.from("injected inner-path restore failure"),
+          truncated: false,
+          timedOut: false,
+        };
+      }
+      return runCommand(argv, opts);
+    };
+    expect(await brokerStartFailureMessage({ ...config, runCommand: failRestore })).toMatch(
+      /scratch snapshot restore or content verification failed: injected inner-path restore failure/,
+    );
+    expect(injected).toBe(true);
+  });
+
+  it("restores a legacy pre-checksum snapshot once and upgrades its authority", { timeout: 180_000 }, async () => {
+    const { config, archivePath } = await makePublishedScratchSnapshot("scratch-legacy-upgrade");
+    const snapshotDir = path.dirname(archivePath);
+    for (const entry of await readdir(snapshotDir)) {
+      if (entry !== "scratch.tar") await rm(path.join(snapshotDir, entry));
+    }
+
+    const running = await startBroker(config);
+    try {
+      const upgraded = await readdir(snapshotDir);
+      expect(upgraded).toContain("checksum-authority-v1");
+      expect(upgraded.filter((entry) => entry.startsWith("scratch.tar.sha256."))).toHaveLength(1);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it("keeps both GNU and BusyBox in-container content verification load-bearing", { timeout: 300_000 }, async () => {
+    for (const [variant, image] of [
+      ["gnu", PRODUCTION_MUTATION_IMAGE],
+      ["busybox", TEST_IMAGE],
+    ] as const) {
+      const config = await makeDuplicateEntryScratchSnapshot(`scratch-verify-${variant}`, image);
+      expect(await brokerStartFailureMessage(config)).toMatch(
+        /scratch snapshot restore or content verification failed/,
+      );
+    }
+  });
+
+  it(
     "skips only GNU tar root metadata while preserving inner metadata and resumability",
     { timeout: 300_000 },
     async () => {

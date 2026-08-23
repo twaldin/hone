@@ -195,10 +195,17 @@ export function hone(args: string[], opts: { cwd: string; env?: Record<string, s
   return promise;
 }
 
-/** Spawn without waiting — caller drives lifecycle (kill tests). Detached so the whole tree can be nuked. */
-export function honeSpawn(args: string[], opts: { cwd: string; env?: Record<string, string> }): ChildProcess {
+/** Spawn without waiting — caller drives lifecycle. The sealed launcher option
+ * puts Hone itself at the process-group root, so OS signals reach Hone's
+ * durable-pause handler directly instead of racing tsx's 30 ms relay ack. */
+export function honeSpawn(
+  args: string[],
+  opts: { cwd: string; env?: Record<string, string>; sealedLauncher?: boolean },
+): ChildProcess {
   approveFixtureCapsule(opts.cwd);
-  return spawn(tsxBin, [mainTs, ...args], {
+  const application = opts.sealedLauncher ? process.execPath : tsxBin;
+  const argv = opts.sealedLauncher ? [join(pkgRoot, "bin", "hone.js"), ...args] : [mainTs, ...args];
+  return spawn(application, argv, {
     cwd: opts.cwd,
     env: { ...process.env, ...opts.env },
     detached: true,

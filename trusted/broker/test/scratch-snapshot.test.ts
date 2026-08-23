@@ -145,11 +145,15 @@ describe("scratch snapshot bounds (kernel cap + deadline wired into the keeper)"
     // The in-container deadline must sit strictly below the 300s host exec timeout.
     expect(SCRATCH_SNAPSHOT_DEADLINE_SEC * 1000).toBeLessThan(300_000);
     const measuredArchiveBytes = 247_235_840;
-    const measuredRestoreMemory = scratchRestoreMemoryBytes(measuredArchiveBytes);
+    const adversarialEntries = 30_000;
+    const measuredRestoreMemory = scratchRestoreMemoryBytes(measuredArchiveBytes, adversarialEntries);
     expect(measuredRestoreMemory).toBe(
-      Math.ceil((measuredArchiveBytes * 2 + 64 * 1024 * 1024) / (1024 * 1024)) * 1024 * 1024,
+      Math.ceil(
+        (measuredArchiveBytes * 2 + adversarialEntries * 6 * 1024 + 64 * 1024 * 1024) / (1024 * 1024),
+      ) * 1024 * 1024,
     );
-    expect(scratchRestoreMemoryBytes(2 * 1024 * 1024 * 1024)).toBeGreaterThan(measuredRestoreMemory);
+    expect(scratchRestoreMemoryBytes(2 * 1024 * 1024 * 1024, SCRATCH_INODE_LIMIT))
+      .toBeGreaterThan(measuredRestoreMemory);
 
     const h = await makeFakeDockerBroker("bounds", { scratchQuotaBytes: quota, containerLease: "hone-lease-x" });
     const volumeCreate = h.calls[findCall(h.calls, "docker", "volume", "create")];
@@ -160,8 +164,8 @@ describe("scratch snapshot bounds (kernel cap + deadline wired into the keeper)"
     expect(hasPair(keeperRun ?? [], "-e", `HONE_SCRATCH_QUOTA_BYTES=${quota}`)).toBe(true);
     expect(hasPair(keeperRun ?? [], "-e", `HONE_SCRATCH_SNAPSHOT_MAX_BYTES=${cap}`)).toBe(true);
     expect(hasPair(keeperRun ?? [], "-e", `HONE_SCRATCH_SNAPSHOT_DEADLINE_SEC=${SCRATCH_SNAPSHOT_DEADLINE_SEC}`)).toBe(true);
-    expect(hasPair(keeperRun ?? [], "--memory", String(scratchRestoreMemoryBytes(0)))).toBe(true);
-    expect(hasPair(keeperRun ?? [], "--memory-swap", String(scratchRestoreMemoryBytes(0)))).toBe(true);
+    expect(hasPair(keeperRun ?? [], "--memory", String(scratchRestoreMemoryBytes(0, 0)))).toBe(true);
+    expect(hasPair(keeperRun ?? [], "--memory-swap", String(scratchRestoreMemoryBytes(0, 0)))).toBe(true);
     expect(hasPair(keeperRun ?? [], "--volumes-from", "hone-lease-x:ro")).toBe(true);
     expect(hasPair(keeperRun ?? [], "--cap-add", "DAC_OVERRIDE")).toBe(true);
     // GNU tar restores ownership before final modes. The trusted keeper must
@@ -191,7 +195,9 @@ describe("scratch snapshot bounds (kernel cap + deadline wired into the keeper)"
     expect(hasPair(snapshotExec ?? [], "-e", `HONE_SCRATCH_SNAPSHOT_OUT=${attemptName}`)).toBe(true);
     expect((await readFile(path.join(h.runDir, "scratch-snapshot", "scratch.tar"), "utf8"))).toBe("fake-tar-bytes");
     const marker = snapshotDigestMarker("fake-tar-bytes");
-    expect((await readdir(path.join(h.runDir, "scratch-snapshot"))).sort()).toEqual(["scratch.tar", marker].sort());
+    expect((await readdir(path.join(h.runDir, "scratch-snapshot"))).sort()).toEqual(
+      ["checksum-authority-v1", "scratch.tar", marker].sort(),
+    );
     expect(await readFile(path.join(h.runDir, "scratch-snapshot", marker), "utf8")).toBe(
       `sha256:${marker.slice(SCRATCH_SNAPSHOT_DIGEST_PREFIX.length)}\n`,
     );
@@ -269,7 +275,7 @@ describe("per-attempt snapshot outputs (a late-writing orphaned exec is inert)",
     const snapshotDir = path.join(h.runDir, "scratch-snapshot");
     expect(await readFile(path.join(snapshotDir, "scratch.tar"), "utf8")).toBe("fresh-attempt-bytes");
     expect((await readdir(snapshotDir)).sort()).toEqual(
-      ["scratch.tar", snapshotDigestMarker("fresh-attempt-bytes")].sort(),
+      ["checksum-authority-v1", "scratch.tar", snapshotDigestMarker("fresh-attempt-bytes")].sort(),
     );
   });
 });
@@ -310,15 +316,32 @@ describe("finalizeScratchSnapshot power-loss ordering", () => {
     expect(order).toEqual([
       `syncFile:${attemptName}`,
       `syncFile:${marker}`,
+      "syncFile:checksum-authority-v1",
       "syncDir:ok",
       `rename:${attemptName}->scratch.tar`,
       "syncDir:ok",
     ]);
     expect(await readFile(path.join(dir, "scratch.tar"), "utf8")).toBe("next");
+    expect(await readFile(path.join(dir, "checksum-authority-v1"), "utf8")).toBe(
+      "scratch-snapshot-checksum-authority-v1\n",
+    );
     expect(await readFile(path.join(dir, marker), "utf8")).toBe(
       `sha256:${marker.slice(SCRATCH_SNAPSHOT_DIGEST_PREFIX.length)}\n`,
     );
     await expect(stat(path.join(dir, attemptName))).rejects.toThrow();
+  });
+
+  it("keeps only the current checksum marker across repeated snapshots", async () => {
+    const dir = path.join(tmpBase, "finalize", "marker-cleanup");
+    await mkdir(dir, { recursive: true });
+    for (const bytes of ["first", "second"]) {
+      const attemptName = newScratchSnapshotAttemptName();
+      await writeFile(path.join(dir, attemptName), bytes);
+      await finalizeScratchSnapshot(dir, attemptName);
+    }
+    expect((await readdir(dir)).sort()).toEqual(
+      ["checksum-authority-v1", "scratch.tar", snapshotDigestMarker("second")].sort(),
+    );
   });
 
   it("refuses to publish anything but a per-attempt basename (no legacy shared temp, no traversal, no self-rename)", async () => {
