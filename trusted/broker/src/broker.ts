@@ -3678,6 +3678,7 @@ export class Broker {
       // tracked name or repeat staging against a poisoned journal.
       if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
       this.trackedContainers.add(evalName);
+      startedMs = Date.now();
       try {
         res = await this.run(argv, { timeoutMs: this.evalTimeoutSec * 1000, maxOutputBytes: 32 * 1024 * 1024 });
       } finally {

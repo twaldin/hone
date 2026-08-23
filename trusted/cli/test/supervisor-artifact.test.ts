@@ -123,4 +123,26 @@ describe("run --optimizer-artifact", () => {
       runCommand(["capsule", "--headless", "--resume", "--optimizer-artifact", artifactHash], capturedIo.io),
     ).rejects.toThrow(/base optimizer drift/);
   });
+
+  it("threads the frozen evaluator timeout through trusted supervision", async () => {
+    const root = testRoot();
+    makeCapsule(root, { image: FIX_IMAGE });
+    const marker = join(root, "evaluator-timeout.txt");
+    const backend = join(root, "timeout-observer.mjs");
+    writeFileSync(
+      backend,
+      `import { writeFileSync } from "node:fs";
+export default { async start(ctx) {
+  writeFileSync(${JSON.stringify(marker)}, String(ctx.evalTimeoutSec));
+  ctx.registerCleanupBarrier(Promise.reject(new Error("intentional unfinished run")));
+} };\n`,
+    );
+    const captured = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "0" });
+    expect(await runCommand(
+      ["capsule", "--headless", "--backend", "./timeout-observer.mjs"],
+      captured.io,
+      { evalTimeoutSec: 2700 },
+    )).toBe(1);
+    expect(readFileSync(marker, "utf8")).toBe("2700");
+  });
 });

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdirSync,
@@ -6,11 +7,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
   CapsuleManifest,
   ChildRunLaunchReceipt,
   EvaluationRecord,
+  MetaCampaignConfigV2,
   canonicalJson,
   capsuleDigest,
 } from "@hone/schema";
@@ -41,11 +44,11 @@ import { RecursiveSearchChildLauncher } from "../src/commands/hone.js";
 import type { CliChildSupervisor } from "../src/commands/hone.js";
 import { metaWorkKey } from "../src/meta-journal.js";
 import type { MetaJournalV1 } from "../src/meta-journal.js";
+import { computeTrustedRuntimeDigest } from "../src/runtime-digest.js";
 import type { CampaignPauseAuthority } from "../src/types.js";
 import { runEpisodeLoop } from "../../../optimizer/src/loop.js";
 
 const ENABLED = process.env["HONE_RECURSIVE_SEARCH_SMOKE"] === "1";
-const CONFIG_HASH = `sha256:${"c".repeat(64)}` as Sha256Digest;
 const BUNDLE = `sha256:${"b".repeat(64)}` as Sha256Digest;
 const MUTATION_IMAGE = "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10";
 const OUTER_CAPSULE_ID = "cap_000000000000";
@@ -124,17 +127,43 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
   it("starts search episode zero, dispatches a real inner evaluation, and scores without executing /bin/false", async () => {
     const repoRoot = process.env["HONE_REPO_ROOT"];
     const evidencePath = process.env["HONE_RECURSIVE_SMOKE_EVIDENCE"];
-    if (repoRoot === undefined || evidencePath === undefined) {
-      throw new Error("smoke requires HONE_REPO_ROOT and HONE_RECURSIVE_SMOKE_EVIDENCE");
+    const campaignPath = process.env["HONE_RECURSIVE_SMOKE_CAMPAIGN"];
+    if (repoRoot === undefined || evidencePath === undefined || campaignPath === undefined) {
+      throw new Error(
+        "smoke requires HONE_REPO_ROOT, HONE_RECURSIVE_SMOKE_EVIDENCE, and HONE_RECURSIVE_SMOKE_CAMPAIGN",
+      );
     }
-    const smokeRoot = join(repoRoot, ".hone-runs", "m2-recursive-wiring-smoke");
+    const campaignConfig = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+    const executedSourceCommit = execFileSync("git", ["-C", repoRoot, "rev-parse", "--verify", "HEAD^{commit}"], {
+      encoding: "utf8",
+    }).trim();
+    const executedRuntimeDigest = computeTrustedRuntimeDigest();
+    expect(executedRuntimeDigest).toBe(campaignConfig.trustedRuntime.digest);
+    const configHash = sha256(canonicalJson(campaignConfig));
+    if (!("mode" in campaignConfig.corpusCohort)) {
+      throw new Error("smoke campaign must carry the owner-authorized partial cohort");
+    }
+    const selectedMember = campaignConfig.developmentPanel.members.find((member) => member.taskId === "OSS-T05");
+    if (selectedMember === undefined) throw new Error("smoke campaign panel has no OSS-T05 member");
+    const selectedAuthority = campaignConfig.corpusCohort.partialCohort.admitted.find(
+      (entry) => entry.capsuleId === selectedMember.capsule.capsuleId,
+    );
+    if (selectedAuthority === undefined) throw new Error("smoke panel member is absent from the admitted cohort");
+    const smokeBudget = { ...CHILD_BUDGET, maxWallClockSec: campaignConfig.evaluatorTimeoutSec };
+    const smokeRoot = join(repoRoot, ".hone-runs", "m2-recursive-search-smoke");
     rmSync(smokeRoot, { recursive: true, force: true });
     mkdirSync(smokeRoot, { recursive: true });
 
-    const childCapsuleDir = join(repoRoot, "capsules", "calibration-bitset-rank");
+    const childCapsuleDir = join(repoRoot, "capsules", selectedAuthority.label);
     const childManifest = CapsuleManifest.parse(
       JSON.parse(readFileSync(join(childCapsuleDir, "manifest.json"), "utf8")),
     );
+    if (
+      childManifest.id !== selectedAuthority.capsuleId
+      || capsuleDigest(childManifest) !== selectedAuthority.capsuleDigest
+    ) {
+      throw new Error("smoke child identity does not reproduce the frozen cohort authority");
+    }
     const childCas = new CasStore(join(smokeRoot, "inner-cas"));
     const childBaseline = await packDirAsArtifact(join(childCapsuleDir, "baseline"), childCas) as Sha256Digest;
     const childEvents: RunEvent[] = [];
@@ -155,19 +184,20 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       }),
     };
     const adapterConfig = {
-      counts: { innerEpisodesMax: 1 },
+      ...campaignConfig,
       developmentPanel: {
+        ...campaignConfig.developmentPanel,
         members: [{
-          capsule: { capsuleId: childManifest.id },
-          calibratedInnerCeiling: CHILD_BUDGET,
+          ...selectedMember,
+          calibratedInnerCeiling: smokeBudget,
         }],
       },
-    } as unknown as RecursiveMetaCampaignConfig;
+    } as RecursiveMetaCampaignConfig;
     const adapter = new RecursiveSearchChildLauncher(
       repoRoot,
       smokeRoot,
       adapterConfig,
-      CONFIG_HASH,
+      configHash,
       journal,
       gate,
       {} as CliChildSupervisor,
@@ -186,7 +216,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     const outerCasDir = join(smokeRoot, "outer-cas");
     const outerBaseline = await packDirAsArtifact(outerBaselineDir, new CasStore(outerCasDir)) as Sha256Digest;
     const admission: ChildRunAdmission = {
-      campaignConfigHash: CONFIG_HASH,
+      campaignConfigHash: configHash,
       cohort: "panel-a",
       capsuleProvenanceHash: capsuleDigest(childManifest),
       sourceProvenanceHash: outerBaseline,
@@ -201,7 +231,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       evalEntrypoint: ["/bin/false"],
       protectedPaths: [],
       assetGroups: [{ id: "meta-train", visibility: "public", paths: ["meta-task.txt"] }],
-      budget: { ...CHILD_BUDGET, maxWallClockSec: 600, maxEvaluatorInvocations: 2 },
+      budget: { ...smokeBudget, maxWallClockSec: smokeBudget.maxWallClockSec + 300, maxEvaluatorInvocations: 2 },
       diagnosticOrdering: { path: "ordering.json", hash: sha256("smoke-ordering") },
       contentHashes: { "meta-task.txt": sha256(metaTask) },
       meta: { evaluatorSource: "meta", provenance: "bounded recursive wiring smoke" },
@@ -227,9 +257,17 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         return runCommand(argv, opts);
       },
       evaluationStrategy: async (input) => {
-        scored = await trustedStrategy(input);
-        controller.abort();
-        return scored;
+        try {
+          scored = await trustedStrategy(input);
+          controller.abort();
+          return scored;
+        } catch (error) {
+          writeFileSync(
+            join(smokeRoot, "trusted-strategy-error.txt"),
+            `${error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error)}\n`,
+          );
+          throw error;
+        }
       },
       recursive: {
         depth: 0,
@@ -238,7 +276,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         evaluationTask: {
           depth: 0,
           innerEpisodesMax: 1,
-          members: [{ capsuleId: childManifest.id, calibratedInnerCeiling: CHILD_BUDGET }],
+          members: [{ capsuleId: childManifest.id, calibratedInnerCeiling: smokeBudget }],
         },
         admitChildRun: ({ request }) =>
           request.child.capsuleId === childManifest.id
@@ -260,7 +298,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
             runDir: join(smokeRoot, "inner-run"),
             casDir: join(smokeRoot, "inner-cas"),
             onEvent: (event) => childEvents.push(event),
-            evalTimeoutSec: 180,
+            evalTimeoutSec: campaignConfig.evaluatorTimeoutSec,
           });
           try {
             await inner.init();
@@ -287,7 +325,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
           const identity = workIdentity(request);
           rows.push({
             ...identity,
-            workKey: metaWorkKey(CONFIG_HASH, identity),
+            workKey: metaWorkKey(configHash, identity),
             qNormalized: qRaw,
             observed: { tokens: 0, usd: 0, wallClockSec: record.durationMs / 1000, evaluatorInvocations: 1 },
           } as unknown as MetaMeasurement);
@@ -304,6 +342,32 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     const searchEvents: RunEvent[] = [];
     const workerBundlePath = join(smokeRoot, "worker.mjs");
     writeFileSync(workerBundlePath, "throw new Error('smoke worker must not execute');\n");
+    const bunRuntime = Buffer.from("sealed Bun runtime fixture; mutation is forbidden in this smoke", "utf8");
+    const piRuntime = Buffer.from("sealed Pi native fixture; mutation is forbidden in this smoke", "utf8");
+    const contentHash = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+    writeFileSync(join(smokeRoot, "mutation-runtime.json"), `${canonicalJson({
+      version: 1,
+      bun: {
+        version: "1.3.14",
+        sourceName: "bun",
+        bundleName: "bun.gz",
+        sandboxName: "bun",
+        sha256: contentHash(bunRuntime),
+        mode: 0o500,
+      },
+      pi: {
+        version: "16.5.2",
+        files: [{
+          sourceName: "pi_natives.linux-x64-baseline.node",
+          bundleName: "pi_natives.linux-x64-baseline.node.gz",
+          sandboxName: "pi_natives.linux-x64-baseline.node",
+          sha256: contentHash(piRuntime),
+          mode: 0o400,
+        }],
+      },
+    })}\n`);
+    writeFileSync(join(smokeRoot, "bun.gz"), gzipSync(bunRuntime, { level: 1 }));
+    writeFileSync(join(smokeRoot, "pi_natives.linux-x64-baseline.node.gz"), gzipSync(piRuntime, { level: 1 }));
     const previousToken = process.env["HONE_BROKER_TOKEN"];
     process.env["HONE_BROKER_TOKEN"] = running.publicToken;
     try {
@@ -324,13 +388,19 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       await running.close();
       ledger.close();
     }
+    const searchEventsPath = join(smokeRoot, "search-events.ndjson");
+    writeFileSync(searchEventsPath, `${searchEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
     const recursiveScore = scored;
-    if (recursiveScore === undefined) throw new Error("search phase completed without a recursive score");
+    if (recursiveScore === undefined) {
+      throw new Error(`search phase completed without a recursive score: ${canonicalJson(searchEvents)}`);
+    }
 
     const record = innerRecord;
     if (record === undefined) throw new Error("smoke completed without inner evaluation evidence");
     if (childTerminalEventPath === undefined) throw new Error("smoke completed without durable child terminal evidence");
     expect(recursiveScore.output.valid).toBe(true);
+    expect(record.costUsd).toBe(0);
+    expect(recursiveScore.costUsd).toBe(0);
     expect(recursiveScore.output.constraints).toEqual({ allChildrenValid: true, fullPanel: true });
     expect(recursiveScore.output.objectives.normalizedGain).toBe(Object.values(record.output.objectives)[0]);
     const started = searchEvents.filter((event) => event.type === "episode.started");
@@ -346,12 +416,35 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     expect(outerDockerCalls.some((argv) => argv.includes("bun"))).toBe(false);
     const durableEvents = readFileSync(childTerminalEventPath);
     const evidence = {
-      version: "m2-recursive-wiring-smoke.v1",
+      version: "m2-refreeze-final-smoke.v1",
       recordedAt: new Date().toISOString(),
       command:
-        `sg docker -c 'HONE_RECURSIVE_SEARCH_SMOKE=1 HONE_REPO_ROOT=${repoRoot} HONE_RECURSIVE_SMOKE_EVIDENCE=${evidencePath} ./node_modules/.bin/vitest run --root trusted/cli test/recursive-search.smoke.test.ts'`,
-      result: "passed: search episode 0 started, dispatched one recursive child to a real Docker evaluator, and emitted its trusted score",
+        `sg docker -c 'HONE_RECURSIVE_SEARCH_SMOKE=1 HONE_REPO_ROOT=${repoRoot} HONE_RECURSIVE_SMOKE_CAMPAIGN=${campaignPath} HONE_RECURSIVE_SMOKE_EVIDENCE=${evidencePath} ./node_modules/.bin/vitest run --root trusted/cli test/recursive-search.smoke.test.ts'`,
+      result: "passed: config-bound search episode 0 dispatched one recursive child to a real Docker evaluator and emitted its trusted score",
       smokeRoot,
+      executedRuntime: {
+        sourceCommit: executedSourceCommit,
+        digest: executedRuntimeDigest,
+      },
+      campaign: {
+        draftPath: campaignPath,
+        configHash,
+        evaluatorTimeoutSec: campaignConfig.evaluatorTimeoutSec,
+        cohortAdmittedCount: campaignConfig.corpusCohort.partialCohort.admitted.length,
+        configuredDevelopmentPanelCount: campaignConfig.developmentPanel.members.length,
+        smokePanelFixtureCount: adapterConfig.developmentPanel.members.length,
+        selectedTaskId: selectedMember.taskId,
+        selectedLabel: selectedAuthority.label,
+        selectedCapsuleId: selectedAuthority.capsuleId,
+        routing: campaignConfig.routing,
+        campaignBudget: campaignConfig.budgets.campaign,
+      },
+      fixtureSubstitutions: [
+        "The six-member configured development panel is reduced to its authorized OSS-T05 member for a bounded zero-model smoke; the production allocation validation, recursive spawn, settlement lookup, and panel arithmetic still run.",
+        "The candidate gate accepts the smoke artifact and smoke-only qBase=0/scale=1 normalization makes the trusted settlement trace explicit; neither has campaign or promotion authority.",
+        "The MetaJournalV1 query surface is in memory and child lifecycle files are fixture-authored with production schemas and receipt hashing; the production Broker validates those durable files before the trusted strategy accepts the matching settlement.",
+        "The synthetic outer /bin/false evaluator, throwing mutation worker, and integrity-checked synthetic Bun/Pi pack are deliberate non-executed tripwires/initialization fixtures; the selected authorized cohort capsule runs its real train evaluator in Docker.",
+      ],
       syntheticOuterEntrypoint: outerManifest.evalEntrypoint,
       syntheticOuterEntrypointExecuted: false,
       outerMutationImage: MUTATION_IMAGE,
@@ -383,5 +476,5 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     };
     mkdirSync(dirname(evidencePath), { recursive: true });
     writeFileSync(evidencePath, `${canonicalJson(evidence)}\n`);
-  }, 300_000);
+  }, 600_000);
 });

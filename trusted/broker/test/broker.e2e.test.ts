@@ -35,7 +35,7 @@ const ExecShape = z.object({
 // Test roots live under the repo so Docker Desktop file sharing covers every
 // bind-mount source (/Users is shared by default; /var/folders may not be).
 const pkgDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const tmpBase = path.join(pkgDir, ".test-tmp", `run-${randomBytes(4).toString("hex")}`);
+const tmpBase = path.join(pkgDir, "..", "..", ".t", randomBytes(2).toString("hex"));
 
 const GENEROUS_BUDGET = { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 3_600, maxEvaluatorInvocations: 100 };
 
@@ -226,6 +226,7 @@ describe("wire protocol round-trip (every method)", () => {
     expect(record.cached).toBe(false);
     expect(record.artifactHash).toBe(candidateHash);
     expect(record.durationMs).toBeGreaterThan(0);
+    expect(record.durationMs).toBeLessThan(60_000);
   });
 
   it("getBudget reflects evaluator invocations", async () => {

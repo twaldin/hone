@@ -90,6 +90,8 @@ export interface RunnerBackendContext {
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
   /** Trusted M1 full-run replicate identity, absent on M0. */
   measurementEpoch?: string | undefined;
+  /** Trusted per-evaluation wall-time cap, frozen by M2 campaign orchestration. */
+  evalTimeoutSec?: number | undefined;
   /** Trusted outer-broker evaluator; never serialized or exposed to a sandbox. */
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   /** Total optimizer episodes for this trusted run. M0 leaves this absent. */

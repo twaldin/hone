@@ -3,12 +3,36 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   M2AuthorizedPartialCohort,
+  canonicalJson,
+  type AdmissionApprovalBasis,
+  type M2AuthorizedAdmittedCapsule,
   type M2AuthorizedPartialCohort as AuthorizedPartialCohort,
   type M2CohortEvidencePointer,
 } from "@hone/schema";
 import { UsageError } from "./args.js";
 
 export const M2_AUTHORIZED_PARTIAL_COHORT_FILE = "plans/m2-authorized-partial-cohort.v1.json";
+/**
+ * Match a Gate-2 receipt to the authority frozen for this admitted identity.
+ * The original cohort inherits its one cohort-wide ruling; later re-admissions
+ * carry their exact owner approval basis on the individual binding.
+ */
+export function gate2ReceiptCitesAuthorizedBasis(
+  cohort: AuthorizedPartialCohort,
+  capsule: M2AuthorizedAdmittedCapsule,
+  basis: AdmissionApprovalBasis | undefined,
+): boolean {
+  if (basis === undefined) return false;
+  if (capsule.gate2Authorization !== undefined) {
+    return canonicalJson(basis) === canonicalJson(capsule.gate2Authorization);
+  }
+  return basis.authorizationKey === cohort.authorization.decisionKey
+    && basis.authorizedBy.identity === cohort.authorization.owner.identity
+    && basis.authorizedBy.kind === cohort.authorization.owner.kind
+    && basis.authorizedAt === cohort.authorization.decidedAt
+    && basis.deliveredVia === cohort.authorization.deliveredVia;
+}
+
 
 function verifyEvidencePointer(root: string, pointer: M2CohortEvidencePointer): void {
   const pathname = resolve(root, pointer.path);

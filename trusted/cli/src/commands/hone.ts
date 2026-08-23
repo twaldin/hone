@@ -86,7 +86,7 @@ import {
 import { extractWorkspaceArtifact } from "../artifact.js";
 import { admitCapsule, capsuleOracleDigest, capsuleScalarizerDigest, type AdmittedCapsule } from "../admission.js";
 import { loadCapsule } from "../capsule.js";
-import { verifyM2AuthorizedPartialCohort } from "../m2-cohort.js";
+import { gate2ReceiptCitesAuthorizedBasis, verifyM2AuthorizedPartialCohort } from "../m2-cohort.js";
 import {
   finalizeMetaHoldout,
   selectMetaTrainWinner,
@@ -800,6 +800,7 @@ export interface TrustedChildDispatchPolicy {
   readonly promotion: AnyMetaCampaignConfig["promotion"];
   readonly proxyRole?: "inner-capsule-improvement";
   readonly campaignConfigHash?: Sha256Digest;
+  readonly evaluatorTimeoutSec?: number;
 }
 
 
@@ -854,6 +855,9 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         {
           runId: executionRunId,
           measurementEpoch: request.identity.measurementEpoch,
+          ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
+            ? {}
+            : { evalTimeoutSec: this.dispatchPolicy.evaluatorTimeoutSec }),
           optimizerEpisodesMax: request.innerEpisodesMax,
           maxPublicCandidateEvaluations: 2 * request.innerEpisodesMax,
           ...(request.identity.phase === "holdout"
@@ -887,6 +891,9 @@ export class CliChildSupervisor implements MetaChildSupervisor {
           {
             runId: executionRunId,
             measurementEpoch: request.identity.measurementEpoch,
+            ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
+              ? {}
+              : { evalTimeoutSec: this.dispatchPolicy.evaluatorTimeoutSec }),
             optimizerEpisodesMax: request.innerEpisodesMax,
             maxPublicCandidateEvaluations: 2 * request.innerEpisodesMax,
             ...(request.identity.phase === "holdout"
@@ -1715,13 +1722,7 @@ export function discoverCapsules(
         throw new UsageError(`authorized cohort capsule ${authorized.label} does not reproduce its Gate-2 receipt binding`);
       }
       const basis = admitted.approval.receipt.approvalBasis;
-      if (
-        basis === undefined
-        || basis.authorizationKey !== policy.authorization.decisionKey
-        || basis.authorizedBy.identity !== policy.authorization.owner.identity
-        || basis.authorizedAt !== policy.authorization.decidedAt
-        || basis.deliveredVia !== policy.authorization.deliveredVia
-      ) {
+      if (!gate2ReceiptCitesAuthorizedBasis(policy, authorized, basis)) {
         throw new UsageError(`authorized cohort capsule ${authorized.label} receipt does not cite the owner authorization`);
       }
       if (found.has(admitted.manifest.id)) {
@@ -2742,6 +2743,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       promotion: config.promotion,
       proxyRole: "inner-capsule-improvement",
       campaignConfigHash: configHash,
+      evaluatorTimeoutSec: config.evaluatorTimeoutSec,
     },
     campaignDir,
     capsules,
@@ -2972,6 +2974,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       : [syntheticCapsule, "--headless", "--config", outerConfigPath, "--optimizer-artifact", controller.sourceArtifact];
     const code = await runCommand(commandArgs, io, {
       runId: outerRunId,
+      evalTimeoutSec: config.evaluatorTimeoutSec,
       recursiveBroker,
       evaluationStrategy: recursiveEvaluationStrategy,
       optimizerEpisodesMax: config.counts.candidateAttemptsMax,

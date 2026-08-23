@@ -90,6 +90,7 @@ function draft() {
       holdoutReplicates: 3,
       childConcurrency: 4,
     },
+    evaluatorTimeoutSec: 2700,
     budgets: {
       child,
       outer: { maxTokens: 1, maxUsd: 1, maxWallClockSec: 1, maxEvaluatorInvocations: 25 },
@@ -231,6 +232,11 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
     expect(new Set([...parsed.train, ...parsed.holdout].map((entry) => entry.image)).size).toBe(19);
     expect(parsed.optimizerRuntime.image).toMatch(/^hone-mutation@sha256:/);
     expect(parsed.counts).toMatchObject({ candidates: 12, candidateAttemptsMax: 24, innerEpisodesMax: 4 });
+  });
+
+  it("pins the recursive campaign evaluator timeout to the owner-ratified cap", () => {
+    expect(MetaCampaignConfigV2.parse(draft()).evaluatorTimeoutSec).toBe(2700);
+    expect(() => MetaCampaignConfigV2.parse({ ...draft(), evaluatorTimeoutSec: 600 })).toThrow();
   });
 
   it("requires a stage-B G1 controller to equal the exact G1 target", () => {
@@ -431,6 +437,28 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
     expect(parsed.train).toHaveLength(6);
     expect(parsed.holdout).toHaveLength(8);
     expect(MetaCampaignConfigV2.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);
+  });
+
+  it("binds a later owner Gate-2 authority to an individual re-admission", () => {
+    const value = authorizedPartialDraft();
+    const partial = value.corpusCohort.partialCohort;
+    const parsed = M2AuthorizedPartialCohort.parse({
+      ...partial,
+      admitted: partial.admitted.map((admitted, index) => index === 0
+        ? {
+            ...admitted,
+            gate2Authorization: {
+              authorizationKey: "m2-wave-gate2",
+              authorizedBy: { identity: "captain", kind: "owner" },
+              authorizedAt: "2026-08-23T06:33:44Z",
+              deliveredVia: "first-mate",
+              reviewEvidence: ["plans/m2-readmission-wave-evidence.v1.json"],
+            },
+          }
+        : admitted),
+    });
+    expect(parsed.admitted[0]?.gate2Authorization?.authorizationKey)
+      .toBe("m2-wave-gate2");
   });
 
   it("refuses a shortened cohort without its named owner authorization", () => {
