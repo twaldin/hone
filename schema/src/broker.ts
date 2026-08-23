@@ -32,6 +32,8 @@ export const BudgetState = z.object({
     wallClockSec: z.number().nonnegative(),
     evaluatorInvocations: z.number().int().nonnegative(),
   }),
+  /** Total elapsed time since run start, including pauses and offline gaps (operator observability only). */
+  lifetimeSec: z.number().nonnegative().optional(),
 });
 export type BudgetState = z.infer<typeof BudgetState>;
 

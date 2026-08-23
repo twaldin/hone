@@ -158,6 +158,62 @@ export function readEvents(runDir: string): RunEvent[] {
   return events;
 }
 
+export interface ActiveClockReplay {
+  /** Durable run.started origin for the separate operator lifetime signal. */
+  runStartedAtMs: number | null;
+  /** Current open run.started/run.resumed interval, or null while paused/terminal. */
+  activeStartedAtMs: number | null;
+  /** Closed active intervals only; safe as a legacy broker-journal bootstrap. */
+  accumulatedActiveWallClockSec: number;
+  /** Closed intervals plus the current open interval through nowMs. */
+  activeWallClockSec: number;
+  lifetimeSec: number;
+}
+
+/**
+ * Reconstructs active time from the public durable lifecycle. A clean pause
+ * closes at run.paused. If a process dies without pausing, the next resume
+ * closes the abandoned interval at its final journaled event: acknowledged
+ * work is charged, while the process-down gap and unacknowledged work are not.
+ */
+export function replayActiveClock(events: readonly RunEvent[], nowMs: number = Date.now()): ActiveClockReplay {
+  let runStartedAtMs: number | null = null;
+  let activeStartedAtMs: number | null = null;
+  let lastEvidenceAtMs: number | null = null;
+  let accumulatedActiveMs = 0;
+
+  const closeActive = (atMs: number): void => {
+    if (activeStartedAtMs === null) return;
+    accumulatedActiveMs += Math.max(0, atMs - activeStartedAtMs);
+    activeStartedAtMs = null;
+  };
+
+  for (const event of events) {
+    const atMs = Date.parse(event.at);
+    if (event.type === "run.started") {
+      runStartedAtMs ??= atMs;
+      if (activeStartedAtMs === null) activeStartedAtMs = atMs;
+    } else if (event.type === "run.resumed") {
+      // No clean pause: the prior boot's final acknowledged event is the
+      // crash boundary. Never bridge its process-down gap into this boot.
+      if (activeStartedAtMs !== null) closeActive(lastEvidenceAtMs ?? atMs);
+      activeStartedAtMs = atMs;
+    } else if (event.type === "run.paused" || event.type === "run.finished") {
+      closeActive(atMs);
+    }
+    lastEvidenceAtMs = atMs;
+  }
+
+  const liveActiveMs = activeStartedAtMs === null ? 0 : Math.max(0, nowMs - activeStartedAtMs);
+  return {
+    runStartedAtMs,
+    activeStartedAtMs,
+    accumulatedActiveWallClockSec: accumulatedActiveMs / 1000,
+    activeWallClockSec: (accumulatedActiveMs + liveActiveMs) / 1000,
+    lifetimeSec: runStartedAtMs === null ? 0 : Math.max(0, nowMs - runStartedAtMs) / 1000,
+  };
+}
+
 export type RunStatus = "pending" | "running" | "paused" | "completed" | "stopped" | "failed" | "budget";
 
 export interface IncumbentState {

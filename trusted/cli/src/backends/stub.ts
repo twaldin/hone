@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { RunEvent } from "@hone/schema";
 import { DISPATCH_JOURNAL_FILE, DISPATCH_JOURNAL_VERSION } from "@hone/proxy";
 import { sleep } from "../promise.js";
+import { readEvents, replayActiveClock } from "../eventlog.js";
 import type { RunnerBackend, RunnerBackendContext } from "../types.js";
 
 /**
@@ -25,7 +26,9 @@ export function createBackend(): RunnerBackend {
       const delayMs = Number(ctx.env["HONE_STUB_DELAY_MS"] ?? 0);
       const checkpointDelayMs = Number(ctx.env["HONE_STUB_CHECKPOINT_DELAY_MS"] ?? 0);
       const startedAt = Date.now();
-      const baseWallSec = ctx.replayed.lastBudget?.spent.wallClockSec ?? 0;
+      const activeClock = replayActiveClock(readEvents(ctx.runDir), startedAt);
+      const activeStartedAt = activeClock.activeStartedAtMs ?? startedAt;
+      const baseWallSec = activeClock.accumulatedActiveWallClockSec;
       const now = (): string => new Date().toISOString();
       const base = { runId: ctx.runId };
       let parent = ctx.replayed.incumbent?.artifact ?? fakeArtifact(0xb);
@@ -86,9 +89,12 @@ export function createBackend(): RunnerBackend {
               spent: {
                 tokens: spentTokens,
                 usd: spentUsd,
-                wallClockSec: baseWallSec + (Date.now() - startedAt) / 1000,
+                wallClockSec: baseWallSec + (Date.now() - activeStartedAt) / 1000,
                 evaluatorInvocations,
               },
+              lifetimeSec: activeClock.runStartedAtMs === null
+                ? 0
+                : Math.max(0, Date.now() - activeClock.runStartedAtMs) / 1000,
             },
           });
           ctx.emit({

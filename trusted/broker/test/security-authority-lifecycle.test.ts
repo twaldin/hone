@@ -1285,6 +1285,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
       runDir: path.join(tmpBase, "runs", "slot-wal"),
       casDir: path.join(tmpBase, "cas", "slot-wal"),
       runId: "run-slot-wal",
+      now: () => 0,
     };
     const a = await boot(shared);
     const cand = await saveCandidate(a, candidateTar);
@@ -1292,7 +1293,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     await expect(
       a.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT),
     ).rejects.toThrow();
-    expect((await stateLines(a)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: cand }]);
+    expect((await stateLines(a)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: cand, activeMs: 0 }]);
     await a.broker.close();
     const b = await boot(shared);
     await expect(
@@ -1300,7 +1301,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     ).rejects.toThrow(/attempt already consumed/);
   });
   it("serializes racing candidate admissions so exactly one evaluator can start", async () => {
-    const b = await boot();
+    const b = await boot({ now: () => 0 });
     b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2)).set(candidate2Hash, score(3));
     const a = await saveCandidate(b, candidateTar);
     const c = await saveCandidate(b, candidate2Tar);
@@ -1311,7 +1312,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     ]);
     expect(outcomes.filter((x) => x.status === "fulfilled")).toHaveLength(1);
     expect(outcomes.filter((x) => x.status === "rejected")).toHaveLength(1);
-    expect((await stateLines(b)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: a }]);
+    expect((await stateLines(b)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: a, activeMs: 0 }]);
   });
   it("rejects duplicate or contradictory persisted attempt facts", async () => {
     const shared = {
@@ -1472,6 +1473,7 @@ describe("trusted event ordering and candidacy", () => {
       runDir: path.join(tmpBase, "runs", "recover-all"),
       casDir: path.join(tmpBase, "cas", "recover-all"),
       runId: "run-recover-all",
+      now: () => 0,
     };
     const a = await boot(shared);
     a.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
@@ -1481,8 +1483,8 @@ describe("trusted event ordering and candidacy", () => {
     a.broker.reportIncumbent({ artifact: { hash: cand } }, CLIENT);
     await a.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 0 }, ADMIN);
     a.broker.recordSpend({ tokens: a.broker.manifest.budget.maxTokens, usd: 0 }, ADMIN);
-    const published = [...a.events];
-    expect(published.map((event) => event.type)).toEqual(expect.arrayContaining([
+    const beforeClose = [...a.events];
+    expect(beforeClose.map((event) => event.type)).toEqual(expect.arrayContaining([
       "episode.started",
       "episode.candidate",
       "eval.completed",
@@ -1492,7 +1494,15 @@ describe("trusted event ordering and candidacy", () => {
       "budget.snapshot",
       "budget.exhausted",
     ]));
+    const expectedCloseSnapshot: RunEvent = {
+      runId: a.runId,
+      at: new Date(0).toISOString(),
+      type: "budget.snapshot",
+      budget: a.broker.getBudget(ADMIN),
+    };
     await a.broker.close();
+    const published = [...a.events];
+    expect(published).toEqual([...beforeClose, expectedCloseSnapshot]);
 
     const b = await boot(shared);
     expect(b.broker.replayJournalEvents(published)).toBe(0);
@@ -2283,6 +2293,55 @@ describe("evaluator containment", () => {
     } finally {
       await gateLease.release();
     }
+  });
+
+  it("preserves active spend across a durable pause/restart without charging the offline gap", async () => {
+    let nowMs = 0;
+    const manifest = makeManifest({
+      budget: { ...GENEROUS_BUDGET, maxWallClockSec: 2 },
+    });
+    const shared = {
+      manifest,
+      runId: "run-active-wallclock-restart",
+      runDir: path.join(tmpBase, "runs", "active-wallclock-restart"),
+      casDir: path.join(tmpBase, "cas", "active-wallclock-restart"),
+      now: () => nowMs,
+    };
+    const first = await boot(shared);
+
+    nowMs = 600;
+    first.broker.recordSpend({ tokens: 1, usd: 0 }, ADMIN);
+    nowMs = 800;
+    first.broker.pauseActiveTime();
+    expect(first.broker.getBudget(ADMIN)).toMatchObject({
+      spent: { wallClockSec: 0.8 },
+      lifetimeSec: 0.8,
+    });
+    await first.broker.close();
+
+    // The process is absent for 100x the active interval. Lifetime retains
+    // that operator signal, but the budget level resumes exactly at 0.8s.
+    nowMs = 100_800;
+    const resumed = await boot(shared);
+    expect(resumed.broker.getBudget(ADMIN)).toMatchObject({
+      spent: { wallClockSec: 0.8 },
+      lifetimeSec: 100.8,
+    });
+
+    nowMs = 101_200;
+    expect(resumed.broker.getBudget(ADMIN)).toMatchObject({
+      spent: { wallClockSec: 1.2 },
+      lifetimeSec: 101.2,
+    });
+    expect(resumed.broker.getBudgetExhaustion(ADMIN)).toBeUndefined();
+    resumed.broker.snapshotBudget(ADMIN);
+    expect(resumed.events.at(-1)).toMatchObject({
+      type: "budget.snapshot",
+      budget: {
+        spent: { wallClockSec: 1.2 },
+        lifetimeSec: 101.2,
+      },
+    });
   });
 
   it("poisons further broker operations when a paused container cannot be released", async () => {
