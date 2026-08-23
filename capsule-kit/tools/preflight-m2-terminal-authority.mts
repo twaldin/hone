@@ -702,7 +702,10 @@ function recordedRunner(commands: CommandRecord[], mountSink: { value?: MountEvi
       const containerName = nameIndex >= 0 ? argv[nameIndex + 1] : undefined;
       if (containerName) {
         const sample = (): void => {
-          if (mountSink.value === undefined) mountSink.value = inspectMount(containerName);
+          if (mountSink.value === undefined) {
+            const inspected = inspectMount(containerName);
+            if (inspected !== undefined) mountSink.value = inspected;
+          }
         };
         sample();
         timer = setInterval(sample, 5);
