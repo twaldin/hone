@@ -1123,7 +1123,13 @@ export function deriveProbeReport(events: readonly RunEvent[], budget: BudgetSta
     let memo: { aggregate: number; assetGroupId: string; seed: number } | null = null;
     for (let i = started.index + 1; i < events.length; i++) {
       const e = events[i];
-      if (e !== undefined && e.type === "eval.completed" && e.episode === undefined && e.artifact.hash === started.parent.hash) {
+      if (
+        e !== undefined
+        && e.type === "eval.completed"
+        && e.episode === undefined
+        && e.artifact.hash === started.parent.hash
+        && e.aggregate !== null
+      ) {
         memo = { aggregate: e.aggregate, assetGroupId: e.assetGroupId, seed: e.seed };
       }
     }
@@ -1155,6 +1161,9 @@ export function deriveProbeReport(events: readonly RunEvent[], budget: BudgetSta
     } else if (e.type === "gate.paired" && e.episode === episode) {
       gates.push({ parentScore: e.parentScore, childScore: e.childScore, passed: e.passed });
     } else if (e.type === "eval.completed" && e.episode === episode) {
+      if (e.aggregate === null) {
+        throw new Error(`probe episode ${episode} has a null aggregate — cannot derive a paired report`);
+      }
       const prior = evals.get(e.artifact.hash);
       if (prior !== undefined && (prior.aggregate !== e.aggregate || prior.assetGroupId !== e.assetGroupId || prior.seed !== e.seed)) {
         throw new Error(`probe episode ${episode} holds conflicting trusted evaluations of ${e.artifact.hash} — ambiguous, cannot derive a paired report`);

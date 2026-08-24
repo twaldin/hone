@@ -80,6 +80,15 @@ describe("deriveProbeReport (trusted paired measurement from broker events)", ()
     expect(report.baseline.aggregate).toBe(0.5);
   });
 
+  it("refuses to turn a null aggregate into probe authority", () => {
+    const events: RunEvent[] = [
+      { runId: "run_p", at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } },
+      { runId: "run_p", at: at(), type: "eval.completed", episode: 0, artifact: { hash: fakeHash("b") }, assetGroupId: "train", seed: 1, aggregate: null, cached: false },
+    ];
+
+    expect(() => deriveProbeReport(events, BUDGET)).toThrow(/null aggregate/);
+  });
+
   it("fails closed when nothing was measured — an incomplete episode is never a probe", () => {
     expect(() => deriveProbeReport([], BUDGET)).toThrow(/no completed evaluation/);
     const unmeasured: RunEvent[] = [

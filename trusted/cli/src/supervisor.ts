@@ -2068,6 +2068,12 @@ async function superviseLocked(
         io.err("recursive child remains durably pending — run left unfinished for trusted resume");
         return 1;
       }
+      if (preFinish.activeEpisode !== null) {
+        io.err(
+          `optimizer episode ${preFinish.activeEpisode.episode} remains durably incomplete — run left unfinished for trusted resume`,
+        );
+        return 1;
+      }
       status = "failed";
       reason = "crash";
     } else {

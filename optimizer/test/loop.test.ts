@@ -407,6 +407,79 @@ describe("runEpisodeLoop", () => {
     expect(stub.recursivePlans).toEqual([expected, expected]);
   });
 
+  it("records a long null recursive aggregate, completes the episode, and continues", async () => {
+    const ceiling = {
+      maxTokens: 12_000_000,
+      maxUsd: 25,
+      maxWallClockSec: 10_800,
+      maxEvaluatorInvocations: 200,
+    };
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: {},
+      baselineValid: false,
+      objectivesBySaveIndex: {},
+      execPlan: [],
+      // M2 ignition 5's panel occupied the broker for 6,304,434 ms, beyond
+      // the broker's default 3,600-second sandbox claim.
+      evaluationDurationMs: 6_304_434,
+      defaultSandboxTtlSec: 3_600,
+      envelope: {
+        maxTokens: 5_000_000,
+        maxUsd: 25,
+        maxWallClockSec: 86_400,
+        maxEvaluatorInvocations: 25,
+      },
+      recursiveTask: {
+        depth: 0,
+        innerEpisodesMax: 4,
+        members: [{ capsuleId: "cap_000000000002", calibratedInnerCeiling: ceiling }],
+      },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-null-recursive-aggregate",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        maxEpisodes: 2,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(JSON.parse(JSON.stringify(eventsOf(events, "eval.completed")))).toEqual([
+      expect.objectContaining({ episode: 0, aggregate: null }),
+      expect.objectContaining({ episode: 1, aggregate: null }),
+    ]);
+    expect(eventsOf(events, "episode.invalid")).toEqual([
+      expect.objectContaining({
+        episode: 0,
+        repaired: false,
+        reason: expect.stringContaining("null aggregate"),
+      }),
+      expect.objectContaining({
+        episode: 1,
+        repaired: false,
+        reason: expect.stringContaining("null aggregate"),
+      }),
+    ]);
+    expect(stub.execArgvs).toEqual([]);
+    expect(stub.completedEpisodes).toEqual([0, 1]);
+    expect(stub.completedEpisodeParams).toEqual([
+      { episode: 0, releaseSandboxId: "sb_000000000001" },
+      { episode: 1, releaseSandboxId: "sb_000000000002" },
+    ]);
+    expect(stub.createdSandboxParams).toEqual([
+      { artifact: { hash: BASELINE }, role: "mutation", ttlSec: 86_400 },
+      { artifact: { hash: BASELINE }, role: "mutation", ttlSec: 86_400 },
+    ]);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
   it("discards an eval-invalid candidate whose repair also fails, without minting an incumbent", async () => {
     const stub = new StubBroker({
       baselineHash: BASELINE,
@@ -607,6 +680,51 @@ describe("runEpisodeLoop paired comparator evidence", () => {
     // deltaVsBaseline is computed from the same-coordinate baseline measurement.
     expect(incumbents[1]?.deltaVsBaseline).toBeCloseTo(0.2, 10);
     expect(stub.finished).toEqual([c1]);
+  });
+
+  it("rejects a challenger when its required baseline comparator returns null", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      invalidBaselineSeeds: [1],
+      objectivesBySaveIndex: {
+        1: { score: 0.6 },
+        2: { score: 0.7 },
+      },
+      execPlan: [
+        { exitCode: 0, stdout: okStdout("first-improvement") },
+        { exitCode: 0, stdout: okStdout("unpaired-challenger") },
+      ],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-null-baseline-comparator",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        maxEpisodes: 2,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    const firstCandidate = stubHash(1);
+    expect(stub.reportedIncumbents).toEqual([firstCandidate]);
+    expect(eventsOf(events, "incumbent.new").map((event) => event.artifact.hash)).toEqual([firstCandidate]);
+    expect(eventsOf(events, "episode.invalid")).toEqual([
+      expect.objectContaining({
+        episode: 1,
+        repaired: false,
+        reason: "baseline comparison returned a null aggregate",
+      }),
+    ]);
+    expect(stub.completedEpisodes).toEqual([0, 1]);
+    expect(stub.finished).toEqual([firstCandidate]);
   });
 
   it("ε-restart challenger is paired against the current incumbent on its own seed; a worse challenger is never reported", async () => {
@@ -878,6 +996,7 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
     expect(stub.createdSandboxParams).toEqual([{
       artifact: { hash: BASELINE },
       role: "mutation",
+      ttlSec: 86_400,
       continueEpisode: 0,
     }]);
     expect(stub.completedEpisodes).toEqual([0]);

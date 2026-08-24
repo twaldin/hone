@@ -43,6 +43,10 @@ export interface StubScript {
   baselineHash: string;
   /** Objectives returned for the baseline artifact. */
   baselineObjectives: Record<string, number>;
+  /** False models a trusted panel that settled but could not produce an aggregate. */
+  baselineValid?: boolean;
+  /** Seeds where the trusted baseline panel settles without an aggregate. */
+  invalidBaselineSeeds?: number[];
   /** Objectives per saveArtifact call index (1-based). Missing index => evaluating it is a test failure. */
   objectivesBySaveIndex: Record<number, Record<string, number>>;
   /** Seed-specific override: objectives keyed `${saveIndex}:${seed}`, consulted before objectivesBySaveIndex. */
@@ -51,6 +55,10 @@ export interface StubScript {
   invalidSaveIndices?: number[];
   /** Consumed in exec-call order; running past the end fails the test. */
   execPlan: ExecStep[];
+  /** Trusted evaluation duration used by the sandbox-lifetime simulation. */
+  evaluationDurationMs?: number;
+  /** Broker default when createSandbox omits ttlSec. */
+  defaultSandboxTtlSec?: number;
   /** When set, reportSessionNoYieldBound fails as if durable journaling were unavailable. */
   reportNoYieldError?: string;
   envelope: BudgetEnvelope;
@@ -109,6 +117,8 @@ export class StubBroker {
   private sandboxSeq = 0;
   private readonly sandboxParent = new Map<string, string>();
   private readonly saveIndexByHash = new Map<string, number>();
+  private readonly sandboxExpiresAt = new Map<string, number>();
+  private nowMs = 0;
   private readonly memo = new Map<string, EvaluationRecord>();
 
   constructor(private readonly script: StubScript) {
@@ -181,6 +191,10 @@ export class StubBroker {
         this.createdSandboxParams.push(params);
         const sandboxId = `sb_${String(++this.sandboxSeq).padStart(12, "0")}`;
         this.sandboxParent.set(sandboxId, params.artifact.hash);
+        this.sandboxExpiresAt.set(
+          sandboxId,
+          this.nowMs + (params.ttlSec ?? this.script.defaultSandboxTtlSec ?? 3_600) * 1_000,
+        );
         this.ops.push(`createSandbox:${sandboxId}`);
         return { sandboxId };
       }
@@ -208,6 +222,7 @@ export class StubBroker {
       }
       case "exec": {
         const params = BrokerMethods.exec.params.parse(rawParams);
+        this.requireSandbox(params.sandboxId);
         this.ops.push(`exec:${params.sandboxId}:${params.argv.join(" ")}`);
         const emulated = this.workerProtocolExec(params.sandboxId, params.argv);
         if (emulated !== null) return BrokerMethods.exec.result.parse(emulated);
@@ -252,6 +267,13 @@ export class StubBroker {
           cached: false,
           evaluatedAt: new Date().toISOString(),
         });
+        this.nowMs += this.script.evaluationDurationMs ?? 5;
+        for (const [sandboxId, expiresAt] of this.sandboxExpiresAt) {
+          if (this.nowMs >= expiresAt) {
+            this.sandboxExpiresAt.delete(sandboxId);
+            this.sandboxParent.delete(sandboxId);
+          }
+        }
         this.memo.set(key, record);
         return record;
       }
@@ -270,6 +292,11 @@ export class StubBroker {
       }
       case "completeEpisode": {
         const params = BrokerMethods.completeEpisode.params.parse(rawParams);
+        if (params.releaseSandboxId !== undefined) {
+          this.requireSandbox(params.releaseSandboxId);
+          this.sandboxExpiresAt.delete(params.releaseSandboxId);
+          this.sandboxParent.delete(params.releaseSandboxId);
+        }
         this.completedEpisodeParams.push(params);
         if (!this.completedEpisodes.includes(params.episode)) {
           this.completedEpisodes.push(params.episode);
@@ -289,6 +316,10 @@ export class StubBroker {
         throw new Error(`unexpected method: ${method}`);
     }
   }
+  private requireSandbox(sandboxId: string): void {
+    if (!this.sandboxParent.has(sandboxId)) throw new Error(`unknown sandbox: ${sandboxId}`);
+  }
+
 
   /**
    * Emulate the loop's sealed-artifact transfer protocol against shared
@@ -339,7 +370,15 @@ export class StubBroker {
 
   private outputFor(hash: string, seed: number): Record<string, unknown> {
     if (hash === this.script.baselineHash) {
-      return { valid: true, objectives: this.script.baselineObjectives, constraints: {}, perExample: {} };
+      return this.script.baselineValid === false || this.script.invalidBaselineSeeds?.includes(seed) === true
+        ? {
+            valid: false,
+            objectives: {},
+            constraints: { allChildrenValid: false },
+            perExample: {},
+            diagnostics: { summary: "recursive child settlement failed: cap_000000000002=candidate_failed" },
+          }
+        : { valid: true, objectives: this.script.baselineObjectives, constraints: {}, perExample: {} };
     }
     const index = this.saveIndexByHash.get(hash);
     if (index === undefined) throw new Error(`evaluate of unknown artifact ${hash}`);

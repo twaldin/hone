@@ -2501,6 +2501,16 @@ describe("evaluator containment", () => {
 // ---------- lifecycle and resources ----------
 
 describe("sandbox lifecycle and resource ceilings", () => {
+  it("refuses a forged sandbox reference before invoking Docker", async () => {
+    const b = await boot();
+    const callsBefore = b.log.length;
+
+    await expect(
+      b.broker.exec({ sandboxId: "sb_forged", argv: ["true"] }, CLIENT),
+    ).rejects.toThrow("unknown sandbox: sb_forged");
+    expect(b.log).toHaveLength(callsBefore);
+  });
+
   it("caps concurrently active sandboxes", async () => {
     const b = await boot({ maxActiveSandboxes: 2 });
     await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
