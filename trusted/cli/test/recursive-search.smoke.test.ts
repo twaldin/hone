@@ -147,6 +147,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     }).trim();
     const executedRuntimeDigest = computeTrustedRuntimeDigest();
     expect(executedRuntimeDigest).toBe(campaignConfig.trustedRuntime.digest);
+    expect(executedSourceCommit).toBe(campaignConfig.trustedRuntime.sourceCommit);
     const configHash = sha256(canonicalJson(campaignConfig));
     if (!("mode" in campaignConfig.corpusCohort)) {
       throw new Error("smoke campaign must carry the owner-authorized partial cohort");
