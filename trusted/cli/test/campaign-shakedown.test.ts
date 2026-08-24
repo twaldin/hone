@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   CapsuleManifest,
   ChildRunLaunchReceipt,
@@ -72,6 +73,11 @@ const SCORE_BY_CANDIDATE_ORDINAL: Record<number, number> = {
   4: 0.6,
   5: 0.75,
 };
+const MutationUsageRecord = z.object({
+  type: z.literal("campaign-shakedown.mutation-usage.v1"),
+  modelCalls: z.number().int().nonnegative(),
+  providerCalls: z.number().int().nonnegative(),
+}).strict();
 
 function workIdentity(request: SpawnRunRequest): MetaWorkIdentity {
   const schedule = request.child.schedule;
@@ -144,6 +150,7 @@ function mutationShim(): Buffer {
       "if [ -f \"$count_file\" ]; then count=$(cat \"$count_file\"); fi",
       "count=$((count + 1))",
       "printf '%s\\n' \"$count\" > \"$count_file\"",
+      "printf '%s\\n' '{\"type\":\"campaign-shakedown.mutation-usage.v1\",\"modelCalls\":0,\"providerCalls\":0}'",
       "result() { printf '%s\\n' \"{\\\"summary\\\":\\\"zero-provider campaign shakedown\\\",\\\"approach\\\":\\\"$1\\\",\\\"filesChanged\\\":[]}\"; }",
       "case \"$count\" in",
       "  1)",
@@ -292,6 +299,7 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
     const brokerEvents: RunEvent[] = [];
     const dockerCalls: string[][] = [];
     const mutationExitCodes: number[] = [];
+    const mutationUsageRecords: Array<{ modelCalls: number; providerCalls: number }> = [];
     const launchedChildren: SpawnRunRequest[] = [];
     const trustedStrategy = adapter.evaluationStrategy();
     const recursivePlan = {
@@ -324,6 +332,27 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
         const result = await runCommand(argv, options);
         if (argv.includes("/scratch/.hone-runtime/bun") && argv.includes("/scratch/hone-worker.mjs")) {
           mutationExitCodes.push(result.exitCode);
+          for (const line of result.stdout.toString("utf8").split("\n")) {
+            if (line.length === 0) continue;
+            let record: unknown;
+            try {
+              record = JSON.parse(line);
+            } catch {
+              continue;
+            }
+            if (
+              typeof record === "object"
+              && record !== null
+              && "type" in record
+              && record.type === "campaign-shakedown.mutation-usage.v1"
+            ) {
+              const usage = MutationUsageRecord.parse(record);
+              mutationUsageRecords.push({
+                modelCalls: usage.modelCalls,
+                providerCalls: usage.providerCalls,
+              });
+            }
+          }
         }
         return result;
       },
@@ -472,10 +501,19 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
         event.type === "gate.paired" && (event.episode === 0 || event.episode === 4),
     );
 
+    const observedMutationSpend = mutationUsageRecords.reduce(
+      (sum, record) => ({
+        modelCalls: sum.modelCalls + record.modelCalls,
+        providerCalls: sum.providerCalls + record.providerCalls,
+      }),
+      { modelCalls: 0, providerCalls: 0 },
+    );
     expect(searchEvents.filter((event) => event.type === "episode.started").map((event) => event.episode))
       .toEqual([0, 1, 2, 3, 4]);
     expect(completed).toEqual([0, 1, 2, 3, 4]);
     expect(mutationExitCodes).toEqual([0, 1, 0, 1, 0, 0, 0, 0]);
+    expect(mutationUsageRecords).toHaveLength(mutationExitCodes.length);
+    expect(observedMutationSpend).toEqual({ modelCalls: 0, providerCalls: 0 });
     expect(candidateHashes[1]).toBe(candidateHashes[2]);
     expect(localRepeatGates.map((event) => event.passed)).toEqual([false, true]);
     expect(terminalDecisionGates.map((event) => [event.episode, event.passed])).toEqual([
@@ -509,8 +547,8 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
       target: "shakedown:campaign",
       result: "passed",
       zeroSpend: {
-        modelCalls: 0,
-        providerCalls: 0,
+        modelCalls: observedMutationSpend.modelCalls,
+        providerCalls: observedMutationSpend.providerCalls,
         tokens: finalBudget?.spent.tokens,
         usd: finalBudget?.spent.usd,
       },

@@ -70,6 +70,8 @@ export interface StubScript {
   reportIncumbentErrorsByHash?: Record<string, string>;
   /** Durable first-pair verdict keyed by candidate hash. */
   promotionVerdictsByHash?: Record<string, PromotionVerdict>;
+  /** Save indices explicitly granted a positive first-pair verdict. Omission fails closed. */
+  promotableSaveIndices?: number[];
   envelope: BudgetEnvelope;
   recursiveTask?: RecursiveTask;
 }
@@ -291,13 +293,19 @@ export class StubBroker {
       case "getPromotionVerdict": {
         const params = BrokerMethods.getPromotionVerdict.params.parse(rawParams);
         this.promotionVerdictAsks.push(params.artifact.hash);
-        const verdict = this.script.promotionVerdictsByHash?.[params.artifact.hash] ?? {
-          status: "positive",
-          parent: { hash: this.script.baselineHash },
-          parentScore: 0,
-          childScore: 1,
-          delta: 1,
-        };
+        const saveIndex = this.saveIndexByHash.get(params.artifact.hash);
+        const explicitlyPromotable =
+          saveIndex !== undefined && this.script.promotableSaveIndices?.includes(saveIndex) === true;
+        const verdict = this.script.promotionVerdictsByHash?.[params.artifact.hash]
+          ?? (explicitlyPromotable
+            ? {
+                status: "positive" as const,
+                parent: { hash: this.script.baselineHash },
+                parentScore: 0,
+                childScore: 1,
+                delta: 1,
+              }
+            : { status: "never-paired" as const });
         return BrokerMethods.getPromotionVerdict.result.parse(verdict);
       }
       case "reportIncumbent": {

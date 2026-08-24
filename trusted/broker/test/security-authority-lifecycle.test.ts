@@ -1275,6 +1275,69 @@ describe("durable promotion verdict query", () => {
     });
     expect(positive.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT)).toEqual({});
   });
+
+  it("refuses a trusted candidate measurement that has no public evaluation admission", async () => {
+    const b = await boot();
+    b.ctl.evalOutputs.set(candidateHash, score(2));
+    const candidate = await saveCandidate(b, candidateTar);
+    await b.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 0 },
+      ADMIN,
+    );
+    expect(b.broker.getPromotionVerdict({ artifact: { hash: candidate } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-public-admission",
+    });
+    expect(() => b.broker.reportIncumbent({ artifact: { hash: candidate } }, CLIENT)).toThrow(
+      /artifact has no public candidate evaluation admission/,
+    );
+  });
+
+  it("refuses a replayed positive gate whose parent disagrees with immutable lineage", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "lineage-mismatch-verdict"),
+      casDir: path.join(tmpBase, "cas", "lineage-mismatch-verdict"),
+      runId: "run-lineage-mismatch-verdict",
+    };
+    const original = await boot(shared);
+    original.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const candidate = await saveCandidate(original, candidateTar);
+    await original.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    await original.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    const lines = await stateLines(original);
+    const candidateEvaluation = lines.find((line) =>
+      line["t"] === "eval"
+      && (line["record"] as { artifactHash?: string } | undefined)?.artifactHash === candidate
+    );
+    if (candidateEvaluation === undefined) throw new Error("fixture lost candidate evaluation");
+    const gate = candidateEvaluation["gate"] as { parent?: string } | undefined;
+    if (gate === undefined) throw new Error("fixture lost candidate gate");
+    gate.parent = candidate2Hash;
+    await original.broker.close();
+    await writeFile(
+      path.join(shared.runDir, "broker-state.ndjson"),
+      `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+    );
+
+    const replayedMismatch = await boot(shared);
+    expect(replayedMismatch.broker.getPromotionVerdict(
+      { artifact: { hash: candidate } },
+      CLIENT,
+    )).toEqual({
+      status: "refused",
+      reason: "lineage-mismatch",
+    });
+    expect(() => replayedMismatch.broker.reportIncumbent(
+      { artifact: { hash: candidate } },
+      CLIENT,
+    )).toThrow(/no persisted same-epoch parent-first gate pairing/);
+  });
 });
 
 // ---------- cross-epoch gate monotonicity ----------
