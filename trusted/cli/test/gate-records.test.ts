@@ -119,6 +119,7 @@ function buildConfig(stage: "A" | "B"): RecursiveConfig {
   return MetaCampaignConfigV2.parse({
     ...legacy,
     version: 2,
+    evaluatorTimeoutSec: 2700,
     seedOptimizer: target,
     controllerOptimizer: controller,
     optimizerRuntime: { image: `hone-optimizer@${digest("recursive:optimizer-image")}` },
