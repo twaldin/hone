@@ -511,6 +511,9 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     if (recursiveScore === undefined) {
       throw new Error(`search phase completed without a recursive score: ${canonicalJson(searchEvents)}`);
     }
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.qNormalized).toBe(recursiveScore.output.objectives.normalizedGain);
+    expect(rows[0]?.observed.usd).toBe(0);
 
     const record = innerRecord;
     if (record === undefined) throw new Error("smoke completed without inner evaluation evidence");
@@ -669,6 +672,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         formula: "(qRaw - qBase) / scale",
         scope: "smoke-only; no campaign or promotion authority",
       },
+      trustedMeasurementRows: rows,
       modelCalls: 0,
       recursiveScore,
       recursiveResourceLedger: join(smokeRoot, "recursive-resource.ndjson"),
