@@ -157,7 +157,7 @@ describe("trusted calibration coordinator", () => {
     expect(dry.coordinates).toHaveLength(80);
     expect(dry.modelCalls).toBe(0);
   });
-  it("resumes after a durable attempt outcome without launching the cell twice", async () => {
+  it("resumes a durable outcome once and never derives numeric cell evidence from a null aggregate", async () => {
     const root = mkdtempSync(join(tmpdir(), "hone-calibration-resume-"));
     mkdirSync(join(root, "capsules"), { recursive: true });
     const campaignPath = join(root, "selection.json");
@@ -199,6 +199,33 @@ describe("trusted calibration coordinator", () => {
       outcome,
       at: "2026-08-12T01:00:00.000Z",
     })}\n`);
+    const executionRunDir = join(root, ".hone-runs", cell.childRunId);
+    mkdirSync(executionRunDir, { recursive: true });
+    const eligibleAggregate = cell.capsule.qBase + cell.capsule.scale * 0.5;
+    writeFileSync(join(executionRunDir, "events.ndjson"), [
+      {
+        runId: cell.childRunId,
+        at: "2026-08-12T01:00:01.000Z",
+        type: "eval.completed",
+        episode: 0,
+        artifact: { hash: cell.sourceArtifact },
+        assetGroupId: "meta-train",
+        seed: cell.seed,
+        aggregate: null,
+        cached: false,
+      },
+      {
+        runId: cell.childRunId,
+        at: "2026-08-12T01:00:02.000Z",
+        type: "eval.completed",
+        episode: 0,
+        artifact: { hash: cell.sourceArtifact },
+        assetGroupId: "meta-train",
+        seed: cell.seed,
+        aggregate: eligibleAggregate,
+        cached: false,
+      },
+    ].map((event) => JSON.stringify(event)).join("\n") + "\n");
     const runLaunched = vi.fn();
     const io: CmdIo = { root, env: {}, isTTY: false, out: vi.fn(), err: vi.fn() };
 
@@ -212,6 +239,29 @@ describe("trusted calibration coordinator", () => {
     const journal = readFileSync(join(stateDir, "calibration-journal.ndjson"), "utf8");
     expect(journal.match(/"type":"attempt-terminal"/g)).toHaveLength(1);
     expect(journal.match(/"type":"cell-terminal"/g)).toHaveLength(1);
+    const cellEvidence = JSON.parse(
+      readFileSync(join(stateDir, "cells", "00.json"), "utf8"),
+    ) as {
+      anytimeEvidence: {
+        trustedEvents: {
+          event: { type: string; aggregate?: number | null };
+          normalizedGain?: number | null;
+          bestNormalizedGain?: number | null;
+        }[];
+      };
+    };
+    const evalEvidence = cellEvidence.anytimeEvidence.trustedEvents.filter(
+      ({ event }) => event.type === "eval.completed",
+    );
+    expect(evalEvidence).toHaveLength(2);
+    expect(evalEvidence[0]).toMatchObject({
+      event: { aggregate: null },
+      normalizedGain: null,
+      bestNormalizedGain: null,
+    });
+    expect(evalEvidence[1]?.event.aggregate).toBeCloseTo(eligibleAggregate, 10);
+    expect(evalEvidence[1]?.normalizedGain).toBeCloseTo(0.5, 10);
+    expect(evalEvidence[1]?.bestNormalizedGain).toBeCloseTo(0.5, 10);
   });
 
 

@@ -216,6 +216,59 @@ describe("terminal-order fence", () => {
     ]);
     expect(events.at(-1)?.type).toBe("run.finished");
   });
+
+  it("leaves an optimizer crash inside an incomplete episode resumable", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(
+      join(root, "resumable-episode-crash-backend.mjs"),
+      `export function createBackend() {
+        return {
+          async start(ctx) {
+            const active = ctx.replayed.activeEpisode;
+            if (active === null) {
+              ctx.emit({
+                runId: ctx.runId,
+                at: new Date().toISOString(),
+                type: "episode.started",
+                episode: 0,
+                parent: { hash: "${fakeHash("b")}" },
+              });
+              throw new Error("injected crash after all external work settled");
+            }
+            ctx.emit({
+              runId: ctx.runId,
+              at: new Date().toISOString(),
+              type: "episode.completed",
+              episode: active.episode,
+            });
+          },
+        };
+      }
+      `,
+    );
+    const firstIo = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--backend", "./resumable-episode-crash-backend.mjs"], firstIo.io),
+    ).toBe(1);
+    const runId = soleRunId(root);
+    expect(firstIo.err.join("\n")).toContain("injected crash after all external work settled");
+    expect(eventTypes(root, runId)).toContain("episode.started");
+    expect(eventTypes(root, runId)).not.toContain("episode.completed");
+    expect(eventTypes(root, runId)).not.toContain("run.finished");
+
+    const resumedIo = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--resume"], resumedIo.io),
+      resumedIo.err.join("\n"),
+    ).toBe(0);
+
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.filter((event) => event.type === "episode.started")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "episode.completed")).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "completed" });
+  });
 });
 
 describe("optimizer process-group kill", () => {

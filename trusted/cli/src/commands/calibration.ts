@@ -615,9 +615,13 @@ function writeCellEvidence(root: string, stateDir: string, cell: CalibrationPlan
   let bestNormalizedGain: number | null = null;
   const trustedEvents = events.map((event, cursor) => {
     if (event.type === "budget.snapshot" || event.type === "probe.completed") usage = { ...event.budget.spent };
-    if (event.type === "eval.completed") {
-      const gain = normalizedGain(event.aggregate, cell.capsule.qBase, cell.capsule.scale);
-      bestNormalizedGain = bestNormalizedGain === null ? gain : Math.max(bestNormalizedGain, gain);
+    const eventNormalizedGain = event.type !== "eval.completed" || event.aggregate === null
+      ? null
+      : normalizedGain(event.aggregate, cell.capsule.qBase, cell.capsule.scale);
+    if (eventNormalizedGain !== null) {
+      bestNormalizedGain = bestNormalizedGain === null
+        ? eventNormalizedGain
+        : Math.max(bestNormalizedGain, eventNormalizedGain);
     }
     return {
       cursor,
@@ -626,7 +630,7 @@ function writeCellEvidence(root: string, stateDir: string, cell: CalibrationPlan
       remaining: remainingBudget(cell.budget, usage),
       ...(event.type === "eval.completed"
         ? {
-            normalizedGain: normalizedGain(event.aggregate, cell.capsule.qBase, cell.capsule.scale),
+            normalizedGain: eventNormalizedGain,
             bestNormalizedGain,
           }
         : {}),
