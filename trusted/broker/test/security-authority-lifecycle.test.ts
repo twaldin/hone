@@ -1218,6 +1218,128 @@ describe("promotion authority (reportIncumbent is only a hint)", () => {
   });
 });
 
+describe("durable promotion verdict query", () => {
+  it("distinguishes never-paired, positive, non-positive, and other trusted refusals", async () => {
+    const neverPaired = await boot();
+    const savedOnly = await saveCandidate(neverPaired, candidateTar);
+    expect(neverPaired.broker.getPromotionVerdict({ artifact: { hash: savedOnly } }, CLIENT)).toEqual({
+      status: "never-paired",
+    });
+    expect(neverPaired.broker.getPromotionVerdict({ artifact: { hash: baselineHash } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-lineage",
+    });
+
+    const noPair = await boot();
+    noPair.ctl.evalOutputs.set(candidateHash, score(2));
+    const unpaired = await saveCandidate(noPair, candidateTar);
+    await noPair.broker.evaluate({ artifact: { hash: unpaired }, assetGroupId: "train", seed: 0 }, CLIENT);
+    expect(noPair.broker.getPromotionVerdict({ artifact: { hash: unpaired } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-persisted-pair",
+    });
+
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "negative-verdict-replay"),
+      casDir: path.join(tmpBase, "cas", "negative-verdict-replay"),
+      runId: "run-negative-verdict-replay",
+    };
+    const negative = await boot(shared);
+    negative.ctl.evalOutputs.set(baselineHash, score(2)).set(candidateHash, score(1));
+    const losing = await saveCandidate(negative, candidateTar);
+    await negative.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await negative.broker.evaluate({ artifact: { hash: losing }, assetGroupId: "train", seed: 0 }, CLIENT);
+    const losingVerdict = {
+      status: "non-positive",
+      parent: { hash: baselineHash },
+      parentScore: 2,
+      childScore: 1,
+      delta: -1,
+    };
+    expect(negative.broker.getPromotionVerdict({ artifact: { hash: losing } }, CLIENT)).toEqual(losingVerdict);
+    await negative.broker.close();
+    const replayed = await boot(shared);
+    expect(replayed.broker.getPromotionVerdict({ artifact: { hash: losing } }, CLIENT)).toEqual(losingVerdict);
+
+    const positive = await boot();
+    positive.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const winner = await saveCandidate(positive, candidateTar);
+    await positive.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await positive.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "train", seed: 0 }, CLIENT);
+    expect(positive.broker.getPromotionVerdict({ artifact: { hash: winner } }, CLIENT)).toEqual({
+      status: "positive",
+      parent: { hash: baselineHash },
+      parentScore: 1,
+      childScore: 2,
+      delta: 1,
+    });
+    expect(positive.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT)).toEqual({});
+  });
+
+  it("refuses a trusted candidate measurement that has no public evaluation admission", async () => {
+    const b = await boot();
+    b.ctl.evalOutputs.set(candidateHash, score(2));
+    const candidate = await saveCandidate(b, candidateTar);
+    await b.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 0 },
+      ADMIN,
+    );
+    expect(b.broker.getPromotionVerdict({ artifact: { hash: candidate } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-public-admission",
+    });
+    expect(() => b.broker.reportIncumbent({ artifact: { hash: candidate } }, CLIENT)).toThrow(
+      /artifact has no public candidate evaluation admission/,
+    );
+  });
+
+  it("refuses a replayed positive gate whose parent disagrees with immutable lineage", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "lineage-mismatch-verdict"),
+      casDir: path.join(tmpBase, "cas", "lineage-mismatch-verdict"),
+      runId: "run-lineage-mismatch-verdict",
+    };
+    const original = await boot(shared);
+    original.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const candidate = await saveCandidate(original, candidateTar);
+    await original.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    await original.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    const lines = await stateLines(original);
+    const candidateEvaluation = lines.find((line) =>
+      line["t"] === "eval"
+      && (line["record"] as { artifactHash?: string } | undefined)?.artifactHash === candidate
+    );
+    if (candidateEvaluation === undefined) throw new Error("fixture lost candidate evaluation");
+    const gate = candidateEvaluation["gate"] as { parent?: string } | undefined;
+    if (gate === undefined) throw new Error("fixture lost candidate gate");
+    gate.parent = candidate2Hash;
+    await original.broker.close();
+    await writeFile(
+      path.join(shared.runDir, "broker-state.ndjson"),
+      `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+    );
+
+    const replayedMismatch = await boot(shared);
+    expect(replayedMismatch.broker.getPromotionVerdict(
+      { artifact: { hash: candidate } },
+      CLIENT,
+    )).toEqual({
+      status: "refused",
+      reason: "lineage-mismatch",
+    });
+    expect(() => replayedMismatch.broker.reportIncumbent(
+      { artifact: { hash: candidate } },
+      CLIENT,
+    )).toThrow(/no persisted same-epoch parent-first gate pairing/);
+  });
+});
+
 // ---------- cross-epoch gate monotonicity ----------
 
 

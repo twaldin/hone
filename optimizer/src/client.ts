@@ -189,6 +189,12 @@ export class BrokerClient {
     return EvaluationRecord.parse(await this.call("evaluate", params));
   }
 
+  async getPromotionVerdict(
+    params: ParamsOf<"getPromotionVerdict">,
+  ): Promise<ResultOf<"getPromotionVerdict">> {
+    return this.call("getPromotionVerdict", params);
+  }
+
   async reportIncumbent(params: ParamsOf<"reportIncumbent">): Promise<void> {
     await this.call("reportIncumbent", params);
   }

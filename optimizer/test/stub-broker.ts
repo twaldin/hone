@@ -13,6 +13,7 @@ import {
   type BudgetState,
   type RecursiveEvaluationPlan,
   type RecursiveTask,
+  type PromotionVerdict,
 } from "@hone/schema";
 import { deferred } from "../src/deferred.js";
 import { RUNTIME_PART_DIR, SANDBOX_WORKER_PATH, WORKER_PART_DIR } from "../src/loop.js";
@@ -53,6 +54,8 @@ export interface StubScript {
   objectivesBySaveIndex: Record<number, Record<string, number>>;
   /** Seed-specific override: objectives keyed `${saveIndex}:${seed}`, consulted before objectivesBySaveIndex. */
   objectivesBySaveIndexAndSeed?: Record<string, Record<string, number>>;
+  /** Optional exact hash returned by each saveArtifact call (1-based by array position). */
+  saveArtifactHashes?: string[];
   /** saveArtifact indices whose evaluation comes back output.valid=false. */
   invalidSaveIndices?: number[];
   /** Consumed in exec-call order; running past the end fails the test. */
@@ -63,6 +66,12 @@ export interface StubScript {
   defaultSandboxTtlSec?: number;
   /** When set, reportSessionNoYieldBound fails as if durable journaling were unavailable. */
   reportNoYieldError?: string;
+  /** Production-shaped reportIncumbent refusal keyed by artifact hash. */
+  reportIncumbentErrorsByHash?: Record<string, string>;
+  /** Durable first-pair verdict keyed by candidate hash. */
+  promotionVerdictsByHash?: Record<string, PromotionVerdict>;
+  /** Save indices explicitly granted a positive first-pair verdict. Omission fails closed. */
+  promotableSaveIndices?: number[];
   envelope: BudgetEnvelope;
   recursiveTask?: RecursiveTask;
 }
@@ -93,6 +102,7 @@ export class StubBroker {
   readonly evaluateAsks: string[] = [];
   /** Recursive allocation plan attached to every evaluate request, if any. */
   readonly recursivePlans: Array<RecursiveEvaluationPlan | undefined> = [];
+  readonly promotionVerdictAsks: string[] = [];
   readonly reportedIncumbents: string[] = [];
   readonly reportedNoYieldBounds: Array<z.infer<typeof BrokerMethods.reportSessionNoYieldBound.params>> = [];
   readonly finished: string[] = [];
@@ -241,9 +251,10 @@ export class StubBroker {
       case "saveArtifact": {
         const params = BrokerMethods.saveArtifact.params.parse(rawParams);
         if (!this.sandboxParent.has(params.sandboxId)) throw new Error(`unknown sandbox ${params.sandboxId}`);
-        const hash = stubHash(this.savedArtifacts.length + 1);
+        const saveIndex = this.savedArtifacts.length + 1;
+        const hash = this.script.saveArtifactHashes?.[saveIndex - 1] ?? stubHash(saveIndex);
         this.savedArtifacts.push(hash);
-        this.saveIndexByHash.set(hash, this.savedArtifacts.length);
+        this.saveIndexByHash.set(hash, saveIndex);
         return { hash };
       }
       case "evaluate": {
@@ -279,8 +290,28 @@ export class StubBroker {
         this.memo.set(key, record);
         return record;
       }
+      case "getPromotionVerdict": {
+        const params = BrokerMethods.getPromotionVerdict.params.parse(rawParams);
+        this.promotionVerdictAsks.push(params.artifact.hash);
+        const saveIndex = this.saveIndexByHash.get(params.artifact.hash);
+        const explicitlyPromotable =
+          saveIndex !== undefined && this.script.promotableSaveIndices?.includes(saveIndex) === true;
+        const verdict = this.script.promotionVerdictsByHash?.[params.artifact.hash]
+          ?? (explicitlyPromotable
+            ? {
+                status: "positive" as const,
+                parent: { hash: this.script.baselineHash },
+                parentScore: 0,
+                childScore: 1,
+                delta: 1,
+              }
+            : { status: "never-paired" as const });
+        return BrokerMethods.getPromotionVerdict.result.parse(verdict);
+      }
       case "reportIncumbent": {
         const params = BrokerMethods.reportIncumbent.params.parse(rawParams);
+        const refusal = this.script.reportIncumbentErrorsByHash?.[params.artifact.hash];
+        if (refusal !== undefined) throw new Error(refusal);
         this.reportedIncumbents.push(params.artifact.hash);
         return {};
       }

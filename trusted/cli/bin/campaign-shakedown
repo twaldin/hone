@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+cd "$root"
+export HONE_CAMPAIGN_SHAKEDOWN=1
+exec ./node_modules/.bin/vitest run --root trusted/cli test/campaign-shakedown.test.ts

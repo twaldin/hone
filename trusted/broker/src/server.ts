@@ -116,6 +116,13 @@ function buildMethodTable(broker: Broker): Map<string, MethodEntry> {
     adminOnly: false,
     handler: async (raw, ctx) => m.evaluate.result.parse(await broker.evaluate(parseParams(m.evaluate.params, raw), ctx)),
   });
+  table.set("getPromotionVerdict", {
+    adminOnly: false,
+    handler: async (raw, ctx) =>
+      m.getPromotionVerdict.result.parse(
+        broker.getPromotionVerdict(parseParams(m.getPromotionVerdict.params, raw), ctx),
+      ),
+  });
   table.set("reportIncumbent", {
     adminOnly: false,
     handler: async (raw, ctx) =>

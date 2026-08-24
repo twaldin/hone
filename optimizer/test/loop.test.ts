@@ -104,6 +104,7 @@ describe("runEpisodeLoop", () => {
         3: { a: 0.6, b: 0.7 }, // episode 1 repaired candidate, aggregate = mean = 0.65
         4: { score: 0.55 }, // episode 2 restart candidate: beats baseline, not the incumbent
       },
+      promotableSaveIndices: [1, 3],
       execPlan: [
         { exitCode: 0, stdout: okStdout("memoize-neighbors") }, // ep0 mutation
         { exitCode: 1, stderr: "TypeError: boom in astar.js:42" }, // ep1 mutation fails
@@ -629,6 +630,111 @@ describe("runEpisodeLoop", () => {
 });
 
 describe("runEpisodeLoop paired comparator evidence", () => {
+  it("continues when repaired canonical bytes recur after their first trusted pairing was non-positive", async () => {
+    const repeated = stubHash(42);
+    const later = stubHash(43);
+    const productionRefusal =
+      "reportIncumbent: no positive trusted delta vs parent (paired delta -0.00048376795453293486)";
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      saveArtifactHashes: [repeated, repeated, repeated, repeated, later],
+      objectivesBySaveIndex: {
+        2: { score: 0.49 },
+        4: { score: 0.51 },
+        5: { score: 0.45 },
+      },
+      promotionVerdictsByHash: {
+        [repeated]: {
+          status: "non-positive",
+          parent: { hash: BASELINE },
+          parentScore: 0.5,
+          childScore: 0.49,
+          delta: -0.01,
+        },
+      },
+      execPlan: [
+        { exitCode: 1, stderr: "episode 0 failed after producing canonical bytes" },
+        { exitCode: 0, stdout: okStdout("repair episode 0 without changing bytes") },
+        { exitCode: 1, stderr: "episode 1 reproduced the canonical bytes" },
+        { exitCode: 0, stdout: okStdout("repair episode 1 without changing bytes") },
+        { exitCode: 0, stdout: okStdout("continue after frozen losing verdict") },
+      ],
+      reportIncumbentErrorsByHash: { [repeated]: productionRefusal },
+      envelope: {
+        maxTokens: 1_000_000,
+        maxUsd: 100,
+        maxWallClockSec: 100_000,
+        maxEvaluatorInvocations: 100,
+      },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-repeat-hash",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        maxEpisodes: 3,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.savedArtifacts.slice(0, 4)).toEqual([
+      repeated,
+      repeated,
+      repeated,
+      repeated,
+    ]);
+    expect(stub.reportedIncumbents).not.toContain(repeated);
+    expect(stub.promotionVerdictAsks).toContain(repeated);
+    expect(stub.completedEpisodes).toEqual([0, 1, 2]);
+    expect(eventsOf(events, "episode.started")).toHaveLength(3);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
+  it.each([
+    ["unconfigured fail-closed", undefined],
+    ["never-paired", { status: "never-paired" }],
+    ["refused", { status: "refused", reason: "no-persisted-pair" }],
+  ] as const)("skips a locally-positive candidate with trusted verdict %s and completes", async (_name, verdict) => {
+    const candidate = stubHash(1);
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: { 1: { score: 0.6 } },
+      ...(verdict === undefined ? {} : { promotionVerdictsByHash: { [candidate]: verdict } }),
+      reportIncumbentErrorsByHash: { [candidate]: "unexpected promotion attempt" },
+      execPlan: [{ exitCode: 0, stdout: okStdout("locally-positive but not promotable") }],
+      envelope: {
+        maxTokens: 1_000_000,
+        maxUsd: 100,
+        maxWallClockSec: 100_000,
+        maxEvaluatorInvocations: 100,
+      },
+    });
+    await stub.listen();
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: `run-${_name}-verdict`,
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: (event) => event,
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+    expect(stub.promotionVerdictAsks).toEqual([candidate]);
+    expect(stub.reportedIncumbents).toEqual([]);
+    expect(stub.completedEpisodes).toEqual([0]);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
   it("grandchild episode asks the broker for the baseline on the candidate's exact coordinate before reporting", async () => {
     const stub = new StubBroker({
       baselineHash: BASELINE,
@@ -637,6 +743,7 @@ describe("runEpisodeLoop paired comparator evidence", () => {
         1: { score: 0.6 }, // episode 0 candidate → incumbent
         2: { score: 0.7 }, // episode 1 grandchild, mutated from the incumbent
       },
+      promotableSaveIndices: [1, 2],
       execPlan: [
         { exitCode: 0, stdout: okStdout("first-improvement") },
         { exitCode: 0, stdout: okStdout("grandchild-improvement") },
@@ -691,6 +798,7 @@ describe("runEpisodeLoop paired comparator evidence", () => {
         1: { score: 0.6 },
         2: { score: 0.7 },
       },
+      promotableSaveIndices: [1, 2],
       execPlan: [
         { exitCode: 0, stdout: okStdout("first-improvement") },
         { exitCode: 0, stdout: okStdout("unpaired-challenger") },
@@ -736,6 +844,7 @@ describe("runEpisodeLoop paired comparator evidence", () => {
         2: { score: 0.65 },
         3: { score: 0.55 },
       },
+      promotableSaveIndices: [1, 2],
       invalidSaveIndexSeeds: ["1:1"],
       execPlan: [
         { exitCode: 0, stdout: okStdout("first-improvement") },
@@ -783,6 +892,7 @@ describe("runEpisodeLoop paired comparator evidence", () => {
         1: { score: 0.6 }, // episode 0 candidate → incumbent (measured 0.6 at seed 0)
         2: { score: 0.65 }, // episode 1 restart challenger at seed 1
       },
+      promotableSaveIndices: [1, 2],
       // On the challenger's coordinate the incumbent scores 0.7: the challenger
       // beats the incumbent's stale seed-0 mean (0.6) but loses the paired
       // comparison — cumulative unpaired means must never decide.
@@ -841,6 +951,7 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
       baselineHash: BASELINE,
       baselineObjectives: { score: 0.5 },
       objectivesBySaveIndex: { 1: { score: 0.6 } },
+      promotableSaveIndices: [1],
       execPlan: [{ exitCode: 0, stdout: okStdout("probe-improvement") }],
       // Budget could fund many more episodes — only the cap may stop the loop.
       envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
@@ -874,6 +985,7 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
       baselineObjectives: { score: 0.5 },
       // save 1 = failed workspace snapshot (never evaluated), save 2 = repaired candidate.
       objectivesBySaveIndex: { 2: { score: 0.7 } },
+      promotableSaveIndices: [2],
       execPlan: [
         { exitCode: 1, stderr: "TypeError: boom" }, // ep0 mutation fails
         { exitCode: 0, stdout: okStdout("fix-boom") }, // ep0 repair succeeds
@@ -944,6 +1056,7 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
       baselineHash: BASELINE,
       baselineObjectives: { score: 0.5 },
       objectivesBySaveIndex: { 1: { score: 0.6 } },
+      promotableSaveIndices: [1],
       // Exactly one episode's mutation is scripted; a second would be an
       // unscripted-call test failure.
       execPlan: [{ exitCode: 0, stdout: okStdout("resumed-probe") }],
