@@ -35,6 +35,7 @@ import {
   ExecParams,
   ExecResult,
   FinishParams,
+  GetPromotionVerdictParams,
   GetFileParams,
   GetFileResult,
   QueryCorpusParams,
@@ -46,6 +47,7 @@ import {
   SessionNoYieldRecord,
   SessionUsageAnomalyRecord,
   ReportSessionNoYieldBoundParams,
+  PromotionVerdict,
   RecursiveTask,
   ResourceUsage,
   SandboxRef,
@@ -686,6 +688,8 @@ type GetFileR = z.infer<typeof GetFileResult>;
 type SaveArtifactP = z.infer<typeof SaveArtifactParams>;
 type EvaluateP = z.infer<typeof EvaluateParams>;
 type ReportIncumbentP = z.infer<typeof ReportIncumbentParams>;
+type GetPromotionVerdictP = z.infer<typeof GetPromotionVerdictParams>;
+type PromotionVerdictR = z.infer<typeof PromotionVerdict>;
 type ReportSessionNoYieldBoundP = z.infer<typeof ReportSessionNoYieldBoundParams>;
 type CompleteEpisodeP = z.infer<typeof CompleteEpisodeParams>;
 type FinishP = z.infer<typeof FinishParams>;
@@ -4327,26 +4331,50 @@ export class Broker {
    * can make an initially losing candidate promotable. The pair replays
    * verbatim from the journal, so this authority survives crashes.
    */
+  private promotionVerdictFor(hash: string): PromotionVerdictR {
+    const lin = this.lineage.get(hash);
+    if (lin === undefined) return { status: "refused", reason: "no-lineage" };
+    if ((this.lifetimeCoords.get(hash)?.size ?? 0) === 0) return { status: "never-paired" };
+    if (!this.promotionSlots.has(hash)) return { status: "refused", reason: "no-public-admission" };
+    const gateEntry = this.gates.get(hash);
+    if (gateEntry === undefined) return { status: "refused", reason: "no-persisted-pair" };
+    if (gateEntry.gate.parent !== lin.parent) return { status: "refused", reason: "lineage-mismatch" };
+    const delta = gateEntry.gate.childScore - gateEntry.gate.parentScore;
+    return {
+      status: delta > 0 ? "positive" : "non-positive",
+      parent: { hash: gateEntry.gate.parent },
+      parentScore: gateEntry.gate.parentScore,
+      childScore: gateEntry.gate.childScore,
+      delta,
+    };
+  }
+
+  /**
+   * Read-only optimizer view of the frozen first trusted pairing. This is
+   * derived only from journal-replayed authority; later seeds cannot replace
+   * a losing pair or manufacture a missing one.
+   */
+  getPromotionVerdict(params: GetPromotionVerdictP, _ctx: CallContext): PromotionVerdictR {
+    this.budgetGate();
+    return this.promotionVerdictFor(params.artifact.hash);
+  }
+
   reportIncumbent(params: ReportIncumbentP, _ctx: CallContext): Record<string, never> {
     this.budgetGate();
     const hash = params.artifact.hash;
     if (this.currentIncumbent?.hash === hash) return {}; // idempotent re-report
 
-    const lin = this.lineage.get(hash);
-    if (!lin) {
-      throw new BrokerError("INTERNAL", `reportIncumbent: ${hash} is not a saved candidate of this run (no lineage)`);
-    }
-    if ((this.lifetimeCoords.get(hash)?.size ?? 0) === 0) {
-      throw new BrokerError("INTERNAL", `reportIncumbent: no trusted evaluation for artifact ${hash}`);
-    }
-    if (!this.promotionSlots.has(hash)) {
-      throw new BrokerError(
-        "INTERNAL",
-        `reportIncumbent: insufficient authority — artifact has no public candidate evaluation admission (cap ${this.maxPublicCandidateEvaluations})`,
-      );
-    }
-    const gateEntry = this.gates.get(hash);
-    if (gateEntry === undefined || gateEntry.gate.parent !== lin.parent) {
+    const verdict = this.promotionVerdictFor(hash);
+    if (verdict.status === "refused") {
+      if (verdict.reason === "no-lineage") {
+        throw new BrokerError("INTERNAL", `reportIncumbent: ${hash} is not a saved candidate of this run (no lineage)`);
+      }
+      if (verdict.reason === "no-public-admission") {
+        throw new BrokerError(
+          "INTERNAL",
+          `reportIncumbent: insufficient authority — artifact has no public candidate evaluation admission (cap ${this.maxPublicCandidateEvaluations})`,
+        );
+      }
       throw new BrokerError(
         "INTERNAL",
         "reportIncumbent: insufficient authority — no persisted same-epoch parent-first gate pairing candidate and parent " +
@@ -4354,9 +4382,16 @@ export class Broker {
           "within the current mutation episode)",
       );
     }
-    const deltaVsParent = gateEntry.gate.childScore - gateEntry.gate.parentScore;
-    if (!(deltaVsParent > 0)) {
-      throw new BrokerError("INTERNAL", `reportIncumbent: no positive trusted delta vs parent (paired delta ${deltaVsParent})`);
+    if (verdict.status === "never-paired") {
+      throw new BrokerError("INTERNAL", `reportIncumbent: no trusted evaluation for artifact ${hash}`);
+    }
+    if (verdict.status === "non-positive") {
+      throw new BrokerError("INTERNAL", `reportIncumbent: no positive trusted delta vs parent (paired delta ${verdict.delta})`);
+    }
+    const lin = this.lineage.get(hash);
+    const gateEntry = this.gates.get(hash);
+    if (lin === undefined || gateEntry === undefined) {
+      throw new BrokerError("INTERNAL", "reportIncumbent: positive verdict lost its durable authority");
     }
     const cand = this.trusted.get(`${gateEntry.epoch}|${hash}`);
     if (cand === undefined || cand.size === 0) {

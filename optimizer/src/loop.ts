@@ -717,8 +717,19 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         passed,
       });
       lineage.push({ episode, approach: attempt.result.approach, delta: childAggregate - parentAggregate });
+      const promotionVerdict = passed
+        ? await broker.getPromotionVerdict({ artifact: candidate })
+        : null;
+      if (promotionVerdict !== null && promotionVerdict.status !== "positive") {
+        console.error(JSON.stringify({
+          type: "promotion.skipped",
+          episode,
+          artifact: candidate.hash,
+          verdict: promotionVerdict,
+        }));
+      }
 
-      if (passed) {
+      if (passed && promotionVerdict?.status === "positive") {
         // Same-coordinate comparator evidence (this assetGroupId + this
         // episode's seed). Exact replay hits carry no second invocation charge.
         let incumbentPairAggregate: number | null = null;

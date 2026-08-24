@@ -629,6 +629,110 @@ describe("runEpisodeLoop", () => {
 });
 
 describe("runEpisodeLoop paired comparator evidence", () => {
+  it("continues when repaired canonical bytes recur after their first trusted pairing was non-positive", async () => {
+    const repeated = stubHash(42);
+    const later = stubHash(43);
+    const productionRefusal =
+      "reportIncumbent: no positive trusted delta vs parent (paired delta -0.00048376795453293486)";
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      saveArtifactHashes: [repeated, repeated, repeated, repeated, later],
+      objectivesBySaveIndex: {
+        2: { score: 0.49 },
+        4: { score: 0.51 },
+        5: { score: 0.45 },
+      },
+      promotionVerdictsByHash: {
+        [repeated]: {
+          status: "non-positive",
+          parent: { hash: BASELINE },
+          parentScore: 0.5,
+          childScore: 0.49,
+          delta: -0.01,
+        },
+      },
+      execPlan: [
+        { exitCode: 1, stderr: "episode 0 failed after producing canonical bytes" },
+        { exitCode: 0, stdout: okStdout("repair episode 0 without changing bytes") },
+        { exitCode: 1, stderr: "episode 1 reproduced the canonical bytes" },
+        { exitCode: 0, stdout: okStdout("repair episode 1 without changing bytes") },
+        { exitCode: 0, stdout: okStdout("continue after frozen losing verdict") },
+      ],
+      reportIncumbentErrorsByHash: { [repeated]: productionRefusal },
+      envelope: {
+        maxTokens: 1_000_000,
+        maxUsd: 100,
+        maxWallClockSec: 100_000,
+        maxEvaluatorInvocations: 100,
+      },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-repeat-hash",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        rand: () => 0.99,
+        maxEpisodes: 3,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    expect(stub.savedArtifacts.slice(0, 4)).toEqual([
+      repeated,
+      repeated,
+      repeated,
+      repeated,
+    ]);
+    expect(stub.reportedIncumbents).not.toContain(repeated);
+    expect(stub.promotionVerdictAsks).toContain(repeated);
+    expect(stub.completedEpisodes).toEqual([0, 1, 2]);
+    expect(eventsOf(events, "episode.started")).toHaveLength(3);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
+  it.each([
+    ["never-paired", { status: "never-paired" }],
+    ["refused", { status: "refused", reason: "no-persisted-pair" }],
+  ] as const)("skips a locally-positive candidate with trusted verdict %s and completes", async (_name, verdict) => {
+    const candidate = stubHash(1);
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: { 1: { score: 0.6 } },
+      promotionVerdictsByHash: { [candidate]: verdict },
+      reportIncumbentErrorsByHash: { [candidate]: "unexpected promotion attempt" },
+      execPlan: [{ exitCode: 0, stdout: okStdout("locally-positive but not promotable") }],
+      envelope: {
+        maxTokens: 1_000_000,
+        maxUsd: 100,
+        maxWallClockSec: 100_000,
+        maxEvaluatorInvocations: 100,
+      },
+    });
+    await stub.listen();
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: `run-${_name}-verdict`,
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: (event) => event,
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+    expect(stub.promotionVerdictAsks).toEqual([candidate]);
+    expect(stub.reportedIncumbents).toEqual([]);
+    expect(stub.completedEpisodes).toEqual([0]);
+    expect(stub.finished).toEqual([BASELINE]);
+  });
+
   it("grandchild episode asks the broker for the baseline on the candidate's exact coordinate before reporting", async () => {
     const stub = new StubBroker({
       baselineHash: BASELINE,

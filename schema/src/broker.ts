@@ -147,6 +147,30 @@ export const ReportIncumbentParams = z.object({
   /** Optimizer's own claimed metrics — display only; trusted scores come from EvaluationRecords. */
   claimed: z.record(z.number()).optional(),
 });
+
+export const GetPromotionVerdictParams = z.object({ artifact: ArtifactRef }).strict();
+export const PromotionVerdictRefusalReason = z.enum([
+  "no-lineage",
+  "no-public-admission",
+  "no-persisted-pair",
+  "lineage-mismatch",
+]);
+const PromotionPair = z.object({
+  parent: ArtifactRef,
+  parentScore: z.number(),
+  childScore: z.number(),
+  delta: z.number(),
+});
+export const PromotionVerdict = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("never-paired") }).strict(),
+  PromotionPair.extend({ status: z.literal("positive") }).strict(),
+  PromotionPair.extend({ status: z.literal("non-positive") }).strict(),
+  z.object({
+    status: z.literal("refused"),
+    reason: PromotionVerdictRefusalReason,
+  }).strict(),
+]);
+export type PromotionVerdict = z.infer<typeof PromotionVerdict>;
 export const SESSION_NO_YIELD_RECORD_TYPE = "hone.mutation.no-yield-bound.v1" as const;
 export const SESSION_NO_YIELD_EXIT_CODE = 4;
 
@@ -352,6 +376,7 @@ export const BrokerMethods = {
     // EvaluationRecord defined in evaluator.ts; kept loose here to avoid a cycle — runner re-validates.
     result: z.object({}).passthrough(),
   },
+  getPromotionVerdict: { params: GetPromotionVerdictParams, result: PromotionVerdict },
   reportIncumbent: { params: ReportIncumbentParams, result: z.object({}) },
   reportSessionNoYieldBound: { params: ReportSessionNoYieldBoundParams, result: z.object({}) },
   completeEpisode: { params: CompleteEpisodeParams, result: z.object({}) },
