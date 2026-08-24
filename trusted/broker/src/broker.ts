@@ -3653,12 +3653,19 @@ export class Broker {
       // reproduce bytes whose immutable candidate lineage names an older
       // episode. Journal the fresh episode-local provenance separately rather
       // than rewriting lineage or weakening continuation admission.
-      this.appendState({
-        t: "continuation",
-        hash,
-        parent: sb.parentHash,
-        episode: sb.episode,
-      });
+      //
+      // Legacy repair facts may name an episode without checkpoint-v1
+      // authority. Their repair/lineage outcome remains replayable, but a
+      // checkpoint-less continuation fact would make the next boot correctly
+      // reject its own journal. Keep that binding process-local instead.
+      if (this.episodeCheckpoints.has(sb.episode)) {
+        this.appendState({
+          t: "continuation",
+          hash,
+          parent: sb.parentHash,
+          episode: sb.episode,
+        });
+      }
       this.bindContinuationArtifact(hash, sb.episode);
     }
 

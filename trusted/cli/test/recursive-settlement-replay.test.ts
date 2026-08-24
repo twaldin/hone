@@ -754,7 +754,9 @@ describe("recursive child nonterminal settlement replay", () => {
     await exercisePauseResume(true);
   });
 
-  it("replays an episode-1 continuation crash into one child terminal and outer settlement", { timeout: 30_000 }, async () => {
+  // This fixture owns the outer pending-child replay/settlement seam. The
+  // broker lifecycle regressions exercise production continuation binding.
+  it("settles an outer reservation after fixture-authored child continuation recovery", { timeout: 30_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), "hone-continuation-crash-replay-"));
     const port = await reserveGatewayPort();
     const gatewayUrl = `http://127.0.0.1:${port}/v1/responses`;
