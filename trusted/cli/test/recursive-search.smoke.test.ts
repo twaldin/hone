@@ -253,7 +253,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       evalEntrypoint: ["/bin/false"],
       protectedPaths: [],
       assetGroups: [{ id: "meta-train", visibility: "public", paths: ["meta-task.txt"] }],
-      budget: { ...smokeBudget, maxWallClockSec: smokeBudget.maxWallClockSec + 300, maxEvaluatorInvocations: 6 },
+      budget: { ...smokeBudget, maxWallClockSec: smokeBudget.maxWallClockSec + 300, maxEvaluatorInvocations: 4 },
       diagnosticOrdering: { path: "ordering.json", hash: sha256("smoke-ordering") },
       contentHashes: { "meta-task.txt": sha256(metaTask) },
       meta: { evaluatorSource: "meta", provenance: "bounded recursive wiring smoke" },
@@ -288,6 +288,15 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
             stdoutSha256: sha256(result.stdout),
           });
         }
+        if (
+          outerMutationExecutions.length === 4
+          && outerMutationExecutions[3]?.exitCode === 0
+        ) {
+          // Stop after the later episode has successfully repaired from the
+          // exact aliased continuation bytes, before M0's one-candidate
+          // evaluator authority would be asked to score that candidate again.
+          controller.abort();
+        }
         return result;
       },
       defaultTtlSec: COMPRESSED_LEGACY_SANDBOX_TTL_SEC,
@@ -314,11 +323,10 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
           }
         }
         const firstAggregate = scored?.output.objectives.normalizedGain;
-        if (trustedStrategyCalls <= 4) {
+        if (trustedStrategyCalls === 2 || trustedStrategyCalls === 4) {
           if (firstAggregate === undefined) {
             throw new Error("smoke fixture cannot score a later episode before the trusted panel");
           }
-          const candidateCall = trustedStrategyCalls % 2 === 0;
           return EvaluationRecord.parse({
             capsuleId: input.capsuleId,
             artifactHash: input.artifact.hash,
@@ -326,13 +334,13 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
             seed: input.seed,
             output: {
               valid: true,
-              objectives: { normalizedGain: firstAggregate - (candidateCall ? 1 : 0) },
+              objectives: { normalizedGain: firstAggregate - (trustedStrategyCalls === 2 ? 1 : 0) },
               constraints: { allChildrenValid: true, fullPanel: true },
               perExample: {},
               diagnostics: {
-                summary: candidateCall
+                summary: trustedStrategyCalls === 2
                   ? "smoke fixture: repaired alias candidate remains below its parent"
-                  : "smoke fixture: next-episode parent remains eligible",
+                  : "smoke fixture: post-null parent remains eligible for the alias reproduction",
               },
             },
             costUsd: 0,
@@ -341,8 +349,11 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
             evaluatedAt: new Date().toISOString(),
           });
         }
+        if (trustedStrategyCalls !== 3) {
+          throw new Error(`unexpected smoke trusted strategy call ${trustedStrategyCalls}`);
+        }
         nullAggregateEvaluations += 1;
-        const nullRecord = EvaluationRecord.parse({
+        return EvaluationRecord.parse({
           capsuleId: input.capsuleId,
           artifactHash: input.artifact.hash,
           assetGroupId: input.assetGroupId,
@@ -359,8 +370,6 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
           cached: false,
           evaluatedAt: new Date().toISOString(),
         });
-        if (trustedStrategyCalls === 6) controller.abort();
-        return nullRecord;
       },
       recursive: {
         depth: 0,
@@ -483,7 +492,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         runId: "run_recursive_outer_smoke",
         workerBundlePath,
         signal: controller.signal,
-        maxEpisodes: 4,
+        maxEpisodes: 3,
         emit: (event) => {
           searchEvents.push(event);
           return event;
@@ -531,35 +540,33 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       .filter((line) => line.length > 0)
       .map((line) => JSON.parse(line) as Record<string, unknown>)
       .filter((line) => line["t"] === "continuation");
-    expect(started.map((event) => event.episode)).toEqual([0, 1, 2, 3]);
+    expect(started.map((event) => event.episode)).toEqual([0, 1, 2]);
     expect(evaluations[0]).toMatchObject({
       episode: 0,
       artifact: { hash: outerBaseline },
       aggregate: recursiveScore.output.objectives.normalizedGain,
       cached: false,
     });
-    expect(repairedCandidates.map((event) => event.episode)).toEqual([0, 1]);
-    expect(repairedCandidateHashes).toHaveLength(2);
+    expect(repairedCandidates.map((event) => event.episode)).toEqual([0]);
+    expect(repairedCandidateHashes).toHaveLength(1);
     expect(repairedCandidateHashes[0]).not.toBe(outerBaseline);
-    expect(repairedCandidateHashes[1]).toBe(repairedCandidateHashes[0]);
     expect(continuationFacts).toEqual([
       expect.objectContaining({
         t: "continuation",
         hash: repairedCandidateHashes[0],
         parent: outerBaseline,
-        episode: 1,
+        episode: 2,
       }),
     ]);
-    expect(nullEvaluations.map((event) => event.episode)).toEqual([2, 3]);
+    expect(nullEvaluations.map((event) => event.episode)).toEqual([1]);
     expect(invalidEpisodes).toEqual([
       expect.objectContaining({ episode: 0, repaired: true, reason: expect.stringContaining("mutation session failed") }),
-      expect.objectContaining({ episode: 1, repaired: true, reason: expect.stringContaining("mutation session failed") }),
-      expect.objectContaining({ episode: 2, repaired: false, reason: expect.stringContaining("null aggregate") }),
+      expect.objectContaining({ episode: 1, repaired: false, reason: expect.stringContaining("null aggregate") }),
     ]);
-    expect(brokerStartedEpisodes).toEqual([0, 1, 2, 3]);
-    expect(brokerCompletedEpisodes).toEqual([0, 1, 2]);
-    expect(trustedStrategyCalls).toBe(6);
-    expect(nullAggregateEvaluations).toBe(2);
+    expect(brokerStartedEpisodes).toEqual([0, 1, 2]);
+    expect(brokerCompletedEpisodes).toEqual([0, 1]);
+    expect(trustedStrategyCalls).toBe(4);
+    expect(nullAggregateEvaluations).toBe(1);
     expect(firstPanelElapsedMs).toBeGreaterThan(COMPRESSED_LEGACY_SANDBOX_TTL_SEC * 1_000);
     expect(mutationShimCalls).toHaveLength(4);
     expect(outerMutationExecutions.map((execution) => execution.exitCode)).toEqual([1, 0, 1, 0]);
@@ -570,7 +577,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       recordedAt: new Date().toISOString(),
       command:
         `sg docker -c 'HONE_RECURSIVE_SEARCH_SMOKE=1 HONE_REPO_ROOT=${repoRoot} HONE_RECURSIVE_SMOKE_CAMPAIGN=${campaignPath} HONE_RECURSIVE_SMOKE_EVIDENCE=${evidencePath} ./node_modules/.bin/vitest run --root trusted/cli test/recursive-search.smoke.test.ts'`,
-      result: "passed: config-bound SEARCH scored a real recursive panel, retained its episode sandbox beyond the compressed legacy TTL, admitted exact canonical bytes as an episode-local continuation in the next episode, then durably closed a null-aggregate episode and continued",
+      result: "passed: config-bound SEARCH scored a real recursive panel, retained its episode sandbox beyond the compressed legacy TTL, durably continued after a null aggregate, then admitted exact canonical bytes as an episode-local continuation and repaired from them in the next eligible episode",
       smokeRoot,
       executedRuntime: {
         sourceCommit: executedSourceCommit,
@@ -595,9 +602,9 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         "The candidate gate accepts the smoke artifact and smoke-only qBase=0/scale=1 normalization makes the trusted settlement trace explicit; neither has campaign or promotion authority.",
         "The MetaJournalV1 query surface is in memory and child lifecycle files are fixture-authored with production schemas and receipt hashing; the production Broker validates those durable files before the trusted strategy accepts the matching settlement.",
         "The broker's historical 3,600-second default sandbox TTL is compressed to one second while the optimizer still derives the episode claim from the campaign wall envelope. The trusted recursive panel is held beyond that compressed boundary before a real Docker sandbox executes the post-evaluation mutation shim; the pre-fix TTL runtime would reap that sandbox and fail with SANDBOX_NOT_FOUND.",
-        "The executable Bun fixture makes each fresh mutation attempt write the same canonical file and fail, then makes the one-repair sandbox succeed without changing those bytes. Episode 0 graduates that hash; episode 1 reproduces the hash, persists an episode-local continuation fact, and repairs from it. This matches the production failure seam without executing a provider-backed worker.",
-        "After the two repaired episodes, two smoke-only trusted strategy records deliberately return valid=false with no objectives and zero cost. The first null aggregate is durably completed and the next episode starts; the second aborts the bounded harness after proving continuation. The other three smoke-only strategy records preserve eligible parent/candidate ordering at zero cost. None can mint a promotion or calibration gain.",
-        "The synthetic outer /bin/false evaluator and throwing mutation worker remain tripwires. An integrity-checked executable Bun fixture deliberately ignores the worker argument and drives the bounded fail/repair lifecycle, exercising post-evaluation mutation plumbing with zero provider/model calls.",
+        "The executable Bun fixture makes each eligible fresh mutation attempt write the same canonical file and fail, then makes the one-repair sandbox succeed without changing those bytes. Episode 0 graduates that hash; after the null episode, episode 2 reproduces the hash, persists an episode-local continuation fact, and repairs from it. This matches the production failure seam without executing a provider-backed worker.",
+        "One smoke-only trusted strategy record deliberately returns valid=false with no objectives and zero cost. That null aggregate is durably completed and the next episode starts. Two other smoke-only strategy records preserve eligible parent/candidate ordering at zero cost. None can mint a promotion or calibration gain.",
+        "The synthetic outer /bin/false evaluator and throwing mutation worker remain tripwires. An integrity-checked executable Bun fixture deliberately ignores the worker argument and drives the bounded fail/repair lifecycle, exercising post-evaluation mutation plumbing with zero provider/model calls. The harness aborts only after the later episode's repair save succeeds, before M0's one-public-candidate evaluation authority would be consumed a second time.",
         "The smoke candidate uses the production image-bound digest helper: its non-executed comparison image and real child target image differ, and therefore seal distinct optimizer bundle digests before trusted reservation and launch.",
       ],
       syntheticOuterEntrypoint: outerManifest.evalEntrypoint,
@@ -633,16 +640,19 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       continuationArtifactLifecycle: {
         mutationExecutions: outerMutationExecutions,
         repairedCandidateHashes,
-        exactCrossEpisodeAlias: repairedCandidateHashes.length === 2
-          && repairedCandidateHashes[0] === repairedCandidateHashes[1],
         continuationFacts,
+        exactCrossEpisodeAlias: repairedCandidateHashes.length === 1
+          && continuationFacts.length === 1
+          && continuationFacts[0]?.["hash"] === repairedCandidateHashes[0],
+        laterEpisodeRepairCompletedBeforeAbort: outerMutationExecutions.length === 4
+          && outerMutationExecutions[3]?.exitCode === 0,
       },
       nullAggregateLifecycle: {
         trustedStrategyCalls,
         nullAggregateEvaluations,
         optimizerNullEvaluationEpisodes: nullEvaluations.map((event) => event.episode),
         optimizerInvalidEpisodes: invalidEpisodes.map((event) => event.episode),
-        nextEpisodeStarted: brokerStartedEpisodes.includes(3),
+        nextEpisodeStarted: brokerStartedEpisodes.includes(2),
         promotionEvents: searchEvents.filter((event) => event.type === "incumbent.new").length,
       },
       childCapsule: {
