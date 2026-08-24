@@ -130,7 +130,7 @@ function childEvidence(
 }
 
 describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
-  it("scores a real recursive panel, survives the legacy sandbox TTL into mutation, and continues after null", async () => {
+  it("scores a real recursive panel, survives the legacy sandbox TTL, reuses episode-local continuation bytes, and continues after null", async () => {
     const repoRoot = process.env["HONE_REPO_ROOT"];
     const evidencePath = process.env["HONE_RECURSIVE_SMOKE_EVIDENCE"];
     const campaignPath = process.env["HONE_RECURSIVE_SMOKE_CAMPAIGN"];
@@ -147,6 +147,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     }).trim();
     const executedRuntimeDigest = computeTrustedRuntimeDigest();
     expect(executedRuntimeDigest).toBe(campaignConfig.trustedRuntime.digest);
+    expect(executedSourceCommit).toBe(campaignConfig.trustedRuntime.sourceCommit);
     const configHash = sha256(canonicalJson(campaignConfig));
     if (!("mode" in campaignConfig.corpusCohort)) {
       throw new Error("smoke campaign must carry the owner-authorized partial cohort");
@@ -253,12 +254,13 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       evalEntrypoint: ["/bin/false"],
       protectedPaths: [],
       assetGroups: [{ id: "meta-train", visibility: "public", paths: ["meta-task.txt"] }],
-      budget: { ...smokeBudget, maxWallClockSec: smokeBudget.maxWallClockSec + 300, maxEvaluatorInvocations: 3 },
+      budget: { ...smokeBudget, maxWallClockSec: smokeBudget.maxWallClockSec + 300, maxEvaluatorInvocations: 5 },
       diagnosticOrdering: { path: "ordering.json", hash: sha256("smoke-ordering") },
       contentHashes: { "meta-task.txt": sha256(metaTask) },
       meta: { evaluatorSource: "meta", provenance: "bounded recursive wiring smoke" },
     });
     const outerDockerCalls: string[][] = [];
+    const outerMutationExecutions: { exitCode: number; stdoutSha256: Sha256Digest }[] = [];
     const outerBrokerEvents: RunEvent[] = [];
     const controller = new AbortController();
     let scored: EvaluationRecord | undefined;
@@ -280,7 +282,23 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       onEvent: (event) => outerBrokerEvents.push(event),
       runCommand: async (argv, opts) => {
         outerDockerCalls.push([...argv]);
-        return runCommand(argv, opts);
+        const result = await runCommand(argv, opts);
+        if (argv.includes("/scratch/.hone-runtime/bun") && argv.includes("/scratch/hone-worker.mjs")) {
+          outerMutationExecutions.push({
+            exitCode: result.exitCode,
+            stdoutSha256: sha256(result.stdout),
+          });
+        }
+        if (
+          outerMutationExecutions.length === 4
+          && outerMutationExecutions[3]?.exitCode === 0
+        ) {
+          // Stop after the later episode has successfully repaired from the
+          // exact aliased continuation bytes, before M0's one-candidate
+          // evaluator authority would be asked to score that candidate again.
+          controller.abort();
+        }
+        return result;
       },
       defaultTtlSec: COMPRESSED_LEGACY_SANDBOX_TTL_SEC,
       reaperIntervalMs: 50,
@@ -305,8 +323,38 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
             throw error;
           }
         }
+        const firstAggregate = scored?.output.objectives.normalizedGain;
+        if (trustedStrategyCalls === 2 || trustedStrategyCalls === 4) {
+          if (firstAggregate === undefined) {
+            throw new Error("smoke fixture cannot score a later episode before the trusted panel");
+          }
+          return EvaluationRecord.parse({
+            capsuleId: input.capsuleId,
+            artifactHash: input.artifact.hash,
+            assetGroupId: input.assetGroupId,
+            seed: input.seed,
+            output: {
+              valid: true,
+              objectives: { normalizedGain: firstAggregate - (trustedStrategyCalls === 2 ? 1 : 0) },
+              constraints: { allChildrenValid: true, fullPanel: true },
+              perExample: {},
+              diagnostics: {
+                summary: trustedStrategyCalls === 2
+                  ? "smoke fixture: repaired alias candidate remains below its parent"
+                  : "smoke fixture: post-null parent remains eligible for the alias reproduction",
+              },
+            },
+            costUsd: 0,
+            durationMs: 0,
+            cached: false,
+            evaluatedAt: new Date().toISOString(),
+          });
+        }
+        if (trustedStrategyCalls !== 3) {
+          throw new Error(`unexpected smoke trusted strategy call ${trustedStrategyCalls}`);
+        }
         nullAggregateEvaluations += 1;
-        const nullRecord = EvaluationRecord.parse({
+        return EvaluationRecord.parse({
           capsuleId: input.capsuleId,
           artifactHash: input.artifact.hash,
           assetGroupId: input.assetGroupId,
@@ -323,8 +371,6 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
           cached: false,
           evaluatedAt: new Date().toISOString(),
         });
-        if (trustedStrategyCalls === 3) controller.abort();
-        return nullRecord;
       },
       recursive: {
         depth: 0,
@@ -404,7 +450,12 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     const bunRuntime = Buffer.from(
       [
         "#!/bin/sh",
-        "printf '%s\\n' '{\"summary\":\"zero-provider lifecycle shim\",\"approach\":\"ttl-survival\",\"filesChanged\":[]}'",
+        "if [ ! -f /workspace/episode-alias.txt ]; then",
+        "  printf '%s\\n' 'canonical cross-episode continuation bytes' > /workspace/episode-alias.txt",
+        "  printf '%s\\n' 'smoke fixture: first mutation attempt fails after producing canonical bytes' >&2",
+        "  exit 1",
+        "fi",
+        "printf '%s\\n' '{\"summary\":\"zero-provider lifecycle shim\",\"approach\":\"episode-local-alias-repair\",\"filesChanged\":[]}'",
         "",
       ].join("\n"),
       "utf8",
@@ -460,6 +511,9 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     if (recursiveScore === undefined) {
       throw new Error(`search phase completed without a recursive score: ${canonicalJson(searchEvents)}`);
     }
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.qNormalized).toBe(recursiveScore.output.objectives.normalizedGain);
+    expect(rows[0]?.observed.usd).toBe(0);
 
     const record = innerRecord;
     if (record === undefined) throw new Error("smoke completed without inner evaluation evidence");
@@ -473,15 +527,23 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     const evaluations = searchEvents.filter((event) => event.type === "eval.completed");
     const nullEvaluations = evaluations.filter((event) => event.aggregate === null);
     const invalidEpisodes = searchEvents.filter((event) => event.type === "episode.invalid");
+    const repairedCandidates = searchEvents.filter((event) => event.type === "episode.candidate");
     const brokerStartedEpisodes = outerBrokerEvents
       .filter((event) => event.type === "episode.started")
       .map((event) => event.episode);
     const brokerCompletedEpisodes = outerBrokerEvents
       .filter((event) => event.type === "episode.completed")
       .map((event) => event.episode);
-    const mutationShimCall = outerDockerCalls.find(
+    const mutationShimCalls = outerDockerCalls.filter(
       (argv) => argv.includes("/scratch/.hone-runtime/bun") && argv.includes("/scratch/hone-worker.mjs"),
     );
+    const repairedCandidateHashes = repairedCandidates.map((event) => event.candidate.hash);
+    const brokerStatePath = join(smokeRoot, "outer-run", "broker-state.ndjson");
+    const continuationFacts = readFileSync(brokerStatePath, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((line) => line["t"] === "continuation");
     expect(started.map((event) => event.episode)).toEqual([0, 1, 2]);
     expect(evaluations[0]).toMatchObject({
       episode: 0,
@@ -489,24 +551,37 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       aggregate: recursiveScore.output.objectives.normalizedGain,
       cached: false,
     });
-    expect(nullEvaluations.map((event) => event.episode)).toEqual([1, 2]);
+    expect(repairedCandidates.map((event) => event.episode)).toEqual([0]);
+    expect(repairedCandidateHashes).toHaveLength(1);
+    expect(repairedCandidateHashes[0]).not.toBe(outerBaseline);
+    expect(continuationFacts).toEqual([
+      expect.objectContaining({
+        t: "continuation",
+        hash: repairedCandidateHashes[0],
+        parent: outerBaseline,
+        episode: 2,
+      }),
+    ]);
+    expect(nullEvaluations.map((event) => event.episode)).toEqual([1]);
     expect(invalidEpisodes).toEqual([
+      expect.objectContaining({ episode: 0, repaired: true, reason: expect.stringContaining("mutation session failed") }),
       expect.objectContaining({ episode: 1, repaired: false, reason: expect.stringContaining("null aggregate") }),
     ]);
     expect(brokerStartedEpisodes).toEqual([0, 1, 2]);
     expect(brokerCompletedEpisodes).toEqual([0, 1]);
-    expect(trustedStrategyCalls).toBe(3);
-    expect(nullAggregateEvaluations).toBe(2);
+    expect(trustedStrategyCalls).toBe(4);
+    expect(nullAggregateEvaluations).toBe(1);
     expect(firstPanelElapsedMs).toBeGreaterThan(COMPRESSED_LEGACY_SANDBOX_TTL_SEC * 1_000);
-    expect(mutationShimCall).toBeDefined();
+    expect(mutationShimCalls).toHaveLength(4);
+    expect(outerMutationExecutions.map((execution) => execution.exitCode)).toEqual([1, 0, 1, 0]);
     expect(outerDockerCalls.some((argv) => argv.includes("/bin/false"))).toBe(false);
     const durableEvents = readFileSync(childTerminalEventPath);
     const evidence = {
-      version: "m2-refreeze-cycle6-smoke.v1",
+      version: "m2-refreeze-cycle7-smoke.v1",
       recordedAt: new Date().toISOString(),
       command:
         `sg docker -c 'HONE_RECURSIVE_SEARCH_SMOKE=1 HONE_REPO_ROOT=${repoRoot} HONE_RECURSIVE_SMOKE_CAMPAIGN=${campaignPath} HONE_RECURSIVE_SMOKE_EVIDENCE=${evidencePath} ./node_modules/.bin/vitest run --root trusted/cli test/recursive-search.smoke.test.ts'`,
-      result: "passed: config-bound SEARCH scored a real recursive panel, retained its episode sandbox beyond the compressed legacy TTL into post-evaluation mutation, then durably closed a null-aggregate episode and continued",
+      result: "passed: config-bound SEARCH scored a real recursive panel, retained its episode sandbox beyond the compressed legacy TTL, durably continued after a null aggregate, then admitted exact canonical bytes as an episode-local continuation and repaired from them in the next eligible episode",
       smokeRoot,
       executedRuntime: {
         sourceCommit: executedSourceCommit,
@@ -530,16 +605,17 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         "The six-member configured development panel is reduced to its authorized OSS-T05 member for a bounded zero-model smoke; the production allocation validation, recursive spawn, settlement lookup, and panel arithmetic still run.",
         "The candidate gate accepts the smoke artifact and smoke-only qBase=0/scale=1 normalization makes the trusted settlement trace explicit; neither has campaign or promotion authority.",
         "The MetaJournalV1 query surface is in memory and child lifecycle files are fixture-authored with production schemas and receipt hashing; the production Broker validates those durable files before the trusted strategy accepts the matching settlement.",
-        "The broker's historical 3,600-second default sandbox TTL is compressed to one second while the optimizer still derives the episode claim from the campaign wall envelope. The trusted recursive panel is held beyond that compressed boundary before a real Docker sandbox executes the post-evaluation mutation shim; the pre-fix runtime would reap that sandbox and fail with SANDBOX_NOT_FOUND.",
-        "After the scored episode, two smoke-only trusted strategy records deliberately return valid=false with no objectives and zero cost. The first null aggregate is durably completed and the next episode starts; the second aborts the bounded harness after proving continuation. These records cannot mint a promotion or calibration gain.",
-        "The synthetic outer /bin/false evaluator and throwing mutation worker remain tripwires. An integrity-checked executable Bun fixture deliberately ignores the worker argument and emits a structured no-change result, exercising post-evaluation mutation plumbing with zero provider/model calls.",
+        "The broker's historical 3,600-second default sandbox TTL is compressed to one second while the optimizer still derives the episode claim from the campaign wall envelope. The trusted recursive panel is held beyond that compressed boundary before a real Docker sandbox executes the post-evaluation mutation shim; the pre-fix TTL runtime would reap that sandbox and fail with SANDBOX_NOT_FOUND.",
+        "The executable Bun fixture makes each eligible fresh mutation attempt write the same canonical file and fail, then makes the one-repair sandbox succeed without changing those bytes. Episode 0 graduates that hash; after the null episode, episode 2 reproduces the hash, persists an episode-local continuation fact, and repairs from it. This matches the production failure seam without executing a provider-backed worker.",
+        "One smoke-only trusted strategy record deliberately returns valid=false with no objectives and zero cost. That null aggregate is durably completed and the next episode starts. Two other smoke-only strategy records preserve eligible parent/candidate ordering at zero cost. None can mint a promotion or calibration gain.",
+        "The synthetic outer /bin/false evaluator and throwing mutation worker remain tripwires. An integrity-checked executable Bun fixture deliberately ignores the worker argument and drives the bounded fail/repair lifecycle, exercising post-evaluation mutation plumbing with zero provider/model calls. The harness aborts only after the later episode's repair save succeeds, before M0's one-public-candidate evaluation authority would be consumed a second time.",
         "The smoke candidate uses the production image-bound digest helper: its non-executed comparison image and real child target image differ, and therefore seal distinct optimizer bundle digests before trusted reservation and launch.",
       ],
       syntheticOuterEntrypoint: outerManifest.evalEntrypoint,
       syntheticOuterEntrypointExecuted: false,
       outerMutationImage: MUTATION_IMAGE,
       outerMutationWorkerExecuted: false,
-      outerMutationShimExecuted: mutationShimCall !== undefined,
+      outerMutationShimExecuted: mutationShimCalls.length > 0,
       imageBoundOptimizerIdentity: {
         comparisonImage: outerManifest.image,
         comparisonBundleDigest,
@@ -550,7 +626,8 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       },
       searchPhase: {
         episode: 0,
-        candidateArtifact: outerBaseline,
+        parentArtifact: outerBaseline,
+        repairedCandidateArtifact: repairedCandidateHashes[0],
         eventTypes: searchEvents.map((event) => event.type),
         scoredAggregate: recursiveScore.output.objectives.normalizedGain,
       },
@@ -560,9 +637,19 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         optimizerEpisodeClaimTtlSec: outerManifest.budget.maxWallClockSec,
         compressedPanelHoldMs: COMPRESSED_PANEL_HOLD_MS,
         observedFirstPanelElapsedMs: firstPanelElapsedMs,
-        postEvaluationMutationShimExecuted: mutationShimCall !== undefined,
+        postEvaluationMutationShimExecuted: mutationShimCalls.length > 0,
         brokerStartedEpisodes,
         brokerCompletedEpisodes,
+      },
+      continuationArtifactLifecycle: {
+        mutationExecutions: outerMutationExecutions,
+        repairedCandidateHashes,
+        continuationFacts,
+        exactCrossEpisodeAlias: repairedCandidateHashes.length === 1
+          && continuationFacts.length === 1
+          && continuationFacts[0]?.["hash"] === repairedCandidateHashes[0],
+        laterEpisodeRepairCompletedBeforeAbort: outerMutationExecutions.length === 4
+          && outerMutationExecutions[3]?.exitCode === 0,
       },
       nullAggregateLifecycle: {
         trustedStrategyCalls,
@@ -585,6 +672,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         formula: "(qRaw - qBase) / scale",
         scope: "smoke-only; no campaign or promotion authority",
       },
+      trustedMeasurementRows: rows,
       modelCalls: 0,
       recursiveScore,
       recursiveResourceLedger: join(smokeRoot, "recursive-resource.ndjson"),
