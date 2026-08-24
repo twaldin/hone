@@ -253,7 +253,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       evalEntrypoint: ["/bin/false"],
       protectedPaths: [],
       assetGroups: [{ id: "meta-train", visibility: "public", paths: ["meta-task.txt"] }],
-      budget: { ...smokeBudget, maxWallClockSec: smokeBudget.maxWallClockSec + 300, maxEvaluatorInvocations: 2 },
+      budget: { ...smokeBudget, maxWallClockSec: smokeBudget.maxWallClockSec + 300, maxEvaluatorInvocations: 3 },
       diagnosticOrdering: { path: "ordering.json", hash: sha256("smoke-ordering") },
       contentHashes: { "meta-task.txt": sha256(metaTask) },
       meta: { evaluatorSource: "meta", provenance: "bounded recursive wiring smoke" },
