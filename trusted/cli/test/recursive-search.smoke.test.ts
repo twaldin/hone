@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
@@ -61,6 +62,8 @@ const CHILD_BUDGET: BudgetEnvelope = {
   maxWallClockSec: 300,
   maxEvaluatorInvocations: 1,
 };
+const COMPRESSED_LEGACY_SANDBOX_TTL_SEC = 1;
+const COMPRESSED_PANEL_HOLD_MS = 1_500;
 
 function sha256(content: string | Buffer): Sha256Digest {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
@@ -127,7 +130,7 @@ function childEvidence(
 }
 
 describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
-  it("starts search episode zero, dispatches a real inner evaluation, and scores without executing /bin/false", async () => {
+  it("scores a real recursive panel, survives the legacy sandbox TTL into mutation, and continues after null", async () => {
     const repoRoot = process.env["HONE_REPO_ROOT"];
     const evidencePath = process.env["HONE_RECURSIVE_SMOKE_EVIDENCE"];
     const campaignPath = process.env["HONE_RECURSIVE_SMOKE_CAMPAIGN"];
@@ -256,8 +259,12 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       meta: { evaluatorSource: "meta", provenance: "bounded recursive wiring smoke" },
     });
     const outerDockerCalls: string[][] = [];
+    const outerBrokerEvents: RunEvent[] = [];
     const controller = new AbortController();
     let scored: EvaluationRecord | undefined;
+    let trustedStrategyCalls = 0;
+    let nullAggregateEvaluations = 0;
+    let firstPanelElapsedMs = 0;
     const trustedStrategy = adapter.evaluationStrategy();
     const running = await startBroker({
       runId: "run_recursive_outer_smoke",
@@ -270,23 +277,54 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
       image: outerManifest.image,
       runDir: join(smokeRoot, "outer-run"),
       casDir: outerCasDir,
-      onEvent: () => {},
+      onEvent: (event) => outerBrokerEvents.push(event),
       runCommand: async (argv, opts) => {
         outerDockerCalls.push([...argv]);
         return runCommand(argv, opts);
       },
+      defaultTtlSec: COMPRESSED_LEGACY_SANDBOX_TTL_SEC,
+      reaperIntervalMs: 50,
       evaluationStrategy: async (input) => {
-        try {
-          scored = await trustedStrategy(input);
-          controller.abort();
-          return scored;
-        } catch (error) {
-          writeFileSync(
-            join(smokeRoot, "trusted-strategy-error.txt"),
-            `${error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error)}\n`,
-          );
-          throw error;
+        trustedStrategyCalls += 1;
+        if (trustedStrategyCalls === 1) {
+          const startedAt = Date.now();
+          try {
+            scored = await trustedStrategy(input);
+            const remainingHoldMs = COMPRESSED_PANEL_HOLD_MS - (Date.now() - startedAt);
+            if (remainingHoldMs > 0) {
+              // Integration-only real-clock seam: the production broker reaper must actually tick past its compressed old TTL.
+              await delay(remainingHoldMs);
+            }
+            firstPanelElapsedMs = Date.now() - startedAt;
+            return scored;
+          } catch (error) {
+            writeFileSync(
+              join(smokeRoot, "trusted-strategy-error.txt"),
+              `${error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error)}\n`,
+            );
+            throw error;
+          }
         }
+        nullAggregateEvaluations += 1;
+        const nullRecord = EvaluationRecord.parse({
+          capsuleId: input.capsuleId,
+          artifactHash: input.artifact.hash,
+          assetGroupId: input.assetGroupId,
+          seed: input.seed,
+          output: {
+            valid: false,
+            objectives: {},
+            constraints: { allChildrenValid: false, fullPanel: false },
+            perExample: {},
+            diagnostics: { summary: "smoke fixture: settled recursive panel contains no eligible aggregate" },
+          },
+          costUsd: 0,
+          durationMs: 0,
+          cached: false,
+          evaluatedAt: new Date().toISOString(),
+        });
+        if (trustedStrategyCalls === 3) controller.abort();
+        return nullRecord;
       },
       recursive: {
         depth: 0,
@@ -362,9 +400,16 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
 
     const searchEvents: RunEvent[] = [];
     const workerBundlePath = join(smokeRoot, "worker.mjs");
-    writeFileSync(workerBundlePath, "throw new Error('smoke worker must not execute');\n");
-    const bunRuntime = Buffer.from("sealed Bun runtime fixture; mutation is forbidden in this smoke", "utf8");
-    const piRuntime = Buffer.from("sealed Pi native fixture; mutation is forbidden in this smoke", "utf8");
+    writeFileSync(workerBundlePath, "throw new Error('smoke worker argument must not be executed by the lifecycle shim');\n");
+    const bunRuntime = Buffer.from(
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' '{\"summary\":\"zero-provider lifecycle shim\",\"approach\":\"ttl-survival\",\"filesChanged\":[]}'",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const piRuntime = Buffer.from("sealed Pi native fixture; provider-backed mutation is forbidden in this smoke", "utf8");
     const contentHash = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
     writeFileSync(join(smokeRoot, "mutation-runtime.json"), `${canonicalJson({
       version: 1,
@@ -397,7 +442,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         runId: "run_recursive_outer_smoke",
         workerBundlePath,
         signal: controller.signal,
-        maxEpisodes: 1,
+        maxEpisodes: 3,
         emit: (event) => {
           searchEvents.push(event);
           return event;
@@ -426,22 +471,42 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     expect(recursiveScore.output.objectives.normalizedGain).toBe(Object.values(record.output.objectives)[0]);
     const started = searchEvents.filter((event) => event.type === "episode.started");
     const evaluations = searchEvents.filter((event) => event.type === "eval.completed");
-    expect(started).toHaveLength(1);
-    expect(evaluations).toHaveLength(1);
+    const nullEvaluations = evaluations.filter((event) => event.aggregate === null);
+    const invalidEpisodes = searchEvents.filter((event) => event.type === "episode.invalid");
+    const brokerStartedEpisodes = outerBrokerEvents
+      .filter((event) => event.type === "episode.started")
+      .map((event) => event.episode);
+    const brokerCompletedEpisodes = outerBrokerEvents
+      .filter((event) => event.type === "episode.completed")
+      .map((event) => event.episode);
+    const mutationShimCall = outerDockerCalls.find(
+      (argv) => argv.includes("/scratch/.hone-runtime/bun") && argv.includes("/scratch/hone-worker.mjs"),
+    );
+    expect(started.map((event) => event.episode)).toEqual([0, 1, 2]);
     expect(evaluations[0]).toMatchObject({
       episode: 0,
       artifact: { hash: outerBaseline },
       aggregate: recursiveScore.output.objectives.normalizedGain,
+      cached: false,
     });
+    expect(nullEvaluations.map((event) => event.episode)).toEqual([1, 2]);
+    expect(invalidEpisodes).toEqual([
+      expect.objectContaining({ episode: 1, repaired: false, reason: expect.stringContaining("null aggregate") }),
+    ]);
+    expect(brokerStartedEpisodes).toEqual([0, 1, 2]);
+    expect(brokerCompletedEpisodes).toEqual([0, 1]);
+    expect(trustedStrategyCalls).toBe(3);
+    expect(nullAggregateEvaluations).toBe(2);
+    expect(firstPanelElapsedMs).toBeGreaterThan(COMPRESSED_LEGACY_SANDBOX_TTL_SEC * 1_000);
+    expect(mutationShimCall).toBeDefined();
     expect(outerDockerCalls.some((argv) => argv.includes("/bin/false"))).toBe(false);
-    expect(outerDockerCalls.some((argv) => argv.includes("bun"))).toBe(false);
     const durableEvents = readFileSync(childTerminalEventPath);
     const evidence = {
-      version: "m2-refreeze-final-smoke.v1",
+      version: "m2-refreeze-cycle6-smoke.v1",
       recordedAt: new Date().toISOString(),
       command:
         `sg docker -c 'HONE_RECURSIVE_SEARCH_SMOKE=1 HONE_REPO_ROOT=${repoRoot} HONE_RECURSIVE_SMOKE_CAMPAIGN=${campaignPath} HONE_RECURSIVE_SMOKE_EVIDENCE=${evidencePath} ./node_modules/.bin/vitest run --root trusted/cli test/recursive-search.smoke.test.ts'`,
-      result: "passed: config-bound search episode 0 dispatched one recursive child to a real Docker evaluator and emitted its trusted score",
+      result: "passed: config-bound SEARCH scored a real recursive panel, retained its episode sandbox beyond the compressed legacy TTL into post-evaluation mutation, then durably closed a null-aggregate episode and continued",
       smokeRoot,
       executedRuntime: {
         sourceCommit: executedSourceCommit,
@@ -465,13 +530,16 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         "The six-member configured development panel is reduced to its authorized OSS-T05 member for a bounded zero-model smoke; the production allocation validation, recursive spawn, settlement lookup, and panel arithmetic still run.",
         "The candidate gate accepts the smoke artifact and smoke-only qBase=0/scale=1 normalization makes the trusted settlement trace explicit; neither has campaign or promotion authority.",
         "The MetaJournalV1 query surface is in memory and child lifecycle files are fixture-authored with production schemas and receipt hashing; the production Broker validates those durable files before the trusted strategy accepts the matching settlement.",
-        "The synthetic outer /bin/false evaluator, throwing mutation worker, and integrity-checked synthetic Bun/Pi pack are deliberate non-executed tripwires/initialization fixtures; the selected authorized cohort capsule runs its real train evaluator in Docker.",
+        "The broker's historical 3,600-second default sandbox TTL is compressed to one second while the optimizer still derives the episode claim from the campaign wall envelope. The trusted recursive panel is held beyond that compressed boundary before a real Docker sandbox executes the post-evaluation mutation shim; the pre-fix runtime would reap that sandbox and fail with SANDBOX_NOT_FOUND.",
+        "After the scored episode, two smoke-only trusted strategy records deliberately return valid=false with no objectives and zero cost. The first null aggregate is durably completed and the next episode starts; the second aborts the bounded harness after proving continuation. These records cannot mint a promotion or calibration gain.",
+        "The synthetic outer /bin/false evaluator and throwing mutation worker remain tripwires. An integrity-checked executable Bun fixture deliberately ignores the worker argument and emits a structured no-change result, exercising post-evaluation mutation plumbing with zero provider/model calls.",
         "The smoke candidate uses the production image-bound digest helper: its non-executed comparison image and real child target image differ, and therefore seal distinct optimizer bundle digests before trusted reservation and launch.",
       ],
       syntheticOuterEntrypoint: outerManifest.evalEntrypoint,
       syntheticOuterEntrypointExecuted: false,
       outerMutationImage: MUTATION_IMAGE,
       outerMutationWorkerExecuted: false,
+      outerMutationShimExecuted: mutationShimCall !== undefined,
       imageBoundOptimizerIdentity: {
         comparisonImage: outerManifest.image,
         comparisonBundleDigest,
@@ -485,6 +553,24 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         candidateArtifact: outerBaseline,
         eventTypes: searchEvents.map((event) => event.type),
         scoredAggregate: recursiveScore.output.objectives.normalizedGain,
+      },
+      episodeLifecycle: {
+        productionLegacySandboxTtlSec: 3_600,
+        compressedLegacySandboxTtlSec: COMPRESSED_LEGACY_SANDBOX_TTL_SEC,
+        optimizerEpisodeClaimTtlSec: outerManifest.budget.maxWallClockSec,
+        compressedPanelHoldMs: COMPRESSED_PANEL_HOLD_MS,
+        observedFirstPanelElapsedMs: firstPanelElapsedMs,
+        postEvaluationMutationShimExecuted: mutationShimCall !== undefined,
+        brokerStartedEpisodes,
+        brokerCompletedEpisodes,
+      },
+      nullAggregateLifecycle: {
+        trustedStrategyCalls,
+        nullAggregateEvaluations,
+        optimizerNullEvaluationEpisodes: nullEvaluations.map((event) => event.episode),
+        optimizerInvalidEpisodes: invalidEpisodes.map((event) => event.episode),
+        nextEpisodeStarted: brokerStartedEpisodes.includes(2),
+        promotionEvents: searchEvents.filter((event) => event.type === "incumbent.new").length,
       },
       childCapsule: {
         id: childManifest.id,
