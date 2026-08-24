@@ -100,7 +100,17 @@ export const RunEvent = z.discriminatedUnion("type", [
     isolation: EvaluatorIsolationRecord,
     evaluatorContainer: z.string().min(1),
   }),
-  z.object({ ...base, type: z.literal("eval.completed"), episode: z.number().int().nonnegative().optional(), artifact: ArtifactRef, assetGroupId: z.string(), seed: z.number().int(), aggregate: z.number(), cached: z.boolean() }),
+  z.object({
+    ...base,
+    type: z.literal("eval.completed"),
+    episode: z.number().int().nonnegative().optional(),
+    artifact: ArtifactRef,
+    assetGroupId: z.string(),
+    seed: z.number().int(),
+    /** Null is a settled negative outcome: the trusted evaluator produced no eligible aggregate. */
+    aggregate: z.number().finite().nullable(),
+    cached: z.boolean(),
+  }),
   z.object({
     ...base,
     type: z.literal("probe.completed"),

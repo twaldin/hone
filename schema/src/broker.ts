@@ -70,6 +70,9 @@ export const GetTaskResult = z.object({
   recursiveTask: RecursiveTask.optional(),
 });
 
+/** Longest authenticated mutation-sandbox claim the public wire admits. */
+export const MAX_SANDBOX_TTL_SEC = 86_400;
+
 export const CreateSandboxParams = z.object({
   /** Artifact to unpack into /workspace inside the sandbox. */
   artifact: ArtifactRef,
@@ -81,7 +84,7 @@ export const CreateSandboxParams = z.object({
    * mints a second episode boundary.
    */
   continueEpisode: z.number().int().nonnegative().optional(),
-  ttlSec: z.number().int().positive().max(86_400).optional(),
+  ttlSec: z.number().int().positive().max(MAX_SANDBOX_TTL_SEC).optional(),
 });
 
 export const ExecParams = z.object({

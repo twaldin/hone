@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ArtifactRef, BudgetState, EvaluationRecord, RunEvent } from "@hone/schema";
+import { MAX_SANDBOX_TTL_SEC, type ArtifactRef, type BudgetState, type EvaluationRecord, type RunEvent } from "@hone/schema";
 import { buildEpisodeContext, type FailureEvidence, type LineageEntry } from "../assets/context.js";
 import { epsilonRestart, mutationTimeoutSec, oneRepair, trainAssetGroupId } from "../assets/policy.js";
 import { BrokerClient, BrokerRpcError } from "./client.js";
@@ -146,11 +146,12 @@ export interface EpisodeLoopOptions {
   runtimeBundleDir?: string;
 }
 
-/** Mean of objective values — the same default scalarization as trusted/scoring. */
-export function aggregateOf(record: EvaluationRecord): number {
+/** Mean of eligible objective values; null is a settled negative evaluation outcome. */
+export function aggregateOf(record: EvaluationRecord): number | null {
   const values = Object.values(record.output.objectives);
-  if (!record.output.valid || values.length === 0) return Number.NEGATIVE_INFINITY;
-  return values.reduce((a, b) => a + b, 0) / values.length;
+  if (!record.output.valid || values.length === 0) return null;
+  const aggregate = values.reduce((a, b) => a + b, 0) / values.length;
+  return Number.isFinite(aggregate) ? aggregate : null;
 }
 
 /** Deterministic uniform [0,1) keyed on (seed, episode) — mulberry32, one draw. */
@@ -241,6 +242,15 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
 
   try {
     const task = await broker.getTask();
+    // The episode boundary must precede its parent evaluation so trusted
+    // pairing uses one epoch. Keep that authenticated claim alive for the
+    // run's entire wall envelope: recursive panels may legitimately outlive
+    // the broker's one-hour default, but the public contract still caps the
+    // claim at one day.
+    const episodeSandboxTtlSec = Math.min(
+      MAX_SANDBOX_TTL_SEC,
+      Math.ceil(task.budget.envelope.maxWallClockSec),
+    );
     const assetGroupId = task.visibleAssetGroups.includes(trainAssetGroupId)
       ? trainAssetGroupId
       : task.visibleAssetGroups[0];
@@ -551,6 +561,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       const { sandboxId } = await broker.createSandbox({
         artifact: parent,
         role: "mutation",
+        ttlSec: episodeSandboxTtlSec,
         ...(resuming ? { continueEpisode: episode } : {}),
       });
 
@@ -560,6 +571,23 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       if (opts.signal?.aborted) return;
       const parentAggregate = aggregateOf(parentRecord);
       if (parent.hash === baseline.hash) baselineAggregate = parentAggregate;
+      if (parentAggregate === null) {
+        const summary = parentRecord.output.diagnostics?.summary;
+        emit({
+          ...base,
+          at: now(),
+          type: "episode.invalid",
+          episode,
+          reason: `parent evaluation returned a null aggregate${summary === undefined ? "" : `: ${summary}`}`,
+          repaired: false,
+        });
+        emit({ ...base, at: now(), type: "budget.snapshot", budget: await broker.getBudget() });
+        // No eligible parent score means trusted pairing can never authorize a
+        // candidate in this epoch. Retire the still-live pre-evaluation claim
+        // and advance; an unknown id must continue to fail closed here.
+        await broker.completeEpisode({ episode, releaseSandboxId: sandboxId });
+        continue;
+      }
 
       const context = buildEpisodeContext({
         episode,
@@ -603,11 +631,13 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         candidateEvaluationConsumed = true;
         record = await evaluate(candidate, episode, episode, resuming);
         if (opts.signal?.aborted) return;
-        if (!record.output.valid) {
+        if (aggregateOf(record) === null) {
           attempt = {
             ...attempt,
             failure: {
-              reason: "evaluator rejected the candidate as invalid",
+              reason: record.output.valid
+                ? "evaluator returned a null aggregate for the candidate"
+                : "evaluator rejected the candidate as invalid",
               exitCode: null,
               stdoutTail: "",
               stderrTail: "",
@@ -650,7 +680,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
             });
             const repairRecord = await evaluate(repair.artifact, episode, episode, resuming);
             if (opts.signal?.aborted) return;
-            if (repairRecord.output.valid) {
+            if (aggregateOf(repairRecord) !== null) {
               candidate = repair.artifact;
               record = repairRecord;
               attempt = repair;
@@ -672,6 +702,10 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       }
 
       const childAggregate = aggregateOf(record);
+      if (childAggregate === null) {
+        await completeClaimedEpisode();
+        continue;
+      }
       const passed = childAggregate > parentAggregate;
       emit({
         ...base,
@@ -695,22 +729,45 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
               : aggregateOf(await evaluate(incumbent.artifact, episode, episode, resuming));
           if (incumbent.artifact.hash === baseline.hash) baselineAggregate = incumbentPairAggregate;
         }
-        if (incumbentPairAggregate === null || childAggregate > incumbentPairAggregate) {
+        const improvesIncumbent =
+          incumbent === null
+          || (incumbentPairAggregate !== null && childAggregate > incumbentPairAggregate);
+        if (incumbent !== null && incumbentPairAggregate === null) {
+          emit({
+            ...base,
+            at: now(),
+            type: "episode.invalid",
+            episode,
+            reason: "incumbent comparison returned a null aggregate",
+            repaired: false,
+          });
+        } else if (improvesIncumbent) {
           if (parent.hash !== baseline.hash && incumbent?.artifact.hash !== baseline.hash) {
             baselineAggregate = aggregateOf(await evaluate(baseline, episode, episode, resuming));
           }
           if (opts.signal?.aborted) return;
-          incumbent = { artifact: candidate, aggregate: childAggregate };
-          emit({
-            ...base,
-            at: now(),
-            type: "incumbent.new",
-            artifact: candidate,
-            aggregate: childAggregate,
-            deltaVsBaseline: baselineAggregate === null ? childAggregate : childAggregate - baselineAggregate,
-            episode,
-          });
-          await broker.reportIncumbent({ artifact: candidate, claimed: { aggregate: childAggregate } });
+          if (baselineAggregate === null) {
+            emit({
+              ...base,
+              at: now(),
+              type: "episode.invalid",
+              episode,
+              reason: "baseline comparison returned a null aggregate",
+              repaired: false,
+            });
+          } else {
+            incumbent = { artifact: candidate, aggregate: childAggregate };
+            emit({
+              ...base,
+              at: now(),
+              type: "incumbent.new",
+              artifact: candidate,
+              aggregate: childAggregate,
+              deltaVsBaseline: childAggregate - baselineAggregate,
+              episode,
+            });
+            await broker.reportIncumbent({ artifact: candidate, claimed: { aggregate: childAggregate } });
+          }
         }
       }
 

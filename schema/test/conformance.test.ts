@@ -421,6 +421,22 @@ describe("contract 4: event log", () => {
     expect(e.type).toBe("incumbent.new");
   });
 
+  it("round-trips a settled evaluation with no eligible aggregate", () => {
+    const event = RunEvent.parse({
+      runId: "run_null",
+      at: new Date().toISOString(),
+      type: "eval.completed",
+      episode: 0,
+      artifact: { hash: "sha256:" + "b".repeat(64) },
+      assetGroupId: "meta-train",
+      seed: 0,
+      aggregate: null,
+      cached: false,
+    });
+
+    expect(event).toMatchObject({ type: "eval.completed", aggregate: null });
+  });
+
   it("no-yield bound events carry a complete, named trigger record", () => {
     const record = {
       type: "hone.mutation.no-yield-bound.v1" as const,

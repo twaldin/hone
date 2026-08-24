@@ -16,6 +16,7 @@ import type {
 } from "@hone/schema";
 import type {
   MetaCandidateGate,
+  MetaFailureSettlement,
   MetaMeasurement,
   MetaResourceEnvelopeLedger,
   MetaWorkIdentity,
@@ -103,14 +104,16 @@ function threeChildPlan(): RecursiveEvaluationPlan {
 interface Harness {
   strategy: TrustedEvaluationStrategy;
   rows: MetaMeasurement[];
+  failures: MetaFailureSettlement[];
 }
 
 function harness(): Harness {
   const campaignDir = mkdtempSync(join(tmpdir(), "hone-recursive-evaluation-"));
   const rows: MetaMeasurement[] = [];
+  const failures: MetaFailureSettlement[] = [];
   const journal = {
     queryTrainMeasurements: () => [...rows],
-    queryFailureSettlements: () => [],
+    queryFailureSettlements: () => [...failures],
   } as unknown as MetaJournalV1;
   const gate = {
     check: async (request: Parameters<MetaCandidateGate["check"]>[0]) => ({
@@ -148,7 +151,7 @@ function harness(): Harness {
     {} as MetaResourceEnvelopeLedger,
     {} as CampaignPauseAuthority,
   );
-  return { strategy: launcher.evaluationStrategy(), rows };
+  return { strategy: launcher.evaluationStrategy(), rows, failures };
 }
 
 function request(
@@ -233,6 +236,42 @@ describe("recursive search trusted evaluation adapter", () => {
     expect(spawned.map((params) => params.child.runId)).toEqual(
       spawned.map((params) => `run_meta_${metaWorkKey(CONFIG_HASH, identityFor(params)).slice("sha256:".length)}`),
     );
+  });
+
+  it("returns a null aggregate after one child settles candidate_failed", async () => {
+    const { strategy, rows, failures } = harness();
+    const spawnRun = vi.fn(async (params: SpawnRunParams): Promise<SpawnRunResult> => {
+      const identity = identityFor(params);
+      const workKey = metaWorkKey(CONFIG_HASH, identity);
+      const observed = { tokens: 10, usd: 0.1, wallClockSec: 1, evaluatorInvocations: 1 };
+      if (params.child.capsuleId === SECOND_CAPSULE) {
+        failures.push({
+          ...identity,
+          workKey,
+          observed,
+          status: "candidate_failed",
+        } as unknown as MetaFailureSettlement);
+      } else {
+        rows.push({
+          ...identity,
+          workKey,
+          qNormalized: 0.25,
+          observed,
+        } as unknown as MetaMeasurement);
+      }
+      return {} as SpawnRunResult;
+    });
+
+    const record = await strategy(request(plan(), spawnRun));
+
+    expect(record.output).toMatchObject({
+      valid: false,
+      objectives: {},
+      constraints: { allChildrenValid: false },
+      diagnostics: { summary: expect.stringContaining(`${SECOND_CAPSULE}=candidate_failed`) },
+    });
+    expect(record.costUsd).toBeCloseTo(0.2, 10);
+    expect(spawnRun).toHaveBeenCalledTimes(2);
   });
 
   it("fails every trusted allocation guard before dispatch instead of clamping mutable input", async () => {
