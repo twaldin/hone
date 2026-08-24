@@ -727,6 +727,54 @@ describe("runEpisodeLoop paired comparator evidence", () => {
     expect(stub.finished).toEqual([firstCandidate]);
   });
 
+  it("rejects and continues when an ε-restart incumbent comparator returns null", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: {
+        1: { score: 0.6 },
+        2: { score: 0.65 },
+        3: { score: 0.55 },
+      },
+      invalidSaveIndexSeeds: ["1:1"],
+      execPlan: [
+        { exitCode: 0, stdout: okStdout("first-improvement") },
+        { exitCode: 0, stdout: okStdout("unpaired-restart-challenger") },
+        { exitCode: 0, stdout: okStdout("continued-challenger") },
+      ],
+      envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
+    });
+    await stub.listen();
+
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-null-incumbent-comparator",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        rand: (episode) => (episode === 1 ? 0 : 0.99),
+        maxEpisodes: 3,
+      });
+    } finally {
+      await stub.close();
+    }
+
+    const incumbent = stubHash(1);
+    expect(eventsOf(events, "episode.invalid")).toEqual([
+      expect.objectContaining({
+        episode: 1,
+        repaired: false,
+        reason: "incumbent comparison returned a null aggregate",
+      }),
+    ]);
+    expect(eventsOf(events, "incumbent.new").map((event) => event.artifact.hash)).toEqual([incumbent]);
+    expect(stub.reportedIncumbents).toEqual([incumbent]);
+    expect(stub.completedEpisodes).toEqual([0, 1, 2]);
+    expect(eventsOf(events, "episode.started")).toHaveLength(3);
+    expect(stub.finished).toEqual([incumbent]);
+  });
+
   it("ε-restart challenger is paired against the current incumbent on its own seed; a worse challenger is never reported", async () => {
     const stub = new StubBroker({
       baselineHash: BASELINE,

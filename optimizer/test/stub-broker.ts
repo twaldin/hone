@@ -47,6 +47,8 @@ export interface StubScript {
   baselineValid?: boolean;
   /** Seeds where the trusted baseline panel settles without an aggregate. */
   invalidBaselineSeeds?: number[];
+  /** Saved-artifact/seed coordinates whose trusted panels settle without an aggregate. */
+  invalidSaveIndexSeeds?: string[];
   /** Objectives per saveArtifact call index (1-based). Missing index => evaluating it is a test failure. */
   objectivesBySaveIndex: Record<number, Record<string, number>>;
   /** Seed-specific override: objectives keyed `${saveIndex}:${seed}`, consulted before objectivesBySaveIndex. */
@@ -382,6 +384,15 @@ export class StubBroker {
     }
     const index = this.saveIndexByHash.get(hash);
     if (index === undefined) throw new Error(`evaluate of unknown artifact ${hash}`);
+    if (this.script.invalidSaveIndexSeeds?.includes(`${index}:${seed}`) === true) {
+      return {
+        valid: false,
+        objectives: {},
+        constraints: { allChildrenValid: false },
+        perExample: {},
+        diagnostics: { summary: "trusted recursive panel could not aggregate a failed child" },
+      };
+    }
     if (this.script.invalidSaveIndices?.includes(index) === true) {
       return {
         valid: false,
