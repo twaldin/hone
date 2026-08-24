@@ -1293,6 +1293,85 @@ describe("durable promotion verdict query", () => {
     );
   });
 
+  it("blocks public score-shopping after an earlier privileged candidate measurement", async () => {
+    const b = await boot();
+    b.ctl.evalOutputs.set(candidateHash, score(-4));
+    const candidate = await saveCandidate(b, candidateTar);
+
+    const privileged = await b.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 0 },
+      ADMIN,
+    );
+    expect(privileged.output.objectives.score).toBe(-4);
+    expect(b.broker.getPromotionVerdict({ artifact: { hash: candidate } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-public-admission",
+    });
+
+    // The optimizer can request a fresh coordinate where the same artifact
+    // scores much better, but the earlier privileged measurement permanently
+    // taints it: the favorable public result is measurement, not authority.
+    b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(9));
+    await b.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 1 },
+      CLIENT,
+    );
+    const shopped = await b.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 1 },
+      CLIENT,
+    );
+    expect(shopped.output.objectives.score).toBe(9);
+    expect(b.broker.getPromotionVerdict({ artifact: { hash: candidate } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-persisted-pair",
+    });
+    const candidateFacts = (await stateLines(b)).filter((line) =>
+      line["t"] === "eval"
+      && (line["record"] as { artifactHash?: string } | undefined)?.artifactHash === candidate
+    );
+    expect(candidateFacts).toHaveLength(2);
+    expect(candidateFacts.some((line) => "gate" in line)).toBe(false);
+    expect(() => b.broker.reportIncumbent({ artifact: { hash: candidate } }, CLIENT)).toThrow(
+      /no persisted same-epoch parent-first gate pairing/,
+    );
+  });
+
+  it("preserves legitimate privileged-only and public-only evaluation paths", async () => {
+    const privilegedOnly = await boot();
+    privilegedOnly.ctl.evalOutputs.set(candidateHash, score(4));
+    const measured = await saveCandidate(privilegedOnly, candidateTar);
+    await expect(
+      privilegedOnly.broker.evaluate(
+        { artifact: { hash: measured }, assetGroupId: "train", seed: 0 },
+        ADMIN,
+      ),
+    ).resolves.toMatchObject({ artifactHash: measured, output: { objectives: { score: 4 } } });
+    expect(privilegedOnly.broker.getPromotionVerdict({ artifact: { hash: measured } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-public-admission",
+    });
+
+    const publicOnly = await boot();
+    publicOnly.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const promotable = await saveCandidate(publicOnly, candidateTar);
+    await publicOnly.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    await publicOnly.broker.evaluate(
+      { artifact: { hash: promotable }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    expect(publicOnly.broker.getPromotionVerdict({ artifact: { hash: promotable } }, CLIENT)).toEqual({
+      status: "positive",
+      parent: { hash: baselineHash },
+      parentScore: 1,
+      childScore: 2,
+      delta: 1,
+    });
+    expect(publicOnly.broker.reportIncumbent({ artifact: { hash: promotable } }, CLIENT)).toEqual({});
+  });
+
   it("refuses a replayed positive gate whose parent disagrees with immutable lineage", async () => {
     const shared = {
       runDir: path.join(tmpBase, "runs", "lineage-mismatch-verdict"),
