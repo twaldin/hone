@@ -186,6 +186,85 @@ const RESUME_EVENTS: RunEvent[] = [
   },
 ];
 
+const REUSED_CONTINUATION = digest("episode-zero-continuation-bytes");
+const CONTINUATION_CRASH_EVENTS: RunEvent[] = [
+  INITIAL_EVENTS[0]!,
+  INITIAL_EVENTS[1]!,
+  {
+    runId: childRunId,
+    at: "2026-08-24T04:41:15.516Z",
+    type: "episode.started",
+    episode: 0,
+    parent: { hash: sourceArtifact },
+  },
+  {
+    runId: childRunId,
+    at: "2026-08-24T04:48:38.568Z",
+    type: "episode.candidate",
+    episode: 0,
+    candidate: { hash: REUSED_CONTINUATION },
+    sessionTrace: digest("episode-zero-repair-trace"),
+  },
+  {
+    runId: childRunId,
+    at: "2026-08-24T04:50:39.432Z",
+    type: "episode.completed",
+    episode: 0,
+  },
+  {
+    runId: childRunId,
+    at: "2026-08-24T04:50:40.174Z",
+    type: "episode.started",
+    episode: 1,
+    parent: { hash: sourceArtifact },
+  },
+  {
+    runId: childRunId,
+    at: "2026-08-24T04:52:41.949Z",
+    type: "eval.completed",
+    episode: 1,
+    artifact: { hash: sourceArtifact },
+    assetGroupId: "train",
+    seed: 1,
+    aggregate: member.capsule.qBase,
+    cached: false,
+  },
+];
+const CONTINUATION_RESUME_EVENTS: RunEvent[] = [
+  {
+    runId: childRunId,
+    at: "2026-08-24T05:04:04.764Z",
+    type: "run.resumed",
+    fromCursor: CONTINUATION_CRASH_EVENTS.length,
+  },
+  {
+    runId: childRunId,
+    at: "2026-08-24T05:04:35.053Z",
+    type: "episode.invalid",
+    episode: 1,
+    reason: "mutation session failed (exit 1, episode 1)",
+    repaired: true,
+  },
+  {
+    runId: childRunId,
+    at: "2026-08-24T05:04:36.000Z",
+    type: "episode.completed",
+    episode: 1,
+  },
+  {
+    runId: childRunId,
+    at: "2026-08-24T05:04:36.100Z",
+    type: "budget.snapshot",
+    budget: { envelope: reservation, spent: FULL_SPEND, lifetimeSec: 1451 },
+  },
+  {
+    runId: childRunId,
+    at: "2026-08-24T05:04:36.200Z",
+    type: "run.finished",
+    status: "completed",
+  },
+];
+
 const fixtureChildSource = String.raw`
 const fs = require("node:fs");
 const [eventPath, gatewayUrl, mode, initial64, paused64, resumed64] = process.argv.slice(1);
@@ -203,6 +282,10 @@ function append(event) {
 }
 async function main() {
   if (mode !== "resume") for (const event of initial) append(event);
+  if (mode === "crash") {
+    process.exitCode = 1;
+    return;
+  }
   try {
     const response = await fetch(gatewayUrl);
     if (!response.ok) throw new Error("gateway returned " + response.status);
@@ -272,8 +355,9 @@ async function stopGateway(server: Server): Promise<void> {
 async function runFixtureChild(
   eventPath: string,
   gatewayUrl: string,
-  mode: "pause" | "pause-hold" | "resume" | "complete",
+  mode: "pause" | "pause-hold" | "resume" | "complete" | "crash",
   initialEvents: readonly RunEvent[] = INITIAL_EVENTS,
+  resumeEvents: readonly RunEvent[] = RESUME_EVENTS,
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
   const child = spawn(process.execPath, [
     "-e",
@@ -283,7 +367,7 @@ async function runFixtureChild(
     mode,
     encoded(initialEvents),
     encoded(PAUSE_EVENTS),
-    encoded(RESUME_EVENTS),
+    encoded(resumeEvents),
   ], { stdio: ["ignore", "pipe", "pipe"] });
   const stderr: Buffer[] = [];
   child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
@@ -293,6 +377,9 @@ async function runFixtureChild(
     child.kill("SIGKILL");
   }
   const [code, signal] = await closed;
+  if (mode === "crash" && code !== 1) {
+    throw new Error(`fixture child crash failed ${code}/${signal}: ${Buffer.concat(stderr).toString("utf8")}`);
+  }
   if ((mode === "resume" || mode === "complete") && code !== 0) {
     throw new Error(`fixture child resume failed ${code}/${signal}: ${Buffer.concat(stderr).toString("utf8")}`);
   }
@@ -423,9 +510,11 @@ class GatewayChildSupervisor {
   constructor(
     private readonly root: string,
     private readonly gatewayUrl: string,
-    private readonly phase: "pause" | "pause-hold" | "resume" | "complete" | "unknown",
+    private readonly phase: "pause" | "pause-hold" | "resume" | "complete" | "crash" | "unknown",
     private readonly qRaw = member.capsule.qBase + member.capsule.scale * 0.25,
     private readonly runtimeBundleDigest: Sha256Digest = bundleDigest,
+    private readonly initialEvents: readonly RunEvent[] = INITIAL_EVENTS,
+    private readonly resumeEvents: readonly RunEvent[] = RESUME_EVENTS,
   ) {}
 
   async runLaunched(childRequest: MetaChildRunRequest): Promise<MetaChildRunOutcome> {
@@ -438,8 +527,9 @@ class GatewayChildSupervisor {
         eventPath,
         this.gatewayUrl,
         this.phase,
-        INITIAL_EVENTS.map((event) =>
+        this.initialEvents.map((event) =>
           event.type === "run.started" ? { ...event, optimizerDigest: this.runtimeBundleDigest } : event),
+        this.resumeEvents,
       );
     this.kills.push(exited.signal);
     if (this.phase === "unknown") writeFileSync(eventPath, "{\"runId\":\n", { mode: 0o600 });
@@ -662,6 +752,80 @@ describe("recursive child nonterminal settlement replay", () => {
 
   it("replays the nonterminal journal after SIGKILL between pause and resume", { timeout: 30_000 }, async () => {
     await exercisePauseResume(true);
+  });
+
+  // This fixture owns the outer pending-child replay/settlement seam. The
+  // broker lifecycle regressions exercise production continuation binding.
+  it("settles an outer reservation after fixture-authored child continuation recovery", { timeout: 30_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-continuation-crash-replay-"));
+    const port = await reserveGatewayPort();
+    const gatewayUrl = `http://127.0.0.1:${port}/v1/responses`;
+    const crashingSupervisor = new GatewayChildSupervisor(
+      root,
+      gatewayUrl,
+      "crash",
+      member.capsule.qBase + member.capsule.scale * 0.25,
+      bundleDigest,
+      CONTINUATION_CRASH_EVENTS,
+      CONTINUATION_RESUME_EVENTS,
+    );
+    let runtime = openRuntime(root, crashingSupervisor);
+    try {
+      await expect(runtime.broker.spawnRun(request, CLIENT)).rejects.toThrow(
+        `child ${childRunId} has no durable terminal event`,
+      );
+      expect(runtime.recursiveLedger.budgetState(OUTER_RUN_ID)).toMatchObject({
+        reservations: 1,
+        openReservations: 1,
+      });
+      const interrupted = eventFacts(join(root, ".hone-runs", childRunId, "events.ndjson"));
+      expect(interrupted.filter((event) => event.type === "episode.completed")).toHaveLength(1);
+      expect(interrupted.at(-1)).toMatchObject({ type: "eval.completed", episode: 1 });
+      expect(interrupted.some((event) => event.type === "run.finished")).toBe(false);
+    } finally {
+      await runtime.close();
+    }
+
+    const gateway = await startGateway(port);
+    try {
+      const resumedSupervisor = new GatewayChildSupervisor(
+        root,
+        gatewayUrl,
+        "resume",
+        member.capsule.qBase + member.capsule.scale * 0.25,
+        bundleDigest,
+        CONTINUATION_CRASH_EVENTS,
+        CONTINUATION_RESUME_EVENTS,
+      );
+      runtime = openRuntime(root, resumedSupervisor);
+      try {
+        const result = await runtime.broker.spawnRun(request, CLIENT);
+        expect(result.terminal.status).toBe("completed");
+        expect(runtime.recursiveLedger.budgetState(OUTER_RUN_ID)).toMatchObject({
+          reservations: 1,
+          openReservations: 0,
+        });
+      } finally {
+        await runtime.close();
+      }
+    } finally {
+      await stopGateway(gateway);
+    }
+
+    const completed = eventFacts(join(root, ".hone-runs", childRunId, "events.ndjson"));
+    expect(completed.filter((event) => event.type === "run.started")).toHaveLength(1);
+    expect(completed.filter((event) => event.type === "run.resumed")).toHaveLength(1);
+    expect(completed.filter((event) => event.type === "episode.started")).toHaveLength(2);
+    expect(completed.filter((event) => event.type === "episode.completed")).toHaveLength(2);
+    expect(completed.filter((event) => event.type === "run.finished")).toHaveLength(1);
+    expect(completed.at(-1)).toMatchObject({ type: "run.finished", status: "completed" });
+    expect(journalFacts(join(root, "campaign", "meta-journal.ndjson")).map((fact) => fact["t"])).toEqual([
+      "header",
+      "reservation",
+      "pending",
+      "settlement",
+      "measurement",
+    ]);
   });
 
   it("refuses a non-image-bound launch identity before spending the child budget", { timeout: 30_000 }, async () => {

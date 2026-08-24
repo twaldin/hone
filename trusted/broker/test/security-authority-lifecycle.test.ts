@@ -488,6 +488,155 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
     expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
   });
 
+  it("rehydrates a failed-exec repair as an exact-episode continuation after restart", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "resume-repair-binding"),
+      casDir: path.join(tmpBase, "cas", "resume-repair-binding"),
+      runId: "run-resume-repair-binding",
+    };
+    const first = await boot(shared);
+    const sandbox = await first.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    first.ctl.execExit = 7;
+    first.ctl.saveTar = candidateTar;
+    await first.broker.exec({ sandboxId: sandbox.sandboxId, argv: ["false"] }, CLIENT);
+    const repair = await first.broker.saveArtifact({ sandboxId: sandbox.sandboxId }, CLIENT);
+    expect(repair).toEqual({ hash: candidateHash });
+    await first.broker.close();
+
+    const resumed = await boot(shared);
+    const continued = await resumed.broker.createSandbox(
+      { artifact: repair, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    expect(resumed.events.filter((event) => event.type === "episode.started")).toHaveLength(0);
+    await resumed.broker.completeEpisode({
+      episode: 0,
+      releaseSandboxId: continued.sandboxId,
+    }, CLIENT);
+  });
+
+  it("rejects continuation replay facts for a wrong parent, completed episode, or unknown episode", async () => {
+    const appendContinuation = async (
+      runDir: string,
+      fact: { hash: string; parent: string; episode: number },
+    ): Promise<void> => {
+      await appendFile(
+        path.join(runDir, "broker-state.ndjson"),
+        `${JSON.stringify({ t: "continuation", ...fact })}\n`,
+      );
+    };
+
+    const wrongParentShared = {
+      runDir: path.join(tmpBase, "runs", "poison-continuation-parent"),
+      casDir: path.join(tmpBase, "cas", "poison-continuation-parent"),
+      runId: "run-poison-continuation-parent",
+    };
+    const wrongParent = await boot(wrongParentShared);
+    await wrongParent.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await wrongParent.broker.close();
+    await appendContinuation(wrongParent.runDir, {
+      hash: candidateHash,
+      parent: candidate2Hash,
+      episode: 0,
+    });
+    await expect(boot(wrongParentShared)).rejects.toThrow(
+      `run state log corrupt: continuation ${candidateHash} does not match active episode 0`,
+    );
+
+    const completedShared = {
+      runDir: path.join(tmpBase, "runs", "poison-continuation-completed"),
+      casDir: path.join(tmpBase, "cas", "poison-continuation-completed"),
+      runId: "run-poison-continuation-completed",
+    };
+    const completed = await boot(completedShared);
+    const completedSandbox = await completed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await completed.broker.completeEpisode({
+      episode: 0,
+      releaseSandboxId: completedSandbox.sandboxId,
+    }, CLIENT);
+    await completed.broker.close();
+    await appendContinuation(completed.runDir, {
+      hash: candidateHash,
+      parent: baselineHash,
+      episode: 0,
+    });
+    await expect(boot(completedShared)).rejects.toThrow(
+      `run state log corrupt: continuation ${candidateHash} does not match active episode 0`,
+    );
+
+    const unknownShared = {
+      runDir: path.join(tmpBase, "runs", "poison-continuation-unknown"),
+      casDir: path.join(tmpBase, "cas", "poison-continuation-unknown"),
+      runId: "run-poison-continuation-unknown",
+    };
+    const unknown = await boot(unknownShared);
+    await unknown.broker.close();
+    await appendContinuation(unknown.runDir, {
+      hash: candidateHash,
+      parent: baselineHash,
+      episode: 99,
+    });
+    await expect(boot(unknownShared)).rejects.toThrow(
+      `run state log corrupt: continuation ${candidateHash} does not match active episode 99`,
+    );
+  });
+
+  it("does not persist an unreplayable continuation for a checkpoint-less legacy repair", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "legacy-repair-continuation"),
+      casDir: path.join(tmpBase, "cas", "legacy-repair-continuation"),
+      runId: "run-legacy-repair-continuation",
+    };
+    const seeded = await boot(shared);
+    await seeded.broker.close();
+    await appendFile(
+      path.join(seeded.runDir, "broker-state.ndjson"),
+      [
+        JSON.stringify({
+          t: "lineage",
+          candidate: candidate2Hash,
+          parent: baselineHash,
+          episode: 0,
+        }),
+        JSON.stringify({
+          t: "repair",
+          hash: candidateHash,
+          parent: baselineHash,
+          episode: 7,
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    const legacy = await boot(shared);
+    const sandbox = await legacy.broker.createSandbox(
+      { artifact: { hash: candidateHash }, role: "mutation" },
+      CLIENT,
+    );
+    legacy.ctl.execExit = 7;
+    legacy.ctl.saveTar = candidate2Tar;
+    await legacy.broker.exec({ sandboxId: sandbox.sandboxId, argv: ["false"] }, CLIENT);
+    expect(await legacy.broker.saveArtifact({ sandboxId: sandbox.sandboxId }, CLIENT)).toEqual({
+      hash: candidate2Hash,
+    });
+    expect(
+      (await stateLines(legacy)).filter((line) => line["t"] === "continuation"),
+    ).toHaveLength(0);
+    await legacy.broker.close();
+
+    // A process-local compatibility binding must not poison the next replay.
+    await boot(shared);
+  });
+
   it("returns the same resumed sandbox when the first RPC response is lost", async () => {
     const shared = {
       runDir: path.join(tmpBase, "runs", "resume-response-loss"),
@@ -1419,6 +1568,90 @@ describe("trusted event ordering and candidacy", () => {
     const restarted = c.events.filter((e) => e.type === "episode.started");
     expect(restarted).toHaveLength(1);
     expect(restarted[0]).toMatchObject({ episode: 2, parent: { hash: candidateHash } });
+  });
+
+  it("continues a failed episode from bytes first produced in a completed episode while refusing foreign bytes", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "cross-episode-continuation"),
+      casDir: path.join(tmpBase, "cas", "cross-episode-continuation"),
+      runId: "run-cross-episode-continuation",
+    };
+    const b = await boot(shared);
+
+    // Episode 0 reproduces the incident's first failure/repair: the failed
+    // snapshot is repaired successfully without changing its canonical bytes,
+    // so the hash graduates to immutable candidate lineage for episode 0.
+    const first = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    b.ctl.execExit = 7;
+    b.ctl.saveTar = candidateTar;
+    await b.broker.exec({ sandboxId: first.sandboxId, argv: ["false"] }, CLIENT);
+    const firstFailure = await b.broker.saveArtifact({ sandboxId: first.sandboxId }, CLIENT);
+    const firstRepair = await b.broker.createSandbox(
+      { artifact: firstFailure, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    b.ctl.execExit = 0;
+    await b.broker.exec({ sandboxId: firstRepair.sandboxId, argv: ["true"] }, CLIENT);
+    expect(await b.broker.saveArtifact({ sandboxId: firstRepair.sandboxId }, CLIENT)).toEqual(firstFailure);
+    await b.broker.completeEpisode({ episode: 0 }, CLIENT);
+
+    // Episode 1 fails after producing the exact same canonical bytes. The hash
+    // is old lineage, but this save is fresh durable provenance that authorizes
+    // it as this episode's continuation artifact.
+    const second = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    // Membership is episode-exact, not "this hash appeared somewhere": before
+    // episode 1 reproduces these bytes, its episode-0 binding must be refused
+    // before any Docker create side effect.
+    const dockerCreatesBeforeEpisodeBinding = b.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    ).length;
+    await expect(
+      b.broker.createSandbox(
+        { artifact: firstFailure, role: "mutation", continueEpisode: 1 },
+        CLIENT,
+      ),
+    ).rejects.toThrow(`continuation artifact ${firstFailure.hash} does not belong to episode 1`);
+    expect(b.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    )).toHaveLength(dockerCreatesBeforeEpisodeBinding);
+    b.ctl.execExit = 7;
+    await b.broker.exec({ sandboxId: second.sandboxId, argv: ["false"] }, CLIENT);
+    const secondFailure = await b.broker.saveArtifact({ sandboxId: second.sandboxId }, CLIENT);
+    expect(secondFailure).toEqual(firstFailure);
+
+    // Crash after the failed snapshot is durable but before the repair
+    // sandbox exists. Replay must recover the episode-local binding and make
+    // the incomplete checkpoint genuinely resumable.
+    await b.broker.close();
+    const resumed = await boot(shared);
+
+    await expect(
+      resumed.broker.createSandbox(
+        { artifact: { hash: candidate2Hash }, role: "mutation", continueEpisode: 1 },
+        CLIENT,
+      ),
+    ).rejects.toThrow(`continuation artifact ${candidate2Hash} does not belong to episode 1`);
+    const continued = await resumed.broker.createSandbox(
+      { artifact: secondFailure, role: "mutation", continueEpisode: 1 },
+      CLIENT,
+    );
+    expect(
+      (await stateLines(resumed)).filter((line) => line["t"] === "continuation"),
+    ).toEqual([
+      expect.objectContaining({
+        t: "continuation",
+        hash: secondFailure.hash,
+        parent: baselineHash,
+        episode: 1,
+      }),
+    ]);
+    await resumed.broker.completeEpisode({ episode: 1, releaseSandboxId: continued.sandboxId }, CLIENT);
   });
 
   it("deltaVsBaseline is the paired mean and later artifacts cannot enter the evaluator", async () => {

@@ -898,6 +898,13 @@ const StatePayload = z.discriminatedUnion("t", [
   z.object({ t: z.literal("episodeComplete"), episode: z.number().int().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("lineage"), candidate: z.string(), parent: z.string(), episode: z.number().int().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("repair"), hash: z.string(), parent: z.string(), episode: z.number().int().nonnegative(), events: JournalEvents }),
+  z.object({
+    t: z.literal("continuation"),
+    hash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    parent: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    episode: z.number().int().nonnegative(),
+    events: JournalEvents,
+  }),
   /** M0 candidate attempt: the one public non-baseline evaluator admission, WAL'd before spawn. */
   z.object({ t: z.literal("slot"), hash: z.string().regex(/^sha256:[0-9a-f]{64}$/), events: JournalEvents }),
   z.object({ t: z.literal("trace"), hash: z.string().regex(/^sha256:[0-9a-f]{64}$/), bytes: z.number().int().nonnegative(), events: JournalEvents }),
@@ -1314,6 +1321,8 @@ export class Broker {
   private readonly lineage = new Map<string, { parent: string; episode: number }>();
   /** Failed-exec repair snapshots: NOT candidates; sandboxes resumed from one reuse its episode. */
   private readonly repairs = new Map<string, { parent: string; episode: number }>();
+  /** Durable proof that a CAS hash was produced inside an episode, independent of immutable first lineage. */
+  private readonly continuationEpisodes = new Map<string, Set<number>>();
   /** Durable episode boundaries and the one replayable incomplete checkpoint. */
   private readonly episodeCheckpoints = new Map<number, {
     parent: string | undefined;
@@ -2161,6 +2170,7 @@ export class Broker {
             );
           }
           this.lineage.set(line.candidate, { parent: line.parent, episode: line.episode });
+          this.bindContinuationArtifact(line.candidate, line.episode);
           // Graduation: once a hash has candidate lineage it is never a
           // repair snapshot again — the lineage line is the tombstone.
           this.repairs.delete(line.candidate);
@@ -2168,7 +2178,23 @@ export class Broker {
         }
         case "repair":
           this.repairs.set(line.hash, { parent: line.parent, episode: line.episode });
+          this.bindContinuationArtifact(line.hash, line.episode);
           break;
+        case "continuation": {
+          const checkpoint = this.episodeCheckpoints.get(line.episode);
+          if (
+            checkpoint === undefined
+            || checkpoint.completed
+            || checkpoint.parent !== line.parent
+          ) {
+            throw new BrokerError(
+              "INTERNAL",
+              `run state log corrupt: continuation ${line.hash} does not match active episode ${line.episode}`,
+            );
+          }
+          this.bindContinuationArtifact(line.hash, line.episode);
+          break;
+        }
         case "slot":
           // Every slot hash is unique and bounded by the trusted constructor.
           // Repeating a fact is corruption even if it names the same hash.
@@ -3006,6 +3032,13 @@ export class Broker {
     };
   }
 
+  private bindContinuationArtifact(hash: string, episode: number): void {
+    const episodes = this.continuationEpisodes.get(hash) ?? new Set<number>();
+    episodes.add(episode);
+    this.continuationEpisodes.set(hash, episodes);
+  }
+
+
   /**
    * A caller can lose the response after a resumed parent claim succeeded.
    * Only the one in-memory sandbox registered for the same episode, parent,
@@ -3083,8 +3116,6 @@ export class Broker {
           const requestedContinuation = params.continueEpisode;
           if (requestedContinuation !== undefined) {
             const checkpoint = this.episodeCheckpoints.get(requestedContinuation);
-            const lineage = this.lineage.get(params.artifact.hash);
-            const repairLineage = this.repairs.get(params.artifact.hash);
             if (
               checkpoint === undefined
               || checkpoint.completed
@@ -3095,8 +3126,7 @@ export class Broker {
             }
             if (
               params.artifact.hash !== checkpoint.parent
-              && lineage?.episode !== requestedContinuation
-              && repairLineage?.episode !== requestedContinuation
+              && this.continuationEpisodes.get(params.artifact.hash)?.has(requestedContinuation) !== true
             ) {
               throw new BrokerError(
                 "INTERNAL",
@@ -3269,12 +3299,9 @@ export class Broker {
         ) {
           throw new BrokerError("INTERNAL", `cannot continue non-active checkpoint-v1 episode ${requestedContinuation}`);
         }
-        const lineage = this.lineage.get(params.artifact.hash);
-        const repairLineage = this.repairs.get(params.artifact.hash);
         if (
           params.artifact.hash !== checkpoint.parent
-          && lineage?.episode !== requestedContinuation
-          && repairLineage?.episode !== requestedContinuation
+          && this.continuationEpisodes.get(params.artifact.hash)?.has(requestedContinuation) !== true
         ) {
           throw new BrokerError(
             "INTERNAL",
@@ -3606,6 +3633,7 @@ export class Broker {
           [{ type: "episode.candidate", episode: sb.episode, candidate: { hash }, sessionTrace }],
         );
         this.lineage.set(hash, { parent: sb.parentHash, episode: sb.episode });
+        this.bindContinuationArtifact(hash, sb.episode);
         // Graduation: the hash may have been journaled as a repair snapshot
         // earlier; lineage supersedes it (replay treats the lineage line as
         // the tombstone), so descendants pair against THIS artifact.
@@ -3617,6 +3645,28 @@ export class Broker {
       // event; remembered so a follow-up sandbox reuses the original episode.
       this.appendState({ t: "repair", hash, parent: sb.parentHash, episode: sb.episode });
       this.repairs.set(hash, { parent: sb.parentHash, episode: sb.episode });
+      this.bindContinuationArtifact(hash, sb.episode);
+    }
+
+    if (hash !== sb.parentHash && this.continuationEpisodes.get(hash)?.has(sb.episode) !== true) {
+      // CAS identity is content-only: a later episode can legitimately
+      // reproduce bytes whose immutable candidate lineage names an older
+      // episode. Journal the fresh episode-local provenance separately rather
+      // than rewriting lineage or weakening continuation admission.
+      //
+      // Legacy repair facts may name an episode without checkpoint-v1
+      // authority. Their repair/lineage outcome remains replayable, but a
+      // checkpoint-less continuation fact would make the next boot correctly
+      // reject its own journal. Keep that binding process-local instead.
+      if (this.episodeCheckpoints.has(sb.episode)) {
+        this.appendState({
+          t: "continuation",
+          hash,
+          parent: sb.parentHash,
+          episode: sb.episode,
+        });
+      }
+      this.bindContinuationArtifact(hash, sb.episode);
     }
 
     // Terminal save (final-gate finding): a successful save RETIRES the
