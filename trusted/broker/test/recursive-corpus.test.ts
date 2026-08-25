@@ -711,6 +711,124 @@ describe("recursive spawnRun authority", () => {
     });
   });
 
+  it("replays and independently settles two crash-open siblings through the real broker path", async () => {
+    const ledgerPath = path.join(tmpBase, "two-open-crash-ledger.ndjson");
+    const runDir = path.join(tmpBase, "two-open-root-run");
+    const reservation = {
+      ...LARGE,
+      maxTokens: 50,
+      maxUsd: 50,
+      maxWallClockSec: 50,
+      maxEvaluatorInvocations: 50,
+    };
+    const requests = [
+      childRequest("two-open-first", 1, reservation, "capsule"),
+      childRequest("two-open-second", 1, reservation, "capsule"),
+    ];
+    const firstLedger = RecursiveResourceLedger.open(ledgerPath);
+    ledgers.push(firstLedger);
+    let entered = 0;
+    let releaseCrash!: () => void;
+    const bothEntered = new Promise<void>((resolve) => {
+      releaseCrash = resolve;
+    });
+    const firstLauncher: ChildRunLauncher = async () => {
+      entered += 1;
+      if (entered === 2) releaseCrash();
+      await bothEntered;
+      throw new Error("simulated panel crash with two durable reservations");
+    };
+    const first = makeBroker({
+      runId: "two-open-root",
+      runDir,
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger: firstLedger,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: firstLauncher,
+      },
+    });
+
+    const crashed = await Promise.allSettled(requests.map((request) => first.spawnRun(request, CLIENT)));
+    expect(crashed.every((result) => result.status === "rejected")).toBe(true);
+    expect(firstLedger.budgetState("two-open-root")).toMatchObject({
+      reservations: 2,
+      openReservations: 2,
+      remaining: { maxTokens: 100 },
+    });
+    await first.close();
+    brokers.splice(brokers.indexOf(first), 1);
+    firstLedger.close();
+    ledgers.splice(ledgers.indexOf(firstLedger), 1);
+
+    const replayedLedger = RecursiveResourceLedger.open(ledgerPath);
+    ledgers.push(replayedLedger);
+    const usage: ResourceUsage = { tokens: 10, usd: 2, wallClockSec: 3, evaluatorInvocations: 4 };
+    const replayedChildren: string[] = [];
+    const finalized: string[] = [];
+    let releaseFirst!: () => void;
+    const secondSettled = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const replayLauncher: ChildRunLauncher = async ({ replay, request, admission }) => {
+      expect(replay).toBe(true);
+      replayedChildren.push(request.child.runId);
+      if (request.child.runId === "two-open-first") await secondSettled;
+      return {
+        ...(await writeChildEvidence(request, admission, request.child.runId)),
+        usage,
+        finalizeSettlement: () => {
+          finalized.push(request.child.runId);
+          if (request.child.runId === "two-open-second") releaseFirst();
+        },
+      };
+    };
+    const resumed = makeBroker({
+      runId: "two-open-root",
+      runDir,
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger: replayedLedger,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: replayLauncher,
+      },
+    });
+
+    const results = await Promise.all(requests.map((request) => resumed.spawnRun(request, CLIENT)));
+    expect(new Set(replayedChildren)).toEqual(new Set(["two-open-first", "two-open-second"]));
+    expect(finalized).toEqual(["two-open-second", "two-open-first"]);
+    expect(results.map((result) => result.child.runId).sort()).toEqual(
+      ["two-open-first", "two-open-second"],
+    );
+    expect(replayedLedger.budgetState("two-open-root")).toMatchObject({
+      reservations: 2,
+      openReservations: 0,
+      remaining: {
+        maxTokens: 180,
+        maxUsd: 196,
+        maxWallClockSec: 194,
+        maxEvaluatorInvocations: 192,
+      },
+    });
+    const durableTypes = (await readFile(ledgerPath, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line).t);
+    expect(durableTypes).toEqual([
+      "account",
+      "reservation",
+      "reservation",
+      "usage",
+      "settlement",
+      "usage",
+      "settlement",
+    ]);
+  });
+
   it("holds the full reservation until the child terminal event is durable, then returns only unused resources", async () => {
     const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "settlement-ledger.ndjson"));
     ledgers.push(ledger);

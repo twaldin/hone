@@ -219,7 +219,7 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
       calibratedInnerCeiling: CHILD_BUDGET,
     }));
     const adapterConfig = {
-      counts: { innerEpisodesMax: 1 },
+      counts: { innerEpisodesMax: 1, searchChildConcurrency: 3 },
       developmentPanel: { members: panelMembers },
       generation: { stage: "A" },
     } as unknown as RecursiveMetaCampaignConfig;
@@ -301,6 +301,12 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
     const mutationExitCodes: number[] = [];
     const mutationUsageRecords: Array<{ modelCalls: number; providerCalls: number }> = [];
     const launchedChildren: SpawnRunRequest[] = [];
+    let peakOpenRecursiveReservations = 0;
+    const panelBarriers = new Map<number, {
+      entered: number;
+      allEntered: Promise<void>;
+      release: () => void;
+    }>();
     const trustedStrategy = adapter.evaluationStrategy();
     const recursivePlan = {
       depth: 0 as const,
@@ -378,6 +384,22 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
           const identity = workIdentity(request);
           const schedule = request.child.schedule;
           if (schedule === undefined) throw new Error("admitted shakedown child lost its schedule");
+          let barrier = panelBarriers.get(schedule.candidateOrdinal);
+          if (barrier === undefined) {
+            let release!: () => void;
+            const allEntered = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            barrier = { entered: 0, allEntered, release };
+            panelBarriers.set(schedule.candidateOrdinal, barrier);
+          }
+          barrier.entered += 1;
+          peakOpenRecursiveReservations = Math.max(
+            peakOpenRecursiveReservations,
+            ledger.budgetState("run_campaign_shakedown").openReservations,
+          );
+          if (barrier.entered === PANEL_SIZE) barrier.release();
+          await barrier.allEntered;
           const workKey = metaWorkKey(configHash, identity);
           const failed = (schedule.candidateOrdinal === 3 || schedule.candidateOrdinal === 4)
             && schedule.allocationOrdinal === PANEL_SIZE - 1;
@@ -538,6 +560,8 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
     expect(failures).toHaveLength(2);
     expect(launchedChildren).toHaveLength(18);
     expect(launchedChildren.every((request) => request.child.schedule !== undefined)).toBe(true);
+    expect(peakOpenRecursiveReservations).toBe(3);
+    expect([...panelBarriers.values()].every((barrier) => barrier.entered === PANEL_SIZE)).toBe(true);
     expect(finishCalls).toHaveLength(1);
     expect(finishCalls[0]?.[0].best.hash).toBe(brokerPromoted[0]?.artifact.hash);
     expect(finalBudget).toMatchObject({ spent: { tokens: 0, usd: 0, evaluatorInvocations: 11 } });
@@ -556,6 +580,8 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
         outerEpisodes: completed.length,
         panelChildren: PANEL_SIZE,
         childLaunches: launchedChildren.length,
+        searchChildConcurrency: adapterConfig.counts.searchChildConcurrency,
+        peakOpenRecursiveReservations,
         failedChildSettlements: failures.size,
         nullAggregates: nullEvaluations.length,
         repairedAliasAcrossEpisodes: candidateHashes[1] === candidateHashes[2],

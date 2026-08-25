@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import {
   M2_CALIBRATION_DEFERRED_BINDING,
@@ -33,6 +34,9 @@ import {
   M2_DRAFT_PROTECTED_PATHS,
   M2_LAUNCH_DRAFT_DOCUMENT_VERSION,
   M2_LAUNCH_DRAFT_RECORD_VERSION,
+  M2_OUTER_DIRECT_ENVELOPE_POLICY,
+  assertM2OuterDirectEnvelope,
+  deriveM2OuterDirectEnvelope,
   generateM2LaunchDraft,
   writeM2LaunchDraft,
   type M2DraftAdmittedCapsule,
@@ -201,10 +205,9 @@ function fixture(): Fixture {
     calibrationCapsuleIds: CALIBRATION_CAPSULE_IDS,
     parameters: {
       optimizerImage: `hone-optimizer@${digest("optimizer-image")}`,
-      // Evaluator floors: child must fund a complete run even at the deferred
-      // ceiling of 12 (4*12+1 = 49); outer must fund candidateAttemptsMax + 1 = 25.
+      // Evaluator floor: a child must fund a complete run even at the
+      // deferred ceiling of 12 (4*12+1 = 49). Outer is plan-derived below.
       childBudget: { maxTokens: 1_000_000, maxUsd: 2, maxWallClockSec: 1800, maxEvaluatorInvocations: 49 },
-      outerBudget: { maxTokens: 5_000_000, maxUsd: 25, maxWallClockSec: 86_400, maxEvaluatorInvocations: 25 },
       calibratedInnerCeilings: Object.fromEntries(
         Object.values(panelA).map((id) => [id, ceiling]),
       ),
@@ -408,6 +411,15 @@ describe("generateM2LaunchDraft", () => {
         + config.recursiveBudgets.terminal.budget[dimension],
       );
     }
+    expect(config.counts).toMatchObject({ searchChildConcurrency: 3, childConcurrency: 4 });
+    expect(config.outerBudgetDerivation).toEqual(deriveM2OuterDirectEnvelope(12));
+    expect(config.budgets.outer).toEqual({
+      maxTokens: 22_500_000,
+      maxUsd: 113,
+      maxWallClockSec: 137_343,
+      maxEvaluatorInvocations: 27,
+    });
+    expect(assertM2OuterDirectEnvelope(config)).toEqual(config.outerBudgetDerivation);
     const ancestorCapacity = assertM2OuterAncestorCapacity(config);
     expect(ancestorCapacity.plannedChildren).toEqual({
       search: 12 * config.developmentPanel.members.length,
@@ -463,6 +475,83 @@ describe("generateM2LaunchDraft", () => {
       provenanceInputsDigest: provenance.inputsDigest,
     });
     expect(draft.unresolvedDecisions).toEqual([]);
+  });
+
+  it("derives Campaign-8's outer direct envelope and rejects the preserved insufficient freeze", () => {
+    const derivation = deriveM2OuterDirectEnvelope(12);
+    expect(derivation).toMatchObject({
+      projectionBasis: "campaign-8-observed-panel-mean",
+      plannedEpisodes: 12,
+      plannedDirectEvaluations: 24,
+      retryHeadroomEvaluations: 3,
+      totalDirectEvaluations: 27,
+      searchChildConcurrency: 3,
+      confirmationTerminalChildConcurrency: 4,
+    });
+    expect(derivation.derived).toEqual({
+      maxTokens: 22_500_000,
+      maxUsd: 113,
+      maxWallClockSec: 137_343,
+      maxEvaluatorInvocations: 27,
+    });
+    const observedPlannedWall =
+      M2_OUTER_DIRECT_ENVELOPE_POLICY.projectedPanelMeanWallClockSec
+      * derivation.plannedDirectEvaluations;
+    expect(observedPlannedWall).toBeCloseTo(97_666.08, 6);
+    expect(derivation.derived.maxWallClockSec).toBeGreaterThanOrEqual(
+      observedPlannedWall * 1.25,
+    );
+
+    const preservedPath = fileURLToPath(new URL(
+      "../../../data/m2-refreeze-final/campaign-frozen.json",
+      import.meta.url,
+    ));
+    const preserved = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedPath, "utf8")));
+    expect(preserved.budgets.outer).toEqual({
+      maxTokens: 5_000_000,
+      maxUsd: 25,
+      maxWallClockSec: 86_400,
+      maxEvaluatorInvocations: 25,
+    });
+    expect(() => assertM2OuterDirectEnvelope(preserved)).toThrow(
+      /frozen outer direct maxTokens 5000000 cannot cover the planned search phase/,
+    );
+  });
+
+  it("makes every outer derivation and concurrency guard load-bearing", () => {
+    const config = generateM2LaunchDraft(fixture().inputs).config;
+    for (const dimension of DIMENSIONS) {
+      const mutated = structuredClone(config);
+      mutated.budgets.outer[dimension] -= 1;
+      expect(() => assertM2OuterDirectEnvelope(mutated)).toThrow(
+        new RegExp(`outer direct ${dimension}|must equal the freeze-time derivation`),
+      );
+    }
+
+    const oversized = structuredClone(config);
+    oversized.budgets.outer.maxTokens += 1;
+    expect(() => assertM2OuterDirectEnvelope(oversized)).toThrow(
+      /must equal the freeze-time derivation exactly/,
+    );
+
+    const missingEvidence = structuredClone(config);
+    delete missingEvidence.outerBudgetDerivation;
+    expect(() => assertM2OuterDirectEnvelope(missingEvidence)).toThrow(
+      /missing its exact freeze-time derivation evidence/,
+    );
+
+    const missingSearchBound = structuredClone(config);
+    delete missingSearchBound.counts.searchChildConcurrency;
+    expect(() => assertM2OuterDirectEnvelope(missingSearchBound)).toThrow(
+      /SEARCH\/judging concurrency bounds/,
+    );
+
+    const forgedArithmetic = structuredClone(config);
+    forgedArithmetic.outerBudgetDerivation!.derived.maxWallClockSec -= 1;
+    forgedArithmetic.budgets.outer.maxWallClockSec -= 1;
+    expect(() => MetaCampaignConfigV2.parse(forgedArithmetic)).toThrow(
+      /derived maxWallClockSec must equal/,
+    );
   });
 
   it("populates both frozen observation routes (outer=sol, inner=terra)", () => {
@@ -602,7 +691,7 @@ describe("generateM2LaunchDraft", () => {
     expect(explicit.unresolvedDecisions).toEqual([]);
   });
 
-  it("refuses per-run budgets below the evaluator floors before any arithmetic", () => {
+  it("refuses per-child budgets below the evaluator floors before aggregate arithmetic", () => {
     const { inputs, admittedByLabel } = fixture();
     // Floor at the calibrated ceiling of 8 is 4*8+1 = 33.
     expect(() =>
@@ -615,15 +704,6 @@ describe("generateM2LaunchDraft", () => {
       }),
     ).toThrow(/cannot fund one complete run at innerEpisodesMax 8 \(needs 33\)/);
 
-    expect(() =>
-      generateM2LaunchDraft({
-        ...inputs,
-        parameters: {
-          ...inputs.parameters,
-          outerBudget: { ...inputs.parameters.outerBudget, maxEvaluatorInvocations: 24 },
-        },
-      }),
-    ).toThrow(/candidateAttemptsMax \+ 1 evaluations \(needs 25\)/);
 
     const panelId = admittedByLabel.get("panel-a-OWN-T01")!.manifest.id;
     expect(() =>

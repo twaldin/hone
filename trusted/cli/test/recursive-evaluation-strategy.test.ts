@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -126,7 +126,7 @@ function harness(): Harness {
     bundleDigestForImage: () => BUNDLE,
   };
   const config = {
-    counts: { innerEpisodesMax: 4 },
+    counts: { innerEpisodesMax: 4, searchChildConcurrency: 3 },
     developmentPanel: {
       members: [
         {
@@ -356,7 +356,7 @@ describe("recursive search trusted evaluation adapter", () => {
       },
     };
     const config = {
-      counts: { innerEpisodesMax: 4 },
+      counts: { innerEpisodesMax: 4, searchChildConcurrency: 3 },
       developmentPanel: {
         members: [
           {
@@ -386,6 +386,12 @@ describe("recursive search trusted evaluation adapter", () => {
       {} as CampaignPauseAuthority,
     );
     const ledger = RecursiveResourceLedger.open(join(campaignDir, "recursive-resource.ndjson"));
+    const enteredChildren: string[] = [];
+    const openReservationCounts: number[] = [];
+    let releaseChildren!: () => void;
+    const allChildrenEntered = new Promise<void>((resolve) => {
+      releaseChildren = resolve;
+    });
     const broker = new Broker({
       runId: "run_recursive_outer_image_binding",
       manifest: {
@@ -424,6 +430,12 @@ describe("recursive search trusted evaluation adapter", () => {
           optimizerProvenanceHash: childRequest.child.optimizerArtifact.hash,
         }),
         launchChildRun: async ({ request: childRequest, admission }) => {
+          enteredChildren.push(childRequest.child.runId);
+          openReservationCounts.push(
+            ledger.budgetState("run_recursive_outer_image_binding").openReservations,
+          );
+          if (enteredChildren.length === 3) releaseChildren();
+          await allChildrenEntered;
           const actualBundle = runtimeBundleByCapsule[childRequest.child.capsuleId];
           if (actualBundle === undefined) throw new Error("test launched a capsule outside its runtime map");
           const childDir = join(root, childRequest.child.runId);
@@ -498,7 +510,15 @@ describe("recursive search trusted evaluation adapter", () => {
         BUNDLE,
         IMAGE_BOUND_BUNDLE,
       ]);
-      expect(finalized).toEqual(launched.map((childRequest) => childRequest.child.runId));
+      expect(finalized.sort()).toEqual(launched.map((childRequest) => childRequest.child.runId).sort());
+      expect(new Set(finalized)).toHaveLength(3);
+      expect(openReservationCounts).toContain(3);
+      const durableShape = readFileSync(ledger.filePath, "utf8")
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line).t);
+      expect(durableShape.slice(0, 4)).toEqual(["account", "reservation", "reservation", "reservation"]);
+      expect(durableShape.filter((type) => type === "settlement")).toHaveLength(3);
       expect(record.output.objectives).toEqual({ normalizedGain: 0.5 });
       expect(record.output.constraints).toEqual({ allChildrenValid: true, fullPanel: true });
       expect(ledger.budgetState("run_recursive_outer_image_binding")).toMatchObject({

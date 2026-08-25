@@ -801,12 +801,89 @@ export const RecursiveCampaignCounts = z.object({
   /** Frozen trusted safety ceiling; an optimizer may allocate fewer episodes. */
   innerEpisodesMax: z.union([z.literal(4), z.literal(8), z.literal(12)]),
   searchReplicates: z.number().int().positive(),
+  /** SEARCH-only child bound; absent only on pre-concurrency frozen evidence. */
+  searchChildConcurrency: z.literal(3).optional(),
   /** Fixed scientific-shell judging replication. */
   confirmationReplicates: z.literal(3),
   holdoutReplicates: z.literal(3),
   childConcurrency: z.number().int().positive(),
 }).strict();
 export type RecursiveCampaignCounts = z.infer<typeof RecursiveCampaignCounts>;
+
+const M2OuterDirectEnvelopeDerivationShape = z.object({
+  method: z.literal("m2-outer-direct-envelope.v1"),
+  projectionBasis: z.literal("campaign-8-observed-panel-mean"),
+  plannedEpisodes: z.number().int().positive(),
+  directEvaluationsPerEpisode: z.literal(2),
+  retryHeadroomEvaluations: z.number().int().positive(),
+  searchChildConcurrency: z.literal(3),
+  confirmationTerminalChildConcurrency: z.literal(4),
+  projectedPanelMeanWallClockSec: z.number().finite().positive(),
+  wallClockMarginBps: z.number().int().nonnegative(),
+  mutationSessionsPerEpisode: z.literal(1),
+  mutationSessionMaxTokens: z.number().int().positive(),
+  tokenMarginBps: z.number().int().nonnegative(),
+  usdPerMillionTokens: z.number().finite().positive(),
+  plannedDirectEvaluations: z.number().int().positive(),
+  totalDirectEvaluations: z.number().int().positive(),
+  derived: BudgetEnvelope,
+}).strict();
+
+/**
+ * Freeze evidence for the outer controller's DIRECT budget. Recursive child
+ * reservations live in separate envelopes; this derivation funds the Sol
+ * mutation sessions and the direct panel evaluations that drive search.
+ */
+export const M2OuterDirectEnvelopeDerivation = M2OuterDirectEnvelopeDerivationShape.superRefine(
+  (derivation, ctx) => {
+    const plannedDirectEvaluations =
+      derivation.plannedEpisodes * derivation.directEvaluationsPerEpisode;
+    const totalDirectEvaluations =
+      plannedDirectEvaluations + derivation.retryHeadroomEvaluations;
+    const derived = {
+      maxTokens: Math.ceil(
+        derivation.plannedEpisodes
+        * derivation.mutationSessionsPerEpisode
+        * derivation.mutationSessionMaxTokens
+        * (10_000 + derivation.tokenMarginBps)
+        / 10_000,
+      ),
+      maxUsd: 0,
+      maxWallClockSec: Math.ceil(
+        totalDirectEvaluations
+        * derivation.projectedPanelMeanWallClockSec
+        * (10_000 + derivation.wallClockMarginBps)
+        / 10_000,
+      ),
+      maxEvaluatorInvocations: totalDirectEvaluations,
+    };
+    derived.maxUsd = Math.ceil(derived.maxTokens * derivation.usdPerMillionTokens / 1_000_000);
+    if (derivation.plannedDirectEvaluations !== plannedDirectEvaluations) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["plannedDirectEvaluations"],
+        message: `planned direct evaluations must equal ${plannedDirectEvaluations}`,
+      });
+    }
+    if (derivation.totalDirectEvaluations !== totalDirectEvaluations) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["totalDirectEvaluations"],
+        message: `total direct evaluations must equal ${totalDirectEvaluations}`,
+      });
+    }
+    for (const dimension of BUDGET_DIMENSIONS) {
+      if (!Number.isSafeInteger(derived[dimension]) || derivation.derived[dimension] !== derived[dimension]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["derived", dimension],
+          message: `derived ${dimension} must equal ${String(derived[dimension])}`,
+        });
+      }
+    }
+  },
+);
+export type M2OuterDirectEnvelopeDerivation = z.infer<typeof M2OuterDirectEnvelopeDerivation>;
 
 const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   version: z.literal(META_CAMPAIGN_CONFIG_V2),
@@ -824,6 +901,8 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   modelObservation: M2ModelObservationPolicy,
   developmentPanel: M2DevelopmentPanel,
   recursiveBudgets: M2RecursiveBudgets,
+  /** Freeze-derived outer direct-envelope arithmetic; absent on historical frozen evidence only. */
+  outerBudgetDerivation: M2OuterDirectEnvelopeDerivation.optional(),
   allowedClaim: z.literal(M2_ALLOWED_CLAIM),
 }).strict();
 
@@ -876,6 +955,45 @@ function refineMetaCampaignV2(
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [partition, index, "scale"], message: "scale must equal qReference - qBase" });
       }
     });
+
+  }
+  if (
+    cfg.counts.searchChildConcurrency !== undefined
+    && cfg.counts.searchChildConcurrency > cfg.counts.childConcurrency
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["counts", "searchChildConcurrency"],
+      message: "search child concurrency cannot exceed the confirmation/terminal child concurrency",
+    });
+  }
+  if (cfg.outerBudgetDerivation !== undefined) {
+    if (cfg.outerBudgetDerivation.plannedEpisodes !== cfg.counts.candidates) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["outerBudgetDerivation", "plannedEpisodes"],
+        message: "outer direct-envelope planned episodes must equal counts.candidates",
+      });
+    }
+    if (
+      cfg.counts.searchChildConcurrency !== cfg.outerBudgetDerivation.searchChildConcurrency
+      || cfg.counts.childConcurrency !== cfg.outerBudgetDerivation.confirmationTerminalChildConcurrency
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["outerBudgetDerivation"],
+        message: "outer direct-envelope concurrency evidence must match the frozen search and judging bounds",
+      });
+    }
+    for (const dimension of BUDGET_DIMENSIONS) {
+      if (cfg.budgets.outer[dimension] !== cfg.outerBudgetDerivation.derived[dimension]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["budgets", "outer", dimension],
+          message: `outer direct budget must equal its freeze derivation (${cfg.outerBudgetDerivation.derived[dimension]})`,
+        });
+      }
+    }
   }
 
   const development = new Set(cfg.corpusCohort.developmentCapsuleIds);

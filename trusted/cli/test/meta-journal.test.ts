@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import {
   MetaJournalV1,
   metaCampaignConfigHash,
+  metaWorkKey,
   type MetaResourceUsageV1,
   type MetaSha256DigestV1,
   type MetaSettlementInputV1,
@@ -434,6 +435,67 @@ describe("MetaJournalV1 durable identity and idempotency", () => {
     expect(replayed.queryTrainMeasurements()).toHaveLength(1);
     expect(replayed.queryFailureSettlements()).toHaveLength(1);
     replayed.close();
+  });
+
+  it("replays two interleaved open children and settles each pending identity exactly once", async () => {
+    const path = await journalPath("interleaved-open-children");
+    const cfg = recursiveConfig();
+    const firstWork = identity("interleaved-first", {
+      capsuleId: cfg.developmentPanel.members[0]!.capsule.capsuleId,
+      measurementEpoch: "m2:interleaved-first",
+    });
+    const secondWork = identity("interleaved-second", {
+      capsuleId: cfg.developmentPanel.members[1]!.capsule.capsuleId,
+      measurementEpoch: "m2:interleaved-second",
+    });
+    const envelopeFor = (label: string) => ({
+      purpose: "search" as const,
+      envelope: cfg.recursiveBudgets.search.identity,
+      reservationId: `interleaved-${label}`,
+      parentReservationId: null,
+      reserved: { ...cfg.budgets.child },
+    });
+
+    const first = MetaJournalV1.open(path, cfg);
+    first.reserveChild(firstWork, envelopeFor("first"));
+    first.reserveChild(secondWork, envelopeFor("second"));
+    first.recordChildPending(firstWork, pending("first-open", usage(4)));
+    first.recordChildPending(secondWork, pending("second-open", usage(4)));
+    expect(first.budgetState()).toMatchObject({ reservations: 2, openReservations: 2 });
+    first.close();
+
+    const replayed = MetaJournalV1.open(path, cfg);
+    expect(new Set(replayed.queryPendingChildren().map((row) => row.workKey))).toEqual(
+      new Set([metaWorkKey(replayed.configHash, firstWork), metaWorkKey(replayed.configHash, secondWork)]),
+    );
+    replayed.settleChildFailure(secondWork, {
+      evidenceHash: digest("interleaved-second-terminal"),
+      observed: usage(5),
+      status: "candidate_failed",
+    });
+    replayed.settleChild(firstWork, settlement(0.7, {
+      evidenceHash: digest("interleaved-first-terminal"),
+      observed: usage(5),
+    }));
+    expect(replayed.queryPendingChildren()).toEqual([]);
+    expect(replayed.budgetState()).toMatchObject({ settlements: 2, openReservations: 0 });
+    expect(() => replayed.settleChildFailure(secondWork, {
+      evidenceHash: digest("conflicting-interleaved-second"),
+      observed: usage(5),
+      status: "candidate_failed",
+    })).toThrow(/conflicting duplicate settlement/);
+    replayed.close();
+
+    expect(lines(path).map((line) => JSON.parse(line).t)).toEqual([
+      "header",
+      "reservation",
+      "reservation",
+      "pending",
+      "pending",
+      "failure-settlement",
+      "settlement",
+      "measurement",
+    ]);
   });
 });
 

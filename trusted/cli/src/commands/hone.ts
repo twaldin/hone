@@ -37,6 +37,7 @@ import {
   MetaEnvelopeFileRecordPortV1,
   MetaResourceEnvelopeLedger,
   metaCampaignConfigHash,
+  mapBounded,
   selectDeterministicBest,
   trustedPhaseMeasurementEpoch,
   type CandidateGateResult,
@@ -48,6 +49,7 @@ import {
   type MetaChildRunRequest,
   type MetaChildSupervisor,
   type MetaControlTransformationReceipt,
+  type MetaFailureSettlement,
   type MetaMeasurement,
   type MetaReservation,
   type MetaResourceUsage,
@@ -102,7 +104,14 @@ import { UsageError, boolFlag, parseFlags, strFlag } from "../args.js";
 import { EVENTS_FILE, bestArtifact, readEvents, replayRun, writeFileDurable } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
 import { MetaJournalV1, metaWorkKey } from "../meta-journal.js";
-import { persistMetaSearchTrajectory } from "../meta-trajectory.js";
+import {
+  assertM2OuterDirectEnvelope,
+  deriveM2OuterDirectEnvelope,
+} from "../launch-draft.js";
+import {
+  persistMetaSearchTrajectory,
+  persistTrajectoryWithoutMaskingSearchFailure,
+} from "../meta-trajectory.js";
 import {
   assembleG1Authorization,
   assembleG1Record,
@@ -1338,57 +1347,64 @@ export class RecursiveSearchChildLauncher {
         this.ordinalArtifacts.set(candidateOrdinal, sourceArtifact);
       }
 
-      const measurements: MetaMeasurement[] = [];
-      const failures: string[] = [];
-      let costUsd = 0;
-      for (const allocation of plan.allocations) {
-        const member = members.get(allocation.capsuleId);
-        if (member === undefined) throw new Error(`recursive allocation lost panel capsule ${allocation.capsuleId}`);
-        const runtimeBundleDigest = this.gate.bundleDigestForImage(sourceArtifact, member.capsule.image);
-        const identity: MetaWorkIdentity = {
-          phase: "search",
-          arm: "candidate",
-          sourceArtifact,
-          bundleDigest: runtimeBundleDigest,
-          capsuleId: allocation.capsuleId,
-          replicate: 0,
-          measurementEpoch: `m2:${sha256(canonicalJson({
-            candidateOrdinal,
-            allocationOrdinal: allocation.allocationOrdinal,
-            innerEpisodesMax: allocation.innerEpisodesMax,
-            reserved: allocation.reservation,
-          })).slice("sha256:".length)}`,
-        };
-        const runId = `run_meta_${metaWorkKey(this.configHash, identity).slice("sha256:".length)}`;
-        await input.spawnRun(SpawnRunParams.parse({
-          child: {
-            runId,
+      const childResults = await mapBounded(
+        plan.allocations,
+        this.config.counts.searchChildConcurrency ?? 1,
+        async (allocation): Promise<
+          | { kind: "measurement"; value: MetaMeasurement }
+          | { kind: "failure"; value: MetaFailureSettlement }
+        > => {
+          const member = members.get(allocation.capsuleId);
+          if (member === undefined) throw new Error(`recursive allocation lost panel capsule ${allocation.capsuleId}`);
+          const runtimeBundleDigest = this.gate.bundleDigestForImage(sourceArtifact, member.capsule.image);
+          const identity: MetaWorkIdentity = {
+            phase: "search",
+            arm: "candidate",
+            sourceArtifact,
+            bundleDigest: runtimeBundleDigest,
             capsuleId: allocation.capsuleId,
-            sourceArtifact: { hash: sourceArtifact },
-            optimizerArtifact: { hash: runtimeBundleDigest },
-            purpose: "capsule",
-            schedule: {
+            replicate: 0,
+            measurementEpoch: `m2:${sha256(canonicalJson({
               candidateOrdinal,
               allocationOrdinal: allocation.allocationOrdinal,
               innerEpisodesMax: allocation.innerEpisodesMax,
+              reserved: allocation.reservation,
+            })).slice("sha256:".length)}`,
+          };
+          const runId = `run_meta_${metaWorkKey(this.configHash, identity).slice("sha256:".length)}`;
+          await input.spawnRun(SpawnRunParams.parse({
+            child: {
+              runId,
+              capsuleId: allocation.capsuleId,
+              sourceArtifact: { hash: sourceArtifact },
+              optimizerArtifact: { hash: runtimeBundleDigest },
+              purpose: "capsule",
+              schedule: {
+                candidateOrdinal,
+                allocationOrdinal: allocation.allocationOrdinal,
+                innerEpisodesMax: allocation.innerEpisodesMax,
+              },
             },
-          },
-          depth: 1,
-          reservation: allocation.reservation,
-        }));
-        const workKey = metaWorkKey(this.configHash, identity);
-        const measurement = this.journal.queryTrainMeasurements().find((row) => row.workKey === workKey);
-        if (measurement !== undefined) {
-          measurements.push(measurement);
-          costUsd += measurement.observed.usd;
-          continue;
-        }
-        const failure = this.journal.queryFailureSettlements().find((row) => row.workKey === workKey);
-        if (failure === undefined) {
-          throw new Error(`recursive child ${runId} returned without a trusted settlement`);
-        }
-        costUsd += failure.observed.usd;
-        failures.push(`${allocation.capsuleId}=${failure.status}`);
+            depth: 1,
+            reservation: allocation.reservation,
+          }));
+          const workKey = metaWorkKey(this.configHash, identity);
+          const measurement = this.journal.queryTrainMeasurements().find((row) => row.workKey === workKey);
+          if (measurement !== undefined) return { kind: "measurement", value: measurement };
+          const failure = this.journal.queryFailureSettlements().find((row) => row.workKey === workKey);
+          if (failure === undefined) {
+            throw new Error(`recursive child ${runId} returned without a trusted settlement`);
+          }
+          return { kind: "failure", value: failure };
+        },
+      );
+      const measurements: MetaMeasurement[] = [];
+      const failures: string[] = [];
+      let costUsd = 0;
+      for (const result of childResults) {
+        costUsd += result.value.observed.usd;
+        if (result.kind === "measurement") measurements.push(result.value);
+        else failures.push(`${result.value.capsuleId}=${result.value.status}`);
       }
 
       if (failures.length > 0) {
@@ -2214,10 +2230,37 @@ function freezeRecursiveCampaignConfig(
   corpus: FrozenCorpus,
   identities: FrozenRecursiveIdentities,
 ): RecursiveMetaCampaignConfig {
+  const outerBudgetDerivation = deriveM2OuterDirectEnvelope(draft.counts.candidates);
+  if (draft.counts.childConcurrency !== outerBudgetDerivation.confirmationTerminalChildConcurrency) {
+    throw new UsageError(
+      `recursive freeze requires confirmation/terminal child concurrency `
+      + `${outerBudgetDerivation.confirmationTerminalChildConcurrency}`,
+    );
+  }
+  const campaignBudget = Object.fromEntries(SCHEDULED_BUDGET_DIMENSIONS.map((dimension) => {
+    const derived =
+      draft.budgets.campaign[dimension]
+      - draft.budgets.outer[dimension]
+      + outerBudgetDerivation.derived[dimension];
+    if (!Number.isFinite(derived) || Math.abs(derived) > Number.MAX_SAFE_INTEGER || derived <= 0) {
+      throw new UsageError(`derived recursive campaign ${dimension} is not a safe positive value`);
+    }
+    return [dimension, derived];
+  })) as BudgetEnvelope;
   const identified = {
     ...draft,
     train: corpus.train,
     holdout: corpus.holdout,
+    counts: {
+      ...draft.counts,
+      searchChildConcurrency: outerBudgetDerivation.searchChildConcurrency,
+    },
+    budgets: {
+      ...draft.budgets,
+      campaign: campaignBudget,
+      outer: outerBudgetDerivation.derived,
+    },
+    outerBudgetDerivation,
     seedOptimizer: {
       sourceCommit: identities.sourceCommit,
       sourceArtifact: identities.target.sourceArtifact,
@@ -2239,6 +2282,7 @@ function freezeRecursiveCampaignConfig(
       degradedBundleDigest: identities.degradedControl.bundleDigest,
     },
   };
+  assertM2OuterDirectEnvelope(identified);
   const { protocolHash: _protocolHash, analysisConfigHash: _analysisConfigHash, ...protocolFields } = identified;
   const protocolHash = sha256(canonicalJson({ domain: "hone-m2-recursive-protocol-v1", config: protocolFields }));
   const analysisConfigHash = sha256(canonicalJson({
@@ -3136,13 +3180,27 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       // corpus capsule; its manifest bytes were validated before campaign seal.
       admissionReview: "off",
     });
-    if (
-      existsSync(join(outerRunDir, EVENTS_FILE))
-      && readEvents(outerRunDir).some((event) => event.type === "eval.completed" || event.type === "episode.invalid")
-    ) {
+    const hasPartialTrajectory = existsSync(join(outerRunDir, EVENTS_FILE))
+      && readEvents(outerRunDir).some(
+        (event) => event.type === "eval.completed" || event.type === "episode.invalid",
+      );
+    if (code !== 0) {
+      if (hasPartialTrajectory) {
+        const persistence = persistTrajectoryWithoutMaskingSearchFailure(code, () => {
+          persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal });
+        });
+        if (persistence.persistenceError !== null) {
+          io.err(
+            `recursive search optimizer exited ${code}; partial trajectory persistence also failed `
+            + `without replacing the primary failure: ${persistence.persistenceError}`,
+          );
+        }
+      }
+      return code;
+    }
+    if (hasPartialTrajectory) {
       persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal });
     }
-    if (code !== 0) return code;
     const terminal = replayRun(outerRunDir).finished;
     if (terminal?.status !== "completed") throw new UsageError("recursive search returned success without a completed terminal event");
     assertExactSearchCardinality(journal, config);

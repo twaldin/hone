@@ -14,6 +14,7 @@ import {
   M2_TERMINAL_CAPSULE_COUNT,
   M2_CALIBRATION_DEFERRED_BINDING,
   MetaCampaignConfigV2,
+  M2OuterDirectEnvelopeDerivation,
   MetaCampaignConfigV2Draft,
   canonicalJson,
   type AdmissionReceiptRecord,
@@ -23,6 +24,7 @@ import {
   type M2CalibrationBinding,
   type MetaCapsuleEntry,
   type MetaCampaignConfigV2 as RecursiveMetaCampaignConfig,
+  type M2OuterDirectEnvelopeDerivation as M2OuterDirectEnvelopeDerivationRecord,
   type PromotionRule,
 } from "@hone/schema";
 import { z } from "zod";
@@ -211,8 +213,6 @@ export interface M2LaunchDraftParameters {
   readonly optimizerImage: string;
   /** One child run's four-dimensional budget slice. */
   readonly childBudget: BudgetEnvelope;
-  /** Outer trajectory-generation budget. */
-  readonly outerBudget: BudgetEnvelope;
   /**
    * Complete-run resource vector per Panel-A capsule at the frozen calibrated
    * inner ceiling, keyed by capsule id. Launch open decision: these vectors
@@ -379,6 +379,102 @@ function assertSafeBudget(budget: BudgetEnvelope, label: string): void {
       throw new UsageError(`${label} ${dimension} is not safely representable (${value})`);
     }
   }
+}
+
+/**
+ * Campaign-8 measured 4,069.42 active seconds per direct recursive panel at
+ * SEARCH child concurrency 3. The direct budget meters cumulative evaluator
+ * wall usage, so concurrency is recorded but never treated as a spend
+ * discount: all 24 planned panels must fit. The frozen policy keeps three
+ * explicit retry panels, then applies 25% wall/token margins. Sol mutation
+ * sessions retain the optimizer's 1.5M-token no-yield ceiling; the $5/MTok
+ * exchange rate is the conservative ratio already used by the prior
+ * $25/5M direct envelope.
+ */
+export const M2_OUTER_DIRECT_ENVELOPE_POLICY = {
+  projectionBasis: "campaign-8-observed-panel-mean" as const,
+  directEvaluationsPerEpisode: 2 as const,
+  retryHeadroomEvaluations: 3,
+  searchChildConcurrency: 3 as const,
+  confirmationTerminalChildConcurrency: 4 as const,
+  projectedPanelMeanWallClockSec: 4_069.42,
+  wallClockMarginBps: 2_500,
+  mutationSessionsPerEpisode: 1 as const,
+  mutationSessionMaxTokens: 1_500_000,
+  tokenMarginBps: 2_500,
+  usdPerMillionTokens: 5,
+};
+
+export function deriveM2OuterDirectEnvelope(
+  plannedEpisodes: number,
+): M2OuterDirectEnvelopeDerivationRecord {
+  if (!Number.isSafeInteger(plannedEpisodes) || plannedEpisodes <= 0) {
+    throw new UsageError(`outer direct-envelope planned episodes must be a positive integer, got ${plannedEpisodes}`);
+  }
+  const plannedDirectEvaluations =
+    plannedEpisodes * M2_OUTER_DIRECT_ENVELOPE_POLICY.directEvaluationsPerEpisode;
+  const totalDirectEvaluations =
+    plannedDirectEvaluations + M2_OUTER_DIRECT_ENVELOPE_POLICY.retryHeadroomEvaluations;
+  const maxTokens = Math.ceil(
+    plannedEpisodes
+    * M2_OUTER_DIRECT_ENVELOPE_POLICY.mutationSessionsPerEpisode
+    * M2_OUTER_DIRECT_ENVELOPE_POLICY.mutationSessionMaxTokens
+    * (10_000 + M2_OUTER_DIRECT_ENVELOPE_POLICY.tokenMarginBps)
+    / 10_000,
+  );
+  return M2OuterDirectEnvelopeDerivation.parse({
+    method: "m2-outer-direct-envelope.v1",
+    ...M2_OUTER_DIRECT_ENVELOPE_POLICY,
+    plannedEpisodes,
+    plannedDirectEvaluations,
+    totalDirectEvaluations,
+    derived: {
+      maxTokens,
+      maxUsd: Math.ceil(
+        maxTokens * M2_OUTER_DIRECT_ENVELOPE_POLICY.usdPerMillionTokens / 1_000_000,
+      ),
+      maxWallClockSec: Math.ceil(
+        totalDirectEvaluations
+        * M2_OUTER_DIRECT_ENVELOPE_POLICY.projectedPanelMeanWallClockSec
+        * (10_000 + M2_OUTER_DIRECT_ENVELOPE_POLICY.wallClockMarginBps)
+        / 10_000,
+      ),
+      maxEvaluatorInvocations: totalDirectEvaluations,
+    },
+  });
+}
+
+/**
+ * Static freeze gate. Historical evidence remains parseable, but it can
+ * never be re-frozen until every direct dimension covers the current
+ * derivation and the arithmetic evidence is present byte-for-byte.
+ */
+export function assertM2OuterDirectEnvelope(
+  config: Pick<RecursiveMetaCampaignConfig, "counts" | "budgets" | "outerBudgetDerivation">,
+): M2OuterDirectEnvelopeDerivationRecord {
+  const expected = deriveM2OuterDirectEnvelope(config.counts.candidates);
+  for (const dimension of BUDGET_DIMENSIONS) {
+    if (config.budgets.outer[dimension] < expected.derived[dimension]) {
+      throw new UsageError(
+        `frozen outer direct ${dimension} ${config.budgets.outer[dimension]} cannot cover the planned search phase `
+        + `(needs ${expected.derived[dimension]} from ${expected.plannedDirectEvaluations} planned panels `
+        + `+ ${expected.retryHeadroomEvaluations} retry panels)`,
+      );
+    }
+  }
+  if (canonicalJson(config.budgets.outer) !== canonicalJson(expected.derived)) {
+    throw new UsageError("frozen outer direct envelope must equal the freeze-time derivation exactly");
+  }
+  if (canonicalJson(config.outerBudgetDerivation) !== canonicalJson(expected)) {
+    throw new UsageError("frozen outer direct envelope is missing its exact freeze-time derivation evidence");
+  }
+  if (
+    config.counts.searchChildConcurrency !== expected.searchChildConcurrency
+    || config.counts.childConcurrency !== expected.confirmationTerminalChildConcurrency
+  ) {
+    throw new UsageError("frozen SEARCH/judging concurrency bounds do not match the outer-envelope derivation");
+  }
+  return expected;
 }
 
 function envelopeIdentity(purpose: "search" | "confirmation" | "terminal", inputsDigest: string): string {
@@ -729,6 +825,13 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
   // trajectory needs candidateAttemptsMax + 1 (every attempt plus baseline).
   // The M2 schema superRefine rechecks the same invariants at freeze.
   const candidateAttemptsMax = parameters.candidateAttemptsMax ?? M2_CANDIDATE_ATTEMPTS_MAX;
+  const candidates = parameters.candidates ?? M2_CANDIDATE_COUNT;
+  const outerBudgetDerivation = deriveM2OuterDirectEnvelope(candidates);
+  if (parameters.childConcurrency !== outerBudgetDerivation.confirmationTerminalChildConcurrency) {
+    throw new UsageError(
+      `confirmation/terminal child concurrency must remain ${outerBudgetDerivation.confirmationTerminalChildConcurrency}`,
+    );
+  }
   const perRunEvaluatorFloor = 4 * calibration.innerEpisodesMax + 1;
   if (parameters.childBudget.maxEvaluatorInvocations < perRunEvaluatorFloor) {
     throw new UsageError(
@@ -736,9 +839,9 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
       + `complete run at innerEpisodesMax ${calibration.innerEpisodesMax} (needs ${perRunEvaluatorFloor})`,
     );
   }
-  if (parameters.outerBudget.maxEvaluatorInvocations < candidateAttemptsMax + 1) {
+  if (outerBudgetDerivation.derived.maxEvaluatorInvocations < candidateAttemptsMax + 1) {
     throw new UsageError(
-      `outer budget maxEvaluatorInvocations ${parameters.outerBudget.maxEvaluatorInvocations} cannot fund `
+      `derived outer budget maxEvaluatorInvocations ${outerBudgetDerivation.derived.maxEvaluatorInvocations} cannot fund `
       + `candidateAttemptsMax + 1 evaluations (needs ${candidateAttemptsMax + 1})`,
     );
   }
@@ -766,7 +869,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
   const confirmationBudget = multiplyBudget(parameters.childBudget, confirmationRuns);
   const terminalBudget = multiplyBudget(parameters.childBudget, terminalRuns);
   const campaignBudget = addBudgets([
-    parameters.outerBudget,
+    outerBudgetDerivation.derived,
     outerTrajectory,
     confirmationBudget,
     terminalBudget,
@@ -812,7 +915,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     );
   }
   openDecisions.push(
-    "budget vectors (child/outer/per-capsule calibrated ceilings) are launch open decision #4 — caller-supplied, not plan-frozen",
+    "child/per-capsule calibrated budget vectors are launch open decision #4; the outer direct vector is freeze-derived",
   );
 
   const config = {
@@ -863,10 +966,11 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
           provenanceInputsDigest: provenance.inputsDigest,
         },
     counts: {
-      candidates: parameters.candidates ?? M2_CANDIDATE_COUNT,
+      candidates,
       candidateAttemptsMax,
       innerEpisodesMax: calibration.innerEpisodesMax,
       searchReplicates: 1,
+      searchChildConcurrency: outerBudgetDerivation.searchChildConcurrency,
       confirmationReplicates: 3,
       holdoutReplicates: 3,
       childConcurrency: parameters.childConcurrency,
@@ -874,7 +978,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     evaluatorTimeoutSec: M2_EVALUATOR_TIMEOUT_SEC,
     budgets: {
       campaign: campaignBudget,
-      outer: parameters.outerBudget,
+      outer: outerBudgetDerivation.derived,
       child: parameters.childBudget,
     },
     developmentPanel: {
@@ -896,6 +1000,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
         budget: terminalBudget,
       },
     },
+    outerBudgetDerivation,
     controls: {
       brokenSourceArtifact: placeholderDigest("broken-source"),
       brokenBundleDigest: placeholderDigest("broken-bundle"),

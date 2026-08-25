@@ -1701,7 +1701,7 @@ export function selectDeterministicBest(records: readonly EvaluationRecord[]): E
   return eligible[0]!.record;
 }
 
-async function mapBounded<T, R>(items: readonly T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+export async function mapBounded<T, R>(items: readonly T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
   const worker = async (): Promise<void> => {

@@ -70,6 +70,50 @@ function sumUsage(rows: readonly SearchSettlement[]): MetaResourceUsage {
   return rows.reduce<MetaResourceUsage>((sum, row) => addUsage(sum, row.observed), { ...ZERO_USAGE });
 }
 
+export function controllerSpendDelta(
+  current: MetaResourceUsage,
+  prior: MetaResourceUsage,
+  candidateOrdinal: number,
+): MetaResourceUsage {
+  const delta: MetaResourceUsage = {
+    tokens: current.tokens - prior.tokens,
+    usd: current.usd - prior.usd,
+    wallClockSec: current.wallClockSec - prior.wallClockSec,
+    evaluatorInvocations: current.evaluatorInvocations - prior.evaluatorInvocations,
+  };
+  if (Object.values(delta).some((value) => value < 0)) {
+    throw new Error(`candidate ordinal ${candidateOrdinal} regresses trusted controller spend`);
+  }
+  return delta;
+}
+export interface FailedSearchTrajectoryPersistence {
+  readonly exitCode: number;
+  readonly persistenceError: string | null;
+}
+
+/**
+ * A partial trajectory is useful failure evidence, but it is secondary to the
+ * optimizer/Broker failure that stopped the run. Never let evidence
+ * materialization replace that primary replay signal on the CLI boundary.
+ */
+export function persistTrajectoryWithoutMaskingSearchFailure(
+  exitCode: number,
+  persist: () => void,
+): FailedSearchTrajectoryPersistence {
+  if (!Number.isInteger(exitCode) || exitCode === 0) {
+    throw new Error(`failed search persistence requires a nonzero integer exit code, got ${exitCode}`);
+  }
+  try {
+    persist();
+    return { exitCode, persistenceError: null };
+  } catch (error) {
+    return {
+      exitCode,
+      persistenceError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export function extractAnytimePoints(events: ReturnType<typeof readEvents>): AnytimeSearchPointV1[] {
   const points: MutablePoint[] = [];
   const byEpisode = new Map<number, MutablePoint>();
@@ -105,6 +149,13 @@ export function extractAnytimePoints(events: ReturnType<typeof readEvents>): Any
       const point = episodePoint(event.episode, cursor);
       point.eventCursor = cursor;
       point.candidateArtifact = event.candidate.hash as Sha256Digest;
+      // Trusted strategy evaluations are intentionally emitted without an
+      // episode field. `episode.candidate` is the durable episode binding and
+      // occurs before the following budget snapshot, so charge that snapshot
+      // to this point. Without this, a refused/null panel kept the stale
+      // episode-start spend and made a later valid monotonicity guard report a
+      // false controller-spend regression.
+      pending.add(point);
       continue;
     }
     if (event.type === "episode.invalid") {
@@ -239,16 +290,11 @@ function persistRecursiveTrajectory(
     if (outerPoint === undefined) {
       throw new Error(`candidate ordinal ${candidateOrdinal} has no matching trusted outer event`);
     }
-    const controllerSpent: MetaResourceUsage = {
-      tokens: outerPoint.spent.tokens - priorControllerSpent.tokens,
-      usd: outerPoint.spent.usd - priorControllerSpent.usd,
-      wallClockSec: outerPoint.spent.wallClockSec - priorControllerSpent.wallClockSec,
-      evaluatorInvocations:
-        outerPoint.spent.evaluatorInvocations - priorControllerSpent.evaluatorInvocations,
-    };
-    if (Object.values(controllerSpent).some((value) => value < 0)) {
-      throw new Error(`candidate ordinal ${candidateOrdinal} regresses trusted controller spend`);
-    }
+    const controllerSpent = controllerSpendDelta(
+      outerPoint.spent,
+      priorControllerSpent,
+      candidateOrdinal,
+    );
     priorCursor = outerPoint.eventCursor;
     priorControllerSpent = { ...outerPoint.spent };
     events.push({

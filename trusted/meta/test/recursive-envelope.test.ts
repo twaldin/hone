@@ -240,6 +240,29 @@ describe("trusted componentwise envelope ledger", () => {
     }
   });
 
+  test("replays interleaved sibling reservations and permits broker-ordered settlement per child", () => {
+    const records = new MemoryRecords();
+    const firstLedger = new MetaResourceEnvelopeLedger(budgets(), records);
+    firstLedger.reserveSearchDescendant(reservation("open-first", reserved(60)));
+    firstLedger.reserveSearchDescendant(reservation("open-second", reserved(60)));
+    expect(firstLedger.remainingSearch()).toEqual(reserved(0));
+
+    // Simulate a process boundary while both children are open. Either child
+    // may finish first; the sibling remains charged and independently
+    // resumable.
+    const replayed = new MetaResourceEnvelopeLedger(budgets(), new MemoryRecords(records.rows));
+    expect(replayed.reservation("open-first")).toMatchObject({ settled: false });
+    expect(replayed.reservation("open-second")).toMatchObject({ settled: false });
+    replayed.settleDescendant("open-second", usage(20));
+    expect(replayed.remainingSearch()).toEqual(reserved(40));
+    expect(replayed.reservation("open-first")).toMatchObject({ settled: false });
+    replayed.settleDescendant("open-first", usage(30));
+    expect(replayed.remainingSearch()).toEqual(reserved(70));
+    expect(() => replayed.settleDescendant("open-second", usage(21))).toThrow(
+      /conflicting settlement replay/,
+    );
+  });
+
   test("reserves nested slices from ancestors, forbids depth 3, and settles children first", () => {
     const ledger = new MetaResourceEnvelopeLedger(budgets(), new MemoryRecords());
     ledger.reserveSearchDescendant(reservation("depth-1", reserved(100)));
