@@ -49,8 +49,11 @@ import {
 import type { CliChildSupervisor } from "../src/commands/hone.js";
 import { metaWorkKey } from "../src/meta-journal.js";
 import type { MetaJournalV1 } from "../src/meta-journal.js";
-import { computeTrustedRuntimeDigest } from "../src/runtime-digest.js";
+import { computeTrustedRuntimeDigest, sealBootRuntimeDigest } from "../src/runtime-digest.js";
 import type { CampaignPauseAuthority } from "../src/types.js";
+import { collectOptimizerSnapshot } from "../src/optimizer-digest.js";
+import { runCommand as runHone } from "../src/supervisor.js";
+import { tarToCas } from "./helpers.js";
 import { runEpisodeLoop } from "../../../optimizer/src/loop.js";
 
 const ENABLED = process.env["HONE_RECURSIVE_SEARCH_SMOKE"] === "1";
@@ -757,4 +760,157 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
     mkdirSync(dirname(evidencePath), { recursive: true });
     writeFileSync(evidencePath, `${canonicalJson(evidence)}\n`);
   }, 600_000);
+
+  it("runs a production command panel with three genuinely simultaneous evaluator containers", async () => {
+    const repoRoot = process.env["HONE_REPO_ROOT"];
+    if (repoRoot === undefined) throw new Error("production-panel smoke requires HONE_REPO_ROOT");
+    sealBootRuntimeDigest();
+
+    // A candidate artifact is load-bearing here. The old smoke launched
+    // Brokers directly, skipping the production child supervisor's candidate
+    // resolution and Docker-client freeze where campaign 9 failed.
+    const baseSnapshot = collectOptimizerSnapshot(repoRoot);
+    const candidateFiles: Record<string, string> = {};
+    for (const [rel, file] of baseSnapshot.files) {
+      if (!rel.startsWith("optimizer/")) continue;
+      const packageRel = rel.slice("optimizer/".length);
+      if (
+        packageRel.startsWith("src/")
+        || packageRel.startsWith("assets/")
+        || packageRel.startsWith("worker/")
+        || packageRel === "package.json"
+        || packageRel === "tsconfig.json"
+      ) {
+        candidateFiles[packageRel] = file.bytes.toString("utf8");
+      }
+    }
+    // The normal backend runs one trusted baseline probe when an optimizer
+    // exits cleanly without an episode. All three optimizer containers wait
+    // for one absolute instant so the REAL evaluator containers must overlap;
+    // no proxy/model request is possible from this program.
+    const releaseAt = Date.now() + 60_000;
+    candidateFiles["src/main.ts"] = [
+      `const releaseAt = ${releaseAt};`,
+      "await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, releaseAt - Date.now())));",
+      "",
+    ].join("\n");
+    const candidateArtifact = tarToCas(repoRoot, candidateFiles);
+
+    const stamp = Date.now();
+    const runIds = [0, 1, 2].map((index) => `run_recursive_production_panel_smoke_${stamp}_${index}`);
+    const capsuleLabels = [
+      "harness-session-log-normalization",
+      "floyd-block-search-render",
+      "flt-dag-orphan-recovery",
+    ] as const;
+    const childEnvs = runIds.map(() => {
+      const env = { ...process.env };
+      delete env["HONE_OPTIMIZER_CMD"];
+      delete env["HONE_OPTIMIZER_DIGEST"];
+      return env;
+    });
+    const outputs = runIds.map(() => [] as string[]);
+    const errors = runIds.map(() => [] as string[]);
+    let monitorRunning = true;
+    let peakEvaluatorRunIds = new Set<string>();
+    let peakObservedAt: number | null = null;
+    const monitor = (async () => {
+      while (monitorRunning) {
+        const rows = execFileSync(
+          "docker",
+          ["ps", "--format", "{{.Names}}|{{.Label \"hone.runId\"}}"],
+          { encoding: "utf8" },
+        ).trim().split("\n").filter((line) => line.length > 0);
+        const live = new Set(
+          rows
+            .map((line) => line.split("|"))
+            .filter(([name, runId]) => name?.includes("-eval-") === true && runId !== undefined && runIds.includes(runId))
+            .map(([, runId]) => runId!),
+        );
+        if (live.size > peakEvaluatorRunIds.size) {
+          peakEvaluatorRunIds = live;
+          peakObservedAt = Date.now();
+        }
+        await delay(25);
+      }
+    })();
+
+    try {
+      // Real panel members differ substantially in candidate/baseline
+      // preparation time. Start all bounded workers now, but delay their
+      // inner command entry to make that production skew deterministic. Every
+      // CmdIo env was captured above, exactly as CliChildSupervisor does.
+      const codes = await Promise.all(runIds.map(async (runId, index) => {
+        await delay(index * 15_000);
+        return await runHone(
+          [
+            join(repoRoot, "capsules", capsuleLabels[index]!),
+            "--headless",
+            "--optimizer-artifact",
+            candidateArtifact,
+          ],
+          {
+            root: repoRoot,
+            env: childEnvs[index]!,
+            isTTY: false,
+            out: (line) => outputs[index]!.push(line),
+            err: (line) => errors[index]!.push(line),
+          },
+          {
+            runId,
+            measurementEpoch: `recursive-production-panel-smoke:${runId}`,
+            optimizerEpisodesMax: 1,
+            maxPublicCandidateEvaluations: 2,
+            optimizerBaseSnapshot: baseSnapshot,
+          },
+        );
+      }));
+      expect(codes).toEqual([0, 0, 0]);
+      expect(errors).toEqual([[], [], []]);
+      expect([...peakEvaluatorRunIds].sort()).toEqual([...runIds].sort());
+      expect(peakObservedAt).not.toBeNull();
+
+      const isolationEvents = outputs.flatMap((lines) =>
+        lines
+          .map((line) => {
+            try {
+              return JSON.parse(line) as RunEvent;
+            } catch {
+              return null;
+            }
+          })
+          .filter((event): event is Extract<RunEvent, { type: "evaluator.isolation" }> =>
+            event?.type === "evaluator.isolation"),
+      );
+      expect(isolationEvents).toHaveLength(3);
+      expect(isolationEvents.every((event) => event.isolation.mode === "reserved-uid")).toBe(true);
+      expect(new Set(isolationEvents.map((event) => event.isolation.workerUid)).size).toBe(3);
+      expect(new Set(isolationEvents.map((event) => event.isolation.allocationId)).size).toBe(3);
+
+      // A live-container observation is stronger than reservation counts or
+      // isolation events: Docker itself reported all three evaluator names at
+      // the same wall-clock instant, and each child then durably terminalized.
+      const finishedAt = runIds.map((runId) => {
+        const events = readFileSync(join(repoRoot, ".hone-runs", runId, "events.ndjson"), "utf8")
+          .trim().split("\n").map((line) => JSON.parse(line) as RunEvent);
+        let terminal: Extract<RunEvent, { type: "run.finished" }> | undefined;
+        for (let index = events.length - 1; index >= 0; index -= 1) {
+          const event = events[index];
+          if (event?.type === "run.finished") {
+            terminal = event;
+            break;
+          }
+        }
+        if (terminal === undefined) throw new Error(`${runId} has no durable terminal`);
+        return Date.parse(terminal.at);
+      });
+      expect(finishedAt.every((at) => peakObservedAt !== null && at >= peakObservedAt)).toBe(true);
+    } finally {
+      monitorRunning = false;
+      await monitor;
+      for (const runId of runIds) {
+        rmSync(join(repoRoot, ".hone-runs", runId), { recursive: true, force: true });
+      }
+    }
+  }, 180_000);
 });

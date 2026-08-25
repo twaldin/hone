@@ -221,19 +221,19 @@ export interface FrozenDockerClient {
  * mid-run must never re-steer later calls to a different daemon).
  *
  * Production (`production` non-null): verifies the injected env and the
- * ambient env agree on every steering key (the default RunCommand inherits
- * the ambient env), resolves the active endpoint exactly once (explicit
- * DOCKER_HOST wins; otherwise the current context's endpoint), refuses
- * non-local/TLS forms (M0 pins an exact `unix://` socket), canonicalizes
- * the socket path (realpath — an endpoint string alone still follows a
- * retargeted symlink), proves the canonical object IS a socket (lstat) and
- * pins its dev:ino for the whole attempt. Every channel then uses ONLY
- * `unix://<canonical>`: the returned env (detached create helper, optimizer
- * clients) carries it as DOCKER_HOST with an EMPTY 0700 trusted
- * DOCKER_CONFIG (no credential-bearing config is ever copied; images are
- * pinned local — nothing pulls), the returned RunCommand rewrites every
- * docker argv to carry it explicitly per-invocation, and the ambient
- * process env is bound to the same resolution as belt-and-suspenders.
+ * ambient env agree on every steering key before the run starts, resolves
+ * the active endpoint exactly once (explicit DOCKER_HOST wins; otherwise the
+ * current context's endpoint), refuses non-local/TLS forms (M0 pins an exact
+ * `unix://` socket), canonicalizes the socket path (realpath — an endpoint
+ * string alone still follows a retargeted symlink), proves the canonical
+ * object IS a socket (lstat) and pins its dev:ino for the whole attempt.
+ * Every channel then uses ONLY `unix://<canonical>`: the returned env
+ * (detached create helper, optimizer clients) carries it as DOCKER_HOST with
+ * an EMPTY 0700 trusted DOCKER_CONFIG (no credential-bearing config is ever
+ * copied; images are pinned local — nothing pulls), and the returned
+ * RunCommand rewrites every docker argv to carry it explicitly per-invocation.
+ * The process-global environment is deliberately never mutated: multiple
+ * recursive children share this process and own distinct trusted config dirs.
  *
  * Fails closed (throws) on divergent steering env, TLS forms, non-unix
  * endpoints, uncanonicalizable paths, and canonical objects that are not
@@ -307,14 +307,6 @@ export async function freezeDockerClientEnv(
     DOCKER_HOST: canonicalEndpoint,
     DOCKER_CONFIG: configDir,
   };
-  // Bind the ambient process env (inherited by the default RunCommand) to
-  // the SAME canonical resolution — belt-and-suspenders under the explicit
-  // per-invocation pinning below.
-  process.env["DOCKER_HOST"] = canonicalEndpoint;
-  process.env["DOCKER_CONFIG"] = configDir;
-  delete process.env["DOCKER_CONTEXT"];
-  delete process.env["DOCKER_TLS_VERIFY"];
-  delete process.env["DOCKER_CERT_PATH"];
   // Explicit per-invocation pinning (the primary defense): every docker argv
   // carries the canonical endpoint + trusted config, so no ambient env or
   // context/config mutation after this line can steer a production call.
