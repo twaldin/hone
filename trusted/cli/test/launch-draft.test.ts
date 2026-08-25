@@ -481,6 +481,10 @@ describe("generateM2LaunchDraft", () => {
     const derivation = deriveM2OuterDirectEnvelope(12);
     expect(derivation).toMatchObject({
       projectionBasis: "campaign-8-observed-panel-mean",
+      projectionReceiptPath: "data/m2-refreeze-final/campaign-8-abandonment-receipt.v1.json",
+      projectionReceiptSha256: "sha256:c5c474a3b1f5b9721e2b049a672124e69665524970e2c0ba8f60e592fabea77b",
+      projectionReceiptCommit: "d91251332",
+      projectionMeanField: "outerEnvelopeArithmetic.firstTwoProjectionMeanSec",
       plannedEpisodes: 12,
       plannedDirectEvaluations: 24,
       retryHeadroomEvaluations: 3,

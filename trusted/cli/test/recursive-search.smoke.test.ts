@@ -672,7 +672,7 @@ describe.skipIf(!ENABLED)("recursive search real-evaluator smoke", () => {
         outerAncestorCapacity,
       },
       fixtureSubstitutions: [
-        "The six-member configured development panel is reduced to three distinct allocation identities backed by the same authorized OSS-T05 runtime for a bounded zero-model concurrency smoke. This covers dispatch overlap, reservation/settlement ordering, and real evaluator isolation; it does not claim three-capsule scientific diversity.",
+        "The six-member configured development panel is reduced to three distinct admitted capsules (OWN-T03, OWN-T06, and OSS-T05) for a bounded zero-model concurrency smoke. This covers real multi-capsule dispatch overlap, reservation/settlement ordering, and evaluator isolation; it is not a scientific panel result.",
         "The candidate gate accepts the smoke artifact and smoke-only qBase=0/scale=1 normalization makes the trusted settlement trace explicit; neither has campaign or promotion authority.",
         "The MetaJournalV1 query surface is in memory and child lifecycle files are fixture-authored with production schemas and receipt hashing; separate durable journal regressions cover interleaved pending replay. The production Broker validates these files before the trusted strategy accepts each matching settlement.",
         "The broker's historical 3,600-second default sandbox TTL is compressed to one second while the optimizer still derives the episode claim from the campaign wall envelope. The trusted recursive panel is held beyond that compressed boundary before a real Docker sandbox executes the post-evaluation mutation shim; the pre-fix TTL runtime would reap that sandbox and fail with SANDBOX_NOT_FOUND.",

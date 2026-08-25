@@ -813,6 +813,10 @@ export type RecursiveCampaignCounts = z.infer<typeof RecursiveCampaignCounts>;
 const M2OuterDirectEnvelopeDerivationShape = z.object({
   method: z.literal("m2-outer-direct-envelope.v1"),
   projectionBasis: z.literal("campaign-8-observed-panel-mean"),
+  projectionReceiptPath: z.literal("data/m2-refreeze-final/campaign-8-abandonment-receipt.v1.json"),
+  projectionReceiptSha256: z.literal("sha256:c5c474a3b1f5b9721e2b049a672124e69665524970e2c0ba8f60e592fabea77b"),
+  projectionReceiptCommit: z.literal("d91251332"),
+  projectionMeanField: z.literal("outerEnvelopeArithmetic.firstTwoProjectionMeanSec"),
   plannedEpisodes: z.number().int().positive(),
   directEvaluationsPerEpisode: z.literal(2),
   retryHeadroomEvaluations: z.number().int().positive(),

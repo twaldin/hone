@@ -382,17 +382,23 @@ function assertSafeBudget(budget: BudgetEnvelope, label: string): void {
 }
 
 /**
- * Campaign-8 measured 4,069.42 active seconds per direct recursive panel at
- * SEARCH child concurrency 3. The direct budget meters cumulative evaluator
- * wall usage, so concurrency is recorded but never treated as a spend
- * discount: all 24 planned panels must fit. The frozen policy keeps three
- * explicit retry panels, then applies 25% wall/token margins. Sol mutation
- * sessions retain the optimizer's 1.5M-token no-yield ceiling; the $5/MTok
- * exchange rate is the conservative ratio already used by the prior
+ * Campaign-8's abandonment receipt measured 4,069.42 elapsed active seconds
+ * per direct recursive panel across its first two projections. The outer
+ * budget also meters elapsed active seconds, not summed evaluator durations.
+ * SEARCH concurrency 3 should reduce elapsed panel time, but freeze refuses to
+ * bank an ideal speedup: every planned/retry panel retains the measured serial
+ * mean, then receives a 25% wall margin. Sol mutation sessions retain the
+ * optimizer's 1.5M-token no-yield ceiling plus a 25% token margin; the
+ * $5/MTok exchange rate is the conservative ratio already used by the prior
  * $25/5M direct envelope.
  */
 export const M2_OUTER_DIRECT_ENVELOPE_POLICY = {
   projectionBasis: "campaign-8-observed-panel-mean" as const,
+  projectionReceiptPath: "data/m2-refreeze-final/campaign-8-abandonment-receipt.v1.json" as const,
+  projectionReceiptSha256:
+    "sha256:c5c474a3b1f5b9721e2b049a672124e69665524970e2c0ba8f60e592fabea77b" as const,
+  projectionReceiptCommit: "d91251332" as const,
+  projectionMeanField: "outerEnvelopeArithmetic.firstTwoProjectionMeanSec" as const,
   directEvaluationsPerEpisode: 2 as const,
   retryHeadroomEvaluations: 3,
   searchChildConcurrency: 3 as const,

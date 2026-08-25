@@ -2225,10 +2225,11 @@ interface FrozenRecursiveIdentities {
   readonly degradedControl: RegisteredControl;
 }
 
-function freezeRecursiveCampaignConfig(
+export function freezeRecursiveCampaignConfig(
   draft: RecursiveMetaCampaignConfig,
   corpus: FrozenCorpus,
   identities: FrozenRecursiveIdentities,
+  enforceOuterEnvelope: typeof assertM2OuterDirectEnvelope = assertM2OuterDirectEnvelope,
 ): RecursiveMetaCampaignConfig {
   const outerBudgetDerivation = deriveM2OuterDirectEnvelope(draft.counts.candidates);
   if (draft.counts.childConcurrency !== outerBudgetDerivation.confirmationTerminalChildConcurrency) {
@@ -2282,7 +2283,7 @@ function freezeRecursiveCampaignConfig(
       degradedBundleDigest: identities.degradedControl.bundleDigest,
     },
   };
-  assertM2OuterDirectEnvelope(identified);
+  enforceOuterEnvelope(identified);
   const { protocolHash: _protocolHash, analysisConfigHash: _analysisConfigHash, ...protocolFields } = identified;
   const protocolHash = sha256(canonicalJson({ domain: "hone-m2-recursive-protocol-v1", config: protocolFields }));
   const analysisConfigHash = sha256(canonicalJson({
@@ -2423,6 +2424,41 @@ function assertExactSearchCardinality(journal: MetaJournalV1, config: AnyMetaCam
       `search admitted ${sourceArtifacts.size} unique optimizer source artifacts; frozen campaign requires exactly ${config.counts.candidates}`,
     );
   }
+}
+
+export interface SearchCommandRunBoundaryInput {
+  readonly exitCode: number;
+  readonly outerRunDir: string;
+  readonly persistTrajectory: () => string;
+  readonly reportSecondaryFailure: (message: string) => void;
+}
+
+/**
+ * Shared legacy/recursive CLI boundary. Partial trajectory evidence must be
+ * attempted after a failed optimizer run without replacing its exit status.
+ */
+export function completeSearchCommandRun(input: SearchCommandRunBoundaryInput): number {
+  const hasPartialTrajectory = existsSync(join(input.outerRunDir, EVENTS_FILE))
+    && readEvents(input.outerRunDir).some(
+      (event) => event.type === "eval.completed" || event.type === "episode.invalid",
+    );
+  if (input.exitCode !== 0) {
+    if (hasPartialTrajectory) {
+      const persistence = persistTrajectoryWithoutMaskingSearchFailure(
+        input.exitCode,
+        input.persistTrajectory,
+      );
+      if (persistence.persistenceError !== null) {
+        input.reportSecondaryFailure(
+          `search optimizer exited ${input.exitCode}; partial trajectory persistence also failed `
+          + `without replacing the primary failure: ${persistence.persistenceError}`,
+        );
+      }
+    }
+    return input.exitCode;
+  }
+  if (hasPartialTrajectory) input.persistTrajectory();
+  return input.exitCode;
 }
 
 /** Official train-only outer campaign entrypoint. Confirmation/holdout remain separate trusted runner methods. */
@@ -2688,25 +2724,25 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
         admissionReview: "off",
       },
     );
-    if (
-      existsSync(join(outerRunDir, EVENTS_FILE))
-      && readEvents(outerRunDir).some((event) => event.type === "eval.completed" || event.type === "episode.invalid")
-    ) {
-      persistMetaSearchTrajectory({
+    const boundaryCode = completeSearchCommandRun({
+      exitCode: code,
+      outerRunDir,
+      persistTrajectory: () => persistMetaSearchTrajectory({
         root: io.root,
         campaignDir,
         outerRunId,
         configHash,
         config,
         journal,
-      });
-    }
-    if (code === 0) {
+      }),
+      reportSecondaryFailure: io.err,
+    });
+    if (boundaryCode === 0) {
       const terminal = replayRun(outerRunDir).finished;
       if (terminal?.status !== "completed") throw new UsageError("search returned success without a completed terminal event");
       assertExactSearchCardinality(journal, config);
     }
-    return code;
+    return boundaryCode;
   } finally {
     runner.close();
     journal.close();
@@ -3180,27 +3216,14 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       // corpus capsule; its manifest bytes were validated before campaign seal.
       admissionReview: "off",
     });
-    const hasPartialTrajectory = existsSync(join(outerRunDir, EVENTS_FILE))
-      && readEvents(outerRunDir).some(
-        (event) => event.type === "eval.completed" || event.type === "episode.invalid",
-      );
-    if (code !== 0) {
-      if (hasPartialTrajectory) {
-        const persistence = persistTrajectoryWithoutMaskingSearchFailure(code, () => {
-          persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal });
-        });
-        if (persistence.persistenceError !== null) {
-          io.err(
-            `recursive search optimizer exited ${code}; partial trajectory persistence also failed `
-            + `without replacing the primary failure: ${persistence.persistenceError}`,
-          );
-        }
-      }
-      return code;
-    }
-    if (hasPartialTrajectory) {
-      persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal });
-    }
+    const boundaryCode = completeSearchCommandRun({
+      exitCode: code,
+      outerRunDir,
+      persistTrajectory: () =>
+        persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal }),
+      reportSecondaryFailure: io.err,
+    });
+    if (boundaryCode !== 0) return boundaryCode;
     const terminal = replayRun(outerRunDir).finished;
     if (terminal?.status !== "completed") throw new UsageError("recursive search returned success without a completed terminal event");
     assertExactSearchCardinality(journal, config);
