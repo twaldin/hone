@@ -168,11 +168,42 @@ describe("freezeDockerClientEnv (endpoint canonicalized + inode-pinned once; con
         expect(configDir).toBe(join(dir, "docker-config"));
         expect(readdirSync(configDir)).toEqual([]); // EMPTY: no credential-bearing config enters runDir
         expect(statSync(configDir).mode & 0o777).toBe(0o700);
-        // The ambient channel (default RunCommand) is bound to the SAME canonical resolution.
-        expect(process.env["DOCKER_HOST"]).toBe(`unix://${canonical}`);
-        expect(process.env["DOCKER_CONFIG"]).toBe(configDir);
+        // Per-run authority stays local to the returned client. Mutating the
+        // process would corrupt sibling recursive children in this process.
+        expect(process.env["DOCKER_HOST"]).toBeUndefined();
+        expect(process.env["DOCKER_CONFIG"]).toBeUndefined();
         expect(process.env["DOCKER_CONTEXT"]).toBeUndefined();
         expect(frozen.socketError()).toBeNull(); // clean control: the pinned socket is intact
+      } finally {
+        await close();
+      }
+    }));
+
+  it("REGRESSION (recursive panel): staggered child freezes keep independent configs without corrupting the shared process environment", async () =>
+    withCleanAmbient(async () => {
+      const root = newDir();
+      const sock = join(root, "engine.sock");
+      const close = await listenUnixSocket(sock);
+      try {
+        // Production snapshots every child's CmdIo before candidate
+        // resolution. One child can reach Docker several seconds earlier,
+        // while its siblings retain these matching pre-freeze snapshots.
+        const childAEnv = base();
+        const childBEnv = base();
+        const run: RunCommand = (argv) => {
+          expect(argv.slice(0, 3)).toEqual(["docker", "context", "inspect"]);
+          return Promise.resolve(res({ stdout: Buffer.from(`unix://${sock}\n`) }));
+        };
+        const childA = await freezeDockerClientEnv(join(root, "child-a"), "run_child_a", childAEnv, { run });
+        // This exact second freeze rejected at HEAD: child A had overwritten
+        // process.env.DOCKER_CONFIG with its private run directory.
+        const childB = await freezeDockerClientEnv(join(root, "child-b"), "run_child_b", childBEnv, { run });
+
+        expect(childA.env["DOCKER_CONFIG"]).toBe(join(root, "child-a", "docker-config"));
+        expect(childB.env["DOCKER_CONFIG"]).toBe(join(root, "child-b", "docker-config"));
+        expect(childA.env["DOCKER_CONFIG"]).not.toBe(childB.env["DOCKER_CONFIG"]);
+        expect(process.env["DOCKER_HOST"]).toBeUndefined();
+        expect(process.env["DOCKER_CONFIG"]).toBeUndefined();
       } finally {
         await close();
       }
@@ -266,6 +297,9 @@ describe("freezeDockerClientEnv (endpoint canonicalized + inode-pinned once; con
       await close1();
       // Disappearance fails closed…
       expect(frozen.socketError()).toMatch(/disappeared mid-run/);
+      // Keep the just-freed inode occupied so Linux cannot immediately reuse
+      // it for the replacement socket and make this identity test ambiguous.
+      writeFileSync(join(dir, "freed-inode-occupier"), "");
       // …and a REPLACEMENT socket at the same path (new inode — a different
       // daemon may answer there with ANY engine ID) fails closed too: no
       // terminal/resource-clean success against the wrong engine.
