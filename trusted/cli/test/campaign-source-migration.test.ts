@@ -273,8 +273,12 @@ describe("campaign migrate-source", () => {
     pinsPastHead.seedOptimizer.sourceCommit = unjournaledCommit;
     pinsPastHead.controllerOptimizer.sourceCommit = unjournaledCommit;
     pinsPastHead.trustedRuntime.sourceCommit = unjournaledCommit;
-    pinsPastHead.trustedRuntime.digest = `sha256:${"5".repeat(64)}`;
     expect(() => metaCampaignConfigHash(pinsPastHead))
+      .toThrow("source migration journal head does not match the campaign source identity");
+
+    const digestPastHead = structuredClone(firstMigrated);
+    digestPastHead.trustedRuntime.digest = `sha256:${"5".repeat(64)}`;
+    expect(() => metaCampaignConfigHash(digestPastHead))
       .toThrow("source migration journal head does not match the campaign source identity");
 
     const changedReason = structuredClone(migrated);
