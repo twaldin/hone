@@ -93,6 +93,8 @@ afterEach(() => {
 });
 
 class RefusingChildSupervisor extends CliChildSupervisor {
+  readonly trustedRuns: TrustedRunOptions[] = [];
+
   constructor(
     private readonly root: string,
     campaignDir: string,
@@ -121,6 +123,7 @@ class RefusingChildSupervisor extends CliChildSupervisor {
     io: CmdIo,
     trusted: TrustedRunOptions,
   ): Promise<number> {
+    this.trustedRuns.push(trusted);
     const runId = trusted.runId;
     if (runId === undefined) throw new Error("fixture child has no trusted run id");
     const runDir = join(this.root, ".hone-runs", runId);
@@ -149,6 +152,7 @@ function makeSupervisor(
   blockBreadcrumbPath = false,
   establishJournalAuthority = false,
 ): {
+  root: string;
   campaignDir: string;
   outerRunDir: string;
   supervisor: RefusingChildSupervisor;
@@ -161,6 +165,7 @@ function makeSupervisor(
   mkdirSync(outerRunDir, { recursive: true, mode: 0o700 });
   if (blockBreadcrumbPath) mkdirSync(join(outerRunDir, PRE_AUTHORITY_BREADCRUMB_FILE));
   return {
+    root,
     campaignDir,
     outerRunDir,
     supervisor: new RefusingChildSupervisor(root, campaignDir, outerRunDir, establishJournalAuthority),
@@ -199,6 +204,10 @@ describe("pre-authority child refusal breadcrumbs", () => {
     expect(first.feedback).toBe("child has no durable terminal event");
     expect(resumed.status).toBe("infrastructure_not_run");
     expect(resumed.feedback).toBe("child infrastructure stopped before terminalization (exit 1)");
+    expect(supervisor.trustedRuns.map((trusted) => trusted.adjudicateInterruptedChild)).toEqual([
+      undefined,
+      true,
+    ]);
     expect(JSON.parse(
       readFileSync(join(campaignDir, `child-config-${childRunId}.json`), "utf8"),
     ).sessionNoYieldMaxTokens).toBe(SESSION_NO_YIELD_MAX_TOKENS);
@@ -227,6 +236,23 @@ describe("pre-authority child refusal breadcrumbs", () => {
     });
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(existsSync(join(campaignDir, PRE_AUTHORITY_BREADCRUMB_FILE))).toBe(false);
+  });
+
+  it("preserves an explicitly paused child's retry instead of adjudicating it as an interrupted crash", async () => {
+    const { root, supervisor } = makeSupervisor();
+    await supervisor.runLaunched(request, configHash);
+    appendEvent(join(root, ".hone-runs", childRunId), {
+      runId: childRunId,
+      at: "2026-08-26T12:00:01.000Z",
+      type: "run.paused",
+      reason: "operator",
+    });
+
+    await supervisor.runLaunched({ ...request, resume: true }, configHash);
+    expect(supervisor.trustedRuns.map((trusted) => trusted.adjudicateInterruptedChild)).toEqual([
+      undefined,
+      undefined,
+    ]);
   });
 
   it("does not record a post-authority child failure", async () => {

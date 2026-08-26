@@ -273,7 +273,13 @@ describe("createSandbox under journal failure (no ack, no leak, no unbounded cre
       h.broker.createSandbox({ artifact: { hash: h.baselineHash }, role: "mutation" }, { privileged: false }),
     ).rejects.toThrow(/run state log append failed/);
     // The spawned container was reaped — never acknowledged, never leaked.
-    expect(h.calls.some((c) => c[0] === "docker" && c[1] === "rm" && c[2] === "-f" && c[3] === "cid-1")).toBe(true);
+    expect(h.calls.some((c) =>
+      c[0] === "docker"
+      && c[1] === "rm"
+      && c[2] === "-f"
+      && c[3] === "-v"
+      && c[4] === "cid-1"
+    )).toBe(true);
     vi.restoreAllMocks();
 
     // Poisoned journal: repeated creates are refused at admission BEFORE any

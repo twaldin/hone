@@ -1392,7 +1392,7 @@ export class Broker {
     },
     proveContainerAbsent: async (claim) => {
       try {
-        const removed = await this.run(["docker", "rm", "-f", claim.evaluatorContainer], { timeoutMs: 30_000 });
+        const removed = await this.run(["docker", "rm", "-f", "-v", claim.evaluatorContainer], { timeoutMs: 30_000 });
         return {
           absent: containerGone(removed),
           detail: stderrText(removed) || "Docker did not prove the claimed evaluator container absent",
@@ -2656,7 +2656,7 @@ export class Broker {
   }
 
   private async removeTrackedContainer(ref: string): Promise<CmdResult> {
-    const res = await this.run(["docker", "rm", "-f", ref], { timeoutMs: 30_000 });
+    const res = await this.run(["docker", "rm", "-f", "-v", ref], { timeoutMs: 30_000 });
     if (containerGone(res)) {
       this.trackedContainers.delete(ref);
       const quarantined = this.quarantinedEvaluatorLeases.get(ref);
@@ -4892,7 +4892,15 @@ export class Broker {
   ): z.infer<typeof ChildRunTerminal> {
     const expectedRunId = request.child.runId;
     let bytes: Buffer;
-    const fd = openSync(eventPath, "r");
+    let fd: number;
+    try {
+      fd = openSync(eventPath, "r");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new BrokerError("CHILD_PENDING", `child ${expectedRunId} has no durable terminal event`);
+      }
+      throw error;
+    }
     try {
       fsyncSync(fd);
       bytes = readFileSync(fd);
@@ -4900,7 +4908,10 @@ export class Broker {
       closeSync(fd);
     }
     journalIo.syncDir(path.dirname(eventPath));
-    if (bytes.length === 0 || bytes[bytes.length - 1] !== 0x0a) {
+    if (bytes.length === 0) {
+      throw new BrokerError("CHILD_PENDING", `child ${expectedRunId} has no durable terminal event`);
+    }
+    if (bytes[bytes.length - 1] !== 0x0a) {
       throw new BrokerError("INTERNAL", `child ${expectedRunId} terminal event is not durably newline-terminated`);
     }
     const rawLines = bytes.toString("utf8").split("\n");
@@ -4927,7 +4938,7 @@ export class Broker {
     const event = events[cursor];
     const rawTerminal = rawLines[cursor];
     if (event === undefined || rawTerminal === undefined || event.type !== "run.finished") {
-      throw new BrokerError("INTERNAL", `child ${expectedRunId} has no durable terminal event`);
+      throw new BrokerError("CHILD_PENDING", `child ${expectedRunId} has no durable terminal event`);
     }
     return ChildRunTerminal.parse({
       runId: expectedRunId,

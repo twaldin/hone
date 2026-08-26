@@ -916,7 +916,15 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         stderrTail = extendPreAuthorityStderrTail(stderrTail, line);
       },
     };
-    const code = await this.runChildCommand(args, diagnosticIo, trusted);
+    let code: number;
+    try {
+      code = await this.runChildCommand(args, diagnosticIo, trusted);
+    } catch (error) {
+      diagnosticIo.err(
+        `child command failed before terminalization: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      code = 1;
+    }
     if (code === 0) return code;
 
     let journalAuthorityEstablished = false;
@@ -1023,8 +1031,15 @@ export class CliChildSupervisor implements MetaChildSupervisor {
       }
     } else {
       let terminal = false;
+      let interrupted = false;
       try {
-        terminal = replayRun(runDir).finished !== null;
+        const replayed = replayRun(runDir);
+        terminal = replayed.finished !== null;
+        // A durably paused child owns an explicit retry. A replayed child
+        // still marked running has lost its prior supervisor: adjudicate that
+        // stale attempt negative under the run lock without starting another
+        // optimizer or provider dispatch.
+        interrupted = request.resume && replayed.status === "running";
       } catch {
         return this.notRun(request, "child durable state cannot be replayed", runDir);
       }
@@ -1054,6 +1069,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
             ...(this.campaignPauseAuthority === undefined
               ? {}
               : { campaignPauseAuthority: this.campaignPauseAuthority }),
+            ...(interrupted ? { adjudicateInterruptedChild: true } : {}),
             ...(campaignConfigHash === undefined ? {} : { campaignConfigHash }),
           },
         );
