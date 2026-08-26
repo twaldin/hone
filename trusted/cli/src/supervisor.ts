@@ -497,6 +497,8 @@ export interface TrustedRunOptions {
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
   /** Trusted recursive journal authority; true leaves an INTERNAL child crash resumable. */
   hasUnsettledPendingChild?: (() => boolean) | undefined;
+  /** Resume-only negative adjudication for a stale, unpaused recursive child. */
+  adjudicateInterruptedChild?: boolean | undefined;
   /**
    * Review bypass for the trusted synthetic meta capsule only: its authoring
    * validation and later frozen-byte recheck precede/replace Gate 2.
@@ -938,6 +940,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ...(trusted.hasUnsettledPendingChild !== undefined
         ? { hasUnsettledPendingChild: trusted.hasUnsettledPendingChild }
         : {}),
+      ...(trusted.adjudicateInterruptedChild === true ? { adjudicateInterruptedChild: true } : {}),
       ...(trusted.admissionReview !== undefined ? { admissionReview: trusted.admissionReview } : {}),
       ...(trusted.campaignConfigHash !== undefined ? { campaignConfigHash: trusted.campaignConfigHash } : {}),
       ...(trusted.recursiveBroker !== undefined ? { recursiveBroker: trusted.recursiveBroker } : {}),
@@ -1466,6 +1469,7 @@ export interface SuperviseExtra {
   proxyRole?: M2ProxyRole | undefined;
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
   hasUnsettledPendingChild?: (() => boolean) | undefined;
+  adjudicateInterruptedChild?: boolean | undefined;
   admissionReview?: "required" | "off" | undefined;
 }
 
@@ -1702,7 +1706,7 @@ async function superviseLocked(
   // The backend is the SEALED one from the run config — never a flag. A
   // durably sealed optimizer completion skips the backend outright: no
   // optimizer rerun, no container/broker/proxy resource is ever spawned.
-  const backend = optimizerAlreadyComplete || sessionNoYieldBound
+  const backend = optimizerAlreadyComplete || sessionNoYieldBound || extra.adjudicateInterruptedChild === true
     ? null
     : await loadBackend(config.backend, io.root, io.env);
 
@@ -1872,7 +1876,9 @@ async function superviseLocked(
     },
   };
 
-  let failure: Error | null = null;
+  let failure: Error | null = extra.adjudicateInterruptedChild === true
+    ? new Error("interrupted recursive child adjudicated as a trusted negative")
+    : null;
   let authorityFailure: Error | null = null;
   try {
     if (backend !== null) {
@@ -2101,7 +2107,7 @@ async function superviseLocked(
       status = "stopped";
       reason = "session-no-yield-bound";
     } else if (failure !== null) {
-      if (!isOptimizerStorageExhaustedError(failure)) {
+      if (!isOptimizerStorageExhaustedError(failure) && extra.adjudicateInterruptedChild !== true) {
         if (extra.hasUnsettledPendingChild?.() === true) {
           io.err("recursive child remains durably pending — run left unfinished for trusted resume");
           return 1;

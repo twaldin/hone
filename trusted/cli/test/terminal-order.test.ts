@@ -300,6 +300,54 @@ describe("terminal-order fence", () => {
     expect(existsSync(join(runDir, TERMINAL_RESERVE_FILE))).toBe(false);
   });
 
+  it("adjudicates a stale unpaused recursive child negative without restarting its backend", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const starts = join(root, "interrupted-child-starts");
+    writeFileSync(
+      join(root, "interrupted-child-backend.mjs"),
+      `import { appendFileSync } from "node:fs";
+      export function createBackend() {
+        return {
+          async start(ctx) {
+            appendFileSync(${JSON.stringify(starts)}, "start\\n");
+            ctx.emit({
+              runId: ctx.runId,
+              at: new Date().toISOString(),
+              type: "episode.started",
+              episode: 0,
+              parent: { hash: "${fakeHash("b")}" },
+            });
+            throw new Error("synthetic child process disappeared");
+          },
+        };
+      }
+      `,
+    );
+    const initial = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--backend", "./interrupted-child-backend.mjs"], initial.io),
+    ).toBe(1);
+    const runId = soleRunId(root);
+    expect(eventTypes(root, runId)).not.toContain("run.finished");
+    expect(readFileSync(starts, "utf8")).toBe("start\n");
+
+    const resumed = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(
+      await cliRunCommand(
+        ["capsule", "--headless", "--resume"],
+        resumed.io,
+        { adjudicateInterruptedChild: true },
+      ),
+      resumed.err.join("\n"),
+    ).toBe(1);
+    expect(readFileSync(starts, "utf8")).toBe("start\n");
+    const runDir = join(root, ".hone-runs", runId);
+    expect(replayRun(runDir)).toMatchObject({ status: "failed", outcomeReason: "crash" });
+    expect(eventTypes(root, runId).filter((type) => type === "run.resumed")).toHaveLength(1);
+    expect(eventTypes(root, runId).at(-1)).toBe("run.finished");
+  });
+
   it("durably pauses a vanished recursive child for deterministic retry instead of crashing the outer run", async () => {
     const root = makeRoot();
     makeCapsule(root);
