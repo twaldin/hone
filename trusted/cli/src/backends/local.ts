@@ -816,9 +816,11 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
       HONE_BROKER_SOCK: transportEndpoint(runtime.transport),
       HONE_RUN_ID: ctx.runId,
       HONE_SEED: String(ctx.config.seed),
-      ...(ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] !== undefined
-        ? { HONE_SESSION_NO_YIELD_MAX_TOKENS: ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] }
-        : {}),
+      ...(ctx.config.sessionNoYieldMaxTokens !== undefined
+        ? { HONE_SESSION_NO_YIELD_MAX_TOKENS: String(ctx.config.sessionNoYieldMaxTokens) }
+        : ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] !== undefined
+          ? { HONE_SESSION_NO_YIELD_MAX_TOKENS: ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] }
+          : {}),
       // The M0 probe is the entire one-candidate campaign. The mutable loop
       // gets both advisory values; broker-side caps remain authoritative.
       ...(opts.maxEpisodes !== undefined

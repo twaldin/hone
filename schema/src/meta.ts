@@ -4,7 +4,7 @@ import { BudgetEnvelope, IMAGE_DIGEST_REF } from "./capsule.js";
 import { AdmissionApprovalBasis } from "./admission.js";
 import { M2_INNER_MODEL_ROUTE, M2_OUTER_MODEL_ROUTE } from "./proxy.js";
 import { canonicalJson } from "./canonical.js";
-import { PromotionRule } from "./runconfig.js";
+import { PromotionRule, SessionNoYieldMaxTokens } from "./runconfig.js";
 
 /**
  * Contract 6 — M1 meta-campaign config (WP-M1-0).
@@ -179,6 +179,11 @@ const MetaCampaignConfigShape = z.object({
   modelObservation: ModelObservationPolicy,
   counts: MetaCampaignCounts,
   budgets: MetaCampaignBudgets,
+  /**
+   * Optional campaign-wide ceiling inherited by outer and child mutation
+   * sessions. Omission preserves the 1.5M engine default.
+   */
+  sessionNoYieldMaxTokens: SessionNoYieldMaxTokens.optional(),
   /** Exact canonical-source + image-bound-bundle pairs for both real controls. */
   controls: z
     .object({

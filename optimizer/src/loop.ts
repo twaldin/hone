@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MAX_SANDBOX_TTL_SEC, type ArtifactRef, type BudgetState, type EvaluationRecord, type RunEvent } from "@hone/schema";
-import { buildEpisodeContext, type FailureEvidence, type LineageEntry } from "../assets/context.js";
+import {
+  buildEpisodeContext,
+  EVALUATOR_RECORD_PATH,
+  type FailureEvidence,
+  type LineageEntry,
+} from "../assets/context.js";
 import { epsilonRestart, mutationTimeoutSec, oneRepair, trainAssetGroupId } from "../assets/policy.js";
 import { BrokerClient, BrokerRpcError } from "./client.js";
 import { EPISODE_JSON_PATH, EpisodeContext, parseMutateStdout, type MutateResult } from "./episode.js";
@@ -390,6 +395,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
     const mutateOnce = async (
       sandbox: { sandboxId: string } | { from: ArtifactRef; continueEpisode?: number },
       context: EpisodeContext,
+      evaluationRecord: EvaluationRecord,
       episode: number,
     ): Promise<MutateAttempt> => {
       const sandboxId =
@@ -403,6 +409,11 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
               })
             ).sandboxId;
       await ensureWorker(sandboxId);
+      await broker.putFile({
+        sandboxId,
+        path: EVALUATOR_RECORD_PATH,
+        contentBase64: Buffer.from(`${JSON.stringify(evaluationRecord, null, 2)}\n`, "utf8").toString("base64"),
+      });
       let staged = false;
       try {
         const prior = await broker.getFile({ sandboxId, path: EPISODE_JSON_PATH });
@@ -595,6 +606,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         parentEvaluation: parentRecord,
         lineage,
         budget,
+        sessionNoYieldMaxTokens,
       });
 
       const savedCandidate = resuming ? activeResume.candidate : null;
@@ -606,7 +618,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
       };
       let attempt: MutateAttempt =
         savedCandidate === null
-          ? await mutateOnce({ sandboxId }, context, episode)
+          ? await mutateOnce({ sandboxId }, context, parentRecord, episode)
           : {
               artifact: savedCandidate.artifact,
               result: savedCandidate.result,
@@ -661,9 +673,15 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
             parentEvaluation: parentRecord,
             lineage,
             budget,
+            sessionNoYieldMaxTokens,
             failure: attempt.failure,
           });
-          const repair = await mutateOnce({ from: repairFrom, continueEpisode: episode }, repairContext, episode);
+          const repair = await mutateOnce(
+            { from: repairFrom, continueEpisode: episode },
+            repairContext,
+            parentRecord,
+            episode,
+          );
           if (opts.signal?.aborted) return;
           if (repair.stoppedForNoYield) {
             await completeClaimedEpisode();

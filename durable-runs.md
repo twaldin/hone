@@ -50,6 +50,12 @@ Clock rollback fails closed rather than reducing spend. A `run.started` or `run.
 
 Repair has one intentionally conservative pre-fsync case. If the process dies after entering repair but before `episode.invalid` is fsynced, the durable record cannot claim that repair finished, so each resume redoes one repair mutation session. This is correct and budget-bounded, but an operator watching spend may see that additional session. Once `episode.invalid` is durable, the repair decision is replayed and no repair work is repeated.
 
+## Session yield ceiling
+
+Mutation sessions default to a 1,500,000-token no-yield ceiling. A frozen run or meta-campaign may set `sessionNoYieldMaxTokens` to a larger positive integer; the value is schema-validated, sealed into the run config, and inherited by outer and child mutation sessions. Omission keeps the 1,500,000-token default, and configuration cannot lower it.
+
+The future pumpfun M1 freeze should set `sessionNoYieldMaxTokens` to approximately 1,700,000 (use `1700000`). That exception accommodates its measured first coherent edit plus bounded smoke while prompt aggregation removes the repeated 2,000-entry evaluator payload. It applies only to that future freeze: never mutate an already-running campaign's pinned configuration.
+
 ## Durability inventory
 
 Before the durable-run cutover, Hone already had several load-bearing pieces:

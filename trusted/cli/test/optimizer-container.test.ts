@@ -667,7 +667,7 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
     expect(seen.argvs[1]?.[3]).toBe("hone-opt-run_host-1");
   });
 
-  it("forwards the configured session no-yield token ceiling into the sealed optimizer", async () => {
+  it("forwards the sealed run-config session no-yield ceiling into the optimizer", async () => {
     const root = makeRoot();
     const runDir = join(root, ".hone-runs", "run_session_bound");
     mkdirSync(runDir, { recursive: true });
@@ -675,6 +675,7 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
     const script = join(root, "optimizer.mjs");
     writeFileSync(script, "process.exit(0);\n");
     const ctx = optCtx(root, runDir, "run_session_bound");
+    ctx.config = RunConfig.parse({ ...ctx.config, sessionNoYieldMaxTokens: 1_700_000 });
     ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] = "2500000";
 
     await runOptimizer(
@@ -686,7 +687,8 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
       }),
     );
 
-    expect(seen.argvs[0]).toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=2500000");
+    expect(seen.argvs[0]).toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=1700000");
+    expect(seen.argvs[0]).not.toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=2500000");
   });
 
   it("carries the no-yield ceiling through recursive child IO into the sealed optimizer", async () => {

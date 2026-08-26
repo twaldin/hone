@@ -61,6 +61,19 @@ describe("bare run: default mutation route", () => {
     expect(await cliRunCommand(["capsule", "--headless", "--backend", "stub", "--config", "cfg.json"], io)).toBe(0);
     expect(soleRunConfig(root).routing["mutation"]?.model).toBe("picked-explicitly");
   });
+
+  it("seals a schema-valid session no-yield override from --config into the run", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(join(root, "cfg.json"), JSON.stringify({ sessionNoYieldMaxTokens: 1_700_000 }));
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+
+    expect(await cliRunCommand(
+      ["capsule", "--headless", "--backend", "stub", "--config", "cfg.json"],
+      io,
+    )).toBe(0);
+    expect(soleRunConfig(root).sessionNoYieldMaxTokens).toBe(1_700_000);
+  });
 });
 
 describe("promotion rule: frozen into runconfig persistence at campaign start", () => {

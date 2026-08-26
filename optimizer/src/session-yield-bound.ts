@@ -1,4 +1,5 @@
 import {
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   SESSION_NO_YIELD_EXIT_CODE,
   SESSION_NO_YIELD_RECORD_TYPE,
   SESSION_USAGE_ANOMALY_RECORD_TYPE,
@@ -7,18 +8,13 @@ import {
 } from "@hone/schema";
 
 export {
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   SESSION_NO_YIELD_EXIT_CODE,
   SESSION_USAGE_ANOMALY_RECORD_TYPE,
   SESSION_NO_YIELD_RECORD_TYPE,
   type SessionNoYieldRecord,
 };
 
-/**
- * Calibrated to more than twice the largest successful-yield segment in the
- * 80-run M2 saturation corpus: 721,625 tokens
- * (run_calibration_6de9863750b31cbec690b5b9, episode 0).
- */
-export const DEFAULT_SESSION_NO_YIELD_MAX_TOKENS = 1_500_000;
 
 export interface SessionTurnUsage {
   promptTokens: number;

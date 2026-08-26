@@ -16,6 +16,7 @@ import {
   type PromotionVerdict,
 } from "@hone/schema";
 import { deferred } from "../src/deferred.js";
+import { EVALUATOR_RECORD_PATH } from "../assets/context.js";
 import { RUNTIME_PART_DIR, SANDBOX_WORKER_PATH, WORKER_PART_DIR } from "../src/loop.js";
 
 /**
@@ -94,6 +95,8 @@ export class StubBroker {
   readonly socketPath: string;
   /** Episode-context putFiles only; worker-bundle chunks land in workerParts. */
   readonly putFiles: PutFileRecord[] = [];
+  /** Full trusted parent records staged outside /workspace for session drill-down. */
+  readonly evaluationRecords: PutFileRecord[] = [];
   readonly createdSandboxParams: Array<z.infer<typeof BrokerMethods.createSandbox.params>> = [];
   readonly savedArtifacts: string[] = [];
   /** Artifact hashes evaluated fresh (memo misses), in order. */
@@ -215,6 +218,14 @@ export class StubBroker {
         this.ops.push(`putFile:${params.sandboxId}:${params.path}`);
         const bytes = Buffer.from(params.contentBase64, "base64");
         if (params.path.startsWith("/scratch/")) this.scratch.set(params.path, bytes);
+        if (params.path === EVALUATOR_RECORD_PATH) {
+          this.evaluationRecords.push({
+            sandboxId: params.sandboxId,
+            path: params.path,
+            content: bytes.toString("utf8"),
+          });
+          return {};
+        }
         if (params.path.startsWith(`${WORKER_PART_DIR}/`)) {
           this.workerParts.push({ sandboxId: params.sandboxId, path: params.path, bytes });
           return {};

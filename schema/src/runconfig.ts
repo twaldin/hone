@@ -36,6 +36,19 @@ export const DEFAULT_PROMOTION_RULE: PromotionRule = {
   requireNegativeControls: true,
 };
 
+/**
+ * Calibrated to more than twice the largest successful-yield segment in the
+ * 80-run M2 saturation corpus: 721,625 tokens. Omitted configuration keeps
+ * this engine default; a sealed run or meta-campaign may only raise it.
+ */
+export const DEFAULT_SESSION_NO_YIELD_MAX_TOKENS = 1_500_000;
+export const SessionNoYieldMaxTokens = z
+  .number()
+  .int()
+  .safe()
+  .min(DEFAULT_SESSION_NO_YIELD_MAX_TOKENS);
+export type SessionNoYieldMaxTokens = z.infer<typeof SessionNoYieldMaxTokens>;
+
 export const RunConfig = z.object({
   version: z.literal(RUN_CONFIG_VERSION),
   capsuleId: z.string(),
@@ -54,6 +67,11 @@ export const RunConfig = z.object({
   improverSeat: z.boolean().default(false),
   /** Deterministic base seed; episode seeds derive from it. */
   seed: z.number().int().nonnegative().default(0),
+  /**
+   * Optional sealed per-session no-yield ceiling. Absence retains the engine
+   * default; config may raise but never weaken the default safety bound.
+   */
+  sessionNoYieldMaxTokens: SessionNoYieldMaxTokens.optional(),
   /**
    * Pre-registered promotion rule, frozen into the contract at campaign
    * start. The M0 seed's artifact-level incumbent stays greedy; this rule

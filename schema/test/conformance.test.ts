@@ -6,6 +6,7 @@ import {
   BrokerMethods,
   CapsuleManifest,
   DEFAULT_PROMOTION_RULE,
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   DiagnosticOrderingReport,
   EvaluatorOutput,
   PromotionRule,
@@ -370,6 +371,28 @@ describe("contract 5: run config", () => {
     expect(rc.backend).toBe("local");
     // Campaign field: required after parse, pre-registered defaults when absent.
     expect(rc.promotion).toEqual(DEFAULT_PROMOTION_RULE);
+    expect(rc.sessionNoYieldMaxTokens).toBeUndefined();
+  });
+
+  it("schema-validates a sealed no-yield ceiling without changing the default", () => {
+    const base = {
+      version: 1,
+      capsuleId: "cap_000000000000",
+      objective: "x",
+      budget: { maxTokens: 2_000_000, maxUsd: 1, maxWallClockSec: 60, maxEvaluatorInvocations: 1 },
+      routing: {},
+    };
+    expect(RunConfig.parse({
+      ...base,
+      sessionNoYieldMaxTokens: 1_700_000,
+    }).sessionNoYieldMaxTokens).toBe(1_700_000);
+    for (const invalid of [
+      DEFAULT_SESSION_NO_YIELD_MAX_TOKENS - 1,
+      1_700_000.5,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      expect(() => RunConfig.parse({ ...base, sessionNoYieldMaxTokens: invalid })).toThrow();
+    }
   });
 
   it("rejects an empty backend spec — the sealed backend must name something", () => {

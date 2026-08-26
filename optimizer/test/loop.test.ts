@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { RunEvent } from "@hone/schema";
-import { buildEpisodeContext } from "../assets/context.js";
+import { buildEpisodeContext, EVALUATOR_RECORD_PATH } from "../assets/context.js";
 import { EPISODE_JSON_PATH, EpisodeContext } from "../src/episode.js";
 import {
   parseMaxEpisodes,
@@ -190,6 +190,14 @@ describe("runEpisodeLoop", () => {
     const contexts = stub.putFiles.map((p) => EpisodeContext.parse(JSON.parse(p.content)));
     expect(stub.putFiles.every((p) => p.path === "/scratch/episode.json")).toBe(true);
     expect(contexts.map((c) => c.mode)).toEqual(["mutation", "mutation", "repair", "mutation"]);
+    expect(stub.evaluationRecords).toHaveLength(4);
+    expect(stub.evaluationRecords.every((entry) => entry.path === EVALUATOR_RECORD_PATH)).toBe(true);
+    expect(stub.evaluationRecords.map((entry) => JSON.parse(entry.content).artifactHash)).toEqual([
+      BASELINE,
+      c0,
+      c0,
+      BASELINE,
+    ]);
     const repair = contexts[2];
     expect(repair?.userPrompt).toContain("TypeError: boom in astar.js:42");
     expect(repair?.userPrompt).toContain("exit 1");
@@ -1120,6 +1128,7 @@ describe("runEpisodeLoop maxEpisodes cap", () => {
         envelope: { maxTokens: 1_000_000, maxUsd: 100, maxWallClockSec: 100_000, maxEvaluatorInvocations: 100 },
         spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 1 },
       },
+      sessionNoYieldMaxTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
     });
     stub.scratch.set(EPISODE_JSON_PATH, Buffer.from(JSON.stringify(context)));
     await stub.listen();
@@ -1382,6 +1391,7 @@ describe("runEpisodeLoop sealed worker transfer", () => {
     const written = [
       ...stub.workerParts.map((p) => p.path),
       ...stub.runtimeParts.map((p) => p.path),
+      ...stub.evaluationRecords.map((p) => p.path),
       ...stub.putFiles.map((p) => p.path),
     ];
     expect(written.length).toBeGreaterThan(0);
@@ -1395,7 +1405,7 @@ describe("runEpisodeLoop sealed worker transfer", () => {
     expect(stub.ops.some((op) => op.includes(`chmod 700 ${SANDBOX_RUNTIME_DIR}`))).toBe(true);
     // No stage residue: assembly installed every sealed artifact and removed
     // both chunk dirs, so later sandboxes only see the verified runtime,
-    // worker, and current episode context.
+    // worker, current episode context, and full evaluator record.
     const residue = [...stub.scratch.keys()].filter(
       (path) => path.startsWith(`${WORKER_PART_DIR}/`) || path.startsWith(`${RUNTIME_PART_DIR}/`),
     );
@@ -1405,6 +1415,7 @@ describe("runEpisodeLoop sealed worker transfer", () => {
       `${SANDBOX_RUNTIME_DIR}/pi_natives.linux-x64-baseline.node`,
       "/scratch/episode.json",
       SANDBOX_WORKER_PATH,
+      EVALUATOR_RECORD_PATH,
     ]);
   });
 });

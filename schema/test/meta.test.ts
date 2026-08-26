@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   M1_ALLOWED_CLAIM,
   M1_CONFIRMATION_ARMS,
   M1_HOLDOUT_ARMS,
@@ -43,6 +44,7 @@ describe("contract 6: MetaCampaignConfigV1 — valid fixture", () => {
     expect(FIXTURE.routing.innerMutation).toBe(M1_MODEL_ROUTE);
     expect(FIXTURE.modelObservation.identity).toBe("alias-observation");
     expect(FIXTURE.invariants.apply).toBe("none");
+    expect(FIXTURE.sessionNoYieldMaxTokens).toBeUndefined();
   });
 
   it("round-trips every registered artifact identity and count", () => {
@@ -55,6 +57,16 @@ describe("contract 6: MetaCampaignConfigV1 — valid fixture", () => {
     });
     expect(roundTripped.controls).toEqual(FIXTURE.controls);
     expect(roundTripped.counts).toEqual(FIXTURE.counts);
+  });
+
+  it("accepts only a campaign-wide ceiling that preserves or raises the engine default", () => {
+    const raised = cfg();
+    raised.sessionNoYieldMaxTokens = 1_700_000;
+    expect(MetaCampaignConfigV1.parse(raised).sessionNoYieldMaxTokens).toBe(1_700_000);
+
+    const weakened = cfg();
+    weakened.sessionNoYieldMaxTokens = DEFAULT_SESSION_NO_YIELD_MAX_TOKENS - 1;
+    reject(weakened, "weakened no-yield ceiling");
   });
 });
 

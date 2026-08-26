@@ -3,13 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_PROMOTION_RULE, MetaCampaignConfigV2, canonicalJson } from "@hone/schema";
+import { MetaCampaignConfigV2, canonicalJson } from "@hone/schema";
 import {
   type MetaChildRunRequest,
   type Sha256Digest,
 } from "@hone/meta";
 import {
   CampaignModelRegistry,
+  campaignChildDispatchPolicy,
   CliChildSupervisor,
 } from "../src/commands/hone.js";
 import { appendEvent, readEvents } from "../src/eventlog.js";
@@ -21,11 +22,15 @@ import {
 } from "../src/pre-authority-breadcrumb.js";
 import type { TrustedRunOptions } from "../src/supervisor.js";
 
+const SESSION_NO_YIELD_MAX_TOKENS = 1_700_000;
 const frozenConfigPath = fileURLToPath(new URL(
   "../../../data/m2-refreeze-final/campaign-frozen-recursive-capacity.json",
   import.meta.url,
 ));
-const config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(frozenConfigPath, "utf8")));
+const config = MetaCampaignConfigV2.parse({
+  ...JSON.parse(readFileSync(frozenConfigPath, "utf8")),
+  sessionNoYieldMaxTokens: SESSION_NO_YIELD_MAX_TOKENS,
+});
 const configHash = metaCampaignConfigHash(config) as Sha256Digest;
 const capsule = config.developmentPanel.members[0]!.capsule;
 const sourceArtifact = config.seedOptimizer.sourceArtifact as Sha256Digest;
@@ -89,7 +94,7 @@ class RefusingChildSupervisor extends CliChildSupervisor {
     const io: CmdIo = { root, env: {}, isTTY: false, out: () => {}, err: () => {} };
     super(
       io,
-      { promotion: DEFAULT_PROMOTION_RULE, campaignConfigHash: configHash },
+      campaignChildDispatchPolicy(config, { campaignConfigHash: configHash }),
       campaignDir,
       new Map([[capsule.capsuleDigest, {
         dir: "/fixture/preauthority-capsule",
@@ -165,6 +170,9 @@ describe("pre-authority child refusal breadcrumbs", () => {
     expect(first.feedback).toBe("child has no durable terminal event");
     expect(resumed.status).toBe("infrastructure_not_run");
     expect(resumed.feedback).toBe("child infrastructure stopped before terminalization (exit 1)");
+    expect(JSON.parse(
+      readFileSync(join(campaignDir, `child-config-${childRunId}.json`), "utf8"),
+    ).sessionNoYieldMaxTokens).toBe(SESSION_NO_YIELD_MAX_TOKENS);
     const path = join(outerRunDir, PRE_AUTHORITY_BREADCRUMB_FILE);
     const records = readFileSync(path, "utf8")
       .trim()

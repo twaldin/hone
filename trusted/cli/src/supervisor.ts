@@ -7,7 +7,16 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { ApplyMode, BudgetEnvelope, M2ProxyRole, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
+import {
+  ApplyMode,
+  BudgetEnvelope,
+  M2ProxyRole,
+  ModelRouting,
+  PromotionRule,
+  RunConfig,
+  RunEvent,
+  SessionNoYieldMaxTokens,
+} from "@hone/schema";
 import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue } from "@hone/schema";
 import type { BrokerCorpusConfig, BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
 import {
@@ -145,6 +154,7 @@ const ConfigOverrides = z
     headless: z.boolean().optional(),
     improverSeat: z.boolean().optional(),
     seed: z.number().int().nonnegative().optional(),
+    sessionNoYieldMaxTokens: SessionNoYieldMaxTokens.optional(),
     budget: BudgetEnvelope.partial().optional(),
     promotion: PromotionRule.optional(),
   })
@@ -244,6 +254,9 @@ function buildConfig(
     backend: flags.backend,
     improverSeat: overrides.improverSeat ?? false,
     seed: overrides.seed ?? 0,
+    ...(overrides.sessionNoYieldMaxTokens === undefined
+      ? {}
+      : { sessionNoYieldMaxTokens: overrides.sessionNoYieldMaxTokens }),
     ...(overrides.promotion !== undefined ? { promotion: overrides.promotion } : {}),
   });
   // Hard upper envelope (same validator as interactive E-edits): a --config or

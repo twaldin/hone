@@ -842,6 +842,20 @@ export interface TrustedChildDispatchPolicy {
   readonly proxyRole?: "inner-capsule-improvement";
   readonly campaignConfigHash?: Sha256Digest;
   readonly evaluatorTimeoutSec?: number;
+  readonly sessionNoYieldMaxTokens?: number;
+}
+
+export function campaignChildDispatchPolicy(
+  config: AnyMetaCampaignConfig,
+  trusted: Omit<TrustedChildDispatchPolicy, "promotion" | "sessionNoYieldMaxTokens"> = {},
+): TrustedChildDispatchPolicy {
+  return {
+    promotion: config.promotion,
+    ...(config.sessionNoYieldMaxTokens === undefined
+      ? {}
+      : { sessionNoYieldMaxTokens: config.sessionNoYieldMaxTokens }),
+    ...trusted,
+  };
 }
 
 
@@ -952,6 +966,9 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         seed: request.identity.replicate,
         budget: request.remainingBudget,
         promotion: this.dispatchPolicy.promotion,
+        ...(this.dispatchPolicy.sessionNoYieldMaxTokens === undefined
+          ? {}
+          : { sessionNoYieldMaxTokens: this.dispatchPolicy.sessionNoYieldMaxTokens }),
       }, null, 2)}\n`);
       chmodSync(configPath, 0o600);
       if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
@@ -2711,7 +2728,7 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     candidateGate: gate,
     childSupervisor: new CliChildSupervisor(
       io,
-      { promotion: config.promotion },
+      campaignChildDispatchPolicy(config),
       campaignDir,
       capsules,
       seedSnapshot,
@@ -2810,6 +2827,9 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
         headless: true,
         budget: config.budgets.outer,
         promotion: config.promotion,
+        ...(config.sessionNoYieldMaxTokens === undefined
+          ? {}
+          : { sessionNoYieldMaxTokens: config.sessionNoYieldMaxTokens }),
       }, null, 2)}\n`);
       chmodSync(configFile, 0o600);
     }
@@ -3075,12 +3095,11 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   const modelRegistry = new CampaignModelRegistry(campaignDir, configHash, io.root);
   const childSupervisor = new CliChildSupervisor(
     io,
-    {
-      promotion: config.promotion,
+    campaignChildDispatchPolicy(config, {
       proxyRole: "inner-capsule-improvement",
       campaignConfigHash: configHash,
       evaluatorTimeoutSec: config.evaluatorTimeoutSec,
-    },
+    }),
     campaignDir,
     capsules,
     target.snapshot,
@@ -3300,6 +3319,9 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
         seed: config.generation.outerReplicate,
         budget: config.budgets.outer,
         promotion: config.promotion,
+        ...(config.sessionNoYieldMaxTokens === undefined
+          ? {}
+          : { sessionNoYieldMaxTokens: config.sessionNoYieldMaxTokens }),
       }, null, 2)}\n`);
       chmodSync(outerConfigPath, 0o600);
     }
