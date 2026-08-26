@@ -1707,22 +1707,39 @@ export function createBackend(
         // exact-identity legacy selftest). An explicit optimizer argv override
         // has no sealed worker to prove and remains a dev/test-only seam.
         if (optimizer.bundleDir !== null || deps.mutationToolbeltSmoke !== undefined) {
+          let result: unknown;
           if (deps.mutationToolbeltSmoke !== undefined) {
-            await deps.mutationToolbeltSmoke(optimizer);
+            result = await deps.mutationToolbeltSmoke(optimizer);
           } else {
-            const result = ctx.mutationWorkerPreflightContract === undefined
+            result = ctx.mutationWorkerPreflightContract === undefined
               ? await runMutationToolbeltSmoke(optimizer)
               : await runMutationToolbeltSmoke(
                 optimizer,
                 ctx.mutationWorkerPreflightContract,
               );
+          }
+          if (result !== undefined) {
+            const contract = ctx.mutationWorkerPreflightContract ?? "full-toolbelt";
+            const expectedType = contract === "legacy-selftest"
+              ? "hone-mutation-legacy-selftest.v1"
+              : "hone-mutation-toolbelt-selftest.v1";
+            if (
+              result === null
+              || typeof result !== "object"
+              || !("type" in result)
+              || result.type !== expectedType
+              || !("modelCalls" in result)
+              || result.modelCalls !== 0
+            ) {
+              throw new Error(`mutation worker preflight result does not prove ${contract}`);
+            }
             writeFileDurable(
               join(ctx.runDir, MUTATION_WORKER_PREFLIGHT_FILE),
               `${JSON.stringify({
                 version: 1,
                 runId: ctx.runId,
                 optimizerDigest: ctx.optimizerDigest,
-                contract: ctx.mutationWorkerPreflightContract ?? "full-toolbelt",
+                contract,
                 result,
               })}\n`,
             );

@@ -6,6 +6,7 @@ import type { BudgetState } from "@hone/schema";
 import { readBrokerJournalEvaluations, type CmdResult, type RunCommand } from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend, deriveProbeReport } from "../src/backends/local.js";
+import { MUTATION_WORKER_PREFLIGHT_FILE } from "../src/backends/optimizer-container.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
 import { runCommand as cliRunCommand } from "../src/supervisor.js";
 import type { ProbeReport, RunnerBackendContext } from "../src/types.js";
@@ -315,6 +316,8 @@ async function runProbeFlow(opts: {
   abortOnGate?: boolean;
   m1?: { episodes: number; strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> };
   toolbeltFailure?: Error;
+  toolbeltResult?: unknown;
+  mutationWorkerPreflightContract?: RunnerBackendContext["mutationWorkerPreflightContract"];
   captureStartError?: boolean;
 }): Promise<ProbeFlow> {
   const root = makeRoot();
@@ -394,6 +397,7 @@ async function runProbeFlow(opts: {
         optimizerStarted: existsSync(invocationsPath),
       });
       if (opts.toolbeltFailure !== undefined) throw opts.toolbeltFailure;
+      return opts.toolbeltResult;
     },
   });
   const abort = new AbortController();
@@ -441,6 +445,9 @@ async function runProbeFlow(opts: {
           optimizerEpisodesMax: opts.m1.episodes,
           maxPublicCandidateEvaluations: Math.max(1, opts.m1.episodes),
         }),
+    ...(opts.mutationWorkerPreflightContract === undefined
+      ? {}
+      : { mutationWorkerPreflightContract: opts.mutationWorkerPreflightContract }),
     requestStop: () => {
       flow.stops++;
     },
@@ -505,6 +512,81 @@ describe("trusted M1 fixed-work local branch", () => {
     expect(calls).toBe(1);
     expect(seenEpoch).toBe("m1:test-epoch");
     expect(readBrokerJournalEvaluations(flow.runDir).records).toHaveLength(1);
+  });
+
+  it("durably records both full-toolbelt and legacy-selftest preflight contracts", { timeout: 30_000 }, async () => {
+    const strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> = async (input) =>
+      EvaluationRecord.parse({
+        runId: input.runId,
+        capsuleId: input.capsuleId,
+        artifactHash: input.artifact.hash,
+        assetGroupId: input.assetGroupId,
+        seed: input.seed,
+        output: {
+          valid: true,
+          aggregate: 0.5,
+          objectives: { meta: 0.5 },
+          constraints: {},
+          perExample: {},
+          diagnostics: { summary: "preflight record fixture" },
+        },
+        costUsd: 0,
+        durationMs: 1,
+        cached: false,
+        evaluatedAt: new Date().toISOString(),
+      });
+    const cases = [
+      {
+        contract: undefined,
+        result: {
+          type: "hone-mutation-toolbelt-selftest.v1",
+          home: "/home/hone",
+          modelCalls: 0,
+          tools: ["bash", "write", "edit"],
+          outputs: { bash: "bash-ok\n", write: "write-ok\n", edit: "edit-ok\n" },
+        },
+        expected: "full-toolbelt",
+      },
+      {
+        contract: "legacy-selftest" as const,
+        result: {
+          type: "hone-mutation-legacy-selftest.v1",
+          contract: "legacy-selftest",
+          modelCalls: 0,
+          output: "hone-mutation selftest ok",
+        },
+        expected: "legacy-selftest",
+      },
+    ];
+    for (const fixture of cases) {
+      const flow = await runProbeFlow({
+        seed: [{
+          runId: "run_probe",
+          at: at(),
+          type: "run.started",
+          capsuleId: CAP_ID,
+          contractHash: fakeHash("c"),
+          optimizerDigest: fakeHash("0"),
+        }],
+        verdict: false,
+        m1: { episodes: 1, strategy },
+        toolbeltResult: fixture.result,
+        ...(fixture.contract === undefined
+          ? {}
+          : { mutationWorkerPreflightContract: fixture.contract }),
+      });
+      const record = JSON.parse(readFileSync(
+        join(flow.runDir, MUTATION_WORKER_PREFLIGHT_FILE),
+        "utf8",
+      ));
+      expect(record).toEqual({
+        version: 1,
+        runId: "run_probe",
+        optimizerDigest: fakeHash("0"),
+        contract: fixture.expected,
+        result: fixture.result,
+      });
+    }
   });
 
   it("refuses at zero spend when the mutation toolbelt smoke rejects", { timeout: 30_000 }, async () => {

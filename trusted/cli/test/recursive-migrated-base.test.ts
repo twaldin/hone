@@ -26,6 +26,7 @@ import {
   migrateCampaignSource,
   recursiveOptimizerBaseSnapshot,
   recursiveMutationWorkerPreflightContract,
+  recursiveCommand,
 } from "../src/commands/hone.js";
 import { main } from "../src/main.js";
 import { writeOptimizerArtifactSeal } from "../src/optimizer-artifact.js";
@@ -102,7 +103,7 @@ function copyReviewedBase(): string {
   return destination;
 }
 
-async function migratedFixture(): Promise<{
+async function migratedFixture(campaign11Identity = false): Promise<{
   root: string;
   configPath: string;
   config: RecursiveConfig;
@@ -111,6 +112,12 @@ async function migratedFixture(): Promise<{
   const { root, head } = initializeGitRoot();
   const configPath = join(scratch("hone-migrated-config-"), "campaign.json");
   const original = preservedConfig();
+  if (campaign11Identity) {
+    original.seedOptimizer.sourceArtifact = campaign11SourceArtifact;
+    original.seedOptimizer.bundleDigest = campaign11BaseDigest;
+    original.controllerOptimizer.sourceArtifact = campaign11SourceArtifact;
+    original.controllerOptimizer.bundleDigest = campaign11BaseDigest;
+  }
   writeFileSync(configPath, `${JSON.stringify(original, null, 2)}\n`);
   await migrateCampaignSource({
     root,
@@ -339,5 +346,25 @@ describe("migrated recursive optimizer base", () => {
       exact,
       collectOptimizerSnapshot(mutatedBase),
     )).toBeUndefined();
+  });
+
+  test.skipIf(!reviewedBaseAvailable)("recursive dispatch receives the exact legacy compatibility contract", async () => {
+    const fixture = await migratedFixture(true);
+    const sealedBase = copyReviewedBase();
+    let observed: string | undefined;
+
+    await expect(recursiveCommand([
+      "--campaign",
+      fixture.configPath,
+      "--sealed-base",
+      sealedBase,
+      "--headless",
+    ], commandIo(fixture.root, { out: [], err: [] }), {
+      observeMutationWorkerPreflightContract: (contract) => {
+        observed = contract;
+        throw new Error("dispatch-contract-observed");
+      },
+    })).rejects.toThrow("dispatch-contract-observed");
+    expect(observed).toBe("legacy-selftest");
   });
 });

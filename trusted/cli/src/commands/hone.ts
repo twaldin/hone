@@ -3429,8 +3429,19 @@ export function recursivePhaseReceipt(
   return output;
 }
 
+export interface RecursiveCommandOptions {
+  /** Test-only observation at the trusted dispatch-policy boundary. */
+  readonly observeMutationWorkerPreflightContract?: (
+    contract: MutationWorkerPreflightContract | undefined,
+  ) => void;
+}
+
 /** Execute one frozen recursive generation cell; orchestration composes these durable cells. */
-export async function recursiveCommand(args: string[], io: CmdIo): Promise<number> {
+export async function recursiveCommand(
+  args: string[],
+  io: CmdIo,
+  options: RecursiveCommandOptions = {},
+): Promise<number> {
   const { positionals, flags } = parseFlags(args, {
     booleans: ["headless", "attest-diff-confined", "attest-mechanism-plausible"],
     strings: [
@@ -3489,6 +3500,10 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       sealedBaseFlag,
     );
   }
+  const mutationWorkerPreflightContract = phase === "freeze"
+    ? undefined
+    : recursiveMutationWorkerPreflightContract(config, rootSnapshot);
+  options.observeMutationWorkerPreflightContract?.(mutationWorkerPreflightContract);
   const casDir = casRoot(io.root);
   const cas = new CasStore(casDir);
   assertMutablePathsResolve(config.mutablePaths, rootSnapshot);
@@ -3560,8 +3575,6 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   const hashBody = configHash.slice("sha256:".length);
   const campaignDir = join(runsRoot(io.root), `recursive-cell-${hashBody}`);
   const outerRunId = `run_recursive_outer_${hashBody}`;
-  const mutationWorkerPreflightContract =
-    recursiveMutationWorkerPreflightContract(config, rootSnapshot);
   const outerRunDir = join(runsRoot(io.root), outerRunId);
   mkdirSync(campaignDir, { recursive: true, mode: 0o700 });
   chmodSync(campaignDir, 0o700);
