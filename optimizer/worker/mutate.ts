@@ -16,8 +16,9 @@
  * 2 bad input/env, 3 run budget exhausted (proxy 402 hone_budget_exceeded),
  * 4 session stopped at the no-yield token bound (structured stdout record).
  *
- * `--selftest` performs the no-LLM smoke: registry + settings constructed
- * offline, sample episode.json parsed, prints "hone-mutation selftest ok".
+ * `--selftest` performs the no-LLM registry/settings/bridge smoke.
+ * `--toolbelt-selftest` activates and executes bash+write+edit without
+ * prompting a model, then prints a machine-readable zero-spend result.
  *
  * Delivery: this source is part of the sealed optimizer snapshot. The
  * no-network manifest-image build bundles it (with its captured Pi SDK
@@ -375,12 +376,28 @@ function buildRegistry(env: SessionEnv, authStorage: AuthStorage): ModelRegistry
   return registry;
 }
 
-function isolatedSettings(): Settings {
-  return Settings.isolated({
-    "compaction.enabled": false,
-    "retry.enabled": false,
-    "dev.autoqa": false,
+const WORKER_SETTINGS_OVERRIDES = {
+  "compaction.enabled": false,
+  "retry.enabled": false,
+  "dev.autoqa": false,
+} as const;
+
+/**
+ * Pi still has legacy tool guards that dereference its global Settings proxy.
+ * Keep that singleton process-local and non-persistent, then return the
+ * separate isolated instance every worker session has always received.
+ */
+async function workerSettings(env: Pick<SessionEnv, "cwd" | "agentDir">): Promise<Settings> {
+  const initialized = await Settings.init({
+    cwd: env.cwd,
+    agentDir: env.agentDir,
+    inMemory: true,
+    overrides: WORKER_SETTINGS_OVERRIDES,
   });
+  if (Settings.instance !== initialized) {
+    throw new Error("Pi global Settings initialization did not install the worker instance");
+  }
+  return Settings.isolated(WORKER_SETTINGS_OVERRIDES);
 }
 
 function assertNoAutoQa(): void {
@@ -392,6 +409,7 @@ function assertNoAutoQa(): void {
 async function selftest(): Promise<void> {
   assertNoAutoQa();
   const agentDir = mkdtempSync(join(tmpdir(), "hone-selftest-"));
+  await workerSettings({ cwd: agentDir, agentDir });
   const authStorage = await discoverAuthStorage(agentDir);
   const registry = buildRegistry(
     {
@@ -407,7 +425,6 @@ async function selftest(): Promise<void> {
   );
   const model = registry.find("hone-proxy", "hone-selftest");
   if (model === undefined) throw new Error("selftest: registered model not found in registry");
-  isolatedSettings();
   const sample = parseEpisode(
     JSON.stringify({
       version: 2,
@@ -456,6 +473,141 @@ async function selftest(): Promise<void> {
     await closed.promise;
   }
   console.log("hone-mutation selftest ok");
+}
+
+interface ToolbeltSelftestResult {
+  type: "hone-mutation-toolbelt-selftest.v1";
+  home: string;
+  modelCalls: 0;
+  tools: ["bash", "write", "edit"];
+  outputs: {
+    bash: string;
+    write: string;
+    edit: string;
+  };
+}
+
+async function toolbeltSelftest(): Promise<void> {
+  assertNoAutoQa();
+  const cwd = process.env.HONE_WORKDIR ?? "/workspace";
+  const agentDir = process.env.HONE_AGENT_DIR ?? "/scratch/omp-agent";
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  const env: SessionEnv = {
+    cwd,
+    agentDir,
+    baseUrl: "http://127.0.0.1:9/v1",
+    token: "toolbelt-selftest",
+    modelId: "hone-toolbelt-selftest",
+    deadline: Date.now() + 60_000,
+    noYieldMaxTokens: parseSessionNoYieldMaxTokens(undefined),
+  };
+  const authStorage = await discoverAuthStorage(agentDir);
+  const registry = buildRegistry(env, authStorage);
+  const model = registry.find("hone-proxy", env.modelId);
+  if (model === undefined) throw new Error("toolbelt selftest: registered model not found");
+  const { session } = await createAgentSession({
+    cwd,
+    agentDir,
+    authStorage,
+    modelRegistry: registry,
+    model,
+    systemPrompt: "Offline worker toolbelt selftest. No model prompt is permitted.",
+    deadline: env.deadline,
+    sessionManager: SessionManager.inMemory(cwd),
+    settings: await workerSettings(env),
+    toolNames: ["read", "bash", "write", "edit"],
+    requireYieldTool: false,
+    disableExtensionDiscovery: true,
+    preloadedCustomToolPaths: [],
+    enableMCP: false,
+    enableLsp: false,
+    skipPythonPreflight: true,
+    skills: [],
+    rules: [],
+    contextFiles: [],
+    promptTemplates: [],
+    slashCommands: [],
+  });
+  const failures: string[] = [];
+  const capture = async (name: string, action: () => Promise<void>): Promise<void> => {
+    try {
+      await action();
+    } catch (error) {
+      failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  const bashPath = join(cwd, ".hone-toolbelt-bash");
+  const writePath = join(cwd, ".hone-toolbelt-write");
+  const editPath = join(cwd, ".hone-toolbelt-edit");
+  writeFileSync(writePath, "before\n", "utf8");
+  writeFileSync(editPath, "before\n", "utf8");
+  try {
+    await session.setActiveToolsByName(["read", "bash", "write", "edit"]);
+    const active = session.getActiveToolNames();
+    for (const name of ["read", "bash", "write", "edit"]) {
+      if (!active.includes(name)) failures.push(`${name}: missing from active tool set`);
+    }
+    await capture("bash", async () => {
+      const tool = session.getToolByName("bash");
+      if (tool === undefined) throw new Error("not registered");
+      await tool.execute(
+        "toolbelt-bash",
+        { command: "printf 'bash-ok\\n' > .hone-toolbelt-bash", cwd },
+        undefined,
+      );
+    });
+    await capture("write", async () => {
+      const tool = session.getToolByName("write");
+      if (tool === undefined) throw new Error("not registered");
+      await tool.execute(
+        "toolbelt-write",
+        { path: writePath, content: "write-ok\n" },
+        undefined,
+      );
+    });
+    await capture("edit", async () => {
+      const readTool = session.getToolByName("read");
+      const editTool = session.getToolByName("edit");
+      if (readTool === undefined || editTool === undefined) throw new Error("read/edit not registered");
+      const readResult = await readTool.execute("toolbelt-read", { path: editPath }, undefined);
+      const rendered = readResult.content
+        .map((block) => (block.type === "text" ? block.text : ""))
+        .join("");
+      const tag = /\[[^\]\r\n]+#([0-9A-Fa-f]{4})\]/.exec(rendered)?.[1];
+      if (tag === undefined) throw new Error(`read returned no hashline tag: ${rendered}`);
+      await editTool.execute(
+        "toolbelt-edit",
+        {
+          input:
+            `*** Begin Patch\n[${editPath}#${tag}]\nSWAP 1.=1:\n+edit-ok\n*** End Patch\n`,
+        },
+        undefined,
+      );
+    });
+    if (failures.length > 0) throw new Error(`toolbelt selftest failed: ${failures.join("; ")}`);
+    const result: ToolbeltSelftestResult = {
+      type: "hone-mutation-toolbelt-selftest.v1",
+      home: process.env.HOME ?? "",
+      modelCalls: 0,
+      tools: ["bash", "write", "edit"],
+      outputs: {
+        bash: readFileSync(bashPath, "utf8"),
+        write: readFileSync(writePath, "utf8"),
+        edit: readFileSync(editPath, "utf8"),
+      },
+    };
+    if (
+      result.outputs.bash !== "bash-ok\n"
+      || result.outputs.write !== "write-ok\n"
+      || result.outputs.edit !== "edit-ok\n"
+    ) {
+      throw new Error(`toolbelt selftest output mismatch: ${JSON.stringify(result.outputs)}`);
+    }
+    console.log(JSON.stringify(result));
+  } finally {
+    await session.dispose();
+  }
 }
 
 function cooldownSeconds(message: string): number | null {
@@ -585,7 +737,7 @@ async function runSession(env: SessionEnv, episode: EpisodeFile): Promise<Record
     systemPrompt: episode.systemPrompt,
     deadline: env.deadline,
     sessionManager: manager,
-    settings: isolatedSettings(),
+    settings: await workerSettings(env),
     toolNames: episode.tools,
     requireYieldTool: true,
     outputSchema: episode.outputSchema,
@@ -719,6 +871,10 @@ class BudgetExhausted extends Error {}
 async function main(): Promise<number> {
   if (process.argv.includes("--selftest")) {
     await selftest();
+    return 0;
+  }
+  if (process.argv.includes("--toolbelt-selftest")) {
+    await toolbeltSelftest();
     return 0;
   }
 

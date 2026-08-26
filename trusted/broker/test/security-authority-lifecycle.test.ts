@@ -21,7 +21,11 @@ import { runCommand, type CmdResult, type RunCommand } from "../src/command.js";
 import { BrokerError } from "../src/errors.js";
 import { deferred } from "../src/deferred.js";
 import { BrokerServer } from "../src/server.js";
-import { WORKSPACE_TMPFS_INODES } from "../src/broker.js";
+import {
+  MUTATION_SANDBOX_HOME,
+  MUTATION_SANDBOX_USER,
+  WORKSPACE_TMPFS_INODES,
+} from "../src/broker.js";
 import { acquireHostEvaluatorGate, acquireReservedEvaluatorUid } from "../src/host-evaluator-gate.js";
 import {
   MANIFEST_IMAGE,
@@ -206,6 +210,7 @@ async function boot(
     volumeCreateFails?: boolean;
     evalTimeoutSec?: number;
     reaperIntervalMs?: number;
+    mutationEnv?: Record<string, string>;
 
     runId?: string;
     measurementEpoch?: string;
@@ -365,6 +370,7 @@ async function boot(
     ...(opts.sessionTraceQuotaBytes !== undefined ? { sessionTraceQuotaBytes: opts.sessionTraceQuotaBytes } : {}),
     ...(opts.evalTimeoutSec !== undefined ? { evalTimeoutSec: opts.evalTimeoutSec } : {}),
     ...(opts.reaperIntervalMs !== undefined ? { reaperIntervalMs: opts.reaperIntervalMs } : {}),
+    ...(opts.mutationEnv === undefined ? {} : { mutationEnv: opts.mutationEnv }),
 
     ...(opts.measurementEpoch !== undefined ? { measurementEpoch: opts.measurementEpoch } : {}),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
@@ -3028,6 +3034,21 @@ describe("sandbox lifecycle and resource ceilings", () => {
     expect(argv).toContain("--read-only");
     expect(argv).toContain(`/workspace:rw,exec,nosuid,nodev,size=1073741824,nr_inodes=${WORKSPACE_TMPFS_INODES},mode=1777`);
     expect(argv).toContain("/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777");
+  });
+  it("forces the uid-1000 writable home for every image and ignores mutation-env HOME overrides", async () => {
+    const b = await boot({ mutationEnv: { HOME: "/image-or-caller-home", OTHER: "kept" } });
+    await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const argv = b.log.find((entry) => entry[1] === "run" && entry.includes("-d")) ?? [];
+    const user = argv.indexOf("--user");
+    expect(argv[user + 1]).toBe(MUTATION_SANDBOX_USER);
+    expect(argv).toContain(
+      `${MUTATION_SANDBOX_HOME}:rw,exec,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000`,
+    );
+    const environment = argv.flatMap((value, index) => value === "-e" ? [argv[index + 1]] : []);
+    expect(environment).toContain("OTHER=kept");
+    expect(environment.filter((value) => value?.startsWith("HOME="))).toEqual([
+      `HOME=${MUTATION_SANDBOX_HOME}`,
+    ]);
   });
   it("extracts mutation artifacts inside /workspace as the fixed uid", async () => {
     const b = await boot();

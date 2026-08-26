@@ -299,6 +299,7 @@ interface ProbeFlow {
   invocationsPath: string;
   probeReports: ProbeReport[];
   stops: number;
+  toolbeltPreflights: Array<{ image: string; optimizerStarted: boolean }>;
   events(): RunEvent[];
   invocations(): { maxEpisodes: string | null; resume: { nextEpisode: number } }[];
 }
@@ -350,6 +351,7 @@ async function runProbeFlow(opts: {
     invocationsPath,
     probeReports: [],
     stops: 0,
+    toolbeltPreflights: [],
     events: () => readEvents(runDir),
     invocations: () =>
       existsSync(invocationsPath)
@@ -378,7 +380,17 @@ async function runProbeFlow(opts: {
   };
   // In-container argv override + fake docker spawn: the backend believes it
   // launched the sealed container; lifecycle (env wiring, exit codes) is real.
-  const backend = createBackend({ run, spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE), createHelper: scriptedCreateHelper(run) });
+  const backend = createBackend({
+    run,
+    spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE),
+    createHelper: scriptedCreateHelper(run),
+    mutationToolbeltSmoke: async (runtime) => {
+      flow.toolbeltPreflights.push({
+        image: runtime.image,
+        optimizerStarted: existsSync(invocationsPath),
+      });
+    },
+  });
   const abort = new AbortController();
   const ctx: RunnerBackendContext = {
     runId,
@@ -477,6 +489,7 @@ describe("trusted M1 fixed-work local branch", () => {
     });
 
     expect(flow.invocations()).toEqual([{ maxEpisodes: "3", resume: expect.objectContaining({ nextEpisode: 0 }) }]);
+    expect(flow.toolbeltPreflights).toEqual([{ image: FIX_IMAGE, optimizerStarted: false }]);
     expect(flow.probeReports).toHaveLength(0);
     expect(flow.events().some((event) => event.type === "probe.completed")).toBe(false);
     expect(calls).toBe(1);
