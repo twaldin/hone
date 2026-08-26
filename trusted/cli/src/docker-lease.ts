@@ -71,7 +71,7 @@ export function makeDockerRunLease(runId: string, image: string, run: RunCommand
     },
     async close(): Promise<void> {
       if (!attempted) return;
-      const result = await run(["docker", "rm", "-f", name], { timeoutMs: 30_000 });
+      const result = await run(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 });
       const stderr = result.stderr.toString("utf8");
       if (result.exitCode !== 0 && !MISSING_CONTAINER.test(stderr)) {
         throw new Error(`docker run lease cleanup failed: ${stderr.slice(0, 2000) || `exit ${result.exitCode}`}`);

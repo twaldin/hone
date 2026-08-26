@@ -31,6 +31,7 @@ hone resume --campaign <campaign-state-dir> --pause <pause-id>
 | Record | Meaning | Resume? |
 | --- | --- | --- |
 | `run.paused`, reason `operator` | Operator requested a durable pause. | Yes |
+| `run.paused`, reason `recursive-child-pending` | A recursive child stopped without a durable terminal event. Its reservation stays open and the outer coordinate re-enters deterministically on resume; the child cannot contribute a positive settlement while pending. | Yes |
 | `run.paused`, reason `provider-rate-limit`, `provider-auth`, `provider-payment`, `provider-transport`, `provider-5xx`, `returned-model-drift`, or `proxy-failover` | A provider or retryable infrastructure limit stopped spending. `providerStatus` and `pauseId` are recorded when available. | Yes, after correcting or waiting out the cause |
 | `run.finished`, status `budget`, reason `budget-exhausted` | A configured token, USD, wall-clock, or evaluator budget ended the run. | No |
 | `run.finished`, status `stopped`, reason `session-no-yield-bound` | The per-session no-yield bound ended the run. | No |
@@ -39,6 +40,8 @@ hone resume --campaign <campaign-state-dir> --pause <pause-id>
 | `run.finished`, status `completed` | The run completed normally. | No |
 
 A pause is deliberately nonterminal: it writes `run.paused` and no `run.finished`. `hone status` prints both `status` and `reason`; operators do not need to infer the outcome from a null candidate or correlate sidecars.
+
+Every active run physically allocates a small `terminal-reserve.bin` before `run.started` or `run.resumed`. A broker `ENOSPC` response uses a reserved optimizer exit: the trusted backend releases those blocks before teardown, then writes `run.finished` with status `failed` even when an episode was active. The reserve is removed after any ordinary terminal event and retained across pauses. If the terminal write still cannot be made, recursive parents classify the child as pending and durably pause rather than treating nonterminal state as positive evidence or crashing the campaign.
 
 Budget snapshots define `spent.wallClockSec` as active time only: intervals opened by `run.started`/`run.resumed` and closed by `run.paused` or trusted-backend termination. Paused and process-down time does not consume the wall-clock envelope; `lifetimeSec` preserves total elapsed operator time separately. After an unpaused crash, active accounting closes the abandoned interval at its final acknowledged journal fact. This is an evidence clock: it cannot overcharge downtime, and it cannot undercharge work the trusted journal can recognize or settle; an unacknowledged in-flight attempt is deliberately not billable active time and must be retried or recovered through its durable spend journal.
 

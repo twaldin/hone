@@ -58,7 +58,7 @@ describe("makeDockerRunLease (per-epoch donor create/remove semantics)", () => {
     await expect(lease.start()).rejects.toThrow(/already started/);
 
     await lease.close();
-    expect(argvs.at(-1)).toEqual(["docker", "rm", "-f", DONOR]);
+    expect(argvs.at(-1)).toEqual(["docker", "rm", "-f", "-v", DONOR]);
   });
 
   it("close tolerates an already-missing donor but never a live removal failure", async () => {

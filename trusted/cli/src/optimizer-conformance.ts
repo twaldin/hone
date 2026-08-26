@@ -424,9 +424,9 @@ export async function conformCandidateOptimizer(
     }
   }
   const cleanupFailures = (await Promise.all([
-    removeDockerResource(run, ["docker", "rm", "-f", candidateName], `container ${candidateName}`),
-    removeDockerResource(run, ["docker", "rm", "-f", buildName], `container ${buildName}`),
-    removeDockerResource(run, ["docker", "rm", "-f", stubName], `container ${stubName}`),
+    removeDockerResource(run, ["docker", "rm", "-f", "-v", candidateName], `container ${candidateName}`),
+    removeDockerResource(run, ["docker", "rm", "-f", "-v", buildName], `container ${buildName}`),
+    removeDockerResource(run, ["docker", "rm", "-f", "-v", stubName], `container ${stubName}`),
   ])).filter((failure): failure is string => failure !== null);
   const networkFailure = await removeDockerResource(run, ["docker", "network", "rm", network], `network ${network}`);
   if (networkFailure !== null) cleanupFailures.push(networkFailure);

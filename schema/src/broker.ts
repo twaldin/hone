@@ -387,6 +387,10 @@ export const BrokerMethods = {
 } as const;
 export type BrokerMethodName = keyof typeof BrokerMethods;
 
+/** Reserved optimizer exits interpreted only by the trusted container supervisor. */
+export const OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE = 73;
+export const OPTIMIZER_CHILD_PENDING_EXIT_CODE = 75;
+
 export const BrokerErrorCode = z.enum([
   "BUDGET_EXCEEDED",
   "SANDBOX_NOT_FOUND",
@@ -399,6 +403,8 @@ export const BrokerErrorCode = z.enum([
   "CURSOR_INVALID",
   "NOT_IMPLEMENTED",
   "QUOTA_EXCEEDED",
+  "STORAGE_EXHAUSTED",
+  "CHILD_PENDING",
   "INTERNAL",
 ]);
 export type BrokerErrorCode = z.infer<typeof BrokerErrorCode>;

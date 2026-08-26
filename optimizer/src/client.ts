@@ -1,6 +1,12 @@
 import net from "node:net";
 import { z } from "zod";
-import { BrokerErrorCode, BrokerMethods, EvaluationRecord } from "@hone/schema";
+import {
+  BrokerErrorCode,
+  BrokerMethods,
+  EvaluationRecord,
+  OPTIMIZER_CHILD_PENDING_EXIT_CODE,
+  OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE,
+} from "@hone/schema";
 import { deferred } from "./deferred.js";
 
 /**
@@ -45,6 +51,14 @@ export class BrokerRpcError extends Error {
     const parsed = BrokerErrorCode.safeParse(brokerCode);
     this.brokerCode = parsed.success ? parsed.data : undefined;
   }
+}
+
+/** Convert only trusted, resumable control failures into reserved process exits. */
+export function brokerControlExitCode(error: unknown): number | undefined {
+  if (!(error instanceof BrokerRpcError)) return undefined;
+  if (error.brokerCode === "STORAGE_EXHAUSTED") return OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE;
+  if (error.brokerCode === "CHILD_PENDING") return OPTIMIZER_CHILD_PENDING_EXIT_CODE;
+  return undefined;
 }
 
 interface Pending {

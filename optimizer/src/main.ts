@@ -29,6 +29,7 @@
  * to SIGKILL after its grace window.
  */
 import { ArtifactRef, type RunEvent } from "@hone/schema";
+import { brokerControlExitCode, BrokerRpcError } from "./client.js";
 import { MutateResult, type MutateResult as MutateResultRecord } from "./episode.js";
 import { parseMaxEpisodes, runEpisodeLoop } from "./loop.js";
 import { parseSessionNoYieldMaxTokens } from "./session-yield-bound.js";
@@ -147,18 +148,29 @@ async function main(): Promise<number> {
   };
 
   try {
-    await runEpisodeLoop({
-      brokerSocket,
-      runId,
-      emit,
-      signal: abort.signal,
-      seed,
-      resume,
-      sessionNoYieldMaxTokens,
-      ...(oneShotCandidate ? { oneShotCandidate: true } : {}),
-      ...(maxEpisodes !== undefined ? { maxEpisodes } : {}),
-    });
-    return 0;
+    try {
+      await runEpisodeLoop({
+        brokerSocket,
+        runId,
+        emit,
+        signal: abort.signal,
+        seed,
+        resume,
+        sessionNoYieldMaxTokens,
+        ...(oneShotCandidate ? { oneShotCandidate: true } : {}),
+        ...(maxEpisodes !== undefined ? { maxEpisodes } : {}),
+      });
+      return 0;
+    } catch (error) {
+      const controlExit = brokerControlExitCode(error);
+      if (controlExit === undefined) throw error;
+      console.error(JSON.stringify({
+        type: "optimizer.control-exit",
+        brokerCode: (error as BrokerRpcError).brokerCode,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+      return controlExit;
+    }
   } finally {
     process.removeListener("SIGTERM", onSignal);
     process.removeListener("SIGINT", onSignal);

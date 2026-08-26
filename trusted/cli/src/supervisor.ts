@@ -27,14 +27,26 @@ import {
   writeCapsuleSnapshot,
 } from "./admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
-import { createBackend as createLocalBackend } from "./backends/local.js";
+import {
+  createBackend as createLocalBackend,
+  isOptimizerChildPendingError,
+  isOptimizerStorageExhaustedError,
+} from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
 import { applyContractRevision, budgetEnvelopeError, contractHash, renderContract } from "./contract.js";
 import { brokerCorpusConfigDigest, corpusCohortFenceError, type CorpusCohortBinding } from "./corpus-provenance.js";
 import { LadderLockedError, deliver, ladderLocked, LADDER_REFUSAL } from "./deliver.js";
 import { DELIVERY_TARGET_FILE, assertTargetIdentity, isEmbeddedBaselineTarget, readSealedDeliveryTarget, sealDeliveryTarget } from "./delivery-target.js";
 import type { DeliveryTarget } from "./delivery-target.js";
-import { appendEvent, readEvents, replayActiveClock, replayRun, writeFileDurable } from "./eventlog.js";
+import {
+  appendEvent,
+  ensureTerminalReserve,
+  readEvents,
+  releaseTerminalReserve,
+  replayActiveClock,
+  replayRun,
+  writeFileDurable,
+} from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
 import type { CmdIo } from "./io.js";
 import {
@@ -1525,6 +1537,7 @@ async function superviseLocked(
   // sentinel. A dead/stale sentinel is tiny and safe (same semantics as a
   // SIGKILL leftover); consumers gate on pidAlive AND the lock identity
   // probe (a bare PID is meaningless — PIDs recycle, nonces do not).
+  ensureTerminalReserve(runDir);
   writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId, nonce })}\n`);
   const initialReplay = replayRun(runDir);
 
@@ -1931,6 +1944,17 @@ async function superviseLocked(
       io.err(`backend cleanup incomplete: ${cleanupFailure.message} — run left unfinished (resume with \`hone run --resume\`)`);
       return 1;
     }
+    if (isOptimizerChildPendingError(failure)) {
+      if (extra.hasUnsettledPendingChild?.() !== true) {
+        failure = new Error("optimizer reported a pending recursive child without durable pending authority");
+      } else {
+        onPause({ reason: "recursive-child-pending" });
+        await termThenKill();
+        io.err("recursive child remains durably pending — outer run paused for deterministic retry");
+        return 0;
+      }
+    }
+
     // The trusted backend and every resource are now terminated. Delivery
     // and reporting do not consume the optimizer/evaluator wall envelope.
     clearTimeout(wallBudgetTimer);
@@ -2077,15 +2101,17 @@ async function superviseLocked(
       status = "stopped";
       reason = "session-no-yield-bound";
     } else if (failure !== null) {
-      if (extra.hasUnsettledPendingChild?.() === true) {
-        io.err("recursive child remains durably pending — run left unfinished for trusted resume");
-        return 1;
-      }
-      if (preFinish.activeEpisode !== null) {
-        io.err(
-          `optimizer episode ${preFinish.activeEpisode.episode} remains durably incomplete — run left unfinished for trusted resume`,
-        );
-        return 1;
+      if (!isOptimizerStorageExhaustedError(failure)) {
+        if (extra.hasUnsettledPendingChild?.() === true) {
+          io.err("recursive child remains durably pending — run left unfinished for trusted resume");
+          return 1;
+        }
+        if (preFinish.activeEpisode !== null) {
+          io.err(
+            `optimizer episode ${preFinish.activeEpisode.episode} remains durably incomplete — run left unfinished for trusted resume`,
+          );
+          return 1;
+        }
       }
       status = "failed";
       reason = "crash";
@@ -2105,6 +2131,11 @@ async function superviseLocked(
       status,
       ...(reason === undefined ? {} : { reason }),
     });
+    try {
+      releaseTerminalReserve(runDir);
+    } catch (error) {
+      io.err(`terminal reserve cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
 
     const report = exitReport(runId, replayRun(runDir));
     if (headless) {

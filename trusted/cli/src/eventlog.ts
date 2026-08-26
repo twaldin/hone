@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, renameSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, readFileSync, readSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { RunEvent } from "@hone/schema";
 import type { ApplyMode, ArtifactRef, BudgetState, RunOutcomeReason } from "@hone/schema";
@@ -9,6 +9,48 @@ import type { ApplyMode, ArtifactRef, BudgetState, RunOutcomeReason } from "@hon
  */
 
 export const EVENTS_FILE = "events.ndjson";
+export const TERMINAL_RESERVE_FILE = "terminal-reserve.bin";
+export const TERMINAL_RESERVE_BYTES = 4 * 1024 * 1024;
+const TERMINAL_RESERVE_CHUNK = Buffer.alloc(64 * 1024);
+
+/**
+ * Physically allocate a small run-local reserve while capacity exists. A
+ * storage-exhausted optimizer releases it before broker teardown so the
+ * trusted supervisor can still append and fsync the terminal event.
+ */
+export function ensureTerminalReserve(runDir: string): void {
+  const reservePath = join(runDir, TERMINAL_RESERVE_FILE);
+  if (existsSync(reservePath)) {
+    const existing = lstatSync(reservePath);
+    if (
+      existing.isFile()
+      && existing.nlink === 1
+      && existing.size === TERMINAL_RESERVE_BYTES
+      && existing.blocks * 512 >= TERMINAL_RESERVE_BYTES
+    ) {
+      return;
+    }
+    rmSync(reservePath, { force: true });
+  }
+  const fd = openSync(reservePath, "w", 0o600);
+  try {
+    for (let offset = 0; offset < TERMINAL_RESERVE_BYTES; offset += TERMINAL_RESERVE_CHUNK.length) {
+      writeAllSync(fd, TERMINAL_RESERVE_CHUNK);
+    }
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  syncDir(runDir);
+}
+
+/** Release the preallocated blocks exactly once; named run state is untouched. */
+export function releaseTerminalReserve(runDir: string): void {
+  const reservePath = join(runDir, TERMINAL_RESERVE_FILE);
+  if (!existsSync(reservePath)) return;
+  rmSync(reservePath);
+  syncDir(runDir);
+}
 
 export function eventsPath(runDir: string): string {
   return join(runDir, EVENTS_FILE);
