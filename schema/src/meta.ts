@@ -1251,6 +1251,15 @@ export type MetaCampaignConfigV2Draft = z.infer<typeof MetaCampaignConfigV2Draft
 export const MetaCampaignConfig = z.union([MetaCampaignConfigV1, MetaCampaignConfigV2]);
 export type MetaCampaignConfig = z.infer<typeof MetaCampaignConfig>;
 
+/** Every source-commit pin that a sanctioned campaign source migration advances together. */
+export function campaignSourceCommits(config: MetaCampaignConfig): readonly string[] {
+  return [
+    config.seedOptimizer.sourceCommit,
+    config.trustedRuntime.sourceCommit,
+    ...(config.version === 2 ? [config.controllerOptimizer.sourceCommit] : []),
+  ];
+}
+
 function canonicalIdentity(identity: z.infer<typeof RecursiveOptimizerIdentity>): string {
   return `${identity.sourceCommit}\n${identity.sourceArtifact}\n${identity.bundleDigest}`;
 }

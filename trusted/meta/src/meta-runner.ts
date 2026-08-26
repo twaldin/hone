@@ -17,6 +17,7 @@ import {
   EvaluationRecord,
   MetaCampaignConfig as MetaCampaignConfigSchema,
   M2EnvelopeIdentity as M2EnvelopeIdentitySchema,
+  campaignSourceCommits,
   canonicalJson,
   type MetaCampaignConfig,
   type CampaignSourceMigrationV1,
@@ -1704,12 +1705,10 @@ function validateSourceMigrationJournal(config: MetaCampaignConfig): Sha256Diges
     previous = record;
   }
 
-  const sourcePins = [
-    config.seedOptimizer.sourceCommit,
-    config.trustedRuntime.sourceCommit,
-    ...(config.version === 2 ? [config.controllerOptimizer.sourceCommit] : []),
-  ];
-  if (sourcePins.some((pin) => pin !== last.to) || config.trustedRuntime.digest !== last.bootDigest) {
+  if (
+    campaignSourceCommits(config).some((pin) => pin !== last.to)
+    || config.trustedRuntime.digest !== last.bootDigest
+  ) {
     throw new Error("source migration journal head does not match the campaign source identity");
   }
 

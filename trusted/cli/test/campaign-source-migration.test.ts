@@ -2,8 +2,13 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { metaCampaignConfigHash } from "@hone/meta";
-import { MetaCampaignConfigV2, canonicalJson, type MetaCampaignConfigV2 as RecursiveConfig } from "@hone/schema";
+import { campaignSourceMigrationRecordDigest, metaCampaignConfigHash } from "@hone/meta";
+import {
+  MetaCampaignConfigV2,
+  canonicalJson,
+  type CampaignSourceMigrationV1,
+  type MetaCampaignConfigV2 as RecursiveConfig,
+} from "@hone/schema";
 import { describe, expect, test } from "vitest";
 import {
   assertCampaignSourceMigrationOnly,
@@ -14,6 +19,7 @@ import {
 import { main } from "../src/main.js";
 import type { CmdIo } from "../src/io.js";
 import { MetaJournalV1 } from "../src/meta-journal.js";
+import { verifiedBootRuntimeDigest } from "../src/runtime-digest.js";
 import { makeRoot } from "./helpers.js";
 
 const preservedPath = fileURLToPath(new URL(
@@ -89,6 +95,11 @@ function frozenFieldBytes(config: RecursiveConfig): string {
   });
 }
 
+function rehashMigrationRecord(record: CampaignSourceMigrationV1): void {
+  const { recordDigest: _recordDigest, ...body } = record;
+  record.recordDigest = campaignSourceMigrationRecordDigest(body);
+}
+
 function commandIo(root: string, lines: { out: string[]; err: string[] }): CmdIo {
   return {
     root,
@@ -104,7 +115,8 @@ function initializeGitRoot(root: string): string {
   execFileSync("git", ["config", "user.email", "migration-test@example.invalid"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Migration Test"], { cwd: root });
   writeFileSync(join(root, "tracked.txt"), "clean\n");
-  execFileSync("git", ["add", "tracked.txt"], { cwd: root });
+  writeFileSync(join(root, ".gitignore"), ".hone-runs/\n");
+  execFileSync("git", ["add", "tracked.txt", ".gitignore"], { cwd: root });
   execFileSync("git", ["commit", "-qm", "fixture"], { cwd: root });
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 }
@@ -215,6 +227,7 @@ describe("campaign migrate-source", () => {
       at: "2026-08-26T01:00:00.000Z",
       bootDigest: TO_BOOT_DIGEST,
     });
+    const firstMigrated = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
     await migrateCampaignSource({
       root,
       campaignPath,
@@ -234,6 +247,35 @@ describe("campaign migrate-source", () => {
       bootDigest: NEXT_BOOT_DIGEST,
       previousRecordDigest: history?.[0]?.recordDigest,
     });
+
+    const noOpRecord = structuredClone(firstMigrated);
+    const onlyRecord = noOpRecord.sourceMigrationJournal!.migrations[0]!;
+    onlyRecord.to = onlyRecord.from;
+    onlyRecord.bootDigest = onlyRecord.fromBootDigest;
+    rehashMigrationRecord(onlyRecord);
+    noOpRecord.seedOptimizer.sourceCommit = onlyRecord.from;
+    noOpRecord.controllerOptimizer.sourceCommit = onlyRecord.from;
+    noOpRecord.trustedRuntime.sourceCommit = onlyRecord.from;
+    noOpRecord.trustedRuntime.digest = onlyRecord.fromBootDigest;
+    expect(() => metaCampaignConfigHash(noOpRecord))
+      .toThrow("source migration must change the pinned commit");
+
+    const discontinuous = structuredClone(migrated);
+    const discontinuousRecord = discontinuous.sourceMigrationJournal!.migrations[1]!;
+    discontinuousRecord.from = "d".repeat(40);
+    discontinuousRecord.fromBootDigest = `sha256:${"6".repeat(64)}`;
+    rehashMigrationRecord(discontinuousRecord);
+    expect(() => metaCampaignConfigHash(discontinuous))
+      .toThrow("source migration journal provenance is discontinuous");
+
+    const pinsPastHead = structuredClone(firstMigrated);
+    const unjournaledCommit = "c".repeat(40);
+    pinsPastHead.seedOptimizer.sourceCommit = unjournaledCommit;
+    pinsPastHead.controllerOptimizer.sourceCommit = unjournaledCommit;
+    pinsPastHead.trustedRuntime.sourceCommit = unjournaledCommit;
+    pinsPastHead.trustedRuntime.digest = `sha256:${"5".repeat(64)}`;
+    expect(() => metaCampaignConfigHash(pinsPastHead))
+      .toThrow("source migration journal head does not match the campaign source identity");
 
     const changedReason = structuredClone(migrated);
     changedReason.sourceMigrationJournal!.migrations[0]!.reason = "mutated reason";
@@ -317,6 +359,156 @@ describe("campaign migrate-source", () => {
     ], commandIo(cleanRoot, cleanLines));
     expect(cleanCode).toBe(2);
     expect(cleanLines.err.join("\n")).toContain("does not resolve to the clean working tree HEAD");
+  });
+
+  test("CLI refuses a tracked campaign before computing or committing a migration", async () => {
+    const root = makeRoot();
+    initializeGitRoot(root);
+    const campaignPath = join(root, "tracked-campaign.json");
+    const originalBytes = `${JSON.stringify(preservedConfig(), null, 2)}\n`;
+    writeFileSync(campaignPath, originalBytes);
+    execFileSync("git", ["add", "tracked-campaign.json"], { cwd: root });
+    execFileSync("git", ["commit", "-qm", "track frozen campaign"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim();
+    const lines = { out: [] as string[], err: [] as string[] };
+
+    const code = await main([
+      "campaign",
+      "migrate-source",
+      "--campaign",
+      campaignPath,
+      "--from",
+      preservedConfig().trustedRuntime.sourceCommit,
+      "--to",
+      head,
+      "--reason",
+      "tracked campaign refusal",
+    ], commandIo(root, lines));
+
+    expect(code).toBe(2);
+    expect(lines.err.join("\n")).toContain("is git-tracked; migration would dirty the coordinator worktree");
+    expect(readFileSync(campaignPath, "utf8")).toBe(originalBytes);
+  });
+
+  test("CLI migrates an ignored runtime campaign without dirtying the coordinator tree", async () => {
+    const root = makeRoot();
+    const head = initializeGitRoot(root);
+    const campaignPath = join(root, ".hone-runs", "campaign-frozen.json");
+    mkdirSync(dirname(campaignPath), { recursive: true });
+    const original = preservedConfig();
+    writeFileSync(campaignPath, `${JSON.stringify(original, null, 2)}\n`);
+    const lines = { out: [] as string[], err: [] as string[] };
+
+    const code = await main([
+      "campaign",
+      "migrate-source",
+      "--campaign",
+      campaignPath,
+      "--from",
+      original.trustedRuntime.sourceCommit,
+      "--to",
+      head,
+      "--reason",
+      "ignored runtime campaign",
+    ], commandIo(root, lines));
+
+    expect(code).toBe(0);
+    expect(lines.err).toEqual([]);
+    expect(execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
+      cwd: root,
+      encoding: "utf8",
+    })).toBe("");
+    const migrated = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+    expect(migrated.trustedRuntime.sourceCommit).toBe(head);
+    expect(() => assertRecursiveCampaignSourceIdentity(
+      migrated,
+      head,
+      migrated.trustedRuntime.digest,
+    )).not.toThrow();
+  });
+
+  test("recursive command drives the migrated-source identity gate before campaign work", async () => {
+    const root = makeRoot();
+    initializeGitRoot(root);
+    const fixturePath = join(makeRoot(), "migrated.json");
+    const original = preservedConfig();
+    writeFileSync(fixturePath, `${JSON.stringify(original, null, 2)}\n`);
+    await migrateCampaignSource({
+      root,
+      campaignPath: fixturePath,
+      from: original.trustedRuntime.sourceCommit,
+      to: TO_COMMIT,
+      reason: "post-migration coordinator gate",
+      at: "2026-08-26T02:30:00.000Z",
+      bootDigest: TO_BOOT_DIGEST,
+    });
+    const lines = { out: [] as string[], err: [] as string[] };
+
+    const code = await main([
+      "recursive",
+      "--campaign",
+      fixturePath,
+      "--headless",
+    ], commandIo(root, lines));
+
+    expect(code).toBe(2);
+    expect(lines.err.join("\n")).toContain("recursive campaign trusted runtime identity drift");
+  });
+
+  test("recursive command refuses a registered migration history that current config does not extend", async () => {
+    const root = makeRoot();
+    const head = initializeGitRoot(root);
+    const bootDigest = verifiedBootRuntimeDigest() as `sha256:${string}`;
+    const fixtureRoot = makeRoot();
+    const registeredFixturePath = join(fixtureRoot, "registered.json");
+    const currentFixturePath = join(fixtureRoot, "current.json");
+    const original = preservedConfig();
+    writeFileSync(registeredFixturePath, `${JSON.stringify(original, null, 2)}\n`);
+    writeFileSync(currentFixturePath, `${JSON.stringify(original, null, 2)}\n`);
+    await migrateCampaignSource({
+      root,
+      campaignPath: registeredFixturePath,
+      from: original.trustedRuntime.sourceCommit,
+      to: head,
+      reason: "registered history",
+      at: "2026-08-26T03:00:00.000Z",
+      bootDigest,
+    });
+    await migrateCampaignSource({
+      root,
+      campaignPath: currentFixturePath,
+      from: original.trustedRuntime.sourceCommit,
+      to: head,
+      reason: "divergent current history",
+      at: "2026-08-26T03:01:00.000Z",
+      bootDigest,
+    });
+    const registered = MetaCampaignConfigV2.parse(
+      JSON.parse(readFileSync(registeredFixturePath, "utf8")),
+    );
+    const configHash = metaCampaignConfigHash(registered);
+    const registeredPath = join(
+      root,
+      ".hone-runs",
+      `recursive-cell-${configHash.slice("sha256:".length)}`,
+      "campaign.json",
+    );
+    mkdirSync(dirname(registeredPath), { recursive: true });
+    writeFileSync(registeredPath, `${JSON.stringify(registered, null, 2)}\n`);
+    const lines = { out: [] as string[], err: [] as string[] };
+
+    const code = await main([
+      "recursive",
+      "--campaign",
+      currentFixturePath,
+      "--headless",
+    ], commandIo(root, lines));
+
+    expect(code).toBe(2);
+    expect(lines.err.join("\n")).toContain("recursive cell state belongs to a different configuration");
   });
 
   test("help publishes the exact operator command", async () => {

@@ -72,6 +72,7 @@ import {
   ProxyTraceRecord,
   RecursiveEvaluationPlan,
   SpawnRunParams,
+  campaignSourceCommits,
   canonicalJson,
   capsuleDigest,
   deriveCapsuleId,
@@ -2235,15 +2236,28 @@ export function assertCleanSourceTree(root: string): void {
   if (status.length > 0) throw new UsageError("official meta campaigns require a clean source worktree");
 }
 
-const CAMPAIGN_SESSION_FILE = "campaign-session.v1.json";
-
-function recursiveSourcePins(config: RecursiveMetaCampaignConfig): readonly string[] {
-  return [
-    config.seedOptimizer.sourceCommit,
-    config.controllerOptimizer.sourceCommit,
-    config.trustedRuntime.sourceCommit,
-  ];
+/** A tracked campaign would make the post-migration coordinator tree dirty forever. */
+export function assertCampaignPathUntracked(root: string, campaignPath: string): void {
+  const repoRelative = relative(resolve(root), resolve(campaignPath));
+  if (repoRelative === ".." || repoRelative.startsWith(`..${sep}`)) return;
+  let tracked: string;
+  try {
+    tracked = execFileSync("git", ["-C", root, "ls-files", "-z", "--", repoRelative], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    throw new UsageError("campaign source migration could not verify that the campaign file is runtime state");
+  }
+  if (tracked.length > 0) {
+    throw new UsageError(
+      `campaign file ${campaignPath} is git-tracked; migration would dirty the coordinator worktree — `
+      + "copy it to an ignored runtime path such as .hone-runs/campaign-frozen.json and retry",
+    );
+  }
 }
+
+const CAMPAIGN_SESSION_FILE = "campaign-session.v1.json";
 
 /**
  * The ordinary recursive coordinator's fail-closed source gate. Calling the
@@ -2257,7 +2271,7 @@ export function assertRecursiveCampaignSourceIdentity(
   const config = MetaCampaignConfigV2.parse(configInput);
   metaCampaignConfigHash(config);
   if (
-    recursiveSourcePins(config).some((pin) => pin !== commit)
+    campaignSourceCommits(config).some((pin) => pin !== commit)
     || config.trustedRuntime.digest !== bootDigest
   ) {
     throw new UsageError("recursive campaign trusted runtime identity drift");
@@ -2356,7 +2370,9 @@ function nonterminalCampaignRunPins(
     const pinnedDigest = readFileSync(pinPath, "utf8").trim();
     if (pinnedDigest !== fromBootDigest && pinnedDigest !== toBootDigest) {
       throw new UsageError(
-        `nonterminal campaign run ${entry.name} has foreign runtime pin ${pinnedDigest}; refusing migration`,
+        `nonterminal campaign run ${entry.name} has foreign runtime pin ${pinnedDigest}; `
+        + `restore it to the campaign source digest ${fromBootDigest} before retrying `
+        + `(only that digest or the exact target digest ${toBootDigest} is accepted)`,
       );
     }
     pins.push({ runDir, runId: entry.name, pinPath, pinnedDigest });
@@ -2380,8 +2396,11 @@ function registeredCampaignConfigNeedsReconciliation(
 function reconcileRegisteredCampaignConfig(
   registeredConfigPath: string,
   config: RecursiveMetaCampaignConfig,
+  preflightResult?: boolean,
 ): void {
-  if (!registeredCampaignConfigNeedsReconciliation(registeredConfigPath, config)) return;
+  const needsReconciliation = preflightResult
+    ?? registeredCampaignConfigNeedsReconciliation(registeredConfigPath, config);
+  if (!needsReconciliation) return;
   writeFileDurable(registeredConfigPath, `${JSON.stringify(config, null, 2)}\n`);
   chmodSync(registeredConfigPath, 0o600);
 }
@@ -2407,6 +2426,13 @@ export interface CampaignSourceMigrationResult {
 /**
  * Sanctioned frozen-campaign source transition. Every guard and run pin is
  * preflighted before mutation; the campaign file is the durable commit point.
+ *
+ * On the supported single-operator host, write authority over the campaign
+ * file is the migration trust anchor. Record digests authenticate continuity
+ * and tamper evidence; they deliberately do not claim a separate signer.
+ * A retry may observe a run pin already at the exact target boot digest.
+ * Every other pin must still equal the recorded source digest or migration
+ * refuses before mutation, so partial pre-pins must be restored explicitly.
  */
 export async function migrateCampaignSource(
   request: CampaignSourceMigrationRequest,
@@ -2420,7 +2446,7 @@ export async function migrateCampaignSource(
   const originalBytes = readFileSync(request.campaignPath);
   const config = MetaCampaignConfigV2.parse(JSON.parse(originalBytes.toString("utf8")));
   const configHash = metaCampaignConfigHash(config);
-  const pins = recursiveSourcePins(config);
+  const pins = campaignSourceCommits(config);
   if (pins.some((pin) => pin !== request.from)) {
     throw new UsageError(
       `--from ${request.from} does not exactly match the campaign's current sourceCommit`,
@@ -2492,14 +2518,19 @@ export async function migrateCampaignSource(
     if (!readFileSync(request.campaignPath).equals(originalBytes)) {
       throw new UsageError("campaign file changed during source migration; retry");
     }
-    registeredCampaignConfigNeedsReconciliation(registeredConfigPath, migrated);
+    const registeredNeedsReconciliation =
+      registeredCampaignConfigNeedsReconciliation(registeredConfigPath, migrated);
     for (const run of lockedRuns) {
       writeFileDurable(run.pinPath, `${request.bootDigest}\n`);
     }
     writeFileDurable(request.campaignPath, `${JSON.stringify(migrated, null, 2)}\n`);
     chmodSync(request.campaignPath, 0o600);
 
-    reconcileRegisteredCampaignConfig(registeredConfigPath, migrated);
+    reconcileRegisteredCampaignConfig(
+      registeredConfigPath,
+      migrated,
+      registeredNeedsReconciliation,
+    );
     return {
       configHash,
       campaignPath: request.campaignPath,
@@ -2536,11 +2567,13 @@ export async function campaignCommand(args: string[], io: CmdIo): Promise<number
   if (resolvedCommit !== to) {
     throw new UsageError(`--to ${to} does not resolve to the clean working tree HEAD ${resolvedCommit}`);
   }
+  const campaignPath = resolve(io.root, campaignFlag);
+  assertCampaignPathUntracked(io.root, campaignPath);
   const bootDigest = verifiedBootRuntimeDigest() as Sha256Digest;
   const operator = io.env["USER"] ?? io.env["LOGNAME"];
   const result = await migrateCampaignSource({
     root: io.root,
-    campaignPath: resolve(io.root, campaignFlag),
+    campaignPath,
     from,
     to,
     reason,
@@ -3339,6 +3372,17 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   const commit = sourceCommit(io.root);
   const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
   if (phase !== "freeze") assertRecursiveCampaignSourceIdentity(config, commit, runtimeDigest);
+  if (phase !== "freeze") {
+    const preflightConfigHash = metaCampaignConfigHash(config);
+    const preflightRegisteredConfigPath = join(
+      runsRoot(io.root),
+      `recursive-cell-${preflightConfigHash.slice("sha256:".length)}`,
+      "campaign.json",
+    );
+    if (existsSync(preflightRegisteredConfigPath)) {
+      registeredCampaignConfigNeedsReconciliation(preflightRegisteredConfigPath, config);
+    }
+  }
   const casDir = casRoot(io.root);
   const cas = new CasStore(casDir);
   const rootSnapshot = collectOptimizerSnapshot(io.root);
