@@ -104,7 +104,7 @@ export function appendEvent(runDir: string, event: RunEvent, sync: (dir: string)
  * hard-rejects. Truncate (+fsync) to the last complete line first — the torn
  * bytes were never acknowledged, so dropping them is the resume contract.
  */
-function repairTornTail(fd: number): void {
+export function repairTornTail(fd: number): void {
   const size = fstatSync(fd).size;
   if (size === 0) return;
   const probe = Buffer.alloc(1);

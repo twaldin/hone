@@ -148,7 +148,12 @@ import {
 } from "../optimizer-conformance.js";
 import { casRoot, loadRunConfigFile, runsRoot } from "../runs.js";
 import { verifiedBootRuntimeDigest } from "../runtime-digest.js";
-import { runCommand } from "../supervisor.js";
+import { runCommand, type TrustedRunOptions } from "../supervisor.js";
+import {
+  appendPreAuthorityRefusalBreadcrumb,
+  classifyPreAuthorityRefusal,
+  extendPreAuthorityStderrTail,
+} from "../pre-authority-breadcrumb.js";
 import { z } from "zod";
 import type { CampaignPauseAuthority } from "../types.js";
 
@@ -849,10 +854,77 @@ export class CliChildSupervisor implements MetaChildSupervisor {
     private readonly baseSnapshot: OptimizerSnapshot,
     private readonly modelRegistry: CampaignModelRegistry,
     private readonly campaignPauseAuthority?: CampaignPauseAuthority,
+    private readonly breadcrumbDir: string = campaignDir,
   ) {}
 
   async run(request: MetaChildRunRequest): Promise<MetaChildRunOutcome> {
     return await this.runLaunched(request, this.dispatchPolicy.campaignConfigHash);
+  }
+
+  /** Production child-command seam; overridden only by boundary tests. */
+  protected async runChildCommand(args: string[], io: CmdIo, trusted: TrustedRunOptions): Promise<number> {
+    return await runCommand(args, io, trusted);
+  }
+
+  private async runChildProcess(
+    request: MetaChildRunRequest,
+    executionRunId: string,
+    runDir: string,
+    mode: "start" | "resume",
+    args: string[],
+    trusted: TrustedRunOptions,
+  ): Promise<number> {
+    let stderrTail = "";
+    const baseIo = this.childIo();
+    const diagnosticIo: CmdIo = {
+      ...baseIo,
+      err: (line) => {
+        baseIo.err(line);
+        stderrTail = extendPreAuthorityStderrTail(stderrTail, line);
+      },
+    };
+    const code = await this.runChildCommand(args, diagnosticIo, trusted);
+    if (code === 0) return code;
+
+    let journalAuthorityEstablished = false;
+    try {
+      readBrokerJournalEvaluations(runDir);
+      journalAuthorityEstablished = true;
+    } catch {
+      // Absence, a torn tail, or an unreadable journal is not established authority.
+    }
+    if (journalAuthorityEstablished) return code;
+
+    const diagnostic = stderrTail.length > 0
+      ? stderrTail
+      : `child command exited ${code} without diagnostic stderr\n`;
+    try {
+      appendPreAuthorityRefusalBreadcrumb(this.breadcrumbDir, {
+        childRunId: request.reservation.childRunId,
+        exitCode: code,
+        reasonClass: classifyPreAuthorityRefusal(diagnostic),
+        stderrTail: diagnostic,
+        launch: {
+          executionRunId,
+          mode,
+          attempt: request.attempt,
+          phase: request.identity.phase,
+          arm: request.identity.arm,
+          replicate: request.identity.replicate,
+          measurementEpoch: request.identity.measurementEpoch,
+          capsuleId: request.capsule.capsuleId,
+          capsuleDigest: request.capsule.capsuleDigest,
+          sourceArtifact: request.sourceArtifact,
+          bundleDigest: request.bundleDigest,
+          requestedModel: request.requestedModel,
+          innerEpisodesMax: request.innerEpisodesMax,
+          campaignConfigHash: trusted.campaignConfigHash ?? null,
+        },
+      });
+    } catch {
+      // Diagnostic persistence never participates in child settlement or resume.
+    }
+    return code;
   }
 
   async runLaunched(
@@ -885,9 +957,12 @@ export class CliChildSupervisor implements MetaChildSupervisor {
       if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
         return this.notRun(request, "campaign child admission paused before durable run start", runDir);
       }
-      const code = await runCommand(
+      const code = await this.runChildProcess(
+        request,
+        executionRunId,
+        runDir,
+        "start",
         [location.dir, "--headless", "--config", configPath, "--optimizer-artifact", request.sourceArtifact],
-        this.childIo(),
         {
           runId: executionRunId,
           measurementEpoch: request.identity.measurementEpoch,
@@ -921,9 +996,12 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
           return this.notRun(request, "campaign child admission paused before durable run resume", runDir);
         }
-        const code = await runCommand(
+        const code = await this.runChildProcess(
+          request,
+          executionRunId,
+          runDir,
+          "resume",
           [location.dir, "--headless", "--resume", "--optimizer-artifact", request.sourceArtifact],
-          this.childIo(),
           {
             runId: executionRunId,
             measurementEpoch: request.identity.measurementEpoch,
@@ -2624,6 +2702,8 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     controls: [brokenControl, degradedControl],
   });
   const modelRegistry = new CampaignModelRegistry(campaignDir, configHash, io.root);
+  const outerRunId = `run_meta_outer_${configHash.slice("sha256:".length)}`;
+  const outerRunDir = join(runsRoot(io.root), outerRunId);
   const runner = new MetaCampaignRunner({
     config,
     journal,
@@ -2636,6 +2716,8 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
       capsules,
       seedSnapshot,
       modelRegistry,
+      undefined,
+      outerRunDir,
     ),
   });
   const strategy: TrustedEvaluationStrategy = async (request) => await runner.evaluateSearchCandidate({
@@ -2644,8 +2726,6 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     assetGroupId: request.assetGroupId,
     seed: request.seed,
   });
-  const outerRunId = `run_meta_outer_${configHash.slice("sha256:".length)}`;
-  const outerRunDir = join(runsRoot(io.root), outerRunId);
   try {
     const seedIdentity: MetaOptimizerIdentity = {
       sourceArtifact: config.seedOptimizer.sourceArtifact as Sha256Digest,
@@ -2960,6 +3040,8 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   const configHash = metaCampaignConfigHash(config);
   const hashBody = configHash.slice("sha256:".length);
   const campaignDir = join(runsRoot(io.root), `recursive-cell-${hashBody}`);
+  const outerRunId = `run_recursive_outer_${hashBody}`;
+  const outerRunDir = join(runsRoot(io.root), outerRunId);
   mkdirSync(campaignDir, { recursive: true, mode: 0o700 });
   chmodSync(campaignDir, 0o700);
   const registeredConfigPath = join(campaignDir, "campaign.json");
@@ -3004,6 +3086,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     target.snapshot,
     modelRegistry,
     campaignPauseAuthority,
+    outerRunDir,
   );
   const recursiveResourceLedger = RecursiveResourceLedger.open(
     join(campaignDir, "recursive-resource.v1.ndjson"),
@@ -3029,8 +3112,6 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     childSupervisor,
     envelopeLedger,
   });
-  const outerRunId = `run_recursive_outer_${hashBody}`;
-  const outerRunDir = join(runsRoot(io.root), outerRunId);
 
   try {
     const targetIdentity: MetaOptimizerIdentity = {
