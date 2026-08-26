@@ -1544,6 +1544,9 @@ async function superviseLocked(
   ensureTerminalReserve(runDir);
   writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId, nonce })}\n`);
   const initialReplay = replayRun(runDir);
+  if (extra.adjudicateInterruptedChild === true && initialReplay.status !== "running") {
+    extra.adjudicateInterruptedChild = false;
+  }
 
   // Terminal-status flags, declared BEFORE the emit closure (TDZ) so it can
   // normalize a broker-authored budget.exhausted into the terminal status.

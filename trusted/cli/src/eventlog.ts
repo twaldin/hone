@@ -14,7 +14,9 @@ export const TERMINAL_RESERVE_BYTES = 4 * 1024 * 1024;
 const TERMINAL_RESERVE_CHUNK = Buffer.alloc(64 * 1024);
 
 /**
- * Physically allocate a small run-local reserve while capacity exists. A
+ * Physically allocate a small run-local reserve while capacity exists. The
+ * block-count proof assumes a non-compressing filesystem (production uses
+ * ext4); compressed filesystems may conservatively rewrite the reserve. A
  * storage-exhausted optimizer releases it before broker teardown so the
  * trusted supervisor can still append and fsync the terminal event.
  */

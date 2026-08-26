@@ -452,7 +452,7 @@ describe("scratch snapshot script semantics (real container)", () => {
       const live = ps.stdout.toString("utf8").split("\n").filter((line) => !/\[\w+\]\s*$/.test(line));
       expect(live.join("\n")).not.toMatch(/sleep 1000|tar -cf|find \/scratch/);
     } finally {
-      await runCommand(["docker", "rm", "-f", keeper], { timeoutMs: 30_000 });
+      await runCommand(["docker", "rm", "-f", "-v", keeper], { timeoutMs: 30_000 });
     }
   }, 180_000);
 
@@ -488,7 +488,7 @@ describe("scratch snapshot script semantics (real container)", () => {
       const live = ps.stdout.toString("utf8").split("\n").filter((line) => !/\[\w+\]\s*$/.test(line));
       expect(live.join("\n")).not.toMatch(/sleep 1000|find \/scratch|awk/);
     } finally {
-      await runCommand(["docker", "rm", "-f", keeper], { timeoutMs: 30_000 });
+      await runCommand(["docker", "rm", "-f", "-v", keeper], { timeoutMs: 30_000 });
     }
   }, 180_000);
 

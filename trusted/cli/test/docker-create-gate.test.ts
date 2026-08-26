@@ -846,7 +846,7 @@ describe("real Docker probe: the daemon-side facts the causal proof rests on", (
         expect(conflict.exitCode).not.toBe(0);
         expect(conflict.stderr.toString("utf8")).toMatch(/already in use/i);
       } finally {
-        await runCommand(["docker", "rm", "-f", name], { timeoutMs: 30_000 });
+        await runCommand(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 });
       }
     },
   );
