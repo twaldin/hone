@@ -75,40 +75,59 @@ before the campaign file is committed. Ordinary `hone recursive` then accepts
 only the new source; the original campaign hash and durable state directory
 remain stable.
 
-Every recursive phase after migration must also name the preserved optimizer
-closure explicitly:
+Every recursive freeze now captures its complete source/dependency closure into
+the campaign CAS before publishing the frozen record. Regular files are split
+into fixed-size content-addressed CAS chunks; the stable tree object is separate
+from the small capture-time manifest, so a repeated capture reuses unchanged
+store and source bytes instead of copying a worktree per cycle. The command
+reports `marginalBytes` and `reusedBytes`.
+
+For an already-frozen campaign, append the same digest-chained record with the
+operator front door. Campaign 11's sanctioned backfill command is:
 
 ```sh
+hone campaign capture-closure \
+  --campaign /home/tim/omp-firstmate/worktrees/m2-exec-runtime-11/data/m2-refreeze-final/campaign-frozen-cycle11.json \
+  --source /home/tim/omp-firstmate/worktrees/m2-exec-runtime-10 \
+  --source-commit 124b249df3bdef1943b5661dc835689d54e8477d \
+  --cas /home/tim/omp-firstmate/worktrees/m2-exec-runtime-11/.hone-cas \
+  --node-modules-archive /home/tim/omp-firstmate/data/hone-closure-evidence/m2-exec-runtime-10-node_modules.tar.zst \
+  --archive-sha256 /home/tim/omp-firstmate/data/hone-closure-evidence/m2-exec-runtime-10-node_modules.tar.zst.sha256 \
+  --optimizer-base-digest sha256:fe92e17955adebe53c9ed4076ae1dcdfb2e328d19818d7273fb4f4d850f0d6dc
+```
+
+The source commit may be an earlier source-migration lineage member: capture
+reads its Git blobs directly while binding the record to the campaign engine's
+current boot identity. The manifest separately records the recomputed boot
+digest of the materialized historical closure. The archive sidecar is verified
+before extraction. Capture refuses a dirty evidence worktree, a foreign source
+commit, a base-digest mismatch, a changed campaign record, or an unheld
+campaign-record lock. Source migration takes the same record lock, so the two
+append-only journals compose in either order.
+
+Restore never runs an installer. It hashes every manifest/tree/chunk object,
+materializes into a fresh temporary directory, checks every file and symlink,
+recomputes both the closure boot digest and the image-bound optimizer digest,
+and only then renames the target into place:
+
+```sh
+hone campaign restore-closure \
+  --campaign data/m2-refreeze-final/campaign-frozen-cycle11.json \
+  --cas .hone-cas \
+  --target /srv/hone-closures/campaign-11
+
 hone recursive \
   --campaign data/m2-refreeze-final/campaign-frozen-cycle11.json \
-  --sealed-base /home/tim/omp-firstmate/worktrees/m2-exec-runtime-10 \
+  --sealed-base /srv/hone-closures/campaign-11 \
   --headless
 ```
 
-`--sealed-base` names a repository-shaped snapshot root containing the frozen
-optimizer, schema, lockfile, and dependency closure. The coordinator collects
-those bytes and requires their optimizer digest to equal the outer run's
-durable `optimizer-artifact.json` `baseDigest`; that seal must in turn name the
-campaign's exact frozen controller source artifact and bundle digest. A missing
-path, absent/foreign outer seal, or digest mismatch refuses. Migrated campaigns
-never fall back to the new engine tree. Unmigrated campaigns reject
-`--sealed-base` and retain the historical clean-current-tree behavior.
-
-A source migration is continuable only after the outer run durably wrote its
-`optimizer-artifact.json`; a campaign migrated before its first outer start has
-no base-identity authority and therefore refuses every migrated recursive
-phase. Non-freeze phases also no longer recapture the live seed merely to
-self-heal CAS: if the frozen seed/controller source artifact was pruned, restore
-that exact artifact to `.hone-cas` before resume. Capturing the post-migration
-engine as a replacement would be the wrong optimizer bytes and is forbidden.
-
-For Campaign 11's immediate continuation, the untouched runtime-10 worktree is
-the independently verified complete closure (`fe92e179…` under the coordinator
-image). A durable copied closure must use the tracked 124b tree and copy both
-runtime-10 `node_modules/` and `optimizer/node_modules/` with metadata
-preserved, then reproduce the full `fe92e179…` digest before use. The operator
-runbook must eventually replace this retained-worktree custody with the same
-complete closure sealed into CAS; source-only copies are not sufficient.
+`--sealed-base` treats the restored directory exactly like a retained sibling
+worktree. A closure record can authenticate it before the outer run exists;
+when an outer `optimizer-artifact.json` also exists, both base identities must
+agree. Migrated campaigns still never fall back to the new engine tree.
+Historical campaigns with neither a migration nor a closure record retain the
+clean-current-tree behavior and reject `--sealed-base`.
 
 The exact migrated Campaign 11 identity predates `--toolbelt-selftest`.
 After its migration record and complete `499ee208…` / `fe92e179…` seed,
