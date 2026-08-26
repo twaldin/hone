@@ -4106,6 +4106,10 @@ export class Broker {
           // next invocation cannot inherit its RLIMIT_NPROC pool.
           this.quarantinedEvaluatorLeases.set(evalName, { lease: isolation, isolation: isolationRecord });
           isolationQuarantined = true;
+          // The admitted invocation is complete enough to diagnose. Publish
+          // its earlier transaction before the later quarantine fact; the
+          // throw below skips the ordinary success-path publication.
+          this.publish(invocationEvents);
           this.emit({
             type: "evaluator.isolation.quarantined",
             isolation: isolationRecord,
