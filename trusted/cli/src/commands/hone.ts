@@ -163,7 +163,7 @@ import {
   extendPreAuthorityStderrTail,
 } from "../pre-authority-breadcrumb.js";
 import { z } from "zod";
-import type { CampaignPauseAuthority } from "../types.js";
+import type { CampaignPauseAuthority, MutationWorkerPreflightContract } from "../types.js";
 
 const HONE_USAGE = "usage: hone hone --campaign <path> --headless [--phase freeze|search|confirmation|holdout] [--out <gitignored-path>]";
 const CAMPAIGN_MIGRATE_SOURCE_USAGE =
@@ -852,6 +852,7 @@ export interface TrustedChildDispatchPolicy {
   readonly promotion: AnyMetaCampaignConfig["promotion"];
   readonly proxyRole?: "inner-capsule-improvement";
   readonly campaignConfigHash?: Sha256Digest;
+  readonly mutationWorkerPreflightContract?: MutationWorkerPreflightContract;
   readonly evaluatorTimeoutSec?: number;
   readonly sessionNoYieldMaxTokens?: number;
 }
@@ -1030,6 +1031,9 @@ export class CliChildSupervisor implements MetaChildSupervisor {
             ? { terminalHoldoutAssetGroupIds: location.terminalHoldoutAssetGroupIds }
             : {}),
           optimizerBaseSnapshot: this.baseSnapshot,
+          ...(this.dispatchPolicy.mutationWorkerPreflightContract === undefined
+            ? {}
+            : { mutationWorkerPreflightContract: this.dispatchPolicy.mutationWorkerPreflightContract }),
           ...(this.dispatchPolicy.proxyRole === undefined ? {} : { proxyRole: this.dispatchPolicy.proxyRole }),
           ...(this.campaignPauseAuthority === undefined
             ? {}
@@ -1076,6 +1080,9 @@ export class CliChildSupervisor implements MetaChildSupervisor {
               ? { terminalHoldoutAssetGroupIds: location.terminalHoldoutAssetGroupIds }
               : {}),
             optimizerBaseSnapshot: this.baseSnapshot,
+            ...(this.dispatchPolicy.mutationWorkerPreflightContract === undefined
+              ? {}
+              : { mutationWorkerPreflightContract: this.dispatchPolicy.mutationWorkerPreflightContract }),
             ...(this.dispatchPolicy.proxyRole === undefined ? {} : { proxyRole: this.dispatchPolicy.proxyRole }),
             ...(this.campaignPauseAuthority === undefined
               ? {}
@@ -3336,6 +3343,34 @@ export function recursiveOptimizerBaseSnapshot(
   return snapshot;
 }
 
+const LEGACY_CAMPAIGN11_SOURCE_ARTIFACT =
+  "sha256:499ee208f5b7376a3cfc583e44b7971f7b1b9d378499429ddd67caf04d5f36e2";
+const LEGACY_CAMPAIGN11_BUNDLE_DIGEST =
+  "sha256:fe92e17955adebe53c9ed4076ae1dcdfb2e328d19818d7273fb4f4d850f0d6dc";
+
+/**
+ * Exact compatibility allowlist for Campaign 11's migrated pre-toolbelt
+ * worker. The base closure has already been authenticated against the outer
+ * optimizer seal before this check. No migration record or any identity drift
+ * leaves the modern full-toolbelt contract in force.
+ */
+export function recursiveMutationWorkerPreflightContract(
+  config: RecursiveMetaCampaignConfig,
+  baseSnapshot: OptimizerSnapshot,
+): MutationWorkerPreflightContract | undefined {
+  if (
+    config.sourceMigrationJournal !== undefined
+    && config.seedOptimizer.sourceArtifact === LEGACY_CAMPAIGN11_SOURCE_ARTIFACT
+    && config.seedOptimizer.bundleDigest === LEGACY_CAMPAIGN11_BUNDLE_DIGEST
+    && config.controllerOptimizer.sourceArtifact === LEGACY_CAMPAIGN11_SOURCE_ARTIFACT
+    && config.controllerOptimizer.bundleDigest === LEGACY_CAMPAIGN11_BUNDLE_DIGEST
+    && snapshotDigest(config.optimizerRuntime.image, baseSnapshot) === LEGACY_CAMPAIGN11_BUNDLE_DIGEST
+  ) {
+    return "legacy-selftest";
+  }
+  return undefined;
+}
+
 async function prepareRecursiveControls(
   targetSnapshot: OptimizerSnapshot,
   cas: CasStore,
@@ -3525,6 +3560,8 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   const hashBody = configHash.slice("sha256:".length);
   const campaignDir = join(runsRoot(io.root), `recursive-cell-${hashBody}`);
   const outerRunId = `run_recursive_outer_${hashBody}`;
+  const mutationWorkerPreflightContract =
+    recursiveMutationWorkerPreflightContract(config, rootSnapshot);
   const outerRunDir = join(runsRoot(io.root), outerRunId);
   mkdirSync(campaignDir, { recursive: true, mode: 0o700 });
   chmodSync(campaignDir, 0o700);
@@ -3562,6 +3599,9 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       proxyRole: "inner-capsule-improvement",
       campaignConfigHash: configHash,
       evaluatorTimeoutSec: config.evaluatorTimeoutSec,
+      ...(mutationWorkerPreflightContract === undefined
+        ? {}
+        : { mutationWorkerPreflightContract }),
     }),
     campaignDir,
     capsules,
@@ -3799,6 +3839,9 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       optimizerEpisodesMax: config.counts.candidateAttemptsMax,
       maxPublicCandidateEvaluations: config.counts.candidateAttemptsMax,
       optimizerBaseSnapshot: rootSnapshot,
+      ...(mutationWorkerPreflightContract === undefined
+        ? {}
+        : { mutationWorkerPreflightContract }),
       proxyRole: "outer-optimizer",
       campaignPauseAuthority,
       campaignConfigHash: configHash,

@@ -22,7 +22,7 @@ import {
   snapshotDigest,
   writeOptimizerStaging,
 } from "../optimizer-digest.js";
-import type { RunnerBackendContext } from "../types.js";
+import type { MutationWorkerPreflightContract, RunnerBackendContext } from "../types.js";
 
 /**
  * Containerized optimizer execution (trusted boundary): the loop NEVER runs as a
@@ -472,6 +472,19 @@ export interface MutationToolbeltSmokeResult {
   };
 }
 
+export interface MutationLegacySelftestResult {
+  readonly type: "hone-mutation-legacy-selftest.v1";
+  readonly contract: "legacy-selftest";
+  readonly modelCalls: 0;
+  readonly output: "hone-mutation selftest ok";
+}
+
+export type MutationWorkerPreflightResult =
+  | MutationToolbeltSmokeResult
+  | MutationLegacySelftestResult;
+
+export const MUTATION_WORKER_PREFLIGHT_FILE = "mutation-worker-preflight.v1.json";
+
 export function parseMutationToolbeltSmoke(stdout: Buffer): MutationToolbeltSmokeResult {
   const line = stdout
     .toString("utf8")
@@ -512,18 +525,48 @@ export function parseMutationToolbeltSmoke(stdout: Buffer): MutationToolbeltSmok
   return value as MutationToolbeltSmokeResult;
 }
 
+export function parseMutationLegacySelftest(stdout: Buffer): MutationLegacySelftestResult {
+  const line = stdout
+    .toString("utf8")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .at(-1);
+  if (line !== "hone-mutation selftest ok") {
+    throw new Error(`mutation legacy selftest failed validation: ${line ?? "(no output)"}`);
+  }
+  return {
+    type: "hone-mutation-legacy-selftest.v1",
+    contract: "legacy-selftest",
+    modelCalls: 0,
+    output: "hone-mutation selftest ok",
+  };
+}
+
 /**
  * Zero-provider standing gate for the exact mutation-worker image and bundle.
- * It runs the worker's real bash/write/edit implementations under the same
- * forced uid, read-only root, writable home, and workspace tmpfs as Broker
- * mutation sandboxes. No proxy endpoint is mounted and no session is prompted.
+ * Modern workers execute the real bash/write/edit implementations. The one
+ * trusted legacy contract executes the frozen worker's own registry/settings/
+ * bridge selftest instead. Both use the production uid, read-only root,
+ * writable home and workspace tmpfs with `--network none`; neither prompts a
+ * model or receives a proxy capability.
  */
+type MutationSmokeRuntime = Pick<
+  OptimizerRuntime,
+  "image" | "runId" | "safeRunId" | "bundleDir" | "bundleSeal" | "containerLease" | "run"
+>;
+
+export function runMutationToolbeltSmoke(
+  runtime: MutationSmokeRuntime,
+): Promise<MutationToolbeltSmokeResult>;
+export function runMutationToolbeltSmoke(
+  runtime: MutationSmokeRuntime,
+  contract: MutationWorkerPreflightContract,
+): Promise<MutationLegacySelftestResult>;
 export async function runMutationToolbeltSmoke(
-  runtime: Pick<
-    OptimizerRuntime,
-    "image" | "runId" | "safeRunId" | "bundleDir" | "bundleSeal" | "containerLease" | "run"
-  >,
-): Promise<MutationToolbeltSmokeResult> {
+  runtime: MutationSmokeRuntime,
+  contract?: MutationWorkerPreflightContract,
+): Promise<MutationWorkerPreflightResult> {
   if (runtime.bundleDir === null || runtime.bundleSeal === null) {
     throw new Error("mutation toolbelt preflight requires a sealed optimizer bundle");
   }
@@ -532,6 +575,7 @@ export async function runMutationToolbeltSmoke(
   const runtimeDir = "/scratch/.hone-runtime";
   const bun = MUTATION_RUNTIME_MANIFEST.bun;
   const native = MUTATION_RUNTIME_MANIFEST.pi.files[0];
+  const selftestFlag = contract === "legacy-selftest" ? "--selftest" : "--toolbelt-selftest";
   const script = [
     "set -eu",
     `mkdir -p ${runtimeDir}`,
@@ -540,7 +584,7 @@ export async function runMutationToolbeltSmoke(
     `gzip -dc /hone/bundle/${native.bundleName} > ${runtimeDir}/${native.sandboxName}`,
     `chmod ${native.mode.toString(8)} ${runtimeDir}/${native.sandboxName}`,
     `exec env HONE_WORKDIR=/workspace HONE_AGENT_DIR=/scratch/omp-agent PI_NATIVE_VARIANT=baseline ` +
-      `${runtimeDir}/${bun.sandboxName} /hone/bundle/worker.mjs --toolbelt-selftest`,
+      `${runtimeDir}/${bun.sandboxName} /hone/bundle/worker.mjs ${selftestFlag}`,
   ].join(" && ");
   const argv = [
     "docker", "run", "--rm",
@@ -581,7 +625,9 @@ export async function runMutationToolbeltSmoke(
       `mutation toolbelt preflight failed in ${runtime.image} (exit ${result.exitCode}${result.timedOut ? ", timed out" : ""}): ${detail}`,
     );
   }
-  return parseMutationToolbeltSmoke(result.stdout);
+  return contract === "legacy-selftest"
+    ? parseMutationLegacySelftest(result.stdout)
+    : parseMutationToolbeltSmoke(result.stdout);
 }
 
 /**

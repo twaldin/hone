@@ -33,7 +33,7 @@ import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from 
 import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
 import type { BudgetDecision, BudgetDimension, ProxyHandle } from "@hone/proxy";
 import { admitCapsule, authenticateFrozenCapsuleAssets } from "../admission.js";
-import { readEvents, releaseTerminalReserve, replayActiveClock, replayRun } from "../eventlog.js";
+import { readEvents, releaseTerminalReserve, replayActiveClock, replayRun, writeFileDurable } from "../eventlog.js";
 import { makeDockerRunLease, type DockerRunLease } from "../docker-lease.js";
 import {
   CONCLUSIVE_ENGINE_REJECTION_RE,
@@ -46,6 +46,7 @@ import { freezeDockerClientEnv, dockerEngineSealError, sealDockerEngine } from "
 import { materializeGitCommit } from "../git-baseline.js";
 import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "../types.js";
 import {
+  MUTATION_WORKER_PREFLIGHT_FILE,
   optimizerCreateArgs,
   optimizerRunName,
   optimizerStartArgs,
@@ -1701,12 +1702,31 @@ export function createBackend(
           gate,
           clientEnv: frozen.env,
         });
-        // No model prompt can begin until the actual capsule image proves its
-        // bash/write/edit toolbelt under the production worker bundle. An
-        // explicit optimizer argv override has no sealed worker to prove and
-        // remains a dev/test-only seam; tests can inject the smoke boundary.
+        // No model prompt can begin until the exact worker bundle passes its
+        // trusted preflight contract (modern full toolbelt, or the one
+        // exact-identity legacy selftest). An explicit optimizer argv override
+        // has no sealed worker to prove and remains a dev/test-only seam.
         if (optimizer.bundleDir !== null || deps.mutationToolbeltSmoke !== undefined) {
-          await (deps.mutationToolbeltSmoke ?? runMutationToolbeltSmoke)(optimizer);
+          if (deps.mutationToolbeltSmoke !== undefined) {
+            await deps.mutationToolbeltSmoke(optimizer);
+          } else {
+            const result = ctx.mutationWorkerPreflightContract === undefined
+              ? await runMutationToolbeltSmoke(optimizer)
+              : await runMutationToolbeltSmoke(
+                optimizer,
+                ctx.mutationWorkerPreflightContract,
+              );
+            writeFileDurable(
+              join(ctx.runDir, MUTATION_WORKER_PREFLIGHT_FILE),
+              `${JSON.stringify({
+                version: 1,
+                runId: ctx.runId,
+                optimizerDigest: ctx.optimizerDigest,
+                contract: ctx.mutationWorkerPreflightContract ?? "full-toolbelt",
+                result,
+              })}\n`,
+            );
+          }
         }
         if (ctx.signal.aborted) return;
 

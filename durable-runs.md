@@ -110,6 +110,19 @@ preserved, then reproduce the full `fe92e179…` digest before use. The operator
 runbook must eventually replace this retained-worktree custody with the same
 complete closure sealed into CAS; source-only copies are not sufficient.
 
+The exact migrated Campaign 11 identity predates `--toolbelt-selftest`.
+After its migration record and complete `499ee208…` / `fe92e179…` seed,
+controller, and base closure are authenticated, worker preflight runs that
+bundle's legacy `--selftest` under `--network none`. It accepts only the exact
+`hone-mutation selftest ok` output and records
+`contract: "legacy-selftest", modelCalls: 0` in
+`mutation-worker-preflight.v1.json`; it does **not** claim bash/write/edit
+coverage. Every other identity continues to require the full modern toolbelt
+record (`contract: "full-toolbelt"` with bash, write, edit, and zero model
+calls). The legacy compatibility contract is trusted campaign orchestration
+only and is never inferred from a run flag, environment variable, or worker
+output.
+
 `events.ndjson` is the supervisor-readable outcome record:
 
 | Record | Meaning | Resume? |

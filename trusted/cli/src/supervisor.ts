@@ -80,7 +80,15 @@ import {
   runsRoot,
   writeRunConfigFile,
 } from "./runs.js";
-import type { CampaignPauseAuthority, ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext, RunPauseRequest } from "./types.js";
+import type {
+  CampaignPauseAuthority,
+  ChildLike,
+  MutationWorkerPreflightContract,
+  ProbeReport,
+  RunnerBackend,
+  RunnerBackendContext,
+  RunPauseRequest,
+} from "./types.js";
 
 const RUN_USAGE =
   "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume] [--backend stub|local] [--config <json>] [--optimizer-artifact sha256:<64hex>]";
@@ -491,6 +499,8 @@ export interface TrustedRunOptions {
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
   /** Internal campaign seed closure; never serialized or re-collected from repoRoot. */
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+  /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
+  mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
   /** Frozen model capability for this trusted session. Omit only on legacy M0/M1 runs. */
   proxyRole?: M2ProxyRole | undefined;
   /** Shared recursive-campaign provider pause authority. */
@@ -919,6 +929,9 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       orderingReport: admitted.orderingReport,
       ...(optimizerSnapshot !== undefined ? { optimizerSnapshot } : {}),
       ...(optimizerBaseSnapshot !== undefined ? { optimizerBaseSnapshot } : {}),
+      ...(trusted.mutationWorkerPreflightContract !== undefined
+        ? { mutationWorkerPreflightContract: trusted.mutationWorkerPreflightContract }
+        : {}),
       optimizerArtifactSeal,
       ...(trusted.measurementEpoch !== undefined ? { measurementEpoch: trusted.measurementEpoch } : {}),
       ...(trusted.evalTimeoutSec !== undefined ? { evalTimeoutSec: trusted.evalTimeoutSec } : {}),
@@ -1453,6 +1466,8 @@ export interface SuperviseExtra {
   optimizerSnapshot?: OptimizerSnapshot | undefined;
   /** Exact default/campaign seed closure captured during admission. */
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+  /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
+  mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
   /** Exact durable selection receipt, or null/absent for the M0 default optimizer. */
   optimizerArtifactSeal?: OptimizerArtifactSeal | null | undefined;
   measurementEpoch?: string | undefined;
@@ -1838,6 +1853,9 @@ async function superviseLocked(
     optimizerDigest,
     ...(extra.optimizerSnapshot !== undefined ? { optimizerSnapshot: extra.optimizerSnapshot } : {}),
     ...(extra.optimizerBaseSnapshot !== undefined ? { optimizerBaseSnapshot: extra.optimizerBaseSnapshot } : {}),
+    ...(extra.mutationWorkerPreflightContract !== undefined
+      ? { mutationWorkerPreflightContract: extra.mutationWorkerPreflightContract }
+      : {}),
     ...(extra.measurementEpoch !== undefined ? { measurementEpoch: extra.measurementEpoch } : {}),
     ...(extra.evalTimeoutSec !== undefined ? { evalTimeoutSec: extra.evalTimeoutSec } : {}),
     ...(extra.evaluationStrategy !== undefined ? { evaluationStrategy: extra.evaluationStrategy } : {}),

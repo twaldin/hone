@@ -25,6 +25,7 @@ import { MetaCampaignConfigV2, type MetaCampaignConfigV2 as RecursiveConfig } fr
 import {
   migrateCampaignSource,
   recursiveOptimizerBaseSnapshot,
+  recursiveMutationWorkerPreflightContract,
 } from "../src/commands/hone.js";
 import { main } from "../src/main.js";
 import { writeOptimizerArtifactSeal } from "../src/optimizer-artifact.js";
@@ -37,6 +38,7 @@ const preservedConfigPath = join(repoRoot, "data", "m2-refreeze-final", "campaig
 const reviewedBaseRoot = "/home/tim/omp-firstmate/data/hone-child-terminal-crash/scratch-r1/base-124b";
 const preservedRuntimeRoot = "/home/tim/omp-firstmate/worktrees/m2-exec-runtime-10";
 const campaign11BaseDigest = "sha256:fe92e17955adebe53c9ed4076ae1dcdfb2e328d19818d7273fb4f4d850f0d6dc";
+const campaign11SourceArtifact = "sha256:499ee208f5b7376a3cfc583e44b7971f7b1b9d378499429ddd67caf04d5f36e2";
 const reviewedBaseAvailable = existsSync(reviewedBaseRoot)
   && existsSync(join(preservedRuntimeRoot, "node_modules"))
   && existsSync(join(preservedRuntimeRoot, "optimizer", "node_modules"));
@@ -290,5 +292,52 @@ describe("migrated recursive optimizer base", () => {
       fixture.outerRunDir,
       sealedBase,
     )).toThrow("sealed outer optimizer identity does not match the frozen campaign controller");
+  });
+
+  test.skipIf(!reviewedBaseAvailable)("legacy worker compatibility requires migration plus every exact Campaign 11 identity", async () => {
+    const fixture = await migratedFixture();
+    const sealedBase = copyReviewedBase();
+    const snapshot = recursiveOptimizerBaseSnapshot(
+      fixture.config,
+      fixture.root,
+      fixture.outerRunDir,
+      sealedBase,
+    );
+    const exact = structuredClone(fixture.config);
+    exact.seedOptimizer.sourceArtifact = campaign11SourceArtifact;
+    exact.seedOptimizer.bundleDigest = campaign11BaseDigest;
+    exact.controllerOptimizer.sourceArtifact = campaign11SourceArtifact;
+    exact.controllerOptimizer.bundleDigest = campaign11BaseDigest;
+    expect(recursiveMutationWorkerPreflightContract(exact, snapshot)).toBe("legacy-selftest");
+
+    const unmigrated = structuredClone(exact);
+    delete unmigrated.sourceMigrationJournal;
+    expect(recursiveMutationWorkerPreflightContract(unmigrated, snapshot)).toBeUndefined();
+
+    for (const mutate of [
+      (config: RecursiveConfig) => {
+        config.seedOptimizer.sourceArtifact = `sha256:${"a".repeat(64)}`;
+      },
+      (config: RecursiveConfig) => {
+        config.seedOptimizer.bundleDigest = `sha256:${"a".repeat(64)}`;
+      },
+      (config: RecursiveConfig) => {
+        config.controllerOptimizer.sourceArtifact = `sha256:${"a".repeat(64)}`;
+      },
+      (config: RecursiveConfig) => {
+        config.controllerOptimizer.bundleDigest = `sha256:${"a".repeat(64)}`;
+      },
+    ]) {
+      const foreign = structuredClone(exact);
+      mutate(foreign);
+      expect(recursiveMutationWorkerPreflightContract(foreign, snapshot)).toBeUndefined();
+    }
+
+    const mutatedBase = copyReviewedBase();
+    appendFileSync(join(mutatedBase, "optimizer", "worker", "mutate.ts"), "\n// identity mismatch\n");
+    expect(recursiveMutationWorkerPreflightContract(
+      exact,
+      collectOptimizerSnapshot(mutatedBase),
+    )).toBeUndefined();
   });
 });

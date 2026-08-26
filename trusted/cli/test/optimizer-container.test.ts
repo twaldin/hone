@@ -427,6 +427,41 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
     }
   });
 
+  it("runs the exact-identity legacy selftest without proxy access or model dispatch", async () => {
+    const { runtime, argvs } = await preparedSmokeRuntime(res({
+      stdout: Buffer.from("hone-mutation selftest ok\n"),
+    }));
+    try {
+      await expect(runMutationToolbeltSmoke(runtime, "legacy-selftest")).resolves.toEqual({
+        type: "hone-mutation-legacy-selftest.v1",
+        contract: "legacy-selftest",
+        modelCalls: 0,
+        output: "hone-mutation selftest ok",
+      });
+      const argv = argvs.find(
+        (entry) => entry[1] === "run" && entry.includes(`hone-toolbelt-${runtime.safeRunId}`),
+      ) ?? [];
+      expect(argv.at(-1)).toContain("--selftest");
+      expect(argv.at(-1)).not.toContain("--toolbelt-selftest");
+      expect(argv).toContain("none");
+      expect(argv.join("\0")).not.toContain("HONE_PROXY");
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+
+  it("refuses a broken legacy worker even when its container exits zero", async () => {
+    const { runtime } = await preparedSmokeRuntime(res({
+      stdout: Buffer.from("broken frozen worker\n"),
+    }));
+    try {
+      await expect(runMutationToolbeltSmoke(runtime, "legacy-selftest"))
+        .rejects.toThrow("mutation legacy selftest failed validation");
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+
   it.each([
     ["non-zero exit", res({ exitCode: 9, stderr: Buffer.from("toolbelt failed") })],
     ["timeout", res({ exitCode: -1, timedOut: true, stderr: Buffer.from("toolbelt stalled") })],
@@ -437,7 +472,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
       expect(argvs.some((argv) =>
         argv[1] === "rm"
         && argv[2] === "-f"
-        && argv[3] === `hone-toolbelt-${runtime.safeRunId}`
+        && argv.at(-1) === `hone-toolbelt-${runtime.safeRunId}`
       )).toBe(true);
     } finally {
       await runtime.cleanup();
@@ -452,7 +487,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
       expect(argvs.some((argv) =>
         argv[1] === "rm"
         && argv[2] === "-f"
-        && argv[3] === `hone-toolbelt-${runtime.safeRunId}`
+        && argv.at(-1) === `hone-toolbelt-${runtime.safeRunId}`
       )).toBe(true);
     } finally {
       await runtime.cleanup();
