@@ -858,6 +858,25 @@ export function campaignChildDispatchPolicy(
   };
 }
 
+export function writeCampaignOuterRunConfig(
+  configPath: string,
+  config: AnyMetaCampaignConfig,
+  seed?: number,
+): void {
+  writeFileDurable(configPath, `${JSON.stringify({
+    routing: { mutation: { model: config.routing.outerMutation } },
+    apply: "none",
+    headless: true,
+    ...(seed === undefined ? {} : { seed }),
+    budget: config.budgets.outer,
+    promotion: config.promotion,
+    ...(config.sessionNoYieldMaxTokens === undefined
+      ? {}
+      : { sessionNoYieldMaxTokens: config.sessionNoYieldMaxTokens }),
+  }, null, 2)}\n`);
+  chmodSync(configPath, 0o600);
+}
+
 
 export class CliChildSupervisor implements MetaChildSupervisor {
   constructor(
@@ -2821,17 +2840,7 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     }
     const configFile = join(campaignDir, "outer-config.json");
     if (!existsSync(configFile)) {
-      writeFileDurable(configFile, `${JSON.stringify({
-        routing: { mutation: { model: config.routing.outerMutation } },
-        apply: "none",
-        headless: true,
-        budget: config.budgets.outer,
-        promotion: config.promotion,
-        ...(config.sessionNoYieldMaxTokens === undefined
-          ? {}
-          : { sessionNoYieldMaxTokens: config.sessionNoYieldMaxTokens }),
-      }, null, 2)}\n`);
-      chmodSync(configFile, 0o600);
+      writeCampaignOuterRunConfig(configFile, config);
     }
     const resume = existsSync(outerRunDir);
     const code = await runCommand(
@@ -3312,18 +3321,11 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
 
     const outerConfigPath = join(campaignDir, "outer-config.json");
     if (!existsSync(outerConfigPath)) {
-      writeFileDurable(outerConfigPath, `${JSON.stringify({
-        routing: { mutation: { model: config.routing.outerMutation } },
-        apply: "none",
-        headless: true,
-        seed: config.generation.outerReplicate,
-        budget: config.budgets.outer,
-        promotion: config.promotion,
-        ...(config.sessionNoYieldMaxTokens === undefined
-          ? {}
-          : { sessionNoYieldMaxTokens: config.sessionNoYieldMaxTokens }),
-      }, null, 2)}\n`);
-      chmodSync(outerConfigPath, 0o600);
+      writeCampaignOuterRunConfig(
+        outerConfigPath,
+        config,
+        config.generation.outerReplicate,
+      );
     }
     const resume = existsSync(outerRunDir);
     const commandArgs = resume

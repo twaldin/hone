@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import {
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   M2_CANDIDATE_ATTEMPTS_MAX,
   M2_CANDIDATE_COUNT,
   M2_EVALUATOR_TIMEOUT_SEC,
@@ -406,7 +407,7 @@ export const M2_OUTER_DIRECT_ENVELOPE_POLICY = {
   projectedPanelMeanWallClockSec: 4_069.42,
   wallClockMarginBps: 2_500,
   mutationSessionsPerEpisode: 1 as const,
-  mutationSessionMaxTokens: 1_500_000,
+  mutationSessionMaxTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   tokenMarginBps: 2_500,
   usdPerMillionTokens: 5,
 };

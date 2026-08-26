@@ -54,6 +54,8 @@ Repair has one intentionally conservative pre-fsync case. If the process dies af
 
 Mutation sessions default to a 1,500,000-token no-yield ceiling. A frozen run or meta-campaign may set `sessionNoYieldMaxTokens` to a larger positive integer; the value is schema-validated, sealed into the run config, and inherited by outer and child mutation sessions. Omission keeps the 1,500,000-token default, and configuration cannot lower it.
 
+The pre-existing trusted-operator escape hatch `HONE_SESSION_NO_YIELD_MAX_TOKENS` accepts any positive safe integer, including a value below the default when no sealed config override exists. Prefer the sealed config surface for campaign policy; when both are present, the sealed config wins.
+
 The future pumpfun M1 freeze should set `sessionNoYieldMaxTokens` to approximately 1,700,000 (use `1700000`). That exception accommodates its measured first coherent edit plus bounded smoke while prompt aggregation removes the repeated 2,000-entry evaluator payload. It applies only to that future freeze: never mutate an already-running campaign's pinned configuration.
 
 ## Durability inventory

@@ -92,6 +92,21 @@ describe("buildEpisodeContext", () => {
     expect(ctx.userPrompt).toContain("session no-yield tokens remaining: 1500000 (at session start)");
   });
 
+  it("renders a raised session no-yield ceiling as the enforced bound and remainder", () => {
+    const ctx = buildEpisodeContext({
+      episode: 0,
+      objective: "obj",
+      parentEvaluation: record({}),
+      lineage: [],
+      budget,
+      sessionNoYieldMaxTokens: 1_700_000,
+    });
+
+    expect(ctx.userPrompt).toContain("session no-yield token bound: 1700000");
+    expect(ctx.userPrompt).toContain("session no-yield tokens remaining: 1700000 (at session start)");
+    expect(ctx.userPrompt).not.toContain("session no-yield token bound: 1500000");
+  });
+
   it("truncates oversized feedback blobs at the policy bound", () => {
     const huge = "x".repeat(maxFeedbackChars + 500);
     const ctx = buildEpisodeContext({
@@ -135,6 +150,41 @@ Per-example results:
   feedback: 4 frozen files; reciprocal geometric mean milliseconds
 
 Evaluator summary: upstream-derived JS/TS/CSS parser and formatter regression suite passed`);
+  });
+
+  it("keeps exactly the inline cap in the legacy shape and aggregates only above it", () => {
+    const perExample = Object.fromEntries(
+      Array.from({ length: MAX_INLINE_PER_EXAMPLE_RESULTS + 1 }, (_, index) => [
+        `case-${String(index).padStart(2, "0")}`,
+        { score: index, feedback: `feedback-${index}` },
+      ]),
+    );
+    const contextInput = {
+      episode: 0,
+      objective: "obj",
+      lineage: [],
+      budget,
+      sessionNoYieldMaxTokens,
+    };
+    const atCap = buildEpisodeContext({
+      ...contextInput,
+      parentEvaluation: record(Object.fromEntries(
+        Object.entries(perExample).slice(0, MAX_INLINE_PER_EXAMPLE_RESULTS),
+      )),
+    }).userPrompt;
+    expect(atCap).toContain("Per-example results:");
+    expect(atCap).not.toContain("Lowest-score examples:");
+    expect(atCap.match(/^- case-/gm)).toHaveLength(MAX_INLINE_PER_EXAMPLE_RESULTS);
+    expect(atCap).not.toContain(EVALUATOR_RECORD_PATH);
+
+    const overCap = buildEpisodeContext({
+      ...contextInput,
+      parentEvaluation: record(perExample),
+    }).userPrompt;
+    expect(overCap).toContain("Lowest-score examples:");
+    expect(overCap).toContain("Omitted 1 middle-score examples:");
+    expect(overCap).toContain(`Full evaluator record (all ${MAX_INLINE_PER_EXAMPLE_RESULTS + 1} per-example results): ${EVALUATOR_RECORD_PATH}`);
+    expect(overCap).not.toMatch(/NaN|undefined/);
   });
 
   it("bounds a 2,000-entry evaluator prompt", () => {

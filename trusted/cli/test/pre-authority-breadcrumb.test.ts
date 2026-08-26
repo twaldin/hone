@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { MetaCampaignConfigV2, canonicalJson } from "@hone/schema";
+import { MetaCampaignConfigV1, MetaCampaignConfigV2, canonicalJson } from "@hone/schema";
 import {
   type MetaChildRunRequest,
   type Sha256Digest,
@@ -12,6 +12,7 @@ import {
   CampaignModelRegistry,
   campaignChildDispatchPolicy,
   CliChildSupervisor,
+  writeCampaignOuterRunConfig,
 } from "../src/commands/hone.js";
 import { appendEvent, readEvents } from "../src/eventlog.js";
 import type { CmdIo } from "../src/io.js";
@@ -27,6 +28,13 @@ const frozenConfigPath = fileURLToPath(new URL(
   "../../../data/m2-refreeze-final/campaign-frozen-recursive-capacity.json",
   import.meta.url,
 ));
+const m1Config = MetaCampaignConfigV1.parse({
+  ...JSON.parse(readFileSync(fileURLToPath(new URL(
+    "../../../schema/fixtures/meta-campaign.m1.json",
+    import.meta.url,
+  )), "utf8")),
+  sessionNoYieldMaxTokens: SESSION_NO_YIELD_MAX_TOKENS,
+});
 const config = MetaCampaignConfigV2.parse({
   ...JSON.parse(readFileSync(frozenConfigPath, "utf8")),
   sessionNoYieldMaxTokens: SESSION_NO_YIELD_MAX_TOKENS,
@@ -158,6 +166,27 @@ function makeSupervisor(
     supervisor: new RefusingChildSupervisor(root, campaignDir, outerRunDir, establishJournalAuthority),
   };
 }
+
+describe("campaign outer run config", () => {
+  it("writes the raised no-yield ceiling into both M1 and recursive outer sessions", () => {
+    const root = mkdtempSync(join(tmpdir(), "hone-outer-config-"));
+    roots.push(root);
+    const m1Path = join(root, "m1-outer-config.json");
+    const recursivePath = join(root, "recursive-outer-config.json");
+
+    writeCampaignOuterRunConfig(m1Path, m1Config);
+    writeCampaignOuterRunConfig(recursivePath, config, config.generation.outerReplicate);
+
+    const m1Outer = JSON.parse(readFileSync(m1Path, "utf8"));
+    const recursiveOuter = JSON.parse(readFileSync(recursivePath, "utf8"));
+    expect(m1Outer.sessionNoYieldMaxTokens).toBe(SESSION_NO_YIELD_MAX_TOKENS);
+    expect(m1Outer.seed).toBeUndefined();
+    expect(recursiveOuter.sessionNoYieldMaxTokens).toBe(SESSION_NO_YIELD_MAX_TOKENS);
+    expect(recursiveOuter.seed).toBe(config.generation.outerReplicate);
+    expect(statSync(m1Path).mode & 0o777).toBe(0o600);
+    expect(statSync(recursivePath).mode & 0o777).toBe(0o600);
+  });
+});
 
 describe("pre-authority child refusal breadcrumbs", () => {
   it("durably names the campaign-9 environment-divergence reason on start and resume", async () => {
