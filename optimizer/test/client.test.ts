@@ -2,8 +2,17 @@ import { mkdtempSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  OPTIMIZER_CHILD_PENDING_EXIT_CODE,
+  OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE,
+} from "@hone/schema";
 import { afterEach, describe, expect, it } from "vitest";
-import { BrokerClient, parseBrokerEndpoint } from "../src/client.js";
+import {
+  brokerControlExitCode,
+  BrokerClient,
+  BrokerRpcError,
+  parseBrokerEndpoint,
+} from "../src/client.js";
 import { deferred } from "../src/deferred.js";
 
 /**
@@ -175,5 +184,20 @@ describe("BrokerClient transport + auth", () => {
     );
     expect(failure.message).toBe("unauthorized");
     expect(failure.message).not.toContain(wrongToken);
+  });
+});
+
+describe("broker control exits", () => {
+  it("classifies storage exhaustion and pending recursive children without swallowing other failures", () => {
+    expect(
+      brokerControlExitCode(new BrokerRpcError(-32012, "ENOSPC", "STORAGE_EXHAUSTED")),
+    ).toBe(OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE);
+    expect(
+      brokerControlExitCode(new BrokerRpcError(-32013, "child has no terminal", "CHILD_PENDING")),
+    ).toBe(OPTIMIZER_CHILD_PENDING_EXIT_CODE);
+    expect(
+      brokerControlExitCode(new BrokerRpcError(-32006, "unexpected bug", "INTERNAL")),
+    ).toBeUndefined();
+    expect(brokerControlExitCode(new Error("local failure"))).toBeUndefined();
   });
 });

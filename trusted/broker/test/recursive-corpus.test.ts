@@ -548,6 +548,111 @@ describe("recursive spawnRun authority", () => {
       openReservations: 1,
     });
   });
+  it("classifies an authenticated child without a terminal as pending and keeps its reservation open", async () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "pending-terminal-ledger.ndjson"));
+    ledgers.push(ledger);
+    ledger.registerRun("pending-terminal-root", 0, [], LARGE);
+    const request = childRequest("pending-terminal-child", 1, {
+      maxTokens: 30,
+      maxUsd: 30,
+      maxWallClockSec: 30,
+      maxEvaluatorInvocations: 30,
+    }, "capsule");
+    const finalizeSettlement = vi.fn();
+    const launcher: ChildRunLauncher = async ({ request: launchedRequest, admission }) => {
+      const evidence = await writeChildEvidence(launchedRequest, admission, "pending-terminal");
+      const started: RunEvent = {
+        runId: launchedRequest.child.runId,
+        at: "1970-01-01T00:00:00.000Z",
+        type: "run.started",
+        capsuleId: launchedRequest.child.capsuleId,
+        contractHash: contentHash("child-run-contract"),
+        optimizerDigest: launchedRequest.child.optimizerArtifact.hash,
+        campaignConfigHash: admission.campaignConfigHash,
+      };
+      await writeFile(evidence.terminalEventPath, `${JSON.stringify(started)}\n`);
+      return {
+        ...evidence,
+        usage: { tokens: 1, usd: 1, wallClockSec: 1, evaluatorInvocations: 1 },
+        finalizeSettlement,
+      };
+    };
+    const broker = makeBroker({
+      runId: "pending-terminal-root",
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: launcher,
+      },
+    });
+
+    const error = await broker.spawnRun(request, CLIENT).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    );
+    expect(error).toMatchObject({
+      code: "CHILD_PENDING",
+      message: `child ${request.child.runId} has no durable terminal event`,
+    });
+    expect(finalizeSettlement).not.toHaveBeenCalled();
+    expect(ledger.budgetState("pending-terminal-root")).toMatchObject({
+      reservations: 1,
+      openReservations: 1,
+    });
+  });
+
+  it.each(["missing", "empty"] as const)(
+    "classifies a %s child event journal as pending and keeps its reservation open",
+    async (journalState) => {
+      const ledger = RecursiveResourceLedger.open(path.join(tmpBase, `${journalState}-terminal-ledger.ndjson`));
+      ledgers.push(ledger);
+      const rootRunId = `${journalState}-terminal-root`;
+      ledger.registerRun(rootRunId, 0, [], LARGE);
+      const request = childRequest(`${journalState}-terminal-child`, 1, {
+        maxTokens: 30,
+        maxUsd: 30,
+        maxWallClockSec: 30,
+        maxEvaluatorInvocations: 30,
+      }, "capsule");
+      const finalizeSettlement = vi.fn();
+      const launcher: ChildRunLauncher = async ({ request: launchedRequest, admission }) => {
+        const evidence = await writeChildEvidence(launchedRequest, admission, `${journalState}-terminal`);
+        if (journalState === "missing") await rm(evidence.terminalEventPath);
+        else await writeFile(evidence.terminalEventPath, "");
+        return {
+          ...evidence,
+          usage: { tokens: 1, usd: 1, wallClockSec: 1, evaluatorInvocations: 1 },
+          finalizeSettlement,
+        };
+      };
+      const broker = makeBroker({
+        runId: rootRunId,
+        budget: LARGE,
+        recursive: {
+          depth: 0,
+          ancestors: [],
+          ledger,
+          admitChildRun: ADMIT_CHILD,
+          launchChildRun: launcher,
+        },
+      });
+
+      const error = await broker.spawnRun(request, CLIENT).then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+      expect(error).toMatchObject({
+        code: "CHILD_PENDING",
+        message: `child ${request.child.runId} has no durable terminal event`,
+      });
+      expect(finalizeSettlement).not.toHaveBeenCalled();
+      expect(ledger.budgetState(rootRunId)).toMatchObject({ reservations: 1, openReservations: 1 });
+    },
+  );
+
   it("refuses spawnRun at depth 2 before invoking the trusted launcher", async () => {
 
     const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "depth-ledger.ndjson"));

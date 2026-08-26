@@ -1251,7 +1251,7 @@ describe("REAL docker: host-uid build into the 0700-rooted handoff", () => {
         expect(() => verifyOptimizerBundleSeal(rt)).toThrow(/sealed bundle bytes drifted/);
       } finally {
         await runtime?.cleanup();
-        await runCommand(["docker", "rm", "-f", lease], { timeoutMs: 60_000 });
+        await runCommand(["docker", "rm", "-f", "-v", lease], { timeoutMs: 60_000 });
       }
     },
   );

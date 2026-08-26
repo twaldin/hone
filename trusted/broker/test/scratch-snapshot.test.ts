@@ -87,7 +87,7 @@ async function makeFakeDockerBroker(
     calls.push([...argv]);
     if (argv[0] !== "docker") return Promise.resolve(fakeRes());
     if (argv[1] === "run") return Promise.resolve(fakeRes({ stdout: Buffer.from(`cid-${++cid}\n`) }));
-    if (argv[1] === "rm" && argv[2] === "-f" && opts.failRemove?.has(argv[3] ?? "")) {
+    if (argv[1] === "rm" && argv[2] === "-f" && argv.slice(2).some((target) => opts.failRemove?.has(target))) {
       return Promise.resolve(fakeRes({ exitCode: 1, stderr: Buffer.from("cannot remove: device busy") }));
     }
     if (argv[1] === "exec" && argv.includes(SCRATCH_SNAPSHOT_SCRIPT)) {
@@ -223,7 +223,7 @@ describe("scratch snapshot bounds (kernel cap + deadline wired into the keeper)"
     // preserved intact for the next strict resume sweep: no snapshot exec, no
     // keeper removal, no volume removal.
     expect(h.calls.some((c) => c.includes(SCRATCH_SNAPSHOT_SCRIPT))).toBe(false);
-    expect(findCall(h.calls, "docker", "rm", "-f", h.keeperName)).toBe(-1);
+    expect(findCall(h.calls, "docker", "rm", "-f", "-v", h.keeperName)).toBe(-1);
     expect(findCall(h.calls, "docker", "volume", "rm")).toBe(-1);
   });
 });
@@ -452,7 +452,7 @@ describe("scratch snapshot script semantics (real container)", () => {
       const live = ps.stdout.toString("utf8").split("\n").filter((line) => !/\[\w+\]\s*$/.test(line));
       expect(live.join("\n")).not.toMatch(/sleep 1000|tar -cf|find \/scratch/);
     } finally {
-      await runCommand(["docker", "rm", "-f", keeper], { timeoutMs: 30_000 });
+      await runCommand(["docker", "rm", "-f", "-v", keeper], { timeoutMs: 30_000 });
     }
   }, 180_000);
 
@@ -488,7 +488,7 @@ describe("scratch snapshot script semantics (real container)", () => {
       const live = ps.stdout.toString("utf8").split("\n").filter((line) => !/\[\w+\]\s*$/.test(line));
       expect(live.join("\n")).not.toMatch(/sleep 1000|find \/scratch|awk/);
     } finally {
-      await runCommand(["docker", "rm", "-f", keeper], { timeoutMs: 30_000 });
+      await runCommand(["docker", "rm", "-f", "-v", keeper], { timeoutMs: 30_000 });
     }
   }, 180_000);
 

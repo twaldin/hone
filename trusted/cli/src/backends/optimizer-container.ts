@@ -571,11 +571,11 @@ export async function runMutationToolbeltSmoke(
   try {
     result = await runtime.run(argv, { timeoutMs: 120_000 });
   } catch (error) {
-    await runtime.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 }).catch(() => {});
+    await runtime.run(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 }).catch(() => {});
     throw error;
   }
   if (result.exitCode !== 0 || result.timedOut) {
-    await runtime.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 }).catch(() => {});
+    await runtime.run(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 }).catch(() => {});
     const detail = result.stderr.toString("utf8").trim().slice(-4_000);
     throw new Error(
       `mutation toolbelt preflight failed in ${runtime.image} (exit ${result.exitCode}${result.timedOut ? ", timed out" : ""}): ${detail}`,
@@ -611,7 +611,7 @@ export async function prepareOptimizerRuntime(
     const failures: string[] = [];
     for (const name of [optimizerBuildName(safeRunId), ...runtime.spawnedNames]) {
       try {
-        const result = await opts.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 });
+        const result = await opts.run(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 });
         if (result.exitCode !== 0 && !MISSING_CONTAINER_RE.test(result.stderr.toString("utf8"))) {
           failures.push(`container ${name}: ${result.stderr.toString("utf8").trim() || `exit ${result.exitCode}`}`);
         }

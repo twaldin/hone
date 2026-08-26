@@ -834,6 +834,20 @@ export class BrokerServer {
           },
         });
       }
+      if (
+        err !== null
+        && typeof err === "object"
+        && "code" in err
+        && err.code === "ENOSPC"
+      ) {
+        return respond({
+          error: {
+            code: BROKER_ERROR_NUMBER.STORAGE_EXHAUSTED,
+            message: err instanceof Error ? err.message : "storage exhausted",
+            data: { code: "STORAGE_EXHAUSTED" },
+          },
+        });
+      }
       if (err instanceof ZodError) {
         // A result failed contract validation — internal bug, never the client's fault.
         return respond({

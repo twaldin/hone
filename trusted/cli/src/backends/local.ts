@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { z } from "zod";
 import {
   M2_MODEL_ROUTING,
+  OPTIMIZER_CHILD_PENDING_EXIT_CODE,
+  OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE,
   RunEvent,
   type ArtifactRef,
   type BudgetState,
@@ -31,7 +33,7 @@ import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from 
 import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
 import type { BudgetDecision, BudgetDimension, ProxyHandle } from "@hone/proxy";
 import { admitCapsule, authenticateFrozenCapsuleAssets } from "../admission.js";
-import { readEvents, replayActiveClock, replayRun } from "../eventlog.js";
+import { readEvents, releaseTerminalReserve, replayActiveClock, replayRun } from "../eventlog.js";
 import { makeDockerRunLease, type DockerRunLease } from "../docker-lease.js";
 import {
   CONCLUSIVE_ENGINE_REJECTION_RE,
@@ -323,7 +325,7 @@ export async function sweepStaleRunResources(
   };
   const removeWriters = async (ids: readonly string[]): Promise<boolean> => {
     if (ids.length === 0) return true;
-    const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", ...ids], "labeled containers");
+    const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", "-v", ...ids], "labeled containers");
     if (failure === undefined) return true;
     if (strict) throw new Error(`stale run cleanup incomplete: ${failure}`);
     return false;
@@ -417,9 +419,8 @@ export async function sweepStaleRunResources(
     const ids = await listLabeledContainers();
     if (ids !== null && !(await removeWriters(ids))) return;
   }
-
   for (const name of [scratchKeeper, relay, brokerRelay]) {
-    const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", name], `container ${name}`);
+    const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", "-v", name], `container ${name}`);
     if (failure !== undefined) failures.push(failure);
   }
 
@@ -560,8 +561,8 @@ export async function setupEgress(
   const cleanup = async (): Promise<void> => {
     const failures: string[] = [];
     for (const [argv, what] of [
-      [["docker", "rm", "-f", brokerRelay], `container ${brokerRelay}`],
-      [["docker", "rm", "-f", relay], `container ${relay}`],
+      [["docker", "rm", "-f", "-v", brokerRelay], `container ${brokerRelay}`],
+      [["docker", "rm", "-f", "-v", relay], `container ${relay}`],
       [["docker", "network", "rm", network], `network ${network}`],
     ] as const) {
       const failure = await dockerRemovalFailure(run, [...argv], what);
@@ -617,7 +618,7 @@ export async function setupEgress(
       brokerRelayStarted = true;
       return `tcp://${brokerRelay}:${RELAY_PORT}`;
     } catch (err) {
-      const cleanupFailure = await dockerRemovalFailure(run, ["docker", "rm", "-f", brokerRelay], `container ${brokerRelay}`);
+      const cleanupFailure = await dockerRemovalFailure(run, ["docker", "rm", "-f", "-v", brokerRelay], `container ${brokerRelay}`);
       if (cleanupFailure !== undefined) {
         throw new Error(`${err instanceof Error ? err.message : String(err)}; ${cleanupFailure}`);
       }
@@ -725,7 +726,7 @@ function containerKillHandle(child: OptimizerChildLike, name: string, run: RunCo
     pid: child.pid,
     kill(signal?: NodeJS.Signals): boolean {
       const sig = signal ?? "SIGTERM";
-      void run(sig === "SIGKILL" ? ["docker", "rm", "-f", name] : ["docker", "kill", "-s", "TERM", name], { timeoutMs: 30_000 }).catch(() => {});
+      void run(sig === "SIGKILL" ? ["docker", "rm", "-f", "-v", name] : ["docker", "kill", "-s", "TERM", name], { timeoutMs: 30_000 }).catch(() => {});
       // A reaped client needs no signal — its number may already belong to
       // someone else.
       if (!clientAlive) return true;
@@ -783,6 +784,28 @@ function cappedDiagnosticAppender(
     remaining = 0;
     sealed = true;
   };
+}
+
+export class OptimizerStorageExhaustedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OptimizerStorageExhaustedError";
+  }
+}
+
+export class OptimizerChildPendingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OptimizerChildPendingError";
+  }
+}
+
+export function isOptimizerStorageExhaustedError(error: unknown): error is OptimizerStorageExhaustedError {
+  return error instanceof OptimizerStorageExhaustedError;
+}
+
+export function isOptimizerChildPendingError(error: unknown): error is OptimizerChildPendingError {
+  return error instanceof OptimizerChildPendingError;
 }
 
 /**
@@ -844,7 +867,7 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
   /** Joined daemon-side reap by name, AWAITED before the invocation settles; strict sweeps + cleanup() backstop failures. */
   const reap = async (): Promise<void> => {
     try {
-      await runtime.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 });
+      await runtime.run(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 });
     } catch {
       // cleanup() and the strict final sweep re-attempt and surface failures.
     }
@@ -941,6 +964,25 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
       settleAfterLog(() => {
         if (ctx.signal.aborted) return done.resolve();
         if (code === 0) return done.resolve();
+        if (code === OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE) {
+          try {
+            releaseTerminalReserve(ctx.runDir);
+          } catch (error) {
+            return done.reject(new OptimizerStorageExhaustedError(
+              `optimizer exhausted storage and terminal reserve release failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ));
+          }
+          return done.reject(new OptimizerStorageExhaustedError(
+            `optimizer exhausted storage — terminal reserve released; see ${join(ctx.runDir, "optimizer.log")}`,
+          ));
+        }
+        if (code === OPTIMIZER_CHILD_PENDING_EXIT_CODE) {
+          return done.reject(new OptimizerChildPendingError(
+            `optimizer deferred to a pending recursive child; see ${join(ctx.runDir, "optimizer.log")}`,
+          ));
+        }
         done.reject(new Error(`optimizer exited ${code ?? `signal ${signal ?? "?"}`} — see ${join(ctx.runDir, "optimizer.log")}`));
       }),
     );

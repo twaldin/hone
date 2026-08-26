@@ -2868,7 +2868,7 @@ describe("evaluator containment", () => {
       b.ctl.evalOutputs.set(baselineHash, score(1));
       await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 22 }, CLIENT);
 
-      expect(b.log).toContainEqual(["docker", "rm", "-f", ownerContainer]);
+      expect(b.log).toContainEqual(["docker", "rm", "-f", "-v", ownerContainer]);
       const durableFacts = await stateLines(b);
       const blocked = durableFacts.find((line) => line.t === "uidClaimBlocked");
       const takenOver = durableFacts.find((line) => line.t === "uidClaimTakeover");
@@ -3189,7 +3189,7 @@ describe("sandbox lifecycle and resource ceilings", () => {
     b.ctl.execExit = "timeout";
     const res = await b.broker.exec({ sandboxId, argv: ["sleep", "999"], timeoutSec: 1 }, CLIENT);
     expect(res.exitCode).toBe(124);
-    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "c_0")).toBe(true);
+    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v" && a[4] === "c_0")).toBe(true);
     await expect(b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT)).rejects.toThrow(/unknown sandbox/);
   });
 
@@ -3202,7 +3202,7 @@ describe("sandbox lifecycle and resource ceilings", () => {
     const evalArgv = b.log.find((a) => a[1] === "run" && a.includes("--rm")) ?? [];
     const evalName = evalArgv[evalArgv.indexOf("--name") + 1] ?? "";
     expect(evalName).toMatch(/-eval-/);
-    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === evalName)).toBe(true);
+    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v" && a[4] === evalName)).toBe(true);
     expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(1);
   });
 
@@ -3647,7 +3647,7 @@ describe("terminal saveArtifact (a successful save retires the sandbox)", () => 
     const saved = await b.broker.saveArtifact({ sandboxId }, CLIENT);
     expect(saved.hash).toBe(candidateHash);
     // The container (c_0: first -d spawn of this boot) was removed BEFORE the ack.
-    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "c_0")).toBe(true);
+    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v" && a[4] === "c_0")).toBe(true);
     // The entry is gone — the slot and its proxy bearer are released.
     await expect(b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT)).rejects.toThrow(/sandbox/i);
     // Iteration resumes from the saved CAS artifact in a FRESH sandbox.
@@ -3682,7 +3682,11 @@ describe("terminal saveArtifact (a successful save retires the sandbox)", () => 
     // survives to retain /scratch, an active slot, or the injected proxy token.
     const spawned = b.log.filter((a) => a[1] === "run" && a.includes("-d"));
     expect(spawned).toHaveLength(8);
-    const removed = new Set(b.log.filter((a) => a[1] === "rm" && a[2] === "-f").map((a) => a[3]));
+    const removed = new Set(
+      b.log
+        .filter((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v")
+        .map((a) => a[4]),
+    );
     for (let i = 0; i < 8; i++) expect(removed.has(`c_${i}`), `container c_${i} must be removed`).toBe(true);
   });
 
@@ -3762,7 +3766,7 @@ describe("broker close quiescence", () => {
     const evalRun = b.log.find((a) => a[1] === "run" && !a.includes("-d"));
     const evalName = evalRun?.[evalRun.indexOf("--name") + 1] ?? "";
     expect(evalName).toMatch(/-eval-/);
-    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === evalName)).toBe(true);
+    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v" && a[4] === evalName)).toBe(true);
     // The staged assets were torn down even on the aborted path.
     expect((await readdir(path.join(b.runDir, "tmp"))).filter((e) => e.startsWith("assets-"))).toHaveLength(0);
   });
@@ -3772,7 +3776,7 @@ describe("broker close quiescence", () => {
     // c_0 is the scratch keeper's daemon id; the sandbox container is c_1.
     b.ctl.rmFailFor.add("c_1");
     await expect(b.broker.close()).rejects.toThrow(/containers still live: c_1/);
-    expect(b.log.filter((argv) => argv[1] === "rm" && argv[3] === "c_1").length).toBeGreaterThanOrEqual(2);
+    expect(b.log.filter((argv) => argv[1] === "rm" && argv[3] === "-v" && argv[4] === "c_1").length).toBeGreaterThanOrEqual(2);
     expect(
       b.log.some(
         (argv) => argv[1] === "exec" && argv.includes(`hone-scratch-keeper-${b.runId}`) && argv.includes("/bin/sh"),

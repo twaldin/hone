@@ -21,7 +21,7 @@ const base = {
  * Every durable way a run can stop spending. Supervisors consume this single
  * taxonomy instead of inferring an outcome from nullable candidates or sidecars.
  */
-export const RunPauseReason = CampaignPauseReason.or(z.literal("operator"));
+export const RunPauseReason = CampaignPauseReason.or(z.enum(["operator", "recursive-child-pending"]));
 export type RunPauseReason = z.infer<typeof RunPauseReason>;
 export const RunStopReason = z.enum(["operator", "budget-exhausted", "session-no-yield-bound"]);
 export type RunStopReason = z.infer<typeof RunStopReason>;

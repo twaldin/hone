@@ -176,7 +176,7 @@ describe("wrap: joined fenced creates with write-ahead intents", () => {
         return Promise.resolve(res({ timedOut: true, exitCode: 1 }));
       }
       if (argv[1] === "rm") {
-        sequence.push(`rm-called:${argv[3] ?? ""}`);
+        sequence.push(`rm-called:${argv.at(-1) ?? ""}`);
         rmCalled.resolve();
         return rmSettled.promise;
       }
@@ -213,7 +213,7 @@ describe("wrap: joined fenced creates with write-ahead intents", () => {
     const result = await gate.wrap(run)(["docker", "run", "-d", "--name", "hone-relay", IMAGE, "node", "-e", "x"], {});
     expect(result.exitCode).toBe(1);
     expect(argvs.map((a) => a[1])).toEqual(["create", "start", "rm"]);
-    expect(argvs[2]).toEqual(["docker", "rm", "-f", "dcid"]);
+    expect(argvs[2]).toEqual(["docker", "rm", "-f", "-v", "dcid"]);
   });
 
   it("P1(3): only a CONCLUSIVE Engine rejection settles failed; a signaled client or transport loss after POST acceptance stays OPEN", async () => {
@@ -747,7 +747,7 @@ describe("inherited open intents: deterministic crash schedules, every kind", ()
     const daemon2: RunCommand = (argv) => {
       if (argv[1] === "container" && argv[2] === "inspect") return Promise.resolve(res({ stdout: Buffer.from("[{}]\n") }));
       if (argv[1] === "rm") {
-        reaped.push(argv[3] ?? "");
+        reaped.push(argv.at(-1) ?? "");
         return Promise.resolve(res({ stdout: Buffer.from("hone-scratch-keeper-x\n") }));
       }
       return Promise.resolve(res());
@@ -846,7 +846,7 @@ describe("real Docker probe: the daemon-side facts the causal proof rests on", (
         expect(conflict.exitCode).not.toBe(0);
         expect(conflict.stderr.toString("utf8")).toMatch(/already in use/i);
       } finally {
-        await runCommand(["docker", "rm", "-f", name], { timeoutMs: 30_000 });
+        await runCommand(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 });
       }
     },
   );

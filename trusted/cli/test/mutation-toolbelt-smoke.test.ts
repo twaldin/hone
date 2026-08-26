@@ -153,8 +153,8 @@ liveDocker("zero-model mutation worker toolbelt preflight", () => {
   }, 600_000);
 
   afterAll(async () => {
-    await runCommand(["docker", "rm", "-f", DONOR], { timeoutMs: 30_000 }).catch(() => {});
-    await runCommand(["docker", "rm", "-f", BARE_DONOR], { timeoutMs: 30_000 }).catch(() => {});
+    await runCommand(["docker", "rm", "-f", "-v", DONOR], { timeoutMs: 30_000 }).catch(() => {});
+    await runCommand(["docker", "rm", "-f", "-v", BARE_DONOR], { timeoutMs: 30_000 }).catch(() => {});
     await runCommand(["docker", "image", "rm", "-f", BARE_IMAGE], { timeoutMs: 60_000 }).catch(() => {});
     if (outDir !== "") {
       try {

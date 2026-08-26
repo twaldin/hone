@@ -661,7 +661,7 @@ export function openDockerCreateGate(
   /** Joined daemon-side reap of a registered container — the client's death never stops a container. */
   const reap = async (run: RunCommand, ref: string): Promise<void> => {
     try {
-      await run(["docker", "rm", "-f", ref], {});
+      await run(["docker", "rm", "-f", "-v", ref], {});
     } catch {
       // The container is REGISTERED (visible to the strict sweeps); a failed
       // reap here surfaces at the final sweep, never as silent success.
@@ -885,7 +885,7 @@ export function openDockerCreateGate(
       }
       const rmArgv =
         kind === "container"
-          ? ["docker", "rm", "-f", name]
+          ? ["docker", "rm", "-f", "-v", name]
           : kind === "volume"
             ? ["docker", "volume", "rm", "-f", name]
             : ["docker", "network", "rm", name];
@@ -929,7 +929,7 @@ export function openDockerCreateGate(
       }
       // Reap any registration that landed since the observation phase
       // (cleanup, not proof), then claim.
-      const reReap = await run(["docker", "rm", "-f", name], {});
+      const reReap = await run(["docker", "rm", "-f", "-v", name], {});
       if (reReap.exitCode !== 0 && !MISSING_RE.test(reReap.stderr.toString("utf8"))) {
         throw new Error(`removing crashed create "${name}" failed: ${reReap.stderr.toString("utf8").slice(0, 2000)}`);
       }
@@ -970,7 +970,7 @@ export function openDockerCreateGate(
       // epoch is gone — which the strict sweep guaranteed and epoch
       // monotonicity keeps true forever.
       for (const intent of group) prove(intent.seq, "fenced");
-      const unclaim = await run(["docker", "rm", "-f", name], {});
+      const unclaim = await run(["docker", "rm", "-f", "-v", name], {});
       if (unclaim.exitCode !== 0 && !MISSING_RE.test(unclaim.stderr.toString("utf8"))) {
         throw new Error(`removing docker create claim "${name}" failed: ${unclaim.stderr.toString("utf8").slice(0, 2000)}`);
       }

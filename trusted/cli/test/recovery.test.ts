@@ -83,12 +83,12 @@ describe("sweepStaleRunResources (finding 10 — crashed prior process)", () => 
     expect(ps).toBeGreaterThanOrEqual(0);
     expect(calls[ps]).toEqual(["docker", "ps", "-aq", "--no-trunc", "--filter", "label=hone.runId=run:7f3a"]);
 
-    const rmLabeled = findCall(calls, "docker", "rm", "-f", "aaa111");
-    expect(calls[rmLabeled]).toEqual(["docker", "rm", "-f", "aaa111", "bbb222"]);
+    const rmLabeled = findCall(calls, "docker", "rm", "-f", "-v", "aaa111");
+    expect(calls[rmLabeled]).toEqual(["docker", "rm", "-f", "-v", "aaa111", "bbb222"]);
 
-    const rmRelay = findCall(calls, "docker", "rm", "-f", "hone-proxy-run-7f3a");
+    const rmRelay = findCall(calls, "docker", "rm", "-f", "-v", "hone-proxy-run-7f3a");
     expect(rmRelay).toBeGreaterThanOrEqual(0);
-    const rmBrokerRelay = findCall(calls, "docker", "rm", "-f", "hone-broker-run-7f3a");
+    const rmBrokerRelay = findCall(calls, "docker", "rm", "-f", "-v", "hone-broker-run-7f3a");
     expect(rmBrokerRelay).toBeGreaterThanOrEqual(0);
 
     const rmNet = findCall(calls, "docker", "network", "rm");
@@ -111,11 +111,11 @@ describe("sweepStaleRunResources (finding 10 — crashed prior process)", () => 
     });
 
     await expect(sweepStaleRunResources("run_x", runDir, run)).resolves.toBeUndefined();
-    expect(findCall(calls, "docker", "rm", "-f", "hone-proxy-run_x")).toBeGreaterThanOrEqual(0);
-    expect(findCall(calls, "docker", "rm", "-f", "hone-broker-run_x")).toBeGreaterThanOrEqual(0);
+    expect(findCall(calls, "docker", "rm", "-f", "-v", "hone-proxy-run_x")).toBeGreaterThanOrEqual(0);
+    expect(findCall(calls, "docker", "rm", "-f", "-v", "hone-broker-run_x")).toBeGreaterThanOrEqual(0);
     expect(findCall(calls, "docker", "network", "rm", "hone-run_x")).toBeGreaterThanOrEqual(0);
     // no batch rm for an unknown container list
-    expect(findCall(calls, "docker", "rm", "-f", "aaa111")).toBe(-1);
+    expect(findCall(calls, "docker", "rm", "-f", "-v", "aaa111")).toBe(-1);
   });
 
   it("removes labeled and deterministic per-run scratch volumes", async () => {
@@ -152,7 +152,7 @@ describe("sweepStaleRunResources (finding 10 — crashed prior process)", () => 
 
     await sweepStaleRunResources("run_x", runDir, run, true);
     const snapshot = calls.findIndex((c) => c[0] === "docker" && c[1] === "exec" && c.includes("hone-scratch-keeper-run_x"));
-    const remove = findCall(calls, "docker", "rm", "-f", "stale-mutation");
+    const remove = findCall(calls, "docker", "rm", "-f", "-v", "stale-mutation");
     expect(remove).toBeGreaterThanOrEqual(0);
     expect(remove).toBeLessThan(snapshot);
     // Durable, atomic publication: every unpublished temp swept, final snapshot in place.
