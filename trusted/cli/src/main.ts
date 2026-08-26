@@ -25,7 +25,7 @@ usage:
   hone author <capsule-objective> [--repo DIR] [--headless] [--acknowledge-dirty]
   hone hone --campaign <path> --headless
   hone calibration --campaign <path> --headless [--state <.hone-runs/path>] [--resume] [--dry-structure] [--smoke-cell N]
-  hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal]
+  hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal] [--sealed-base <dir>]
   hone campaign migrate-source --campaign <frozen.json> --from <oldSourceCommit> --to <newSourceCommit> --reason <text>
   hone resume [--pause PAUSE_ID] [--campaign CAMPAIGN_STATE_DIR]
   hone status [--run ID]
