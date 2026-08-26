@@ -19,6 +19,7 @@ import {
   type BudgetEnvelope,
   type MetaCampaignConfig,
 } from "@hone/schema";
+import { metaCampaignConfigHash as trustedMetaCampaignConfigHash } from "@hone/meta";
 import { z } from "zod";
 
 export type MetaSha256DigestV1 = `sha256:${string}`;
@@ -267,8 +268,7 @@ export const metaJournalIo = {
 };
 
 export function metaCampaignConfigHash(config: MetaCampaignConfig): MetaSha256DigestV1 {
-  const parsed = MetaCampaignConfigSchema.parse(config);
-  return `sha256:${createHash("sha256").update(canonicalJson(parsed)).digest("hex")}`;
+  return trustedMetaCampaignConfigHash(config);
 }
 
 export function metaWorkKey(configHash: string, identity: MetaWorkIdentityV1): MetaSha256DigestV1 {

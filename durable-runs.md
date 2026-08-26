@@ -26,6 +26,25 @@ hone resume --campaign <campaign-state-dir>
 hone resume --campaign <campaign-state-dir> --pause <pause-id>
 ```
 
+Migrate a paused recursive campaign after checking out a required engine fix:
+
+```sh
+hone campaign migrate-source \
+  --campaign <frozen.json> \
+  --from <currently-pinned-full-commit> \
+  --to <checked-out-full-commit> \
+  --reason "<operator reason>"
+```
+
+The command requires a clean working tree whose `HEAD` is exactly `--to` and
+requires `--from` to match every current campaign source pin. It recomputes the
+boot digest, appends an authenticated migration record to the frozen campaign,
+and re-pins every nonterminal campaign run's `.hone-version` while holding its
+run lock. Terminal runs are unchanged. A foreign run pin, stale `--from`,
+changed frozen field, or broken migration history refuses before the campaign
+file is committed. Ordinary `hone recursive` then accepts only the new source;
+the original campaign hash and durable state directory remain stable.
+
 `events.ndjson` is the supervisor-readable outcome record:
 
 | Record | Meaning | Resume? |
@@ -59,7 +78,7 @@ Mutation sessions default to a 1,500,000-token no-yield ceiling. A frozen run or
 
 The pre-existing trusted-operator escape hatch `HONE_SESSION_NO_YIELD_MAX_TOKENS` accepts any positive safe integer, including a value below the default when no sealed config override exists. Prefer the sealed config surface for campaign policy; when both are present, the sealed config wins.
 
-The future pumpfun M1 freeze should set `sessionNoYieldMaxTokens` to approximately 1,700,000 (use `1700000`). That exception accommodates its measured first coherent edit plus bounded smoke while prompt aggregation removes the repeated 2,000-entry evaluator payload. It applies only to that future freeze: never mutate an already-running campaign's pinned configuration.
+The future pumpfun M1 freeze should set `sessionNoYieldMaxTokens` to approximately 1,700,000 (use `1700000`). That exception accommodates its measured first coherent edit plus bounded smoke while prompt aggregation removes the repeated 2,000-entry evaluator payload. It applies only to that future freeze: never mutate an already-running campaign's budget or policy fields. The sanctioned `campaign migrate-source` transition is deliberately limited to source commits, the recomputed boot digest, and its append-only provenance; it cannot change this ceiling.
 
 ## Durability inventory
 

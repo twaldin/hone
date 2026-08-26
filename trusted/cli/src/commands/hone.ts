@@ -36,6 +36,8 @@ import {
   MetaCampaignRunner,
   MetaEnvelopeFileRecordPortV1,
   MetaResourceEnvelopeLedger,
+  campaignSourceMigrationExtends,
+  campaignSourceMigrationRecordDigest,
   metaCampaignConfigHash,
   mapBounded,
   selectDeterministicBest,
@@ -73,6 +75,7 @@ import {
   canonicalJson,
   capsuleDigest,
   deriveCapsuleId,
+  type CampaignSourceMigrationV1,
   type BudgetEnvelope,
   type ChildRunAdmission as ChildRunAdmissionRecord,
   type CampaignPauseSignal as CampaignPauseSignalRecord,
@@ -148,7 +151,7 @@ import {
 } from "../optimizer-conformance.js";
 import { casRoot, loadRunConfigFile, runsRoot } from "../runs.js";
 import { verifiedBootRuntimeDigest } from "../runtime-digest.js";
-import { runCommand, type TrustedRunOptions } from "../supervisor.js";
+import { RUNTIME_PIN_FILE, acquireRunLock, runCommand, type TrustedRunOptions } from "../supervisor.js";
 import {
   appendPreAuthorityRefusalBreadcrumb,
   classifyPreAuthorityRefusal,
@@ -158,6 +161,9 @@ import { z } from "zod";
 import type { CampaignPauseAuthority } from "../types.js";
 
 const HONE_USAGE = "usage: hone hone --campaign <path> --headless [--phase freeze|search|confirmation|holdout] [--out <gitignored-path>]";
+const CAMPAIGN_MIGRATE_SOURCE_USAGE =
+  "usage: hone campaign migrate-source --campaign <frozen.json> "
+  + "--from <oldSourceCommit> --to <newSourceCommit> --reason <text>";
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const PROXY_TRACE_FILE = "proxy-trace.ndjson";
 const CampaignPauseAuthorityFileV1 = z.object({
@@ -2229,6 +2235,326 @@ export function assertCleanSourceTree(root: string): void {
   if (status.length > 0) throw new UsageError("official meta campaigns require a clean source worktree");
 }
 
+const CAMPAIGN_SESSION_FILE = "campaign-session.v1.json";
+
+function recursiveSourcePins(config: RecursiveMetaCampaignConfig): readonly string[] {
+  return [
+    config.seedOptimizer.sourceCommit,
+    config.controllerOptimizer.sourceCommit,
+    config.trustedRuntime.sourceCommit,
+  ];
+}
+
+/**
+ * The ordinary recursive coordinator's fail-closed source gate. Calling the
+ * campaign hash first also authenticates an optional migration journal.
+ */
+export function assertRecursiveCampaignSourceIdentity(
+  configInput: RecursiveMetaCampaignConfig,
+  commit: string,
+  bootDigest: string,
+): void {
+  const config = MetaCampaignConfigV2.parse(configInput);
+  metaCampaignConfigHash(config);
+  if (
+    recursiveSourcePins(config).some((pin) => pin !== commit)
+    || config.trustedRuntime.digest !== bootDigest
+  ) {
+    throw new UsageError("recursive campaign trusted runtime identity drift");
+  }
+}
+
+function sourceMigrationFrozenProjection(configInput: RecursiveMetaCampaignConfig): string {
+  const config = MetaCampaignConfigV2.parse(configInput);
+  const {
+    sourceMigrationJournal: _journal,
+    seedOptimizer,
+    controllerOptimizer,
+    trustedRuntime,
+    ...frozen
+  } = config;
+  const { sourceCommit: _seedCommit, ...seedFrozen } = seedOptimizer;
+  const { sourceCommit: _controllerCommit, ...controllerFrozen } = controllerOptimizer;
+  const {
+    sourceCommit: _runtimeCommit,
+    digest: _runtimeDigest,
+    ...runtimeFrozen
+  } = trustedRuntime;
+  return canonicalJson({
+    ...frozen,
+    seedOptimizer: seedFrozen,
+    controllerOptimizer: controllerFrozen,
+    trustedRuntime: runtimeFrozen,
+  });
+}
+
+/** Mutation guard: source migration may touch only source pins, boot digest, and its provenance. */
+export function assertCampaignSourceMigrationOnly(
+  before: RecursiveMetaCampaignConfig,
+  after: RecursiveMetaCampaignConfig,
+): void {
+  if (sourceMigrationFrozenProjection(before) !== sourceMigrationFrozenProjection(after)) {
+    throw new UsageError("source migration attempted to alter frozen campaign fields");
+  }
+}
+
+interface CampaignRunPin {
+  readonly runDir: string;
+  readonly runId: string;
+  readonly pinPath: string;
+  readonly pinnedDigest: string;
+}
+
+function campaignSealedRun(runDir: string, campaignConfigHash: Sha256Digest): boolean {
+  const sealPath = join(runDir, CAMPAIGN_SESSION_FILE);
+  if (!existsSync(sealPath)) return false;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(sealPath, "utf8"));
+  } catch (error) {
+    throw new UsageError(
+      `cannot authenticate campaign run seal ${sealPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (raw === null || typeof raw !== "object") {
+    throw new UsageError(`cannot authenticate campaign run seal ${sealPath}: expected an object`);
+  }
+  return (raw as Record<string, unknown>)["campaignConfigHash"] === campaignConfigHash;
+}
+
+function nonterminalCampaignRunPins(
+  root: string,
+  campaignConfigHash: Sha256Digest,
+  fromBootDigest: string,
+  toBootDigest: string,
+): CampaignRunPin[] {
+  const base = runsRoot(root);
+  if (!existsSync(base)) return [];
+  const pins: CampaignRunPin[] = [];
+  for (const entry of readdirSync(base, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const runDir = join(base, entry.name);
+    if (!campaignSealedRun(runDir, campaignConfigHash)) continue;
+    const eventPath = join(runDir, EVENTS_FILE);
+    if (existsSync(eventPath)) {
+      let terminal: boolean;
+      try {
+        terminal = replayRun(runDir).finished !== null;
+      } catch (error) {
+        throw new UsageError(
+          `cannot replay campaign run ${entry.name} before source migration: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      if (terminal) continue;
+    }
+    const pinPath = join(runDir, RUNTIME_PIN_FILE);
+    if (!existsSync(pinPath)) {
+      throw new UsageError(`nonterminal campaign run ${entry.name} has no ${RUNTIME_PIN_FILE}; refusing migration`);
+    }
+    const pinnedDigest = readFileSync(pinPath, "utf8").trim();
+    if (pinnedDigest !== fromBootDigest && pinnedDigest !== toBootDigest) {
+      throw new UsageError(
+        `nonterminal campaign run ${entry.name} has foreign runtime pin ${pinnedDigest}; refusing migration`,
+      );
+    }
+    pins.push({ runDir, runId: entry.name, pinPath, pinnedDigest });
+  }
+  return pins.sort((left, right) => left.runId.localeCompare(right.runId));
+}
+
+function registeredCampaignConfigNeedsReconciliation(
+  registeredConfigPath: string,
+  config: RecursiveMetaCampaignConfig,
+): boolean {
+  if (!existsSync(registeredConfigPath)) return false;
+  const registered = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(registeredConfigPath, "utf8")));
+  if (canonicalJson(registered) === canonicalJson(config)) return false;
+  if (!campaignSourceMigrationExtends(registered, config)) {
+    throw new UsageError("recursive cell state belongs to a different configuration");
+  }
+  return true;
+}
+
+function reconcileRegisteredCampaignConfig(
+  registeredConfigPath: string,
+  config: RecursiveMetaCampaignConfig,
+): void {
+  if (!registeredCampaignConfigNeedsReconciliation(registeredConfigPath, config)) return;
+  writeFileDurable(registeredConfigPath, `${JSON.stringify(config, null, 2)}\n`);
+  chmodSync(registeredConfigPath, 0o600);
+}
+
+export interface CampaignSourceMigrationRequest {
+  readonly root: string;
+  readonly campaignPath: string;
+  readonly from: string;
+  readonly to: string;
+  readonly reason: string;
+  readonly at: string;
+  readonly bootDigest: Sha256Digest;
+  readonly operator?: string;
+}
+
+export interface CampaignSourceMigrationResult {
+  readonly configHash: Sha256Digest;
+  readonly campaignPath: string;
+  readonly migration: CampaignSourceMigrationV1;
+  readonly repinnedRuns: readonly string[];
+}
+
+/**
+ * Sanctioned frozen-campaign source transition. Every guard and run pin is
+ * preflighted before mutation; the campaign file is the durable commit point.
+ */
+export async function migrateCampaignSource(
+  request: CampaignSourceMigrationRequest,
+): Promise<CampaignSourceMigrationResult> {
+  if (!/^[0-9a-f]{40}$/.test(request.from) || !/^[0-9a-f]{40}$/.test(request.to)) {
+    throw new UsageError("--from and --to must be full lowercase git commit ids");
+  }
+  if (request.from === request.to) throw new UsageError("source migration requires different --from and --to commits");
+  if (request.reason.trim().length === 0) throw new UsageError("--reason must contain non-whitespace text");
+
+  const originalBytes = readFileSync(request.campaignPath);
+  const config = MetaCampaignConfigV2.parse(JSON.parse(originalBytes.toString("utf8")));
+  const configHash = metaCampaignConfigHash(config);
+  const pins = recursiveSourcePins(config);
+  if (pins.some((pin) => pin !== request.from)) {
+    throw new UsageError(
+      `--from ${request.from} does not exactly match the campaign's current sourceCommit`,
+    );
+  }
+
+  const previous = config.sourceMigrationJournal?.migrations.at(-1);
+  const body = {
+    version: 1,
+    at: request.at,
+    from: request.from,
+    to: request.to,
+    fromBootDigest: config.trustedRuntime.digest,
+    bootDigest: request.bootDigest,
+    reason: request.reason,
+    ...(request.operator === undefined ? {} : { operator: request.operator }),
+    previousRecordDigest: previous?.recordDigest ?? null,
+  } as const;
+  const migration = {
+    ...body,
+    recordDigest: campaignSourceMigrationRecordDigest(body),
+  } satisfies CampaignSourceMigrationV1;
+  const migrated = MetaCampaignConfigV2.parse({
+    ...config,
+    seedOptimizer: { ...config.seedOptimizer, sourceCommit: request.to },
+    controllerOptimizer: { ...config.controllerOptimizer, sourceCommit: request.to },
+    trustedRuntime: {
+      ...config.trustedRuntime,
+      sourceCommit: request.to,
+      digest: request.bootDigest,
+    },
+    sourceMigrationJournal: {
+      version: 1,
+      campaignConfigHash: config.sourceMigrationJournal?.campaignConfigHash ?? configHash,
+      migrations: [...(config.sourceMigrationJournal?.migrations ?? []), migration],
+    },
+  });
+  assertCampaignSourceMigrationOnly(config, migrated);
+  if (metaCampaignConfigHash(migrated) !== configHash) {
+    throw new UsageError("source migration changed the frozen campaign identity");
+  }
+  const registeredConfigPath = join(
+    runsRoot(request.root),
+    `recursive-cell-${configHash.slice("sha256:".length)}`,
+    "campaign.json",
+  );
+
+  const plannedRuns = nonterminalCampaignRunPins(
+    request.root,
+    configHash,
+    config.trustedRuntime.digest,
+    request.bootDigest,
+  );
+  const releases: Array<() => Promise<void>> = [];
+  try {
+    for (const run of plannedRuns) releases.push(await acquireRunLock(run.runDir, run.runId));
+    const lockedRuns = nonterminalCampaignRunPins(
+      request.root,
+      configHash,
+      config.trustedRuntime.digest,
+      request.bootDigest,
+    );
+    if (
+      canonicalJson(lockedRuns.map(({ runId, pinnedDigest }) => ({ runId, pinnedDigest })))
+      !== canonicalJson(plannedRuns.map(({ runId, pinnedDigest }) => ({ runId, pinnedDigest })))
+    ) {
+      throw new UsageError("campaign run set changed during source migration; retry");
+    }
+    if (!readFileSync(request.campaignPath).equals(originalBytes)) {
+      throw new UsageError("campaign file changed during source migration; retry");
+    }
+    registeredCampaignConfigNeedsReconciliation(registeredConfigPath, migrated);
+    for (const run of lockedRuns) {
+      writeFileDurable(run.pinPath, `${request.bootDigest}\n`);
+    }
+    writeFileDurable(request.campaignPath, `${JSON.stringify(migrated, null, 2)}\n`);
+    chmodSync(request.campaignPath, 0o600);
+
+    reconcileRegisteredCampaignConfig(registeredConfigPath, migrated);
+    return {
+      configHash,
+      campaignPath: request.campaignPath,
+      migration,
+      repinnedRuns: lockedRuns.map(({ runId }) => runId),
+    };
+  } finally {
+    for (const release of releases.reverse()) await release();
+  }
+}
+
+/** Explicit operator front door for a frozen campaign source migration. */
+export async function campaignCommand(args: string[], io: CmdIo): Promise<number> {
+  const { positionals, flags } = parseFlags(args, {
+    booleans: [],
+    strings: ["campaign", "from", "to", "reason"],
+  });
+  if (positionals.length !== 1 || positionals[0] !== "migrate-source") {
+    throw new UsageError(CAMPAIGN_MIGRATE_SOURCE_USAGE);
+  }
+  const campaignFlag = strFlag(flags, "campaign");
+  const from = strFlag(flags, "from");
+  const to = strFlag(flags, "to");
+  const reason = strFlag(flags, "reason");
+  if (campaignFlag === undefined || from === undefined || to === undefined || reason === undefined) {
+    throw new UsageError(CAMPAIGN_MIGRATE_SOURCE_USAGE);
+  }
+  if (!/^[0-9a-f]{40}$/.test(from) || !/^[0-9a-f]{40}$/.test(to)) {
+    throw new UsageError("--from and --to must be full lowercase git commit ids");
+  }
+
+  assertCleanSourceTree(io.root);
+  const resolvedCommit = sourceCommit(io.root);
+  if (resolvedCommit !== to) {
+    throw new UsageError(`--to ${to} does not resolve to the clean working tree HEAD ${resolvedCommit}`);
+  }
+  const bootDigest = verifiedBootRuntimeDigest() as Sha256Digest;
+  const operator = io.env["USER"] ?? io.env["LOGNAME"];
+  const result = await migrateCampaignSource({
+    root: io.root,
+    campaignPath: resolve(io.root, campaignFlag),
+    from,
+    to,
+    reason,
+    at: new Date().toISOString(),
+    bootDigest,
+    ...(operator === undefined || operator.trim().length === 0 ? {} : { operator }),
+  });
+  io.out(canonicalJson({
+    command: "campaign.migrate-source",
+    ...result,
+  }));
+  return 0;
+}
+
 async function prepareControl(
   control: MetaControlArtifact,
   cas: CasStore,
@@ -2957,16 +3283,17 @@ async function checkedPublicIdentity(
   return { sourceArtifact, bundleDigest: checked.bundleDigest };
 }
 
-function recursivePhaseReceipt(
+export function recursivePhaseReceipt(
   campaignDir: string,
   phase: string,
-  configHash: Sha256Digest,
+  config: RecursiveMetaCampaignConfig,
   body: Record<string, unknown>,
 ): string {
   const receipt = {
     version: 1,
-    configHash,
+    configHash: metaCampaignConfigHash(config),
     phase,
+    sourceMigrationJournal: config.sourceMigrationJournal ?? null,
     ...body,
   };
   const output = join(campaignDir, `${phase}-receipt.json`);
@@ -3011,6 +3338,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   assertCleanSourceTree(io.root);
   const commit = sourceCommit(io.root);
   const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
+  if (phase !== "freeze") assertRecursiveCampaignSourceIdentity(config, commit, runtimeDigest);
   const casDir = casRoot(io.root);
   const cas = new CasStore(casDir);
   const rootSnapshot = collectOptimizerSnapshot(io.root);
@@ -3065,9 +3393,6 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     return 0;
   }
 
-  if (config.trustedRuntime.sourceCommit !== commit || config.trustedRuntime.digest !== runtimeDigest) {
-    throw new UsageError("recursive campaign trusted runtime identity drift");
-  }
   assertM2OuterAncestorCapacity(config);
   const comparisonImage = recursiveOptimizerImage(config);
   const target = await resolveRegisteredOptimizer(config.seedOptimizer, commit, rootSnapshot, casDir, comparisonImage);
@@ -3091,8 +3416,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   chmodSync(campaignDir, 0o700);
   const registeredConfigPath = join(campaignDir, "campaign.json");
   if (existsSync(registeredConfigPath)) {
-    const registered = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(registeredConfigPath, "utf8")));
-    if (canonicalJson(registered) !== canonicalJson(config)) throw new UsageError("recursive cell state belongs to a different configuration");
+    reconcileRegisteredCampaignConfig(registeredConfigPath, config);
   } else {
     writeFileDurable(registeredConfigPath, `${JSON.stringify(config, null, 2)}\n`);
     chmodSync(registeredConfigPath, 0o600);
@@ -3176,7 +3500,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
           degradedControl: controls.degraded,
         });
         const measurementHash = sha256(canonicalJson(result.measurements));
-        const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+        const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
           generation: config.generation,
           winner,
           measurementCount: result.measurements.length,
@@ -3216,7 +3540,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
         degradedControl: controls.degraded,
       });
       const measurementHash = sha256(canonicalJson(result.measurements));
-      const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+      const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
         generation: config.generation,
         controlWinner: controlWinnerIdentity,
         generation2: generation2Identity,
@@ -3254,7 +3578,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
         generation2: identities.generation2,
       });
       const result = await runner.runRecursiveTerminal(identities);
-      const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+      const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
         generation: config.generation,
         artifacts: identities,
         measurementCount: result.measurements.length,
@@ -3324,7 +3648,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       assertExactSearchCardinality(journal, config);
       const trajectoryPath = persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal });
       const winner = await selectedSearchWinner(outerRunDir, config, gate);
-      const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+      const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
         generation: config.generation,
         target: targetIdentity,
         controller: config.controllerOptimizer,
@@ -3376,7 +3700,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     assertExactSearchCardinality(journal, config);
     const trajectoryPath = persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal });
     const winner = await selectedSearchWinner(outerRunDir, config, gate);
-    const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+    const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
       generation: config.generation,
       target: targetIdentity,
       controller: config.controllerOptimizer,

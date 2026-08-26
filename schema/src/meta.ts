@@ -35,6 +35,34 @@ const SHA256 = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 const GIT_COMMIT = z.string().regex(/^[0-9a-f]{40}$/);
 
 /**
+ * Explicit provenance for the only sanctioned mutation of a frozen campaign:
+ * moving its trusted source closure to a new commit. The record digests are
+ * checked by the trusted meta runner; the schema keeps the persisted surface
+ * narrow and rejects unregistered migration metadata.
+ */
+export const CampaignSourceMigrationV1 = z.object({
+  version: z.literal(1),
+  at: z.string().datetime({ offset: true }),
+  from: GIT_COMMIT,
+  to: GIT_COMMIT,
+  fromBootDigest: SHA256,
+  bootDigest: SHA256,
+  reason: z.string().min(1).max(4_096),
+  operator: z.string().min(1).max(256).optional(),
+  previousRecordDigest: SHA256.nullable(),
+  recordDigest: SHA256,
+}).strict();
+export type CampaignSourceMigrationV1 = z.infer<typeof CampaignSourceMigrationV1>;
+
+export const CampaignSourceMigrationJournalV1 = z.object({
+  version: z.literal(1),
+  /** Hash of the exact pre-migration frozen config; remains the campaign identity. */
+  campaignConfigHash: SHA256,
+  migrations: z.array(CampaignSourceMigrationV1).min(1),
+}).strict();
+export type CampaignSourceMigrationJournalV1 = z.infer<typeof CampaignSourceMigrationJournalV1>;
+
+/**
  * One registered corpus entry. Everything the trusted meta-runner needs to
  * normalize a child run is frozen here BEFORE any outer search:
  * Y_ir = (q_i(A_ir) - qBase) / scale, with scale = qReference - qBase > 0.
@@ -207,6 +235,11 @@ const MetaCampaignConfigShape = z.object({
   protocolHash: SHA256,
   /** Hash of the frozen analysis configuration. */
   analysisConfigHash: SHA256,
+  /**
+   * Append-only source-closure migration provenance. It is absent on the
+   * original frozen config and authenticated against that config's hash.
+   */
+  sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
   invariants: MetaCampaignInvariants,
 });
 

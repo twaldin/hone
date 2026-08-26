@@ -7,7 +7,7 @@ import { calibrationCommand } from "./commands/calibration.js";
 import { authorCommand } from "./commands/author.js";
 import { bestCommand } from "./commands/best.js";
 import { diffCommand } from "./commands/diff.js";
-import { honeCommand, recursiveCommand } from "./commands/hone.js";
+import { campaignCommand, honeCommand, recursiveCommand } from "./commands/hone.js";
 import { resumeCampaignCommand } from "./commands/resume.js";
 import { statusCommand } from "./commands/status.js";
 import { stopCommand } from "./commands/stop.js";
@@ -26,6 +26,7 @@ usage:
   hone hone --campaign <path> --headless
   hone calibration --campaign <path> --headless [--state <.hone-runs/path>] [--resume] [--dry-structure] [--smoke-cell N]
   hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal]
+  hone campaign migrate-source --campaign <frozen.json> --from <oldSourceCommit> --to <newSourceCommit> --reason <text>
   hone resume [--pause PAUSE_ID] [--campaign CAMPAIGN_STATE_DIR]
   hone status [--run ID]
   hone best [--run ID]
@@ -54,6 +55,8 @@ export async function main(argv: string[], io: CmdIo): Promise<number> {
         return await calibrationCommand(rest, io);
       case "recursive":
         return await recursiveCommand(rest, io);
+      case "campaign":
+        return await campaignCommand(rest, io);
       case "resume":
         return await resumeCampaignCommand(rest, io);
       case "status":

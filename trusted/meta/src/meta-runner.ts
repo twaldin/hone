@@ -19,6 +19,7 @@ import {
   M2EnvelopeIdentity as M2EnvelopeIdentitySchema,
   canonicalJson,
   type MetaCampaignConfig,
+  type CampaignSourceMigrationV1,
   type M2EnvelopeIdentity,
 } from "@hone/schema";
 import { z } from "zod";
@@ -1668,10 +1669,97 @@ export function recursiveEnvelopeReservationId(
   return sha256(canonicalJson({ version: 1, configHash, purpose, identity }));
 }
 
+type CampaignSourceMigrationRecordBody = Omit<CampaignSourceMigrationV1, "recordDigest">;
 
+/** Hash one migration record without its self-authenticating digest field. */
+export function campaignSourceMigrationRecordDigest(
+  record: CampaignSourceMigrationRecordBody,
+): Sha256Digest {
+  return sha256(canonicalJson(record));
+}
+
+function validateSourceMigrationJournal(config: MetaCampaignConfig): Sha256Digest | null {
+  const journal = config.sourceMigrationJournal;
+  if (journal === undefined) return null;
+  const first = journal.migrations[0];
+  const last = journal.migrations[journal.migrations.length - 1];
+  if (first === undefined || last === undefined) throw new Error("source migration journal is empty");
+
+  let previous: CampaignSourceMigrationV1 | undefined;
+  for (const record of journal.migrations) {
+    const { recordDigest, ...body } = record;
+    if (record.from === record.to) throw new Error("source migration must change the pinned commit");
+    if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) {
+      throw new Error("source migration journal record chain is not append-only");
+    }
+    if (
+      previous !== undefined
+      && (record.from !== previous.to || record.fromBootDigest !== previous.bootDigest)
+    ) {
+      throw new Error("source migration journal provenance is discontinuous");
+    }
+    if (recordDigest !== campaignSourceMigrationRecordDigest(body)) {
+      throw new Error("source migration journal record digest mismatch");
+    }
+    previous = record;
+  }
+
+  const sourcePins = [
+    config.seedOptimizer.sourceCommit,
+    config.trustedRuntime.sourceCommit,
+    ...(config.version === 2 ? [config.controllerOptimizer.sourceCommit] : []),
+  ];
+  if (sourcePins.some((pin) => pin !== last.to) || config.trustedRuntime.digest !== last.bootDigest) {
+    throw new Error("source migration journal head does not match the campaign source identity");
+  }
+
+  const { sourceMigrationJournal: _journal, ...withoutJournal } = config;
+  const original = {
+    ...withoutJournal,
+    seedOptimizer: { ...withoutJournal.seedOptimizer, sourceCommit: first.from },
+    trustedRuntime: {
+      ...withoutJournal.trustedRuntime,
+      sourceCommit: first.from,
+      digest: first.fromBootDigest,
+    },
+    ...(withoutJournal.version === 2
+      ? {
+        controllerOptimizer: {
+          ...withoutJournal.controllerOptimizer,
+          sourceCommit: first.from,
+        },
+      }
+      : {}),
+  } as MetaCampaignConfig;
+  const reconstructed = sha256(canonicalJson(MetaCampaignConfigSchema.parse(original)));
+  if (reconstructed !== journal.campaignConfigHash) {
+    throw new Error("source migration altered frozen campaign fields outside the sanctioned source identity");
+  }
+  return reconstructed;
+}
+
+/**
+ * Frozen campaign identity. Unmigrated campaigns retain their historical
+ * whole-config hash; migrated campaigns reconstruct and authenticate that
+ * original hash while validating every append-only provenance record.
+ */
 export function metaCampaignConfigHash(configInput: MetaCampaignConfig): Sha256Digest {
   const config = MetaCampaignConfigSchema.parse(configInput);
-  return sha256(canonicalJson(config));
+  return validateSourceMigrationJournal(config) ?? sha256(canonicalJson(config));
+}
+
+/** True only when `current` is the same frozen campaign with an appended migration history. */
+export function campaignSourceMigrationExtends(
+  registeredInput: MetaCampaignConfig,
+  currentInput: MetaCampaignConfig,
+): boolean {
+  const registered = MetaCampaignConfigSchema.parse(registeredInput);
+  const current = MetaCampaignConfigSchema.parse(currentInput);
+  if (metaCampaignConfigHash(registered) !== metaCampaignConfigHash(current)) return false;
+  const prior = registered.sourceMigrationJournal?.migrations ?? [];
+  const next = current.sourceMigrationJournal?.migrations ?? [];
+  if (prior.length > next.length) return false;
+  return prior.every((record, index) => canonicalJson(record) === canonicalJson(next[index]));
 }
 
 export function metaEvidenceHash(evidence: MetaChildEvidenceV1): Sha256Digest {
