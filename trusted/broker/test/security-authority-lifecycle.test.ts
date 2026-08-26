@@ -221,6 +221,8 @@ async function boot(
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
     now?: () => number;
+    /** Production event-side-effect seam (for synchronous supervisor abort/re-entry). */
+    onEvent?: (event: RunEvent, broker: Broker) => void;
   } = {},
 ): Promise<Booted> {
   const id = randomBytes(4).toString("hex");
@@ -348,6 +350,7 @@ async function boot(
     return fakeResult(); // volume rm, ...
   };
 
+  let broker: Broker;
   const config: BrokerConfig = {
     runId,
     manifest: opts.manifest ?? makeManifest(),
@@ -362,7 +365,10 @@ async function boot(
     image: TEST_IMAGE,
     runDir,
     casDir,
-    onEvent: (e) => events.push(e),
+    onEvent: (e) => {
+      events.push(e);
+      opts.onEvent?.(e, broker);
+    },
     runCommand: run,
     ...(opts.holdoutBudget !== undefined ? { holdoutBudget: opts.holdoutBudget } : {}),
     ...(opts.maxActiveSandboxes !== undefined ? { maxActiveSandboxes: opts.maxActiveSandboxes } : {}),
@@ -380,7 +386,7 @@ async function boot(
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
-  const broker = new Broker(config);
+  broker = new Broker(config);
   await broker.init();
   // Seed the (fresh) CAS with the shared fixture artifacts.
   await broker.cas.putBuffer(baselineTar);
@@ -1990,6 +1996,175 @@ describe("trusted event ordering and candidacy", () => {
     const withGap = published.filter((_event, index) => index !== gapAt);
     const c = await boot(shared);
     expect(() => c.broker.replayJournalEvents(withGap)).toThrow(/non-prefix gap/);
+  });
+  it("keeps the authority order when exact-cap delivery synchronously re-enters the broker", async () => {
+    let clockPaused = false;
+    let now = 0;
+    const a = await boot({
+      manifest: makeManifest({
+        budget: { ...GENEROUS_BUDGET, maxEvaluatorInvocations: 1 },
+      }),
+      now: () => now++,
+      onEvent: (event, broker) => {
+        if (
+          !clockPaused
+          && event.type === "budget.snapshot"
+          && event.budget.spent.evaluatorInvocations === 1
+        ) {
+          clockPaused = true;
+          broker.pauseActiveTime();
+        }
+      },
+    });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+
+    await a.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+
+    const isolationAt = a.events.findIndex((event) => event.type === "evaluator.isolation");
+    expect(isolationAt).toBeGreaterThanOrEqual(0);
+    expect(a.events.slice(isolationAt, isolationAt + 5).map((event) => event.type)).toEqual([
+      "evaluator.isolation",
+      "budget.snapshot",
+      "budget.exhausted",
+      "budget.snapshot",
+      "eval.completed",
+    ]);
+  });
+
+  it("does not let a later immediate event overtake an unready journal transaction", async () => {
+    const a = await boot();
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    a.ctl.evalInspect = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+
+    const evaluating = a.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    await entered.promise;
+    a.broker.pauseActiveTime();
+    expect(a.events.some((event) => event.type === "evaluator.isolation")).toBe(false);
+    expect(a.events.some((event) => event.type === "budget.snapshot")).toBe(false);
+
+    release.resolve();
+    await evaluating;
+    const isolationAt = a.events.findIndex((event) => event.type === "evaluator.isolation");
+    expect(a.events.slice(isolationAt, isolationAt + 4).map((event) => event.type)).toEqual([
+      "evaluator.isolation",
+      "budget.snapshot",
+      "budget.snapshot",
+      "eval.completed",
+    ]);
+  });
+
+  it("finalizes a rejected evaluator transaction before delivering later events", async () => {
+    const a = await boot();
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    a.ctl.evalInspect = () => {
+      throw new Error("rejected evaluator spawn");
+    };
+
+    await expect(
+      a.broker.evaluate(
+        { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+        CLIENT,
+      ),
+    ).rejects.toThrow(/rejected evaluator spawn/);
+    expect(a.events.some((event) => event.type === "evaluator.isolation")).toBe(true);
+    const deliveredAfterFailure = a.events.length;
+
+    a.broker.pauseActiveTime();
+    expect(a.events).toHaveLength(deliveredAfterFailure + 1);
+    expect(a.events.at(-1)?.type).toBe("budget.snapshot");
+  });
+
+  it("accepts only a complete exact shared-budget reorder from a historical journal", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "recover-shared-reentry"),
+      casDir: path.join(tmpBase, "cas", "recover-shared-reentry"),
+      runId: "run-recover-shared-reentry",
+      manifest: makeManifest({
+        budget: { ...GENEROUS_BUDGET, maxEvaluatorInvocations: 1 },
+      }),
+      holdoutBudget: 1,
+    };
+    let clockPaused = false;
+    const a = await boot({
+      ...shared,
+      now: () => 0,
+      onEvent: (event, broker) => {
+        if (
+          !clockPaused
+          && event.type === "budget.snapshot"
+          && event.budget.spent.evaluatorInvocations === 1
+        ) {
+          clockPaused = true;
+          broker.pauseActiveTime();
+        }
+      },
+    });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await a.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    const published = [...a.events];
+    await a.broker.close();
+
+    const exhaustedAt = published.findIndex((event) => event.type === "budget.exhausted");
+    const laterSnapshotAt = published.findIndex(
+      (event, index) => index > exhaustedAt && event.type === "budget.snapshot",
+    );
+    const laterExclusiveAt = published.findIndex(
+      (event, index) => index > laterSnapshotAt && event.type === "eval.completed",
+    );
+    expect(exhaustedAt).toBeGreaterThanOrEqual(0);
+    expect(laterSnapshotAt).toBeGreaterThan(exhaustedAt);
+    expect(laterExclusiveAt).toBeGreaterThan(laterSnapshotAt);
+    const reordered = [...published];
+    const [nestedSnapshot] = reordered.splice(laterSnapshotAt, 1);
+    expect(nestedSnapshot?.type).toBe("budget.snapshot");
+    reordered.splice(exhaustedAt, 0, nestedSnapshot as RunEvent);
+
+    const recovered = await boot(shared);
+    expect(recovered.broker.replayJournalEvents(reordered)).toBe(0);
+    expect(recovered.events).toEqual([]);
+
+    const truncatedAt = reordered.findIndex((event) => event.type === "eval.completed");
+    expect(truncatedAt).toBeGreaterThan(exhaustedAt);
+    const truncatedAfterInversion = reordered.slice(0, truncatedAt);
+    const rejectsTruncatedInversion = await boot(shared);
+    expect(() => rejectsTruncatedInversion.broker.replayJournalEvents(truncatedAfterInversion)).toThrow(
+      /non-prefix gap/,
+    );
+
+    const tampered = reordered.map((event) =>
+      event === nestedSnapshot && event.type === "budget.snapshot"
+        ? {
+            ...event,
+            budget: {
+              ...event.budget,
+              spent: { ...event.budget.spent, evaluatorInvocations: 0 },
+            },
+          }
+        : event
+    );
+    const rejectsTamper = await boot(shared);
+    expect(() => rejectsTamper.broker.replayJournalEvents(tampered)).toThrow(/non-prefix gap/);
+
+    const missing = reordered.filter((event) => event !== nestedSnapshot);
+    const rejectsMissing = await boot(shared);
+    expect(() => rejectsMissing.broker.replayJournalEvents(missing)).toThrow(/non-prefix gap/);
   });
 });
 
