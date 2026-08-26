@@ -207,6 +207,65 @@ describe("meta recursive trajectory extraction", () => {
       .toHaveLength(3);
   });
 
+  it("binds a byte-identical failed-panel retry by trusted event occurrence rather than immutable lineage", () => {
+    const repeated = `sha256:${"c".repeat(64)}` as RecursiveCandidateOuterGroup["artifact"];
+    const events = [
+      RunEvent.parse({ runId: "run", at, type: "run.started", capsuleId: "cap", contractHash: hash, optimizerDigest: hash }),
+      RunEvent.parse({ runId: "run", at, type: "episode.started", episode: 0, parent: { hash } }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 0, aggregate: 0.5, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "episode.candidate", episode: 0, candidate: { hash: repeated }, sessionTrace: hash }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", episode: 0, artifact: { hash: repeated }, assetGroupId: "train", seed: 0, aggregate: null, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "episode.completed", episode: 0 }),
+      RunEvent.parse({ runId: "run", at, type: "episode.started", episode: 1, parent: { hash } }),
+      // A no-change repair has no new episode.candidate event and retains the
+      // original lineage tag, but the launcher assigned it a fresh ordinal.
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", episode: 0, artifact: { hash: repeated }, assetGroupId: "train", seed: 1, aggregate: 0.7, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "episode.completed", episode: 1 }),
+    ];
+    const grouped = new Map<number, RecursiveCandidateOuterGroup>([
+      [0, { artifact: hash, childRunIds: ["c-base"] }],
+      [1, { artifact: repeated, childRunIds: ["c-first"] }],
+      [2, { artifact: repeated, childRunIds: ["c-retry"] }],
+    ]);
+
+    const bound = bindRecursiveOuterEvents(grouped, events);
+
+    expect(bound.map((event) => [
+      event.candidateOrdinal,
+      event.eventCursor,
+      event.candidateArtifact,
+      event.childRunIds,
+    ])).toEqual([
+      [0, 2, hash, ["c-base"]],
+      [1, 4, repeated, ["c-first"]],
+      [2, 7, repeated, ["c-retry"]],
+    ]);
+  });
+
+  it("does not admit a later unscoped comparator after an eligible seed retry", () => {
+    const events = [
+      RunEvent.parse({ runId: "run", at, type: "run.started", capsuleId: "cap", contractHash: hash, optimizerDigest: hash }),
+      RunEvent.parse({ runId: "run", at, type: "episode.started", episode: 0, parent: { hash } }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 0, aggregate: null, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(10) }),
+      RunEvent.parse({ runId: "run", at, type: "episode.completed", episode: 0 }),
+      RunEvent.parse({ runId: "run", at, type: "episode.started", episode: 1, parent: { hash } }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 1, aggregate: 0.5, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(20) }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 2, aggregate: 0.6, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(30) }),
+    ];
+
+    const sourcePoints = extractAnytimePoints(events).filter(
+      (point) => point.candidateArtifact === hash,
+    );
+
+    expect(sourcePoints.map((point) => [point.eventCursor, point.status, point.score])).toEqual([
+      [2, "invalid", null],
+      [6, "evaluated", 0.5],
+    ]);
+  });
+
   it("still refuses a genuine controller-spend regression", () => {
     expect(() => controllerSpendDelta(
       { tokens: 9, usd: 1, wallClockSec: 2, evaluatorInvocations: 1 },

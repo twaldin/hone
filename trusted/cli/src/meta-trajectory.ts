@@ -119,6 +119,7 @@ export function extractAnytimePoints(events: readonly RunEvent[]): AnytimeSearch
   const points: MutablePoint[] = [];
   const byEpisode = new Map<number, MutablePoint>();
   const pending = new Set<MutablePoint>();
+  const trustedEvaluationPoints = new Set<MutablePoint>();
   let baseline: MutablePoint | null = null;
   let lastSpent: MetaResourceUsage = { ...ZERO_USAGE };
   let activeEpisode: number | null = null;
@@ -147,7 +148,19 @@ export function extractAnytimePoints(events: readonly RunEvent[]): AnytimeSearch
     artifact: Sha256Digest,
   ): MutablePoint => {
     const current = episodePoint(episode, cursor);
-    if (current.candidateArtifact === null || current.candidateArtifact === artifact) return current;
+    // Candidate bytes and their immutable lineage episode are not an attempt
+    // identity. A failed panel can be retried byte-for-byte without another
+    // episode.candidate event; each trusted evaluation occurrence must
+    // therefore advance to its own point after the prior point settles.
+    if (
+      current.candidateArtifact === null
+      || (
+        current.candidateArtifact === artifact
+        && !trustedEvaluationPoints.has(current)
+      )
+    ) {
+      return current;
+    }
     const point: MutablePoint = {
       ordinal: points.length,
       eventCursor: cursor,
@@ -257,6 +270,7 @@ export function extractAnytimePoints(events: readonly RunEvent[]): AnytimeSearch
       point.status = event.aggregate === null ? "invalid" : "evaluated";
       point.score = event.aggregate;
       point.cached = event.cached;
+      trustedEvaluationPoints.add(point);
       pending.add(point);
       continue;
     }
