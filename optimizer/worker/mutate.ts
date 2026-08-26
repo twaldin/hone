@@ -384,19 +384,17 @@ const WORKER_SETTINGS_OVERRIDES = {
 
 /**
  * Pi still has legacy tool guards that dereference its global Settings proxy.
- * Keep that singleton process-local and non-persistent, then return the
- * separate isolated instance every worker session has always received.
+ * Initialize that singleton as file-blind, process-local defense in depth,
+ * then return the separate isolated instance every worker session has always
+ * received.
  */
-async function workerSettings(env: Pick<SessionEnv, "cwd" | "agentDir">): Promise<Settings> {
-  const initialized = await Settings.init({
-    cwd: env.cwd,
+async function workerSettings(env: Pick<SessionEnv, "agentDir">): Promise<Settings> {
+  await Settings.init({
+    cwd: env.agentDir,
     agentDir: env.agentDir,
     inMemory: true,
     overrides: WORKER_SETTINGS_OVERRIDES,
   });
-  if (Settings.instance !== initialized) {
-    throw new Error("Pi global Settings initialization did not install the worker instance");
-  }
   return Settings.isolated(WORKER_SETTINGS_OVERRIDES);
 }
 
@@ -409,7 +407,7 @@ function assertNoAutoQa(): void {
 async function selftest(): Promise<void> {
   assertNoAutoQa();
   const agentDir = mkdtempSync(join(tmpdir(), "hone-selftest-"));
-  await workerSettings({ cwd: agentDir, agentDir });
+  await workerSettings({ agentDir });
   const authStorage = await discoverAuthStorage(agentDir);
   const registry = buildRegistry(
     {

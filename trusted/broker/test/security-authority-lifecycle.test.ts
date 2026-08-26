@@ -43,6 +43,10 @@ import { SCRATCH_SNAPSHOT_SCRIPT } from "../src/broker.js";
  * final live-docker smoke runs against a FAKE docker CLI — the broker's
  * behavior at its trust boundaries is what is under test, not docker.
  */
+// Host-evaluator cases still use the process TMPDIR for their real shared
+// socket/claim queue. Run this file with an isolated TMPDIR when a live
+// campaign is holding reserved evaluator UIDs; otherwise its host-wide
+// contention is intentional production behavior, not a fake-Docker seam.
 
 const CLIENT: CallContext = { privileged: false };
 const ADMIN: CallContext = { privileged: true };

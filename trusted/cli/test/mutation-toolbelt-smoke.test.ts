@@ -37,6 +37,7 @@ const BARE_IMAGE = `hone-worker-toolbelt-bare:${nonce}`;
 const RUN_ID = `run_worker_toolbelt_${nonce}`;
 const SAFE_RUN_ID = RUN_ID.replace(/[^a-zA-Z0-9_.-]/g, "-");
 const DONOR = `hone-worker-toolbelt-donor-${nonce}`;
+const BARE_DONOR = `hone-worker-toolbelt-bare-donor-${nonce}`;
 
 interface ImageConfig {
   User?: string;
@@ -87,18 +88,31 @@ liveDocker("zero-model mutation worker toolbelt preflight", () => {
     await stageMutationRuntime(process.env, runtimeDir);
 
     await mustRun(
-      ["docker", "create", "--name", DONOR, TASK_IMAGE, "true"],
-      "create toolbelt donor",
+      [
+        "docker", "create",
+        "--user", "0:0",
+        "--name", BARE_DONOR,
+        BARE_BASE_IMAGE,
+        "/bin/sh", "-c",
+        "sed -i '/^[^:]*:[^:]*:1000:/d' /etc/passwd && sed -i '/^[^:]*:[^:]*:1000:/d' /etc/group",
+      ],
+      "create passwd-less bare donor",
       60_000,
     );
+    await mustRun(["docker", "start", "-a", BARE_DONOR], "strip uid-1000 passwd entries", 60_000);
     await mustRun(
-      ["docker", "export", "--output", bareRootfs, DONOR],
-      "export bare worker rootfs",
+      ["docker", "export", "--output", bareRootfs, BARE_DONOR],
+      "export passwd-less bare worker rootfs",
       60_000,
     );
     await mustRun(
       ["docker", "import", bareRootfs, BARE_IMAGE],
-      "import config-free bare worker fixture",
+      "import config-free passwd-less worker fixture",
+      60_000,
+    );
+    await mustRun(
+      ["docker", "create", "--name", DONOR, TASK_IMAGE, "true"],
+      "create toolbelt runtime donor",
       60_000,
     );
     const uid = process.getuid?.();
@@ -140,6 +154,7 @@ liveDocker("zero-model mutation worker toolbelt preflight", () => {
 
   afterAll(async () => {
     await runCommand(["docker", "rm", "-f", DONOR], { timeoutMs: 30_000 }).catch(() => {});
+    await runCommand(["docker", "rm", "-f", BARE_DONOR], { timeoutMs: 30_000 }).catch(() => {});
     await runCommand(["docker", "image", "rm", "-f", BARE_IMAGE], { timeoutMs: 60_000 }).catch(() => {});
     if (outDir !== "") {
       try {
@@ -168,11 +183,38 @@ liveDocker("zero-model mutation worker toolbelt preflight", () => {
     });
   });
 
-  it("runs the byte-identical toolbelt in a bare image with no user, workdir, or HOME config", async () => {
+  it("runs the byte-identical toolbelt in a passwd-less image with no user, workdir, or HOME config", async () => {
     const config = await inspectConfig(BARE_IMAGE);
     expect(config.User ?? "").toBe("");
     expect(config.WorkingDir ?? "").toBe("");
     expect(config.Env?.some((entry) => entry.startsWith("HOME=")) ?? false).toBe(false);
+    const passwd = (await mustRun(
+      ["docker", "run", "--rm", "--user", "0:0", BARE_IMAGE, "/bin/cat", "/etc/passwd"],
+      "inspect bare passwd",
+      60_000,
+    )).toString("utf8");
+    const group = (await mustRun(
+      ["docker", "run", "--rm", "--user", "0:0", BARE_IMAGE, "/bin/cat", "/etc/group"],
+      "inspect bare group",
+      60_000,
+    )).toString("utf8");
+    expect(passwd.split("\n").some((line) => line.split(":")[2] === "1000")).toBe(false);
+    expect(group.split("\n").some((line) => line.split(":")[2] === "1000")).toBe(false);
+    const effective = JSON.parse((await mustRun(
+      [
+        "docker", "run", "--rm",
+        "--network", "none",
+        "--user", "1000:1000",
+        "--read-only",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=67108864,mode=1777",
+        BARE_IMAGE,
+        "/usr/bin/node", "-e",
+        'const { homedir } = require("node:os"); console.log(JSON.stringify({ envHome: process.env.HOME ?? null, osHome: homedir() }));',
+      ],
+      "probe unforced bare home",
+      60_000,
+    )).toString("utf8")) as { envHome: string | null; osHome: string };
+    expect(effective).toEqual({ envHome: "/", osHome: "/" });
     expect(bareResult).toEqual(taskResult);
   });
 });

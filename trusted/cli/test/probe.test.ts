@@ -300,6 +300,7 @@ interface ProbeFlow {
   probeReports: ProbeReport[];
   stops: number;
   toolbeltPreflights: Array<{ image: string; optimizerStarted: boolean }>;
+  startError: Error | null;
   events(): RunEvent[];
   invocations(): { maxEpisodes: string | null; resume: { nextEpisode: number } }[];
 }
@@ -313,6 +314,8 @@ async function runProbeFlow(opts: {
   verdict: boolean;
   abortOnGate?: boolean;
   m1?: { episodes: number; strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> };
+  toolbeltFailure?: Error;
+  captureStartError?: boolean;
 }): Promise<ProbeFlow> {
   const root = makeRoot();
   const runId = "run_probe";
@@ -351,6 +354,7 @@ async function runProbeFlow(opts: {
     invocationsPath,
     probeReports: [],
     stops: 0,
+    startError: null,
     toolbeltPreflights: [],
     events: () => readEvents(runDir),
     invocations: () =>
@@ -389,6 +393,7 @@ async function runProbeFlow(opts: {
         image: runtime.image,
         optimizerStarted: existsSync(invocationsPath),
       });
+      if (opts.toolbeltFailure !== undefined) throw opts.toolbeltFailure;
     },
   });
   const abort = new AbortController();
@@ -444,7 +449,12 @@ async function runProbeFlow(opts: {
     registerCleanupBarrier: () => {},
   };
 
-  await backend.start(ctx);
+  try {
+    await backend.start(ctx);
+  } catch (error) {
+    if (opts.captureStartError !== true) throw error;
+    flow.startError = error instanceof Error ? error : new Error(String(error));
+  }
   return flow;
 }
 
@@ -495,6 +505,32 @@ describe("trusted M1 fixed-work local branch", () => {
     expect(calls).toBe(1);
     expect(seenEpoch).toBe("m1:test-epoch");
     expect(readBrokerJournalEvaluations(flow.runDir).records).toHaveLength(1);
+  });
+
+  it("refuses at zero spend when the mutation toolbelt smoke rejects", { timeout: 30_000 }, async () => {
+    const toolbeltFailure = new Error("mutation toolbelt unavailable");
+    const strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> = async () => {
+      throw new Error("evaluation must not start after a toolbelt refusal");
+    };
+    const flow = await runProbeFlow({
+      seed: [{
+        runId: "run_probe",
+        at: at(),
+        type: "run.started",
+        capsuleId: CAP_ID,
+        contractHash: fakeHash("c"),
+        optimizerDigest: fakeHash("0"),
+      }],
+      verdict: false,
+      m1: { episodes: 3, strategy },
+      toolbeltFailure,
+      captureStartError: true,
+    });
+
+    expect(flow.startError).toBe(toolbeltFailure);
+    expect(flow.toolbeltPreflights).toEqual([{ image: FIX_IMAGE, optimizerStarted: false }]);
+    expect(flow.invocations()).toEqual([]);
+    expect(flow.events().some((event) => event.type === "episode.started")).toBe(false);
   });
 });
 
