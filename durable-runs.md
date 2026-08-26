@@ -94,6 +94,14 @@ path, absent/foreign outer seal, or digest mismatch refuses. Migrated campaigns
 never fall back to the new engine tree. Unmigrated campaigns reject
 `--sealed-base` and retain the historical clean-current-tree behavior.
 
+A source migration is continuable only after the outer run durably wrote its
+`optimizer-artifact.json`; a campaign migrated before its first outer start has
+no base-identity authority and therefore refuses every migrated recursive
+phase. Non-freeze phases also no longer recapture the live seed merely to
+self-heal CAS: if the frozen seed/controller source artifact was pruned, restore
+that exact artifact to `.hone-cas` before resume. Capturing the post-migration
+engine as a replacement would be the wrong optimizer bytes and is forbidden.
+
 For Campaign 11's immediate continuation, the untouched runtime-10 worktree is
 the independently verified complete closure (`fe92e179…` under the coordinator
 image). A durable copied closure must use the tracked 124b tree and copy both
