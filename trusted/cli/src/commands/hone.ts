@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
   CasStore,
   RecursiveResourceLedger,
@@ -139,7 +139,11 @@ import {
   type MetaControlArtifact,
   type MetaControlSourceSeal,
 } from "../meta-controls.js";
-import { resolveCandidateOptimizer, type ResolvedCandidateOptimizer } from "../optimizer-artifact.js";
+import {
+  readOptimizerArtifactSeal,
+  resolveCandidateOptimizer,
+  type ResolvedCandidateOptimizer,
+} from "../optimizer-artifact.js";
 import {
   collectOptimizerSnapshot,
   optimizerOverridden,
@@ -3262,7 +3266,8 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
 const RECURSIVE_USAGE =
   "usage: hone recursive --campaign <path> --headless "
   + "[--phase freeze|search|confirmation|terminal|authorize] "
-  + "[--out <gitignored-path>] [--target-artifact sha256:<64hex>] [--controller-artifact sha256:<64hex>] "
+  + "[--out <gitignored-path>] [--sealed-base <dir>] "
+  + "[--target-artifact sha256:<64hex>] [--controller-artifact sha256:<64hex>] "
   + "[--control-winner sha256:<64hex>] [--generation0 sha256:<64hex>] [--generation1 sha256:<64hex>] "
   + "[--generation2 sha256:<64hex>] [--gate-thresholds <path>] [--gate G1|G2] [--approver <name>] "
   + "[--reason <text>] [--record-dir <stage-a-cell-dir>] [--attest-diff-confined] [--attest-mechanism-plausible]";
@@ -3275,6 +3280,60 @@ function digestFlag(value: string | undefined, label: string): Sha256Digest | un
 
 function recursiveOptimizerImage(config: RecursiveMetaCampaignConfig): string {
   return config.optimizerRuntime.image;
+}
+
+/**
+ * Select the optimizer base closure for recursive coordination.
+ *
+ * An unmigrated campaign is still sealed to the current clean source tree.
+ * Once source migration is journaled, that tree is the new engine and is no
+ * longer evidence of the optimizer base. The operator must name the preserved
+ * closure explicitly; its digest is authenticated against the outer run's
+ * durable optimizer-artifact seal, itself bound back to the frozen controller
+ * identity. There is deliberately no migrated-mode fallback to live bytes.
+ */
+export function recursiveOptimizerBaseSnapshot(
+  configInput: RecursiveMetaCampaignConfig,
+  root: string,
+  outerRunDir: string,
+  sealedBaseFlag: string | undefined,
+): OptimizerSnapshot {
+  const config = MetaCampaignConfigV2.parse(configInput);
+  if (config.sourceMigrationJournal === undefined) {
+    if (sealedBaseFlag !== undefined) {
+      throw new UsageError("--sealed-base is valid only after an explicit campaign source migration");
+    }
+    return collectOptimizerSnapshot(root);
+  }
+  if (sealedBaseFlag === undefined) {
+    throw new UsageError(
+      "migrated recursive campaigns require --sealed-base <dir>; refusing to fall back to the current source tree",
+    );
+  }
+
+  const outerSeal = readOptimizerArtifactSeal(outerRunDir);
+  if (outerSeal === null) {
+    throw new UsageError(
+      `migrated recursive campaign has no sealed outer optimizer base identity in ${outerRunDir}`,
+    );
+  }
+  if (
+    outerSeal.runId !== basename(outerRunDir)
+    || outerSeal.sourceArtifact !== config.controllerOptimizer.sourceArtifact
+    || outerSeal.mergedDigest !== config.controllerOptimizer.bundleDigest
+  ) {
+    throw new UsageError("sealed outer optimizer identity does not match the frozen campaign controller");
+  }
+
+  const sealedBaseRoot = resolve(root, sealedBaseFlag);
+  const snapshot = collectOptimizerSnapshot(sealedBaseRoot);
+  const actualDigest = snapshotDigest(recursiveOptimizerImage(config), snapshot);
+  if (actualDigest !== outerSeal.baseDigest) {
+    throw new UsageError(
+      `sealed optimizer base digest mismatch: ${actualDigest} != campaign seal ${outerSeal.baseDigest}`,
+    );
+  }
+  return snapshot;
 }
 
 async function prepareRecursiveControls(
@@ -3343,6 +3402,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       "campaign",
       "phase",
       "out",
+      "sealed-base",
       "target-artifact",
       "controller-artifact",
       "control-winner",
@@ -3363,6 +3423,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   if (!["freeze", "search", "confirmation", "terminal", "authorize"].includes(phaseFlag)) throw new UsageError(RECURSIVE_USAGE);
   const phase = phaseFlag as "freeze" | "search" | "confirmation" | "terminal" | "authorize";
   const outFlag = strFlag(flags, "out");
+  const sealedBaseFlag = strFlag(flags, "sealed-base");
   if ((phase === "freeze") !== (outFlag !== undefined)) throw new UsageError(RECURSIVE_USAGE);
   if (optimizerOverridden(io.env)) throw new UsageError("official recursive campaigns refuse HONE_OPTIMIZER_CMD");
 
@@ -3372,25 +3433,34 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
   const commit = sourceCommit(io.root);
   const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
   if (phase !== "freeze") assertRecursiveCampaignSourceIdentity(config, commit, runtimeDigest);
-  if (phase !== "freeze") {
+  let rootSnapshot: OptimizerSnapshot;
+  if (phase === "freeze") {
+    if (sealedBaseFlag !== undefined) {
+      throw new UsageError("--sealed-base is valid only after an explicit campaign source migration");
+    }
+    rootSnapshot = collectOptimizerSnapshot(io.root);
+  } else {
     const preflightConfigHash = metaCampaignConfigHash(config);
-    const preflightRegisteredConfigPath = join(
-      runsRoot(io.root),
-      `recursive-cell-${preflightConfigHash.slice("sha256:".length)}`,
-      "campaign.json",
-    );
+    const hashBody = preflightConfigHash.slice("sha256:".length);
+    const preflightCampaignDir = join(runsRoot(io.root), `recursive-cell-${hashBody}`);
+    const preflightRegisteredConfigPath = join(preflightCampaignDir, "campaign.json");
     if (existsSync(preflightRegisteredConfigPath)) {
       registeredCampaignConfigNeedsReconciliation(preflightRegisteredConfigPath, config);
     }
+    rootSnapshot = recursiveOptimizerBaseSnapshot(
+      config,
+      io.root,
+      join(runsRoot(io.root), `run_recursive_outer_${hashBody}`),
+      sealedBaseFlag,
+    );
   }
   const casDir = casRoot(io.root);
   const cas = new CasStore(casDir);
-  const rootSnapshot = collectOptimizerSnapshot(io.root);
   assertMutablePathsResolve(config.mutablePaths, rootSnapshot);
   assertOptimizerProtectedPathsResolve(config.protectedPaths, rootSnapshot);
-  const localSeed = await captureSeedCandidate(io.root, cas);
 
   if (phase === "freeze") {
+    const localSeed = await captureSeedCandidate(io.root, cas);
     const corpus = freezeCorpusEntries(io.root, config);
     config = MetaCampaignConfigV2.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
     const comparisonImage = recursiveOptimizerImage(config);
