@@ -12,6 +12,7 @@ import type {
   MetaCampaignConfigV2 as RecursiveMetaCampaignConfig,
   RunEvent,
   SpawnRunParams,
+  ChildRunLaunchReceipt as ChildRunLaunchReceiptShape,
   SpawnRunResult,
 } from "@hone/schema";
 import type {
@@ -105,12 +106,19 @@ interface Harness {
   strategy: TrustedEvaluationStrategy;
   rows: MetaMeasurement[];
   failures: MetaFailureSettlement[];
+  campaignDir: string;
 }
 
-function harness(): Harness {
-  const campaignDir = mkdtempSync(join(tmpdir(), "hone-recursive-evaluation-"));
-  const rows: MetaMeasurement[] = [];
-  const failures: MetaFailureSettlement[] = [];
+interface HarnessOptions {
+  campaignDir?: string;
+  rows?: MetaMeasurement[];
+  failures?: MetaFailureSettlement[];
+}
+
+function harness(options: HarnessOptions = {}): Harness {
+  const campaignDir = options.campaignDir ?? mkdtempSync(join(tmpdir(), "hone-recursive-evaluation-"));
+  const rows = options.rows ?? [];
+  const failures = options.failures ?? [];
   const journal = {
     queryTrainMeasurements: () => [...rows],
     queryFailureSettlements: () => [...failures],
@@ -151,7 +159,7 @@ function harness(): Harness {
     {} as MetaResourceEnvelopeLedger,
     {} as CampaignPauseAuthority,
   );
-  return { strategy: launcher.evaluationStrategy(), rows, failures };
+  return { strategy: launcher.evaluationStrategy(), rows, failures, campaignDir };
 }
 
 function request(
@@ -193,6 +201,29 @@ function createIdentityHash(
     innerEpisodesMax: schedule.innerEpisodesMax,
     reserved: reservation,
   })).digest("hex");
+}
+
+function writeDurableLaunchReceipt(campaignDir: string, params: SpawnRunParams): void {
+  const receiptBody: Omit<ChildRunLaunchReceiptShape, "receiptDigest"> = {
+    child: params.child,
+    depth: params.depth,
+    admission: {
+      campaignConfigHash: CONFIG_HASH,
+      cohort: "panel-a",
+      capsuleProvenanceHash: CONFIG_HASH,
+      sourceProvenanceHash: params.child.sourceArtifact.hash,
+      optimizerProvenanceHash: params.child.optimizerArtifact.hash,
+    },
+    launchedAt: "2026-08-26T00:00:00.000Z",
+  };
+  const receipt = ChildRunLaunchReceipt.parse({
+    ...receiptBody,
+    receiptDigest: hashChildRunLaunchReceipt(receiptBody),
+  });
+  writeFileSync(
+    join(campaignDir, `child-launch-${params.child.runId}.json`),
+    `${canonicalJson(receipt)}\n`,
+  );
 }
 
 describe("recursive search trusted evaluation adapter", () => {
@@ -272,6 +303,217 @@ describe("recursive search trusted evaluation adapter", () => {
     });
     expect(record.costUsd).toBeCloseTo(0.2, 10);
     expect(spawnRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("mints a fresh child-work identity after a null panel instead of replaying its failed settlement", async () => {
+    const { strategy, rows, failures } = harness();
+    const spawned: SpawnRunParams[] = [];
+    const spawnRun = vi.fn(async (params: SpawnRunParams): Promise<SpawnRunResult> => {
+      spawned.push(params);
+      const identity = identityFor(params);
+      const workKey = metaWorkKey(CONFIG_HASH, identity);
+      const observed = { tokens: 10, usd: 0.1, wallClockSec: 1, evaluatorInvocations: 1 };
+      if (params.child.schedule?.candidateOrdinal === 0 && params.child.capsuleId === SECOND_CAPSULE) {
+        if (!failures.some((failure) => failure.workKey === workKey)) {
+          failures.push({
+            ...identity,
+            workKey,
+            observed,
+            status: "candidate_failed",
+          } as unknown as MetaFailureSettlement);
+        }
+      } else if (!rows.some((row) => row.workKey === workKey)) {
+        rows.push({
+          ...identity,
+          workKey,
+          qNormalized: params.child.capsuleId === FIRST_CAPSULE ? 0.25 : 0.75,
+          observed,
+        } as unknown as MetaMeasurement);
+      }
+      return {} as SpawnRunResult;
+    });
+
+    const first = await strategy(request(plan(), spawnRun));
+    const second = await strategy({ ...request(plan(), spawnRun), seed: 1 });
+
+    expect(first.output).toMatchObject({ valid: false, objectives: {} });
+    expect(second.output).toMatchObject({
+      valid: true,
+      objectives: { normalizedGain: 0.5 },
+      constraints: { allChildrenValid: true, fullPanel: true },
+    });
+    expect(spawned.map((params) => params.child.schedule?.candidateOrdinal)).toEqual([0, 0, 1, 1]);
+    const firstRunIds = spawned.slice(0, 2).map((params) => params.child.runId);
+    const retryRunIds = spawned.slice(2).map((params) => params.child.runId);
+    expect(new Set(retryRunIds).size).toBe(2);
+    expect(retryRunIds.every((runId) => !firstRunIds.includes(runId))).toBe(true);
+  });
+
+  it("rehydrates a settled failed panel as retryable rather than memoizing it after restart", async () => {
+    const first = harness();
+    const firstRunIds: string[] = [];
+    const failedSpawn = vi.fn(async (params: SpawnRunParams): Promise<SpawnRunResult> => {
+      firstRunIds.push(params.child.runId);
+      writeDurableLaunchReceipt(first.campaignDir, params);
+      const identity = identityFor(params);
+      const workKey = metaWorkKey(CONFIG_HASH, identity);
+      const observed = { tokens: 10, usd: 0.1, wallClockSec: 1, evaluatorInvocations: 1 };
+      if (params.child.capsuleId === SECOND_CAPSULE) {
+        first.failures.push({
+          ...identity,
+          workKey,
+          childRunId: params.child.runId,
+          observed,
+          status: "candidate_failed",
+        } as unknown as MetaFailureSettlement);
+      } else {
+        first.rows.push({
+          ...identity,
+          workKey,
+          childRunId: params.child.runId,
+          qNormalized: 0.25,
+          observed,
+        } as unknown as MetaMeasurement);
+      }
+      return {} as SpawnRunResult;
+    });
+    await expect(first.strategy(request(plan(), failedSpawn))).resolves.toMatchObject({
+      output: { valid: false, objectives: {} },
+    });
+
+    const resumed = harness({
+      campaignDir: first.campaignDir,
+      rows: first.rows,
+      failures: first.failures,
+    });
+    const retrySpawns: SpawnRunParams[] = [];
+    const successfulSpawn = vi.fn(async (params: SpawnRunParams): Promise<SpawnRunResult> => {
+      retrySpawns.push(params);
+      const identity = identityFor(params);
+      const workKey = metaWorkKey(CONFIG_HASH, identity);
+      resumed.rows.push({
+        ...identity,
+        workKey,
+        childRunId: params.child.runId,
+        qNormalized: params.child.capsuleId === FIRST_CAPSULE ? 0.25 : 0.75,
+        observed: { tokens: 10, usd: 0.1, wallClockSec: 1, evaluatorInvocations: 1 },
+      } as unknown as MetaMeasurement);
+      return {} as SpawnRunResult;
+    });
+    await expect(
+      resumed.strategy({ ...request(plan(), successfulSpawn), seed: 1 }),
+    ).resolves.toMatchObject({
+      output: {
+        valid: true,
+        objectives: { normalizedGain: 0.5 },
+        constraints: { allChildrenValid: true, fullPanel: true },
+      },
+    });
+    expect(retrySpawns.map((params) => params.child.schedule?.candidateOrdinal)).toEqual([1, 1]);
+    expect(retrySpawns.every((params) => !firstRunIds.includes(params.child.runId))).toBe(true);
+  });
+
+  it("keeps a settled successful panel memoized across restart", async () => {
+    const first = harness();
+    const firstRunIds: string[] = [];
+    const settle = vi.fn(async (params: SpawnRunParams): Promise<SpawnRunResult> => {
+      firstRunIds.push(params.child.runId);
+      writeDurableLaunchReceipt(first.campaignDir, params);
+      const identity = identityFor(params);
+      first.rows.push({
+        ...identity,
+        workKey: metaWorkKey(CONFIG_HASH, identity),
+        childRunId: params.child.runId,
+        qNormalized: params.child.capsuleId === FIRST_CAPSULE ? 0.25 : 0.75,
+        observed: { tokens: 10, usd: 0.1, wallClockSec: 1, evaluatorInvocations: 1 },
+      } as unknown as MetaMeasurement);
+      return {} as SpawnRunResult;
+    });
+    await expect(first.strategy(request(plan(), settle))).resolves.toMatchObject({
+      output: { valid: true, objectives: { normalizedGain: 0.5 } },
+    });
+
+    const resumed = harness({
+      campaignDir: first.campaignDir,
+      rows: first.rows,
+      failures: first.failures,
+    });
+    const replayed: SpawnRunParams[] = [];
+    await expect(resumed.strategy({
+      ...request(plan(), async (params): Promise<SpawnRunResult> => {
+        replayed.push(params);
+        return {} as SpawnRunResult;
+      }),
+      seed: 1,
+    })).resolves.toMatchObject({
+      output: { valid: true, objectives: { normalizedGain: 0.5 } },
+    });
+    expect(replayed.map((params) => params.child.schedule?.candidateOrdinal)).toEqual([0, 0]);
+    expect(replayed.map((params) => params.child.runId)).toEqual(firstRunIds);
+  });
+
+  it("resumes an ordinal that has both a failed settlement and an open child before allowing a fresh retry", async () => {
+    const campaignDir = mkdtempSync(join(tmpdir(), "hone-recursive-open-attempt-"));
+    const params = plan().allocations.map((allocation): SpawnRunParams => {
+      const schedule = {
+        candidateOrdinal: 0,
+        allocationOrdinal: allocation.allocationOrdinal,
+        innerEpisodesMax: allocation.innerEpisodesMax,
+      };
+      const draft: SpawnRunParams = {
+        child: {
+          runId: `run_meta_${"0".repeat(64)}`,
+          capsuleId: allocation.capsuleId,
+          sourceArtifact: { hash: SOURCE },
+          optimizerArtifact: { hash: BUNDLE },
+          purpose: "capsule" as const,
+          schedule,
+        },
+        depth: 1,
+        reservation: allocation.reservation,
+      };
+      const identity = identityFor(draft);
+      return {
+        ...draft,
+        child: {
+          ...draft.child,
+          runId: `run_meta_${metaWorkKey(CONFIG_HASH, identity).slice("sha256:".length)}`,
+        },
+      };
+    });
+    for (const child of params) writeDurableLaunchReceipt(campaignDir, child);
+    const failedChild = params[1];
+    if (failedChild === undefined) throw new Error("open-attempt fixture lost its failed child");
+    const failedIdentity = identityFor(failedChild);
+    const failures = [{
+      ...failedIdentity,
+      workKey: metaWorkKey(CONFIG_HASH, failedIdentity),
+      childRunId: failedChild.child.runId,
+      observed: { tokens: 10, usd: 0.1, wallClockSec: 1, evaluatorInvocations: 1 },
+      status: "candidate_failed",
+    } as unknown as MetaFailureSettlement];
+    const resumed = harness({ campaignDir, failures });
+    const retrySpawns: SpawnRunParams[] = [];
+    const spawnRun = vi.fn(async (child: SpawnRunParams): Promise<SpawnRunResult> => {
+      retrySpawns.push(child);
+      if (child.child.capsuleId === FIRST_CAPSULE) {
+        const identity = identityFor(child);
+        resumed.rows.push({
+          ...identity,
+          workKey: metaWorkKey(CONFIG_HASH, identity),
+          childRunId: child.child.runId,
+          qNormalized: 0.25,
+          observed: { tokens: 10, usd: 0.1, wallClockSec: 1, evaluatorInvocations: 1 },
+        } as unknown as MetaMeasurement);
+      }
+      return {} as SpawnRunResult;
+    });
+
+    await expect(resumed.strategy(request(plan(), spawnRun))).resolves.toMatchObject({
+      output: { valid: false, objectives: {} },
+    });
+    expect(retrySpawns.map((child) => child.child.schedule?.candidateOrdinal)).toEqual([0, 0]);
+    expect(retrySpawns.map((child) => child.child.runId)).toEqual(params.map((child) => child.child.runId));
   });
 
   it("fails every trusted allocation guard before dispatch instead of clamping mutable input", async () => {

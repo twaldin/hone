@@ -46,6 +46,7 @@ import {
 } from "../src/commands/hone.js";
 import { metaWorkKey } from "../src/meta-journal.js";
 import type { MetaJournalV1 } from "../src/meta-journal.js";
+import { bindRecursiveOuterEvents, type RecursiveCandidateOuterGroup } from "../src/meta-trajectory.js";
 import type { CampaignPauseAuthority } from "../src/types.js";
 import { runEpisodeLoop } from "../../../optimizer/src/loop.js";
 
@@ -60,18 +61,20 @@ const CHILD_BUDGET: BudgetEnvelope = {
   maxEvaluatorInvocations: 1,
 };
 const PANEL_SIZE = 3;
-const OUTER_EPISODES = 5;
+const OUTER_EPISODES = 6;
 
 function sha256(content: string | Buffer): Sha256Digest {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
+
 const SCORE_BY_CANDIDATE_ORDINAL: Record<number, number> = {
   0: 0.5,
-  1: 0.8,
-  2: 0.7,
-  3: 0.6,
+  1: 0.5,
+  2: 0.8,
+  3: 0.7,
   4: 0.6,
-  5: 0.75,
+  5: 0.6,
+  6: 0.75,
 };
 const MutationUsageRecord = z.object({
   type: z.literal("campaign-shakedown.mutation-usage.v1"),
@@ -205,7 +208,7 @@ function mutationShim(): Buffer {
  * episodes, artifact canonicalization, promotion authority, and finish all run.
  */
 describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () => {
-  it("walks promotion, losing repeat-hash, alias repair, failed child/null aggregate, and non-promotion through a finished run", async () => {
+  it("walks initial-panel retry, promotion, losing repeat-hash, alias repair, failed child/null aggregate, and non-promotion through a finished run", async () => {
     execFileSync("docker", ["image", "inspect", MUTATION_IMAGE], { stdio: "ignore" });
     const root = mkdtempSync(join(tmpdir(), "hone-campaign-shakedown-"));
     const configHash = sha256("campaign-shakedown-config-v1");
@@ -401,8 +404,11 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
           if (barrier.entered === PANEL_SIZE) barrier.release();
           await barrier.allEntered;
           const workKey = metaWorkKey(configHash, identity);
-          const failed = (schedule.candidateOrdinal === 3 || schedule.candidateOrdinal === 4)
-            && schedule.allocationOrdinal === PANEL_SIZE - 1;
+          const failed = (
+            schedule.candidateOrdinal === 0
+            || schedule.candidateOrdinal === 4
+            || schedule.candidateOrdinal === 5
+          ) && schedule.allocationOrdinal === PANEL_SIZE - 1;
           const evidence = writeChildEvidence(root, request, admission, failed ? "failed" : "completed");
           const observed = {
             tokens: 0,
@@ -477,7 +483,7 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
         runId: "run_campaign_shakedown",
         workerBundlePath,
         maxEpisodes: OUTER_EPISODES,
-        rand: (episode) => (episode === 2 ? 0 : 0.99),
+        rand: (episode) => (episode === 3 ? 0 : 0.99),
         emit: (event) => {
           searchEvents.push(event);
           return event;
@@ -516,11 +522,11 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
     const finishCalls = finish.mock.calls;
     const localRepeatGates = searchEvents.filter(
       (event): event is Extract<RunEvent, { type: "gate.paired" }> =>
-        event.type === "gate.paired" && (event.episode === 1 || event.episode === 2),
+        event.type === "gate.paired" && (event.episode === 2 || event.episode === 3),
     );
     const terminalDecisionGates = searchEvents.filter(
       (event): event is Extract<RunEvent, { type: "gate.paired" }> =>
-        event.type === "gate.paired" && (event.episode === 0 || event.episode === 4),
+        event.type === "gate.paired" && (event.episode === 1 || event.episode === 5),
     );
 
     const observedMutationSpend = mutationUsageRecords.reduce(
@@ -531,40 +537,63 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
       { modelCalls: 0, providerCalls: 0 },
     );
     expect(searchEvents.filter((event) => event.type === "episode.started").map((event) => event.episode))
-      .toEqual([0, 1, 2, 3, 4]);
-    expect(completed).toEqual([0, 1, 2, 3, 4]);
+      .toEqual([0, 1, 2, 3, 4, 5]);
+    expect(completed).toEqual([0, 1, 2, 3, 4, 5]);
     expect(mutationExitCodes).toEqual([0, 1, 0, 1, 0, 0, 0, 0]);
     expect(mutationUsageRecords).toHaveLength(mutationExitCodes.length);
     expect(observedMutationSpend).toEqual({ modelCalls: 0, providerCalls: 0 });
+    expect(candidateEvents[0]).toMatchObject({ episode: 1 });
+    expect(candidateEvents[0]?.candidate.hash).not.toBe(outerBaseline);
     expect(candidateHashes[1]).toBe(candidateHashes[2]);
     expect(localRepeatGates.map((event) => event.passed)).toEqual([false, true]);
     expect(terminalDecisionGates.map((event) => [event.episode, event.passed])).toEqual([
-      [0, true],
-      [4, false],
+      [1, true],
+      [5, false],
     ]);
     expect(repeatedEvals).toHaveLength(2);
     expect(repeatedEvals[0]?.["gate"]).toMatchObject({ passed: false });
     expect(repeatedEvals[1]).not.toHaveProperty("gate");
     expect(continuations).toEqual([
-      expect.objectContaining({ t: "continuation", hash: repeatedHash, episode: 2 }),
+      expect.objectContaining({ t: "continuation", hash: repeatedHash, episode: 3 }),
     ]);
     expect(promoted).toHaveLength(1);
     expect(brokerPromoted).toHaveLength(1);
     expect(brokerPromoted[0]?.artifact.hash).toBe(promoted[0]?.artifact.hash);
-    expect(nullEvaluations.map((event) => event.episode)).toEqual([3, 3]);
+    expect(nullEvaluations.map((event) => event.episode)).toEqual([0, 4, 4]);
     expect(searchEvents.filter((event) => event.type === "episode.invalid")).toEqual([
-      expect.objectContaining({ episode: 1, repaired: true }),
+      expect.objectContaining({ episode: 0, repaired: false, reason: expect.stringContaining("null aggregate") }),
       expect.objectContaining({ episode: 2, repaired: true }),
-      expect.objectContaining({ episode: 3, repaired: false, reason: expect.stringContaining("invalid") }),
+      expect.objectContaining({ episode: 3, repaired: true }),
+      expect.objectContaining({ episode: 4, repaired: false, reason: expect.stringContaining("invalid") }),
     ]);
-    expect(failures).toHaveLength(2);
-    expect(launchedChildren).toHaveLength(18);
+    expect(failures).toHaveLength(3);
+    expect(launchedChildren).toHaveLength(21);
     expect(launchedChildren.every((request) => request.child.schedule !== undefined)).toBe(true);
+    const trajectoryGroups = new Map<number, RecursiveCandidateOuterGroup>();
+    for (const request of launchedChildren) {
+      const schedule = request.child.schedule;
+      if (schedule === undefined) throw new Error("shakedown launch lost its candidate schedule");
+      const current = trajectoryGroups.get(schedule.candidateOrdinal);
+      if (current !== undefined && current.artifact !== request.child.sourceArtifact.hash) {
+        throw new Error("shakedown candidate ordinal changed source artifact");
+      }
+      const group = current ?? {
+        artifact: request.child.sourceArtifact.hash as Sha256Digest,
+        childRunIds: [],
+      };
+      group.childRunIds.push(request.child.runId);
+      trajectoryGroups.set(schedule.candidateOrdinal, group);
+    }
+    const boundCandidates = bindRecursiveOuterEvents(trajectoryGroups, brokerEvents);
+    expect(boundCandidates.map((event) => event.candidateOrdinal)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(boundCandidates[0]?.candidateArtifact).toBe(outerBaseline);
+    expect(boundCandidates[1]?.candidateArtifact).toBe(outerBaseline);
+    expect(boundCandidates[0]?.childRunIds).not.toEqual(boundCandidates[1]?.childRunIds);
     expect(peakOpenRecursiveReservations).toBe(3);
     expect([...panelBarriers.values()].every((barrier) => barrier.entered === PANEL_SIZE)).toBe(true);
     expect(finishCalls).toHaveLength(1);
     expect(finishCalls[0]?.[0].best.hash).toBe(brokerPromoted[0]?.artifact.hash);
-    expect(finalBudget).toMatchObject({ spent: { tokens: 0, usd: 0, evaluatorInvocations: 11 } });
+    expect(finalBudget).toMatchObject({ spent: { tokens: 0, usd: 0, evaluatorInvocations: 12 } });
     expect(dockerCalls.some((argv) => argv.includes("/bin/false"))).toBe(false);
 
     const summary = {
@@ -584,6 +613,10 @@ describe.skipIf(!ENABLED)("compressed zero-spend full-campaign shakedown", () =>
         peakOpenRecursiveReservations,
         failedChildSettlements: failures.size,
         nullAggregates: nullEvaluations.length,
+        initialNullPanelRetryFresh:
+          boundCandidates[0]?.candidateArtifact === boundCandidates[1]?.candidateArtifact
+          && boundCandidates[0]?.childRunIds.join(",") !== boundCandidates[1]?.childRunIds.join(","),
+        firstPostRetryCandidateDistinct: candidateEvents[0]?.candidate.hash !== outerBaseline,
         repairedAliasAcrossEpisodes: candidateHashes[1] === candidateHashes[2],
         repeatFirstVerdictNonPositiveLaterLocalPositive:
           localRepeatGates.map((event) => event.passed).join(",") === "false,true",

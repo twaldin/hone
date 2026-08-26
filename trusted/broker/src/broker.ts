@@ -819,7 +819,7 @@ type EmittableEvent =
       zeroUsageTurns: number;
       normalizedUsageTurns: number;
     }
-  | { type: "eval.completed"; episode?: number; artifact: ArtifactRef; assetGroupId: string; seed: number; aggregate: number; cached: boolean }
+  | { type: "eval.completed"; episode?: number; artifact: ArtifactRef; assetGroupId: string; seed: number; aggregate: number | null; cached: boolean }
   | { type: "gate.paired"; episode: number; parentScore: number; childScore: number; passed: boolean }
   | { type: "incumbent.new"; artifact: ArtifactRef; aggregate: number; deltaVsBaseline: number; episode: number }
   | { type: "corpus.query"; request: QueryCorpusP }
@@ -4182,7 +4182,8 @@ export class Broker {
    * Trusted scalarization + the eval.completed event. Holdout results NEVER
    * enter the log or the promotion table — scores of ledger-gated groups stay
    * admin-side. Ineligible outputs (invalid, objective-less, non-finite, or
-   * any failed constraint) grant no authority.
+   * any failed constraint) emit a journal-backed null result but grant no
+   * authority.
    *
    * Authority is EPOCH-SCOPED: the measurement lands in the epoch captured
    * when its evaluation was admitted, and a same-epoch retry is a no-op
@@ -4203,7 +4204,8 @@ export class Broker {
    *
    * Public events keep the historical shape: eval.completed once per
    * artifact/coordinate lifetime (episode-tagged on the artifact's first
-   * record), gate.paired only alongside that first tagged record — fresh
+   * record), gate.paired only alongside that first tagged eligible record.
+   * Ineligible results are explicit settled negatives; fresh eligible
    * re-measurements in later epochs are measurements, not news and not
    * authority (see registerGate: the first pair is frozen).
    */
@@ -4216,6 +4218,20 @@ export class Broker {
       throw new BrokerError("INTERNAL", `measurement epoch was never minted by trusted code: ${epoch}`);
     }
     if (aggregate === undefined) {
+      const lineage = this.lineage.get(record.artifactHash);
+      const hadTrusted = (this.lifetimeCoords.get(record.artifactHash)?.size ?? 0) > 0;
+      const tagged = this.anyEpisodeStarted && !hadTrusted ? lineage : undefined;
+      const events: EmittableEvent[] = this.anyEpisodeStarted
+        ? [{
+            type: "eval.completed",
+            ...(tagged !== undefined ? { episode: tagged.episode } : {}),
+            artifact: { hash: record.artifactHash },
+            assetGroupId: record.assetGroupId,
+            seed: record.seed,
+            aggregate: null,
+            cached: record.cached,
+          }]
+        : [];
       const journaled = this.journalFact({
         t: "eval",
         record,
@@ -4223,7 +4239,7 @@ export class Broker {
         epoch,
         epochSeq,
         ...(this.trustedMeasurementEpoch !== undefined ? { measurementEpoch: this.trustedMeasurementEpoch } : {}),
-      }, []);
+      }, events);
       this.journaledEvaluationMemoKeys.add(memoKey);
       this.publish(journaled);
       return;
