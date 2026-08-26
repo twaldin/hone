@@ -3,7 +3,12 @@ import { chmodSync, copyFileSync, createReadStream, lstatSync, mkdirSync, mkdtem
 import type { Stats } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RunCommand } from "@hone/broker";
+import {
+  MUTATION_SANDBOX_HOME,
+  MUTATION_SANDBOX_USER,
+  WORKSPACE_TMPFS_INODES,
+  type RunCommand,
+} from "@hone/broker";
 import type { DockerCreateGate } from "../docker-create-gate.js";
 import {
   MUTATION_RUNTIME_MANIFEST,
@@ -453,6 +458,130 @@ export async function stageMutationRuntime(env: NodeJS.ProcessEnv, runtimeDir: s
       throw new Error(`pinned runtime source ${source.path} hashes ${digest} != pinned ${source.sha256} — refusing`);
     }
   }
+}
+
+export interface MutationToolbeltSmokeResult {
+  readonly type: "hone-mutation-toolbelt-selftest.v1";
+  readonly home: string;
+  readonly modelCalls: 0;
+  readonly tools: readonly ["bash", "write", "edit"];
+  readonly outputs: {
+    readonly bash: string;
+    readonly write: string;
+    readonly edit: string;
+  };
+}
+
+export function parseMutationToolbeltSmoke(stdout: Buffer): MutationToolbeltSmokeResult {
+  const line = stdout
+    .toString("utf8")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .at(-1);
+  if (line === undefined) throw new Error("mutation toolbelt preflight returned no output");
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    throw new Error(`mutation toolbelt preflight returned malformed JSON: ${line.slice(0, 1_000)}`);
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("mutation toolbelt preflight result is not an object");
+  }
+  const record = value as Record<string, unknown>;
+  const outputs = record["outputs"];
+  if (
+    record["type"] !== "hone-mutation-toolbelt-selftest.v1"
+    || record["home"] !== MUTATION_SANDBOX_HOME
+    || record["modelCalls"] !== 0
+    || !Array.isArray(record["tools"])
+    || record["tools"].length !== 3
+    || record["tools"][0] !== "bash"
+    || record["tools"][1] !== "write"
+    || record["tools"][2] !== "edit"
+    || outputs === null
+    || typeof outputs !== "object"
+    || Array.isArray(outputs)
+    || (outputs as Record<string, unknown>)["bash"] !== "bash-ok\n"
+    || (outputs as Record<string, unknown>)["write"] !== "write-ok\n"
+    || (outputs as Record<string, unknown>)["edit"] !== "edit-ok\n"
+  ) {
+    throw new Error(`mutation toolbelt preflight result failed validation: ${line.slice(0, 1_000)}`);
+  }
+  return value as MutationToolbeltSmokeResult;
+}
+
+/**
+ * Zero-provider standing gate for the exact mutation-worker image and bundle.
+ * It runs the worker's real bash/write/edit implementations under the same
+ * forced uid, read-only root, writable home, and workspace tmpfs as Broker
+ * mutation sandboxes. No proxy endpoint is mounted and no session is prompted.
+ */
+export async function runMutationToolbeltSmoke(
+  runtime: Pick<
+    OptimizerRuntime,
+    "image" | "runId" | "safeRunId" | "bundleDir" | "bundleSeal" | "containerLease" | "run"
+  >,
+): Promise<MutationToolbeltSmokeResult> {
+  if (runtime.bundleDir === null || runtime.bundleSeal === null) {
+    throw new Error("mutation toolbelt preflight requires a sealed optimizer bundle");
+  }
+  verifyOptimizerBundleSeal(runtime);
+  const name = `hone-toolbelt-${runtime.safeRunId}`;
+  const runtimeDir = "/scratch/.hone-runtime";
+  const bun = MUTATION_RUNTIME_MANIFEST.bun;
+  const native = MUTATION_RUNTIME_MANIFEST.pi.files[0];
+  const script = [
+    "set -eu",
+    `mkdir -p ${runtimeDir}`,
+    `gzip -dc /hone/bundle/${bun.bundleName} > ${runtimeDir}/${bun.sandboxName}`,
+    `chmod ${bun.mode.toString(8)} ${runtimeDir}/${bun.sandboxName}`,
+    `gzip -dc /hone/bundle/${native.bundleName} > ${runtimeDir}/${native.sandboxName}`,
+    `chmod ${native.mode.toString(8)} ${runtimeDir}/${native.sandboxName}`,
+    `exec env HONE_WORKDIR=/workspace HONE_AGENT_DIR=/scratch/omp-agent PI_NATIVE_VARIANT=baseline ` +
+      `${runtimeDir}/${bun.sandboxName} /hone/bundle/worker.mjs --toolbelt-selftest`,
+  ].join(" && ");
+  const argv = [
+    "docker", "run", "--rm",
+    "--pull=never",
+    "--log-driver", "none",
+    "--name", name,
+    "--label", `hone.runId=${runtime.runId}`,
+    "--network", "none",
+    "--pids-limit", "512",
+    "--memory", "2147483648",
+    "--cpus", "2",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--user", MUTATION_SANDBOX_USER,
+    "--read-only",
+    "--tmpfs", `/workspace:rw,exec,nosuid,nodev,size=1073741824,nr_inodes=${WORKSPACE_TMPFS_INODES},mode=1777`,
+    "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777",
+    "--tmpfs", "/scratch:rw,exec,nosuid,nodev,size=1073741824,mode=0700,uid=1000,gid=1000",
+    "--tmpfs", `${MUTATION_SANDBOX_HOME}:rw,exec,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000`,
+    "-w", "/workspace",
+    "-e", `HOME=${MUTATION_SANDBOX_HOME}`,
+    "-v", `${runtime.bundleDir}:${BUNDLE_MOUNT}:ro`,
+    "--volumes-from", `${runtime.containerLease}:ro`,
+    runtime.image,
+    "sh", "-c", script,
+  ];
+  let result;
+  try {
+    result = await runtime.run(argv, { timeoutMs: 120_000 });
+  } catch (error) {
+    await runtime.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 }).catch(() => {});
+    throw error;
+  }
+  if (result.exitCode !== 0 || result.timedOut) {
+    await runtime.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 }).catch(() => {});
+    const detail = result.stderr.toString("utf8").trim().slice(-4_000);
+    throw new Error(
+      `mutation toolbelt preflight failed in ${runtime.image} (exit ${result.exitCode}${result.timedOut ? ", timed out" : ""}): ${detail}`,
+    );
+  }
+  return parseMutationToolbeltSmoke(result.stdout);
 }
 
 /**

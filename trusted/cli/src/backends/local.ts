@@ -48,6 +48,7 @@ import {
   optimizerRunName,
   optimizerStartArgs,
   prepareOptimizerRuntime,
+  runMutationToolbeltSmoke,
   transportEndpoint,
   verifyOptimizerBundleSeal,
 } from "./optimizer-container.js";
@@ -1242,7 +1243,12 @@ export function deriveProbeReport(events: readonly RunEvent[], budget: BudgetSta
 }
 
 export function createBackend(
-  deps: { run?: RunCommand; spawnOptimizer?: OptimizerSpawn; createHelper?: DockerCreateHelper } = {},
+  deps: {
+    run?: RunCommand;
+    spawnOptimizer?: OptimizerSpawn;
+    createHelper?: DockerCreateHelper;
+    mutationToolbeltSmoke?: (runtime: OptimizerRuntime) => Promise<unknown>;
+  } = {},
 ): RunnerBackend {
   const run = deps.run ?? runCommand;
   const spawnImpl: OptimizerSpawn = deps.spawnOptimizer ?? ((cmd, args, opts) => spawn(cmd, args, opts));
@@ -1651,6 +1657,13 @@ export function createBackend(
           gate,
           clientEnv: frozen.env,
         });
+        // No model prompt can begin until the actual capsule image proves its
+        // bash/write/edit toolbelt under the production worker bundle. An
+        // explicit optimizer argv override has no sealed worker to prove and
+        // remains a dev/test-only seam; tests can inject the smoke boundary.
+        if (optimizer.bundleDir !== null || deps.mutationToolbeltSmoke !== undefined) {
+          await (deps.mutationToolbeltSmoke ?? runMutationToolbeltSmoke)(optimizer);
+        }
         if (ctx.signal.aborted) return;
 
         if (ctx.optimizerEpisodesMax !== undefined) {

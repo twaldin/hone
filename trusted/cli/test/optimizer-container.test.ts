@@ -15,6 +15,8 @@ import {
   optimizerBuildArgs,
   optimizerCreateArgs,
   optimizerStartArgs,
+  parseMutationToolbeltSmoke,
+  runMutationToolbeltSmoke,
   prepareOptimizerRuntime,
   stageMutationRuntime,
   verifyOptimizerBundleSeal,
@@ -59,6 +61,51 @@ import {
 function res(overrides: Partial<CmdResult> = {}): CmdResult {
   return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false, ...overrides };
 }
+
+const validToolbeltResult = {
+  type: "hone-mutation-toolbelt-selftest.v1",
+  home: "/home/hone",
+  modelCalls: 0,
+  tools: ["bash", "write", "edit"],
+  outputs: {
+    bash: "bash-ok\n",
+    write: "write-ok\n",
+    edit: "edit-ok\n",
+  },
+};
+
+describe("mutation toolbelt result gate", () => {
+  it("accepts only the final machine-readable zero-spend record", () => {
+    expect(
+      parseMutationToolbeltSmoke(
+        Buffer.from(`ignored diagnostic\n${JSON.stringify(validToolbeltResult)}\n`, "utf8"),
+      ),
+    ).toEqual(validToolbeltResult);
+  });
+
+  it.each([
+    ["wrong record type", { ...validToolbeltResult, type: "other" }],
+    ["wrong HOME", { ...validToolbeltResult, home: "/" }],
+    ["non-zero model spend", { ...validToolbeltResult, modelCalls: 1 }],
+    ["missing bash", { ...validToolbeltResult, tools: ["write", "edit"] }],
+    ["wrong tool order", { ...validToolbeltResult, tools: ["write", "bash", "edit"] }],
+    ["extra tool", { ...validToolbeltResult, tools: ["bash", "write", "edit", "read"] }],
+    ["non-object outputs", { ...validToolbeltResult, outputs: [] }],
+    ["failed bash output", { ...validToolbeltResult, outputs: { ...validToolbeltResult.outputs, bash: "wrong\n" } }],
+    ["failed write output", { ...validToolbeltResult, outputs: { ...validToolbeltResult.outputs, write: "wrong\n" } }],
+    ["failed edit output", { ...validToolbeltResult, outputs: { ...validToolbeltResult.outputs, edit: "wrong\n" } }],
+  ])("rejects %s", (_name, value) => {
+    expect(() => parseMutationToolbeltSmoke(Buffer.from(`${JSON.stringify(value)}\n`))).toThrow(
+      /failed validation/,
+    );
+  });
+
+  it("rejects missing, malformed, and non-object output", () => {
+    expect(() => parseMutationToolbeltSmoke(Buffer.alloc(0))).toThrow(/no output/);
+    expect(() => parseMutationToolbeltSmoke(Buffer.from("{"))).toThrow(/malformed JSON/);
+    expect(() => parseMutationToolbeltSmoke(Buffer.from("[]"))).toThrow(/not an object/);
+  });
+});
 
 const TEST_RUNTIME_SOURCE = "/tmp/hone-runtime-test-fixture";
 
@@ -303,6 +350,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
         writeFileSync(join(out, "optimizer.mjs"), "// bundle\n"); // worker.mjs deliberately absent
       }
+
       return Promise.resolve(res());
     };
     await expect(
@@ -317,6 +365,103 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         runtimeSourceDir: TEST_RUNTIME_SOURCE,
       }),
     ).rejects.toThrow(/produced no .*worker\.mjs/);
+  });
+  let smokeOrdinal = 0;
+  async function preparedSmokeRuntime(
+    smokeResult: CmdResult | Error,
+  ): Promise<{ runtime: OptimizerRuntime; argvs: string[][] }> {
+    const runId = `run_toolbelt_unit_${++smokeOrdinal}`;
+    const argvs: string[][] = [];
+    const run: RunCommand = (argv) => {
+      argvs.push([...argv]);
+      if (isBuild(argv)) {
+        const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
+        writeBuiltArtifacts(out);
+        return Promise.resolve(res());
+      }
+      if (argv[1] === "run" && argv.includes(`hone-toolbelt-${runId}`)) {
+        if (smokeResult instanceof Error) return Promise.reject(smokeResult);
+        return Promise.resolve(smokeResult);
+      }
+      return Promise.resolve(res());
+    };
+    const runtime = await prepareOptimizerRuntime(
+      {
+        runId,
+        env: {},
+        optimizerDigest: computeOptimizerDigest(FIX_IMAGE),
+      },
+      {
+        image: FIX_IMAGE,
+        transport: { kind: "unix", hostSocketPath: "/dev/null", token: "a".repeat(64) },
+        run,
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE),
+        containerLease: `hone-lease-${runId}`,
+        gate: testGate(runId),
+        clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
+      },
+    );
+    return { runtime, argvs };
+  }
+
+  it("runs the zero-spend worker smoke under the production uid, HOME, mounts, image, and sealed bundle", async () => {
+    const expected = Buffer.from(`${JSON.stringify(validToolbeltResult)}\n`);
+    const { runtime, argvs } = await preparedSmokeRuntime(res({ stdout: expected }));
+    try {
+      await expect(runMutationToolbeltSmoke(runtime)).resolves.toEqual(validToolbeltResult);
+      const argv = argvs.find((entry) => entry[1] === "run" && entry.includes(`hone-toolbelt-${runtime.safeRunId}`)) ?? [];
+      expect(flagValue(argv, "--user")).toBe("1000:1000");
+      expect(argv).toContain("/home/hone:rw,exec,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000");
+      expect(argv.flatMap((value, index) => value === "-e" ? [argv[index + 1]] : [])).toEqual([
+        "HOME=/home/hone",
+      ]);
+      expect(argv[argv.indexOf("--volumes-from") + 1]).toBe(`${runtime.containerLease}:ro`);
+      expect(mountsOf(argv)).toEqual([`${runtime.bundleDir}:/hone/bundle:ro`]);
+      expect(argv.indexOf(runtime.image)).toBeGreaterThan(argv.indexOf("--volumes-from"));
+      expect(argv.slice(argv.indexOf(runtime.image) + 1, argv.indexOf(runtime.image) + 3)).toEqual(["sh", "-c"]);
+      expect(argv.at(-1)).toContain("--toolbelt-selftest");
+      expect(argv.join("\0")).not.toContain("HONE_PROXY");
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+
+  it.each([
+    ["non-zero exit", res({ exitCode: 9, stderr: Buffer.from("toolbelt failed") })],
+    ["timeout", res({ exitCode: -1, timedOut: true, stderr: Buffer.from("toolbelt stalled") })],
+  ])("refuses a %s and reaps the one-shot container", async (_name, failure) => {
+    const { runtime, argvs } = await preparedSmokeRuntime(failure);
+    try {
+      await expect(runMutationToolbeltSmoke(runtime)).rejects.toThrow(/mutation toolbelt preflight failed/);
+      expect(argvs.some((argv) =>
+        argv[1] === "rm"
+        && argv[2] === "-f"
+        && argv[3] === `hone-toolbelt-${runtime.safeRunId}`
+      )).toBe(true);
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+
+  it("reaps after a docker-client throw and refuses an optimizer override with no sealed worker", async () => {
+    const failure = new Error("docker transport failed");
+    const { runtime, argvs } = await preparedSmokeRuntime(failure);
+    try {
+      await expect(runMutationToolbeltSmoke(runtime)).rejects.toThrow(failure);
+      expect(argvs.some((argv) =>
+        argv[1] === "rm"
+        && argv[2] === "-f"
+        && argv[3] === `hone-toolbelt-${runtime.safeRunId}`
+      )).toBe(true);
+    } finally {
+      await runtime.cleanup();
+    }
+    await expect(
+      runMutationToolbeltSmoke(
+        testOptimizerRuntime({ runId: "run_toolbelt_override", argv: ["node", "optimizer.mjs"] }),
+      ),
+    ).rejects.toThrow(/requires a sealed optimizer bundle/);
   });
 
   it("threads the docker-run lease into the build argv and the runtime", async () => {
@@ -743,6 +888,7 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
 
     const invocations = join(root, "invocations.ndjson");
     const argvs: string[][] = [];
+    const toolbeltContainerId = "t00lbe1tc1d";
     const run: RunCommand = (argv) => {
       argvs.push([...argv]);
       if (argv[1] === "info") return Promise.resolve(res({ stdout: Buffer.from("ENGINE-TEST\n") }));
@@ -767,8 +913,16 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
         writeRuntimeFixtures(out);
         return Promise.resolve(res({ stdout: Buffer.from("bu1ldc1d\n") }));
       }
+      // The gate rewrites the one-shot smoke from `run` to daemon-id create/start.
+      const createdName = argv[argv.indexOf("--name") + 1];
+      if (argv[1] === "create" && createdName?.startsWith("hone-toolbelt-") === true) {
+        return Promise.resolve(res({ stdout: Buffer.from(`${toolbeltContainerId}\n`) }));
+      }
       // Every other create (donor, relays, keeper) answers with a container id.
       if (argv[1] === "create") return Promise.resolve(res({ stdout: Buffer.from("d0n0r1d\n") }));
+      if (argv[1] === "start" && argv.at(-1) === toolbeltContainerId) {
+        return Promise.resolve(res({ stdout: Buffer.from(`${JSON.stringify(validToolbeltResult)}\n`) }));
+      }
       const outArg = argv.find((a) => typeof a === "string" && a.startsWith("HONE_SCRATCH_SNAPSHOT_OUT="));
       if (argv[1] === "exec" && outArg !== undefined) {
         // Model the keeper's snapshot exec: the in-container tar publishes
@@ -820,6 +974,11 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
     // survives.
     expect(argvs.filter((a) => a[1] === "create" && a.some((x) => x.includes("bun build"))).length).toBe(1);
     expect(argvs.filter((a) => a[1] === "run")).toEqual([]);
+    const toolbeltCreates = argvs.filter(
+      (a) => a[1] === "create" && a[a.indexOf("--name") + 1]?.startsWith("hone-toolbelt-") === true,
+    );
+    expect(toolbeltCreates).toHaveLength(1);
+    expect(argvs.filter((a) => a[1] === "start" && a.at(-1) === toolbeltContainerId)).toHaveLength(1);
     // M0 one-shot: the probe IS the run — exactly one two-phase optimizer
     // invocation (create + start -a); approval never launches a second.
     const optCreates = seen.argvs.filter((a) => a[1] === "create");

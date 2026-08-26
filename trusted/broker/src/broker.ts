@@ -396,6 +396,9 @@ export const SCRATCH_INODE_LIMIT = 131072;
  * keeps enforcing the exact archive cap at admission.
  */
 export const WORKSPACE_TMPFS_INODES = MAX_ARTIFACT_ENTRIES + 1024;
+/** Fixed identity and writable home shared by every mutation sandbox image. */
+export const MUTATION_SANDBOX_USER = "1000:1000";
+export const MUTATION_SANDBOX_HOME = "/home/hone";
 /** Host-side wall clock granted to the snapshot `docker exec`. */
 const SCRATCH_SNAPSHOT_HOST_TIMEOUT_MS = 300_000;
 /** In-container tar deadline — strictly below the host exec timeout, so a
@@ -3221,14 +3224,14 @@ export class Broker {
       "--label",
       `hone.runId=${this.config.runId}`,
       ...this.resourceArgs(),
-      "--user", "1000:1000",
+      "--user", MUTATION_SANDBOX_USER,
       "--read-only",
       "--tmpfs",
       `/workspace:rw,exec,nosuid,nodev,size=${this.workspaceQuotaBytes},nr_inodes=${WORKSPACE_TMPFS_INODES},mode=1777`,
       "--tmpfs",
       "/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777",
       "--tmpfs",
-      "/home/hone:rw,exec,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000",
+      `${MUTATION_SANDBOX_HOME}:rw,exec,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000`,
       "-w",
       "/workspace",
     ];
@@ -3237,8 +3240,13 @@ export class Broker {
     // the client wire protocol. Values are role-scoped and metered; the
     // upstream credentials themselves never enter any sandbox.
     for (const [k, v] of Object.entries(this.config.mutationEnv ?? {})) {
+      if (k === "HOME") continue;
       argv.push("-e", `${k}=${v}`);
     }
+    // The fixed uid's home is broker authority, not image/config authority.
+    // Append it last so even a conflicting mutationEnv cannot steer Node's
+    // homedir (and Pi agent storage) back onto the read-only image root.
+    argv.push("-e", `HOME=${MUTATION_SANDBOX_HOME}`);
     for (const m of mounts) argv.push("-v", `${m.host}:${m.container}:${m.mode}`);
     argv.push(this.config.image, "sleep", "2147483647");
 
