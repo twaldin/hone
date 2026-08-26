@@ -1682,6 +1682,36 @@ describe("M0 one-shot candidate evaluation authority", () => {
 // ---------- event derivation ----------
 
 describe("trusted event ordering and candidacy", () => {
+  it("publishes a trusted null evaluation event after an episode starts without granting promotion authority", async () => {
+    const b = await boot({ maxPublicCandidateEvaluations: 4 });
+    b.ctl.evalOutputs.set(baselineHash, {
+      valid: false,
+      objectives: {},
+      constraints: {},
+      perExample: {},
+    });
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+
+    await expect(
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT),
+    ).resolves.toMatchObject({ artifactHash: baselineHash, output: { valid: false } });
+    const evaluations = b.events.filter((event) => event.type === "eval.completed");
+    expect(evaluations).toEqual([
+      expect.objectContaining({
+        artifact: { hash: baselineHash },
+        aggregate: null,
+        cached: false,
+      }),
+    ]);
+    expect(evaluations[0]).not.toHaveProperty("episode");
+    expect(b.events.filter((event) => event.type === "gate.paired")).toHaveLength(0);
+    expect(b.events.filter((event) => event.type === "incumbent.new")).toHaveLength(0);
+    await b.broker.completeEpisode({ episode: 0, releaseSandboxId: sandboxId }, CLIENT);
+  });
+
   it("pre-episode parent evidence cannot rescue a child-first one-shot candidate", async () => {
     const b = await boot();
     b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2)).set(candidate2Hash, score(3));

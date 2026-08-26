@@ -1224,7 +1224,6 @@ export function assertM2OuterAncestorCapacity(
  */
 export class RecursiveSearchChildLauncher {
   private readonly candidateOrdinals = new Map<Sha256Digest, number>();
-  private readonly ordinalArtifacts = new Map<number, Sha256Digest>();
   private nextCandidateOrdinal = 0;
 
   constructor(
@@ -1238,6 +1237,13 @@ export class RecursiveSearchChildLauncher {
     private readonly envelopeLedger: MetaResourceEnvelopeLedger,
     private readonly campaignPauseAuthority: CampaignPauseAuthority,
   ) {
+    const terminalMeasurements = new Set(
+      this.journal.queryTrainMeasurements().map((measurement) => measurement.childRunId),
+    );
+    const terminalFailures = new Set(
+      this.journal.queryFailureSettlements().map((failure) => failure.childRunId),
+    );
+    const groups = new Map<number, { artifact: Sha256Digest; childRunIds: string[] }>();
     for (const entry of readdirSync(this.campaignDir)) {
       if (!entry.startsWith("child-launch-") || !entry.endsWith(".json")) continue;
       const receipt = ChildRunLaunchReceipt.parse(
@@ -1246,17 +1252,32 @@ export class RecursiveSearchChildLauncher {
       const schedule = receipt.child.schedule;
       if (schedule === undefined || receipt.child.purpose !== "capsule" || receipt.depth !== 1) continue;
       const artifact = receipt.child.sourceArtifact.hash as Sha256Digest;
-      const byArtifact = this.candidateOrdinals.get(artifact);
-      const byOrdinal = this.ordinalArtifacts.get(schedule.candidateOrdinal);
-      if (
-        (byArtifact !== undefined && byArtifact !== schedule.candidateOrdinal)
-        || (byOrdinal !== undefined && byOrdinal !== artifact)
-      ) {
+      const group = groups.get(schedule.candidateOrdinal);
+      if (group !== undefined && group.artifact !== artifact) {
         throw new Error("durable recursive child receipts disagree on candidate ordinal identity");
       }
-      this.candidateOrdinals.set(artifact, schedule.candidateOrdinal);
-      this.ordinalArtifacts.set(schedule.candidateOrdinal, artifact);
+      const resolved = group ?? { artifact, childRunIds: [] };
+      if (!resolved.childRunIds.includes(receipt.child.runId)) resolved.childRunIds.push(receipt.child.runId);
+      groups.set(schedule.candidateOrdinal, resolved);
       this.nextCandidateOrdinal = Math.max(this.nextCandidateOrdinal, schedule.candidateOrdinal + 1);
+    }
+    const latestByArtifact = new Map<Sha256Digest, { ordinal: number; childRunIds: string[] }>();
+    for (const [ordinal, group] of groups) {
+      const current = latestByArtifact.get(group.artifact);
+      if (current === undefined || ordinal > current.ordinal) {
+        latestByArtifact.set(group.artifact, { ordinal, childRunIds: group.childRunIds });
+      }
+    }
+    for (const [artifact, latest] of latestByArtifact) {
+      const hasOpenChild = latest.childRunIds.some(
+        (childRunId) => !terminalMeasurements.has(childRunId) && !terminalFailures.has(childRunId),
+      );
+      const hasFailedChild = latest.childRunIds.some((childRunId) => terminalFailures.has(childRunId));
+      // An incomplete attempt must resume its durable work identities. A
+      // settled successful panel remains memoizable. A settled failed panel
+      // is deliberately absent so the next outer coordinate mints a new
+      // ordinal rather than replaying the same terminal child settlement.
+      if (hasOpenChild || !hasFailedChild) this.candidateOrdinals.set(artifact, latest.ordinal);
     }
   }
 
@@ -1344,7 +1365,6 @@ export class RecursiveSearchChildLauncher {
         candidateOrdinal = this.nextCandidateOrdinal;
         this.nextCandidateOrdinal += 1;
         this.candidateOrdinals.set(sourceArtifact, candidateOrdinal);
-        this.ordinalArtifacts.set(candidateOrdinal, sourceArtifact);
       }
 
       const childResults = await mapBounded(
@@ -1407,6 +1427,12 @@ export class RecursiveSearchChildLauncher {
         else failures.push(`${result.value.capsuleId}=${result.value.status}`);
       }
 
+      if (
+        failures.length > 0
+        && this.candidateOrdinals.get(sourceArtifact) === candidateOrdinal
+      ) {
+        this.candidateOrdinals.delete(sourceArtifact);
+      }
       if (failures.length > 0) {
         return EvaluationRecord.parse({
           capsuleId: input.capsuleId,

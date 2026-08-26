@@ -1,12 +1,13 @@
 import { RunEvent, type BudgetState } from "@hone/schema";
 import { describe, expect, it } from "vitest";
 import {
+  bindRecursiveOuterEvents,
   controllerSpendDelta,
   extractAnytimePoints,
+  type RecursiveCandidateOuterGroup,
   persistTrajectoryWithoutMaskingSearchFailure,
 } from "../src/meta-trajectory.js";
-
-const hash = `sha256:${"a".repeat(64)}`;
+const hash = `sha256:${"a".repeat(64)}` as RecursiveCandidateOuterGroup["artifact"];
 const candidate = `sha256:${"b".repeat(64)}`;
 const at = "2026-07-15T00:00:00.000Z";
 const envelope = { maxTokens: 100, maxUsd: 1, maxWallClockSec: 100, maxEvaluatorInvocations: 10 };
@@ -146,6 +147,64 @@ describe("meta recursive trajectory extraction", () => {
     expect(() => persistTrajectoryWithoutMaskingSearchFailure(0, () => {})).toThrow(
       /requires a nonzero integer exit code/,
     );
+  });
+
+  it("orders a successful seed retry before the new candidate saved later in the same episode", () => {
+    const events = [
+      RunEvent.parse({ runId: "run", at, type: "run.started", capsuleId: "cap", contractHash: hash, optimizerDigest: hash }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(0) }),
+      RunEvent.parse({ runId: "run", at, type: "episode.started", episode: 0, parent: { hash } }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 0, aggregate: null, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(10) }),
+      RunEvent.parse({ runId: "run", at, type: "episode.completed", episode: 0 }),
+      RunEvent.parse({ runId: "run", at, type: "episode.started", episode: 1, parent: { hash } }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 1, aggregate: 0.5, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(20) }),
+      RunEvent.parse({ runId: "run", at, type: "episode.candidate", episode: 1, candidate: { hash: candidate }, sessionTrace: hash }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", episode: 1, artifact: { hash: candidate }, assetGroupId: "train", seed: 1, aggregate: 0.8, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(30) }),
+      RunEvent.parse({ runId: "run", at, type: "episode.completed", episode: 1 }),
+    ];
+
+    const candidates = extractAnytimePoints(events).filter((point) => point.candidateArtifact !== null);
+
+    expect(candidates.map((point) => point.candidateArtifact)).toEqual([hash, hash, candidate]);
+    expect(candidates.map((point) => point.eventCursor)).toEqual([3, 7, 10]);
+    expect(candidates.map((point) => point.bestScore)).toEqual([null, 0.5, 0.8]);
+  });
+
+  it("binds repeated null panels to distinct trusted ordinals instead of crashing at ordinal zero", () => {
+    const events = [
+      RunEvent.parse({ runId: "run", at, type: "run.started", capsuleId: "cap", contractHash: hash, optimizerDigest: hash }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(0) }),
+      RunEvent.parse({ runId: "run", at, type: "episode.started", episode: 0, parent: { hash } }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 0, aggregate: null, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(10) }),
+      RunEvent.parse({ runId: "run", at, type: "episode.completed", episode: 0 }),
+      RunEvent.parse({ runId: "run", at, type: "episode.started", episode: 1, parent: { hash } }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 1, aggregate: null, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(20) }),
+      RunEvent.parse({ runId: "run", at, type: "episode.completed", episode: 1 }),
+      RunEvent.parse({ runId: "run", at, type: "episode.started", episode: 2, parent: { hash } }),
+      RunEvent.parse({ runId: "run", at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 2, aggregate: null, cached: false }),
+      RunEvent.parse({ runId: "run", at, type: "budget.snapshot", budget: budget(30) }),
+      RunEvent.parse({ runId: "run", at, type: "episode.completed", episode: 2 }),
+      RunEvent.parse({ runId: "run", at, type: "run.finished", best: { hash }, status: "completed" }),
+    ];
+    const grouped = new Map<number, RecursiveCandidateOuterGroup>([
+      [0, { artifact: hash, childRunIds: ["child-0"] }],
+      [1, { artifact: hash, childRunIds: ["child-1"] }],
+      [2, { artifact: hash, childRunIds: ["child-2"] }],
+    ]);
+
+    const bound = bindRecursiveOuterEvents(grouped, events);
+
+    expect(bound.map((event) => event.candidateOrdinal)).toEqual([0, 1, 2]);
+    expect(bound.map((event) => event.eventCursor)).toEqual([3, 7, 11]);
+    expect(bound.map((event) => event.candidateArtifact)).toEqual([hash, hash, hash]);
+    expect(bound.map((event) => event.childRunIds)).toEqual([["child-0"], ["child-1"], ["child-2"]]);
+    expect(extractAnytimePoints(events).filter((point) => point.candidateArtifact === hash))
+      .toHaveLength(3);
   });
 
   it("still refuses a genuine controller-spend regression", () => {
