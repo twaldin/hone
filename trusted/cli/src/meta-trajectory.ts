@@ -417,6 +417,9 @@ function persistRecursiveTrajectory(
   const trajectory = MetaSearchTrajectoryV2.parse({
     version: 2,
     configHash: opts.configHash,
+    ...(opts.config.sourceMigrationJournal === undefined
+      ? {}
+      : { sourceMigrationJournal: opts.config.sourceMigrationJournal }),
     outerRunId: opts.outerRunId,
     searchEnvelope: opts.config.recursiveBudgets.search.identity,
     panel: opts.config.developmentPanel,
@@ -498,6 +501,9 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
   const trajectory = MetaSearchTrajectoryV1.parse({
     version: 1,
     configHash: opts.configHash,
+    ...(opts.config.sourceMigrationJournal === undefined
+      ? {}
+      : { sourceMigrationJournal: opts.config.sourceMigrationJournal }),
     outerRunId: opts.outerRunId,
     controllerBundleDigest: started.optimizerDigest,
     targetSourceArtifact: opts.config.seedOptimizer.sourceArtifact,

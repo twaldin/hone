@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  CampaignSourceMigrationJournalV1,
   M2DevelopmentPanel,
   M2EnvelopeIdentity,
   M2PanelAggregation,
@@ -65,6 +66,8 @@ export type MetaOuterTrajectoryPointV1 = z.infer<typeof MetaOuterTrajectoryPoint
 export const MetaSearchTrajectoryV1 = z.object({
   version: z.literal(1),
   configHash: SHA256,
+  /** Present after a sanctioned source migration; absent on historical evidence. */
+  sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
   outerRunId: z.string().min(1),
   controllerBundleDigest: SHA256,
   targetSourceArtifact: SHA256,
@@ -110,6 +113,8 @@ export type MetaOuterTrajectoryPointV2 = z.infer<typeof MetaOuterTrajectoryPoint
 const MetaSearchTrajectoryV2Shape = z.object({
   version: z.literal(2),
   configHash: SHA256,
+  /** Present after a sanctioned source migration; absent on historical evidence. */
+  sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
   outerRunId: z.string().min(1),
   searchEnvelope: M2EnvelopeIdentity.extend({ purpose: z.literal("search") }).strict(),
   panel: M2DevelopmentPanel,
