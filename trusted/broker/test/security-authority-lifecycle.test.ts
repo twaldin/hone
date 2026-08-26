@@ -2066,6 +2066,27 @@ describe("trusted event ordering and candidacy", () => {
     ]);
   });
 
+  it("finalizes a rejected evaluator transaction before delivering later events", async () => {
+    const a = await boot();
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    a.ctl.evalInspect = () => {
+      throw new Error("rejected evaluator spawn");
+    };
+
+    await expect(
+      a.broker.evaluate(
+        { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+        CLIENT,
+      ),
+    ).rejects.toThrow(/rejected evaluator spawn/);
+    expect(a.events.some((event) => event.type === "evaluator.isolation")).toBe(true);
+    const deliveredAfterFailure = a.events.length;
+
+    a.broker.pauseActiveTime();
+    expect(a.events).toHaveLength(deliveredAfterFailure + 1);
+    expect(a.events.at(-1)?.type).toBe("budget.snapshot");
+  });
+
   it("accepts only a complete exact shared-budget reorder from a historical journal", async () => {
     const shared = {
       runDir: path.join(tmpBase, "runs", "recover-shared-reentry"),
@@ -2118,6 +2139,14 @@ describe("trusted event ordering and candidacy", () => {
     const recovered = await boot(shared);
     expect(recovered.broker.replayJournalEvents(reordered)).toBe(0);
     expect(recovered.events).toEqual([]);
+
+    const truncatedAt = reordered.findIndex((event) => event.type === "eval.completed");
+    expect(truncatedAt).toBeGreaterThan(exhaustedAt);
+    const truncatedAfterInversion = reordered.slice(0, truncatedAt);
+    const rejectsTruncatedInversion = await boot(shared);
+    expect(() => rejectsTruncatedInversion.broker.replayJournalEvents(truncatedAfterInversion)).toThrow(
+      /non-prefix gap/,
+    );
 
     const tampered = reordered.map((event) =>
       event === nestedSnapshot && event.type === "budget.snapshot"

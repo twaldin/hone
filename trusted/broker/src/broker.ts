@@ -1359,6 +1359,7 @@ export class Broker {
    */
   private readonly publicationQueue: PublicationGroup[] = [];
   private readonly publicationGroupByEvents = new WeakMap<readonly RunEvent[], PublicationGroup>();
+  private readonly deliveredPublicationGroups = new WeakSet<readonly RunEvent[]>();
   private publicationHead = 0;
   private publishingEvents = false;
   /** False only for pre-transaction journals; first reconciliation migrates them once. */
@@ -2433,18 +2434,28 @@ export class Broker {
     this.stagePublication(full);
     return full;
   }
+  /**
+   * Stages one exact array identity; publish() must receive this same object.
+   * Register before queueing so a registration failure cannot wedge the head.
+   */
   private stagePublication(events: RunEvent[]): void {
     if (events.length === 0) return;
     const group: PublicationGroup = { events, ready: false, nextEvent: 0 };
-    this.publicationQueue.push(group);
     this.publicationGroupByEvents.set(events, group);
+    try {
+      this.publicationQueue.push(group);
+    } catch (error) {
+      this.publicationGroupByEvents.delete(events);
+      throw error;
+    }
   }
 
+  /** Marks a staged group ready; safe to repeat after complete delivery. */
   private publish(events: readonly RunEvent[]): void {
-    if (events.length === 0) return;
+    if (events.length === 0 || this.deliveredPublicationGroups.has(events)) return;
     const group = this.publicationGroupByEvents.get(events);
     if (group === undefined) {
-      throw new BrokerError("INTERNAL", "broker event publication group is unknown or was already delivered");
+      throw new BrokerError("INTERNAL", "broker event publication group is unknown");
     }
     group.ready = true;
     this.flushPublications();
@@ -2465,6 +2476,7 @@ export class Broker {
           this.config.onEvent(event);
           group.nextEvent += 1;
         }
+        this.deliveredPublicationGroups.add(group.events);
         this.publicationGroupByEvents.delete(group.events);
         this.publicationHead += 1;
       }
@@ -3468,8 +3480,9 @@ export class Broker {
         );
       }
       throw error;
+    } finally {
+      this.publish(startedEvents);
     }
-    this.publish(startedEvents);
     return { sandboxId };
   }
 
@@ -3710,13 +3723,16 @@ export class Broker {
           { t: "lineage", candidate: hash, parent: sb.parentHash, episode: sb.episode },
           [{ type: "episode.candidate", episode: sb.episode, candidate: { hash }, sessionTrace }],
         );
-        this.lineage.set(hash, { parent: sb.parentHash, episode: sb.episode });
-        this.bindContinuationArtifact(hash, sb.episode);
-        // Graduation: the hash may have been journaled as a repair snapshot
-        // earlier; lineage supersedes it (replay treats the lineage line as
-        // the tombstone), so descendants pair against THIS artifact.
-        this.repairs.delete(hash);
-        this.publish(events);
+        try {
+          this.lineage.set(hash, { parent: sb.parentHash, episode: sb.episode });
+          this.bindContinuationArtifact(hash, sb.episode);
+          // Graduation: the hash may have been journaled as a repair snapshot
+          // earlier; lineage supersedes it (replay treats the lineage line as
+          // the tombstone), so descendants pair against THIS artifact.
+          this.repairs.delete(hash);
+        } finally {
+          this.publish(events);
+        }
       }
     } else if (hash !== sb.parentHash && !this.lineage.has(hash) && !this.repairs.has(hash)) {
       // Repair snapshot (no exec, or last exec failed): NOT a candidate, no
@@ -3935,6 +3951,7 @@ export class Broker {
     }
 
     const releaseEvaluation = await this.enterEvaluationQuiescence();
+    let invocationEvents: RunEvent[] = [];
     try {
     // Stage the selected group BEFORE burning the invocation: a missing or
     // non-regular host asset is trusted-side misconfiguration, not an
@@ -3945,7 +3962,6 @@ export class Broker {
     let isolationRecord: z.infer<typeof EvaluatorIsolationRecord> | undefined;
     let isolationQuarantined = false;
 
-    let invocationEvents: RunEvent[] = [];
     let res: CmdResult;
     let startedMs = 0;
     const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
@@ -4161,7 +4177,11 @@ export class Broker {
     this.recordEvaluation(record, group.visibility, epoch, memoKey);
     return record;
     } finally {
-      await releaseEvaluation();
+      try {
+        this.publish(invocationEvents);
+      } finally {
+        await releaseEvaluation();
+      }
     }
   }
 
@@ -4174,6 +4194,7 @@ export class Broker {
     const strategy = this.evaluationStrategy;
     if (strategy === undefined) throw new BrokerError("INTERNAL", "trusted evaluation strategy is not configured");
     const releaseEvaluation = await this.enterEvaluationQuiescence();
+    let invocationEvents: RunEvent[] = [];
     try {
       if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
       const budgetEvents: EmittableEvent[] = [
@@ -4183,7 +4204,7 @@ export class Broker {
       if (exhausted !== undefined && !this.exhaustedAnnounced.has(exhausted)) {
         budgetEvents.push({ type: "budget.exhausted", dimension: exhausted });
       }
-      const invocationEvents = this.journalFact({ t: "inv" }, budgetEvents);
+      invocationEvents = this.journalFact({ t: "inv" }, budgetEvents);
       this.spent.evaluatorInvocations += 1;
       this.syncRecursiveUsage();
 
@@ -4218,7 +4239,11 @@ export class Broker {
       this.recordEvaluation(record, group.visibility, epoch, memoKey);
       return record;
     } finally {
-      await releaseEvaluation();
+      try {
+        this.publish(invocationEvents);
+      } finally {
+        await releaseEvaluation();
+      }
     }
   }
 
@@ -4252,8 +4277,11 @@ export class Broker {
         ledgerBudget: charged.budget,
       }],
     );
-    this.holdoutCount = seq;
-    this.publish(events);
+    try {
+      this.holdoutCount = seq;
+    } finally {
+      this.publish(events);
+    }
   }
 
   /**
@@ -4318,8 +4346,11 @@ export class Broker {
         epochSeq,
         ...(this.trustedMeasurementEpoch !== undefined ? { measurementEpoch: this.trustedMeasurementEpoch } : {}),
       }, events);
-      this.journaledEvaluationMemoKeys.add(memoKey);
-      this.publish(journaled);
+      try {
+        this.journaledEvaluationMemoKeys.add(memoKey);
+      } finally {
+        this.publish(journaled);
+      }
       return;
     }
     if (
@@ -4380,12 +4411,15 @@ export class Broker {
       ...(this.trustedMeasurementEpoch !== undefined ? { measurementEpoch: this.trustedMeasurementEpoch } : {}),
       ...(gate !== undefined ? { gate } : {}),
     }, events);
-    this.journaledEvaluationMemoKeys.add(memoKey);
-    // Tables AFTER the durable fact, via the same helpers replay uses — a
-    // crash rebuilds the exact same measurements and persisted gates.
-    this.insertMeasurement(epoch, record.artifactHash, pairKey, aggregate);
-    if (gate !== undefined) this.registerGate(record.artifactHash, epoch, pairKey, gate);
-    this.publish(journaled);
+    try {
+      this.journaledEvaluationMemoKeys.add(memoKey);
+      // Tables AFTER the durable fact, via the same helpers replay uses — a
+      // crash rebuilds the exact same measurements and persisted gates.
+      this.insertMeasurement(epoch, record.artifactHash, pairKey, aggregate);
+      if (gate !== undefined) this.registerGate(record.artifactHash, epoch, pairKey, gate);
+    } finally {
+      this.publish(journaled);
+    }
   }
 
   /**
@@ -4540,11 +4574,14 @@ export class Broker {
         { type: "budget.snapshot", budget: this.budgetStateNow() },
       ],
     );
-    const promoted = { hash, aggregate, deltaVsBaseline, episode: lin.episode };
-    this.incumbentHistory.push(promoted);
-    this.currentIncumbent = promoted;
-    this.lastIncumbent = params;
-    this.publish(events);
+    try {
+      const promoted = { hash, aggregate, deltaVsBaseline, episode: lin.episode };
+      this.incumbentHistory.push(promoted);
+      this.currentIncumbent = promoted;
+      this.lastIncumbent = params;
+    } finally {
+      this.publish(events);
+    }
     return {};
   }
 
@@ -4652,9 +4689,12 @@ export class Broker {
           { t: "episodeComplete", episode: params.episode },
           [{ type: "episode.completed", episode: params.episode }],
         );
-        checkpoint.completed = true;
-        if (this.resumingEpisode?.episode === params.episode) this.resumingEpisode = undefined;
-        this.publish(events);
+        try {
+          checkpoint.completed = true;
+          if (this.resumingEpisode?.episode === params.episode) this.resumingEpisode = undefined;
+        } finally {
+          this.publish(events);
+        }
         return {};
       };
       return await this.serializeMutation(() =>
@@ -4963,10 +5003,13 @@ export class Broker {
     }
     this.state().append(transaction.line);
     this.stagePublication(transaction.events);
-    this.eventJournalFormat = true;
-    this.journalEvents.push(...transaction.events);
-    this.corpusJournalBytes += transaction.chargedBytes;
-    this.publish(transaction.events);
+    try {
+      this.eventJournalFormat = true;
+      this.journalEvents.push(...transaction.events);
+      this.corpusJournalBytes += transaction.chargedBytes;
+    } finally {
+      this.publish(transaction.events);
+    }
     return response;
   }
 
@@ -5080,10 +5123,13 @@ export class Broker {
       { t: "spend", tokens: params.tokens, usd: params.usd },
       budgetEvents,
     );
-    this.spent.tokens += params.tokens;
-    this.spent.usd += params.usd;
-    this.syncRecursiveUsage();
-    this.publish(events);
+    try {
+      this.spent.tokens += params.tokens;
+      this.spent.usd += params.usd;
+      this.syncRecursiveUsage();
+    } finally {
+      this.publish(events);
+    }
     return {};
   }
 
@@ -5197,6 +5243,27 @@ export class Broker {
         else available.set(line, count - 1);
       }
       return 0;
+    }
+    if (missingAt !== null) {
+      // A real missing suffix has no occurrence anywhere in the public log.
+      // Consume the matched journal prefix by multiplicity, then refuse an
+      // out-of-order suffix record rather than appending a duplicate copy.
+      const unmatchedPublic = new Map<string, number>();
+      for (const line of publicLines) unmatchedPublic.set(line, (unmatchedPublic.get(line) ?? 0) + 1);
+      for (let index = 0; index < missingAt; index += 1) {
+        const line = JSON.stringify(this.journalEvents[index]);
+        const count = unmatchedPublic.get(line) ?? 0;
+        if (count === 0) {
+          throw new BrokerError("INTERNAL", "broker event log has a non-prefix gap relative to the authority journal");
+        }
+        if (count === 1) unmatchedPublic.delete(line);
+        else unmatchedPublic.set(line, count - 1);
+      }
+      for (const event of this.journalEvents.slice(missingAt)) {
+        if ((unmatchedPublic.get(JSON.stringify(event)) ?? 0) > 0) {
+          throw new BrokerError("INTERNAL", "broker event log has a non-prefix gap relative to the authority journal");
+        }
+      }
     }
     const missing = missingAt === null ? [] : this.journalEvents.slice(missingAt);
     for (const event of missing) this.config.onEvent(event);
