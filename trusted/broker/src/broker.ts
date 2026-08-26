@@ -828,6 +828,12 @@ type EmittableEvent =
   | { type: "corpus.query"; request: QueryCorpusP }
   | { type: "corpus.response"; response: QueryCorpusR }
   | { type: "budget.snapshot"; budget: BudgetState };
+
+interface PublicationGroup {
+  readonly events: RunEvent[];
+  ready: boolean;
+  nextEvent: number;
+}
 const BROKER_EVENT_TYPES = new Set<RunEvent["type"]>([
   "holdout.accessed",
   "evaluator.queue.entered",
@@ -1346,6 +1352,15 @@ export class Broker {
   private readonly incumbentHistory: IncumbentState[] = [];
   /** Full ordered broker-authored event journal, replayed before optimizer resume. */
   private readonly journalEvents: RunEvent[] = [];
+  /**
+   * Journal-order publication fence. A synchronous onEvent side effect may
+   * re-enter the broker (budget abort pauses the active clock); later facts
+   * stay queued until every earlier transaction is ready and delivered.
+   */
+  private readonly publicationQueue: PublicationGroup[] = [];
+  private readonly publicationGroupByEvents = new WeakMap<readonly RunEvent[], PublicationGroup>();
+  private publicationHead = 0;
+  private publishingEvents = false;
   /** False only for pre-transaction journals; first reconciliation migrates them once. */
   private eventJournalFormat = false;
   private stateLog: RunStateLog | undefined;
@@ -2415,11 +2430,51 @@ export class Broker {
     for (const event of full) {
       if (event.type === "budget.exhausted") this.exhaustedAnnounced.add(event.dimension);
     }
+    this.stagePublication(full);
     return full;
+  }
+  private stagePublication(events: RunEvent[]): void {
+    if (events.length === 0) return;
+    const group: PublicationGroup = { events, ready: false, nextEvent: 0 };
+    this.publicationQueue.push(group);
+    this.publicationGroupByEvents.set(events, group);
   }
 
   private publish(events: readonly RunEvent[]): void {
-    for (const event of events) this.config.onEvent(event);
+    if (events.length === 0) return;
+    const group = this.publicationGroupByEvents.get(events);
+    if (group === undefined) {
+      throw new BrokerError("INTERNAL", "broker event publication group is unknown or was already delivered");
+    }
+    group.ready = true;
+    this.flushPublications();
+  }
+
+  private flushPublications(): void {
+    if (this.publishingEvents) return;
+    this.publishingEvents = true;
+    try {
+      while (this.publicationHead < this.publicationQueue.length) {
+        const group = this.publicationQueue[this.publicationHead];
+        if (group === undefined || !group.ready) break;
+        while (group.nextEvent < group.events.length) {
+          const event = group.events[group.nextEvent];
+          if (event === undefined) {
+            throw new BrokerError("INTERNAL", "broker event publication group is sparse");
+          }
+          this.config.onEvent(event);
+          group.nextEvent += 1;
+        }
+        this.publicationGroupByEvents.delete(group.events);
+        this.publicationHead += 1;
+      }
+      if (this.publicationHead === this.publicationQueue.length) {
+        this.publicationQueue.length = 0;
+        this.publicationHead = 0;
+      }
+    } finally {
+      this.publishingEvents = false;
+    }
   }
 
   private emit(event: EmittableEvent): void {
@@ -2434,7 +2489,9 @@ export class Broker {
     this.eventJournalFormat = true;
     this.journalEvents.push(full);
     if (full.type === "budget.exhausted") this.exhaustedAnnounced.add(full.dimension);
-    this.config.onEvent(full);
+    const events = [full];
+    this.stagePublication(events);
+    this.publish(events);
   }
 
   private directUsageNow(nowMs = this.now()): z.infer<typeof ResourceUsage> {
@@ -4901,6 +4958,7 @@ export class Broker {
       throw new BrokerError("QUOTA_EXCEEDED", "corpus journal byte budget exhausted");
     }
     this.state().append(transaction.line);
+    this.stagePublication(transaction.events);
     this.eventJournalFormat = true;
     this.journalEvents.push(...transaction.events);
     this.corpusJournalBytes += transaction.chargedBytes;
@@ -5036,9 +5094,13 @@ export class Broker {
 
   /**
    * Reconciles the complete broker-authored event journal against the
-   * runner's public log. Only a missing suffix is recoverable: finding a later
-   * public event after an earlier journal event is absent means the public log
-   * has a non-prefix hole and must fail closed.
+   * runner's public log. A missing suffix is recoverable. Broker-exclusive
+   * events always remain an exact prefix. Shared budget events may appear in
+   * a different interleaving only when every exact journal event is already
+   * present: historical supervisors synchronously paused the broker while
+   * delivering an exact-cap snapshot, re-entering between two events in one
+   * authority transaction. The sibling journal proves content and order;
+   * missing or altered records still fail closed.
    */
   replayJournalEvents(alreadyLogged: readonly RunEvent[]): number {
     if (!this.eventJournalFormat) {
@@ -5098,21 +5160,39 @@ export class Broker {
     }
 
     // Shared budget types may also be supervisor-authored. Match every exact
-    // journal record against the full public stream and permit only a missing
-    // suffix; validate the whole shape before appending anything.
+    // journal record against the full public stream and permit a missing
+    // suffix. Historical synchronous budget-abort re-entry could interleave a
+    // later shared snapshot inside one journal transaction; accept that old
+    // shape only when the complete exact journal multiset is present.
     const publicLines = alreadyLogged.map((event) => JSON.stringify(event));
     let cursor = 0;
     let missingAt: number | null = null;
+    let nonPrefixGap = false;
     for (let index = 0; index < this.journalEvents.length; index += 1) {
       const found = publicLines.indexOf(JSON.stringify(this.journalEvents[index]), cursor);
       if (found >= 0) {
         if (missingAt !== null) {
-          throw new BrokerError("INTERNAL", "broker event log has a non-prefix gap relative to the authority journal");
+          nonPrefixGap = true;
+          break;
         }
         cursor = found + 1;
       } else {
         missingAt ??= index;
       }
+    }
+    if (nonPrefixGap) {
+      const available = new Map<string, number>();
+      for (const line of publicLines) available.set(line, (available.get(line) ?? 0) + 1);
+      for (const event of this.journalEvents) {
+        const line = JSON.stringify(event);
+        const count = available.get(line) ?? 0;
+        if (count === 0) {
+          throw new BrokerError("INTERNAL", "broker event log has a non-prefix gap relative to the authority journal");
+        }
+        if (count === 1) available.delete(line);
+        else available.set(line, count - 1);
+      }
+      return 0;
     }
     const missing = missingAt === null ? [] : this.journalEvents.slice(missingAt);
     for (const event of missing) this.config.onEvent(event);
