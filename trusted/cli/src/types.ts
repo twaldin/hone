@@ -66,6 +66,9 @@ export interface RunPauseRequest {
   providerStatus?: number | null | undefined;
 }
 
+/** Trusted worker preflight contract; absence always means the full modern toolbelt smoke. */
+export type MutationWorkerPreflightContract = "legacy-selftest";
+
 /**
  * Everything a backend needs, injected by the supervisor. WP7's real backend
  * composes broker + proxy + optimizer behind this same interface; this
@@ -88,6 +91,8 @@ export interface RunnerBackendContext {
   optimizerSnapshot?: OptimizerSnapshot | undefined;
   /** Exact campaign/default base closure captured once during trusted admission. */
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+  /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
+  mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
   /** Trusted M1 full-run replicate identity, absent on M0. */
   measurementEpoch?: string | undefined;
   /** Trusted per-evaluation wall-time cap, frozen by M2 campaign orchestration. */
