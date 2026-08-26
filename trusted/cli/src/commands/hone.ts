@@ -77,6 +77,7 @@ import {
   capsuleDigest,
   deriveCapsuleId,
   type CampaignSourceMigrationV1,
+  type CampaignRuntimeClosureCaptureV1,
   type BudgetEnvelope,
   type ChildRunAdmission as ChildRunAdmissionRecord,
   type CampaignPauseSignal as CampaignPauseSignalRecord,
@@ -3060,6 +3061,17 @@ function writeFrozenCampaign(root: string, outFlag: string, config: AnyMetaCampa
   return outputPath;
 }
 
+/** The only freeze publication path: a recursive frozen config cannot be written before its closure record is attached. */
+export function writeFrozenRecursiveCampaignWithClosure(
+  root: string,
+  outFlag: string,
+  frozenConfig: RecursiveMetaCampaignConfig,
+  closureRecord: CampaignRuntimeClosureCaptureV1,
+): { config: RecursiveMetaCampaignConfig; outputPath: string } {
+  const config = withRuntimeClosureCapture(frozenConfig, closureRecord);
+  return { config, outputPath: writeFrozenCampaign(root, outFlag, config) };
+}
+
 function phaseEpochs(
   configHash: Sha256Digest,
   phase: "confirmation" | "holdout",
@@ -3771,10 +3783,16 @@ export async function recursiveCommand(
       casDir,
       previousRecordDigest: null,
     });
-    const frozen = withRuntimeClosureCapture(frozenConfig, closureCapture.record);
-    const outerAncestorCapacity = assertM2OuterAncestorCapacity(frozen);
     if (outFlag === undefined) throw new UsageError(RECURSIVE_USAGE);
-    const outputPath = writeFrozenCampaign(io.root, outFlag, frozen);
+    const publication = writeFrozenRecursiveCampaignWithClosure(
+      io.root,
+      outFlag,
+      frozenConfig,
+      closureCapture.record,
+    );
+    const frozen = publication.config;
+    const outputPath = publication.outputPath;
+    const outerAncestorCapacity = assertM2OuterAncestorCapacity(frozen);
     io.out(canonicalJson({
       phase,
       outputPath,

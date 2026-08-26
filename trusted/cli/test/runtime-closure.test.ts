@@ -16,13 +16,18 @@ import {
   metaCampaignConfigHash,
 } from "@hone/meta";
 import type { Sha256Digest } from "@hone/meta";
-import { MetaCampaignConfigV2 } from "@hone/schema";
+import {
+  MetaCampaignConfigV2,
+  canonicalJson,
+} from "@hone/schema";
 import type { MetaCampaignConfigV2 as RecursiveMetaCampaignConfig } from "@hone/schema";
 import { afterEach, describe, expect, test } from "vitest";
-import { casPath, readCas } from "../src/cas.js";
+import { casPath, readCas, writeCas } from "../src/cas.js";
 import {
   migrateCampaignSource,
   recursiveOptimizerBaseSnapshot,
+  recursivePhaseReceipt,
+  writeFrozenRecursiveCampaignWithClosure,
 } from "../src/commands/hone.js";
 import { collectOptimizerSnapshot, snapshotDigest } from "../src/optimizer-digest.js";
 import {
@@ -388,6 +393,112 @@ describe("durable runtime closure", () => {
     }
   });
 
+
+  test("restore recomputes boot and optimizer identities after every upstream binding passes", async () => {
+    const fixture = syntheticClosure();
+    const captured = await captureRuntimeClosure({
+      sourceRoot: fixture.root,
+      sourceCommit: fixture.head,
+      campaignBootDigest: fixture.bootDigest,
+      expectedBootDigest: fixture.bootDigest,
+      optimizerImage: fixture.config.optimizerRuntime.image,
+      optimizerBaseDigest: fixture.optimizerBaseDigest,
+      campaignConfigHash: fixture.configHash,
+      capturedAt: "2026-08-26T22:05:30.000Z",
+      casDir: fixture.casDir,
+      previousRecordDigest: null,
+    });
+    const originalManifest = JSON.parse(
+      readCas(fixture.casDir, captured.record.manifestArtifact).toString("utf8"),
+    ) as Record<string, unknown>;
+    const forgedRecord = (
+      field: "bootDigest" | "optimizerBaseDigest",
+      digest: Sha256Digest,
+    ): typeof captured.record => {
+      const manifest = { ...originalManifest, [field]: digest };
+      const manifestArtifact = writeCas(
+        fixture.casDir,
+        Buffer.from(canonicalJson(manifest), "utf8"),
+      ) as Sha256Digest;
+      const unsigned = { ...captured.record, [field]: digest, manifestArtifact };
+      const { recordDigest: _recordDigest, ...body } = unsigned;
+      return { ...unsigned, recordDigest: campaignRuntimeClosureRecordDigest(body) };
+    };
+
+    const wrongBoot = forgedRecord("bootDigest", `sha256:${"6".repeat(64)}`);
+    expect(() => restoreRuntimeClosure({
+      casDir: fixture.casDir,
+      targetDir: join(scratch("hone-runtime-closure-wrong-boot-"), "restore"),
+      campaignConfigHash: fixture.configHash,
+      record: wrongBoot,
+    })).toThrow("restored boot digest mismatch");
+
+    const wrongOptimizer = forgedRecord("optimizerBaseDigest", `sha256:${"7".repeat(64)}`);
+    expect(() => restoreRuntimeClosure({
+      casDir: fixture.casDir,
+      targetDir: join(scratch("hone-runtime-closure-wrong-optimizer-"), "restore"),
+      campaignConfigHash: fixture.configHash,
+      record: wrongOptimizer,
+    })).toThrow("restored optimizer base digest mismatch");
+  });
+
+  test("freeze publication writes the closure journal into the published config", async () => {
+    const fixture = syntheticClosure();
+    const captured = await captureRuntimeClosure({
+      sourceRoot: fixture.root,
+      sourceCommit: fixture.head,
+      campaignBootDigest: fixture.bootDigest,
+      expectedBootDigest: fixture.bootDigest,
+      optimizerImage: fixture.config.optimizerRuntime.image,
+      optimizerBaseDigest: fixture.optimizerBaseDigest,
+      campaignConfigHash: fixture.configHash,
+      capturedAt: "2026-08-26T22:05:31.000Z",
+      casDir: fixture.casDir,
+      previousRecordDigest: null,
+    });
+    const publication = writeFrozenRecursiveCampaignWithClosure(
+      fixture.root,
+      ".hone-cas/published-frozen.json",
+      fixture.config,
+      captured.record,
+    );
+    const published = MetaCampaignConfigV2.parse(
+      JSON.parse(readFileSync(publication.outputPath, "utf8")),
+    );
+    expect(published.runtimeClosureJournal?.captures).toHaveLength(1);
+    expect(published.runtimeClosureJournal?.campaignConfigHash).toBe(
+      metaCampaignConfigHash(fixture.config),
+    );
+  });
+
+  test("recursive phase receipts expose the exact closure journal and explicit absence", async () => {
+    const fixture = syntheticClosure();
+    const captured = await captureRuntimeClosure({
+      sourceRoot: fixture.root,
+      sourceCommit: fixture.head,
+      campaignBootDigest: fixture.bootDigest,
+      expectedBootDigest: fixture.bootDigest,
+      optimizerImage: fixture.config.optimizerRuntime.image,
+      optimizerBaseDigest: fixture.optimizerBaseDigest,
+      campaignConfigHash: fixture.configHash,
+      capturedAt: "2026-08-26T22:05:32.000Z",
+      casDir: fixture.casDir,
+      previousRecordDigest: null,
+    });
+    const recorded = withRuntimeClosureCapture(fixture.config, captured.record);
+    const receipt = JSON.parse(readFileSync(
+      recursivePhaseReceipt(scratch("hone-runtime-closure-receipt-"), "search", recorded, {}),
+      "utf8",
+    )) as Record<string, unknown>;
+    expect(receipt["runtimeClosureJournal"]).toEqual(recorded.runtimeClosureJournal);
+
+    const absentReceipt = JSON.parse(readFileSync(
+      recursivePhaseReceipt(scratch("hone-runtime-closure-receipt-absent-"), "search", fixture.config, {}),
+      "utf8",
+    )) as Record<string, unknown>;
+    expect(absentReceipt["runtimeClosureJournal"]).toBeNull();
+  });
+
   test("historical backfill reconstructs workspace links from verified store evidence", async () => {
     const fixture = syntheticClosure();
     const archiveDir = scratch("hone-runtime-closure-archive-");
@@ -400,7 +511,7 @@ describe("durable runtime closure", () => {
     execFileSync("git", ["add", "post-freeze.txt"], { cwd: fixture.root });
     execFileSync("git", ["commit", "-qm", "post-freeze engine"], { cwd: fixture.root });
 
-    const captured = await captureRuntimeClosure({
+    const historicalRequest = {
       sourceRoot: fixture.root,
       sourceCommit: fixture.head,
       campaignBootDigest: fixture.bootDigest,
@@ -412,7 +523,12 @@ describe("durable runtime closure", () => {
       previousRecordDigest: null,
       nodeModulesArchive: archive,
       nodeModulesArchiveSha256: archiveDigest,
-    });
+    } as const;
+    await expect(captureRuntimeClosure({
+      ...historicalRequest,
+      nodeModulesArchiveSha256: `sha256:${"8".repeat(64)}`,
+    })).rejects.toThrow("node_modules evidence archive digest mismatch");
+    const captured = await captureRuntimeClosure(historicalRequest);
     expect(captured.record.bootDigest).toBe(fixture.bootDigest);
     const restored = join(scratch("hone-runtime-closure-archive-restore-"), "closure");
     const result = restoreRuntimeClosure({

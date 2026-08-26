@@ -105,6 +105,14 @@ commit, a base-digest mismatch, a changed campaign record, or an unheld
 campaign-record lock. Source migration takes the same record lock, so the two
 append-only journals compose in either order.
 
+`--dry-run` suppresses only the campaign-record append: it still populates the
+named `--cas` with the complete closure (about 4.2 GB for Campaign 11). Always
+name a scratch CAS for a proof run unless populating the live CAS is intended.
+A killed capture or migration deliberately leaves
+`<campaign>.campaign-record.lock` behind. After proving no capture or migration
+process is live, remove that exact stale lock manually before retrying; the
+tool never guesses that a lock is stale.
+
 Restore never runs an installer. It hashes every manifest/tree/chunk object,
 materializes into a fresh temporary directory, checks every file and symlink,
 recomputes both the closure boot digest and the image-bound optimizer digest,
