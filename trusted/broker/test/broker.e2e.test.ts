@@ -726,6 +726,20 @@ describe("sandbox lifecycle", () => {
     }
   });
 
+  it("refuses a missing snapshot archive when its checksum authority sentinel remains", { timeout: 180_000 }, async () => {
+    const { config, archivePath } = await makePublishedScratchSnapshot("scratch-archive-deleted");
+    const snapshotDir = path.dirname(archivePath);
+    const authorities = (await readdir(snapshotDir)).filter((entry) => entry !== "scratch.tar").sort();
+    expect(authorities).toContain("checksum-authority-v1");
+    expect(authorities.filter((entry) => entry.startsWith("scratch.tar.sha256."))).toHaveLength(1);
+    await rm(archivePath);
+
+    const failure = await brokerStartFailureMessage(config);
+    expect(failure).not.toBeNull();
+    expect(failure).toMatch(/scratch snapshot archive is missing while checksum authority sentinel exists/);
+    expect((await readdir(snapshotDir)).sort()).toEqual(authorities);
+  });
+
   it("fails closed when the snapshot checksum changes across a successful extraction", { timeout: 180_000 }, async () => {
     const { config, archivePath } = await makePublishedScratchSnapshot("scratch-checksum-race");
     let mutated = false;

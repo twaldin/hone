@@ -2728,8 +2728,17 @@ export class Broker {
     try {
       await stat(this.scratchSnapshotPath);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      try {
+        await lstat(path.join(this.scratchSnapshotDir, SCRATCH_SNAPSHOT_AUTHORITY_FILE));
+      } catch (authorityError) {
+        if ((authorityError as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw authorityError;
+      }
+      throw new BrokerError(
+        "INTERNAL",
+        "scratch snapshot archive is missing while checksum authority sentinel exists",
+      );
     }
     const expectedArchiveHash = await sha256File(this.scratchSnapshotPath);
     const markerName = `${SCRATCH_SNAPSHOT_DIGEST_PREFIX}${expectedArchiveHash.slice("sha256:".length)}`;
