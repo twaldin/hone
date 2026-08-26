@@ -3613,6 +3613,9 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
         // The G1 statistical record lives in the (separate) stage-A cell directory.
         const authorization = assembleG1Authorization({
           configHash,
+          ...(config.sourceMigrationJournal === undefined
+            ? {}
+            : { sourceMigrationJournal: config.sourceMigrationJournal }),
           record: readG1Record(resolve(io.root, recordDir)),
           controlWinner: await checkedPublicIdentity(controlWinner, gate),
           generation2: await checkedPublicIdentity(generation2, gate),
@@ -3628,6 +3631,9 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       if (generation0 === undefined || generation1 === undefined || generation2 === undefined) throw new UsageError(RECURSIVE_USAGE);
       const authorization = assembleG2Authorization({
         configHash,
+        ...(config.sourceMigrationJournal === undefined
+          ? {}
+          : { sourceMigrationJournal: config.sourceMigrationJournal }),
         record: readG2Record(campaignDir),
         generation0: await checkedPublicIdentity(generation0, gate),
         generation1: await checkedPublicIdentity(generation1, gate),
