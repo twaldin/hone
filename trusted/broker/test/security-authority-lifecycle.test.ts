@@ -2035,6 +2035,37 @@ describe("trusted event ordering and candidacy", () => {
     ]);
   });
 
+  it("does not let a later immediate event overtake an unready journal transaction", async () => {
+    const a = await boot();
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    a.ctl.evalInspect = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+
+    const evaluating = a.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    await entered.promise;
+    a.broker.pauseActiveTime();
+    expect(a.events.some((event) => event.type === "evaluator.isolation")).toBe(false);
+    expect(a.events.some((event) => event.type === "budget.snapshot")).toBe(false);
+
+    release.resolve();
+    await evaluating;
+    const isolationAt = a.events.findIndex((event) => event.type === "evaluator.isolation");
+    expect(a.events.slice(isolationAt, isolationAt + 4).map((event) => event.type)).toEqual([
+      "evaluator.isolation",
+      "budget.snapshot",
+      "budget.snapshot",
+      "eval.completed",
+    ]);
+  });
+
   it("accepts only a complete exact shared-budget reorder from a historical journal", async () => {
     const shared = {
       runDir: path.join(tmpBase, "runs", "recover-shared-reentry"),
@@ -2046,10 +2077,9 @@ describe("trusted event ordering and candidacy", () => {
       holdoutBudget: 1,
     };
     let clockPaused = false;
-    let now = 0;
     const a = await boot({
       ...shared,
-      now: () => now++,
+      now: () => 0,
       onEvent: (event, broker) => {
         if (
           !clockPaused
