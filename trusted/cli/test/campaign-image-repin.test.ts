@@ -49,6 +49,10 @@ const preservedPath = fileURLToPath(new URL(
 const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const TO_IMAGE = `hone-equivalent@sha256:${"a".repeat(64)}`;
 const NEXT_IMAGE = `hone-equivalent@sha256:${"b".repeat(64)}`;
+type ExactImageEvidence = Exclude<
+  CampaignImageEquivalenceEvidenceV1,
+  { evidenceMode: "distribution" }
+>;
 
 function preservedConfig(): RecursiveConfig {
   return MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedPath, "utf8")));
@@ -58,7 +62,7 @@ function evidence(
   capsuleId: string,
   fromImage: string,
   toImage: string,
-): CampaignImageEquivalenceEvidenceV1 {
+): ExactImageEvidence {
   return {
     version: 1,
     generatedAt: "2026-08-27T01:00:00.000Z",

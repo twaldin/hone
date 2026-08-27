@@ -76,10 +76,21 @@ only the new source; the original campaign hash and durable state directory
 remain stable.
 
 If a digest-pinned capsule image is permanently unavailable, do not substitute
-an image in the frozen JSON by hand. First produce a version-1 image-equivalence
-record with zero model calls: the original baseline score and one settled
-candidate score must each replay exactly for at least three repetitions on the
-replacement image, and the capsule's determinism/tripwire checks must pass.
+an image in the frozen JSON by hand. Exact replay is the default: with zero
+model calls, the original baseline score and one settled-candidate score must
+each replay exactly for at least three repetitions, and the capsule's
+determinism/tripwire checks must pass.
+
+Only an evaluator proven not to consume the broker's `HONE_SEED` may use the
+distribution arm. Before measurement, persist a distribution pre-registration
+that fixes both artifacts and historical scores, at least 12 repetitions per
+artifact, and the schema-fixed $k=0.5$. It must also bind the evaluator source
+hash and exact entropy/timing line citations. The final evidence records every
+raw score and recomputable min, max, mean, relative self-spread, and relative
+mean offset. Each historical score must lie in its rebuilt `[min,max]`, and each
+relative mean offset must be strictly less than `0.5 * selfSpread`. The command
+refuses this arm if the source contains `HONE_SEED`, if a citation or source
+hash drifts, or if measurement did not start after the hashed pre-registration.
 Then run:
 
 ```sh
@@ -92,8 +103,8 @@ hone campaign repin-image \
   --reason "<operator reason>"
 ```
 
-The command validates the evidence structure and exact score agreement, hashes
-the evidence bytes, and appends a digest-chained image re-pin record under the
+The command validates the selected evidence arm, hashes the evidence bytes,
+and appends a digest-chained image re-pin record under the
 same campaign-record lock as source migration and closure capture. It updates
 every copy of that capsule image in the train/holdout and development-panel
 surfaces while preserving the original campaign hash. The installed capsule
