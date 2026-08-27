@@ -257,6 +257,25 @@ describe("durable runtime closure", () => {
     })).rejects.toThrow("optimizer base digest mismatch");
   });
 
+  test("capture refuses a real disk-byte mutation between verification and CAS storage", async () => {
+    const fixture = syntheticClosure();
+    await expect(captureRuntimeClosure({
+      sourceRoot: fixture.root,
+      sourceCommit: fixture.head,
+      campaignBootDigest: fixture.bootDigest,
+      expectedBootDigest: fixture.bootDigest,
+      optimizerImage: fixture.config.optimizerRuntime.image,
+      optimizerBaseDigest: fixture.optimizerBaseDigest,
+      campaignConfigHash: fixture.configHash,
+      capturedAt: "2026-08-26T22:02:03.000Z",
+      casDir: fixture.casDir,
+      previousRecordDigest: null,
+      beforeFileCapture: () => {
+        write(fixture.root, "package.json", "{\"name\":\"mutated-after-verification\"}\n");
+      },
+    })).rejects.toThrow("tracked source bytes drifted during closure capture: package.json");
+  });
+
   test("restore kills CAS-byte and manifest-binding mutations before publishing a target", async () => {
     const fixture = syntheticClosure();
     const captured = await captureRuntimeClosure({

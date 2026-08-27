@@ -124,6 +124,8 @@ export interface CaptureRuntimeClosureRequest {
   readonly previousRecordDigest: Sha256Digest | null;
   readonly nodeModulesArchive?: string;
   readonly nodeModulesArchiveSha256?: Sha256Digest;
+  /** Test-only mutation seam after the first disk read and before CAS capture. */
+  readonly beforeFileCapture?: () => void;
 }
 
 export interface CaptureRuntimeClosureResult {
@@ -253,7 +255,7 @@ function gitBlobDigest(bytes: Buffer, oid: string): string {
 function readVerifiedSourceEntry(
   root: string,
   entry: GitTreeEntry,
-): { kind: "file"; abs: string; gitOid: string; mode: number } | { kind: "symlink"; target: string } {
+): { kind: "file"; abs: string; gitOid: string; diskSha256: Sha256Digest; mode: number } | { kind: "symlink"; target: string } {
   const abs = closurePath(root, entry.path);
   const stat = lstatSync(abs);
   if (entry.mode === "120000") {
@@ -268,8 +270,13 @@ function readVerifiedSourceEntry(
   const executable = (stat.mode & 0o111) === 0 ? "100644" : "100755";
   if (executable !== entry.mode) throw new UsageError(`tracked source mode drifted during closure capture: ${entry.path}`);
   const bytes = readFileSync(abs);
-  if (gitBlobDigest(bytes, entry.oid) !== entry.oid) throw new UsageError(`tracked source bytes drifted during closure capture: ${entry.path}`);
-  return { kind: "file", abs, gitOid: entry.oid, mode: stat.mode & 0o777 };
+  return {
+    kind: "file",
+    abs,
+    gitOid: entry.oid,
+    diskSha256: sha256(bytes),
+    mode: stat.mode & 0o777,
+  };
 }
 
 async function sha256File(path: string): Promise<Sha256Digest> {
@@ -483,6 +490,7 @@ interface CollectedNode {
   readonly kind: "file" | "symlink";
   readonly abs?: string;
   readonly gitOid?: string;
+  readonly diskSha256?: Sha256Digest;
   readonly mode?: number;
   readonly target?: string;
 }
@@ -564,7 +572,7 @@ function captureFile(casDir: string, node: CollectedNode): { entry: RuntimeClosu
   }
   if (node.abs === undefined || node.mode === undefined) throw new UsageError(`runtime closure file ${node.path} has no source or mode`);
   const bytes = readFileSync(node.abs);
-  if (node.gitOid !== undefined && gitBlobDigest(bytes, node.gitOid) !== node.gitOid) {
+  if (node.diskSha256 !== undefined && sha256(bytes) !== node.diskSha256) {
     throw new UsageError(`tracked source bytes drifted during closure capture: ${node.path}`);
   }
   const chunks: Array<{ hash: string; size: number }> = [];
@@ -747,6 +755,7 @@ export async function captureRuntimeClosure(
           kind: "file",
           abs: captured.abs,
           gitOid: captured.gitOid,
+          diskSha256: captured.diskSha256,
           mode: captured.mode,
         }
         : { path: source.path, kind: "symlink", target: captured.target });
@@ -756,6 +765,7 @@ export async function captureRuntimeClosure(
       collectWorkspaceDependencyLinks(captureRoot, workspace, nodes);
     }
 
+    request.beforeFileCapture?.();
     const entries: RuntimeClosureEntry[] = [];
     let marginalBytes = 0;
     let marginalContentBytes = 0;
