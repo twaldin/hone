@@ -788,7 +788,12 @@ export async function calibrationCommand(
 
     const capsuleLocations = new Map<string, CapsuleLocation>(prepared.map(({ dir, admitted }) => [
       admitted.digest,
-      { dir, digest: admitted.digest, terminalHoldoutAssetGroupIds: [] },
+      {
+        dir,
+        digest: admitted.digest,
+        executionImage: admitted.manifest.image,
+        terminalHoldoutAssetGroupIds: [],
+      },
     ]));
     const modelRegistry = new CampaignModelRegistry(stateDir, plan.configHash, io.root);
     const supervisor = dependencies.createSupervisor?.(

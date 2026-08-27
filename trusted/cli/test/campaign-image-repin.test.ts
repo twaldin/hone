@@ -18,6 +18,7 @@ import {
 } from "@hone/schema";
 import { describe, expect, test } from "vitest";
 import {
+  campaignAdmittedCapsuleImage,
   assertCampaignImageRepinOnly,
   repinCampaignImage,
   migrateCampaignSource,
@@ -141,6 +142,7 @@ describe("campaign repin-image", () => {
     expect(campaignRecordExtends(before, after)).toBe(true);
     expect(registered).toEqual(after);
     expect(after.train.find((entry) => entry.capsuleId === capsule.capsuleId)?.image).toBe(TO_IMAGE);
+    expect(campaignAdmittedCapsuleImage(after, capsule.capsuleId, TO_IMAGE)).toBe(capsule.image);
     expect(after.developmentPanel.members.find((member) => member.capsule.capsuleId === capsule.capsuleId)?.capsule.image)
       .toBe(TO_IMAGE);
     expect(after.imageRepinJournal?.repins[0]).toMatchObject({

@@ -10,6 +10,7 @@ import { z } from "zod";
 import {
   ApplyMode,
   BudgetEnvelope,
+  IMAGE_DIGEST_REF,
   M2ProxyRole,
   ModelRouting,
   PromotionRule,
@@ -100,6 +101,8 @@ const CampaignSessionSealV1 = z.object({
   proxyRole: M2ProxyRole,
   /** Canonical digest of the exact frozen corpus wire config, when the run carries one. */
   corpusDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+  /** Effective digest-pinned capsule image, including a sanctioned campaign re-pin. */
+  capsuleImage: z.string().regex(IMAGE_DIGEST_REF).optional(),
 }).strict();
 type CampaignSessionSealV1 = z.infer<typeof CampaignSessionSealV1>;
 
@@ -501,6 +504,8 @@ export interface TrustedRunOptions {
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
   /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
   mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
+  /** Authenticated campaign-only execution image; the admitted capsule identity remains unchanged. */
+  capsuleImageOverride?: string | undefined;
   /** Frozen model capability for this trusted session. Omit only on legacy M0/M1 runs. */
   proxyRole?: M2ProxyRole | undefined;
   /** Shared recursive-campaign provider pause authority. */
@@ -571,7 +576,22 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
   // sole bypass is an explicit trusted synthetic-meta authoring/recheck path.
   const admissionReview = trusted.admissionReview ?? "required";
   const admitted = admitCapsule(capsuleDir, { review: admissionReview });
-  const manifest = admitted.manifest;
+  const admittedManifest = admitted.manifest;
+  if (
+    trusted.capsuleImageOverride !== undefined
+    && !IMAGE_DIGEST_REF.test(trusted.capsuleImageOverride)
+  ) {
+    throw new UsageError("trusted capsule image override must be an immutable digest reference");
+  }
+  const manifest = trusted.capsuleImageOverride === undefined
+    ? admittedManifest
+    : { ...admittedManifest, image: trusted.capsuleImageOverride };
+  if (
+    trusted.capsuleImageOverride !== undefined
+    && trusted.campaignConfigHash === undefined
+  ) {
+    throw new UsageError("trusted capsule image override requires a campaign-sealed run");
+  }
   if (
     admitted.provisional
     && (
@@ -636,6 +656,10 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         || campaignSeal.authorityPath !== trusted.campaignPauseAuthority.path
       ) {
         throw new UsageError("campaign session role/config/authority seal changed since the run started");
+      }
+      const sealedCapsuleImage = campaignSeal.capsuleImage ?? admittedManifest.image;
+      if (sealedCapsuleImage !== manifest.image) {
+        throw new UsageError("campaign capsule execution image changed since the run started");
       }
       if (trusted.corpus !== undefined && trusted.corpus.provenance.campaignConfigHash !== sealedCampaignHash) {
         throw new UsageError("frozen corpus provenance does not carry the run's sealed campaign config hash");
@@ -864,13 +888,15 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         campaignConfigHash: trusted.campaignConfigHash,
         authorityPath: trusted.campaignPauseAuthority?.path,
         proxyRole: trusted.proxyRole,
+        capsuleImage: manifest.image,
         ...(trusted.corpus !== undefined ? { corpusDigest: brokerCorpusConfigDigest(trusted.corpus) } : {}),
       }))}\n`);
     }
-    // Snapshot the ADMITTED manifest: resume proves capsule identity against it.
-    writeCapsuleSnapshot(runDir, manifest);
+    // Snapshot the ADMITTED manifest. The separate campaign session seal binds
+    // a sanctioned execution-image override without changing capsule identity.
+    writeCapsuleSnapshot(runDir, admittedManifest);
     try {
-      freezeCapsuleAssets(runDir, capsuleDir, manifest);
+      freezeCapsuleAssets(runDir, capsuleDir, admittedManifest);
     } catch (error) {
       rmSync(runDir, { recursive: true, force: true });
       throw error;

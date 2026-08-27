@@ -86,6 +86,7 @@ const request: MetaChildRunRequest = {
   resume: false,
 };
 const DIVERGENCE = "docker client environment diverges between the run env and this process (DOCKER_HOST, DOCKER_CONFIG) — refusing before any Docker contact";
+const REPINNED_IMAGE = `hone-repinned@sha256:${"f".repeat(64)}`;
 const roots: string[] = [];
 
 afterEach(() => {
@@ -109,6 +110,7 @@ class RefusingChildSupervisor extends CliChildSupervisor {
       new Map([[capsule.capsuleDigest, {
         dir: "/fixture/preauthority-capsule",
         digest: capsule.capsuleDigest,
+        executionImage: REPINNED_IMAGE,
         terminalHoldoutAssetGroupIds: [],
       }]]),
       { files: new Map() },
@@ -207,6 +209,10 @@ describe("pre-authority child refusal breadcrumbs", () => {
     expect(supervisor.trustedRuns.map((trusted) => trusted.adjudicateInterruptedChild)).toEqual([
       undefined,
       true,
+    ]);
+    expect(supervisor.trustedRuns.map((trusted) => trusted.capsuleImageOverride)).toEqual([
+      REPINNED_IMAGE,
+      REPINNED_IMAGE,
     ]);
     expect(JSON.parse(
       readFileSync(join(campaignDir, `child-config-${childRunId}.json`), "utf8"),

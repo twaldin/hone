@@ -545,6 +545,7 @@ export function campaignChildAdmissionAllowed(authority: CampaignPauseAuthority)
 export interface CapsuleLocation {
   dir: string;
   digest: string;
+  executionImage: string;
   terminalHoldoutAssetGroupIds: readonly string[];
 }
 
@@ -1048,6 +1049,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         [location.dir, "--headless", "--config", configPath, "--optimizer-artifact", request.sourceArtifact],
         {
           runId: executionRunId,
+          capsuleImageOverride: location.executionImage,
           measurementEpoch: request.identity.measurementEpoch,
           ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
             ? {}
@@ -1097,6 +1099,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
           [location.dir, "--headless", "--resume", "--optimizer-artifact", request.sourceArtifact],
           {
             runId: executionRunId,
+            capsuleImageOverride: location.executionImage,
             measurementEpoch: request.identity.measurementEpoch,
             ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
               ? {}
@@ -2152,16 +2155,32 @@ function freezeCorpusEntries(root: string, config: AnyMetaCampaignConfig): Froze
   };
 }
 
-function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
+export function campaignAdmittedCapsuleImage(
+  config: AnyMetaCampaignConfig,
+  capsuleId: string,
+  registeredImage: string,
+): string {
+  return config.imageRepinJournal?.repins
+    .find((repin) => repin.capsuleId === capsuleId)?.fromImage
+    ?? registeredImage;
+}
+
+export function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
+  metaCampaignConfigHash(config);
   const discovered = discoverCapsules(root, config.version === 2 ? config.corpusCohort : undefined);
   const found = new Map<string, CapsuleLocation>();
   for (const registered of [...config.train, ...config.holdout]) {
     const capsule = discovered.get(registered.capsuleId);
     if (capsule === undefined) throw new UsageError(`registered campaign capsule ${registered.capsuleId} is not installed`);
     const admitted = capsule.admitted;
+    const admittedImage = campaignAdmittedCapsuleImage(
+      config,
+      registered.capsuleId,
+      registered.image,
+    );
     if (
       admitted.digest !== registered.capsuleDigest
-      || admitted.manifest.image !== registered.image
+      || admitted.manifest.image !== admittedImage
       || capsuleOracleDigest(admitted) !== registered.oracleDigest
       || capsuleScalarizerDigest(admitted) !== registered.scalarizerDigest
     ) {
@@ -2186,6 +2205,7 @@ function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig):
     found.set(registered.capsuleDigest, {
       dir: capsule.dir,
       digest: admitted.digest,
+      executionImage: registered.image,
       terminalHoldoutAssetGroupIds,
     });
   }
