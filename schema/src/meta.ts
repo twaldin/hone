@@ -63,6 +63,38 @@ export const CampaignSourceMigrationJournalV1 = z.object({
 export type CampaignSourceMigrationJournalV1 = z.infer<typeof CampaignSourceMigrationJournalV1>;
 
 /**
+ * Durable binding from one frozen campaign to a content-addressed copy of
+ * the exact source and installed dependency bytes needed to reconstruct its
+ * optimizer base. The referenced manifest and tree live in the campaign CAS;
+ * the trusted runtime verifies those artifacts before restore.
+ */
+export const CampaignRuntimeClosureCaptureV1 = z.object({
+  version: z.literal(1),
+  at: z.string().datetime({ offset: true }),
+  sourceCommit: GIT_COMMIT,
+  bootDigest: SHA256,
+  /** Campaign engine boot identity in force when this historical base was captured. */
+  campaignBootDigest: SHA256,
+  optimizerImage: z.string().min(1).max(4_096),
+  optimizerBaseDigest: SHA256,
+  closureDigest: SHA256,
+  manifestArtifact: SHA256,
+  fileCount: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  previousRecordDigest: SHA256.nullable(),
+  recordDigest: SHA256,
+}).strict();
+export type CampaignRuntimeClosureCaptureV1 = z.infer<typeof CampaignRuntimeClosureCaptureV1>;
+
+export const CampaignRuntimeClosureJournalV1 = z.object({
+  version: z.literal(1),
+  /** Original frozen campaign identity, shared with the source-migration journal. */
+  campaignConfigHash: SHA256,
+  captures: z.array(CampaignRuntimeClosureCaptureV1).min(1),
+}).strict();
+export type CampaignRuntimeClosureJournalV1 = z.infer<typeof CampaignRuntimeClosureJournalV1>;
+
+/**
  * One registered corpus entry. Everything the trusted meta-runner needs to
  * normalize a child run is frozen here BEFORE any outer search:
  * Y_ir = (q_i(A_ir) - qBase) / scale, with scale = qReference - qBase > 0.
@@ -240,6 +272,12 @@ const MetaCampaignConfigShape = z.object({
    * original frozen config and authenticated against that config's hash.
    */
   sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+  /**
+   * Append-only runtime-closure captures. This provenance is intentionally
+   * orthogonal to source migration: both journals authenticate against the
+   * same original frozen campaign identity and may be appended independently.
+   */
+  runtimeClosureJournal: CampaignRuntimeClosureJournalV1.optional(),
   invariants: MetaCampaignInvariants,
 });
 

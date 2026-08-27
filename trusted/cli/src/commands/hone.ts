@@ -36,7 +36,7 @@ import {
   MetaCampaignRunner,
   MetaEnvelopeFileRecordPortV1,
   MetaResourceEnvelopeLedger,
-  campaignSourceMigrationExtends,
+  campaignRecordExtends,
   campaignSourceMigrationRecordDigest,
   metaCampaignConfigHash,
   mapBounded,
@@ -77,6 +77,7 @@ import {
   capsuleDigest,
   deriveCapsuleId,
   type CampaignSourceMigrationV1,
+  type CampaignRuntimeClosureCaptureV1,
   type BudgetEnvelope,
   type ChildRunAdmission as ChildRunAdmissionRecord,
   type CampaignPauseSignal as CampaignPauseSignalRecord,
@@ -156,6 +157,16 @@ import {
 } from "../optimizer-conformance.js";
 import { casRoot, loadRunConfigFile, runsRoot } from "../runs.js";
 import { verifiedBootRuntimeDigest } from "../runtime-digest.js";
+import {
+  acquireCampaignRecordLock,
+  appendRuntimeClosureCaptureRecord,
+  captureRuntimeClosure,
+  parseSha256Sidecar,
+  restoreRuntimeClosure,
+  runtimeClosureCaptureRecord,
+  withRuntimeClosureCapture,
+} from "../runtime-closure.js";
+import type { CaptureRuntimeClosureResult } from "../runtime-closure.js";
 import { RUNTIME_PIN_FILE, acquireRunLock, runCommand, type TrustedRunOptions } from "../supervisor.js";
 import {
   appendPreAuthorityRefusalBreadcrumb,
@@ -169,6 +180,15 @@ const HONE_USAGE = "usage: hone hone --campaign <path> --headless [--phase freez
 const CAMPAIGN_MIGRATE_SOURCE_USAGE =
   "usage: hone campaign migrate-source --campaign <frozen.json> "
   + "--from <oldSourceCommit> --to <newSourceCommit> --reason <text>";
+const CAMPAIGN_CAPTURE_CLOSURE_USAGE =
+  "usage: hone campaign capture-closure --campaign <frozen.json> --source <git-worktree> "
+  + "[--source-commit <historicalCommit>] [--cas <dir>] "
+  + "[--node-modules-archive <tar.zst> --archive-sha256 <sidecar>] "
+  + "[--optimizer-base-digest sha256:<64hex>] [--at <iso-time>] [--restore <target> "
+  + "--verify-image <immutable-image> --verify-digest sha256:<64hex>] [--dry-run]";
+const CAMPAIGN_RESTORE_CLOSURE_USAGE =
+  "usage: hone campaign restore-closure --campaign <frozen.json> --target <empty-path> "
+  + "[--cas <dir>] [--manifest sha256:<64hex>]";
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const PROXY_TRACE_FILE = "proxy-trace.ndjson";
 const CampaignPauseAuthorityFileV1 = z.object({
@@ -2398,7 +2418,7 @@ function registeredCampaignConfigNeedsReconciliation(
   if (!existsSync(registeredConfigPath)) return false;
   const registered = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(registeredConfigPath, "utf8")));
   if (canonicalJson(registered) === canonicalJson(config)) return false;
-  if (!campaignSourceMigrationExtends(registered, config)) {
+  if (!campaignRecordExtends(registered, config)) {
     throw new UsageError("recursive cell state belongs to a different configuration");
   }
   return true;
@@ -2454,6 +2474,8 @@ export async function migrateCampaignSource(
   if (request.from === request.to) throw new UsageError("source migration requires different --from and --to commits");
   if (request.reason.trim().length === 0) throw new UsageError("--reason must contain non-whitespace text");
 
+  const campaignRecordLock = acquireCampaignRecordLock(request.campaignPath);
+  try {
   const originalBytes = readFileSync(request.campaignPath);
   const config = MetaCampaignConfigV2.parse(JSON.parse(originalBytes.toString("utf8")));
   const configHash = metaCampaignConfigHash(config);
@@ -2551,52 +2573,228 @@ export async function migrateCampaignSource(
   } finally {
     for (const release of releases.reverse()) await release();
   }
+  } finally {
+    campaignRecordLock.release();
+  }
 }
 
-/** Explicit operator front door for a frozen campaign source migration. */
+/** Explicit operator front door for frozen-campaign source and closure records. */
 export async function campaignCommand(args: string[], io: CmdIo): Promise<number> {
-  const { positionals, flags } = parseFlags(args, {
-    booleans: [],
-    strings: ["campaign", "from", "to", "reason"],
-  });
-  if (positionals.length !== 1 || positionals[0] !== "migrate-source") {
-    throw new UsageError(CAMPAIGN_MIGRATE_SOURCE_USAGE);
-  }
-  const campaignFlag = strFlag(flags, "campaign");
-  const from = strFlag(flags, "from");
-  const to = strFlag(flags, "to");
-  const reason = strFlag(flags, "reason");
-  if (campaignFlag === undefined || from === undefined || to === undefined || reason === undefined) {
-    throw new UsageError(CAMPAIGN_MIGRATE_SOURCE_USAGE);
-  }
-  if (!/^[0-9a-f]{40}$/.test(from) || !/^[0-9a-f]{40}$/.test(to)) {
-    throw new UsageError("--from and --to must be full lowercase git commit ids");
+  const [subcommand, ...rest] = args;
+  if (subcommand === "migrate-source") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: [],
+      strings: ["campaign", "from", "to", "reason"],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const from = strFlag(flags, "from");
+    const to = strFlag(flags, "to");
+    const reason = strFlag(flags, "reason");
+    if (
+      positionals.length !== 0
+      || campaignFlag === undefined
+      || from === undefined
+      || to === undefined
+      || reason === undefined
+    ) {
+      throw new UsageError(CAMPAIGN_MIGRATE_SOURCE_USAGE);
+    }
+    if (!/^[0-9a-f]{40}$/.test(from) || !/^[0-9a-f]{40}$/.test(to)) {
+      throw new UsageError("--from and --to must be full lowercase git commit ids");
+    }
+
+    assertCleanSourceTree(io.root);
+    const resolvedCommit = sourceCommit(io.root);
+    if (resolvedCommit !== to) {
+      throw new UsageError(`--to ${to} does not resolve to the clean working tree HEAD ${resolvedCommit}`);
+    }
+    const campaignPath = resolve(io.root, campaignFlag);
+    assertCampaignPathUntracked(io.root, campaignPath);
+    const bootDigest = verifiedBootRuntimeDigest() as Sha256Digest;
+    const operator = io.env["USER"] ?? io.env["LOGNAME"];
+    const result = await migrateCampaignSource({
+      root: io.root,
+      campaignPath,
+      from,
+      to,
+      reason,
+      at: new Date().toISOString(),
+      bootDigest,
+      ...(operator === undefined || operator.trim().length === 0 ? {} : { operator }),
+    });
+    io.out(canonicalJson({
+      command: "campaign.migrate-source",
+      ...result,
+    }));
+    return 0;
   }
 
-  assertCleanSourceTree(io.root);
-  const resolvedCommit = sourceCommit(io.root);
-  if (resolvedCommit !== to) {
-    throw new UsageError(`--to ${to} does not resolve to the clean working tree HEAD ${resolvedCommit}`);
+  if (subcommand === "capture-closure") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: ["dry-run"],
+      strings: [
+        "campaign",
+        "source",
+        "source-commit",
+        "cas",
+        "node-modules-archive",
+        "archive-sha256",
+        "optimizer-base-digest",
+        "at",
+        "restore",
+        "verify-image",
+        "verify-digest",
+      ],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const sourceFlag = strFlag(flags, "source");
+    const casFlag = strFlag(flags, "cas");
+    const archiveFlag = strFlag(flags, "node-modules-archive");
+    const sidecarFlag = strFlag(flags, "archive-sha256");
+    const restoreFlag = strFlag(flags, "restore");
+    const verifyImage = strFlag(flags, "verify-image");
+    const verifyDigest = digestFlag(strFlag(flags, "verify-digest"), "--verify-digest");
+    const dryRun = boolFlag(flags, "dry-run");
+    if (
+      positionals.length !== 0
+      || campaignFlag === undefined
+      || sourceFlag === undefined
+      || (archiveFlag === undefined) !== (sidecarFlag === undefined)
+      || (dryRun && casFlag === undefined)
+      || ((verifyImage === undefined) !== (verifyDigest === undefined))
+      || (verifyImage !== undefined && restoreFlag === undefined)
+    ) {
+      throw new UsageError(CAMPAIGN_CAPTURE_CLOSURE_USAGE);
+    }
+
+    const campaignPath = resolve(io.root, campaignFlag);
+    const originalBytes = readFileSync(campaignPath);
+    const config = MetaCampaignConfigV2.parse(JSON.parse(originalBytes.toString("utf8")));
+    const configHash = metaCampaignConfigHash(config);
+    if (!dryRun) assertCampaignPathUntracked(io.root, campaignPath);
+    const sourceCommitFlag = strFlag(flags, "source-commit");
+    if (sourceCommitFlag !== undefined && !/^[0-9a-f]{40}$/.test(sourceCommitFlag)) {
+      throw new UsageError("--source-commit must be a full lowercase git commit id");
+    }
+    const captureSourceCommit = sourceCommitFlag ?? config.trustedRuntime.sourceCommit;
+    const campaignSourceLineage = new Set<string>([config.trustedRuntime.sourceCommit]);
+    for (const migration of config.sourceMigrationJournal?.migrations ?? []) {
+      campaignSourceLineage.add(migration.from);
+      campaignSourceLineage.add(migration.to);
+    }
+    if (!campaignSourceLineage.has(captureSourceCommit)) {
+      throw new UsageError("--source-commit is not present in the campaign source-migration lineage");
+    }
+    const priorCapture = config.runtimeClosureJournal?.captures.at(-1);
+    const explicitBaseDigest = digestFlag(
+      strFlag(flags, "optimizer-base-digest"),
+      "--optimizer-base-digest",
+    );
+    const optimizerBaseDigest = explicitBaseDigest
+      ?? (priorCapture?.optimizerBaseDigest as Sha256Digest | undefined)
+      ?? config.seedOptimizer.bundleDigest as Sha256Digest;
+    const casDir = casFlag === undefined ? casRoot(io.root) : resolve(io.root, casFlag);
+    const sourceRoot = resolve(io.root, sourceFlag);
+    const archivePath = archiveFlag === undefined ? undefined : resolve(io.root, archiveFlag);
+    const sidecarPath = sidecarFlag === undefined ? undefined : resolve(io.root, sidecarFlag);
+    const capture = await captureRuntimeClosure({
+      sourceRoot,
+      sourceCommit: captureSourceCommit,
+      campaignBootDigest: config.trustedRuntime.digest as Sha256Digest,
+      ...(captureSourceCommit === config.trustedRuntime.sourceCommit
+        ? { expectedBootDigest: config.trustedRuntime.digest as Sha256Digest }
+        : {}),
+      optimizerImage: config.optimizerRuntime.image,
+      optimizerBaseDigest,
+      campaignConfigHash: configHash,
+      capturedAt: strFlag(flags, "at") ?? new Date().toISOString(),
+      casDir,
+      previousRecordDigest: priorCapture?.recordDigest as Sha256Digest | undefined ?? null,
+      ...(archivePath === undefined || sidecarPath === undefined
+        ? {}
+        : {
+          nodeModulesArchive: archivePath,
+          nodeModulesArchiveSha256: parseSha256Sidecar(sidecarPath, archivePath),
+        }),
+    });
+    withRuntimeClosureCapture(config, capture.record);
+
+    let verifiedOptimizerIdentity: { image: string; digest: string } | undefined;
+    const restored = restoreFlag === undefined
+      ? undefined
+      : restoreRuntimeClosure({
+        casDir,
+        targetDir: resolve(io.root, restoreFlag),
+        campaignConfigHash: configHash,
+        record: capture.record,
+      });
+    if (restored !== undefined && verifyImage !== undefined && verifyDigest !== undefined) {
+      const digest = snapshotDigest(
+        verifyImage,
+        collectOptimizerSnapshot(restored.targetDir),
+      );
+      if (digest !== verifyDigest) {
+        throw new UsageError(`restored optimizer identity mismatch: ${digest} != sealed ${verifyDigest}`);
+      }
+      verifiedOptimizerIdentity = { image: verifyImage, digest };
+    }
+    if (!dryRun) {
+      const acquired = acquireCampaignRecordLock(campaignPath);
+      try {
+        appendRuntimeClosureCaptureRecord(campaignPath, capture.record, acquired.lock, originalBytes);
+      } finally {
+        acquired.release();
+      }
+    }
+    io.out(canonicalJson({
+      command: "campaign.capture-closure",
+      campaignPath,
+      casDir,
+      configHash,
+      dryRun,
+      recordAppended: !dryRun,
+      marginalBytes: capture.marginalBytes,
+      reusedBytes: capture.reusedBytes,
+      record: capture.record,
+      ...(restored === undefined ? {} : { restored }),
+      ...(verifiedOptimizerIdentity === undefined ? {} : { verifiedOptimizerIdentity }),
+    }));
+    return 0;
   }
-  const campaignPath = resolve(io.root, campaignFlag);
-  assertCampaignPathUntracked(io.root, campaignPath);
-  const bootDigest = verifiedBootRuntimeDigest() as Sha256Digest;
-  const operator = io.env["USER"] ?? io.env["LOGNAME"];
-  const result = await migrateCampaignSource({
-    root: io.root,
-    campaignPath,
-    from,
-    to,
-    reason,
-    at: new Date().toISOString(),
-    bootDigest,
-    ...(operator === undefined || operator.trim().length === 0 ? {} : { operator }),
-  });
-  io.out(canonicalJson({
-    command: "campaign.migrate-source",
-    ...result,
-  }));
-  return 0;
+
+  if (subcommand === "restore-closure") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: [],
+      strings: ["campaign", "target", "cas", "manifest"],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const targetFlag = strFlag(flags, "target");
+    if (positionals.length !== 0 || campaignFlag === undefined || targetFlag === undefined) {
+      throw new UsageError(CAMPAIGN_RESTORE_CLOSURE_USAGE);
+    }
+    const campaignPath = resolve(io.root, campaignFlag);
+    const config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+    const configHash = metaCampaignConfigHash(config);
+    const record = runtimeClosureCaptureRecord(config, strFlag(flags, "manifest"));
+    const casFlag = strFlag(flags, "cas");
+    const result = restoreRuntimeClosure({
+      casDir: casFlag === undefined ? casRoot(io.root) : resolve(io.root, casFlag),
+      targetDir: resolve(io.root, targetFlag),
+      campaignConfigHash: configHash,
+      record,
+    });
+    io.out(canonicalJson({
+      command: "campaign.restore-closure",
+      campaignPath,
+      manifestArtifact: record.manifestArtifact,
+      ...result,
+    }));
+    return 0;
+  }
+
+  throw new UsageError(
+    `${CAMPAIGN_MIGRATE_SOURCE_USAGE}\n${CAMPAIGN_CAPTURE_CLOSURE_USAGE}\n${CAMPAIGN_RESTORE_CLOSURE_USAGE}`,
+  );
 }
 
 async function prepareControl(
@@ -2862,6 +3060,17 @@ function writeFrozenCampaign(root: string, outFlag: string, config: AnyMetaCampa
   writeFileDurable(outputPath, `${JSON.stringify(config, null, 2)}\n`);
   chmodSync(outputPath, 0o600);
   return outputPath;
+}
+
+/** The only freeze publication path: a recursive frozen config cannot be written before its closure record is attached. */
+export function writeFrozenRecursiveCampaignWithClosure(
+  root: string,
+  outFlag: string,
+  frozenConfig: RecursiveMetaCampaignConfig,
+  closureRecord: CampaignRuntimeClosureCaptureV1,
+): { config: RecursiveMetaCampaignConfig; outputPath: string } {
+  const config = withRuntimeClosureCapture(frozenConfig, closureRecord);
+  return { config, outputPath: writeFrozenCampaign(root, outFlag, config) };
 }
 
 function phaseEpochs(
@@ -3292,12 +3501,10 @@ function recursiveOptimizerImage(config: RecursiveMetaCampaignConfig): string {
 /**
  * Select the optimizer base closure for recursive coordination.
  *
- * An unmigrated campaign is still sealed to the current clean source tree.
- * Once source migration is journaled, that tree is the new engine and is no
- * longer evidence of the optimizer base. The operator must name the preserved
- * closure explicitly; its digest is authenticated against the outer run's
- * durable optimizer-artifact seal, itself bound back to the frozen controller
- * identity. There is deliberately no migrated-mode fallback to live bytes.
+ * An unmigrated campaign may continue from its authenticated live tree. A
+ * source migration still forbids that fallback. An explicit --sealed-base is
+ * accepted when either the historical outer optimizer seal or a durable
+ * runtime-closure record binds its digest; when both exist they must agree.
  */
 export function recursiveOptimizerBaseSnapshot(
   configInput: RecursiveMetaCampaignConfig,
@@ -3306,38 +3513,60 @@ export function recursiveOptimizerBaseSnapshot(
   sealedBaseFlag: string | undefined,
 ): OptimizerSnapshot {
   const config = MetaCampaignConfigV2.parse(configInput);
-  if (config.sourceMigrationJournal === undefined) {
-    if (sealedBaseFlag !== undefined) {
-      throw new UsageError("--sealed-base is valid only after an explicit campaign source migration");
-    }
+  metaCampaignConfigHash(config);
+  const closureRecord = config.runtimeClosureJournal?.captures.at(-1);
+  if (config.sourceMigrationJournal === undefined && sealedBaseFlag === undefined) {
     return collectOptimizerSnapshot(root);
   }
-  if (sealedBaseFlag === undefined) {
+  if (
+    config.sourceMigrationJournal === undefined
+    && sealedBaseFlag !== undefined
+    && closureRecord === undefined
+  ) {
+    throw new UsageError(
+      "--sealed-base is valid only after an explicit campaign source migration or runtime closure capture",
+    );
+  }
+  if (config.sourceMigrationJournal !== undefined && sealedBaseFlag === undefined) {
     throw new UsageError(
       "migrated recursive campaigns require --sealed-base <dir>; refusing to fall back to the current source tree",
     );
   }
+  if (sealedBaseFlag === undefined) throw new UsageError("sealed optimizer base path is missing");
 
   const outerSeal = readOptimizerArtifactSeal(outerRunDir);
-  if (outerSeal === null) {
+  if (outerSeal !== null && (
+    outerSeal.runId !== basename(outerRunDir)
+    || outerSeal.sourceArtifact !== config.controllerOptimizer.sourceArtifact
+    || outerSeal.mergedDigest !== config.controllerOptimizer.bundleDigest
+  )) {
+    throw new UsageError("sealed outer optimizer identity does not match the frozen campaign controller");
+  }
+  if (
+    outerSeal === null
+    && closureRecord === undefined
+    && config.sourceMigrationJournal !== undefined
+  ) {
     throw new UsageError(
       `migrated recursive campaign has no sealed outer optimizer base identity in ${outerRunDir}`,
     );
   }
   if (
-    outerSeal.runId !== basename(outerRunDir)
-    || outerSeal.sourceArtifact !== config.controllerOptimizer.sourceArtifact
-    || outerSeal.mergedDigest !== config.controllerOptimizer.bundleDigest
+    outerSeal !== null
+    && closureRecord !== undefined
+    && outerSeal.baseDigest !== closureRecord.optimizerBaseDigest
   ) {
-    throw new UsageError("sealed outer optimizer identity does not match the frozen campaign controller");
+    throw new UsageError("runtime closure optimizer identity disagrees with the sealed outer base");
   }
 
+  const expectedDigest = closureRecord?.optimizerBaseDigest ?? outerSeal?.baseDigest;
+  if (expectedDigest === undefined) throw new UsageError("campaign has no sealed optimizer base identity");
   const sealedBaseRoot = resolve(root, sealedBaseFlag);
   const snapshot = collectOptimizerSnapshot(sealedBaseRoot);
   const actualDigest = snapshotDigest(recursiveOptimizerImage(config), snapshot);
-  if (actualDigest !== outerSeal.baseDigest) {
+  if (actualDigest !== expectedDigest) {
     throw new UsageError(
-      `sealed optimizer base digest mismatch: ${actualDigest} != campaign seal ${outerSeal.baseDigest}`,
+      `sealed optimizer base digest mismatch: ${actualDigest} != campaign seal ${expectedDigest}`,
     );
   }
   return snapshot;
@@ -3421,6 +3650,7 @@ export function recursivePhaseReceipt(
     configHash: metaCampaignConfigHash(config),
     phase,
     sourceMigrationJournal: config.sourceMigrationJournal ?? null,
+    runtimeClosureJournal: config.runtimeClosureJournal ?? null,
     ...body,
   };
   const output = join(campaignDir, `${phase}-receipt.json`);
@@ -3434,6 +3664,13 @@ export interface RecursiveCommandOptions {
   readonly observeMutationWorkerPreflightContract?: (
     contract: MutationWorkerPreflightContract | undefined,
   ) => void;
+  /** Test seam at the freeze-time CAS capture boundary; production always uses the durable capturer. */
+  readonly captureFrozenRuntimeClosure?: typeof captureRuntimeClosure;
+  /** Test-only prepared freeze inputs; publication still traverses the command's production call site. */
+  readonly preparedFreezePublication?: {
+    readonly frozenConfig: RecursiveMetaCampaignConfig;
+    readonly closureCapture: CaptureRuntimeClosureResult;
+  };
 }
 
 /** Execute one frozen recursive generation cell; orchestration composes these durable cells. */
@@ -3510,40 +3747,67 @@ export async function recursiveCommand(
   assertOptimizerProtectedPathsResolve(config.protectedPaths, rootSnapshot);
 
   if (phase === "freeze") {
-    const localSeed = await captureSeedCandidate(io.root, cas);
-    const corpus = freezeCorpusEntries(io.root, config);
-    config = MetaCampaignConfigV2.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
-    const comparisonImage = recursiveOptimizerImage(config);
-    const explicitTarget = digestFlag(strFlag(flags, "target-artifact"), "--target-artifact");
-    const targetSource = explicitTarget
-      ?? (config.generation.stage === "A" ? localSeed.artifactHash : config.seedOptimizer.sourceArtifact as Sha256Digest);
-    const explicitController = digestFlag(strFlag(flags, "controller-artifact"), "--controller-artifact");
-    const controllerSource = explicitController
-      ?? (config.generation.controllerGeneration === 1 ? targetSource : localSeed.artifactHash);
-    const target = await resolveCandidateOptimizer({
-      casDir,
-      artifactHash: targetSource,
-      image: comparisonImage,
-      baseSnapshot: rootSnapshot,
-    });
-    const controller = await resolveCandidateOptimizer({
-      casDir,
-      artifactHash: controllerSource,
-      image: comparisonImage,
-      baseSnapshot: rootSnapshot,
-    });
-    const controls = await prepareRecursiveControls(target.snapshot, cas, casDir, comparisonImage);
-    const frozen = freezeRecursiveCampaignConfig(config, corpus, {
-      sourceCommit: commit,
-      runtimeDigest,
-      target,
-      controller,
-      brokenControl: controls.broken,
-      degradedControl: controls.degraded,
-    });
-    const outerAncestorCapacity = assertM2OuterAncestorCapacity(frozen);
+    let frozenConfig: RecursiveMetaCampaignConfig;
+    let closureCapture: CaptureRuntimeClosureResult;
+    if (options.preparedFreezePublication !== undefined) {
+      frozenConfig = options.preparedFreezePublication.frozenConfig;
+      closureCapture = options.preparedFreezePublication.closureCapture;
+    } else {
+      const localSeed = await captureSeedCandidate(io.root, cas);
+      const corpus = freezeCorpusEntries(io.root, config);
+      config = MetaCampaignConfigV2.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
+      const comparisonImage = recursiveOptimizerImage(config);
+      const explicitTarget = digestFlag(strFlag(flags, "target-artifact"), "--target-artifact");
+      const targetSource = explicitTarget
+        ?? (config.generation.stage === "A" ? localSeed.artifactHash : config.seedOptimizer.sourceArtifact as Sha256Digest);
+      const explicitController = digestFlag(strFlag(flags, "controller-artifact"), "--controller-artifact");
+      const controllerSource = explicitController
+        ?? (config.generation.controllerGeneration === 1 ? targetSource : localSeed.artifactHash);
+      const target = await resolveCandidateOptimizer({
+        casDir,
+        artifactHash: targetSource,
+        image: comparisonImage,
+        baseSnapshot: rootSnapshot,
+      });
+      const controller = await resolveCandidateOptimizer({
+        casDir,
+        artifactHash: controllerSource,
+        image: comparisonImage,
+        baseSnapshot: rootSnapshot,
+      });
+      const controls = await prepareRecursiveControls(target.snapshot, cas, casDir, comparisonImage);
+      frozenConfig = freezeRecursiveCampaignConfig(config, corpus, {
+        sourceCommit: commit,
+        runtimeDigest,
+        target,
+        controller,
+        brokenControl: controls.broken,
+        degradedControl: controls.degraded,
+      });
+      const frozenConfigHash = metaCampaignConfigHash(frozenConfig);
+      closureCapture = await (options.captureFrozenRuntimeClosure ?? captureRuntimeClosure)({
+        sourceRoot: io.root,
+        sourceCommit: commit,
+        campaignBootDigest: runtimeDigest,
+        expectedBootDigest: runtimeDigest,
+        optimizerImage: comparisonImage,
+        optimizerBaseDigest: snapshotDigest(comparisonImage, rootSnapshot) as Sha256Digest,
+        campaignConfigHash: frozenConfigHash,
+        capturedAt: new Date().toISOString(),
+        casDir,
+        previousRecordDigest: null,
+      });
+    }
     if (outFlag === undefined) throw new UsageError(RECURSIVE_USAGE);
-    const outputPath = writeFrozenCampaign(io.root, outFlag, frozen);
+    const publication = writeFrozenRecursiveCampaignWithClosure(
+      io.root,
+      outFlag,
+      frozenConfig,
+      closureCapture.record,
+    );
+    const frozen = publication.config;
+    const outputPath = publication.outputPath;
+    const outerAncestorCapacity = assertM2OuterAncestorCapacity(frozen);
     io.out(canonicalJson({
       phase,
       outputPath,
@@ -3553,6 +3817,12 @@ export async function recursiveCommand(
       controller: frozen.controllerOptimizer,
       controls: frozen.controls,
       outerAncestorCapacity,
+      runtimeClosure: {
+        manifestArtifact: closureCapture.record.manifestArtifact,
+        closureDigest: closureCapture.record.closureDigest,
+        marginalBytes: closureCapture.marginalBytes,
+        reusedBytes: closureCapture.reusedBytes,
+      },
     }));
     return 0;
   }

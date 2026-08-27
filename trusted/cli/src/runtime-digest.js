@@ -215,9 +215,10 @@ function readManifest(path) {
  * `workspace:` dependencies starting at the CLI package — never a hand
  * list, so a trusted dependency of a dependency (e.g. broker → scoring)
  * can never silently escape the pin. Sorted by package name.
+ * @param {string} repoRoot
  * @returns {[string, string][]}
  */
-function trustedRuntimeRoots() {
+function trustedRuntimeRoots(repoRoot) {
   /** @type {Map<string, string>} */
   const roots = new Map();
   /** @param {string} root @returns {void} */
@@ -235,7 +236,7 @@ function trustedRuntimeRoots() {
       visit(depRoot);
     }
   };
-  visit(trustedCliRoot());
+  visit(join(repoRoot, "trusted", "cli"));
   return [...roots.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
@@ -618,30 +619,31 @@ function hashDependencyClosure(digest, repoRoot, roots, sink) {
  * production this contains runtime-digest.js, so the boot-critical sealer
  * implementation is hashed and staged from the exact buffer being
  * executed, never from a second pathname read.
- * @param {SnapshotSink | null} [sink]
- * @param {Map<string, { bytes: Buffer, mode: number }> | null} [captured]
+ * @param {string} repoRoot
+ * @param {SnapshotSink | null} sink
+ * @param {Map<string, { bytes: Buffer, mode: number }> | null} captured
  * @returns {string}
  */
-export function computeTrustedRuntimeDigest(sink = null, captured = null) {
+function computeTrustedRuntimeDigestForRoot(repoRoot, sink, captured) {
   const digest = createHash("sha256");
   digest.update("hone-trusted-runtime-v3");
-  const repoRoot = trustedRepoRoot();
+  const resolvedRepoRoot = realpathSync(repoRoot);
   /** @type {Set<string>} */
   const consumedCaptured = new Set();
   for (const rel of ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]) {
-    const path = join(repoRoot, rel);
+    const path = join(resolvedRepoRoot, rel);
     if (existsSync(path)) {
       digest.update(`\0workspace\0${rel}\0`);
       digest.update(readTrustedFile(path).bytes);
     }
   }
-  const roots = trustedRuntimeRoots();
+  const roots = trustedRuntimeRoots(resolvedRepoRoot);
   // The tsx loader consults tsconfig for the module graph it actually
   // builds (extends chains, baseUrl/paths remaps): a mapping edit could
   // redirect a trusted import to unsealed code without touching src/.
   // Seal the whole consulted closure; a closure that escapes the trusted
   // workspace refuses outright (collectTsconfigClosure throws).
-  for (const file of collectTsconfigClosure(repoRoot, roots.map(([, root]) => root))) {
+  for (const file of collectTsconfigClosure(resolvedRepoRoot, roots.map(([, root]) => root))) {
     digest.update(`\0tsconfig\0${file.rel}\0`);
     digest.update(readTrustedFile(file.abs).bytes);
   }
@@ -671,8 +673,29 @@ export function computeTrustedRuntimeDigest(sink = null, captured = null) {
       `launcher supplied ${unused.length} capture(s) outside the trusted runtime closure (${unused.slice(0, 3).join(", ")}) — refusing to seal`,
     );
   }
-  hashDependencyClosure(digest, repoRoot, roots, sink);
+  hashDependencyClosure(digest, resolvedRepoRoot, roots, sink);
   return `sha256:${digest.digest("hex")}`;
+}
+
+/**
+ * Recompute the trusted runtime identity from an explicitly materialized
+ * repository closure. Restore uses this instead of the process-pinned live
+ * repository so no ambient sibling worktree can satisfy verification.
+ * @param {string} repoRoot
+ * @returns {string}
+ */
+export function computeTrustedRuntimeDigestAt(repoRoot) {
+  return computeTrustedRuntimeDigestForRoot(repoRoot, null, null);
+}
+
+/**
+ * Compute the trusted runtime identity from the process-pinned live repository.
+ * @param {SnapshotSink | null} [sink]
+ * @param {Map<string, { bytes: Buffer, mode: number }> | null} [captured]
+ * @returns {string}
+ */
+export function computeTrustedRuntimeDigest(sink = null, captured = null) {
+  return computeTrustedRuntimeDigestForRoot(trustedRepoRoot(), sink, captured);
 }
 
 /**

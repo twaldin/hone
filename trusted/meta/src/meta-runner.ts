@@ -21,6 +21,7 @@ import {
   canonicalJson,
   type MetaCampaignConfig,
   type CampaignSourceMigrationV1,
+  type CampaignRuntimeClosureCaptureV1,
   type M2EnvelopeIdentity,
 } from "@hone/schema";
 import { z } from "zod";
@@ -1671,6 +1672,7 @@ export function recursiveEnvelopeReservationId(
 }
 
 type CampaignSourceMigrationRecordBody = Omit<CampaignSourceMigrationV1, "recordDigest">;
+type CampaignRuntimeClosureRecordBody = Omit<CampaignRuntimeClosureCaptureV1, "recordDigest">;
 
 /** Hash one migration record without its self-authenticating digest field. */
 export function campaignSourceMigrationRecordDigest(
@@ -1679,15 +1681,46 @@ export function campaignSourceMigrationRecordDigest(
   return sha256(canonicalJson(record));
 }
 
-function validateSourceMigrationJournal(config: MetaCampaignConfig): Sha256Digest | null {
-  const journal = config.sourceMigrationJournal;
-  if (journal === undefined) return null;
-  const first = journal.migrations[0];
-  const last = journal.migrations[journal.migrations.length - 1];
+/** Hash one closure-capture record without its self-authenticating digest field. */
+export function campaignRuntimeClosureRecordDigest(
+  record: CampaignRuntimeClosureRecordBody,
+): Sha256Digest {
+  return sha256(canonicalJson(record));
+}
+
+interface OriginalCampaignIdentity {
+  readonly configHash: Sha256Digest;
+  readonly sourceCommits: ReadonlySet<string>;
+  readonly bootDigests: ReadonlySet<string>;
+}
+
+function validateOriginalCampaignIdentity(config: MetaCampaignConfig): OriginalCampaignIdentity {
+  const migrationJournal = config.sourceMigrationJournal;
+  const {
+    sourceMigrationJournal: _migrationJournal,
+    runtimeClosureJournal: _closureJournal,
+    ...withoutJournals
+  } = config;
+  const sourceCommits = new Set<string>();
+  const bootDigests = new Set<string>();
+
+  if (migrationJournal === undefined) {
+    const currentCommit = campaignSourceCommits(config)[0];
+    if (currentCommit === undefined) throw new Error("campaign has no source identity");
+    sourceCommits.add(currentCommit);
+    bootDigests.add(config.trustedRuntime.digest);
+    const original = MetaCampaignConfigSchema.parse(withoutJournals);
+    return { configHash: sha256(canonicalJson(original)), sourceCommits, bootDigests };
+  }
+
+  const first = migrationJournal.migrations[0];
+  const last = migrationJournal.migrations[migrationJournal.migrations.length - 1];
   if (first === undefined || last === undefined) throw new Error("source migration journal is empty");
 
   let previous: CampaignSourceMigrationV1 | undefined;
-  for (const record of journal.migrations) {
+  sourceCommits.add(first.from);
+  bootDigests.add(first.fromBootDigest);
+  for (const record of migrationJournal.migrations) {
     const { recordDigest, ...body } = record;
     if (record.from === record.to) throw new Error("source migration must change the pinned commit");
     if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) {
@@ -1702,6 +1735,8 @@ function validateSourceMigrationJournal(config: MetaCampaignConfig): Sha256Diges
     if (recordDigest !== campaignSourceMigrationRecordDigest(body)) {
       throw new Error("source migration journal record digest mismatch");
     }
+    sourceCommits.add(record.to);
+    bootDigests.add(record.bootDigest);
     previous = record;
   }
 
@@ -1712,53 +1747,93 @@ function validateSourceMigrationJournal(config: MetaCampaignConfig): Sha256Diges
     throw new Error("source migration journal head does not match the campaign source identity");
   }
 
-  const { sourceMigrationJournal: _journal, ...withoutJournal } = config;
-  const original = {
-    ...withoutJournal,
-    seedOptimizer: { ...withoutJournal.seedOptimizer, sourceCommit: first.from },
+  const original = MetaCampaignConfigSchema.parse({
+    ...withoutJournals,
+    seedOptimizer: { ...withoutJournals.seedOptimizer, sourceCommit: first.from },
     trustedRuntime: {
-      ...withoutJournal.trustedRuntime,
+      ...withoutJournals.trustedRuntime,
       sourceCommit: first.from,
       digest: first.fromBootDigest,
     },
-    ...(withoutJournal.version === 2
+    ...(withoutJournals.version === 2
       ? {
         controllerOptimizer: {
-          ...withoutJournal.controllerOptimizer,
+          ...withoutJournals.controllerOptimizer,
           sourceCommit: first.from,
         },
       }
       : {}),
-  } as MetaCampaignConfig;
-  const reconstructed = sha256(canonicalJson(MetaCampaignConfigSchema.parse(original)));
-  if (reconstructed !== journal.campaignConfigHash) {
+  });
+  const configHash = sha256(canonicalJson(original));
+  if (configHash !== migrationJournal.campaignConfigHash) {
     throw new Error("source migration altered frozen campaign fields outside the sanctioned source identity");
   }
-  return reconstructed;
+  return { configHash, sourceCommits, bootDigests };
+}
+
+function validateRuntimeClosureJournal(
+  config: MetaCampaignConfig,
+  original: OriginalCampaignIdentity,
+): void {
+  const journal = config.runtimeClosureJournal;
+  if (journal === undefined) return;
+  if (journal.campaignConfigHash !== original.configHash) {
+    throw new Error("runtime closure journal belongs to a different frozen campaign");
+  }
+
+  let previous: CampaignRuntimeClosureCaptureV1 | undefined;
+  for (const record of journal.captures) {
+    const { recordDigest, ...body } = record;
+    if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) {
+      throw new Error("runtime closure journal record chain is not append-only");
+    }
+    if (recordDigest !== campaignRuntimeClosureRecordDigest(body)) {
+      throw new Error("runtime closure journal record digest mismatch");
+    }
+    if (!original.sourceCommits.has(record.sourceCommit)) {
+      throw new Error("runtime closure record source commit is not in the campaign lineage");
+    }
+    if (!original.bootDigests.has(record.campaignBootDigest)) {
+      throw new Error("runtime closure record is not bound to a campaign boot identity");
+    }
+    if (config.version === 2 && record.optimizerImage !== config.optimizerRuntime.image) {
+      throw new Error("runtime closure record optimizer image does not match the campaign");
+    }
+    previous = record;
+  }
 }
 
 /**
- * Frozen campaign identity. Unmigrated campaigns retain their historical
- * whole-config hash; migrated campaigns reconstruct and authenticate that
- * original hash while validating every append-only provenance record.
+ * Frozen campaign identity. Both sanctioned journals authenticate against the
+ * same original whole-config hash and therefore compose in either append order.
  */
 export function metaCampaignConfigHash(configInput: MetaCampaignConfig): Sha256Digest {
   const config = MetaCampaignConfigSchema.parse(configInput);
-  return validateSourceMigrationJournal(config) ?? sha256(canonicalJson(config));
+  const original = validateOriginalCampaignIdentity(config);
+  validateRuntimeClosureJournal(config, original);
+  return original.configHash;
 }
 
-/** True only when `current` is the same frozen campaign with an appended migration history. */
-export function campaignSourceMigrationExtends(
+/** True only when `current` is the same campaign with append-only record journals. */
+export function campaignRecordExtends(
   registeredInput: MetaCampaignConfig,
   currentInput: MetaCampaignConfig,
 ): boolean {
   const registered = MetaCampaignConfigSchema.parse(registeredInput);
   const current = MetaCampaignConfigSchema.parse(currentInput);
   if (metaCampaignConfigHash(registered) !== metaCampaignConfigHash(current)) return false;
-  const prior = registered.sourceMigrationJournal?.migrations ?? [];
-  const next = current.sourceMigrationJournal?.migrations ?? [];
-  if (prior.length > next.length) return false;
-  return prior.every((record, index) => canonicalJson(record) === canonicalJson(next[index]));
+  const priorMigrations = registered.sourceMigrationJournal?.migrations ?? [];
+  const nextMigrations = current.sourceMigrationJournal?.migrations ?? [];
+  const priorCaptures = registered.runtimeClosureJournal?.captures ?? [];
+  const nextCaptures = current.runtimeClosureJournal?.captures ?? [];
+  if (priorMigrations.length > nextMigrations.length || priorCaptures.length > nextCaptures.length) {
+    return false;
+  }
+  return priorMigrations.every(
+    (record, index) => canonicalJson(record) === canonicalJson(nextMigrations[index]),
+  ) && priorCaptures.every(
+    (record, index) => canonicalJson(record) === canonicalJson(nextCaptures[index]),
+  );
 }
 
 export function metaEvidenceHash(evidence: MetaChildEvidenceV1): Sha256Digest {

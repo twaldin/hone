@@ -1,14 +1,27 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync, rmSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  campaignRuntimeClosureRecordDigest,
+  metaCampaignConfigHash,
+} from "@hone/meta";
+import type { Sha256Digest } from "@hone/meta";
 import { MetaCampaignConfigV2 } from "@hone/schema";
 import { describe, expect, it, vi } from "vitest";
+import {
+  freezeRecursiveCampaignConfig,
+  recursiveCommand,
+} from "../src/commands/hone.js";
+import type { CmdIo } from "../src/io.js";
 import { assertM2OuterDirectEnvelope } from "../src/launch-draft.js";
-import { freezeRecursiveCampaignConfig } from "../src/commands/hone.js";
+import { verifiedBootRuntimeDigest } from "../src/runtime-digest.js";
 
 const preservedPath = fileURLToPath(new URL(
   "../../../data/m2-refreeze-final/campaign-frozen.json",
   import.meta.url,
 ));
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 function preservedConfig(): MetaCampaignConfigV2 {
   return MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedPath, "utf8")));
@@ -97,5 +110,79 @@ describe("recursive freeze envelope enforcement", () => {
     expect(() => MetaCampaignConfigV2.parse(overcommitted)).toThrow(
       /search child concurrency cannot exceed the confirmation\/terminal child concurrency/,
     );
+  });
+
+  it("publishes the runtime closure journal through the real recursive freeze command", async () => {
+    const outputFlag = `.hone-runs/recursive-freeze-publication-${process.pid}.json`;
+    const outputPath = resolve(repoRoot, outputFlag);
+    rmSync(outputPath, { force: true });
+    const lines = { out: [] as string[], err: [] as string[] };
+    const io: CmdIo = {
+      root: repoRoot,
+      env: { ...process.env },
+      isTTY: false,
+      out: (line) => lines.out.push(line),
+      err: (line) => lines.err.push(line),
+    };
+    const draft = preservedConfig();
+    const prepared = freezeInputs(draft);
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).trim();
+    const bootDigest = verifiedBootRuntimeDigest() as Sha256Digest;
+    prepared.identities.sourceCommit = commit;
+    prepared.identities.runtimeDigest = bootDigest;
+    const frozenConfig = freezeRecursiveCampaignConfig(
+      draft,
+      prepared.corpus,
+      prepared.identities as never,
+    );
+    const body = {
+      version: 1,
+      at: "2026-08-27T00:00:00.000Z",
+      sourceCommit: commit,
+      bootDigest,
+      campaignBootDigest: bootDigest,
+      optimizerImage: frozenConfig.optimizerRuntime.image,
+      optimizerBaseDigest: frozenConfig.seedOptimizer.bundleDigest,
+      closureDigest: `sha256:${"a".repeat(64)}` as Sha256Digest,
+      manifestArtifact: `sha256:${"b".repeat(64)}` as Sha256Digest,
+      fileCount: 0,
+      totalBytes: 0,
+      previousRecordDigest: null,
+    } as const;
+    const closureCapture = {
+      record: {
+        ...body,
+        recordDigest: campaignRuntimeClosureRecordDigest(body),
+      },
+      marginalBytes: 0,
+      reusedBytes: 0,
+    };
+    try {
+      const code = await recursiveCommand([
+        "--campaign",
+        "data/m2-refreeze-final/campaign-frozen.json",
+        "--phase",
+        "freeze",
+        "--out",
+        outputFlag,
+        "--headless",
+      ], io, {
+        preparedFreezePublication: { frozenConfig, closureCapture },
+      });
+      expect(lines.err, lines.err.join("\n")).toEqual([]);
+      expect(code).toBe(0);
+      const published = MetaCampaignConfigV2.parse(
+        JSON.parse(readFileSync(outputPath, "utf8")),
+      );
+      expect(published.runtimeClosureJournal?.captures).toHaveLength(1);
+      expect(published.runtimeClosureJournal?.campaignConfigHash).toBe(
+        metaCampaignConfigHash(published),
+      );
+    } finally {
+      rmSync(outputPath, { force: true });
+    }
   });
 });
