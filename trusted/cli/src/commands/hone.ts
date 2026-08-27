@@ -166,6 +166,7 @@ import {
   runtimeClosureCaptureRecord,
   withRuntimeClosureCapture,
 } from "../runtime-closure.js";
+import type { CaptureRuntimeClosureResult } from "../runtime-closure.js";
 import { RUNTIME_PIN_FILE, acquireRunLock, runCommand, type TrustedRunOptions } from "../supervisor.js";
 import {
   appendPreAuthorityRefusalBreadcrumb,
@@ -3663,6 +3664,13 @@ export interface RecursiveCommandOptions {
   readonly observeMutationWorkerPreflightContract?: (
     contract: MutationWorkerPreflightContract | undefined,
   ) => void;
+  /** Test seam at the freeze-time CAS capture boundary; production always uses the durable capturer. */
+  readonly captureFrozenRuntimeClosure?: typeof captureRuntimeClosure;
+  /** Test-only prepared freeze inputs; publication still traverses the command's production call site. */
+  readonly preparedFreezePublication?: {
+    readonly frozenConfig: RecursiveMetaCampaignConfig;
+    readonly closureCapture: CaptureRuntimeClosureResult;
+  };
 }
 
 /** Execute one frozen recursive generation cell; orchestration composes these durable cells. */
@@ -3739,50 +3747,57 @@ export async function recursiveCommand(
   assertOptimizerProtectedPathsResolve(config.protectedPaths, rootSnapshot);
 
   if (phase === "freeze") {
-    const localSeed = await captureSeedCandidate(io.root, cas);
-    const corpus = freezeCorpusEntries(io.root, config);
-    config = MetaCampaignConfigV2.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
-    const comparisonImage = recursiveOptimizerImage(config);
-    const explicitTarget = digestFlag(strFlag(flags, "target-artifact"), "--target-artifact");
-    const targetSource = explicitTarget
-      ?? (config.generation.stage === "A" ? localSeed.artifactHash : config.seedOptimizer.sourceArtifact as Sha256Digest);
-    const explicitController = digestFlag(strFlag(flags, "controller-artifact"), "--controller-artifact");
-    const controllerSource = explicitController
-      ?? (config.generation.controllerGeneration === 1 ? targetSource : localSeed.artifactHash);
-    const target = await resolveCandidateOptimizer({
-      casDir,
-      artifactHash: targetSource,
-      image: comparisonImage,
-      baseSnapshot: rootSnapshot,
-    });
-    const controller = await resolveCandidateOptimizer({
-      casDir,
-      artifactHash: controllerSource,
-      image: comparisonImage,
-      baseSnapshot: rootSnapshot,
-    });
-    const controls = await prepareRecursiveControls(target.snapshot, cas, casDir, comparisonImage);
-    const frozenConfig = freezeRecursiveCampaignConfig(config, corpus, {
-      sourceCommit: commit,
-      runtimeDigest,
-      target,
-      controller,
-      brokenControl: controls.broken,
-      degradedControl: controls.degraded,
-    });
-    const frozenConfigHash = metaCampaignConfigHash(frozenConfig);
-    const closureCapture = await captureRuntimeClosure({
-      sourceRoot: io.root,
-      sourceCommit: commit,
-      campaignBootDigest: runtimeDigest,
-      expectedBootDigest: runtimeDigest,
-      optimizerImage: comparisonImage,
-      optimizerBaseDigest: snapshotDigest(comparisonImage, rootSnapshot) as Sha256Digest,
-      campaignConfigHash: frozenConfigHash,
-      capturedAt: new Date().toISOString(),
-      casDir,
-      previousRecordDigest: null,
-    });
+    let frozenConfig: RecursiveMetaCampaignConfig;
+    let closureCapture: CaptureRuntimeClosureResult;
+    if (options.preparedFreezePublication !== undefined) {
+      frozenConfig = options.preparedFreezePublication.frozenConfig;
+      closureCapture = options.preparedFreezePublication.closureCapture;
+    } else {
+      const localSeed = await captureSeedCandidate(io.root, cas);
+      const corpus = freezeCorpusEntries(io.root, config);
+      config = MetaCampaignConfigV2.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
+      const comparisonImage = recursiveOptimizerImage(config);
+      const explicitTarget = digestFlag(strFlag(flags, "target-artifact"), "--target-artifact");
+      const targetSource = explicitTarget
+        ?? (config.generation.stage === "A" ? localSeed.artifactHash : config.seedOptimizer.sourceArtifact as Sha256Digest);
+      const explicitController = digestFlag(strFlag(flags, "controller-artifact"), "--controller-artifact");
+      const controllerSource = explicitController
+        ?? (config.generation.controllerGeneration === 1 ? targetSource : localSeed.artifactHash);
+      const target = await resolveCandidateOptimizer({
+        casDir,
+        artifactHash: targetSource,
+        image: comparisonImage,
+        baseSnapshot: rootSnapshot,
+      });
+      const controller = await resolveCandidateOptimizer({
+        casDir,
+        artifactHash: controllerSource,
+        image: comparisonImage,
+        baseSnapshot: rootSnapshot,
+      });
+      const controls = await prepareRecursiveControls(target.snapshot, cas, casDir, comparisonImage);
+      frozenConfig = freezeRecursiveCampaignConfig(config, corpus, {
+        sourceCommit: commit,
+        runtimeDigest,
+        target,
+        controller,
+        brokenControl: controls.broken,
+        degradedControl: controls.degraded,
+      });
+      const frozenConfigHash = metaCampaignConfigHash(frozenConfig);
+      closureCapture = await (options.captureFrozenRuntimeClosure ?? captureRuntimeClosure)({
+        sourceRoot: io.root,
+        sourceCommit: commit,
+        campaignBootDigest: runtimeDigest,
+        expectedBootDigest: runtimeDigest,
+        optimizerImage: comparisonImage,
+        optimizerBaseDigest: snapshotDigest(comparisonImage, rootSnapshot) as Sha256Digest,
+        campaignConfigHash: frozenConfigHash,
+        capturedAt: new Date().toISOString(),
+        casDir,
+        previousRecordDigest: null,
+      });
+    }
     if (outFlag === undefined) throw new UsageError(RECURSIVE_USAGE);
     const publication = writeFrozenRecursiveCampaignWithClosure(
       io.root,
