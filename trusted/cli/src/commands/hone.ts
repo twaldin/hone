@@ -2517,6 +2517,7 @@ interface PreparedCampaignOptimizerRefreeze {
 
 interface PlannedOptimizerRunRefreeze {
   readonly runDir: string;
+  readonly pauseBeforeMigration: boolean;
   readonly record: CampaignOptimizerRunRefreezeV1;
   readonly expectedSeal: OptimizerArtifactSeal;
   readonly replacement: ResolvedCandidateOptimizer;
@@ -2628,8 +2629,8 @@ async function planOptimizerRunRefreezes(
   const planned: PlannedOptimizerRunRefreeze[] = [];
   for (const run of runs) {
     const state = replayRun(run.runDir);
-    if (state.status !== "paused" || state.finished !== null) {
-      throw new UsageError(`optimizer refreeze requires nonterminal run ${run.runId} to be durably paused`);
+    if ((state.status !== "paused" && state.status !== "running") || state.finished !== null) {
+      throw new UsageError(`optimizer refreeze requires nonterminal run ${run.runId} to be paused or lock-proven offline`);
     }
     const expectedSeal = readOptimizerArtifactSeal(run.runDir);
     if (expectedSeal === null) {
@@ -2669,6 +2670,7 @@ async function planOptimizerRunRefreezes(
     }
     const newContract = migratedContract(oldContract, expectedSeal.mergedDigest, replacement.mergedDigest);
     planned.push({
+      pauseBeforeMigration: state.status === "running",
       runDir: run.runDir,
       expectedSeal,
       replacement,
@@ -2720,7 +2722,7 @@ function applyOptimizerRunRefreeze(
     migration.recordDigest,
   );
 
-  const before = replayRun(runDir);
+  let before = replayRun(runDir);
   if (
     before.optimizerDigest === record.to.bundleDigest
     && before.contractHash === record.to.contractHash
@@ -2733,6 +2735,15 @@ function applyOptimizerRunRefreeze(
       throw new UsageError(`optimizer refreeze run ${record.runId} lacks its journal-linked event`);
     }
     return;
+  }
+  if (before.status === "running" && plan.pauseBeforeMigration) {
+    appendEvent(runDir, {
+      type: "run.paused",
+      runId: record.runId,
+      at: migration.at,
+      reason: "operator",
+    });
+    before = replayRun(runDir);
   }
   if (
     before.status !== "paused"
@@ -2866,6 +2877,7 @@ async function recoverOptimizerRunRefreezes(
       throw new UsageError(`recorded optimizer run ${record.runId} contract does not reproduce`);
     }
     applyOptimizerRunRefreeze({
+      pauseBeforeMigration: replayRun(run.runDir).status === "running",
       runDir: run.runDir,
       record,
       expectedSeal: currentSeal,
