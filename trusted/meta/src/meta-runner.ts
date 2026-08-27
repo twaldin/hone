@@ -1767,6 +1767,81 @@ function restoreOriginalCampaignImages(
   return replaceCampaignCapsuleImages(sourceOriginal, currentImages);
 }
 
+type BundleIdentity = { sourceArtifact: string; bundleDigest: string };
+
+function sameBundleIdentity(left: BundleIdentity, right: BundleIdentity): boolean {
+  return left.sourceArtifact === right.sourceArtifact && left.bundleDigest === right.bundleDigest;
+}
+
+function restoreOriginalOptimizerIdentities(
+  config: MetaCampaignConfig,
+  migrations: readonly CampaignSourceMigrationV1[],
+): MetaCampaignConfig {
+  let restored = config;
+  for (const record of [...migrations].reverse()) {
+    const refreeze = record.optimizerRefreeze;
+    if (refreeze === undefined) continue;
+    if (restored.version !== 2) {
+      throw new Error("optimizer refreeze provenance is valid only for recursive campaigns");
+    }
+    if (refreeze.optimizerImage !== restored.optimizerRuntime.image) {
+      throw new Error("optimizer refreeze image does not match the recursive campaign runtime");
+    }
+    if (refreeze.fromOptimizerBaseDigest === refreeze.optimizerBaseDigest) {
+      throw new Error("optimizer refreeze must change the optimizer base digest");
+    }
+    if (
+      !sameBundleIdentity(restored.seedOptimizer, refreeze.seed.to)
+      || !sameBundleIdentity(restored.controllerOptimizer, refreeze.controller.to)
+      || !sameBundleIdentity(
+        {
+          sourceArtifact: restored.controls.brokenSourceArtifact,
+          bundleDigest: restored.controls.brokenBundleDigest,
+        },
+        refreeze.controls.broken.to,
+      )
+      || !sameBundleIdentity(
+        {
+          sourceArtifact: restored.controls.degradedSourceArtifact,
+          bundleDigest: restored.controls.degradedBundleDigest,
+        },
+        refreeze.controls.degraded.to,
+      )
+    ) {
+      throw new Error("optimizer refreeze journal provenance is discontinuous");
+    }
+    const runIds = refreeze.runs.map((run) => run.runId);
+    if (
+      new Set(runIds).size !== runIds.length
+      || canonicalJson(runIds) !== canonicalJson([...runIds].sort())
+    ) {
+      throw new Error("optimizer refreeze run records must be unique and sorted");
+    }
+    for (const run of refreeze.runs) {
+      if (
+        run.from.baseDigest === run.to.baseDigest
+        || run.from.bundleDigest === run.to.bundleDigest
+        || run.from.contractHash === run.to.contractHash
+      ) {
+        throw new Error(`optimizer refreeze run ${run.runId} must change its base, bundle, and contract digests`);
+      }
+    }
+    restored = MetaCampaignConfigSchema.parse({
+      ...restored,
+      seedOptimizer: { ...restored.seedOptimizer, ...refreeze.seed.from },
+      controllerOptimizer: { ...restored.controllerOptimizer, ...refreeze.controller.from },
+      controls: {
+        brokenSourceArtifact: refreeze.controls.broken.from.sourceArtifact,
+        brokenBundleDigest: refreeze.controls.broken.from.bundleDigest,
+        degradedSourceArtifact: refreeze.controls.degraded.from.sourceArtifact,
+        degradedBundleDigest: refreeze.controls.degraded.from.bundleDigest,
+      },
+    });
+  }
+  return restored;
+}
+
+
 function validateOriginalCampaignIdentity(config: MetaCampaignConfig): OriginalCampaignIdentity {
   const migrationJournal = config.sourceMigrationJournal;
   const imageRepinJournal = config.imageRepinJournal;
@@ -1821,18 +1896,22 @@ function validateOriginalCampaignIdentity(config: MetaCampaignConfig): OriginalC
       throw new Error("source migration journal head does not match the campaign source identity");
     }
 
+    const originalOptimizerIdentities = restoreOriginalOptimizerIdentities(
+      MetaCampaignConfigSchema.parse(withoutJournals),
+      migrationJournal.migrations,
+    );
     sourceOriginal = MetaCampaignConfigSchema.parse({
-      ...withoutJournals,
-      seedOptimizer: { ...withoutJournals.seedOptimizer, sourceCommit: first.from },
+      ...originalOptimizerIdentities,
+      seedOptimizer: { ...originalOptimizerIdentities.seedOptimizer, sourceCommit: first.from },
       trustedRuntime: {
-        ...withoutJournals.trustedRuntime,
+        ...originalOptimizerIdentities.trustedRuntime,
         sourceCommit: first.from,
         digest: first.fromBootDigest,
       },
-      ...(withoutJournals.version === 2
+      ...(originalOptimizerIdentities.version === 2
         ? {
           controllerOptimizer: {
-            ...withoutJournals.controllerOptimizer,
+            ...originalOptimizerIdentities.controllerOptimizer,
             sourceCommit: first.from,
           },
         }

@@ -284,7 +284,7 @@ export interface RunState {
   runId: string | null;
   capsuleId: string | null;
   contractHash: string | null;
-  /** Optimizer digest sealed by run.started (null before the run started). */
+  /** Optimizer digest sealed by run.started or the latest journal-linked engine migration. */
   optimizerDigest: string | null;
   /** Last probe.completed outcome (null when no probe has been decided). */
   probe: { approved: boolean } | null;
@@ -354,6 +354,26 @@ export function replay(events: RunEvent[]): RunState {
         state.resumeCount++;
         state.status = "running";
         state.outcomeReason = null;
+        break;
+      case "run.optimizer-migrated":
+        if (state.status !== "paused") {
+          throw new Error("optimizer migration requires a durably paused run");
+        }
+        if (
+          state.optimizerDigest !== event.fromOptimizerDigest
+          || state.contractHash !== event.fromContractHash
+        ) {
+          throw new Error("optimizer migration does not extend the run's sealed optimizer and contract identity");
+        }
+        if (
+          event.fromSourceArtifact === event.sourceArtifact
+          && event.fromBaseDigest === event.baseDigest
+          && event.fromOptimizerDigest === event.optimizerDigest
+        ) {
+          throw new Error("optimizer migration must change the sealed optimizer identity");
+        }
+        state.optimizerDigest = event.optimizerDigest;
+        state.contractHash = event.contractHash;
         break;
       case "run.paused":
         state.status = "paused";

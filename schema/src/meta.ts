@@ -34,6 +34,62 @@ export const M1_ALLOWED_CLAIM = "directional-reversible-frozen-corpus";
 const SHA256 = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 const GIT_COMMIT = z.string().regex(/^[0-9a-f]{40}$/);
 
+export const CampaignOptimizerBundleIdentityV1 = z.object({
+  sourceArtifact: SHA256,
+  bundleDigest: SHA256,
+}).strict();
+export type CampaignOptimizerBundleIdentityV1 = z.infer<typeof CampaignOptimizerBundleIdentityV1>;
+
+export const CampaignOptimizerRunRefreezeV1 = z.object({
+  runId: z.string().min(1),
+  image: z.string().regex(IMAGE_DIGEST_REF),
+  from: z.object({
+    sourceArtifact: SHA256,
+    baseDigest: SHA256,
+    bundleDigest: SHA256,
+    contractHash: SHA256,
+  }).strict(),
+  to: z.object({
+    sourceArtifact: SHA256,
+    baseDigest: SHA256,
+    bundleDigest: SHA256,
+    contractHash: SHA256,
+  }).strict(),
+}).strict();
+export type CampaignOptimizerRunRefreezeV1 = z.infer<typeof CampaignOptimizerRunRefreezeV1>;
+
+/**
+ * An optimizer refreeze is an engine migration, not a capsule image re-pin.
+ * It rebuilds the target, controller, controls, and every paused nonterminal
+ * run against one new trusted optimizer base while retaining the campaign's
+ * original scientific identity through the source-migration record chain.
+ */
+export const CampaignOptimizerRefreezeV1 = z.object({
+  optimizerImage: z.string().regex(IMAGE_DIGEST_REF),
+  fromOptimizerBaseDigest: SHA256,
+  optimizerBaseDigest: SHA256,
+  seed: z.object({
+    from: CampaignOptimizerBundleIdentityV1,
+    to: CampaignOptimizerBundleIdentityV1,
+  }).strict(),
+  controller: z.object({
+    from: CampaignOptimizerBundleIdentityV1,
+    to: CampaignOptimizerBundleIdentityV1,
+  }).strict(),
+  controls: z.object({
+    broken: z.object({
+      from: CampaignOptimizerBundleIdentityV1,
+      to: CampaignOptimizerBundleIdentityV1,
+    }).strict(),
+    degraded: z.object({
+      from: CampaignOptimizerBundleIdentityV1,
+      to: CampaignOptimizerBundleIdentityV1,
+    }).strict(),
+  }).strict(),
+  runs: z.array(CampaignOptimizerRunRefreezeV1),
+}).strict();
+export type CampaignOptimizerRefreezeV1 = z.infer<typeof CampaignOptimizerRefreezeV1>;
+
 /**
  * Explicit provenance for the only sanctioned mutation of a frozen campaign:
  * moving its trusted source closure to a new commit. The record digests are
@@ -48,6 +104,7 @@ export const CampaignSourceMigrationV1 = z.object({
   fromBootDigest: SHA256,
   bootDigest: SHA256,
   reason: z.string().min(1).max(4_096),
+  optimizerRefreeze: CampaignOptimizerRefreezeV1.optional(),
   operator: z.string().min(1).max(256).optional(),
   previousRecordDigest: SHA256.nullable(),
   recordDigest: SHA256,

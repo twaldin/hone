@@ -64,6 +64,7 @@ export interface ResolvedCandidateOptimizer extends CandidateOptimizerSelection 
 export interface OptimizerArtifactSeal extends CandidateOptimizerSelection {
   version: 1;
   runId: string;
+  sourceMigrationRecordDigest?: string | undefined;
 }
 
 export interface ResolvedSealedCandidateOptimizer extends ResolvedCandidateOptimizer {
@@ -79,6 +80,7 @@ const OptimizerArtifactSealSchema = z
     baseDigest: DigestSchema,
     mergedDigest: DigestSchema,
     mutablePaths: z.record(DigestSchema),
+    sourceMigrationRecordDigest: DigestSchema.optional(),
   })
   .strict();
 
@@ -531,6 +533,54 @@ export function writeOptimizerArtifactSeal(runDir: string, runId: string, select
     throw error;
   }
   return seal;
+}
+
+/**
+ * Sanctioned replacement used only by a digest-chained campaign source
+ * migration. The expected old seal makes the operation compare-and-swap;
+ * observing the exact replacement is accepted so a killed migration can
+ * finish its remaining durable writes without weakening resume sealing.
+ */
+export function replaceOptimizerArtifactSeal(
+  runDir: string,
+  expected: OptimizerArtifactSeal,
+  selection: CandidateOptimizerSelection,
+  sourceMigrationRecordDigest: string,
+): OptimizerArtifactSeal {
+  const replacement = OptimizerArtifactSealSchema.parse({
+    version: 1,
+    runId: expected.runId,
+    sourceArtifact: selection.sourceArtifact,
+    baseDigest: selection.baseDigest,
+    mergedDigest: selection.mergedDigest,
+    mutablePaths: selection.mutablePaths,
+    sourceMigrationRecordDigest,
+  });
+  const current = readOptimizerArtifactSeal(runDir);
+  if (current === null) throw new UsageError(`${OPTIMIZER_ARTIFACT_SEAL_FILE} disappeared during optimizer refreeze`);
+  if (canonicalJson(current) === canonicalJson(replacement)) return replacement;
+  if (canonicalJson(current) !== canonicalJson(expected)) {
+    throw new UsageError(`${OPTIMIZER_ARTIFACT_SEAL_FILE} drifted before optimizer refreeze`);
+  }
+
+  const path = join(runDir, OPTIMIZER_ARTIFACT_SEAL_FILE);
+  const tmp = join(runDir, `.${OPTIMIZER_ARTIFACT_SEAL_FILE}.${process.pid}.${randomUUID()}.tmp`);
+  let fd: number | null = null;
+  try {
+    fd = openSync(tmp, "wx", 0o600);
+    fchmodSync(fd, 0o600);
+    writeAllSync(fd, Buffer.from(`${canonicalJson(replacement)}\n`, "utf8"));
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(tmp, path);
+    syncDir(runDir);
+  } catch (error) {
+    if (fd !== null) closeSync(fd);
+    rmSync(tmp, { force: true });
+    throw error;
+  }
+  return replacement;
 }
 
 /** Read and authenticate the owner-only, single-link regular selection seal. */

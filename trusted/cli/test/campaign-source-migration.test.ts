@@ -31,6 +31,10 @@ const NEXT_COMMIT = "e".repeat(40);
 const TO_BOOT_DIGEST = `sha256:${"9".repeat(64)}` as const;
 const NEXT_BOOT_DIGEST = `sha256:${"8".repeat(64)}` as const;
 
+function digest(character: string): `sha256:${string}` {
+  return `sha256:${character.repeat(64)}`;
+}
+
 function preservedConfig(): RecursiveConfig {
   return MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedPath, "utf8")));
 }
@@ -295,6 +299,93 @@ describe("campaign migrate-source", () => {
       .toThrow("altered frozen campaign fields outside the sanctioned source identity");
     expect(() => assertCampaignSourceMigrationOnly(before, alteredFrozenField))
       .toThrow("attempted to alter frozen campaign fields");
+  });
+
+  test("authenticates optimizer refreeze identities through the source migration journal", () => {
+    const before = preservedConfig();
+    const configHash = metaCampaignConfigHash(before);
+    const optimizerRefreeze = {
+      optimizerImage: before.optimizerRuntime.image,
+      fromOptimizerBaseDigest: digest("1"),
+      optimizerBaseDigest: digest("2"),
+      seed: {
+        from: {
+          sourceArtifact: before.seedOptimizer.sourceArtifact,
+          bundleDigest: before.seedOptimizer.bundleDigest,
+        },
+        to: { sourceArtifact: digest("3"), bundleDigest: digest("4") },
+      },
+      controller: {
+        from: {
+          sourceArtifact: before.controllerOptimizer.sourceArtifact,
+          bundleDigest: before.controllerOptimizer.bundleDigest,
+        },
+        to: { sourceArtifact: digest("3"), bundleDigest: digest("4") },
+      },
+      controls: {
+        broken: {
+          from: {
+            sourceArtifact: before.controls.brokenSourceArtifact,
+            bundleDigest: before.controls.brokenBundleDigest,
+          },
+          to: { sourceArtifact: digest("5"), bundleDigest: digest("6") },
+        },
+        degraded: {
+          from: {
+            sourceArtifact: before.controls.degradedSourceArtifact,
+            bundleDigest: before.controls.degradedBundleDigest,
+          },
+          to: { sourceArtifact: digest("7"), bundleDigest: digest("8") },
+        },
+      },
+      runs: [],
+    };
+    const body = {
+      version: 1 as const,
+      at: "2026-08-27T09:00:00.000Z",
+      from: before.trustedRuntime.sourceCommit,
+      to: TO_COMMIT,
+      fromBootDigest: before.trustedRuntime.digest,
+      bootDigest: TO_BOOT_DIGEST,
+      reason: "refreeze engine bundle",
+      optimizerRefreeze,
+      previousRecordDigest: null,
+    };
+    const migration = {
+      ...body,
+      recordDigest: campaignSourceMigrationRecordDigest(body),
+    };
+    const migrated = MetaCampaignConfigV2.parse({
+      ...before,
+      seedOptimizer: { sourceCommit: TO_COMMIT, ...optimizerRefreeze.seed.to },
+      controllerOptimizer: { sourceCommit: TO_COMMIT, ...optimizerRefreeze.controller.to },
+      trustedRuntime: { sourceCommit: TO_COMMIT, digest: TO_BOOT_DIGEST },
+      controls: {
+        brokenSourceArtifact: optimizerRefreeze.controls.broken.to.sourceArtifact,
+        brokenBundleDigest: optimizerRefreeze.controls.broken.to.bundleDigest,
+        degradedSourceArtifact: optimizerRefreeze.controls.degraded.to.sourceArtifact,
+        degradedBundleDigest: optimizerRefreeze.controls.degraded.to.bundleDigest,
+      },
+      sourceMigrationJournal: {
+        version: 1,
+        campaignConfigHash: configHash,
+        migrations: [migration],
+      },
+    });
+    expect(metaCampaignConfigHash(migrated)).toBe(configHash);
+    expect(() => assertCampaignSourceMigrationOnly(before, migrated)).not.toThrow();
+
+    const forgedHead = structuredClone(migrated);
+    forgedHead.seedOptimizer.bundleDigest = digest("9");
+    forgedHead.controllerOptimizer.bundleDigest = digest("9");
+    expect(() => metaCampaignConfigHash(forgedHead))
+      .toThrow("optimizer refreeze journal provenance is discontinuous");
+    const forgedRecord = structuredClone(migrated);
+    forgedRecord.sourceMigrationJournal!.migrations[0]!.optimizerRefreeze!.seed.from.bundleDigest = digest("a");
+    forgedRecord.sourceMigrationJournal!.migrations[0]!.optimizerRefreeze!.controller.from.bundleDigest = digest("a");
+    rehashMigrationRecord(forgedRecord.sourceMigrationJournal!.migrations[0]!);
+    expect(() => metaCampaignConfigHash(forgedRecord))
+      .toThrow("altered frozen campaign fields outside the sanctioned source identity");
   });
 
   test("refuses a foreign nonterminal runtime pin before changing the campaign", async () => {
