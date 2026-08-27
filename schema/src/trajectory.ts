@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  CampaignImageRepinJournalV1,
   CampaignSourceMigrationJournalV1,
   M2DevelopmentPanel,
   M2EnvelopeIdentity,
@@ -68,6 +69,8 @@ export const MetaSearchTrajectoryV1 = z.object({
   configHash: SHA256,
   /** Present after a sanctioned source migration; absent on historical evidence. */
   sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+  /** Present after a sanctioned capsule image replacement. */
+  imageRepinJournal: CampaignImageRepinJournalV1.optional(),
   outerRunId: z.string().min(1),
   controllerBundleDigest: SHA256,
   targetSourceArtifact: SHA256,
@@ -115,6 +118,8 @@ const MetaSearchTrajectoryV2Shape = z.object({
   configHash: SHA256,
   /** Present after a sanctioned source migration; absent on historical evidence. */
   sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+  /** Present after a sanctioned capsule image replacement. */
+  imageRepinJournal: CampaignImageRepinJournalV1.optional(),
   outerRunId: z.string().min(1),
   searchEnvelope: M2EnvelopeIdentity.extend({ purpose: z.literal("search") }).strict(),
   panel: M2DevelopmentPanel,

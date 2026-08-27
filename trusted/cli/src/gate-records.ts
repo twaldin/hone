@@ -3,10 +3,12 @@ import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import {
+  CampaignImageRepinJournalV1,
   CampaignSourceMigrationJournalV1,
   M2_PANEL_A_TASK_IDS,
   M2_PANEL_B_TASK_IDS,
   canonicalJson,
+  type CampaignImageRepinJournalV1 as CampaignImageRepinJournal,
   type CampaignSourceMigrationJournalV1 as CampaignSourceMigrationJournal,
   type MetaCampaignConfigV2,
 } from "@hone/schema";
@@ -171,6 +173,7 @@ export const G1StatisticalRecordV1 = z
     stage: z.literal("A"),
     configHash: SHA256,
     sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+    imageRepinJournal: CampaignImageRepinJournalV1.optional(),
     measurementCount: z.number().int().nonnegative(),
     measurementHash: SHA256,
     seed: OptimizerIdentity,
@@ -247,6 +250,7 @@ export const G2StatisticalRecordV1 = z
     stage: z.literal("B"),
     configHash: SHA256,
     sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+    imageRepinJournal: CampaignImageRepinJournalV1.optional(),
     measurementCount: z.number().int().nonnegative(),
     measurementHash: SHA256,
     target: OptimizerIdentity,
@@ -292,6 +296,7 @@ export const AuthorizationGateRecordV1 = z.discriminatedUnion("gate", [
       gate: z.literal("G1"),
       configHash: SHA256,
       sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+      imageRepinJournal: CampaignImageRepinJournalV1.optional(),
       /** inputsDigest of the G1 statistical record this authorization certifies. */
       statisticalRecordDigest: SHA256,
       statisticalPass: z.literal(true),
@@ -314,6 +319,7 @@ export const AuthorizationGateRecordV1 = z.discriminatedUnion("gate", [
       gate: z.literal("G2"),
       configHash: SHA256,
       sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+      imageRepinJournal: CampaignImageRepinJournalV1.optional(),
       statisticalRecordDigest: SHA256,
       statisticalPass: z.literal(true),
       acceptedArtifacts: z
@@ -592,6 +598,9 @@ export function assembleG1Record(inputs: G1RecordInputs): VerifiedG1Record {
     ...(config.sourceMigrationJournal === undefined
       ? {}
       : { sourceMigrationJournal: config.sourceMigrationJournal }),
+    ...(config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: config.imageRepinJournal }),
     measurementCount: inputs.measurements.length,
     measurementHash: inputs.receipt.measurementHash,
     seed,
@@ -749,6 +758,9 @@ export function assembleG2Record(inputs: G2RecordInputs): VerifiedG2Record {
     ...(config.sourceMigrationJournal === undefined
       ? {}
       : { sourceMigrationJournal: config.sourceMigrationJournal }),
+    ...(config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: config.imageRepinJournal }),
     measurementCount: inputs.measurements.length,
     measurementHash: inputs.receipt.measurementHash,
     target,
@@ -865,6 +877,7 @@ export interface G1AuthorizationInputs {
   /** configHash of the STAGE-B cell this authorization opens (not the stage-A record's hash). */
   configHash: string;
   sourceMigrationJournal?: CampaignSourceMigrationJournal;
+  imageRepinJournal?: CampaignImageRepinJournal;
   /** The stage-A G1 statistical record being certified; produced in the stage-A cell. */
   record: G1StatisticalRecordV1;
   controlWinner: OptimizerIdentity;
@@ -885,6 +898,9 @@ export function assembleG1Authorization(inputs: G1AuthorizationInputs): Verified
     ...(inputs.sourceMigrationJournal === undefined
       ? {}
       : { sourceMigrationJournal: inputs.sourceMigrationJournal }),
+    ...(inputs.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: inputs.imageRepinJournal }),
     statisticalRecordDigest: record.inputsDigest,
     statisticalPass: true as const,
     acceptedArtifacts: {
@@ -906,6 +922,7 @@ export interface G2AuthorizationInputs {
   /** configHash of the TERMINAL cell this authorization opens. */
   configHash: string;
   sourceMigrationJournal?: CampaignSourceMigrationJournal;
+  imageRepinJournal?: CampaignImageRepinJournal;
   /** The stage-B G2 statistical record being certified. */
   record: G2StatisticalRecordV1;
   generation0: OptimizerIdentity;
@@ -935,6 +952,9 @@ export function assembleG2Authorization(inputs: G2AuthorizationInputs): Verified
     ...(inputs.sourceMigrationJournal === undefined
       ? {}
       : { sourceMigrationJournal: inputs.sourceMigrationJournal }),
+    ...(inputs.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: inputs.imageRepinJournal }),
     statisticalRecordDigest: record.inputsDigest,
     statisticalPass: true as const,
     acceptedArtifacts: { generation0, generation1, generation2 },

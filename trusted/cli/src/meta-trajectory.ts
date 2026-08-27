@@ -420,6 +420,9 @@ function persistRecursiveTrajectory(
     ...(opts.config.sourceMigrationJournal === undefined
       ? {}
       : { sourceMigrationJournal: opts.config.sourceMigrationJournal }),
+    ...(opts.config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: opts.config.imageRepinJournal }),
     outerRunId: opts.outerRunId,
     searchEnvelope: opts.config.recursiveBudgets.search.identity,
     panel: opts.config.developmentPanel,
@@ -504,6 +507,9 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
     ...(opts.config.sourceMigrationJournal === undefined
       ? {}
       : { sourceMigrationJournal: opts.config.sourceMigrationJournal }),
+    ...(opts.config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: opts.config.imageRepinJournal }),
     outerRunId: opts.outerRunId,
     controllerBundleDigest: started.optimizerDigest,
     targetSourceArtifact: opts.config.seedOptimizer.sourceArtifact,

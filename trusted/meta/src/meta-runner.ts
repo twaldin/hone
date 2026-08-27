@@ -20,6 +20,7 @@ import {
   campaignSourceCommits,
   canonicalJson,
   type MetaCampaignConfig,
+  type CampaignImageRepinV1,
   type CampaignSourceMigrationV1,
   type CampaignRuntimeClosureCaptureV1,
   type M2EnvelopeIdentity,
@@ -1671,8 +1672,16 @@ export function recursiveEnvelopeReservationId(
   return sha256(canonicalJson({ version: 1, configHash, purpose, identity }));
 }
 
+type CampaignImageRepinRecordBody = Omit<CampaignImageRepinV1, "recordDigest">;
 type CampaignSourceMigrationRecordBody = Omit<CampaignSourceMigrationV1, "recordDigest">;
 type CampaignRuntimeClosureRecordBody = Omit<CampaignRuntimeClosureCaptureV1, "recordDigest">;
+
+/** Hash one image re-pin record without its self-authenticating digest field. */
+export function campaignImageRepinRecordDigest(
+  record: CampaignImageRepinRecordBody,
+): Sha256Digest {
+  return sha256(canonicalJson(record));
+}
 
 /** Hash one migration record without its self-authenticating digest field. */
 export function campaignSourceMigrationRecordDigest(
@@ -1694,79 +1703,156 @@ interface OriginalCampaignIdentity {
   readonly bootDigests: ReadonlySet<string>;
 }
 
+function replaceCampaignCapsuleImages(
+  config: MetaCampaignConfig,
+  replacements: ReadonlyMap<string, string>,
+): MetaCampaignConfig {
+  const replace = <T extends { capsuleId: string; image: string }>(capsule: T): T => ({
+    ...capsule,
+    image: replacements.get(capsule.capsuleId) ?? capsule.image,
+  });
+  return MetaCampaignConfigSchema.parse({
+    ...config,
+    train: config.train.map(replace),
+    holdout: config.holdout.map(replace),
+    ...(config.version === 2
+      ? {
+        developmentPanel: {
+          ...config.developmentPanel,
+          members: config.developmentPanel.members.map((member) => ({
+            ...member,
+            capsule: replace(member.capsule),
+          })),
+        },
+      }
+      : {}),
+  });
+}
+
+function restoreOriginalCampaignImages(
+  current: MetaCampaignConfig,
+  sourceOriginal: MetaCampaignConfig,
+): MetaCampaignConfig {
+  const journal = current.imageRepinJournal;
+  if (journal === undefined) return sourceOriginal;
+
+  let previous: CampaignImageRepinV1 | undefined;
+  for (const record of journal.repins) {
+    const { recordDigest, ...body } = record;
+    if (record.fromImage === record.toImage) {
+      throw new Error("campaign image re-pin must change the pinned image");
+    }
+    if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) {
+      throw new Error("campaign image re-pin journal record chain is not append-only");
+    }
+    if (recordDigest !== campaignImageRepinRecordDigest(body)) {
+      throw new Error("campaign image re-pin journal record digest mismatch");
+    }
+    previous = record;
+  }
+
+  const currentImages = new Map(
+    [...current.train, ...current.holdout].map((capsule) => [capsule.capsuleId, capsule.image]),
+  );
+  for (const record of [...journal.repins].reverse()) {
+    const image = currentImages.get(record.capsuleId);
+    if (image === undefined) {
+      throw new Error(`campaign image re-pin names unknown capsule ${record.capsuleId}`);
+    }
+    if (image !== record.toImage) {
+      throw new Error("campaign image re-pin journal provenance is discontinuous");
+    }
+    currentImages.set(record.capsuleId, record.fromImage);
+  }
+  return replaceCampaignCapsuleImages(sourceOriginal, currentImages);
+}
+
 function validateOriginalCampaignIdentity(config: MetaCampaignConfig): OriginalCampaignIdentity {
   const migrationJournal = config.sourceMigrationJournal;
+  const imageRepinJournal = config.imageRepinJournal;
   const {
     sourceMigrationJournal: _migrationJournal,
+    imageRepinJournal: _imageRepinJournal,
     runtimeClosureJournal: _closureJournal,
     ...withoutJournals
   } = config;
   const sourceCommits = new Set<string>();
   const bootDigests = new Set<string>();
+  let sourceOriginal: MetaCampaignConfig;
 
   if (migrationJournal === undefined) {
     const currentCommit = campaignSourceCommits(config)[0];
     if (currentCommit === undefined) throw new Error("campaign has no source identity");
     sourceCommits.add(currentCommit);
     bootDigests.add(config.trustedRuntime.digest);
-    const original = MetaCampaignConfigSchema.parse(withoutJournals);
-    return { configHash: sha256(canonicalJson(original)), sourceCommits, bootDigests };
-  }
+    sourceOriginal = MetaCampaignConfigSchema.parse(withoutJournals);
+  } else {
+    const first = migrationJournal.migrations[0];
+    const last = migrationJournal.migrations[migrationJournal.migrations.length - 1];
+    if (first === undefined || last === undefined) throw new Error("source migration journal is empty");
 
-  const first = migrationJournal.migrations[0];
-  const last = migrationJournal.migrations[migrationJournal.migrations.length - 1];
-  if (first === undefined || last === undefined) throw new Error("source migration journal is empty");
-
-  let previous: CampaignSourceMigrationV1 | undefined;
-  sourceCommits.add(first.from);
-  bootDigests.add(first.fromBootDigest);
-  for (const record of migrationJournal.migrations) {
-    const { recordDigest, ...body } = record;
-    if (record.from === record.to) throw new Error("source migration must change the pinned commit");
-    if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) {
-      throw new Error("source migration journal record chain is not append-only");
-    }
-    if (
-      previous !== undefined
-      && (record.from !== previous.to || record.fromBootDigest !== previous.bootDigest)
-    ) {
-      throw new Error("source migration journal provenance is discontinuous");
-    }
-    if (recordDigest !== campaignSourceMigrationRecordDigest(body)) {
-      throw new Error("source migration journal record digest mismatch");
-    }
-    sourceCommits.add(record.to);
-    bootDigests.add(record.bootDigest);
-    previous = record;
-  }
-
-  if (
-    campaignSourceCommits(config).some((pin) => pin !== last.to)
-    || config.trustedRuntime.digest !== last.bootDigest
-  ) {
-    throw new Error("source migration journal head does not match the campaign source identity");
-  }
-
-  const original = MetaCampaignConfigSchema.parse({
-    ...withoutJournals,
-    seedOptimizer: { ...withoutJournals.seedOptimizer, sourceCommit: first.from },
-    trustedRuntime: {
-      ...withoutJournals.trustedRuntime,
-      sourceCommit: first.from,
-      digest: first.fromBootDigest,
-    },
-    ...(withoutJournals.version === 2
-      ? {
-        controllerOptimizer: {
-          ...withoutJournals.controllerOptimizer,
-          sourceCommit: first.from,
-        },
+    let previous: CampaignSourceMigrationV1 | undefined;
+    sourceCommits.add(first.from);
+    bootDigests.add(first.fromBootDigest);
+    for (const record of migrationJournal.migrations) {
+      const { recordDigest, ...body } = record;
+      if (record.from === record.to) throw new Error("source migration must change the pinned commit");
+      if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) {
+        throw new Error("source migration journal record chain is not append-only");
       }
-      : {}),
-  });
+      if (
+        previous !== undefined
+        && (record.from !== previous.to || record.fromBootDigest !== previous.bootDigest)
+      ) {
+        throw new Error("source migration journal provenance is discontinuous");
+      }
+      if (recordDigest !== campaignSourceMigrationRecordDigest(body)) {
+        throw new Error("source migration journal record digest mismatch");
+      }
+      sourceCommits.add(record.to);
+      bootDigests.add(record.bootDigest);
+      previous = record;
+    }
+
+    if (
+      campaignSourceCommits(config).some((pin) => pin !== last.to)
+      || config.trustedRuntime.digest !== last.bootDigest
+    ) {
+      throw new Error("source migration journal head does not match the campaign source identity");
+    }
+
+    sourceOriginal = MetaCampaignConfigSchema.parse({
+      ...withoutJournals,
+      seedOptimizer: { ...withoutJournals.seedOptimizer, sourceCommit: first.from },
+      trustedRuntime: {
+        ...withoutJournals.trustedRuntime,
+        sourceCommit: first.from,
+        digest: first.fromBootDigest,
+      },
+      ...(withoutJournals.version === 2
+        ? {
+          controllerOptimizer: {
+            ...withoutJournals.controllerOptimizer,
+            sourceCommit: first.from,
+          },
+        }
+        : {}),
+    });
+  }
+
+  const original = restoreOriginalCampaignImages(config, sourceOriginal);
   const configHash = sha256(canonicalJson(original));
-  if (configHash !== migrationJournal.campaignConfigHash) {
+  if (
+    migrationJournal !== undefined
+    && configHash !== migrationJournal.campaignConfigHash
+  ) {
     throw new Error("source migration altered frozen campaign fields outside the sanctioned source identity");
+  }
+  if (
+    imageRepinJournal !== undefined
+    && configHash !== imageRepinJournal.campaignConfigHash
+  ) {
+    throw new Error("campaign image re-pin altered frozen fields outside the sanctioned image reference");
   }
   return { configHash, sourceCommits, bootDigests };
 }
@@ -1824,13 +1910,21 @@ export function campaignRecordExtends(
   if (metaCampaignConfigHash(registered) !== metaCampaignConfigHash(current)) return false;
   const priorMigrations = registered.sourceMigrationJournal?.migrations ?? [];
   const nextMigrations = current.sourceMigrationJournal?.migrations ?? [];
+  const priorRepins = registered.imageRepinJournal?.repins ?? [];
+  const nextRepins = current.imageRepinJournal?.repins ?? [];
   const priorCaptures = registered.runtimeClosureJournal?.captures ?? [];
   const nextCaptures = current.runtimeClosureJournal?.captures ?? [];
-  if (priorMigrations.length > nextMigrations.length || priorCaptures.length > nextCaptures.length) {
+  if (
+    priorMigrations.length > nextMigrations.length
+    || priorRepins.length > nextRepins.length
+    || priorCaptures.length > nextCaptures.length
+  ) {
     return false;
   }
   return priorMigrations.every(
     (record, index) => canonicalJson(record) === canonicalJson(nextMigrations[index]),
+  ) && priorRepins.every(
+    (record, index) => canonicalJson(record) === canonicalJson(nextRepins[index]),
   ) && priorCaptures.every(
     (record, index) => canonicalJson(record) === canonicalJson(nextCaptures[index]),
   );
