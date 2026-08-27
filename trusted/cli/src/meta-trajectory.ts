@@ -21,7 +21,7 @@ import {
   type TrustedMetaCandidateEvent,
 } from "@hone/meta";
 import type { MetaJournalV1 } from "./meta-journal.js";
-import { EVENTS_FILE, readEvents, writeFileDurable } from "./eventlog.js";
+import { EVENTS_FILE, readEvents, replayRun, writeFileDurable } from "./eventlog.js";
 import { runsRoot } from "./runs.js";
 
 const ZERO_USAGE: Readonly<MetaResourceUsage> = {
@@ -396,7 +396,7 @@ function childTrajectory(root: string, settlement: SearchSettlement): MetaChildT
 }
 function persistRecursiveTrajectory(
   opts: PersistMetaSearchTrajectoryOptions,
-  started: Extract<ReturnType<typeof readEvents>[number], { type: "run.started" }>,
+  controllerBundleDigest: Sha256Digest,
   outerEventBytes: Buffer,
   outerEvents: ReturnType<typeof readEvents>,
   children: readonly MetaChildTrajectoryV1[],
@@ -437,7 +437,7 @@ function persistRecursiveTrajectory(
     outerRunId: opts.outerRunId,
     searchEnvelope: opts.config.recursiveBudgets.search.identity,
     panel: opts.config.developmentPanel,
-    controllerBundleDigest: started.optimizerDigest,
+    controllerBundleDigest,
     targetSourceArtifact: opts.config.seedOptimizer.sourceArtifact,
     targetBundleDigest: opts.config.seedOptimizer.bundleDigest,
     createdAt: lastEvent.at,
@@ -463,6 +463,22 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
   if (started === undefined || !/^sha256:[0-9a-f]{64}$/.test(started.optimizerDigest)) {
     throw new Error("outer trajectory has no sealed controller optimizer digest");
   }
+  const effectiveControllerDigest = replayRun(outerRunDir).optimizerDigest;
+  if (
+    effectiveControllerDigest === null
+    || !/^sha256:[0-9a-f]{64}$/.test(effectiveControllerDigest)
+  ) {
+    throw new Error("outer trajectory has no effective sealed controller optimizer digest");
+  }
+  if (
+    opts.config.version === 2
+    && opts.config.sourceMigrationJournal?.migrations.some(
+      (migration) => migration.optimizerRefreeze !== undefined,
+    ) === true
+    && effectiveControllerDigest !== opts.config.controllerOptimizer.bundleDigest
+  ) {
+    throw new Error("outer trajectory controller optimizer does not match the journaled campaign head");
+  }
 
   const settlements: SearchSettlement[] = [
     ...opts.journal.queryTrainMeasurements().filter((row) => row.phase === "search"),
@@ -475,7 +491,13 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
   );
   const children = settlements.map((settlement) => childTrajectory(opts.root, settlement));
   if (opts.config.version === 2) {
-    return persistRecursiveTrajectory(opts, started, outerEventBytes, outerEvents, children);
+    return persistRecursiveTrajectory(
+      opts,
+      effectiveControllerDigest as Sha256Digest,
+      outerEventBytes,
+      outerEvents,
+      children,
+    );
   }
   const childrenByArtifact = new Map<string, MetaChildTrajectoryV1[]>();
   for (const child of children) {
@@ -517,7 +539,7 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
     configHash: opts.configHash,
     ...trajectoryCampaignJournals(opts.config),
     outerRunId: opts.outerRunId,
-    controllerBundleDigest: started.optimizerDigest,
+    controllerBundleDigest: effectiveControllerDigest,
     targetSourceArtifact: opts.config.seedOptimizer.sourceArtifact,
     targetBundleDigest: opts.config.seedOptimizer.bundleDigest,
     createdAt: lastEvent.at,
