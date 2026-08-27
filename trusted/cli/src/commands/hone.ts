@@ -183,6 +183,10 @@ import {
   runtimeClosureCaptureRecord,
   withRuntimeClosureCapture,
 } from "../runtime-closure.js";
+import {
+  assertRequiredPanelCapsuleSmoke,
+  runPanelCapsuleSmoke,
+} from "../campaign-capsule-smoke.js";
 import type { CaptureRuntimeClosureResult } from "../runtime-closure.js";
 import { RUNTIME_PIN_FILE, acquireRunLock, runCommand, type TrustedRunOptions } from "../supervisor.js";
 import {
@@ -211,6 +215,8 @@ const CAMPAIGN_CAPTURE_CLOSURE_USAGE =
 const CAMPAIGN_RESTORE_CLOSURE_USAGE =
   "usage: hone campaign restore-closure --campaign <frozen.json> --target <empty-path> "
   + "[--cas <dir>] [--manifest sha256:<64hex>]";
+const CAMPAIGN_SMOKE_CAPSULES_USAGE =
+  "usage: hone campaign smoke-capsules --campaign <frozen.json> --evidence <receipt.json>";
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const PROXY_TRACE_FILE = "proxy-trace.ndjson";
 const CampaignPauseAuthorityFileV1 = z.object({
@@ -3782,6 +3788,42 @@ export async function campaignCommand(args: string[], io: CmdIo): Promise<number
     return 0;
   }
 
+  if (subcommand === "smoke-capsules") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: [],
+      strings: ["campaign", "evidence"],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const evidenceFlag = strFlag(flags, "evidence");
+    if (positionals.length !== 0 || campaignFlag === undefined || evidenceFlag === undefined) {
+      throw new UsageError(CAMPAIGN_SMOKE_CAPSULES_USAGE);
+    }
+    assertCleanSourceTree(io.root);
+    const campaignPath = resolve(io.root, campaignFlag);
+    const config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+    const source = sourceCommit(io.root);
+    const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
+    const result = await runPanelCapsuleSmoke({
+      root: io.root,
+      config,
+      sourceCommit: source,
+      runtimeDigest,
+      evidencePath: resolve(io.root, evidenceFlag),
+      capsules: resolveRegisteredCapsules(io.root, config),
+    });
+    io.out(canonicalJson({
+      command: "campaign.smoke-capsules",
+      campaignPath,
+      evidencePath: resolve(io.root, evidenceFlag),
+      guardPath: result.guardPath,
+      campaignConfigHash: result.receipt.campaignConfigHash,
+      capsules: result.receipt.capsules.length,
+      dispatch: result.receipt.dispatch,
+      ignitionEligible: result.receipt.ignitionEligible,
+    }));
+    return 0;
+  }
+
   if (subcommand === "restore-closure") {
     const { positionals, flags } = parseFlags(rest, {
       booleans: [],
@@ -3814,7 +3856,8 @@ export async function campaignCommand(args: string[], io: CmdIo): Promise<number
 
   throw new UsageError(
     `${CAMPAIGN_MIGRATE_SOURCE_USAGE}\n${CAMPAIGN_REPIN_IMAGE_USAGE}\n`
-    + `${CAMPAIGN_CAPTURE_CLOSURE_USAGE}\n${CAMPAIGN_RESTORE_CLOSURE_USAGE}`,
+    + `${CAMPAIGN_CAPTURE_CLOSURE_USAGE}\n${CAMPAIGN_RESTORE_CLOSURE_USAGE}\n`
+    + CAMPAIGN_SMOKE_CAPSULES_USAGE,
   );
 }
 
@@ -4007,6 +4050,12 @@ export function freezeRecursiveCampaignConfig(
       outer: outerBudgetDerivation.derived,
     },
     outerBudgetDerivation,
+    preIgnitionGates: {
+      panelCapsuleSmoke: {
+        version: 1,
+        required: true,
+      },
+    },
     seedOptimizer: {
       sourceCommit: identities.sourceCommit,
       sourceArtifact: identities.target.sourceArtifact,
@@ -4693,6 +4742,8 @@ export interface RecursiveCommandOptions {
     readonly frozenConfig: RecursiveMetaCampaignConfig;
     readonly closureCapture: CaptureRuntimeClosureResult;
   };
+  /** Test-only boundary proving SEARCH traverses the pre-ignition gate wiring. */
+  readonly stopAfterPreIgnitionGate?: boolean;
 }
 
 /** Execute one frozen recursive generation cell; orchestration composes these durable cells. */
@@ -4738,6 +4789,10 @@ export async function recursiveCommand(
   const commit = sourceCommit(io.root);
   const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
   if (phase !== "freeze") assertRecursiveCampaignSourceIdentity(config, commit, runtimeDigest);
+  if (phase === "search") {
+    assertRequiredPanelCapsuleSmoke(io.root, config);
+    if (options.stopAfterPreIgnitionGate === true) return 0;
+  }
   let rootSnapshot: OptimizerSnapshot;
   if (phase === "freeze") {
     if (sealedBaseFlag !== undefined) {

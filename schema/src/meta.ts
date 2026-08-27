@@ -1215,6 +1215,15 @@ export const M2OuterDirectEnvelopeDerivation = M2OuterDirectEnvelopeDerivationSh
 );
 export type M2OuterDirectEnvelopeDerivation = z.infer<typeof M2OuterDirectEnvelopeDerivation>;
 
+export const M2PreIgnitionGates = z.object({
+  panelCapsuleSmoke: z.object({
+    version: z.literal(1),
+    required: z.literal(true),
+  }).strict(),
+}).strict();
+export type M2PreIgnitionGates = z.infer<typeof M2PreIgnitionGates>;
+
+
 const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   version: z.literal(META_CAMPAIGN_CONFIG_V2),
   seedOptimizer: RecursiveOptimizerIdentity,
@@ -1233,6 +1242,11 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   recursiveBudgets: M2RecursiveBudgets,
   /** Freeze-derived outer direct-envelope arithmetic; absent on historical frozen evidence only. */
   outerBudgetDerivation: M2OuterDirectEnvelopeDerivation.optional(),
+  /**
+   * Freeze-time declaration of the pre-ignition sidecar gates required by
+   * this engine. Omission is accepted only for historical frozen evidence.
+   */
+  preIgnitionGates: M2PreIgnitionGates.optional(),
   allowedClaim: z.literal(M2_ALLOWED_CLAIM),
 }).strict();
 
