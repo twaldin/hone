@@ -33,6 +33,7 @@ usage:
            [--cas <dir>] [--node-modules-archive <tar.zst> --archive-sha256 <sidecar>]
            [--restore <target> --verify-image <image> --verify-digest sha256:<64hex>] [--dry-run]
   hone campaign restore-closure --campaign <frozen.json> --target <dir> [--cas <dir>] [--manifest sha256:<64hex>]
+  hone campaign smoke-capsules --campaign <frozen.json> --evidence <receipt.json>
   hone resume [--pause PAUSE_ID] [--campaign CAMPAIGN_STATE_DIR]
   hone status [--run ID]
   hone best [--run ID]

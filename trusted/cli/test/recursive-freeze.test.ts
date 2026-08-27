@@ -181,6 +181,12 @@ describe("recursive freeze envelope enforcement", () => {
       expect(published.runtimeClosureJournal?.campaignConfigHash).toBe(
         metaCampaignConfigHash(published),
       );
+      expect(published.preIgnitionGates).toEqual({
+        panelCapsuleSmoke: {
+          version: 1,
+          required: true,
+        },
+      });
     } finally {
       rmSync(outputPath, { force: true });
     }
