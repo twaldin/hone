@@ -1,16 +1,29 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MetaCampaignConfigV2 } from "@hone/schema";
 import { describe, expect, test } from "vitest";
-import { repinCampaignImage } from "../src/commands/hone.js";
+import {
+  repinCampaignImage,
+  verifyStructuralNondeterminism,
+} from "../src/commands/hone.js";
 import { makeRoot } from "./helpers.js";
 
 const preservedPath = fileURLToPath(new URL(
   "../../../data/m2-refreeze-final/campaign-frozen.json",
   import.meta.url,
 ));
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const evaluatorRelativePath = "capsules/biome-parser-formatter/baseline/eval.py";
 const TO_IMAGE = `hone-distribution@sha256:${"d".repeat(64)}`;
 
 function sha256(bytes: Buffer | string): `sha256:${string}` {
@@ -62,25 +75,34 @@ interface Fixture {
 
 function fixture(): Fixture {
   const root = makeRoot();
+  symlinkSync(join(repoRoot, "capsules"), join(root, "capsules"), "dir");
+  symlinkSync(join(repoRoot, "plans"), join(root, "plans"), "dir");
   const campaignPath = join(root, "campaign-frozen.json");
   const config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedPath, "utf8")));
-  const capsule = config.train[0]!;
+  const capsule = config.train.find((entry) => entry.capsuleId === "cap_93f9f6942024")!;
+  const receiptDir = join(root, ".hone-cas", "admission-receipts");
+  mkdirSync(receiptDir, { recursive: true, mode: 0o700 });
+  chmodSync(receiptDir, 0o700);
+  const receiptName = `${capsule.capsuleDigest.slice("sha256:".length)}.ndjson`;
+  copyFileSync(join(repoRoot, ".hone-cas", "admission-receipts", receiptName), join(receiptDir, receiptName));
+  chmodSync(join(receiptDir, receiptName), 0o600);
   writeFileSync(campaignPath, `${JSON.stringify(config, null, 2)}\n`);
   const evidencePath = join(root, "evidence", "distribution-equivalence.v1.json");
   const preRegistrationPath = join(root, "evidence", "distribution-preregistration.v1.json");
-  const sourcePath = join(root, "evaluator.py");
-  const sourceText = [
-    "import secrets, time",
-    "measured_nonce = secrets.randbits(63)",
-    "started = time.monotonic()",
-    "",
-  ].join("\n");
+  const sourcePath = join(root, evaluatorRelativePath);
+  const sourceText = readFileSync(sourcePath, "utf8");
   const structuralNondeterminism = {
-    evaluatorSourcePath: "evaluator.py",
+    evaluatorSourcePath: evaluatorRelativePath,
     evaluatorSourceSha256: sha256(sourceText),
     seedEnvironmentVariable: "HONE_SEED",
-    entropySources: [{ line: 2, exactSourceLine: "measured_nonce = secrets.randbits(63)" }],
-    timingSources: [{ line: 3, exactSourceLine: "started = time.monotonic()" }],
+    entropySources: [
+      { line: 815, exactSourceLine: "            measured_nonce = secrets.randbits(63)" },
+      { line: 816, exactSourceLine: "            warmup_nonce = secrets.randbits(63)" },
+    ],
+    timingSources: [
+      { line: 431, exactSourceLine: "        started = time.perf_counter_ns()" },
+      { line: 435, exactSourceLine: "        elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0" },
+    ],
   };
   const baseline = { artifact: `sha256:${"1".repeat(64)}`, historicalScore: 10 };
   const settledCandidate = { artifact: `sha256:${"2".repeat(64)}`, historicalScore: 20 };
@@ -139,13 +161,18 @@ function fixture(): Fixture {
 
 function writeFixture(f: Fixture): void {
   mkdirSync(dirname(f.evidencePath), { recursive: true });
-  writeFileSync(f.sourcePath, f.sourceText);
   const proof = {
-    evaluatorSourcePath: "evaluator.py",
+    evaluatorSourcePath: evaluatorRelativePath,
     evaluatorSourceSha256: sha256(f.sourceText),
     seedEnvironmentVariable: "HONE_SEED",
-    entropySources: [{ line: 2, exactSourceLine: "measured_nonce = secrets.randbits(63)" }],
-    timingSources: [{ line: 3, exactSourceLine: "started = time.monotonic()" }],
+    entropySources: [
+      { line: 815, exactSourceLine: "            measured_nonce = secrets.randbits(63)" },
+      { line: 816, exactSourceLine: "            warmup_nonce = secrets.randbits(63)" },
+    ],
+    timingSources: [
+      { line: 431, exactSourceLine: "        started = time.perf_counter_ns()" },
+      { line: 435, exactSourceLine: "        elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000.0" },
+    ],
   };
   f.preRegistration.structuralNondeterminism = proof;
   f.evidence.structuralNondeterminism = proof;
@@ -180,16 +207,42 @@ describe("campaign repin-image distribution evidence", () => {
   });
 
   test("refuses a seed-reading evaluator from the distribution arm", () => {
-    const f = fixture();
-    f.sourceText += 'seed = os.environ["HONE_SEED"]\n';
-    writeFixture(f);
-    expect(() => repin(f)).toThrow("evaluator reads HONE_SEED");
+    const root = makeRoot();
+    const sourcePath = join(root, "evaluator.py");
+    const sourceText = [
+      "import os, secrets, time",
+      "seed = os.environ[\"HONE_SEED\"]",
+      "measured_nonce = secrets.randbits(63)",
+      "started = time.monotonic()",
+      "",
+    ].join("\n");
+    writeFileSync(sourcePath, sourceText);
+    expect(() => verifyStructuralNondeterminism(
+      root,
+      {
+        evaluatorSourcePath: "evaluator.py",
+        evaluatorSourceSha256: sha256(sourceText),
+        seedEnvironmentVariable: "HONE_SEED",
+        entropySources: [{ line: 3, exactSourceLine: "measured_nonce = secrets.randbits(63)" }],
+        timingSources: [{ line: 4, exactSourceLine: "started = time.monotonic()" }],
+      },
+      sourcePath,
+    )).toThrow("evaluator reads HONE_SEED");
   });
 
-  test("refuses source hash drift and false structural source citations", () => {
+  test("refuses source hash drift, false citations, and a decoy evaluator", () => {
     const driftedSource = fixture();
     writeFixture(driftedSource);
-    writeFileSync(driftedSource.sourcePath, `${driftedSource.sourceText}# drift\n`);
+    const driftedPreregProof =
+      driftedSource.preRegistration.structuralNondeterminism as MutableStructuralProof;
+    const driftedEvidenceProof =
+      driftedSource.evidence.structuralNondeterminism as MutableStructuralProof;
+    driftedPreregProof.evaluatorSourceSha256 = `sha256:${"f".repeat(64)}`;
+    driftedEvidenceProof.evaluatorSourceSha256 = `sha256:${"f".repeat(64)}`;
+    let preregBytes = `${JSON.stringify(driftedSource.preRegistration, null, 2)}\n`;
+    writeFileSync(driftedSource.preRegistrationPath, preregBytes);
+    driftedSource.evidence.preRegistrationSha256 = sha256(preregBytes);
+    writeFileSync(driftedSource.evidencePath, `${JSON.stringify(driftedSource.evidence, null, 2)}\n`);
     expect(() => repin(driftedSource)).toThrow("source hash does not match");
 
     const falseCitation = fixture();
@@ -198,11 +251,55 @@ describe("campaign repin-image distribution evidence", () => {
     const evidenceProof = falseCitation.evidence.structuralNondeterminism as MutableStructuralProof;
     preregProof.entropySources[0]!.exactSourceLine = "measured_nonce = deterministic";
     evidenceProof.entropySources[0]!.exactSourceLine = "measured_nonce = deterministic";
-    const preregBytes = `${JSON.stringify(falseCitation.preRegistration, null, 2)}\n`;
+    preregBytes = `${JSON.stringify(falseCitation.preRegistration, null, 2)}\n`;
     writeFileSync(falseCitation.preRegistrationPath, preregBytes);
     falseCitation.evidence.preRegistrationSha256 = sha256(preregBytes);
     writeFileSync(falseCitation.evidencePath, `${JSON.stringify(falseCitation.evidence, null, 2)}\n`);
     expect(() => repin(falseCitation)).toThrow("source citation does not match");
+
+    const decoy = fixture();
+    const decoyRelativePath = ".hone-runs/decoy-evaluator.py";
+    const decoyPath = join(decoy.root, decoyRelativePath);
+    const decoySource = "import secrets, time\nnonce = secrets.randbits(63)\nstarted = time.monotonic()\n";
+    mkdirSync(dirname(decoyPath), { recursive: true });
+    writeFileSync(decoyPath, decoySource);
+    try {
+      writeFixture(decoy);
+      const decoyProof = {
+        evaluatorSourcePath: decoyRelativePath,
+        evaluatorSourceSha256: sha256(decoySource),
+        seedEnvironmentVariable: "HONE_SEED",
+        entropySources: [{ line: 2, exactSourceLine: "nonce = secrets.randbits(63)" }],
+        timingSources: [{ line: 3, exactSourceLine: "started = time.monotonic()" }],
+      };
+      decoy.preRegistration.structuralNondeterminism = decoyProof;
+      decoy.evidence.structuralNondeterminism = decoyProof;
+      preregBytes = `${JSON.stringify(decoy.preRegistration, null, 2)}\n`;
+      writeFileSync(decoy.preRegistrationPath, preregBytes);
+      decoy.evidence.preRegistrationSha256 = sha256(preregBytes);
+      writeFileSync(decoy.evidencePath, `${JSON.stringify(decoy.evidence, null, 2)}\n`);
+      expect(() => repin(decoy)).toThrow("must match the installed capsule evaluator");
+
+    const missingSignal = fixture();
+    writeFixture(missingSignal);
+    const missingSignalPrereg =
+      missingSignal.preRegistration.structuralNondeterminism as MutableStructuralProof;
+    const missingSignalEvidence =
+      missingSignal.evidence.structuralNondeterminism as MutableStructuralProof;
+    const nonsignal = {
+      line: 814,
+      exactSourceLine: "            repetitions = int(CHALLENGE[\"repetitions\"][source.name][mode])",
+    };
+    missingSignalPrereg.entropySources[0] = nonsignal;
+    missingSignalEvidence.entropySources[0] = nonsignal;
+    preregBytes = `${JSON.stringify(missingSignal.preRegistration, null, 2)}\n`;
+    writeFileSync(missingSignal.preRegistrationPath, preregBytes);
+    missingSignal.evidence.preRegistrationSha256 = sha256(preregBytes);
+    writeFileSync(missingSignal.evidencePath, `${JSON.stringify(missingSignal.evidence, null, 2)}\n`);
+    expect(() => repin(missingSignal)).toThrow("does not contain the required nondeterminism signal");
+    } finally {
+      rmSync(decoyPath, { force: true });
+    }
   });
 
   test("refuses missing structural proof, an operator-chosen k, and fewer than 12 reps", () => {
@@ -236,6 +333,43 @@ describe("campaign repin-image distribution evidence", () => {
     forgedBaseline.mean += 0.001;
     writeFileSync(forgedMean.evidencePath, `${JSON.stringify(forgedMean.evidence, null, 2)}\n`);
     expect(() => repin(forgedMean)).toThrow("mean does not match the raw score distribution");
+
+    const fixedBoundary = fixture();
+    const boundaryBaseline = fixedBoundary.evidence.baseline as DistributionReplay;
+    fixedBoundary.evidence.baseline = replay(
+      boundaryBaseline.artifact,
+      9,
+      [9, 11, 9, 11, 9, 11, 9, 11, 9, 11, 9, 11],
+    );
+    const fixedBoundaryPrereg =
+      fixedBoundary.preRegistration.baseline as { artifact: string; historicalScore: number };
+    fixedBoundaryPrereg.historicalScore = 9;
+    writeFixture(fixedBoundary);
+    expect(() => repin(fixedBoundary)).toThrow("less than 0.5 times self-spread");
+
+    const planShortfall = fixture();
+    const plan = planShortfall.preRegistration.measurementPlan as {
+      replicatesPerArtifact: number;
+      k: number;
+    };
+    plan.replicatesPerArtifact = 24;
+    writeFixture(planShortfall);
+    expect(() => repin(planShortfall)).toThrow("does not satisfy its pre-registered measurement plan");
+
+    for (const exploratoryMeasurements of [
+      {
+        excluded: false,
+        statement: "Pre-registration measurements were exploratory and are excluded; only post-pre-registration measurements are confirmatory.",
+      },
+      { excluded: true, statement: "operator supplied statement" },
+    ]) {
+      const exploratory = fixture();
+      exploratory.evidence.exploratoryMeasurements = exploratoryMeasurements;
+      writeFixture(exploratory);
+      exploratory.evidence.exploratoryMeasurements = exploratoryMeasurements;
+      writeFileSync(exploratory.evidencePath, `${JSON.stringify(exploratory.evidence, null, 2)}\n`);
+      expect(() => repin(exploratory)).toThrow("invalid image equivalence evidence");
+    }
     const tooFew = fixture();
     const baseline = tooFew.evidence.baseline as DistributionReplay;
     tooFew.evidence.baseline = replay(baseline.artifact, baseline.historicalScore, baseline.rawScores.slice(0, 11));
@@ -251,6 +385,31 @@ describe("campaign repin-image distribution evidence", () => {
     preregBaseline.historicalScore = 100;
     writeFixture(outside);
     expect(() => repin(outside)).toThrow("outside the rebuilt distribution range");
+
+    const equalInstant = fixture();
+    equalInstant.evidence.measurementStartedAt = "2026-08-27T04:00:00.000Z";
+    writeFixture(equalInstant);
+    expect(() => repin(equalInstant)).toThrow("not performed after pre-registration");
+
+    const bindingDrift = fixture();
+    writeFixture(bindingDrift);
+    const bindingBaseline = bindingDrift.evidence.baseline as DistributionReplay;
+    bindingBaseline.artifact = `sha256:${"3".repeat(64)}`;
+    writeFileSync(bindingDrift.evidencePath, `${JSON.stringify(bindingDrift.evidence, null, 2)}\n`);
+    expect(() => repin(bindingDrift)).toThrow("does not match its pre-registration");
+
+    const escaped = fixture();
+    writeFixture(escaped);
+    const escapedPath = join(dirname(dirname(escaped.preRegistrationPath)), "escaped-preregistration.json");
+    writeFileSync(escapedPath, readFileSync(escaped.preRegistrationPath));
+    escaped.evidence.preRegistrationPath = "../escaped-preregistration.json";
+    escaped.evidence.preRegistrationSha256 = sha256(readFileSync(escapedPath));
+    writeFileSync(escaped.evidencePath, `${JSON.stringify(escaped.evidence, null, 2)}\n`);
+    try {
+      expect(() => repin(escaped)).toThrow("must stay inside");
+    } finally {
+      rmSync(escapedPath, { force: true });
+    }
 
     const offset = fixture();
     const candidate = offset.evidence.settledCandidate as DistributionReplay;

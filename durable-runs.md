@@ -85,12 +85,16 @@ Only an evaluator proven not to consume the broker's `HONE_SEED` may use the
 distribution arm. Before measurement, persist a distribution pre-registration
 that fixes both artifacts and historical scores, at least 12 repetitions per
 artifact, and the schema-fixed $k=0.5$. It must also bind the evaluator source
-hash and exact entropy/timing line citations. The final evidence records every
-raw score and recomputable min, max, mean, relative self-spread, and relative
-mean offset. Each historical score must lie in its rebuilt `[min,max]`, and each
-relative mean offset must be strictly less than `0.5 * selfSpread`. The command
-refuses this arm if the source contains `HONE_SEED`, if a citation or source
-hash drifts, or if measurement did not start after the hashed pre-registration.
+hash and exact entropy/timing line citations. The source path is derived from
+the admitted capsule manifest's evaluator entrypoint; an operator-chosen decoy
+file cannot satisfy the proof. The final evidence records every raw score and
+recomputable min, max, mean, relative self-spread, and relative mean offset.
+Each historical score must lie in its rebuilt `[min,max]`, and each relative
+mean offset must be strictly less than `0.5 * selfSpread`. The command refuses
+this arm if the bound source contains `HONE_SEED`, if a citation or source hash
+drifts, or if measurement did not start after the hashed pre-registration. The
+seed check is deliberately a conservative substring fence for honest mistakes,
+not a claim to detect obfuscated source.
 Then run:
 
 ```sh

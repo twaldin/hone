@@ -80,6 +80,7 @@ import {
   capsuleDigest,
   deriveCapsuleId,
   type CampaignImageRepinV1,
+  type CampaignImageStructuralNondeterminismProofV1,
   type CampaignSourceMigrationV1,
   type CampaignRuntimeClosureCaptureV1,
   type BudgetEnvelope,
@@ -2702,6 +2703,67 @@ interface VerifiedDistributionEvidenceFiles {
   readonly files: readonly { path: string; bytes: Buffer }[];
 }
 
+function installedCampaignCapsule(
+  root: string,
+  config: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+): DiscoveredCapsule {
+  const registered = [...config.train, ...config.holdout]
+    .find((entry) => entry.capsuleId === capsuleId);
+  if (registered === undefined) {
+    throw new UsageError(`distribution evidence names unknown capsule ${capsuleId}`);
+  }
+  if ("mode" in config.corpusCohort) {
+    const policy = verifyM2AuthorizedPartialCohort(root, config.corpusCohort.partialCohort);
+    const authorized = policy.admitted.find((entry) => entry.capsuleId === capsuleId);
+    if (authorized === undefined) {
+      throw new UsageError(`distribution evidence capsule ${capsuleId} is not admitted`);
+    }
+    const dir = join(root, "capsules", authorized.label);
+    const admitted = admitCapsule(dir, {
+      review: "required",
+      allowMissingGitBaselineWithOwnerReceipt: true,
+    });
+    if (
+      admitted.provisional
+      || admitted.manifest.id !== authorized.capsuleId
+      || admitted.digest !== authorized.capsuleDigest
+      || admitted.approval?.receipt.recordHash !== authorized.gate2ReceiptHash
+      || !gate2ReceiptCitesAuthorizedBasis(
+        policy,
+        authorized,
+        admitted.approval.receipt.approvalBasis,
+      )
+    ) {
+      throw new UsageError(`distribution evidence capsule ${capsuleId} failed admission binding`);
+    }
+    const capsule = { dir, admitted };
+    resolveRegisteredCapsuleLocation(config, registered, capsule);
+    return capsule;
+  }
+  const capsule = discoverCapsules(root).get(capsuleId);
+  if (capsule === undefined) {
+    throw new UsageError(`distribution evidence capsule ${capsuleId} is not installed`);
+  }
+  resolveRegisteredCapsuleLocation(config, registered, capsule);
+  return capsule;
+}
+
+function installedEvaluatorSourcePath(capsule: DiscoveredCapsule): string {
+  const entrypoint = capsule.admitted.manifest.evalEntrypoint;
+  const source = [...entrypoint].reverse().find((arg) => !arg.startsWith("-"));
+  if (source === undefined || source === entrypoint[0]) {
+    throw new UsageError("distribution evidence requires a capsule evaluator source entrypoint");
+  }
+  if (source.startsWith("/trusted/baseline/")) {
+    return resolve(capsule.dir, "baseline", source.slice("/trusted/baseline/".length));
+  }
+  if (source.startsWith("/trusted/")) {
+    return resolve(capsule.dir, source.slice("/trusted/".length));
+  }
+  return resolve(capsule.dir, "baseline", source);
+}
+
 function evidenceFileWithin(root: string, input: string, label: string): string {
   const path = resolve(root, input);
   const rel = relative(root, path);
@@ -2714,12 +2776,15 @@ function evidenceFileWithin(root: string, input: string, label: string): string 
   return path;
 }
 
-function verifyStructuralNondeterminism(
+export function verifyStructuralNondeterminism(
   root: string,
-  evidence: DistributionEvidence,
+  proof: CampaignImageStructuralNondeterminismProofV1,
+  installedEvaluatorPath: string,
 ): { path: string; bytes: Buffer } {
-  const proof = evidence.structuralNondeterminism;
   const sourcePath = evidenceFileWithin(root, proof.evaluatorSourcePath, "evaluator source");
+  if (sourcePath !== installedEvaluatorPath) {
+    throw new UsageError("structural proof source must match the installed capsule evaluator");
+  }
   const sourceBytes = readFileSync(sourcePath);
   if (sha256(sourceBytes) !== proof.evaluatorSourceSha256) {
     throw new UsageError("evaluator source hash does not match structural nondeterminism proof");
@@ -2753,6 +2818,7 @@ function verifyStructuralNondeterminism(
 function verifyDistributionEvidence(
   request: CampaignImageRepinRequest,
   evidence: DistributionEvidence,
+  config: RecursiveMetaCampaignConfig,
 ): VerifiedDistributionEvidenceFiles {
   const evidenceDir = dirname(request.evidencePath);
   const preRegistrationPath = evidenceFileWithin(
@@ -2805,7 +2871,12 @@ function verifyDistributionEvidence(
   )) {
     throw new UsageError("distribution measurement was not performed after pre-registration");
   }
-  const source = verifyStructuralNondeterminism(request.root, evidence);
+  const capsule = installedCampaignCapsule(request.root, config, evidence.capsuleId);
+  const source = verifyStructuralNondeterminism(
+    request.root,
+    evidence.structuralNondeterminism,
+    installedEvaluatorSourcePath(capsule),
+  );
   return {
     files: [
       { path: preRegistrationPath, bytes: preRegistrationBytes },
@@ -2848,9 +2919,7 @@ export function repinCampaignImage(request: CampaignImageRepinRequest): Campaign
   ) {
     throw new UsageError("image equivalence evidence identity does not match the requested re-pin");
   }
-  const distributionFiles = "evidenceMode" in evidence && evidence.evidenceMode === "distribution"
-    ? verifyDistributionEvidence(request, evidence)
-    : { files: [] };
+  let distributionFiles: VerifiedDistributionEvidenceFiles = { files: [] };
   const evidenceSha256 = sha256(evidenceBytes);
   const evidencePath = relative(dirname(request.campaignPath), request.evidencePath).split(sep).join("/");
   if (evidencePath.length === 0) throw new UsageError("--evidence must not be the campaign file");
@@ -2865,6 +2934,9 @@ export function repinCampaignImage(request: CampaignImageRepinRequest): Campaign
       throw new UsageError(
         `--from-image ${request.fromImage} does not exactly match capsule ${request.capsuleId} image ${currentImage}`,
       );
+    }
+    if ("evidenceMode" in evidence && evidence.evidenceMode === "distribution") {
+      distributionFiles = verifyDistributionEvidence(request, evidence, config);
     }
 
     const previous = config.imageRepinJournal?.repins.at(-1);
