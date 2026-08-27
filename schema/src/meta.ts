@@ -107,12 +107,95 @@ const CampaignImageEquivalenceReplayV1 = z.object({
   }
 });
 
-/**
- * Machine-checkable authorization evidence for an image re-pin. The command
- * accepts only exact three-or-more-replay agreement for both a baseline and a
- * settled candidate, with zero model calls and passing capsule tripwires.
- */
-export const CampaignImageEquivalenceEvidenceV1 = z.object({
+const SourceLineCitationV1 = z.object({
+  line: z.number().int().positive(),
+  exactSourceLine: z.string().min(1).max(4_096),
+}).strict();
+
+export const CampaignImageStructuralNondeterminismProofV1 = z.object({
+  evaluatorSourcePath: z.string().min(1).max(4_096),
+  evaluatorSourceSha256: SHA256,
+  seedEnvironmentVariable: z.literal("HONE_SEED"),
+  entropySources: z.array(SourceLineCitationV1).min(1),
+  timingSources: z.array(SourceLineCitationV1).min(1),
+}).strict();
+export type CampaignImageStructuralNondeterminismProofV1 =
+  z.infer<typeof CampaignImageStructuralNondeterminismProofV1>;
+
+export const CampaignImageDistributionPreregistrationV1 = z.object({
+  version: z.literal(1),
+  evidenceMode: z.literal("distribution-preregistration"),
+  registeredAt: z.string().datetime({ offset: true }),
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  fromImage: z.string().regex(IMAGE_DIGEST_REF),
+  toImage: z.string().regex(IMAGE_DIGEST_REF),
+  structuralNondeterminism: CampaignImageStructuralNondeterminismProofV1,
+  measurementPlan: z.object({
+    replicatesPerArtifact: z.number().int().min(12),
+    k: z.literal(0.5),
+  }).strict(),
+  baseline: z.object({
+    artifact: SHA256,
+    historicalScore: z.number().finite(),
+  }).strict(),
+  settledCandidate: z.object({
+    artifact: SHA256,
+    historicalScore: z.number().finite(),
+  }).strict(),
+}).strict();
+export type CampaignImageDistributionPreregistrationV1 =
+  z.infer<typeof CampaignImageDistributionPreregistrationV1>;
+
+const CampaignImageDistributionReplayV1 = z.object({
+  artifact: SHA256,
+  historicalScore: z.number().finite(),
+  rawScores: z.array(z.number().finite()).min(12),
+  min: z.number().finite(),
+  max: z.number().finite(),
+  mean: z.number().finite(),
+  selfSpread: z.number().finite().nonnegative(),
+  relativeMeanOffset: z.number().finite().nonnegative(),
+}).strict().superRefine((replay, ctx) => {
+  const min = Math.min(...replay.rawScores);
+  const max = Math.max(...replay.rawScores);
+  const mean = replay.rawScores.reduce((sum, score) => sum + score, 0) / replay.rawScores.length;
+  const denominator = Math.abs(mean);
+  const selfSpread = denominator === 0 ? 0 : (max - min) / denominator;
+  const relativeMeanOffset = denominator === 0
+    ? Math.abs(replay.historicalScore - mean)
+    : Math.abs(replay.historicalScore - mean) / denominator;
+  for (const [path, actual, expected] of [
+    ["min", replay.min, min],
+    ["max", replay.max, max],
+    ["mean", replay.mean, mean],
+    ["selfSpread", replay.selfSpread, selfSpread],
+    ["relativeMeanOffset", replay.relativeMeanOffset, relativeMeanOffset],
+  ] as const) {
+    if (!Object.is(actual, expected)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [path],
+        message: `${path} does not match the raw score distribution`,
+      });
+    }
+  }
+  if (replay.historicalScore < min || replay.historicalScore > max) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["historicalScore"],
+      message: "historical score is outside the rebuilt distribution range",
+    });
+  }
+  if (!(relativeMeanOffset < 0.5 * selfSpread)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["relativeMeanOffset"],
+      message: "relative mean offset must be less than 0.5 times self-spread",
+    });
+  }
+});
+
+const CampaignImageExactEquivalenceEvidenceV1 = z.object({
   version: z.literal(1),
   generatedAt: z.string().datetime({ offset: true }),
   capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
@@ -127,6 +210,44 @@ export const CampaignImageEquivalenceEvidenceV1 = z.object({
   modelCalls: z.literal(0),
   result: z.literal("passed"),
 }).strict();
+
+const CampaignImageDistributionEquivalenceEvidenceV1 = z.object({
+  version: z.literal(1),
+  evidenceMode: z.literal("distribution"),
+  generatedAt: z.string().datetime({ offset: true }),
+  measurementStartedAt: z.string().datetime({ offset: true }),
+  measurementCompletedAt: z.string().datetime({ offset: true }),
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  fromImage: z.string().regex(IMAGE_DIGEST_REF),
+  toImage: z.string().regex(IMAGE_DIGEST_REF),
+  preRegistrationPath: z.string().min(1).max(4_096),
+  preRegistrationSha256: SHA256,
+  structuralNondeterminism: CampaignImageStructuralNondeterminismProofV1,
+  k: z.literal(0.5),
+  exploratoryMeasurements: z.object({
+    excluded: z.literal(true),
+    statement: z.literal(
+      "Pre-registration measurements were exploratory and are excluded; only post-pre-registration measurements are confirmatory.",
+    ),
+  }).strict(),
+  baseline: CampaignImageDistributionReplayV1,
+  settledCandidate: CampaignImageDistributionReplayV1,
+  tripwires: z.array(z.object({
+    name: z.string().min(1).max(512),
+    passed: z.literal(true),
+  }).strict()).min(1),
+  modelCalls: z.literal(0),
+  result: z.literal("passed"),
+}).strict();
+
+/**
+ * Exact replay remains the default. Distribution evidence is a separate,
+ * fail-closed arm for evaluators proven not to consume HONE_SEED.
+ */
+export const CampaignImageEquivalenceEvidenceV1 = z.union([
+  CampaignImageExactEquivalenceEvidenceV1,
+  CampaignImageDistributionEquivalenceEvidenceV1,
+]);
 export type CampaignImageEquivalenceEvidenceV1 = z.infer<typeof CampaignImageEquivalenceEvidenceV1>;
 
 /**

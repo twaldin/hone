@@ -69,6 +69,7 @@ import {
   DiagnosticOrderingReport,
   EvaluationRecord,
   CampaignImageEquivalenceEvidenceV1,
+  CampaignImageDistributionPreregistrationV1,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
   ProxyTraceRecord,
@@ -79,6 +80,7 @@ import {
   capsuleDigest,
   deriveCapsuleId,
   type CampaignImageRepinV1,
+  type CampaignImageStructuralNondeterminismProofV1,
   type CampaignSourceMigrationV1,
   type CampaignRuntimeClosureCaptureV1,
   type BudgetEnvelope,
@@ -2692,11 +2694,202 @@ export interface CampaignImageRepinResult {
   readonly repin: CampaignImageRepinV1;
 }
 
+type DistributionEvidence = Extract<
+  z.infer<typeof CampaignImageEquivalenceEvidenceV1>,
+  { evidenceMode: "distribution" }
+>;
+
+interface VerifiedDistributionEvidenceFiles {
+  readonly files: readonly { path: string; bytes: Buffer }[];
+}
+
+function installedCampaignCapsule(
+  root: string,
+  config: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+): DiscoveredCapsule {
+  const registered = [...config.train, ...config.holdout]
+    .find((entry) => entry.capsuleId === capsuleId);
+  if (registered === undefined) {
+    throw new UsageError(`distribution evidence names unknown capsule ${capsuleId}`);
+  }
+  if ("mode" in config.corpusCohort) {
+    const policy = verifyM2AuthorizedPartialCohort(root, config.corpusCohort.partialCohort);
+    const authorized = policy.admitted.find((entry) => entry.capsuleId === capsuleId);
+    if (authorized === undefined) {
+      throw new UsageError(`distribution evidence capsule ${capsuleId} is not admitted`);
+    }
+    const dir = join(root, "capsules", authorized.label);
+    const admitted = admitCapsule(dir, {
+      review: "required",
+      allowMissingGitBaselineWithOwnerReceipt: true,
+    });
+    if (
+      admitted.provisional
+      || admitted.manifest.id !== authorized.capsuleId
+      || admitted.digest !== authorized.capsuleDigest
+      || admitted.approval?.receipt.recordHash !== authorized.gate2ReceiptHash
+      || !gate2ReceiptCitesAuthorizedBasis(
+        policy,
+        authorized,
+        admitted.approval.receipt.approvalBasis,
+      )
+    ) {
+      throw new UsageError(`distribution evidence capsule ${capsuleId} failed admission binding`);
+    }
+    const capsule = { dir, admitted };
+    resolveRegisteredCapsuleLocation(config, registered, capsule);
+    return capsule;
+  }
+  const capsule = discoverCapsules(root).get(capsuleId);
+  if (capsule === undefined) {
+    throw new UsageError(`distribution evidence capsule ${capsuleId} is not installed`);
+  }
+  resolveRegisteredCapsuleLocation(config, registered, capsule);
+  return capsule;
+}
+
+function installedEvaluatorSourcePath(capsule: DiscoveredCapsule): string {
+  const entrypoint = capsule.admitted.manifest.evalEntrypoint;
+  const source = [...entrypoint].reverse().find((arg) => !arg.startsWith("-"));
+  if (source === undefined || source === entrypoint[0]) {
+    throw new UsageError("distribution evidence requires a capsule evaluator source entrypoint");
+  }
+  if (source.startsWith("/trusted/baseline/")) {
+    return resolve(capsule.dir, "baseline", source.slice("/trusted/baseline/".length));
+  }
+  if (source.startsWith("/trusted/")) {
+    return resolve(capsule.dir, source.slice("/trusted/".length));
+  }
+  return resolve(capsule.dir, "baseline", source);
+}
+
+function evidenceFileWithin(root: string, input: string, label: string): string {
+  const path = resolve(root, input);
+  const rel = relative(root, path);
+  if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`)) {
+    throw new UsageError(`${label} must stay inside ${root}`);
+  }
+  if (!existsSync(path) || !statSync(path).isFile()) {
+    throw new UsageError(`${label} must name an existing regular file`);
+  }
+  return path;
+}
+
+export function verifyStructuralNondeterminism(
+  root: string,
+  proof: CampaignImageStructuralNondeterminismProofV1,
+  installedEvaluatorPath: string,
+): { path: string; bytes: Buffer } {
+  const sourcePath = evidenceFileWithin(root, proof.evaluatorSourcePath, "evaluator source");
+  if (sourcePath !== installedEvaluatorPath) {
+    throw new UsageError("structural proof source must match the installed capsule evaluator");
+  }
+  const sourceBytes = readFileSync(sourcePath);
+  if (sha256(sourceBytes) !== proof.evaluatorSourceSha256) {
+    throw new UsageError("evaluator source hash does not match structural nondeterminism proof");
+  }
+  const source = sourceBytes.toString("utf8");
+  if (source.includes(proof.seedEnvironmentVariable)) {
+    throw new UsageError(
+      `distribution evidence is forbidden because the evaluator reads ${proof.seedEnvironmentVariable}`,
+    );
+  }
+  const lines = source.split(/\r?\n/);
+  const verifyCitations = (
+    citations: readonly { line: number; exactSourceLine: string }[],
+    label: string,
+    signal: RegExp,
+  ): void => {
+    for (const citation of citations) {
+      if (lines[citation.line - 1] !== citation.exactSourceLine) {
+        throw new UsageError(`${label} source citation does not match evaluator line ${citation.line}`);
+      }
+      if (!signal.test(citation.exactSourceLine)) {
+        throw new UsageError(`${label} source citation does not contain the required nondeterminism signal`);
+      }
+    }
+  };
+  verifyCitations(proof.entropySources, "entropy", /secrets\.|random\.|urandom|nonce/i);
+  verifyCitations(proof.timingSources, "timing", /time\.|monotonic|perf_counter|elapsed|wall/i);
+  return { path: sourcePath, bytes: sourceBytes };
+}
+
+function verifyDistributionEvidence(
+  request: CampaignImageRepinRequest,
+  evidence: DistributionEvidence,
+  config: RecursiveMetaCampaignConfig,
+): VerifiedDistributionEvidenceFiles {
+  const evidenceDir = dirname(request.evidencePath);
+  const preRegistrationPath = evidenceFileWithin(
+    evidenceDir,
+    evidence.preRegistrationPath,
+    "distribution pre-registration",
+  );
+  const preRegistrationBytes = readFileSync(preRegistrationPath);
+  if (sha256(preRegistrationBytes) !== evidence.preRegistrationSha256) {
+    throw new UsageError("distribution pre-registration hash does not match evidence");
+  }
+  let preRegistration: z.infer<typeof CampaignImageDistributionPreregistrationV1>;
+  try {
+    preRegistration = CampaignImageDistributionPreregistrationV1.parse(
+      JSON.parse(preRegistrationBytes.toString("utf8")),
+    );
+  } catch (error) {
+    throw new UsageError(
+      `invalid distribution pre-registration: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (
+    preRegistration.capsuleId !== evidence.capsuleId
+    || preRegistration.fromImage !== evidence.fromImage
+    || preRegistration.toImage !== evidence.toImage
+    || preRegistration.baseline.artifact !== evidence.baseline.artifact
+    || preRegistration.baseline.historicalScore !== evidence.baseline.historicalScore
+    || preRegistration.settledCandidate.artifact !== evidence.settledCandidate.artifact
+    || preRegistration.settledCandidate.historicalScore !== evidence.settledCandidate.historicalScore
+    || canonicalJson(preRegistration.structuralNondeterminism)
+      !== canonicalJson(evidence.structuralNondeterminism)
+  ) {
+    throw new UsageError("distribution evidence does not match its pre-registration");
+  }
+  if (
+    preRegistration.measurementPlan.k !== evidence.k
+    || evidence.baseline.rawScores.length < preRegistration.measurementPlan.replicatesPerArtifact
+    || evidence.settledCandidate.rawScores.length < preRegistration.measurementPlan.replicatesPerArtifact
+  ) {
+    throw new UsageError("distribution evidence does not satisfy its pre-registered measurement plan");
+  }
+  const registeredAt = Date.parse(preRegistration.registeredAt);
+  const measurementStartedAt = Date.parse(evidence.measurementStartedAt);
+  const measurementCompletedAt = Date.parse(evidence.measurementCompletedAt);
+  const generatedAt = Date.parse(evidence.generatedAt);
+  if (!(
+    registeredAt < measurementStartedAt
+    && measurementStartedAt <= measurementCompletedAt
+    && measurementCompletedAt <= generatedAt
+  )) {
+    throw new UsageError("distribution measurement was not performed after pre-registration");
+  }
+  const capsule = installedCampaignCapsule(request.root, config, evidence.capsuleId);
+  const source = verifyStructuralNondeterminism(
+    request.root,
+    evidence.structuralNondeterminism,
+    installedEvaluatorSourcePath(capsule),
+  );
+  return {
+    files: [
+      { path: preRegistrationPath, bytes: preRegistrationBytes },
+      source,
+    ],
+  };
+}
+
 /**
- * Sanctioned frozen-campaign image replacement. Exact equivalence evidence is
- * parsed and hashed before the append-only record becomes the durable commit
- * point. The campaign record lock serializes this operation with source
- * migration and closure capture.
+ * Sanctioned frozen-campaign image replacement. Exact replay remains the
+ * default; the distribution arm additionally verifies a prior registration
+ * and evaluator-source proof. Evidence bytes are hashed before the append-only
+ * record becomes the durable commit point under the shared campaign lock.
  */
 export function repinCampaignImage(request: CampaignImageRepinRequest): CampaignImageRepinResult {
   if (!/^cap_[0-9a-f]{12}$/.test(request.capsuleId)) {
@@ -2726,6 +2919,7 @@ export function repinCampaignImage(request: CampaignImageRepinRequest): Campaign
   ) {
     throw new UsageError("image equivalence evidence identity does not match the requested re-pin");
   }
+  let distributionFiles: VerifiedDistributionEvidenceFiles = { files: [] };
   const evidenceSha256 = sha256(evidenceBytes);
   const evidencePath = relative(dirname(request.campaignPath), request.evidencePath).split(sep).join("/");
   if (evidencePath.length === 0) throw new UsageError("--evidence must not be the campaign file");
@@ -2740,6 +2934,9 @@ export function repinCampaignImage(request: CampaignImageRepinRequest): Campaign
       throw new UsageError(
         `--from-image ${request.fromImage} does not exactly match capsule ${request.capsuleId} image ${currentImage}`,
       );
+    }
+    if ("evidenceMode" in evidence && evidence.evidenceMode === "distribution") {
+      distributionFiles = verifyDistributionEvidence(request, evidence, config);
     }
 
     const previous = config.imageRepinJournal?.repins.at(-1);
@@ -2784,6 +2981,11 @@ export function repinCampaignImage(request: CampaignImageRepinRequest): Campaign
     }
     if (!readFileSync(request.evidencePath).equals(evidenceBytes)) {
       throw new UsageError("image equivalence evidence changed during re-pin; retry");
+    }
+    for (const file of distributionFiles.files) {
+      if (!readFileSync(file.path).equals(file.bytes)) {
+        throw new UsageError("distribution evidence input changed during re-pin; retry");
+      }
     }
     writeFileDurable(request.campaignPath, `${JSON.stringify(migrated, null, 2)}\n`);
     chmodSync(request.campaignPath, 0o600);
