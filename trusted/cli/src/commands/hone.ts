@@ -2751,6 +2751,9 @@ export function repinCampaignImage(request: CampaignImageRepinRequest): Campaign
     if (!readFileSync(request.campaignPath).equals(originalBytes)) {
       throw new UsageError("campaign file changed during image re-pin; retry");
     }
+    if (!readFileSync(request.evidencePath).equals(evidenceBytes)) {
+      throw new UsageError("image equivalence evidence changed during re-pin; retry");
+    }
     writeFileDurable(request.campaignPath, `${JSON.stringify(migrated, null, 2)}\n`);
     chmodSync(request.campaignPath, 0o600);
     reconcileRegisteredCampaignConfig(
