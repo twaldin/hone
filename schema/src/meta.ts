@@ -63,6 +63,73 @@ export const CampaignSourceMigrationJournalV1 = z.object({
 export type CampaignSourceMigrationJournalV1 = z.infer<typeof CampaignSourceMigrationJournalV1>;
 
 /**
+ * Provenance for a sanctioned replacement of one capsule's unavailable image.
+ * The equivalence record is hashed as exact bytes before this record is
+ * appended; consumers can therefore distinguish re-pinned campaigns from the
+ * original image-bound freeze.
+ */
+export const CampaignImageRepinV1 = z.object({
+  version: z.literal(1),
+  at: z.string().datetime({ offset: true }),
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  fromImage: z.string().regex(IMAGE_DIGEST_REF),
+  toImage: z.string().regex(IMAGE_DIGEST_REF),
+  evidencePath: z.string().min(1).max(4_096),
+  evidenceSha256: SHA256,
+  reason: z.string().min(1).max(4_096),
+  operator: z.string().min(1).max(256).optional(),
+  previousRecordDigest: SHA256.nullable(),
+  recordDigest: SHA256,
+}).strict();
+export type CampaignImageRepinV1 = z.infer<typeof CampaignImageRepinV1>;
+
+export const CampaignImageRepinJournalV1 = z.object({
+  version: z.literal(1),
+  /** Hash of the exact pre-repin frozen config; remains the campaign identity. */
+  campaignConfigHash: SHA256,
+  repins: z.array(CampaignImageRepinV1).min(1),
+}).strict();
+export type CampaignImageRepinJournalV1 = z.infer<typeof CampaignImageRepinJournalV1>;
+
+const CampaignImageEquivalenceReplayV1 = z.object({
+  artifact: SHA256,
+  recordedScore: z.number().finite(),
+  reproducedScores: z.array(z.number().finite()).min(3),
+}).strict().superRefine((replay, ctx) => {
+  for (const [index, score] of replay.reproducedScores.entries()) {
+    if (score !== replay.recordedScore) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reproducedScores", index],
+        message: `reproduced score ${score} does not exactly match recorded score ${replay.recordedScore}`,
+      });
+    }
+  }
+});
+
+/**
+ * Machine-checkable authorization evidence for an image re-pin. The command
+ * accepts only exact three-or-more-replay agreement for both a baseline and a
+ * settled candidate, with zero model calls and passing capsule tripwires.
+ */
+export const CampaignImageEquivalenceEvidenceV1 = z.object({
+  version: z.literal(1),
+  generatedAt: z.string().datetime({ offset: true }),
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  fromImage: z.string().regex(IMAGE_DIGEST_REF),
+  toImage: z.string().regex(IMAGE_DIGEST_REF),
+  baseline: CampaignImageEquivalenceReplayV1,
+  settledCandidate: CampaignImageEquivalenceReplayV1,
+  tripwires: z.array(z.object({
+    name: z.string().min(1).max(512),
+    passed: z.literal(true),
+  }).strict()).min(1),
+  modelCalls: z.literal(0),
+  result: z.literal("passed"),
+}).strict();
+export type CampaignImageEquivalenceEvidenceV1 = z.infer<typeof CampaignImageEquivalenceEvidenceV1>;
+
+/**
  * Durable binding from one frozen campaign to a content-addressed copy of
  * the exact source and installed dependency bytes needed to reconstruct its
  * optimizer base. The referenced manifest and tree live in the campaign CAS;
@@ -272,6 +339,11 @@ const MetaCampaignConfigShape = z.object({
    * original frozen config and authenticated against that config's hash.
    */
   sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+  /**
+   * Append-only image replacement provenance. Each record binds one capsule's
+   * old and new immutable image references to exact equivalence-evidence bytes.
+   */
+  imageRepinJournal: CampaignImageRepinJournalV1.optional(),
   /**
    * Append-only runtime-closure captures. This provenance is intentionally
    * orthogonal to source migration: both journals authenticate against the

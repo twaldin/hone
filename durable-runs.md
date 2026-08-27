@@ -75,6 +75,44 @@ before the campaign file is committed. Ordinary `hone recursive` then accepts
 only the new source; the original campaign hash and durable state directory
 remain stable.
 
+If a digest-pinned capsule image is permanently unavailable, do not substitute
+an image in the frozen JSON by hand. First produce a version-1 image-equivalence
+record with zero model calls: the original baseline score and one settled
+candidate score must each replay exactly for at least three repetitions on the
+replacement image, and the capsule's determinism/tripwire checks must pass.
+Then run:
+
+```sh
+hone campaign repin-image \
+  --campaign <frozen-campaign.json> \
+  --capsule <cap_id> \
+  --from-image <unavailable-name@sha256:digest> \
+  --to-image <equivalent-name@sha256:digest> \
+  --evidence <image-equivalence.v1.json> \
+  --reason "<operator reason>"
+```
+
+The command validates the evidence structure and exact score agreement, hashes
+the evidence bytes, and appends a digest-chained image re-pin record under the
+same campaign-record lock as source migration and closure capture. It updates
+every copy of that capsule image in the train/holdout and development-panel
+surfaces while preserving the original campaign hash. The installed capsule
+manifest remains authenticated at its original image and capsule digest;
+recursive children receive the journal-authenticated replacement as a separate
+execution image, which is sealed in each child campaign session and cannot
+change on resume. The re-pin journal is included in phase receipts,
+trajectories, statistical records, and authorizations. Missing, mismatched,
+nondeterministic, nonzero-model-call, or failed-tripwire evidence refuses before
+mutation.
+
+Terminalize any unfinished child of the affected capsule before re-pinning.
+Such a child is session-sealed to its original image and correctly refuses a
+resume under the replacement; leaving it nonterminal would deterministically
+livelock its work identity. Re-pin only after equivalence evidence exists, then
+resume the outer campaign. The journal authenticates `evidenceSha256`; later
+audits must re-hash the referenced `evidencePath` and compare it to that digest
+because ordinary resume does not reopen the evidence file.
+
 Every recursive freeze now captures its complete source/dependency closure into
 the campaign CAS before publishing the frozen record. Regular files are split
 into fixed-size content-addressed CAS chunks; the stable tree object is separate

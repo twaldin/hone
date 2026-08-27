@@ -37,6 +37,7 @@ import {
   MetaEnvelopeFileRecordPortV1,
   MetaResourceEnvelopeLedger,
   campaignRecordExtends,
+  campaignImageRepinRecordDigest,
   campaignSourceMigrationRecordDigest,
   metaCampaignConfigHash,
   mapBounded,
@@ -67,6 +68,7 @@ import {
   CapsuleManifest,
   DiagnosticOrderingReport,
   EvaluationRecord,
+  CampaignImageEquivalenceEvidenceV1,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
   ProxyTraceRecord,
@@ -76,6 +78,7 @@ import {
   canonicalJson,
   capsuleDigest,
   deriveCapsuleId,
+  type CampaignImageRepinV1,
   type CampaignSourceMigrationV1,
   type CampaignRuntimeClosureCaptureV1,
   type BudgetEnvelope,
@@ -180,6 +183,10 @@ const HONE_USAGE = "usage: hone hone --campaign <path> --headless [--phase freez
 const CAMPAIGN_MIGRATE_SOURCE_USAGE =
   "usage: hone campaign migrate-source --campaign <frozen.json> "
   + "--from <oldSourceCommit> --to <newSourceCommit> --reason <text>";
+const CAMPAIGN_REPIN_IMAGE_USAGE =
+  "usage: hone campaign repin-image --campaign <frozen.json> --capsule <id> "
+  + "--from-image <immutable-image> --to-image <immutable-image> "
+  + "--evidence <equivalence-record.json> --reason <text>";
 const CAMPAIGN_CAPTURE_CLOSURE_USAGE =
   "usage: hone campaign capture-closure --campaign <frozen.json> --source <git-worktree> "
   + "[--source-commit <historicalCommit>] [--cas <dir>] "
@@ -538,6 +545,7 @@ export function campaignChildAdmissionAllowed(authority: CampaignPauseAuthority)
 export interface CapsuleLocation {
   dir: string;
   digest: string;
+  executionImage: string;
   terminalHoldoutAssetGroupIds: readonly string[];
 }
 
@@ -1041,6 +1049,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         [location.dir, "--headless", "--config", configPath, "--optimizer-artifact", request.sourceArtifact],
         {
           runId: executionRunId,
+          capsuleImageOverride: location.executionImage,
           measurementEpoch: request.identity.measurementEpoch,
           ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
             ? {}
@@ -1090,6 +1099,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
           [location.dir, "--headless", "--resume", "--optimizer-artifact", request.sourceArtifact],
           {
             runId: executionRunId,
+            capsuleImageOverride: location.executionImage,
             measurementEpoch: request.identity.measurementEpoch,
             ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
               ? {}
@@ -2036,7 +2046,7 @@ function parseResponseObservations(body: string): Array<{ model: string | null; 
   return observations;
 }
 
-interface DiscoveredCapsule {
+export interface DiscoveredCapsule {
   readonly dir: string;
   readonly admitted: AdmittedCapsule;
 }
@@ -2145,42 +2155,70 @@ function freezeCorpusEntries(root: string, config: AnyMetaCampaignConfig): Froze
   };
 }
 
-function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
+export function campaignAdmittedCapsuleImage(
+  config: AnyMetaCampaignConfig,
+  capsuleId: string,
+  registeredImage: string,
+): string {
+  return config.imageRepinJournal?.repins
+    .find((repin) => repin.capsuleId === capsuleId)?.fromImage
+    ?? registeredImage;
+}
+
+export function resolveRegisteredCapsuleLocation(
+  config: AnyMetaCampaignConfig,
+  registered: MetaCapsuleEntry,
+  capsule: DiscoveredCapsule,
+): CapsuleLocation {
+  const admitted = capsule.admitted;
+  const admittedImage = campaignAdmittedCapsuleImage(
+    config,
+    registered.capsuleId,
+    registered.image,
+  );
+  if (
+    admitted.digest !== registered.capsuleDigest
+    || admitted.manifest.image !== admittedImage
+    || capsuleOracleDigest(admitted) !== registered.oracleDigest
+    || capsuleScalarizerDigest(admitted) !== registered.scalarizerDigest
+  ) {
+    throw new UsageError(`registered campaign capsule ${registered.capsuleId} has identity drift`);
+  }
+  const terminalHoldoutAssetGroupIds = admitted.manifest.assetGroups
+    .filter((group) => group.visibility === "holdout")
+    .map((group) => group.id);
+  if (config.holdout.some((entry) => entry.capsuleId === registered.capsuleId)) {
+    const terminalArms = config.version === 2 ? 3 : 2;
+    const requiredLifetimeAccesses =
+      (4 * config.counts.innerEpisodesMax + 1) * terminalArms * config.counts.holdoutReplicates;
+    if (terminalHoldoutAssetGroupIds.length === 0) {
+      throw new UsageError(`terminal holdout capsule ${registered.capsuleId} has no holdout asset group`);
+    }
+    if (admitted.manifest.budget.maxEvaluatorInvocations < requiredLifetimeAccesses) {
+      throw new UsageError(
+        `terminal holdout capsule ${registered.capsuleId} lifetime budget ${admitted.manifest.budget.maxEvaluatorInvocations} cannot cover ${requiredLifetimeAccesses} accesses`,
+      );
+    }
+  }
+  return {
+    dir: capsule.dir,
+    digest: admitted.digest,
+    executionImage: registered.image,
+    terminalHoldoutAssetGroupIds,
+  };
+}
+
+export function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
+  metaCampaignConfigHash(config);
   const discovered = discoverCapsules(root, config.version === 2 ? config.corpusCohort : undefined);
   const found = new Map<string, CapsuleLocation>();
   for (const registered of [...config.train, ...config.holdout]) {
     const capsule = discovered.get(registered.capsuleId);
     if (capsule === undefined) throw new UsageError(`registered campaign capsule ${registered.capsuleId} is not installed`);
-    const admitted = capsule.admitted;
-    if (
-      admitted.digest !== registered.capsuleDigest
-      || admitted.manifest.image !== registered.image
-      || capsuleOracleDigest(admitted) !== registered.oracleDigest
-      || capsuleScalarizerDigest(admitted) !== registered.scalarizerDigest
-    ) {
-      throw new UsageError(`registered campaign capsule ${registered.capsuleId} has identity drift`);
-    }
-    const terminalHoldoutAssetGroupIds = admitted.manifest.assetGroups
-      .filter((group) => group.visibility === "holdout")
-      .map((group) => group.id);
-    if (config.holdout.some((entry) => entry.capsuleId === registered.capsuleId)) {
-      const terminalArms = config.version === 2 ? 3 : 2;
-      const requiredLifetimeAccesses =
-        (4 * config.counts.innerEpisodesMax + 1) * terminalArms * config.counts.holdoutReplicates;
-      if (terminalHoldoutAssetGroupIds.length === 0) {
-        throw new UsageError(`terminal holdout capsule ${registered.capsuleId} has no holdout asset group`);
-      }
-      if (admitted.manifest.budget.maxEvaluatorInvocations < requiredLifetimeAccesses) {
-        throw new UsageError(
-          `terminal holdout capsule ${registered.capsuleId} lifetime budget ${admitted.manifest.budget.maxEvaluatorInvocations} cannot cover ${requiredLifetimeAccesses} accesses`,
-        );
-      }
-    }
-    found.set(registered.capsuleDigest, {
-      dir: capsule.dir,
-      digest: admitted.digest,
-      terminalHoldoutAssetGroupIds,
-    });
+    found.set(
+      registered.capsuleDigest,
+      resolveRegisteredCapsuleLocation(config, registered, capsule),
+    );
   }
   return found;
 }
@@ -2578,6 +2616,189 @@ export async function migrateCampaignSource(
   }
 }
 
+function repinCampaignCapsuleImage(
+  config: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+  image: string,
+): RecursiveMetaCampaignConfig {
+  const replace = <T extends MetaCapsuleEntry>(capsule: T): T => (
+    capsule.capsuleId === capsuleId ? { ...capsule, image } : capsule
+  );
+  return MetaCampaignConfigV2.parse({
+    ...config,
+    train: config.train.map(replace),
+    holdout: config.holdout.map(replace),
+    developmentPanel: {
+      ...config.developmentPanel,
+      members: config.developmentPanel.members.map((member) => ({
+        ...member,
+        capsule: replace(member.capsule),
+      })),
+    },
+  });
+}
+
+function imageRepinFrozenProjection(
+  configInput: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+): string {
+  const config = MetaCampaignConfigV2.parse(configInput);
+  const { imageRepinJournal: _journal, ...withoutJournal } = config;
+  return canonicalJson(repinCampaignCapsuleImage(
+    MetaCampaignConfigV2.parse(withoutJournal),
+    capsuleId,
+    "hone-repin-projection@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  ));
+}
+
+/** Mutation guard: an image re-pin may touch only one capsule image and its journal. */
+export function assertCampaignImageRepinOnly(
+  before: RecursiveMetaCampaignConfig,
+  after: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+): void {
+  if (imageRepinFrozenProjection(before, capsuleId) !== imageRepinFrozenProjection(after, capsuleId)) {
+    throw new UsageError("campaign image re-pin attempted to alter frozen campaign fields");
+  }
+}
+
+function currentCampaignCapsuleImage(
+  config: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+): string {
+  const matches = [...config.train, ...config.holdout]
+    .filter((capsule) => capsule.capsuleId === capsuleId);
+  if (matches.length !== 1) {
+    throw new UsageError(`--capsule ${capsuleId} must name exactly one campaign corpus entry`);
+  }
+  return matches[0]!.image;
+}
+
+export interface CampaignImageRepinRequest {
+  readonly root: string;
+  readonly campaignPath: string;
+  readonly capsuleId: string;
+  readonly fromImage: string;
+  readonly toImage: string;
+  readonly evidencePath: string;
+  readonly reason: string;
+  readonly at: string;
+  readonly operator?: string;
+}
+
+export interface CampaignImageRepinResult {
+  readonly configHash: Sha256Digest;
+  readonly campaignPath: string;
+  readonly repin: CampaignImageRepinV1;
+}
+
+/**
+ * Sanctioned frozen-campaign image replacement. Exact equivalence evidence is
+ * parsed and hashed before the append-only record becomes the durable commit
+ * point. The campaign record lock serializes this operation with source
+ * migration and closure capture.
+ */
+export function repinCampaignImage(request: CampaignImageRepinRequest): CampaignImageRepinResult {
+  if (!/^cap_[0-9a-f]{12}$/.test(request.capsuleId)) {
+    throw new UsageError("--capsule must be a canonical capsule id");
+  }
+  if (request.fromImage === request.toImage) {
+    throw new UsageError("campaign image re-pin requires different --from-image and --to-image");
+  }
+  if (request.reason.trim().length === 0) throw new UsageError("--reason must contain non-whitespace text");
+  if (!existsSync(request.evidencePath) || !statSync(request.evidencePath).isFile()) {
+    throw new UsageError("--evidence must name an existing regular file");
+  }
+
+  const evidenceBytes = readFileSync(request.evidencePath);
+  let evidence: z.infer<typeof CampaignImageEquivalenceEvidenceV1>;
+  try {
+    evidence = CampaignImageEquivalenceEvidenceV1.parse(JSON.parse(evidenceBytes.toString("utf8")));
+  } catch (error) {
+    throw new UsageError(
+      `invalid image equivalence evidence: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (
+    evidence.capsuleId !== request.capsuleId
+    || evidence.fromImage !== request.fromImage
+    || evidence.toImage !== request.toImage
+  ) {
+    throw new UsageError("image equivalence evidence identity does not match the requested re-pin");
+  }
+  const evidenceSha256 = sha256(evidenceBytes);
+  const evidencePath = relative(dirname(request.campaignPath), request.evidencePath).split(sep).join("/");
+  if (evidencePath.length === 0) throw new UsageError("--evidence must not be the campaign file");
+
+  const campaignRecordLock = acquireCampaignRecordLock(request.campaignPath);
+  try {
+    const originalBytes = readFileSync(request.campaignPath);
+    const config = MetaCampaignConfigV2.parse(JSON.parse(originalBytes.toString("utf8")));
+    const configHash = metaCampaignConfigHash(config);
+    const currentImage = currentCampaignCapsuleImage(config, request.capsuleId);
+    if (currentImage !== request.fromImage) {
+      throw new UsageError(
+        `--from-image ${request.fromImage} does not exactly match capsule ${request.capsuleId} image ${currentImage}`,
+      );
+    }
+
+    const previous = config.imageRepinJournal?.repins.at(-1);
+    const body = {
+      version: 1,
+      at: request.at,
+      capsuleId: request.capsuleId,
+      fromImage: request.fromImage,
+      toImage: request.toImage,
+      evidencePath,
+      evidenceSha256,
+      reason: request.reason,
+      ...(request.operator === undefined ? {} : { operator: request.operator }),
+      previousRecordDigest: previous?.recordDigest ?? null,
+    } as const;
+    const repin = {
+      ...body,
+      recordDigest: campaignImageRepinRecordDigest(body),
+    } satisfies CampaignImageRepinV1;
+    const migrated = MetaCampaignConfigV2.parse({
+      ...repinCampaignCapsuleImage(config, request.capsuleId, request.toImage),
+      imageRepinJournal: {
+        version: 1,
+        campaignConfigHash: config.imageRepinJournal?.campaignConfigHash ?? configHash,
+        repins: [...(config.imageRepinJournal?.repins ?? []), repin],
+      },
+    });
+    assertCampaignImageRepinOnly(config, migrated, request.capsuleId);
+    if (metaCampaignConfigHash(migrated) !== configHash) {
+      throw new UsageError("campaign image re-pin changed the frozen campaign identity");
+    }
+
+    const registeredConfigPath = join(
+      runsRoot(request.root),
+      `recursive-cell-${configHash.slice("sha256:".length)}`,
+      "campaign.json",
+    );
+    const registeredNeedsReconciliation =
+      registeredCampaignConfigNeedsReconciliation(registeredConfigPath, migrated);
+    if (!readFileSync(request.campaignPath).equals(originalBytes)) {
+      throw new UsageError("campaign file changed during image re-pin; retry");
+    }
+    if (!readFileSync(request.evidencePath).equals(evidenceBytes)) {
+      throw new UsageError("image equivalence evidence changed during re-pin; retry");
+    }
+    writeFileDurable(request.campaignPath, `${JSON.stringify(migrated, null, 2)}\n`);
+    chmodSync(request.campaignPath, 0o600);
+    reconcileRegisteredCampaignConfig(
+      registeredConfigPath,
+      migrated,
+      registeredNeedsReconciliation,
+    );
+    return { configHash, campaignPath: request.campaignPath, repin };
+  } finally {
+    campaignRecordLock.release();
+  }
+}
+
+
 /** Explicit operator front door for frozen-campaign source and closure records. */
 export async function campaignCommand(args: string[], io: CmdIo): Promise<number> {
   const [subcommand, ...rest] = args;
@@ -2626,6 +2847,46 @@ export async function campaignCommand(args: string[], io: CmdIo): Promise<number
       command: "campaign.migrate-source",
       ...result,
     }));
+    return 0;
+  }
+
+  if (subcommand === "repin-image") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: [],
+      strings: ["campaign", "capsule", "from-image", "to-image", "evidence", "reason"],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const capsuleId = strFlag(flags, "capsule");
+    const fromImage = strFlag(flags, "from-image");
+    const toImage = strFlag(flags, "to-image");
+    const evidenceFlag = strFlag(flags, "evidence");
+    const reason = strFlag(flags, "reason");
+    if (
+      positionals.length !== 0
+      || campaignFlag === undefined
+      || capsuleId === undefined
+      || fromImage === undefined
+      || toImage === undefined
+      || evidenceFlag === undefined
+      || reason === undefined
+    ) {
+      throw new UsageError(CAMPAIGN_REPIN_IMAGE_USAGE);
+    }
+    const campaignPath = resolve(io.root, campaignFlag);
+    assertCampaignPathUntracked(io.root, campaignPath);
+    const operator = io.env["USER"] ?? io.env["LOGNAME"];
+    const result = repinCampaignImage({
+      root: io.root,
+      campaignPath,
+      capsuleId,
+      fromImage,
+      toImage,
+      evidencePath: resolve(io.root, evidenceFlag),
+      reason,
+      at: new Date().toISOString(),
+      ...(operator === undefined || operator.trim().length === 0 ? {} : { operator }),
+    });
+    io.out(canonicalJson({ command: "campaign.repin-image", ...result }));
     return 0;
   }
 
@@ -2793,7 +3054,8 @@ export async function campaignCommand(args: string[], io: CmdIo): Promise<number
   }
 
   throw new UsageError(
-    `${CAMPAIGN_MIGRATE_SOURCE_USAGE}\n${CAMPAIGN_CAPTURE_CLOSURE_USAGE}\n${CAMPAIGN_RESTORE_CLOSURE_USAGE}`,
+    `${CAMPAIGN_MIGRATE_SOURCE_USAGE}\n${CAMPAIGN_REPIN_IMAGE_USAGE}\n`
+    + `${CAMPAIGN_CAPTURE_CLOSURE_USAGE}\n${CAMPAIGN_RESTORE_CLOSURE_USAGE}`,
   );
 }
 
@@ -3650,6 +3912,7 @@ export function recursivePhaseReceipt(
     configHash: metaCampaignConfigHash(config),
     phase,
     sourceMigrationJournal: config.sourceMigrationJournal ?? null,
+    imageRepinJournal: config.imageRepinJournal ?? null,
     runtimeClosureJournal: config.runtimeClosureJournal ?? null,
     ...body,
   };
@@ -4049,10 +4312,7 @@ export async function recursiveCommand(
         if (controlWinner === undefined || generation2 === undefined || recordDir === undefined) throw new UsageError(RECURSIVE_USAGE);
         // The G1 statistical record lives in the (separate) stage-A cell directory.
         const authorization = assembleG1Authorization({
-          configHash,
-          ...(config.sourceMigrationJournal === undefined
-            ? {}
-            : { sourceMigrationJournal: config.sourceMigrationJournal }),
+          config,
           record: readG1Record(resolve(io.root, recordDir)),
           controlWinner: await checkedPublicIdentity(controlWinner, gate),
           generation2: await checkedPublicIdentity(generation2, gate),
@@ -4067,10 +4327,7 @@ export async function recursiveCommand(
       const generation2 = digestFlag(strFlag(flags, "generation2"), "--generation2");
       if (generation0 === undefined || generation1 === undefined || generation2 === undefined) throw new UsageError(RECURSIVE_USAGE);
       const authorization = assembleG2Authorization({
-        configHash,
-        ...(config.sourceMigrationJournal === undefined
-          ? {}
-          : { sourceMigrationJournal: config.sourceMigrationJournal }),
+        config,
         record: readG2Record(campaignDir),
         generation0: await checkedPublicIdentity(generation0, gate),
         generation1: await checkedPublicIdentity(generation1, gate),

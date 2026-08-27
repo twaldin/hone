@@ -1,12 +1,33 @@
-import { RunEvent, type BudgetState } from "@hone/schema";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { hashChildRunLaunchReceipt } from "@hone/broker";
+import { campaignImageRepinRecordDigest, metaCampaignConfigHash } from "@hone/meta";
+import {
+  ChildRunLaunchReceipt,
+  MetaCampaignConfigV1,
+  M2_PANEL_A_TASK_IDS,
+  MetaCampaignConfigV2,
+  RunEvent,
+  canonicalJson,
+  type BudgetState,
+  type ChildRunLaunchReceipt as ChildRunLaunchReceiptShape,
+  type MetaCampaignConfigV1 as LegacyConfig,
+  type MetaCampaignConfigV2 as RecursiveConfig,
+} from "@hone/schema";
 import { describe, expect, it } from "vitest";
+import { appendEvent } from "../src/eventlog.js";
+import { MetaJournalV1 } from "../src/meta-journal.js";
 import {
   bindRecursiveOuterEvents,
   controllerSpendDelta,
   extractAnytimePoints,
+  persistMetaSearchTrajectory,
   type RecursiveCandidateOuterGroup,
   persistTrajectoryWithoutMaskingSearchFailure,
 } from "../src/meta-trajectory.js";
+import { makeRoot } from "./helpers.js";
 const hash = `sha256:${"a".repeat(64)}` as RecursiveCandidateOuterGroup["artifact"];
 const candidate = `sha256:${"b".repeat(64)}`;
 const at = "2026-07-15T00:00:00.000Z";
@@ -20,6 +41,105 @@ function budget(tokens: number): BudgetState {
 }
 
 describe("meta recursive trajectory extraction", () => {
+
+const legacyFixturePath = fileURLToPath(new URL(
+  "../../../schema/fixtures/meta-campaign.m1.json",
+  import.meta.url,
+));
+
+function digest(value: string): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function repinLegacy(config: LegacyConfig): LegacyConfig {
+  const capsule = config.train[0]!;
+  const toImage = `hone-repinned@${digest("trajectory:v1:image")}`;
+  const body = {
+    version: 1,
+    at: "2026-08-27T02:40:00.000Z",
+    capsuleId: capsule.capsuleId,
+    fromImage: capsule.image,
+    toImage,
+    evidencePath: "trajectory-equivalence.v1.json",
+    evidenceSha256: digest("trajectory:v1:evidence"),
+    reason: "trajectory V1 provenance",
+    previousRecordDigest: null,
+  } as const;
+  return MetaCampaignConfigV1.parse({
+    ...config,
+    train: config.train.map((entry) => (
+      entry.capsuleId === capsule.capsuleId ? { ...entry, image: toImage } : entry
+    )),
+    imageRepinJournal: {
+      version: 1,
+      campaignConfigHash: metaCampaignConfigHash(config),
+      repins: [{ ...body, recordDigest: campaignImageRepinRecordDigest(body) }],
+    },
+  });
+}
+
+function repinRecursive(config: RecursiveConfig): RecursiveConfig {
+  const capsule = config.train[0]!;
+  const toImage = `hone-repinned@${digest("trajectory:v2:image")}`;
+  const body = {
+    version: 1,
+    at: "2026-08-27T02:41:00.000Z",
+    capsuleId: capsule.capsuleId,
+    fromImage: capsule.image,
+    toImage,
+    evidencePath: "trajectory-equivalence.v2.json",
+    evidenceSha256: digest("trajectory:v2:evidence"),
+    reason: "trajectory V2 provenance",
+    previousRecordDigest: null,
+  } as const;
+  return MetaCampaignConfigV2.parse({
+    ...config,
+    train: config.train.map((entry) => (
+      entry.capsuleId === capsule.capsuleId ? { ...entry, image: toImage } : entry
+    )),
+    developmentPanel: {
+      ...config.developmentPanel,
+      members: config.developmentPanel.members.map((member) => ({
+        ...member,
+        capsule: member.capsule.capsuleId === capsule.capsuleId
+          ? { ...member.capsule, image: toImage }
+          : member.capsule,
+      })),
+    },
+    imageRepinJournal: {
+      version: 1,
+      campaignConfigHash: metaCampaignConfigHash(config),
+      repins: [{ ...body, recordDigest: campaignImageRepinRecordDigest(body) }],
+    },
+  });
+}
+
+function writeOuterEvents(
+  root: string,
+  runId: string,
+  envelope: BudgetState["envelope"],
+  candidateArtifact?: `sha256:${string}`,
+): void {
+  const runDir = join(root, ".hone-runs", runId);
+  mkdirSync(runDir, { recursive: true });
+  appendEvent(runDir, {
+    runId,
+    at,
+    type: "run.started",
+    capsuleId: "cap_trajectory0000",
+    contractHash: digest("trajectory:contract"),
+    optimizerDigest: digest("trajectory:optimizer"),
+  });
+  appendEvent(runDir, { runId, at, type: "budget.snapshot", budget: { envelope, spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 } } });
+  appendEvent(runDir, { runId, at, type: "episode.started", episode: 0, parent: { hash } });
+  appendEvent(runDir, { runId, at, type: "eval.completed", artifact: { hash }, assetGroupId: "train", seed: 0, aggregate: 0.2, cached: false });
+  appendEvent(runDir, { runId, at, type: "budget.snapshot", budget: { envelope, spent: { tokens: 1, usd: 0, wallClockSec: 1, evaluatorInvocations: 1 } } });
+  if (candidateArtifact !== undefined) {
+    appendEvent(runDir, { runId, at, type: "episode.candidate", episode: 0, candidate: { hash: candidateArtifact }, sessionTrace: digest("trajectory:trace") });
+    appendEvent(runDir, { runId, at, type: "eval.completed", episode: 0, artifact: { hash: candidateArtifact }, assetGroupId: "train", seed: 0, aggregate: null, cached: false });
+    appendEvent(runDir, { runId, at, type: "budget.snapshot", budget: { envelope, spent: { tokens: 2, usd: 0, wallClockSec: 2, evaluatorInvocations: 2 } } });
+  }
+}
   it("keeps the first unscoped evaluation as baseline and ignores later promotion probes", () => {
     const events = [
       RunEvent.parse({ runId: "run", at, type: "run.started", capsuleId: "cap", contractHash: hash, optimizerDigest: hash }),
@@ -272,5 +392,135 @@ describe("meta recursive trajectory extraction", () => {
       { tokens: 10, usd: 1, wallClockSec: 2, evaluatorInvocations: 1 },
       1,
     )).toThrow("candidate ordinal 1 regresses trusted controller spend");
+  });
+
+  it("persists the image re-pin journal in V1 trajectory evidence", () => {
+    const root = makeRoot();
+    const campaignDir = join(root, "campaign");
+    mkdirSync(campaignDir, { recursive: true });
+    const config = repinLegacy(MetaCampaignConfigV1.parse(JSON.parse(
+      readFileSync(legacyFixturePath, "utf8"),
+    )));
+    const configHash = metaCampaignConfigHash(config);
+    const outerRunId = "run_trajectory_v1";
+    writeOuterEvents(root, outerRunId, config.budgets.outer);
+    const journal = MetaJournalV1.open(join(campaignDir, "meta-journal.ndjson"), config);
+    try {
+      const output = persistMetaSearchTrajectory({
+        root,
+        campaignDir,
+        outerRunId,
+        configHash,
+        config,
+        journal,
+      });
+      const trajectory = JSON.parse(readFileSync(output, "utf8"));
+      expect(trajectory.imageRepinJournal).toEqual(config.imageRepinJournal);
+    } finally {
+      journal.close();
+    }
+  });
+
+  it("persists the image re-pin journal in recursive V2 trajectory evidence", () => {
+    const root = makeRoot();
+    const campaignDir = join(root, "campaign");
+    mkdirSync(campaignDir, { recursive: true });
+    const recursiveFixturePath = fileURLToPath(new URL(
+      "../../../data/m2-refreeze-final/campaign-frozen.json",
+      import.meta.url,
+    ));
+    const config = repinRecursive(MetaCampaignConfigV2.parse(JSON.parse(
+      readFileSync(recursiveFixturePath, "utf8"),
+    )));
+    const trajectoryConfig = structuredClone(config);
+    const usedTaskIds = new Set(
+      trajectoryConfig.developmentPanel.members.map((member) => member.taskId),
+    );
+    for (let index = 6; index < 8; index += 1) {
+      const capsule = config.holdout[index - 6]!;
+      const taskId = M2_PANEL_A_TASK_IDS.find((candidate) => !usedTaskIds.has(candidate))!;
+      usedTaskIds.add(taskId);
+      trajectoryConfig.train.push(capsule);
+      trajectoryConfig.developmentPanel.members.push({
+        taskId,
+        capsule,
+        calibratedInnerCeiling: config.budgets.child,
+      });
+    }
+    const configHash = metaCampaignConfigHash(config);
+    const outerRunId = "run_trajectory_v2";
+    const candidateArtifact = digest("trajectory:v2:candidate");
+    writeOuterEvents(root, outerRunId, config.budgets.outer, candidateArtifact);
+
+    const bundleDigest = digest("trajectory:v2:bundle");
+    const identity = {
+      phase: "search" as const,
+      arm: "candidate" as const,
+      sourceArtifact: candidateArtifact,
+      bundleDigest,
+      capsuleId: config.train[0]!.capsuleId,
+      replicate: 0,
+      measurementEpoch: "trajectory:v2:epoch",
+    };
+    const journal = MetaJournalV1.open(join(campaignDir, "meta-journal.ndjson"), config);
+    const reservation = journal.reserveChild(identity, {
+      purpose: "search",
+      envelope: config.recursiveBudgets.search.identity,
+      reservationId: "trajectory-v2-reservation",
+      parentReservationId: null,
+      reserved: config.budgets.child,
+    });
+    journal.settleChildFailure(identity, {
+      evidenceHash: digest("trajectory:v2:failure"),
+      observed: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 },
+      status: "candidate_failed",
+    });
+    const childRunId = reservation.childRunId;
+    const receiptBody: Omit<ChildRunLaunchReceiptShape, "receiptDigest"> = {
+      child: {
+        runId: childRunId,
+        capsuleId: config.train[0]!.capsuleId,
+        sourceArtifact: { hash: candidateArtifact },
+        optimizerArtifact: { hash: bundleDigest },
+        purpose: "capsule",
+        schedule: {
+          candidateOrdinal: 0,
+          allocationOrdinal: 0,
+          innerEpisodesMax: config.counts.innerEpisodesMax,
+        },
+      },
+      depth: 1,
+      admission: {
+        campaignConfigHash: configHash,
+        cohort: "panel-a",
+        capsuleProvenanceHash: config.train[0]!.capsuleDigest,
+        sourceProvenanceHash: candidateArtifact,
+        optimizerProvenanceHash: bundleDigest,
+      },
+      launchedAt: "2026-08-27T02:42:00.000Z",
+    };
+    const receipt = ChildRunLaunchReceipt.parse({
+      ...receiptBody,
+      receiptDigest: hashChildRunLaunchReceipt(receiptBody),
+    });
+    writeFileSync(
+      join(campaignDir, `child-launch-${childRunId}.json`),
+      `${canonicalJson(receipt)}\n`,
+    );
+
+    try {
+      const output = persistMetaSearchTrajectory({
+        root,
+        campaignDir,
+        outerRunId,
+        configHash,
+        config: trajectoryConfig,
+        journal,
+      });
+      const trajectory = JSON.parse(readFileSync(output, "utf8"));
+      expect(trajectory.imageRepinJournal).toEqual(config.imageRepinJournal);
+    } finally {
+      journal.close();
+    }
   });
 });

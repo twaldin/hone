@@ -3,11 +3,11 @@ import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import {
+  CampaignImageRepinJournalV1,
   CampaignSourceMigrationJournalV1,
   M2_PANEL_A_TASK_IDS,
   M2_PANEL_B_TASK_IDS,
   canonicalJson,
-  type CampaignSourceMigrationJournalV1 as CampaignSourceMigrationJournal,
   type MetaCampaignConfigV2,
 } from "@hone/schema";
 import { metaCampaignConfigHash, type MetaMeasurement } from "@hone/meta";
@@ -171,6 +171,7 @@ export const G1StatisticalRecordV1 = z
     stage: z.literal("A"),
     configHash: SHA256,
     sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+    imageRepinJournal: CampaignImageRepinJournalV1.optional(),
     measurementCount: z.number().int().nonnegative(),
     measurementHash: SHA256,
     seed: OptimizerIdentity,
@@ -247,6 +248,7 @@ export const G2StatisticalRecordV1 = z
     stage: z.literal("B"),
     configHash: SHA256,
     sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+    imageRepinJournal: CampaignImageRepinJournalV1.optional(),
     measurementCount: z.number().int().nonnegative(),
     measurementHash: SHA256,
     target: OptimizerIdentity,
@@ -292,6 +294,7 @@ export const AuthorizationGateRecordV1 = z.discriminatedUnion("gate", [
       gate: z.literal("G1"),
       configHash: SHA256,
       sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+      imageRepinJournal: CampaignImageRepinJournalV1.optional(),
       /** inputsDigest of the G1 statistical record this authorization certifies. */
       statisticalRecordDigest: SHA256,
       statisticalPass: z.literal(true),
@@ -314,6 +317,7 @@ export const AuthorizationGateRecordV1 = z.discriminatedUnion("gate", [
       gate: z.literal("G2"),
       configHash: SHA256,
       sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+      imageRepinJournal: CampaignImageRepinJournalV1.optional(),
       statisticalRecordDigest: SHA256,
       statisticalPass: z.literal(true),
       acceptedArtifacts: z
@@ -592,6 +596,9 @@ export function assembleG1Record(inputs: G1RecordInputs): VerifiedG1Record {
     ...(config.sourceMigrationJournal === undefined
       ? {}
       : { sourceMigrationJournal: config.sourceMigrationJournal }),
+    ...(config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: config.imageRepinJournal }),
     measurementCount: inputs.measurements.length,
     measurementHash: inputs.receipt.measurementHash,
     seed,
@@ -749,6 +756,9 @@ export function assembleG2Record(inputs: G2RecordInputs): VerifiedG2Record {
     ...(config.sourceMigrationJournal === undefined
       ? {}
       : { sourceMigrationJournal: config.sourceMigrationJournal }),
+    ...(config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: config.imageRepinJournal }),
     measurementCount: inputs.measurements.length,
     measurementHash: inputs.receipt.measurementHash,
     target,
@@ -862,9 +872,8 @@ function readAuthorization(campaignDir: string, gate: "G1" | "G2"): VerifiedAuth
 // ---------------------------------------------------------------------------
 
 export interface G1AuthorizationInputs {
-  /** configHash of the STAGE-B cell this authorization opens (not the stage-A record's hash). */
-  configHash: string;
-  sourceMigrationJournal?: CampaignSourceMigrationJournal;
+  /** Exact Stage-B campaign this authorization opens; journals are derived, never caller-copied. */
+  config: MetaCampaignConfigV2;
   /** The stage-A G1 statistical record being certified; produced in the stage-A cell. */
   record: G1StatisticalRecordV1;
   controlWinner: OptimizerIdentity;
@@ -881,10 +890,13 @@ export function assembleG1Authorization(inputs: G1AuthorizationInputs): Verified
   const body = {
     version: `${GATE_RECORDS_VERSION}/authorization` as const,
     gate: "G1" as const,
-    configHash: inputs.configHash,
-    ...(inputs.sourceMigrationJournal === undefined
+    configHash: metaCampaignConfigHash(inputs.config),
+    ...(inputs.config.sourceMigrationJournal === undefined
       ? {}
-      : { sourceMigrationJournal: inputs.sourceMigrationJournal }),
+      : { sourceMigrationJournal: inputs.config.sourceMigrationJournal }),
+    ...(inputs.config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: inputs.config.imageRepinJournal }),
     statisticalRecordDigest: record.inputsDigest,
     statisticalPass: true as const,
     acceptedArtifacts: {
@@ -903,9 +915,8 @@ export function assembleG1Authorization(inputs: G1AuthorizationInputs): Verified
 }
 
 export interface G2AuthorizationInputs {
-  /** configHash of the TERMINAL cell this authorization opens. */
-  configHash: string;
-  sourceMigrationJournal?: CampaignSourceMigrationJournal;
+  /** Exact terminal campaign; journals are derived, never caller-copied. */
+  config: MetaCampaignConfigV2;
   /** The stage-B G2 statistical record being certified. */
   record: G2StatisticalRecordV1;
   generation0: OptimizerIdentity;
@@ -931,10 +942,13 @@ export function assembleG2Authorization(inputs: G2AuthorizationInputs): Verified
   const body = {
     version: `${GATE_RECORDS_VERSION}/authorization` as const,
     gate: "G2" as const,
-    configHash: inputs.configHash,
-    ...(inputs.sourceMigrationJournal === undefined
+    configHash: metaCampaignConfigHash(inputs.config),
+    ...(inputs.config.sourceMigrationJournal === undefined
       ? {}
-      : { sourceMigrationJournal: inputs.sourceMigrationJournal }),
+      : { sourceMigrationJournal: inputs.config.sourceMigrationJournal }),
+    ...(inputs.config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: inputs.config.imageRepinJournal }),
     statisticalRecordDigest: record.inputsDigest,
     statisticalPass: true as const,
     acceptedArtifacts: { generation0, generation1, generation2 },
