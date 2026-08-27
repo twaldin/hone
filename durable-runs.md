@@ -96,10 +96,22 @@ The command validates the evidence structure and exact score agreement, hashes
 the evidence bytes, and appends a digest-chained image re-pin record under the
 same campaign-record lock as source migration and closure capture. It updates
 every copy of that capsule image in the train/holdout and development-panel
-surfaces while preserving the original campaign hash. The re-pin journal is
-included in phase receipts, trajectories, statistical records, and
-authorizations. Missing, mismatched, nondeterministic, nonzero-model-call, or
-failed-tripwire evidence refuses before mutation.
+surfaces while preserving the original campaign hash. The installed capsule
+manifest remains authenticated at its original image and capsule digest;
+recursive children receive the journal-authenticated replacement as a separate
+execution image, which is sealed in each child campaign session and cannot
+change on resume. The re-pin journal is included in phase receipts,
+trajectories, statistical records, and authorizations. Missing, mismatched,
+nondeterministic, nonzero-model-call, or failed-tripwire evidence refuses before
+mutation.
+
+Terminalize any unfinished child of the affected capsule before re-pinning.
+Such a child is session-sealed to its original image and correctly refuses a
+resume under the replacement; leaving it nonterminal would deterministically
+livelock its work identity. Re-pin only after equivalence evidence exists, then
+resume the outer campaign. The journal authenticates `evidenceSha256`; later
+audits must re-hash the referenced `evidencePath` and compare it to that digest
+because ordinary resume does not reopen the evidence file.
 
 Every recursive freeze now captures its complete source/dependency closure into
 the campaign CAS before publishing the frozen record. Regular files are split

@@ -8,8 +8,6 @@ import {
   M2_PANEL_A_TASK_IDS,
   M2_PANEL_B_TASK_IDS,
   canonicalJson,
-  type CampaignImageRepinJournalV1 as CampaignImageRepinJournal,
-  type CampaignSourceMigrationJournalV1 as CampaignSourceMigrationJournal,
   type MetaCampaignConfigV2,
 } from "@hone/schema";
 import { metaCampaignConfigHash, type MetaMeasurement } from "@hone/meta";
@@ -874,10 +872,8 @@ function readAuthorization(campaignDir: string, gate: "G1" | "G2"): VerifiedAuth
 // ---------------------------------------------------------------------------
 
 export interface G1AuthorizationInputs {
-  /** configHash of the STAGE-B cell this authorization opens (not the stage-A record's hash). */
-  configHash: string;
-  sourceMigrationJournal?: CampaignSourceMigrationJournal;
-  imageRepinJournal?: CampaignImageRepinJournal;
+  /** Exact Stage-B campaign this authorization opens; journals are derived, never caller-copied. */
+  config: MetaCampaignConfigV2;
   /** The stage-A G1 statistical record being certified; produced in the stage-A cell. */
   record: G1StatisticalRecordV1;
   controlWinner: OptimizerIdentity;
@@ -894,13 +890,13 @@ export function assembleG1Authorization(inputs: G1AuthorizationInputs): Verified
   const body = {
     version: `${GATE_RECORDS_VERSION}/authorization` as const,
     gate: "G1" as const,
-    configHash: inputs.configHash,
-    ...(inputs.sourceMigrationJournal === undefined
+    configHash: metaCampaignConfigHash(inputs.config),
+    ...(inputs.config.sourceMigrationJournal === undefined
       ? {}
-      : { sourceMigrationJournal: inputs.sourceMigrationJournal }),
-    ...(inputs.imageRepinJournal === undefined
+      : { sourceMigrationJournal: inputs.config.sourceMigrationJournal }),
+    ...(inputs.config.imageRepinJournal === undefined
       ? {}
-      : { imageRepinJournal: inputs.imageRepinJournal }),
+      : { imageRepinJournal: inputs.config.imageRepinJournal }),
     statisticalRecordDigest: record.inputsDigest,
     statisticalPass: true as const,
     acceptedArtifacts: {
@@ -919,10 +915,8 @@ export function assembleG1Authorization(inputs: G1AuthorizationInputs): Verified
 }
 
 export interface G2AuthorizationInputs {
-  /** configHash of the TERMINAL cell this authorization opens. */
-  configHash: string;
-  sourceMigrationJournal?: CampaignSourceMigrationJournal;
-  imageRepinJournal?: CampaignImageRepinJournal;
+  /** Exact terminal campaign; journals are derived, never caller-copied. */
+  config: MetaCampaignConfigV2;
   /** The stage-B G2 statistical record being certified. */
   record: G2StatisticalRecordV1;
   generation0: OptimizerIdentity;
@@ -948,13 +942,13 @@ export function assembleG2Authorization(inputs: G2AuthorizationInputs): Verified
   const body = {
     version: `${GATE_RECORDS_VERSION}/authorization` as const,
     gate: "G2" as const,
-    configHash: inputs.configHash,
-    ...(inputs.sourceMigrationJournal === undefined
+    configHash: metaCampaignConfigHash(inputs.config),
+    ...(inputs.config.sourceMigrationJournal === undefined
       ? {}
-      : { sourceMigrationJournal: inputs.sourceMigrationJournal }),
-    ...(inputs.imageRepinJournal === undefined
+      : { sourceMigrationJournal: inputs.config.sourceMigrationJournal }),
+    ...(inputs.config.imageRepinJournal === undefined
       ? {}
-      : { imageRepinJournal: inputs.imageRepinJournal }),
+      : { imageRepinJournal: inputs.config.imageRepinJournal }),
     statisticalRecordDigest: record.inputsDigest,
     statisticalPass: true as const,
     acceptedArtifacts: { generation0, generation1, generation2 },

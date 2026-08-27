@@ -10,7 +10,10 @@ import {
   metaCampaignConfigHash,
 } from "@hone/meta";
 import {
+  CapsuleManifest,
+  DiagnosticOrderingReport,
   MetaCampaignConfigV2,
+  capsuleDigest,
   type CampaignImageEquivalenceEvidenceV1,
   type CampaignImageRepinV1,
   type CampaignRuntimeClosureCaptureV1,
@@ -18,23 +21,32 @@ import {
 } from "@hone/schema";
 import { describe, expect, test } from "vitest";
 import {
-  campaignAdmittedCapsuleImage,
+  capsuleOracleDigest,
+  capsuleScalarizerDigest,
+  type AdmittedCapsule,
+} from "../src/admission.js";
+import {
   assertCampaignImageRepinOnly,
-  repinCampaignImage,
+  campaignAdmittedCapsuleImage,
   migrateCampaignSource,
+  recursivePhaseReceipt,
+  repinCampaignImage,
+  resolveRegisteredCapsuleLocation,
 } from "../src/commands/hone.js";
-import { main } from "../src/main.js";
 import type { CmdIo } from "../src/io.js";
+import { main } from "../src/main.js";
 import {
   acquireCampaignRecordLock,
   appendRuntimeClosureCaptureRecord,
 } from "../src/runtime-closure.js";
+import { trajectoryCampaignJournals } from "../src/meta-trajectory.js";
 import { makeRoot } from "./helpers.js";
 
 const preservedPath = fileURLToPath(new URL(
   "../../../data/m2-refreeze-final/campaign-frozen.json",
   import.meta.url,
 ));
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const TO_IMAGE = `hone-equivalent@sha256:${"a".repeat(64)}`;
 const NEXT_IMAGE = `hone-equivalent@sha256:${"b".repeat(64)}`;
 
@@ -74,6 +86,10 @@ function writeEvidence(
   value: CampaignImageEquivalenceEvidenceV1,
   name = "image-equivalence.v1.json",
 ): string {
+  return writeRawEvidence(root, value, name);
+}
+
+function writeRawEvidence(root: string, value: unknown, name: string): string {
   const path = join(root, "evidence", name);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -155,6 +171,61 @@ describe("campaign repin-image", () => {
     expect(() => assertCampaignImageRepinOnly(before, after, capsule.capsuleId)).not.toThrow();
   });
 
+  test("resolves a repinned installed capsule at its new execution image and original identity", () => {
+    const root = makeRoot();
+    const campaignPath = join(root, "campaign-frozen.json");
+    const before = preservedConfig();
+    const registered = before.train.find((entry) => entry.capsuleId === "cap_93f9f6942024")!;
+    const capsuleDir = join(repoRoot, "capsules", "biome-parser-formatter");
+    const manifest = CapsuleManifest.parse(JSON.parse(
+      readFileSync(join(capsuleDir, "manifest.json"), "utf8"),
+    ));
+    const admitted: AdmittedCapsule = {
+      manifest,
+      digest: capsuleDigest(manifest),
+      orderingReport: DiagnosticOrderingReport.parse(JSON.parse(
+        readFileSync(join(capsuleDir, manifest.diagnosticOrdering.path), "utf8"),
+      )),
+      approval: null,
+      provisional: false,
+    };
+    expect(admitted.digest).toBe(registered.capsuleDigest);
+    expect(capsuleOracleDigest(admitted)).toBe(registered.oracleDigest);
+    expect(capsuleScalarizerDigest(admitted)).toBe(registered.scalarizerDigest);
+
+    const evidencePath = writeEvidence(
+      root,
+      evidence(registered.capsuleId, registered.image, TO_IMAGE),
+    );
+    writeFileSync(campaignPath, `${JSON.stringify(before, null, 2)}\n`);
+    repinCampaignImage({
+      root,
+      campaignPath,
+      capsuleId: registered.capsuleId,
+      fromImage: registered.image,
+      toImage: TO_IMAGE,
+      evidencePath,
+      reason: "resolution regression",
+      at: "2026-08-27T01:01:30.000Z",
+    });
+    const repinned = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+    const current = repinned.train.find((entry) => entry.capsuleId === registered.capsuleId)!;
+    const location = resolveRegisteredCapsuleLocation(
+      repinned,
+      current,
+      { dir: capsuleDir, admitted },
+    );
+    expect(location.executionImage).toBe(TO_IMAGE);
+
+    const forged = structuredClone(repinned);
+    delete forged.imageRepinJournal;
+    expect(() => resolveRegisteredCapsuleLocation(
+      forged,
+      forged.train.find((entry) => entry.capsuleId === registered.capsuleId)!,
+      { dir: capsuleDir, admitted },
+    )).toThrow("identity drift");
+  });
+
   test("refuses missing, mismatched, and nondeterministic equivalence evidence before mutation", () => {
     const root = makeRoot();
     const campaignPath = join(root, "campaign-frozen.json");
@@ -184,6 +255,45 @@ describe("campaign repin-image", () => {
     expect(() => repinCampaignImage({ ...request, evidencePath: nondeterministicPath }))
       .toThrow("does not exactly match recorded score");
     expect(readFileSync(campaignPath, "utf8")).toBe(`${JSON.stringify(before, null, 2)}\n`);
+
+    const twoReplays = structuredClone(evidence(capsule.capsuleId, capsule.image, TO_IMAGE)) as {
+      baseline: { reproducedScores: number[] };
+    };
+    twoReplays.baseline.reproducedScores = [0.25, 0.25];
+    expect(() => repinCampaignImage({
+      ...request,
+      evidencePath: writeRawEvidence(root, twoReplays, "two-replays.json"),
+    })).toThrow("invalid image equivalence evidence");
+
+    const modelCall = {
+      ...evidence(capsule.capsuleId, capsule.image, TO_IMAGE),
+      modelCalls: 1,
+    };
+    expect(() => repinCampaignImage({
+      ...request,
+      evidencePath: writeRawEvidence(root, modelCall, "model-call.json"),
+    })).toThrow("invalid image equivalence evidence");
+
+    const failedTripwire = {
+      ...evidence(capsule.capsuleId, capsule.image, TO_IMAGE),
+      tripwires: [{ name: "determinism", passed: false }],
+    };
+    expect(() => repinCampaignImage({
+      ...request,
+      evidencePath: writeRawEvidence(root, failedTripwire, "failed-tripwire.json"),
+    })).toThrow("invalid image equivalence evidence");
+
+    const otherCapsuleEvidence = evidence(before.train[1]!.capsuleId, capsule.image, TO_IMAGE);
+    expect(() => repinCampaignImage({
+      ...request,
+      evidencePath: writeRawEvidence(root, otherCapsuleEvidence, "other-capsule.json"),
+    })).toThrow("evidence identity does not match");
+
+    expect(() => repinCampaignImage({
+      ...request,
+      toImage: capsule.image,
+      evidencePath: wrongIdentity,
+    })).toThrow("requires different --from-image and --to-image");
   });
 
   test("exposes the evidence-required operator command with the documented flags", async () => {
@@ -248,6 +358,44 @@ describe("campaign repin-image", () => {
     const changedReason = structuredClone(migrated);
     changedReason.imageRepinJournal!.repins[0]!.reason = "tampered";
     expect(() => metaCampaignConfigHash(changedReason)).toThrow("record digest mismatch");
+
+    const receiptDir = join(root, "phase-receipts");
+    mkdirSync(receiptDir, { recursive: true });
+    const receipt = JSON.parse(readFileSync(
+      recursivePhaseReceipt(receiptDir, "search", migrated, {}),
+      "utf8",
+    ));
+    expect(receipt.imageRepinJournal).toEqual(migrated.imageRepinJournal);
+    expect(trajectoryCampaignJournals(migrated).imageRepinJournal)
+      .toEqual(migrated.imageRepinJournal);
+
+    const staleEvidencePath = writeEvidence(
+      root,
+      evidence(capsule.capsuleId, capsule.image, NEXT_IMAGE),
+      "image-equivalence-stale.v1.json",
+    );
+    expect(() => repinCampaignImage({
+      ...request,
+      toImage: NEXT_IMAGE,
+      evidencePath: staleEvidencePath,
+    })).toThrow("does not exactly match capsule");
+
+    const forgedTarget = structuredClone(migrated);
+    forgedTarget.imageRepinJournal!.repins[0]!.toImage = NEXT_IMAGE;
+    rehash(forgedTarget.imageRepinJournal!.repins[0]!);
+    expect(() => metaCampaignConfigHash(forgedTarget)).toThrow("provenance is discontinuous");
+
+    const divergentHistory = structuredClone(migrated);
+    divergentHistory.imageRepinJournal!.repins[0]!.reason = "same length, divergent history";
+    rehash(divergentHistory.imageRepinJournal!.repins[0]!);
+    expect(campaignRecordExtends(migrated, divergentHistory)).toBe(false);
+
+    const noOpJournal = structuredClone(migrated);
+    noOpJournal.train[0]!.image = capsule.image;
+    noOpJournal.developmentPanel.members[0]!.capsule.image = capsule.image;
+    noOpJournal.imageRepinJournal!.repins[0]!.toImage = capsule.image;
+    rehash(noOpJournal.imageRepinJournal!.repins[0]!);
+    expect(() => metaCampaignConfigHash(noOpJournal)).toThrow("must change the pinned image");
 
     const alteredOriginal = structuredClone(migrated);
     alteredOriginal.imageRepinJournal!.repins[0]!.fromImage = NEXT_IMAGE;

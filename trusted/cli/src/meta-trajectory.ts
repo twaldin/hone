@@ -58,6 +58,22 @@ function sha256(bytes: Buffer | string): Sha256Digest {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
+export function trajectoryCampaignJournals(
+  config: Pick<MetaCampaignConfig, "sourceMigrationJournal" | "imageRepinJournal">,
+): {
+  sourceMigrationJournal?: MetaCampaignConfig["sourceMigrationJournal"];
+  imageRepinJournal?: MetaCampaignConfig["imageRepinJournal"];
+} {
+  return {
+    ...(config.sourceMigrationJournal === undefined
+      ? {}
+      : { sourceMigrationJournal: config.sourceMigrationJournal }),
+    ...(config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: config.imageRepinJournal }),
+  };
+}
+
 function addUsage(left: MetaResourceUsage, right: MetaResourceUsage): MetaResourceUsage {
   return {
     tokens: left.tokens + right.tokens,
@@ -417,12 +433,7 @@ function persistRecursiveTrajectory(
   const trajectory = MetaSearchTrajectoryV2.parse({
     version: 2,
     configHash: opts.configHash,
-    ...(opts.config.sourceMigrationJournal === undefined
-      ? {}
-      : { sourceMigrationJournal: opts.config.sourceMigrationJournal }),
-    ...(opts.config.imageRepinJournal === undefined
-      ? {}
-      : { imageRepinJournal: opts.config.imageRepinJournal }),
+    ...trajectoryCampaignJournals(opts.config),
     outerRunId: opts.outerRunId,
     searchEnvelope: opts.config.recursiveBudgets.search.identity,
     panel: opts.config.developmentPanel,
@@ -504,12 +515,7 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
   const trajectory = MetaSearchTrajectoryV1.parse({
     version: 1,
     configHash: opts.configHash,
-    ...(opts.config.sourceMigrationJournal === undefined
-      ? {}
-      : { sourceMigrationJournal: opts.config.sourceMigrationJournal }),
-    ...(opts.config.imageRepinJournal === undefined
-      ? {}
-      : { imageRepinJournal: opts.config.imageRepinJournal }),
+    ...trajectoryCampaignJournals(opts.config),
     outerRunId: opts.outerRunId,
     controllerBundleDigest: started.optimizerDigest,
     targetSourceArtifact: opts.config.seedOptimizer.sourceArtifact,

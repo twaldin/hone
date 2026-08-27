@@ -2046,7 +2046,7 @@ function parseResponseObservations(body: string): Array<{ model: string | null; 
   return observations;
 }
 
-interface DiscoveredCapsule {
+export interface DiscoveredCapsule {
   readonly dir: string;
   readonly admitted: AdmittedCapsule;
 }
@@ -2165,6 +2165,49 @@ export function campaignAdmittedCapsuleImage(
     ?? registeredImage;
 }
 
+export function resolveRegisteredCapsuleLocation(
+  config: AnyMetaCampaignConfig,
+  registered: MetaCapsuleEntry,
+  capsule: DiscoveredCapsule,
+): CapsuleLocation {
+  const admitted = capsule.admitted;
+  const admittedImage = campaignAdmittedCapsuleImage(
+    config,
+    registered.capsuleId,
+    registered.image,
+  );
+  if (
+    admitted.digest !== registered.capsuleDigest
+    || admitted.manifest.image !== admittedImage
+    || capsuleOracleDigest(admitted) !== registered.oracleDigest
+    || capsuleScalarizerDigest(admitted) !== registered.scalarizerDigest
+  ) {
+    throw new UsageError(`registered campaign capsule ${registered.capsuleId} has identity drift`);
+  }
+  const terminalHoldoutAssetGroupIds = admitted.manifest.assetGroups
+    .filter((group) => group.visibility === "holdout")
+    .map((group) => group.id);
+  if (config.holdout.some((entry) => entry.capsuleId === registered.capsuleId)) {
+    const terminalArms = config.version === 2 ? 3 : 2;
+    const requiredLifetimeAccesses =
+      (4 * config.counts.innerEpisodesMax + 1) * terminalArms * config.counts.holdoutReplicates;
+    if (terminalHoldoutAssetGroupIds.length === 0) {
+      throw new UsageError(`terminal holdout capsule ${registered.capsuleId} has no holdout asset group`);
+    }
+    if (admitted.manifest.budget.maxEvaluatorInvocations < requiredLifetimeAccesses) {
+      throw new UsageError(
+        `terminal holdout capsule ${registered.capsuleId} lifetime budget ${admitted.manifest.budget.maxEvaluatorInvocations} cannot cover ${requiredLifetimeAccesses} accesses`,
+      );
+    }
+  }
+  return {
+    dir: capsule.dir,
+    digest: admitted.digest,
+    executionImage: registered.image,
+    terminalHoldoutAssetGroupIds,
+  };
+}
+
 export function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
   metaCampaignConfigHash(config);
   const discovered = discoverCapsules(root, config.version === 2 ? config.corpusCohort : undefined);
@@ -2172,42 +2215,10 @@ export function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignC
   for (const registered of [...config.train, ...config.holdout]) {
     const capsule = discovered.get(registered.capsuleId);
     if (capsule === undefined) throw new UsageError(`registered campaign capsule ${registered.capsuleId} is not installed`);
-    const admitted = capsule.admitted;
-    const admittedImage = campaignAdmittedCapsuleImage(
-      config,
-      registered.capsuleId,
-      registered.image,
+    found.set(
+      registered.capsuleDigest,
+      resolveRegisteredCapsuleLocation(config, registered, capsule),
     );
-    if (
-      admitted.digest !== registered.capsuleDigest
-      || admitted.manifest.image !== admittedImage
-      || capsuleOracleDigest(admitted) !== registered.oracleDigest
-      || capsuleScalarizerDigest(admitted) !== registered.scalarizerDigest
-    ) {
-      throw new UsageError(`registered campaign capsule ${registered.capsuleId} has identity drift`);
-    }
-    const terminalHoldoutAssetGroupIds = admitted.manifest.assetGroups
-      .filter((group) => group.visibility === "holdout")
-      .map((group) => group.id);
-    if (config.holdout.some((entry) => entry.capsuleId === registered.capsuleId)) {
-      const terminalArms = config.version === 2 ? 3 : 2;
-      const requiredLifetimeAccesses =
-        (4 * config.counts.innerEpisodesMax + 1) * terminalArms * config.counts.holdoutReplicates;
-      if (terminalHoldoutAssetGroupIds.length === 0) {
-        throw new UsageError(`terminal holdout capsule ${registered.capsuleId} has no holdout asset group`);
-      }
-      if (admitted.manifest.budget.maxEvaluatorInvocations < requiredLifetimeAccesses) {
-        throw new UsageError(
-          `terminal holdout capsule ${registered.capsuleId} lifetime budget ${admitted.manifest.budget.maxEvaluatorInvocations} cannot cover ${requiredLifetimeAccesses} accesses`,
-        );
-      }
-    }
-    found.set(registered.capsuleDigest, {
-      dir: capsule.dir,
-      digest: admitted.digest,
-      executionImage: registered.image,
-      terminalHoldoutAssetGroupIds,
-    });
   }
   return found;
 }
@@ -4301,13 +4312,7 @@ export async function recursiveCommand(
         if (controlWinner === undefined || generation2 === undefined || recordDir === undefined) throw new UsageError(RECURSIVE_USAGE);
         // The G1 statistical record lives in the (separate) stage-A cell directory.
         const authorization = assembleG1Authorization({
-          configHash,
-          ...(config.sourceMigrationJournal === undefined
-            ? {}
-            : { sourceMigrationJournal: config.sourceMigrationJournal }),
-          ...(config.imageRepinJournal === undefined
-            ? {}
-            : { imageRepinJournal: config.imageRepinJournal }),
+          config,
           record: readG1Record(resolve(io.root, recordDir)),
           controlWinner: await checkedPublicIdentity(controlWinner, gate),
           generation2: await checkedPublicIdentity(generation2, gate),
@@ -4322,13 +4327,7 @@ export async function recursiveCommand(
       const generation2 = digestFlag(strFlag(flags, "generation2"), "--generation2");
       if (generation0 === undefined || generation1 === undefined || generation2 === undefined) throw new UsageError(RECURSIVE_USAGE);
       const authorization = assembleG2Authorization({
-        configHash,
-        ...(config.sourceMigrationJournal === undefined
-          ? {}
-          : { sourceMigrationJournal: config.sourceMigrationJournal }),
-        ...(config.imageRepinJournal === undefined
-          ? {}
-          : { imageRepinJournal: config.imageRepinJournal }),
+        config,
         record: readG2Record(campaignDir),
         generation0: await checkedPublicIdentity(generation0, gate),
         generation1: await checkedPublicIdentity(generation1, gate),
