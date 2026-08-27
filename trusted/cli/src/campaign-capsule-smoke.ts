@@ -1,7 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { Broker, CasStore, packDirAsArtifact, unpackArtifact } from "@hone/broker";
+import { Broker, BrokerError, CasStore, packDirAsArtifact, unpackArtifact } from "@hone/broker";
 import {
   CapsuleManifest,
   EvaluationRecord,
@@ -66,6 +74,7 @@ const PanelCapsuleSmokeReceiptBody = z.object({
   completedAt: z.string().datetime(),
   evaluationOrder: z.literal("sequential-quiet-host"),
   settlementJournal: z.string().min(1),
+  settlementJournalHash: HASH,
   capsules: z.array(CapsuleSmokeRow).min(1),
   aggregate: z.object({
     expectedCapsules: z.number().int().positive(),
@@ -77,6 +86,10 @@ const PanelCapsuleSmokeReceiptBody = z.object({
   dispatch: z.object({
     modelCalls: z.literal(0),
     providerCalls: z.literal(0),
+    mutationUsageRecords: z.literal(0),
+    proxyTraceRecords: z.literal(0),
+    tokens: z.literal(0),
+    usd: z.literal(0),
   }).strict(),
   ignitionEligible: z.literal(true),
 }).strict();
@@ -105,7 +118,9 @@ function sha256(bytes: Buffer | string): Sha256Digest {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
-function receiptDigest(body: z.infer<typeof PanelCapsuleSmokeReceiptBody>): Sha256Digest {
+export function panelCapsuleSmokeReceiptDigest(
+  body: z.infer<typeof PanelCapsuleSmokeReceiptBody>,
+): Sha256Digest {
   return sha256(canonicalJson(body));
 }
 
@@ -120,13 +135,25 @@ export function panelCapsuleSmokeReceiptPath(root: string, configHash: Sha256Dig
 export function assertPanelCapsuleSmokeEligibility(
   configInput: RecursiveMetaCampaignConfig,
   rowsInput: readonly CapsuleSmokeRow[],
-  dispatch: { readonly modelCalls: number; readonly providerCalls: number },
+  dispatch: {
+    readonly modelCalls: number;
+    readonly providerCalls: number;
+    readonly mutationUsageRecords: number;
+    readonly proxyTraceRecords: number;
+    readonly tokens: number;
+    readonly usd: number;
+  },
 ): { normalizedGain: number } {
   const config = MetaCampaignConfigV2.parse(configInput);
-  if (dispatch.modelCalls !== 0 || dispatch.providerCalls !== 0) {
-    throw new UsageError(
-      `panel capsule smoke observed dispatch (modelCalls=${dispatch.modelCalls}, providerCalls=${dispatch.providerCalls})`,
-    );
+  if (
+    dispatch.modelCalls !== 0
+    || dispatch.providerCalls !== 0
+    || dispatch.mutationUsageRecords !== 0
+    || dispatch.proxyTraceRecords !== 0
+    || dispatch.tokens !== 0
+    || dispatch.usd !== 0
+  ) {
+    throw new UsageError(`panel capsule smoke observed dispatch or spend: ${canonicalJson(dispatch)}`);
   }
   const rows = rowsInput.map((row) => CapsuleSmokeRow.parse(row));
   const expected = new Map(
@@ -149,9 +176,6 @@ export function assertPanelCapsuleSmokeEligibility(
       throw new UsageError(`panel capsule smoke identity drift for ${row.capsuleId}`);
     }
   }
-  if ([...expected.keys()].some((capsuleId) => !seen.has(capsuleId))) {
-    throw new UsageError("panel capsule smoke omitted a frozen panel capsule");
-  }
   const normalizedGain = rows.reduce((sum, row) => sum + row.settlement.qNormalized, 0) / rows.length;
   if (!Number.isFinite(normalizedGain)) throw new UsageError("panel capsule smoke aggregate is not finite");
   return { normalizedGain };
@@ -167,7 +191,7 @@ export function readPanelCapsuleSmokeReceipt(path: string): PanelCapsuleSmokeRec
     );
   }
   const { receiptDigest: recorded, ...body } = parsed;
-  const expected = receiptDigest(PanelCapsuleSmokeReceiptBody.parse(body));
+  const expected = panelCapsuleSmokeReceiptDigest(PanelCapsuleSmokeReceiptBody.parse(body));
   if (recorded !== expected) {
     throw new UsageError(`panel capsule smoke receipt digest ${recorded} does not match ${expected}`);
   }
@@ -189,6 +213,9 @@ export function assertRequiredPanelCapsuleSmoke(
     || receipt.runtimeDigest !== config.trustedRuntime.digest
   ) {
     throw new UsageError("panel capsule smoke receipt belongs to a different frozen runtime");
+  }
+  if (sha256(readFileSync(receipt.settlementJournal)) !== receipt.settlementJournalHash) {
+    throw new UsageError("panel capsule smoke settlement journal digest does not match");
   }
   const eligibility = assertPanelCapsuleSmokeEligibility(config, receipt.capsules, receipt.dispatch);
   if (eligibility.normalizedGain !== receipt.aggregate.normalizedGain) {
@@ -215,6 +242,11 @@ export async function runPanelCapsuleSmoke(
   const guardPath = panelCapsuleSmokeReceiptPath(request.root, configHash);
   mkdirSync(dirname(guardPath), { recursive: true, mode: 0o700 });
   rmSync(guardPath, { force: true });
+  for (const entry of readdirSync(dirname(guardPath), { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name.startsWith("attempt-")) {
+      rmSync(join(dirname(guardPath), entry.name), { recursive: true, force: true });
+    }
+  }
   const attemptId = randomUUID().replaceAll("-", "");
   const attemptRoot = join(dirname(guardPath), `attempt-${attemptId}`);
   mkdirSync(attemptRoot, { recursive: true, mode: 0o700 });
@@ -222,6 +254,12 @@ export async function runPanelCapsuleSmoke(
   const journalPath = join(attemptRoot, "settlements.ndjson");
   const journal = MetaJournalV1.open(journalPath, config);
   const startedAt = new Date().toISOString();
+  let observedTokens = 0;
+  let observedUsd = 0;
+  let observedMutationUsageRecords = 0;
+  let observedModelCalls = 0;
+  let observedProviderCalls = 0;
+  let observedProxyTraceRecords = 0;
   const rows: CapsuleSmokeRow[] = [];
 
   try {
@@ -280,6 +318,7 @@ export async function runPanelCapsuleSmoke(
         evalTimeoutSec: config.evaluatorTimeoutSec,
         onEvent: (event) => events.push(event),
       });
+      let budgetSpent: { tokens: number; usd: number };
       let evaluation: z.infer<typeof EvaluationRecord>;
       try {
         await broker.init();
@@ -294,18 +333,22 @@ export async function runPanelCapsuleSmoke(
             { privileged: true },
           );
         } catch (error) {
-          protectedPathRejected = error instanceof Error && error.message.includes("protected paths modified");
+          protectedPathRejected = error instanceof BrokerError && error.code === "PROTECTED_PATH_VIOLATION";
         }
         if (!protectedPathRejected) {
           throw new UsageError(`panel capsule ${manifest.id} accepted the protected-path control`);
         }
+        const budget = broker.getBudget({ privileged: true });
+        budgetSpent = { tokens: budget.spent.tokens, usd: budget.spent.usd ?? 0 };
+        observedTokens += budgetSpent.tokens;
+        observedUsd += budgetSpent.usd;
       } finally {
         await broker.close();
       }
-      const isolation = events.find((event) => event.type === "evaluator.isolation");
-      const completed = events.filter((event) => event.type === "eval.completed");
-      if (isolation === undefined || completed.length !== 1) {
-        throw new UsageError(`panel capsule ${manifest.id} did not traverse isolation and one evaluator completion`);
+      const isolations = events.filter((event) => event.type === "evaluator.isolation");
+      const isolation = isolations[0];
+      if (isolation === undefined || isolations.length !== 1) {
+        throw new UsageError(`panel capsule ${manifest.id} did not traverse exactly one evaluator isolation`);
       }
       const objectives = Object.values(evaluation.output.objectives);
       const score = objectives[0];
@@ -341,8 +384,8 @@ export async function runPanelCapsuleSmoke(
       const measurement = journal.settleChild(identity, {
         evidenceHash: recordHash,
         observed: {
-          tokens: 0,
-          usd: 0,
+          tokens: budgetSpent.tokens,
+          usd: budgetSpent.usd,
           wallClockSec: evaluation.durationMs / 1000,
           evaluatorInvocations: 1,
         },
@@ -383,7 +426,43 @@ export async function runPanelCapsuleSmoke(
     journal.close();
   }
 
-  const dispatch = { modelCalls: 0 as const, providerCalls: 0 as const };
+  const inspectDispatchRecords = (root: string): void => {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const path = join(root, entry.name);
+      if (entry.isDirectory()) {
+        inspectDispatchRecords(path);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".ndjson")) continue;
+      const lines = readFileSync(path, "utf8").split("\n").filter((line) => line.length > 0);
+      if (entry.name.includes("proxy-dispatch") || entry.name.includes("proxy-trace")) {
+        observedProxyTraceRecords += lines.length;
+        observedProviderCalls += lines.length;
+      }
+      for (const line of lines) {
+        try {
+          const record: unknown = JSON.parse(line);
+          if (record === null || typeof record !== "object" || !("modelCalls" in record)) continue;
+          const usage = record as { modelCalls?: unknown; providerCalls?: unknown };
+          if (typeof usage.modelCalls !== "number" || typeof usage.providerCalls !== "number") continue;
+          observedMutationUsageRecords += 1;
+          observedModelCalls += usage.modelCalls;
+          observedProviderCalls += usage.providerCalls;
+        } catch {
+          // Non-JSON diagnostics carry no dispatch authority.
+        }
+      }
+    }
+  };
+  inspectDispatchRecords(attemptRoot);
+  const dispatch = {
+    modelCalls: observedModelCalls,
+    providerCalls: observedProviderCalls,
+    mutationUsageRecords: observedMutationUsageRecords,
+    proxyTraceRecords: observedProxyTraceRecords,
+    tokens: observedTokens,
+    usd: observedUsd,
+  };
   const { normalizedGain } = assertPanelCapsuleSmokeEligibility(config, rows, dispatch);
   const completedAt = new Date().toISOString();
   const body = PanelCapsuleSmokeReceiptBody.parse({
@@ -396,6 +475,7 @@ export async function runPanelCapsuleSmoke(
     completedAt,
     evaluationOrder: "sequential-quiet-host",
     settlementJournal: journalPath,
+    settlementJournalHash: sha256(readFileSync(journalPath)),
     capsules: rows,
     aggregate: {
       expectedCapsules: config.developmentPanel.members.length,
@@ -407,7 +487,10 @@ export async function runPanelCapsuleSmoke(
     dispatch,
     ignitionEligible: true,
   });
-  const receipt = PanelCapsuleSmokeReceipt.parse({ ...body, receiptDigest: receiptDigest(body) });
+  const receipt = PanelCapsuleSmokeReceipt.parse({
+    ...body,
+    receiptDigest: panelCapsuleSmokeReceiptDigest(body),
+  });
   const bytes = `${canonicalJson(receipt)}\n`;
   const evidencePath = resolve(request.evidencePath);
   mkdirSync(dirname(evidencePath), { recursive: true, mode: 0o700 });

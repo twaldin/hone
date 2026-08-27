@@ -4742,6 +4742,8 @@ export interface RecursiveCommandOptions {
     readonly frozenConfig: RecursiveMetaCampaignConfig;
     readonly closureCapture: CaptureRuntimeClosureResult;
   };
+  /** Test-only boundary proving SEARCH traverses the pre-ignition gate wiring. */
+  readonly stopAfterPreIgnitionGate?: boolean;
 }
 
 /** Execute one frozen recursive generation cell; orchestration composes these durable cells. */
@@ -4787,7 +4789,10 @@ export async function recursiveCommand(
   const commit = sourceCommit(io.root);
   const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
   if (phase !== "freeze") assertRecursiveCampaignSourceIdentity(config, commit, runtimeDigest);
-  if (phase === "search") assertRequiredPanelCapsuleSmoke(io.root, config);
+  if (phase === "search") {
+    assertRequiredPanelCapsuleSmoke(io.root, config);
+    if (options.stopAfterPreIgnitionGate === true) return 0;
+  }
   let rootSnapshot: OptimizerSnapshot;
   if (phase === "freeze") {
     if (sealedBaseFlag !== undefined) {
