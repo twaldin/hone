@@ -196,7 +196,8 @@ import type { CampaignPauseAuthority, MutationWorkerPreflightContract } from "..
 const HONE_USAGE = "usage: hone hone --campaign <path> --headless [--phase freeze|search|confirmation|holdout] [--out <gitignored-path>]";
 const CAMPAIGN_MIGRATE_SOURCE_USAGE =
   "usage: hone campaign migrate-source --campaign <frozen.json> "
-  + "--from <oldSourceCommit> --to <newSourceCommit> --reason <text> [--refreeze-optimizer]";
+  + "--from <oldSourceCommit> --to <newSourceCommit> --reason <text> "
+  + "[--refreeze-optimizer --sealed-base <dir>]";
 const CAMPAIGN_REPIN_IMAGE_USAGE =
   "usage: hone campaign repin-image --campaign <frozen.json> --capsule <id> "
   + "--from-image <immutable-image> --to-image <immutable-image> "
@@ -2503,6 +2504,7 @@ export interface CampaignSourceMigrationRequest {
   readonly bootDigest: Sha256Digest;
   readonly operator?: string;
   readonly refreezeOptimizer?: boolean;
+  readonly sealedBase?: string;
 }
 
 interface PreparedCampaignOptimizerRefreeze {
@@ -2515,7 +2517,7 @@ interface PreparedCampaignOptimizerRefreeze {
   readonly degraded: RegisteredControl;
 }
 
-interface PlannedOptimizerRunRefreeze {
+export interface PlannedOptimizerRunRefreeze {
   readonly runDir: string;
   readonly pauseBeforeMigration: boolean;
   readonly record: CampaignOptimizerRunRefreezeV1;
@@ -2528,16 +2530,17 @@ interface PlannedOptimizerRunRefreeze {
 async function prepareCampaignOptimizerRefreeze(
   root: string,
   config: RecursiveMetaCampaignConfig,
+  sealedBase: string,
 ): Promise<PreparedCampaignOptimizerRefreeze> {
   const priorClosure = config.runtimeClosureJournal?.captures.at(-1);
   if (priorClosure === undefined) {
     throw new UsageError("optimizer refreeze requires a captured current runtime closure");
   }
   const image = config.optimizerRuntime.image;
-  const baseSnapshot = collectOptimizerSnapshot(root);
+  const baseSnapshot = collectOptimizerSnapshot(sealedBase);
   const optimizerBaseDigest = snapshotDigest(image, baseSnapshot) as Sha256Digest;
-  if (optimizerBaseDigest === priorClosure.optimizerBaseDigest) {
-    throw new UsageError("optimizer refreeze requires a changed optimizer base digest");
+  if (optimizerBaseDigest !== priorClosure.optimizerBaseDigest) {
+    throw new UsageError("optimizer refreeze sealed base does not match the captured optimizer base digest");
   }
   const casDir = casRoot(root);
   const cas = new CasStore(casDir);
@@ -2560,15 +2563,9 @@ async function prepareCampaignOptimizerRefreeze(
     image,
     baseSnapshot,
   });
-  for (const [label, resolved] of [["seed", seed], ["controller", controller]] as const) {
-    const forbidden = changedOptimizerPaths(baseSnapshot, resolved.snapshot)
-      .filter((candidatePath) => !registeredMutablePath(config, candidatePath));
-    if (forbidden.length > 0) {
-      throw new UsageError(
-        `refrozen ${label} changes paths outside the frozen mutable allowlist: ${forbidden.join(", ")}`,
-      );
-    }
-  }
+  // The journal explicitly authorizes engine-source changes. Scientific
+  // candidate diffs remain governed by the frozen mutable allowlist after
+  // the refreeze; this seed/controller rebuild is not a candidate admission.
   const controls = await prepareRecursiveControls(seed.snapshot, cas, casDir, image);
   return {
     baseSnapshot,
@@ -2776,11 +2773,19 @@ function applyOptimizerRunRefreeze(
   }
 }
 
+export function applyOptimizerRunRefreezes(
+  plans: readonly PlannedOptimizerRunRefreeze[],
+  migration: CampaignSourceMigrationV1,
+): void {
+  for (const plan of plans) applyOptimizerRunRefreeze(plan, migration);
+}
+
 async function recoverOptimizerRunRefreezes(
   root: string,
   config: RecursiveMetaCampaignConfig,
   runs: readonly CampaignRunPin[],
   migration: CampaignSourceMigrationV1,
+  sealedBase: string,
 ): Promise<void> {
   const refreeze = migration.optimizerRefreeze;
   if (refreeze === undefined) return;
@@ -2812,7 +2817,7 @@ async function recoverOptimizerRunRefreezes(
   });
   if (completelyApplied) return;
 
-  const prepared = await prepareCampaignOptimizerRefreeze(root, config);
+  const prepared = await prepareCampaignOptimizerRefreeze(root, config, sealedBase);
   if (
     prepared.optimizerBaseDigest !== refreeze.optimizerBaseDigest
     || prepared.fromOptimizerBaseDigest !== refreeze.fromOptimizerBaseDigest
@@ -2914,6 +2919,9 @@ export async function migrateCampaignSource(
   }
   if (request.from === request.to) throw new UsageError("source migration requires different --from and --to commits");
   if (request.reason.trim().length === 0) throw new UsageError("--reason must contain non-whitespace text");
+  if ((request.refreezeOptimizer === true) !== (request.sealedBase !== undefined)) {
+    throw new UsageError("--refreeze-optimizer requires exactly one --sealed-base <dir>");
+  }
 
   const campaignRecordLock = acquireCampaignRecordLock(request.campaignPath);
   try {
@@ -2952,7 +2960,13 @@ export async function migrateCampaignSource(
         ) {
           throw new UsageError("campaign run set changed during source migration recovery; retry");
         }
-        await recoverOptimizerRunRefreezes(request.root, config, lockedRuns, lastMigration);
+        await recoverOptimizerRunRefreezes(
+          request.root,
+          config,
+          lockedRuns,
+          lastMigration,
+          request.sealedBase!,
+        );
         for (const run of lockedRuns) {
           writeFileDurable(run.pinPath, `${request.bootDigest}\n`);
         }
@@ -2980,7 +2994,7 @@ export async function migrateCampaignSource(
     }
 
     const prepared = request.refreezeOptimizer === true
-      ? await prepareCampaignOptimizerRefreeze(request.root, config)
+      ? await prepareCampaignOptimizerRefreeze(request.root, config, request.sealedBase!)
       : undefined;
     const plannedRuns = nonterminalCampaignRunPins(
       request.root,
@@ -3002,6 +3016,17 @@ export async function migrateCampaignSource(
         !== canonicalJson(plannedRuns.map(({ runId, pinnedDigest }) => ({ runId, pinnedDigest })))
       ) {
         throw new UsageError("campaign run set changed during source migration; retry");
+      }
+      if (prepared !== undefined) {
+        const outerRunId = `run_recursive_outer_${configHash.slice("sha256:".length)}`;
+        const nonterminalChildren = lockedRuns
+          .map((run) => run.runId)
+          .filter((runId) => runId !== outerRunId);
+        if (nonterminalChildren.length > 0) {
+          throw new UsageError(
+            `optimizer refreeze requires every child run to be terminal; still open: ${nonterminalChildren.join(", ")}`,
+          );
+        }
       }
       const runRefreezes = prepared === undefined
         ? []
@@ -3124,7 +3149,7 @@ export async function migrateCampaignSource(
       // or runtime pin until this same command completes the recorded plan.
       writeFileDurable(request.campaignPath, `${JSON.stringify(migrated, null, 2)}\n`);
       chmodSync(request.campaignPath, 0o600);
-      for (const plan of runRefreezes) applyOptimizerRunRefreeze(plan, migration);
+      applyOptimizerRunRefreezes(runRefreezes, migration);
       for (const run of lockedRuns) {
         writeFileDurable(run.pinPath, `${request.bootDigest}\n`);
       }
@@ -3536,12 +3561,13 @@ export async function campaignCommand(args: string[], io: CmdIo): Promise<number
   if (subcommand === "migrate-source") {
     const { positionals, flags } = parseFlags(rest, {
       booleans: ["refreeze-optimizer"],
-      strings: ["campaign", "from", "to", "reason"],
+      strings: ["campaign", "from", "to", "reason", "sealed-base"],
     });
     const campaignFlag = strFlag(flags, "campaign");
     const from = strFlag(flags, "from");
     const to = strFlag(flags, "to");
     const reason = strFlag(flags, "reason");
+    const sealedBaseFlag = strFlag(flags, "sealed-base");
     if (
       positionals.length !== 0
       || campaignFlag === undefined
@@ -3574,6 +3600,7 @@ export async function campaignCommand(args: string[], io: CmdIo): Promise<number
       bootDigest,
       ...(operator === undefined || operator.trim().length === 0 ? {} : { operator }),
       ...(boolFlag(flags, "refreeze-optimizer") ? { refreezeOptimizer: true } : {}),
+      ...(sealedBaseFlag === undefined ? {} : { sealedBase: resolve(io.root, sealedBaseFlag) }),
     });
     io.out(canonicalJson({
       command: "campaign.migrate-source",

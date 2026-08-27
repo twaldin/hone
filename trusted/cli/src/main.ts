@@ -26,7 +26,7 @@ usage:
   hone hone --campaign <path> --headless
   hone calibration --campaign <path> --headless [--state <.hone-runs/path>] [--resume] [--dry-structure] [--smoke-cell N]
   hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal] [--sealed-base <dir>]
-  hone campaign migrate-source --campaign <frozen.json> --from <oldSourceCommit> --to <newSourceCommit> --reason <text> [--refreeze-optimizer]
+  hone campaign migrate-source --campaign <frozen.json> --from <oldSourceCommit> --to <newSourceCommit> --reason <text> [--refreeze-optimizer --sealed-base <dir>]
   hone campaign repin-image --campaign <frozen.json> --capsule <id> --from-image <image> --to-image <image>
            --evidence <equivalence-record.json> --reason <text>
   hone campaign capture-closure --campaign <frozen.json> --source <git-worktree> [--source-commit <commit>]

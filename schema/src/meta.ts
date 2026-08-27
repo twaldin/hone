@@ -60,9 +60,9 @@ export type CampaignOptimizerRunRefreezeV1 = z.infer<typeof CampaignOptimizerRun
 
 /**
  * An optimizer refreeze is an engine migration, not a capsule image re-pin.
- * It rebuilds the target, controller, controls, and every paused nonterminal
- * run against one new trusted optimizer base while retaining the campaign's
- * original scientific identity through the source-migration record chain.
+ * It rebuilds target/controller/control bundles over the retained authenticated
+ * optimizer base, so the scientific base stays byte-identical while engine
+ * source artifacts advance through the source-migration record chain.
  */
 export const CampaignOptimizerRefreezeV1 = z.object({
   optimizerImage: z.string().regex(IMAGE_DIGEST_REF),

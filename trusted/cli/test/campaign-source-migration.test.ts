@@ -307,7 +307,7 @@ describe("campaign migrate-source", () => {
     const optimizerRefreeze = {
       optimizerImage: before.optimizerRuntime.image,
       fromOptimizerBaseDigest: digest("1"),
-      optimizerBaseDigest: digest("2"),
+      optimizerBaseDigest: digest("1"),
       seed: {
         from: {
           sourceArtifact: before.seedOptimizer.sourceArtifact,
@@ -386,6 +386,12 @@ describe("campaign migrate-source", () => {
     rehashMigrationRecord(forgedRecord.sourceMigrationJournal!.migrations[0]!);
     expect(() => metaCampaignConfigHash(forgedRecord))
       .toThrow("altered frozen campaign fields outside the sanctioned source identity");
+
+    const changedBase = structuredClone(migrated);
+    changedBase.sourceMigrationJournal!.migrations[0]!.optimizerRefreeze!.optimizerBaseDigest = digest("2");
+    rehashMigrationRecord(changedBase.sourceMigrationJournal!.migrations[0]!);
+    expect(() => metaCampaignConfigHash(changedBase))
+      .toThrow("must retain the authenticated optimizer base digest");
   });
 
   test("refuses a foreign nonterminal runtime pin before changing the campaign", async () => {
@@ -613,5 +619,37 @@ describe("campaign migrate-source", () => {
     expect(lines.out.join("\n")).toContain(
       "hone campaign migrate-source --campaign <frozen.json> --from <oldSourceCommit> --to <newSourceCommit> --reason <text>",
     );
+  });
+});
+
+describe("campaign migrate-source refreeze CLI", () => {
+  test("carries --refreeze-optimizer into the sealed-base requirement", async () => {
+    const root = makeRoot();
+    const head = initializeGitRoot(root);
+    const campaignPath = join(root, ".hone-runs", "campaign-refreeze.json");
+    mkdirSync(dirname(campaignPath), { recursive: true });
+    const original = preservedConfig();
+    writeFileSync(campaignPath, `${JSON.stringify(original, null, 2)}\n`);
+    const lines = { out: [] as string[], err: [] as string[] };
+
+    const code = await main([
+      "campaign",
+      "migrate-source",
+      "--campaign",
+      campaignPath,
+      "--from",
+      original.trustedRuntime.sourceCommit,
+      "--to",
+      head,
+      "--reason",
+      "refreeze flag forwarding",
+      "--refreeze-optimizer",
+    ], commandIo(root, lines));
+
+    expect(code).toBe(2);
+    expect(lines.err.join("\n")).toContain(
+      "--refreeze-optimizer requires exactly one --sealed-base <dir>",
+    );
+    expect(JSON.parse(readFileSync(campaignPath, "utf8"))).toEqual(original);
   });
 });

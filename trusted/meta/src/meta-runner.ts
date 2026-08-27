@@ -1787,8 +1787,8 @@ function restoreOriginalOptimizerIdentities(
     if (refreeze.optimizerImage !== restored.optimizerRuntime.image) {
       throw new Error("optimizer refreeze image does not match the recursive campaign runtime");
     }
-    if (refreeze.fromOptimizerBaseDigest === refreeze.optimizerBaseDigest) {
-      throw new Error("optimizer refreeze must change the optimizer base digest");
+    if (refreeze.fromOptimizerBaseDigest !== refreeze.optimizerBaseDigest) {
+      throw new Error("optimizer refreeze must retain the authenticated optimizer base digest");
     }
     if (
       !sameBundleIdentity(restored.seedOptimizer, refreeze.seed.to)
@@ -1819,11 +1819,11 @@ function restoreOriginalOptimizerIdentities(
     }
     for (const run of refreeze.runs) {
       if (
-        run.from.baseDigest === run.to.baseDigest
+        run.from.baseDigest !== run.to.baseDigest
         || run.from.bundleDigest === run.to.bundleDigest
         || run.from.contractHash === run.to.contractHash
       ) {
-        throw new Error(`optimizer refreeze run ${run.runId} must change its base, bundle, and contract digests`);
+        throw new Error(`optimizer refreeze run ${run.runId} must retain its base and change its bundle and contract digests`);
       }
     }
     restored = MetaCampaignConfigSchema.parse({
