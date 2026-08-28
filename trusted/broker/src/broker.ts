@@ -1603,6 +1603,46 @@ export class Broker {
       if (holdoutGroup?.visibility !== "holdout") {
         throw new BrokerError("INTERNAL", "holdout split group is not visibility=holdout");
       }
+      const fileCache = new Map<string, { bytes: Buffer; hash: string; parsed: unknown }>();
+      const unitHash = (
+        unit: z.infer<typeof PromotionHoldoutSplit>["train"]["units"][number],
+      ): { containerHash: string; contentHash: string } => {
+        let cached = fileCache.get(unit.path);
+        if (cached === undefined) {
+          try {
+            const bytes = readFileSync(path.join(config.capsuleRootDir, unit.path));
+            const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+            cached = {
+              bytes,
+              hash,
+              parsed: unit.selector === "" ? undefined : JSON.parse(bytes.toString("utf8")),
+            };
+            fileCache.set(unit.path, cached);
+          } catch {
+            throw new BrokerError("INTERNAL", `holdout split unit ${unit.id} is not a readable materialized file`);
+          }
+        }
+        if (unit.selector === "") return { containerHash: cached.hash, contentHash: cached.hash };
+        let selected = cached.parsed;
+        for (const encoded of unit.selector.slice(1).split("/")) {
+          const segment = encoded.replace(/~1/g, "/").replace(/~0/g, "~");
+          if (Array.isArray(selected)) {
+            const index = Number(segment);
+            if (!Number.isSafeInteger(index) || index < 0 || index >= selected.length) {
+              throw new BrokerError("INTERNAL", `holdout split selector is missing for unit ${unit.id}`);
+            }
+            selected = selected[index];
+          } else if (selected !== null && typeof selected === "object" && segment in selected) {
+            selected = (selected as Record<string, unknown>)[segment];
+          } else {
+            throw new BrokerError("INTERNAL", `holdout split selector is missing for unit ${unit.id}`);
+          }
+        }
+        return {
+          containerHash: cached.hash,
+          contentHash: `sha256:${createHash("sha256").update(canonicalJson(selected)).digest("hex")}`,
+        };
+      };
       const assertUnits = (
         units: ReadonlyArray<z.infer<typeof PromotionHoldoutSplit>["train"]["units"][number]>,
         group: NonNullable<typeof trainGroup>,
@@ -1611,18 +1651,13 @@ export class Broker {
         for (const unit of units) {
           const normalized = path.posix.normalize(unit.path);
           const covered = roots.some((root) => normalized === root || normalized.startsWith(`${root}/`));
-          let actualContentHash: string;
-          try {
-            actualContentHash =
-              `sha256:${createHash("sha256").update(readFileSync(path.join(config.capsuleRootDir, unit.path))).digest("hex")}`;
-          } catch {
-            throw new BrokerError("INTERNAL", `holdout split unit ${unit.id} is not a readable regular file`);
-          }
+          const actual = unitHash(unit);
           if (
             normalized !== unit.path
             || !covered
-            || this.manifest.contentHashes[unit.path] !== unit.contentHash
-            || actualContentHash !== unit.contentHash
+            || this.manifest.contentHashes[unit.path] !== unit.containerHash
+            || actual.containerHash !== unit.containerHash
+            || actual.contentHash !== unit.contentHash
           ) {
             throw new BrokerError(
               "INTERNAL",
@@ -5899,8 +5934,40 @@ function assertPromotionHoldoutTerminalIsolation(
     if (!identity.isFile()) {
       throw new BrokerError("INTERNAL", `promotion holdout unit ${unit.id} must be a regular file`);
     }
-    return { id: unit.id, canonical, dev: identity.dev, ino: identity.ino };
+    return {
+      id: unit.id,
+      canonical,
+      dev: identity.dev,
+      ino: identity.ino,
+      contentHash: unit.contentHash,
+      containerHash: unit.containerHash,
+    };
   });
+  const sealedById = new Map(sealed.map((unit) => [unit.id, unit.contentHash]));
+  const copiedLogicalUnit = (bytes: Buffer): string | undefined => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      return undefined;
+    }
+    const pending: unknown[] = [parsed];
+    while (pending.length > 0) {
+      const value = pending.pop();
+      if (value === null || typeof value !== "object") continue;
+      if ("id" in value && typeof value.id === "string") {
+        const expected = sealedById.get(value.id);
+        if (
+          expected !== undefined
+          && `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}` === expected
+        ) {
+          return value.id;
+        }
+      }
+      pending.push(...(Array.isArray(value) ? value : Object.values(value)));
+    }
+    return undefined;
+  };
   const refuseIfSealed = (candidatePath: string, groupId: string): void => {
     const link = lstatSync(candidatePath);
     if (link.isSymbolicLink()) {
@@ -5918,8 +5985,15 @@ function assertPromotionHoldoutTerminalIsolation(
       return;
     }
     if (!identity.isFile()) return;
+    const bytes = readFileSync(candidatePath);
+    const fileHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const logicalUnitId = copiedLogicalUnit(bytes);
     const matched = sealed.find((unit) =>
-      unit.canonical === canonical || (unit.dev === identity.dev && unit.ino === identity.ino)
+      unit.canonical === canonical
+      || (unit.dev === identity.dev && unit.ino === identity.ino)
+      || unit.containerHash === fileHash
+      || unit.contentHash === fileHash
+      || unit.id === logicalUnitId
     );
     if (matched !== undefined) {
       throw new BrokerError(

@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { once } from "node:events";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 
@@ -69,7 +69,7 @@ let candidateHash: string;
 let candidate2Tar: Buffer;
 let candidate2Hash: string;
 
-function sha256(content: string): string {
+function sha256(content: string | Buffer): string {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
@@ -1402,6 +1402,9 @@ describe("durable promotion verdict query", () => {
       content: `sealed-${index}`,
       contentHash: sha256(`sealed-${index}`),
       achievableScoreMax: 1,
+      selector: "",
+      trainContainerHash: sha256(`sealed-${index}`),
+      holdoutContainerHash: sha256(`sealed-${index}`),
       trainPath: `train/holdout-case-${index}.txt`,
       holdoutPath: `holdout/holdout-case-${index}.txt`,
     }));
@@ -1476,15 +1479,64 @@ describe("durable promotion verdict query", () => {
       terminalHoldoutAssetGroupIds: ["holdout-hardlink-mirror"],
     })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
 
+    const copyRoot = path.join(capsuleRootDir, "holdout-copy-mirror");
+    await mkdir(copyRoot, { recursive: true });
+    const copyHashes: Record<string, string> = {};
+    for (const unit of split.holdout.units) {
+      const source = path.join(capsuleRootDir, unit.path);
+      const copyRel = `holdout-copy-mirror/${unit.id}.txt`;
+      const copy = path.join(capsuleRootDir, copyRel);
+      await copyFile(source, copy);
+      copyHashes[copyRel] = unit.containerHash;
+      const sourceStat = await stat(source);
+      const copyStat = await stat(copy);
+      expect(`${copyStat.dev}:${copyStat.ino}`).not.toBe(`${sourceStat.dev}:${sourceStat.ino}`);
+      expect(sha256(await readFile(copy))).toBe(unit.containerHash);
+    }
+    const copyManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "holdout-copy-mirror", visibility: "holdout", paths: ["holdout-copy-mirror"] },
+      ],
+      contentHashes: { ...contentHashes, ...copyHashes },
+    });
+    await expect(boot({
+      manifest: copyManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout-copy-mirror"],
+    })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
+
     const b = await boot({
       manifest: makeManifest({
         contentHashes: { ...baseManifest.contentHashes, ...splitHashes },
       }),
       promotionHoldoutSplit: split,
     });
+    const sealedContentHashes = new Set(split.holdout.units.flatMap((unit) => [
+      unit.contentHash,
+      unit.containerHash,
+    ]));
+    b.ctl.evalInspect = async (argv) => {
+      const mount = argv.find((arg) => arg.endsWith(":/capsule/assets:ro"));
+      expect(mount).toBeDefined();
+      const stagedRoot = mount?.slice(0, -":/capsule/assets:ro".length) ?? "";
+      const pending = [stagedRoot];
+      while (pending.length > 0) {
+        const current = pending.pop()!;
+        const currentStat = await stat(current);
+        if (currentStat.isDirectory()) {
+          for (const entry of await readdir(current)) pending.push(path.join(current, entry));
+        } else if (currentStat.isFile()) {
+          expect(sealedContentHashes.has(sha256(await readFile(current)))).toBe(false);
+        }
+      }
+    };
     b.ctl.evalOutputs.set(baselineHash, score(0.2)).set(candidateHash, score(0.4));
     const winner = await saveCandidate(b, candidateTar);
-    await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    const visibleGroups = b.broker.getTask(CLIENT).visibleAssetGroups;
+    for (const [seed, assetGroupId] of visibleGroups.entries()) {
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId, seed }, CLIENT);
+    }
     await b.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "train", seed: 0 }, CLIENT);
     b.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT);
 
@@ -1499,6 +1551,7 @@ describe("durable promotion verdict query", () => {
       seeds: [0],
       nullControlId: sha256("not-a-control"),
     }, CLIENT)).toThrow(/trusted authority/);
+    b.ctl.evalInspect = null;
 
     const records = await b.broker.assessPromotionHoldouts(ADMIN);
 

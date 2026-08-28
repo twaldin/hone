@@ -10,8 +10,14 @@ const CAPSULE_ID = z.string().regex(/^cap_[0-9a-f]{12}$/);
 
 export const HoldoutSplitUnit = z.object({
   id: z.string().min(1),
+  /** Materialized bank/file path relative to capsule root. */
   path: z.string().min(1),
+  /** RFC-6901 pointer inside a JSON bank; empty means the whole file. */
+  selector: z.string().refine((value) => value === "" || value.startsWith("/")),
+  /** Hash of the selected logical unit. */
   contentHash: SHA256,
+  /** Hash of the materialized container file. */
+  containerHash: SHA256,
   /** Attainable maximum for this unit, derived from its evaluator contract. */
   achievableScoreMax: z.number().finite(),
 }).strict();
@@ -37,7 +43,7 @@ export const PromotionHoldoutSplit = z.object({
   capsuleId: CAPSULE_ID,
   capsuleDigest: SHA256,
   seedDerivation: HoldoutSeedDerivation,
-  algorithm: z.literal("sha256-rank-v2"),
+  algorithm: z.enum(["sha256-rank-v2", "sealed-groups-all-units-v1"]),
   frozenAt: z.string().datetime(),
   populationDigest: SHA256,
   noiseClass: HoldoutNoiseClass,
@@ -53,12 +59,13 @@ export const PromotionHoldoutSplit = z.object({
   if (split.train.assetGroupId === split.holdout.assetGroupId) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "train and holdout asset groups must differ" });
   const units = [...split.train.units, ...split.holdout.units];
   const ids = new Set<string>();
-  const paths = new Set<string>();
+  const identities = new Set<string>();
   for (const unit of units) {
+    const identity = `${unit.path}\u0000${unit.selector}`;
     if (ids.has(unit.id)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate split unit id ${unit.id}` });
-    if (paths.has(unit.path)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate split unit path ${unit.path}` });
+    if (identities.has(identity)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate split unit location ${unit.path}#${unit.selector}` });
     ids.add(unit.id);
-    paths.add(unit.path);
+    identities.add(identity);
   }
   const derivedAchievableMax = split.holdout.units.reduce((sum, unit) => sum + unit.achievableScoreMax, 0)
     / split.holdout.units.length;
@@ -85,7 +92,7 @@ export type PromotionHoldoutSplit = z.infer<typeof PromotionHoldoutSplit>;
 /** Redacted run-event identity; unit ids, paths and hashes remain in trusted split authority only. */
 export const PromotionHoldoutSplitSummary = z.object({
   version: z.literal(HOLDOUT_SPLIT_VERSION), splitId: SHA256, capsuleId: CAPSULE_ID, capsuleDigest: SHA256,
-  seedDerivation: HoldoutSeedDerivation, algorithm: z.literal("sha256-rank-v2"), frozenAt: z.string().datetime(),
+  seedDerivation: HoldoutSeedDerivation, algorithm: z.enum(["sha256-rank-v2", "sealed-groups-all-units-v1"]), frozenAt: z.string().datetime(),
   populationDigest: SHA256, noiseClass: HoldoutNoiseClass, evaluationRepeats: z.number().int().positive(),
   minimumDetectableEffect: z.number().finite().positive(), claimMinimumHoldoutUnits: z.number().int().positive(),
   designEligibility: HoldoutDesignEligibility, trainAssetGroupId: z.string().min(1), holdoutAssetGroupId: z.string().min(1),

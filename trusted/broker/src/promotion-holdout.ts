@@ -22,6 +22,9 @@ export interface PromotionHoldoutSourceUnit {
   contentHash: string;
   /** Derived from the unit evaluator contract, never from observed candidate scores. */
   achievableScoreMax: number;
+  selector: string;
+  trainContainerHash: string;
+  holdoutContainerHash: string;
   trainPath: string;
   holdoutPath: string;
 }
@@ -101,7 +104,9 @@ export function createPromotionHoldoutSplit(input: CreatePromotionHoldoutSplitIn
       units: population.filter((unit) => !holdoutIds.has(unit.id)).map((unit) => ({
         id: unit.id,
         path: unit.trainPath,
+        selector: unit.selector,
         contentHash: unit.contentHash,
+        containerHash: unit.trainContainerHash,
         achievableScoreMax: unit.achievableScoreMax,
       })),
     },
@@ -110,7 +115,9 @@ export function createPromotionHoldoutSplit(input: CreatePromotionHoldoutSplitIn
       units: holdoutPopulation.map((unit) => ({
         id: unit.id,
         path: unit.holdoutPath,
+        selector: unit.selector,
         contentHash: unit.contentHash,
+        containerHash: unit.holdoutContainerHash,
         achievableScoreMax: unit.achievableScoreMax,
       })),
     },
@@ -126,11 +133,13 @@ export function assertPromotionHoldoutSplitIdentity(splitInput: PromotionHoldout
     .map(({ id, contentHash, achievableScoreMax }) => ({ id, contentHash, achievableScoreMax }))
     .sort((left, right) => left.id.localeCompare(right.id));
   if (digest(population) !== split.populationDigest) throw new Error("holdout population digest does not match its units");
-  const derivedSeed = derivePromotionHoldoutSeed(split.seedDerivation.campaignIdentity, split.capsuleDigest);
-  const expectedHoldout = holdoutIdsFor(derivedSeed, split.capsuleDigest, population, split.holdout.units.length);
-  if (split.holdout.units.some((unit) => !expectedHoldout.has(unit.id))
-    || split.train.units.some((unit) => expectedHoldout.has(unit.id))) {
-    throw new Error("holdout split is not the canonical derived-seed assignment");
+  if (split.algorithm === "sha256-rank-v2") {
+    const derivedSeed = derivePromotionHoldoutSeed(split.seedDerivation.campaignIdentity, split.capsuleDigest);
+    const expectedHoldout = holdoutIdsFor(derivedSeed, split.capsuleDigest, population, split.holdout.units.length);
+    if (split.holdout.units.some((unit) => !expectedHoldout.has(unit.id))
+      || split.train.units.some((unit) => expectedHoldout.has(unit.id))) {
+      throw new Error("holdout split is not the canonical derived-seed assignment");
+    }
   }
 }
 

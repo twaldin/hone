@@ -1,5 +1,8 @@
-import { readFileSync } from "node:fs";
-import { PromotionHoldoutRecord } from "@hone/schema";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { CapsuleManifest, PromotionHoldoutRecord, PromotionHoldoutSplit } from "@hone/schema";
 import { describe, expect, test } from "vitest";
 import {
   assertPromotionHoldoutSplitIdentity,
@@ -9,6 +12,8 @@ import {
   derivePromotionHoldoutSeed,
   promotionHoldoutSplitSummary,
 } from "../src/promotion-holdout.js";
+import { Broker } from "../src/broker.js";
+import { admitCapsule } from "../../cli/src/admission.js";
 
 const HASH = (digit: string) => `sha256:${digit.repeat(64)}`;
 const CAPSULE_DIGEST = HASH("a");
@@ -20,6 +25,9 @@ function units(count: number) {
     id: `case-${index.toString().padStart(2, "0")}`,
     achievableScoreMax: 1,
     contentHash: HASH(((index % 9) + 1).toString()),
+    selector: "",
+    trainContainerHash: HASH(((index % 9) + 1).toString()),
+    holdoutContainerHash: HASH(((index % 9) + 1).toString()),
     trainPath: `assets/train/case-${index}.json`,
     holdoutPath: `assets/holdout/case-${index}.json`,
   }));
@@ -176,5 +184,75 @@ describe("promotion holdout assessment", () => {
     expect(receipts).toHaveLength(3);
     expect(receipts.every((row) => cited.has(row.recordDigest))).toBe(true);
     expect(receipts.every((row) => row.record.assetGroupId === record.holdout.assetGroupId)).toBe(true);
+  });
+
+  test("boots the trusted broker from both audited real-data split ledgers", async () => {
+    const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+    const temporaryRoot = mkdtempSync(join(tmpdir(), "hone-audited-holdout-"));
+    try {
+      for (const spec of [
+        {
+          label: "flt-text-input",
+          ledger: "audited-flt-split.v2.json",
+          materialize: (root: string) => {
+            mkdirSync(join(root, "train"), { recursive: true });
+            mkdirSync(join(root, "promotion-holdout"), { recursive: true });
+            copyFileSync(join(repositoryRoot, "capsules/flt-text-input/assets/train/cases.json"), join(root, "train/cases.json"));
+            copyFileSync(join(repositoryRoot, "capsules/flt-text-input/assets/validation/cases.json"), join(root, "promotion-holdout/cases.json"));
+          },
+        },
+        {
+          label: "tradeup-profit",
+          ledger: "audited-tradeup-split.v2.json",
+          materialize: (root: string) => {
+            mkdirSync(join(root, "train"), { recursive: true });
+            mkdirSync(join(root, "promotion-holdout"), { recursive: true });
+            copyFileSync(join(repositoryRoot, "capsules/tradeup-profit/assets/train/cases.json"), join(root, "train/cases.json"));
+            const validation = JSON.parse(readFileSync(join(repositoryRoot, "capsules/tradeup-profit/assets/validation/cases.json"), "utf8"));
+            const holdout = JSON.parse(readFileSync(join(repositoryRoot, "capsules/tradeup-profit/assets/holdout/cases.json"), "utf8"));
+            writeFileSync(
+              join(root, "promotion-holdout/cases.json"),
+              JSON.stringify({ ...validation, cases: [...validation.cases, ...holdout.cases], split: "promotion-holdout" }) + "\n",
+            );
+          },
+        },
+      ]) {
+        const admitted = admitCapsule(join(repositoryRoot, "capsules", spec.label));
+        const ledger = JSON.parse(readFileSync(join(repositoryRoot, "data/hone-m2-holdout", spec.ledger), "utf8"));
+        const split = PromotionHoldoutSplit.parse(ledger.split);
+        assertPromotionHoldoutSplitIdentity(split);
+        const capsuleRoot = join(temporaryRoot, spec.label, "capsule");
+        spec.materialize(capsuleRoot);
+        const manifest = CapsuleManifest.parse({
+          ...admitted.manifest,
+          assetGroups: [
+            { id: "train", visibility: "public", paths: ["train"] },
+            { id: "promotion-holdout", visibility: "holdout", paths: ["promotion-holdout"] },
+          ],
+          contentHashes: {
+            "train/cases.json": split.train.units[0]!.containerHash,
+            "promotion-holdout/cases.json": split.holdout.units[0]!.containerHash,
+          },
+        });
+        const runDir = join(temporaryRoot, spec.label, "run");
+        const broker = new Broker({
+          runId: `run_audited_${spec.label}`,
+          manifest,
+          capsuleRootDir: capsuleRoot,
+          baselineArtifactHash: `sha256:${"0".repeat(64)}`,
+          capsuleDigest: admitted.digest,
+          optimizerDigest: `sha256:${"1".repeat(64)}`,
+          promotionHoldoutSplit: split,
+          holdoutLedgerPath: join(runDir, "holdout.ndjson"),
+          image: admitted.manifest.image,
+          runDir,
+          casDir: join(temporaryRoot, spec.label, "cas"),
+          onEvent: () => {},
+        });
+        await broker.close();
+      }
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true });
+    }
   });
 });
