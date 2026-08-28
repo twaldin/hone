@@ -1592,7 +1592,7 @@ export class Broker {
       } catch (error) {
         throw new BrokerError("INTERNAL", error instanceof Error ? error.message : String(error));
       }
-      if (split.capsuleId !== this.manifest.id || split.capsuleDigest !== config.capsuleDigest) {
+      if (split.capsuleId !== this.manifest.id || split.capsuleDigest !== this.runtimeIdentity.admittedCapsuleDigest) {
         throw new BrokerError("INTERNAL", "holdout split does not match the frozen capsule identity");
       }
       const trainGroup = this.manifest.assetGroups.find((group) => group.id === split.train.assetGroupId);
@@ -1897,7 +1897,7 @@ export class Broker {
     // Durable state opens (and replays) synchronously at construction — a
     // broker NEVER exists without its journal, so no method can act before
     // replay and no acknowledged fact can be lost to ordering.
-    mkdirSync(config.runDir, { recursive: true });
+    mkdirSync(config.runDir, { recursive: true, mode: 0o700 });
     const stateLog = RunStateLog.open(path.join(config.runDir, STATE_FILE));
     try {
       this.validateReplay(stateLog);
