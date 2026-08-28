@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeSync,
 } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -1801,14 +1802,12 @@ export class Broker {
         throw new BrokerError("INTERNAL", `terminal holdout asset group ${assetGroupId} is not visibility=holdout`);
       }
     }
-    if (
-      this.promotionHoldoutSplit !== undefined
-      && terminalHoldoutAssetGroupIds.has(this.promotionHoldoutSplit.holdout.assetGroupId)
-    ) {
-      throw new BrokerError(
-        "INTERNAL",
-        `promotion holdout ${this.promotionHoldoutSplit.holdout.assetGroupId} cannot be released as a terminal optimizer capability: `
-        + "promotion holdout contents and scores must remain optimizer-invisible",
+    if (this.promotionHoldoutSplit !== undefined) {
+      assertPromotionHoldoutTerminalIsolation(
+        this.manifest,
+        config.capsuleRootDir,
+        this.promotionHoldoutSplit,
+        terminalHoldoutAssetGroupIds,
       );
     }
     this.terminalHoldoutAssetGroupIds = terminalHoldoutAssetGroupIds;
@@ -5878,6 +5877,66 @@ function meanOver(scores: Map<string, number>, keys: readonly string[]): number 
 }
 
 /**
+ * Promotion holdouts are stricter than general same-visibility asset groups:
+ * no terminal optimizer capability may reach any underlying holdout byte,
+ * even through a second group name, nested root, symlink, or hard link.
+ */
+function assertPromotionHoldoutTerminalIsolation(
+  manifest: CapsuleManifest,
+  capsuleRootDir: string,
+  split: z.infer<typeof PromotionHoldoutSplit>,
+  terminalGroupIds: ReadonlySet<string>,
+): void {
+  if (terminalGroupIds.size === 0) return;
+  const sealed = split.holdout.units.map((unit) => {
+    const full = path.join(capsuleRootDir, unit.path);
+    const link = lstatSync(full);
+    if (link.isSymbolicLink()) {
+      throw new BrokerError("INTERNAL", `promotion holdout unit ${unit.id} cannot be a symlink`);
+    }
+    const canonical = realpathSync.native(full);
+    const identity = statSync(canonical);
+    if (!identity.isFile()) {
+      throw new BrokerError("INTERNAL", `promotion holdout unit ${unit.id} must be a regular file`);
+    }
+    return { id: unit.id, canonical, dev: identity.dev, ino: identity.ino };
+  });
+  const refuseIfSealed = (candidatePath: string, groupId: string): void => {
+    const link = lstatSync(candidatePath);
+    if (link.isSymbolicLink()) {
+      throw new BrokerError(
+        "INTERNAL",
+        `terminal holdout group ${groupId} contains a symlink and cannot prove promotion holdout isolation`,
+      );
+    }
+    const canonical = realpathSync.native(candidatePath);
+    const identity = statSync(canonical);
+    if (identity.isDirectory()) {
+      for (const entry of readdirSync(candidatePath)) {
+        refuseIfSealed(path.join(candidatePath, entry), groupId);
+      }
+      return;
+    }
+    if (!identity.isFile()) return;
+    const matched = sealed.find((unit) =>
+      unit.canonical === canonical || (unit.dev === identity.dev && unit.ino === identity.ino)
+    );
+    if (matched !== undefined) {
+      throw new BrokerError(
+        "INTERNAL",
+        `terminal holdout group ${groupId} reaches promotion holdout unit ${matched.id}: `
+        + "promotion holdout contents and scores must remain optimizer-invisible",
+      );
+    }
+  };
+  for (const groupId of terminalGroupIds) {
+    const group = manifest.assetGroups.find((candidate) => candidate.id === groupId);
+    if (group === undefined) throw new BrokerError("INTERNAL", `terminal holdout group ${groupId} is missing`);
+    for (const root of group.paths) refuseIfSealed(path.join(capsuleRootDir, root), groupId);
+  }
+}
+
+/**
  * Preflight (constructor): asset-group paths must not overlap or nest across
  * visibility classes — otherwise mounting a public group could smuggle
  * protected/holdout files into a container that must never see them.
@@ -5893,6 +5952,8 @@ function assertAssetGroupIsolation(manifest: CapsuleManifest): void {
   }
   for (const [i, a] of entries.entries()) {
     for (const b of entries.slice(i + 1)) {
+      // Same-visibility aliases are permitted here. Promotion holdout bytes
+      // receive the stricter path/realpath/dev+ino terminal guard above.
       if (a.visibility === b.visibility) continue;
       // "." mounts the whole capsule root — it is an ancestor of everything.
       if (a.path === "." || b.path === "." || a.path === b.path || a.path.startsWith(`${b.path}/`) || b.path.startsWith(`${a.path}/`)) {

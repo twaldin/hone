@@ -8,7 +8,13 @@ export const HOLDOUT_SEED_DOMAIN = "hone-promotion-holdout-seed-v1" as const;
 const SHA256 = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 const CAPSULE_ID = z.string().regex(/^cap_[0-9a-f]{12}$/);
 
-export const HoldoutSplitUnit = z.object({ id: z.string().min(1), path: z.string().min(1), contentHash: SHA256 }).strict();
+export const HoldoutSplitUnit = z.object({
+  id: z.string().min(1),
+  path: z.string().min(1),
+  contentHash: SHA256,
+  /** Attainable maximum for this unit, derived from its evaluator contract. */
+  achievableScoreMax: z.number().finite(),
+}).strict();
 export type HoldoutSplitUnit = z.infer<typeof HoldoutSplitUnit>;
 const HoldoutSplitPartition = z.object({ assetGroupId: z.string().min(1), units: z.array(HoldoutSplitUnit).min(1) }).strict();
 
@@ -53,6 +59,11 @@ export const PromotionHoldoutSplit = z.object({
     if (paths.has(unit.path)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `duplicate split unit path ${unit.path}` });
     ids.add(unit.id);
     paths.add(unit.path);
+  }
+  const derivedAchievableMax = split.holdout.units.reduce((sum, unit) => sum + unit.achievableScoreMax, 0)
+    / split.holdout.units.length;
+  if (Math.abs(split.achievableScoreMax - derivedAchievableMax) > Number.EPSILON * Math.max(1, Math.abs(derivedAchievableMax)) * 8) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "achievableScoreMax must equal the mean of holdout unit maxima" });
   }
   const requiredUnits = Math.ceil(1 / split.minimumDetectableEffect);
   if (split.claimMinimumHoldoutUnits !== requiredUnits) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "claimMinimumHoldoutUnits must equal ceil(1 / minimumDetectableEffect)" });

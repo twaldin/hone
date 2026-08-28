@@ -1401,6 +1401,7 @@ describe("durable promotion verdict query", () => {
       id: `holdout-case-${index}`,
       content: `sealed-${index}`,
       contentHash: sha256(`sealed-${index}`),
+      achievableScoreMax: 1,
       trainPath: `train/holdout-case-${index}.txt`,
       holdoutPath: `holdout/holdout-case-${index}.txt`,
     }));
@@ -1417,7 +1418,6 @@ describe("durable promotion verdict query", () => {
       noiseEnvelope: 0,
       evaluationRepeats: 1,
       minimumDetectableEffect: 0.05,
-      achievableScoreMax: 1,
     });
     const contentById = new Map(sourceUnits.map((unit) => [unit.id, unit.content]));
     const splitHashes: Record<string, string> = {};
@@ -1426,13 +1426,55 @@ describe("durable promotion verdict query", () => {
       splitHashes[unit.path] = unit.contentHash;
     }
     const baseManifest = makeManifest();
+    const contentHashes = { ...baseManifest.contentHashes, ...splitHashes };
     await expect(boot({
-      manifest: makeManifest({
-        contentHashes: { ...baseManifest.contentHashes, ...splitHashes },
-      }),
+      manifest: makeManifest({ contentHashes }),
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["holdout"],
-    })).rejects.toThrow(/cannot be released as a terminal optimizer capability.*optimizer-invisible/);
+    })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
+
+    const aliasManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "holdout-mirror", visibility: "holdout", paths: ["holdout"] },
+      ],
+      contentHashes,
+    });
+    await expect(boot({
+      manifest: aliasManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout-mirror"],
+    })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
+
+    const mirrorRoot = path.join(capsuleRootDir, "holdout-hardlink-mirror");
+    await mkdir(mirrorRoot, { recursive: true });
+    const hardlinkHashes: Record<string, string> = {};
+    const sealedIdentities = new Set<string>();
+    const mirrorIdentities = new Set<string>();
+    for (const unit of split.holdout.units) {
+      const source = path.join(capsuleRootDir, unit.path);
+      const mirrorRel = `holdout-hardlink-mirror/${unit.id}.txt`;
+      const mirror = path.join(capsuleRootDir, mirrorRel);
+      await link(source, mirror);
+      hardlinkHashes[mirrorRel] = unit.contentHash;
+      const sourceStat = await stat(source);
+      const mirrorStat = await stat(mirror);
+      sealedIdentities.add(`${sourceStat.dev}:${sourceStat.ino}`);
+      mirrorIdentities.add(`${mirrorStat.dev}:${mirrorStat.ino}`);
+    }
+    expect([...sealedIdentities].every((identity) => mirrorIdentities.has(identity))).toBe(true);
+    const hardlinkManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "holdout-hardlink-mirror", visibility: "holdout", paths: ["holdout-hardlink-mirror"] },
+      ],
+      contentHashes: { ...contentHashes, ...hardlinkHashes },
+    });
+    await expect(boot({
+      manifest: hardlinkManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout-hardlink-mirror"],
+    })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
 
     const b = await boot({
       manifest: makeManifest({

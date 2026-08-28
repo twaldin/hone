@@ -20,6 +20,8 @@ const digest = (value: unknown): `sha256:${string}` =>
 export interface PromotionHoldoutSourceUnit {
   id: string;
   contentHash: string;
+  /** Derived from the unit evaluator contract, never from observed candidate scores. */
+  achievableScoreMax: number;
   trainPath: string;
   holdoutPath: string;
 }
@@ -37,7 +39,6 @@ export interface CreatePromotionHoldoutSplitInput {
   noiseEnvelope: number | null;
   evaluationRepeats: number;
   minimumDetectableEffect: number;
-  achievableScoreMax: number;
 }
 
 export function derivePromotionHoldoutSeed(campaignIdentity: string, capsuleDigest: string): `sha256:${string}` {
@@ -65,9 +66,16 @@ export function createPromotionHoldoutSplit(input: CreatePromotionHoldoutSplitIn
     throw new Error("holdout unit count must leave non-empty train and holdout partitions");
   }
   const population = [...input.units].sort((left, right) => left.id.localeCompare(right.id));
-  const identityPopulation = population.map(({ id, contentHash }) => ({ id, contentHash }));
+  const identityPopulation = population.map(({ id, contentHash, achievableScoreMax }) => ({
+    id,
+    contentHash,
+    achievableScoreMax,
+  }));
   const derivedSeed = derivePromotionHoldoutSeed(input.campaignIdentity, input.capsuleDigest);
   const holdoutIds = holdoutIdsFor(derivedSeed, input.capsuleDigest, identityPopulation, input.holdoutUnits);
+  const holdoutPopulation = population.filter((unit) => holdoutIds.has(unit.id));
+  const achievableScoreMax = holdoutPopulation.reduce((sum, unit) => sum + unit.achievableScoreMax, 0)
+    / holdoutPopulation.length;
   const claimMinimumHoldoutUnits = Math.ceil(1 / input.minimumDetectableEffect);
   const withoutIdentity = {
     version: HOLDOUT_SPLIT_VERSION,
@@ -87,14 +95,24 @@ export function createPromotionHoldoutSplit(input: CreatePromotionHoldoutSplitIn
     minimumDetectableEffect: input.minimumDetectableEffect,
     claimMinimumHoldoutUnits,
     designEligibility: input.holdoutUnits >= claimMinimumHoldoutUnits ? "claim-capable" as const : "instrumentation-only" as const,
-    achievableScoreMax: input.achievableScoreMax,
+    achievableScoreMax,
     train: {
       assetGroupId: input.trainAssetGroupId,
-      units: population.filter((unit) => !holdoutIds.has(unit.id)).map((unit) => ({ id: unit.id, path: unit.trainPath, contentHash: unit.contentHash })),
+      units: population.filter((unit) => !holdoutIds.has(unit.id)).map((unit) => ({
+        id: unit.id,
+        path: unit.trainPath,
+        contentHash: unit.contentHash,
+        achievableScoreMax: unit.achievableScoreMax,
+      })),
     },
     holdout: {
       assetGroupId: input.holdoutAssetGroupId,
-      units: population.filter((unit) => holdoutIds.has(unit.id)).map((unit) => ({ id: unit.id, path: unit.holdoutPath, contentHash: unit.contentHash })),
+      units: holdoutPopulation.map((unit) => ({
+        id: unit.id,
+        path: unit.holdoutPath,
+        contentHash: unit.contentHash,
+        achievableScoreMax: unit.achievableScoreMax,
+      })),
     },
   };
   return PromotionHoldoutSplit.parse({ ...withoutIdentity, splitId: digest(withoutIdentity) });
@@ -105,7 +123,7 @@ export function assertPromotionHoldoutSplitIdentity(splitInput: PromotionHoldout
   const { splitId, ...withoutIdentity } = split;
   if (digest(withoutIdentity) !== splitId) throw new Error("holdout split identity does not match its frozen assignment");
   const population = [...split.train.units, ...split.holdout.units]
-    .map(({ id, contentHash }) => ({ id, contentHash }))
+    .map(({ id, contentHash, achievableScoreMax }) => ({ id, contentHash, achievableScoreMax }))
     .sort((left, right) => left.id.localeCompare(right.id));
   if (digest(population) !== split.populationDigest) throw new Error("holdout population digest does not match its units");
   const derivedSeed = derivePromotionHoldoutSeed(split.seedDerivation.campaignIdentity, split.capsuleDigest);

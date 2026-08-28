@@ -18,6 +18,7 @@ const FROZEN_AT = "2026-08-28T00:00:00.000Z";
 function units(count: number) {
   return Array.from({ length: count }, (_, index) => ({
     id: `case-${index.toString().padStart(2, "0")}`,
+    achievableScoreMax: 1,
     contentHash: HASH(((index % 9) + 1).toString()),
     trainPath: `assets/train/case-${index}.json`,
     holdoutPath: `assets/holdout/case-${index}.json`,
@@ -38,7 +39,6 @@ function deterministicSplit(inputUnits = units(12), holdoutUnits = 2, minimumDet
     noiseEnvelope: 0,
     evaluationRepeats: 1,
     minimumDetectableEffect,
-    achievableScoreMax: 1,
   });
 }
 
@@ -149,6 +149,28 @@ describe("promotion holdout assessment", () => {
     expect(record).toMatchObject({
       status: "unmeasurable",
       claimable: false,
+      holdout: { assetGroupId: "promotion-holdout", holdoutUnits: 20 },
+    });
+    expect(receipts).toHaveLength(3);
+    expect(receipts.every((row) => cited.has(row.recordDigest))).toBe(true);
+    expect(receipts.every((row) => row.record.assetGroupId === record.holdout.assetGroupId)).toBe(true);
+  });
+
+  test("parses the corrected tradeup record and resolves every receipt citation", () => {
+    const results = JSON.parse(readFileSync(
+      new URL("../../../data/hone-m2-holdout/corrected-tradeup-results.v2.json", import.meta.url),
+      "utf8",
+    ));
+    const record = PromotionHoldoutRecord.parse(results.promotionRecord);
+    const receipts = readFileSync(
+      new URL("../../../data/hone-m2-holdout/corrected-tradeup-evaluations.v2.ndjson", import.meta.url),
+      "utf8",
+    ).trim().split("\n").map((line) => JSON.parse(line));
+    const cited = new Set(results.receiptDigests);
+
+    expect(record).toMatchObject({
+      status: "supported",
+      claimable: true,
       holdout: { assetGroupId: "promotion-holdout", holdoutUnits: 20 },
     });
     expect(receipts).toHaveLength(3);
