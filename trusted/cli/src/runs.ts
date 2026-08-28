@@ -28,7 +28,7 @@ export function mintRunId(): string {
 export function mintRunDirDurable(root: string, runId: string): string {
   const base = runsRoot(root);
   const runDir = join(base, runId);
-  mkdirSync(runDir, { recursive: true });
+  mkdirSync(runDir, { recursive: true, mode: 0o700 });
   syncDir(runDir);
   syncDir(base);
   syncDir(root);

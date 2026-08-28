@@ -13,6 +13,7 @@ import {
   writeAllSync,
   writeFileDurable,
 } from "../src/eventlog.js";
+import { mintRunDirDurable, runsRoot } from "../src/runs.js";
 import { CAP_ID, FIX_OPTIMIZER_DIGEST, at, fakeHash, makeRoot } from "./helpers.js";
 
 /**
@@ -76,6 +77,20 @@ describe("writeFileDurable (whole-or-absent publication)", () => {
     writeFileDurable(path, `${JSON.stringify({ v: 1 })}\n`);
     writeFileDurable(path, `${JSON.stringify({ v: 2 })}\n`);
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ v: 2 });
+  });
+});
+
+describe("run directory custody", () => {
+  it("mints the complete run directory chain as owner-only under a permissive umask", () => {
+    const root = makeRoot();
+    const priorUmask = process.umask(0o022);
+    try {
+      const runDir = mintRunDirDurable(root, "run_owner_only");
+      expect(statSync(runsRoot(root)).mode & 0o777).toBe(0o700);
+      expect(statSync(runDir).mode & 0o777).toBe(0o700);
+    } finally {
+      process.umask(priorUmask);
+    }
   });
 });
 
