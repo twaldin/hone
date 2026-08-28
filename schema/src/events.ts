@@ -5,7 +5,7 @@ import { EvaluatorIsolationRecord } from "./evaluator.js";
 import {
   HoldoutNullControlRecord,
   PromotionHoldoutRecord,
-  PromotionHoldoutSplit,
+  PromotionHoldoutSplitSummary,
 } from "./holdout.js";
 import { PROMOTION_GATE_VERSION, PromotionGateDecision } from "./promotion.js";
 
@@ -169,7 +169,7 @@ export const RunEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("budget.snapshot"), budget: BudgetState }),
   z.object({ ...base, type: z.literal("budget.exhausted"), dimension: z.string() }),
   z.object({ ...base, type: z.literal("holdout.accessed"), capsuleId: z.string(), ledgerCount: z.number().int().positive(), ledgerBudget: z.number().int().positive() }),
-  z.object({ ...base, type: z.literal("holdout.split.frozen"), split: PromotionHoldoutSplit }),
+  z.object({ ...base, type: z.literal("holdout.split.frozen"), split: PromotionHoldoutSplitSummary }),
   z.object({
     ...base,
     type: z.literal("holdout.eval.completed"),

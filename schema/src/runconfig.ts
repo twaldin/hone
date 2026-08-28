@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { BudgetEnvelope } from "./capsule.js";
 import { ModelRouting } from "./proxy.js";
-import { PromotionHoldoutSplit } from "./holdout.js";
 
 /**
  * Contract 5 — Run config / contract.
@@ -79,10 +78,5 @@ export const RunConfig = z.object({
    * governs the M1 outer champion promotion decision.
    */
   promotion: PromotionRule.default(DEFAULT_PROMOTION_RULE),
-  /**
-   * Frozen promotion holdout assignment. The supervisor seals it before the
-   * optimizer launches; the broker never exposes it through getTask.
-   */
-  promotionHoldoutSplit: PromotionHoldoutSplit.optional(),
 });
 export type RunConfig = z.infer<typeof RunConfig>;

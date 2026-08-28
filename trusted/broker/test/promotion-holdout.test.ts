@@ -1,15 +1,19 @@
+import { readFileSync } from "node:fs";
+import { PromotionHoldoutRecord } from "@hone/schema";
 import { describe, expect, test } from "vitest";
 import {
   assertPromotionHoldoutSplitIdentity,
   buildHoldoutNullControl,
   buildPromotionHoldoutRecord,
   createPromotionHoldoutSplit,
+  derivePromotionHoldoutSeed,
+  promotionHoldoutSplitSummary,
 } from "../src/promotion-holdout.js";
 
 const HASH = (digit: string) => `sha256:${digit.repeat(64)}`;
 const CAPSULE_DIGEST = HASH("a");
+const CAMPAIGN_IDENTITY = HASH("b");
 const FROZEN_AT = "2026-08-28T00:00:00.000Z";
-const SEED = "hone-m2-promotion-holdout-2026-08-28";
 
 function units(count: number) {
   return Array.from({ length: count }, (_, index) => ({
@@ -20,32 +24,37 @@ function units(count: number) {
   }));
 }
 
-function deterministicSplit(inputUnits = units(12)) {
+function deterministicSplit(inputUnits = units(12), holdoutUnits = 2, minimumDetectableEffect = 0.05) {
   return createPromotionHoldoutSplit({
     capsuleId: "cap_0123456789ab",
     capsuleDigest: CAPSULE_DIGEST,
-    seed: SEED,
+    campaignIdentity: CAMPAIGN_IDENTITY,
     frozenAt: FROZEN_AT,
     trainAssetGroupId: "train",
     holdoutAssetGroupId: "holdout",
     units: inputUnits,
-    holdoutUnits: 2,
+    holdoutUnits,
     noiseClass: "deterministic-zero-noise",
     noiseEnvelope: 0,
     evaluationRepeats: 1,
+    minimumDetectableEffect,
+    achievableScoreMax: 1,
   });
 }
 
 describe("frozen promotion holdout split", () => {
-  test("is independent of input order and binds the seeded assignment", () => {
+  test("derives its seed from pre-split identities and is input-order independent", () => {
     const forward = deterministicSplit();
     const reversed = deterministicSplit([...units(12)].reverse());
 
     expect(reversed).toEqual(forward);
-    expect(forward.train.units).toHaveLength(10);
-    expect(forward.holdout.units).toHaveLength(2);
-    expect(forward.holdout.units.every((unit) => unit.path.startsWith("assets/holdout/"))).toBe(true);
-    expect(forward.train.units.every((unit) => unit.path.startsWith("assets/train/"))).toBe(true);
+    expect(derivePromotionHoldoutSeed(CAMPAIGN_IDENTITY, CAPSULE_DIGEST)).toMatch(/^sha256:/);
+    expect(forward.seedDerivation).toEqual({
+      algorithm: "sha256-campaign-capsule-v1",
+      domain: "hone-promotion-holdout-seed-v1",
+      campaignIdentity: CAMPAIGN_IDENTITY,
+    });
+    expect(forward.designEligibility).toBe("instrumentation-only");
     expect(() => assertPromotionHoldoutSplitIdentity(forward)).not.toThrow();
   });
 
@@ -53,61 +62,97 @@ describe("frozen promotion holdout split", () => {
     const split = deterministicSplit();
     const tampered = structuredClone(split);
     tampered.holdout.units[0]!.contentHash = HASH("f");
-
     expect(() => assertPromotionHoldoutSplitIdentity(tampered)).toThrow(/identity|population/);
   });
 
-  test("changes identity when the pre-evaluation seed changes", () => {
-    const original = deterministicSplit();
-    const reseeded = createPromotionHoldoutSplit({
-      capsuleId: original.capsuleId,
-      capsuleDigest: original.capsuleDigest,
-      seed: "different-m2-holdout-seed-0001",
-      frozenAt: original.frozenAt,
-      trainAssetGroupId: original.train.assetGroupId,
-      holdoutAssetGroupId: original.holdout.assetGroupId,
-      units: units(12),
-      holdoutUnits: 2,
-      noiseClass: "deterministic-zero-noise",
-      noiseEnvelope: 0,
-      evaluationRepeats: 1,
-    });
-
-    expect(reseeded.splitId).not.toBe(original.splitId);
+  test("redacts unit identities and paths from the event summary", () => {
+    const summary = promotionHoldoutSplitSummary(deterministicSplit());
+    expect(summary).toMatchObject({ holdoutUnits: 2, trainUnits: 10 });
+    expect(JSON.stringify(summary)).not.toContain("case-00");
+    expect(JSON.stringify(summary)).not.toContain("assets/holdout");
   });
 });
 
 describe("promotion holdout assessment", () => {
-  test("keeps in-sample noise clearance separate from holdout overfitting", () => {
-    const split = deterministicSplit();
+  test("marks a saturated instrument unmeasurable rather than overfit", () => {
+    const split = deterministicSplit(units(25), 20, 0.05);
     const nullControl = buildHoldoutNullControl({
       splitId: split.splitId,
       artifactHash: HASH("1"),
       assetGroupId: "holdout",
       seeds: [0, 1],
-      scores: [0.5, 0.5],
+      scores: [0.8, 0.8],
       recordedAt: FROZEN_AT,
     });
     const record = buildPromotionHoldoutRecord({
       artifactHash: HASH("2"),
       parentArtifactHash: HASH("1"),
-      splitId: split.splitId,
+      split,
       gateVersion: "noise-envelope-v2",
       noiseDecision: "promote",
-      trainParentScore: 0.5,
-      trainChildScore: 0.8,
-      holdoutParentScores: [0.5],
-      holdoutChildScores: [0.4],
-      assetGroupId: "holdout",
+      trainParentScore: 0.3,
+      trainChildScore: 0.6,
+      holdoutParentScores: [0.8],
+      holdoutChildScores: [0.8],
       seeds: [0],
       nullControl,
       recordedAt: FROZEN_AT,
     });
 
+    expect(record.holdout.headroom).toBeCloseTo(0.2);
     expect(record.training.noiseDecision).toBe("promote");
-    expect(record.status).toBe("overfit");
-    expect(record.generalizationGap).toBeCloseTo(0.4);
+    expect(record.status).toBe("unmeasurable");
     expect(record.claimable).toBe(false);
-    expect(record.nullControl.informationFree).toBe(true);
+    expect(record.nullControl).toMatchObject({ estimator: "sample-sd-v1", sampleStandardDeviation: 0 });
+  });
+
+  test("can record overfit only when granularity, headroom, and deterministic null support it", () => {
+    const split = deterministicSplit(units(25), 20, 0.05);
+    const nullControl = buildHoldoutNullControl({
+      splitId: split.splitId,
+      artifactHash: HASH("1"),
+      assetGroupId: "holdout",
+      seeds: [0, 1],
+      scores: [0.2, 0.2],
+      recordedAt: FROZEN_AT,
+    });
+    const record = buildPromotionHoldoutRecord({
+      artifactHash: HASH("2"),
+      parentArtifactHash: HASH("1"),
+      split,
+      gateVersion: "noise-envelope-v2",
+      noiseDecision: "promote",
+      trainParentScore: 0.3,
+      trainChildScore: 0.6,
+      holdoutParentScores: [0.2],
+      holdoutChildScores: [0.2],
+      seeds: [0],
+      nullControl,
+      recordedAt: FROZEN_AT,
+    });
+    expect(record.status).toBe("overfit");
+    expect(record.claimable).toBe(false);
+  });
+
+  test("parses the corrected real-data record and resolves every receipt citation", () => {
+    const results = JSON.parse(readFileSync(
+      new URL("../../../data/hone-m2-holdout/corrected-pilot-results.v2.json", import.meta.url),
+      "utf8",
+    ));
+    const record = PromotionHoldoutRecord.parse(results.promotionRecord);
+    const receipts = readFileSync(
+      new URL("../../../data/hone-m2-holdout/corrected-pilot-evaluations.v2.ndjson", import.meta.url),
+      "utf8",
+    ).trim().split("\n").map((line) => JSON.parse(line));
+    const cited = new Set(results.receiptDigests);
+
+    expect(record).toMatchObject({
+      status: "unmeasurable",
+      claimable: false,
+      holdout: { assetGroupId: "promotion-holdout", holdoutUnits: 20 },
+    });
+    expect(receipts).toHaveLength(3);
+    expect(receipts.every((row) => cited.has(row.recordDigest))).toBe(true);
+    expect(receipts.every((row) => row.record.assetGroupId === record.holdout.assetGroupId)).toBe(true);
   });
 });

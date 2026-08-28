@@ -56,6 +56,7 @@ import {
   HoldoutNullControlRecord,
   PromotionHoldoutRecord,
   PromotionHoldoutSplit,
+  PromotionHoldoutSplitSummary,
   RecordHoldoutNullControlParams,
   RecordPromotionHoldoutParams,
   RecursiveTask,
@@ -80,6 +81,7 @@ import {
   assertPromotionHoldoutSplitIdentity,
   buildHoldoutNullControl,
   buildPromotionHoldoutRecord,
+  promotionHoldoutSplitSummary,
 } from "./promotion-holdout.js";
 
 import { BrokerError } from "./errors.js";
@@ -830,7 +832,7 @@ type EmittableEvent =
     }
   | { type: "budget.exhausted"; dimension: string }
   | { type: "holdout.accessed"; capsuleId: string; ledgerCount: number; ledgerBudget: number }
-  | { type: "holdout.split.frozen"; split: z.infer<typeof PromotionHoldoutSplit> }
+  | { type: "holdout.split.frozen"; split: z.infer<typeof PromotionHoldoutSplitSummary> }
   | {
       type: "holdout.eval.completed";
       splitId: string;
@@ -988,7 +990,7 @@ const StatePayload = z.discriminatedUnion("t", [
   z.object({ t: z.literal("spend"), tokens: z.number().int().nonnegative(), usd: z.number().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("inv"), isolation: EvaluatorIsolationRecord.optional(), events: JournalEvents }),
   z.object({ t: z.literal("holdout"), seq: z.number().int().positive(), events: JournalEvents }),
-  z.object({ t: z.literal("holdoutSplit"), split: PromotionHoldoutSplit, events: JournalEvents }),
+  z.object({ t: z.literal("holdoutSplit"), split: PromotionHoldoutSplitSummary, events: JournalEvents }),
   z.object({
     t: z.literal("holdoutEval"),
     splitId: z.string().regex(/^sha256:[0-9a-f]{64}$/),
@@ -1799,6 +1801,16 @@ export class Broker {
         throw new BrokerError("INTERNAL", `terminal holdout asset group ${assetGroupId} is not visibility=holdout`);
       }
     }
+    if (
+      this.promotionHoldoutSplit !== undefined
+      && terminalHoldoutAssetGroupIds.has(this.promotionHoldoutSplit.holdout.assetGroupId)
+    ) {
+      throw new BrokerError(
+        "INTERNAL",
+        `promotion holdout ${this.promotionHoldoutSplit.holdout.assetGroupId} cannot be released as a terminal optimizer capability: `
+        + "promotion holdout contents and scores must remain optimizer-invisible",
+      );
+    }
     this.terminalHoldoutAssetGroupIds = terminalHoldoutAssetGroupIds;
     this.maxActiveSandboxes = config.maxActiveSandboxes ?? 8;
     this.maxConcurrentEvaluations = config.maxConcurrentEvaluations ?? 4;
@@ -1848,9 +1860,10 @@ export class Broker {
       this.validateReplay(stateLog);
       this.replayState(stateLog);
       if (this.promotionHoldoutSplit !== undefined && !this.holdoutSplitJournaled) {
+        const summary = promotionHoldoutSplitSummary(this.promotionHoldoutSplit);
         const events = this.journalFact(
-          { t: "holdoutSplit", split: this.promotionHoldoutSplit },
-          [{ type: "holdout.split.frozen", split: this.promotionHoldoutSplit }],
+          { t: "holdoutSplit", split: summary },
+          [{ type: "holdout.split.frozen", split: summary }],
         );
         try {
           this.holdoutSplitJournaled = true;
@@ -2361,7 +2374,7 @@ export class Broker {
           if (
             this.holdoutSplitJournaled
             || this.promotionHoldoutSplit === undefined
-            || !sameCanonical(line.split, this.promotionHoldoutSplit)
+            || !sameCanonical(line.split, promotionHoldoutSplitSummary(this.promotionHoldoutSplit))
           ) {
             throw new BrokerError("INTERNAL", "run state log holdout split does not match trusted configuration");
           }
@@ -4919,7 +4932,7 @@ export class Broker {
     const record = buildPromotionHoldoutRecord({
       artifactHash: params.artifactHash,
       parentArtifactHash: verdict.parent.hash,
-      splitId: split.splitId,
+      split,
       gateVersion: verdict.gateVersion,
       noiseDecision: verdict.decision,
       trainParentScore: verdict.parentScore,
@@ -4930,7 +4943,6 @@ export class Broker {
       holdoutChildScores: params.seeds.map((seed) =>
         this.promotionHoldoutScore(params.artifactHash, params.assetGroupId, seed),
       ),
-      assetGroupId: params.assetGroupId,
       seeds: params.seeds,
       nullControl: control,
       recordedAt: new Date(this.now()).toISOString(),
@@ -4978,7 +4990,7 @@ export class Broker {
       const key = canonicalJson([artifactHash, split.holdout.assetGroupId, seed]);
       if (!this.promotionHoldoutScores.has(key)) coordinates.set(key, { artifactHash, seed });
     };
-    for (const seed of controlSeeds) addCoordinate(this.config.baselineArtifactHash, seed);
+    for (const seed of controlSeeds) addCoordinate(verdict.parent.hash, seed);
     for (const promotion of promotions) {
       for (const seed of evaluationSeeds) {
         addCoordinate(promotion.verdict.parent.hash, seed);
@@ -5011,7 +5023,7 @@ export class Broker {
     }
     const control = this.recordHoldoutNullControl({
       splitId: split.splitId,
-      artifactHash: this.config.baselineArtifactHash,
+      artifactHash: verdict.parent.hash,
       assetGroupId: split.holdout.assetGroupId,
       seeds: controlSeeds,
     }, ctx);

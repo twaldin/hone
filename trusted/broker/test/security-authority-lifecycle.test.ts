@@ -224,6 +224,7 @@ async function boot(
     promotionNoiseSd?: number;
     omitPromotionCalibration?: boolean;
     promotionHoldoutSplit?: PromotionHoldoutSplit;
+    terminalHoldoutAssetGroupIds?: readonly string[];
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
     now?: () => number;
@@ -419,6 +420,9 @@ async function boot(
     ...(opts.promotionHoldoutSplit === undefined
       ? {}
       : { promotionHoldoutSplit: opts.promotionHoldoutSplit }),
+    ...(opts.terminalHoldoutAssetGroupIds === undefined
+      ? {}
+      : { terminalHoldoutAssetGroupIds: opts.terminalHoldoutAssetGroupIds }),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
@@ -1393,7 +1397,7 @@ describe("durable promotion verdict query", () => {
     expect(positive.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT)).toEqual({});
   });
   it("keeps a frozen holdout invisible to the optimizer and journals terminal generalization proof", async () => {
-    const sourceUnits = Array.from({ length: 6 }, (_, index) => ({
+    const sourceUnits = Array.from({ length: 25 }, (_, index) => ({
       id: `holdout-case-${index}`,
       content: `sealed-${index}`,
       contentHash: sha256(`sealed-${index}`),
@@ -1403,15 +1407,17 @@ describe("durable promotion verdict query", () => {
     const split = createPromotionHoldoutSplit({
       capsuleId: "cap_0123456789ab",
       capsuleDigest: TEST_CAPSULE_DIGEST,
-      seed: "authority-test-holdout-seed",
+      campaignIdentity: `sha256:${"c".repeat(64)}`,
       frozenAt: "2026-08-28T00:00:00.000Z",
       trainAssetGroupId: "train",
       holdoutAssetGroupId: "holdout",
       units: sourceUnits,
-      holdoutUnits: 2,
+      holdoutUnits: 20,
       noiseClass: "deterministic-zero-noise",
       noiseEnvelope: 0,
       evaluationRepeats: 1,
+      minimumDetectableEffect: 0.05,
+      achievableScoreMax: 1,
     });
     const contentById = new Map(sourceUnits.map((unit) => [unit.id, unit.content]));
     const splitHashes: Record<string, string> = {};
@@ -1420,13 +1426,21 @@ describe("durable promotion verdict query", () => {
       splitHashes[unit.path] = unit.contentHash;
     }
     const baseManifest = makeManifest();
+    await expect(boot({
+      manifest: makeManifest({
+        contentHashes: { ...baseManifest.contentHashes, ...splitHashes },
+      }),
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout"],
+    })).rejects.toThrow(/cannot be released as a terminal optimizer capability.*optimizer-invisible/);
+
     const b = await boot({
       manifest: makeManifest({
         contentHashes: { ...baseManifest.contentHashes, ...splitHashes },
       }),
       promotionHoldoutSplit: split,
     });
-    b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    b.ctl.evalOutputs.set(baselineHash, score(0.2)).set(candidateHash, score(0.4));
     const winner = await saveCandidate(b, candidateTar);
     await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
     await b.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "train", seed: 0 }, CLIENT);
@@ -1451,14 +1465,16 @@ describe("durable promotion verdict query", () => {
       artifactHash: winner,
       parentArtifactHash: baselineHash,
       splitId: split.splitId,
-      training: { delta: 1, noiseDecision: "promote" },
-      holdout: { delta: 1, seeds: [0] },
+      training: { delta: 0.2, noiseDecision: "promote" },
+      holdout: { delta: 0.2, seeds: [0], headroom: 0.8, designEligibility: "claim-capable" },
       generalizationGap: 0,
       status: "supported",
       claimable: true,
-      nullControl: { informationFree: true, observedSpan: 0 },
+      nullControl: { informationFree: true, estimator: "sample-sd-v1", sampleStandardDeviation: 0 },
     });
     expect(b.events.filter((event) => event.type === "holdout.split.frozen")).toHaveLength(1);
+    const splitEvent = b.events.find((event) => event.type === "holdout.split.frozen");
+    expect(JSON.stringify(splitEvent)).not.toContain("holdout-case-");
     expect(b.events.filter((event) => event.type === "holdout.eval.completed")).toHaveLength(3);
     expect(b.events.filter((event) => event.type === "holdout.null-control.completed")).toHaveLength(1);
     expect(b.events.filter((event) => event.type === "promotion.holdout.completed")).toHaveLength(1);

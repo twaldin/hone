@@ -10,17 +10,15 @@ import { z } from "zod";
 import {
   ApplyMode,
   BudgetEnvelope,
-  canonicalJson,
   IMAGE_DIGEST_REF,
   M2ProxyRole,
   ModelRouting,
   PromotionRule,
-  PromotionHoldoutSplit,
   RunConfig,
   RunEvent,
   SessionNoYieldMaxTokens,
 } from "@hone/schema";
-import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue } from "@hone/schema";
+import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue, PromotionHoldoutSplit } from "@hone/schema";
 import type { BrokerCorpusConfig, BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
 import {
   admitCapsule,
@@ -191,7 +189,6 @@ const ConfigOverrides = z
     sessionNoYieldMaxTokens: SessionNoYieldMaxTokens.optional(),
     budget: BudgetEnvelope.partial().optional(),
     promotion: PromotionRule.optional(),
-    promotionHoldoutSplit: PromotionHoldoutSplit.optional(),
   })
   .strict();
 type ConfigOverrides = z.infer<typeof ConfigOverrides>;
@@ -293,9 +290,6 @@ function buildConfig(
       ? {}
       : { sessionNoYieldMaxTokens: overrides.sessionNoYieldMaxTokens }),
     ...(overrides.promotion !== undefined ? { promotion: overrides.promotion } : {}),
-    ...(overrides.promotionHoldoutSplit !== undefined
-      ? { promotionHoldoutSplit: overrides.promotionHoldoutSplit }
-      : {}),
   });
   // Hard upper envelope (same validator as interactive E-edits): a --config or
   // --budget-usd value above the frozen capsule manifest refuses HERE, before
@@ -966,15 +960,6 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     plan = { runId, runDir, config, resumed: false };
   }
 
-  if (
-    trusted.promotionHoldoutSplit !== undefined
-    && plan.config.promotionHoldoutSplit !== undefined
-    && canonicalJson(trusted.promotionHoldoutSplit) !== canonicalJson(plan.config.promotionHoldoutSplit)
-  ) {
-    throw new UsageError("trusted promotion holdout split conflicts with the sealed run config");
-  }
-  const promotionHoldoutSplit =
-    trusted.promotionHoldoutSplit ?? plan.config.promotionHoldoutSplit;
 
   return superviseRun(
     plan,
@@ -1006,8 +991,8 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ...(trusted.terminalHoldoutAssetGroupIds !== undefined
         ? { terminalHoldoutAssetGroupIds: trusted.terminalHoldoutAssetGroupIds }
         : {}),
-      ...(promotionHoldoutSplit !== undefined
-        ? { promotionHoldoutSplit }
+      ...(trusted.promotionHoldoutSplit !== undefined
+        ? { promotionHoldoutSplit: trusted.promotionHoldoutSplit }
         : {}),
       ...(trusted.proxyRole !== undefined ? { proxyRole: trusted.proxyRole } : {}),
       ...(trusted.campaignPauseAuthority !== undefined

@@ -62,6 +62,8 @@ export {
   buildHoldoutNullControl,
   buildPromotionHoldoutRecord,
   createPromotionHoldoutSplit,
+  derivePromotionHoldoutSeed,
+  promotionHoldoutSplitSummary,
   type CreatePromotionHoldoutSplitInput,
   type PromotionHoldoutSourceUnit,
 } from "./promotion-holdout.js";
