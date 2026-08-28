@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { HoldoutLedger, HoldoutBudgetExceededError } from "../src/index.js";
@@ -66,6 +66,27 @@ describe("holdout ledger — hard lifetime budget, append order is the authority
     });
   });
 
+  it("repairs an operator-owned pre-created custody chain under a permissive umask", async () => {
+    const root = tmp();
+    const custodyDir = join(root, "custody");
+    const ledgerDir = join(custodyDir, "ledgers");
+    const path = join(ledgerDir, "holdout.ledger");
+    const priorUmask = process.umask(0o022);
+    try {
+      mkdirSync(ledgerDir, { recursive: true });
+      expect(statSync(custodyDir).mode & 0o777).toBe(0o755);
+      expect(statSync(ledgerDir).mode & 0o777).toBe(0o755);
+
+      const ledger = await HoldoutLedger.open(path, { budget: 1, durableRoot: custodyDir });
+      await ledger.close();
+      expect(statSync(custodyDir).mode & 0o777).toBe(0o700);
+      expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    } finally {
+      process.umask(priorUmask);
+    }
+  });
+
   it("refuses custody mode drift before adopting an existing ledger", async () => {
     const path = join(tmp(), "holdout.ledger");
     const ledger = await HoldoutLedger.open(path, { budget: 1 });
@@ -75,6 +96,16 @@ describe("holdout ledger — hard lifetime budget, append order is the authority
     await expect(HoldoutLedger.open(path)).rejects.toThrow(
       /holdout ledger custody .* mode 0644, expected 0600/,
     );
+  });
+
+  it("refuses a ledger hard-linked outside its custody directory", async () => {
+    const root = tmp();
+    const path = join(root, "holdout.ledger");
+    const ledger = await HoldoutLedger.open(path, { budget: 1 });
+    await ledger.close();
+    linkSync(path, join(root, "ledger-alias"));
+
+    await expect(HoldoutLedger.open(path)).rejects.toThrow(/has 2 links, expected exactly 1/);
   });
 
   it("survives a process 'crash': re-open mid-test and the count persists; budget still binds", async () => {
@@ -445,6 +476,24 @@ describe("holdout ledger atomic publication & legacy crash repair — a crash at
     await expect(HoldoutLedger.open(path, { budget: 1 })).rejects.toThrow(
       /holdout ledger custody .* mode 0644, expected 0600/,
     );
+  });
+
+  it("refuses when the checked ledger inode disappears before append acquisition", async () => {
+    const path = join(tmp(), "holdout.ledger");
+    const ledger = await HoldoutLedger.open(path, { budget: 3 });
+    await ledger.charge();
+    await ledger.close();
+
+    const openAppend = ledgerIo.openAppend;
+    vi.spyOn(ledgerIo, "openAppend").mockImplementationOnce(async (pathname) => {
+      unlinkSync(pathname);
+      writeFileSync(`${pathname}.inode-occupier`, "occupy the unlinked inode\n", { mode: 0o600 });
+      return await openAppend(pathname);
+    });
+
+    await expect(HoldoutLedger.open(path)).rejects.toThrow(/inode changed before append handle acquisition/);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path)).toHaveLength(0);
   });
 
   it("legacy empty final (crash after O_EXCL create, before header): budgetless reopen refuses recoverably, budgeted reopen repairs one exact header and charges persist", async () => {
