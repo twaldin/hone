@@ -18,6 +18,7 @@ import { admitCapsule } from "../../cli/src/admission.js";
 const HASH = (digit: string) => `sha256:${digit.repeat(64)}`;
 const CAPSULE_DIGEST = HASH("a");
 const CAMPAIGN_IDENTITY = HASH("b");
+const EXECUTION_IMAGE_OVERRIDE = `hone-holdout-test@sha256:${"2".repeat(64)}`;
 const FROZEN_AT = "2026-08-28T00:00:00.000Z";
 
 function units(count: number) {
@@ -186,7 +187,7 @@ describe("promotion holdout assessment", () => {
     expect(receipts.every((row) => row.record.assetGroupId === record.holdout.assetGroupId)).toBe(true);
   });
 
-  test("boots the trusted broker from both audited real-data split ledgers", async () => {
+  test("accepts a different execution image but refuses a different admitted digest", async () => {
     const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
     const temporaryRoot = mkdtempSync(join(tmpdir(), "hone-audited-holdout-"));
     try {
@@ -235,21 +236,26 @@ describe("promotion holdout assessment", () => {
           },
         });
         const runDir = join(temporaryRoot, spec.label, "run");
-        const broker = new Broker({
+        const config = {
           runId: `run_audited_${spec.label}`,
           manifest,
           capsuleRootDir: capsuleRoot,
           baselineArtifactHash: `sha256:${"0".repeat(64)}`,
-          capsuleDigest: admitted.digest,
+          admittedCapsuleDigest: admitted.digest,
           optimizerDigest: `sha256:${"1".repeat(64)}`,
           promotionHoldoutSplit: split,
           holdoutLedgerPath: join(runDir, "holdout.ndjson"),
-          image: admitted.manifest.image,
+          executionImage: EXECUTION_IMAGE_OVERRIDE,
           runDir,
           casDir: join(temporaryRoot, spec.label, "cas"),
           onEvent: () => {},
-        });
+        };
+        const broker = new Broker(config);
         await broker.close();
+        expect(() => new Broker({
+          ...config,
+          admittedCapsuleDigest: HASH("f"),
+        })).toThrow(/holdout split does not match the frozen capsule identity/);
       }
     } finally {
       rmSync(temporaryRoot, { recursive: true, force: true });
