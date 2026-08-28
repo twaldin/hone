@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { CapsuleManifest, capsuleDigest } from "@hone/schema";
 
 export const PROMOTION_NOISE_OBSERVATIONS_VERSION =
-  "campaign-12-promotion-noise-observations-v1" as const;
+  "campaign-12-promotion-noise-observations-v2" as const;
 export const PROMOTION_NOISE_ESTIMATOR = "pooled-within-coordinate-sd-v1" as const;
 export const ESTIMATOR_MIN_REPEATS_PER_COORDINATE = 3 as const;
 
@@ -26,6 +26,11 @@ interface BrokerEvalLine {
   measurementEpoch?: string;
 }
 
+interface CampaignSession {
+  capsuleImage?: string;
+  executionImage?: string;
+}
+
 export interface RepeatedScoreObservation {
   runId: string;
   at: string;
@@ -42,8 +47,9 @@ export interface RepeatedScoreGroup {
 export interface CapsuleNoiseObservations {
   identity: {
     capsuleId: string;
-    capsuleDigest: string;
-    evaluatorImage: string;
+    admittedCapsuleDigest: string;
+    admittedManifestImage: string;
+    executionImage: string;
     assetGroupId: "train";
     measurementEpochs: string[];
   };
@@ -53,6 +59,8 @@ export interface CapsuleNoiseObservations {
     eventsSha256: string;
     manifestPath: string;
     manifestSha256: string;
+    campaignSessionPath: string;
+    campaignSessionSha256: string;
     brokerStatePath: string;
     brokerStateSha256: string;
     measurementEpoch: string;
@@ -69,8 +77,8 @@ export interface PromotionNoiseObservationsArtifact {
 
 export interface DerivedNoiseCalibration {
   capsuleId: string;
-  capsuleDigest: string;
-  evaluatorImage: string;
+  admittedCapsuleDigest: string;
+  executionImage: string;
   assetGroupId: "train";
   measurementEpochs: string[];
   estimator: typeof PROMOTION_NOISE_ESTIMATOR;
@@ -123,12 +131,22 @@ export function derivePromotionNoiseObservations(runsRootInput: string): Promoti
   for (const runDir of runDirs) {
     const eventsPath = join(runDir, "events.ndjson");
     const manifestPath = join(runDir, "capsule-manifest.json");
+    const campaignSessionPath = join(runDir, "campaign-session.v1.json");
     const brokerStatePath = join(runDir, "broker-state.ndjson");
-    if (!existsSync(eventsPath) || !existsSync(manifestPath) || !existsSync(brokerStatePath)) continue;
+    if (
+      !existsSync(eventsPath)
+      || !existsSync(manifestPath)
+      || !existsSync(campaignSessionPath)
+      || !existsSync(brokerStatePath)
+    ) continue;
     const eventsBytes = readFileSync(eventsPath);
     const manifestBytes = readFileSync(manifestPath);
+    const campaignSessionBytes = readFileSync(campaignSessionPath);
     const brokerBytes = readFileSync(brokerStatePath);
     const manifest = CapsuleManifest.parse(JSON.parse(manifestBytes.toString("utf8")));
+    const session = JSON.parse(campaignSessionBytes.toString("utf8")) as CampaignSession;
+    const executionImage = session.executionImage ?? session.capsuleImage;
+    if (executionImage === undefined) throw new Error(`${runDir} has no executed capsule image receipt`);
     const digest = capsuleDigest(manifest);
     const epochs = new Set(
       (lines(brokerBytes) as BrokerEvalLine[])
@@ -148,8 +166,9 @@ export function derivePromotionNoiseObservations(runsRootInput: string): Promoti
       capsule = {
         identity: {
           capsuleId: manifest.id,
-          capsuleDigest: digest,
-          evaluatorImage: manifest.image,
+          admittedCapsuleDigest: digest,
+          admittedManifestImage: manifest.image,
+          executionImage,
           assetGroupId: "train",
           measurementEpochs: [],
         },
@@ -157,8 +176,12 @@ export function derivePromotionNoiseObservations(runsRootInput: string): Promoti
         groups: [],
       };
       byCapsule.set(manifest.id, capsule);
-    } else if (capsule.identity.capsuleDigest !== digest || capsule.identity.evaluatorImage !== manifest.image) {
-      throw new Error(`${manifest.id} measured runs disagree on capsule digest or evaluator image`);
+    } else if (
+      capsule.identity.admittedCapsuleDigest !== digest
+      || capsule.identity.admittedManifestImage !== manifest.image
+      || capsule.identity.executionImage !== executionImage
+    ) {
+      throw new Error(`${manifest.id} measured runs disagree on admitted or executed evaluator identity`);
     }
     capsule.identity.measurementEpochs.push(measurementEpoch);
     capsule.sourceFiles.push({
@@ -167,6 +190,8 @@ export function derivePromotionNoiseObservations(runsRootInput: string): Promoti
       eventsSha256: sha256(eventsBytes),
       manifestPath: relative(runsRoot, manifestPath),
       manifestSha256: sha256(manifestBytes),
+      campaignSessionPath: relative(runsRoot, campaignSessionPath),
+      campaignSessionSha256: sha256(campaignSessionBytes),
       brokerStatePath: relative(runsRoot, brokerStatePath),
       brokerStateSha256: sha256(brokerBytes),
       measurementEpoch,
@@ -262,7 +287,11 @@ export function deriveNoiseCalibrations(
       return Math.max(...scores) - Math.min(...scores);
     }));
     return {
-      ...capsule.identity,
+      capsuleId: capsule.identity.capsuleId,
+      admittedCapsuleDigest: capsule.identity.admittedCapsuleDigest,
+      executionImage: capsule.identity.executionImage,
+      assetGroupId: capsule.identity.assetGroupId,
+      measurementEpochs: capsule.identity.measurementEpochs,
       estimator: PROMOTION_NOISE_ESTIMATOR,
       estimatorMinRepeatsPerCoordinate: ESTIMATOR_MIN_REPEATS_PER_COORDINATE,
       sampleDepths,
@@ -292,6 +321,89 @@ export function deriveNoiseCalibrations(
       },
     };
   });
+}
+
+export interface DirectPairedDeltaScale {
+  capsuleId: string;
+  admittedCapsuleDigest: string;
+  executionImage: string;
+  assetGroupId: "train";
+  baselineArtifactHash: string;
+  pairedDeltaTrials: number;
+  pairedDeltaDegreesOfFreedom: number;
+  pairedDeltaSd: number;
+  informationFreePositive: number;
+  maxObservedLocalPairDelta: number;
+  sourceCohortSha256: string;
+}
+
+interface LocalNullTrial {
+  capsuleId?: string;
+  capsuleDigest?: string;
+  image?: string;
+  baselineArtifact?: string;
+  parentScore?: number;
+  childScore?: number;
+  gateEvents?: number;
+  evalAssetGroupIds?: string[];
+  evalSeeds?: number[];
+}
+
+/** Purpose-built schedule-faithful null trials -> direct paired-delta SD. */
+export function deriveDirectPairedDeltaScales(bytes: Buffer): DirectPairedDeltaScale[] {
+  const trials = lines(bytes) as LocalNullTrial[];
+  const byCapsule = new Map<string, LocalNullTrial[]>();
+  for (const trial of trials) {
+    if (
+      trial.capsuleId === undefined
+      || trial.capsuleDigest === undefined
+      || trial.image === undefined
+      || trial.baselineArtifact === undefined
+      || trial.parentScore === undefined
+      || trial.childScore === undefined
+      || trial.gateEvents !== 1
+      || JSON.stringify(trial.evalAssetGroupIds) !== JSON.stringify(["train", "train"])
+      || trial.evalSeeds?.length !== 2
+      || trial.evalSeeds[0] !== trial.evalSeeds[1]
+    ) {
+      throw new Error("local null trial is missing schedule-faithful paired evidence");
+    }
+    const group = byCapsule.get(trial.capsuleId) ?? [];
+    group.push(trial);
+    byCapsule.set(trial.capsuleId, group);
+  }
+  const sourceCohortSha256 = sha256(bytes);
+  const result: DirectPairedDeltaScale[] = [];
+  for (const [capsuleId, group] of byCapsule) {
+    if (group.length !== 16) throw new Error(`${capsuleId} has ${group.length} local null trials, expected 16`);
+    const first = group[0]!;
+    if (!group.every((trial) =>
+      trial.capsuleDigest === first.capsuleDigest
+      && trial.image === first.image
+      && trial.baselineArtifact === first.baselineArtifact
+    )) {
+      throw new Error(`${capsuleId} local null trials disagree on evaluator identity`);
+    }
+    const deltas = group.map((trial) => trial.childScore! - trial.parentScore!);
+    const mean = deltas.reduce((sum, delta) => sum + delta, 0) / deltas.length;
+    const squaredError = deltas.every((delta) => delta === deltas[0])
+      ? 0
+      : deltas.reduce((sum, delta) => sum + (delta - mean) ** 2, 0);
+    result.push({
+      capsuleId,
+      admittedCapsuleDigest: first.capsuleDigest!,
+      executionImage: first.image!,
+      assetGroupId: "train",
+      baselineArtifactHash: first.baselineArtifact!,
+      pairedDeltaTrials: deltas.length,
+      pairedDeltaDegreesOfFreedom: deltas.length - 1,
+      pairedDeltaSd: Math.sqrt(squaredError / (deltas.length - 1)),
+      informationFreePositive: deltas.filter((delta) => delta > 0).length,
+      maxObservedLocalPairDelta: Math.max(...deltas.map(Math.abs)),
+      sourceCohortSha256,
+    });
+  }
+  return result.sort((left, right) => left.capsuleId.localeCompare(right.capsuleId));
 }
 
 export function writePromotionNoiseObservations(runsRoot: string, outputPath: string): void {

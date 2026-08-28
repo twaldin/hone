@@ -1086,7 +1086,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         [location.dir, "--headless", "--config", configPath, "--optimizer-artifact", request.sourceArtifact],
         {
           runId: executionRunId,
-          capsuleImageOverride: location.executionImage,
+          executionImageOverride: location.executionImage,
           measurementEpoch: request.identity.measurementEpoch,
           ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
             ? {}
@@ -1136,7 +1136,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
           [location.dir, "--headless", "--resume", "--optimizer-artifact", request.sourceArtifact],
           {
             runId: executionRunId,
-            capsuleImageOverride: location.executionImage,
+            executionImageOverride: location.executionImage,
             measurementEpoch: request.identity.measurementEpoch,
             ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
               ? {}

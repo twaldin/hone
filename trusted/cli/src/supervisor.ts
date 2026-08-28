@@ -99,12 +99,20 @@ const CampaignSessionSealV1 = z.object({
   campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   authorityPath: z.string().min(1),
   proxyRole: M2ProxyRole,
-  /** Canonical digest of the exact frozen corpus wire config, when the run carries one. */
   corpusDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
-  /** Effective digest-pinned capsule image, including a sanctioned campaign re-pin. */
+  /** Legacy name; this was always the executed image. */
   capsuleImage: z.string().regex(IMAGE_DIGEST_REF).optional(),
 }).strict();
-type CampaignSessionSealV1 = z.infer<typeof CampaignSessionSealV1>;
+const CampaignSessionSealV2 = z.object({
+  version: z.literal(2),
+  campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  authorityPath: z.string().min(1),
+  proxyRole: M2ProxyRole,
+  corpusDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+  executionImage: z.string().regex(IMAGE_DIGEST_REF),
+}).strict();
+const CampaignSessionSeal = z.discriminatedUnion("version", [CampaignSessionSealV1, CampaignSessionSealV2]);
+type CampaignSessionSeal = z.infer<typeof CampaignSessionSeal>;
 
 function assertCampaignAuthority(
   campaignConfigHash: `sha256:${string}`,
@@ -119,10 +127,11 @@ function assertCampaignAuthority(
   }
 }
 
-function readCampaignSessionSeal(runDir: string): CampaignSessionSealV1 {
+function readCampaignSessionSeal(runDir: string): CampaignSessionSeal & { executionImage?: string | undefined } {
   const path = join(runDir, CAMPAIGN_SESSION_FILE);
   if (!existsSync(path)) throw new UsageError(`campaign-sealed run is missing ${CAMPAIGN_SESSION_FILE}`);
-  return CampaignSessionSealV1.parse(JSON.parse(readFileSync(path, "utf8")));
+  const seal = CampaignSessionSeal.parse(JSON.parse(readFileSync(path, "utf8")));
+  return seal.version === 1 ? { ...seal, executionImage: seal.capsuleImage } : seal;
 }
 function campaignSessionFenceError(
   runDir: string,
@@ -504,8 +513,8 @@ export interface TrustedRunOptions {
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
   /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
   mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
-  /** Authenticated campaign-only execution image; the admitted capsule identity remains unchanged. */
-  capsuleImageOverride?: string | undefined;
+  /** Authenticated campaign-only execution image; admitted manifest/digest remain unchanged. */
+  executionImageOverride?: string | undefined;
   /** Frozen model capability for this trusted session. Omit only on legacy M0/M1 runs. */
   proxyRole?: M2ProxyRole | undefined;
   /** Shared recursive-campaign provider pause authority. */
@@ -578,19 +587,17 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
   const admitted = admitCapsule(capsuleDir, { review: admissionReview });
   const admittedManifest = admitted.manifest;
   if (
-    trusted.capsuleImageOverride !== undefined
-    && !IMAGE_DIGEST_REF.test(trusted.capsuleImageOverride)
+    trusted.executionImageOverride !== undefined
+    && !IMAGE_DIGEST_REF.test(trusted.executionImageOverride)
   ) {
-    throw new UsageError("trusted capsule image override must be an immutable digest reference");
+    throw new UsageError("trusted execution image override must be an immutable digest reference");
   }
-  const manifest = trusted.capsuleImageOverride === undefined
-    ? admittedManifest
-    : { ...admittedManifest, image: trusted.capsuleImageOverride };
+  const executionImage = trusted.executionImageOverride ?? admittedManifest.image;
   if (
-    trusted.capsuleImageOverride !== undefined
+    trusted.executionImageOverride !== undefined
     && trusted.campaignConfigHash === undefined
   ) {
-    throw new UsageError("trusted capsule image override requires a campaign-sealed run");
+    throw new UsageError("trusted execution image override requires a campaign-sealed run");
   }
   if (
     admitted.provisional
@@ -613,25 +620,25 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       if (trusted.optimizerBaseSnapshot !== undefined) {
         throw new UsageError("an internal optimizer base snapshot cannot be combined with HONE_OPTIMIZER_CMD");
       }
-      return resolveOptimizerDigest(io.env, manifest.image);
+      return resolveOptimizerDigest(io.env, executionImage);
     }
     optimizerBaseSnapshot = trusted.optimizerBaseSnapshot ?? collectOptimizerSnapshot();
-    return resolveOptimizerSnapshotDigest(io.env, manifest.image, optimizerBaseSnapshot);
+    return resolveOptimizerSnapshotDigest(io.env, executionImage, optimizerBaseSnapshot);
   };
 
   let plan: RunPlan;
   if (resumeRequested) {
     const found = trusted.runId === undefined
-      ? findResumableRun(io.root, manifest.id)
+      ? findResumableRun(io.root, admittedManifest.id)
       : (() => {
           if (!/^run_[a-zA-Z0-9_.-]+$/.test(trusted.runId)) throw new UsageError("trusted run id is invalid");
           const runDir = join(runsRoot(io.root), trusted.runId);
           if (!existsSync(runDir)) return null;
           const state = replayRun(runDir);
-          if (state.runId !== trusted.runId || state.capsuleId !== manifest.id || state.finished !== null) return null;
+          if (state.runId !== trusted.runId || state.capsuleId !== admittedManifest.id || state.finished !== null) return null;
           return { runDir, runId: trusted.runId, state };
         })();
-    if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${manifest.id} under ${runsRoot(io.root)}`);
+    if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${admittedManifest.id} under ${runsRoot(io.root)}`);
     const started = readEvents(found.runDir)[0];
     const sealedCampaignHash = started?.type === "run.started" ? started.campaignConfigHash : undefined;
     if (sealedCampaignHash === undefined) {
@@ -657,9 +664,8 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ) {
         throw new UsageError("campaign session role/config/authority seal changed since the run started");
       }
-      const sealedCapsuleImage = campaignSeal.capsuleImage ?? admittedManifest.image;
-      if (sealedCapsuleImage !== manifest.image) {
-        throw new UsageError("campaign capsule execution image changed since the run started");
+      if (campaignSeal.executionImage !== executionImage) {
+        throw new UsageError("campaign execution image changed since the run started");
       }
       if (trusted.corpus !== undefined && trusted.corpus.provenance.campaignConfigHash !== sealedCampaignHash) {
         throw new UsageError("frozen corpus provenance does not carry the run's sealed campaign config hash");
@@ -697,7 +703,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       runId: found.runId,
       ...(optimizerArtifactFlag !== undefined ? { artifactHash: optimizerArtifactFlag } : {}),
       casDir: casRoot(io.root),
-      image: manifest.image,
+      image: executionImage,
       ...(trusted.optimizerBaseSnapshot !== undefined ? { baseSnapshot: trusted.optimizerBaseSnapshot } : {}),
     });
     if (selected === null) {
@@ -803,7 +809,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       }
     }
     let config = buildConfig(
-      manifest,
+      admittedManifest,
       overrides,
       {
         headless: boolFlag(flags, "headless"),
@@ -849,7 +855,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     if (config.apply === "none" && repoFlag !== undefined) {
       throw new UsageError("--repo binds a delivery target and requires --apply branch|pr|auto");
     }
-    if (config.apply !== "none" && manifest.baseline.kind !== "git") {
+    if (config.apply !== "none" && admittedManifest.baseline.kind !== "git") {
       throw new UsageError(`--apply ${config.apply} needs a git-baseline capsule — this capsule's baseline is a CAS artifact, which binds no delivery target`);
     }
     // Embedded capsule-baseline stores (.gitdir) carry no checkout for auto
@@ -870,7 +876,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       selectedCandidate = await resolveCandidateOptimizer({
         casDir: casRoot(io.root),
         artifactHash: optimizerArtifactFlag,
-        image: manifest.image,
+        image: executionImage,
         ...(trusted.optimizerBaseSnapshot !== undefined ? { baseSnapshot: trusted.optimizerBaseSnapshot } : {}),
       });
       assertCandidateOptimizerEnvironment(io.env, selectedCandidate.mergedDigest);
@@ -883,12 +889,12 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     if (existsSync(join(runsRoot(io.root), runId))) throw new UsageError(`run ${runId} already exists`);
     const runDir = mintRunDirDurable(io.root, runId);
     if (trusted.campaignConfigHash !== undefined) {
-      writeFileDurable(join(runDir, CAMPAIGN_SESSION_FILE), `${JSON.stringify(CampaignSessionSealV1.parse({
-        version: 1,
+      writeFileDurable(join(runDir, CAMPAIGN_SESSION_FILE), `${JSON.stringify(CampaignSessionSealV2.parse({
+        version: 2,
         campaignConfigHash: trusted.campaignConfigHash,
         authorityPath: trusted.campaignPauseAuthority?.path,
         proxyRole: trusted.proxyRole,
-        capsuleImage: manifest.image,
+        executionImage,
         ...(trusted.corpus !== undefined ? { corpusDigest: brokerCorpusConfigDigest(trusted.corpus) } : {}),
       }))}\n`);
     }
@@ -929,7 +935,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     // The sealed delivery target is RENDERED into the owner-approved
     // contract, so the contract hash binds exactly where the run may
     // deliver; the resume re-render re-binds it (resume-seal.ts).
-    const seal = { runId, manifest, capsuleDigest: admitted.digest, optimizerDigest, orderingReport: admitted.orderingReport, deliveryTarget };
+    const seal = { runId, manifest: admittedManifest, capsuleDigest: admitted.digest, optimizerDigest, orderingReport: admitted.orderingReport, deliveryTarget };
     writeFileDurable(join(runDir, CONTRACT_FILE), renderContract({ ...seal, config }));
     if (!config.headless) {
       const approved = await promptApproval(join(runDir, CONTRACT_FILE), seal, config, io);
@@ -948,9 +954,12 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
   return superviseRun(
     plan,
     {
-      manifest,
+      admittedManifest,
+      runtimeIdentity: {
+        admittedCapsuleDigest: admitted.digest,
+        executionImage,
+      },
       capsuleDir,
-      capsuleDigest: admitted.digest,
       optimizerDigest,
       orderingReport: admitted.orderingReport,
       ...(optimizerSnapshot !== undefined ? { optimizerSnapshot } : {}),
@@ -1483,9 +1492,9 @@ export function remainingWallBudgetMs(
 
 /** Frozen inputs superviseRun carries beside the plan (all admission-derived). */
 export interface SuperviseExtra {
-  manifest: CapsuleManifest;
+  admittedManifest: CapsuleManifest;
+  runtimeIdentity: RunnerBackendContext["runtimeIdentity"];
   capsuleDir: string;
-  capsuleDigest: string;
   optimizerDigest: string;
   orderingReport: DiagnosticOrderingReport;
   /** Candidate-selected merged captured closure. */
@@ -1571,7 +1580,7 @@ async function superviseLocked(
   stopChannel: SupervisorStopChannel,
 ): Promise<number> {
   const { runId, runDir, config } = plan;
-  const { manifest, capsuleDir, capsuleDigest, optimizerDigest } = extra;
+  const { admittedManifest, runtimeIdentity, capsuleDir, optimizerDigest } = extra;
   const headless = config.headless;
   const casDir = casRoot(io.root);
   mkdirSync(casDir, { recursive: true });
@@ -1677,8 +1686,8 @@ async function superviseLocked(
       runId,
       runDir,
       config,
-      manifest,
-      capsuleDigest,
+      manifest: admittedManifest,
+      capsuleDigest: runtimeIdentity.admittedCapsuleDigest,
       optimizerDigest,
       orderingReport: extra.orderingReport,
       deliveryTarget: sealedTarget,
@@ -1698,7 +1707,7 @@ async function superviseLocked(
     // The run-local asset tree is the only capsule asset authority accepted
     // after admission. Authenticate it while holding the run lock, after all
     // flag/config seals but before run.resumed or any backend work.
-    authenticateFrozenCapsuleAssets(runDir, manifest);
+    authenticateFrozenCapsuleAssets(runDir, admittedManifest);
     // Boot-bound runtime recheck IMMEDIATELY before the durable run event:
     // recompute the closure, compare against the boot seal and the run's
     // pin, then append — no await between the comparison and the append.
@@ -1738,7 +1747,7 @@ async function superviseLocked(
       runId,
       at: new Date().toISOString(),
       type: "run.started",
-      capsuleId: manifest.id,
+      capsuleId: admittedManifest.id,
       contractHash: contractHash(readFileSync(join(runDir, CONTRACT_FILE), "utf8")),
       ...(extra.campaignConfigHash !== undefined ? { campaignConfigHash: extra.campaignConfigHash } : {}),
       optimizerDigest,
@@ -1872,10 +1881,10 @@ async function superviseLocked(
     runDir,
     casDir,
     capsuleDir,
-    manifest,
+    admittedManifest,
+    runtimeIdentity,
     config,
     env: io.env,
-    capsuleDigest,
     optimizerDigest,
     ...(extra.optimizerSnapshot !== undefined ? { optimizerSnapshot: extra.optimizerSnapshot } : {}),
     ...(extra.optimizerBaseSnapshot !== undefined ? { optimizerBaseSnapshot: extra.optimizerBaseSnapshot } : {}),

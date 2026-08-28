@@ -1307,23 +1307,23 @@ export function createBackend(
     // supervisor would terminalize a STALE event-log best while the
     // journal holds a newer durable incumbent (permanently, since a
     // finished run never resumes). Abort is honored only after reconcile.
-    validateCapsule(ctx.capsuleDir, ctx.capsuleDigest, ctx.admissionReview ?? "required");
+    validateCapsule(ctx.capsuleDir, ctx.runtimeIdentity.admittedCapsuleDigest, ctx.admissionReview ?? "required");
 
 
       const cas = new CasStore(ctx.casDir);
       let baselineArtifactHash: string;
       let evaluatorBaselineArtifactHash: string | undefined;
       if (ctx.terminalHoldoutAssetGroupIds === undefined) {
-        baselineArtifactHash = await measureBaseline(ctx.capsuleDir, ctx.manifest, cas);
+        baselineArtifactHash = await measureBaseline(ctx.capsuleDir, ctx.admittedManifest, cas);
       } else {
         if (ctx.config.apply !== "none") {
           throw new Error("terminal holdout evaluator isolation requires apply:none");
         }
-        const measured = await measureTerminalHoldoutBaseline(ctx.capsuleDir, ctx.manifest, cas);
+        const measured = await measureTerminalHoldoutBaseline(ctx.capsuleDir, ctx.admittedManifest, cas);
         baselineArtifactHash = measured.mutationArtifactHash;
         evaluatorBaselineArtifactHash = measured.evaluatorArtifactHash;
       }
-      const frozenAssetRoot = authenticateFrozenCapsuleAssets(ctx.runDir, ctx.manifest);
+      const frozenAssetRoot = authenticateFrozenCapsuleAssets(ctx.runDir, ctx.admittedManifest);
       // Broker + proxy are mutually referential (proxy meters INTO the broker,
       // broker env points sandboxes AT the proxy); the late-bound ref breaks the cycle.
       let running: RunningBroker | null = null;
@@ -1445,11 +1445,10 @@ export function createBackend(
       });
       const proxySession = issueProxySessionCapability(proxy, ctx.config.routing, ctx.proxyRole);
 
-      // The frozen manifest's immutable image is THE image — mutation
-      // sandboxes, eval sandboxes, the macOS relay, AND both optimizer
-      // containers (build + run) all run it. There is deliberately no
-      // environment override.
-      const image = ctx.manifest.image;
+      // Admission seals the immutable manifest/digest. A separately named
+      // execution image — possibly a campaign-authorised override — runs every
+      // mutation, evaluator, relay, and optimizer container.
+      const executionImage = ctx.runtimeIdentity.executionImage;
       let egress: Egress | null = null;
       let optimizer: OptimizerRuntime | null = null;
       let containerLease: DockerRunLease | null = null;
@@ -1499,14 +1498,14 @@ export function createBackend(
         // crash-window create from THIS attempt is provably dead once a
         // later claim shows its name unreserved (moby resolves volumes-from
         // after name reservation, before Register).
-        containerLease = makeDockerRunLease(ctx.runId, image, grun, gate.epoch);
+        containerLease = makeDockerRunLease(ctx.runId, executionImage, grun, gate.epoch);
         await containerLease.start();
         // Claim-prove the remaining inherited intents BEFORE any same-named
         // resource (keeper/relay names are deterministic) can be re-minted.
         // A name still reserved daemon-side refuses startup; an unprovable
         // latch (donor/volume/network) stays open and blocks terminal only.
-        await gate.proveInheritedIntents(grun, { runId: ctx.runId, image, donorName: containerLease.name });
-        egress = await setupEgress(ctx, proxy, image, grun, containerLease.name);
+        await gate.proveInheritedIntents(grun, { runId: ctx.runId, image: executionImage, donorName: containerLease.name });
+        egress = await setupEgress(ctx, proxy, executionImage, grun, containerLease.name);
 
         // Both transports need a short public Unix socket. sockaddr_un cannot
         // represent deep campaign run paths on either Darwin or Linux; Linux
@@ -1530,12 +1529,11 @@ export function createBackend(
           // serves manifest.objective). The frozen snapshot keeps the
           // capsule's original identity; the contract hash seals this run's
           // overrides.
-          manifest: { ...ctx.manifest, objective: ctx.config.objective, budget: ctx.config.budget },
+          manifest: { ...ctx.admittedManifest, objective: ctx.config.objective, budget: ctx.config.budget },
           capsuleRootDir: frozenAssetRoot,
           baselineArtifactHash,
-          image,
+          ...ctx.runtimeIdentity,
           ...(evaluatorBaselineArtifactHash === undefined ? {} : { evaluatorBaselineArtifactHash }),
-          capsuleDigest: ctx.capsuleDigest,
           optimizerDigest: ctx.optimizerDigest,
           ...(ctx.measurementEpoch !== undefined ? { measurementEpoch: ctx.measurementEpoch } : {}),
           ...(ctx.evalTimeoutSec !== undefined ? { evalTimeoutSec: ctx.evalTimeoutSec } : {}),
@@ -1552,20 +1550,20 @@ export function createBackend(
             : {}),
           // Per-capsule sandbox resource requirements (manifest-core, sealed
           // in the digest). Absent => broker defaults (2 GiB / 2 cpus).
-          ...(ctx.manifest.sandbox === undefined
+          ...(ctx.admittedManifest.sandbox === undefined
             ? {}
             : {
-                sandboxMemoryBytes: ctx.manifest.sandbox.memoryBytes,
-                ...(ctx.manifest.sandbox.cpus === undefined ? {} : { sandboxCpus: ctx.manifest.sandbox.cpus }),
+                sandboxMemoryBytes: ctx.admittedManifest.sandbox.memoryBytes,
+                ...(ctx.admittedManifest.sandbox.cpus === undefined ? {} : { sandboxCpus: ctx.admittedManifest.sandbox.cpus }),
               }),
           // Repo-lifetime holdout ledger, keyed by capsule digest so every
           // run of this exact capsule draws from ONE budget. Lives under the
           // CAS root (broker creates the file and parents).
-          holdoutLedgerPath: join(ctx.casDir, "ledgers", `${ctx.capsuleDigest.replace(/^sha256:/, "")}.ndjson`),
+          holdoutLedgerPath: join(ctx.casDir, "ledgers", `${ctx.runtimeIdentity.admittedCapsuleDigest.replace(/^sha256:/, "")}.ndjson`),
           // The lifetime ledger budget is pinned to the FROZEN capsule
           // envelope, never the editable per-run budget — the shared ledger
           // header must stay identical across every run of this capsule.
-          holdoutBudget: ctx.manifest.budget.maxEvaluatorInvocations,
+          holdoutBudget: ctx.admittedManifest.budget.maxEvaluatorInvocations,
           runDir: ctx.runDir,
           casDir: ctx.casDir,
           runCommand: grun,
@@ -1694,7 +1692,7 @@ export function createBackend(
         // One-time exact-snapshot proof + container build for the single M0
         // probe invocation.
         optimizer = await prepareOptimizerRuntime(ctx, {
-          image,
+          image: executionImage,
           transport,
           run: grun,
           spawnImpl,
@@ -1763,8 +1761,8 @@ export function createBackend(
             // M2 outer sessions instead settle each optimizer-authored
             // spawnRun allocation through the recursive launcher.
             const finalGroup =
-              ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout" && group.id === "train")
-              ?? ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout");
+              ctx.admittedManifest.assetGroups.find((group) => group.visibility !== "holdout" && group.id === "train")
+              ?? ctx.admittedManifest.assetGroups.find((group) => group.visibility !== "holdout");
             if (finalGroup === undefined) throw new Error("M1 child has no registered non-holdout evaluation coordinate");
             const finalArtifact = {
               hash: running.broker.trustedIncumbent?.hash ?? baselineArtifactHash,

@@ -149,7 +149,11 @@ export const RunEvent = z.discriminatedUnion("type", [
     childScore: z.number(),
     passed: z.boolean(),
     /** Absent only on historical pre-noise-envelope events. */
-    gateVersion: z.union([z.literal("noise-envelope-v1"), z.literal(PROMOTION_GATE_VERSION)]).optional(),
+    gateVersion: z.union([
+      z.literal("noise-envelope-v1"),
+      z.literal("noise-envelope-v2"),
+      z.literal(PROMOTION_GATE_VERSION),
+    ]).optional(),
     calibrationEvidenceVersion: z.string().nullable().optional(),
     delta: z.number().optional(),
     noiseFloor: z.number().nonnegative().nullable().optional(),

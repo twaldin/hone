@@ -5,13 +5,13 @@ import { pathToFileURL } from "node:url";
 import {
   CAMPAIGN_12_CALIBRATED_AT,
   CAMPAIGN_12_CALIBRATION_EVIDENCE_VERSION,
-  CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2,
+  CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V3,
   campaign12PromotionNoiseCalibration,
 } from "@hone/broker";
 import { CapsuleManifest, capsuleDigest, type PromotionNoiseCalibration } from "@hone/schema";
 
 export const CAMPAIGN_12_RECLASSIFICATION_VERSION =
-  "campaign-12-promotion-reclassification-v2" as const;
+  "campaign-12-promotion-reclassification-v3" as const;
 export const CAMPAIGN_12_PROMOTION_CUTOFF = "2026-08-28T00:05:41.275Z" as const;
 
 interface LegacyEvent {
@@ -32,6 +32,11 @@ interface BrokerEvalLine {
   measurementEpoch?: string;
 }
 
+interface CampaignSession {
+  capsuleImage?: string;
+  executionImage?: string;
+}
+
 export type PromotionReclassification = "genuine" | "noise-attributable" | "indeterminate";
 export type IndeterminateKind = "confidence" | "data-availability";
 
@@ -39,8 +44,8 @@ export interface ReclassifiedPromotion {
   runId: string;
   at: string;
   capsuleId: string;
-  capsuleDigest: string;
-  evaluatorImage: string;
+  admittedCapsuleDigest: string;
+  executionImage: string;
   measurementEpoch: string;
   assetGroupId: string | null;
   episode: number;
@@ -60,6 +65,7 @@ export interface ReclassifiedPromotion {
     threeSd: number;
     p95: number;
     twoSd: number;
+    shipped4_5Sd: number;
   } | null;
 }
 
@@ -77,9 +83,9 @@ export interface PromotionReclassificationArtifact {
   calibration: {
     evidenceVersion: typeof CAMPAIGN_12_CALIBRATION_EVIDENCE_VERSION;
     calibratedAt: typeof CAMPAIGN_12_CALIBRATED_AT;
-    estimator: "pooled-within-coordinate-sd-v1";
-    noiseAtOrBelow: "3 pooled within-coordinate score SD";
-    confidenceIndeterminateThrough: "4.5 pooled within-coordinate score SD";
+    estimator: "identity-matched direct paired-delta SD; pooled score-SD fallback";
+    noiseAtOrBelow: "2.121 paired-delta SD (or 3 pooled score SD)";
+    confidenceIndeterminateThrough: "3.182 paired-delta SD (or 4.5 pooled score SD), tail-guarded by max observed delta";
   };
   input: {
     runsRoot: string;
@@ -89,13 +95,15 @@ export interface PromotionReclassificationArtifact {
       eventsSha256: string;
       manifestPath: string;
       manifestSha256: string;
+      campaignSessionPath: string;
+      campaignSessionSha256: string;
       brokerStatePath: string;
       brokerStateSha256: string;
     }>;
     observedLegacyGates: number;
   };
   summary: Counts;
-  sensitivity: Record<"maxSpan" | "p99" | "threeSd" | "p95" | "twoSd", { survive: number; rejected: number }>;
+  sensitivity: Record<"shipped4_5Sd" | "maxSpan" | "p99" | "threeSd" | "p95" | "twoSd", { survive: number; rejected: number }>;
   byCapsule: Record<string, Counts>;
   promotions: ReclassifiedPromotion[];
 }
@@ -112,8 +120,8 @@ function classify(
   runId: string,
   identity: {
     capsuleId: string;
-    capsuleDigest: string;
-    evaluatorImage: string;
+    admittedCapsuleDigest: string;
+    executionImage: string;
     measurementEpoch: string;
   },
   assetGroupId: string | undefined,
@@ -121,10 +129,10 @@ function classify(
   gate: LegacyEvent | undefined,
   calibration: PromotionNoiseCalibration | null,
 ): ReclassifiedPromotion {
-  const evidence = CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2.find((entry) =>
+  const evidence = CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V3.find((entry) =>
     entry.capsuleId === identity.capsuleId
-    && entry.capsuleDigest === identity.capsuleDigest
-    && entry.evaluatorImage === identity.evaluatorImage
+    && entry.admittedCapsuleDigest === identity.admittedCapsuleDigest
+    && entry.executionImage === identity.executionImage
     && assetGroupId === entry.assetGroupId
     && entry.measurementEpochs.includes(identity.measurementEpoch)
   );
@@ -145,7 +153,9 @@ function classify(
     observedDelta: delta,
     noiseFloor: calibration?.noiseFloor ?? null,
     noiseEnvelope: calibration?.noiseEnvelope ?? null,
-    sensitivityThresholds: evidence?.sensitivityThresholds ?? null,
+    sensitivityThresholds: evidence === undefined
+      ? null
+      : { ...evidence.sensitivityThresholds, shipped4_5Sd: evidence.noiseEnvelope },
   };
   if (gate === undefined || delta === null || calibration === null || evidence === undefined || !(delta > 0)) {
     return {
@@ -215,13 +225,23 @@ export function deriveCampaign12PromotionReclassification(
   for (const runDir of runDirs) {
     const eventPath = join(runDir, "events.ndjson");
     const manifestPath = join(runDir, "capsule-manifest.json");
+    const campaignSessionPath = join(runDir, "campaign-session.v1.json");
     const brokerStatePath = join(runDir, "broker-state.ndjson");
-    if (!existsSync(eventPath) || !existsSync(manifestPath) || !existsSync(brokerStatePath)) continue;
+    if (
+      !existsSync(eventPath)
+      || !existsSync(manifestPath)
+      || !existsSync(campaignSessionPath)
+      || !existsSync(brokerStatePath)
+    ) continue;
     const eventBytes = readFileSync(eventPath);
     const manifestBytes = readFileSync(manifestPath);
+    const campaignSessionBytes = readFileSync(campaignSessionPath);
     const brokerBytes = readFileSync(brokerStatePath);
     const events = parseLines<LegacyEvent>(eventBytes);
     const manifest = CapsuleManifest.parse(JSON.parse(manifestBytes.toString("utf8")));
+    const session = JSON.parse(campaignSessionBytes.toString("utf8")) as CampaignSession;
+    const executionImage = session.executionImage ?? session.capsuleImage;
+    if (executionImage === undefined) throw new Error(`${runDir} has no executed capsule image receipt`);
     const epochs = new Set(
       parseLines<BrokerEvalLine>(brokerBytes)
         .filter((line) => line.t === "eval" && line.measurementEpoch !== undefined)
@@ -237,8 +257,8 @@ export function deriveCampaign12PromotionReclassification(
     }
     const identity = {
       capsuleId,
-      capsuleDigest: capsuleDigest(manifest),
-      evaluatorImage: manifest.image,
+      admittedCapsuleDigest: capsuleDigest(manifest),
+      executionImage,
       measurementEpoch,
     };
     sourceFiles.push({
@@ -247,6 +267,8 @@ export function deriveCampaign12PromotionReclassification(
       eventsSha256: sha256(eventBytes),
       manifestPath: relative(runsRoot, manifestPath),
       manifestSha256: sha256(manifestBytes),
+      campaignSessionPath: relative(runsRoot, campaignSessionPath),
+      campaignSessionSha256: sha256(campaignSessionBytes),
       brokerStatePath: relative(runsRoot, brokerStatePath),
       brokerStateSha256: sha256(brokerBytes),
     });
@@ -291,6 +313,7 @@ export function deriveCampaign12PromotionReclassification(
     byCapsule[promotion.capsuleId] = counts;
   }
   const sensitivity = {
+    shipped4_5Sd: { survive: 0, rejected: 0 },
     maxSpan: { survive: 0, rejected: 0 },
     p99: { survive: 0, rejected: 0 },
     threeSd: { survive: 0, rejected: 0 },
@@ -314,9 +337,9 @@ export function deriveCampaign12PromotionReclassification(
     calibration: {
       evidenceVersion: CAMPAIGN_12_CALIBRATION_EVIDENCE_VERSION,
       calibratedAt: CAMPAIGN_12_CALIBRATED_AT,
-      estimator: "pooled-within-coordinate-sd-v1",
-      noiseAtOrBelow: "3 pooled within-coordinate score SD",
-      confidenceIndeterminateThrough: "4.5 pooled within-coordinate score SD",
+      estimator: "identity-matched direct paired-delta SD; pooled score-SD fallback",
+      noiseAtOrBelow: "2.121 paired-delta SD (or 3 pooled score SD)",
+      confidenceIndeterminateThrough: "3.182 paired-delta SD (or 4.5 pooled score SD), tail-guarded by max observed delta",
     },
     input: { runsRoot, sourceFiles, observedLegacyGates },
     summary,

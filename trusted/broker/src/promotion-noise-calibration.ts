@@ -1,19 +1,21 @@
 import {
+  DIRECT_PAIRED_DELTA_SD_ESTIMATOR,
+  POOLED_SCORE_SD_ESTIMATOR,
   PROMOTION_GATE_VERSION,
   PromotionNoiseCalibration,
   type PromotionNoiseCalibration as PromotionNoiseCalibrationValue,
 } from "@hone/schema";
 
 export const CAMPAIGN_12_CALIBRATION_EVIDENCE_VERSION =
-  "campaign-12-uncached-identical-train-v2" as const;
+  "campaign-12-identity-matched-noise-v3" as const;
 export const CAMPAIGN_12_CALIBRATED_AT = "2026-08-28T03:32:53.235Z" as const;
 
-interface CalibrationEvidence {
+interface JournalCalibrationEvidence {
   capsuleId: string;
-  capsuleDigest: string;
-  evaluatorImage: string;
+  admittedCapsuleDigest: string;
+  executionImage: string;
   assetGroupId: "train";
-  estimator: "pooled-within-coordinate-sd-v1";
+  estimator: typeof POOLED_SCORE_SD_ESTIMATOR;
   estimatorMinRepeatsPerCoordinate: 3;
   sampleDepths: readonly number[];
   informationFreeMeasurements: number;
@@ -42,11 +44,11 @@ interface CalibrationEvidence {
  * null pass rates do not imply similar tolerances: biome and Floyd pass at
  * roughly 41–43%, while Floyd's absolute envelope is about 26x larger.
  */
-export const CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2: readonly CalibrationEvidence[] = [
+export const CAMPAIGN_12_JOURNAL_NOISE_EVIDENCE_V2: readonly JournalCalibrationEvidence[] = [
   {
     capsuleId: "cap_c50f80b4b6f1",
-    capsuleDigest: "sha256:02bfd3b55ea717eb9c42f18a203804c5f4e3276da01cb1822f96227ed500368b",
-    evaluatorImage: "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10",
+    admittedCapsuleDigest: "sha256:02bfd3b55ea717eb9c42f18a203804c5f4e3276da01cb1822f96227ed500368b",
+    executionImage: "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10",
     assetGroupId: "train",
     estimator: "pooled-within-coordinate-sd-v1",
     estimatorMinRepeatsPerCoordinate: 3,
@@ -69,8 +71,8 @@ export const CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2: readonly CalibrationEvi
   },
   {
     capsuleId: "cap_21e8600c6f5a",
-    capsuleDigest: "sha256:a6b9a972b45b80a95290f11863146c025241916d226965e67eac971e40e93fb6",
-    evaluatorImage: "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10",
+    admittedCapsuleDigest: "sha256:a6b9a972b45b80a95290f11863146c025241916d226965e67eac971e40e93fb6",
+    executionImage: "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10",
     assetGroupId: "train",
     estimator: "pooled-within-coordinate-sd-v1",
     estimatorMinRepeatsPerCoordinate: 3,
@@ -93,8 +95,8 @@ export const CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2: readonly CalibrationEvi
   },
   {
     capsuleId: "cap_63630c40b876",
-    capsuleDigest: "sha256:37d10ea93836a704adcb3cde4ec4c23daaa7161598e3601bb0a632722cd5789a",
-    evaluatorImage: "hone-task@sha256:421f033a97c266279c4799f5b6f4e4b81fced0f8a9a4f1d3091a05866f217392",
+    admittedCapsuleDigest: "sha256:37d10ea93836a704adcb3cde4ec4c23daaa7161598e3601bb0a632722cd5789a",
+    executionImage: "hone-task@sha256:421f033a97c266279c4799f5b6f4e4b81fced0f8a9a4f1d3091a05866f217392",
     assetGroupId: "train",
     estimator: "pooled-within-coordinate-sd-v1",
     estimatorMinRepeatsPerCoordinate: 3,
@@ -117,8 +119,8 @@ export const CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2: readonly CalibrationEvi
   },
   {
     capsuleId: "cap_f11c10c3fc15",
-    capsuleDigest: "sha256:c4f8ce59fb6668027ff9ebc6378243173999038fe468d93f70e88c8776894531",
-    evaluatorImage: "hone-task@sha256:421f033a97c266279c4799f5b6f4e4b81fced0f8a9a4f1d3091a05866f217392",
+    admittedCapsuleDigest: "sha256:c4f8ce59fb6668027ff9ebc6378243173999038fe468d93f70e88c8776894531",
+    executionImage: "hone-task@sha256:421f033a97c266279c4799f5b6f4e4b81fced0f8a9a4f1d3091a05866f217392",
     assetGroupId: "train",
     estimator: "pooled-within-coordinate-sd-v1",
     estimatorMinRepeatsPerCoordinate: 3,
@@ -153,8 +155,8 @@ export const CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2: readonly CalibrationEvi
   },
   {
     capsuleId: "cap_23de71dd36fa",
-    capsuleDigest: "sha256:4f1817c56199e53eff1dae234c20a36648f015c03447bd73f21588d157768321",
-    evaluatorImage: "hone-simdjson-parse@sha256:3a3d7c2285edd17f5f6f7b4bbd8b5ac426b88b895d38b9399ac84048943ef446",
+    admittedCapsuleDigest: "sha256:4f1817c56199e53eff1dae234c20a36648f015c03447bd73f21588d157768321",
+    executionImage: "hone-simdjson-parse@sha256:3a3d7c2285edd17f5f6f7b4bbd8b5ac426b88b895d38b9399ac84048943ef446",
     assetGroupId: "train",
     estimator: "pooled-within-coordinate-sd-v1",
     estimatorMinRepeatsPerCoordinate: 3,
@@ -189,8 +191,8 @@ export const CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2: readonly CalibrationEvi
   },
   {
     capsuleId: "cap_93f9f6942024",
-    capsuleDigest: "sha256:5c0b981ba12680b4efea80b69efd8300183a75fa057802372487ce147a4cd761",
-    evaluatorImage: "hone-biome-task@sha256:e540584bba29bf04d6a687cfca8c3dcd2acc8a5977d1cefca4c41fdb727cf1e9",
+    admittedCapsuleDigest: "sha256:5c0b981ba12680b4efea80b69efd8300183a75fa057802372487ce147a4cd761",
+    executionImage: "hone-biome-task@sha256:545f0775d78c4e956a43133e46bfd36e1cf3347dcf6dcf56956bca6131bd5107",
     assetGroupId: "train",
     estimator: "pooled-within-coordinate-sd-v1",
     estimatorMinRepeatsPerCoordinate: 3,
@@ -225,10 +227,124 @@ export const CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2: readonly CalibrationEvi
   },
 ];
 
+export const CAMPAIGN_12_JOURNAL_OBSERVATIONS_SHA256 =
+  "sha256:882d3974873ec57d500ff0831d05d0b13a522767db2a682a47ec4b994c8cf93e" as const;
+export const CAMPAIGN_12_LOCAL_NULL_SOURCE_COMMIT =
+  "0271c9aaff021c4101d1fe0b508576484a919240" as const;
+export const CAMPAIGN_12_LOCAL_NULL_SHA256 =
+  "sha256:b32d52f0c3309da6ce79b1fe23cc3141d0377c8dda6eef1ef9efcda069e1bf33" as const;
+
+interface LocalPairedDeltaEvidence {
+  capsuleId: string;
+  admittedCapsuleDigest: string;
+  executionImage: string;
+  baselineArtifactHash: string;
+  pairedDeltaTrials: 16;
+  pairedDeltaDegreesOfFreedom: 15;
+  pairedDeltaSd: number;
+  informationFreePositive: number;
+  maxObservedLocalPairDelta: number;
+}
+
+const LOCAL_PAIRED_DELTA_BY_CAPSULE: Readonly<Record<string, LocalPairedDeltaEvidence>> = {
+  cap_23de71dd36fa: {
+    capsuleId: "cap_23de71dd36fa",
+    admittedCapsuleDigest: "sha256:4f1817c56199e53eff1dae234c20a36648f015c03447bd73f21588d157768321",
+    executionImage: "hone-simdjson-parse@sha256:3a3d7c2285edd17f5f6f7b4bbd8b5ac426b88b895d38b9399ac84048943ef446",
+    baselineArtifactHash: "sha256:52872355cf46e14273934d8b07d2894ad1cc3e7d9ee68d23be6bf973973b5f46",
+    pairedDeltaTrials: 16,
+    pairedDeltaDegreesOfFreedom: 15,
+    pairedDeltaSd: 0.0054658068404987254,
+    informationFreePositive: 6,
+    maxObservedLocalPairDelta: 0.015091778685737411,
+  },
+  cap_63630c40b876: {
+    capsuleId: "cap_63630c40b876",
+    admittedCapsuleDigest: "sha256:37d10ea93836a704adcb3cde4ec4c23daaa7161598e3601bb0a632722cd5789a",
+    executionImage: "hone-task@sha256:421f033a97c266279c4799f5b6f4e4b81fced0f8a9a4f1d3091a05866f217392",
+    baselineArtifactHash: "sha256:d716f0436015fc01b6912a66a47e733b57de6bd647615fb641d2c602ee601fb9",
+    pairedDeltaTrials: 16,
+    pairedDeltaDegreesOfFreedom: 15,
+    pairedDeltaSd: 0,
+    informationFreePositive: 0,
+    maxObservedLocalPairDelta: 0,
+  },
+  cap_93f9f6942024: {
+    capsuleId: "cap_93f9f6942024",
+    admittedCapsuleDigest: "sha256:5c0b981ba12680b4efea80b69efd8300183a75fa057802372487ce147a4cd761",
+    executionImage: "hone-biome-task@sha256:545f0775d78c4e956a43133e46bfd36e1cf3347dcf6dcf56956bca6131bd5107",
+    baselineArtifactHash: "sha256:d1dba6c4b4181d967b2c2d50fff7472260f48af2238fc4dca48b45943149bfc2",
+    pairedDeltaTrials: 16,
+    pairedDeltaDegreesOfFreedom: 15,
+    pairedDeltaSd: 0.00023741853378906786,
+    informationFreePositive: 10,
+    maxObservedLocalPairDelta: 0.000420918761274508,
+  },
+  cap_c50f80b4b6f1: {
+    capsuleId: "cap_c50f80b4b6f1",
+    admittedCapsuleDigest: "sha256:02bfd3b55ea717eb9c42f18a203804c5f4e3276da01cb1822f96227ed500368b",
+    executionImage: "hone-mutation@sha256:e43b8871710267d86f3e1118b2f9a3d8ef0ab505b14e671da9728200260dcd10",
+    baselineArtifactHash: "sha256:3be127a293a4718274d310a9438049adfb00b63bb6fd707b40bd413f8ad8f2f6",
+    pairedDeltaTrials: 16,
+    pairedDeltaDegreesOfFreedom: 15,
+    pairedDeltaSd: 0,
+    informationFreePositive: 0,
+    maxObservedLocalPairDelta: 0,
+  },
+  cap_f11c10c3fc15: {
+    capsuleId: "cap_f11c10c3fc15",
+    admittedCapsuleDigest: "sha256:c4f8ce59fb6668027ff9ebc6378243173999038fe468d93f70e88c8776894531",
+    executionImage: "hone-task@sha256:421f033a97c266279c4799f5b6f4e4b81fced0f8a9a4f1d3091a05866f217392",
+    baselineArtifactHash: "sha256:5b25e6289fe8aae34771ed9b10b7f80a97ea52b51567af6ede22adfc2b77eacb",
+    pairedDeltaTrials: 16,
+    pairedDeltaDegreesOfFreedom: 15,
+    pairedDeltaSd: 0.010767197710364523,
+    informationFreePositive: 7,
+    maxObservedLocalPairDelta: 0.022349177958261912,
+  },
+};
+
+export const CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V3 = CAMPAIGN_12_JOURNAL_NOISE_EVIDENCE_V2.map((journal) => {
+  const local = LOCAL_PAIRED_DELTA_BY_CAPSULE[journal.capsuleId];
+  const identityMatchedLocal =
+    local !== undefined
+    && local.admittedCapsuleDigest === journal.admittedCapsuleDigest
+    && local.executionImage === journal.executionImage;
+  const maxObservedPairDelta = journal.sensitivityThresholds.maxSpan;
+  if (identityMatchedLocal) {
+    const noiseFloor = (3 / Math.SQRT2) * local.pairedDeltaSd;
+    return {
+      ...journal,
+      estimator: DIRECT_PAIRED_DELTA_SD_ESTIMATOR,
+      sourceCohortSha256: [CAMPAIGN_12_JOURNAL_OBSERVATIONS_SHA256, CAMPAIGN_12_LOCAL_NULL_SHA256],
+      maxObservedPairDelta,
+      pairedDeltaTrials: local.pairedDeltaTrials,
+      pairedDeltaDegreesOfFreedom: local.pairedDeltaDegreesOfFreedom,
+      pairedDeltaSd: local.pairedDeltaSd,
+      localArmBaselineHash: local.baselineArtifactHash,
+      noiseFloor,
+      noiseEnvelope: Math.max((4.5 / Math.SQRT2) * local.pairedDeltaSd, maxObservedPairDelta),
+      journalInformationFreePairs: journal.informationFreePairs,
+      journalInformationFreePositive: journal.informationFreePositive,
+      informationFreePairs: local.pairedDeltaTrials,
+      informationFreePositive: local.informationFreePositive,
+    };
+  }
+  return {
+    ...journal,
+    estimator: POOLED_SCORE_SD_ESTIMATOR,
+    sourceCohortSha256: [CAMPAIGN_12_JOURNAL_OBSERVATIONS_SHA256],
+    maxObservedPairDelta,
+    noiseEnvelope: Math.max(4.5 * journal.pooledWithinCoordinateSd, maxObservedPairDelta),
+    journalInformationFreePairs: journal.informationFreePairs,
+    journalInformationFreePositive: journal.informationFreePositive,
+  };
+});
+
 export interface PromotionCalibrationIdentity {
   capsuleId: string;
-  capsuleDigest: string;
-  evaluatorImage: string;
+  admittedCapsuleDigest: string;
+  executionImage: string;
   assetGroupId: string;
   measurementEpoch: string | null;
 }
@@ -236,34 +352,48 @@ export interface PromotionCalibrationIdentity {
 export function campaign12PromotionNoiseCalibration(
   identity: PromotionCalibrationIdentity,
 ): PromotionNoiseCalibrationValue | null {
-  const evidence = CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2.find((entry) =>
+  const evidence = CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V3.find((entry) =>
     entry.capsuleId === identity.capsuleId
-    && entry.capsuleDigest === identity.capsuleDigest
-    && entry.evaluatorImage === identity.evaluatorImage
+    && entry.admittedCapsuleDigest === identity.admittedCapsuleDigest
+    && entry.executionImage === identity.executionImage
     && entry.assetGroupId === identity.assetGroupId
     && identity.measurementEpoch !== null
     && entry.measurementEpochs.includes(identity.measurementEpoch)
   );
   if (evidence === undefined) return null;
-  return PromotionNoiseCalibration.parse({
+  const common = {
     gateVersion: PROMOTION_GATE_VERSION,
     evidenceVersion: CAMPAIGN_12_CALIBRATION_EVIDENCE_VERSION,
     calibratedAt: CAMPAIGN_12_CALIBRATED_AT,
     capsuleId: identity.capsuleId,
-    capsuleDigest: identity.capsuleDigest,
-    evaluatorImage: identity.evaluatorImage,
+    admittedCapsuleDigest: identity.admittedCapsuleDigest,
+    executionImage: identity.executionImage,
     assetGroupId: identity.assetGroupId,
     measurementEpoch: identity.measurementEpoch,
-    estimator: evidence.estimator,
-    estimatorMinRepeatsPerCoordinate: evidence.estimatorMinRepeatsPerCoordinate,
-    sampleDepths: evidence.sampleDepths,
-    informationFreeMeasurements: evidence.informationFreeMeasurements,
-    coordinateGroups: evidence.coordinateGroups,
-    pooledDegreesOfFreedom: evidence.pooledDegreesOfFreedom,
-    pooledWithinCoordinateSd: evidence.pooledWithinCoordinateSd,
+    sourceCohortSha256: evidence.sourceCohortSha256,
+    maxObservedPairDelta: evidence.maxObservedPairDelta,
     noiseFloor: evidence.noiseFloor,
     noiseEnvelope: evidence.noiseEnvelope,
     informationFreePairs: evidence.informationFreePairs,
     informationFreePositive: evidence.informationFreePositive,
-  });
+  };
+  return evidence.estimator === DIRECT_PAIRED_DELTA_SD_ESTIMATOR
+    ? PromotionNoiseCalibration.parse({
+        ...common,
+        estimator: evidence.estimator,
+        pairedDeltaTrials: evidence.pairedDeltaTrials,
+        pairedDeltaDegreesOfFreedom: evidence.pairedDeltaDegreesOfFreedom,
+        pairedDeltaSd: evidence.pairedDeltaSd,
+        localArmBaselineHash: evidence.localArmBaselineHash,
+      })
+    : PromotionNoiseCalibration.parse({
+        ...common,
+        estimator: evidence.estimator,
+        estimatorMinRepeatsPerCoordinate: evidence.estimatorMinRepeatsPerCoordinate,
+        sampleDepths: evidence.sampleDepths,
+        informationFreeMeasurements: evidence.informationFreeMeasurements,
+        coordinateGroups: evidence.coordinateGroups,
+        pooledDegreesOfFreedom: evidence.pooledDegreesOfFreedom,
+        pooledWithinCoordinateSd: evidence.pooledWithinCoordinateSd,
+      });
 }

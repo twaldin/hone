@@ -210,7 +210,7 @@ describe("pre-authority child refusal breadcrumbs", () => {
       undefined,
       true,
     ]);
-    expect(supervisor.trustedRuns.map((trusted) => trusted.capsuleImageOverride)).toEqual([
+    expect(supervisor.trustedRuns.map((trusted) => trusted.executionImageOverride)).toEqual([
       REPINNED_IMAGE,
       REPINNED_IMAGE,
     ]);

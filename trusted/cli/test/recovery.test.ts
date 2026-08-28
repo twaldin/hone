@@ -698,9 +698,12 @@ describe("run lock (FinalSecurityGate finding 2 — OS-enforced exclusivity)", (
       superviseRun(
         plan,
         {
-          manifest: manifestObject(),
+          admittedManifest: manifestObject(),
+          runtimeIdentity: {
+            admittedCapsuleDigest: fakeHash("f"),
+            executionImage: manifestObject().image,
+          },
           capsuleDir: join(root, "capsule"),
-          capsuleDigest: fakeHash("f"),
           optimizerDigest: fakeHash("0"),
           orderingReport: DiagnosticOrderingReport.parse(orderingReportRaw()),
         },

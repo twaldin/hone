@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2 } from "@hone/broker";
+import { CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V3 } from "@hone/broker";
 import {
   CAMPAIGN_12_PROMOTION_CUTOFF,
   deriveCampaign12PromotionReclassification,
@@ -28,10 +28,12 @@ describe("campaign-12 promotion reclassification", () => {
     ));
     const manifestBytes = readFileSync(manifestSource);
     writeFileSync(join(runDir, "capsule-manifest.json"), manifestBytes);
-    const floyd = CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2.find(
+    const floyd = CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V3.find(
       (entry) => entry.capsuleId === "cap_f11c10c3fc15",
     );
     if (floyd === undefined) throw new Error("missing Floyd calibration fixture");
+    const campaignSession = `${JSON.stringify({ version: 1, capsuleImage: floyd.executionImage })}\n`;
+    writeFileSync(join(runDir, "campaign-session.v1.json"), campaignSession);
     writeFileSync(
       join(runDir, "broker-state.ndjson"),
       `${JSON.stringify({ t: "eval", measurementEpoch: floyd.measurementEpochs[0] })}\n`,
@@ -64,6 +66,7 @@ describe("campaign-12 promotion reclassification", () => {
     const staleRunDir = join(root, `run_meta_${"f".repeat(64)}`);
     mkdirSync(staleRunDir);
     writeFileSync(join(staleRunDir, "capsule-manifest.json"), manifestBytes);
+    writeFileSync(join(staleRunDir, "campaign-session.v1.json"), campaignSession);
     writeFileSync(
       join(staleRunDir, "broker-state.ndjson"),
       `${JSON.stringify({ t: "eval", measurementEpoch: "m2:stale-unmeasured-epoch" })}\n`,
@@ -79,17 +82,33 @@ describe("campaign-12 promotion reclassification", () => {
       join(staleRunDir, "events.ndjson"),
       `${staleEvents.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
     );
+    const staleImageRunDir = join(root, `run_meta_${"9".repeat(64)}`);
+    mkdirSync(staleImageRunDir);
+    writeFileSync(join(staleImageRunDir, "capsule-manifest.json"), manifestBytes);
+    writeFileSync(
+      join(staleImageRunDir, "campaign-session.v1.json"),
+      `${JSON.stringify({ version: 1, capsuleImage: "changed-execution-image" })}\n`,
+    );
+    writeFileSync(
+      join(staleImageRunDir, "broker-state.ndjson"),
+      `${JSON.stringify({ t: "eval", measurementEpoch: floyd.measurementEpochs[0] })}\n`,
+    );
+    const staleImageRunId = "run_meta_stale_execution_image_fixture";
+    writeFileSync(
+      join(staleImageRunDir, "events.ndjson"),
+      `${staleEvents.map((entry) => JSON.stringify({ ...entry, runId: staleImageRunId })).join("\n")}\n`,
+    );
 
     const first = deriveCampaign12PromotionReclassification(root);
     const second = deriveCampaign12PromotionReclassification(root);
     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
     expect(first.summary).toEqual({
-      totalPromotions: 5,
+      totalPromotions: 6,
       survive: 1,
       insideNoiseFloor: 1,
-      indeterminate: 3,
+      indeterminate: 4,
     });
-    expect(first.promotions.filter((promotion) => promotion.indeterminateKind === "data-availability")).toHaveLength(2);
+    expect(first.promotions.filter((promotion) => promotion.indeterminateKind === "data-availability")).toHaveLength(3);
     expect(first.promotions.filter((promotion) => promotion.indeterminateKind === "confidence")).toHaveLength(1);
     expect(first.promotions.filter((promotion) => promotion.classification === "genuine")).toHaveLength(1);
     expect(first.promotions.some((promotion) =>
@@ -112,11 +131,15 @@ describe("recorded campaign-12 journal", () => {
     expect(first.input.observedLegacyGates).toBe(149);
     expect(first.summary).toEqual({
       totalPromotions: 74,
-      survive: 48,
-      insideNoiseFloor: 21,
-      indeterminate: 5,
+      survive: 46,
+      insideNoiseFloor: 22,
+      indeterminate: 6,
     });
+    expect(first.promotions.filter(
+      (promotion) => promotion.indeterminateKind === "data-availability",
+    )).toHaveLength(0);
     expect(first.sensitivity).toEqual({
+      shipped4_5Sd: { survive: 46, rejected: 28 },
       maxSpan: { survive: 48, rejected: 26 },
       p99: { survive: 53, rejected: 21 },
       threeSd: { survive: 53, rejected: 21 },

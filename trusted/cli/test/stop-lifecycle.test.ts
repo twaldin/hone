@@ -440,7 +440,8 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
       runDir,
       casDir: join(root, ".hone-cas"),
       capsuleDir,
-      manifest,
+      admittedManifest: manifest,
+      runtimeIdentity: { admittedCapsuleDigest: digest, executionImage: manifest.image },
       config: RunConfig.parse({
         version: 1,
         capsuleId: manifest.id,
@@ -453,7 +454,6 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
         HONE_EGRESS: "socket",
         HONE_OPTIMIZER_CMD: `${process.execPath} ${optimizerEntry}`,
       },
-      capsuleDigest: digest,
       // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
       admissionReview: "off",
       optimizerDigest: fakeHash("0"),

@@ -203,7 +203,7 @@ async function boot(
     runDir?: string;
     casDir?: string;
     holdoutBudget?: number;
-    capsuleDigest?: string;
+    admittedCapsuleDigest?: string;
     optimizerDigest?: string;
     evaluatorBaselineArtifactHash?: string;
     holdoutLedgerPath?: string;
@@ -359,13 +359,13 @@ async function boot(
     manifest: opts.manifest ?? makeManifest(),
     capsuleRootDir: opts.capsuleRootDir ?? capsuleRootDir,
     baselineArtifactHash: baselineHash,
-    capsuleDigest: opts.capsuleDigest ?? TEST_CAPSULE_DIGEST,
+    admittedCapsuleDigest: opts.admittedCapsuleDigest ?? TEST_CAPSULE_DIGEST,
     optimizerDigest: opts.optimizerDigest ?? TEST_OPTIMIZER_DIGEST,
     ...(opts.evaluatorBaselineArtifactHash === undefined
       ? {}
       : { evaluatorBaselineArtifactHash: opts.evaluatorBaselineArtifactHash }),
     holdoutLedgerPath: opts.holdoutLedgerPath ?? path.join(runDir, "holdout-ledger.ndjson"),
-    image: TEST_IMAGE,
+    executionImage: TEST_IMAGE,
     runDir,
     casDir,
     onEvent: (e) => {
@@ -391,13 +391,15 @@ async function boot(
       : {
           promotionNoiseCalibrations: [{
             gateVersion: PROMOTION_GATE_VERSION,
-            evidenceVersion: "broker-test-calibration-v2",
+            evidenceVersion: "broker-test-calibration-v3",
             calibratedAt: "2026-08-28T00:00:00.000Z",
             capsuleId: (opts.manifest ?? makeManifest()).id,
-            capsuleDigest: opts.capsuleDigest ?? TEST_CAPSULE_DIGEST,
-            evaluatorImage: TEST_IMAGE,
+            admittedCapsuleDigest: opts.admittedCapsuleDigest ?? TEST_CAPSULE_DIGEST,
+            executionImage: TEST_IMAGE,
             assetGroupId: "train",
             measurementEpoch: opts.measurementEpoch ?? null,
+            sourceCohortSha256: [`sha256:${"a".repeat(64)}`],
+            maxObservedPairDelta: 0,
             estimator: "pooled-within-coordinate-sd-v1",
             estimatorMinRepeatsPerCoordinate: 3,
             sampleDepths: [7, 7, 7],
@@ -1355,7 +1357,7 @@ describe("durable promotion verdict query", () => {
       childScore: 1,
       delta: -1,
       gateVersion: PROMOTION_GATE_VERSION,
-      calibrationEvidenceVersion: "broker-test-calibration-v2",
+      calibrationEvidenceVersion: "broker-test-calibration-v3",
       noiseFloor: 0,
       noiseEnvelope: 0,
       decision: "refuse-no-improvement",
@@ -1377,7 +1379,7 @@ describe("durable promotion verdict query", () => {
       childScore: 2,
       delta: 1,
       gateVersion: PROMOTION_GATE_VERSION,
-      calibrationEvidenceVersion: "broker-test-calibration-v2",
+      calibrationEvidenceVersion: "broker-test-calibration-v3",
       noiseFloor: 0,
       noiseEnvelope: 0,
       decision: "promote",
@@ -1513,7 +1515,7 @@ describe("durable promotion verdict query", () => {
       childScore: 2,
       delta: 1,
       gateVersion: PROMOTION_GATE_VERSION,
-      calibrationEvidenceVersion: "broker-test-calibration-v2",
+      calibrationEvidenceVersion: "broker-test-calibration-v3",
       noiseFloor: 0,
       noiseEnvelope: 0,
       decision: "promote",
@@ -2420,7 +2422,7 @@ describe("evaluation memo provenance (digests key the cache)", () => {
     expect(evalRuns(a)).toBe(1);
 
     // Different CAPSULE digest, same CAS: miss — a real evaluation runs.
-    const c = await boot({ casDir, capsuleDigest: `sha256:${"1".repeat(64)}` });
+    const c = await boot({ casDir, admittedCapsuleDigest: `sha256:${"1".repeat(64)}` });
     c.ctl.evalOutputs.set(baselineHash, score(1));
     expect((await c.broker.evaluate(coord, CLIENT)).cached).toBe(false);
     expect(evalRuns(c)).toBe(1);
@@ -2448,7 +2450,7 @@ describe("evaluation memo provenance (digests key the cache)", () => {
     const evalRuns = (b: Booted): number => b.log.filter((argv) => argv[1] === "run" && !argv.includes("-d")).length;
     const coord = { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 7 } as const;
 
-    // Same artifact/capsuleDigest/optimizerDigest/group/seed throughout —
+    // Same artifact/admittedCapsuleDigest/optimizerDigest/group/seed throughout —
     // only the evaluator wall-time cap (docker timeout) differs.
     const a = await boot({ casDir, evalTimeoutSec: 600 });
     a.ctl.evalOutputs.set(baselineHash, score(1));
@@ -3173,10 +3175,10 @@ describe("evaluator containment", () => {
           manifest,
           capsuleRootDir,
           baselineArtifactHash: baselineHash,
-          capsuleDigest: TEST_CAPSULE_DIGEST,
+          admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
           optimizerDigest: TEST_OPTIMIZER_DIGEST,
           holdoutLedgerPath: path.join(tmpBase, "runs", "overlap", "holdout-ledger.ndjson"),
-          image: TEST_IMAGE,
+          executionImage: TEST_IMAGE,
           runDir: path.join(tmpBase, "runs", "overlap"),
           casDir: path.join(tmpBase, "cas", "overlap"),
           onEvent: () => {},
@@ -3202,10 +3204,10 @@ describe("evaluator containment", () => {
         }),
         capsuleRootDir: evilRoot,
         baselineArtifactHash: baselineHash,
-        capsuleDigest: TEST_CAPSULE_DIGEST,
+        admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
         optimizerDigest: TEST_OPTIMIZER_DIGEST,
         holdoutLedgerPath: path.join(tmpBase, "runs", "symlink", "holdout-ledger.ndjson"),
-        image: TEST_IMAGE,
+        executionImage: TEST_IMAGE,
         runDir: path.join(tmpBase, "runs", "symlink"),
         casDir: path.join(tmpBase, "cas", "symlink"),
         onEvent: () => {},
@@ -3236,10 +3238,10 @@ describe("evaluator containment", () => {
           }),
           capsuleRootDir: evilRoot,
           baselineArtifactHash: baselineHash,
-          capsuleDigest: TEST_CAPSULE_DIGEST,
+          admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
           optimizerDigest: TEST_OPTIMIZER_DIGEST,
           holdoutLedgerPath: path.join(tmpBase, "runs", "hardlink", "holdout-ledger.ndjson"),
-          image: TEST_IMAGE,
+          executionImage: TEST_IMAGE,
           runDir: path.join(tmpBase, "runs", "hardlink"),
           casDir: path.join(tmpBase, "cas", "hardlink"),
           onEvent: () => {},
@@ -3268,10 +3270,10 @@ describe("evaluator containment", () => {
           }),
           capsuleRootDir: evilRoot,
           baselineArtifactHash: baselineHash,
-          capsuleDigest: TEST_CAPSULE_DIGEST,
+          admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
           optimizerDigest: TEST_OPTIMIZER_DIGEST,
           holdoutLedgerPath: path.join(tmpBase, "runs", "nested-hardlink", "holdout-ledger.ndjson"),
-          image: TEST_IMAGE,
+          executionImage: TEST_IMAGE,
           runDir: path.join(tmpBase, "runs", "nested-hardlink"),
           casDir: path.join(tmpBase, "cas", "nested-hardlink"),
           onEvent: () => {},
@@ -3960,10 +3962,10 @@ describe("live docker smoke (quota volume + full loop, no leaks)", () => {
       manifest: makeManifest(),
       capsuleRootDir,
       baselineArtifactHash: baselineHash,
-      capsuleDigest: TEST_CAPSULE_DIGEST,
+      admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
       optimizerDigest: TEST_OPTIMIZER_DIGEST,
       holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
-      image: TEST_IMAGE,
+      executionImage: TEST_IMAGE,
       runDir,
       casDir,
       onEvent: (e) => events.push(e),

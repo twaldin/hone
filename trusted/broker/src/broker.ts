@@ -21,6 +21,7 @@ import {
   assessPromotion,
   BudgetState,
   canonicalJson,
+  CapsuleRuntimeIdentity,
   CapsuleManifest,
   ChildRunAdmission,
   ChildRunLaunchReceipt,
@@ -212,8 +213,10 @@ export interface BrokerConfig {
    * lineage root and this hash is never exposed through broker RPC.
    */
   evaluatorBaselineArtifactHash?: string | undefined;
-  /** Full canonical capsule digest ("sha256:<64 hex>") — pins the frozen capsule in the eval memo key. */
-  capsuleDigest: string;
+  /** Digest of the admitted manifest; never recomputed from an execution override. */
+  admittedCapsuleDigest: string;
+  /** Image actually executed by mutation/evaluator containers. */
+  executionImage: string;
   /** Digest of the optimizer artifact driving this run ("sha256:<64 hex>") — also memo-key material. */
   optimizerDigest: string;
   /**
@@ -247,8 +250,6 @@ export interface BrokerConfig {
    * resets when a new run opens the same path.
    */
   holdoutLedgerPath: string;
-  /** OCI image for both mutation and eval sandboxes (seed: one image). */
-  image: string;
   /** Per-run dir: sockets, scratch, unpack cache, durable run state live here. */
   runDir: string;
   /** Trusted host Unix socket mounted at /run/hone/proxy.sock; defaults to runDir/proxy.sock. */
@@ -910,6 +911,24 @@ const PreviousCalibratedGateFact = z.object({
   noiseEnvelope: z.number().nonnegative().nullable(),
   decision: z.enum(["promote", "refuse-no-improvement", "refuse-within-noise", "refuse-uncalibrated"]),
 }).strict();
+const PreviousV2GateFact = z.object({
+  parent: z.string(),
+  parentScore: z.number(),
+  childScore: z.number(),
+  passed: z.boolean(),
+  gateVersion: z.literal("noise-envelope-v2"),
+  calibrationEvidenceVersion: z.string().nullable(),
+  delta: z.number(),
+  noiseFloor: z.number().nonnegative().nullable(),
+  noiseEnvelope: z.number().nonnegative().nullable(),
+  decision: z.enum([
+    "promote",
+    "refuse-no-improvement",
+    "refuse-within-noise",
+    "refuse-indeterminate",
+    "refuse-uncalibrated",
+  ]),
+}).strict();
 const CalibratedGateFact = z.object({
   parent: z.string(),
   parentScore: z.number(),
@@ -922,7 +941,12 @@ const CalibratedGateFact = z.object({
   noiseEnvelope: z.number().nonnegative().nullable(),
   decision: PromotionGateDecision,
 }).strict();
-const GateFact = z.union([CalibratedGateFact, PreviousCalibratedGateFact, LegacyGateFact]);
+const GateFact = z.union([
+  CalibratedGateFact,
+  PreviousV2GateFact,
+  PreviousCalibratedGateFact,
+  LegacyGateFact,
+]);
 type GateFact = z.infer<typeof GateFact>;
 
 const StatePayload = z.discriminatedUnion("t", [
@@ -1236,6 +1260,7 @@ function sameCanonical(left: unknown, right: unknown): boolean {
  */
 export class Broker {
   readonly manifest: CapsuleManifest;
+  readonly runtimeIdentity: z.infer<typeof CapsuleRuntimeIdentity>;
   readonly cas: CasStore;
   private readonly run: RunCommand;
   private readonly now: () => number;
@@ -1473,6 +1498,10 @@ export class Broker {
 
   constructor(private readonly config: BrokerConfig) {
     this.manifest = CapsuleManifest.parse(config.manifest);
+    this.runtimeIdentity = CapsuleRuntimeIdentity.parse({
+      admittedCapsuleDigest: config.admittedCapsuleDigest,
+      executionImage: config.executionImage,
+    });
     assertAssetGroupIsolation(this.manifest);
     assertAssetPathsResolveSafely(this.manifest, config.capsuleRootDir);
     this.cas = new CasStore(config.casDir);
@@ -1507,8 +1536,8 @@ export class Broker {
       ?? this.manifest.assetGroups.flatMap((group) => {
         const calibration = campaign12PromotionNoiseCalibration({
           capsuleId: this.manifest.id,
-          capsuleDigest: config.capsuleDigest,
-          evaluatorImage: config.image,
+          admittedCapsuleDigest: this.runtimeIdentity.admittedCapsuleDigest,
+          executionImage: this.runtimeIdentity.executionImage,
           assetGroupId: group.id,
           measurementEpoch: config.measurementEpoch ?? null,
         });
@@ -1519,8 +1548,8 @@ export class Broker {
       const calibration = PromotionNoiseCalibration.parse(input);
       if (
         calibration.capsuleId !== this.manifest.id
-        || calibration.capsuleDigest !== config.capsuleDigest
-        || calibration.evaluatorImage !== config.image
+        || calibration.admittedCapsuleDigest !== this.runtimeIdentity.admittedCapsuleDigest
+        || calibration.executionImage !== this.runtimeIdentity.executionImage
         || calibration.measurementEpoch !== (config.measurementEpoch ?? null)
         || !this.manifest.assetGroups.some((group) => group.id === calibration.assetGroupId)
       ) {
@@ -2862,7 +2891,7 @@ export class Broker {
         "--log-driver", "none",
         "-v", `${name}:/scratch`,
         "-v", `${this.scratchSnapshotDir}:/snapshot`,
-        this.config.image,
+        this.runtimeIdentity.executionImage,
         "sleep", "2147483647",
       ],
       { timeoutMs: 120_000 },
@@ -3394,7 +3423,7 @@ export class Broker {
     // homedir (and Pi agent storage) back onto the read-only image root.
     argv.push("-e", `HOME=${MUTATION_SANDBOX_HOME}`);
     for (const m of mounts) argv.push("-v", `${m.host}:${m.container}:${m.mode}`);
-    argv.push(this.config.image, "sleep", "2147483647");
+    argv.push(this.runtimeIdentity.executionImage, "sleep", "2147483647");
 
     // Pre-register the deterministic name BEFORE the daemon call. A timeout
     // can mean “created, response lost”; every uncertain outcome is removed
@@ -3869,7 +3898,7 @@ export class Broker {
   private evaluationMemoKey(params: EvaluateP, epoch: string): string {
     return (
       `run:${this.config.runId}|gen:${epoch}|${params.artifact.hash}` +
-      `|${this.config.capsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}` +
+      `|${this.runtimeIdentity.admittedCapsuleDigest}|${this.config.optimizerDigest}|${params.assetGroupId}|${params.seed}|wall:${this.evalTimeoutSec}` +
       (this.trustedMeasurementEpoch === undefined
         ? ""
         : `|measurementEpoch:${encodeURIComponent(this.trustedMeasurementEpoch)}`) +
@@ -4164,7 +4193,7 @@ export class Broker {
         "-v",
         `${stageDir}:/capsule/assets:ro`,
       ];
-      argv.push(this.config.image, ...this.manifest.evalEntrypoint);
+      argv.push(this.runtimeIdentity.executionImage, ...this.manifest.evalEntrypoint);
 
       // Registration is SYNCHRONOUS with the spawn: close() either sees this
       // name in the tracked set and reaps it, or this op threw before

@@ -69,7 +69,8 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
     runDir,
     casDir: join(root, ".hone-cas"),
     capsuleDir,
-    manifest,
+    admittedManifest: manifest,
+    runtimeIdentity: { admittedCapsuleDigest: capsuleDigest(manifest), executionImage: manifest.image },
     config: RunConfig.parse({
       version: 1,
       capsuleId: manifest.id,
@@ -79,7 +80,6 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
       headless: true,
     }),
     env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network" },
-    capsuleDigest: capsuleDigest(manifest),
     // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
     admissionReview: "off",
     optimizerDigest: fakeHash("0"),

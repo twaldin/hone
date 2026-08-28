@@ -10,7 +10,7 @@ import { runCommand } from "../src/command.js";
 export const TEST_IMAGE = "busybox:1.36";
 /** Manifest-level immutable image ref (schema v2 requires repo@sha256); live docker uses TEST_IMAGE via config.image. */
 export const MANIFEST_IMAGE = `busybox@sha256:${"0".repeat(64)}`;
-/** Opaque full-capsule digest for BrokerConfig.capsuleDigest in tests. */
+/** Opaque full-capsule digest for BrokerConfig.admittedCapsuleDigest in tests. */
 export const TEST_CAPSULE_DIGEST = `sha256:${"c".repeat(64)}`;
 /** Opaque optimizer-artifact digest for BrokerConfig.optimizerDigest in tests. */
 export const TEST_OPTIMIZER_DIGEST = `sha256:${"d".repeat(64)}`;

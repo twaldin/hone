@@ -665,7 +665,8 @@ describe("broker wiring: ctx.corpus reaches the broker", () => {
       runDir,
       casDir: join(root, ".hone-cas"),
       capsuleDir,
-      manifest,
+      admittedManifest: manifest,
+      runtimeIdentity: { admittedCapsuleDigest: capsuleDigest(manifest), executionImage: manifest.image },
       config: RunConfig.parse({
         version: 1,
         capsuleId: manifest.id,
@@ -675,7 +676,6 @@ describe("broker wiring: ctx.corpus reaches the broker", () => {
         headless: true,
       }),
       env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network" },
-      capsuleDigest: capsuleDigest(manifest),
       admissionReview: "off",
       optimizerDigest: fakeHash("0"),
       corpus,

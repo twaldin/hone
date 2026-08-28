@@ -407,7 +407,8 @@ async function runProbeFlow(opts: {
     runDir,
     casDir: join(root, ".hone-cas"),
     capsuleDir,
-    manifest,
+    admittedManifest: manifest,
+    runtimeIdentity: { admittedCapsuleDigest: digest, executionImage: manifest.image },
     config: RunConfig.parse({
       version: 1,
       capsuleId: manifest.id,
@@ -421,7 +422,6 @@ async function runProbeFlow(opts: {
       HONE_EGRESS: "socket",
       HONE_OPTIMIZER_CMD: `${process.execPath} ${optimizerEntry}`,
     },
-    capsuleDigest: digest,
     // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
     admissionReview: "off",
     optimizerDigest: fakeHash("0"),

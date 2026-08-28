@@ -98,10 +98,10 @@ async function makeBrokerConfig(
     manifest: capsule.manifest,
     capsuleRootDir: capsule.capsuleRootDir,
     baselineArtifactHash: baselineHash,
-    capsuleDigest: TEST_CAPSULE_DIGEST,
+    admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
     optimizerDigest: TEST_OPTIMIZER_DIGEST,
     holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
-    image: extras.image ?? TEST_IMAGE,
+    executionImage: extras.image ?? TEST_IMAGE,
     runDir,
     casDir: path.join(tmpBase, "cas"),
     onEvent: (event) => {

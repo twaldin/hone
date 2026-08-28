@@ -335,7 +335,7 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
         campaignConfigHash: configHash,
         campaignPauseAuthority: authority,
         proxyRole: "inner-capsule-improvement",
-        capsuleImageOverride: repinnedImage,
+        executionImageOverride: repinnedImage,
       },
     )).toBe(1);
 
@@ -346,8 +346,10 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
     ));
     const session = JSON.parse(readFileSync(join(runDir, "campaign-session.v1.json"), "utf8"));
     expect(snapshot.image).toBe(manifestObject().image);
-    expect(session.capsuleImage).toBe(repinnedImage);
-    expect(readFileSync(join(runDir, "contract.md"), "utf8")).toContain(repinnedImage);
+    expect(session).toMatchObject({ version: 2, executionImage: repinnedImage });
+    const contract = readFileSync(join(runDir, "contract.md"), "utf8");
+    expect(contract).toContain(snapshot.image);
+    expect(contract).not.toContain(repinnedImage);
 
     const before = readFileSync(join(runDir, "events.ndjson"), "utf8");
     const openAuthority: CampaignPauseAuthority = {
@@ -361,9 +363,9 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
         campaignConfigHash: configHash,
         campaignPauseAuthority: openAuthority,
         proxyRole: "inner-capsule-improvement",
-        capsuleImageOverride: `hone-foreign@sha256:${"f".repeat(64)}`,
+        executionImageOverride: `hone-foreign@sha256:${"f".repeat(64)}`,
       },
-    )).rejects.toThrow("campaign capsule execution image changed since the run started");
+    )).rejects.toThrow("campaign execution image changed since the run started");
     expect(readFileSync(join(runDir, "events.ndjson"), "utf8")).toBe(before);
   });
 

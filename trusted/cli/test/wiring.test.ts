@@ -198,7 +198,8 @@ describe("image wiring: manifest.image is THE image, no environment override", (
       runDir,
       casDir: join(root, ".hone-cas"),
       capsuleDir,
-      manifest,
+      admittedManifest: manifest,
+      runtimeIdentity: { admittedCapsuleDigest: capsuleDigest(manifest), executionImage: manifest.image },
       config: RunConfig.parse({
         version: 1,
         capsuleId: manifest.id,
@@ -212,7 +213,6 @@ describe("image wiring: manifest.image is THE image, no environment override", (
         HONE_EGRESS: "network", // exercise the relay container path
         HONE_MUTATION_IMAGE: "evil:latest", // MUST be ignored
       },
-      capsuleDigest: capsuleDigest(manifest),
       // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
       admissionReview: "off",
       optimizerDigest: fakeHash("0"),

@@ -5,6 +5,7 @@ import type {
   CampaignPauseSignal,
   CampaignResumeSignal,
   CapsuleManifest,
+  CapsuleRuntimeIdentity,
   M2ProxyRole,
   RunConfig,
   RunEvent,
@@ -80,11 +81,12 @@ export interface RunnerBackendContext {
   runDir: string;
   casDir: string;
   capsuleDir: string;
-  manifest: CapsuleManifest;
+  /** Immutable admitted manifest; never overwritten with an execution image. */
+  admittedManifest: CapsuleManifest;
+  /** Explicit mixed tuple: admitted digest + actually executed image. */
+  runtimeIdentity: CapsuleRuntimeIdentity;
   config: RunConfig;
   env: NodeJS.ProcessEnv;
-  /** Canonical digest of the admitted capsule manifest (sha256:<64 hex>). */
-  capsuleDigest: string;
   /** Sealed optimizer digest (sha256:<64 hex>) — computed or explicitly pinned. */
   optimizerDigest: string;
   /** Candidate-selected merged closure; takes precedence over the captured base at execution. */
