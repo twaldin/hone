@@ -1397,6 +1397,14 @@ describe("durable promotion verdict query", () => {
     expect(positive.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT)).toEqual({});
   });
   it("keeps a frozen holdout invisible to the optimizer and journals terminal generalization proof", async () => {
+    const frozenHoldoutCapsuleRootDir = path.join(tmpBase, "capsule-frozen-holdout");
+    const baseManifest = makeManifest();
+    for (const fixturePath of Object.keys(baseManifest.contentHashes)) {
+      const isolatedFixturePath = path.join(frozenHoldoutCapsuleRootDir, fixturePath);
+      await mkdir(path.dirname(isolatedFixturePath), { recursive: true });
+      await copyFile(path.join(capsuleRootDir, fixturePath), isolatedFixturePath);
+    }
+
     const sourceUnits = Array.from({ length: 25 }, (_, index) => ({
       id: `holdout-case-${index}`,
       content: `sealed-${index}`,
@@ -1425,12 +1433,12 @@ describe("durable promotion verdict query", () => {
     const contentById = new Map(sourceUnits.map((unit) => [unit.id, unit.content]));
     const splitHashes: Record<string, string> = {};
     for (const unit of [...split.train.units, ...split.holdout.units]) {
-      await writeFile(path.join(capsuleRootDir, unit.path), contentById.get(unit.id)!);
+      await writeFile(path.join(frozenHoldoutCapsuleRootDir, unit.path), contentById.get(unit.id)!);
       splitHashes[unit.path] = unit.contentHash;
     }
-    const baseManifest = makeManifest();
     const contentHashes = { ...baseManifest.contentHashes, ...splitHashes };
     await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
       manifest: makeManifest({ contentHashes }),
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["holdout"],
@@ -1444,20 +1452,21 @@ describe("durable promotion verdict query", () => {
       contentHashes,
     });
     await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
       manifest: aliasManifest,
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["holdout-mirror"],
     })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
 
-    const mirrorRoot = path.join(capsuleRootDir, "holdout-hardlink-mirror");
+    const mirrorRoot = path.join(frozenHoldoutCapsuleRootDir, "holdout-hardlink-mirror");
     await mkdir(mirrorRoot, { recursive: true });
     const hardlinkHashes: Record<string, string> = {};
     const sealedIdentities = new Set<string>();
     const mirrorIdentities = new Set<string>();
     for (const unit of split.holdout.units) {
-      const source = path.join(capsuleRootDir, unit.path);
+      const source = path.join(frozenHoldoutCapsuleRootDir, unit.path);
       const mirrorRel = `holdout-hardlink-mirror/${unit.id}.txt`;
-      const mirror = path.join(capsuleRootDir, mirrorRel);
+      const mirror = path.join(frozenHoldoutCapsuleRootDir, mirrorRel);
       await link(source, mirror);
       hardlinkHashes[mirrorRel] = unit.contentHash;
       const sourceStat = await stat(source);
@@ -1474,18 +1483,19 @@ describe("durable promotion verdict query", () => {
       contentHashes: { ...contentHashes, ...hardlinkHashes },
     });
     await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
       manifest: hardlinkManifest,
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["holdout-hardlink-mirror"],
     })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
 
-    const copyRoot = path.join(capsuleRootDir, "holdout-copy-mirror");
+    const copyRoot = path.join(frozenHoldoutCapsuleRootDir, "holdout-copy-mirror");
     await mkdir(copyRoot, { recursive: true });
     const copyHashes: Record<string, string> = {};
     for (const unit of split.holdout.units) {
-      const source = path.join(capsuleRootDir, unit.path);
+      const source = path.join(frozenHoldoutCapsuleRootDir, unit.path);
       const copyRel = `holdout-copy-mirror/${unit.id}.txt`;
-      const copy = path.join(capsuleRootDir, copyRel);
+      const copy = path.join(frozenHoldoutCapsuleRootDir, copyRel);
       await copyFile(source, copy);
       copyHashes[copyRel] = unit.containerHash;
       const sourceStat = await stat(source);
@@ -1501,12 +1511,13 @@ describe("durable promotion verdict query", () => {
       contentHashes: { ...contentHashes, ...copyHashes },
     });
     await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
       manifest: copyManifest,
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["holdout-copy-mirror"],
     })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
 
-    const disjointRoot = path.join(capsuleRootDir, "terminal-disjoint");
+    const disjointRoot = path.join(frozenHoldoutCapsuleRootDir, "terminal-disjoint");
     await mkdir(disjointRoot, { recursive: true });
     await writeFile(path.join(disjointRoot, "data.txt"), "unrelated terminal bytes");
     const disjointManifest = makeManifest({
@@ -1520,12 +1531,14 @@ describe("durable promotion verdict query", () => {
       },
     });
     await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
       manifest: disjointManifest,
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["terminal-disjoint"],
     })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
 
     const b = await boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
       manifest: makeManifest({
         contentHashes: { ...baseManifest.contentHashes, ...splitHashes },
       }),
