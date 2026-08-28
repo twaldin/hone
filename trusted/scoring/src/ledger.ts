@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, unlink, type FileHandle } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, unlink, type FileHandle } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { z } from "zod";
 
@@ -231,6 +231,24 @@ function dirChain(durableRoot: string, dir: string): string[] {
   return chain;
 }
 
+async function assertCustodyPath(path: string, kind: "file" | "directory", expectedMode: number): Promise<void> {
+  const stat = await lstat(path);
+  const correctKind = kind === "file" ? stat.isFile() : stat.isDirectory();
+  if (stat.isSymbolicLink() || !correctKind) {
+    throw new Error(`holdout ledger custody ${path}: expected a regular ${kind}`);
+  }
+  const uid = process.getuid?.();
+  if (uid !== undefined && stat.uid !== uid) {
+    throw new Error(`holdout ledger custody ${path}: owned by uid ${stat.uid}, expected operator uid ${uid}`);
+  }
+  const actualMode = stat.mode & 0o777;
+  if (actualMode !== expectedMode) {
+    throw new Error(
+      `holdout ledger custody ${path}: mode 0${actualMode.toString(8)}, expected 0${expectedMode.toString(8)}`,
+    );
+  }
+}
+
 export class HoldoutLedger {
   readonly path: string;
   #handle: FileHandle;
@@ -260,6 +278,12 @@ export class HoldoutLedger {
    * no charge and is repaired in place given an explicit budget; any other
    * malformed nonempty file is refused.
    *
+   * Custody is established at this same boundary: every directory this call
+   * creates is requested and verified as operator-owned 0700, the temporary
+   * ledger is created 0600, and the published hard link is verified as an
+   * operator-owned regular 0600 file before any handle is returned. Re-open
+   * repeats the final-file check so a mode or ownership drift is never adopted.
+   *
    * The ledger's directory chain is created here and made DURABLE here:
    * every successful open — creator, publication-race loser, or plain
    * re-open — fsyncs the ledger bytes and every directory level from the
@@ -278,9 +302,21 @@ export class HoldoutLedger {
       // discarded an unsynced dirent. Durability of every level (whether we
       // created it, a concurrent opener did, or it pre-existed) is
       // established by the unconditional chain sync below.
-      await mkdir(dir, { recursive: true });
+      const firstCreatedDir = await mkdir(dir, { recursive: true, mode: 0o700 });
+      let custodyDir = resolve(dir);
+      const firstCreated = resolve(firstCreatedDir ?? dir);
+      for (;;) {
+        await assertCustodyPath(custodyDir, "directory", 0o700);
+        if (custodyDir === firstCreated) break;
+        const parent = dirname(custodyDir);
+        if (parent === custodyDir) {
+          throw new Error(`holdout ledger custody directory ${firstCreated} is not an ancestor of ${dir}`);
+        }
+        custodyDir = parent;
+      }
       let raw: Buffer | null;
       try {
+        await assertCustodyPath(path, "file", 0o600);
         raw = await readFile(path);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
@@ -298,7 +334,7 @@ export class HoldoutLedger {
         const tmpPath = `${path}.${randomUUID()}.tmp`;
         let published = false;
         try {
-          const tmpHandle = await open(tmpPath, "wx");
+          const tmpHandle = await open(tmpPath, "wx", 0o600);
           try {
             await appendLineDurable(tmpHandle, `${JSON.stringify({ v: 2, budget })}\n`, tmpPath);
           } finally {
@@ -318,6 +354,7 @@ export class HoldoutLedger {
           await unlink(tmpPath).catch(() => undefined);
         }
         if (!published) continue;
+        await assertCustodyPath(path, "file", 0o600);
         // The header bytes were already fsynced through the temp handle
         // (same inode), so only the DIRECTORY entries still need
         // durability: sync the chain leaf first — an fsynced file in an

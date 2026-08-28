@@ -7,6 +7,7 @@ import {
   capsuleDigest,
 } from "@hone/schema";
 import { describe, expect, it } from "vitest";
+import { validateCapsule } from "../src/backends/local.js";
 import { admitCapsule } from "../src/admission.js";
 import { discoverCapsules } from "../src/commands/hone.js";
 import { loadRunConfigFile } from "../src/runs.js";
@@ -100,6 +101,26 @@ describe("admission receipt ledger", () => {
       receipt,
     });
     expect(statSync(ledgerPath(casRoot)).mode & 0o777).toBe(0o600);
+  });
+
+  it("writes a required receipt owner-only and re-admits it under a permissive umask", () => {
+    const root = makeRoot();
+    const capsuleDir = makeCapsule(root);
+    const digest = capsuleDigest(manifestObject());
+    const casRoot = join(root, ".hone-cas");
+    const [gate1, approval] = approvalHistory({ capsuleDigest: digest });
+    const priorUmask = process.umask(0o022);
+    try {
+      appendAdmissionReceipt(casRoot, gate1);
+      appendAdmissionReceipt(casRoot, approval);
+    } finally {
+      process.umask(priorUmask);
+    }
+
+    expect(statSync(casRoot).mode & 0o777).toBe(0o700);
+    expect(statSync(dirname(ledgerPath(casRoot, digest))).mode & 0o777).toBe(0o700);
+    expect(statSync(ledgerPath(casRoot, digest)).mode & 0o777).toBe(0o600);
+    expect(() => validateCapsule(capsuleDir, digest, "required")).not.toThrow();
   });
 
   it("hash-binds the named owner authorization and review evidence", () => {

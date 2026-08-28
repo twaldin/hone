@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { HoldoutLedger, HoldoutBudgetExceededError } from "../src/index.js";
@@ -39,6 +39,42 @@ describe("holdout ledger — hard lifetime budget, append order is the authority
     expect(JSON.parse(lines[0]!)).toEqual({ v: 2, budget: 2 });
     const nonces = lines.slice(1).map((l) => JSON.parse(l).nonce as string);
     expect(new Set(nonces).size).toBe(2); // one unique nonce per attempt
+  });
+
+  it("creates the custody chain owner-only under a permissive umask", async () => {
+    const root = tmp();
+    const custodyDir = join(root, "custody");
+    const ledgerDir = join(custodyDir, "ledgers");
+    const path = join(ledgerDir, "holdout.ledger");
+    const priorUmask = process.umask(0o022);
+    try {
+      const ledger = await HoldoutLedger.open(path, { budget: 1, durableRoot: root });
+      await ledger.close();
+    } finally {
+      process.umask(priorUmask);
+    }
+
+    const mode = (pathname: string) => (statSync(pathname).mode & 0o777).toString(8);
+    expect({
+      custodyDirectory: mode(custodyDir),
+      ledgerDirectory: mode(ledgerDir),
+      ledgerFile: mode(path),
+    }).toEqual({
+      custodyDirectory: "700",
+      ledgerDirectory: "700",
+      ledgerFile: "600",
+    });
+  });
+
+  it("refuses custody mode drift before adopting an existing ledger", async () => {
+    const path = join(tmp(), "holdout.ledger");
+    const ledger = await HoldoutLedger.open(path, { budget: 1 });
+    await ledger.close();
+    chmodSync(path, 0o644);
+
+    await expect(HoldoutLedger.open(path)).rejects.toThrow(
+      /holdout ledger custody .* mode 0644, expected 0600/,
+    );
   });
 
   it("survives a process 'crash': re-open mid-test and the count persists; budget still binds", async () => {
@@ -184,14 +220,14 @@ describe("holdout ledger — hard lifetime budget, append order is the authority
     // Swap the file: the open O_APPEND handle now points at an orphaned inode,
     // so the reread can never find the charge's own line.
     unlinkSync(path);
-    writeFileSync(path, '{"v":2,"budget":2}\n');
+    writeFileSync(path, '{"v":2,"budget":2}\n', { mode: 0o600 });
     await expect(ledger.charge()).rejects.toThrow(/own charge line/i);
     await ledger.close();
   });
 
   it("rejects a v1 ledger file — the format version is part of the fail-closed surface", async () => {
     const path = join(tmp(), "holdout.ledger");
-    writeFileSync(path, '{"v":1,"budget":3}\n');
+    writeFileSync(path, '{"v":1,"budget":3}\n', { mode: 0o600 });
     await expect(HoldoutLedger.open(path)).rejects.toThrow(/corrupt header/i);
   });
 
@@ -398,10 +434,23 @@ describe("holdout ledger atomic publication & legacy crash repair — a crash at
 
   const tempFiles = (dir: string) => readdirSync(dir).filter((f) => f.endsWith(".tmp"));
 
+  it("fails loudly when hard-link publication does not preserve the owner-only mode", async () => {
+    const path = join(tmp(), "holdout.ledger");
+    const linkNoClobber = ledgerIo.linkNoClobber;
+    vi.spyOn(ledgerIo, "linkNoClobber").mockImplementation(async (source, destination) => {
+      await linkNoClobber(source, destination);
+      chmodSync(destination, 0o644);
+    });
+
+    await expect(HoldoutLedger.open(path, { budget: 1 })).rejects.toThrow(
+      /holdout ledger custody .* mode 0644, expected 0600/,
+    );
+  });
+
   it("legacy empty final (crash after O_EXCL create, before header): budgetless reopen refuses recoverably, budgeted reopen repairs one exact header and charges persist", async () => {
     const dir = tmp();
     const path = join(dir, "holdout.ledger");
-    writeFileSync(path, ""); // the old creator crashed between open('ax') and its header write
+    writeFileSync(path, "", { mode: 0o600 }); // the old creator crashed between open('ax') and its header write
     // Without a budget the leftover is a RECOVERABLE refusal — never an accepted empty ledger.
     await expect(HoldoutLedger.open(path)).rejects.toThrow(/explicit budget/i);
     expect(readFileSync(path, "utf8")).toBe(""); // refusal mutated nothing
@@ -420,7 +469,7 @@ describe("holdout ledger atomic publication & legacy crash repair — a crash at
     for (let len = 1; len <= header.length; len += 1) {
       const dir = tmp();
       const path = join(dir, "holdout.ledger");
-      writeFileSync(path, header.slice(0, len));
+      writeFileSync(path, header.slice(0, len), { mode: 0o600 });
       const ledger = await HoldoutLedger.open(path, { budget: 3 });
       expect(readFileSync(path, "utf8")).toBe(`${header}\n`);
       expect(tempFiles(dir)).toEqual([]);
@@ -432,7 +481,7 @@ describe("holdout ledger atomic publication & legacy crash repair — a crash at
   it("a crash after repair but before chain durability is confirmed: open fails, replay adopts the repaired header", async () => {
     const dir = tmp();
     const path = join(dir, "holdout.ledger");
-    writeFileSync(path, '{"v":2,"bud');
+    writeFileSync(path, '{"v":2,"bud', { mode: 0o600 });
     // Injected crash: the repair itself completes, but the process dies in
     // the adopt path before chain durability is confirmed — open MUST fail,
     // and the repaired header MUST still be recoverable on replay.
@@ -451,7 +500,7 @@ describe("holdout ledger atomic publication & legacy crash repair — a crash at
 
   it("refuses a crashed prefix that pins a DIFFERENT budget — identities never overwrite each other", async () => {
     const path = join(tmp(), "holdout.ledger");
-    writeFileSync(path, '{"v":2,"budget":7');
+    writeFileSync(path, '{"v":2,"budget":7', { mode: 0o600 });
     await expect(HoldoutLedger.open(path, { budget: 5 })).rejects.toThrow(/mismatch/i);
     expect(readFileSync(path, "utf8")).toBe('{"v":2,"budget":7'); // refusal mutated nothing
     const ledger = await HoldoutLedger.open(path, { budget: 7 }); // the pinned identity still repairs
@@ -462,13 +511,13 @@ describe("holdout ledger atomic publication & legacy crash repair — a crash at
   it("refuses any other malformed headerless file, even with a budget — repair only touches provable header prefixes", async () => {
     for (const junk of ["garbage", '{"v":1,"budget":3', '{"v":2,"budget":03', '{"v":2,"budget":3}}', '{"v":2,"budget":x']) {
       const path = join(tmp(), "holdout.ledger");
-      writeFileSync(path, junk);
+      writeFileSync(path, junk, { mode: 0o600 });
       await expect(HoldoutLedger.open(path, { budget: 3 })).rejects.toThrow(/corrupt/i);
       expect(readFileSync(path, "utf8")).toBe(junk); // refusal mutated nothing
     }
     // Headerless invalid UTF-8 is refused too, never treated as a prefix.
     const path = join(tmp(), "holdout.ledger");
-    writeFileSync(path, Buffer.from([0xc3, 0x28]));
+    writeFileSync(path, Buffer.from([0xc3, 0x28]), { mode: 0o600 });
     await expect(HoldoutLedger.open(path, { budget: 3 })).rejects.toThrow(/corrupt/i);
   });
 
@@ -583,7 +632,7 @@ describe("holdout ledger atomic publication & legacy crash repair — a crash at
 
   it("two concurrent openers repairing the SAME legacy prefix (same identity) both succeed and converge on one exact header", async () => {
     const path = join(tmp(), "holdout.ledger");
-    writeFileSync(path, '{"v":2,"bud');
+    writeFileSync(path, '{"v":2,"bud', { mode: 0o600 });
     const [a, b] = await Promise.all([
       HoldoutLedger.open(path, { budget: 2 }),
       HoldoutLedger.open(path, { budget: 2 }),
