@@ -2,6 +2,11 @@ import { z } from "zod";
 import { ArtifactRef, BudgetState, QueryCorpusParams, QueryCorpusResult } from "./broker.js";
 import { CampaignPauseReason } from "./proxy.js";
 import { EvaluatorIsolationRecord } from "./evaluator.js";
+import {
+  HoldoutNullControlRecord,
+  PromotionHoldoutRecord,
+  PromotionHoldoutSplit,
+} from "./holdout.js";
 import { PROMOTION_GATE_VERSION, PromotionGateDecision } from "./promotion.js";
 
 /**
@@ -164,6 +169,19 @@ export const RunEvent = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("budget.snapshot"), budget: BudgetState }),
   z.object({ ...base, type: z.literal("budget.exhausted"), dimension: z.string() }),
   z.object({ ...base, type: z.literal("holdout.accessed"), capsuleId: z.string(), ledgerCount: z.number().int().positive(), ledgerBudget: z.number().int().positive() }),
+  z.object({ ...base, type: z.literal("holdout.split.frozen"), split: PromotionHoldoutSplit }),
+  z.object({
+    ...base,
+    type: z.literal("holdout.eval.completed"),
+    splitId: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    artifact: ArtifactRef,
+    assetGroupId: z.string().min(1),
+    seed: z.number().int().nonnegative(),
+    aggregate: z.number().finite().nullable(),
+    cached: z.boolean(),
+  }),
+  z.object({ ...base, type: z.literal("holdout.null-control.completed"), control: HoldoutNullControlRecord }),
+  z.object({ ...base, type: z.literal("promotion.holdout.completed"), record: PromotionHoldoutRecord }),
   z.object({ ...base, type: z.literal("corpus.query"), request: QueryCorpusParams }),
   z.object({ ...base, type: z.literal("corpus.response"), response: QueryCorpusResult }),
   z.object({ ...base, type: z.literal("delivery.applied"), mode: z.enum(["none", "branch", "pr", "auto"]), ref: z.string().optional() }),

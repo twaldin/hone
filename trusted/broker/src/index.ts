@@ -57,3 +57,11 @@ export {
   campaign12PromotionNoiseCalibration,
   type PromotionCalibrationIdentity,
 } from "./promotion-noise-calibration.js";
+export {
+  assertPromotionHoldoutSplitIdentity,
+  buildHoldoutNullControl,
+  buildPromotionHoldoutRecord,
+  createPromotionHoldoutSplit,
+  type CreatePromotionHoldoutSplitInput,
+  type PromotionHoldoutSourceUnit,
+} from "./promotion-holdout.js";

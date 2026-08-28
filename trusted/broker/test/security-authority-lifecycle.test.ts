@@ -14,6 +14,7 @@ import {
   PROMOTION_GATE_VERSION,
   type CapsuleManifest,
   type RunEvent,
+  type PromotionHoldoutSplit,
 } from "@hone/schema";
 import { Broker, type BrokerConfig, type CallContext } from "../src/broker.js";
 import { packDirAsArtifact } from "../src/artifact.js";
@@ -22,6 +23,7 @@ import { runCommand, type CmdResult, type RunCommand } from "../src/command.js";
 import { BrokerError } from "../src/errors.js";
 import { deferred } from "../src/deferred.js";
 import { BrokerServer } from "../src/server.js";
+import { createPromotionHoldoutSplit } from "../src/promotion-holdout.js";
 import {
   MUTATION_SANDBOX_HOME,
   MUTATION_SANDBOX_USER,
@@ -221,6 +223,7 @@ async function boot(
     measurementEpoch?: string;
     promotionNoiseSd?: number;
     omitPromotionCalibration?: boolean;
+    promotionHoldoutSplit?: PromotionHoldoutSplit;
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
     now?: () => number;
@@ -413,6 +416,9 @@ async function boot(
             informationFreePositive: 0,
           }],
         }),
+    ...(opts.promotionHoldoutSplit === undefined
+      ? {}
+      : { promotionHoldoutSplit: opts.promotionHoldoutSplit }),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
@@ -1385,6 +1391,77 @@ describe("durable promotion verdict query", () => {
       decision: "promote",
     });
     expect(positive.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT)).toEqual({});
+  });
+  it("keeps a frozen holdout invisible to the optimizer and journals terminal generalization proof", async () => {
+    const sourceUnits = Array.from({ length: 6 }, (_, index) => ({
+      id: `holdout-case-${index}`,
+      content: `sealed-${index}`,
+      contentHash: sha256(`sealed-${index}`),
+      trainPath: `train/holdout-case-${index}.txt`,
+      holdoutPath: `holdout/holdout-case-${index}.txt`,
+    }));
+    const split = createPromotionHoldoutSplit({
+      capsuleId: "cap_0123456789ab",
+      capsuleDigest: TEST_CAPSULE_DIGEST,
+      seed: "authority-test-holdout-seed",
+      frozenAt: "2026-08-28T00:00:00.000Z",
+      trainAssetGroupId: "train",
+      holdoutAssetGroupId: "holdout",
+      units: sourceUnits,
+      holdoutUnits: 2,
+      noiseClass: "deterministic-zero-noise",
+      noiseEnvelope: 0,
+      evaluationRepeats: 1,
+    });
+    const contentById = new Map(sourceUnits.map((unit) => [unit.id, unit.content]));
+    const splitHashes: Record<string, string> = {};
+    for (const unit of [...split.train.units, ...split.holdout.units]) {
+      await writeFile(path.join(capsuleRootDir, unit.path), contentById.get(unit.id)!);
+      splitHashes[unit.path] = unit.contentHash;
+    }
+    const baseManifest = makeManifest();
+    const b = await boot({
+      manifest: makeManifest({
+        contentHashes: { ...baseManifest.contentHashes, ...splitHashes },
+      }),
+      promotionHoldoutSplit: split,
+    });
+    b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const winner = await saveCandidate(b, candidateTar);
+    await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await b.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "train", seed: 0 }, CLIENT);
+    b.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT);
+
+    expect(b.broker.getTask(CLIENT).visibleAssetGroups).not.toContain("holdout");
+    await expect(
+      b.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "holdout", seed: 0 }, CLIENT),
+    ).rejects.toMatchObject({ code: "HOLDOUT_ACCESS_DENIED" });
+    expect(() => b.broker.recordPromotionHoldout({
+      splitId: split.splitId,
+      artifactHash: winner,
+      assetGroupId: "holdout",
+      seeds: [0],
+      nullControlId: sha256("not-a-control"),
+    }, CLIENT)).toThrow(/trusted authority/);
+
+    const records = await b.broker.assessPromotionHoldouts(ADMIN);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      artifactHash: winner,
+      parentArtifactHash: baselineHash,
+      splitId: split.splitId,
+      training: { delta: 1, noiseDecision: "promote" },
+      holdout: { delta: 1, seeds: [0] },
+      generalizationGap: 0,
+      status: "supported",
+      claimable: true,
+      nullControl: { informationFree: true, observedSpan: 0 },
+    });
+    expect(b.events.filter((event) => event.type === "holdout.split.frozen")).toHaveLength(1);
+    expect(b.events.filter((event) => event.type === "holdout.eval.completed")).toHaveLength(3);
+    expect(b.events.filter((event) => event.type === "holdout.null-control.completed")).toHaveLength(1);
+    expect(b.events.filter((event) => event.type === "promotion.holdout.completed")).toHaveLength(1);
   });
   it("replays a pre-versioned gate as readable but never silently grants new authority", async () => {
     const shared = {

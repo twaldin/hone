@@ -128,6 +128,20 @@ function buildMethodTable(broker: Broker): Map<string, MethodEntry> {
     handler: async (raw, ctx) =>
       m.reportIncumbent.result.parse(broker.reportIncumbent(parseParams(m.reportIncumbent.params, raw), ctx)),
   });
+  table.set("recordHoldoutNullControl", {
+    adminOnly: true,
+    handler: async (raw, ctx) =>
+      m.recordHoldoutNullControl.result.parse(
+        broker.recordHoldoutNullControl(parseParams(m.recordHoldoutNullControl.params, raw), ctx),
+      ),
+  });
+  table.set("recordPromotionHoldout", {
+    adminOnly: true,
+    handler: async (raw, ctx) =>
+      m.recordPromotionHoldout.result.parse(
+        broker.recordPromotionHoldout(parseParams(m.recordPromotionHoldout.params, raw), ctx),
+      ),
+  });
   table.set("reportSessionNoYieldBound", {
     adminOnly: false,
     handler: async (raw, ctx) =>
