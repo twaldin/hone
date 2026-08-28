@@ -478,7 +478,7 @@ describe("holdout ledger atomic publication & legacy crash repair — a crash at
     );
   });
 
-  it("refuses when the checked ledger inode disappears before append acquisition", async () => {
+  it("refuses without recreating when an existing ledger disappears as append acquisition begins", async () => {
     const path = join(tmp(), "holdout.ledger");
     const ledger = await HoldoutLedger.open(path, { budget: 3 });
     await ledger.charge();
@@ -487,13 +487,11 @@ describe("holdout ledger atomic publication & legacy crash repair — a crash at
     const openAppend = ledgerIo.openAppend;
     vi.spyOn(ledgerIo, "openAppend").mockImplementationOnce(async (pathname) => {
       unlinkSync(pathname);
-      writeFileSync(`${pathname}.inode-occupier`, "occupy the unlinked inode\n", { mode: 0o600 });
       return await openAppend(pathname);
     });
 
-    await expect(HoldoutLedger.open(path)).rejects.toThrow(/inode changed before append handle acquisition/);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(readFileSync(path)).toHaveLength(0);
+    await expect(HoldoutLedger.open(path)).rejects.toThrow(/fresh ledger needs an explicit budget/);
+    expect(existsSync(path)).toBe(false);
   });
 
   it("legacy empty final (crash after O_EXCL create, before header): budgetless reopen refuses recoverably, budgeted reopen repairs one exact header and charges persist", async () => {
