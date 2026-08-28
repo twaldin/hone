@@ -1434,7 +1434,7 @@ describe("durable promotion verdict query", () => {
       manifest: makeManifest({ contentHashes }),
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["holdout"],
-    })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
 
     const aliasManifest = makeManifest({
       assetGroups: [
@@ -1447,7 +1447,7 @@ describe("durable promotion verdict query", () => {
       manifest: aliasManifest,
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["holdout-mirror"],
-    })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
 
     const mirrorRoot = path.join(capsuleRootDir, "holdout-hardlink-mirror");
     await mkdir(mirrorRoot, { recursive: true });
@@ -1477,7 +1477,7 @@ describe("durable promotion verdict query", () => {
       manifest: hardlinkManifest,
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["holdout-hardlink-mirror"],
-    })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
 
     const copyRoot = path.join(capsuleRootDir, "holdout-copy-mirror");
     await mkdir(copyRoot, { recursive: true });
@@ -1504,7 +1504,7 @@ describe("durable promotion verdict query", () => {
       manifest: copyManifest,
       promotionHoldoutSplit: split,
       terminalHoldoutAssetGroupIds: ["holdout-copy-mirror"],
-    })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
 
     const disjointRoot = path.join(capsuleRootDir, "terminal-disjoint");
     await mkdir(disjointRoot, { recursive: true });

@@ -1838,12 +1838,6 @@ export class Broker {
       }
     }
     if (this.promotionHoldoutSplit !== undefined) {
-      assertPromotionHoldoutTerminalIsolation(
-        this.manifest,
-        config.capsuleRootDir,
-        this.promotionHoldoutSplit,
-        terminalHoldoutAssetGroupIds,
-      );
       if (terminalHoldoutAssetGroupIds.size > 0) {
         throw new BrokerError(
           "INTERNAL",
@@ -1851,6 +1845,14 @@ export class Broker {
           + "semantic re-encoding makes shared-capability leak detection undecidable",
         );
       }
+      // Unreachable under mutual exclusion; retained as a content-aware safety
+      // net if shared capabilities are ever deliberately reintroduced.
+      assertPromotionHoldoutTerminalIsolation(
+        this.manifest,
+        config.capsuleRootDir,
+        this.promotionHoldoutSplit,
+        terminalHoldoutAssetGroupIds,
+      );
     }
     this.terminalHoldoutAssetGroupIds = terminalHoldoutAssetGroupIds;
     this.maxActiveSandboxes = config.maxActiveSandboxes ?? 8;
