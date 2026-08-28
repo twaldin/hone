@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeSync,
 } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -53,6 +54,12 @@ import {
   PromotionGateDecision,
   PromotionNoiseCalibration,
   PROMOTION_GATE_VERSION,
+  HoldoutNullControlRecord,
+  PromotionHoldoutRecord,
+  PromotionHoldoutSplit,
+  PromotionHoldoutSplitSummary,
+  RecordHoldoutNullControlParams,
+  RecordPromotionHoldoutParams,
   RecursiveTask,
   ResourceUsage,
   SandboxRef,
@@ -71,6 +78,12 @@ import { deferred } from "./deferred.js";
 import { acquireEvaluatorIsolation, type EvaluatorIsolationLease } from "./evaluator-isolation.js";
 import { type UidClaimRecovery } from "./host-evaluator-gate.js";
 import { campaign12PromotionNoiseCalibration } from "./promotion-noise-calibration.js";
+import {
+  assertPromotionHoldoutSplitIdentity,
+  buildHoldoutNullControl,
+  buildPromotionHoldoutRecord,
+  promotionHoldoutSplitSummary,
+} from "./promotion-holdout.js";
 
 import { BrokerError } from "./errors.js";
 import { RecursiveResourceLedger } from "./recursive.js";
@@ -230,6 +243,11 @@ export interface BrokerConfig {
    * dated campaign-12 artifact; unmatched identities remain uncalibrated.
    */
   promotionNoiseCalibrations?: readonly z.infer<typeof PromotionNoiseCalibration>[] | undefined;
+  /**
+   * Trusted frozen per-capsule promotion holdout. It is process configuration,
+   * never returned by getTask or accepted from optimizer-authored config.
+   */
+  promotionHoldoutSplit?: z.infer<typeof PromotionHoldoutSplit> | undefined;
   /** Optional host-only evaluator strategy used by the trusted M1 outer broker. */
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   /**
@@ -704,6 +722,8 @@ type EvaluateP = z.infer<typeof EvaluateParams>;
 type ReportIncumbentP = z.infer<typeof ReportIncumbentParams>;
 type GetPromotionVerdictP = z.infer<typeof GetPromotionVerdictParams>;
 type PromotionVerdictR = z.infer<typeof PromotionVerdict>;
+type RecordHoldoutNullControlP = z.infer<typeof RecordHoldoutNullControlParams>;
+type RecordPromotionHoldoutP = z.infer<typeof RecordPromotionHoldoutParams>;
 type ReportSessionNoYieldBoundP = z.infer<typeof ReportSessionNoYieldBoundParams>;
 type CompleteEpisodeP = z.infer<typeof CompleteEpisodeParams>;
 type FinishP = z.infer<typeof FinishParams>;
@@ -813,6 +833,18 @@ type EmittableEvent =
     }
   | { type: "budget.exhausted"; dimension: string }
   | { type: "holdout.accessed"; capsuleId: string; ledgerCount: number; ledgerBudget: number }
+  | { type: "holdout.split.frozen"; split: z.infer<typeof PromotionHoldoutSplitSummary> }
+  | {
+      type: "holdout.eval.completed";
+      splitId: string;
+      artifact: ArtifactRef;
+      assetGroupId: string;
+      seed: number;
+      aggregate: number | null;
+      cached: boolean;
+    }
+  | { type: "holdout.null-control.completed"; control: z.infer<typeof HoldoutNullControlRecord> }
+  | { type: "promotion.holdout.completed"; record: z.infer<typeof PromotionHoldoutRecord> }
   | { type: "episode.started"; episode: number; parent: ArtifactRef }
   | { type: "episode.completed"; episode: number }
   | { type: "episode.candidate"; episode: number; candidate: ArtifactRef; sessionTrace: string }
@@ -859,6 +891,10 @@ interface PublicationGroup {
 }
 const BROKER_EVENT_TYPES = new Set<RunEvent["type"]>([
   "holdout.accessed",
+  "holdout.split.frozen",
+  "holdout.eval.completed",
+  "holdout.null-control.completed",
+  "promotion.holdout.completed",
   "evaluator.queue.entered",
   "evaluator.queue.acquired",
   "evaluator.isolation",
@@ -955,6 +991,15 @@ const StatePayload = z.discriminatedUnion("t", [
   z.object({ t: z.literal("spend"), tokens: z.number().int().nonnegative(), usd: z.number().nonnegative(), events: JournalEvents }),
   z.object({ t: z.literal("inv"), isolation: EvaluatorIsolationRecord.optional(), events: JournalEvents }),
   z.object({ t: z.literal("holdout"), seq: z.number().int().positive(), events: JournalEvents }),
+  z.object({ t: z.literal("holdoutSplit"), split: PromotionHoldoutSplitSummary, events: JournalEvents }),
+  z.object({
+    t: z.literal("holdoutEval"),
+    splitId: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    record: EvaluationRecord,
+    events: JournalEvents,
+  }),
+  z.object({ t: z.literal("holdoutNullControl"), control: HoldoutNullControlRecord, events: JournalEvents }),
+  z.object({ t: z.literal("promotionHoldout"), record: PromotionHoldoutRecord, events: JournalEvents }),
   z.object({
     t: z.literal("eval"),
     record: EvaluationRecord,
@@ -1296,6 +1341,7 @@ export class Broker {
   /** Optional trusted M1 replicate identity, independent of the broker's boot/episode gate epoch. */
   private readonly trustedMeasurementEpoch: string | undefined;
   private readonly promotionNoiseCalibrations: ReadonlyMap<string, z.infer<typeof PromotionNoiseCalibration>>;
+  private readonly promotionHoldoutSplit: z.infer<typeof PromotionHoldoutSplit> | undefined;
   /** M0 remains `eval`; M1 receives a disjoint hash-derived cache namespace. */
   private readonly evaluationCacheNamespace: string;
   private readonly evaluationStrategy: TrustedEvaluationStrategy | undefined;
@@ -1418,6 +1464,11 @@ export class Broker {
   /** Full trusted records from the resumed episode, returned only for exact replay asks. */
   private readonly replayedEvaluations = new Map<string, EvaluationRecord>();
   private readonly journaledEvaluationMemoKeys = new Set<string>();
+  /** Trusted-only scores; never inserted into optimizer-facing promotion tables. */
+  private readonly promotionHoldoutScores = new Map<string, number | null>();
+  private readonly holdoutNullControls = new Map<string, z.infer<typeof HoldoutNullControlRecord>>();
+  private readonly promotionHoldoutRecords = new Map<string, z.infer<typeof PromotionHoldoutRecord>>();
+  private holdoutSplitJournaled = false;
   /** Trusted current incumbent — promotion is monotone against this. */
   private currentIncumbent: IncumbentState | undefined;
   /** Full ordered promotion history (replayed + live) — crash-resume event recovery. */
@@ -1532,6 +1583,93 @@ export class Broker {
       throw new BrokerError("INTERNAL", "measurementEpoch must be 1-256 characters without control characters");
     }
     this.trustedMeasurementEpoch = config.measurementEpoch;
+    if (config.promotionHoldoutSplit === undefined) {
+      this.promotionHoldoutSplit = undefined;
+    } else {
+      const split = PromotionHoldoutSplit.parse(config.promotionHoldoutSplit);
+      try {
+        assertPromotionHoldoutSplitIdentity(split);
+      } catch (error) {
+        throw new BrokerError("INTERNAL", error instanceof Error ? error.message : String(error));
+      }
+      if (split.capsuleId !== this.manifest.id || split.capsuleDigest !== config.capsuleDigest) {
+        throw new BrokerError("INTERNAL", "holdout split does not match the frozen capsule identity");
+      }
+      const trainGroup = this.manifest.assetGroups.find((group) => group.id === split.train.assetGroupId);
+      const holdoutGroup = this.manifest.assetGroups.find((group) => group.id === split.holdout.assetGroupId);
+      if (trainGroup === undefined || trainGroup.visibility === "holdout") {
+        throw new BrokerError("INTERNAL", "holdout split train group is not optimizer-visible");
+      }
+      if (holdoutGroup?.visibility !== "holdout") {
+        throw new BrokerError("INTERNAL", "holdout split group is not visibility=holdout");
+      }
+      const fileCache = new Map<string, { bytes: Buffer; hash: string; parsed: unknown }>();
+      const unitHash = (
+        unit: z.infer<typeof PromotionHoldoutSplit>["train"]["units"][number],
+      ): { containerHash: string; contentHash: string } => {
+        let cached = fileCache.get(unit.path);
+        if (cached === undefined) {
+          try {
+            const bytes = readFileSync(path.join(config.capsuleRootDir, unit.path));
+            const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+            cached = {
+              bytes,
+              hash,
+              parsed: unit.selector === "" ? undefined : JSON.parse(bytes.toString("utf8")),
+            };
+            fileCache.set(unit.path, cached);
+          } catch {
+            throw new BrokerError("INTERNAL", `holdout split unit ${unit.id} is not a readable materialized file`);
+          }
+        }
+        if (unit.selector === "") return { containerHash: cached.hash, contentHash: cached.hash };
+        let selected = cached.parsed;
+        for (const encoded of unit.selector.slice(1).split("/")) {
+          const segment = encoded.replace(/~1/g, "/").replace(/~0/g, "~");
+          if (Array.isArray(selected)) {
+            const index = Number(segment);
+            if (!Number.isSafeInteger(index) || index < 0 || index >= selected.length) {
+              throw new BrokerError("INTERNAL", `holdout split selector is missing for unit ${unit.id}`);
+            }
+            selected = selected[index];
+          } else if (selected !== null && typeof selected === "object" && segment in selected) {
+            selected = (selected as Record<string, unknown>)[segment];
+          } else {
+            throw new BrokerError("INTERNAL", `holdout split selector is missing for unit ${unit.id}`);
+          }
+        }
+        return {
+          containerHash: cached.hash,
+          contentHash: `sha256:${createHash("sha256").update(canonicalJson(selected)).digest("hex")}`,
+        };
+      };
+      const assertUnits = (
+        units: ReadonlyArray<z.infer<typeof PromotionHoldoutSplit>["train"]["units"][number]>,
+        group: NonNullable<typeof trainGroup>,
+      ): void => {
+        const roots = group.paths.map((entry) => path.posix.normalize(entry).replace(/\/+$/, ""));
+        for (const unit of units) {
+          const normalized = path.posix.normalize(unit.path);
+          const covered = roots.some((root) => normalized === root || normalized.startsWith(`${root}/`));
+          const actual = unitHash(unit);
+          if (
+            normalized !== unit.path
+            || !covered
+            || this.manifest.contentHashes[unit.path] !== unit.containerHash
+            || actual.containerHash !== unit.containerHash
+            || actual.contentHash !== unit.contentHash
+          ) {
+            throw new BrokerError(
+              "INTERNAL",
+              `holdout split unit ${unit.id} is not content-bound inside asset group ${group.id}`,
+            );
+          }
+        }
+      };
+      assertUnits(split.train.units, trainGroup);
+      assertUnits(split.holdout.units, holdoutGroup);
+      this.promotionHoldoutSplit = split;
+    }
     const configuredCalibrations = config.promotionNoiseCalibrations
       ?? this.manifest.assetGroups.flatMap((group) => {
         const calibration = campaign12PromotionNoiseCalibration({
@@ -1699,6 +1837,23 @@ export class Broker {
         throw new BrokerError("INTERNAL", `terminal holdout asset group ${assetGroupId} is not visibility=holdout`);
       }
     }
+    if (this.promotionHoldoutSplit !== undefined) {
+      if (terminalHoldoutAssetGroupIds.size > 0) {
+        throw new BrokerError(
+          "INTERNAL",
+          "promotion holdout and terminal holdout capabilities are mutually exclusive on one capsule: "
+          + "semantic re-encoding makes shared-capability leak detection undecidable",
+        );
+      }
+      // Unreachable under mutual exclusion; retained as a content-aware safety
+      // net if shared capabilities are ever deliberately reintroduced.
+      assertPromotionHoldoutTerminalIsolation(
+        this.manifest,
+        config.capsuleRootDir,
+        this.promotionHoldoutSplit,
+        terminalHoldoutAssetGroupIds,
+      );
+    }
     this.terminalHoldoutAssetGroupIds = terminalHoldoutAssetGroupIds;
     this.maxActiveSandboxes = config.maxActiveSandboxes ?? 8;
     this.maxConcurrentEvaluations = config.maxConcurrentEvaluations ?? 4;
@@ -1747,6 +1902,18 @@ export class Broker {
     try {
       this.validateReplay(stateLog);
       this.replayState(stateLog);
+      if (this.promotionHoldoutSplit !== undefined && !this.holdoutSplitJournaled) {
+        const summary = promotionHoldoutSplitSummary(this.promotionHoldoutSplit);
+        const events = this.journalFact(
+          { t: "holdoutSplit", split: summary },
+          [{ type: "holdout.split.frozen", split: summary }],
+        );
+        try {
+          this.holdoutSplitJournaled = true;
+        } finally {
+          this.publish(events);
+        }
+      }
       this.syncRecursiveUsage(true);
       // This boot's startup generation is minted ABOVE every replayed epoch:
       // fresh re-measurements are today's authority; replayed ones are not.
@@ -2245,6 +2412,50 @@ export class Broker {
             throw new BrokerError("INTERNAL", `run state log corrupt: holdout seq ${line.seq}, expected ${this.holdoutCount + 1}`);
           }
           this.holdoutCount = line.seq;
+          break;
+        case "holdoutSplit":
+          if (
+            this.holdoutSplitJournaled
+            || this.promotionHoldoutSplit === undefined
+            || !sameCanonical(line.split, promotionHoldoutSplitSummary(this.promotionHoldoutSplit))
+          ) {
+            throw new BrokerError("INTERNAL", "run state log holdout split does not match trusted configuration");
+          }
+          this.holdoutSplitJournaled = true;
+          break;
+        case "holdoutEval": {
+          if (this.promotionHoldoutSplit?.splitId !== line.splitId) {
+            throw new BrokerError("INTERNAL", "run state log holdout evaluation has no matching frozen split");
+          }
+          const aggregate = eligibleAggregate(line.record) ?? null;
+          const key = canonicalJson([
+            line.record.artifactHash,
+            line.record.assetGroupId,
+            line.record.seed,
+          ]);
+          if (this.promotionHoldoutScores.has(key)) {
+            throw new BrokerError("INTERNAL", "run state log contains a duplicate promotion holdout coordinate");
+          }
+          this.promotionHoldoutScores.set(key, aggregate);
+          break;
+        }
+        case "holdoutNullControl":
+          if (
+            this.promotionHoldoutSplit?.splitId !== line.control.splitId
+            || this.holdoutNullControls.has(line.control.controlId)
+          ) {
+            throw new BrokerError("INTERNAL", "run state log contains an invalid holdout null control");
+          }
+          this.holdoutNullControls.set(line.control.controlId, line.control);
+          break;
+        case "promotionHoldout":
+          if (
+            this.promotionHoldoutSplit?.splitId !== line.record.splitId
+            || this.promotionHoldoutRecords.has(line.record.artifactHash)
+          ) {
+            throw new BrokerError("INTERNAL", "run state log contains an invalid promotion holdout record");
+          }
+          this.promotionHoldoutRecords.set(line.record.artifactHash, line.record);
           break;
         case "artifact":
           if (!this.candidateArtifactHashes.has(line.hash)) {
@@ -4390,12 +4601,37 @@ export class Broker {
     }
   }
 
+  private recordPromotionHoldoutEvaluation(record: EvaluationRecord): void {
+    const split = this.promotionHoldoutSplit;
+    if (split === undefined || record.assetGroupId !== split.holdout.assetGroupId) return;
+    const key = canonicalJson([record.artifactHash, record.assetGroupId, record.seed]);
+    if (this.promotionHoldoutScores.has(key)) return;
+    const aggregate = eligibleAggregate(record) ?? null;
+    const events = this.journalFact(
+      { t: "holdoutEval", splitId: split.splitId, record },
+      [{
+        type: "holdout.eval.completed",
+        splitId: split.splitId,
+        artifact: { hash: record.artifactHash },
+        assetGroupId: record.assetGroupId,
+        seed: record.seed,
+        aggregate,
+        cached: record.cached,
+      }],
+    );
+    try {
+      this.promotionHoldoutScores.set(key, aggregate);
+    } finally {
+      this.publish(events);
+    }
+  }
+
   /**
-   * Trusted scalarization + the eval.completed event. Holdout results NEVER
-   * enter the log or the promotion table — scores of ledger-gated groups stay
-   * admin-side. Ineligible outputs (invalid, objective-less, non-finite, or
-   * any failed constraint) emit a journal-backed null result but grant no
-   * authority.
+   * Trusted scalarization + evaluation persistence. Ordinary holdout results
+   * never enter the optimizer-facing promotion table. When a trusted frozen
+   * promotion split is configured, its results instead enter a disjoint
+   * trusted-only journal and event surface for terminal claim assessment.
+   * Ineligible outputs are recorded as null and grant no authority.
    *
    * Authority is EPOCH-SCOPED: the measurement lands in the epoch captured
    * when its evaluation was admitted, and a same-epoch retry is a no-op
@@ -4422,7 +4658,10 @@ export class Broker {
    * authority (see registerGate: the first pair is frozen).
    */
   private recordEvaluation(record: EvaluationRecord, visibility: string, epoch: string, memoKey: string): void {
-    if (visibility === "holdout" && !this.terminalHoldoutAssetGroupIds.has(record.assetGroupId)) return;
+    if (visibility === "holdout" && !this.terminalHoldoutAssetGroupIds.has(record.assetGroupId)) {
+      this.recordPromotionHoldoutEvaluation(record);
+      return;
+    }
     if (this.journaledEvaluationMemoKeys.has(memoKey)) return;
     const aggregate = eligibleAggregate(record);
     const epochSeq = this.epochSeqByName.get(epoch);
@@ -4616,6 +4855,233 @@ export class Broker {
     this.budgetGate();
     return this.promotionVerdictFor(params.artifact.hash);
   }
+  private promotionHoldoutScore(
+    artifactHash: string,
+    assetGroupId: string,
+    seed: number,
+  ): number {
+    const score = this.promotionHoldoutScores.get(canonicalJson([artifactHash, assetGroupId, seed]));
+    if (score === undefined) {
+      throw new BrokerError(
+        "INTERNAL",
+        `missing trusted holdout measurement for ${artifactHash} at ${assetGroupId}|${seed}`,
+      );
+    }
+    if (score === null) {
+      throw new BrokerError(
+        "INTERNAL",
+        `ineligible trusted holdout measurement for ${artifactHash} at ${assetGroupId}|${seed}`,
+      );
+    }
+    return score;
+  }
+
+  recordHoldoutNullControl(
+    params: RecordHoldoutNullControlP,
+    ctx: CallContext,
+  ): z.infer<typeof HoldoutNullControlRecord> {
+    if (!ctx.privileged) {
+      throw new BrokerError("HOLDOUT_ACCESS_DENIED", "holdout null controls require trusted authority");
+    }
+    const split = this.promotionHoldoutSplit;
+    if (
+      split === undefined
+      || params.splitId !== split.splitId
+      || params.assetGroupId !== split.holdout.assetGroupId
+    ) {
+      throw new BrokerError("INTERNAL", "holdout null control does not match the frozen split");
+    }
+    const requiredRepeats = Math.max(2, split.evaluationRepeats);
+    if (params.seeds.length !== requiredRepeats || new Set(params.seeds).size !== params.seeds.length) {
+      throw new BrokerError(
+        "INTERNAL",
+        `holdout null control requires exactly ${requiredRepeats} unique measurements`,
+      );
+    }
+    const prior = [...this.holdoutNullControls.values()].find((control) =>
+      control.splitId === params.splitId
+      && control.artifactHash === params.artifactHash
+      && control.assetGroupId === params.assetGroupId
+      && sameCanonical(control.seeds, params.seeds)
+    );
+    if (prior !== undefined) return prior;
+    const control = buildHoldoutNullControl({
+      splitId: split.splitId,
+      artifactHash: params.artifactHash,
+      assetGroupId: params.assetGroupId,
+      seeds: params.seeds,
+      scores: params.seeds.map((seed) =>
+        this.promotionHoldoutScore(params.artifactHash, params.assetGroupId, seed),
+      ),
+      recordedAt: new Date(this.now()).toISOString(),
+    });
+    const events = this.journalFact(
+      { t: "holdoutNullControl", control },
+      [{ type: "holdout.null-control.completed", control }],
+    );
+    try {
+      this.holdoutNullControls.set(control.controlId, control);
+    } finally {
+      this.publish(events);
+    }
+    return control;
+  }
+
+  recordPromotionHoldout(
+    params: RecordPromotionHoldoutP,
+    ctx: CallContext,
+  ): z.infer<typeof PromotionHoldoutRecord> {
+    if (!ctx.privileged) {
+      throw new BrokerError("HOLDOUT_ACCESS_DENIED", "promotion holdout records require trusted authority");
+    }
+    const split = this.promotionHoldoutSplit;
+    if (
+      split === undefined
+      || params.splitId !== split.splitId
+      || params.assetGroupId !== split.holdout.assetGroupId
+      || params.seeds.length !== split.evaluationRepeats
+      || new Set(params.seeds).size !== params.seeds.length
+    ) {
+      throw new BrokerError("INTERNAL", "promotion holdout request does not match the frozen split protocol");
+    }
+    const existing = this.promotionHoldoutRecords.get(params.artifactHash);
+    if (existing !== undefined) {
+      if (
+        existing.splitId !== params.splitId
+        || existing.holdout.assetGroupId !== params.assetGroupId
+        || !sameCanonical(existing.holdout.seeds, params.seeds)
+        || existing.nullControl.controlId !== params.nullControlId
+      ) {
+        throw new BrokerError("INTERNAL", "promotion already has a different holdout record");
+      }
+      return existing;
+    }
+    if (!this.incumbentHistory.some((incumbent) => incumbent.hash === params.artifactHash)) {
+      throw new BrokerError("INTERNAL", "holdout assessment requires a durably recorded in-sample promotion");
+    }
+    const verdict = this.promotionVerdictFor(params.artifactHash);
+    if (verdict.status !== "promotable") {
+      throw new BrokerError("INTERNAL", "holdout assessment requires a noise-clearing in-sample promotion");
+    }
+    const control = this.holdoutNullControls.get(params.nullControlId);
+    if (
+      control === undefined
+      || control.splitId !== split.splitId
+      || control.assetGroupId !== params.assetGroupId
+      || params.seeds.some((seed) => !control.seeds.includes(seed))
+    ) {
+      throw new BrokerError("INTERNAL", "promotion holdout null control does not match its split and coordinates");
+    }
+    const record = buildPromotionHoldoutRecord({
+      artifactHash: params.artifactHash,
+      parentArtifactHash: verdict.parent.hash,
+      split,
+      gateVersion: verdict.gateVersion,
+      noiseDecision: verdict.decision,
+      trainParentScore: verdict.parentScore,
+      trainChildScore: verdict.childScore,
+      holdoutParentScores: params.seeds.map((seed) =>
+        this.promotionHoldoutScore(verdict.parent.hash, params.assetGroupId, seed),
+      ),
+      holdoutChildScores: params.seeds.map((seed) =>
+        this.promotionHoldoutScore(params.artifactHash, params.assetGroupId, seed),
+      ),
+      seeds: params.seeds,
+      nullControl: control,
+      recordedAt: new Date(this.now()).toISOString(),
+    });
+    const events = this.journalFact(
+      { t: "promotionHoldout", record },
+      [{ type: "promotion.holdout.completed", record }],
+    );
+    try {
+      this.promotionHoldoutRecords.set(record.artifactHash, record);
+    } finally {
+      this.publish(events);
+    }
+    return record;
+  }
+  /**
+   * Terminal trusted path: measure the final durable in-sample promotion on
+   * the frozen holdout, ship one information-free null control, and persist
+   * its generalization record. Intermediate incumbents remain optimizer
+   * feedback, not publishable claims. The complete request count is checked
+   * before the first holdout access, so a tight campaign budget fails without
+   * a partial claim surface.
+   */
+  async assessPromotionHoldouts(
+    ctx: CallContext,
+  ): Promise<readonly z.infer<typeof PromotionHoldoutRecord>[]> {
+    if (!ctx.privileged) {
+      throw new BrokerError("HOLDOUT_ACCESS_DENIED", "promotion holdout assessment requires trusted authority");
+    }
+    const split = this.promotionHoldoutSplit;
+    if (split === undefined) {
+      throw new BrokerError("INTERNAL", "no frozen promotion holdout split is configured");
+    }
+    const evaluationSeeds = Array.from({ length: split.evaluationRepeats }, (_, seed) => seed);
+    const controlSeeds = split.evaluationRepeats === 1 ? [0, 1] : evaluationSeeds;
+    const incumbent = this.incumbentHistory.at(-1);
+    if (incumbent === undefined) return [];
+    const verdict = this.promotionVerdictFor(incumbent.hash);
+    if (verdict.status !== "promotable") {
+      throw new BrokerError("INTERNAL", "final durable incumbent is not promotable");
+    }
+    const promotions = [{ artifactHash: incumbent.hash, verdict }];
+    const coordinates = new Map<string, { artifactHash: string; seed: number }>();
+    const addCoordinate = (artifactHash: string, seed: number): void => {
+      const key = canonicalJson([artifactHash, split.holdout.assetGroupId, seed]);
+      if (!this.promotionHoldoutScores.has(key)) coordinates.set(key, { artifactHash, seed });
+    };
+    for (const seed of controlSeeds) addCoordinate(verdict.parent.hash, seed);
+    for (const promotion of promotions) {
+      for (const seed of evaluationSeeds) {
+        addCoordinate(promotion.verdict.parent.hash, seed);
+        addCoordinate(promotion.artifactHash, seed);
+      }
+    }
+    const required = coordinates.size;
+    const evaluatorRemaining =
+      this.manifest.budget.maxEvaluatorInvocations
+      - this.spent.evaluatorInvocations
+      - this.pendingEvaluations;
+    const ledgerState = this.ledger?.state();
+    if (ledgerState === undefined) {
+      throw new BrokerError("INTERNAL", "holdout ledger is not open");
+    }
+    const holdoutRemaining = ledgerState.budget - ledgerState.count;
+    if (required > evaluatorRemaining || required > holdoutRemaining) {
+      throw new BrokerError(
+        "BUDGET_EXCEEDED",
+        `promotion holdout requires ${required} evaluator requests before spending; `
+        + `only ${Math.min(evaluatorRemaining, holdoutRemaining)} remain`,
+      );
+    }
+    for (const coordinate of coordinates.values()) {
+      await this.evaluate({
+        artifact: { hash: coordinate.artifactHash },
+        assetGroupId: split.holdout.assetGroupId,
+        seed: coordinate.seed,
+      }, ctx);
+    }
+    const control = this.recordHoldoutNullControl({
+      splitId: split.splitId,
+      artifactHash: verdict.parent.hash,
+      assetGroupId: split.holdout.assetGroupId,
+      seeds: controlSeeds,
+    }, ctx);
+    return promotions.map((promotion) =>
+      this.recordPromotionHoldout({
+        splitId: split.splitId,
+        artifactHash: promotion.artifactHash,
+        assetGroupId: split.holdout.assetGroupId,
+        seeds: evaluationSeeds,
+        nullControlId: control.controlId,
+      }, ctx)
+    );
+  }
+
+
 
   reportIncumbent(params: ReportIncumbentP, _ctx: CallContext): Record<string, never> {
     this.budgetGate();
@@ -5455,6 +5921,113 @@ function meanOver(scores: Map<string, number>, keys: readonly string[]): number 
 }
 
 /**
+ * Promotion holdouts are stricter than general same-visibility asset groups:
+ * no terminal optimizer capability may reach any underlying holdout byte,
+ * even through a second group name, nested root, symlink, or hard link.
+ */
+function assertPromotionHoldoutTerminalIsolation(
+  manifest: CapsuleManifest,
+  capsuleRootDir: string,
+  split: z.infer<typeof PromotionHoldoutSplit>,
+  terminalGroupIds: ReadonlySet<string>,
+): void {
+  if (terminalGroupIds.size === 0) return;
+  const sealed = split.holdout.units.map((unit) => {
+    const full = path.join(capsuleRootDir, unit.path);
+    const link = lstatSync(full);
+    if (link.isSymbolicLink()) {
+      throw new BrokerError("INTERNAL", `promotion holdout unit ${unit.id} cannot be a symlink`);
+    }
+    const canonical = realpathSync.native(full);
+    const identity = statSync(canonical);
+    if (!identity.isFile()) {
+      throw new BrokerError("INTERNAL", `promotion holdout unit ${unit.id} must be a regular file`);
+    }
+    return {
+      id: unit.id,
+      canonical,
+      dev: identity.dev,
+      ino: identity.ino,
+      contentHash: unit.contentHash,
+      containerHash: unit.containerHash,
+    };
+  });
+  const sealedById = new Map(sealed.map((unit) => [unit.id, unit.contentHash]));
+  const copiedLogicalUnit = (bytes: Buffer): string | undefined => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      return undefined;
+    }
+    const pending: unknown[] = [parsed];
+    while (pending.length > 0) {
+      const value = pending.pop();
+      if (value === null || typeof value !== "object") continue;
+      if ("id" in value && typeof value.id === "string") {
+        const expected = sealedById.get(value.id);
+        if (
+          expected !== undefined
+          && `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}` === expected
+        ) {
+          return value.id;
+        }
+      }
+      pending.push(...(Array.isArray(value) ? value : Object.values(value)));
+    }
+    return undefined;
+  };
+  const refuseIfSealed = (candidatePath: string, groupId: string): void => {
+    let link;
+    try {
+      link = lstatSync(candidatePath);
+    } catch {
+      throw new BrokerError(
+        "INTERNAL",
+        `terminal holdout group ${groupId} path is missing on host: ${path.relative(capsuleRootDir, candidatePath)}`,
+      );
+    }
+    if (link.isSymbolicLink()) {
+      throw new BrokerError(
+        "INTERNAL",
+        `terminal holdout group ${groupId} contains a symlink and cannot prove promotion holdout isolation`,
+      );
+    }
+    const canonical = realpathSync.native(candidatePath);
+    const identity = statSync(canonical);
+    if (identity.isDirectory()) {
+      for (const entry of readdirSync(candidatePath)) {
+        refuseIfSealed(path.join(candidatePath, entry), groupId);
+      }
+      return;
+    }
+    if (!identity.isFile()) return;
+    const bytes = readFileSync(candidatePath);
+    const fileHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const logicalUnitId = copiedLogicalUnit(bytes);
+    const matched = sealed.find((unit) =>
+      unit.canonical === canonical
+      || (unit.dev === identity.dev && unit.ino === identity.ino)
+      || unit.containerHash === fileHash
+      || unit.contentHash === fileHash
+      || unit.id === logicalUnitId
+    );
+    if (matched !== undefined) {
+      throw new BrokerError(
+        "INTERNAL",
+        `terminal holdout group ${groupId} reaches promotion holdout unit ${matched.id}: `
+        + "promotion holdout contents and scores must remain optimizer-invisible",
+      );
+    }
+  };
+  for (const groupId of terminalGroupIds) {
+    const group = manifest.assetGroups.find((candidate) => candidate.id === groupId);
+    if (group === undefined) throw new BrokerError("INTERNAL", `terminal holdout group ${groupId} is missing`);
+    for (const root of group.paths) refuseIfSealed(path.join(capsuleRootDir, root), groupId);
+  }
+}
+
+/**
  * Preflight (constructor): asset-group paths must not overlap or nest across
  * visibility classes — otherwise mounting a public group could smuggle
  * protected/holdout files into a container that must never see them.
@@ -5470,6 +6043,8 @@ function assertAssetGroupIsolation(manifest: CapsuleManifest): void {
   }
   for (const [i, a] of entries.entries()) {
     for (const b of entries.slice(i + 1)) {
+      // Same-visibility aliases are permitted here. Promotion holdout bytes
+      // receive the stricter path/realpath/dev+ino terminal guard above.
       if (a.visibility === b.visibility) continue;
       // "." mounts the whole capsule root — it is an ancestor of everything.
       if (a.path === "." || b.path === "." || a.path === b.path || a.path.startsWith(`${b.path}/`) || b.path.startsWith(`${a.path}/`)) {

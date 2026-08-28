@@ -18,7 +18,7 @@ import {
   RunEvent,
   SessionNoYieldMaxTokens,
 } from "@hone/schema";
-import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue } from "@hone/schema";
+import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue, PromotionHoldoutSplit } from "@hone/schema";
 import type { BrokerCorpusConfig, BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
 import {
   admitCapsule,
@@ -509,6 +509,8 @@ export interface TrustedRunOptions {
   trustedValidPublicCandidateTarget?: number | undefined;
   /** Narrow holdout capability released only by terminal-latched meta orchestration. */
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
+  /** Frozen promotion holdout; host-only and absent from optimizer-authored config. */
+  promotionHoldoutSplit?: PromotionHoldoutSplit | undefined;
   /** Internal campaign seed closure; never serialized or re-collected from repoRoot. */
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
   /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
@@ -605,6 +607,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       trusted.evaluationStrategy !== undefined
       || trusted.trustedValidPublicCandidateTarget !== undefined
       || trusted.terminalHoldoutAssetGroupIds !== undefined
+      || trusted.promotionHoldoutSplit !== undefined
       || trusted.corpus !== undefined
     )
   ) {
@@ -957,6 +960,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     plan = { runId, runDir, config, resumed: false };
   }
 
+
   return superviseRun(
     plan,
     {
@@ -986,6 +990,9 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         : {}),
       ...(trusted.terminalHoldoutAssetGroupIds !== undefined
         ? { terminalHoldoutAssetGroupIds: trusted.terminalHoldoutAssetGroupIds }
+        : {}),
+      ...(trusted.promotionHoldoutSplit !== undefined
+        ? { promotionHoldoutSplit: trusted.promotionHoldoutSplit }
         : {}),
       ...(trusted.proxyRole !== undefined ? { proxyRole: trusted.proxyRole } : {}),
       ...(trusted.campaignPauseAuthority !== undefined
@@ -1519,6 +1526,7 @@ export interface SuperviseExtra {
   campaignConfigHash?: `sha256:${string}` | undefined;
   trustedValidPublicCandidateTarget?: number | undefined;
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
+  promotionHoldoutSplit?: PromotionHoldoutSplit | undefined;
   recursiveBroker?: BrokerRecursiveConfig | undefined;
   corpus?: BrokerCorpusConfig | undefined;
   corpusCohort?: CorpusCohortBinding | undefined;
@@ -1909,6 +1917,9 @@ async function superviseLocked(
       : {}),
     ...(extra.terminalHoldoutAssetGroupIds !== undefined
       ? { terminalHoldoutAssetGroupIds: extra.terminalHoldoutAssetGroupIds }
+      : {}),
+    ...(extra.promotionHoldoutSplit !== undefined
+      ? { promotionHoldoutSplit: extra.promotionHoldoutSplit }
       : {}),
     ...(extra.proxyRole !== undefined ? { proxyRole: extra.proxyRole } : {}),
     ...(extra.campaignPauseAuthority !== undefined ? { campaignPauseAuthority: extra.campaignPauseAuthority } : {}),

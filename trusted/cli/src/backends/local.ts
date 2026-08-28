@@ -1548,6 +1548,9 @@ export function createBackend(
           ...(ctx.terminalHoldoutAssetGroupIds !== undefined
             ? { terminalHoldoutAssetGroupIds: ctx.terminalHoldoutAssetGroupIds }
             : {}),
+          ...(ctx.promotionHoldoutSplit !== undefined
+            ? { promotionHoldoutSplit: ctx.promotionHoldoutSplit }
+            : {}),
           // Per-capsule sandbox resource requirements (manifest-core, sealed
           // in the digest). Absent => broker defaults (2 GiB / 2 cpus).
           ...(ctx.admittedManifest.sandbox === undefined
@@ -1812,6 +1815,10 @@ export function createBackend(
             }
             if (ctx.signal.aborted) return;
           }
+        }
+
+        if (ctx.promotionHoldoutSplit !== undefined) {
+          await running.broker.assessPromotionHoldouts({ privileged: true });
         }
 
 

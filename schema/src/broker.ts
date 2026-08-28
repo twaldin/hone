@@ -5,6 +5,12 @@ import {
   PromotionGateDecision,
   PromotionNoiseCalibration,
 } from "./promotion.js";
+import {
+  HoldoutNullControlRecord,
+  PromotionHoldoutRecord,
+  RecordHoldoutNullControlParams,
+  RecordPromotionHoldoutParams,
+} from "./holdout.js";
 
 /**
  * Contract 2 — Broker wire protocol (JSON-RPC 2.0 over unix socket).
@@ -391,6 +397,14 @@ export const BrokerMethods = {
   },
   getPromotionVerdict: { params: GetPromotionVerdictParams, result: PromotionVerdict },
   reportIncumbent: { params: ReportIncumbentParams, result: z.object({}) },
+  recordHoldoutNullControl: {
+    params: RecordHoldoutNullControlParams,
+    result: HoldoutNullControlRecord,
+  },
+  recordPromotionHoldout: {
+    params: RecordPromotionHoldoutParams,
+    result: PromotionHoldoutRecord,
+  },
   reportSessionNoYieldBound: { params: ReportSessionNoYieldBoundParams, result: z.object({}) },
   completeEpisode: { params: CompleteEpisodeParams, result: z.object({}) },
   getBudget: { params: z.object({}), result: BudgetState },

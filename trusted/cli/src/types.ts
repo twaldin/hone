@@ -10,6 +10,7 @@ import type {
   RunConfig,
   RunEvent,
   RunPauseReason,
+  PromotionHoldoutSplit,
 } from "@hone/schema";
 import type { RunState } from "./eventlog.js";
 import type { OptimizerSnapshot } from "./optimizer-digest.js";
@@ -109,6 +110,8 @@ export interface RunnerBackendContext {
   trustedValidPublicCandidateTarget?: number | undefined;
   /** Holdout groups released only inside a terminal-latched child run. */
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
+  /** Frozen promotion holdout; trusted-only and never returned to the optimizer. */
+  promotionHoldoutSplit?: PromotionHoldoutSplit | undefined;
   /** Frozen M2 proxy bearer role. Absent only for legacy M0/M1 mutation routing. */
   proxyRole?: M2ProxyRole | undefined;
   /** Shared durable M2 provider-pause authority. */

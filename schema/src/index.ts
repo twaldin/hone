@@ -10,3 +10,4 @@ export * from "./runconfig.js";
 export * from "./meta.js";
 export * from "./trajectory.js";
 export * from "./promotion.js";
+export * from "./holdout.js";

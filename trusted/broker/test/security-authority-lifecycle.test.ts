@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { once } from "node:events";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 
@@ -14,6 +14,7 @@ import {
   PROMOTION_GATE_VERSION,
   type CapsuleManifest,
   type RunEvent,
+  type PromotionHoldoutSplit,
 } from "@hone/schema";
 import { Broker, type BrokerConfig, type CallContext } from "../src/broker.js";
 import { packDirAsArtifact } from "../src/artifact.js";
@@ -22,6 +23,7 @@ import { runCommand, type CmdResult, type RunCommand } from "../src/command.js";
 import { BrokerError } from "../src/errors.js";
 import { deferred } from "../src/deferred.js";
 import { BrokerServer } from "../src/server.js";
+import { createPromotionHoldoutSplit } from "../src/promotion-holdout.js";
 import {
   MUTATION_SANDBOX_HOME,
   MUTATION_SANDBOX_USER,
@@ -67,7 +69,7 @@ let candidateHash: string;
 let candidate2Tar: Buffer;
 let candidate2Hash: string;
 
-function sha256(content: string): string {
+function sha256(content: string | Buffer): string {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
@@ -221,6 +223,8 @@ async function boot(
     measurementEpoch?: string;
     promotionNoiseSd?: number;
     omitPromotionCalibration?: boolean;
+    promotionHoldoutSplit?: PromotionHoldoutSplit;
+    terminalHoldoutAssetGroupIds?: readonly string[];
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
     now?: () => number;
@@ -413,6 +417,12 @@ async function boot(
             informationFreePositive: 0,
           }],
         }),
+    ...(opts.promotionHoldoutSplit === undefined
+      ? {}
+      : { promotionHoldoutSplit: opts.promotionHoldoutSplit }),
+    ...(opts.terminalHoldoutAssetGroupIds === undefined
+      ? {}
+      : { terminalHoldoutAssetGroupIds: opts.terminalHoldoutAssetGroupIds }),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
@@ -1385,6 +1395,203 @@ describe("durable promotion verdict query", () => {
       decision: "promote",
     });
     expect(positive.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT)).toEqual({});
+  });
+  it("keeps a frozen holdout invisible to the optimizer and journals terminal generalization proof", async () => {
+    const sourceUnits = Array.from({ length: 25 }, (_, index) => ({
+      id: `holdout-case-${index}`,
+      content: `sealed-${index}`,
+      contentHash: sha256(`sealed-${index}`),
+      achievableScoreMax: 1,
+      selector: "",
+      trainContainerHash: sha256(`sealed-${index}`),
+      holdoutContainerHash: sha256(`sealed-${index}`),
+      trainPath: `train/holdout-case-${index}.txt`,
+      holdoutPath: `holdout/holdout-case-${index}.txt`,
+    }));
+    const split = createPromotionHoldoutSplit({
+      capsuleId: "cap_0123456789ab",
+      capsuleDigest: TEST_CAPSULE_DIGEST,
+      campaignIdentity: `sha256:${"c".repeat(64)}`,
+      frozenAt: "2026-08-28T00:00:00.000Z",
+      trainAssetGroupId: "train",
+      holdoutAssetGroupId: "holdout",
+      units: sourceUnits,
+      holdoutUnits: 20,
+      noiseClass: "deterministic-zero-noise",
+      noiseEnvelope: 0,
+      evaluationRepeats: 1,
+      minimumDetectableEffect: 0.05,
+    });
+    const contentById = new Map(sourceUnits.map((unit) => [unit.id, unit.content]));
+    const splitHashes: Record<string, string> = {};
+    for (const unit of [...split.train.units, ...split.holdout.units]) {
+      await writeFile(path.join(capsuleRootDir, unit.path), contentById.get(unit.id)!);
+      splitHashes[unit.path] = unit.contentHash;
+    }
+    const baseManifest = makeManifest();
+    const contentHashes = { ...baseManifest.contentHashes, ...splitHashes };
+    await expect(boot({
+      manifest: makeManifest({ contentHashes }),
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const aliasManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "holdout-mirror", visibility: "holdout", paths: ["holdout"] },
+      ],
+      contentHashes,
+    });
+    await expect(boot({
+      manifest: aliasManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout-mirror"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const mirrorRoot = path.join(capsuleRootDir, "holdout-hardlink-mirror");
+    await mkdir(mirrorRoot, { recursive: true });
+    const hardlinkHashes: Record<string, string> = {};
+    const sealedIdentities = new Set<string>();
+    const mirrorIdentities = new Set<string>();
+    for (const unit of split.holdout.units) {
+      const source = path.join(capsuleRootDir, unit.path);
+      const mirrorRel = `holdout-hardlink-mirror/${unit.id}.txt`;
+      const mirror = path.join(capsuleRootDir, mirrorRel);
+      await link(source, mirror);
+      hardlinkHashes[mirrorRel] = unit.contentHash;
+      const sourceStat = await stat(source);
+      const mirrorStat = await stat(mirror);
+      sealedIdentities.add(`${sourceStat.dev}:${sourceStat.ino}`);
+      mirrorIdentities.add(`${mirrorStat.dev}:${mirrorStat.ino}`);
+    }
+    expect([...sealedIdentities].every((identity) => mirrorIdentities.has(identity))).toBe(true);
+    const hardlinkManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "holdout-hardlink-mirror", visibility: "holdout", paths: ["holdout-hardlink-mirror"] },
+      ],
+      contentHashes: { ...contentHashes, ...hardlinkHashes },
+    });
+    await expect(boot({
+      manifest: hardlinkManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout-hardlink-mirror"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const copyRoot = path.join(capsuleRootDir, "holdout-copy-mirror");
+    await mkdir(copyRoot, { recursive: true });
+    const copyHashes: Record<string, string> = {};
+    for (const unit of split.holdout.units) {
+      const source = path.join(capsuleRootDir, unit.path);
+      const copyRel = `holdout-copy-mirror/${unit.id}.txt`;
+      const copy = path.join(capsuleRootDir, copyRel);
+      await copyFile(source, copy);
+      copyHashes[copyRel] = unit.containerHash;
+      const sourceStat = await stat(source);
+      const copyStat = await stat(copy);
+      expect(`${copyStat.dev}:${copyStat.ino}`).not.toBe(`${sourceStat.dev}:${sourceStat.ino}`);
+      expect(sha256(await readFile(copy))).toBe(unit.containerHash);
+    }
+    const copyManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "holdout-copy-mirror", visibility: "holdout", paths: ["holdout-copy-mirror"] },
+      ],
+      contentHashes: { ...contentHashes, ...copyHashes },
+    });
+    await expect(boot({
+      manifest: copyManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout-copy-mirror"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const disjointRoot = path.join(capsuleRootDir, "terminal-disjoint");
+    await mkdir(disjointRoot, { recursive: true });
+    await writeFile(path.join(disjointRoot, "data.txt"), "unrelated terminal bytes");
+    const disjointManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "terminal-disjoint", visibility: "holdout", paths: ["terminal-disjoint"] },
+      ],
+      contentHashes: {
+        ...contentHashes,
+        "terminal-disjoint/data.txt": sha256("unrelated terminal bytes"),
+      },
+    });
+    await expect(boot({
+      manifest: disjointManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["terminal-disjoint"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const b = await boot({
+      manifest: makeManifest({
+        contentHashes: { ...baseManifest.contentHashes, ...splitHashes },
+      }),
+      promotionHoldoutSplit: split,
+    });
+    const sealedContentHashes = new Set(split.holdout.units.flatMap((unit) => [
+      unit.contentHash,
+      unit.containerHash,
+    ]));
+    b.ctl.evalInspect = async (argv) => {
+      const mount = argv.find((arg) => arg.endsWith(":/capsule/assets:ro"));
+      expect(mount).toBeDefined();
+      const stagedRoot = mount?.slice(0, -":/capsule/assets:ro".length) ?? "";
+      const pending = [stagedRoot];
+      while (pending.length > 0) {
+        const current = pending.pop()!;
+        const currentStat = await stat(current);
+        if (currentStat.isDirectory()) {
+          for (const entry of await readdir(current)) pending.push(path.join(current, entry));
+        } else if (currentStat.isFile()) {
+          expect(sealedContentHashes.has(sha256(await readFile(current)))).toBe(false);
+        }
+      }
+    };
+    b.ctl.evalOutputs.set(baselineHash, score(0.2)).set(candidateHash, score(0.4));
+    const winner = await saveCandidate(b, candidateTar);
+    const visibleGroups = b.broker.getTask(CLIENT).visibleAssetGroups;
+    for (const [seed, assetGroupId] of visibleGroups.entries()) {
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId, seed }, CLIENT);
+    }
+    await b.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "train", seed: 0 }, CLIENT);
+    b.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT);
+
+    expect(b.broker.getTask(CLIENT).visibleAssetGroups).not.toContain("holdout");
+    await expect(
+      b.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "holdout", seed: 0 }, CLIENT),
+    ).rejects.toMatchObject({ code: "HOLDOUT_ACCESS_DENIED" });
+    expect(() => b.broker.recordPromotionHoldout({
+      splitId: split.splitId,
+      artifactHash: winner,
+      assetGroupId: "holdout",
+      seeds: [0],
+      nullControlId: sha256("not-a-control"),
+    }, CLIENT)).toThrow(/trusted authority/);
+    b.ctl.evalInspect = null;
+
+    const records = await b.broker.assessPromotionHoldouts(ADMIN);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      artifactHash: winner,
+      parentArtifactHash: baselineHash,
+      splitId: split.splitId,
+      training: { delta: 0.2, noiseDecision: "promote" },
+      holdout: { delta: 0.2, seeds: [0], headroom: 0.8, designEligibility: "claim-capable" },
+      generalizationGap: 0,
+      status: "supported",
+      claimable: true,
+      nullControl: { informationFree: true, estimator: "sample-sd-v1", sampleStandardDeviation: 0 },
+    });
+    expect(b.events.filter((event) => event.type === "holdout.split.frozen")).toHaveLength(1);
+    const splitEvent = b.events.find((event) => event.type === "holdout.split.frozen");
+    expect(JSON.stringify(splitEvent)).not.toContain("holdout-case-");
+    expect(b.events.filter((event) => event.type === "holdout.eval.completed")).toHaveLength(3);
+    expect(b.events.filter((event) => event.type === "holdout.null-control.completed")).toHaveLength(1);
+    expect(b.events.filter((event) => event.type === "promotion.holdout.completed")).toHaveLength(1);
   });
   it("replays a pre-versioned gate as readable but never silently grants new authority", async () => {
     const shared = {
