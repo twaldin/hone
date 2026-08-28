@@ -310,7 +310,9 @@ export const CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V3 = CAMPAIGN_12_JOURNAL_NO
     local !== undefined
     && local.admittedCapsuleDigest === journal.admittedCapsuleDigest
     && local.executionImage === journal.executionImage;
-  const maxObservedPairDelta = journal.sensitivityThresholds.maxSpan;
+  const maxObservedPairDelta = identityMatchedLocal
+    ? Math.max(journal.sensitivityThresholds.maxSpan, local.maxObservedLocalPairDelta)
+    : journal.sensitivityThresholds.maxSpan;
   if (identityMatchedLocal) {
     const noiseFloor = (3 / Math.SQRT2) * local.pairedDeltaSd;
     return {

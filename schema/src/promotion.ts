@@ -23,7 +23,7 @@ const CalibrationIdentity = z.object({
   calibratedAt: z.string().datetime(),
   capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
   admittedCapsuleDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-  executionImage: z.string().min(1),
+  executionImage: z.string().min(1).refine((value) => !/^sha256:/.test(value), "execution image cannot be an admitted digest"),
   assetGroupId: z.string().min(1),
   measurementEpoch: z.string().min(1).nullable(),
   sourceCohortSha256: z.array(z.string().regex(/^sha256:[0-9a-f]{64}$/)).min(1),

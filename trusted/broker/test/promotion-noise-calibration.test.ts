@@ -87,6 +87,10 @@ describe("campaign-12 promotion noise calibration", () => {
       ...floyd,
       noiseEnvelope: floyd.maxObservedPairDelta - Number.EPSILON,
     })).toThrow();
+    expect(() => PromotionNoiseCalibration.parse({
+      ...floyd,
+      executionImage: floyd.admittedCapsuleDigest,
+    })).toThrow(/execution image/);
   });
 
   it("fails closed when any measured evaluator identity dimension is stale", () => {

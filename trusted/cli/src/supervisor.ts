@@ -664,9 +664,6 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ) {
         throw new UsageError("campaign session role/config/authority seal changed since the run started");
       }
-      if (campaignSeal.executionImage !== executionImage) {
-        throw new UsageError("campaign execution image changed since the run started");
-      }
       if (trusted.corpus !== undefined && trusted.corpus.provenance.campaignConfigHash !== sealedCampaignHash) {
         throw new UsageError("frozen corpus provenance does not carry the run's sealed campaign config hash");
       }
@@ -684,6 +681,15 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       if (trusted.corpus !== undefined && trusted.corpusCohort !== undefined) {
         const cohortError = corpusCohortFenceError(trusted.corpus, trusted.corpusCohort);
         if (cohortError !== null) throw new UsageError(cohortError);
+      }
+      // Legacy v1 seals may predate execution-image recording; absent means
+      // unconstrained, not changed. Corpus-specific mismatches above retain
+      // their precise refusal reasons.
+      if (
+        campaignSeal.executionImage !== undefined
+        && campaignSeal.executionImage !== executionImage
+      ) {
+        throw new UsageError("campaign execution image changed since the run started");
       }
     }
     // Resume replays Gate 2 again: revocation or a delegation change refuses

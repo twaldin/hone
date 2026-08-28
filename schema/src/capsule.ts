@@ -26,7 +26,7 @@ export const IMAGE_DIGEST_REF =
  */
 export const CapsuleRuntimeIdentity = z.object({
   admittedCapsuleDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-  executionImage: z.string().min(1),
+  executionImage: z.string().min(1).refine((value) => !/^sha256:/.test(value), "execution image cannot be an admitted digest"),
 }).strict();
 export type CapsuleRuntimeIdentity = z.infer<typeof CapsuleRuntimeIdentity>;
 
