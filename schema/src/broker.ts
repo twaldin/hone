@@ -170,6 +170,7 @@ const PromotionPair = z.object({
   delta: z.number(),
   gateVersion: z.literal(PROMOTION_GATE_VERSION),
   calibrationEvidenceVersion: z.string().nullable(),
+  noiseFloor: z.number().nonnegative().nullable(),
   noiseEnvelope: z.number().nonnegative().nullable(),
   decision: PromotionGateDecision,
 });

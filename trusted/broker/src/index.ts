@@ -49,7 +49,7 @@ export { deferred, type Deferred } from "./deferred.js";
 export {
   CAMPAIGN_12_CALIBRATION_EVIDENCE_VERSION,
   CAMPAIGN_12_CALIBRATED_AT,
-  CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V1,
+  CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V2,
   campaign12PromotionNoiseCalibration,
   type PromotionCalibrationIdentity,
 } from "./promotion-noise-calibration.js";

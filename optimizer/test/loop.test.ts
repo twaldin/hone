@@ -659,8 +659,9 @@ describe("runEpisodeLoop paired comparator evidence", () => {
           parentScore: 0.5,
           childScore: 0.49,
           delta: -0.01,
-          gateVersion: "noise-envelope-v1",
-          calibrationEvidenceVersion: "optimizer-test-calibration-v1",
+          gateVersion: "noise-envelope-v2",
+          calibrationEvidenceVersion: "optimizer-test-calibration-v2",
+          noiseFloor: 0,
           noiseEnvelope: 0,
           decision: "refuse-no-improvement",
         },
@@ -707,6 +708,46 @@ describe("runEpisodeLoop paired comparator evidence", () => {
     expect(stub.completedEpisodes).toEqual([0, 1, 2]);
     expect(eventsOf(events, "episode.started")).toHaveLength(3);
     expect(stub.finished).toEqual([BASELINE]);
+  });
+
+  it("refuses a locally-positive child inside a non-zero calibrated noise floor", async () => {
+    const stub = new StubBroker({
+      baselineHash: BASELINE,
+      baselineObjectives: { score: 0.5 },
+      objectivesBySaveIndex: { 1: { score: 0.52 } },
+      promotionNoiseSd: 0.01,
+      execPlan: [{ exitCode: 0, stdout: okStdout("small positive wobble") }],
+      envelope: {
+        maxTokens: 1_000_000,
+        maxUsd: 100,
+        maxWallClockSec: 100_000,
+        maxEvaluatorInvocations: 100,
+      },
+    });
+    await stub.listen();
+    const events: RunEvent[] = [];
+    try {
+      await runEpisodeLoop({
+        brokerSocket: stub.socketPath,
+        runId: "run-calibrated-noise",
+        workerBundlePath: WORKER_BUNDLE_PATH,
+        emit: collectEmit(events),
+        maxEpisodes: 1,
+      });
+    } finally {
+      await stub.close();
+    }
+    expect(eventsOf(events, "gate.paired")).toEqual([
+      expect.objectContaining({
+        delta: expect.closeTo(0.02),
+        noiseFloor: 0.03,
+        noiseEnvelope: 0.045,
+        decision: "refuse-within-noise",
+        passed: false,
+      }),
+    ]);
+    expect(stub.promotionVerdictAsks).toEqual([]);
+    expect(stub.reportedIncumbents).toEqual([]);
   });
 
   it.each([

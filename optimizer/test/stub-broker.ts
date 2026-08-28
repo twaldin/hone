@@ -74,8 +74,8 @@ export interface StubScript {
   promotionVerdictsByHash?: Record<string, PromotionVerdict>;
   /** Save indices explicitly granted a positive first-pair verdict. Omission fails closed. */
   promotableSaveIndices?: number[];
-  /** Capsule-specific information-free score span exposed by getTask. */
-  promotionNoiseEnvelope?: number;
+  /** Capsule-specific pooled within-coordinate score SD exposed by getTask. */
+  promotionNoiseSd?: number;
   envelope: BudgetEnvelope;
   recursiveTask?: RecursiveTask;
 }
@@ -203,15 +203,23 @@ export class StubBroker {
           budget: this.budgetNow(),
           promotionGateCalibrations: [{
             gateVersion: PROMOTION_GATE_VERSION,
-            evidenceVersion: "optimizer-test-calibration-v1",
+            evidenceVersion: "optimizer-test-calibration-v2",
             calibratedAt: "2026-08-28T00:00:00.000Z",
             capsuleId: "cap_000000000000",
             capsuleDigest: `sha256:${"c".repeat(64)}`,
             evaluatorImage: "test-evaluator",
             assetGroupId: "train",
             measurementEpoch: null,
-            noiseEnvelope: this.script.promotionNoiseEnvelope ?? 0,
-            informationFreePairs: 1,
+            estimator: "pooled-within-coordinate-sd-v1",
+            estimatorMinRepeatsPerCoordinate: 3,
+            sampleDepths: [7, 7, 7],
+            informationFreeMeasurements: 21,
+            coordinateGroups: 3,
+            pooledDegreesOfFreedom: 18,
+            pooledWithinCoordinateSd: this.script.promotionNoiseSd ?? 0,
+            noiseFloor: 3 * (this.script.promotionNoiseSd ?? 0),
+            noiseEnvelope: 4.5 * (this.script.promotionNoiseSd ?? 0),
+            informationFreePairs: 3,
             informationFreePositive: 0,
           }],
           ...(this.script.recursiveTask === undefined ? {} : { recursiveTask: this.script.recursiveTask }),
@@ -332,8 +340,9 @@ export class StubBroker {
                 childScore: 1,
                 delta: 1,
                 gateVersion: PROMOTION_GATE_VERSION,
-                calibrationEvidenceVersion: "optimizer-test-calibration-v1",
-                noiseEnvelope: this.script.promotionNoiseEnvelope ?? 0,
+                calibrationEvidenceVersion: "optimizer-test-calibration-v2",
+                noiseFloor: 3 * (this.script.promotionNoiseSd ?? 0),
+                noiseEnvelope: 4.5 * (this.script.promotionNoiseSd ?? 0),
                 decision: "promote" as const,
               }
             : { status: "never-paired" as const });

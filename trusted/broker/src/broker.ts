@@ -842,6 +842,7 @@ type EmittableEvent =
       gateVersion: typeof PROMOTION_GATE_VERSION;
       calibrationEvidenceVersion: string | null;
       delta: number;
+      noiseFloor: number | null;
       noiseEnvelope: number | null;
       decision: z.infer<typeof PromotionGateDecision>;
     }
@@ -898,6 +899,17 @@ const LegacyGateFact = z.object({
   childScore: z.number(),
   passed: z.boolean(),
 }).strict();
+const PreviousCalibratedGateFact = z.object({
+  parent: z.string(),
+  parentScore: z.number(),
+  childScore: z.number(),
+  passed: z.boolean(),
+  gateVersion: z.literal("noise-envelope-v1"),
+  calibrationEvidenceVersion: z.string().nullable(),
+  delta: z.number(),
+  noiseEnvelope: z.number().nonnegative().nullable(),
+  decision: z.enum(["promote", "refuse-no-improvement", "refuse-within-noise", "refuse-uncalibrated"]),
+}).strict();
 const CalibratedGateFact = z.object({
   parent: z.string(),
   parentScore: z.number(),
@@ -906,10 +918,11 @@ const CalibratedGateFact = z.object({
   gateVersion: z.literal(PROMOTION_GATE_VERSION),
   calibrationEvidenceVersion: z.string().nullable(),
   delta: z.number(),
+  noiseFloor: z.number().nonnegative().nullable(),
   noiseEnvelope: z.number().nonnegative().nullable(),
   decision: PromotionGateDecision,
 }).strict();
-const GateFact = z.union([CalibratedGateFact, LegacyGateFact]);
+const GateFact = z.union([CalibratedGateFact, PreviousCalibratedGateFact, LegacyGateFact]);
 type GateFact = z.infer<typeof GateFact>;
 
 const StatePayload = z.discriminatedUnion("t", [
@@ -4474,6 +4487,7 @@ export class Broker {
           gateVersion: gate.gateVersion,
           calibrationEvidenceVersion: gate.calibrationEvidenceVersion,
           delta: gate.delta,
+          noiseFloor: gate.noiseFloor,
           noiseEnvelope: gate.noiseEnvelope,
           decision: gate.decision,
         });
@@ -4546,7 +4560,7 @@ export class Broker {
     const gateEntry = this.gates.get(hash);
     if (gateEntry === undefined) return { status: "refused", reason: "no-persisted-pair" };
     if (gateEntry.gate.parent !== lin.parent) return { status: "refused", reason: "lineage-mismatch" };
-    if (!("gateVersion" in gateEntry.gate)) {
+    if (!("gateVersion" in gateEntry.gate) || gateEntry.gate.gateVersion !== PROMOTION_GATE_VERSION) {
       return { status: "refused", reason: "legacy-unversioned-gate" };
     }
     const gate = gateEntry.gate;
@@ -4558,6 +4572,7 @@ export class Broker {
       delta: gate.delta,
       gateVersion: gate.gateVersion,
       calibrationEvidenceVersion: gate.calibrationEvidenceVersion,
+      noiseFloor: gate.noiseFloor,
       noiseEnvelope: gate.noiseEnvelope,
       decision: gate.decision,
     };

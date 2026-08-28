@@ -219,7 +219,8 @@ async function boot(
 
     runId?: string;
     measurementEpoch?: string;
-    promotionNoiseEnvelope?: number;
+    promotionNoiseSd?: number;
+    omitPromotionCalibration?: boolean;
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
     now?: () => number;
@@ -385,19 +386,31 @@ async function boot(
     ...(opts.mutationEnv === undefined ? {} : { mutationEnv: opts.mutationEnv }),
 
     ...(opts.measurementEpoch !== undefined ? { measurementEpoch: opts.measurementEpoch } : {}),
-    promotionNoiseCalibrations: [{
-      gateVersion: PROMOTION_GATE_VERSION,
-      evidenceVersion: "broker-test-calibration-v1",
-      calibratedAt: "2026-08-28T00:00:00.000Z",
-      capsuleId: (opts.manifest ?? makeManifest()).id,
-      capsuleDigest: opts.capsuleDigest ?? TEST_CAPSULE_DIGEST,
-      evaluatorImage: TEST_IMAGE,
-      assetGroupId: "train",
-      measurementEpoch: opts.measurementEpoch ?? null,
-      noiseEnvelope: opts.promotionNoiseEnvelope ?? 0,
-      informationFreePairs: 1,
-      informationFreePositive: 0,
-    }],
+    ...(opts.omitPromotionCalibration === true
+      ? {}
+      : {
+          promotionNoiseCalibrations: [{
+            gateVersion: PROMOTION_GATE_VERSION,
+            evidenceVersion: "broker-test-calibration-v2",
+            calibratedAt: "2026-08-28T00:00:00.000Z",
+            capsuleId: (opts.manifest ?? makeManifest()).id,
+            capsuleDigest: opts.capsuleDigest ?? TEST_CAPSULE_DIGEST,
+            evaluatorImage: TEST_IMAGE,
+            assetGroupId: "train",
+            measurementEpoch: opts.measurementEpoch ?? null,
+            estimator: "pooled-within-coordinate-sd-v1",
+            estimatorMinRepeatsPerCoordinate: 3,
+            sampleDepths: [7, 7, 7],
+            informationFreeMeasurements: 21,
+            coordinateGroups: 3,
+            pooledDegreesOfFreedom: 18,
+            pooledWithinCoordinateSd: opts.promotionNoiseSd ?? 0,
+            noiseFloor: 3 * (opts.promotionNoiseSd ?? 0),
+            noiseEnvelope: 4.5 * (opts.promotionNoiseSd ?? 0),
+            informationFreePairs: 3,
+            informationFreePositive: 0,
+          }],
+        }),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
@@ -1216,8 +1229,63 @@ describe("promotion authority (reportIncumbent is only a hint)", () => {
     await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
     await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
     expect(() => b.broker.reportIncumbent({ artifact: { hash: cand }, claimed: { score: 9000 } }, CLIENT)).toThrow(
-      /no positive trusted delta/,
+      /calibrated gate refused.*refuse-no-improvement/,
     );
+  });
+
+  it("enforces a non-zero noise scale through the broker and records confidence decisions", async () => {
+    const probe = async (childScore: number) => {
+      const b = await boot({ promotionNoiseSd: 0.01 });
+      b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(childScore));
+      const cand = await saveCandidate(b, candidateTar);
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+      await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
+      return { b, cand, gate: b.events.find((event) => event.type === "gate.paired") };
+    };
+    const noise = await probe(1.02);
+    expect(noise.gate).toMatchObject({
+      delta: expect.closeTo(0.02),
+      noiseFloor: 0.03,
+      noiseEnvelope: 0.045,
+      decision: "refuse-within-noise",
+      passed: false,
+    });
+    const confidence = await probe(1.04);
+    expect(confidence.gate).toMatchObject({
+      delta: expect.closeTo(0.04),
+      noiseFloor: 0.03,
+      noiseEnvelope: 0.045,
+      decision: "refuse-indeterminate",
+      passed: false,
+    });
+    const headroom = await probe(1.05);
+    expect(headroom.gate).toMatchObject({
+      delta: expect.closeTo(0.05),
+      noiseFloor: 0.03,
+      noiseEnvelope: 0.045,
+      decision: "promote",
+      passed: true,
+    });
+    expect(headroom.b.broker.reportIncumbent({ artifact: { hash: headroom.cand } }, CLIENT)).toEqual({});
+  });
+
+  it("fails closed with an auditable event when the evaluator identity is uncalibrated", async () => {
+    const b = await boot({ omitPromotionCalibration: true });
+    b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const cand = await saveCandidate(b, candidateTar);
+    await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
+    expect(b.events.find((event) => event.type === "gate.paired")).toMatchObject({
+      delta: 1,
+      noiseFloor: null,
+      noiseEnvelope: null,
+      decision: "refuse-uncalibrated",
+      passed: false,
+    });
+    expect(b.broker.getPromotionVerdict({ artifact: { hash: cand } }, CLIENT)).toMatchObject({
+      status: "not-promotable",
+      decision: "refuse-uncalibrated",
+    });
   });
 
   it("rejects every later candidate before evaluator spawn once the M0 promotion slot is consumed", async () => {
@@ -1287,7 +1355,8 @@ describe("durable promotion verdict query", () => {
       childScore: 1,
       delta: -1,
       gateVersion: PROMOTION_GATE_VERSION,
-      calibrationEvidenceVersion: "broker-test-calibration-v1",
+      calibrationEvidenceVersion: "broker-test-calibration-v2",
+      noiseFloor: 0,
       noiseEnvelope: 0,
       decision: "refuse-no-improvement",
     };
@@ -1308,12 +1377,48 @@ describe("durable promotion verdict query", () => {
       childScore: 2,
       delta: 1,
       gateVersion: PROMOTION_GATE_VERSION,
-      calibrationEvidenceVersion: "broker-test-calibration-v1",
+      calibrationEvidenceVersion: "broker-test-calibration-v2",
+      noiseFloor: 0,
       noiseEnvelope: 0,
       decision: "promote",
     });
     expect(positive.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT)).toEqual({});
   });
+  it("replays a pre-versioned gate as readable but never silently grants new authority", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "legacy-gate-replay"),
+      casDir: path.join(tmpBase, "cas", "legacy-gate-replay"),
+      runId: "run-legacy-gate-replay",
+    };
+    const original = await boot(shared);
+    original.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const candidate = await saveCandidate(original, candidateTar);
+    await original.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await original.broker.evaluate({ artifact: { hash: candidate }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await original.broker.close();
+    const statePath = path.join(shared.runDir, "broker-state.ndjson");
+    const legacyLines = (await readFile(statePath, "utf8")).trimEnd().split("\n").map((text) => {
+      const line = JSON.parse(text) as {
+        gate?: { parent: string; parentScore: number; childScore: number; passed: boolean };
+      };
+      if (line.gate !== undefined) {
+        line.gate = {
+          parent: line.gate.parent,
+          parentScore: line.gate.parentScore,
+          childScore: line.gate.childScore,
+          passed: line.gate.passed,
+        };
+      }
+      return JSON.stringify(line);
+    });
+    await writeFile(statePath, `${legacyLines.join("\n")}\n`);
+    const replayed = await boot(shared);
+    expect(replayed.broker.getPromotionVerdict({ artifact: { hash: candidate } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "legacy-unversioned-gate",
+    });
+  });
+
 
   it("refuses a trusted candidate measurement that has no public evaluation admission", async () => {
     const b = await boot();
@@ -1408,7 +1513,8 @@ describe("durable promotion verdict query", () => {
       childScore: 2,
       delta: 1,
       gateVersion: PROMOTION_GATE_VERSION,
-      calibrationEvidenceVersion: "broker-test-calibration-v1",
+      calibrationEvidenceVersion: "broker-test-calibration-v2",
+      noiseFloor: 0,
       noiseEnvelope: 0,
       decision: "promote",
     });
@@ -3465,6 +3571,7 @@ describe("trusted probe evidence (episode-tagged evals + broker-authored gate.pa
       parentScore: 1,
       childScore: 2,
       delta: 1,
+      noiseFloor: 0,
       noiseEnvelope: 0,
       decision: "promote",
       passed: true,
@@ -3487,6 +3594,7 @@ describe("trusted probe evidence (episode-tagged evals + broker-authored gate.pa
       parentScore: 2,
       childScore: 2,
       delta: 0,
+      noiseFloor: 0,
       noiseEnvelope: 0,
       decision: "refuse-no-improvement",
       passed: false,
