@@ -46,3 +46,10 @@ export { packDirAsArtifact, unpackArtifact, diffProtectedPaths, findProtectedPat
 export { runCommand, type RunCommand, type CmdOptions, type CmdResult } from "./command.js";
 export { globToRegExp, matchesAnyGlob } from "./glob.js";
 export { deferred, type Deferred } from "./deferred.js";
+export {
+  CAMPAIGN_12_CALIBRATION_EVIDENCE_VERSION,
+  CAMPAIGN_12_CALIBRATED_AT,
+  CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V1,
+  campaign12PromotionNoiseCalibration,
+  type PromotionCalibrationIdentity,
+} from "./promotion-noise-calibration.js";

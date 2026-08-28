@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ArtifactRef, BudgetState, QueryCorpusParams, QueryCorpusResult } from "./broker.js";
 import { CampaignPauseReason } from "./proxy.js";
 import { EvaluatorIsolationRecord } from "./evaluator.js";
+import { PROMOTION_GATE_VERSION, PromotionGateDecision } from "./promotion.js";
 
 /**
  * Contract 4 — Event log. Append-only NDJSON, one file per run.
@@ -140,7 +141,20 @@ export const RunEvent = z.discriminatedUnion("type", [
     seed: z.number().int(),
     budget: BudgetState,
   }),
-  z.object({ ...base, type: z.literal("gate.paired"), episode: z.number().int().nonnegative(), parentScore: z.number(), childScore: z.number(), passed: z.boolean() }),
+  z.object({
+    ...base,
+    type: z.literal("gate.paired"),
+    episode: z.number().int().nonnegative(),
+    parentScore: z.number(),
+    childScore: z.number(),
+    passed: z.boolean(),
+    /** Absent only on historical pre-noise-envelope events. */
+    gateVersion: z.literal(PROMOTION_GATE_VERSION).optional(),
+    calibrationEvidenceVersion: z.string().nullable().optional(),
+    delta: z.number().optional(),
+    noiseEnvelope: z.number().nonnegative().nullable().optional(),
+    decision: PromotionGateDecision.optional(),
+  }),
   z.object({ ...base, type: z.literal("incumbent.new"), artifact: ArtifactRef, aggregate: z.number(), deltaVsBaseline: z.number(), episode: z.number().int().nonnegative() }),
   z.object({ ...base, type: z.literal("budget.snapshot"), budget: BudgetState }),
   z.object({ ...base, type: z.literal("budget.exhausted"), dimension: z.string() }),

@@ -654,11 +654,15 @@ describe("runEpisodeLoop paired comparator evidence", () => {
       },
       promotionVerdictsByHash: {
         [repeated]: {
-          status: "non-positive",
+          status: "not-promotable",
           parent: { hash: BASELINE },
           parentScore: 0.5,
           childScore: 0.49,
           delta: -0.01,
+          gateVersion: "noise-envelope-v1",
+          calibrationEvidenceVersion: "optimizer-test-calibration-v1",
+          noiseEnvelope: 0,
+          decision: "refuse-no-improvement",
         },
       },
       execPlan: [

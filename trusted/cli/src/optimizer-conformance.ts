@@ -92,6 +92,7 @@ const server = net.createServer((socket) => {
           objective: "candidate optimizer conformance handshake",
           baselineArtifact: { hash: baseline },
           visibleAssetGroups: ["train"],
+          promotionGateCalibrations: [],
           budget,
         } }) + "\n");
       } else if (method === "getBudget") {

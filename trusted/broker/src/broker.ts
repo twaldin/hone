@@ -18,6 +18,7 @@ import path from "node:path";
 import { z } from "zod";
 import {
   BudgetEnvelope,
+  assessPromotion,
   BudgetState,
   canonicalJson,
   CapsuleManifest,
@@ -48,6 +49,9 @@ import {
   SessionUsageAnomalyRecord,
   ReportSessionNoYieldBoundParams,
   PromotionVerdict,
+  PromotionGateDecision,
+  PromotionNoiseCalibration,
+  PROMOTION_GATE_VERSION,
   RecursiveTask,
   ResourceUsage,
   SandboxRef,
@@ -65,6 +69,7 @@ import { runCommand, type CmdResult, type RunCommand } from "./command.js";
 import { deferred } from "./deferred.js";
 import { acquireEvaluatorIsolation, type EvaluatorIsolationLease } from "./evaluator-isolation.js";
 import { type UidClaimRecovery } from "./host-evaluator-gate.js";
+import { campaign12PromotionNoiseCalibration } from "./promotion-noise-calibration.js";
 
 import { BrokerError } from "./errors.js";
 import { RecursiveResourceLedger } from "./recursive.js";
@@ -217,6 +222,11 @@ export interface BrokerConfig {
    * never a sandbox RPC or environment input.
    */
   measurementEpoch?: string | undefined;
+  /**
+   * Trusted, identity-bound promotion calibrations. Omit to use the built-in
+   * dated campaign-12 artifact; unmatched identities remain uncalibrated.
+   */
+  promotionNoiseCalibrations?: readonly z.infer<typeof PromotionNoiseCalibration>[] | undefined;
   /** Optional host-only evaluator strategy used by the trusted M1 outer broker. */
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   /**
@@ -823,7 +833,18 @@ type EmittableEvent =
       normalizedUsageTurns: number;
     }
   | { type: "eval.completed"; episode?: number; artifact: ArtifactRef; assetGroupId: string; seed: number; aggregate: number | null; cached: boolean }
-  | { type: "gate.paired"; episode: number; parentScore: number; childScore: number; passed: boolean }
+  | {
+      type: "gate.paired";
+      episode: number;
+      parentScore: number;
+      childScore: number;
+      passed: boolean;
+      gateVersion: typeof PROMOTION_GATE_VERSION;
+      calibrationEvidenceVersion: string | null;
+      delta: number;
+      noiseEnvelope: number | null;
+      decision: z.infer<typeof PromotionGateDecision>;
+    }
   | { type: "incumbent.new"; artifact: ArtifactRef; aggregate: number; deltaVsBaseline: number; episode: number }
   | { type: "corpus.query"; request: QueryCorpusP }
   | { type: "corpus.response"; response: QueryCorpusR }
@@ -871,12 +892,24 @@ const JournalEvents = z.array(RunEvent).optional();
  * captured at the instant the candidate's measurement was accepted. Journaled
  * inside the eval fact; replay restores it verbatim (never re-derives).
  */
-const GateFact = z.object({
+const LegacyGateFact = z.object({
   parent: z.string(),
   parentScore: z.number(),
   childScore: z.number(),
   passed: z.boolean(),
-});
+}).strict();
+const CalibratedGateFact = z.object({
+  parent: z.string(),
+  parentScore: z.number(),
+  childScore: z.number(),
+  passed: z.boolean(),
+  gateVersion: z.literal(PROMOTION_GATE_VERSION),
+  calibrationEvidenceVersion: z.string().nullable(),
+  delta: z.number(),
+  noiseEnvelope: z.number().nonnegative().nullable(),
+  decision: PromotionGateDecision,
+}).strict();
+const GateFact = z.union([CalibratedGateFact, LegacyGateFact]);
 type GateFact = z.infer<typeof GateFact>;
 
 const StatePayload = z.discriminatedUnion("t", [
@@ -1224,6 +1257,7 @@ export class Broker {
   private readonly leaseArgs: readonly string[];
   /** Optional trusted M1 replicate identity, independent of the broker's boot/episode gate epoch. */
   private readonly trustedMeasurementEpoch: string | undefined;
+  private readonly promotionNoiseCalibrations: ReadonlyMap<string, z.infer<typeof PromotionNoiseCalibration>>;
   /** M0 remains `eval`; M1 receives a disjoint hash-derived cache namespace. */
   private readonly evaluationCacheNamespace: string;
   private readonly evaluationStrategy: TrustedEvaluationStrategy | undefined;
@@ -1456,6 +1490,35 @@ export class Broker {
       throw new BrokerError("INTERNAL", "measurementEpoch must be 1-256 characters without control characters");
     }
     this.trustedMeasurementEpoch = config.measurementEpoch;
+    const configuredCalibrations = config.promotionNoiseCalibrations
+      ?? this.manifest.assetGroups.flatMap((group) => {
+        const calibration = campaign12PromotionNoiseCalibration({
+          capsuleId: this.manifest.id,
+          capsuleDigest: config.capsuleDigest,
+          evaluatorImage: config.image,
+          assetGroupId: group.id,
+          measurementEpoch: config.measurementEpoch ?? null,
+        });
+        return calibration === null ? [] : [calibration];
+      });
+    const calibrations = new Map<string, z.infer<typeof PromotionNoiseCalibration>>();
+    for (const input of configuredCalibrations) {
+      const calibration = PromotionNoiseCalibration.parse(input);
+      if (
+        calibration.capsuleId !== this.manifest.id
+        || calibration.capsuleDigest !== config.capsuleDigest
+        || calibration.evaluatorImage !== config.image
+        || calibration.measurementEpoch !== (config.measurementEpoch ?? null)
+        || !this.manifest.assetGroups.some((group) => group.id === calibration.assetGroupId)
+      ) {
+        throw new BrokerError("INTERNAL", "promotion noise calibration does not match capsule, evaluator, asset group, or measurement epoch");
+      }
+      if (calibrations.has(calibration.assetGroupId)) {
+        throw new BrokerError("INTERNAL", `duplicate promotion noise calibration for ${calibration.assetGroupId}`);
+      }
+      calibrations.set(calibration.assetGroupId, calibration);
+    }
+    this.promotionNoiseCalibrations = calibrations;
     this.evaluationCacheNamespace =
       config.measurementEpoch === undefined
         ? "eval"
@@ -3111,6 +3174,7 @@ export class Broker {
         .filter((group) => group.visibility !== "holdout" || this.terminalHoldoutAssetGroupIds.has(group.id))
         .map((group) => group.id),
       budget: this.budgetStateNow(),
+      promotionGateCalibrations: [...this.promotionNoiseCalibrations.values()],
       ...(this.recursive?.evaluationTask === undefined
         ? {}
         : { recursiveTask: this.recursive.evaluationTask }),
@@ -4374,9 +4438,18 @@ export class Broker {
       lin === undefined || hadTrusted || !this.promotionSlots.has(record.artifactHash)
         ? undefined
         : this.trusted.get(`${epoch}|${lin.parent}`)?.get(pairKey);
-    const gate: GateFact | undefined =
+    const gate: z.infer<typeof CalibratedGateFact> | undefined =
       lin !== undefined && parentScore !== undefined
-        ? { parent: lin.parent, parentScore, childScore: aggregate, passed: aggregate > parentScore }
+        ? {
+            parent: lin.parent,
+            parentScore,
+            childScore: aggregate,
+            ...assessPromotion(
+              parentScore,
+              aggregate,
+              this.promotionNoiseCalibrations.get(record.assetGroupId) ?? null,
+            ),
+          }
         : undefined;
 
     const tagged = this.anyEpisodeStarted && !hadTrusted ? lin : undefined;
@@ -4398,6 +4471,11 @@ export class Broker {
           parentScore: gate.parentScore,
           childScore: gate.childScore,
           passed: gate.passed,
+          gateVersion: gate.gateVersion,
+          calibrationEvidenceVersion: gate.calibrationEvidenceVersion,
+          delta: gate.delta,
+          noiseEnvelope: gate.noiseEnvelope,
+          decision: gate.decision,
         });
       }
     }
@@ -4443,9 +4521,10 @@ export class Broker {
   /**
    * Promotion authority (contract 2): the client's report is a HINT. An
    * artifact becomes incumbent only when this broker's own eligible records
-   * prove it — the ONE persisted SAME-EPOCH, PARENT-FIRST gate pair with a
-   * positive delta, plus monotone improvement over the current incumbent on
-   * same-epoch paired records. Claimed metrics are never read.
+   * prove it — the ONE persisted SAME-EPOCH, PARENT-FIRST gate pair whose
+   * delta exceeds its identity-bound per-capsule noise envelope, plus the
+   * same calibrated improvement over the current incumbent. Claimed metrics
+   * are never read.
    *
    * Anti-score-shopping: the gate pair exists only when the lineage parent
    * was measured BEFORE the candidate within one measurement epoch AND the
@@ -4467,13 +4546,20 @@ export class Broker {
     const gateEntry = this.gates.get(hash);
     if (gateEntry === undefined) return { status: "refused", reason: "no-persisted-pair" };
     if (gateEntry.gate.parent !== lin.parent) return { status: "refused", reason: "lineage-mismatch" };
-    const delta = gateEntry.gate.childScore - gateEntry.gate.parentScore;
+    if (!("gateVersion" in gateEntry.gate)) {
+      return { status: "refused", reason: "legacy-unversioned-gate" };
+    }
+    const gate = gateEntry.gate;
     return {
-      status: delta > 0 ? "positive" : "non-positive",
-      parent: { hash: gateEntry.gate.parent },
-      parentScore: gateEntry.gate.parentScore,
-      childScore: gateEntry.gate.childScore,
-      delta,
+      status: gate.passed ? "promotable" : "not-promotable",
+      parent: { hash: gate.parent },
+      parentScore: gate.parentScore,
+      childScore: gate.childScore,
+      delta: gate.delta,
+      gateVersion: gate.gateVersion,
+      calibrationEvidenceVersion: gate.calibrationEvidenceVersion,
+      noiseEnvelope: gate.noiseEnvelope,
+      decision: gate.decision,
     };
   }
 
@@ -4513,8 +4599,11 @@ export class Broker {
     if (verdict.status === "never-paired") {
       throw new BrokerError("INTERNAL", `reportIncumbent: no trusted evaluation for artifact ${hash}`);
     }
-    if (verdict.status === "non-positive") {
-      throw new BrokerError("INTERNAL", `reportIncumbent: no positive trusted delta vs parent (paired delta ${verdict.delta})`);
+    if (verdict.status === "not-promotable") {
+      throw new BrokerError(
+        "INTERNAL",
+        `reportIncumbent: calibrated gate refused (${verdict.decision}; paired delta ${verdict.delta}; noise envelope ${String(verdict.noiseEnvelope)})`,
+      );
     }
     const lin = this.lineage.get(hash);
     const gateEntry = this.gates.get(hash);
@@ -4538,8 +4627,12 @@ export class Broker {
         );
       }
       const deltaVsInc = meanOver(cand, pairedInc) - meanOver(incScores, pairedInc);
-      if (!(deltaVsInc > 0)) {
-        throw new BrokerError("INTERNAL", `reportIncumbent: not an improvement over current incumbent (paired delta ${deltaVsInc})`);
+      if (verdict.noiseEnvelope === null || !(deltaVsInc > verdict.noiseEnvelope)) {
+        throw new BrokerError(
+          "INTERNAL",
+          `reportIncumbent: improvement over current incumbent did not exceed noise envelope ` +
+            `(paired delta ${deltaVsInc}; noise envelope ${String(verdict.noiseEnvelope)})`,
+        );
       }
     }
 

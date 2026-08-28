@@ -1,5 +1,10 @@
 import { z } from "zod";
 import { BudgetEnvelope } from "./capsule.js";
+import {
+  PROMOTION_GATE_VERSION,
+  PromotionGateDecision,
+  PromotionNoiseCalibration,
+} from "./promotion.js";
 
 /**
  * Contract 2 — Broker wire protocol (JSON-RPC 2.0 over unix socket).
@@ -66,6 +71,8 @@ export const GetTaskResult = z.object({
   /** Asset group ids visible to the optimizer (never contents of protected/holdout). */
   visibleAssetGroups: z.array(z.string()),
   budget: BudgetState,
+  /** Exact capsule/evaluator/group/measurement-epoch calibrations trusted for this run. */
+  promotionGateCalibrations: z.array(PromotionNoiseCalibration),
   /** Present only when trusted orchestration configured a development-panel recursive evaluator. */
   recursiveTask: RecursiveTask.optional(),
 });
@@ -154,17 +161,22 @@ export const PromotionVerdictRefusalReason = z.enum([
   "no-public-admission",
   "no-persisted-pair",
   "lineage-mismatch",
+  "legacy-unversioned-gate",
 ]);
 const PromotionPair = z.object({
   parent: ArtifactRef,
   parentScore: z.number(),
   childScore: z.number(),
   delta: z.number(),
+  gateVersion: z.literal(PROMOTION_GATE_VERSION),
+  calibrationEvidenceVersion: z.string().nullable(),
+  noiseEnvelope: z.number().nonnegative().nullable(),
+  decision: PromotionGateDecision,
 });
 export const PromotionVerdict = z.discriminatedUnion("status", [
   z.object({ status: z.literal("never-paired") }).strict(),
-  PromotionPair.extend({ status: z.literal("positive") }).strict(),
-  PromotionPair.extend({ status: z.literal("non-positive") }).strict(),
+  PromotionPair.extend({ status: z.literal("promotable") }).strict(),
+  PromotionPair.extend({ status: z.literal("not-promotable") }).strict(),
   z.object({
     status: z.literal("refused"),
     reason: PromotionVerdictRefusalReason,

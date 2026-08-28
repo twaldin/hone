@@ -11,6 +11,7 @@ import {
   RESERVED_EVALUATOR_UID_MAX,
   RESERVED_EVALUATOR_UID_MIN,
   SandboxRef,
+  PROMOTION_GATE_VERSION,
   type CapsuleManifest,
   type RunEvent,
 } from "@hone/schema";
@@ -218,6 +219,7 @@ async function boot(
 
     runId?: string;
     measurementEpoch?: string;
+    promotionNoiseEnvelope?: number;
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
     now?: () => number;
@@ -383,6 +385,19 @@ async function boot(
     ...(opts.mutationEnv === undefined ? {} : { mutationEnv: opts.mutationEnv }),
 
     ...(opts.measurementEpoch !== undefined ? { measurementEpoch: opts.measurementEpoch } : {}),
+    promotionNoiseCalibrations: [{
+      gateVersion: PROMOTION_GATE_VERSION,
+      evidenceVersion: "broker-test-calibration-v1",
+      calibratedAt: "2026-08-28T00:00:00.000Z",
+      capsuleId: (opts.manifest ?? makeManifest()).id,
+      capsuleDigest: opts.capsuleDigest ?? TEST_CAPSULE_DIGEST,
+      evaluatorImage: TEST_IMAGE,
+      assetGroupId: "train",
+      measurementEpoch: opts.measurementEpoch ?? null,
+      noiseEnvelope: opts.promotionNoiseEnvelope ?? 0,
+      informationFreePairs: 1,
+      informationFreePositive: 0,
+    }],
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
@@ -1235,7 +1250,7 @@ describe("promotion authority (reportIncumbent is only a hint)", () => {
 });
 
 describe("durable promotion verdict query", () => {
-  it("distinguishes never-paired, positive, non-positive, and other trusted refusals", async () => {
+  it("distinguishes never-paired, promotable, calibrated refusal, and other trusted refusals", async () => {
     const neverPaired = await boot();
     const savedOnly = await saveCandidate(neverPaired, candidateTar);
     expect(neverPaired.broker.getPromotionVerdict({ artifact: { hash: savedOnly } }, CLIENT)).toEqual({
@@ -1266,11 +1281,15 @@ describe("durable promotion verdict query", () => {
     await negative.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
     await negative.broker.evaluate({ artifact: { hash: losing }, assetGroupId: "train", seed: 0 }, CLIENT);
     const losingVerdict = {
-      status: "non-positive",
+      status: "not-promotable",
       parent: { hash: baselineHash },
       parentScore: 2,
       childScore: 1,
       delta: -1,
+      gateVersion: PROMOTION_GATE_VERSION,
+      calibrationEvidenceVersion: "broker-test-calibration-v1",
+      noiseEnvelope: 0,
+      decision: "refuse-no-improvement",
     };
     expect(negative.broker.getPromotionVerdict({ artifact: { hash: losing } }, CLIENT)).toEqual(losingVerdict);
     await negative.broker.close();
@@ -1283,11 +1302,15 @@ describe("durable promotion verdict query", () => {
     await positive.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
     await positive.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "train", seed: 0 }, CLIENT);
     expect(positive.broker.getPromotionVerdict({ artifact: { hash: winner } }, CLIENT)).toEqual({
-      status: "positive",
+      status: "promotable",
       parent: { hash: baselineHash },
       parentScore: 1,
       childScore: 2,
       delta: 1,
+      gateVersion: PROMOTION_GATE_VERSION,
+      calibrationEvidenceVersion: "broker-test-calibration-v1",
+      noiseEnvelope: 0,
+      decision: "promote",
     });
     expect(positive.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT)).toEqual({});
   });
@@ -1379,11 +1402,15 @@ describe("durable promotion verdict query", () => {
       CLIENT,
     );
     expect(publicOnly.broker.getPromotionVerdict({ artifact: { hash: promotable } }, CLIENT)).toEqual({
-      status: "positive",
+      status: "promotable",
       parent: { hash: baselineHash },
       parentScore: 1,
       childScore: 2,
       delta: 1,
+      gateVersion: PROMOTION_GATE_VERSION,
+      calibrationEvidenceVersion: "broker-test-calibration-v1",
+      noiseEnvelope: 0,
+      decision: "promote",
     });
     expect(publicOnly.broker.reportIncumbent({ artifact: { hash: promotable } }, CLIENT)).toEqual({});
   });
@@ -3433,13 +3460,21 @@ describe("trusted probe evidence (episode-tagged evals + broker-authored gate.pa
     const gates = b.events.filter((e) => e.type === "gate.paired");
     expect(gates).toHaveLength(1);
     // Broker-authored scores from the trusted table — never optimizer claims.
-    expect(gates[0]).toMatchObject({ episode: 0, parentScore: 1, childScore: 2, passed: true });
+    expect(gates[0]).toMatchObject({
+      episode: 0,
+      parentScore: 1,
+      childScore: 2,
+      delta: 1,
+      noiseEnvelope: 0,
+      decision: "promote",
+      passed: true,
+    });
     const types = b.events.map((e) => e.type);
     expect(types.indexOf("gate.paired")).toBe(types.lastIndexOf("eval.completed") + 1);
     expect(types.indexOf("incumbent.new")).toBeGreaterThan(types.indexOf("gate.paired"));
   });
 
-  it("greedy gate: a child that does not strictly beat its parent pairs with passed:false", async () => {
+  it("calibrated gate records why a child did not beat its parent", async () => {
     const b = await boot();
     b.ctl.evalOutputs.set(baselineHash, score(2)).set(candidateHash, score(2));
     const cand = await saveCandidate(b, candidateTar);
@@ -3447,7 +3482,15 @@ describe("trusted probe evidence (episode-tagged evals + broker-authored gate.pa
     await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
     const gates = b.events.filter((e) => e.type === "gate.paired");
     expect(gates).toHaveLength(1);
-    expect(gates[0]).toMatchObject({ episode: 0, parentScore: 2, childScore: 2, passed: false });
+    expect(gates[0]).toMatchObject({
+      episode: 0,
+      parentScore: 2,
+      childScore: 2,
+      delta: 0,
+      noiseEnvelope: 0,
+      decision: "refuse-no-improvement",
+      passed: false,
+    });
   });
 
   it("no same-coordinate parent score → tagged eval but NO gate is authored", async () => {

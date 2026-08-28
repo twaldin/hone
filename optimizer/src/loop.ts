@@ -2,7 +2,14 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MAX_SANDBOX_TTL_SEC, type ArtifactRef, type BudgetState, type EvaluationRecord, type RunEvent } from "@hone/schema";
+import {
+  assessPromotion,
+  MAX_SANDBOX_TTL_SEC,
+  type ArtifactRef,
+  type BudgetState,
+  type EvaluationRecord,
+  type RunEvent,
+} from "@hone/schema";
 import {
   buildEpisodeContext,
   EVALUATOR_RECORD_PATH,
@@ -724,7 +731,10 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         await completeClaimedEpisode();
         continue;
       }
-      const passed = childAggregate > parentAggregate;
+      const calibration =
+        task.promotionGateCalibrations.find((entry) => entry.assetGroupId === assetGroupId) ?? null;
+      const gate = assessPromotion(parentAggregate, childAggregate, calibration);
+      const passed = gate.passed;
       emit({
         ...base,
         at: now(),
@@ -732,13 +742,13 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         episode,
         parentScore: parentAggregate,
         childScore: childAggregate,
-        passed,
+        ...gate,
       });
       lineage.push({ episode, approach: attempt.result.approach, delta: childAggregate - parentAggregate });
       const promotionVerdict = passed
         ? await broker.getPromotionVerdict({ artifact: candidate })
         : null;
-      if (promotionVerdict !== null && promotionVerdict.status !== "positive") {
+      if (promotionVerdict !== null && promotionVerdict.status !== "promotable") {
         console.error(JSON.stringify({
           type: "promotion.skipped",
           episode,
@@ -747,7 +757,7 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         }));
       }
 
-      if (passed && promotionVerdict?.status === "positive") {
+      if (passed && promotionVerdict?.status === "promotable") {
         // Same-coordinate comparator evidence (this assetGroupId + this
         // episode's seed). Exact replay hits carry no second invocation charge.
         let incumbentPairAggregate: number | null = null;
@@ -760,7 +770,10 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
         }
         const improvesIncumbent =
           incumbent === null
-          || (incumbentPairAggregate !== null && childAggregate > incumbentPairAggregate);
+          || (
+            incumbentPairAggregate !== null
+            && assessPromotion(incumbentPairAggregate, childAggregate, calibration).passed
+          );
         if (incumbent !== null && incumbentPairAggregate === null) {
           emit({
             ...base,

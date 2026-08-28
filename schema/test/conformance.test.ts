@@ -319,6 +319,7 @@ describe("contract 2: broker protocol", () => {
       objective: "improve the optimizer",
       baselineArtifact: { hash: `sha256:${"a".repeat(64)}` },
       visibleAssetGroups: ["meta-train"],
+      promotionGateCalibrations: [],
       budget: {
         envelope: ceiling,
         spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 },

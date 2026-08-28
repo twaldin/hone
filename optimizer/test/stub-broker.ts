@@ -9,6 +9,7 @@ import {
   BrokerMethods,
   EvaluationRecord,
   canonicalJson,
+  PROMOTION_GATE_VERSION,
   type BudgetEnvelope,
   type BudgetState,
   type RecursiveEvaluationPlan,
@@ -73,6 +74,8 @@ export interface StubScript {
   promotionVerdictsByHash?: Record<string, PromotionVerdict>;
   /** Save indices explicitly granted a positive first-pair verdict. Omission fails closed. */
   promotableSaveIndices?: number[];
+  /** Capsule-specific information-free score span exposed by getTask. */
+  promotionNoiseEnvelope?: number;
   envelope: BudgetEnvelope;
   recursiveTask?: RecursiveTask;
 }
@@ -198,6 +201,19 @@ export class StubBroker {
           baselineArtifact: { hash: this.script.baselineHash },
           visibleAssetGroups: ["train", "validation"],
           budget: this.budgetNow(),
+          promotionGateCalibrations: [{
+            gateVersion: PROMOTION_GATE_VERSION,
+            evidenceVersion: "optimizer-test-calibration-v1",
+            calibratedAt: "2026-08-28T00:00:00.000Z",
+            capsuleId: "cap_000000000000",
+            capsuleDigest: `sha256:${"c".repeat(64)}`,
+            evaluatorImage: "test-evaluator",
+            assetGroupId: "train",
+            measurementEpoch: null,
+            noiseEnvelope: this.script.promotionNoiseEnvelope ?? 0,
+            informationFreePairs: 1,
+            informationFreePositive: 0,
+          }],
           ...(this.script.recursiveTask === undefined ? {} : { recursiveTask: this.script.recursiveTask }),
         });
       }
@@ -310,11 +326,15 @@ export class StubBroker {
         const verdict = this.script.promotionVerdictsByHash?.[params.artifact.hash]
           ?? (explicitlyPromotable
             ? {
-                status: "positive" as const,
+                status: "promotable" as const,
                 parent: { hash: this.script.baselineHash },
                 parentScore: 0,
                 childScore: 1,
                 delta: 1,
+                gateVersion: PROMOTION_GATE_VERSION,
+                calibrationEvidenceVersion: "optimizer-test-calibration-v1",
+                noiseEnvelope: this.script.promotionNoiseEnvelope ?? 0,
+                decision: "promote" as const,
               }
             : { status: "never-paired" as const });
         return BrokerMethods.getPromotionVerdict.result.parse(verdict);
