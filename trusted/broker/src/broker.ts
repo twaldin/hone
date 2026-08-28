@@ -1844,6 +1844,13 @@ export class Broker {
         this.promotionHoldoutSplit,
         terminalHoldoutAssetGroupIds,
       );
+      if (terminalHoldoutAssetGroupIds.size > 0) {
+        throw new BrokerError(
+          "INTERNAL",
+          "promotion holdout and terminal holdout capabilities are mutually exclusive on one capsule: "
+          + "semantic re-encoding makes shared-capability leak detection undecidable",
+        );
+      }
     }
     this.terminalHoldoutAssetGroupIds = terminalHoldoutAssetGroupIds;
     this.maxActiveSandboxes = config.maxActiveSandboxes ?? 8;
@@ -5969,7 +5976,15 @@ function assertPromotionHoldoutTerminalIsolation(
     return undefined;
   };
   const refuseIfSealed = (candidatePath: string, groupId: string): void => {
-    const link = lstatSync(candidatePath);
+    let link;
+    try {
+      link = lstatSync(candidatePath);
+    } catch {
+      throw new BrokerError(
+        "INTERNAL",
+        `terminal holdout group ${groupId} path is missing on host: ${path.relative(capsuleRootDir, candidatePath)}`,
+      );
+    }
     if (link.isSymbolicLink()) {
       throw new BrokerError(
         "INTERNAL",

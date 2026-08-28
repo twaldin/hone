@@ -133,8 +133,13 @@ export const PromotionHoldoutRecord = z.object({
     claimMinimumHoldoutUnits: z.number().int().positive(), designEligibility: HoldoutDesignEligibility,
     noiseClass: HoldoutNoiseClass,
   }).strict(),
-  generalizationGap: z.number().finite(), nullControl: HoldoutNullControlRecord,
-  status: HoldoutGeneralizationStatus, claimable: z.boolean(), recordedAt: z.string().datetime(),
+  generalizationGap: z.number().finite(),
+  nullControl: HoldoutNullControlRecord,
+  status: HoldoutGeneralizationStatus,
+  claimable: z.boolean(),
+  evidenceScope: z.enum(["retrospective", "forward"]),
+  forwardUseConditions: z.array(z.string().min(1)),
+  recordedAt: z.string().datetime(),
 }).strict().superRefine((record, ctx) => {
   const close = (left: number, right: number): boolean => Math.abs(left - right) <= Number.EPSILON * Math.max(1, Math.abs(left), Math.abs(right)) * 8;
   if (!close(record.training.delta, record.training.childScore - record.training.parentScore)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "training delta does not match its score pair" });

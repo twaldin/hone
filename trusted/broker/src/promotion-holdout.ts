@@ -248,6 +248,8 @@ export function buildPromotionHoldoutRecord(input: {
     nullControl: input.nullControl,
     status,
     claimable: input.noiseDecision === "promote" && status === "supported",
+    evidenceScope: "forward",
+    forwardUseConditions: [],
     recordedAt: input.recordedAt,
   });
 }

@@ -1506,6 +1506,25 @@ describe("durable promotion verdict query", () => {
       terminalHoldoutAssetGroupIds: ["holdout-copy-mirror"],
     })).rejects.toThrow(/reaches promotion holdout unit.*optimizer-invisible/);
 
+    const disjointRoot = path.join(capsuleRootDir, "terminal-disjoint");
+    await mkdir(disjointRoot, { recursive: true });
+    await writeFile(path.join(disjointRoot, "data.txt"), "unrelated terminal bytes");
+    const disjointManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "terminal-disjoint", visibility: "holdout", paths: ["terminal-disjoint"] },
+      ],
+      contentHashes: {
+        ...contentHashes,
+        "terminal-disjoint/data.txt": sha256("unrelated terminal bytes"),
+      },
+    });
+    await expect(boot({
+      manifest: disjointManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["terminal-disjoint"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
     const b = await boot({
       manifest: makeManifest({
         contentHashes: { ...baseManifest.contentHashes, ...splitHashes },
