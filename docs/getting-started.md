@@ -30,6 +30,10 @@ node trusted/cli/bin/hone.js --help
 
 Packages expose TypeScript source; there is no root `build` script. Tests run workspaces sequentially. Some CLI integration tests exercise Docker when it is available, and some deliberately modify temporary workspace state. Use an isolated checkout for validation.
 
+Capsule tests also run files sequentially: their seeded-A* ordering check measures real container wall-clock performance, so other evaluator tests must not compete with it. Run `pnpm test` on a quiet host, or use a dedicated validation host. Do not run another test suite, build, or CPU-heavy workload alongside it; file serialization cannot isolate unrelated host or Docker activity.
+
+For the capsule suite alone, use `pnpm --filter @hone/capsules test` under the same conditions. The ordering check still requires a baseline aggregate spread strictly below 15% across three baseline passes (14 fresh container evaluations across all variants and splits). A stability failure is a failed check, not a reason to raise the bound, discard measurements, or retry until green. Retain the failure and investigate resource contention or an evaluator regression before collecting new evidence.
+
 The proxy's live model-provider smoke test is skipped unless `HONE_LIVE_PROXY_TEST=1` is explicitly set. That opt-in test targets the local proxy on port 8317 and requests a one-token completion; it can consume provider quota. Ordinary proxy tests use local mocks.
 
 These commands check implementation behavior. They do not run or establish an M2 experiment.
