@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "variants": {
+    "baseline": {
+      "train": 0.5104,
+      "validation": 0.5081,
+      "combined": 0.5095,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    },
+    "broken": {
+      "train": 0.0212,
+      "validation": 0.0198,
+      "combined": 0.0206,
+      "trainTestsPass": false,
+      "validationTestsPass": false
+    },
+    "naive": {
+      "train": 0.3311,
+      "validation": 0.3287,
+      "combined": 0.3301,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    },
+    "shortcut": {
+      "train": 0.6402,
+      "validation": 0.301,
+      "combined": 0.5045,
+      "trainTestsPass": true,
+      "validationTestsPass": false
+    },
+    "improved": {
+      "train": 0.6255,
+      "validation": 0.6199,
+      "combined": 0.6233,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    }
+  },
+  "stability": {
+    "aggregates": [0.5095, 0.5088, 0.5101],
+    "spread": 0.0025516880397800992,
+    "band": 0.15
+  },
+  "failures": []
+}

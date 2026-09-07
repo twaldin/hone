@@ -1,0 +1,26 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-T08",
+  "capsule": "floyd-block-search-render",
+  "cohort": "train",
+  "stratum": "owner",
+  "panel": "A",
+  "status": "existing-admitted",
+  "objective": "Minimize Block Search p99 frame cost and allocations on a frozen scene while preserving exact selected blocks and rendered command stream. q = reciprocal geometric mean of p99 time and allocation rate; correctness is a hard gate.",
+  "character": "Current-product rendering performance, private.",
+  "source": {
+    "visibility": "private",
+    "repository": "Floyd Addons",
+    "revision": "f5e048d4a8254646306cbf596379416be6401700",
+    "referenceCommit": "315036de",
+    "existingCapsuleId": "cap_494779558b18"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
+    "workloadHashes": "see capsule manifest contentHashes"
+  },
+  "publication": "license-permitting-publishable",
+  "publicationNotice": "../../PUBLICATION.md"
+}

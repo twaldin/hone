@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-H07",
+  "capsule": "mimalloc-allocator",
+  "cohort": "terminal",
+  "stratum": "oss",
+  "panel": null,
+  "status": "pending-authoring",
+  "objective": "Improve allocator throughput on frozen single-thread, multi-thread, small-object, and fragmentation workloads.",
+  "scalarAndGates": "Geometric mean ops/sec; allocator stress tests, peak committed memory and fragmentation no worse than baseline by >1%.",
+  "source": {
+    "repository": "microsoft/mimalloc",
+    "revision": "76d3f8a934f9761e4ee75fa8b071e58d482f2758",
+    "url": "https://github.com/microsoft/mimalloc/commit/76d3f8a934f9761e4ee75fa8b071e58d482f2758",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

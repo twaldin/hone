@@ -1,0 +1,47 @@
+import { DiagnosticOrderingReport } from "@hone/schema";
+import { describe, expect, it } from "vitest";
+import {
+  runOrderingCheck,
+  serializeOrderingReport,
+  summarizeOrderingReport,
+} from "../tools/ordering-check.js";
+
+describe("seeded-astar diagnostic ordering", () => {
+  it(
+    "orders broken < naive < baseline < improved and proves split integrity",
+    { timeout: 1_200_000 },
+    async () => {
+      const report = await runOrderingCheck();
+      expect(report.failures).toEqual([]);
+
+      // Every measurement was a real broker container eval — the tool throws
+      // on memo hits, host exec, or leaks, so reaching here already proves
+      // them; the count pins the exact invocation shape.
+      expect(report.evalInvocations).toBe(14);
+
+      // Redundant with report.failures, but keeps the invariants visible in
+      // the test output when something regresses.
+      const { broken, naive, baseline, improved, shortcut } = report.results;
+      expect(broken.combined).toBeLessThan(naive.combined);
+      expect(naive.combined).toBeLessThan(baseline.combined);
+      expect(baseline.combined).toBeLessThan(improved.combined);
+      expect(shortcut.train).toBeGreaterThan(baseline.train);
+      expect(shortcut.validation).toBeLessThan(baseline.validation);
+
+      // The persisted summary of the SAME run is schema-valid and its
+      // serialization is deterministic byte-for-byte.
+      const summary = summarizeOrderingReport(report);
+      expect(() => DiagnosticOrderingReport.parse(summary)).not.toThrow();
+      expect(summary.stability.aggregates.length).toBeGreaterThanOrEqual(3);
+      expect(summary.variants.baseline.trainTestsPass).toBe(true);
+      expect(summary.variants.baseline.validationTestsPass).toBe(true);
+      expect(summary.variants.improved.trainTestsPass).toBe(true);
+      expect(summary.variants.improved.validationTestsPass).toBe(true);
+      const bytes = serializeOrderingReport(summary);
+      expect(serializeOrderingReport(summary)).toBe(bytes);
+      expect(serializeOrderingReport(DiagnosticOrderingReport.parse(JSON.parse(bytes)))).toBe(
+        bytes,
+      );
+    },
+  );
+});

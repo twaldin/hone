@@ -1,39 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.venv/
-venv/
-env/
-.mypy_cache/
-.ruff_cache/
-.pytest_cache/
-htmlcov/
-.coverage
+node_modules/
 dist/
-build/
-
-# Editor / OS
-.DS_Store
-.vscode/
-.idea/
-
-# hone run state + outputs
-.hone/
-*.honed.md
-
-# Agent instruction files (never ship)
-CLAUDE.md
-AGENTS.md
-GEMINI.md
-
-# Agent runtime dirs
-.opencode/
-.claude/
-.flt/
-
-# Internal artifact dirs
-handoffs/
-specs/
-writeup/
+*.log
+.hone-cas/
+.hone-runs/
+/tmp/
+.hone-sources/

@@ -1,0 +1,23 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-T03",
+  "capsule": "flt-text-input",
+  "cohort": "train",
+  "stratum": "owner",
+  "panel": "A",
+  "status": "existing-admitted",
+  "objective": "Pass sealed Unicode, escape, multiline, completion, history, and editing-state cases with bounded emissions.",
+  "character": "Bounded state machine, MIT.",
+  "source": {
+    "visibility": "owner-licensed",
+    "existingCapsuleId": "cap_2e06839ec475",
+    "existingCapsuleDigest": "sha256:e974bb5b137be017822535491d3bf01cf3b944debb6f2d1b0a8f71d8d9e44521"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
+    "workloadHashes": "see capsule manifest contentHashes"
+  },
+  "publication": "license-dependent"
+}

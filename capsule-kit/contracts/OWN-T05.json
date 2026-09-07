@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-T05",
+  "capsule": "flt-dag-orphan-recovery",
+  "cohort": "train",
+  "stratum": "owner",
+  "panel": "B",
+  "status": "existing-admitted",
+  "objective": "Repair plan-reread orphan retirement and parallel spawn-failure stalls. q = passed sealed transitions / declared transitions; only workflow engine implementation is mutable.",
+  "character": "Historical post-cutoff recovery, async state machine, MIT.",
+  "source": {
+    "visibility": "owner-licensed",
+    "repository": "FLT",
+    "revision": "2f3c9e2f10ef8d93a61233766f3796a576d9f497",
+    "referenceCommit": "031ac46be6aaab11e96cd722b5369e4376fe68b2",
+    "existingCapsuleId": "cap_ac92044c7b66"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
+    "workloadHashes": "see capsule manifest contentHashes"
+  },
+  "publication": "license-dependent"
+}

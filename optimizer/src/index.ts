@@ -1,0 +1,37 @@
+export { buildEpisodeContext, type BuildContextInput, type FailureEvidence, type LineageEntry } from "../assets/context.js";
+export * as policy from "../assets/policy.js";
+export {
+  ADVERSARIAL_VALIDATOR_SYSTEM_PROMPT,
+  CAPSULE_AUTHOR_SYSTEM_PROMPT,
+  EVALUATOR_AUTHOR_SYSTEM_PROMPT,
+  MUTATION_SYSTEM_PROMPT,
+  REPAIR_SYSTEM_PROMPT,
+} from "../assets/prompts.js";
+export { BrokerClient, BrokerRpcError } from "./client.js";
+export {
+  CodingSessionOutputSchema,
+  CodingSessionRole,
+  CodingSessionTool,
+  DEFAULT_MUTATE_OUTPUT_SCHEMA,
+  EPISODE_CONTEXT_VERSION,
+  EPISODE_JSON_PATH,
+  EpisodeContext,
+  MutateResult,
+  parseMutateStdout,
+  type CodingSessionOutputSchema as CodingSessionOutputSchemaType,
+  type CodingSessionRole as CodingSessionRoleType,
+  type CodingSessionTool as CodingSessionToolType,
+} from "./episode.js";
+export {
+  aggregateOf,
+  createBackend,
+  episodeRand,
+  parseMaxEpisodes,
+  runEpisodeLoop,
+  SANDBOX_WORKER_PATH,
+  WORKER_CHUNK_BYTES,
+  WORKER_PART_DIR,
+  type EpisodeLoopOptions,
+  type OptimizerBackendContext,
+  type OptimizerRunnerBackend,
+} from "./loop.js";
