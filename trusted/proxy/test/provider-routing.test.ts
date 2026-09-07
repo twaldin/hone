@@ -1,5 +1,4 @@
 import http from "node:http";
-import { createHash } from "node:crypto";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -385,6 +384,18 @@ describe("frozen provider failure policy", () => {
     expect(await harness.proxy.campaignPause()).toMatchObject({ reason: "provider-auth", status: 401 });
   });
 
+  it("preserves a complete provider error inside an oversized network chunk", async () => {
+    const harness = await setup((request) => ({
+      status: 200, contentType: "text/event-stream",
+      rawBody: ssePrefix(request.model) + 'data: {"error":{"status":401}}\n\n' + " ".repeat(4096),
+    }), { maxResponseBytes: 512 });
+    const response = await completion(harness, "outer-optimizer", true);
+    expect(response.status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect(await harness.proxy.campaignPause()).toMatchObject({ reason: "provider-auth", status: 401 });
+    expect(harness.spends).toEqual([{ tokens: 10, usd: 0 }]);
+  });
+
   it("an unterminated error frame cannot manufacture an auth status", async () => {
     const harness = await setup((request) => ({
       status: 200, contentType: "text/event-stream", incomplete: true,
@@ -558,9 +569,12 @@ describe("frozen provider failure policy", () => {
     expect((await harness.proxy.campaignPause())?.reason).toBe(reason);
     // The prefix really reached the proxy; rejection is not just JSON parse failure.
     const trace = await traces(harness.runDir);
-    const prefixDigest = `sha256:${createHash("sha256")
-      .update('{"error":{"code":"NO_QUOTA"}}').digest("hex")}`;
-    expect(trace.map((record) => record.responseBody)).toEqual(Array(4).fill(prefixDigest));
+    for (const record of trace) {
+      const hash = record.responseBody.slice("sha256:".length);
+      const body = await readFile(join(harness.runDir, "..", "cas", "sha256", hash.slice(0, 2), hash), "utf8");
+      expect(JSON.parse(body)).toEqual({ error: { code: "NO_QUOTA" } });
+      expect(Buffer.byteLength(body)).toBeLessThanOrEqual(128);
+    }
   });
 
   it("SSE error content does not select the JSON quota policy", async () => {
