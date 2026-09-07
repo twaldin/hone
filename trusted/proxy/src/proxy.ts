@@ -1141,6 +1141,10 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           for await (const chunk of upstream.body) {
             const buf = Buffer.from(chunk);
             if (received + buf.length > limits.maxResponseBytes) {
+              // Preserve complete evidence within the cap even when one read
+              // also contains excess bytes.
+              const remaining = limits.maxResponseBytes - received;
+              if (remaining > 0) chunks.push(buf.subarray(0, remaining));
               responseIncomplete = true;
               responseTooLarge = true;
               controller.abort();
