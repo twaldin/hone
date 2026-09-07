@@ -214,20 +214,28 @@ async function setup(
   return harness;
 }
 
-function completion(harness: Harness, role = "outer-optimizer"): Promise<Response> {
+function completion(harness: Harness, role = "outer-optimizer", stream = false): Promise<Response> {
   return fetch(`http://127.0.0.1:${harness.port}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${harness.proxy.tokenFor(role)}`,
     },
-    body: JSON.stringify({ model: "optimizer-selected-route", messages: [], max_tokens: 8 }),
+    body: JSON.stringify({ model: "optimizer-selected-route", messages: [], max_tokens: 8, stream }),
   });
 }
 
 async function traces(runDir: string): Promise<ProxyTraceRecord[]> {
   const raw = await readFile(join(runDir, "proxy-trace.ndjson"), "utf8");
   return raw.trim().split("\n").map((line) => ProxyTraceRecord.parse(JSON.parse(line)));
+}
+
+function ssePrefix(model: string, totalTokens = 10): string {
+  return `data: ${JSON.stringify({
+    model,
+    choices: [{ delta: { content: "partial" } }],
+    usage: { prompt_tokens: totalTokens - 1, completion_tokens: 1, total_tokens: totalTokens },
+  })}\n\n`;
 }
 
 describe("frozen provider failure policy", () => {
@@ -245,6 +253,181 @@ describe("frozen provider failure policy", () => {
     expect(harness.spends).toEqual([{ tokens: 10, usd: 0 }]);
     expect(harness.pauses).toHaveLength(1);
     expect(harness.pauses[0]?.reason).toBe(reason);
+  });
+
+  it("a successful SSE prefix followed by an unknown upstream error never scores a candidate", async () => {
+    const harness = await setup((request) => ({
+      status: 200,
+      contentType: "text/event-stream",
+      rawBody:
+        ssePrefix(request.model) +
+        'data: {"error":{"message":"upstream failed","type":"upstream_error"}}\n\n',
+    }));
+    const response = await completion(harness, "outer-optimizer", true);
+    expect(response.headers.get("x-hone-attempt-classification")).not.toBe("candidate-invalidity");
+    expect(response.status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(4);
+    expect(await harness.proxy.campaignPause()).toMatchObject({
+      reason: "provider-transport", status: null, attempt: 4,
+    });
+    expect(harness.spends).toEqual(Array(4).fill({ tokens: 10, usd: 0 }));
+    const pause = await harness.proxy.campaignPause();
+    const state = await readDispatchJournalState(join(harness.runDir, DISPATCH_JOURNAL_FILE));
+    expect(state.poisoned).toBeUndefined();
+    expect(state.unmatched).toEqual([]);
+    expect(state.pause).toEqual(pause);
+    expect(state.records.filter((record) => record.kind === "settle")).toMatchObject([
+      { classification: "retry", outcome: "usage" },
+      { classification: "retry", outcome: "usage" },
+      { classification: "retry", outcome: "usage" },
+      { classification: "campaign-pause", outcome: "usage" },
+    ]);
+    expect(await traces(harness.runDir)).toMatchObject([
+      { status: 200, classification: "retry" },
+      { status: 200, classification: "retry" },
+      { status: 200, classification: "retry" },
+      { status: 200, classification: "campaign-pause" },
+    ]);
+    harness.upstream.setResponder(() => ({ status: 200 }));
+    await harness.restart();
+    expect(await harness.proxy.campaignPause()).toEqual(pause);
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(4);
+    expect((await harness.proxy.preflight()).passed).toBe(true);
+    expect(await harness.proxy.campaignPause()).toEqual(pause);
+    expect((await harness.proxy.resume()).passed).toBe(true);
+    expect(harness.resumes).toMatchObject([{ pauseId: pause?.pauseId }]);
+    await harness.restart();
+    expect(await harness.proxy.campaignPause()).toBeUndefined();
+    expect((await completion(harness)).status).toBe(200);
+  });
+
+  it.each([
+    [{ error: { status: 401 } }, 401, "provider-auth", 1],
+    [{ error: { status_code: 403 } }, 403, "provider-auth", 1],
+    [{ error: { code: 402 } }, 402, "provider-payment", 1],
+    [{ status: 429, error: { type: "upstream_error" } }, 429, "provider-rate-limit", 1],
+    [{ status_code: 503, error: { type: "upstream_error" } }, 503, "provider-5xx", 4],
+    [{ error: { status: 500 } }, 500, "provider-5xx", 4],
+  ] as const)("a streamed error %j preserves status and provider policy", async (error, status, reason, attempts) => {
+    const harness = await setup((request, index) => ({
+      status: 200, contentType: "text/event-stream",
+      rawBody: ssePrefix(request.model, index + 10) + `data: ${JSON.stringify(error)}\n\n`,
+    }));
+    const preflight = await harness.proxy.preflight();
+    expect(preflight.passed).toBe(false);
+    expect(preflight.observations[0]).toMatchObject({ status, passed: false });
+    expect(harness.upstream.calls).toHaveLength(attempts);
+    expect(await harness.proxy.campaignPause()).toMatchObject({ status, reason, attempt: attempts });
+    expect(harness.spends.map((spend) => spend.tokens)).toEqual(
+      Array.from({ length: attempts }, (_, index) => index + 10),
+    );
+  });
+
+  it("a streamed 5xx retries without leaking partial output, then returns success", async () => {
+    const harness = await setup((request, index) => index === 0 ? {
+      status: 200, contentType: "text/event-stream",
+      rawBody: ssePrefix(request.model, 11) + 'data: {"error":{"status":502}}\n\n',
+    } : { status: 200, totalTokens: 22 });
+    const response = await completion(harness, "outer-optimizer", true);
+    expect(response.status).toBe(200);
+    expect(await response.text()).not.toContain("partial");
+    expect(harness.spends).toEqual([{ tokens: 11, usd: 0 }, { tokens: 22, usd: 0 }]);
+    expect(await harness.proxy.campaignPause()).toBeUndefined();
+    const state = await readDispatchJournalState(join(harness.runDir, DISPATCH_JOURNAL_FILE));
+    expect(state.records.filter((record) => record.kind === "settle")).toMatchObject([
+      { classification: "retry", tokens: 11 },
+      { classification: "success", tokens: 22 },
+    ]);
+  });
+
+  it.each([
+    ['data: {"error":{"type":"authentication_error","message":"HTTP 401 payment 402 rate 429 server 503"}}\n\n', null],
+    ['data: {"error":{"status":"401","status_code":200,"code":500.5}}\n\n', null],
+    ['data: {"error":{"status":600}}\n\n', null],
+    ['data: {"error":{"status":418}}\n\n', 418],
+    ['event: error\ndata: {"message":"unknown failure"}\n\n', null],
+    ['event: error\ndata: not-json\n\n', null],
+    ['data: {"error":"unknown failure"}\n\n', null],
+  ] as const)("unknown streamed failures never infer status from text: %s", async (terminal, status) => {
+    const harness = await setup((request) => ({
+      status: 200, contentType: "text/event-stream", rawBody: ssePrefix(request.model) + terminal,
+    }));
+    expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(4);
+    expect(await harness.proxy.campaignPause()).toMatchObject({
+      reason: "provider-transport", status, attempt: 4,
+    });
+  });
+
+  it("reads a complete multiline CRLF error event", async () => {
+    const harness = await setup((request) => ({
+      status: 200, contentType: "text/event-stream",
+      rawBody: ssePrefix(request.model) +
+        'event: error\r\ndata: {"error":\r\ndata: {"status":429}}\r\n\r\n',
+    }));
+    expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect(await harness.proxy.campaignPause()).toMatchObject({ reason: "provider-rate-limit", status: 429 });
+  });
+
+  it.each([
+    ["reset", { incomplete: true }],
+    ["response cap", { trailingBytes: 4096 }],
+  ] as const)("a complete streamed auth error survives a later %s", async (_label, shape) => {
+    const harness = await setup((request) => ({
+      status: 200, contentType: "text/event-stream",
+      rawBody: ssePrefix(request.model) + 'data: {"error":{"status":401}}\n\n',
+      ...shape,
+    }), { maxResponseBytes: 512 });
+    expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect(await harness.proxy.campaignPause()).toMatchObject({ reason: "provider-auth", status: 401 });
+  });
+
+  it("an unterminated error frame cannot manufacture an auth status", async () => {
+    const harness = await setup((request) => ({
+      status: 200, contentType: "text/event-stream", incomplete: true,
+      rawBody: ssePrefix(request.model) + 'data: {"error":{"status":401}}',
+    }));
+    expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(4);
+    expect((await harness.proxy.campaignPause())?.reason).toBe("provider-transport");
+  });
+
+  it("model drift keeps precedence over unknown streamed failure", async () => {
+    const harness = await setup(() => ({
+      status: 200, contentType: "text/event-stream",
+      rawBody: ssePrefix(M2_INNER_MODEL_ROUTE) + 'data: {"error":{"type":"upstream_error"}}\n\n',
+    }));
+    expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect((await harness.proxy.campaignPause())?.reason).toBe("returned-model-drift");
+  });
+
+  it("normal streams keep agent-authored error text opaque", async () => {
+    const rawBody = ssePrefix(M2_OUTER_MODEL_ROUTE) +
+      `data: ${JSON.stringify({ choices: [{ delta: { content: '{"error":{"status":401}}' } }] })}\n\n` +
+      "data: [DONE]\n\n";
+    const harness = await setup(() => ({ status: 200, contentType: "text/event-stream", rawBody }));
+    const response = await completion(harness, "outer-optimizer", true);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-hone-attempt-classification")).toBe("success");
+    expect(await response.text()).toBe(rawBody);
+    expect(harness.spends).toEqual([{ tokens: 10, usd: 0 }]);
+    expect(await harness.proxy.campaignPause()).toBeUndefined();
+  });
+
+  it("malformed SSE output remains candidate invalidity without a provider error", async () => {
+    const harness = await setup((request) => ({
+      status: 200, contentType: "text/event-stream",
+      rawBody: ssePrefix(request.model) + 'data: {"choices":[null]}\n\ndata: [DONE]\n\n',
+    }));
+    const response = await completion(harness, "outer-optimizer", true);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-hone-attempt-classification")).toBe("candidate-invalidity");
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect(await harness.proxy.campaignPause()).toBeUndefined();
   });
 
   it("an explicit proxy failover sentinel pauses immediately", async () => {
