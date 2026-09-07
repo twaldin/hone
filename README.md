@@ -17,7 +17,7 @@ These are task objectives, not claims of achieved gains. See [Capsules](docs/cap
 ## How it works
 
 1. **Define the task.** A **capsule** packages the objective, pinned baseline code, evaluator, data, execution image and budget. It declares which files may not change and which data the optimizer may see.
-2. **Approve the contract.** Admission checks the capsule's inputs and review receipts. The **trusted supervisor** fixes the run configuration before execution.
+2. **Approve the contract.** Admission checks the capsule's inputs; production intake also requires review receipts. The **trusted supervisor** fixes the run configuration before execution.
 3. **Generate a candidate.** The optimizer uses a model-backed coding worker in a sandbox to propose a change within the capsule's constraints.
 4. **Measure it.** The trusted runtime runs the evaluator and compares candidate and baseline measurements. A **broker** mediates optimizer operations, enforces budgets and records acceptance decisions; the optimizer's own claims are not authority.
 5. **Retain and deliver.** Candidate artifacts, measurements and durable run records stay local. Inspect the accepted candidate and its diff, then explicitly deliver it to a validated repository. Delivery defaults to off.
