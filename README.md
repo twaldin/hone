@@ -28,3 +28,5 @@ Real execution additionally requires an admitted capsule, its exact image and a 
 - [Results](docs/results.md): how evidence will be published and interpreted.
 
 The public tree includes approved derived task implementations and synthetic development fixtures. Frozen terminal inputs and answers remain private. Terminal directories contain source references rather than complete executable bundles; their manifests are named `manifest.reference.json`.
+
+Hone and the approved derived tasks use [MIT](LICENSE). Third-party code retains its own licenses. [Publication and preserved identities](PUBLICATION.md) explains the scope and the historical restrictions still present in frozen capsule metadata.

@@ -19,5 +19,6 @@
     "buildTestEvalCommands": null,
     "workloadHashes": null
   },
-  "publication": "private-redacted"
+  "publication": "license-permitting-publishable",
+  "publicationNotice": "../../PUBLICATION.md"
 }
