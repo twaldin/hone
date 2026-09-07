@@ -1,29 +1,19 @@
-import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import {
-  M2_INNER_MODEL_ROUTE,
-  M2_OUTER_MODEL_ROUTE,
-  M2_PANEL_A_TASK_IDS,
-  M2_PANEL_B_TASK_IDS,
-  MetaCampaignConfigV1,
-  MetaCampaignConfigV2,
-  canonicalJson,
-  type BudgetEnvelope,
-  type MetaCampaignConfigV1 as LegacyConfig,
-  type MetaCampaignConfigV2 as RecursiveConfig,
-} from "@hone/schema";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
+import { canonicalJson } from "@hone/schema";
 import { metaCampaignConfigHash, type MetaMeasurement } from "@hone/meta";
 import { describe, expect, it } from "vitest";
 import {
+  G1_RECORD_FILE,
+  G1_SEARCH_APPROVAL_FILE,
   GATE_RECORDS_VERSION,
   assembleG1Authorization,
   assembleG1Record,
+  assembleG1SearchApproval,
   assembleG2Authorization,
   assembleG2Record,
   assertG1Authorized,
+  assertG1SearchApproved,
   assertG2Authorized,
   readG1Record,
   readConfirmationReceipt,
@@ -33,252 +23,25 @@ import {
   verifyG2Record,
   writeAuthorization,
   writeG1Record,
+  writeG1SearchApproval,
   writeG2Record,
-  type G1GateThresholds,
-  type G2GateThresholds,
-  type HumanDecision,
-  type OptimizerIdentity,
+  type VerifiedG1Record,
 } from "../src/gate-records.js";
-
-const fixturePath = fileURLToPath(new URL("../../../schema/fixtures/meta-campaign.m1.json", import.meta.url));
-
-function digest(value: string): `sha256:${string}` {
-  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
-}
-const sha = (content: string): `sha256:${string}` => `sha256:${createHash("sha256").update(content, "utf8").digest("hex")}`;
-const hex64 = (value: string): string => createHash("sha256").update(value).digest("hex");
-
-const G1_THRESHOLDS: G1GateThresholds = { pairedImprovementSeMultiple: 2, positiveSignEpsilon: 0 };
-const G2_THRESHOLDS: G2GateThresholds = {
-  pairedWinFraction: 2 / 3,
-  ordinalWinEpsilon: 0,
-  tokenParityFraction: 0,
-  validYieldToleranceFraction: 0,
-  positiveSignEpsilon: 0,
-};
-
-const HUMAN: HumanDecision = {
-  approver: "owner",
-  decision: "approved",
-  diffConfinedIntelligible: true,
-  mechanismPlausible: true,
-  reason: "confined intelligible diff, plausible mechanism",
-  decidedAt: "2026-07-24T00:00:00.000Z",
-};
-
-const ID = {
-  seed: { sourceArtifact: digest("id:seed:src"), bundleDigest: digest("id:seed:bundle") },
-  winner: { sourceArtifact: digest("id:winner:src"), bundleDigest: digest("id:winner:bundle") },
-  target: { sourceArtifact: digest("id:target:src"), bundleDigest: digest("id:target:bundle") },
-  controlWinner: { sourceArtifact: digest("id:cw:src"), bundleDigest: digest("id:cw:bundle") },
-  gen0: { sourceArtifact: digest("id:g0:src"), bundleDigest: digest("id:g0:bundle") },
-  gen1: { sourceArtifact: digest("id:g1:src"), bundleDigest: digest("id:g1:bundle") },
-  gen2: { sourceArtifact: digest("id:g2:src"), bundleDigest: digest("id:g2:bundle") },
-  broken: { sourceArtifact: digest("id:broken:src"), bundleDigest: digest("id:broken:bundle") },
-  degraded: { sourceArtifact: digest("id:degraded:src"), bundleDigest: digest("id:degraded:bundle") },
-} satisfies Record<string, OptimizerIdentity>;
-
-function legacyConfig(): LegacyConfig {
-  return MetaCampaignConfigV1.parse(JSON.parse(readFileSync(fixturePath, "utf8")));
-}
-
-function multiply(budget: BudgetEnvelope, factor: number): BudgetEnvelope {
-  return {
-    maxTokens: budget.maxTokens * factor,
-    maxUsd: budget.maxUsd * factor,
-    maxWallClockSec: budget.maxWallClockSec * factor,
-    maxEvaluatorInvocations: budget.maxEvaluatorInvocations * factor,
-  };
-}
-
-/** A valid V2 campaign config for the requested stage; capsuleIds are cap_000000000001..08. */
-function buildConfig(stage: "A" | "B"): RecursiveConfig {
-  const legacy = legacyConfig();
-  const capsule = (index: number) => ({
-    ...legacy.train[0]!,
-    capsuleId: `cap_${index.toString(16).padStart(12, "0")}`,
-    capsuleDigest: digest(`recursive:capsule:${index}`),
-    image: `hone-task-${index}@${digest(`recursive:image:${index}`)}`,
-    oracleDigest: digest(`recursive:oracle:${index}`),
-    scalarizerDigest: digest(`recursive:scalarizer:${index}`),
-  });
-  const train = Array.from({ length: 8 }, (_, index) => capsule(index + 1));
-  const holdout = Array.from({ length: 11 }, (_, index) => capsule(index + 101));
-  const child = { ...legacy.budgets.child };
-  const calibratedPanelCandidate = multiply(child, 8);
-  const target = {
-    sourceCommit: "1".repeat(40),
-    sourceArtifact: digest("recursive:target-source"),
-    bundleDigest: digest("recursive:target-bundle"),
-  };
-  const controller = stage === "A"
-    ? target
-    : { sourceCommit: "1".repeat(40), sourceArtifact: digest("recursive:controller-source"), bundleDigest: digest("recursive:controller-bundle") };
-  const panelTasks = stage === "A" ? M2_PANEL_A_TASK_IDS : M2_PANEL_B_TASK_IDS;
-  const confirmationRuns = (stage === "A" ? 4 : 5) * 8 * 3;
-  return MetaCampaignConfigV2.parse({
-    ...legacy,
-    version: 2,
-    seedOptimizer: target,
-    controllerOptimizer: controller,
-    optimizerRuntime: { image: `hone-optimizer@${digest("recursive:optimizer-image")}` },
-    generation: stage === "A"
-      ? { stage: "A", panel: "A", targetGeneration: 0, controllerGeneration: 0, outerReplicate: 0 }
-      : { stage: "B", panel: "B", targetGeneration: 1, controllerGeneration: 0, outerReplicate: 0 },
-    calibration: {
-      reportDigest: digest("recursive:calibration-report"),
-      excludedCapsuleIds: Array.from({ length: 4 }, (_, index) => `cap_${(2001 + index).toString(16).padStart(12, "0")}`),
-    },
-    corpusCohort: {
-      developmentCapsuleIds: [
-        ...train.map((entry) => entry.capsuleId),
-        ...Array.from({ length: 8 }, (_, index) => `cap_${(2101 + index).toString(16).padStart(12, "0")}`),
-      ],
-      terminalCapsuleIds: holdout.map((entry) => entry.capsuleId),
-      provenanceInputsDigest: digest("recursive:corpus-provenance"),
-    },
-    train,
-    holdout,
-    routing: { outerMutation: M2_OUTER_MODEL_ROUTE, innerMutation: M2_INNER_MODEL_ROUTE },
-    modelObservation: {
-      outerRequestedRoute: M2_OUTER_MODEL_ROUTE,
-      innerRequestedRoute: M2_INNER_MODEL_ROUTE,
-      identity: "alias-observation",
-      recordResponseModel: true,
-      recordProviderFingerprint: true,
-      driftSentinel: true,
-    },
-    counts: {
-      candidates: 37,
-      candidateAttemptsMax: 91,
-      innerEpisodesMax: 8,
-      searchReplicates: 5,
-      confirmationReplicates: 3,
-      holdoutReplicates: 3,
-      childConcurrency: 2,
-    },
-    budgets: { ...legacy.budgets, outer: { ...legacy.budgets.outer, maxEvaluatorInvocations: 92 } },
-    developmentPanel: {
-      panel: stage,
-      members: train.map((entry, index) => ({
-        taskId: panelTasks[index],
-        capsule: entry,
-        calibratedInnerCeiling: child,
-      })),
-    },
-    recursiveBudgets: {
-      search: {
-        identity: { envelopeId: digest("recursive:search-envelope"), purpose: "search" },
-        calibratedPanelCandidate,
-        outerTrajectory: multiply(calibratedPanelCandidate, 12),
-      },
-      confirmation: {
-        identity: { envelopeId: digest("recursive:confirmation-envelope"), purpose: "confirmation" },
-        budget: multiply(child, confirmationRuns),
-      },
-      terminal: {
-        identity: { envelopeId: digest("recursive:terminal-envelope"), purpose: "terminal" },
-        budget: multiply(child, 3 * 11 * 3),
-      },
-    },
-    allowedClaim: "recursive-transfer-frozen-corpus",
-  });
-}
-
-interface ArmSpec {
-  arm: string;
-  identity: OptimizerIdentity;
-  score: (capIndex: number, rep: number) => number;
-  tokens?: (capIndex: number, rep: number) => number;
-  /** Replicate indices to emit; defaults to all confirmationReplicates. */
-  reps?: (capIndex: number) => number[];
-}
-
-function makeMeasurement(
-  config: RecursiveConfig,
-  spec: ArmSpec,
-  capIndex: number,
-  replicate: number,
-): MetaMeasurement {
-  const member = config.developmentPanel.members[capIndex]!;
-  const key = `${spec.arm}:${member.capsule.capsuleId}:${replicate}`;
-  return {
-    configHash: metaCampaignConfigHash(config),
-    protocolHash: digest("protocol"),
-    analysisConfigHash: digest("analysis"),
-    phase: "confirmation",
-    arm: spec.arm as MetaMeasurement["arm"],
-    sourceArtifact: spec.identity.sourceArtifact as `sha256:${string}`,
-    bundleDigest: spec.identity.bundleDigest as `sha256:${string}`,
-    capsuleId: member.capsule.capsuleId,
-    capsuleDigest: member.capsule.capsuleDigest as `sha256:${string}`,
-    replicate,
-    measurementEpoch: `m2:${key}`,
-    requestedModel: M2_INNER_MODEL_ROUTE,
-    responseModel: M2_INNER_MODEL_ROUTE,
-    providerFingerprint: null,
-    modelDriftSentinel: "stable:x",
-    workKey: sha(`workkey:${key}`),
-    childRunId: `run_meta_${hex64(key)}`,
-    evidenceHash: sha(`evidence:${key}`),
-    reserved: { maxTokens: 1000, maxUsd: 1, maxWallClockSec: 60, maxEvaluatorInvocations: 40 },
-    observed: {
-      tokens: spec.tokens ? spec.tokens(capIndex, replicate) : 100,
-      usd: 0.1,
-      wallClockSec: 1,
-      evaluatorInvocations: 4,
-    },
-    qRaw: spec.score(capIndex, replicate),
-    qBase: 0,
-    scale: 1,
-    qNormalized: spec.score(capIndex, replicate),
-  };
-}
-
-function buildMeasurements(config: RecursiveConfig, specs: readonly ArmSpec[]): MetaMeasurement[] {
-  const reps = config.counts.confirmationReplicates;
-  const out: MetaMeasurement[] = [];
-  for (const spec of specs) {
-    for (let capIndex = 0; capIndex < config.developmentPanel.members.length; capIndex += 1) {
-      const replicates = spec.reps ? spec.reps(capIndex) : Array.from({ length: reps }, (_, r) => r);
-      for (const replicate of replicates) {
-        out.push(makeMeasurement(config, spec, capIndex, replicate));
-      }
-    }
-  }
-  return out;
-}
-
-function receiptFor(measurements: readonly MetaMeasurement[]): { measurementCount: number; measurementHash: string } {
-  return { measurementCount: measurements.length, measurementHash: sha(canonicalJson(measurements)) };
-}
-
-const constant = (value: number) => () => value;
-
-/** A fully-passing Stage-A measurement set: winner clearly beats seed, controls below both. */
-function passingG1Specs(): ArmSpec[] {
-  return [
-    { arm: "seed", identity: ID.seed, score: constant(0.1) },
-    { arm: "winner", identity: ID.winner, score: constant(0.3) },
-    { arm: "broken-control", identity: ID.broken, score: constant(0.0) },
-    { arm: "degraded-control", identity: ID.degraded, score: constant(0.05) },
-  ];
-}
-
-/** A fully-passing Stage-B measurement set: G1-controller beats G0-controller by score AND tokens; G2 beats G1. */
-function passingG2Specs(): ArmSpec[] {
-  return [
-    { arm: "seed", identity: ID.target, score: constant(0.3), tokens: constant(90) },
-    { arm: "controller-control-winner", identity: ID.controlWinner, score: constant(0.1), tokens: constant(100) },
-    { arm: "generation-2", identity: ID.gen2, score: constant(0.4), tokens: constant(90) },
-    { arm: "broken-control", identity: ID.broken, score: constant(0.0) },
-    { arm: "degraded-control", identity: ID.degraded, score: constant(0.05) },
-  ];
-}
-
-function tmp(): string {
-  return mkdtempSync(join(tmpdir(), "hone-gate-records-"));
-}
+import {
+  G1_THRESHOLDS,
+  G2_THRESHOLDS,
+  HUMAN,
+  ID,
+  buildConfig,
+  buildMeasurements,
+  constant,
+  digest,
+  passingG1Specs,
+  passingG2Specs,
+  receiptFor,
+  sha,
+  tmp,
+} from "./helpers/gate-fixtures.js";
 
 describe("assembleG1Record: Stage-A statistical gate", () => {
   it("passes when winner beats seed across every capsule with controls below", () => {
@@ -885,5 +648,170 @@ describe("gate records bind against the independently persisted confirmation rec
     const path = join(dir, "confirmation-receipt.json");
     writeFileSync(path, JSON.stringify({ version: 1, phase: "confirmation", measurementCount: 96 }));
     expect(() => readConfirmationReceipt(path)).toThrow(/bound measurement digest/);
+  });
+});
+
+describe("G1 search approval gates Stage-B search without Stage-B products", () => {
+  /** Writes a passing Stage-A G1 record into dir; a different generatedAt yields a different digest. */
+  function passingG1(dir: string, generatedAt = "2026-07-24T00:00:00.000Z"): VerifiedG1Record {
+    const stageA = buildConfig("A");
+    const measurements = buildMeasurements(stageA, passingG1Specs());
+    const record = assembleG1Record({
+      config: stageA,
+      measurements,
+      receipt: receiptFor(measurements),
+      thresholds: G1_THRESHOLDS,
+      seed: ID.seed,
+      winner: ID.winner,
+      generatedAt,
+    });
+    writeG1Record(dir, record);
+    return record;
+  }
+
+  function approvedStageB(controllerGeneration: 0 | 1) {
+    const stageADir = tmp();
+    const stageBDir = tmp();
+    const record = passingG1(stageADir);
+    const config = buildConfig("B", { controllerGeneration });
+    const approval = assembleG1SearchApproval({ config, record, recordDir: stageADir, humanDecision: HUMAN });
+    writeG1SearchApproval(stageBDir, approval);
+    return { stageADir, stageBDir, config, record, approval };
+  }
+
+  it("approves search for the controllerGeneration-0 cell: target = G1 winner, controller = G0 seed", () => {
+    const { stageADir, stageBDir, config, record, approval } = approvedStageB(0);
+    expect(approval.acceptedArtifacts).toEqual({ target: ID.winner, controller: ID.seed });
+    expect(approval.sourceRecordDir).toBe(stageADir);
+    expect(approval.statisticalRecordDigest).toBe(record.inputsDigest);
+    expect(approval.configHash).toBe(metaCampaignConfigHash(config));
+    expect(assertG1SearchApproved(stageBDir, config)).toEqual(approval);
+  });
+
+  it("approves search for the controllerGeneration-1 cell: controller = G1 winner", () => {
+    const { stageBDir, config, approval } = approvedStageB(1);
+    expect(approval.acceptedArtifacts).toEqual({ target: ID.winner, controller: ID.winner });
+    expect(assertG1SearchApproved(stageBDir, config)).toEqual(approval);
+  });
+
+  it("binds the source record directory as an absolute path", () => {
+    const stageADir = tmp();
+    const record = passingG1(stageADir);
+    // A cwd-relative recordDir is resolved before binding (the schema refuses a non-absolute path outright).
+    const approval = assembleG1SearchApproval({
+      config: buildConfig("B"),
+      record,
+      recordDir: relative(process.cwd(), stageADir),
+      humanDecision: HUMAN,
+    });
+    expect(approval.sourceRecordDir).toBe(stageADir);
+  });
+
+  it("refuses search when the approval is absent — and the confirmation-phase G1 authorization does not stand in", () => {
+    const stageADir = tmp();
+    const stageBDir = tmp();
+    const record = passingG1(stageADir);
+    const config = buildConfig("B");
+    expect(() => assertG1SearchApproved(stageBDir, config)).toThrow(/absent/);
+    writeAuthorization(stageBDir, assembleG1Authorization({
+      configHash: metaCampaignConfigHash(config),
+      record,
+      controlWinner: ID.controlWinner,
+      generation2: ID.gen2,
+      humanDecision: HUMAN,
+    }));
+    expect(() => assertG1SearchApproved(stageBDir, config)).toThrow(/search approval .* is absent/);
+  });
+
+  it("refuses to record anything but a strict approved decision", () => {
+    const stageADir = tmp();
+    const record = passingG1(stageADir);
+    const config = buildConfig("B");
+    const rejected = { ...HUMAN, decision: "rejected" } as unknown as typeof HUMAN;
+    expect(() => assembleG1SearchApproval({ config, record, recordDir: stageADir, humanDecision: rejected })).toThrow();
+    const unconfined = { ...HUMAN, diffConfinedIntelligible: false } as unknown as typeof HUMAN;
+    expect(() => assembleG1SearchApproval({ config, record, recordDir: stageADir, humanDecision: unconfined })).toThrow();
+  });
+
+  it("refuses a failing G1 record and a non-stage-B destination", () => {
+    const stageADir = tmp();
+    const stageA = buildConfig("A");
+    const measurements = buildMeasurements(stageA, [
+      { arm: "seed", identity: ID.seed, score: constant(0.3) },
+      { arm: "winner", identity: ID.winner, score: constant(0.1) },
+      { arm: "broken-control", identity: ID.broken, score: constant(0.0) },
+      { arm: "degraded-control", identity: ID.degraded, score: constant(0.05) },
+    ]);
+    const failing = assembleG1Record({
+      config: stageA,
+      measurements,
+      receipt: receiptFor(measurements),
+      thresholds: G1_THRESHOLDS,
+      seed: ID.seed,
+      winner: ID.winner,
+    });
+    expect(failing.pass).toBe(false);
+    writeG1Record(stageADir, failing);
+    expect(() => assembleG1SearchApproval({ config: buildConfig("B"), record: failing, recordDir: stageADir, humanDecision: HUMAN }))
+      .toThrow(/did not pass/);
+    const passing = passingG1(tmp());
+    expect(() => assembleG1SearchApproval({ config: stageA, record: passing, recordDir: stageADir, humanDecision: HUMAN }))
+      .toThrow(/stage-B/);
+    expect(() => assertG1SearchApproved(tmp(), stageA)).toThrow(/stage-B search only/);
+  });
+
+  it("refuses a destination whose target or controller is not what the G1 record validated", () => {
+    const stageADir = tmp();
+    const record = passingG1(stageADir);
+    expect(() =>
+      assembleG1SearchApproval({ config: buildConfig("B", { target: ID.target }), record, recordDir: stageADir, humanDecision: HUMAN }),
+    ).toThrow(/target is not the G1 winner/);
+    expect(() =>
+      assembleG1SearchApproval({ config: buildConfig("B", { controller: ID.controlWinner }), record, recordDir: stageADir, humanDecision: HUMAN }),
+    ).toThrow(/controller is not the G0 seed/);
+  });
+
+  it("refuses a recordDir that does not hold the record being approved", () => {
+    const stageADir = tmp();
+    const record = passingG1(stageADir);
+    const otherDir = tmp();
+    passingG1(otherDir, "2026-07-25T00:00:00.000Z");
+    expect(() => assembleG1SearchApproval({ config: buildConfig("B"), record, recordDir: otherDir, humanDecision: HUMAN }))
+      .toThrow(/different G1 record/);
+    expect(() => assembleG1SearchApproval({ config: buildConfig("B"), record, recordDir: tmp(), humanDecision: HUMAN }))
+      .toThrow(/not readable JSON/);
+  });
+
+  it("refuses an approval bound to a different Stage-B cell", () => {
+    const { stageBDir } = approvedStageB(0);
+    expect(() => assertG1SearchApproved(stageBDir, buildConfig("B", { controllerGeneration: 1 })))
+      .toThrow(/not the dispatched campaign/);
+  });
+
+  it("refuses an approval tampered on disk", () => {
+    const { stageBDir, config } = approvedStageB(0);
+    const path = join(stageBDir, G1_SEARCH_APPROVAL_FILE);
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, canonicalJson({ ...onDisk, acceptedArtifacts: { ...onDisk.acceptedArtifacts, controller: ID.controlWinner } }));
+    expect(() => assertG1SearchApproved(stageBDir, config)).toThrow(/inputsDigest mismatch/);
+    writeFileSync(path, canonicalJson({ ...onDisk, sourceRecordDir: "relative/stage-a" }));
+    expect(() => assertG1SearchApproved(stageBDir, config)).toThrow(/not a valid G1 search approval/);
+  });
+
+  it("fails closed when the source G1 record is gone or was regenerated after approval", () => {
+    const { stageADir, stageBDir, config } = approvedStageB(0);
+    // Regenerated (still passing, still the same identities) → different digest → stale approval.
+    passingG1(stageADir, "2026-07-25T00:00:00.000Z");
+    expect(() => assertG1SearchApproved(stageBDir, config)).toThrow(/stale approval/);
+    rmSync(join(stageADir, G1_RECORD_FILE));
+    expect(() => assertG1SearchApproved(stageBDir, config)).toThrow(/source G1 record .* is absent/);
+  });
+
+  it("fails closed when the source G1 record was tampered to fail", () => {
+    const { stageADir, stageBDir, config } = approvedStageB(0);
+    const path = join(stageADir, G1_RECORD_FILE);
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, canonicalJson({ ...onDisk, pass: false }));
+    expect(() => assertG1SearchApproved(stageBDir, config)).toThrow(/inputsDigest mismatch/);
   });
 });
