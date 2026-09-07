@@ -1,0 +1,5 @@
+inheritance: true
+reviews:
+  request_changes_workflow: true
+  changed_files_summary: false
+  sequence_diagrams: false

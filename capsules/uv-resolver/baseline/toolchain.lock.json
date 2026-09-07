@@ -1,0 +1,11 @@
+{
+  "rust": "1.97.0",
+  "target": "aarch64-unknown-linux-gnu",
+  "baseImage": "rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+  "capsuleImage": "hone-uv-resolver@sha256:4ecfce6915c97234480adf92909b9c2d98c9df42a705da8b69671c257f528e0c",
+  "cargoLockSha256": "4044d175b78d5669c4e584baa8d36f81c1d15858b8531dfef2aa0b4a893783e1",
+  "cargoVendor": "complete cargo vendor output from the pinned Cargo.lock",
+  "profile": "profiling, debug=0, lto=false",
+  "linker": "rust-lld",
+  "uvDefaultFeatures": false
+}

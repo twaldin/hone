@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "innerReps": 3,
+  "timeoutSec": 10,
+  "publicCases": [
+    {
+      "id": "public-prompt-trace",
+      "input": {
+        "kind": "readiness",
+        "events": [
+          {
+            "seq": 1,
+            "pane": "Launching pi\nLoading agent"
+          },
+          {
+            "seq": 2,
+            "pane": "Launching pi\n\n  ❯  \n"
+          }
+        ]
+      },
+      "expected": {
+        "verdicts": [
+          "loading",
+          "ready"
+        ]
+      }
+    },
+    {
+      "id": "public-existing-replace",
+      "input": {
+        "kind": "projectInstructions",
+        "workdir": "project",
+        "filename": "AGENTS.md",
+        "content": "new rules",
+        "filesystem": {
+          "AGENTS.md": "old rules\n",
+          "notes.txt": "keep\n"
+        }
+      },
+      "expected": {
+        "projection": {
+          "workdir": "project",
+          "filename": "AGENTS.md",
+          "filePath": "project/AGENTS.md",
+          "existedBefore": true,
+          "backupPath": "project/.harness-backup-AGENTS.md",
+          "wroteBackup": true
+        },
+        "afterWrite": {
+          ".harness-backup-AGENTS.md": "old rules\n",
+          "AGENTS.md": "new rules\n",
+          "notes.txt": "keep\n"
+        },
+        "afterRestore": {
+          "AGENTS.md": "old rules\n",
+          "notes.txt": "keep\n"
+        }
+      }
+    }
+  ]
+}

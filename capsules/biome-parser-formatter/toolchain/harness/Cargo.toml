@@ -1,0 +1,17 @@
+[package]
+name = "hone_biome_bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+biome_css_formatter = { path = "../biome_css_formatter" }
+biome_css_parser = { path = "../biome_css_parser" }
+biome_css_syntax = { path = "../biome_css_syntax" }
+biome_formatter = { path = "../biome_formatter" }
+biome_js_formatter = { path = "../biome_js_formatter" }
+biome_js_parser = { path = "../biome_js_parser" }
+biome_js_syntax = { path = "../biome_js_syntax" }
+biome_languages = { path = "../biome_languages", features = ["lang_js", "lang_css"] }
+biome_rowan = { path = "../biome_rowan" }

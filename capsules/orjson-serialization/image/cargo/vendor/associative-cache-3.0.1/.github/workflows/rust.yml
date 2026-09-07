@@ -1,0 +1,41 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["--no-default-features", "--all-features"]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Run tests
+      run: cargo test --all --verbose ${{ matrix.features }}
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        fuzz_target: ["two_way", "four_way"]
+    steps:
+    - uses: actions/checkout@v4
+    - run: rustup install nightly
+      name: Install nightly Rust
+    - run: cargo install cargo-fuzz
+      name: Install `cargo fuzz`
+    - run: cargo fuzz --version
+      name: Query `cargo fuzz` version
+    - run: cargo +nightly fuzz run ${{ matrix.fuzz_target }} -- -max_total_time=300 -rss_limit_mb=4096
+      name: Run `cargo fuzz`
+  check_benches:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: cargo check --all --benches

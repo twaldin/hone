@@ -1,0 +1,75 @@
+name: CI
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+
+jobs:
+  unit-test:
+    name: unit tests
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Rust toolchain
+        run: |
+          rustup set profile minimal
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add llvm-tools-preview
+          rustup show
+          cargo --version
+      - uses: Swatinem/rust-cache@v1
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run tests with measuring coverage
+        run: |
+          cargo llvm-cov --color always --lcov --output-path lcov.info
+          cargo llvm-cov --color always --no-run
+        shell: bash
+      - uses: codecov/codecov-action@v3
+        with:
+          files: lcov.info
+
+  msrv:
+    name: MSRV (Rust 1.38)
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Rust toolchain
+        run: |
+          rustup set profile minimal
+          rustup toolchain install 1.38.0
+          rustup default 1.38.0
+          rustup show
+          cargo --version
+      - uses: Swatinem/rust-cache@v1
+      - name: Run tests
+        run: cargo test --color always
+
+  linter:
+    name: clippy and rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install tools
+        run: |
+          rustup set profile minimal
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustup show
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+      - uses: Swatinem/rust-cache@v1
+      - run: cargo fmt -- --color always --check
+      - run: cargo clippy --color always --all -- -D warnings

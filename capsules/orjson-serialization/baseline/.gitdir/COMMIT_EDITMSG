@@ -1,0 +1,12 @@
+round-6 EXEC-BOUNDARY: trusted-side correctness gate replaces forgeable pytest JUnit verdict
+
+Derive the correctness verdict entirely trusted-side: a candidate-linked
+worker serializes/deserializes a frozen 43-case corpus across a subprocess
+boundary and returns only a per-case output digest or raised exception class;
+the trusted parent (pristine reference orjson, never the candidate build)
+reproduces every outcome over a fresh per-case nonce and compares. Removes the
+per-file pytest JUnit gate whose report artifact was authored in the
+candidate-loading process at the conductor uid (PyInit could pre-author a
+report matching the offline-derivable frozen identity then os._exit(0)). Also
+sweep /var/tmp and /dev/shm candidate scratch between launches. Scored
+benchmark chain unchanged.

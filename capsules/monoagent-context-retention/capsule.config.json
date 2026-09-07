@@ -1,0 +1,57 @@
+{
+  "objective": "Improve only context.ts: retain the greatest registered structured-record utility under maxWindowChars while preserving the current user input exactly. The candidate may change ordering, reservation, representation selection, serialization, and truncation policy. It must emit the version-1 structured projection, may select only registered source records and encodings, must not duplicate or fabricate records, and must never exceed the hard character cap. No model, network, service, fixture file, or wall-clock score is available.",
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": ["bun", "eval.ts"],
+  "protectedPaths": [
+    "contract.ts",
+    "eval.ts",
+    "eval.test.ts",
+    "fixture.ts",
+    "toolchain.lock.json",
+    "worker.ts"
+  ],
+  "assetGroups": [
+    { "id": "train", "visibility": "public", "paths": ["assets/train"] },
+    { "id": "validation", "visibility": "protected", "paths": ["assets/validation"] },
+    { "id": "holdout", "visibility": "holdout", "paths": ["assets/holdout"] }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": { "path": "diagnostics/ordering-report.json" },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "internal-use owner-grounded public-train capsule 3; synthetic fixtures only",
+    "usage": "internal-use-only",
+    "sourceRepository": "monoagent",
+    "sourceCommit": "03b459450875fd44d054f5af4acb594427497683",
+    "sourceTree": "e02affd1f852f395079ff5ad76b2a0bc8f1d9460",
+    "sourcePaths": [
+      "src/front/context.ts",
+      "src/db/database.ts",
+      "test/front/context.test.ts"
+    ],
+    "capsuleLock": {
+      "path": "capsule.lock.json",
+      "hash": "sha256:9caef9f3c31c4402d2fe7295668d476a8ccc41ffd10d8d4162e0fb1998cc84c4"
+    },
+    "provenanceRecord": {
+      "path": "provenance.json",
+      "hash": "sha256:d8802af387a4f704a30e441e174956b44988f79da7d4e1c8f2766d7132ddef44"
+    },
+    "diagnosticArtifacts": {
+      "broken": { "path": "diagnostics/broken/context.ts", "hash": "sha256:aab1a3c30c702e430a94a5351871366b864f51b838343fb90278c00b56bc132e" },
+      "naive": { "path": "diagnostics/naive/context.ts", "hash": "sha256:591def6d2e2b80305e66b11542613a7a3dffedb9a35da77e7d06f5b660e40ee3" },
+      "shortcut": { "path": "diagnostics/shortcut/context.ts", "hash": "sha256:a8b3ec107079fefe99a668e11338b71a47cd979331621734b948e195166211e2" },
+      "improved": { "path": "diagnostics/improved/context.ts", "hash": "sha256:2f2079767c77198d4ac16e8026260252fe87c8401a23126c38bdf8896ae8c466" }
+    },
+    "q": "mean sealed-case feasible-normalized weighted structured-record recall; invalid output q_fail=0",
+    "weightVersion": "monoagent-owner-utility-v1",
+    "fixtureCounts": { "train": 12, "validation": 12, "holdout": 12 },
+    "behaviorGroups": ["focused-effort", "broader-state", "conversation-tail", "oversized-noise"],
+    "tags": ["m1", "public-train", "open-quality", "structured-retention", "bun-sqlite", "no-model"]
+  }
+}

@@ -1,0 +1,39 @@
+[package]
+name = "astral-reqwest-middleware"
+version = "0.5.1"
+authors = ["Rodrigo Gryzinski <rodrigo.gryzinski@truelayer.com>"]
+edition = "2018"
+description = "Wrapper around reqwest to allow for client middleware chains."
+repository = "https://github.com/astral-sh/reqwest-middleware"
+license = "MIT OR Apache-2.0"
+keywords = ["reqwest", "http", "middleware"]
+categories = ["web-programming::http-client"]
+readme = "../README.md"
+
+[lib]
+name = "reqwest_middleware"
+
+[features]
+multipart = ["reqwest/multipart"]
+json = ["reqwest/json", "dep:serde"]
+charset = ["reqwest/charset"]
+http2 = ["reqwest/http2"]
+rustls = ["reqwest/rustls"]
+query = ["reqwest/query", "dep:serde"]
+form = ["reqwest/form", "dep:serde"]
+
+[dependencies]
+anyhow = "1.0.0"
+async-trait = "0.1.51"
+http = "1.0.0"
+reqwest = { version = "0.13.1", default-features = false }
+serde = { version = "1.0.106", optional = true }
+thiserror = "2.0"
+tower-service = "0.3.0"
+
+[dev-dependencies]
+reqwest = { version = "0.13.1", features = ["rustls"] }
+reqwest-retry = { path = "../reqwest-retry", package = "astral-reqwest-retry" }
+reqwest-tracing = { path = "../reqwest-tracing", package = "astral-reqwest-tracing" }
+tokio = { version = "1.0.0", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6.0"

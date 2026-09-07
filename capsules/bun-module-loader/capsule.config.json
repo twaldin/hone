@@ -1,0 +1,103 @@
+{
+  "objective": "Improve module-resolution performance on frozen ESM and TypeScript graph shapes derived from bench/module-loader: the timed metric resolves every import edge of each frozen graph through the runtime resolver (Bun.resolveSync driver), aligning the score with the only mutable surface. Only src/resolver/** is mutable; exact module-graph load observations (exports and side effects), exact resolution-path checksums, focused upstream resolver tests, and whole-process-tree peak memory no more than baseline +10% are hard gates.",
+  "image": "hone-bun-module-loader@sha256:42510480a076778ff594c95fd200610a41721d37ab20b97c80f3e98569c36747",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "workload.py",
+    "LICENSE.md",
+    "revision.txt"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 21600,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "MIT",
+    "provenance": "Current-head OSS-T01 at oven-sh/bun 5187e27669440a72ab1b082f92b7f1b5ca94cfc1; no reference patch or privileged winning artifact. Owner-approved plan revision 2026-07-18 repinned OSS-T01 from a227ad991b62fc4e9b9ee5e998ad6c2e6508fe88 because upstream WebKit prebuilt/generated-source skew makes a227ad99 non-self-buildable. Six interleaved A-A measurements set qBase=14.034003452816037, sigma=0.20940813525668572, qFail=0, and qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=15.081044129099466. Metric-narrowing revision 2026-07-22 (owner-endorsed): the timed phase was realigned from whole-process module-graph loads (resolver share ~1-2%, margins swamped by binary-layout and scheduler noise) to a resolution-heavy driver resolving every frozen import edge, scored as the median of interleaved candidate/reference per-pair time ratios against the sealed pristine image binary. qBase is scale-invariant by yardstick construction (baseline == reference scores qBase for any ratio estimator); sigma and qReference are re-derived from the six post-revision stability aggregates via the original construction qBase+max(5*sigma,0.05*abs(qBase-qFail)).",
+    "sourceDetails": {
+      "repository": "oven-sh/bun",
+      "commit": "5187e27669440a72ab1b082f92b7f1b5ca94cfc1",
+      "tree": "5e09213e3cf377246c6abe446fa94ae91f211850",
+      "url": "https://github.com/oven-sh/bun/commit/5187e27669440a72ab1b082f92b7f1b5ca94cfc1",
+      "licenseFile": "LICENSE.md",
+      "derivation": "Exact pinned source is image-baked without repository metadata; the candidate artifact exposes only src/resolver plus trusted evaluator identity files.",
+      "mutableEnvelope": [
+        "src/resolver/**"
+      ]
+    },
+    "toolchain": {
+      "baseImage": "ghcr.io/oven-sh/bun-development-docker-image@sha256:f627937ba0ed62821e75b7cbe2a9b8a73dd69234442c04ad49f7b327fb7f8300",
+      "bootstrapBun": "1.3.13 sha256:67892bb6734ef352f90a964f0a2a680d5f6e6d15bdb5510e56b8065ac4d599ae",
+      "clangLlvm": "21.1.8",
+      "rust": "nightly-2026-05-06",
+      "cargoProfile": "release, lto=off, codegen-units=16",
+      "image": "hone-bun-module-loader@sha256:42510480a076778ff594c95fd200610a41721d37ab20b97c80f3e98569c36747",
+      "network": "none",
+      "dependencies": "image-baked Bun install cache, complete Cargo registry cache, rustup toolchain, native build objects, WebKit/Node prebuilt caches, reflect-metadata 0.2.2 and tsyringe 4.8.0"
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max (provisional; frozen-host recalibration required)",
+      "freshProcess": true,
+      "freshStatePerLaunch": true,
+      "warmRepetitions": 5,
+      "q": "reference-normalized per-graph score after all hard gates pass: each graph runs an untimed correctness load per binary, one untimed settling repetition, then 30 (6 rounds x warmRepetitions) interleaved candidate/reference resolution-driver pairs scored as the median per-pair time ratio (adjacent pair members share host state, so frequency drift, contention spikes, and scheduler mode-occupancy luck divide out), and q is the geometric mean over graphs of qBase/pairRatio, so a candidate identical to the trusted baseline scores qBase by construction; every loader launch gets a fresh per-launch transpiler cache and TMPDIR under a root-owned measurement root plus a fresh IPC namespace, joins a fresh per-launch cgroup leaf before the setpriv privilege drop so its whole-process-tree peak memory is the kernel-owned monotone cgroup memory.peak read after the full-tree reap (candidate code can neither write the leaf control files nor reset the counter), and is followed by a candidate-uid process reap and shared tmp-root purge, so no repetition can replay state persisted by an earlier one",
+      "qFail": 0,
+      "qBase": 14.034003452816037,
+      "sigma": 0.057695965931277085,
+      "qReference": 14.73570362545684,
+      "aaSamples": [
+        13.987198728064019,
+        14.009116222933596,
+        13.984965397044792,
+        13.972097956561877,
+        13.866455712244862,
+        13.894249139632436
+      ],
+      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+      "boundedEvaluatorSec": 600,
+      "hardGates": [
+        "80 focused upstream resolver tests pass (plus 2 upstream skips and 1 todo; one uid-sensitive auto-install permission case is excluded from the unprivileged test runner)",
+        "exact canonical export SHA-256 for every cold and warm observation",
+        "exact canonical side-effect SHA-256 for every cold and warm observation",
+        "whole-process-tree cgroup memory.peak for every graph <= frozen baseline +10%"
+      ]
+    },
+    "tags": [
+      "m2",
+      "oss",
+      "bun",
+      "module-loader",
+      "resolver",
+      "performance"
+    ]
+  }
+}

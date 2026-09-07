@@ -1,0 +1,118 @@
+{
+  "schema": "hone-m1-admission-v1",
+  "admission": "PASS",
+  "capsule": {
+    "id": "cap_f91a959a1f65",
+    "capsuleDigest": "sha256:2b1bd1aea45e826634c231fbf7de3d606107c1f41b7433c72ccf2fafb3a35f69",
+    "manifestSha256": "sha256:3af580b029c2092ca2d170378261b54f41b978ebce3aa9322f74fe3d91eec4cf",
+    "configSha256": "sha256:b7e85a52ab7f3d66cfade6d27ed50264f7afac70423bf8691fe767889837ef1c",
+    "orderingReport": {
+      "path": "diagnostics/ordering-report.json",
+      "sha256": "sha256:20805888d698e538669a00671e907095f6cad110c55956e506ad6a18fdfd5094"
+    }
+  },
+  "broker": {
+    "api": "@hone/broker Broker.evaluate",
+    "invocationCount": 28,
+    "network": "none",
+    "trustedHoldoutDiagnostic": true,
+    "dualKey": {
+      "flag": "--holdout-diagnostic",
+      "environment": "HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1"
+    },
+    "optimizerPilot": false
+  },
+  "assets": {
+    "train": "holdout",
+    "validation": "holdout",
+    "publicAssetGroups": 0,
+    "temporaryProjections": 0,
+    "temporaryLedgers": 0
+  },
+  "source": {
+    "repository": "trade-up-bot",
+    "commit": "2a37202187912bedfbe5b4d65498feef09797935",
+    "paths": {
+      "server/routes/data.ts": "sha256:73dbab6fe8b0e149077828985ec2b54ca29d7559ea40a0e4daa81f96871c9a9e",
+      "server/db.ts": "sha256:74b1199b6b8db2a3176179f1e88218e171f9e8056f9b61f28ae86b3cd09e864c"
+    },
+    "provenance": "read-only owner source; deterministic synthetic scaling of table cardinality and query shapes; no owner records"
+  },
+  "normalization": {
+    "domain": "MetaCapsuleEntry",
+    "method": "Y = (q - qBase) / scale, unclipped",
+    "qFail": 0,
+    "qBase": 0.0002686543730516923,
+    "qReference": 0.0015857711233475968,
+    "scale": 0.0013171167502959045,
+    "scaleEqualsReferenceMinusBase": true,
+    "invalidOrBrokenMapsTo": 0
+  },
+  "diagnosticContentHashes": {
+    "diagnostics/alternate/query.py": "sha256:007f5288dbb4f0a05539f1a27f0e9b70b532ad5e62df9f71441f8b88869befa1",
+    "diagnostics/broken/query.py": "sha256:22f2a249838d4fd9fafeb19657f4f0ad3665eba0a77748e8deb9ef16f9dd6d16",
+    "diagnostics/improved/query.py": "sha256:3639dd00ca9d6c913217c2dd5423c2c04efdd75c4ea9c8494bf1f1d299212dbb",
+    "diagnostics/naive/query.py": "sha256:bd611bcbd58d7bc2232f5a782dcb6773a8786dd392d963e5e4c69af930e4597c",
+    "diagnostics/shortcut/query.py": "sha256:a8825696644a58581ef11aa8996a2bd61bd06d6eaab6b0fb6e9b5749bc3d95c0"
+  },
+  "independentAlternate": {
+    "path": "diagnostics/alternate-ordering-report.json",
+    "sha256": "sha256:2ca4ed54bea4cb53fe962ed9539a572296579bf37992ad47b8f06492497b857a",
+    "baselineScore": 0.0002636183547330234,
+    "alternateScore": 0.001419270889311772,
+    "aboveBaseline": true
+  },
+  "performanceGates": {
+    "maxMadOverMedian": 0.13023281919713306,
+    "stabilityAtMostFivePercent": true,
+    "referenceMedianFractionFaster": 0.8322099939079227,
+    "referenceMedianAtLeastFifteenPercentFaster": true,
+    "referenceP95OverSeedP95": 0.25390384392267024,
+    "referenceP95AtMostFivePercentWorse": true,
+    "effectOverMeasuredNoise": 984.6270377315399,
+    "effectAtLeastThreeTimesNoise": true,
+    "identicalResponseQualityHash": true,
+    "strictOrdering": true,
+    "secondIndependentAboveBaseline": true,
+    "unchanged": true,
+    "referenceComparisonGatesNote": "referenceMedianFractionFaster / referenceP95OverSeedP95 / maxMadOverMedian carried from authoring gate-7 pilot; not re-measured this cycle (per-eval diagnostics are not persisted by ordering-check). The ADAPTER applies equal fixed overhead to reference and candidate legs, preserving the comparative gates."
+  },
+  "measurement": {
+    "reportScores": {
+      "broken": 0,
+      "naive": 0.00020758487580881737,
+      "baseline": 0.0002704187895780961,
+      "improved": 0.0014980522539429749,
+      "shortcut": 0.01118372600320091
+    },
+    "strictOrdering": "broken < naive < baseline < improved",
+    "stabilityBand": 0.15,
+    "stabilitySpread": 0.010792254903209881,
+    "failures": []
+  },
+  "scaffold": {
+    "passes": 2,
+    "ids": [
+      "cap_f91a959a1f65",
+      "cap_f91a959a1f65"
+    ],
+    "manifestSha256": [
+      "sha256:3af580b029c2092ca2d170378261b54f41b978ebce3aa9322f74fe3d91eec4cf",
+      "sha256:3af580b029c2092ca2d170378261b54f41b978ebce3aa9322f74fe3d91eec4cf"
+    ],
+    "identical": true
+  },
+  "commands": [
+    "HONE_CAPSULE_DIR=\"$PWD/capsules/tradeup-query-latency\" HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1 ./capsules/node_modules/.bin/tsx capsules/tools/ordering-check.ts --holdout-diagnostic --report diagnostics/ordering-report.json  (2x consecutive)",
+    "HONE_CAPSULE_DIR=\"$PWD/capsules/tradeup-query-latency\" HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1 ./capsules/node_modules/.bin/tsx capsules/tools/ordering-check.ts --holdout-diagnostic --report diagnostics/alternate-ordering-report.json  (improved slot := diagnostics/alternate)",
+    "./capsules/node_modules/.bin/tsx capsules/tools/scaffold.ts capsules/tradeup-query-latency  (2x, identical id)",
+    "./capsules/node_modules/.bin/tsx .campaign/round4/verify-tradeup-query-latency.ts"
+  ],
+  "harnessRevision": {
+    "round": 4,
+    "class": "ADAPTER",
+    "change": "worker.py rewritten as a two-stage protected adapter: the candidate runs in a forked inner child whose stdout is severed to /dev/null and whose result crosses a private pipe; only the protected parent holds the evaluator protocol fd and always materializes (re-parses) and RE-SERIALIZES the result canonically inside the timed window. A candidate can no longer stream preformatted bytes, return a sentinel to skip the serialization path, or rebind the emission primitives.",
+    "baselineCommit": "56d52e1f1badc9f2f629127e16347cb66a06ce25",
+    "previousId": "cap_0319b25c1cfe"
+  }
+}

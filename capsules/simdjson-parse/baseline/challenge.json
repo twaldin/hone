@@ -1,0 +1,34 @@
+{
+  "taskId": "OSS-T05",
+  "revision": "8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
+  "qFail": 0.0,
+  "validFiles": [
+    "twitter.json",
+    "citm_catalog.json",
+    "generated.json"
+  ],
+  "ndjsonFiles": [
+    "amazon_cellphones.ndjson"
+  ],
+  "malformedFiles": [
+    "trailing-comma.json",
+    "bad-escape.json",
+    "truncated.json",
+    "leading-zero.json"
+  ],
+  "timingModes": [
+    "dom",
+    "ondemand"
+  ],
+  "timingSamples": 10,
+  "timingTargetSec": 1.0,
+  "peakRssToleranceFraction": 0.05,
+  "compileTimeoutSec": 180,
+  "testTimeoutSec": 45,
+  "benchmarkTimeoutSec": 90,
+  "evaluatorTimeoutSec": 900,
+  "timingWorkBytes": {
+    "dom": 200000000,
+    "ondemand": 120000000
+  }
+}

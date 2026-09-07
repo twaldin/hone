@@ -1,0 +1,23 @@
+[package]
+name = "rancor"
+description = "Scalable and efficient error handling without type composition"
+version = "0.1.1"
+authors = ["David Koloski <djkoloski@gmail.com>"]
+edition = "2021"
+rust-version = "1.81"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/rkyv/rancor"
+keywords = ["error", "error-handling", "no_std"]
+categories = ["rust-patterns", "no-std"]
+documentation = "https://docs.rs/rancor"
+
+[dependencies]
+ptr_meta = { version = "0.3", default-features = false, features = ["derive"] }
+
+[features]
+default = ["alloc"]
+alloc = []
+
+[patch.crates-io]
+ptr_meta = { git = "https://github.com/rkyv/ptr_meta" }

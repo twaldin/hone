@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_0588ff00ef4c",
+  "objective": "Make the grid A* pathfinder in astar.py substantially faster while preserving correctness: the trusted correctness suite must keep passing and returned paths must remain optimal shortest paths. Only the pathfinder implementation may change; eval.py, worker.py, and test_astar.py are protected.",
+  "baseline": {
+    "kind": "git",
+    "commit": "8bfedcfdc43fb6204b85e51331526277b4a6f50e"
+  },
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "test_astar.py"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/train_01.json",
+        "assets/train/train_02.json",
+        "assets/train/train_03.json",
+        "assets/train/train_04.json",
+        "assets/train/train_05.json",
+        "assets/train/train_06.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/validation_01.json",
+        "assets/validation/validation_02.json",
+        "assets/validation/validation_03.json",
+        "assets/validation/validation_04.json"
+      ]
+    },
+    {
+      "id": "holdout",
+      "visibility": "holdout",
+      "paths": [
+        "assets/holdout/holdout_01.json",
+        "assets/holdout/holdout_02.json",
+        "assets/holdout/holdout_03.json",
+        "assets/holdout/holdout_04.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:d265a2ac14569b0fa518672e81db27ba9d950c8576ca8b661c21a6370c539de8"
+  },
+  "contentHashes": {
+    "assets/train/train_01.json": "sha256:56211c5000c79b9a07746379223292008fc9a1727a981cdf28b1dce6d394da37",
+    "assets/train/train_02.json": "sha256:cb322e913ea2d4ed7f007d66e57c795cad52f0dc3796d959e183863757f8706d",
+    "assets/train/train_03.json": "sha256:046e76981a6c6d65873c157e694b467fcaf45b038d1c2ee1067a4207ad270712",
+    "assets/train/train_04.json": "sha256:e5ebc2a8a9dd1a5ec57a9c1fa9c14252922a18c01d903e05a6678a8fcfe192e5",
+    "assets/train/train_05.json": "sha256:7c71b3b3e3789e71eee208f12dec56977dc876c875db26262ea52aadd7deadbe",
+    "assets/train/train_06.json": "sha256:22006c0c3daa013341b74571260b00db962bcd1be5ecd864561b53fc2d81671c",
+    "assets/validation/validation_01.json": "sha256:fc743b7557a173b250ec6fd4b609becc3753a4ede1e538710826bae39b448ab3",
+    "assets/validation/validation_02.json": "sha256:a07a92337a290504b04cc44da34fabb1431ebac047371c8549f9a49b63c27ffa",
+    "assets/validation/validation_03.json": "sha256:db9770262be0645baf843a71affe1956b9cea7c0db09c56c0e590d360f970363",
+    "assets/validation/validation_04.json": "sha256:ded0967b2929885f6c78f0b868a37d66fbc37d092abc8ea6ac77fe524169cb44",
+    "assets/holdout/holdout_01.json": "sha256:46f3dff73a1e8304e97dfe855b12d36b62b3c89ab92d808271b749859ecba6e5",
+    "assets/holdout/holdout_02.json": "sha256:5e9aec249fa7bcc61bd7c2dcbfd4d082e8dc1e4a5f4beb4c52465bc2a69aebd2",
+    "assets/holdout/holdout_03.json": "sha256:613b52bd082929a3318c2607f44e2ab4383d1f12c4a580bda6284ac544519086",
+    "assets/holdout/holdout_04.json": "sha256:051b8163c9b1b9f4379ce17938957501e4fc6d2be46812a36fa848b137f7af5a"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "hone seed WP6 tier-1 bootstrap capsule; M1 improved reference frozen byte-for-byte from the M0 delivery winner",
+    "tags": [
+      "tier-1",
+      "performance",
+      "python",
+      "m1-public-train"
+    ],
+    "m0Delivery": {
+      "runId": "run_mrnta7aq34f9c0",
+      "artifact": "sha256:cd9cc018ec8fd5a60cff0af202839c6e799da35ead358b445d1405f5df65bb9e",
+      "assetGroupId": "train",
+      "score": 0.2453954508867987,
+      "sourcePath": "diagnostics/improved/astar.py",
+      "sourceSha256": "sha256:c7aabbbd4132b7180e44f5a06b3d386ec1d6c3c81f9a5e450ef910b3360c48c8"
+    },
+    "independentDiagnosticOrdering": {
+      "candidatePath": "diagnostics/alternate/astar.py",
+      "candidateSha256": "sha256:b4ed2b82a6c4a0b541168905dfa86007bae85bf115b77f9825ba21878c924f2f",
+      "reportPath": "diagnostics/alternate-ordering-report.json",
+      "reportSha256": "sha256:80b5fdb6484d00d32b7a0be9e7e1cd1b51f40f0195dc686d777a42faa260a5db"
+    },
+    "m1Normalization": {
+      "qFail": 0,
+      "qBase": 0.023772025789093716,
+      "qReference": 0.21622805389884087,
+      "scale": 0.19245602810974716
+    },
+    "diagnosticContentHashes": {
+      "diagnostics/alternate/astar.py": "sha256:b4ed2b82a6c4a0b541168905dfa86007bae85bf115b77f9825ba21878c924f2f",
+      "diagnostics/broken/astar.py": "sha256:b1ab62e80fb899477b2a6cf81660c66615deca7bc09651b156f7d9301ea33a98",
+      "diagnostics/improved/astar.py": "sha256:c7aabbbd4132b7180e44f5a06b3d386ec1d6c3c81f9a5e450ef910b3360c48c8",
+      "diagnostics/naive/astar.py": "sha256:68fcf4288c324f339fa123efe12344fb07f80230bc8c5d9be44046e8ef11721c",
+      "diagnostics/shortcut/astar.py": "sha256:40e59f8f062c582d0381a1bc3a97a4f48337dda4f918d08de1885fb47494d0b5"
+    },
+    "performanceAdmission": {
+      "schema": "hone-seeded-astar-performance-admission-v1",
+      "path": "diagnostics/performance-admission.json",
+      "sha256": "sha256:e3ec8f1fcc6184f012e43e27a7f5730a200748a16735fb5f069fbec65246a935",
+      "harnessPath": "tools/performance-admission.ts",
+      "harnessSha256": "sha256:5097766621b10aa1f4eaf7bc622b94707abb51cc53a370d4fbf8b6fb99d3f5fd"
+    }
+  }
+}

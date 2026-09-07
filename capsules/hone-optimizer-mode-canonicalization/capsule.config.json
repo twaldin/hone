@@ -1,0 +1,66 @@
+{
+  "objective": "Canonicalize optimizer source modes across umask and executable-bit differences while retaining real executable identity. Maximize exact cross-host identity cases; only solution.py is mutable.",
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "internal-use-only",
+    "provenance": "bounded artifact-mode extraction from Hone baseline ca768494ecff546d1ff37c116e36e4e362d052e1 and reference 2649981",
+    "sourceDetails": {
+      "repository": "hone-full-rewrite",
+      "commit": "ca768494ecff546d1ff37c116e36e4e362d052e1",
+      "referenceCommit": "2649981",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 3,
+      "freshProcess": true,
+      "q": "passed cross-host identity cases divided by declared cases",
+      "qFail": 0
+    },
+    "tags": [
+      "m2",
+      "owner",
+      "artifact",
+      "cross-platform"
+    ]
+  }
+}

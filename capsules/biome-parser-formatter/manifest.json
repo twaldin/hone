@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_b3f2a63d192b",
+  "objective": "Improve JavaScript, TypeScript, and CSS parser/formatter throughput across frozen deterministic large files. Preserve byte-exact formatted output, parser diagnostic hashes, idempotence, relevant parser/formatter regression tests, and peak RSS within 2% of baseline. Only the four pinned parser/formatter crate src trees are mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "2abb1517cecbc52ecd9f2f2c5e7f3f0448a7c33c"
+  },
+  "image": "hone-biome-task@sha256:c3f82bd01e58fee98a71624e881838ce40270cc86ae0e775edf784e780ac0184",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "challenge.json",
+    "LICENSES",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/expected.json",
+        "assets/train/generated.css",
+        "assets/train/generated.js",
+        "assets/train/generated.ts",
+        "assets/train/recovery.css",
+        "assets/train/recovery.js"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/declarations.ts",
+        "assets/validation/expected.json",
+        "assets/validation/layout.css",
+        "assets/validation/modules.js",
+        "assets/validation/recovery.css",
+        "assets/validation/recovery.js"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:a8b779fa2b9ec691728f68f759a2ec5488dbb350aa643e95210f7b92db470a2d"
+  },
+  "contentHashes": {
+    "assets/train/expected.json": "sha256:8e7507623204f1a85be4845c369397916626a08017bedee6ae9206e9a99a172e",
+    "assets/train/generated.css": "sha256:e6ecbbfda93e7a4e61761b29e4c7a02091a33ff68a3bab8d2b702e2b1522c047",
+    "assets/train/generated.js": "sha256:d3195f019b6d807700bd12180f1b7715fb7c51438ff656610a31c35f6f4dffc0",
+    "assets/train/generated.ts": "sha256:f2fcf8216a4733816858520965a1c7ff624e701eea2503fdadbb1d931252ef12",
+    "assets/train/recovery.css": "sha256:2d3ca5304e4ca62bd520921a5a164cc4433a29954e60fa1463e8fae66713c415",
+    "assets/train/recovery.js": "sha256:2990091364f8d7ee6ea77474ed5ac9e7a3cdb14613657741bc0c3b381523a5d4",
+    "assets/validation/declarations.ts": "sha256:1df7c70edab1f14ec34c140f6d82cdf6acfd1c0ea4d2a40710e11d20cfc1d2e1",
+    "assets/validation/expected.json": "sha256:3ec798b2c103f4bd80f1ff6d45e5895c02c9aa45827192c233e12289d6ef06bc",
+    "assets/validation/layout.css": "sha256:2cfa0c4e35d9a23f3890064c4c6be1b495803a1d81c786ecb31580b74f7a2348",
+    "assets/validation/modules.js": "sha256:8a23cbfa3649e54d3b01431bc9e20ee757d6612e0504fba5c203ca27d54c0e21",
+    "assets/validation/recovery.css": "sha256:e98604f1e451bc553f1fd1831a3199af38e24c219b294be1615e1dfe37b9e425",
+    "assets/validation/recovery.js": "sha256:47fc854ac99843e7137b9e1e1e9cd189a273a8897f7e230a30cf73d041840056"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "Pinned Biome 8ebafe1c7489f1f7af379b8e52b8ad063c82d28a. Workload operations reproduce the uncached parse and format-node/print paths of the upstream JS, TS, and CSS Criterion benches. Third-party CDN benchmark inputs were not redistributed; deterministic large JS/TS/CSS and recovery sources were generated and frozen instead. Round-6: deliberately malformed recovery CSS and formatter edge constructs (previously exercised only by a separate fixed-input selftest mode) are folded into the scored corpus as train/validation recovery.css, so parser error-recovery and formatter edge behavior run under the same nonce-seeded per-iteration input rotation and proof-vs-pristine-reference binding as every other workload, on the timed candidate-indistinguishable path; the separate 'selftest' runner mode was removed. qReference is constructed after locked A-A calibration as qBase + max(5*sigma, 0.05*abs(qBase-qFail)).",
+    "license": "MIT OR Apache-2.0; upstream notices preserved in baseline/LICENSES and image; generated workloads are CC0-1.0",
+    "tags": [
+      "m2",
+      "oss",
+      "biome",
+      "parser",
+      "formatter",
+      "performance"
+    ],
+    "partition": "m2-oss-current-head-train-panel-a",
+    "headroom": {
+      "requirement": "gate-7 development-train headroom: three two-episode seed-optimizer pilots on the current host must produce at least one valid non-baseline candidate while fewer than three runs reach qReference",
+      "pilotPath": "trusted supervisor + local backend + broker measurement path under trusted synthetic-meta authority (admissionReview off); no optimizer-queryable state",
+      "evidence": "diagnostics/admission-evidence.json#seedPilots"
+    },
+    "sourceDetails": {
+      "repository": "biomejs/biome",
+      "revision": "8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
+      "url": "https://github.com/biomejs/biome/commit/8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
+      "toolchain": "Rust 1.96.1 linux/arm64; rust base sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663",
+      "offlineDependencies": "cargo vendor from the pinned Cargo.lock at toolchain/vendor; CARGO_NET_OFFLINE=true; evaluator network disabled",
+      "mutableEnvelope": [
+        "mutable/biome_js_parser/src",
+        "mutable/biome_js_formatter/src",
+        "mutable/biome_css_parser/src",
+        "mutable/biome_css_formatter/src"
+      ],
+      "upstreamBenchHashes": {
+        "biome_js_parser/benches/js_parser.rs": "sha256:c0a5466c73d2a31ff99cceda89fe40d1d8fd3c210c2b7cfdc351d7f845a998c8",
+        "biome_js_formatter/benches/js_formatter.rs": "sha256:5b6b5c76cca39ca81890842925e7f591c27a2493601a99a3de6f715e7a479972",
+        "biome_css_parser/benches/css_parser.rs": "sha256:91d489e82411ab9fdde60e5d9233b594a6f32683ee36e9bf124f3212c07491d2",
+        "biome_css_formatter/benches/css_formatter.rs": "sha256:761585fb9cd870fe08b58d575c4c0e2a223fee7be9e2afd4b5157cc87399c7bd"
+      }
+    },
+    "measurement": {
+      "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local calibration",
+      "freshProcess": true,
+      "samplesPerWorkload": 30,
+      "aaSamples": 3,
+      "q": "frozen anchor (qBase) scaled by the geometric mean over parse/format workloads of the MEDIAN per-pair reference/candidate wall-time ratio; per workload the candidate and the pristine in-container reference alternate over BENCH_BATCHES=30 fresh-process legs, each batch's candidate leg paired with the reference leg run back-to-back against the same instantaneous host load so common-mode contention cancels within the pair, and the median over pairs rejects pairs where a contention burst hit only one leg; repetitions come from a frozen per-file table (challenge.json) calibrated so every timed leg is ~0.6s of work, equalizing each workload's exposure to load; every timed iteration is bound to the pristine reference via a nonce-keyed proof",
+      "qFail": 1e-12,
+      "qBase": 0.0769000486784732,
+      "sigma": 0.00019408050558115806,
+      "qReference": 0.08074505111234687,
+      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+      "rssGate": "peak workload RSS <= frozen ceiling rssLimitKb (28000 KiB); whole-tree kernel cgroup memory.peak accounting; round-6 observed baseline whole-tree peaks with the recovery.css corpus entries: ~24452 KiB train / ~23644 KiB validation (ceiling ~1.15x), so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
+    }
+  }
+}

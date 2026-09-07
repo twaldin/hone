@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hone — Landing Draft Gallery</title>
+<style>
+  :root {
+    --bg: #0d0f12;
+    --panel: #16191e;
+    --border: #262b33;
+    --text: #e8eaed;
+    --dim: #8a919c;
+    --accent: #5eead4;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 32px 40px 80px;
+  }
+  header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; }
+  .count { color: var(--dim); font-size: 13px; }
+  p.hint { color: var(--dim); font-size: 13px; margin-bottom: 28px; }
+  kbd {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 6px; font: 12px ui-monospace, "SF Mono", monospace;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 24px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: border-color .15s ease, transform .15s ease;
+  }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .frame-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1440 / 900;
+    overflow: hidden;
+    background: #000;
+  }
+  .frame-wrap iframe {
+    width: 1440px; height: 900px;
+    transform-origin: top left;
+    border: 0;
+    pointer-events: none;
+    position: absolute; top: 0; left: 0;
+  }
+  .frame-wrap a.overlay { position: absolute; inset: 0; z-index: 2; }
+  .meta {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px;
+  }
+  .meta .name { font-weight: 600; font-size: 14px; }
+  .meta .dir { color: var(--dim); font: 12px ui-monospace, "SF Mono", monospace; }
+  .meta a {
+    color: var(--accent); text-decoration: none; font-size: 13px; font-weight: 550;
+  }
+  .meta a:hover { text-decoration: underline; }
+  .empty { color: var(--dim); padding: 60px 0; text-align: center; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Hone landing drafts</h1>
+  <span class="count" id="count">scanning…</span>
+</header>
+<p class="hint">Serve with <kbd>cd site && python3 -m http.server 4173</kbd> then open <kbd>http://localhost:4173/gallery.html</kbd>. Click any preview to open it full-size in a new tab. Drafts live in <kbd>site/variants/vNN/index.html</kbd>; this page auto-detects v01–v24.</p>
+<div class="grid" id="grid"></div>
+<div class="empty" id="empty" hidden>No variants found yet — designers are still drawing. Refresh in a bit.</div>
+<script>
+(async () => {
+  const grid = document.getElementById("grid");
+  const count = document.getElementById("count");
+  const slots = Array.from({ length: 24 }, (_, i) => "v" + String(i + 1).padStart(2, "0"));
+  const found = [];
+  await Promise.all(slots.map(async (v) => {
+    const url = `variants/${v}/index.html`;
+    try {
+      const res = await fetch(url, { method: "HEAD" });
+      if (res.ok) found.push(v);
+    } catch { /* missing */ }
+  }));
+  found.sort();
+  count.textContent = found.length ? `${found.length} drafts` : "";
+  document.getElementById("empty").hidden = found.length > 0;
+
+  const fit = () => {
+    document.querySelectorAll(".frame-wrap").forEach((w) => {
+      const f = w.querySelector("iframe");
+      if (f) f.style.transform = `scale(${w.clientWidth / 1440})`;
+    });
+  };
+
+  for (const v of found) {
+    const url = `variants/${v}/index.html`;
+    let title = v;
+    try {
+      const html = await (await fetch(url)).text();
+      const m = html.match(/<title>([^<]*)<\/title>/i);
+      if (m && m[1].trim()) title = m[1].trim();
+    } catch { /* keep slot name */ }
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="frame-wrap">
+        <iframe src="${url}" loading="lazy" scrolling="no" tabindex="-1"></iframe>
+        <a class="overlay" href="${url}" target="_blank" aria-label="Open ${v}"></a>
+      </div>
+      <div class="meta">
+        <div><div class="name">${title}</div><div class="dir">variants/${v}</div></div>
+        <a href="${url}" target="_blank">Open ↗</a>
+      </div>`;
+    grid.appendChild(card);
+  }
+  fit();
+  addEventListener("resize", fit);
+})();
+</script>
+</body>
+</html>

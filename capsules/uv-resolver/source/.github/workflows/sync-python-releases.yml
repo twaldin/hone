@@ -1,0 +1,58 @@
+# Sync Python releases and create a pull request.
+#
+# Based on: https://github.com/astral-sh/rye/blob/57b7c089e494138aae29a130afb2e17f447970bf/.github/workflows/sync-python-releases.yml
+name: "Sync Python downloads"
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+permissions: {}
+
+jobs:
+  sync:
+    if: github.repository == 'astral-sh/uv'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "latest"
+          enable-cache: true
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: false
+      - name: Sync Python Releases
+        run: uv run --locked --python 3.12 --no-build --script fetch-download-metadata.py
+        working-directory: ./crates/uv-python
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync Sysconfig Targets
+        run: ${GITHUB_WORKSPACE}/crates/uv-dev/sync_sysconfig_targets.sh
+        working-directory: ./crates/uv-dev
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Update Python version constants"
+        run: uv run --locked --python 3.12 --no-build --script scripts/sync-python-version-constants.py
+
+      - name: "Create Pull Request"
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          commit-message: "Sync latest Python releases"
+          add-paths: |
+            crates/uv-python/download-metadata.json
+            crates/uv-dev/src/generate_sysconfig_mappings.rs
+            crates/uv-python/src/sysconfig/generated_mappings.rs
+            crates/uv-test/src/lib.rs
+          branch: "sync-python-releases"
+          title: "Sync latest Python releases"
+          body: "Automated update for Python releases."
+          base: "main"
+          draft: true

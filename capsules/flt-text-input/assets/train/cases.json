@@ -1,0 +1,2157 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "https://github.com/twaldin/flt.git",
+    "commit": "fe05463a921b9c4d808a338ea07d33abe45b6487",
+    "tree": "6b5de048d6531b5d8f120f7f7b6fbb0540aef9cc",
+    "implementationPath": "src/tui/widgets/text-input.ts",
+    "implementationBlob": "1b90579c7161f7624406500eebab4c022e325abc",
+    "testPath": "tests/unit/tui/text-input.test.ts",
+    "testBlob": "a32be32ea403e0c5180b1bb3902b90f52c509005"
+  },
+  "split": "train",
+  "visibility": "public",
+  "declared": 41,
+  "behaviorGroups": [
+    "completion",
+    "cursor",
+    "deletion",
+    "escape",
+    "helpers",
+    "history",
+    "integration",
+    "multiline",
+    "render"
+  ],
+  "cases": [
+    {
+      "id": "owner.cursor.left-right-clamp",
+      "group": "cursor",
+      "origin": "owner test: left/right move one char with clamping at edges",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "abc"
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "left"
+        },
+        {
+          "op": "key",
+          "key": "right"
+        },
+        {
+          "op": "key",
+          "key": "right"
+        },
+        {
+          "op": "key",
+          "key": "right"
+        },
+        {
+          "op": "setCursor",
+          "pos": 0
+        },
+        {
+          "op": "key",
+          "key": "left"
+        }
+      ],
+      "expected": [
+        {
+          "value": "abc",
+          "cursor": 2,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "abc",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "abc",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "abc",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "abc",
+          "cursor": 0,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "abc",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.cursor.word-left",
+      "group": "cursor",
+      "origin": "owner test: word-left jumps to start of word",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "foo bar baz"
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "word-left"
+        },
+        {
+          "op": "key",
+          "key": "word-left"
+        },
+        {
+          "op": "key",
+          "key": "word-left"
+        }
+      ],
+      "expected": [
+        {
+          "value": "foo bar baz",
+          "cursor": 8,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "foo bar baz",
+          "cursor": 4,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "foo bar baz",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.cursor.word-right",
+      "group": "cursor",
+      "origin": "owner test: word-right jumps to end of word",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "foo bar baz"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 0
+        },
+        {
+          "op": "key",
+          "key": "word-right"
+        },
+        {
+          "op": "key",
+          "key": "word-right"
+        },
+        {
+          "op": "key",
+          "key": "word-right"
+        }
+      ],
+      "expected": [
+        {
+          "value": "foo bar baz",
+          "cursor": 0,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "foo bar baz",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "foo bar baz",
+          "cursor": 7,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "foo bar baz",
+          "cursor": 11,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.helper.word-punctuation",
+      "group": "helpers",
+      "origin": "owner test: word-jumps treat punctuation as separators",
+      "kind": "helper",
+      "ops": [
+        {
+          "fn": "wordBoundaryLeft",
+          "args": [
+            "foo.bar",
+            7
+          ]
+        },
+        {
+          "fn": "wordBoundaryRight",
+          "args": [
+            "foo.bar",
+            0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "result": 4
+        },
+        {
+          "result": 3
+        }
+      ]
+    },
+    {
+      "id": "owner.cursor.home-end-multiline",
+      "group": "cursor",
+      "origin": "owner test: home/end jump to line boundaries",
+      "kind": "widget",
+      "setup": {
+        "mode": "multi",
+        "initialValue": "line one\nline two\nline three"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 15
+        },
+        {
+          "op": "key",
+          "key": "home"
+        },
+        {
+          "op": "key",
+          "key": "end"
+        }
+      ],
+      "expected": [
+        {
+          "value": "line one\nline two\nline three",
+          "cursor": 15,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "line one\nline two\nline three",
+          "cursor": 9,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "line one\nline two\nline three",
+          "cursor": 17,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.cursor.line-aliases",
+      "group": "cursor",
+      "origin": "owner test: line-start / line-end aliases work",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "hello world"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 5
+        },
+        {
+          "op": "key",
+          "key": "line-start"
+        },
+        {
+          "op": "key",
+          "key": "line-end"
+        }
+      ],
+      "expected": [
+        {
+          "value": "hello world",
+          "cursor": 5,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "hello world",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "hello world",
+          "cursor": 11,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.delete.backspace-start",
+      "group": "deletion",
+      "origin": "owner test: backspace at start is a no-op",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "abc"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 0
+        },
+        {
+          "op": "key",
+          "key": "backspace"
+        }
+      ],
+      "expected": [
+        {
+          "value": "abc",
+          "cursor": 0,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "abc",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.delete.backspace-left",
+      "group": "deletion",
+      "origin": "owner test: backspace deletes one char left",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "abc"
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "backspace"
+        }
+      ],
+      "expected": [
+        {
+          "value": "ab",
+          "cursor": 2,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.delete.delete-end",
+      "group": "deletion",
+      "origin": "owner test: delete at end is a no-op",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "abc"
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "delete"
+        }
+      ],
+      "expected": [
+        {
+          "value": "abc",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.delete.delete-right",
+      "group": "deletion",
+      "origin": "owner test: delete removes char to the right",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "abc"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 1
+        },
+        {
+          "op": "key",
+          "key": "delete"
+        }
+      ],
+      "expected": [
+        {
+          "value": "abc",
+          "cursor": 1,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "ac",
+          "cursor": 1,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.delete.backspace-newline",
+      "group": "deletion",
+      "origin": "owner test: backspace over newline joins lines",
+      "kind": "widget",
+      "setup": {
+        "mode": "multi",
+        "initialValue": "foo\nbar"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 4
+        },
+        {
+          "op": "key",
+          "key": "backspace"
+        }
+      ],
+      "expected": [
+        {
+          "value": "foo\nbar",
+          "cursor": 4,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "foobar",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.delete.kill-word-back",
+      "group": "deletion",
+      "origin": "owner test: kill-word-back removes preceding word",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "foo bar baz"
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "kill-word-back"
+        }
+      ],
+      "expected": [
+        {
+          "value": "foo bar ",
+          "cursor": 8,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.delete.kill-line-back",
+      "group": "deletion",
+      "origin": "owner test: kill-line-back removes to line start",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "hello world"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 6
+        },
+        {
+          "op": "key",
+          "key": "kill-line-back"
+        }
+      ],
+      "expected": [
+        {
+          "value": "hello world",
+          "cursor": 6,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "world",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.delete.kill-line-forward",
+      "group": "deletion",
+      "origin": "owner test: kill-line-fwd removes to line end",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "hello world"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 5
+        },
+        {
+          "op": "key",
+          "key": "kill-line-fwd"
+        }
+      ],
+      "expected": [
+        {
+          "value": "hello world",
+          "cursor": 5,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "hello",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.delete.backspace-empty",
+      "group": "deletion",
+      "origin": "owner test: backspace on empty buffer is a no-op",
+      "kind": "widget",
+      "setup": {
+        "initialValue": ""
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "backspace"
+        }
+      ],
+      "expected": [
+        {
+          "value": "",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.history.draft-roundtrip",
+      "group": "history",
+      "origin": "owner test: history prev recalls and next restores draft",
+      "kind": "widget",
+      "setup": {
+        "mode": "single",
+        "history": [
+          "cmd-a",
+          "cmd-b",
+          "cmd-c"
+        ]
+      },
+      "ops": [
+        {
+          "op": "insert",
+          "text": "draft"
+        },
+        {
+          "op": "key",
+          "key": "history-prev"
+        },
+        {
+          "op": "key",
+          "key": "history-prev"
+        },
+        {
+          "op": "key",
+          "key": "history-prev"
+        },
+        {
+          "op": "key",
+          "key": "history-prev"
+        },
+        {
+          "op": "key",
+          "key": "history-next"
+        },
+        {
+          "op": "key",
+          "key": "history-next"
+        },
+        {
+          "op": "key",
+          "key": "history-next"
+        }
+      ],
+      "expected": [
+        {
+          "value": "draft",
+          "cursor": 5,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "cmd-a",
+            "cmd-b",
+            "cmd-c"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "cmd-c",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "cmd-a",
+            "cmd-b",
+            "cmd-c"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "cmd-b",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "cmd-a",
+            "cmd-b",
+            "cmd-c"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "cmd-a",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "cmd-a",
+            "cmd-b",
+            "cmd-c"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "cmd-a",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "cmd-a",
+            "cmd-b",
+            "cmd-c"
+          ],
+          "emits": 0
+        },
+        {
+          "value": "cmd-b",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "cmd-a",
+            "cmd-b",
+            "cmd-c"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "cmd-c",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "cmd-a",
+            "cmd-b",
+            "cmd-c"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "draft",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "cmd-a",
+            "cmd-b",
+            "cmd-c"
+          ],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.history.arrows",
+      "group": "history",
+      "origin": "owner test: up/down trigger single-line history nav",
+      "kind": "widget",
+      "setup": {
+        "mode": "single",
+        "history": [
+          "old"
+        ]
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "up"
+        },
+        {
+          "op": "key",
+          "key": "down"
+        }
+      ],
+      "expected": [
+        {
+          "value": "old",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "old"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "old"
+          ],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.history.typing-resets-index",
+      "group": "history",
+      "origin": "owner test: typing after recall resets history index",
+      "kind": "widget",
+      "setup": {
+        "mode": "single",
+        "history": [
+          "old"
+        ]
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "up"
+        },
+        {
+          "op": "insert",
+          "text": "!"
+        },
+        {
+          "op": "key",
+          "key": "up"
+        }
+      ],
+      "expected": [
+        {
+          "value": "old",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "old"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "old!",
+          "cursor": 4,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "old"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "old",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "old"
+          ],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.history.commit-push",
+      "group": "history",
+      "origin": "owner test: commit pushes to history",
+      "kind": "widget",
+      "setup": {
+        "mode": "single",
+        "history": [],
+        "historyPush": true
+      },
+      "ops": [
+        {
+          "op": "setValue",
+          "value": "hello"
+        },
+        {
+          "op": "key",
+          "key": "enter"
+        }
+      ],
+      "expected": [
+        {
+          "value": "hello",
+          "cursor": 5,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "hello",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [
+            "hello"
+          ],
+          "cancels": 0,
+          "history": [
+            "hello"
+          ],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.multiline.submit",
+      "group": "multiline",
+      "origin": "owner test: enter commits and shift-enter inserts newline",
+      "kind": "widget",
+      "setup": {
+        "mode": "multi"
+      },
+      "ops": [
+        {
+          "op": "insert",
+          "text": "line one"
+        },
+        {
+          "op": "key",
+          "key": "shift-enter"
+        },
+        {
+          "op": "insert",
+          "text": "line two"
+        },
+        {
+          "op": "key",
+          "key": "enter"
+        }
+      ],
+      "expected": [
+        {
+          "value": "line one",
+          "cursor": 8,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "line one\n",
+          "cursor": 9,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "line one\nline two",
+          "cursor": 17,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "line one\nline two",
+          "cursor": 17,
+          "completion": null,
+          "handled": true,
+          "submitted": [
+            "line one\nline two"
+          ],
+          "cancels": 0,
+          "history": [],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.multiline.single-shift-enter",
+      "group": "multiline",
+      "origin": "owner test: shift-enter is no-op in single-line mode",
+      "kind": "widget",
+      "setup": {
+        "mode": "single",
+        "initialValue": "foo"
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "shift-enter"
+        }
+      ],
+      "expected": [
+        {
+          "value": "foo",
+          "cursor": 3,
+          "completion": null,
+          "handled": false,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.multiline.single-paste-normalize",
+      "group": "multiline",
+      "origin": "owner test: insert strips newlines in single-line mode",
+      "kind": "widget",
+      "setup": {
+        "mode": "single"
+      },
+      "ops": [
+        {
+          "op": "insert",
+          "text": "a\nb"
+        }
+      ],
+      "expected": [
+        {
+          "value": "a b",
+          "cursor": 3,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.multiline.vertical-up",
+      "group": "multiline",
+      "origin": "owner test: up/down move between lines in multi mode",
+      "kind": "widget",
+      "setup": {
+        "mode": "multi",
+        "initialValue": "aaa\nbbbb\nccc"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 12
+        },
+        {
+          "op": "key",
+          "key": "up"
+        },
+        {
+          "op": "key",
+          "key": "up"
+        }
+      ],
+      "expected": [
+        {
+          "value": "aaa\nbbbb\nccc",
+          "cursor": 12,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "aaa\nbbbb\nccc",
+          "cursor": 7,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "aaa\nbbbb\nccc",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.multiline.top-history-fallback",
+      "group": "multiline",
+      "origin": "owner test: up at top of multi-buffer falls through to history",
+      "kind": "widget",
+      "setup": {
+        "mode": "multi",
+        "initialValue": "foo\nbar",
+        "history": [
+          "previous"
+        ]
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 2
+        },
+        {
+          "op": "key",
+          "key": "up"
+        }
+      ],
+      "expected": [
+        {
+          "value": "foo\nbar",
+          "cursor": 2,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "previous"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "previous",
+          "cursor": 8,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "previous"
+          ],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.completion.single-autoapply",
+      "group": "completion",
+      "origin": "owner test: single completion auto-applies",
+      "kind": "widget",
+      "setup": {
+        "completions": [
+          {
+            "value": "foo",
+            "cursor": 3,
+            "items": [
+              "foobar"
+            ],
+            "replaceFrom": 0
+          }
+        ]
+      },
+      "ops": [
+        {
+          "op": "insert",
+          "text": "foo"
+        },
+        {
+          "op": "complete"
+        }
+      ],
+      "expected": [
+        {
+          "value": "foo",
+          "cursor": 3,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "foobar",
+          "cursor": 6,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.completion.popup-cycle",
+      "group": "completion",
+      "origin": "owner test: multiple completions open popup and tab cycles",
+      "kind": "widget",
+      "setup": {
+        "completions": [
+          {
+            "value": "ap",
+            "cursor": 2,
+            "items": [
+              "apple",
+              "apricot"
+            ],
+            "replaceFrom": 0
+          }
+        ]
+      },
+      "ops": [
+        {
+          "op": "insert",
+          "text": "ap"
+        },
+        {
+          "op": "complete"
+        },
+        {
+          "op": "key",
+          "key": "tab"
+        },
+        {
+          "op": "key",
+          "key": "tab"
+        }
+      ],
+      "expected": [
+        {
+          "value": "ap",
+          "cursor": 2,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "ap",
+          "cursor": 2,
+          "completion": {
+            "selectedIndex": 0,
+            "replaceFrom": 0,
+            "prefix": "ap",
+            "items": [
+              "apple",
+              "apricot"
+            ]
+          },
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "ap",
+          "cursor": 2,
+          "completion": {
+            "selectedIndex": 1,
+            "replaceFrom": 0,
+            "prefix": "ap",
+            "items": [
+              "apple",
+              "apricot"
+            ]
+          },
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "ap",
+          "cursor": 2,
+          "completion": {
+            "selectedIndex": 0,
+            "replaceFrom": 0,
+            "prefix": "ap",
+            "items": [
+              "apple",
+              "apricot"
+            ]
+          },
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.completion.enter-apply",
+      "group": "completion",
+      "origin": "owner test: enter applies selected completion",
+      "kind": "widget",
+      "setup": {
+        "completions": [
+          {
+            "value": "",
+            "cursor": 0,
+            "items": [
+              "first",
+              "second"
+            ],
+            "replaceFrom": 0
+          }
+        ]
+      },
+      "ops": [
+        {
+          "op": "complete"
+        },
+        {
+          "op": "key",
+          "key": "tab"
+        },
+        {
+          "op": "key",
+          "key": "enter"
+        }
+      ],
+      "expected": [
+        {
+          "value": "",
+          "cursor": 0,
+          "completion": {
+            "selectedIndex": 0,
+            "replaceFrom": 0,
+            "prefix": "",
+            "items": [
+              "first",
+              "second"
+            ]
+          },
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "",
+          "cursor": 0,
+          "completion": {
+            "selectedIndex": 1,
+            "replaceFrom": 0,
+            "prefix": "",
+            "items": [
+              "first",
+              "second"
+            ]
+          },
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "second",
+          "cursor": 6,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.completion.escape-cancel",
+      "group": "completion",
+      "origin": "owner test: escape cancels popup without changing buffer",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "ap",
+        "completions": [
+          {
+            "value": "ap",
+            "cursor": 2,
+            "items": [
+              "apple",
+              "apricot"
+            ],
+            "replaceFrom": 0
+          }
+        ]
+      },
+      "ops": [
+        {
+          "op": "complete"
+        },
+        {
+          "op": "key",
+          "key": "escape"
+        }
+      ],
+      "expected": [
+        {
+          "value": "ap",
+          "cursor": 2,
+          "completion": {
+            "selectedIndex": 0,
+            "replaceFrom": 0,
+            "prefix": "ap",
+            "items": [
+              "apple",
+              "apricot"
+            ]
+          },
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "ap",
+          "cursor": 2,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.completion.typing-closes",
+      "group": "completion",
+      "origin": "owner test: typing after popup opens closes popup",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "ap",
+        "completions": [
+          {
+            "value": "ap",
+            "cursor": 2,
+            "items": [
+              "apple",
+              "apricot"
+            ],
+            "replaceFrom": 0
+          }
+        ]
+      },
+      "ops": [
+        {
+          "op": "complete"
+        },
+        {
+          "op": "insert",
+          "text": "p"
+        }
+      ],
+      "expected": [
+        {
+          "value": "ap",
+          "cursor": 2,
+          "completion": {
+            "selectedIndex": 0,
+            "replaceFrom": 0,
+            "prefix": "ap",
+            "items": [
+              "apple",
+              "apricot"
+            ]
+          },
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "app",
+          "cursor": 3,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.escape.classified",
+      "group": "escape",
+      "origin": "owner test: classified key names map directly",
+      "kind": "parse",
+      "ops": [
+        {
+          "key": "left"
+        },
+        {
+          "key": "right"
+        },
+        {
+          "key": "alt-backspace"
+        },
+        {
+          "key": "ctrl-w"
+        },
+        {
+          "key": "ctrl-u"
+        },
+        {
+          "key": "ctrl-k"
+        },
+        {
+          "key": "ctrl-a"
+        },
+        {
+          "key": "ctrl-e"
+        }
+      ],
+      "expected": [
+        {
+          "result": "left"
+        },
+        {
+          "result": "right"
+        },
+        {
+          "result": "kill-word-back"
+        },
+        {
+          "result": "kill-word-back"
+        },
+        {
+          "result": "kill-line-back"
+        },
+        {
+          "result": "kill-line-fwd"
+        },
+        {
+          "result": "line-start"
+        },
+        {
+          "result": "line-end"
+        }
+      ]
+    },
+    {
+      "id": "owner.escape.word-jump-raw",
+      "group": "escape",
+      "origin": "owner test: raw escape sequences for word jumps",
+      "kind": "parse",
+      "ops": [
+        {
+          "key": "?",
+          "rawHex": "1b62"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b66"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b5b313b3344"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b5b313b3343"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b5b313b3944"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b5b313b3943"
+        }
+      ],
+      "expected": [
+        {
+          "result": "word-left"
+        },
+        {
+          "result": "word-right"
+        },
+        {
+          "result": "word-left"
+        },
+        {
+          "result": "word-right"
+        },
+        {
+          "result": "word-left"
+        },
+        {
+          "result": "word-right"
+        }
+      ]
+    },
+    {
+      "id": "owner.escape.home-end-raw",
+      "group": "escape",
+      "origin": "owner test: Home/End variants",
+      "kind": "parse",
+      "ops": [
+        {
+          "key": "?",
+          "rawHex": "1b5b48"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b4f48"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b5b317e"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b5b46"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b5b347e"
+        }
+      ],
+      "expected": [
+        {
+          "result": "home"
+        },
+        {
+          "result": "home"
+        },
+        {
+          "result": "home"
+        },
+        {
+          "result": "end"
+        },
+        {
+          "result": "end"
+        }
+      ]
+    },
+    {
+      "id": "owner.render.wrap-long",
+      "group": "render",
+      "origin": "owner test: wraps long lines and tracks cursor",
+      "kind": "wrap",
+      "ops": [
+        {
+          "text": "hellohello",
+          "width": 5,
+          "cursor": 7
+        }
+      ],
+      "expected": [
+        {
+          "lines": [
+            "hello",
+            "hello"
+          ],
+          "cursorRow": 1,
+          "cursorCol": 2
+        }
+      ]
+    },
+    {
+      "id": "owner.render.hard-newline",
+      "group": "render",
+      "origin": "owner test: hard newlines start a new row",
+      "kind": "wrap",
+      "ops": [
+        {
+          "text": "foo\nbar",
+          "width": 10,
+          "cursor": 4
+        }
+      ],
+      "expected": [
+        {
+          "lines": [
+            "foo",
+            "bar"
+          ],
+          "cursorRow": 1,
+          "cursorCol": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.render.wrap-filled-end",
+      "group": "render",
+      "origin": "owner test: cursor at end of wrap-filled line falls to next row",
+      "kind": "wrap",
+      "ops": [
+        {
+          "text": "hello",
+          "width": 5,
+          "cursor": 5
+        }
+      ],
+      "expected": [
+        {
+          "lines": [
+            "hello",
+            ""
+          ],
+          "cursorRow": 1,
+          "cursorCol": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.render.empty",
+      "group": "render",
+      "origin": "owner test: empty buffer renders one empty row",
+      "kind": "wrap",
+      "ops": [
+        {
+          "text": "",
+          "width": 10,
+          "cursor": 0
+        }
+      ],
+      "expected": [
+        {
+          "lines": [
+            ""
+          ],
+          "cursorRow": 0,
+          "cursorCol": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.integration.single-edit-submit",
+      "group": "integration",
+      "origin": "owner test: simulated typing edit and commit",
+      "kind": "widget",
+      "setup": {
+        "mode": "single"
+      },
+      "ops": [
+        {
+          "op": "insert",
+          "text": "hello world"
+        },
+        {
+          "op": "key",
+          "key": "home"
+        },
+        {
+          "op": "key",
+          "key": "word-right"
+        },
+        {
+          "op": "insert",
+          "text": ", "
+        },
+        {
+          "op": "key",
+          "key": "home"
+        },
+        {
+          "op": "key",
+          "key": "word-right"
+        },
+        {
+          "op": "key",
+          "key": "kill-word-back"
+        },
+        {
+          "op": "key",
+          "key": "enter"
+        }
+      ],
+      "expected": [
+        {
+          "value": "hello world",
+          "cursor": 11,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "hello world",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "hello world",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "hello,  world",
+          "cursor": 7,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "hello,  world",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "hello,  world",
+          "cursor": 5,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": ",  world",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": ",  world",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [
+            ",  world"
+          ],
+          "cancels": 0,
+          "history": [],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "owner.integration.multiline-edit",
+      "group": "integration",
+      "origin": "owner test: simulated multi-line entry with cursor moves",
+      "kind": "widget",
+      "setup": {
+        "mode": "multi"
+      },
+      "ops": [
+        {
+          "op": "insert",
+          "text": "first line"
+        },
+        {
+          "op": "key",
+          "key": "shift-enter"
+        },
+        {
+          "op": "insert",
+          "text": "second line"
+        },
+        {
+          "op": "key",
+          "key": "up"
+        }
+      ],
+      "expected": [
+        {
+          "value": "first line",
+          "cursor": 10,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "first line\n",
+          "cursor": 11,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "first line\nsecond line",
+          "cursor": 22,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "first line\nsecond line",
+          "cursor": 10,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "owner.helper.line-boundaries",
+      "group": "helpers",
+      "origin": "owner test: lineStart / lineEnd",
+      "kind": "helper",
+      "ops": [
+        {
+          "fn": "lineStart",
+          "args": [
+            "aaa\nbbb\nccc",
+            0
+          ]
+        },
+        {
+          "fn": "lineStart",
+          "args": [
+            "aaa\nbbb\nccc",
+            5
+          ]
+        },
+        {
+          "fn": "lineStart",
+          "args": [
+            "aaa\nbbb\nccc",
+            9
+          ]
+        },
+        {
+          "fn": "lineEnd",
+          "args": [
+            "aaa\nbbb\nccc",
+            0
+          ]
+        },
+        {
+          "fn": "lineEnd",
+          "args": [
+            "aaa\nbbb\nccc",
+            4
+          ]
+        },
+        {
+          "fn": "lineEnd",
+          "args": [
+            "aaa\nbbb\nccc",
+            9
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "result": 0
+        },
+        {
+          "result": 4
+        },
+        {
+          "result": 8
+        },
+        {
+          "result": 3
+        },
+        {
+          "result": 7
+        },
+        {
+          "result": 11
+        }
+      ]
+    },
+    {
+      "id": "owner.helper.word-left-spaces",
+      "group": "helpers",
+      "origin": "owner test: wordBoundaryLeft skips trailing spaces",
+      "kind": "helper",
+      "ops": [
+        {
+          "fn": "wordBoundaryLeft",
+          "args": [
+            "foo bar   ",
+            10
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "result": 4
+        }
+      ]
+    },
+    {
+      "id": "owner.helper.word-right-spaces",
+      "group": "helpers",
+      "origin": "owner test: wordBoundaryRight skips leading spaces",
+      "kind": "helper",
+      "ops": [
+        {
+          "fn": "wordBoundaryRight",
+          "args": [
+            "   foo",
+            0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "result": 6
+        }
+      ]
+    }
+  ]
+}

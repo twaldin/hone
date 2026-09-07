@@ -1,0 +1,1 @@
+Distinct protocol-integrity flag: malformed/incomplete sealed envelopes set valid=false; plain mismatches stay valid zero-credit

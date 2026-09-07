@@ -1,0 +1,21 @@
+---
+source: cyclonedx-bom/src/specs/common/organization.rs
+assertion_line: 412
+expression: xml_output
+---
+<?xml version="1.0" encoding="utf-8"?>
+<supplier bom-ref="Supplier">
+  <name>name</name>
+  <url>url</url>
+  <url>url</url>
+  <contact>
+    <name>name</name>
+    <email>email</email>
+    <phone>phone</phone>
+  </contact>
+  <contact>
+    <name>name</name>
+    <email>email</email>
+    <phone>phone</phone>
+  </contact>
+</supplier>

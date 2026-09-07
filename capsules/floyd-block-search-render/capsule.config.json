@@ -1,0 +1,67 @@
+{
+  "objective": "Minimize Block Search render cost on frozen scenes while preserving the exact selected block command stream. Correctness is a hard gate; only solution.py is mutable.",
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "internal-use-only",
+    "provenance": "bounded scene/render-command extraction from Floyd Addons baseline f5e048d4a8254646306cbf596379416be6401700 and reference 315036de64256dac3e64f5319d40ff1e481bb3df",
+    "sourceDetails": {
+      "repository": "new-floyd-addons",
+      "commit": "f5e048d4a8254646306cbf596379416be6401700",
+      "referenceCommit": "315036de64256dac3e64f5319d40ff1e481bb3df",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 5,
+      "frames": 100,
+      "freshProcess": true,
+      "q": "per-frame exact-output hard gate times the bounded reciprocal 1/(1+g) of the geometric mean g of the reference-normalized p99 trusted per-frame render time (median across interleaved candidate/trusted-seed sample pairs of the p99 ratio, times the frozen 0.5 ms scale) and the trusted whole-tree cgroup peak allocation footprint (MB); frame repetitions are driven by the evaluator, which loads the pristine base scene once and then drives each warmup and measured frame with its own disjoint trusted integer coordinate shift so every frame renders a distinct scene, and every frame is timed and exact-output validated by the trusted parent against its own protected expected",
+      "qFail": 0
+    },
+    "tags": [
+      "m2",
+      "owner",
+      "rendering",
+      "performance"
+    ]
+  }
+}

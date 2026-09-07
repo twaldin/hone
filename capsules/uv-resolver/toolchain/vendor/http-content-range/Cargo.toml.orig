@@ -1,0 +1,25 @@
+[package]
+name = "http-content-range"
+version = "0.2.4"
+description = "HTTP Content Range response header parser"
+authors = ["Yuri Astrakhan <YuriAstrakhan@gmail.com>"]
+repository = "https://github.com/nyurik/http-content-range"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+keywords = ["http", "headers", "content-range"]
+categories = ["network-programming", "web-programming::http-client"]
+exclude = [".gitignore", ".github/*", "justfile"]
+rust-version = "1.58"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_qualifications = "warn"
+
+[lints.clippy]
+# Restrictions
+panic_in_result_fn = "warn"
+todo = "warn"
+unwrap_used = "warn"
+# Pedantics without being too noisy
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

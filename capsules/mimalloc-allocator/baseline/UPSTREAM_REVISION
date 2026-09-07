@@ -1,0 +1,4 @@
+repository=microsoft/mimalloc
+revision=76d3f8a934f9761e4ee75fa8b071e58d482f2758
+url=https://github.com/microsoft/mimalloc/commit/76d3f8a934f9761e4ee75fa8b071e58d482f2758
+license=MIT

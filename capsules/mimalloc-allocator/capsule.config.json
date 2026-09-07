@@ -1,0 +1,140 @@
+{
+  "objective": "Improve geometric-mean mimalloc operations per second on four frozen deterministic single-thread, four-thread, small-object, and fragmentation workloads. The pinned upstream api/api-fill/stress suite, deterministic checksums, a four-thread maximum, peak allocator page-committed bytes, and live-page fragmentation at or below the split baseline plus 1% are hard gates. Only allocator implementation files under src and internal headers under include/mimalloc are mutable; trusted statistics and all build, test, evaluator, and workload code are protected.",
+  "image": "hone-mimalloc-allocator@sha256:7768eb1e62055de5f3ca7df52d00df234fcf98d97313816889595f36ad854465",
+  "sandbox": {
+    "memoryBytes": 2147483648,
+    "cpus": 4
+  },
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    ".*",
+    "*.md",
+    "CMakeLists.txt",
+    "LICENSE",
+    "UPSTREAM_REVISION",
+    "azure-pipelines.yml",
+    "mimalloc.pc.in",
+    "eval.py",
+    "worker.py",
+    "toolchain.lock.json",
+    "bin/**",
+    "cmake/**",
+    "contrib/**",
+    "doc/**",
+    "docs/**",
+    "hone/**",
+    "ide/**",
+    "test/**",
+    "include/mimalloc.h",
+    "include/mimalloc-new-delete.h",
+    "include/mimalloc-override.h",
+    "include/mimalloc-stats.h",
+    "include/mimalloc/types.h",
+    "src/alloc-override.c",
+    "src/static.c",
+    "src/stats.c"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-terminal-holdout",
+    "license": "MIT",
+    "provenance": "microsoft/mimalloc at exact revision 76d3f8a934f9761e4ee75fa8b071e58d482f2758; four independently authored protected C workload drivers use sealed deterministic xorshift64-v1 seeds over a fixed per-workload round budget; terminal holdout received no optimizer, mutation, or headroom pilot; the trusted evaluator owns fd 1 and the wall clock, brackets each measured region across a per-sample authenticated handshake, and scores a load-cancelling yardstick ratio against a pristine reference built from TRUSTED_DIR with no candidate overlay; token-locked fresh-process A-A samples [13792981.46369658,13689235.197234899,13619706.034476556,13469888.217224881,13795608.904651089,13690334.434754014] give qBase=13676292.37533967 and sample sigma=121673.46796984819; qReference=13676292.37533967+max(5*121673.46796984819,0.05*abs(13676292.37533967-0))=14360106.994106654",
+    "sourceDetails": {
+      "repository": "microsoft/mimalloc",
+      "revision": "76d3f8a934f9761e4ee75fa8b071e58d482f2758",
+      "upstreamUrl": "https://github.com/microsoft/mimalloc/commit/76d3f8a934f9761e4ee75fa8b071e58d482f2758",
+      "mutableEnvelope": [
+        "src/** except src/stats.c, src/static.c, and src/alloc-override.c",
+        "include/mimalloc/** except include/mimalloc/types.h"
+      ],
+      "upstreamTests": [
+        "ctest --test-dir build -R ^test-(api|api-fill|stress)$ --output-on-failure"
+      ]
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+      "freshProcess": true,
+      "q": "geometric mean over four drivers of the load-cancelling yardstick score sealed_operations * (min reference elapsed / min candidate elapsed)",
+      "qFail": 0,
+      "qBase": 13676292.37533967,
+      "sigma": 121673.46796984819,
+      "qReference": 14360106.994106654,
+      "qReferenceConstruction": "13676292.37533967 + max(5*121673.46796984819, 0.05*abs(13676292.37533967-0)) = 14360106.994106654",
+      "aaSamples": [
+        13792981.46369658,
+        13689235.197234899,
+        13619706.034476556,
+        13469888.217224881,
+        13795608.904651089,
+        13690334.434754014
+      ],
+      "normalizationScale": 683814.6187669835,
+      "noiseFractionOfScale": 0.17793341152788314,
+      "benchmarkTargetMsPerSample": 360,
+      "benchmarkSamplesPerWorkload": 7,
+      "benchmarkSampleSelection": "per workload the candidate and the pristine reference are timed interleaved (7 samples each) and scored q = sealed operations * (min reference elapsed / min candidate elapsed); the trusted evaluator times each measured region with its own monotonic clock across a per-sample fresh-nonce handshake, so candidate code can neither observe nor fabricate the measurement, the per-binary minimum rejects scheduler-noise outliers, and the reference ratio cancels sustained per-eval host load",
+      "threadCount": 4,
+      "peakCommittedGate": "for each workload, mi_stats_get page_committed.peak after a fresh mi_stats_reset and fixed one-round memory pass must be <= split baseline * 1.01",
+      "fragmentationGate": "at each driver's fixed live allocation checkpoint, max(0,page_committed.current-(malloc_normal.current+malloc_huge.current))/page_committed.current from merged mi_stats must be <= split baseline * 1.01",
+      "workBudget": "each workload runs a fixed sealed round budget; expectedOperations is the deterministic (allocator-independent) operation count for that budget and is validated against every reported sample",
+      "treePeakGate": "kernel cgroup whole-tree memory.peak per workload must be <= split baseline * 1.20 (regression ceiling) AND >= split baseline * 0.25 (workload floor: a completion stream produced without running the allocator is rejected)",
+      "referenceYardstick": "each workload builds a pristine reference (the sealed baseline allocator from TRUSTED_DIR with no candidate overlay) and times reference and candidate interleaved under the same host load; the score is q = sealed operations * (min reference elapsed / min candidate elapsed), so sustained per-eval contention elevates both legs together and cancels in the ratio"
+    },
+    "holdoutSeal": {
+      "taskId": "OSS-H07",
+      "cohort": "terminal",
+      "optimizerPilots": 0,
+      "mutationRuns": 0,
+      "headroomRuns": 0,
+      "trustedDiagnosticsOnly": true,
+      "assetVisibility": "holdout"
+    },
+    "exploitReview": {
+      "protectedPathEscape": "broker diff-protects build files, public/statistics headers, statistics implementation, evaluator, worker, tests, and four workload drivers; evaluator rejects symlinks and new files outside src or include/mimalloc",
+      "benchmarkSpecialCasing": "distinct sealed train and validation seeds; a trusted first-size fingerprint diagnostic is expected to win train and lose validation",
+      "fixtureFingerprinting": "both split configurations are holdout-only and mounted under root-owned /capsule; compilation runs as uid 2000 before the protected evaluator invokes drivers",
+      "outputFabrication": "the trusted evaluator owns fd 1 and never scores anything the candidate-linked executable prints; the benchmark streams only work-completion tokens over a parent-supplied report fd, authenticated per sample by a fresh unpredictable nonce, and the parent measures elapsed with its own monotonic clock, derives throughput from the sealed operation count, and validates the deterministic checksum. A constructor that skips the workload cannot write the scoring channel, cannot fabricate the parent clock, and (via the whole-tree cgroup memory floor) cannot reproduce the sealed memory profile without allocating; the evaluator additionally audits every linked binary with nm and rejects candidate-defined timing or output symbols",
+      "buildScriptMutation": "CMake files, fixed O2/MI_STAT flags, worker, test sources, and toolchain lock are protected; every evaluation performs a clean source rebuild",
+      "timerTampering": "the candidate-linked benchmark performs no scored timing of its own: the trusted evaluator process brackets each measured region with its own CLOCK_MONOTONIC across a per-sample authenticated handshake the child cannot pre-answer, runs under uid 2000 with network disabled, and the nm symbol audit still rejects any candidate-defined timing or output symbols before a benchmark binary is executed",
+      "deadCodeBenchmarkBypass": "the benchmark uses public allocation entry points linked to the same static library exercised by upstream api and stress tests"
+    },
+    "tags": [
+      "m2",
+      "terminal",
+      "oss",
+      "mimalloc",
+      "allocator",
+      "performance"
+    ]
+  }
+}

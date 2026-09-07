@@ -1,0 +1,37 @@
+{
+  "taskId": "OSS-H06",
+  "source": {
+    "repository": "tree-sitter/tree-sitter",
+    "revision": "1ffd612be56259938c47507bbe953af739c7f640",
+    "license": "MIT"
+  },
+  "grammars": {
+    "javascript": {
+      "repository": "tree-sitter/tree-sitter-javascript",
+      "tag": "v0.25.0",
+      "revision": "44c892e0be055ac465d5eeddae6d3e194424e7de",
+      "license": "MIT"
+    },
+    "rust": {
+      "repository": "tree-sitter/tree-sitter-rust",
+      "tag": "v0.24.0",
+      "revision": "18b0515fca567f5a10aee9978c6d2640e878671a",
+      "license": "MIT"
+    },
+    "python": {
+      "repository": "tree-sitter/tree-sitter-python",
+      "tag": "v0.23.6",
+      "revision": "bffb65a8cfe4e46290331dfef0dbf0ef3679de11",
+      "license": "MIT"
+    }
+  },
+  "mutableEnvelope": ["lib/src/**"],
+  "scalar": "geometric mean bytes/sec across full and incremental parsing",
+  "hardGates": [
+    "exact full and edited tree hashes",
+    "incremental tree byte-equivalent to fresh full parse",
+    "exact changed-range hashes",
+    "parser tests",
+    "peak workload RSS no greater than frozen baseline plus 2 percent"
+  ]
+}

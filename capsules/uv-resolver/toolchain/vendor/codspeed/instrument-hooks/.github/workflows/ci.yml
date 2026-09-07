@@ -1,0 +1,282 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  COMMON_CFLAGS: >-
+    -Wall
+    -Werror
+    -Wno-format
+    -Wno-format-security
+    -Wno-unused-but-set-variable
+    -Wno-unused-const-variable
+    -Wno-type-limits
+    -Wno-uninitialized
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+      - uses: pre-commit/action@v3.0.1
+        with:
+          extra_args: --all-files
+
+  tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+      - uses: extractions/setup-just@v3
+      - name: Run tests
+        run: zig build test --summary all
+
+      # Skip installing package docs to avoid wasting time when installing valgrind
+      #  See: https://github.com/actions/runner-images/issues/10977#issuecomment-2810713336
+      - name: Skip installing package docs
+        if: runner.os == 'Linux'
+        run: |
+          sudo tee /etc/dpkg/dpkg.cfg.d/01_nodoc > /dev/null << 'EOF'
+          path-exclude /usr/share/doc/*
+          path-exclude /usr/share/man/*
+          path-exclude /usr/share/info/*
+          EOF
+
+      - name: Run valgrind tests
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+          just test-valgrind
+
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+      - name: Build
+        run: zig build
+
+  test-build-cmake:
+    strategy:
+      matrix:
+        include:
+          - name: Linux GCC
+            os: ubuntu-latest
+            compiler: gcc
+
+          - name: Linux Clang
+            os: ubuntu-latest
+            compiler: clang
+
+          - name: macOS Clang
+            os: macos-latest
+            compiler: clang
+
+          - name: Windows MSVC
+            os: windows-latest
+            compiler: cl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+      - uses: extractions/setup-just@v3
+
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: example/build
+          key: ${{ runner.os }}-build-${{ hashFiles('**/CMakeLists.txt') }}
+
+      - name: "Enable MSVC command prompt"
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: "Install cmake"
+        uses: lukka/get-cmake@latest
+
+      - name: "Build debug mode"
+        shell: bash
+        run: |
+          cd example
+          mkdir -p out
+          cd out
+          cmake .. -DCMAKE_C_COMPILER=${{ matrix.compiler }} -DCMAKE_BUILD_TYPE=Debug
+          cmake --build . --target example
+
+      - name: "Run example (Windows)"
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd example/out/Debug
+          ./example.exe
+
+      - name: "Run example (Unix)"
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd example/out
+          ./example
+
+  test-build-bazel:
+    strategy:
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          # Avoid downloading Bazel every time.
+          bazelisk-cache: true
+          # Store build cache per workflow.
+          disk-cache: ${{ github.workflow }}
+          # Share repository cache between workflows.
+          repository-cache: true
+
+      # Symlinks on windows are broken with bazel
+      - name: Fix symlink on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Get-ChildItem -Path example/instrument-hooks -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item -Path dist -Destination example/instrument-hooks/dist -Recurse
+          Copy-Item -Path includes -Destination example/instrument-hooks/includes -Recurse
+
+      - name: Build benchmarks
+        working-directory: example
+        run: |
+          bazel build //:example
+
+      - name: Run benchmarks
+        working-directory: example
+        run: |
+          bazel run //:example
+
+  test-gcc-versions:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [15, 14, 13, 12, 11, 10, 9]
+    container:
+      image: gcc:${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build example with GCC ${{ matrix.version }}
+        run: |
+          gcc -std=c11 -O3 example/main.c dist/core.c \
+            -I includes/ \
+            ${{ env.COMMON_CFLAGS }} \
+            -o test-example
+
+      - name: Run example
+        run: ./test-example
+
+  test-clang-versions:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [19, 18, 17, 16, 15, 14, 13]
+    container:
+      image: silkeh/clang:${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build example with Clang ${{ matrix.version }}
+        run: |
+          clang -std=c11 -O3 example/main.c dist/core.c \
+            -I includes/ \
+            ${{ env.COMMON_CFLAGS }} \
+            -o test-example
+
+      - name: Run example
+        run: ./test-example
+
+  cross-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # Linux targets - x86/x64
+          - { arch: x86_64-linux-gnu, name: "Linux x86_64 (glibc)" }
+          - { arch: x86_64-linux-musl, name: "Linux x86_64 (musl)" }
+          - { arch: x86-linux-gnu, name: "Linux x86 (32-bit)" }
+
+          # Linux targets - ARM
+          - { arch: aarch64-linux-gnu, name: "Linux ARM64 (glibc)" }
+          - { arch: aarch64-linux-musl, name: "Linux ARM64 (musl)" }
+          - { arch: arm-linux-gnueabihf, name: "Linux ARM (hard-float)" }
+          - { arch: arm-linux-gnueabi, name: "Linux ARM (soft-float)" }
+
+          # Linux targets - RISC-V
+          - { arch: riscv64-linux-gnu, name: "Linux RISC-V 64 (glibc)" }
+          - { arch: riscv64-linux-musl, name: "Linux RISC-V 64 (musl)" }
+
+          # Linux targets - Other architectures
+          - { arch: powerpc64le-linux-gnu, name: "Linux PowerPC64 LE" }
+          - { arch: s390x-linux-gnu, name: "Linux s390x (IBM Z)" }
+          - { arch: mips64el-linux-gnuabi64, name: "Linux MIPS64 LE" }
+          - { arch: loongarch64-linux-gnu, name: "Linux LoongArch64" }
+
+          # macOS targets
+          - { arch: x86_64-macos, name: "macOS x86_64 (Intel)" }
+          - { arch: aarch64-macos, name: "macOS ARM64 (Apple Silicon)" }
+
+          # Windows targets
+          - { arch: x86_64-windows-gnu, name: "Windows x86_64" }
+          - { arch: x86-windows-gnu, name: "Windows x86 (32-bit)" }
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+
+      - name: Compile the example
+        run: |
+          zig cc example/main.c dist/core.c \
+            -I includes/ \
+            -target ${{ matrix.target.arch }} \
+            ${{ env.COMMON_CFLAGS }} \
+            -Wno-constant-conversion \
+            -Wno-incompatible-pointer-types \
+            -Wno-unused-function \
+            -o example.out
+
+  check:
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - lint
+      - tests
+      - build
+      - test-build-cmake
+      - test-build-bazel
+      - test-gcc-versions
+      - test-clang-versions
+      - cross-compile
+    steps:
+      - uses: re-actors/alls-green@release/v1
+        with:
+          jobs: ${{ toJson( needs ) }}

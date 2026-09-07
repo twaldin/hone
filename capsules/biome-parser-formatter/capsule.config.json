@@ -1,0 +1,92 @@
+{
+  "objective": "Improve JavaScript, TypeScript, and CSS parser/formatter throughput across frozen deterministic large files. Preserve byte-exact formatted output, parser diagnostic hashes, idempotence, relevant parser/formatter regression tests, and peak RSS within 2% of baseline. Only the four pinned parser/formatter crate src trees are mutable.",
+  "image": "hone-biome-task@sha256:c3f82bd01e58fee98a71624e881838ce40270cc86ae0e775edf784e780ac0184",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "challenge.json",
+    "LICENSES",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-oss-current-head-train-panel-a",
+    "headroom": {
+      "requirement": "gate-7 development-train headroom: three two-episode seed-optimizer pilots on the current host must produce at least one valid non-baseline candidate while fewer than three runs reach qReference",
+      "pilotPath": "trusted supervisor + local backend + broker measurement path under trusted synthetic-meta authority (admissionReview off); no optimizer-queryable state",
+      "evidence": "diagnostics/admission-evidence.json#seedPilots"
+    },
+    "license": "MIT OR Apache-2.0; upstream notices preserved in baseline/LICENSES and image; generated workloads are CC0-1.0",
+    "provenance": "Pinned Biome 8ebafe1c7489f1f7af379b8e52b8ad063c82d28a. Workload operations reproduce the uncached parse and format-node/print paths of the upstream JS, TS, and CSS Criterion benches. Third-party CDN benchmark inputs were not redistributed; deterministic large JS/TS/CSS and recovery sources were generated and frozen instead. Round-6: deliberately malformed recovery CSS and formatter edge constructs (previously exercised only by a separate fixed-input selftest mode) are folded into the scored corpus as train/validation recovery.css, so parser error-recovery and formatter edge behavior run under the same nonce-seeded per-iteration input rotation and proof-vs-pristine-reference binding as every other workload, on the timed candidate-indistinguishable path; the separate 'selftest' runner mode was removed. qReference is constructed after locked A-A calibration as qBase + max(5*sigma, 0.05*abs(qBase-qFail)).",
+    "sourceDetails": {
+      "repository": "biomejs/biome",
+      "revision": "8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
+      "url": "https://github.com/biomejs/biome/commit/8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
+      "toolchain": "Rust 1.96.1 linux/arm64; rust base sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663",
+      "offlineDependencies": "cargo vendor from the pinned Cargo.lock at toolchain/vendor; CARGO_NET_OFFLINE=true; evaluator network disabled",
+      "mutableEnvelope": [
+        "mutable/biome_js_parser/src",
+        "mutable/biome_js_formatter/src",
+        "mutable/biome_css_parser/src",
+        "mutable/biome_css_formatter/src"
+      ],
+      "upstreamBenchHashes": {
+        "biome_js_parser/benches/js_parser.rs": "sha256:c0a5466c73d2a31ff99cceda89fe40d1d8fd3c210c2b7cfdc351d7f845a998c8",
+        "biome_js_formatter/benches/js_formatter.rs": "sha256:5b6b5c76cca39ca81890842925e7f591c27a2493601a99a3de6f715e7a479972",
+        "biome_css_parser/benches/css_parser.rs": "sha256:91d489e82411ab9fdde60e5d9233b594a6f32683ee36e9bf124f3212c07491d2",
+        "biome_css_formatter/benches/css_formatter.rs": "sha256:761585fb9cd870fe08b58d575c4c0e2a223fee7be9e2afd4b5157cc87399c7bd"
+      }
+    },
+    "measurement": {
+      "platform": "Docker Desktop Linux arm64 on Apple M3 Max; provisional local calibration",
+      "freshProcess": true,
+      "samplesPerWorkload": 30,
+      "aaSamples": 3,
+      "q": "frozen anchor (qBase) scaled by the geometric mean over parse/format workloads of the MEDIAN per-pair reference/candidate wall-time ratio; per workload the candidate and the pristine in-container reference alternate over BENCH_BATCHES=30 fresh-process legs, each batch's candidate leg paired with the reference leg run back-to-back against the same instantaneous host load so common-mode contention cancels within the pair, and the median over pairs rejects pairs where a contention burst hit only one leg; repetitions come from a frozen per-file table (challenge.json) calibrated so every timed leg is ~0.6s of work, equalizing each workload's exposure to load; every timed iteration is bound to the pristine reference via a nonce-keyed proof",
+      "qFail": 1e-12,
+      "qBase": 0.0769000486784732,
+      "sigma": 0.00019408050558115806,
+      "qReference": 0.08074505111234687,
+      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+      "rssGate": "peak workload RSS <= frozen ceiling rssLimitKb (28000 KiB); whole-tree kernel cgroup memory.peak accounting; round-6 observed baseline whole-tree peaks with the recovery.css corpus entries: ~24452 KiB train / ~23644 KiB validation (ceiling ~1.15x), so legitimate perturbations clear allocator/measurement variance while gross memory blow-ups are still rejected"
+    },
+    "tags": [
+      "m2",
+      "oss",
+      "biome",
+      "parser",
+      "formatter",
+      "performance"
+    ]
+  }
+}

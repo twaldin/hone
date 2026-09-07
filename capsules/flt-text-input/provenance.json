@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/twaldin/flt.git",
+    "readOnly": true,
+    "commit": "fe05463a921b9c4d808a338ea07d33abe45b6487",
+    "tree": "6b5de048d6531b5d8f120f7f7b6fbb0540aef9cc",
+    "implementation": {
+      "path": "src/tui/widgets/text-input.ts",
+      "blob": "1b90579c7161f7624406500eebab4c022e325abc"
+    },
+    "tests": {
+      "path": "tests/unit/tui/text-input.test.ts",
+      "blob": "a32be32ea403e0c5180b1bb3902b90f52c509005",
+      "declaredCases": 41
+    },
+    "introductionCommit": "5ef8ba0",
+    "historicalParent": "a5b07aa0c1e8fc999ca614b24396fc397a222ed2"
+  },
+  "baseline": {
+    "kind": "historical-partial-adapter",
+    "lineage": "The historical parent command editor appendCommandText appended to the buffer and backspaceCommand removed the final UTF-16 code unit. baseline/text_input.mjs adapts those genuine behaviors to the later TextInput API and carries the pinned pure key/display helpers unchanged."
+  },
+  "reference": {
+    "path": "diagnostics/improved/text_input.mjs",
+    "construction": "Type annotations were stripped from the pinned current owner implementation without changing runtime behavior; all 41 owner-derived cases and 20 hidden variants pass."
+  },
+  "caseBank": {
+    "train": "41 mechanically translated owner tests across cursor, deletion, history, multiline, completion, escape, render, integration, and helper groups.",
+    "validation": "20 owner-derived hidden Unicode, escape, state, render, and helper variants.",
+    "oracle": "Expected checkpoints were generated once from the pinned current implementation and frozen in protected assets. Candidate processes receive inputs only."
+  },
+  "license": "MIT"
+}

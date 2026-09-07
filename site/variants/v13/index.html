@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hone — Enterprise Optimization Platform (v13 · Clean Enterprise SaaS)</title>
+<meta name="description" content="Hone is a local-first, durable optimization CLI with pre-registered, human-gated evidence. RelayBench publishes the results — either way.">
+<style>
+:root{
+  --bg:#f7f8f7;
+  --surface:#ffffff;
+  --surface-2:#eef1ef;
+  --ink:#101b17;
+  --ink-2:#41504a;
+  --ink-3:#6b7a74;
+  --line:#dde3df;
+  --line-2:#c9d2cd;
+  --brand:#0b5c46;
+  --brand-2:#0e7357;
+  --brand-tint:#e3efe9;
+  --accent:#b4530a;
+  --ok:#1a7f4e;
+  --radius:6px;
+  --shadow-sm:0 1px 2px rgba(16,27,23,.06);
+  --shadow-md:0 4px 16px rgba(16,27,23,.08);
+  --sans:"Avenir Next","Avenir","Seravek","Segoe UI",Frutiger,Candara,"Trebuchet MS",sans-serif;
+  --mono:"SF Mono","Cascadia Code",Menlo,Consolas,"DejaVu Sans Mono",monospace;
+  --measure:64ch;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:16px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+.mono{font-family:var(--mono)}
+a{color:var(--brand);text-decoration:none}
+a:hover{text-decoration:underline}
+a:focus-visible,button:focus-visible{outline:2px solid var(--brand);outline-offset:2px;border-radius:2px}
+.wrap{max-width:1120px;margin:0 auto;padding:0 32px}
+.skip{position:absolute;left:-9999px;top:0;background:var(--brand);color:#fff;padding:8px 16px;z-index:99}
+.skip:focus{left:16px;top:16px}
+
+/* ---------- header ---------- */
+.hdr{
+  position:sticky;top:0;z-index:50;
+  background:rgba(255,255,255,.92);
+  backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--line);
+}
+.hdr-row{display:flex;align-items:center;gap:32px;height:64px}
+.brand{display:flex;align-items:center;gap:10px;color:var(--ink)}
+.brand:hover{text-decoration:none}
+.brand svg{width:26px;height:26px;color:var(--brand)}
+.brand b{font-size:19px;letter-spacing:.01em;font-weight:600}
+.brand small{color:var(--ink-3);font-size:12px;font-weight:500;border-left:1px solid var(--line-2);padding-left:10px;letter-spacing:.06em}
+.nav{display:flex;gap:26px;margin-left:auto}
+.nav a{color:var(--ink-2);font-size:14px;font-weight:500}
+.nav a:hover{color:var(--brand);text-decoration:none}
+.hdr-cta{
+  background:var(--brand);color:#fff;font-size:14px;font-weight:600;
+  padding:9px 18px;border-radius:var(--radius);box-shadow:var(--shadow-sm);
+}
+.hdr-cta:hover{background:var(--brand-2);text-decoration:none}
+
+/* ---------- hero ---------- */
+.hero{padding:88px 0 72px;background:
+  linear-gradient(180deg,#fdfefd 0%,var(--bg) 100%);
+  border-bottom:1px solid var(--line);
+}
+.hero-grid{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:64px;align-items:center}
+.eyebrow{
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:12px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--brand);background:var(--brand-tint);
+  padding:6px 12px;border-radius:999px;margin-bottom:22px;
+}
+.eyebrow::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--ok)}
+h1{
+  font-size:clamp(34px,4.4vw,52px);
+  line-height:1.12;font-weight:600;letter-spacing:-.02em;
+  margin-bottom:20px;
+}
+h1 em{font-style:normal;color:var(--brand)}
+.lede{font-size:18px;color:var(--ink-2);max-width:var(--measure);margin-bottom:30px}
+.cta-row{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:26px}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:15px;font-weight:600;padding:12px 24px;border-radius:var(--radius);
+}
+.btn-primary{background:var(--brand);color:#fff;box-shadow:var(--shadow-sm)}
+.btn-primary:hover{background:var(--brand-2);text-decoration:none}
+.btn-secondary{background:var(--surface);color:var(--ink);border:1px solid var(--line-2)}
+.btn-secondary:hover{border-color:var(--brand);color:var(--brand);text-decoration:none}
+.hero-assure{display:flex;gap:22px;flex-wrap:wrap;font-size:13px;color:var(--ink-3)}
+.hero-assure span{display:inline-flex;align-items:center;gap:6px}
+.hero-assure svg{width:14px;height:14px;color:var(--ok);flex:none}
+
+/* hero terminal card */
+.term{
+  background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  box-shadow:var(--shadow-md);overflow:hidden;
+}
+.term-bar{display:flex;align-items:center;gap:6px;padding:11px 14px;border-bottom:1px solid var(--line);background:var(--surface-2)}
+.term-bar i{width:10px;height:10px;border-radius:50%;background:var(--line-2)}
+.term-bar span{margin-left:auto;font-size:11px;color:var(--ink-3);letter-spacing:.08em}
+.term-body{padding:20px 20px 22px;font-family:var(--mono);font-size:13px;line-height:1.85;color:var(--ink-2)}
+.term-body .p{color:var(--brand);font-weight:700}
+.term-body .arg{color:var(--accent)}
+.term-body .ok{color:var(--ok)}
+.term-body .dim{color:var(--ink-3)}
+
+/* ---------- proof band ---------- */
+.proof{background:var(--surface);border-bottom:1px solid var(--line);padding:34px 0}
+.proof-label{text-align:center;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:22px}
+.proof-row{display:flex;justify-content:center;align-items:center;gap:12px 44px;flex-wrap:wrap}
+.proof-row li{
+  list-style:none;font-family:var(--mono);font-size:14px;font-weight:600;
+  color:var(--ink-3);letter-spacing:.02em;opacity:.85;
+}
+.proof-row li:hover{color:var(--ink-2)}
+
+/* ---------- sections ---------- */
+section{padding:88px 0}
+.sec-head{max-width:680px;margin-bottom:52px}
+.sec-kicker{font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--brand);margin-bottom:12px}
+h2{font-size:clamp(26px,3vw,36px);font-weight:600;letter-spacing:-.015em;line-height:1.2;margin-bottom:14px}
+.sec-lede{font-size:17px;color:var(--ink-2)}
+
+/* feature grid */
+.features{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.feature{background:var(--surface);padding:30px 28px}
+.feature:hover{background:#fcfdfc}
+.feature .f-ico{
+  width:38px;height:38px;border-radius:8px;background:var(--brand-tint);
+  display:flex;align-items:center;justify-content:center;margin-bottom:18px;
+}
+.feature .f-ico svg{width:19px;height:19px;color:var(--brand)}
+.feature h3{font-size:16px;font-weight:600;margin-bottom:8px}
+.feature p{font-size:14.5px;color:var(--ink-2)}
+
+/* pipeline strip */
+.pipe-sec{background:var(--surface);border-block:1px solid var(--line)}
+.pipe{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;counter-reset:step}
+.pipe-step{
+  position:relative;background:var(--bg);border:1px solid var(--line);
+  border-radius:var(--radius);padding:22px 18px 20px;
+}
+.pipe-step::before{
+  counter-increment:step;content:"0" counter(step);
+  font-family:var(--mono);font-size:12px;font-weight:700;color:var(--brand);
+  display:block;margin-bottom:10px;letter-spacing:.08em;
+}
+.pipe-step h3{font-size:14.5px;font-weight:600;margin-bottom:6px}
+.pipe-step p{font-size:13px;color:var(--ink-3);line-height:1.5}
+.pipe-step[data-gate]::after{
+  content:"HUMAN GATE";position:absolute;top:-11px;right:12px;
+  font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.1em;
+  background:var(--accent);color:#fff;padding:3px 8px;border-radius:3px;
+}
+
+/* trust two-col */
+.trust-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:22px}
+.trust-card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:28px;box-shadow:var(--shadow-sm)}
+.trust-card h3{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink);margin-bottom:16px}
+.trust-card h3 svg{width:17px;height:17px;color:var(--brand)}
+.spec{list-style:none}
+.spec li{display:flex;gap:14px;padding:9px 0;border-top:1px dashed var(--line);font-size:14px;color:var(--ink-2)}
+.spec li:first-child{border-top:0}
+.spec b{font-family:var(--mono);font-size:12px;color:var(--brand);flex:0 0 108px;font-weight:600;padding-top:2px;letter-spacing:.02em}
+
+/* relaybench status */
+.rb{background:linear-gradient(180deg,var(--surface) 0%,var(--surface-2) 100%);border-block:1px solid var(--line)}
+.rb-status{
+  display:flex;align-items:center;gap:12px;background:#fff8f0;border:1px solid #ecd9bf;
+  border-radius:var(--radius);padding:14px 18px;margin-bottom:34px;
+  font-family:var(--mono);font-size:12.5px;color:#8a5a1e;letter-spacing:.03em;
+}
+.rb-status i{width:9px;height:9px;border-radius:50%;background:var(--accent);flex:none;animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.rb-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.rb-card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:24px;display:flex;flex-direction:column;gap:10px}
+.rb-card h3{font-size:15px;font-weight:600}
+.rb-card p{font-size:13.5px;color:var(--ink-2);flex:1}
+.rb-slot{
+  border:1px dashed var(--line-2);border-radius:var(--radius);
+  padding:18px;text-align:center;background:var(--bg);
+}
+.rb-slot .val{display:block;font-family:var(--mono);font-size:24px;font-weight:600;color:var(--ink-3);letter-spacing:.05em}
+.rb-slot .lab{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--ink-3);margin-top:6px}
+
+/* final cta */
+.final{text-align:center;padding:96px 0}
+.final h2{margin-bottom:14px}
+.final p{color:var(--ink-2);max-width:56ch;margin:0 auto 30px}
+.final .cmdline{
+  display:inline-block;font-family:var(--mono);font-size:14px;background:var(--ink);
+  color:#d9efe6;padding:14px 26px;border-radius:8px;margin-bottom:30px;box-shadow:var(--shadow-md);
+}
+.final .cmdline b{color:#7fd4b0;font-weight:600}
+
+/* footer */
+footer{border-top:1px solid var(--line);background:var(--surface);padding:40px 0}
+.ftr{display:flex;justify-content:space-between;gap:24px;flex-wrap:wrap;font-size:13px;color:var(--ink-3)}
+.ftr .mono{font-size:11.5px;letter-spacing:.08em}
+
+/* reveal */
+@media (prefers-reduced-motion:no-preference){
+  .rv{opacity:0;transform:translateY(14px);animation:rv .7s cubic-bezier(.22,.9,.3,1) forwards}
+  .rv.d1{animation-delay:.08s}.rv.d2{animation-delay:.16s}.rv.d3{animation-delay:.24s}
+  @keyframes rv{to{opacity:1;transform:none}}
+}
+
+/* responsive */
+@media (max-width:960px){
+  .hero-grid{grid-template-columns:1fr;gap:44px}
+  .features{grid-template-columns:1fr 1fr}
+  .pipe{grid-template-columns:1fr 1fr}
+  .rb-cards{grid-template-columns:1fr}
+}
+@media (max-width:640px){
+  .wrap{padding:0 20px}
+  .nav{display:none}
+  section{padding:60px 0}
+  .hero{padding:56px 0 48px}
+  .features,.pipe,.trust-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="hdr">
+  <div class="wrap hdr-row">
+    <a class="brand" href="#top" aria-label="Hone home">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V4M4 12h10M14 20V4M18 20V9l3 3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square"/></svg>
+      <b>hone</b><small>RELAYBENCH</small>
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#platform">Platform</a>
+      <a href="#method">Method</a>
+      <a href="#trust">Trust</a>
+      <a href="#results">Results</a>
+    </nav>
+    <a class="hdr-cta" href="#get-started">Get started</a>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- HERO -->
+<section class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div class="rv">
+      <span class="eyebrow">Local-first · Durable · Human-gated</span>
+      <h1>Optimization you can <em>audit</em>, not just believe.</h1>
+      <p class="lede">
+        Hone is a local-first, durable optimization CLI. One coding-session kernel
+        improves artifacts, the task-builders that produce them, and — under bounded,
+        human-gated conditions — itself. Every claim ships with pre-registered evidence.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#get-started">Run your first objective</a>
+        <a class="btn btn-secondary" href="#method">See the methodology</a>
+      </div>
+      <div class="hero-assure" aria-label="Assurances">
+        <span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8.5 6 12l8-9" fill="none" stroke="currentColor" stroke-width="2"/></svg>No telemetry</span>
+        <span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8.5 6 12l8-9" fill="none" stroke="currentColor" stroke-width="2"/></svg>Runs on your machine</span>
+        <span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8.5 6 12l8-9" fill="none" stroke="currentColor" stroke-width="2"/></svg>Crash-safe, resumable runs</span>
+      </div>
+    </div>
+
+    <div class="rv d2">
+      <div class="term" role="img" aria-label="Terminal session: hone run with a stated objective, persisting state and reporting a gated result">
+        <div class="term-bar" aria-hidden="true"><i></i><i></i><i></i><span>local · no egress</span></div>
+        <div class="term-body" aria-hidden="true">
+          <div><span class="p">$</span> hone <span class="arg">"reduce cold-start time of the module loader<br>&nbsp;&nbsp;without regressing conformance"</span></div>
+          <div class="dim">◆ objective admitted · snapshot pinned · budget reserved</div>
+          <div class="dim">◆ sandbox: network none · read-only rootfs</div>
+          <div>&nbsp;&nbsp;iter 01–24 &nbsp;<span class="dim">persisted, resumable</span></div>
+          <div><span class="ok">✓ candidate improves holdout · report written</span></div>
+          <div class="dim">◆ promotion awaits human gate — nothing ships itself</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PROOF BAND -->
+<section class="proof" aria-labelledby="proof-t">
+  <div class="wrap">
+    <p class="proof-label" id="proof-t">Benchmarked against pinned open-source workloads</p>
+    <ul class="proof-row">
+      <li>simdjson</li><li>mimalloc</li><li>zstd</li><li>esbuild</li>
+      <li>tree-sitter</li><li>brotli</li><li>ripgrep</li><li>quickjs</li><li>duckdb</li>
+    </ul>
+  </div>
+</section>
+
+<!-- PLATFORM / FEATURES -->
+<section id="platform" aria-labelledby="platform-t">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="sec-kicker">Platform</p>
+      <h2 id="platform-t">One kernel. Three levels of leverage.</h2>
+      <p class="sec-lede">There is no separate “meta” system. The same durable kernel that improves a JSON parser improves the process that improves it — the discipline around it never changes.</p>
+    </div>
+    <div class="features">
+      <article class="feature">
+        <div class="f-ico"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 17V8m5 9V3m5 14v-6m5 6V6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+        <h3>Optimize artifacts</h3>
+        <p>Point Hone at a concrete objective — build time, binary size, throughput, conformance-preserving refactors. Every intermediate state persists locally.</p>
+      </article>
+      <article class="feature">
+        <div class="f-ico"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h12v4H4zM4 12h12v4H4z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M10 8v4" stroke="currentColor" stroke-width="2"/></svg></div>
+        <h3>Optimize task-builders</h3>
+        <p>The programs that construct optimization tasks are artifacts too. Hone tunes them against held-out evaluation so future tasks are better-posed.</p>
+      </article>
+      <article class="feature">
+        <div class="f-ico"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3a7 7 0 1 1-6.3 4M3 3v4h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+        <h3>Optimize the optimizer</h3>
+        <p>Bounded recursive self-optimization: recursion depth capped, budgets reserved up front, every promotion behind independent evaluation and a human gate.</p>
+      </article>
+      <article class="feature">
+        <div class="f-ico"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2 4 5v5c0 4 2.7 6.8 6 8 3.3-1.2 6-4 6-8V5l-6-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></div>
+        <h3>Sealed measurement</h3>
+        <p>Timing comes from a trusted parent process, never self-reported. Scoring oracles stay outside the walls the agent can touch.</p>
+      </article>
+      <article class="feature">
+        <div class="f-ico"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="8" width="14" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M6 8V6a4 4 0 0 1 8 0v2" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+        <h3>Hardened sandbox</h3>
+        <p>Network none, read-only rootfs, capabilities dropped to the floor, a fresh container per evaluation. Mutation and evaluation never share an image.</p>
+      </article>
+      <article class="feature">
+        <div class="f-ico"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16c3-1 3-9 6-9s3 6 6 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 4v13h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+        <h3>Durable by default</h3>
+        <p>Runs are resumable and replayable end to end. A crash — or a week away — loses nothing. Local SQLite, no cloud dependency.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- METHOD -->
+<section class="pipe-sec" id="method" aria-labelledby="method-t">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="sec-kicker">Method</p>
+      <h2 id="method-t">A falsifiable campaign, gated by humans</h2>
+      <p class="sec-lede">Can a coding agent find a measurably better version of itself — twice in a row — on work it has never seen? Every step is designed so either answer is trustworthy.</p>
+    </div>
+    <div class="pipe" role="list">
+      <div class="pipe-step" role="listitem">
+        <h3>Capsules</h3>
+        <p>Frozen, sandboxed benchmarks: pinned source, deterministic harness, protected scoring oracle. Admitted once, never changed.</p>
+      </div>
+      <div class="pipe-step" role="listitem">
+        <h3>Sandbox</h3>
+        <p>The trust boundary. No egress, read-only root, separated mutation and evaluation containers.</p>
+      </div>
+      <div class="pipe-step" data-gate role="listitem">
+        <h3>Stage A → G1</h3>
+        <p>The starting controller G0 searches a frozen development panel for a better controller, G1.</p>
+      </div>
+      <div class="pipe-step" data-gate role="listitem">
+        <h3>Stage B → G2</h3>
+        <p>Paired G0-vs-G1 tournament on a fresh panel — same capsules, budgets, seeds. Yields G2.</p>
+      </div>
+      <div class="pipe-step" role="listitem">
+        <h3>Terminal holdout</h3>
+        <p>G0, G1, G2 compared on untouched capsules no controller ever saw. The pre-registered estimand.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TRUST -->
+<section id="trust" aria-labelledby="trust-t">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="sec-kicker">Trust architecture</p>
+      <h2 id="trust-t">Built on the assumption that scores lie</h2>
+      <p class="sec-lede">A self-improving optimizer is the last system whose numbers should be taken on faith. The trusted runtime stays small and frozen; everything the agent can mutate is scored from outside the walls.</p>
+    </div>
+    <div class="trust-grid">
+      <article class="trust-card">
+        <h3><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="8" width="14" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M6 8V6a4 4 0 0 1 8 0v2" fill="none" stroke="currentColor" stroke-width="2"/></svg>Sandbox isolation</h3>
+        <ul class="spec">
+          <li><b>network</b>none — no egress from any evaluation</li>
+          <li><b>rootfs</b>read-only; writable scratch only where declared</li>
+          <li><b>lifecycle</b>a fresh container for every evaluation</li>
+          <li><b>containers</b>mutation and evaluation run in separated images</li>
+        </ul>
+      </article>
+      <article class="trust-card">
+        <h3><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2 4 5v5c0 4 2.7 6.8 6 8 3.3-1.2 6-4 6-8V5l-6-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>Gaming resistance</h3>
+        <ul class="spec">
+          <li><b>timing</b>measured by a trusted parent process, never self-reported</li>
+          <li><b>binaries</b>sealed measurement tooling the agent cannot rewrite</li>
+          <li><b>oracles</b>scoring logic protected from the code under test</li>
+          <li><b>panels</b>corpus and holdouts frozen before search begins</li>
+        </ul>
+      </article>
+      <article class="trust-card">
+        <h3><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="7" cy="7" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="14" cy="13" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/></svg>Independent review</h3>
+        <ul class="spec">
+          <li><b>reviewers</b>capsules and results examined by parties incentivized to find the seam</li>
+          <li><b>successors</b>candidates evaluated independently of the loop that proposed them</li>
+          <li><b>replay</b>runs persisted and replayable end to end</li>
+        </ul>
+      </article>
+      <article class="trust-card">
+        <h3><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M4 8l6-5 6 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Human gates</h3>
+        <ul class="spec">
+          <li><b>G1 gate</b>no Stage-A promotion without explicit human approval</li>
+          <li><b>G2 gate</b>no Stage-B promotion without explicit human approval</li>
+          <li><b>depth</b>recursion bounded; budgets reserved for ancestors up front</li>
+          <li><b>secrets</b>strict source and credential isolation from the agent</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- RELAYBENCH -->
+<section class="rb" id="results" aria-labelledby="rb-t">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="sec-kicker">RelayBench</p>
+      <h2 id="rb-t">Results published either way</h2>
+      <p class="sec-lede">Thresholds were registered before the first run. When the campaign concludes, RelayBench publishes success <em>or</em> failure against them — the goalposts do not move.</p>
+    </div>
+    <div class="rb-status" role="status">
+      <i aria-hidden="true"></i>
+      STATUS: CAMPAIGN IN PROGRESS — NO NUMBERS PUBLISHED. ALL PANELS BELOW ARE PLACEHOLDERS.
+    </div>
+    <div class="rb-cards">
+      <article class="rb-card">
+        <h3>Adjacent-generation transfer</h3>
+        <p>Does G1 outperform G0, and G2 outperform G1, on the terminal holdout? Each comparison publishes pass or fail against its pre-registered threshold.</p>
+        <div class="rb-slot"><span class="val" aria-hidden="true">G1&gt;G0 · G2&gt;G1</span><span class="lab">AWAITING PUBLICATION</span></div>
+      </article>
+      <article class="rb-card">
+        <h3>Terminal estimand — 50/50</h3>
+        <p>The headline number is computed over a panel weighted equally between owner-authored tasks and pinned open-source benchmarks.</p>
+        <div class="rb-slot"><span class="val" aria-hidden="true">——.—%</span><span class="lab">AWAITING PUBLICATION</span></div>
+      </article>
+      <article class="rb-card">
+        <h3>Sign consistency</h3>
+        <p>Across individual holdout capsules, how often does the later generation win at all? A mean carried by a few capsules is reported as exactly that.</p>
+        <div class="rb-slot"><span class="val" aria-hidden="true">—— / ——</span><span class="lab">AWAITING PUBLICATION</span></div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- FINAL CTA -->
+<section class="final" id="get-started" aria-labelledby="final-t">
+  <div class="wrap">
+    <h2 id="final-t">State an objective. Hone earns the improvement — and the receipts.</h2>
+    <p>Local-first. Durable. Every promotion behind a human gate. If the result is real, it survives all of this; if it isn’t, RelayBench says so.</p>
+    <div class="cmdline" role="img" aria-label='Terminal command: hone "your objective"'><b>$</b> hone "your objective"</div>
+    <div class="cta-row" style="justify-content:center">
+      <a class="btn btn-primary" href="#top">Read the docs</a>
+      <a class="btn btn-secondary" href="#results">Follow RelayBench</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap ftr">
+    <div>
+      <b style="color:var(--ink)">hone</b> — a local-first, durable optimization CLI.<br>RelayBench is its evidence.
+    </div>
+    <div class="mono">
+      NO TELEMETRY · RUNS LIVE ON YOUR MACHINE<br>
+      THRESHOLDS PRE-REGISTERED · RESULTS PUBLISHED EITHER WAY
+    </div>
+  </div>
+</footer>
+</body>
+</html>

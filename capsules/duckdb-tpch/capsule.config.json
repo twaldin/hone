@@ -1,0 +1,73 @@
+{
+  "objective": "Improve reciprocal host-normalized min-of-N reference/target latency for a single-threaded DuckDB physical-filter microbenchmark over fixed SF1 input. Exact typed output, a frozen upstream physical-filter test subset, and whole-tree peak memory no greater than baseline plus 10% are hard gates. Only src/execution/operator/filter/physical_filter.cpp is mutable.",
+  "image": "hone-duckdb-tpch@sha256:a19dc4edd5d6c1a43cdbff7bced30eb1eb2920518aac888473e2ec830161d1e2",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": [
+    ".*", "*.md", "CITATION.cff", "CMakeLists.txt", "LICENSE", "Makefile",
+    "benchmark/**", "extension/**", "scripts/**", "test/**", "third_party/**", "tools/**",
+    "eval.py", "result_hash.cpp", "toolchain.lock.json", "worker.py",
+    "src/CMakeLists.txt", "src/catalog/**", "src/common/**", "src/function/**", "src/include/**",
+    "src/logging/**", "src/main/**", "src/optimizer/**", "src/parallel/**", "src/parser/**",
+    "src/planner/**", "src/storage/**", "src/transaction/**", "src/execution/CMakeLists.txt",
+    "src/execution/expression_executor/**", "src/execution/index/**", "src/execution/nested_loop_join/**",
+    "src/execution/physical_plan/**", "src/execution/sample/**",
+    "src/execution/operator/CMakeLists.txt", "src/execution/operator/aggregate/**",
+    "src/execution/operator/csv_scanner/**", "src/execution/operator/filter/CMakeLists.txt",
+    "src/execution/operator/helper/**", "src/execution/operator/join/**", "src/execution/operator/order/**",
+    "src/execution/operator/persistent/**", "src/execution/operator/projection/**",
+    "src/execution/operator/scan/**", "src/execution/operator/schema/**", "src/execution/operator/set/**"
+  ],
+  "assetGroups": [
+    {"id": "train", "visibility": "holdout", "paths": ["assets/sf1.duckdb", "assets/train/workload.json", "assets/train/query.sql", "assets/train/oracle.sha256"]},
+    {"id": "validation", "visibility": "holdout", "paths": ["assets/sf1.duckdb", "assets/validation/workload.json", "assets/validation/query.sql", "assets/validation/oracle.sha256"]}
+  ],
+  "budget": {"maxTokens": 12000000, "maxUsd": 25, "maxWallClockSec": 10800, "maxEvaluatorInvocations": 200},
+  "sandbox": {"memoryBytes": 8589934592, "cpus": 8},
+  "diagnosticOrdering": {"path": "diagnostics/ordering-report.json"},
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-terminal-holdout",
+    "license": "MIT (upstream LICENSE preserved)",
+    "provenance": "duckdb/duckdb at exact revision 117e1a46be1c903c5a36ee3c881c125597f93c60, layered with trusted evaluator glue in synthetic baseline commit lineage; fixed SF1 database SHA-256 1e2a17dedac4da19efb6c8c154b82042cd78f1faa862a8a1b7d95f717ea0bb94; q is the host-normalized reference-yardstick score NORM_CONST(1.0)*min(reference)/min(target) over 7 timed fresh-process pairs (2 warmups), where the filter-free reference query is run by a SEPARATE pristine runner built+sealed from the trusted baseline with NO candidate overlay (candidate-independent), and every sample runs in a cgroup leaf capped to one core-equivalent (cpu.max) and one task (pids.max=1); trusted repeated-baseline fresh-container aggregates [1.0311366780691889,1.0186448748475132,1.0142276475913028] give qBase=1.0311366780691889, sample sigma=0.008769952071934352, qReference=qBase+max(5*sigma,0.05*abs(qBase-0))=1.0826935119691889; whole-tree cgroup memory.peak gate at baseline 115000 KiB +10%; terminal holdout seal with no optimizer pilots",
+    "sourceDetails": {
+      "repository": "duckdb/duckdb",
+      "revision": "117e1a46be1c903c5a36ee3c881c125597f93c60",
+      "upstreamUrl": "https://github.com/duckdb/duckdb/commit/117e1a46be1c903c5a36ee3c881c125597f93c60",
+      "mutableEnvelope": ["src/execution/operator/filter/physical_filter.cpp"],
+      "upstreamTests": ["test/sql/filter/test_expression_executor_select.test", "test/sql/filter/filter_cache.test", "test/sql/filter/length_case_filter.test"]
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+      "freshProcess": true,
+      "q": "host-normalized reference-yardstick score NORM_CONST(1.0) * min(reference)/min(target) over 7 timed fresh-process target/reference pairs (2 warmups); the filter-free reference query never invokes the mutable PhysicalFilter and is run by a SEPARATE pristine runner built+sealed from the trusted baseline with no candidate overlay, so it is candidate-independent; each sample runs in its own cgroup leaf capped to one core (cpu.max) and one task (pids.max=1); the per-binary minimum cancels shared-host contention drift while rewarding a genuinely faster filter path",
+      "qFail": 0,
+      "warmupRuns": 2,
+      "timedRuns": 7,
+      "estimator": "min-of-N reference/target (per-binary minimum)",
+      "peakRssTolerance": 0.10,
+      "trustedParentTiming": true,
+      "perSampleTimeoutSec": 45
+    },
+    "robustnessReview": {
+      "protectedPathEscape": "the broker protects the evaluator, build graph, runner, tests, dependencies, assets, and every source file outside the one-file physical-filter envelope; the evaluator independently rejects additions and every symlink",
+      "benchmarkSpecialCasing": "independently authored, non-tautological train and validation predicates (distinct selective length thresholds over lower()/upper() case kernels) exercise the same physical-filter kernel over the same fixed database and exact typed output; any pass-through of the input chunk changes the selected row set and fails the exact-output oracle, the frozen upstream test subset includes a length-case filter test whose predicates drop rows, and split-inverting diagnostics must lose on validation",
+      "fixtureFingerprinting": "assets are hash-verified, copied read-only, and unmounted before candidate build; every sample starts with a swept /tmp and /dev/shm, a fresh working directory, and fresh IPC and NET namespaces",
+      "outputFabrication": "each process stdout is checked against an oracle retained only in the trusted parent after the sealed asset mount is removed",
+      "timerTampering": "CLOCK_MONOTONIC timing surrounds each full process in the trusted Python parent and the score is the per-binary minimum of 7 timed reference/target pairs (min(reference)/min(target)); no candidate-linked clock or reported duration is accepted",
+      "processLifecycle": "every sample runs in its own root-owned cgroup leaf (cpu.max one core, pids.max=1) with a fresh process group and bounded timeout; the leaf is killed and retired via cgroup.kill after every leg, and a pre-sample sweep kills any surviving demoted process and reaps orphans adopted by the pid-1 evaluator (a non-empty cgroup.procs after a sample fails it)",
+      "binaryMutation": "the candidate runner and the pristine reference runner are each copied into a root-owned read-only sealed directory before any sample runs and the entire build tree is deleted; peak memory comes from the whole-tree cgroup memory.peak, never a candidate-writable file or a single-child rusage",
+      "buildScriptMutation": "CMake, compiler flags, evaluator, worker, runner, and tests are protected; every evaluation rebuilds submitted source from scratch"
+    },
+    "terminalSeal": {
+      "taskId": "OSS-H02",
+      "contract": "capsules/contracts/OSS-H02.json",
+      "cohort": "terminal",
+      "optimizerPilots": 0,
+      "mutationHeadroomRuns": 0,
+      "seedOptimizerSessions": 0,
+      "optimizerCorpusExposure": false,
+      "trustedActivitiesOnly": true
+    },
+    "tags": ["m2", "terminal", "oss", "duckdb", "physical-filter", "microbenchmark", "performance"]
+  }
+}

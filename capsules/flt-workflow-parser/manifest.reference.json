@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_bf3e8946e160",
+  "objective": "Improve FLT workflow parsing across legacy, dynamic-DAG, human-gate, reference, preset, and generated YAML structures. Preserve owner-consistent AST projection, localized errors, and canonical round-trip stability. Only src/workflow/parser.mjs may change.",
+  "baseline": {
+    "kind": "git",
+    "commit": "d39a88b29691d2c5a4939f9f0c3a7b66ad17f2b1"
+  },
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    ".gitignore",
+    "eval.py",
+    "worker.mjs",
+    "src/presets.mjs",
+    "src/vendor/yaml.mjs",
+    "package.json",
+    "package-lock.json",
+    "toolchain.lock.json",
+    "LICENSE",
+    "YAML-LICENSE"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train/cases.json",
+        "assets/train/inputs/dag-defaults.yaml",
+        "assets/train/inputs/dag-invalid-max-nodes.yaml",
+        "assets/train/inputs/gate-basic.yaml",
+        "assets/train/inputs/gate-pr-timeout.yaml",
+        "assets/train/inputs/generated-canonical-strip.yaml",
+        "assets/train/inputs/generated-mixed-dag.yaml",
+        "assets/train/inputs/generated-owner-code-review.yaml",
+        "assets/train/inputs/legacy-pr-surface.yaml",
+        "assets/train/inputs/legacy-run-basic.yaml",
+        "assets/train/inputs/preset-existing.yaml",
+        "assets/train/inputs/preset-parallel-vector.yaml",
+        "assets/train/inputs/reference-forward-condition.yaml",
+        "assets/train/inputs/reference-unknown-complete.yaml",
+        "assets/train/presets/minimal.json",
+        "assets/train/presets/standard.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation/cases.json",
+        "assets/validation/inputs/dag-missing-plan.yaml",
+        "assets/validation/inputs/dag-reconciler.yaml",
+        "assets/validation/inputs/gate-invalid-adapter.yaml",
+        "assets/validation/inputs/gate-invalid-notify.yaml",
+        "assets/validation/inputs/generated-owner-daily-mutator.yaml",
+        "assets/validation/inputs/generated-parallel-pr.yaml",
+        "assets/validation/inputs/generated-yaml-syntax.yaml",
+        "assets/validation/inputs/legacy-invalid-auto-pr.yaml",
+        "assets/validation/inputs/legacy-step-pr-config.yaml",
+        "assets/validation/inputs/preset-missing.yaml",
+        "assets/validation/inputs/preset-reconciler-missing.yaml",
+        "assets/validation/inputs/reference-backward-condition.yaml",
+        "assets/validation/inputs/reference-merge-collect.yaml",
+        "assets/validation/presets/minimal.json",
+        "assets/validation/presets/standard.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 198
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:157520d2176df2025e436df6f8ceaa60b220042a9ada5d7b193de19fc05782f8"
+  },
+  "contentHashes": {
+    "assets/train/cases.json": "sha256:6a386f263333b0bc1743a4bc75532cdb5dbcd1d00c35d293fd40e153a73efe29",
+    "assets/train/inputs/dag-defaults.yaml": "sha256:cea36d7951de89b582a31cc290d23101ee8f47cfc18c72f16ff1b60f478d43e1",
+    "assets/train/inputs/dag-invalid-max-nodes.yaml": "sha256:7cdcf4b274f94f99c5ce95b36df80239e23290f38a909f307832ea3813c57bcc",
+    "assets/train/inputs/gate-basic.yaml": "sha256:644f5cebba328f6ade9fc5f19532bc7c80324d1e8c47e104d49dc8f356372775",
+    "assets/train/inputs/gate-pr-timeout.yaml": "sha256:84999e7a5d43609190234c2cdc59985a31b8812c4fa2598553852f23fc56a202",
+    "assets/train/inputs/generated-canonical-strip.yaml": "sha256:af26d1614cc94d3d706ad24a303d52be25a55909811ff403281987bc55c40ec9",
+    "assets/train/inputs/generated-mixed-dag.yaml": "sha256:6c3336635f39d67d8c422d6ae587ec241cb395ea36d9672f34bb76c8a105ee18",
+    "assets/train/inputs/generated-owner-code-review.yaml": "sha256:c201e2f243574003140fabf4cdf5420a34ba015d4d0b7312cb2dcad3b1d0f609",
+    "assets/train/inputs/legacy-pr-surface.yaml": "sha256:d0e0423389c4c831765becbcfed4e9cd59ebfd2b3382bc309941650b45150d6b",
+    "assets/train/inputs/legacy-run-basic.yaml": "sha256:672779c25776efe05a580de969162a637e61a02e59a1d08bae5bd415789b916c",
+    "assets/train/inputs/preset-existing.yaml": "sha256:006ca4f2ca25d81e8b84cffc8a3924bac6af77654cf25f4ccc0e02a187fd47d1",
+    "assets/train/inputs/preset-parallel-vector.yaml": "sha256:6faee8eda2ee6df14d263a16c9e6c5745eac4025d873a25f6d9e89ef76a05416",
+    "assets/train/inputs/reference-forward-condition.yaml": "sha256:6c7ee78404e792305bdcf85b9410f5fad8378e32894cbd585fa371ede1bc96b2",
+    "assets/train/inputs/reference-unknown-complete.yaml": "sha256:6bfa45689c76f8540227a13383f997eabfb052ead86ec20a3bb318a1b6adf7fa",
+    "assets/train/presets/minimal.json": "sha256:23b424af6225c168875631f7b5b9e486006f541ff7e7d27c62d57da17a8b530d",
+    "assets/train/presets/standard.json": "sha256:eef5df4c4eb8d8f174be9c73ad4dc39cd3c27508830d91a270dfb535d1ebb11e",
+    "assets/validation/cases.json": "sha256:8fddbc799514afb74e9e3a4f9479415e407c378acab61f2c8aed5c72eb0f6710",
+    "assets/validation/inputs/dag-missing-plan.yaml": "sha256:b7cf556c9a335f8cbe130a0778bd09ff91b5b98a8c254dde24df6ec8da71903a",
+    "assets/validation/inputs/dag-reconciler.yaml": "sha256:98a4498d96f05956b0afc121dd7d0ea40572c23b43e9a151545c6c91354cff23",
+    "assets/validation/inputs/gate-invalid-adapter.yaml": "sha256:3b52cff958149b8bd740d3cdc703ec1668cbad9133eacc0d89a6a0a9b187d513",
+    "assets/validation/inputs/gate-invalid-notify.yaml": "sha256:edb8896e5594c170e609ba7c16203bbdfbf2bf4aa29d341476ccea548db32347",
+    "assets/validation/inputs/generated-owner-daily-mutator.yaml": "sha256:02a2a87e75fd391e07c1a2ec38208aa9f02534f2fa2e0127af4867fd58b9ef67",
+    "assets/validation/inputs/generated-parallel-pr.yaml": "sha256:86a09e52226ea089954685e521d859dd2c10516ecb675fa442ead432a97462d1",
+    "assets/validation/inputs/generated-yaml-syntax.yaml": "sha256:56a287384b3357767f3632ac7a6bf9438b3b21020906c50f5f73d4bef4363eca",
+    "assets/validation/inputs/legacy-invalid-auto-pr.yaml": "sha256:ac0749a1f9c1ee0976f0f3c7e8dc8ea832df9b0ac3dd519c3028a852a87b550a",
+    "assets/validation/inputs/legacy-step-pr-config.yaml": "sha256:77110907f4ac24981ad0c355ead64ab0c29cf07e5e95f08d153b9f0e46698f01",
+    "assets/validation/inputs/preset-missing.yaml": "sha256:e7b0ecbf092dcb7efb3058361af836ecb98aeb7642102caf6ee5c8b624bed73c",
+    "assets/validation/inputs/preset-reconciler-missing.yaml": "sha256:ce81a2fafc2d493f8959fe47a932ee2085e3f57afd615a2367ad1eb6dba55730",
+    "assets/validation/inputs/reference-backward-condition.yaml": "sha256:bc40604042961b8e7a8e8cbb7a14525edec0b527003e4c56e059cdf949507510",
+    "assets/validation/inputs/reference-merge-collect.yaml": "sha256:09fba470d299bc2ef4fb64e20b0afcc102583298c98b16a35923a59583e246c5",
+    "assets/validation/presets/minimal.json": "sha256:23b424af6225c168875631f7b5b9e486006f541ff7e7d27c62d57da17a8b530d",
+    "assets/validation/presets/standard.json": "sha256:eef5df4c4eb8d8f174be9c73ad4dc39cd3c27508830d91a270dfb535d1ebb11e"
+  },
+  "meta": {
+    "license": "MIT",
+    "partition": "terminal-holdout-2",
+    "scalar": "score = passed sealed cases / 26 declared sealed cases",
+    "qFail": 0,
+    "normalization": {
+      "qFail": 0,
+      "qBase": 0.5,
+      "qReference": 1,
+      "scale": 0.5
+    },
+    "diagnosticContentHashes": {
+      "diagnostics/broken/src/workflow/parser.mjs": "sha256:4c66a1d7c1aff1fac49f2a2c4f78525b491dd5719ab23af9914ecbad4bc98a05",
+      "diagnostics/improved/src/workflow/parser.mjs": "sha256:1299861eaafbe0ddde28c093e537574396beb877c0c91d28028cfdfca82b7766",
+      "diagnostics/naive/src/workflow/parser.mjs": "sha256:d41eb4bad608e07509bc0e7986e6c9fb567a6ef4058a36eabe707211414d9909",
+      "diagnostics/shortcut/src/workflow/parser.mjs": "sha256:d9850580ce470c5fcdbfad5a43c4550ff9c4f879ad7f0dbe0003873a6afc43af"
+    },
+    "groups": [
+      "legacy",
+      "dag",
+      "gate",
+      "reference",
+      "preset",
+      "generated"
+    ],
+    "groupCaseCounts": {
+      "legacy": 4,
+      "dag": 4,
+      "gate": 4,
+      "reference": 4,
+      "preset": 4,
+      "generated": 6
+    },
+    "declaredCases": 26,
+    "sourceRepository": "https://github.com/twaldin/flt",
+    "sourceCommit": "fe05463a921b9c4d808a338ea07d33abe45b6487",
+    "sourceTree": "6b5de048d6531b5d8f120f7f7b6fbb0540aef9cc",
+    "sourcePaths": [
+      "src/workflow/parser.ts",
+      "src/presets.ts",
+      "src/workflow/types.ts",
+      "tests/unit/workflow-parser.test.ts",
+      "templates/workflows/code-and-review.yaml",
+      "templates/workflows/daily-mutator.yaml"
+    ],
+    "baselineParserCommit": "a160f018fa74c987a95bbffee60fee6278874795",
+    "referenceParserCommit": "fe05463a921b9c4d808a338ea07d33abe45b6487",
+    "holdoutPolicy": "Both frozen group ids are visibility=holdout; trusted diagnostics only; no optimizer pilot or train-facing asset bytes, scores, identities, or feedback."
+  }
+}

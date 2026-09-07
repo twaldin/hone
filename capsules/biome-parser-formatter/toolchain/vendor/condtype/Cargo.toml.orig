@@ -1,0 +1,20 @@
+[package]
+name = "condtype"
+version = "1.3.0"
+edition = "2021"
+authors = ["Nikolai Vazquez"]
+license = "MIT OR Apache-2.0"
+description = "Choose types at compile-time via boolean constants."
+repository = "https://github.com/nvzqz/condtype"
+homepage = "https://github.com/nvzqz/condtype"
+documentation = "https://docs.rs/condtype"
+categories = ["no-std", "rust-patterns"]
+keywords = ["boolean", "condition", "const", "depend", "type"]
+readme = "README.md"
+
+# Const generics ordered before type generics.
+rust-version = "1.59.0"
+
+[dev-dependencies]
+libc = "0.2.141"
+cfg-if = "1"

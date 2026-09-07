@@ -1,0 +1,702 @@
+{
+  "baselinePeakRssKb": 2124,
+  "cases": [
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "validation-corpus/large/literal.txt"
+      ],
+      "id": "literal",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "validation-corpus/large/regex.txt"
+      ],
+      "id": "regex",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "validation-corpus/large/unicode.txt"
+      ],
+      "id": "unicode",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "validation-corpus/project"
+      ],
+      "id": "ignore",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "needle_[0-9]{4}",
+        "validation-corpus/many"
+      ],
+      "id": "many-small",
+      "pattern": "needle_[0-9]{4}"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "validation-corpus/project"
+      ],
+      "id": "no-match",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "validation-corpus/large/literal.txt"
+      ],
+      "id": "literal-rep2",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "validation-corpus/large/literal.txt"
+      ],
+      "id": "literal-rep3",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "validation-corpus/large/literal.txt"
+      ],
+      "id": "literal-rep4",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "validation-corpus/large/literal.txt"
+      ],
+      "id": "literal-rep5",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "validation-corpus/large/regex.txt"
+      ],
+      "id": "regex-rep2",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "validation-corpus/large/regex.txt"
+      ],
+      "id": "regex-rep3",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "validation-corpus/large/regex.txt"
+      ],
+      "id": "regex-rep4",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "validation-corpus/large/regex.txt"
+      ],
+      "id": "regex-rep5",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "validation-corpus/large/unicode.txt"
+      ],
+      "id": "unicode-rep2",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "validation-corpus/large/unicode.txt"
+      ],
+      "id": "unicode-rep3",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "validation-corpus/large/unicode.txt"
+      ],
+      "id": "unicode-rep4",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "validation-corpus/large/unicode.txt"
+      ],
+      "id": "unicode-rep5",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "validation-corpus/project"
+      ],
+      "id": "ignore-rep2",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "validation-corpus/project"
+      ],
+      "id": "ignore-rep3",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "validation-corpus/project"
+      ],
+      "id": "ignore-rep4",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "validation-corpus/project"
+      ],
+      "id": "ignore-rep5",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "validation-corpus/project"
+      ],
+      "id": "ignore-rep6",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "validation-corpus/project"
+      ],
+      "id": "no-match-rep2",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "validation-corpus/project"
+      ],
+      "id": "no-match-rep3",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "validation-corpus/project"
+      ],
+      "id": "no-match-rep4",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "validation-corpus/project"
+      ],
+      "id": "no-match-rep5",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "validation-corpus/project"
+      ],
+      "id": "no-match-rep6",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    }
+  ],
+  "corpusArchive": "corpus.tar.gz",
+  "corpusRoot": "validation-corpus",
+  "expected": {
+    "ignore": {
+      "exitCode": 0,
+      "resultSha256": "6f2d2aa85be75f2b4050310fce072c747eca0e13cb65eaba127d787a401b3615",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "de9368a8f586d7d5df1b92193abe1d80f2b05463e748290b088fe9e9de45ee97"
+    },
+    "ignore-rep2": {
+      "exitCode": 0,
+      "resultSha256": "6f2d2aa85be75f2b4050310fce072c747eca0e13cb65eaba127d787a401b3615",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "de9368a8f586d7d5df1b92193abe1d80f2b05463e748290b088fe9e9de45ee97"
+    },
+    "ignore-rep3": {
+      "exitCode": 0,
+      "resultSha256": "6f2d2aa85be75f2b4050310fce072c747eca0e13cb65eaba127d787a401b3615",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "de9368a8f586d7d5df1b92193abe1d80f2b05463e748290b088fe9e9de45ee97"
+    },
+    "ignore-rep4": {
+      "exitCode": 0,
+      "resultSha256": "6f2d2aa85be75f2b4050310fce072c747eca0e13cb65eaba127d787a401b3615",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "de9368a8f586d7d5df1b92193abe1d80f2b05463e748290b088fe9e9de45ee97"
+    },
+    "ignore-rep5": {
+      "exitCode": 0,
+      "resultSha256": "6f2d2aa85be75f2b4050310fce072c747eca0e13cb65eaba127d787a401b3615",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "de9368a8f586d7d5df1b92193abe1d80f2b05463e748290b088fe9e9de45ee97"
+    },
+    "ignore-rep6": {
+      "exitCode": 0,
+      "resultSha256": "6f2d2aa85be75f2b4050310fce072c747eca0e13cb65eaba127d787a401b3615",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "de9368a8f586d7d5df1b92193abe1d80f2b05463e748290b088fe9e9de45ee97"
+    },
+    "literal": {
+      "exitCode": 0,
+      "resultSha256": "9b45adaa741401850bc16f66b7ff767e0820e4619b73192585c8cd615b7a482e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "0c5971eca22c06f4932431db55b98029d2955b09085e53f046eceadf8d664a30"
+    },
+    "literal-rep2": {
+      "exitCode": 0,
+      "resultSha256": "9b45adaa741401850bc16f66b7ff767e0820e4619b73192585c8cd615b7a482e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "0c5971eca22c06f4932431db55b98029d2955b09085e53f046eceadf8d664a30"
+    },
+    "literal-rep3": {
+      "exitCode": 0,
+      "resultSha256": "9b45adaa741401850bc16f66b7ff767e0820e4619b73192585c8cd615b7a482e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "0c5971eca22c06f4932431db55b98029d2955b09085e53f046eceadf8d664a30"
+    },
+    "literal-rep4": {
+      "exitCode": 0,
+      "resultSha256": "9b45adaa741401850bc16f66b7ff767e0820e4619b73192585c8cd615b7a482e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "0c5971eca22c06f4932431db55b98029d2955b09085e53f046eceadf8d664a30"
+    },
+    "literal-rep5": {
+      "exitCode": 0,
+      "resultSha256": "9b45adaa741401850bc16f66b7ff767e0820e4619b73192585c8cd615b7a482e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "0c5971eca22c06f4932431db55b98029d2955b09085e53f046eceadf8d664a30"
+    },
+    "many-small": {
+      "exitCode": 0,
+      "resultSha256": "494d221de000e4aa430de456a48abe843976463307069414660a27e0fcaa0b22",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "04ba67eb8448cb0a89a7a06b201f750ff203781317d104e4e76fe06e5529c5e4"
+    },
+    "no-match": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep2": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep3": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep4": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep5": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep6": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "regex": {
+      "exitCode": 0,
+      "resultSha256": "00d2f6873c44f595234145aa0125487eaf9987fba4b114e999dfde1546de4da3",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e73b9827daeb8c3ae3d7e37a0a659e958e362174918f5bbe4d6277c8c0db03f4"
+    },
+    "regex-rep2": {
+      "exitCode": 0,
+      "resultSha256": "00d2f6873c44f595234145aa0125487eaf9987fba4b114e999dfde1546de4da3",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e73b9827daeb8c3ae3d7e37a0a659e958e362174918f5bbe4d6277c8c0db03f4"
+    },
+    "regex-rep3": {
+      "exitCode": 0,
+      "resultSha256": "00d2f6873c44f595234145aa0125487eaf9987fba4b114e999dfde1546de4da3",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e73b9827daeb8c3ae3d7e37a0a659e958e362174918f5bbe4d6277c8c0db03f4"
+    },
+    "regex-rep4": {
+      "exitCode": 0,
+      "resultSha256": "00d2f6873c44f595234145aa0125487eaf9987fba4b114e999dfde1546de4da3",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e73b9827daeb8c3ae3d7e37a0a659e958e362174918f5bbe4d6277c8c0db03f4"
+    },
+    "regex-rep5": {
+      "exitCode": 0,
+      "resultSha256": "00d2f6873c44f595234145aa0125487eaf9987fba4b114e999dfde1546de4da3",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e73b9827daeb8c3ae3d7e37a0a659e958e362174918f5bbe4d6277c8c0db03f4"
+    },
+    "unicode": {
+      "exitCode": 0,
+      "resultSha256": "42acb255b35dbbf2319a55bb2054894b626663e81f484faa68ad3819cd7b174a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "8c9719b1a70eb972c93287ccf1006ccd4fcfd5206f23b8c9ecb08d3d29e133d8"
+    },
+    "unicode-rep2": {
+      "exitCode": 0,
+      "resultSha256": "42acb255b35dbbf2319a55bb2054894b626663e81f484faa68ad3819cd7b174a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "8c9719b1a70eb972c93287ccf1006ccd4fcfd5206f23b8c9ecb08d3d29e133d8"
+    },
+    "unicode-rep3": {
+      "exitCode": 0,
+      "resultSha256": "42acb255b35dbbf2319a55bb2054894b626663e81f484faa68ad3819cd7b174a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "8c9719b1a70eb972c93287ccf1006ccd4fcfd5206f23b8c9ecb08d3d29e133d8"
+    },
+    "unicode-rep4": {
+      "exitCode": 0,
+      "resultSha256": "42acb255b35dbbf2319a55bb2054894b626663e81f484faa68ad3819cd7b174a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "8c9719b1a70eb972c93287ccf1006ccd4fcfd5206f23b8c9ecb08d3d29e133d8"
+    },
+    "unicode-rep5": {
+      "exitCode": 0,
+      "resultSha256": "42acb255b35dbbf2319a55bb2054894b626663e81f484faa68ad3819cd7b174a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "8c9719b1a70eb972c93287ccf1006ccd4fcfd5206f23b8c9ecb08d3d29e133d8"
+    }
+  },
+  "measurementRepetitions": 5,
+  "peakRssLimitKb": 16384,
+  "processesPerSample": 5,
+  "split": "validation",
+  "version": 1,
+  "warmupRepetitions": 1
+}

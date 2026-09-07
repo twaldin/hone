@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "frames": 100,
+  "samples": 5,
+  "warmupFrames": 10,
+  "referenceP99ScaleMs": 0.5,
+  "frameDeltaSpan": 64,
+  "timeoutSec": 10,
+  "publicCases": [
+    {
+      "id": "public-scene",
+      "input": {
+        "blocks": [
+          {
+            "id": 0,
+            "x": -50,
+            "y": -15,
+            "z": -50,
+            "selected": true
+          },
+          {
+            "id": 1,
+            "x": -13,
+            "y": -4,
+            "z": 3,
+            "selected": false
+          },
+          {
+            "id": 2,
+            "x": 24,
+            "y": 7,
+            "z": -45,
+            "selected": false
+          },
+          {
+            "id": 3,
+            "x": -40,
+            "y": -13,
+            "z": 8,
+            "selected": false
+          },
+          {
+            "id": 4,
+            "x": -3,
+            "y": -2,
+            "z": -40,
+            "selected": false
+          },
+          {
+            "id": 5,
+            "x": 34,
+            "y": 9,
+            "z": 13,
+            "selected": false
+          },
+          {
+            "id": 6,
+            "x": -30,
+            "y": -11,
+            "z": -35,
+            "selected": false
+          },
+          {
+            "id": 7,
+            "x": 7,
+            "y": 0,
+            "z": 18,
+            "selected": true
+          },
+          {
+            "id": 8,
+            "x": 44,
+            "y": 11,
+            "z": -30,
+            "selected": false
+          },
+          {
+            "id": 9,
+            "x": -20,
+            "y": -9,
+            "z": 23,
+            "selected": false
+          },
+          {
+            "id": 10,
+            "x": 17,
+            "y": 2,
+            "z": -25,
+            "selected": false
+          },
+          {
+            "id": 11,
+            "x": -47,
+            "y": 13,
+            "z": 28,
+            "selected": false
+          },
+          {
+            "id": 12,
+            "x": -10,
+            "y": -7,
+            "z": -20,
+            "selected": false
+          },
+          {
+            "id": 13,
+            "x": 27,
+            "y": 4,
+            "z": 33,
+            "selected": false
+          },
+          {
+            "id": 14,
+            "x": -37,
+            "y": 15,
+            "z": -15,
+            "selected": true
+          },
+          {
+            "id": 15,
+            "x": 0,
+            "y": -5,
+            "z": 38,
+            "selected": false
+          },
+          {
+            "id": 16,
+            "x": 37,
+            "y": 6,
+            "z": -10,
+            "selected": false
+          },
+          {
+            "id": 17,
+            "x": -27,
+            "y": -14,
+            "z": 43,
+            "selected": false
+          },
+          {
+            "id": 18,
+            "x": 10,
+            "y": -3,
+            "z": -5,
+            "selected": false
+          },
+          {
+            "id": 19,
+            "x": 47,
+            "y": 8,
+            "z": 48,
+            "selected": true
+          }
+        ],
+        "radius": 25
+      },
+      "expected": [
+        "7:7,0,18"
+      ]
+    }
+  ]
+}

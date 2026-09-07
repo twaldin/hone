@@ -1,0 +1,702 @@
+{
+  "baselinePeakRssKb": 1860,
+  "cases": [
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "train-corpus/large/literal.txt"
+      ],
+      "id": "literal",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "train-corpus/large/regex.txt"
+      ],
+      "id": "regex",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "train-corpus/large/unicode.txt"
+      ],
+      "id": "unicode",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "train-corpus/project"
+      ],
+      "id": "ignore",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "needle_[0-9]{4}",
+        "train-corpus/many"
+      ],
+      "id": "many-small",
+      "pattern": "needle_[0-9]{4}"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "train-corpus/project"
+      ],
+      "id": "no-match",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "train-corpus/large/literal.txt"
+      ],
+      "id": "literal-rep2",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "train-corpus/large/literal.txt"
+      ],
+      "id": "literal-rep3",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "train-corpus/large/literal.txt"
+      ],
+      "id": "literal-rep4",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "NEEDLE_LITERAL",
+        "train-corpus/large/literal.txt"
+      ],
+      "id": "literal-rep5",
+      "pattern": "NEEDLE_LITERAL"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "train-corpus/large/regex.txt"
+      ],
+      "id": "regex-rep2",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "train-corpus/large/regex.txt"
+      ],
+      "id": "regex-rep3",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "train-corpus/large/regex.txt"
+      ],
+      "id": "regex-rep4",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "CODE[0-9]{4}::payload",
+        "train-corpus/large/regex.txt"
+      ],
+      "id": "regex-rep5",
+      "pattern": "CODE[0-9]{4}::payload"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "train-corpus/large/unicode.txt"
+      ],
+      "id": "unicode-rep2",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "train-corpus/large/unicode.txt"
+      ],
+      "id": "unicode-rep3",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "train-corpus/large/unicode.txt"
+      ],
+      "id": "unicode-rep4",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--with-filename",
+        "--line-number",
+        "\\p{Greek}+",
+        "train-corpus/large/unicode.txt"
+      ],
+      "id": "unicode-rep5",
+      "pattern": "\\p{Greek}+"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "train-corpus/project"
+      ],
+      "id": "ignore-rep2",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "train-corpus/project"
+      ],
+      "id": "ignore-rep3",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "train-corpus/project"
+      ],
+      "id": "ignore-rep4",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "train-corpus/project"
+      ],
+      "id": "ignore-rep5",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "VISIBLE_HIT",
+        "train-corpus/project"
+      ],
+      "id": "ignore-rep6",
+      "pattern": "VISIBLE_HIT"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "train-corpus/project"
+      ],
+      "id": "no-match-rep2",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "train-corpus/project"
+      ],
+      "id": "no-match-rep3",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "train-corpus/project"
+      ],
+      "id": "no-match-rep4",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "train-corpus/project"
+      ],
+      "id": "no-match-rep5",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    },
+    {
+      "args": [
+        "--no-config",
+        "--no-messages",
+        "--text",
+        "--color",
+        "never",
+        "--sort",
+        "path",
+        "--threads",
+        "1",
+        "--with-filename",
+        "--line-number",
+        "--fixed-strings",
+        "ABSENT_SENTINEL_9f77",
+        "train-corpus/project"
+      ],
+      "id": "no-match-rep6",
+      "pattern": "ABSENT_SENTINEL_9f77"
+    }
+  ],
+  "corpusArchive": "corpus.tar.gz",
+  "corpusRoot": "train-corpus",
+  "expected": {
+    "ignore": {
+      "exitCode": 0,
+      "resultSha256": "fc333a323cfa25ea3b5e7107390bfce49dce599e9ba92819a5afce5ee9fc334d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "fcf5d805899061d31331cc848e79fde6bc6e5a11b2af5406cf3761be8d61e146"
+    },
+    "ignore-rep2": {
+      "exitCode": 0,
+      "resultSha256": "fc333a323cfa25ea3b5e7107390bfce49dce599e9ba92819a5afce5ee9fc334d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "fcf5d805899061d31331cc848e79fde6bc6e5a11b2af5406cf3761be8d61e146"
+    },
+    "ignore-rep3": {
+      "exitCode": 0,
+      "resultSha256": "fc333a323cfa25ea3b5e7107390bfce49dce599e9ba92819a5afce5ee9fc334d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "fcf5d805899061d31331cc848e79fde6bc6e5a11b2af5406cf3761be8d61e146"
+    },
+    "ignore-rep4": {
+      "exitCode": 0,
+      "resultSha256": "fc333a323cfa25ea3b5e7107390bfce49dce599e9ba92819a5afce5ee9fc334d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "fcf5d805899061d31331cc848e79fde6bc6e5a11b2af5406cf3761be8d61e146"
+    },
+    "ignore-rep5": {
+      "exitCode": 0,
+      "resultSha256": "fc333a323cfa25ea3b5e7107390bfce49dce599e9ba92819a5afce5ee9fc334d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "fcf5d805899061d31331cc848e79fde6bc6e5a11b2af5406cf3761be8d61e146"
+    },
+    "ignore-rep6": {
+      "exitCode": 0,
+      "resultSha256": "fc333a323cfa25ea3b5e7107390bfce49dce599e9ba92819a5afce5ee9fc334d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "fcf5d805899061d31331cc848e79fde6bc6e5a11b2af5406cf3761be8d61e146"
+    },
+    "literal": {
+      "exitCode": 0,
+      "resultSha256": "0fb92949e619df7097b7b0524cc98ce561ea1b9cef3b6ac65ebaa4f6cfe737fe",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "6151e003c0b8ecfee3ab3f3d4cdc310ce581b4e83b46a4c4dd2f9b770027cb2d"
+    },
+    "literal-rep2": {
+      "exitCode": 0,
+      "resultSha256": "0fb92949e619df7097b7b0524cc98ce561ea1b9cef3b6ac65ebaa4f6cfe737fe",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "6151e003c0b8ecfee3ab3f3d4cdc310ce581b4e83b46a4c4dd2f9b770027cb2d"
+    },
+    "literal-rep3": {
+      "exitCode": 0,
+      "resultSha256": "0fb92949e619df7097b7b0524cc98ce561ea1b9cef3b6ac65ebaa4f6cfe737fe",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "6151e003c0b8ecfee3ab3f3d4cdc310ce581b4e83b46a4c4dd2f9b770027cb2d"
+    },
+    "literal-rep4": {
+      "exitCode": 0,
+      "resultSha256": "0fb92949e619df7097b7b0524cc98ce561ea1b9cef3b6ac65ebaa4f6cfe737fe",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "6151e003c0b8ecfee3ab3f3d4cdc310ce581b4e83b46a4c4dd2f9b770027cb2d"
+    },
+    "literal-rep5": {
+      "exitCode": 0,
+      "resultSha256": "0fb92949e619df7097b7b0524cc98ce561ea1b9cef3b6ac65ebaa4f6cfe737fe",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "6151e003c0b8ecfee3ab3f3d4cdc310ce581b4e83b46a4c4dd2f9b770027cb2d"
+    },
+    "many-small": {
+      "exitCode": 0,
+      "resultSha256": "e792f5e822327ce2354e84c76ebfe5730ff476f8209d322e88372491a3e51bb9",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "04c1b9d133d421ff784661035bd29c631d39fbe5c808758ac5031b7d7ae7c309"
+    },
+    "no-match": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep2": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep3": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep4": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep5": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "no-match-rep6": {
+      "exitCode": 1,
+      "resultSha256": "1cd0682e04b11b70bcbcff45da8c57c835264fb73db3b97846683e7541cabb50",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "regex": {
+      "exitCode": 0,
+      "resultSha256": "6bdd003eb554adcf41aee564b322abbd11bb4c242d9acb05158564f3e7ecdf18",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "3ffa74ad51cbc8b745e8da046d7278f58a015480b73672114158d5754622e6dd"
+    },
+    "regex-rep2": {
+      "exitCode": 0,
+      "resultSha256": "6bdd003eb554adcf41aee564b322abbd11bb4c242d9acb05158564f3e7ecdf18",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "3ffa74ad51cbc8b745e8da046d7278f58a015480b73672114158d5754622e6dd"
+    },
+    "regex-rep3": {
+      "exitCode": 0,
+      "resultSha256": "6bdd003eb554adcf41aee564b322abbd11bb4c242d9acb05158564f3e7ecdf18",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "3ffa74ad51cbc8b745e8da046d7278f58a015480b73672114158d5754622e6dd"
+    },
+    "regex-rep4": {
+      "exitCode": 0,
+      "resultSha256": "6bdd003eb554adcf41aee564b322abbd11bb4c242d9acb05158564f3e7ecdf18",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "3ffa74ad51cbc8b745e8da046d7278f58a015480b73672114158d5754622e6dd"
+    },
+    "regex-rep5": {
+      "exitCode": 0,
+      "resultSha256": "6bdd003eb554adcf41aee564b322abbd11bb4c242d9acb05158564f3e7ecdf18",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "3ffa74ad51cbc8b745e8da046d7278f58a015480b73672114158d5754622e6dd"
+    },
+    "unicode": {
+      "exitCode": 0,
+      "resultSha256": "9e31b216f8ede01b7247785be9c840690f991a681ecf79939891215b0942d098",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "93d65e17e73ad5dca6100c06e84ed2b1451bc49fc471ada7c85064026205dc4e"
+    },
+    "unicode-rep2": {
+      "exitCode": 0,
+      "resultSha256": "9e31b216f8ede01b7247785be9c840690f991a681ecf79939891215b0942d098",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "93d65e17e73ad5dca6100c06e84ed2b1451bc49fc471ada7c85064026205dc4e"
+    },
+    "unicode-rep3": {
+      "exitCode": 0,
+      "resultSha256": "9e31b216f8ede01b7247785be9c840690f991a681ecf79939891215b0942d098",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "93d65e17e73ad5dca6100c06e84ed2b1451bc49fc471ada7c85064026205dc4e"
+    },
+    "unicode-rep4": {
+      "exitCode": 0,
+      "resultSha256": "9e31b216f8ede01b7247785be9c840690f991a681ecf79939891215b0942d098",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "93d65e17e73ad5dca6100c06e84ed2b1451bc49fc471ada7c85064026205dc4e"
+    },
+    "unicode-rep5": {
+      "exitCode": 0,
+      "resultSha256": "9e31b216f8ede01b7247785be9c840690f991a681ecf79939891215b0942d098",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutSha256": "93d65e17e73ad5dca6100c06e84ed2b1451bc49fc471ada7c85064026205dc4e"
+    }
+  },
+  "measurementRepetitions": 5,
+  "peakRssLimitKb": 16384,
+  "processesPerSample": 5,
+  "split": "train",
+  "version": 1,
+  "warmupRepetitions": 1
+}

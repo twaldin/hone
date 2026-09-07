@@ -1,0 +1,30 @@
+name: lint
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with: { components: rustfmt }
+    - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with: { components: clippy }
+    - run: cargo --locked clippy --all --all-targets --all-features -- -D warnings
+
+on:
+  merge_group:
+    types: [checks_requested]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]

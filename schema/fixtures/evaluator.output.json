@@ -1,0 +1,10 @@
+{
+  "valid": true,
+  "objectives": { "quality": 0.73, "runtime_ms": 418 },
+  "constraints": { "tests_pass": true },
+  "perExample": {
+    "maze_dense_01": { "score": 1.0, "feedback": "optimal path found in 3.1ms, was 41ms at baseline" },
+    "maze_sparse_02": { "score": 0.4, "feedback": { "note": "suboptimal path length 122 vs 117", "timeMs": 9.8 } }
+  },
+  "diagnostics": { "summary": "heap-based open set; tie-breaking changed" }
+}

@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-T06",
+  "capsule": "harness-session-log-normalization",
+  "cohort": "train",
+  "stratum": "owner",
+  "panel": "A",
+  "status": "existing-admitted",
+  "objective": "Correctly recover model, usage, cost, and completion state from sealed Crush/Gemini/Kilo/OpenCode/Qwen/SWE-agent transcripts. q = weighted required fields recovered / declared fields; transcript fixtures and schema are protected.",
+  "character": "Multi-adapter parsing, MIT.",
+  "source": {
+    "visibility": "owner-licensed",
+    "repository": "Harness",
+    "revision": "e101371004685014913c7e0085821caf96db244b",
+    "referenceCommit": "5b09ed7",
+    "existingCapsuleId": "cap_e61f6d822ca1"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
+    "workloadHashes": "see capsule manifest contentHashes"
+  },
+  "publication": "license-dependent"
+}

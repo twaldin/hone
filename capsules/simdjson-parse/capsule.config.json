@@ -1,0 +1,110 @@
+{
+  "objective": "Improve geometric-mean DOM and On-Demand JSON parsing throughput across frozen mixed corpora at simdjson 8e6bac94 while preserving exact event hashes, malformed-input errors, the full relevant upstream test set, and peak RSS.",
+  "image": "hone-simdjson-parse@sha256:63083edb85b611e342254616b8d2515cb7263b7828602da817cec1cd143fcb4c",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    "hone/**",
+    "include/**",
+    "benchmark/**",
+    "tests/**",
+    "cmake/**",
+    "dependencies/**",
+    "examples/**",
+    "fuzz/**",
+    "jsonexamples/**",
+    "scripts/**",
+    "singleheader/**",
+    "style/**",
+    "tools/**",
+    "windows/**",
+    "CMakeLists.txt",
+    "src/simdjson.cpp",
+    "src/implementation.cpp",
+    "src/to_chars.cpp",
+    "src/from_chars.cpp",
+    "src/internal/**",
+    "LICENSE",
+    "LICENSE-MIT",
+    "AUTHORS",
+    "CONTRIBUTORS"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-oss-train-panel-a",
+    "license": "Apache-2.0 OR MIT (upstream LICENSE and LICENSE-MIT preserved)",
+    "provenance": "Pinned public source simdjson/simdjson@8e6bac94877f2d3d026000d36ce81e0aaf38d26f; upstream jsonexamples plus deterministic generated JSON; current-head A-A qReference construction is frozen after local calibration.",
+    "sourceDetails": {
+      "repository": "simdjson/simdjson",
+      "commit": "8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
+      "sourceTree": ".hone-sources/train/simdjson_simdjson@8e6bac94877f2d3d026000d36ce81e0aaf38d26f",
+      "mutableSurface": "src/generic parsing kernels and architecture implementation translation units; public headers, evaluator, build files, benchmark harness, tests, fixtures, and expected hashes are protected",
+      "upstreamHarness": "hone/verify.cpp trusted event harness (parent-timed; no self-reported throughput consumed)",
+      "relevantTests": 44
+    },
+    "toolchain": {
+      "base": "debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+      "compiler": "GCC 12.2.0",
+      "cmake": "3.25.1-1",
+      "googleBenchmark": "Debian libbenchmark-dev 1.7.1-1",
+      "dockerfile": "Dockerfile",
+      "dockerfileSha256": "sha256:c0750efb496e42bb91892d4c567c806361238941dad36973c6321fc41ec0a318"
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+      "activeImplementation": "arm64 (NEON)",
+      "q": "geometric mean over the three frozen corpora of the per-workload candidate/reference speed ratio for full-document DOM and On-Demand parses; each workload ratio is the geometric mean of back-to-back reference/candidate wall-time PAIRS (paired-geomean, lead alternated so sustained host contention cancels within each pair), wall measured in the trusted evaluator parent around the non-self-reporting harness, the reference parser rebuilt from frozen trusted sources in the same eval and timed adjacently; never a self-reported number from candidate-linked code. Timed iterations are BOTH byte- and structure-distinct: the trusted parser-independent harness rotates value bytes AND relocates insignificant whitespace across a sampled subset of structural tokens before every iteration after the first, so no two timed iterations share their bytes OR their stage-1 structural index (a resident-index replay is caught), and every perturbed iteration's full event stream is folded into a chain the parent validates against the trusted reference's chain at the same iteration count.",
+      "qFail": 0,
+      "peakRssGate": "candidate whole-tree peak RSS <= per-split frozen baseline (protected asset) * 1.05, measured as the kernel-owned cgroup2 memory.peak of a fresh per-launch leaf the candidate subtree joins before the privilege drop (not VmHWM of a single pid, which a detached child or clear_refs can dodge)",
+      "freshProcess": true,
+      "validationOracle": "expected event hashes and RSS baselines live only in the protected asset mount (assets/<split>/expected.json), outside the candidate-readable workspace and corpus; perturbed-iteration chains are pinned per iteration count by the trusted reference binary within each eval; each candidate launch runs in a fresh SysV-IPC namespace and candidate-writable residue (/tmp, /var/tmp, /dev/shm, SysV IPC) is purged between launches so no parse result or resident index can bridge launches",
+      "normalization": {
+        "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+        "qBase": 1.0003818995820721,
+        "sigma": 0.0006361137429828387,
+        "qReference": 1.0504009945611756,
+        "status": "provisional local locked A-A calibration under round-4 harness (structural perturbation + cgroup peak); refreshed from the 2x-consecutive ordering run, final frozen GCE like-for-like re-calibration required"
+      }
+    },
+    "tags": [
+      "m2",
+      "oss",
+      "simdjson",
+      "dom",
+      "ondemand",
+      "performance"
+    ]
+  }
+}

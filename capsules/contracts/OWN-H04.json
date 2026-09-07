@@ -1,0 +1,23 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-H04",
+  "capsule": "harness-pi-readiness",
+  "cohort": "terminal",
+  "stratum": "owner",
+  "panel": null,
+  "status": "pending-authoring",
+  "objective": "Correct Pi idle-prompt readiness detection and project-instructions backup behavior across sealed process traces and filesystem states.",
+  "source": {
+    "visibility": "owner-licensed",
+    "repository": "Harness",
+    "revision": "1815353f85f8f052fea30812aaca3be485c51d30",
+    "referenceCommit": "39ff71f"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-dependent"
+}

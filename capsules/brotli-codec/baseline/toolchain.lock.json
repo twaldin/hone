@@ -1,0 +1,9 @@
+{
+  "baseImage": "docker.io/library/debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+  "buildEssential": "12.9",
+  "cmake": "3.25.1-1",
+  "compiler": "gcc 12.2.0-14+deb12u1",
+  "image": "hone-brotli-codec@sha256:432ce8dbe85174d10ea0de3562874e7996dfbd2537d8d6148bc5f5a29fff5adc",
+  "platform": "linux/arm64",
+  "python": "3.11.2-1+b1"
+}

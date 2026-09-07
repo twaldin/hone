@@ -1,0 +1,32 @@
+[package]
+name = "bytecheck"
+description = "Memory validation framework for Rust"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/bytecheck"
+
+[dependencies]
+bytecheck_derive.workspace = true
+ptr_meta.workspace = true
+rancor.workspace = true
+simdutf8 = { workspace = true, optional = true }
+
+# Support for various common crates. These are primarily to get users off the
+# ground and build some momentum.
+
+# These are NOT PLANNED to remain in bytecheck for the 1.0 release. Much like
+# serde, these implementations should be moved into their respective crates over
+# time. Before adding support for another crate, please consider getting
+# bytecheck support in the crate instead.
+
+uuid-1 = { package = "uuid", version = "1", optional = true, default-features = false }
+
+[features]
+default = ["simdutf8"]

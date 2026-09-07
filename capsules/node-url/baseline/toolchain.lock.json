@@ -1,0 +1,19 @@
+{
+  "sourceRevision": "9df0e9b4d4a5be5ce7506fae44acb6667bb68d6b",
+  "sourceTree": "91fb3fe11fe8e0075ba1f19d90dbedb47d7bd731",
+  "baseImage": "debian@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd",
+  "compiler": "gcc 14.2.0",
+  "linker": "LLD 19.1.7",
+  "ninja": "1.12.1",
+  "python": "3.13.5",
+  "configure": [
+    "--ninja",
+    "--without-npm",
+    "--without-amaro",
+    "--without-ssl",
+    "--without-intl",
+    "--without-inspector"
+  ],
+  "cleanBuild": ["ninja", "-C", "out/Release", "node", "-j2"],
+  "incrementalBuild": ["ninja", "-C", "out/Release", "node", "-j4"]
+}

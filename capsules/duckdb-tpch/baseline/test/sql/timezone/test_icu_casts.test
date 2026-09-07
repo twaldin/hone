@@ -1,0 +1,55 @@
+# name: test/sql/timezone/test_icu_casts.test
+# description: Test the ICU cast functions
+# group: [timezone]
+
+require icu
+
+statement ok
+SET Calendar = 'gregorian';
+
+statement ok
+SET TimeZone = 'America/Los_Angeles';
+
+# Test casting to naïve values
+statement ok
+CREATE TABLE tstzs AS 
+	FROM VALUES ('2026-04-09 11:48:07.123456-07'::TIMESTAMPTZ) tbl(t);
+
+statement ok
+CREATE TABLE tsns AS
+	FROM VALUES ('2021-01-01 00:00:00.000000123'::TIMESTAMP_NS) tbl(t);
+
+query I
+select t::TIMESTAMP_NS from tstzs;
+----
+2026-04-09 11:48:07.123456
+
+query I
+SELECT TIMESTAMPTZ_NS '2021-01-01 00:00:00.000000123+00'::TIMESTAMP_NS;
+----
+2020-12-31 16:00:00.000000123
+
+query I
+select t::TIMESTAMPTZ_NS from tsns;
+----
+2021-01-01 00:00:00.000000123-08
+
+query I
+select t::TIMESTAMP from tstzs;
+----
+2026-04-09 11:48:07.123456
+
+query I
+select t::TIMESTAMP_MS from tstzs;
+----
+2026-04-09 11:48:07.123
+
+query I
+select t::TIMESTAMP_S from tstzs;
+----
+2026-04-09 11:48:07
+
+query I
+select t::DATE from tstzs;
+----
+2026-04-09

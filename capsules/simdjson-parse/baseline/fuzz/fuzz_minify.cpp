@@ -1,0 +1,19 @@
+#include "simdjson.h"
+#include "FuzzUtils.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+/*
+ * Minifies by first parsing, then minifying.
+ */
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+    simdjson::padded_string str(reinterpret_cast<const char *>(Data), Size);
+    simdjson::dom::parser parser;
+    simdjson::dom::element elem;
+    auto error = parser.parse(str).get(elem);
+    if (error) { return 0; }
+    std::string minified = simdjson::minify(elem);
+    (void)minified;
+    return 0;
+}

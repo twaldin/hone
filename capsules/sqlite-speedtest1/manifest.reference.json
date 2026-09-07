@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_1c911f3aff9a",
+  "objective": "Improve one high-signal query-shape latency family on deterministic frozen speedtest1 databases: a full z1 scan with NOCASE text ordering and a derived integer tie-break, forced through SQLite's external sorter. The oriented scalar is reciprocal geometric-mean fresh-process latency. Exact SHA-256 result/database identities, the pinned select/index/join/where Tcl slice, stripped binary size, and peak RSS are hard gates. Only the named planner, VDBE, sorter, B-tree, pager, connection-default, and internal-header files are mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "6bc22f899455deab619469885bf8d768daba48c8"
+  },
+  "image": "hone-sqlite-speedtest1@sha256:b4c82080a113d183def64d406fb554394f1ec86594617e72ecc71cc7c1955612",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    ".*",
+    "*.md",
+    "VERSION",
+    "Makefile*",
+    "auto.def",
+    "configure",
+    "bench.c",
+    "eval.py",
+    "worker.py",
+    "toolchain.lock.json",
+    "main.mk",
+    "make.bat",
+    "magic.txt",
+    "manifest",
+    "manifest.tags",
+    "manifest.uuid",
+    "sqlite*.in",
+    "art/**",
+    "autoconf/**",
+    "autosetup/**",
+    "contrib/**",
+    "doc/**",
+    "ext/**",
+    "mptest/**",
+    "test/**",
+    "tool/**",
+    "src/shell.c.in",
+    "src/sqlite.h.in",
+    "src/tcl*.c",
+    "src/test*.c"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train/speedtest.db",
+        "assets/train/workloads.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation/speedtest.db",
+        "assets/validation/workloads.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "sandbox": {
+    "memoryBytes": 2147483648,
+    "cpus": 2
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:522bf913982df55b9e5e7153d9127704992f069cb5815c4de2b886e416a8098e"
+  },
+  "contentHashes": {
+    "assets/train/speedtest.db": "sha256:e6c6dcaa9b232afa2503bb39dd55ed95b870fc8616c50b43c749a3c2f2c56d8d",
+    "assets/train/workloads.json": "sha256:53a9f880f3c7f79a15cf2bbbc3862f0330ffffe87b3a632e620884629ae40305",
+    "assets/validation/speedtest.db": "sha256:6df63e8983673a86724a07cd446d3b1ee4c61137b830c70869cf3cb71fcca864",
+    "assets/validation/workloads.json": "sha256:7646dde69ef5f20964725ab5d80d253516a7635b244a9de39e402fe85ab48454"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "sqlite/sqlite GitHub mirror at exact commit 21fb3ccb37648b93433c592f3f6f7d5ef37de56c (Fossil manifest b14c3f8fec5123b1faa6d88dee2740ee4acb10dd522207531567d46f4714e227); the declared baseline is a synthetic commit layering the trusted evaluator glue (eval.py, worker.py, bench.c, toolchain.lock.json) over that upstream tree with the upstream parent retained in history; frozen databases come from pinned test/speedtest1.c, while the sealed challenge is one protected external-sort query family selected to provide control separation well above host noise; no reference patch exists",
+    "license": "SQLite public domain; bundled build tooling carries upstream BSD-style notices; LICENSE.md preserved",
+    "tags": [
+      "m2",
+      "terminal-holdout",
+      "oss",
+      "sqlite",
+      "query-shape",
+      "sorter",
+      "performance"
+    ],
+    "partition": "m2-terminal-holdout",
+    "sourceDetails": {
+      "repository": "sqlite/sqlite",
+      "revision": "21fb3ccb37648b93433c592f3f6f7d5ef37de56c",
+      "baselineCommit": "synthetic commit on top of upstream 21fb3ccb37648b93433c592f3f6f7d5ef37de56c that adds the trusted evaluator/worker/benchmark glue and the frozen toolchain lock so the exact git-baseline verifier reconstructs the complete evaluated worktree; the upstream parent commit is retained in git history and in this provenance record",
+      "fossilManifestUuid": "b14c3f8fec5123b1faa6d88dee2740ee4acb10dd522207531567d46f4714e227",
+      "upstreamUrl": "https://github.com/sqlite/sqlite/commit/21fb3ccb37648b93433c592f3f6f7d5ef37de56c",
+      "mutableEnvelope": [
+        "src/btree.c",
+        "src/expr.c",
+        "src/main.c",
+        "src/pager.c",
+        "src/select.c",
+        "src/sqliteInt.h",
+        "src/vdbe.c",
+        "src/vdbeapi.c",
+        "src/vdbesort.c",
+        "src/where.c",
+        "src/wherecode.c"
+      ],
+      "upstreamTests": [
+        "testfixture test/select1.test",
+        "testfixture test/index.test",
+        "testfixture test/join.test",
+        "testfixture test/where.test"
+      ]
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+      "freshProcess": true,
+      "freshWritableStatePerRep": true,
+      "sampleRepetitions": 7,
+      "q": "reciprocal geometric mean of the fastest three of seven trusted-parent wall times for one protected external-sort query family run eight times per fresh process",
+      "qFail": 0,
+      "databaseGate": "byte-exact SHA-256 before and after every evaluation",
+      "binarySizeGate": "root-owned sealed stripped benchmark binary bytes no greater than frozen baseline",
+      "rssGate": "fresh benchmark-process peak RSS no greater than 102% of the frozen baseline observation per split"
+    },
+    "terminalSeal": {
+      "taskId": "OSS-H05",
+      "cohort": "terminal",
+      "optimizerPilots": 0,
+      "mutationHeadroomRuns": 0,
+      "seedOptimizerSessions": 0,
+      "trustedActivitiesOnly": [
+        "correctness",
+        "determinism",
+        "interleaved A-A noise",
+        "hand-authored sensitivity",
+        "exploit-resistance review"
+      ],
+      "corpusBoundary": "identity, fixtures, scores, and feedback confined to capsule and admission evidence; never optimizer-queryable"
+    },
+    "exploitReview": {
+      "protectedPathEscape": "the evaluator rejects symlinks, new files, and any byte change outside the exact eleven-file mutable envelope; build, evaluator, harness, fixture, test, and oracle metadata remain protected",
+      "benchmarkSpecialCasing": "separate sealed train and validation databases; a file-size fingerprint diagnostic inherits the valid train optimization and adds validation-only delay",
+      "fixtureFingerprinting": "holdout assets and result oracles stay below a root-only parent; only after build and tests does the evaluator copy one database into a root-owned non-writable directory",
+      "outputFabrication": "protected C executes the real sorter query and computes a type-and-byte-sensitive SHA-256 digest; the trusted parent independently validates the output against inaccessible oracles",
+      "timerTampering": "the root evaluator measures each repetition externally with monotonic_ns; candidate-linked code never supplies elapsed time",
+      "processLifecycle": "each repetition receives a new writable state directory; the worker starts a fresh process group, applies a per-sample timeout, kills the full group, and removes state",
+      "binarySealing": "after build and tests, the evaluator copies the binary into a root-owned read-only directory and verifies its hash after all repetitions",
+      "buildScriptMutation": "configure inputs, makefiles, evaluator, worker, compiler flags, tests, and toolchain lock are protected; every evaluation starts with a clean amalgamation build",
+      "deadCodeBenchmarkBypass": "the protected harness calls public SQLite prepare/step APIs over every sorted output row, and exact output digest/length must match on both splits"
+    }
+  }
+}

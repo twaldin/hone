@@ -1,0 +1,26 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-T04",
+  "capsule": "simdutf-validate",
+  "cohort": "train",
+  "stratum": "oss",
+  "panel": "B",
+  "status": "pending-authoring",
+  "objective": "Improve UTF-8 validation and UTF-8 to UTF-16LE transcoding throughput over mixed-script text corpora.",
+  "scalarAndGates": "Geometric mean throughput; exact validation verdict and byte-exact transcoded output validated against a pristine reference, upstream tests.",
+  "source": {
+    "repository": "simdutf/simdutf",
+    "revision": "1a62f928fcce103868d22df80376feea158060b9",
+    "url": "https://github.com/simdutf/simdutf/commit/1a62f928fcce103868d22df80376feea158060b9",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable",
+  "note": "Replaces dropped zstd-codec (OSS-T04): zstd is ratio-locked by its upstream fuzzer target_nodict_cSize[] at every level, leaving no honest ratio-preserving speed headroom for an improved diagnostic control. simdutf provides genuine exact-output SIMD headroom. Owner decision 2026-07-24."
+}

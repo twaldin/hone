@@ -1,0 +1,26 @@
+[package]
+name = "axoprocess"
+description = "Nicer defaults for invoking CLI Commands"
+version = "0.2.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/axodotdev/axoprocess"
+exclude = [
+  "book/*",
+  "src/snapshots/*",
+  "src/tests/",
+  "tests/",
+]
+
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+
+[features]
+default = []
+stdout_to_stderr_modern = []
+
+[dependencies]
+miette = "7.0.0"
+thiserror = "2.0.0"
+tracing = "0.1.40"

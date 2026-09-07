@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_f6d5da197fb2",
+  "objective": "Recover model, token usage, cost, and completion state across sealed Crush, Gemini, Kilo, OpenCode, Qwen, and SWE-agent transcript envelopes. Maximize weighted exact recovery; only solution.py is mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "94239c460b83ea88dd48311a52c95d089f08546b"
+  },
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/cases.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/cases.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:13ed47aab69fcaff7c51dd081399a436f6623c3cafa566d21f37ffdadf13e115"
+  },
+  "contentHashes": {
+    "assets/train/cases.json": "sha256:0c1acc280ba4703c5f6450c2b7e963b576cb5668325030692c79333e862cca22",
+    "assets/validation/cases.json": "sha256:d8584344cf3894b79e0830bb243075b3fc13beaebb1ff09cde8e0a4c77607536"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "bounded transcript-normalization extraction from Harness baseline e101371004685014913c7e0085821caf96db244b and reference 5b09ed7",
+    "license": "MIT",
+    "tags": [
+      "m2",
+      "owner",
+      "parsing",
+      "adapters"
+    ],
+    "partition": "m2-frozen-corpus",
+    "sourceDetails": {
+      "repository": "harness",
+      "commit": "e101371004685014913c7e0085821caf96db244b",
+      "referenceCommit": "5b09ed7",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 3,
+      "freshProcess": true,
+      "q": "weighted exact recovery: per sealed case, registered field weights recovered in all repetitions divided by total declared weight, averaged over cases",
+      "qFail": 0
+    }
+  }
+}

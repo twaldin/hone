@@ -1,0 +1,42 @@
+[package]
+name = "ls-types"
+version = "0.0.2"
+edition = "2024"
+
+description = "Types for the Language Server Protocol specification"
+authors = [
+  "Markus Westerlind <marwes91@gmail.com>",
+  "Bruno Medeiros <bruno.do.medeiros@gmail.com>",
+  "Milo Moisson <milo@wiro.world>"
+]
+repository = "https://github.com/tower-lsp-community/ls-types"
+keywords = ["language-server", "lsp", "lsif"]
+categories = ["network-programming"]
+license = "MIT"
+
+[dependencies]
+bitflags = "2"
+fluent-uri = "0.3"
+percent-encoding = "2"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+# Enables proposed LSP extensions.
+# NOTE: no semver compatibility is guaranteed for types enabled by this feature.
+proposed = []
+
+[lints.rust]
+unsafe_code = "forbid"
+[lints.rustdoc]
+all = "warn"
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+dbg_macro = "warn"
+todo = "warn"
+
+too_long_first_doc_paragraph = "allow"

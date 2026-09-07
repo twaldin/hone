@@ -1,0 +1,16 @@
+{
+  "name": "hone",
+  "private": true,
+  "version": "0.0.1",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r exec tsc --noEmit",
+    "test": "pnpm -r --workspace-concurrency=1 test"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}

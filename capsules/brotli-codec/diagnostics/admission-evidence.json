@@ -1,0 +1,104 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 5.812675,
+    "incrementalRebuildSec": 0.664334,
+    "evalSec": 60.4
+  },
+  "aa": {
+    "samples": [
+      100.33599025854117,
+      98.88509649716022,
+      100.63645609684579
+    ],
+    "sigma": 0.9365390963731904,
+    "noiseFractionOfScale": 0.009369840299469074
+  },
+  "qBase": 99.9525142841824,
+  "qFail": 0.0,
+  "qReference": 104.95013999839152,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "one-shot encoder returns failure"
+    },
+    {
+      "id": "naive",
+      "q": 75.02916922500299,
+      "hardGatesPass": true,
+      "role": "deliberately slower but correct volatile work in the compression entry point"
+    },
+    {
+      "id": "baseline",
+      "q": 100.33599025854117,
+      "hardGatesPass": true,
+      "role": "synthetic baseline: pinned upstream source plus trusted evaluator glue, sole upstream symlink materialized byte-for-byte"
+    },
+    {
+      "id": "improved",
+      "q": 116.5828479731335,
+      "hardGatesPass": true,
+      "role": "independently authored: scale hash-chain search effort to input compressibility - a cheap sampled byte-entropy estimate flags effectively-incompressible input, for which the H6 hasher then uses a shallow chain sweep (block_bits 8->2) and fewer last-distance probes (16->2), skipping futile deep search; compressed size stays within the 0.25% gate on every cell (incompressible data is size-invariant to search depth) and every stream round-trips"
+    },
+    {
+      "id": "shortcut",
+      "q": 81.88680407057655,
+      "trainQ": 121.52160320968713,
+      "validationQ": 42.252004931465954,
+      "hardGatesPass": true,
+      "shortcutGated": true,
+      "role": "corpus-specialized fast path keyed on a rotation- and perturbation-invariant byte-histogram fingerprint of the frozen 2 MiB training binary corpus, plus a size-triggered validation delay; wins train under identity-distinct rotated inputs and is rejected by validation"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "description": "Scale hash-chain search effort to input compressibility: a cheap sampled byte-entropy estimate flags effectively-incompressible input and the H6 hasher then uses a shallow sweep, skipping deep search that finds no usable matches. Compressed size stays within the 0.25% gate and output round-trips.",
+    "independentlyAuthored": true,
+    "valid": true,
+    "q": 116.5828479731335,
+    "deltaFromQBase": 16.630333688951097,
+    "deltaFromOrderingBaseline": 16.246857714592323,
+    "sigmaMargin": 17.75722311364594,
+    "reachesReference": true,
+    "note": "Quality is a load-normalized speed ratio (pristine reference wall time / candidate wall time, interleaved per pair, trimmed geometric mean). The improved control's real work reduction (deep-search skip on incompressible input) clears the >=2-3x tightened-sigma robustness bar by a wide margin; sigmaMargin above reports the multiple. reachesReference uses the doctrinal qReference = qBase + max(5*sigma, 5%*|qBase-qFail|) floor."
+  },
+  "determinism": {
+    "freshProcessRunsPerSplit": 6,
+    "identicalResultHashesWithinSplit": true,
+    "resultHashes": {
+      "train": "sha256:ab4ab6879dc4e20a5c8bae6b4da1044d038b75fa6a3804d55e801a9c48a3347e",
+      "validation": "sha256:0c83c599afbbc176f3a4a019f13c57f2d67d012bc4cbc8cd01496325effb37a0"
+    }
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstReportHash": "sha256:c959c7a5f82f6a9f253d6bcaa2dc105a3a85728faa2be13b148b2e2a990e7e45",
+    "secondReportHash": "sha256:c1b9ba49209252cb17056e888443e4d48ffb5b05c0b3365beda4c22079575358"
+  },
+  "measurement": {
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "globalLockHeld": true,
+    "tokenCheckedLock": "/tmp/hone-bench-lock.sh",
+    "orderingWallSecs": [
+      321.6,
+      324.4
+    ],
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "normalizationScale": 4.9976257142091205,
+    "noiseFractionOfScale": 0.009369840299469074,
+    "freshProcess": true,
+    "benchmarkTargetMsPerSample": 150,
+    "benchmarkSamplesPerCell": 6,
+    "compressedSizeTolerance": 0.0025,
+    "harness": "quality = NORM_SCALE * trimmed-geomean(reference_wall / candidate_wall) over interleaved candidate/reference process pairs measured by the trusted root evaluator (candidate holds no report channel and contributes no timestamp); every timed iteration processes fresh rotated+sparse-perturbed inputs; every candidate-encoder stream is decoded by a protected reference decoder built from the pristine baseline c/common+c/dec sources and byte-compared; encode and decode run as separate processes under distinct uids in fresh IPC+NET namespaces; the evaluator is a child subreaper and fails the run on any surviving candidate-uid process or candidate-owned tmp residue; the candidate decoder is cross-checked against sealed upstream brotli vectors",
+    "estimator": "interleaved pristine-reference yardstick: each timed sample pairs a candidate leg with a reference leg (bench.c linked against baseline c/common+c/enc+c/dec, sealed from TRUSTED_DIR, never the candidate overlay) over the SAME inputs; per-pair wall-time ratio cancels shared host load; trimmed geometric mean over 6 pairs x 12 cells"
+  },
+  "terminalSeal": {
+    "taskId": "OSS-H08",
+    "contract": "capsules/contracts/OSS-H08.json",
+    "optimizerPilots": 0,
+    "optimizerCorpusExposure": false,
+    "attestation": "No optimizer pilot, mutation/headroom run, seed-optimizer session, queryable optimizer corpus write, panel evidence write, or search-visible state was used; terminal identities, fixtures, scores, and feedback stayed inside capsules/brotli-codec and trusted admission evidence."
+  }
+}

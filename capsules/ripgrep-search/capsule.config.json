@@ -1,0 +1,152 @@
+{
+  "objective": "Improve reciprocal geometric-mean latency across 28 frozen cases spanning six mixed literal, regex, Unicode, ignore-file, no-match, and many-small-file ripgrep search categories. Exact stdout, stderr, and exit-result hashes, relevant cargo tests, and whole-process-tree peak memory (cgroup2 memory.peak) within a sealed ceiling are hard gates. Only crates/searcher/src, crates/regex/src, and crates/ignore/src are mutable.",
+  "image": "hone-ripgrep-search@sha256:a8054f1c8594b544245ae18e41b838f1ccc6b955938d58254239c76716e5f457",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    ".cargo",
+    ".github",
+    ".gitignore",
+    ".ignore",
+    "AI_POLICY.md",
+    "benchsuite",
+    "build.rs",
+    "Cargo.lock",
+    "Cargo.toml",
+    "CHANGELOG.md",
+    "ci",
+    "CONTRIBUTING.md",
+    "COPYING",
+    "eval.py",
+    "FAQ.md",
+    "fuzz",
+    "GUIDE.md",
+    "HomebrewFormula",
+    "LICENSE-MIT",
+    "pkg",
+    "README.md",
+    "RELEASE-CHECKLIST.md",
+    "rustfmt.toml",
+    "scripts",
+    "tests",
+    "UNLICENSE",
+    "vendor",
+    "worker.py",
+    "crates/cli",
+    "crates/core",
+    "crates/globset",
+    "crates/grep",
+    "crates/matcher",
+    "crates/pcre2",
+    "crates/printer",
+    "crates/ignore/Cargo.toml",
+    "crates/ignore/COPYING",
+    "crates/ignore/examples",
+    "crates/ignore/LICENSE-MIT",
+    "crates/ignore/README.md",
+    "crates/ignore/tests",
+    "crates/ignore/UNLICENSE",
+    "crates/regex/Cargo.toml",
+    "crates/regex/LICENSE-MIT",
+    "crates/regex/README.md",
+    "crates/regex/UNLICENSE",
+    "crates/searcher/Cargo.toml",
+    "crates/searcher/examples",
+    "crates/searcher/LICENSE-MIT",
+    "crates/searcher/README.md",
+    "crates/searcher/UNLICENSE"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "Unlicense OR MIT",
+    "provenance": "Current-head OSS-T02 capsule from BurntSushi/ripgrep 227381db0ee83dfa4341f1e27ff9617c0f5ad992. Deterministic frozen corpora sha256:9bbe113734c15b3ba19852297be7fab25e05cc84202b6ab7fc52d8fa81f472ff (train) and sha256:72105b465a54f255132c7835b1091418bf86bcd4b30bdb98c814b3655903b868 (validation) are measured through the pinned upstream benchsuite API with no privileged winning patch. Round-4 hardening: fresh /tmp+/var/tmp+/dev/shm tmpfs + CLONE_NEWIPC per invocation, and whole-process-tree memory via a per-invocation cgroup2 memory.peak leaf (replaces wait4 ru_maxrss). Interleaved A-A qBase=0.017953333, sigma=0.000359648; qReference=qBase+max(5*sigma,0.05*abs(qBase-qFail))=0.019751573. Local Docker Desktop numbers are provisional pending frozen GCE recalibration.",
+    "sourceDetails": {
+      "repository": "BurntSushi/ripgrep",
+      "commit": "227381db0ee83dfa4341f1e27ff9617c0f5ad992",
+      "licenseFiles": [
+        "COPYING",
+        "LICENSE-MIT",
+        "UNLICENSE"
+      ],
+      "mutableSurface": [
+        "crates/searcher/src",
+        "crates/regex/src",
+        "crates/ignore/src"
+      ],
+      "vendoredDependencies": "Cargo.lock resolved crates frozen under vendor/ for --locked --offline builds",
+      "artifactNormalization": "Upstream HomebrewFormula directory symlink was materialized because broker artifacts reject symlinks; build and mutable search subsystem bytes remain pinned to the upstream revision."
+    },
+    "toolchain": {
+      "rust": "1.96.0 (ac68faa20 2026-05-25)",
+      "baseImage": "rust@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc",
+      "capsuleImage": "hone-ripgrep-search@sha256:a8054f1c8594b544245ae18e41b838f1ccc6b955938d58254239c76716e5f457"
+    },
+    "tags": [
+      "m2",
+      "oss",
+      "ripgrep",
+      "search",
+      "performance"
+    ],
+    "measurement": {
+      "platform": "Docker Desktop Linux arm64 on Apple M3 Max",
+      "samples": 6,
+      "freshProcess": true,
+      "q": "reciprocal geometric mean of median batched latency in milliseconds across frozen search cases",
+      "qFail": 0.0,
+      "qBase": 0.017953333,
+      "sigma": 0.000359648,
+      "normalizationScale": 0.00179824,
+      "qReference": 0.019751573,
+      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+      "noiseFractionOfScale": 0.2,
+      "processesPerSample": 5,
+      "measurementRepetitions": 5,
+      "peakRssSource": "cgroup2.memory.peak (whole process tree, per-invocation leaf)",
+      "peakRssBaselineKb": {
+        "train": 1860,
+        "validation": 2124
+      },
+      "peakRssLimitKb": {
+        "train": 16384,
+        "validation": 16384
+      },
+      "relevantTests": "cargo test --release --locked --offline --quiet --tests -p grep-searcher -p grep-regex -p ignore -p ripgrep",
+      "feasibility": {
+        "cleanBuildSec": 22.834,
+        "incrementalRebuildSec": 6.977,
+        "evalSec": 74.0
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "objective": "Maximize sealed-case fixed-capital top-3 expected net profit by changing the genuine candidate generation, pruning, ranking, and portfolio-selection policy. Each case admits exactly 72 distinct mechanically valid proposals; protected KNN observations, owner-derived profit math, liquidity/capital checks, and exhaustive case oracle remain trusted. Invalid protocol or protected edits fail closed; duplicate, liquidity-overlapping, or over-capital selections score zero for that case.",
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": ["eval.py", "worker.mjs", "trusted_oracle.py", "runtime.lock.json", "provenance.json"],
+  "assetGroups": [
+    { "id": "train", "visibility": "public", "paths": ["assets/train"] },
+    { "id": "validation", "visibility": "protected", "paths": ["assets/validation"] },
+    { "id": "holdout", "visibility": "holdout", "paths": ["assets/holdout"] }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": { "path": "diagnostics/ordering-report.json" },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "private trade-up-bot commit 2a37202187912bedfbe5b4d65498feef09797935 tree b21b7674241491f68dfdf21b91761c324a06ed7a; exact paths and source hashes in protected provenance.json",
+    "internalUseOnly": true,
+    "publicationProhibited": true,
+    "license": "NOASSERTION-private-owner-source",
+    "taskClass": "open-quality",
+    "fixedCapitalCents": 30000,
+    "fixedTopK": 3,
+    "fixedProposalEvaluationsPerCase": 72,
+    "caseCount": 36,
+    "tags": ["m1-train", "trade-up", "profit", "selection", "knn-protected", "offline", "linux", "fixed-work"]
+  }
+}

@@ -1,0 +1,230 @@
+---
+title: Migrate from npm install to bun install
+sidebarTitle: Migrate from npm to bun
+mode: center
+---
+
+`bun install` is a fast, Node.js-compatible npm client.
+
+To migrate from `npm install` to `bun install`, run `bun install` instead of `npm install`.
+
+- **Designed for Node.js & Bun**: `bun install` installs a Node.js compatible `node_modules` folder. You can use it in place of `npm install` for Node.js projects without any code changes and without using Bun's runtime.
+- **Automatically converts `package-lock.json`** to Bun's `bun.lock` lockfile format, preserving your existing resolved dependency versions. You can secretly use `bun install` in place of `npm install` at work without anyone noticing.
+- **`.npmrc` compatible**: `bun install` reads npm registry configuration from npm's `.npmrc`, so you can use the same configuration for both npm and Bun.
+- **Hardlinks**: On Windows and Linux, `bun install` uses hardlinks to save disk space and speed up installs.
+
+```bash terminal icon="terminal"
+# It only takes one command to migrate
+bun i
+
+# To add dependencies:
+bun i @types/bun
+
+# To add devDependencies:
+bun i -d @types/bun
+
+# To remove a dependency:
+bun rm @types/bun
+```
+
+---
+
+## Run package.json scripts faster
+
+Run scripts from `package.json`, executables from `node_modules/.bin` (like `npx`), and JavaScript/TypeScript files (like `node`), all with a single command.
+
+| NPM                | Bun              |
+| ------------------ | ---------------- |
+| `npm run <script>` | `bun <script>`   |
+| `npm exec <bin>`   | `bun <bin>`      |
+| `node <file>`      | `bun <file>`     |
+| `npx <package>`    | `bunx <package>` |
+
+`bun run <executable>` uses the locally-installed executable.
+
+```sh terminal icon="terminal"
+# Run a package.json script:
+bun my-script
+bun run my-script
+
+# Run an executable in node_modules/.bin:
+bun my-executable # such as tsc, esbuild, etc.
+bun run my-executable
+
+# Run a JavaScript/TypeScript file:
+bun ./index.ts
+```
+
+---
+
+## Workspaces? Yes.
+
+`bun install` supports workspaces similarly to npm, with more features.
+
+In `package.json`, set `"workspaces"` to an array of relative paths.
+
+```json package.json icon="file-json"
+{
+  "name": "my-app",
+  "workspaces": ["packages/*", "apps/*"]
+}
+```
+
+---
+
+### Filter scripts by workspace name
+
+In Bun, the `--filter` flag accepts a glob pattern and runs the command concurrently for every workspace package whose `name` matches it, respecting dependency order.
+
+```sh terminal icon="terminal"
+bun --filter 'lib-*' my-script
+# instead of:
+# npm run --workspace lib-foo --workspace lib-bar my-script
+```
+
+---
+
+## Update dependencies
+
+`bun update <package>` updates a dependency to the latest version that satisfies the semver range in `package.json`.
+
+```sh terminal icon="terminal"
+# Update a single dependency
+bun update @types/bun
+
+# Update all dependencies
+bun update
+
+# Ignore semver, update to the latest version
+bun update @types/bun --latest
+
+# Update a dependency to a specific version
+bun update @types/bun@1.3.3
+
+# Update all dependencies to the latest versions
+bun update --latest
+```
+
+---
+
+### View outdated dependencies
+
+To view outdated dependencies, run `bun outdated`. It works like `npm outdated`, with more compact output.
+
+```sh terminal icon="terminal"
+bun outdated
+```
+
+```txt
+┌────────────────────────────────────────┬─────────┬────────┬────────┐
+│ Package                                │ Current │ Update │ Latest │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ @types/bun (dev)                       │ 1.1.6   │ 1.1.10 │ 1.1.10 │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ @types/react (dev)                     │ 18.3.3  │ 18.3.8 │ 18.3.8 │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ @typescript-eslint/eslint-plugin (dev) │ 7.16.1  │ 7.18.0 │ 8.6.0  │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ @typescript-eslint/parser (dev)        │ 7.16.1  │ 7.18.0 │ 8.6.0  │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ @vscode/debugadapter (dev)             │ 1.66.0  │ 1.67.0 │ 1.67.0 │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ esbuild (dev)                          │ 0.21.5  │ 0.21.5 │ 0.24.0 │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ eslint (dev)                           │ 9.7.0   │ 9.11.0 │ 9.11.0 │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ mitata (dev)                           │ 0.1.11  │ 0.1.14 │ 1.0.2  │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ prettier-plugin-organize-imports (dev) │ 4.0.0   │ 4.1.0  │ 4.1.0  │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ source-map-js (dev)                    │ 1.2.0   │ 1.2.1  │ 1.2.1  │
+├────────────────────────────────────────┼─────────┼────────┼────────┤
+│ typescript (dev)                       │ 5.5.3   │ 5.6.2  │ 5.6.2  │
+└────────────────────────────────────────┴─────────┴────────┴────────┘
+```
+
+---
+
+## List installed packages
+
+`bun pm ls` lists the packages installed in the `node_modules` folder, using Bun's lockfile as the source of truth. Pass the `-a` flag to also list transitive dependencies.
+
+```sh terminal icon="terminal"
+# List top-level installed packages:
+bun pm ls
+```
+
+```txt
+my-pkg node_modules (781)
+├── @types/node@20.16.5
+├── @types/react@18.3.8
+├── @types/react-dom@18.3.0
+├── eslint@8.57.1
+├── eslint-config-next@14.2.8
+...
+```
+
+```sh terminal icon="terminal"
+# List all installed packages:
+bun pm ls -a
+```
+
+```txt
+my-pkg node_modules
+├── @alloc/quick-lru@5.2.0
+├── @isaacs/cliui@8.0.2
+│   └── strip-ansi@7.1.0
+│       └── ansi-regex@6.1.0
+├── @jridgewell/gen-mapping@0.3.5
+├── @jridgewell/resolve-uri@3.1.2
+...
+```
+
+---
+
+## Create a package tarball
+
+`bun pm pack` creates a tarball of the package in the current directory.
+
+```sh terminal icon="terminal"
+# Create a tarball
+bun pm pack
+```
+
+```txt
+Total files: 46
+Shasum: 2ee19b6f0c6b001358449ca0eadead703f326216
+Integrity: sha512-ZV0lzWTEkGAMz[...]Gl4f8lA9sl97g==
+Unpacked size: 0.41MB
+Packed size: 117.50KB
+```
+
+---
+
+## Shebang
+
+If the package references `node` in the `#!/usr/bin/env node` shebang, `bun run` respects it by default and uses the system's `node` executable. To force it to use Bun instead, pass `--bun` to `bun run`.
+
+When you pass `--bun`, Bun creates a symlink to the locally-installed Bun executable named `"node"` in a temporary directory and adds it to your `PATH` for the duration of the script.
+
+```sh terminal icon="terminal"
+# Force using Bun's runtime instead of node
+bun --bun my-script
+
+# This also works:
+bun run --bun my-script
+```
+
+---
+
+## Global installs
+
+Install packages globally with `bun i -g <package>`. By default, they go into a `.bun/install/global/node_modules` folder inside your home directory.
+
+```sh terminal icon="terminal"
+# Install a package globally
+bun i -g eslint
+
+# Run a globally-installed package without the `bun run` prefix
+eslint --init
+```

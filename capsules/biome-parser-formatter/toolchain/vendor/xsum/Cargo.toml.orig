@@ -1,0 +1,91 @@
+[package]
+name = "xsum"
+version = "0.1.6"
+edition = "2021"
+rust-version = "1.69"
+license = "MIT"
+authors = ["Keita Nonaka <iKonnyaku40@gmail.com>"]
+categories = ["algorithms", "mathematics", "science"]
+description = "Fast Exact Summation of Floating-Point Numbers"
+documentation = "https://docs.rs/xsum/"
+keywords = ["exact", "sum", "floating-point", "summation", "numerical-error"]
+readme = "README.md"
+homepage = "https://github.com/Gumichocopengin8/xsum.rs"
+repository = "https://github.com/Gumichocopengin8/xsum.rs"
+exclude = ["/.github"]
+
+[badges]
+mathematics = { status = "actively-developed" }
+
+[lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "forbid", priority = -1 }
+# missing_docs = "warn"
+unreachable_pub = "forbid"
+
+# https://rust-lang.github.io/rust-clippy/stable/index.html
+[lints.clippy]
+await_holding_lock = "forbid"
+dbg_macro = "forbid"
+empty_enum = "forbid"
+enum_glob_use = "forbid"
+equatable_if_let = "forbid"
+exit = "forbid"
+filter_map_next = "forbid"
+fn_params_excessive_bools = "forbid"
+if_let_mutex = "forbid"
+implicit_clone = "forbid"
+imprecise_flops = "forbid"
+inefficient_to_string = "forbid"
+linkedlist = "forbid"
+lossy_float_literal = "forbid"
+macro_use_imports = "forbid"
+manual_let_else = "forbid"
+match_same_arms = "forbid"
+match_wildcard_for_single_variants = "forbid"
+mem_forget = "forbid"
+missing_assert_message = "forbid"
+missing_const_for_fn = "forbid"
+missing_trait_methods = "forbid"
+must_use_candidate = "forbid"
+needless_borrow = "forbid"
+needless_collect = "forbid"
+needless_continue = "forbid"
+needless_doctest_main = "forbid"
+needless_else = "forbid"
+needless_for_each = "forbid"
+needless_if = "forbid"
+needless_late_init = "forbid"
+needless_lifetimes = "forbid"
+needless_pass_by_ref_mut = "forbid"
+needless_pass_by_value = "forbid"
+option_option = "forbid"
+print_stdout = "forbid"
+redundant_clone = "forbid"
+ref_option = "forbid"
+rest_pat_in_fully_bound_structs = "forbid"
+return_self_not_must_use = "forbid"
+single_match_else = "forbid"
+str_to_string = "forbid"
+suboptimal_flops = "forbid"
+todo = "warn"
+trivially_copy_pass_by_ref = "forbid"
+uninlined_format_args = "forbid"
+unnested_or_patterns = "forbid"
+unused_self = "forbid"
+use_self = "forbid"
+verbose_file_reads = "forbid"
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[[bench]]
+name = "bench_xsum_sum"
+harness = false

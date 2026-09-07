@@ -1,0 +1,19 @@
+---
+title: Write a ReadableStream to a file
+sidebarTitle: Write stream
+mode: center
+---
+
+To write a `ReadableStream` to disk, create a `Response` from the stream and pass it to [`Bun.write()`](/runtime/file-io#writing-files-bun-write).
+
+```ts
+const stream: ReadableStream = ...;
+const path = "./file.txt";
+const response = new Response(stream);
+
+await Bun.write(path, response);
+```
+
+---
+
+See [`Bun.write()`](/runtime/file-io#writing-files-bun-write).

@@ -1,0 +1,11 @@
+{
+  "baseImage": "docker.io/library/debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+  "cc": "Debian GCC 12.2.0-14+deb12u1",
+  "make": "GNU Make 4.3-4.1",
+  "python": "3.11.2-1+b1",
+  "tcl": "8.6.13+dfsg-2",
+  "benchmarkBuildFlags": "-O2 -DNDEBUG -DSQLITE_THREADSAFE=1 -std=c99 -Wall -Wextra -Werror",
+  "testfixtureBuildFlags": "-O0 -g0",
+  "sourceRevision": "21fb3ccb37648b93433c592f3f6f7d5ef37de56c",
+  "fossilManifestUuid": "b14c3f8fec5123b1faa6d88dee2740ee4acb10dd522207531567d46f4714e227"
+}

@@ -1,0 +1,9 @@
+TESTLIB_1.0 {
+    global:
+        test_lib_add;
+};
+
+TESTLIB_2.0 {
+    global:
+        test_lib_mul;
+} TESTLIB_1.0;

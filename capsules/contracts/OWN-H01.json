@@ -1,0 +1,23 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-H01",
+  "capsule": "tradeup-query-latency",
+  "cohort": "terminal",
+  "stratum": "owner",
+  "panel": null,
+  "status": "existing-admitted",
+  "objective": "Reduce fixed Linux query latency while preserving the exact registered response+quality hash.",
+  "source": {
+    "visibility": "private",
+    "existingCapsuleId": "cap_929b5f74f9ef",
+    "existingCapsuleDigest": "sha256:7046ddc9ca1613de06f0b4263362a139cd1a8866b683f625c9e8fde7e84e8bbd"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
+    "workloadHashes": "see capsule manifest contentHashes"
+  },
+  "publication": "license-permitting-publishable",
+  "publicationNotice": "../../PUBLICATION.md"
+}

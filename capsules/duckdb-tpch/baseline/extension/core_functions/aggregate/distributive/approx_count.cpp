@@ -1,0 +1,74 @@
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/hyperloglog.hpp"
+#include "core_functions/aggregate/distributive_functions.hpp"
+
+namespace duckdb {
+
+// Algorithms from
+// "New cardinality estimation algorithms for HyperLogLog sketches"
+// Otmar Ertl, arXiv:1702.01284
+namespace {
+
+struct ApproxDistinctCountState {
+	HyperLogLogP<10> hll;
+};
+
+struct ApproxCountDistinctFunction {
+	template <class STATE, class OP>
+	static void Combine(const STATE &source, STATE &target, AggregateInputData &) {
+		target.hll.Merge(source.hll);
+	}
+
+	template <class T, class STATE>
+	static void Finalize(STATE &state, T &target, AggregateFinalizeData &finalize_data) {
+		target = UnsafeNumericCast<T>(state.hll.Count());
+	}
+
+	static bool IgnoreNull() {
+		return true;
+	}
+};
+
+void ApproxCountDistinctUpdateFunction(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector,
+                                       idx_t count) {
+	D_ASSERT(input_count == 1);
+	auto &input = inputs[0];
+
+	auto input_validity = input.Validity();
+
+	if (count > STANDARD_VECTOR_SIZE) {
+		throw InternalException("ApproxCountDistinct - count must be at most vector size");
+	}
+	Vector hash_vec(LogicalType::HASH, count);
+	VectorOperations::Hash(input, hash_vec, count);
+
+	auto states = state_vector.Values<ApproxDistinctCountState *>();
+	auto hashes = hash_vec.Values<hash_t>();
+	for (idx_t i = 0; i < count; i++) {
+		if (!input_validity.IsValid(i)) {
+			continue;
+		}
+		auto agg_state = states[i].GetValue();
+		const auto hash = hashes[i].GetValue();
+		agg_state->hll.InsertElement(hash);
+	}
+}
+
+AggregateFunction GetApproxCountDistinctFunction(const LogicalType &input_type) {
+	auto fun = AggregateFunction(
+	    {input_type}, LogicalTypeId::BIGINT, AggregateFunction::StateSize<ApproxDistinctCountState>,
+	    AggregateFunction::StateInitialize<ApproxDistinctCountState, ApproxCountDistinctFunction>,
+	    ApproxCountDistinctUpdateFunction,
+	    AggregateFunction::StateCombine<ApproxDistinctCountState, ApproxCountDistinctFunction>,
+	    AggregateFunction::StateFinalize<ApproxDistinctCountState, int64_t, ApproxCountDistinctFunction>, nullptr);
+	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	return fun;
+}
+
+} // namespace
+
+AggregateFunction ApproxCountDistinctFun::GetFunction() {
+	return GetApproxCountDistinctFunction(LogicalType::ANY);
+}
+
+} // namespace duckdb

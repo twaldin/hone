@@ -1,0 +1,15 @@
+{
+  "jobs": {
+    "jsx-commonjs": {
+      "outputBytes": 271386,
+      "semanticHash": "sha256:4080ab4fbda562634cc0dbba7cb45ff85474e413f5bfb63338e0dbac994b76df",
+      "sourcemapHash": "sha256:a626f7613147ec54c42c4d7690dcb3f8b3268188fce4cbcfc3aa0002f8860a2b"
+    },
+    "ts-wide": {
+      "outputBytes": 219843,
+      "semanticHash": "sha256:db07747bedc8150e4137d7cb080f3e3fe2f5970334a6affa9d8516096676f155",
+      "sourcemapHash": "sha256:37cb70b5062c5d476dd5260c36e9e26abfd1b5dd9a6510b1d55e913cdb3b33ec"
+    }
+  },
+  "version": 1
+}

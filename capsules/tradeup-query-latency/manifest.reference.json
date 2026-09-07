@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_f91a959a1f65",
+  "objective": "Reduce the fixed Linux latency of query.py for the sealed skin-data workload while preserving the exact registered response+quality hash. The evaluator starts every measurement in a fresh process with empty SQLite connection state and verified page-cache eviction. Only query/indexing/batching/cache strategy may change; eval.py, worker.py, and toolchain.lock.json are protected.",
+  "baseline": {
+    "kind": "git",
+    "commit": "56d52e1f1badc9f2f629127e16347cb66a06ce25"
+  },
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "toolchain.lock.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train/market.sqlite3",
+        "assets/train/oracle.json",
+        "assets/train/provenance.json",
+        "assets/train/reference.py",
+        "assets/train/workload.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation/market.sqlite3",
+        "assets/validation/oracle.json",
+        "assets/validation/provenance.json",
+        "assets/validation/reference.py",
+        "assets/validation/workload.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:20805888d698e538669a00671e907095f6cad110c55956e506ad6a18fdfd5094"
+  },
+  "contentHashes": {
+    "assets/train/market.sqlite3": "sha256:a0c2a8b1a20ef74b9e263f6f7cf56054322820b15dddbedfc20c41718d34d2de",
+    "assets/train/oracle.json": "sha256:7ece64fc7d9a984042f0e00ef18048290a40d902c460e62ad7448612587cffc8",
+    "assets/train/provenance.json": "sha256:63426d6f023b5af72f84fe923f47ce3402e1aa3f2b68e9a13d548d0e9b6caa84",
+    "assets/train/reference.py": "sha256:3639dd00ca9d6c913217c2dd5423c2c04efdd75c4ea9c8494bf1f1d299212dbb",
+    "assets/train/workload.json": "sha256:adabc2fba81cea67a629fa2a6af335177f3492ce09a0ccefdea442150cd80543",
+    "assets/validation/market.sqlite3": "sha256:676617a7a1bd6140feb07b08008483114e242129a64d396bc33ae1c4f9eb53bc",
+    "assets/validation/oracle.json": "sha256:1581cb541de4e94b6251a5d3cd46d2cc8a171c472915edad29afeafa341d675f",
+    "assets/validation/provenance.json": "sha256:adfad37d08d9cde3385b05b86ec84a622ba96c417c1d402cc0a9a84718907fad",
+    "assets/validation/reference.py": "sha256:3639dd00ca9d6c913217c2dd5423c2c04efdd75c4ea9c8494bf1f1d299212dbb",
+    "assets/validation/workload.json": "sha256:7a5f06fda4ae6ad87e0cceac2be5e55b0a9e2535e5d37fecd1d1b8ae8d55d39b"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "read-only owner repository trade-up-bot at 2a37202187912bedfbe5b4d65498feef09797935; synthetic scaling of server/routes/data.ts and server/db.ts shapes; no owner records",
+    "license": "internal-use-only",
+    "tags": [
+      "terminal-holdout",
+      "performance",
+      "sqlite",
+      "query-ranking"
+    ],
+    "partition": "terminal-holdout-1",
+    "sourceDetails": {
+      "ownerRepository": "trade-up-bot",
+      "commit": "2a37202187912bedfbe5b4d65498feef09797935",
+      "paths": {
+        "server/routes/data.ts": "sha256:73dbab6fe8b0e149077828985ec2b54ca29d7559ea40a0e4daa81f96871c9a9e",
+        "server/db.ts": "sha256:74b1199b6b8db2a3176179f1e88218e171f9e8056f9b61f28ae86b3cd09e864c"
+      },
+      "derivation": "scaled deterministic synthetic tables and workload derived from owner schema/query shapes; no owner records"
+    },
+    "measurement": {
+      "platform": "linux",
+      "cpuQuota": 2,
+      "samples": 9,
+      "interleaved": true,
+      "freshProcess": true,
+      "cacheContract": "immutable read-only DB; POSIX_FADV_DONTNEED plus mincore resident-fraction <= 0.01 before every process",
+      "stateReset": "before every sample the trusted parent reaps worker-uid processes and removes all worker-uid persistent state (/tmp, /var/tmp, /dev/shm trees and System V IPC objects); each worker is started in fresh IPC+NET namespaces before its privilege drop; the candidate workspace is broker-mounted read-only",
+      "q": "positive reciprocal latency score emitted by the trusted evaluator; invalid, broken, malformed, crashed, or timed-out output maps to qFail",
+      "qFail": 0
+    },
+    "normalization": {
+      "qFail": 0,
+      "qBase": 0.0002686543730516923,
+      "qReference": 0.0015857711233475968,
+      "scale": 0.0013171167502959045
+    },
+    "diagnosticContentHashes": {
+      "diagnostics/alternate/query.py": "sha256:007f5288dbb4f0a05539f1a27f0e9b70b532ad5e62df9f71441f8b88869befa1",
+      "diagnostics/broken/query.py": "sha256:22f2a249838d4fd9fafeb19657f4f0ad3665eba0a77748e8deb9ef16f9dd6d16",
+      "diagnostics/improved/query.py": "sha256:3639dd00ca9d6c913217c2dd5423c2c04efdd75c4ea9c8494bf1f1d299212dbb",
+      "diagnostics/naive/query.py": "sha256:bd611bcbd58d7bc2232f5a782dcb6773a8786dd392d963e5e4c69af930e4597c",
+      "diagnostics/shortcut/query.py": "sha256:a8825696644a58581ef11aa8996a2bd61bd06d6eaab6b0fb6e9b5749bc3d95c0"
+    }
+  }
+}

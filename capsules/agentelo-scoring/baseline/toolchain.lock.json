@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "node": "v18.20.4",
+  "python": "3.11.2",
+  "dependencies": [],
+  "networkRequired": false
+}

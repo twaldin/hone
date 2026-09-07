@@ -1,0 +1,12 @@
+[package]
+name = "drop_bomb"
+version = "0.1.5"
+authors = ["Aleksey Kladov <aleksey.kladov@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/matklad/drop_bomb"
+
+categories = [ "rust-patterns" ]
+description = """
+A runtime guard for implementing linear types.
+"""
+exclude = ["*.jpg"]

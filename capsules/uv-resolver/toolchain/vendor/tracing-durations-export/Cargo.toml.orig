@@ -1,0 +1,43 @@
+# cargo-features = ["public-dependency"]
+
+[package]
+name = "tracing-durations-export"
+version = "0.3.5"
+edition = "2021"
+description = "Record and visualize parallelism of tracing spans"
+license = "MIT OR Apache-2.0"
+readme = "Readme.md"
+repository = "https://github.com/konstin/tracing-durations-export"
+categories = ["asynchronous", "development-tools::debugging", "development-tools::profiling"]
+keywords = ["tracing"]
+
+[[bin]]
+name = "plot"
+required-features = ["plot", "cli"]
+
+[dependencies]
+anyhow = { version = "1.0.102", optional = true }
+clap = { version = "4.5.60", optional = true, features = ["derive"] }
+fs = { package = "fs-err", version = "3.3" }
+itertools = { version = "0.14.0", optional = true }
+once_cell = "1.21.3"
+rustc-hash = { version = "2.1.1", optional = true }
+serde = { version = "1.0.228", features = ["derive"] } # public = true
+serde_json = "1.0.149"
+svg = { version = "0.18.0", optional = true } # public = true
+tracing = { version = "0.1.44", default-features = false } # public = true
+tracing-subscriber = { version = "0.3.22", default-features = false } # public = true
+
+[features]
+plot = ["anyhow", "itertools", "rustc-hash", "svg"]
+cli = ["clap"]
+
+[dev-dependencies]
+futures = "0.3.32"
+rand = "0.10.0"
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = { version = "0.1.44", default-features = false, features = ["attributes"] }
+tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt", "std", "registry"] }
+
+[package.metadata.docs.rs]
+features = ["plot"]

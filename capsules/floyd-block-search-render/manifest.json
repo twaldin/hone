@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_315fc7287eaa",
+  "objective": "Minimize Block Search render cost on frozen scenes while preserving the exact selected block command stream. Correctness is a hard gate; only solution.py is mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "26af437552dbe399f7bfb5a0ff0c53912c139103"
+  },
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/cases.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/cases.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:824aa8b4192b9a2490c1f59e33f091092b5c9bc2487f0851e5ef6a33bffd362e"
+  },
+  "contentHashes": {
+    "assets/train/cases.json": "sha256:af0f8f524b070405603f7b47b1c1b4d0c69e382cfef752a3e51a139df0832fd0",
+    "assets/validation/cases.json": "sha256:46be272b0fbf2e12945564b8b64eca66174b66d5fa194ac9b77637ad810fba94"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "bounded scene/render-command extraction from Floyd Addons baseline f5e048d4a8254646306cbf596379416be6401700 and reference 315036de64256dac3e64f5319d40ff1e481bb3df",
+    "license": "internal-use-only",
+    "tags": [
+      "m2",
+      "owner",
+      "rendering",
+      "performance"
+    ],
+    "partition": "m2-frozen-corpus",
+    "sourceDetails": {
+      "repository": "new-floyd-addons",
+      "commit": "f5e048d4a8254646306cbf596379416be6401700",
+      "referenceCommit": "315036de64256dac3e64f5319d40ff1e481bb3df",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 5,
+      "frames": 100,
+      "freshProcess": true,
+      "q": "per-frame exact-output hard gate times the bounded reciprocal 1/(1+g) of the geometric mean g of the reference-normalized p99 trusted per-frame render time (median across interleaved candidate/trusted-seed sample pairs of the p99 ratio, times the frozen 0.5 ms scale) and the trusted whole-tree cgroup peak allocation footprint (MB); frame repetitions are driven by the evaluator, which loads the pristine base scene once and then drives each warmup and measured frame with its own disjoint trusted integer coordinate shift so every frame renders a distinct scene, and every frame is timed and exact-output validated by the trusted parent against its own protected expected",
+      "qFail": 0
+    }
+  }
+}

@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "objective": "Improve the mutation episode: prompts, reflective-context assembly, and parent/restart policy. Preserve the broker protocol, sandbox boundary, and frozen build contract.",
+  "seedOptimizer": {
+    "sourceCommit": "9f48cd14e23083d853cac4957e4590f6003a5754",
+    "sourceArtifact": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bundleDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "trustedRuntime": {
+    "sourceCommit": "9f48cd14e23083d853cac4957e4590f6003a5754",
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "mutablePaths": [
+    "optimizer/assets/prompts",
+    "optimizer/assets/policy.ts",
+    "optimizer/src/context.ts",
+    "optimizer/src/episodes.ts"
+  ],
+  "protectedPaths": [
+    "optimizer/src/broker-client.ts",
+    "optimizer/package.json",
+    "optimizer/pnpm-lock.yaml",
+    "optimizer/Dockerfile",
+    "optimizer/src/main.ts",
+    "optimizer/test",
+    "schema",
+    "trusted",
+    "capsules"
+  ],
+  "train": [
+    {
+      "capsuleId": "cap_aaaaaaaaaaaa",
+      "capsuleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "image": "hone-task-seeded-astar@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "oracleDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "scalarizerDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "qFail": 0,
+      "qBase": 0.42,
+      "qReference": 0.91,
+      "scale": 0.49000000000000005
+    },
+    {
+      "capsuleId": "cap_bbbbbbbbbbbb",
+      "capsuleDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "image": "hone-task-tradeup-profit@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "oracleDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "scalarizerDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "qFail": 0,
+      "qBase": 0.3,
+      "qReference": 0.8,
+      "scale": 0.5
+    },
+    {
+      "capsuleId": "cap_cccccccccccc",
+      "capsuleDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "image": "hone-task-monoagent-context-retention@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "oracleDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "scalarizerDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "qFail": 0,
+      "qBase": 0.55,
+      "qReference": 0.95,
+      "scale": 0.3999999999999999
+    },
+    {
+      "capsuleId": "cap_dddddddddddd",
+      "capsuleDigest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "image": "hone-task-flt-textinput@sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "oracleDigest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+      "scalarizerDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "qFail": 0,
+      "qBase": 0.6,
+      "qReference": 1,
+      "scale": 0.4
+    },
+    {
+      "capsuleId": "cap_eeeeeeeeeeee",
+      "capsuleDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "image": "hone-task-agentelo-scoring@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "oracleDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "scalarizerDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "qFail": 0,
+      "qBase": 0.5,
+      "qReference": 1,
+      "scale": 0.5
+    }
+  ],
+  "holdout": [
+    {
+      "capsuleId": "cap_111111111111",
+      "capsuleDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "image": "hone-task-tradeup-query-latency@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "oracleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "scalarizerDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "qFail": 0,
+      "qBase": 0.2,
+      "qReference": 0.8,
+      "scale": 0.6000000000000001
+    },
+    {
+      "capsuleId": "cap_222222222222",
+      "capsuleDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "image": "hone-task-flt-workflow-parser@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "oracleDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "scalarizerDigest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "qFail": 0,
+      "qBase": 0.45,
+      "qReference": 1,
+      "scale": 0.55
+    }
+  ],
+  "routing": {
+    "outerMutation": "gpt-5.6-sol",
+    "innerMutation": "gpt-5.6-sol"
+  },
+  "modelObservation": {
+    "requestedRoute": "gpt-5.6-sol",
+    "identity": "alias-observation",
+    "recordResponseModel": true,
+    "recordProviderFingerprint": true,
+    "driftSentinel": true
+  },
+  "counts": {
+    "candidates": 20,
+    "candidateAttemptsMax": 40,
+    "innerEpisodesMax": 8,
+    "searchReplicates": 1,
+    "confirmationReplicates": 3,
+    "holdoutReplicates": 3,
+    "childConcurrency": 2
+  },
+  "budgets": {
+    "campaign": {
+      "maxTokens": 693000000,
+      "maxUsd": 885,
+      "maxWallClockSec": 705600,
+      "maxEvaluatorInvocations": 10837
+    },
+    "outer": {
+      "maxTokens": 5000000,
+      "maxUsd": 25,
+      "maxWallClockSec": 86400,
+      "maxEvaluatorInvocations": 1
+    },
+    "child": {
+      "maxTokens": 4000000,
+      "maxUsd": 5,
+      "maxWallClockSec": 3600,
+      "maxEvaluatorInvocations": 63
+    }
+  },
+  "controls": {
+    "brokenSourceArtifact": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "brokenBundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "degradedSourceArtifact": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "degradedBundleDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "promotion": {
+    "minDeltaOverSe": 2,
+    "minSignConsistency": 0.8,
+    "replicates": 3,
+    "requireNegativeControls": true
+  },
+  "measurementEpochNamespace": "m1-official-2026-07",
+  "allowedClaim": "directional-reversible-frozen-corpus",
+  "protocolHash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+  "analysisConfigHash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+  "invariants": {
+    "apply": "none",
+    "terminalHoldoutPhases": 1,
+    "holdoutFeedbackToOptimizer": false,
+    "holdoutSearchEligible": false
+  }
+}

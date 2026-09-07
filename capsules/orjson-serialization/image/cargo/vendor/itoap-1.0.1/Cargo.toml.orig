@@ -1,0 +1,25 @@
+[package]
+name = "itoap"
+version = "1.0.1"
+authors = ["Ryohei Machida <orcinus4627@gmail.com>"]
+description = "Even faster functions for printing integers with decimal format"
+homepage = "https://github.com/Kogia-sima/itoap"
+repository = "https://github.com/Kogia-sima/itoap"
+readme = "README.md"
+categories = ["value-formatting"]
+license = "MIT"
+edition = "2018"
+
+[features]
+default = ["simd", "std"]
+alloc = []
+simd = []
+std = ["alloc"]
+
+[dev-dependencies]
+itoa = { version = "0.4.6", features = ["i128"], default-features = false }
+rand = { version = "0.8.2", features = ["small_rng"], default-features = false }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

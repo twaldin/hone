@@ -1,0 +1,16 @@
+{
+  "baseImage": "debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+  "image": "hone-quickjs-interpreter@sha256:a6d66620ed213b953131398eb5ada2c6494f296a7dcd99024d0cca4362c48b6b",
+  "packages": {
+    "build-essential": "12.9",
+    "python3": "3.11.2-1+b1",
+    "time": "1.9-0.2",
+    "util-linux": "2.38.1-5+deb12u3"
+  },
+  "tools": {
+    "gcc": "12.2.0",
+    "make": "4.3",
+    "python": "3.11.2",
+    "strip": "GNU Binutils 2.40"
+  }
+}

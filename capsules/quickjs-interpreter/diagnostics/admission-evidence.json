@@ -1,0 +1,91 @@
+{
+  "aa": {
+    "noiseFractionOfScale": 0.15754626002207978,
+    "samples": [
+      7365061.121205876,
+      7352686.634846462,
+      7352967.479602715,
+      7447376.332557475,
+      7461647.941295219,
+      7476436.265754106
+    ],
+    "sigma": 58365.8685689724
+  },
+  "controls": [
+    {
+      "hardGatesPass": false,
+      "id": "broken",
+      "q": 0,
+      "role": "compile-time interpreter failure"
+    },
+    {
+      "hardGatesPass": true,
+      "id": "naive",
+      "q": 2514633.9847037066,
+      "role": "deliberately slower but correct per-opcode volatile work"
+    },
+    {
+      "hardGatesPass": true,
+      "id": "baseline",
+      "q": 7447376.332557475,
+      "role": "exact pinned upstream source"
+    },
+    {
+      "hardGatesPass": true,
+      "id": "improved",
+      "q": 7795852.605009422,
+      "role": "independently authored inline float64/int OP_mod remainder fast path"
+    },
+    {
+      "hardGatesPass": true,
+      "id": "shortcut",
+      "q": 6677679.859510381,
+      "role": "OP_mod fast path (both splits) plus validation-only UTF-16 regexp delay",
+      "shortcutGated": true,
+      "trainQ": 7999613.438636494,
+      "validationQ": 5355746.280384268
+    }
+  ],
+  "feasibility": {
+    "cleanBuildSec": 44.95,
+    "evalSec": 96.3,
+    "incrementalRebuildSec": 44.95
+  },
+  "measurement": {
+    "benchmarkBatchWallSec": 2977.4,
+    "finalGceRecalibrationRequired": true,
+    "freshProcess": true,
+    "globalLockHeld": true,
+    "normalizationScale": 370468.13146051543,
+    "perfEventProbe": "PERF_TYPE_HARDWARE instructions/cycles -> ENOENT in the exact broker eval container (linuxkit 6.10.14 VM kernel, root with CAP_SYS_ADMIN, paranoid=2); PERF_TYPE_SOFTWARE works but is not work-proportional; work-proportional cross-check therefore uses the trusted parent's wait4/getrusage(RUSAGE_CHILDREN) CPU accounting",
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "referenceNormalization": 7385110.981771862,
+    "scoring": "reference-normalized: q = raw_q * 7385110.981771862 / reference_q with a pristine in-eval trusted-baseline build sampled interleaved with the candidate; each microbenchmark sample runs a trusted-composed randomized PROGRAM (structure, identifiers, constants; scored per-iteration op count preserved) streamed on stdin at clock-start with a fresh nonce and randomized input, its nonce-salted fold validated byte for byte against the reference on the identical streamed bytes; each leg reduced to the fastest (min) of 15 round-robin interleaved samples per binary; every candidate leg additionally passes the out-of-process CPU gates (cpu <= wall*1.15+0.02s single-threaded discipline per sample; kept-fastest CPU >= 0.4x reference per benchmark, bounding throttled classes to 2.5x); plus module startup (fastest 16 of 31 launches, median of 3 rounds, same per-launch discipline and 0.4x median kept-CPU floor); cancels ambient host-speed drift under sustained VM competitor load"
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstReportHash": "sha256:38c9ab0675c9b7ea0898bce4eae66d31810d75398bb930a17e65da1d9d595c40",
+    "secondReportHash": "sha256:323603a491016c24a83a74bd3e8a83e43296edfdf71ccd85da41320b680da61e"
+  },
+  "perturbation": {
+    "deltaFromOrderingBaseline": 348476.2724519465,
+    "deltaFromQBase": 386489.9757991135,
+    "description": "Inline float64/int remainder (OP_mod) fast path avoiding the no_inline js_binary_arith_slow call for the common float remainder that the per-iteration nonce fold performs on every trusted-composed program",
+    "id": "improved",
+    "independentlyAuthored": true,
+    "q": 7795852.605009422,
+    "reachesReference": true,
+    "valid": true
+  },
+  "qBase": 7409362.629210308,
+  "qFail": 0,
+  "qReference": 7779830.760670824,
+  "terminalSeal": {
+    "mutationOrHeadroomRuns": false,
+    "optimizerPilot": false,
+    "searchVisibleState": false,
+    "seedOptimizerSessions": false,
+    "trustedWorkOnly": true
+  }
+}

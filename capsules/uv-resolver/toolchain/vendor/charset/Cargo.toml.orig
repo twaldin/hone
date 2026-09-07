@@ -1,0 +1,27 @@
+[package]
+name = "charset"
+description = "Character encoding decoding for email"
+version = "0.1.5"
+authors = ["Henri Sivonen <hsivonen@hsivonen.fi>"]
+edition = "2018"
+license = "Apache-2.0 OR MIT"
+readme = "README.md"
+documentation = "https://docs.rs/charset/"
+homepage = "https://docs.rs/charset/"
+repository = "https://github.com/hsivonen/charset"
+keywords = ["encoding", "email", "unicode", "charset", "utf-7"]
+categories = ["text-processing", "encoding", "email"]
+rust-version = "1.47.0"
+
+[dependencies]
+encoding_rs = "0.8.34"
+base64 = { version = "0.22.1", default-features = false }
+serde = { version = "1.0", optional = true }
+
+[dev-dependencies]
+serde_derive = "1.0"
+bincode = "1.3.3"
+serde_json = "1.0"
+
+[badges.maintenance]
+status = "passively-maintained"

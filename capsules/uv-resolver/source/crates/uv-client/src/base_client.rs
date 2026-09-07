@@ -1,0 +1,1428 @@
+use std::env;
+use std::fmt::{Debug, Write};
+use std::num::ParseIntError;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTimeError};
+
+use anyhow::anyhow;
+use http::header::{
+    AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, LOCATION,
+    PROXY_AUTHORIZATION, REFERER, TRANSFER_ENCODING, WWW_AUTHENTICATE,
+};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use reqwest::{
+    Certificate, Client, ClientBuilder, IntoUrl, NoProxy, Proxy, Request, Response, multipart,
+};
+use reqwest_middleware::{ClientWithMiddleware, Middleware};
+use reqwest_retry::policies::ExponentialBackoff;
+use reqwest_retry::{Jitter, RetryTransientMiddleware};
+use thiserror::Error;
+use tracing::{debug, warn};
+use url::ParseError;
+use url::Url;
+
+use uv_auth::{
+    AuthMiddleware, Credentials, CredentialsCache, CredentialsFromUrlError, Indexes, PyxTokenStore,
+};
+use uv_configuration::ProxyUrlKind;
+use uv_configuration::{Concurrency, KeyringProviderType, ProxyUrl, TrustedHost};
+use uv_distribution_types::IndexCredentialsError;
+use uv_git::GitHttpSettings;
+use uv_pep508::MarkerEnvironment;
+use uv_platform_tags::Platform;
+use uv_preview::Preview;
+use uv_redacted::DisplaySafeUrl;
+use uv_redacted::DisplaySafeUrlError;
+use uv_static::EnvVars;
+use uv_version::version;
+use uv_warnings::warn_user_once;
+
+use crate::linehaul::LineHaul;
+use crate::middleware::OfflineMiddleware;
+use crate::tls::{Certificates, read_identity};
+use crate::{Connectivity, RetriableError, RetryState, UvRetryableStrategy};
+
+pub const DEFAULT_RETRIES: u32 = 3;
+
+/// Maximum number of redirects to follow before giving up.
+///
+/// This is the default used by [`reqwest`].
+pub const DEFAULT_MAX_REDIRECTS: u32 = 10;
+
+/// The maximum time between two reads.
+pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The maximum time to connect to a server.
+///
+/// This value is set lower to fail relatively quickly when the index is unreachable or down.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Total duration an upload may take.
+///
+/// reqwest does not support something like a read timeout for uploads, so we have to set a (large)
+/// timeout on the entire upload.
+pub const DEFAULT_READ_TIMEOUT_UPLOAD: Duration = Duration::from_mins(15);
+
+#[derive(Debug, Error)]
+pub enum ClientBuildError {
+    #[error("failed to build HTTP client")]
+    Reqwest(#[from] reqwest::Error),
+    #[error(transparent)]
+    Credentials(#[from] CredentialsFromUrlError),
+    #[error(transparent)]
+    IndexCredentials(#[from] IndexCredentialsError),
+}
+
+/// Selectively skip parts or the entire auth middleware.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum AuthIntegration {
+    /// Run the full auth middleware, including sending an unauthenticated request first.
+    #[default]
+    Default,
+    /// Send only an authenticated request without cloning and sending an unauthenticated request
+    /// first. Errors if no credentials were found.
+    OnlyAuthenticated,
+    /// Skip the auth middleware entirely. The caller is responsible for managing authentication.
+    NoAuthMiddleware,
+}
+
+/// A builder for an [`BaseClient`].
+#[derive(Debug, Clone)]
+pub struct BaseClientBuilder<'a> {
+    keyring: KeyringProviderType,
+    preview: Preview,
+    allow_insecure_host: Vec<TrustedHost>,
+    system_certs: bool,
+    retries: u32,
+    pub connectivity: Connectivity,
+    markers: Option<&'a MarkerEnvironment>,
+    platform: Option<&'a Platform>,
+    auth_integration: AuthIntegration,
+    /// Global authentication cache for a uv invocation to share credentials across uv clients.
+    credentials_cache: Arc<CredentialsCache>,
+    indexes: Indexes,
+    read_timeout: Duration,
+    connect_timeout: Duration,
+    extra_middleware: Option<ExtraMiddleware>,
+    proxies: Vec<Proxy>,
+    http_proxy: Option<ProxyUrl>,
+    https_proxy: Option<ProxyUrl>,
+    no_proxy: Option<Vec<String>>,
+    redirect_policy: RedirectPolicy,
+    /// Whether credentials should be propagated during cross-origin redirects.
+    ///
+    /// A policy allowing propagation is insecure and should only be available for test code.
+    cross_origin_credential_policy: CrossOriginCredentialsPolicy,
+    /// Optional custom reqwest client to use instead of creating a new one.
+    custom_client: Option<Client>,
+    /// uv subcommand in which this client is being used
+    subcommand: Option<Vec<String>>,
+    /// Optional name for this client, used in debug logging.
+    client_name: Option<&'static str>,
+    /// Whether to disable retry delays (for testing).
+    no_retry_delay: bool,
+    /// A shared, dedicated blocking pool for short-lived cache reads.
+    cache_read_runtime: Arc<CacheReadRuntime>,
+}
+
+#[derive(Debug)]
+struct CacheReadRuntime {
+    workers: usize,
+    runtime: OnceLock<tokio::runtime::Runtime>,
+}
+
+impl CacheReadRuntime {
+    fn new(workers: usize) -> Self {
+        Self {
+            workers,
+            runtime: OnceLock::new(),
+        }
+    }
+
+    fn get(&self) -> &tokio::runtime::Runtime {
+        self.runtime.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .thread_name("uv-cache-read")
+                .thread_stack_size(uv_configuration::min_stack_size())
+                .max_blocking_threads(self.workers)
+                .build()
+                .expect("Failed building the cache-read Runtime")
+        })
+    }
+}
+
+impl Drop for CacheReadRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            // This pool can be released from within uv's main runtime, where waiting for another
+            // runtime to shut down is not permitted.
+            runtime.shutdown_background();
+        }
+    }
+}
+
+/// The policy for handling HTTP redirects.
+#[derive(Debug, Default, Clone, Copy)]
+pub enum RedirectPolicy {
+    /// Use reqwest's built-in redirect handling. This bypasses our custom middleware
+    /// on redirect.
+    #[default]
+    BypassMiddleware,
+    /// Handle redirects manually, re-triggering our custom middleware for each request.
+    RetriggerMiddleware,
+    /// No redirect for non-cloneable (e.g., streaming) requests with custom redirect logic.
+    NoRedirect,
+}
+
+impl RedirectPolicy {
+    fn reqwest_policy(self) -> reqwest::redirect::Policy {
+        match self {
+            Self::BypassMiddleware => reqwest::redirect::Policy::default(),
+            Self::RetriggerMiddleware => reqwest::redirect::Policy::none(),
+            Self::NoRedirect => reqwest::redirect::Policy::none(),
+        }
+    }
+}
+
+/// A list of user-defined middlewares to be applied to the client.
+#[derive(Clone)]
+pub struct ExtraMiddleware(pub Vec<Arc<dyn Middleware>>);
+
+impl Debug for ExtraMiddleware {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtraMiddleware")
+            .field("0", &format!("{} middlewares", self.0.len()))
+            .finish()
+    }
+}
+
+impl Default for BaseClientBuilder<'_> {
+    fn default() -> Self {
+        Self {
+            keyring: KeyringProviderType::default(),
+            preview: Preview::default(),
+            allow_insecure_host: vec![],
+            system_certs: false,
+            connectivity: Connectivity::Online,
+            retries: DEFAULT_RETRIES,
+            markers: None,
+            platform: None,
+            auth_integration: AuthIntegration::default(),
+            credentials_cache: Arc::new(CredentialsCache::default()),
+            indexes: Indexes::new(),
+            read_timeout: DEFAULT_READ_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            extra_middleware: None,
+            proxies: vec![],
+            http_proxy: None,
+            https_proxy: None,
+            no_proxy: None,
+            redirect_policy: RedirectPolicy::default(),
+            cross_origin_credential_policy: CrossOriginCredentialsPolicy::Secure,
+            custom_client: None,
+            subcommand: None,
+            client_name: None,
+            no_retry_delay: env::var_os(EnvVars::UV_TEST_NO_HTTP_RETRY_DELAY).is_some(),
+            cache_read_runtime: Arc::new(CacheReadRuntime::new(Concurrency::DEFAULT_CACHE_READS)),
+        }
+    }
+}
+
+impl<'a> BaseClientBuilder<'a> {
+    pub fn new(
+        connectivity: Connectivity,
+        system_certs: bool,
+        allow_insecure_host: Vec<TrustedHost>,
+        preview: Preview,
+        read_timeout: Duration,
+        connect_timeout: Duration,
+        retries: u32,
+    ) -> Self {
+        Self {
+            preview,
+            allow_insecure_host,
+            system_certs,
+            retries,
+            connectivity,
+            read_timeout,
+            connect_timeout,
+            ..Self::default()
+        }
+    }
+
+    /// Use a custom reqwest client instead of creating a new one.
+    ///
+    /// This allows you to provide your own reqwest client with custom configuration.
+    /// Note that some configuration options from this builder will still be applied
+    /// to the client via middleware.
+    #[must_use]
+    pub fn custom_client(mut self, client: Client) -> Self {
+        self.custom_client = Some(client);
+        self
+    }
+
+    #[must_use]
+    pub fn keyring(mut self, keyring_type: KeyringProviderType) -> Self {
+        self.keyring = keyring_type;
+        self
+    }
+
+    #[must_use]
+    pub fn allow_insecure_host(mut self, allow_insecure_host: Vec<TrustedHost>) -> Self {
+        self.allow_insecure_host = allow_insecure_host;
+        self
+    }
+
+    #[must_use]
+    pub fn connectivity(mut self, connectivity: Connectivity) -> Self {
+        self.connectivity = connectivity;
+        self
+    }
+
+    #[must_use]
+    pub fn retries(mut self, retries: u32) -> Self {
+        self.retries = retries;
+        self
+    }
+
+    #[must_use]
+    pub fn no_retry_delay(mut self, no_retry_delay: bool) -> Self {
+        self.no_retry_delay = no_retry_delay;
+        self
+    }
+
+    /// Set the number of workers available for reading cached HTTP responses.
+    #[must_use]
+    pub fn cache_read_concurrency(mut self, workers: usize) -> Self {
+        self.cache_read_runtime = Arc::new(CacheReadRuntime::new(workers));
+        self
+    }
+
+    #[must_use]
+    pub fn with_system_certs(mut self, system_certs: bool) -> Self {
+        self.system_certs = system_certs;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn markers(mut self, markers: &'a MarkerEnvironment) -> Self {
+        self.markers = Some(markers);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn platform(mut self, platform: &'a Platform) -> Self {
+        self.platform = Some(platform);
+        self
+    }
+
+    #[must_use]
+    pub fn auth_integration(mut self, auth_integration: AuthIntegration) -> Self {
+        self.auth_integration = auth_integration;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn indexes(mut self, indexes: Indexes) -> Self {
+        self.indexes = indexes;
+        self
+    }
+
+    #[must_use]
+    pub fn read_timeout(mut self, read_timeout: Duration) -> Self {
+        self.read_timeout = read_timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn extra_middleware(mut self, middleware: ExtraMiddleware) -> Self {
+        self.extra_middleware = Some(middleware);
+        self
+    }
+
+    #[must_use]
+    pub fn proxy(mut self, proxy: Proxy) -> Self {
+        self.proxies.push(proxy);
+        self
+    }
+
+    #[must_use]
+    pub fn http_proxy(mut self, http_proxy: Option<ProxyUrl>) -> Self {
+        self.http_proxy = http_proxy;
+        self
+    }
+
+    #[must_use]
+    pub fn https_proxy(mut self, https_proxy: Option<ProxyUrl>) -> Self {
+        self.https_proxy = https_proxy;
+        self
+    }
+
+    #[must_use]
+    pub fn no_proxy(mut self, no_proxy: Option<Vec<String>>) -> Self {
+        self.no_proxy = no_proxy;
+        self
+    }
+
+    #[must_use]
+    pub fn redirect(mut self, policy: RedirectPolicy) -> Self {
+        self.redirect_policy = policy;
+        self
+    }
+
+    /// Allows credentials to be propagated on cross-origin redirects.
+    ///
+    /// WARNING: This should only be available for tests. In production code, propagating credentials
+    /// during cross-origin redirects can lead to security vulnerabilities including credential
+    /// leakage to untrusted domains.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn allow_cross_origin_credentials(mut self) -> Self {
+        self.cross_origin_credential_policy = CrossOriginCredentialsPolicy::Insecure;
+        self
+    }
+
+    #[must_use]
+    pub fn subcommand(mut self, subcommand: Vec<String>) -> Self {
+        self.subcommand = Some(subcommand);
+        self
+    }
+
+    #[must_use]
+    pub fn client_name(mut self, name: &'static str) -> Self {
+        self.client_name = Some(name);
+        self
+    }
+
+    pub fn credentials_cache(&self) -> &CredentialsCache {
+        &self.credentials_cache
+    }
+
+    /// See [`CredentialsCache::store_credentials_from_url`].
+    pub fn store_credentials_from_url(
+        &self,
+        url: &DisplaySafeUrl,
+    ) -> Result<bool, CredentialsFromUrlError> {
+        self.credentials_cache.store_credentials_from_url(url)
+    }
+
+    /// See [`CredentialsCache::store_credentials`].
+    pub fn store_credentials(&self, url: &DisplaySafeUrl, credentials: Credentials) {
+        self.credentials_cache.store_credentials(url, credentials);
+    }
+
+    pub fn is_offline(&self) -> bool {
+        matches!(self.connectivity, Connectivity::Offline)
+    }
+
+    /// Create a [`RetryPolicy`] for the client.
+    pub fn retry_policy(&self) -> ExponentialBackoff {
+        retry_policy(self.retries, self.no_retry_delay)
+    }
+
+    pub fn build(&self) -> Result<BaseClient, ClientBuildError> {
+        if let Some(name) = self.client_name {
+            debug!(
+                "Using request connect timeout of {}s and read timeout of {}s for {} client",
+                self.connect_timeout.as_secs(),
+                self.read_timeout.as_secs(),
+                name
+            );
+        } else {
+            debug!(
+                "Using request connect timeout of {}s and read timeout of {}s",
+                self.connect_timeout.as_secs(),
+                self.read_timeout.as_secs()
+            );
+        }
+
+        // Use the custom client if provided, otherwise create a new one
+        let (raw_client, raw_dangerous_client, certificate_source) = match &self.custom_client {
+            Some(client) => (client.clone(), client.clone(), CertificateSource::Unknown),
+            None => {
+                self.create_secure_and_insecure_clients(self.read_timeout, self.connect_timeout)?
+            }
+        };
+
+        // Wrap in any relevant middleware and handle connectivity.
+        let client = RedirectClientWithMiddleware {
+            client: self.apply_middleware(raw_client.clone()),
+            redirect_policy: self.redirect_policy,
+            cross_origin_credentials_policy: self.cross_origin_credential_policy,
+        };
+        let dangerous_client = RedirectClientWithMiddleware {
+            client: self.apply_middleware(raw_dangerous_client.clone()),
+            redirect_policy: self.redirect_policy,
+            cross_origin_credentials_policy: self.cross_origin_credential_policy,
+        };
+
+        Ok(BaseClient {
+            connectivity: self.connectivity,
+            allow_insecure_host: self.allow_insecure_host.clone(),
+            retries: self.retries,
+            no_retry_delay: self.no_retry_delay,
+            client,
+            raw_client,
+            dangerous_client,
+            raw_dangerous_client,
+            read_timeout: self.read_timeout,
+            connect_timeout: self.connect_timeout,
+            credentials_cache: self.credentials_cache.clone(),
+            certificate_source,
+            cache_read_runtime: self.cache_read_runtime.clone(),
+        })
+    }
+
+    /// Share the underlying client between two different middleware configurations.
+    pub(crate) fn wrap_existing(&self, existing: &BaseClient) -> BaseClient {
+        // Wrap in any relevant middleware and handle connectivity.
+        let client = RedirectClientWithMiddleware {
+            client: self.apply_middleware(existing.raw_client.clone()),
+            redirect_policy: self.redirect_policy,
+            cross_origin_credentials_policy: self.cross_origin_credential_policy,
+        };
+        let dangerous_client = RedirectClientWithMiddleware {
+            client: self.apply_middleware(existing.raw_dangerous_client.clone()),
+            redirect_policy: self.redirect_policy,
+            cross_origin_credentials_policy: self.cross_origin_credential_policy,
+        };
+
+        BaseClient {
+            connectivity: self.connectivity,
+            allow_insecure_host: self.allow_insecure_host.clone(),
+            retries: self.retries,
+            no_retry_delay: self.no_retry_delay,
+            client,
+            dangerous_client,
+            raw_client: existing.raw_client.clone(),
+            raw_dangerous_client: existing.raw_dangerous_client.clone(),
+            read_timeout: existing.read_timeout,
+            connect_timeout: existing.connect_timeout,
+            credentials_cache: existing.credentials_cache.clone(),
+            certificate_source: existing.certificate_source,
+            cache_read_runtime: self.cache_read_runtime.clone(),
+        }
+    }
+
+    fn create_secure_and_insecure_clients(
+        &self,
+        read_timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Result<(Client, Client, CertificateSource), ClientBuildError> {
+        // Create user agent.
+        let mut user_agent_string = format!("uv/{}", version());
+
+        // Add linehaul metadata.
+        let linehaul = LineHaul::new(self.markers, self.platform, self.subcommand.clone());
+        if let Ok(output) = serde_json::to_string(&linehaul) {
+            let _ = write!(user_agent_string, " {output}");
+        }
+
+        // Load custom CA certificates from `SSL_CERT_FILE` and `SSL_CERT_DIR`.
+        let custom_certs = Certificates::from_env().map(|certs| certs.to_reqwest_certs());
+        let certificate_source = if custom_certs.is_some() {
+            CertificateSource::Custom
+        } else if self.system_certs {
+            CertificateSource::System
+        } else {
+            CertificateSource::WebPki
+        };
+
+        // Create a secure client that validates certificates.
+        let raw_client = self.create_client(
+            &user_agent_string,
+            read_timeout,
+            connect_timeout,
+            custom_certs.clone(),
+            Security::Secure,
+            self.redirect_policy,
+        )?;
+
+        // Create an insecure client that accepts invalid certificates.
+        let raw_dangerous_client = self.create_client(
+            &user_agent_string,
+            read_timeout,
+            connect_timeout,
+            custom_certs,
+            Security::Insecure,
+            self.redirect_policy,
+        )?;
+
+        Ok((raw_client, raw_dangerous_client, certificate_source))
+    }
+
+    fn create_client(
+        &self,
+        user_agent: &str,
+        read_timeout: Duration,
+        connect_timeout: Duration,
+        custom_certs: Option<Vec<Certificate>>,
+        security: Security,
+        redirect_policy: RedirectPolicy,
+    ) -> Result<Client, ClientBuildError> {
+        // Configure the builder.
+        let client_builder = ClientBuilder::new()
+            .http1_title_case_headers()
+            .user_agent(user_agent)
+            .pool_max_idle_per_host(20)
+            .read_timeout(read_timeout)
+            .connect_timeout(connect_timeout)
+            .redirect(redirect_policy.reqwest_policy());
+
+        // If necessary, accept invalid certificates.
+        let client_builder = match security {
+            Security::Secure => client_builder,
+            Security::Insecure => client_builder.danger_accept_invalid_certs(true),
+        };
+
+        let client_builder = client_builder.tls_backend_rustls();
+
+        // Configure the certificate source.
+        //
+        // `SSL_CERT_FILE` and `SSL_CERT_DIR` override the default certificate source when they
+        // contain valid certificates.
+        let client_builder = if let Some(custom_certs) = custom_certs {
+            client_builder.tls_certs_only(custom_certs)
+        } else if self.system_certs {
+            client_builder
+        } else {
+            client_builder.tls_certs_only(Certificates::webpki_roots().to_reqwest_certs())
+        };
+
+        // Configure mTLS.
+        let client_builder = if let Some(ssl_client_cert) = env::var_os(EnvVars::SSL_CLIENT_CERT) {
+            match read_identity(&ssl_client_cert) {
+                Ok(identity) => client_builder.identity(identity),
+                Err(err) => {
+                    warn_user_once!("Ignoring invalid `SSL_CLIENT_CERT`: {err}");
+                    client_builder
+                }
+            }
+        } else {
+            client_builder
+        };
+
+        // apply proxies
+        let mut client_builder = client_builder;
+        for p in &self.proxies {
+            client_builder = client_builder.proxy(p.clone());
+        }
+
+        let no_proxy = self
+            .no_proxy
+            .as_ref()
+            .and_then(|no_proxy| NoProxy::from_string(&no_proxy.join(",")));
+
+        if let Some(http_proxy) = &self.http_proxy {
+            let proxy = http_proxy
+                .as_proxy(ProxyUrlKind::Http)
+                .no_proxy(no_proxy.clone());
+            client_builder = client_builder.proxy(proxy);
+        }
+
+        if let Some(https_proxy) = &self.https_proxy {
+            let proxy = https_proxy.as_proxy(ProxyUrlKind::Https).no_proxy(no_proxy);
+            client_builder = client_builder.proxy(proxy);
+        }
+
+        client_builder.build().map_err(Into::into)
+    }
+
+    fn apply_middleware(&self, client: Client) -> ClientWithMiddleware {
+        match self.connectivity {
+            Connectivity::Online => {
+                // Create a base client to using in the authentication middleware.
+                let base_client = {
+                    let mut client = reqwest_middleware::ClientBuilder::new(client.clone());
+
+                    // Avoid uncloneable errors with a streaming body during publish.
+                    if self.retries > 0 {
+                        // Initialize the retry strategy.
+                        let retry_strategy = RetryTransientMiddleware::new_with_policy_and_strategy(
+                            self.retry_policy(),
+                            UvRetryableStrategy,
+                        );
+                        client = client.with(retry_strategy);
+                    }
+
+                    // When supplied, add the extra middleware.
+                    if let Some(extra_middleware) = &self.extra_middleware {
+                        for middleware in &extra_middleware.0 {
+                            client = client.with_arc(middleware.clone());
+                        }
+                    }
+
+                    client.build()
+                };
+
+                let mut client = reqwest_middleware::ClientBuilder::new(client);
+
+                // Avoid uncloneable errors with a streaming body during publish.
+                if self.retries > 0 {
+                    // Initialize the retry strategy.
+                    let retry_strategy = RetryTransientMiddleware::new_with_policy_and_strategy(
+                        self.retry_policy(),
+                        UvRetryableStrategy,
+                    );
+                    client = client.with(retry_strategy);
+                }
+
+                // When supplied, add the extra middleware.
+                if let Some(extra_middleware) = &self.extra_middleware {
+                    for middleware in &extra_middleware.0 {
+                        client = client.with_arc(middleware.clone());
+                    }
+                }
+
+                // Initialize the authentication middleware to set headers.
+                match self.auth_integration {
+                    AuthIntegration::Default => {
+                        let mut auth_middleware = AuthMiddleware::new()
+                            .with_cache_arc(self.credentials_cache.clone())
+                            .with_base_client(base_client)
+                            .with_indexes(self.indexes.clone())
+                            .with_keyring(self.keyring.to_provider())
+                            .with_preview(self.preview);
+                        if let Ok(token_store) = PyxTokenStore::from_settings() {
+                            auth_middleware = auth_middleware.with_pyx_token_store(token_store);
+                        }
+                        client = client.with(auth_middleware);
+                    }
+                    AuthIntegration::OnlyAuthenticated => {
+                        let mut auth_middleware = AuthMiddleware::new()
+                            .with_cache_arc(self.credentials_cache.clone())
+                            .with_base_client(base_client)
+                            .with_indexes(self.indexes.clone())
+                            .with_keyring(self.keyring.to_provider())
+                            .with_preview(self.preview)
+                            .with_only_authenticated(true);
+                        if let Ok(token_store) = PyxTokenStore::from_settings() {
+                            auth_middleware = auth_middleware.with_pyx_token_store(token_store);
+                        }
+                        client = client.with(auth_middleware);
+                    }
+                    AuthIntegration::NoAuthMiddleware => {
+                        // The downstream code uses custom auth logic.
+                    }
+                }
+
+                client.build()
+            }
+            Connectivity::Offline => reqwest_middleware::ClientBuilder::new(client)
+                .with(OfflineMiddleware)
+                .build(),
+        }
+    }
+}
+
+/// A base client for HTTP requests
+#[derive(Debug, Clone)]
+pub struct BaseClient {
+    /// The underlying HTTP client that enforces valid certificates.
+    client: RedirectClientWithMiddleware,
+    /// The underlying HTTP client that accepts invalid certificates.
+    dangerous_client: RedirectClientWithMiddleware,
+    /// The HTTP client without middleware.
+    raw_client: Client,
+    /// The HTTP client that accepts invalid certificates without middleware.
+    raw_dangerous_client: Client,
+    /// The connectivity mode to use.
+    connectivity: Connectivity,
+    /// Configured client read timeout.
+    read_timeout: Duration,
+    /// Configured client connect timeout.
+    connect_timeout: Duration,
+    /// Hosts that are trusted to use the insecure client.
+    allow_insecure_host: Vec<TrustedHost>,
+    /// The number of retries to attempt on transient errors.
+    retries: u32,
+    /// Whether to disable retry delays (for testing).
+    no_retry_delay: bool,
+    /// Global authentication cache for a uv invocation to share credentials across uv clients.
+    credentials_cache: Arc<CredentialsCache>,
+    /// The certificate roots used by the underlying HTTP client.
+    certificate_source: CertificateSource,
+    /// A shared, dedicated blocking pool for short-lived cache reads.
+    cache_read_runtime: Arc<CacheReadRuntime>,
+}
+
+/// The certificate roots used by a [`BaseClient`].
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum CertificateSource {
+    /// The system certificate roots.
+    System,
+    /// The bundled `WebPKI` certificate roots.
+    WebPki,
+    /// Custom roots loaded from `SSL_CERT_FILE` or `SSL_CERT_DIR`.
+    Custom,
+    /// An externally constructed client whose certificate roots are unknown.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Security {
+    /// The client should use secure settings, i.e., valid certificates.
+    Secure,
+    /// The client should use insecure settings, i.e., skip certificate validation.
+    Insecure,
+}
+
+impl BaseClient {
+    pub(crate) fn cache_read_runtime(&self) -> &tokio::runtime::Runtime {
+        self.cache_read_runtime.get()
+    }
+
+    /// Selects the appropriate client based on the host's trustworthiness.
+    pub fn for_host(&self, url: &DisplaySafeUrl) -> &RedirectClientWithMiddleware {
+        if self.disable_ssl(url) {
+            &self.dangerous_client
+        } else {
+            &self.client
+        }
+    }
+
+    /// Executes a request, applying redirect policy.
+    pub async fn execute(&self, req: Request) -> reqwest_middleware::Result<Response> {
+        let client = self.for_host(&DisplaySafeUrl::from_url(req.url().clone()));
+        client.execute(req).await
+    }
+
+    /// Returns `true` if the host is trusted to use the insecure client.
+    fn disable_ssl(&self, url: &DisplaySafeUrl) -> bool {
+        self.allow_insecure_host
+            .iter()
+            .any(|allow_insecure_host| allow_insecure_host.matches(url))
+    }
+
+    /// Return the [`GitHttpSettings`] for fetching from the given URL.
+    pub fn git_http_settings(&self, url: &DisplaySafeUrl) -> GitHttpSettings {
+        GitHttpSettings::default()
+            .with_disabled_ssl(self.disable_ssl(url))
+            .with_offline(self.connectivity().is_offline())
+    }
+
+    /// The configured client read timeout.
+    pub(crate) fn read_timeout(&self) -> Duration {
+        self.read_timeout
+    }
+
+    /// The configured connectivity mode.
+    pub fn connectivity(&self) -> Connectivity {
+        self.connectivity
+    }
+
+    /// The [`RetryPolicy`] for the client.
+    pub fn retry_policy(&self) -> ExponentialBackoff {
+        retry_policy(self.retries, self.no_retry_delay)
+    }
+
+    pub(crate) fn credentials_cache(&self) -> &CredentialsCache {
+        &self.credentials_cache
+    }
+
+    pub(crate) fn certificate_source(&self) -> CertificateSource {
+        self.certificate_source
+    }
+
+    /// The reqwest client without middleware.
+    ///
+    /// This strips important features such as retries and authenticating. Only use when passing
+    /// a middleware-enabled client isn't possible.
+    pub fn raw_client(&self) -> &Client {
+        &self.raw_client
+    }
+}
+
+/// Wrapper around [`ClientWithMiddleware`] that manages redirects.
+#[derive(Debug, Clone)]
+pub struct RedirectClientWithMiddleware {
+    client: ClientWithMiddleware,
+    redirect_policy: RedirectPolicy,
+    /// Whether credentials should be preserved during cross-origin redirects.
+    ///
+    /// WARNING: This should only be available for tests. In production code, preserving credentials
+    /// during cross-origin redirects can lead to security vulnerabilities including credential
+    /// leakage to untrusted domains.
+    cross_origin_credentials_policy: CrossOriginCredentialsPolicy,
+}
+
+impl RedirectClientWithMiddleware {
+    /// Convenience method to make a `GET` request to a URL.
+    pub fn get<U: IntoUrl>(&self, url: U) -> RequestBuilder<'_> {
+        RequestBuilder::new(self.client.get(url), self)
+    }
+
+    /// Convenience method to make a `POST` request to a URL.
+    pub fn post<U: IntoUrl>(&self, url: U) -> RequestBuilder<'_> {
+        RequestBuilder::new(self.client.post(url), self)
+    }
+
+    /// Convenience method to make a `HEAD` request to a URL.
+    pub(crate) fn head<U: IntoUrl>(&self, url: U) -> RequestBuilder<'_> {
+        RequestBuilder::new(self.client.head(url), self)
+    }
+
+    /// Executes a request, applying the redirect policy.
+    async fn execute(&self, req: Request) -> reqwest_middleware::Result<Response> {
+        match self.redirect_policy {
+            RedirectPolicy::BypassMiddleware => self.client.execute(req).await,
+            RedirectPolicy::RetriggerMiddleware => self.execute_with_redirect_handling(req).await,
+            RedirectPolicy::NoRedirect => self.client.execute(req).await,
+        }
+    }
+
+    /// Executes a request. If the response is a redirect (one of HTTP 301, 302, 303, 307, or 308), the
+    /// request is executed again with the redirect location URL (up to a maximum number of
+    /// redirects).
+    ///
+    /// Unlike the built-in reqwest redirect policies, this sends the redirect request through the
+    /// entire middleware pipeline again.
+    ///
+    /// See RFC 7231 7.1.2 <https://www.rfc-editor.org/rfc/rfc7231#section-7.1.2> for details on
+    /// redirect semantics.
+    async fn execute_with_redirect_handling(
+        &self,
+        req: Request,
+    ) -> reqwest_middleware::Result<Response> {
+        let mut request = req;
+        let mut redirects = 0;
+        let max_redirects = DEFAULT_MAX_REDIRECTS;
+
+        loop {
+            let result = self
+                .client
+                .execute(request.try_clone().expect("HTTP request must be cloneable"))
+                .await;
+            let Ok(response) = result else {
+                return result;
+            };
+
+            if redirects >= max_redirects {
+                return Ok(response);
+            }
+
+            let Some(redirect_request) =
+                request_into_redirect(request, &response, self.cross_origin_credentials_policy)?
+            else {
+                return Ok(response);
+            };
+
+            redirects += 1;
+            request = redirect_request;
+        }
+    }
+
+    pub fn raw_client(&self) -> &ClientWithMiddleware {
+        &self.client
+    }
+}
+
+impl From<RedirectClientWithMiddleware> for ClientWithMiddleware {
+    fn from(item: RedirectClientWithMiddleware) -> Self {
+        item.client
+    }
+}
+
+/// Check if this is should be a redirect and, if so, return a new redirect request.
+///
+/// This implementation is based on the [`reqwest`] crate redirect implementation.
+/// It takes ownership of the original [`Request`] and mutates it to create the new
+/// redirect [`Request`].
+fn request_into_redirect(
+    mut req: Request,
+    res: &Response,
+    cross_origin_credentials_policy: CrossOriginCredentialsPolicy,
+) -> reqwest_middleware::Result<Option<Request>> {
+    let original_req_url = DisplaySafeUrl::from_url(req.url().clone());
+    let status = res.status();
+    let should_redirect = match status {
+        StatusCode::MOVED_PERMANENTLY
+        | StatusCode::FOUND
+        | StatusCode::TEMPORARY_REDIRECT
+        | StatusCode::PERMANENT_REDIRECT => true,
+        StatusCode::SEE_OTHER => {
+            // Per RFC 7231, HTTP 303 is intended for the user agent
+            // to perform a GET or HEAD request to the redirect target.
+            // Historically, some browsers also changed method from POST
+            // to GET on 301 or 302, but this is not required by RFC 7231
+            // and was not intended by the HTTP spec.
+            *req.body_mut() = None;
+            for header in &[
+                TRANSFER_ENCODING,
+                CONTENT_ENCODING,
+                CONTENT_TYPE,
+                CONTENT_LENGTH,
+            ] {
+                req.headers_mut().remove(header);
+            }
+
+            match *req.method() {
+                Method::GET | Method::HEAD => {}
+                _ => {
+                    *req.method_mut() = Method::GET;
+                }
+            }
+            true
+        }
+        _ => false,
+    };
+    if !should_redirect {
+        return Ok(None);
+    }
+
+    let location = res
+        .headers()
+        .get(LOCATION)
+        .ok_or(reqwest_middleware::Error::Middleware(anyhow!(
+            "Server returned redirect (HTTP {status}) without destination URL. This may indicate a server configuration issue"
+        )))?
+        .to_str()
+        .map_err(|_| {
+            reqwest_middleware::Error::Middleware(anyhow!(
+                "Invalid HTTP {status} 'Location' value: must only contain visible ascii characters"
+            ))
+        })?;
+
+    let mut redirect_url = match DisplaySafeUrl::parse(location) {
+        Ok(url) => url,
+        // Per RFC 7231, URLs should be resolved against the request URL.
+        Err(DisplaySafeUrlError::Url(ParseError::RelativeUrlWithoutBase)) => original_req_url.join(location).map_err(|err| {
+            reqwest_middleware::Error::Middleware(anyhow!(
+                "Invalid HTTP {status} 'Location' value `{location}` relative to `{original_req_url}`: {err}"
+            ))
+        })?,
+        Err(err) => {
+            return Err(reqwest_middleware::Error::Middleware(anyhow!(
+                "Invalid HTTP {status} 'Location' value `{location}`: {err}"
+            )));
+        }
+    };
+    // Per RFC 7231, fragments must be propagated
+    if let Some(fragment) = original_req_url.fragment() {
+        redirect_url.set_fragment(Some(fragment));
+    }
+
+    // Ensure the URL is a valid HTTP URI.
+    if let Err(err) = redirect_url.as_str().parse::<http::Uri>() {
+        return Err(reqwest_middleware::Error::Middleware(anyhow!(
+            "HTTP {status} 'Location' value `{redirect_url}` is not a valid HTTP URI: {err}"
+        )));
+    }
+
+    if redirect_url.scheme() != "http" && redirect_url.scheme() != "https" {
+        return Err(reqwest_middleware::Error::Middleware(anyhow!(
+            "Invalid HTTP {status} 'Location' value `{redirect_url}`: scheme needs to be https or http"
+        )));
+    }
+
+    let mut headers = HeaderMap::new();
+    std::mem::swap(req.headers_mut(), &mut headers);
+
+    let cross_host = redirect_url.host_str() != original_req_url.host_str()
+        || redirect_url.port_or_known_default() != original_req_url.port_or_known_default();
+    if cross_host {
+        if cross_origin_credentials_policy == CrossOriginCredentialsPolicy::Secure {
+            debug!("Received a cross-origin redirect. Removing sensitive headers.");
+            headers.remove(AUTHORIZATION);
+            headers.remove(COOKIE);
+            headers.remove(PROXY_AUTHORIZATION);
+            headers.remove(WWW_AUTHENTICATE);
+        }
+    // If the redirect request is not a cross-origin request and the original request already
+    // had a Referer header, attempt to set the Referer header for the redirect request.
+    } else if headers.contains_key(REFERER) {
+        if let Some(referer) = make_referer(&redirect_url, &original_req_url) {
+            headers.insert(REFERER, referer);
+        }
+    }
+
+    // Check if there are credentials on the redirect location itself.
+    // If so, move them to Authorization header.
+    if !redirect_url.username().is_empty() {
+        if let Some(credentials) =
+            Credentials::from_url(&redirect_url).map_err(reqwest_middleware::Error::middleware)?
+        {
+            let _ = redirect_url.set_username("");
+            let _ = redirect_url.set_password(None);
+            headers.insert(AUTHORIZATION, credentials.to_header_value());
+        }
+    }
+
+    std::mem::swap(req.headers_mut(), &mut headers);
+    *req.url_mut() = Url::from(redirect_url);
+    debug!(
+        "Received HTTP {status}. Redirecting to {}",
+        DisplaySafeUrl::ref_cast(req.url())
+    );
+    Ok(Some(req))
+}
+
+/// Return a Referer [`HeaderValue`] according to RFC 7231.
+///
+/// Return [`None`] if https has been downgraded in the redirect location.
+fn make_referer(
+    redirect_url: &DisplaySafeUrl,
+    original_url: &DisplaySafeUrl,
+) -> Option<HeaderValue> {
+    if redirect_url.scheme() == "http" && original_url.scheme() == "https" {
+        return None;
+    }
+
+    let mut referer = original_url.clone();
+    referer.remove_credentials();
+    referer.set_fragment(None);
+    referer.as_str().parse().ok()
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) enum CrossOriginCredentialsPolicy {
+    /// Do not propagate credentials on cross-origin requests.
+    #[default]
+    Secure,
+
+    /// Propagate credentials on cross-origin requests.
+    ///
+    /// WARNING: This should only be available for tests. In production code, preserving credentials
+    /// during cross-origin redirects can lead to security vulnerabilities including credential
+    /// leakage to untrusted domains.
+    #[cfg(test)]
+    Insecure,
+}
+
+/// A builder to construct the properties of a `Request`.
+///
+/// This wraps [`reqwest_middleware::RequestBuilder`] to ensure that the [`BaseClient`]
+/// redirect policy is respected if `send()` is called.
+#[derive(Debug)]
+#[must_use]
+pub struct RequestBuilder<'a> {
+    builder: reqwest_middleware::RequestBuilder,
+    client: &'a RedirectClientWithMiddleware,
+}
+
+impl<'a> RequestBuilder<'a> {
+    fn new(
+        builder: reqwest_middleware::RequestBuilder,
+        client: &'a RedirectClientWithMiddleware,
+    ) -> Self {
+        Self { builder, client }
+    }
+
+    /// Add a `Header` to this Request.
+    pub fn header<K, V>(mut self, key: K, value: V) -> Self
+    where
+        HeaderName: TryFrom<K>,
+        <HeaderName as TryFrom<K>>::Error: Into<http::Error>,
+        HeaderValue: TryFrom<V>,
+        <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
+    {
+        self.builder = self.builder.header(key, value);
+        self
+    }
+
+    #[cfg_attr(docsrs, doc(cfg(feature = "multipart")))]
+    pub fn multipart(mut self, multipart: multipart::Form) -> Self {
+        self.builder = self.builder.multipart(multipart);
+        self
+    }
+
+    /// Build a `Request`.
+    pub fn build(self) -> reqwest::Result<Request> {
+        self.builder.build()
+    }
+
+    /// Constructs the Request and sends it to the target URL, returning a
+    /// future Response.
+    pub async fn send(self) -> reqwest_middleware::Result<Response> {
+        self.client.execute(self.build()?).await
+    }
+
+    pub fn raw_builder(&self) -> &reqwest_middleware::RequestBuilder {
+        &self.builder
+    }
+}
+
+/// Create a [`RetryPolicy`] with the given number of retries.
+fn retry_policy(retries: u32, no_retry_delay: bool) -> ExponentialBackoff {
+    let mut builder = ExponentialBackoff::builder();
+    if no_retry_delay {
+        builder = builder.retry_bounds(Duration::from_millis(0), Duration::from_millis(0));
+    } else {
+        // Configure an effective minimum between attempts of 1s and a real maximum of 30s.
+        builder = builder
+            .jitter(Jitter::Bounded)
+            .retry_bounds(Duration::from_secs(2), Duration::from_secs(30));
+    }
+    builder.build_with_max_retries(retries)
+}
+
+/// Try a fallible async operation against each URL in order, with exponential backoff.
+///
+/// URLs are tried in sequence without any backoff between them. Backoff is only applied after all
+/// URLs have been exhausted. On the next retry attempt the full URL list is tried again from the
+/// beginning.
+pub async fn fetch_with_url_fallback<T, E, F>(
+    urls: &[DisplaySafeUrl],
+    retry_policy: ExponentialBackoff,
+    subject: &str,
+    mut attempt: F,
+) -> Result<T, E>
+where
+    F: AsyncFnMut(DisplaySafeUrl) -> Result<T, E>,
+    E: RetriableError + From<SystemTimeError>,
+{
+    let mut retry_state = RetryState::start(
+        retry_policy,
+        // The last URL will trigger backoff if it fails.
+        urls.last().expect("urls must not be empty").clone(),
+    );
+
+    'retry: loop {
+        for (i, url) in urls.iter().enumerate() {
+            let is_last = i == urls.len() - 1;
+            match attempt(url.clone()).await {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    if !is_last && err.should_try_next_url() {
+                        warn!(
+                            "Failed to fetch {subject} from {url} ({err}); falling back to {}",
+                            urls[i + 1]
+                        );
+                        continue;
+                    }
+                    // All URLs exhausted; apply the retry policy.
+                    if let Some(backoff) = retry_state.should_retry(&err, err.retries()) {
+                        retry_state.sleep_backoff(backoff).await;
+                        continue 'retry;
+                    }
+                    return if retry_state.total_retries() > 0 {
+                        let retries = retry_state.total_retries();
+                        Err(err.into_retried(retries, retry_state.duration()?))
+                    } else {
+                        Err(err)
+                    };
+                }
+            }
+        }
+        unreachable!("urls must not be empty");
+    }
+}
+
+// TODO(konsti): Remove once we find a native home for `retries_from_env`
+#[derive(Debug, Error)]
+pub enum RetryParsingError {
+    #[error("Failed to parse `UV_HTTP_RETRIES`")]
+    ParseInt(#[from] ParseIntError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use anyhow::Result;
+    use reqwest::{Client, Method};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn cache_read_runtime_can_be_dropped_from_an_async_context() {
+        let runtime = CacheReadRuntime::new(1);
+        runtime.get().spawn_blocking(|| {}).await.unwrap();
+        drop(runtime);
+    }
+
+    #[tokio::test]
+    async fn test_redirect_preserves_authorization_header_on_same_origin() -> Result<()> {
+        for status in &[301, 302, 303, 307, 308] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(*status)
+                        .insert_header("location", format!("{}/redirect", server.uri())),
+                )
+                .mount(&server)
+                .await;
+
+            let request = Client::new()
+                .get(server.uri())
+                .basic_auth("username", Some("password"))
+                .build()
+                .unwrap();
+
+            assert!(request.headers().contains_key(AUTHORIZATION));
+
+            let response = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap()
+                .execute(request.try_clone().unwrap())
+                .await
+                .unwrap();
+
+            let redirect_request =
+                request_into_redirect(request, &response, CrossOriginCredentialsPolicy::Secure)?
+                    .unwrap();
+            assert!(redirect_request.headers().contains_key(AUTHORIZATION));
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_redirect_preserves_fragment() -> Result<()> {
+        for status in &[301, 302, 303, 307, 308] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(*status)
+                        .insert_header("location", format!("{}/redirect", server.uri())),
+                )
+                .mount(&server)
+                .await;
+
+            let request = Client::new()
+                .get(format!("{}#fragment", server.uri()))
+                .build()
+                .unwrap();
+
+            let response = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap()
+                .execute(request.try_clone().unwrap())
+                .await
+                .unwrap();
+
+            let redirect_request =
+                request_into_redirect(request, &response, CrossOriginCredentialsPolicy::Secure)?
+                    .unwrap();
+            assert!(
+                redirect_request
+                    .url()
+                    .fragment()
+                    .is_some_and(|fragment| fragment == "fragment")
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_redirect_removes_authorization_header_on_cross_origin() -> Result<()> {
+        for status in &[301, 302, 303, 307, 308] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(*status)
+                        .insert_header("location", "https://cross-origin.com/simple"),
+                )
+                .mount(&server)
+                .await;
+
+            let request = Client::new()
+                .get(server.uri())
+                .basic_auth("username", Some("password"))
+                .build()
+                .unwrap();
+
+            assert!(request.headers().contains_key(AUTHORIZATION));
+
+            let response = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap()
+                .execute(request.try_clone().unwrap())
+                .await
+                .unwrap();
+
+            let redirect_request =
+                request_into_redirect(request, &response, CrossOriginCredentialsPolicy::Secure)?
+                    .unwrap();
+            assert!(!redirect_request.headers().contains_key(AUTHORIZATION));
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_redirect_303_changes_post_to_get() -> Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(303)
+                    .insert_header("location", format!("{}/redirect", server.uri())),
+            )
+            .mount(&server)
+            .await;
+
+        let request = Client::new()
+            .post(server.uri())
+            .basic_auth("username", Some("password"))
+            .build()
+            .unwrap();
+
+        assert_eq!(request.method(), Method::POST);
+
+        let response = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .execute(request.try_clone().unwrap())
+            .await
+            .unwrap();
+
+        let redirect_request =
+            request_into_redirect(request, &response, CrossOriginCredentialsPolicy::Secure)?
+                .unwrap();
+        assert_eq!(redirect_request.method(), Method::GET);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_redirect_no_referer_if_disabled() -> Result<()> {
+        for status in &[301, 302, 303, 307, 308] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(*status)
+                        .insert_header("location", format!("{}/redirect", server.uri())),
+                )
+                .mount(&server)
+                .await;
+
+            let request = Client::builder()
+                .referer(false)
+                .build()
+                .unwrap()
+                .get(server.uri())
+                .basic_auth("username", Some("password"))
+                .build()
+                .unwrap();
+
+            assert!(!request.headers().contains_key(REFERER));
+
+            let response = Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap()
+                .execute(request.try_clone().unwrap())
+                .await
+                .unwrap();
+
+            let redirect_request =
+                request_into_redirect(request, &response, CrossOriginCredentialsPolicy::Secure)?
+                    .unwrap();
+
+            assert!(!redirect_request.headers().contains_key(REFERER));
+        }
+
+        Ok(())
+    }
+}

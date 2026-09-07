@@ -1,0 +1,29 @@
+exclude: ^(includes/(valgrind|callgrind|zig)\.h|dist/core\.c)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: check-serialized
+        name: Check serialized.zig is up to date
+        entry: bash -c 'cd src/tests/deserialize_rust && diff <(cargo run --quiet 2>/dev/null) serialized.zig'
+        language: system
+        pass_filenames: false
+
+  - repo: https://github.com/batmac/pre-commit-zig
+    rev: v0.3.0
+    hooks:
+      - id: zig-fmt
+      - id: zig-build
+      - id: zig-build-test
+
+  - repo: https://github.com/cpp-linter/cpp-linter-hooks
+    rev: v0.6.1
+    hooks:
+      - id: clang-format
+        files: \.(c|h)$

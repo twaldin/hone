@@ -1,0 +1,91 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - develop
+  schedule:
+    - cron: "0 0 * * *"
+
+jobs:
+  validate:
+    name: Validate clippy and rustfmt
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check  --all-features --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+      - name: Fmt
+        run: cargo fmt -- --check
+
+  test:
+    name: Test crate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macOS-latest
+        toolchain:
+          - nightly
+          - stable
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        env:
+          CARGO_TERM_COLOR: never
+          SNAPSHOT_DIR: rust-${{ matrix.toolchain }}
+        run: cargo test
+
+  msrv-build:
+    name: Build crate with documented MSRV
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Read crate metadata
+        id: metadata
+        run: echo "rust-version=$(sed -ne 's/rust-version *= *\"\(.*\)\"/\1/p' Cargo.toml)" >> $GITHUB_OUTPUT
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.metadata.outputs.rust-version }}
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build

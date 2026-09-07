@@ -1,0 +1,116 @@
+---
+title: Run your tests with the Bun test runner
+sidebarTitle: Run tests
+mode: center
+---
+
+Bun has a built-in [test runner](/test) with a Jest-like `expect` API.
+
+---
+
+To use it, run `bun test` from your project directory. The test runner recursively searches for files matching the following patterns and runs the tests they contain.
+
+```txt File Tree icon="folder-tree"
+*.test.{js|jsx|ts|tsx}
+*_test.{js|jsx|ts|tsx}
+*.spec.{js|jsx|ts|tsx}
+*_spec.{js|jsx|ts|tsx}
+```
+
+---
+
+Here's the output of a typical run: three test files (`test.test.js`, `test2.test.js`, and `test3.test.js`), each containing two tests (`add` and `multiply`).
+
+```sh terminal icon="terminal"
+bun test
+```
+
+```txt
+test.test.js:
+✓ add [0.87ms]
+✓ multiply [0.02ms]
+
+test2.test.js:
+✓ add [0.72ms]
+✓ multiply [0.01ms]
+
+test3.test.js:
+✓ add [0.54ms]
+✓ multiply [0.01ms]
+
+ 6 pass
+ 0 fail
+ 6 expect() calls
+Ran 6 tests across 3 files. [9.00ms]
+```
+
+---
+
+To only run certain test files, pass a positional argument to `bun test`. The runner only executes files with that argument in their path.
+
+```sh terminal icon="terminal"
+bun test test3
+```
+
+```txt
+test3.test.js:
+✓ add [1.40ms]
+✓ multiply [0.03ms]
+
+ 2 pass
+ 0 fail
+ 2 expect() calls
+Ran 2 tests across 1 files. [15.00ms]
+```
+
+---
+
+Every test has a name: the first argument to the `test` function. Tests can also be grouped into suites with `describe`.
+
+```ts
+import { test, expect, describe } from "bun:test";
+
+describe("math", () => {
+  test("add", () => {
+    expect(2 + 2).toEqual(4);
+  });
+
+  test("multiply", () => {
+    expect(2 * 2).toEqual(4);
+  });
+});
+```
+
+---
+
+To filter tests by name, use the `-t`/`--test-name-pattern` flag.
+
+`-t add` only runs tests with "add" in the name. The pattern matches test names defined with `test` and suite names defined with `describe`.
+
+```sh terminal icon="terminal"
+bun test -t add
+```
+
+```txt
+test.test.js:
+✓ add [1.79ms]
+» multiply
+
+test2.test.js:
+✓ add [2.30ms]
+» multiply
+
+test3.test.js:
+✓ add [0.32ms]
+» multiply
+
+ 3 pass
+ 3 skip
+ 0 fail
+ 3 expect() calls
+Ran 6 tests across 3 files. [59.00ms]
+```
+
+---
+
+See [`bun test`](/test).

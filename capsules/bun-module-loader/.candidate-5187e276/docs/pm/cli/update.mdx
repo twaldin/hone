@@ -1,0 +1,140 @@
+---
+title: "bun update"
+description: "Update dependencies to latest versions"
+---
+
+import Update from "/snippets/cli/update.mdx";
+
+<Note>To upgrade your Bun CLI version, see [`bun upgrade`](/installation#upgrading).</Note>
+
+To update all dependencies to the latest version:
+
+```sh terminal icon="terminal"
+bun update
+```
+
+To update a specific dependency to the latest version:
+
+```sh terminal icon="terminal"
+bun update [package]
+```
+
+## `--interactive`
+
+Use the `--interactive` flag to choose which packages to update:
+
+```sh terminal icon="terminal"
+bun update --interactive
+bun update -i
+```
+
+The flag opens a terminal interface that lists every outdated package with its current and target versions.
+
+### Interactive Interface
+
+The interface displays packages grouped by dependency type:
+
+```txt
+? Select packages to update - Space to toggle, Enter to confirm, a to select all, n to select none, i to invert, l to toggle latest
+
+  dependencies                Current  Target   Latest
+    □ react                   17.0.2   18.2.0   18.3.1
+    □ lodash                  4.17.20  4.17.21  4.17.21
+
+  devDependencies             Current  Target   Latest
+    □ typescript              4.8.0    5.0.0    5.3.3
+    □ @types/node             16.11.7  18.0.0   20.11.5
+
+  optionalDependencies        Current  Target   Latest
+    □ some-optional-package   1.0.0    1.1.0    1.2.0
+```
+
+**Sections:**
+
+- Packages are grouped under section headers: `dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`
+- Each section shows column headers aligned with the package data
+
+**Columns:**
+
+- **Package**: Package name (may have a suffix such as ` dev`, ` peer`, or ` optional`)
+- **Current**: Currently installed version
+- **Target**: Version that would be installed (respects semver constraints)
+- **Latest**: Latest available version
+
+### Keyboard Controls
+
+**Selection:**
+
+- **Space**: Toggle package selection
+- **Enter**: Confirm selections and update
+- **a/A**: Select all packages
+- **n/N**: Select none
+- **i/I**: Invert selection
+
+**Navigation:**
+
+- **↑/↓ Arrow keys** or **j/k**: Move cursor
+- **l/L**: Toggle between target and latest version for current package
+
+**Exit:**
+
+- **Ctrl+C** or **Ctrl+D**: Cancel without updating
+
+### Visual Indicators
+
+- **☑** Selected packages (will be updated)
+- **□** Unselected packages
+- **>** Current cursor position
+- **Colors**: Red (major), yellow (minor), green (patch) version changes
+- **Underlined**: Currently selected update target
+
+### Package Grouping
+
+Packages are organized in sections by dependency type:
+
+- **dependencies** - Regular runtime dependencies
+- **devDependencies** - Development dependencies
+- **peerDependencies** - Peer dependencies
+- **optionalDependencies** - Optional dependencies
+
+Within each section, individual packages may have a suffix (` dev`, ` peer`, ` optional`).
+
+## `--recursive`
+
+Use the `--recursive` flag with `--interactive` to update dependencies across all workspaces in a monorepo:
+
+```sh terminal icon="terminal"
+bun update --interactive --recursive
+bun update -i -r
+```
+
+With `--recursive`, the interface adds a "Workspace" column showing which workspace each dependency belongs to.
+
+## `--latest`
+
+By default, `bun update` updates each dependency to the latest version that satisfies the version range in your `package.json`.
+
+To update to the latest version regardless of whether it satisfies that range, use the `--latest` flag:
+
+```sh terminal icon="terminal"
+bun update --latest
+```
+
+In interactive mode, press **l** to toggle a package between its target version (respecting semver) and the latest version.
+
+For example, with the following `package.json`:
+
+```json package.json icon="file-json"
+{
+  "dependencies": {
+    "react": "^17.0.2"
+  }
+}
+```
+
+- `bun update` would update to a version that matches `17.x`.
+- `bun update --latest` would update to a version that matches `18.x` or later.
+
+---
+
+<Update />

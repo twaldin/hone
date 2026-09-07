@@ -1,0 +1,3 @@
+0000000000000000000000000000000000000000 8d7478282bf19db59ee7a05ee98c00bbe946cd03 Hone Capsule Author <hone-capsule@invalid.local> 1784398528 -0700	commit (initial): Frozen capsule baseline
+8d7478282bf19db59ee7a05ee98c00bbe946cd03 636fdf0cad55398965cda7953c46f6c0327f1e86 Hone Capsule Author <hone-capsule@invalid.local> 1784564024 -0700	commit: Frozen capsule baseline
+636fdf0cad55398965cda7953c46f6c0327f1e86 94239c460b83ea88dd48311a52c95d089f08546b twaldin <timothy@waldin.net> 1784701644 -0700	commit: Baseline: exclude .gitdir self-reference from tree

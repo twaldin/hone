@@ -1,0 +1,41 @@
+[package]
+name = "pin-project-lite"
+version = "0.2.13"
+edition = "2018"
+rust-version = "1.37"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/taiki-e/pin-project-lite"
+keywords = ["pin", "macros"]
+categories = ["no-std", "no-std::no-alloc", "rust-patterns"]
+exclude = ["/.*", "/tools", "/DEVELOPMENT.md"]
+description = """
+A lightweight version of pin-project written with declarative macros.
+"""
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[workspace]
+members = [
+    "tests/no-core",
+    "tests/no-std",
+]
+
+[lib]
+doc-scrape-examples = false
+
+[dev-dependencies]
+macrotest = "1.0.9"
+rustversion = "1"
+static_assertions = "1"
+trybuild = "=1.0.67"
+
+# For test on MSRV.
+once_cell = "=1.14"
+proc-macro2 = "=1.0.65"
+quote = "=1.0.30"
+serde = "=1.0.156"
+toml = "=0.5.9"
+
+[patch.crates-io]
+prettyplease = { git = "https://github.com/taiki-e/prettyplease.git", branch = "dev" } # lower MSRV

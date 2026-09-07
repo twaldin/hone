@@ -1,0 +1,101 @@
+[
+  {
+    "id": "mixed-reread",
+    "input": {
+      "nodes": [
+        {
+          "id": "root",
+          "status": "completed"
+        },
+        {
+          "id": "left",
+          "status": "running"
+        },
+        {
+          "id": "right",
+          "status": "pending"
+        }
+      ],
+      "removed": [
+        "left"
+      ],
+      "spawns": [
+        {
+          "id": "right",
+          "ok": false
+        }
+      ]
+    },
+    "expected": {
+      "statuses": {
+        "left": "retired",
+        "right": "failed",
+        "root": "completed"
+      },
+      "active": [],
+      "terminal": true
+    }
+  },
+  {
+    "id": "terminal-preserved",
+    "input": {
+      "nodes": [
+        {
+          "id": "a",
+          "status": "failed"
+        },
+        {
+          "id": "b",
+          "status": "completed"
+        }
+      ],
+      "removed": [
+        "a",
+        "b"
+      ],
+      "spawns": []
+    },
+    "expected": {
+      "statuses": {
+        "a": "failed",
+        "b": "completed"
+      },
+      "active": [],
+      "terminal": true
+    }
+  },
+  {
+    "id": "live-spawn",
+    "input": {
+      "nodes": [
+        {
+          "id": "x",
+          "status": "pending"
+        },
+        {
+          "id": "y",
+          "status": "pending"
+        }
+      ],
+      "removed": [
+        "x"
+      ],
+      "spawns": [
+        {
+          "id": "y",
+          "ok": true
+        }
+      ]
+    },
+    "expected": {
+      "statuses": {
+        "x": "retired",
+        "y": "running"
+      },
+      "active": [
+        "y"
+      ],
+      "terminal": false
+    }
+  }
+]

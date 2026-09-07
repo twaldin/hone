@@ -1,0 +1,152 @@
+{
+  "objective": "Improve orjson dumps+loads throughput across frozen dataclass, datetime, NumPy, Unicode, and nested corpora. Maximize the geometric mean throughput after byte-exact dumps, semantic loads, a trusted-side correctness gate (serialize/deserialize output and error behavior validated against a pristine reference over per-case nonces), and peak-RSS gates; only src/lib.rs, src/serialize/, and src/deserialize/ are mutable.",
+  "image": "hone-orjson-serialization@sha256:9fda64d476ea8edfcace3bb89902e8790e0f3ce1efd29a97026a8f945724c824",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    ".gitattributes",
+    ".github",
+    ".gitignore",
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "LICENSE-MPL-2.0",
+    "README.md",
+    "bench",
+    "benchmark_worker.py",
+    "build.rs",
+    "challenge.json",
+    "ci",
+    "data",
+    "doc",
+    "eval.py",
+    "include",
+    "integration",
+    "orjson_workload.py",
+    "pyproject.toml",
+    "pysrc",
+    "requirements-lint.txt",
+    "requirements.txt",
+    "script",
+    "src/alloc.rs",
+    "src/exception.rs",
+    "src/ffi",
+    "src/opt.rs",
+    "src/typeref.rs",
+    "src/util.rs",
+    "test"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-frozen-corpus",
+    "license": "MPL-2.0 AND (Apache-2.0 OR MIT)",
+    "provenance": "Current-head OSS-T08 layered on ijl/orjson 705515d77b28429d0b7c30c3d781abe52e8a1e5a (3.11.9); the pinned baseline commit is a synthetic overlay commit that adds the trusted evaluator glue (eval.py, benchmark_worker.py, orjson_workload.py, challenge.json) on top of that upstream tree so the visible baseline matches the declared commit byte-for-byte. No reference artifact or known winning patch. Round-6 hardening (EXEC-BOUNDARY): the correctness gate is produced ENTIRELY trusted-side and never trusts any artifact a candidate-linked process authors. run_correctness() (eval.py) drives a candidate-linked worker across a subprocess boundary over a frozen 43-case corpus (orjson_workload.correctness_cases/apply_correctness) covering dumps of every type/option, loads of valid+malformed inputs, and error behavior; the worker returns ONLY a per-case output digest or the raised exception class, and this trusted parent — which imports the PRISTINE reference orjson, never the candidate build — independently reproduces every outcome and compares. A fresh 63-bit nonce is folded into every input so no output can be a hardcoded constant (defeats input special-casing), and a candidate that exits during import yields no reply and fails closed. This replaces the round-5 per-file pytest JUnit gate, whose report artifact was written inside the candidate-loading process at the conductor's uid and was therefore forgeable (PyInit_orjson could pre-author a JUnit matching the offline-derivable frozen identity, then os._exit(0) before any test ran). The scored benchmark chain is unchanged. Candidate-owned scratch under /tmp, /var/tmp, and /dev/shm is swept between launches.",
+    "sourceDetails": {
+      "repository": "https://github.com/ijl/orjson",
+      "commit": "705515d77b28429d0b7c30c3d781abe52e8a1e5a",
+      "version": "3.11.9",
+      "licenseFiles": [
+        "LICENSE-MPL-2.0",
+        "LICENSE-APACHE",
+        "LICENSE-MIT"
+      ],
+      "mutablePaths": [
+        "src/lib.rs",
+        "src/serialize",
+        "src/deserialize"
+      ],
+      "currentHead": true,
+      "referenceArtifact": false
+    },
+    "toolchain": {
+      "pythonBase": "python:3.12.11-bookworm@sha256:13c9584604a99ca134c4f41800f74ffc64ee6ac8cf555cf1e704a6087fc84f12",
+      "rustBase": "rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1",
+      "rust": "1.95.0",
+      "python": "3.12.11",
+      "maturin": "1.9.4",
+      "pyo3Ffi": "0.28.3",
+      "numpy": "2.3.3",
+      "pytest": "9.0.2",
+      "cargo": "vendored Cargo.lock sources, offline",
+      "pip": "frozen wheels, --no-index",
+      "networkDuringMutationAndEvaluation": false,
+      "optimizerRuntime": "nodejs (proxy relay) + bun 1.3.14 + pi_natives 16.5.2 baked beside bun for mutation sandboxes; unused by the trusted evaluator"
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+      "targetPlatform": "frozen GCE Linux profile (recalibration required)",
+      "freshProcess": true,
+      "q": "per workload, the paired geomean over 9 interleaved candidate/reference pairs of (pristine-reference chain time / candidate chain time); the per-pair ratio cancels shared host load. Per-split q is the geometric mean across the ten frozen dumps+loads workloads (~1.0 == pristine baseline speed); train+validation aggregate is their arithmetic mean. Every timed run is a data-dependent serialize/parse chain whose final digest is validated against the pristine reference over a per-run-unpredictable nonce.",
+      "qFail": 0,
+      "qBase": 1.016433,
+      "sigma": 0.01386,
+      "qReference": 1.085731,
+      "referenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+      "aaSamples": [
+        0.9976,
+        1.021,
+        1.026,
+        1.036,
+        1.009,
+        1.009
+      ],
+      "noiseFractionOfScale": 0.013635,
+      "correctnessResultHashes": {
+        "train": "eea12554a2b934636ee36d8291b474b97a247fd98df937fe37d3b4ebf605b686",
+        "validation": "8a9c59a91d1cf6bf2bf9e20dadc5422be6b53a6e5220fe4955adfeec591c38ff"
+      },
+      "rss": {
+        "baselineObservedMaxKiB": 46192,
+        "baselineEnvelopeKiB": 51200,
+        "envelopeConstruction": "cgroup2 memory.peak of the whole benchmark worker tree (~46 MiB validation high-water), rounded up to a 50 MiB envelope",
+        "limitKiB": 61440,
+        "limitConstruction": "60 MiB (envelope * ~1.2) headroom for measurement jitter under host contention",
+        "source": "kernel cgroup2 memory.peak (whole-tree, non-resettable), replacing round-2 VmRSS 5 ms polling"
+      },
+      "feasibility": {
+        "cleanBuildSec": 9.894,
+        "passingEvalSec": 43.4
+      }
+    },
+    "tags": [
+      "m2",
+      "oss",
+      "serialization",
+      "rust",
+      "python",
+      "throughput",
+      "current-head"
+    ]
+  }
+}

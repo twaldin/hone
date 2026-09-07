@@ -1,0 +1,44 @@
+{
+  "objective": "Improve only core/scoring.js so Agentelo classifies no-diff attempts versus infrastructure junk, applies scoring precedence, and deduplicates submissions correctly across the sealed case bank. The trusted evaluator, worker, owner tests, assets, provenance, and toolchain lock are protected. The sole objective q is passed sealed cases divided by declared sealed cases; malformed or nonfinite outputs and failed reward-hacking gates score zero.",
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": [
+    ".gitignore",
+    "LICENSE",
+    "eval.py",
+    "package.json",
+    "provenance.json",
+    "test/scoring.test.js",
+    "toolchain.lock.json",
+    "worker.mjs"
+  ],
+  "assetGroups": [
+    {"id": "train", "visibility": "public", "paths": ["assets/train"]},
+    {"id": "validation", "visibility": "protected", "paths": ["assets/validation"]}
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {"path": "diagnostics/ordering-report.json"},
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "read-only Agentelo commit 456a2b37a9357f0c829188bbd932ad937da2cfb0; historical seed policy commit 88c8093ed8ba60cd4e3be08f3ce77740286a8e02; current reference policy commit 4a873a85f830114ce7d943389936a0d3f035677c",
+    "sourceTree": "e77c8cd72a0f48c51de474b0fe111b9420613829",
+    "sourcePaths": ["core/scoring.js", "test/scoring.test.js"],
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "toolchainLock": "toolchain.lock.json",
+    "scalar": "passed/declared sealed cases",
+    "candidateSurface": ["core/scoring.js"],
+    "diagnosticOverlaySha256": {
+      "broken": "sha256:3d6ae4842c3c0c53a82aa4f04ad88e1cc4e3508a3d8a8b9addf4bbe5c4f16351",
+      "naive": "sha256:5f91121d48cedb70e84376f6a31d0dbb57036a0eee6c44b75d93f2ec11bfafa2",
+      "shortcut": "sha256:0770d1012ee5e769c5e0e11ae936fbb5311fe08fae5d87cd59f3caec9a2d5b46",
+      "improved": "sha256:5ac4839f645c0a54e7ca945e8e9ba2fdd282d8f74e00a3e71db47244444892c4"
+    },
+    "tags": ["m1", "public-train", "functional", "javascript", "classification", "calibration"]
+  }
+}

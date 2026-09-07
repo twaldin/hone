@@ -1,0 +1,105 @@
+[
+  {
+    "id": "kilo-cumulative",
+    "input": {
+      "adapter": "kilo",
+      "events": [
+        {
+          "data": {
+            "modelName": "claude",
+            "usage": {
+              "inputTokens": 2,
+              "outputTokens": 3
+            },
+            "costUsd": 0.1
+          }
+        },
+        {
+          "data": {
+            "usage": {
+              "inputTokens": 5,
+              "outputTokens": 7
+            },
+            "costUsd": 0.2,
+            "stopReason": "end_turn"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "model": "claude",
+      "inputTokens": 7,
+      "outputTokens": 10,
+      "cost": 0.3,
+      "completed": true
+    }
+  },
+  {
+    "id": "swe-finish",
+    "input": {
+      "adapter": "swe-agent",
+      "events": [
+        {
+          "model_id": "swe",
+          "tokenUsage": {
+            "prompt": 30,
+            "completion": 12
+          },
+          "state": "finished"
+        }
+      ]
+    },
+    "expected": {
+      "model": "swe",
+      "inputTokens": 30,
+      "outputTokens": 12,
+      "cost": 0,
+      "completed": true
+    }
+  },
+  {
+    "id": "crush-envelope",
+    "input": {
+      "adapter": "crush",
+      "events": [
+        {
+          "message": {
+            "providerModel": "glm-5",
+            "tokens": {
+              "tokensIn": 1000,
+              "tokensOut": 200
+            },
+            "totalCost": 0.45,
+            "type": "done"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "model": "glm-5",
+      "inputTokens": 1000,
+      "outputTokens": 200,
+      "cost": 0.45,
+      "completed": true
+    }
+  },
+  {
+    "id": "baseline-anchor",
+    "input": {
+      "adapter": "crush",
+      "events": [
+        {
+          "model": "anchor",
+          "type": "done"
+        }
+      ]
+    },
+    "expected": {
+      "model": "anchor",
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cost": 0,
+      "completed": true
+    }
+  }
+]

@@ -1,0 +1,63 @@
+{
+  "objective": "Improve FLT workflow parsing across legacy, dynamic-DAG, human-gate, reference, preset, and generated YAML structures. Preserve owner-consistent AST projection, localized errors, and canonical round-trip stability. Only src/workflow/parser.mjs may change.",
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": [
+    ".gitignore",
+    "eval.py",
+    "worker.mjs",
+    "src/presets.mjs",
+    "src/vendor/yaml.mjs",
+    "package.json",
+    "package-lock.json",
+    "toolchain.lock.json",
+    "LICENSE",
+    "YAML-LICENSE"
+  ],
+  "assetGroups": [
+    { "id": "train", "visibility": "holdout", "paths": ["assets/train"] },
+    { "id": "validation", "visibility": "holdout", "paths": ["assets/validation"] }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 198
+  },
+  "diagnosticOrdering": { "path": "diagnostics/ordering-report.json" },
+  "meta": {
+    "partition": "terminal-holdout-2",
+    "scalar": "score = passed sealed cases / 26 declared sealed cases",
+    "qFail": 0,
+    "normalization": {
+      "qFail": 0,
+      "qBase": 0.5,
+      "qReference": 1,
+      "scale": 0.5
+    },
+    "diagnosticContentHashes": {
+      "diagnostics/broken/src/workflow/parser.mjs": "sha256:4c66a1d7c1aff1fac49f2a2c4f78525b491dd5719ab23af9914ecbad4bc98a05",
+      "diagnostics/improved/src/workflow/parser.mjs": "sha256:1299861eaafbe0ddde28c093e537574396beb877c0c91d28028cfdfca82b7766",
+      "diagnostics/naive/src/workflow/parser.mjs": "sha256:d41eb4bad608e07509bc0e7986e6c9fb567a6ef4058a36eabe707211414d9909",
+      "diagnostics/shortcut/src/workflow/parser.mjs": "sha256:d9850580ce470c5fcdbfad5a43c4550ff9c4f879ad7f0dbe0003873a6afc43af"
+    },
+    "groups": ["legacy", "dag", "gate", "reference", "preset", "generated"],
+    "groupCaseCounts": { "legacy": 4, "dag": 4, "gate": 4, "reference": 4, "preset": 4, "generated": 6 },
+    "declaredCases": 26,
+    "sourceRepository": "https://github.com/twaldin/flt",
+    "sourceCommit": "fe05463a921b9c4d808a338ea07d33abe45b6487",
+    "sourceTree": "6b5de048d6531b5d8f120f7f7b6fbb0540aef9cc",
+    "sourcePaths": [
+      "src/workflow/parser.ts",
+      "src/presets.ts",
+      "src/workflow/types.ts",
+      "tests/unit/workflow-parser.test.ts",
+      "templates/workflows/code-and-review.yaml",
+      "templates/workflows/daily-mutator.yaml"
+    ],
+    "baselineParserCommit": "a160f018fa74c987a95bbffee60fee6278874795",
+    "referenceParserCommit": "fe05463a921b9c4d808a338ea07d33abe45b6487",
+    "license": "MIT",
+    "holdoutPolicy": "Both frozen group ids are visibility=holdout; trusted diagnostics only; no optimizer pilot or train-facing asset bytes, scores, identities, or feedback."
+  }
+}

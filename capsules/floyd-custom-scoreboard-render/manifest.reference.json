@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_62751d238ab7",
+  "objective": "Minimize Custom Scoreboard p99 render cost and allocations on frozen sidebar scenes while preserving the exact baseline layout and draw-command stream. Correctness is a hard gate; only solution.py is mutable.",
+  "baseline": {
+    "kind": "git",
+    "commit": "a49d28545359c1bf798fafdbc3189c3b3e8dd956"
+  },
+  "image": "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "candidate_runner.py",
+    "challenge.json",
+    ".gitignore"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": [
+        "assets/train/_reference/renderer.py",
+        "assets/train/cases.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": [
+        "assets/validation/_reference/renderer.py",
+        "assets/validation/cases.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:7a46fa5dc2734f18e4a0f675b0ac0916f16a1cf338ddcb0f8d1933a0784f1571"
+  },
+  "contentHashes": {
+    "assets/train/_reference/renderer.py": "sha256:dfcb48a694ee39eb9f9fcb26b8ef6fe8c7dd3eb0221ab1ebec1dd21a783ebe12",
+    "assets/train/cases.json": "sha256:53f49f306408424415e06ee89cd1f15a1305f6baf26eb707cf3165c6e16df5ed",
+    "assets/validation/_reference/renderer.py": "sha256:dfcb48a694ee39eb9f9fcb26b8ef6fe8c7dd3eb0221ab1ebec1dd21a783ebe12",
+    "assets/validation/cases.json": "sha256:c0556ae08e49c62402228b37a84fd7cb7ec624e8f53cb97603d46e474a9c3d5f"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "bounded exact layout/render-command extraction from Floyd Addons baseline 7c7360d4f68bf4505be64abc258ecf3067bb8dcf and reference ad9358c8",
+    "license": "internal-use-only",
+    "tags": [
+      "m2",
+      "owner",
+      "terminal",
+      "rendering",
+      "performance"
+    ],
+    "partition": "m2-frozen-corpus",
+    "sourceDetails": {
+      "repository": "new-floyd-addons",
+      "commit": "7c7360d4f68bf4505be64abc258ecf3067bb8dcf",
+      "referenceCommit": "ad9358c8",
+      "derivation": "bounded exact-output subsystem extracted for isolated deterministic evaluation"
+    },
+    "measurement": {
+      "platform": "linux",
+      "samples": 9,
+      "freshProcess": true,
+      "frames": "frameReps per sealed case; frame 0 is the verified untimed scene-transfer frame, frames 1..frameReps-1 are the measured novel frames (trusted per-frame entry-value edits, verified against the sealed reference renderer: digest-pinned, shipped inside the holdout asset groups under the root-only /capsule tmpfs, loaded in memory by the trusted root evaluator only, with a candidate-uid readability probe that refuses evaluation if the oracle is reachable)",
+      "q": "per sealed case, 0 when any frame mismatches, else 0.6/(1 + p99_ms/0.6) + 0.4/(1 + peak_rss_mib/16); p99_ms = nearest-rank p99 across measured novel frames of the per-frame minimum over the nine fresh-process repetitions, timed by the trusted parent; peak_rss_mib = max across repetitions of the trusted cgroup-v2 memory.peak of the per-repetition candidate cgroup (whole candidate process tree including exited descendants; kernel-written, root-owned, non-resettable by candidate code); capsule scalar = mean across sealed cases",
+      "p99ScaleMs": 0.6,
+      "allocScaleMb": 16,
+      "p99Weight": 0.6,
+      "allocWeight": 0.4,
+      "qFail": 0,
+      "qBase": 0.4223506898498743,
+      "sigma": 0.005868886735696766,
+      "qReference": 0.4516951235283581,
+      "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail)) from the locked A-A calibration (stability aggregates of the pinned ordering report)"
+    }
+  }
+}

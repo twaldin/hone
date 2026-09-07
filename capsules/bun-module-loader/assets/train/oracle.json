@@ -1,0 +1,40 @@
+{
+ "jobs": {
+  "train-esm-fanout": {
+   "baselinePeakRssKiB": 20364,
+   "exportHash": "sha256:effe6b0e031f5eb53d3ebd548c22b7ed230f8a723f378c88abcc625d50ffd13b",
+   "resolveExportHash": "sha256:208db5b798de19439d8e3df371cc095a8b4d3e52165f095541927a7987635b34",
+   "resolveSideEffectHash": "sha256:c31b3277ba19a597b45a165b02c9fb201c8845fe9a80704dd8866e742360ff94",
+   "sideEffectHash": "sha256:eeb1f86211b31c36a4c90330bb72d859dbe3261f0cdd929dbd837c1f1e56f29c"
+  },
+  "train-extensionless": {
+   "baselinePeakRssKiB": 19780,
+   "exportHash": "sha256:4ac3f1d52d756466be87abc6cbbb76c4e21bb436c9008cb0d352a9f5d4cb3c6a",
+   "resolveExportHash": "sha256:12934e4be5714618ff7128e83d38dd48ccc4b1bf0118923229589db4273eaae7",
+   "resolveSideEffectHash": "sha256:c93fb1f4b0a2f3ffb12df9c25079fc66ad67241b9ed94e5f6054b26479505f19",
+   "sideEffectHash": "sha256:7d2abb47b35bbbd9ca446ac2f2f41de61a98212c71f21afd8928173f28b0280e"
+  },
+  "train-package-exports": {
+   "baselinePeakRssKiB": 22604,
+   "exportHash": "sha256:ee098f8a897651095b37bb06b593c85cda52b82ec9dc77dfde34c30fbef1d8dd",
+   "resolveExportHash": "sha256:8254cb8f6c300d3503e96d477d0b94571508b734403cc45710aaaa76e091a361",
+   "resolveSideEffectHash": "sha256:030fb72113bd1ea28356526e4499b6c56f961c5d4958aaef907be25c840770f6",
+   "sideEffectHash": "sha256:f3f3e9f20bf28e4daaba21cd2c3e8808c32a14dae7f096a8a2db86e86eaac7d9"
+  },
+  "train-ts-chain": {
+   "baselinePeakRssKiB": 20556,
+   "exportHash": "sha256:587d39206114d239f3c1680f1b069a041553f64db6d5e5d90037c7cc9cebbf00",
+   "resolveExportHash": "sha256:3e92b629d456752eb07affe66394fe8228a6c9dd5ce58ee74750bd41ecf51c01",
+   "resolveSideEffectHash": "sha256:f60f49a0be23a650ad0b8c9b284a890678abd94c385e557db6303a532da25de9",
+   "sideEffectHash": "sha256:6cb1760f751ee346eba1e84942bb87a20be8b740dd84e8ef38ba2c6bef3a42fa"
+  },
+  "train-tsconfig-alias": {
+   "baselinePeakRssKiB": 19120,
+   "exportHash": "sha256:cb85bf2b401f4cc6373f798fae1c6ebf99f22ef15fc2e62aca054f956f497114",
+   "resolveExportHash": "sha256:e5ec5ec9eb2a0a0fc573ca04ff84dd5572799e8afc4bdec699120d0d2be25c8c",
+   "resolveSideEffectHash": "sha256:41e6921d44cbe4258d66bf4cd2a0e467ce507bd638fea4e3dfaec0837e8fe706",
+   "sideEffectHash": "sha256:26e6d345f09fd717f2f81087d885f63fede9cad4e1d757055c534dab6caad8b5"
+  }
+ },
+ "version": 1
+}

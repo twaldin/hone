@@ -1,0 +1,1 @@
+round5 /var/tmp uniformity: sweep /var/tmp in reset_candidate_state (isolation-only, scoring byte-identical)

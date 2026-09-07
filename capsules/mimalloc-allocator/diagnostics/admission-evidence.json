@@ -1,0 +1,107 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 2.55,
+    "incrementalRebuildSec": 0.538006,
+    "evalSec": 10.558403
+  },
+  "aa": {
+    "samples": [
+      14159662.93761846,
+      13969426.49290388,
+      14047552.145021513
+    ],
+    "sigma": 95622.82871884762,
+    "noiseFractionOfScale": 0.1360319245157175
+  },
+  "qBase": 14058880.525181284,
+  "qFail": 0,
+  "qReference": 14761824.551440349,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "public allocation entry point returns NULL"
+    },
+    {
+      "id": "naive",
+      "q": 7015821.734826447,
+      "hardGatesPass": true,
+      "role": "deliberately slower but correct volatile work in the allocation entry point; lean whole-tree footprint exercises the retained 0.25x cgroup floor and the 1.5x committed<->cgroup cross-check"
+    },
+    {
+      "id": "baseline",
+      "q": 14159662.93761846,
+      "hardGatesPass": true,
+      "role": "exact pinned upstream allocator implementation"
+    },
+    {
+      "id": "improved",
+      "q": 14757247.00056371,
+      "hardGatesPass": true,
+      "role": "independently authored thread-local size-class magazine over the default-heap malloc/free fast path (exact-class LIFO reuse, main-thread only, drained and retired at the first explicit collection so validation memory accounting matches the unmodified allocator)"
+    },
+    {
+      "id": "shortcut",
+      "q": 9420171.342609465,
+      "trainQ": 14468624.07650225,
+      "validationQ": 4371718.60871668,
+      "hardGatesPass": true,
+      "shortcutGated": true,
+      "role": "first-allocation-size fingerprint that wins sealed train and loses sealed validation"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "description": "thread-local exact-size-class magazine layered over the default-heap malloc/free fast path; main-thread only, served blocks are class-identical to fresh allocations, drained and retired at the first mi_collect/mi_heap_destroy",
+    "independentlyAuthored": true,
+    "valid": true,
+    "q": 14757247.00056371,
+    "deltaFromOrderingBaseline": 597584.0629452504
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstReportHash": "sha256:bb2db5ed9b73e60d2de32ab70d3c7b8db274e3e61af63fc5e1f28ab7ba0ba37f",
+    "secondReportHash": "sha256:51c0553542a06eeb9e3962d79ef12f1e44d28318bc21fb35ee42f77297575aaf",
+    "tokenLocked": true,
+    "incidentWindowRunsExcluded": true,
+    "round5Note": "round-5 2x consecutive ordering re-run under the campaign bench lock; BOTH passes PASSED (stability spread 0.01345 then 0.02745; broken<naive<baseline<improved; shortcut inverts train->validation). Superseded by the round-6 exec-boundary re-run below; the round-5 retained report hash was sha256:e8432da693aa8fc5e6075a34db5955204ca940387b2cb3cfc4e741270456019c.",
+    "round6Note": "round-6 exec-boundary harness (trusted dlopen-after-auth, read-back checksum fold, 4x paired plausibility band, initializer audit, kernel per-sample memory idle/rise gates) changed the measurement completely, so a fresh 2x consecutive ordering was run under the campaign bench lock on a calm host (1-min loadavg 13-17): pass 1 PASSED (spread 0.02486, wall 880.4s, report sha256:bb2db5ed...), pass 2 PASSED immediately after (spread 0.01353, wall 889.1s, report sha256:51c05535...). Both passes: broken<naive<baseline<improved and shortcut wins train / loses validation. ordering-check --report overwrites diagnostics/ordering-report.json in place; the retained + manifest-pinned report is the SECOND pass (firstReportHash is the preserved pre-overwrite hash of the pass-1 report). All calibration fields (aa/qBase/qReference/normalizationScale/controls/perturbation) are re-derived from the retained second pass."
+  },
+  "determinism": {
+    "freshProcessRunsPerSplit": 6,
+    "correctnessHashesStable": true,
+    "driverChecksumsStable": true,
+    "round5Note": "per-sample checksums are now nonce-bound (the go-token is folded into every allocation's canary pattern) and are validated by the trusted parent against the pristine reference's checksum for the same nonce rather than a sealed constant; the nonce=0 validation-pass D-line checksum remains stable and equals the sealed baseline fold (verified: all sealed expectedChecksum values reproduce bytewise at nonce=0).",
+    "round6Note": "round-6 replaced the arithmetically-recomputed pattern fold with a read-back fold: every workload folds the 64-bit word LOADED from each live block (hone_block_readback, separate TU, no LTO) after the round's allocations are live, so the checksum's provenance is the allocated memory itself. The folded VALUE is unchanged (little-endian head canary), so all 8 sealed expectedChecksum values still reproduce bytewise through the dlopen harness on both splits."
+  },
+  "memoryCalibration": {
+    "freshRunsPerSplit": 13,
+    "baselineDefinition": "per split and workload, maximum observed page_committed.peak and live-page fragmentation over 13 token-locked fresh-process baseline memory passes; evaluator permits at most 2% above that frozen page-committed baseline, backstopped by a 1.5x committed<->kernel-cgroup consistency cross-check and a 2x whole-tree cgroup ceiling / 0.25x floor"
+  },
+  "measurement": {
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "globalTokenLockHeld": true,
+    "finalOrderingBatchWallSec": 889.1,
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "normalizationScale": 702944.0262590647,
+    "freshProcess": true,
+    "finalGceRecalibrationRequired": true,
+    "benchmarkSampleSelection": "per workload, the candidate and the pristine reference are timed interleaved (7 samples each) and scored as q = sealed operations * (min reference elapsed / min candidate elapsed); host contention can only lengthen a measured region, so the per-binary minimum rejects scheduler-noise outliers and the reference ratio cancels sustained per-eval load with no candidate-controlled influence",
+    "round2Note": "round-2 hardening changed bench measurement semantics (per-allocation canaries, live-range overlap rejection folded into every timed round; trusted cgroup whole-tree memory.peak gate at 1.20x sealed baseline). Throughput scale dropped accordingly (ordering baseline ~2.74e7 ops/s). aa/qBase/qReference/normalizationScale predate this change and are superseded; they are re-derived during the already-required frozen-host GCE recalibration (finalGceRecalibrationRequired remains true).",
+    "round4Note": "round-4 moved benchmark timing, completion, and result emission out of the candidate-linked executable into the trusted evaluator (child streams work-completion tokens over a report fd while the parent owns fd 1 and brackets each measured region with its own monotonic clock across a per-sample fresh-nonce handshake; whole-tree cgroup memory floor rejects a completion stream produced without allocating) AND replaced the absolute throughput with a load-cancelling yardstick: each workload builds a pristine reference (sealed baseline allocator from TRUSTED_DIR, no candidate overlay) and scores the min-of-N ratio of reference to candidate, so a fully contended eval elevates both legs together and leaves the score unchanged. aa/qBase/qReference/normalizationScale re-derived under this harness from 6 pooled fresh-process baseline runs.",
+    "round5Note": "round-5 EXEC-BOUNDARY hardening (candidate allocator code shares the timed process): the per-sample go-token nonce is now folded into every allocation's canary pattern so the reported per-sample checksum can only be produced by running the timed per-allocation fold once the nonce arrives (closing the closed-form seed/rounds precompute path a candidate constructor could echo before main); the trusted parent hands the same nonce to candidate and pristine reference and rejects any sample whose checksum diverges. The candidate-written D-line peak_committed is cross-checked against the kernel cgroup whole-tree peak (rejected if it exceeds 1.5x the kernel-charged peak) and the whole-tree cgroup floor is retained at 0.25x (a scalar floor cannot encode workload shape; the shape signal is the per-workload committed baseline plus fragmentation band).",
+    "round6Note": "round-6 moved the process boundary itself: the trusted harness binaries (hone-single/multithread/small/fragmentation) are compiled as root exclusively from sealed TRUSTED_DIR sources and link NO candidate code; the candidate is built as a shared library only and is dlopen(RTLD_NOW|RTLD_LOCAL)ed ONLY after the parent's control-channel auth handshake (A-token -> hone_checksum fold reply), so no candidate instruction can execute at process startup or auth time and library initializers run at a trusted-chosen instant when no sample nonce exists. Added: per-sample paired plausibility floor (cand_ns*4 < ref_ns fails) plus a 4.0x cap on the final min-of-N ratio; an initializer-profile audit of the candidate .so against the pristine reference .so (added initializers rejected, .preinit_array rejected outright); kernel-observable per-sample memory gates on the measurement leaf's memory.current (post-purge idle <= idle_max, timed-window rise >= work_min: single 4M/4M, multithread 6M/4M, small 2M/640K, fragmentation 4M/32M); RLIMIT_NPROC zero-slack task budgets. aa/qBase/qReference/normalizationScale/controls/perturbation re-derived from the round-6 retained ordering pass (finalGceRecalibrationRequired remains true for the frozen-host GCE pass)."
+  },
+  "terminalSeal": {
+    "taskId": "OSS-H07",
+    "cohort": "terminal",
+    "optimizerPilots": 0,
+    "mutationRuns": 0,
+    "headroomRuns": 0,
+    "seedOptimizerSessions": 0,
+    "trustedWorkOnly": true,
+    "assetVisibility": "holdout",
+    "queryCorpusExposure": false
+  }
+}

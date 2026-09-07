@@ -1,0 +1,160 @@
+{
+  "status": "admitted-pre-freeze",
+  "capsuleId": "cap_1c911f3aff9a",
+  "manifestBaselineCommit": "6bc22f899455deab619469885bf8d768daba48c8",
+  "diagnosticOrderingHash": "sha256:522bf913982df55b9e5e7153d9127704992f069cb5815c4de2b886e416a8098e",
+  "revision": {
+    "supersedes": "failed-admission OSS-H05 evidence (broad speedtest1 160/310/410/510 mix whose control ladder could not resolve above host noise)",
+    "challenge": "one protected external-sort query-shape latency family (full z1 scan ordered per iteration by a rotated NOCASE text key with a per-iteration derived integer key emitted as column k) run eight identity-distinct times per fresh process, scored by the reciprocal geometric mean of the fastest three of seven trusted-parent wall times",
+    "round2": "supersedes cap_58c0f5d4088c evidence after round-2 gaming-resistance hardening: terminal full-baseline seed + 11 mutable overlays; eight identity-distinct in-process sort iterations with per-rep frozen-digest validation; fresh mount+IPC+net namespaces with a private tmpfs MS_MOVEd over /tmp plus subreaper reap-until-none of candidate-uid processes.",
+    "round4": "supersedes cap_3432da05c288 after round-4 robustness hardening. (1) CG: whole-tree memory accounting. Peak RSS was resource.getrusage(RUSAGE_CHILDREN).ru_maxrss read inside the intermediate worker.py, which only accounts a worker's direct reaped children, so a double-forked detached sorter helper's memory was charged to nobody and vanished from the receipt. The evaluator now mounts a fresh root-only cgroup2, parks itself in a trusted leaf, delegates +memory, and gives every timed repetition a fresh leaf that the worker joins as its first preexec action (while still root, before the mount ns is unshared); after the whole candidate-uid tree is reaped the parent reads the leaf's kernel-owned monotone memory.peak (bytes) and drains the leaf. worker.py no longer computes or reports RSS. The demoted uid can never write the root-owned cgroup control files. (2) EST/RSS recalibration: A-A, controls, and the peak-RSS cap were remeasured under the shipped 8-variant bench + new cgroup harness and refrozen. The whole-tree peak (Python worker glue + benchmark binary + any sorter threads in the leaf) is a larger, harness-consistent scale than the prior ru_maxrss binary-only figure; peakRssMaxKiB re-frozen at 23040 KiB (observed baseline 13344/14172 and improved 20904-21896 across both splits; ~5% over the improved worst case, still well under a whole-database-in-memory candidate's >30 MiB). Round-2 per-rep NS isolation + subreaper reaping and the identity/structurally-distinct 8-variant bench are unchanged."
+  },
+  "feasibility": {
+    "cleanBuildSec": 39.4,
+    "evalSec": 45.7,
+    "everyEvaluationCleanBuildsOnTmpfs": true
+  },
+  "aa": {
+    "samples": [
+      1.7921114333034622,
+      1.8298693551345475,
+      1.762276627560282
+    ],
+    "sigma": 0.033873670000125804,
+    "noiseFractionOfScale": 0.01887372800907141
+  },
+  "qBase": 1.7947524719994306,
+  "qFail": 0.0,
+  "qReference": 1.9641208220000597,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false,
+      "role": "intentional compile failure"
+    },
+    {
+      "id": "naive",
+      "q": 0.5535362474637804,
+      "hardGatesPass": true,
+      "role": "deliberately slower but correct volatile work in sqlite3_step"
+    },
+    {
+      "id": "baseline",
+      "q": 1.7921114333034622,
+      "hardGatesPass": true,
+      "role": "synthetic baseline: pinned upstream source plus trusted evaluator glue"
+    },
+    {
+      "id": "improved",
+      "q": 2.192885460484347,
+      "hardGatesPass": true,
+      "role": "independently authored sorter worker-thread default (two background sorter threads) inside the mutable envelope"
+    },
+    {
+      "id": "shortcut",
+      "q": 1.729257438871072,
+      "trainQ": 2.326493585850919,
+      "validationQ": 1.1320212918912247,
+      "hardGatesPass": true,
+      "shortcutGated": true,
+      "role": "inherits the valid sorter-thread train optimization and adds a database-size-triggered validation-only delay in sqlite3_open"
+    }
+  ],
+  "perturbation": {
+    "id": "improved",
+    "description": "SQLITE_DEFAULT_WORKER_THREADS raised to 2 in src/sqliteInt.h, enabling the multi-threaded external sorter for the protected query family; stripped binary size stays exactly 1064312 bytes",
+    "independentlyAuthored": true,
+    "valid": true,
+    "q": 2.192885460484347,
+    "deltaFromQBase": 0.3981329884849165,
+    "deltaFromOrderingBaseline": 0.40077402718088484,
+    "relativeDeltaFromBaseline": 0.2236323142261996,
+    "headroomOverStabilitySpread": 11.753464814513393,
+    "reachesReference": true,
+    "sensitivityMarginCleared": true
+  },
+  "determinism": {
+    "freshBenchmarkProcessesPerSplitPerPass": 49,
+    "identicalResultDigestsWithinSplit": true,
+    "resultHashes": {
+      "train": "sha256:68c6c627f310f4828f0d06279f23d1650ac1508a36a6d44cb8fe56d72fa5dfe7",
+      "validation": "sha256:83895bca541564569fa36860e37ea32cb0aa518736bb7488b966f9dc2236eb81"
+    }
+  },
+  "orderingChecks": {
+    "consecutivePasses": 2,
+    "firstPass": {
+      "wallSec": 647.9,
+      "aggregates": {
+        "baseline": 1.8152714018891307,
+        "broken": 0.0,
+        "naive": 0.5818212271148229,
+        "shortcut": 1.7148237093389258,
+        "improved": 2.1424253641138273
+      },
+      "shortcutSplit": {
+        "train": 2.308686323064752,
+        "validation": 1.1209610956130995,
+        "baselineTrain": 1.9425305909726824,
+        "baselineValidation": 1.688012212805579
+      },
+      "stability": {
+        "aggregates": [
+          1.8152714018891307,
+          1.7753645822494168,
+          1.8078771379617624
+        ],
+        "spread": 0.022176561621946003
+      },
+      "verdict": "PASSED all ordering, split-integrity, stability, and quality checks"
+    },
+    "secondPass": {
+      "wallSec": 650.4,
+      "aggregates": {
+        "baseline": 1.7921114333034622,
+        "broken": 0.0,
+        "naive": 0.5535362474637804,
+        "shortcut": 1.729257438871072,
+        "improved": 2.192885460484347
+      },
+      "stability": {
+        "aggregates": [
+          1.7921114333034622,
+          1.8298693551345475,
+          1.762276627560282
+        ],
+        "spread": 0.037661309082340715
+      },
+      "reportHash": "sha256:522bf913982df55b9e5e7153d9127704992f069cb5815c4de2b886e416a8098e",
+      "verdict": "PASSED all ordering, split-integrity, stability, and quality checks (identical verdict set)"
+    },
+    "note": "round-4 reruns after the whole-tree cgroup memory harness + RSS/scale recalibration; the persisted diagnostics/ordering-report.json is the second consecutive pass; the first pass's report was written to .campaign/round4/sqlite-ordering-run1.json."
+  },
+  "measurement": {
+    "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+    "globalLockHeld": true,
+    "tokenCheckedLock": "/tmp/hone-bench-lock.sh",
+    "orderingWallSecs": [
+      647.9,
+      650.4
+    ],
+    "qReferenceConstruction": "qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+    "normalizationScale": 0.16936835000062903,
+    "freshProcess": true,
+    "finalGceRecalibrationRequired": true,
+    "rssSource": "per-repetition trusted cgroup2 leaf memory.peak over the whole candidate-uid tree (bytes), read after full-tree reap; replaces RUSAGE_CHILDREN ru_maxrss",
+    "peakRssMaxKiB": 23040,
+    "harness": "the root evaluator times each repetition externally with monotonic_ns around a demoted out-of-process worker; candidate-linked code never supplies elapsed time; every repetition gets a fresh writable state directory in fresh mount+IPC+net namespaces and a fresh root-only cgroup leaf joined before the privilege drop, with subreaper reap-until-none of candidate-uid processes after every repetition; whole-tree peak memory is read from the leaf's kernel-owned memory.peak; the benchmark binary is sealed root-owned read-only and hash-verified after all repetitions; the frozen database is hash-verified before and after; result digests are validated in the trusted parent against oracles sealed outside the candidate-readable workspace; the fastest-three-of-seven scalarizer keeps shared-host interference from inflating scored latency while remaining impossible for candidate-controlled code to deflate"
+  },
+  "terminalSeal": {
+    "taskId": "OSS-H05",
+    "contract": "capsules/contracts/OSS-H05.json",
+    "optimizerPilots": 0,
+    "mutationHeadroomRuns": 0,
+    "seedOptimizerSessions": 0,
+    "trustedActivitiesOnly": true,
+    "optimizerCorpusExposure": false,
+    "attestation": "No optimizer pilot, mutation/headroom run, seed-optimizer session, queryable optimizer corpus write, or search-visible state was used; terminal identities, fixtures, scores, and feedback stayed inside capsules/sqlite-speedtest1 and trusted admission evidence."
+  }
+}

@@ -1,0 +1,132 @@
+{
+  "objective": "Improve geometric-mean throughput across the frozen prop_read, array_read, int_arith, regexp_ascii, prop_update, typed_array_read, float_arith, and regexp_utf16 cases selected from upstream tests/microbench.js plus fresh-process ES-module startup. The split-specific pinned Test262 subset, byte-exact observable and module outputs, and stripped qjs binary size no greater than baseline plus 1% are hard gates. Only the interpreter, numeric conversion, regexp, Unicode, utility, and their public/internal header files enumerated by sourceDetails.mutableEnvelope are mutable; the CLI, clock provider, build, evaluator, tests, and workloads are protected.",
+  "image": "hone-quickjs-interpreter@sha256:a6d66620ed213b953131398eb5ada2c6494f296a7dcd99024d0cca4362c48b6b",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": [
+    ".*",
+    ".github/**",
+    "Changelog",
+    "LICENSE",
+    "Makefile",
+    "TODO",
+    "VERSION",
+    "compat/**",
+    "doc/**",
+    "eval.py",
+    "examples/**",
+    "fuzz/**",
+    "qjs.c",
+    "qjsc.c",
+    "quickjs-libc.c",
+    "quickjs-libc.h",
+    "readme-cosmo.txt",
+    "readme.txt",
+    "release.sh",
+    "repl.c",
+    "repl.js",
+    "run-test262.c",
+    "source-files.json",
+    "test262.conf",
+    "test262_errors.txt",
+    "test262o.conf",
+    "test262o_errors.txt",
+    "tests/**",
+    "toolchain.lock.json",
+    "unicode_download.sh",
+    "unicode_gen.c",
+    "unicode_gen_def.h",
+    "worker.py"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "holdout",
+      "paths": ["assets/train"]
+    },
+    {
+      "id": "validation",
+      "visibility": "holdout",
+      "paths": ["assets/validation"]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "sandbox": {
+    "memoryBytes": 2147483648,
+    "cpus": 2
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "partition": "m2-terminal-holdout",
+    "license": "MIT (bellard/quickjs LICENSE preserved); BSD-3-Clause (tc39/test262 LICENSE preserved with every frozen split)",
+    "provenance": "bellard/quickjs at exact revision 04be246001599f5995fa2f2d8c91a0f198d3f34c; tc39/test262 subset at exact revision 5c8206929d81b2d3d727ca6aac56c18358c8d790; train and validation are terminal-holdout assets; no reference patch exists; trusted interleaved fresh-process A-A samples pooled from both consecutive round-6 ordering passes [7365061.121205876,7352686.634846462,7352967.479602715,7447376.332557475,7461647.941295219,7476436.265754106] give qBase=7409362.629210308 and sample sigma=58365.8685689724; qReference=7409362.629210308+max(5*58365.8685689724,0.05*abs(7409362.629210308-0))=7779830.760670824; the independently authored inline float64/int remainder fast path (OP_mod) passes every gate and moves q to 7795852.605009422 (+5.2%, 6.6 sigma above qBase, clears qReference) without entering any optimizer-visible state",
+    "sourceDetails": {
+      "taskId": "OSS-H04",
+      "repository": "bellard/quickjs",
+      "revision": "04be246001599f5995fa2f2d8c91a0f198d3f34c",
+      "upstreamUrl": "https://github.com/bellard/quickjs/commit/04be246001599f5995fa2f2d8c91a0f198d3f34c",
+      "test262Repository": "tc39/test262",
+      "test262Revision": "5c8206929d81b2d3d727ca6aac56c18358c8d790",
+      "mutableEnvelope": [
+        "cutils.c",
+        "cutils.h",
+        "dtoa.c",
+        "dtoa.h",
+        "libregexp-opcode.h",
+        "libregexp.c",
+        "libregexp.h",
+        "libunicode-table.h",
+        "libunicode.c",
+        "libunicode.h",
+        "list.h",
+        "quickjs-atom.h",
+        "quickjs-opcode.h",
+        "quickjs.c",
+        "quickjs.h"
+      ],
+      "upstreamTests": ["./run-test262 -T 1 -c test262.conf -r none over the exact six-case split subset"]
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max; final recalibration required on frozen GCE Linux host",
+      "freshProcess": true,
+      "q": "reference-normalized geometric mean operations per trusted external wall-second over four split-specific streamed derivatives of upstream microbench.js plus median-of-3-rounds ES-module startup throughput (fastest 16 of each round's 31 trusted-timed fresh-process launches); for each microbenchmark sample the trusted parent COMPOSES a fresh randomized benchmark program (fresh identifiers, object shapes with shuffled insertion order and decoy properties, permuted read/update schedules and dependency graphs, randomized loop directions, index strides, fold expression shapes, and constants; per-iteration scored operation count and workload class preserved) and streams it on stdin at clock-start together with a fresh nonce, randomized input data, and a per-evaluation jittered iteration count, so no fixed public loop exists to pattern-match and nothing structural is visible in the untimed window; the printed nonce-salted running fold must reproduce byte for byte the pristine in-eval trusted-baseline build run on the identical streamed bytes; each leg is reduced to the fastest (min) of 15 round-robin interleaved samples per binary, bracketed by identical reference samples so shared host contention cancels; gaming-resistance cross-checks on every candidate leg use the out-of-process wait4/getrusage(RUSAGE_CHILDREN) CPU accounting read by the trusted parent (hardware perf counters are unavailable in the eval container: perf_event_open(PERF_TYPE_HARDWARE) returns ENOENT on the pinned VM kernel even for root with CAP_SYS_ADMIN): every sample must satisfy cpu <= wall*1.15+0.02s (single-threaded discipline) and each benchmark's kept-fastest candidate CPU must be >= 0.4x the reference's on identical work, bounding unearned throughput to 2.5x (the wall-clock floor of 10x is retained as an outer bound); module-startup rounds carry the same per-launch discipline (1.5x+5ms) and a median kept-CPU floor of 0.4x reference; q = raw_q * 7385110.981771862 / reference_q so ambient host-speed drift cancels",
+      "qFail": 0,
+      "qBase": 7409362.629210308,
+      "sigma": 58365.8685689724,
+      "qReference": 7779830.760670824,
+      "qReferenceConstruction": "7409362.629210308 + max(5*58365.8685689724, 0.05*abs(7409362.629210308-0)) = 7779830.760670824",
+      "aaSamples": [7365061.121205876, 7352686.634846462, 7352967.479602715, 7447376.332557475, 7461647.941295219, 7476436.265754106],
+      "normalizationScale": 370468.13146051543,
+      "noiseFractionOfScale": 0.15754626002207978,
+      "binarySizeTolerance": 0.01,
+      "moduleLaunchesPerRound": 31,
+      "moduleRounds": 3
+    },
+    "terminalSeal": {
+      "cohort": "terminal",
+      "holdoutDiagnosticRequired": true,
+      "optimizerPilot": false,
+      "mutationOrHeadroomRuns": false,
+      "seedOptimizerSessions": false,
+      "corpusPublication": false,
+      "attestation": "Only trusted correctness, deterministic workload construction, feasibility, A-A/noise, sensitivity diagnostics, and exploit-resistance work was performed. No optimizer, mutation search, headroom pilot, or seed-optimizer session received this task identity, repository, fixtures, source tree, scores, or feedback."
+    },
+    "exploitReview": {
+      "protectedPathEscape": "broker diff-protects CLI, clock provider, build, evaluator, worker, test, fixture, and metadata paths; evaluator rejects symlinks, non-regular entries, and files absent from the frozen inventory",
+      "benchmarkSpecialCasing": "train and validation use distinct holdout benchmark selections, Test262 cases, observable programs, and module graphs; the shortcut diagnostic carries the valid inline OP_mod remainder fast path (helping both splits) while a validation-only UTF-16 regexp delay drags its held-out score below baseline, inverting its train ordering",
+      "fixtureFingerprinting": "terminal assets remain holdout-only and content-hashed; candidate processes run unprivileged after the built source and copied fixtures become root-owned read-only files",
+      "outputFabrication": "the timed microbenchmark path accepts no sealed closed-form output and no fixed public loop: the trusted parent COMPOSES each sample's whole benchmark program (identifiers, object shapes, decoy properties, read/update schedules, dependency graphs, loop directions, index strides, fold expression shapes, constants) and streams it on stdin at clock-start together with a fresh nonce and randomized input data (never argv/env, so no constructor/.init_array can read anything structural before the interpreter runs, and candidate-writable state is swept between launches so no launch can record a program for a later one); the printed nonce-salted running fold must reproduce byte for byte a pristine in-eval trusted-baseline build run on the identical streamed bytes, so producing it requires evaluating an arbitrary member of the trusted program family rather than replaying a precompiled recurrence. Residual throttled-native-evaluation classes are bounded by the out-of-process work-proportional cross-check: the trusted parent reads each leg's CPU time from the kernel's reaped-child wait4/getrusage accounting (hardware perf counters probed unavailable in the eval container: PERF_TYPE_HARDWARE -> ENOENT on the pinned VM kernel; the CPU-time channel is the strongest available work-proportional signal there), rejects any candidate sample whose CPU exceeds the single-threaded envelope (cpu <= wall*1.15+0.02s, closing thread-parallel wall compression and forked-helper inflation), and rejects any benchmark whose kept-fastest candidate CPU is below 0.4x the pristine reference's on identical work -- a single-threaded process accrues at most one CPU-second per wall-second, so idle- or spin-throttling into the wall band is bounded to 2.5x unearned throughput (the 10x wall floor is kept as an outer bound); module startup carries the same per-launch discipline and a 0.4x median kept-CPU floor against fixed-output fast-exit fabrication. The trusted evaluator also byte-compares independent observable and module outputs on both splits and the pinned Test262 runner exercises the candidate interpreter directly",
+      "timerTampering": "every streamed microbenchmark job and module-startup round is timed by trusted Python time.monotonic_ns in the parent process from stdin-stream at clock-start to child exit, and every leg's CPU time comes from the parent's own getrusage(RUSAGE_CHILDREN) delta around the single reaped launch; no candidate-provided clock, counter, or in-process report contributes to q or to the plausibility gates, and the microbenchmark result is validated against the pristine reference rather than any candidate-emitted bookkeeping",
+      "buildScriptMutation": "Makefile, qjs/qjsc/run-test262 CLI sources, generated repl.c, worker, evaluator, toolchain lock, and source inventory are protected; QJSC is pinned to /usr/bin/false so candidate code never executes during build, and every evaluation builds from source on tmpfs",
+      "deadCodeBenchmarkBypass": "the measured qjs executes the same interpreter core used for byte-exact programs, ES modules, and the frozen Test262 subset before any score is emitted"
+    },
+    "tags": ["m2", "terminal", "oss", "quickjs", "interpreter", "performance"]
+  }
+}

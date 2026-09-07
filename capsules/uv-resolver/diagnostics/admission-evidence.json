@@ -1,0 +1,78 @@
+{
+  "feasibility": {
+    "cleanBuildSec": 977.6,
+    "incrementalRebuildSec": 455.62,
+    "evalSec": 22.4,
+    "orderingWallSecPerRun": 2060.0
+  },
+  "harness": {
+    "estimator": "paired-geomean",
+    "coldRepetitionsPerWorkload": 41,
+    "warmRepetitionsPerWorkload": 41,
+    "pairTrim": 8,
+    "referenceNormalization": 25.0,
+    "note": "Reference-normalized per-cell speed ratio (score = 25 * trimmed per-pair geomean of reference/candidate wall-time). All q values below are these reference-normalized combined scores from the two consecutive admission ordering runs; A-A is 25.0 by construction. Timed workloads widened (async-stack 19, web-stack 23, concurrency 16, docs-stack 22 packages) so candidate-attributable resolver work dominates process startup at these sub-100ms resolutions.",
+    "rssSource": "whole-tree cgroup memory.peak (kernel-owned; charges the entire measured process tree, exited children and detached descendants included), not wait4 ru_maxrss; per-workload ceiling 24000 KiB * 1.02",
+    "qReferenceDoctrine": "qReference = qBase + max(5*sigma, 5%*|qBase-qFail|) = 26.1286 (NOT ==baseline); the bounded-fetch improved control clears baseline by 2.50*sigma (above the 2-3*sigma noise-separation bar)"
+  },
+  "aa": {
+    "samples": [
+      24.783042528466577,
+      24.50268185500914,
+      25.077731300029093,
+      24.985753856465003,
+      24.990859585266225,
+      25.11473852208342
+    ],
+    "sampleSource": "baseline stability re-measurements (distinct seeds) across the two admission ordering runs",
+    "mean": 24.9091,
+    "sigma": 0.2099,
+    "noiseFractionOfScale": 0.0084
+  },
+  "qBase": 24.8844,
+  "qFail": 0,
+  "qReference": 26.1286,
+  "controls": [
+    {
+      "id": "broken",
+      "q": 0,
+      "hardGatesPass": false
+    },
+    {
+      "id": "naive",
+      "q": 19.1019,
+      "hardGatesPass": true,
+      "correct": true
+    },
+    {
+      "id": "baseline",
+      "q": 24.8844,
+      "hardGatesPass": true
+    },
+    {
+      "id": "improved",
+      "q": 25.4088,
+      "hardGatesPass": true
+    },
+    {
+      "id": "shortcut",
+      "q": 20.6432,
+      "trainQ": 25.804,
+      "validationQ": 0.0,
+      "shortcutGated": true
+    }
+  ],
+  "perturbation": {
+    "id": "capped-metadata-fetch-concurrency",
+    "valid": true,
+    "q": 25.4088,
+    "deltaFromBaseline": 0.5244,
+    "deltaFractionOfBaseline": 0.0211,
+    "marginOverAaSigma": 2.5,
+    "description": "Bound the resolver's in-flight metadata-fetch fan-out (buffer_unordered(6)) instead of spawning a future per queued request. On the 2-CPU sandbox the unbounded fan-out holds every version map and wheel-metadata buffer for the whole request backlog live at once and contends on both cores; a bounded working window cuts peak memory pressure and scheduler churn. Every request is still processed, so the resolution output is byte-for-byte identical to baseline while wall time drops ~2.1% combined (per-split up to +2.7% train / +2.6% validation, largest on the wider workloads). Verified across two consecutive clean ordering runs."
+  },
+  "shortcutMechanism": {
+    "id": "train-workload-pin-memorization",
+    "description": "On a training input (async-stack / web-stack requirement path) the control front-loads the memorized resolved pins: it registers every package's version list and issues a singleton-range metadata Prefetch for each exact pinned version at resolve() start, then bounds the fetch fan-out (buffer_unordered(6)) so the correct-version wheels open in bounded waves. PubGrub converges with no level-by-level discovery latency, yielding a byte-identical lock ~5% faster on train (+25.8 vs 24.9) while peak RSS stays within the whole-tree cgroup ceiling. On a held-out validation input (concurrency / docs-stack path) it deliberately refuses to resolve (panic -> q=0), so the advantage inverts across the split -- the signature of train-only memorization, not a real optimization."
+  }
+}

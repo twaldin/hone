@@ -1,0 +1,55 @@
+name: Rust
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: "Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: "Install Rustfmt"
+        run: rustup component add rustfmt
+      - name: "Install uv"
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: "rustfmt"
+        run: cargo fmt --all --check
+      - name: "Prettier"
+        run: npx prettier --check "**/*.{md,yml}"
+      - name: "Ruff"
+        run: |
+          uvx ruff check --diff .
+          uvx ruff format --diff .
+
+  clippy:
+    name: "Clippy"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # > selecting a toolchain either by action or manual `rustup` calls should happen
+      # > before Swatinem/rust-cache, as the cache uses the current rustc version as its cache key
+      - name: "Install clippy"
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy
+      - run: cargo clippy --workspace --all-features
+
+  test:
+    name: "Test"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # > selecting a toolchain either by action or manual `rustup` calls should happen
+      # > before Swatinem/rust-cache, as the cache uses the current rustc version as its cache key
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo test --workspace --all-features

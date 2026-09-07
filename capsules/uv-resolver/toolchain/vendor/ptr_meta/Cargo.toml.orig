@@ -1,0 +1,23 @@
+[package]
+name = "ptr_meta"
+description = "A radioactive stabilization of the ptr_meta rfc"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/ptr_meta"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ptr_meta_derive = { workspace = true, optional = true }
+
+[features]
+default = ["derive", "std"]
+derive = ["ptr_meta_derive"]
+std = []

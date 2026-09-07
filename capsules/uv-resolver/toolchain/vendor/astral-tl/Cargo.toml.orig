@@ -1,0 +1,32 @@
+[package]
+name = "astral-tl"
+version = "0.7.11"
+authors = ["y21"]
+edition = "2021"
+license = "MIT"
+description = "Fast HTML parser written in pure Rust"
+repository = "https://github.com/astral-sh/astral-tl"
+homepage = "https://github.com/astral-sh/astral-tl"
+readme = "README.md"
+documentation = "https://docs.rs/astral-tl"
+keywords = ["html", "parser"]
+categories = ["parser-implementations", "parsing"]
+exclude = [".github/*"]
+
+# for fuzzing and benchmarking internals, we need to make them public so that they can be accessed from outside testing crates
+# users of the library should never use these directly
+[features]
+__INTERNALS_DO_NOT_USE = []
+
+[dependencies]
+memchr = "2.7"
+
+[dev-dependencies]
+criterion = { version = "0.3", features = ["html_reports"] }
+
+[[bench]]
+name = "tl"
+harness = false
+
+[lib]
+name = "tl"

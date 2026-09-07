@@ -1,0 +1,34 @@
+[package]
+name = "svg"
+version = "0.18.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+authors = [
+    "Adam Bryant <adam.w.bryant@outlook.com>",
+    "Felix Schütt <felix.schuett@maps4print.com>",
+    "Felix Zwettler <f.zwettler@posteo.de>",
+    "GeoffreyY <yeungchingho123@gmail.com>",
+    "Gijs Burghoorn <g.burghoorn@gmail.com>",
+    "Ivan Ukhov <ivan.ukhov@gmail.com>",
+    "Jack Greenbaum <j.greenbaum@computer.org>",
+    "Joshua Klein <mobiusklein@gmail.com>",
+    "Mike Wilkerson <mwilkerson@gmail.com>",
+    "Nathan Hüsken <nathan@wintercloud.de>",
+    "Nathaniel Cook <nvcook42@gmail.com>",
+    "Nick Angelou <angelou.nick@gmail.com>",
+    "Nicolas Silva <nical@fastmail.com>",
+    "Nor Khasyatillah <mazznoer@ymail.com>",
+    "OCTronics <octronics@riseup.net>",
+    "Patrick Chieppe <patrick.chieppe@hotmail.com>",
+    "Will Nelson <will@wnelson.xyz>",
+    "Xander Rudelis <xander.rudelis@gmail.com>",
+    "e-matteson <e.r.matteson@gmail.com>",
+    "kmkzt <info.pscreator@gmail.com>",
+]
+description = "The package provides an SVG composer and parser."
+documentation = "https://docs.rs/svg"
+homepage = "https://github.com/bodoni/svg"
+repository = "https://github.com/bodoni/svg"
+readme = "README.md"
+categories = ["multimedia::images", "parsing", "rendering::data-formats"]
+keywords = ["vector-graphics"]

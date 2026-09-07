@@ -1,0 +1,13 @@
+[project]
+name = "albatross"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["iniconfig>=2,<3"]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+exclude = ["excluded/*"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

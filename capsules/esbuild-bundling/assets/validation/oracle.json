@@ -1,0 +1,15 @@
+{
+  "jobs": {
+    "mixed-deep": {
+      "outputBytes": 524543,
+      "semanticHash": "sha256:cd155ac6465574a162eb9aef9ed2170dfd94547694ab6bf874fbe5f26b52fd94",
+      "sourcemapHash": "sha256:a140fca7929273bce9c77934690d7b4c475917819a3f52da444208b0640243a0"
+    },
+    "ts-deep": {
+      "outputBytes": 234532,
+      "semanticHash": "sha256:a271e4ffc3c60e17a1ce0c33f02932928fc083e033c38163d62c733b9253c22e",
+      "sourcemapHash": "sha256:4bf210b57c021c080cd02162cc90a1a3891e1b7b9b869e8172c6037c75ec8702"
+    }
+  },
+  "version": 1
+}

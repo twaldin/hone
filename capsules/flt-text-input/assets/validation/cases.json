@@ -1,0 +1,974 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "https://github.com/twaldin/flt.git",
+    "commit": "fe05463a921b9c4d808a338ea07d33abe45b6487",
+    "tree": "6b5de048d6531b5d8f120f7f7b6fbb0540aef9cc",
+    "implementationPath": "src/tui/widgets/text-input.ts",
+    "implementationBlob": "1b90579c7161f7624406500eebab4c022e325abc",
+    "testPath": "tests/unit/tui/text-input.test.ts",
+    "testBlob": "a32be32ea403e0c5180b1bb3902b90f52c509005"
+  },
+  "split": "validation",
+  "visibility": "protected",
+  "declared": 20,
+  "behaviorGroups": [
+    "escape",
+    "helpers",
+    "render",
+    "state",
+    "unicode"
+  ],
+  "cases": [
+    {
+      "id": "hidden.unicode.insert-middle",
+      "group": "unicode",
+      "origin": "owner-derived hidden Unicode insertion/state variant",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "A🙂Z"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": 1
+        },
+        {
+          "op": "insert",
+          "text": "é"
+        },
+        {
+          "op": "key",
+          "key": "right"
+        }
+      ],
+      "expected": [
+        {
+          "value": "A🙂Z",
+          "cursor": 1,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "Aé🙂Z",
+          "cursor": 2,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "Aé🙂Z",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "hidden.unicode.single-newline-normalization",
+      "group": "unicode",
+      "origin": "owner-derived hidden Unicode paste variant",
+      "kind": "widget",
+      "setup": {
+        "mode": "single"
+      },
+      "ops": [
+        {
+          "op": "insert",
+          "text": "一\r\n二\r三\n四"
+        }
+      ],
+      "expected": [
+        {
+          "value": "一 二 三 四",
+          "cursor": 7,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "hidden.unicode.multi-crlf-normalization",
+      "group": "unicode",
+      "origin": "owner-derived hidden Unicode multiline variant",
+      "kind": "widget",
+      "setup": {
+        "mode": "multi"
+      },
+      "ops": [
+        {
+          "op": "insert",
+          "text": "é\r\n東京\r🙂"
+        },
+        {
+          "op": "key",
+          "key": "home"
+        },
+        {
+          "op": "key",
+          "key": "end"
+        }
+      ],
+      "expected": [
+        {
+          "value": "é\n東京\n🙂",
+          "cursor": 8,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "é\n東京\n🙂",
+          "cursor": 6,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "é\n東京\n🙂",
+          "cursor": 8,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "hidden.unicode.set-value-cursor",
+      "group": "unicode",
+      "origin": "owner-derived hidden Unicode setValue clamp variant",
+      "kind": "widget",
+      "setup": {},
+      "ops": [
+        {
+          "op": "setValue",
+          "value": "🙂 café",
+          "cursor": 2
+        },
+        {
+          "op": "setCursor",
+          "pos": 999
+        },
+        {
+          "op": "setCursor",
+          "pos": -9
+        }
+      ],
+      "expected": [
+        {
+          "value": "🙂 café",
+          "cursor": 2,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "🙂 café",
+          "cursor": 7,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "🙂 café",
+          "cursor": 0,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "hidden.unicode.completion-metadata",
+      "group": "unicode",
+      "origin": "owner-derived hidden Unicode completion variant",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "東",
+        "completions": [
+          {
+            "value": "東",
+            "cursor": 1,
+            "items": [
+              "東京",
+              "東海道"
+            ],
+            "replaceFrom": 0
+          }
+        ]
+      },
+      "ops": [
+        {
+          "op": "complete",
+          "reverse": true
+        },
+        {
+          "op": "key",
+          "key": "enter"
+        }
+      ],
+      "expected": [
+        {
+          "value": "東",
+          "cursor": 1,
+          "completion": {
+            "selectedIndex": 1,
+            "replaceFrom": 0,
+            "prefix": "東",
+            "items": [
+              "東京",
+              "東海道"
+            ]
+          },
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "東海道",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "hidden.escape.additional-classified",
+      "group": "escape",
+      "origin": "owner-derived hidden classified-key variants",
+      "kind": "parse",
+      "ops": [
+        {
+          "key": "up"
+        },
+        {
+          "key": "down"
+        },
+        {
+          "key": "enter"
+        },
+        {
+          "key": "shift-enter"
+        },
+        {
+          "key": "ctrl-j"
+        },
+        {
+          "key": "alt-d"
+        },
+        {
+          "key": "cmd-backspace"
+        },
+        {
+          "key": "delete"
+        }
+      ],
+      "expected": [
+        {
+          "result": "up"
+        },
+        {
+          "result": "down"
+        },
+        {
+          "result": "enter"
+        },
+        {
+          "result": "shift-enter"
+        },
+        {
+          "result": "shift-enter"
+        },
+        {
+          "result": "kill-word-fwd"
+        },
+        {
+          "result": "kill-line-back"
+        },
+        {
+          "result": "delete"
+        }
+      ]
+    },
+    {
+      "id": "hidden.escape.modifier-five-arrows",
+      "group": "escape",
+      "origin": "owner-derived hidden CSI modifier variants",
+      "kind": "parse",
+      "ops": [
+        {
+          "key": "?",
+          "rawHex": "1b5b313b3544"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b5b313b3543"
+        }
+      ],
+      "expected": [
+        {
+          "result": "word-left"
+        },
+        {
+          "result": "word-right"
+        }
+      ]
+    },
+    {
+      "id": "hidden.escape.application-home-end",
+      "group": "escape",
+      "origin": "owner-derived hidden application-cursor variants",
+      "kind": "parse",
+      "ops": [
+        {
+          "key": "?",
+          "rawHex": "1b4f48"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b4f46"
+        }
+      ],
+      "expected": [
+        {
+          "result": "home"
+        },
+        {
+          "result": "end"
+        }
+      ]
+    },
+    {
+      "id": "hidden.escape.delete-backspace-raw",
+      "group": "escape",
+      "origin": "owner-derived hidden deletion escape variants",
+      "kind": "parse",
+      "ops": [
+        {
+          "key": "?",
+          "rawHex": "1b5b337e"
+        },
+        {
+          "key": "?",
+          "rawHex": "08"
+        }
+      ],
+      "expected": [
+        {
+          "result": "delete"
+        },
+        {
+          "result": "kill-word-back"
+        }
+      ]
+    },
+    {
+      "id": "hidden.escape.unknown-null",
+      "group": "escape",
+      "origin": "owner-derived hidden unknown escape/state variants",
+      "kind": "parse",
+      "ops": [
+        {
+          "key": "not-a-text-input-key"
+        },
+        {
+          "key": "?",
+          "rawHex": "1b5b39397e"
+        },
+        {
+          "key": "?",
+          "rawHex": ""
+        }
+      ],
+      "expected": [
+        {
+          "result": null
+        },
+        {
+          "result": null
+        },
+        {
+          "result": null
+        }
+      ]
+    },
+    {
+      "id": "hidden.state.set-value-closes-completion",
+      "group": "state",
+      "origin": "owner-derived hidden completion reset variant",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "ap",
+        "completions": [
+          {
+            "value": "ap",
+            "cursor": 2,
+            "items": [
+              "apple",
+              "apricot"
+            ],
+            "replaceFrom": 0
+          }
+        ]
+      },
+      "ops": [
+        {
+          "op": "complete"
+        },
+        {
+          "op": "setValue",
+          "value": "next",
+          "cursor": 2
+        }
+      ],
+      "expected": [
+        {
+          "value": "ap",
+          "cursor": 2,
+          "completion": {
+            "selectedIndex": 0,
+            "replaceFrom": 0,
+            "prefix": "ap",
+            "items": [
+              "apple",
+              "apricot"
+            ]
+          },
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "next",
+          "cursor": 2,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "hidden.state.cursor-clamp-emissions",
+      "group": "state",
+      "origin": "owner-derived hidden cursor/emission variant",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "abc"
+      },
+      "ops": [
+        {
+          "op": "setCursor",
+          "pos": -1
+        },
+        {
+          "op": "setCursor",
+          "pos": 99
+        },
+        {
+          "op": "setCursor",
+          "pos": 2
+        }
+      ],
+      "expected": [
+        {
+          "value": "abc",
+          "cursor": 0,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "abc",
+          "cursor": 3,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "abc",
+          "cursor": 2,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "hidden.state.clear-resets-history",
+      "group": "state",
+      "origin": "owner-derived hidden clear/history variant",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "draft",
+        "history": [
+          "old"
+        ]
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "up"
+        },
+        {
+          "op": "clear"
+        },
+        {
+          "op": "key",
+          "key": "down"
+        }
+      ],
+      "expected": [
+        {
+          "value": "old",
+          "cursor": 3,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "old"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "",
+          "cursor": 0,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "old"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [
+            "old"
+          ],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "hidden.state.reverse-completion-cycle",
+      "group": "state",
+      "origin": "owner-derived hidden reverse completion state variant",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "a",
+        "completions": [
+          {
+            "value": "a",
+            "cursor": 1,
+            "items": [
+              "alpha",
+              "alpine",
+              "atom"
+            ],
+            "replaceFrom": 0
+          }
+        ]
+      },
+      "ops": [
+        {
+          "op": "complete",
+          "reverse": true
+        },
+        {
+          "op": "key",
+          "key": "tab"
+        },
+        {
+          "op": "key",
+          "key": "shift-tab"
+        },
+        {
+          "op": "key",
+          "key": "complete-confirm"
+        }
+      ],
+      "expected": [
+        {
+          "value": "a",
+          "cursor": 1,
+          "completion": {
+            "selectedIndex": 2,
+            "replaceFrom": 0,
+            "prefix": "a",
+            "items": [
+              "alpha",
+              "alpine",
+              "atom"
+            ]
+          },
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "a",
+          "cursor": 1,
+          "completion": {
+            "selectedIndex": 0,
+            "replaceFrom": 0,
+            "prefix": "a",
+            "items": [
+              "alpha",
+              "alpine",
+              "atom"
+            ]
+          },
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "a",
+          "cursor": 1,
+          "completion": {
+            "selectedIndex": 2,
+            "replaceFrom": 0,
+            "prefix": "a",
+            "items": [
+              "alpha",
+              "alpine",
+              "atom"
+            ]
+          },
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "atom",
+          "cursor": 4,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        }
+      ]
+    },
+    {
+      "id": "hidden.state.history-dedup-empty",
+      "group": "state",
+      "origin": "owner-derived hidden submit/history metadata variant",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "same",
+        "history": [
+          "same"
+        ],
+        "historyPush": true
+      },
+      "ops": [
+        {
+          "op": "key",
+          "key": "enter"
+        },
+        {
+          "op": "clear"
+        },
+        {
+          "op": "key",
+          "key": "enter"
+        }
+      ],
+      "expected": [
+        {
+          "value": "same",
+          "cursor": 4,
+          "completion": null,
+          "handled": true,
+          "submitted": [
+            "same"
+          ],
+          "cancels": 0,
+          "history": [
+            "same"
+          ],
+          "emits": 0
+        },
+        {
+          "value": "",
+          "cursor": 0,
+          "completion": null,
+          "handled": null,
+          "submitted": [
+            "same"
+          ],
+          "cancels": 0,
+          "history": [
+            "same"
+          ],
+          "emits": 1
+        },
+        {
+          "value": "",
+          "cursor": 0,
+          "completion": null,
+          "handled": true,
+          "submitted": [
+            "same",
+            ""
+          ],
+          "cancels": 0,
+          "history": [
+            "same"
+          ],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "hidden.state.completion-miss",
+      "group": "state",
+      "origin": "owner-derived hidden empty completion variant",
+      "kind": "widget",
+      "setup": {
+        "initialValue": "x",
+        "completions": [
+          {
+            "value": "y",
+            "cursor": 1,
+            "items": [
+              "yes"
+            ],
+            "replaceFrom": 0
+          }
+        ]
+      },
+      "ops": [
+        {
+          "op": "complete"
+        },
+        {
+          "op": "key",
+          "key": "escape"
+        }
+      ],
+      "expected": [
+        {
+          "value": "x",
+          "cursor": 1,
+          "completion": null,
+          "handled": null,
+          "submitted": [],
+          "cancels": 0,
+          "history": [],
+          "emits": 1
+        },
+        {
+          "value": "x",
+          "cursor": 1,
+          "completion": null,
+          "handled": true,
+          "submitted": [],
+          "cancels": 1,
+          "history": [],
+          "emits": 0
+        }
+      ]
+    },
+    {
+      "id": "hidden.render.nonpositive-width",
+      "group": "render",
+      "origin": "owner-derived hidden width boundary variant",
+      "kind": "wrap",
+      "ops": [
+        {
+          "text": "東京",
+          "width": 0,
+          "cursor": 1
+        },
+        {
+          "text": "abc",
+          "width": -2,
+          "cursor": 2
+        }
+      ],
+      "expected": [
+        {
+          "lines": [
+            "東京"
+          ],
+          "cursorRow": 0,
+          "cursorCol": 0
+        },
+        {
+          "lines": [
+            "abc"
+          ],
+          "cursorRow": 0,
+          "cursorCol": 0
+        }
+      ]
+    },
+    {
+      "id": "hidden.render.unicode-safe-width",
+      "group": "render",
+      "origin": "owner-derived hidden Unicode wrap variant",
+      "kind": "wrap",
+      "ops": [
+        {
+          "text": "éé🙂🙂",
+          "width": 2,
+          "cursor": 2
+        }
+      ],
+      "expected": [
+        {
+          "lines": [
+            "éé",
+            "🙂",
+            "🙂"
+          ],
+          "cursorRow": 1,
+          "cursorCol": 0
+        }
+      ]
+    },
+    {
+      "id": "hidden.render.blank-hard-lines",
+      "group": "render",
+      "origin": "owner-derived hidden blank-line wrap variant",
+      "kind": "wrap",
+      "ops": [
+        {
+          "text": "\nA\n",
+          "width": 4,
+          "cursor": 2
+        }
+      ],
+      "expected": [
+        {
+          "lines": [
+            "",
+            "A",
+            ""
+          ],
+          "cursorRow": 1,
+          "cursorCol": 1
+        }
+      ]
+    },
+    {
+      "id": "hidden.helper.unicode-punctuation",
+      "group": "helpers",
+      "origin": "owner-derived hidden Unicode helper variant",
+      "kind": "helper",
+      "ops": [
+        {
+          "fn": "wordBoundaryLeft",
+          "args": [
+            "alpha—β",
+            7
+          ]
+        },
+        {
+          "fn": "wordBoundaryRight",
+          "args": [
+            "🙂 foo",
+            0
+          ]
+        },
+        {
+          "fn": "lineStart",
+          "args": [
+            "一\n二",
+            2
+          ]
+        },
+        {
+          "fn": "lineEnd",
+          "args": [
+            "一\n二",
+            0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "result": 0
+        },
+        {
+          "result": 6
+        },
+        {
+          "result": 2
+        },
+        {
+          "result": 1
+        }
+      ]
+    }
+  ]
+}

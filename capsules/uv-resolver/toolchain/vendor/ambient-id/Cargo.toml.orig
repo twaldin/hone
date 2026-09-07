@@ -1,0 +1,47 @@
+[package]
+name = "ambient-id"
+version = "0.0.11"
+authors = ["William Woodruff <william@astral.sh>"]
+edition = "2024"
+description = "Detects ambient OIDC credentials in a variety of environments"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/astral-sh/ambient-id"
+repository = "https://github.com/astral-sh/ambient-id"
+categories = ["security", "authentication", "asynchronous"]
+keywords = ["oidc", "trusted-publishing", "sigstore", "identity"]
+
+[dependencies]
+reqwest = { version = "0.13.1", default-features = false, features = [
+  "json",
+  "gzip",
+  "deflate",
+  "http2",
+  "query",
+] }
+reqwest-middleware = { version = "0.5.1", optional = true, package = "astral-reqwest-middleware", features = ["query"] }
+secrecy = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[features]
+default = ["reqwest-middleware", "rustls"]
+rustls = ["reqwest/rustls"]
+native-tls = ["reqwest/native-tls"]
+
+# This is a test-only feature to allow CI to run tests that require
+# a functional GitHub Actions OIDC environment (i.e. one provisioned
+# with `permissions: id-token: write`).
+test-github-1p = []
+
+# This is a test-only feature to allow CI to run tests that require
+# a functional Buildkite OIDC environment.
+test-buildkite-1p = []
+
+# This is a test-only feature to allow CI to run tests that require
+# a functional CircleCI OIDC environment.
+test-circleci-1p = []
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+wiremock = "0.6"

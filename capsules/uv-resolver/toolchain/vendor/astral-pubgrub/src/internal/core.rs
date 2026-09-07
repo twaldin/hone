@@ -1,0 +1,562 @@
+// SPDX-License-Identifier: MPL-2.0
+
+//! Core model and functions
+//! to write a functional PubGrub algorithm.
+
+use std::collections::HashSet as Set;
+use std::hash::{BuildHasher, Hash};
+use std::sync::Arc;
+
+use crate::internal::{
+    Arena, DecisionLevel, HashArena, Id, IncompDpId, IncompId, Incompatibility, PartialSolution,
+    Relation, SatisfierSearch, SmallVec,
+};
+use crate::{DependencyProvider, DerivationTree, Map, NoSolutionError, Package, VersionSet};
+
+#[derive(Clone)]
+struct MergedDependencies<P: Package, I> {
+    buckets: Map<DependencyKey<P>, SmallVec<I>>,
+}
+
+impl<P: Package, I> Default for MergedDependencies<P, I> {
+    fn default() -> Self {
+        Self {
+            buckets: Map::default(),
+        }
+    }
+}
+
+impl<P: Package, I> MergedDependencies<P, I> {
+    fn bucket(
+        &mut self,
+        dependent: Id<P>,
+        dependency: Id<P>,
+        range: &impl Hash,
+    ) -> &mut SmallVec<I> {
+        let range_hash = self.buckets.hasher().hash_one(range);
+        self.buckets
+            .entry(DependencyKey {
+                dependent,
+                dependency,
+                range_hash,
+            })
+            .or_default()
+    }
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct DependencyKey<P: Package> {
+    dependent: Id<P>,
+    dependency: Id<P>,
+    range_hash: u64,
+}
+
+/// Current state of the PubGrub algorithm.
+#[derive(Clone)]
+pub struct State<DP: DependencyProvider> {
+    /// The root package and version.
+    pub root_package: Id<DP::P>,
+    root_version: DP::V,
+
+    /// All incompatibilities indexed by package.
+    #[allow(clippy::type_complexity)]
+    pub incompatibilities: Map<Id<DP::P>, Vec<IncompDpId<DP>>>,
+
+    /// All incompatibilities expressing dependencies, with common dependents merged.
+    merged_dependencies: MergedDependencies<DP::P, IncompDpId<DP>>,
+
+    /// Partial solution.
+    pub partial_solution: PartialSolution<DP>,
+
+    /// The store is the reference storage for all incompatibilities.
+    pub incompatibility_store: Arena<Incompatibility<DP::P, DP::VS, DP::M>>,
+
+    /// The store is the reference storage for all packages.
+    pub package_store: HashArena<DP::P>,
+
+    /// This is a stack of work to be done in `unit_propagation`.
+    /// It can definitely be a local variable to that method, but
+    /// this way we can reuse the same allocation for better performance.
+    unit_propagation_buffer: SmallVec<Id<DP::P>>,
+}
+
+impl<DP: DependencyProvider> State<DP> {
+    /// Initialization of PubGrub state.
+    pub fn init(root_package: DP::P, root_version: DP::V) -> Self {
+        let mut incompatibility_store = Arena::new();
+        let mut package_store = HashArena::new();
+        let root_package = package_store.alloc(root_package);
+        let not_root_id = incompatibility_store.alloc(Incompatibility::not_root(
+            root_package,
+            root_version.clone(),
+        ));
+        let mut incompatibilities = Map::default();
+        incompatibilities.insert(root_package, vec![not_root_id]);
+        Self {
+            root_package,
+            root_version,
+            incompatibilities,
+            partial_solution: PartialSolution::empty(),
+            incompatibility_store,
+            package_store,
+            unit_propagation_buffer: SmallVec::Empty,
+            merged_dependencies: MergedDependencies::default(),
+        }
+    }
+
+    /// Add the dependencies for the version being decided of the current package as
+    /// incompatibilities.
+    ///
+    /// `versions` is the set of versions that share these dependencies, in the simplest case the
+    /// version being decided: `VS::singleton(version)`. A caller that knows which versions exist
+    /// can widen the version being decided to a set that contains no other existing version,
+    /// e.g. with `Ranges::widen_versions`: If `2` is the only existing version between `1` and
+    /// `3`, the dependency incompatibilities for `{2}` can instead be created for `>1, <3`. When
+    /// resolution then rejects the version, the version sets derived from these
+    /// incompatibilities exclude a contiguous set instead of accumulating one hole per rejected
+    /// version, and the incompatibilities of adjacent versions merge into contiguous sets,
+    /// keeping the version sets and the operations on them minimal.
+    ///
+    /// `versions` must contain `version`, every existing version in `versions` must have exactly
+    /// the given dependencies, and the set of existing versions must not grow while resolution
+    /// is running.
+    pub fn add_package_version_dependencies(
+        &mut self,
+        package: Id<DP::P>,
+        version: DP::V,
+        versions: DP::VS,
+        dependencies: impl IntoIterator<Item = (DP::P, DP::VS)>,
+    ) -> Option<IncompId<DP::P, DP::VS, DP::M>> {
+        debug_assert!(
+            versions.contains(&version),
+            "the version being decided must be in the version set sharing its dependencies",
+        );
+        let dep_incompats =
+            self.add_incompatibility_from_dependencies(package, versions, dependencies);
+        self.partial_solution.add_package_version_incompatibilities(
+            package,
+            version,
+            dep_incompats,
+            &self.incompatibility_store,
+        )
+    }
+
+    /// Add an incompatibility to the state.
+    pub fn add_incompatibility(&mut self, mut incompat: Incompatibility<DP::P, DP::VS, DP::M>) {
+        // Cached contradictions are only valid in the state that recorded them.
+        incompat.reset_contradiction_cache();
+        let id = self.incompatibility_store.alloc(incompat);
+        self.merge_incompatibility(id);
+    }
+
+    /// Add a single custom incompatibility that requires that the base package and the proxy
+    /// package share the same version range.
+    ///
+    /// This intended for cases where proxy packages (also known as virtual packages) are used.
+    /// Without this information, pubgrub does not know that these packages have to be at the same
+    /// version. In cases where the base package is already set to an incompatible version, this
+    /// avoids going through all versions of the proxy package. In cases where there are two
+    /// incompatible proxy packages, it avoids trying versions for both of them. This improves both
+    /// performance (we don't need to check all versions when there is a conflict) and error
+    /// messages (report a conflict of version ranges instead of enumerating the conflicting
+    /// versions).
+    ///
+    /// Using this method requires that each version of the proxy package depends on the exact
+    /// same version of the base package.
+    #[allow(unused)]
+    pub fn add_proxy_package_incompatibility(
+        &mut self,
+        proxy_package: Id<DP::P>,
+        base_package: Id<DP::P>,
+        versions: DP::VS,
+    ) {
+        let incompat = Incompatibility::from_dependency(
+            proxy_package,
+            versions.clone(),
+            (base_package, versions),
+        );
+        let id = self
+            .incompatibility_store
+            .alloc_iter([incompat].into_iter());
+        for id in IncompDpId::<DP>::range_to_iter(id) {
+            self.merge_incompatibility(id);
+        }
+    }
+
+    /// Add an incompatibility to the state.
+    #[cold]
+    pub(crate) fn add_incompatibility_from_dependencies(
+        &mut self,
+        package: Id<DP::P>,
+        versions: DP::VS,
+        deps: impl IntoIterator<Item = (DP::P, DP::VS)>,
+    ) -> std::ops::Range<IncompDpId<DP>> {
+        // Create incompatibilities and allocate them in the store.
+        let new_incompats_id_range =
+            self.incompatibility_store
+                .alloc_iter(deps.into_iter().map(|(dep_p, dep_vs)| {
+                    let dep_pid = self.package_store.alloc(dep_p);
+                    Incompatibility::from_dependency(package, versions.clone(), (dep_pid, dep_vs))
+                }));
+        // Merge the newly created incompatibilities with the older ones.
+        for id in IncompDpId::<DP>::range_to_iter(new_incompats_id_range.clone()) {
+            self.merge_incompatibility(id);
+        }
+        new_incompats_id_range
+    }
+
+    /// Unit propagation is the core mechanism of the solving algorithm.
+    /// CF <https://github.com/dart-lang/pub/blob/master/doc/solver.md#unit-propagation>
+    ///
+    /// For each package with a satisfied incompatibility, returns the package and the root cause
+    /// incompatibility.
+    #[cold]
+    #[allow(clippy::type_complexity)] // Type definitions don't support impl trait.
+    pub fn unit_propagation(
+        &mut self,
+        package: Id<DP::P>,
+    ) -> Result<SmallVec<(Id<DP::P>, IncompDpId<DP>)>, NoSolutionError<DP>> {
+        let mut satisfier_causes = SmallVec::default();
+        self.unit_propagation_buffer.clear();
+        self.unit_propagation_buffer.push(package);
+        while let Some(current_package) = self.unit_propagation_buffer.pop() {
+            // Iterate over incompatibilities in reverse order
+            // to evaluate first the newest incompatibilities.
+            let mut conflict_id = None;
+            // We only care about incompatibilities if it contains the current package.
+            for &incompat_id in self.incompatibilities[&current_package].iter().rev() {
+                if self
+                    .partial_solution
+                    .is_contradicted(&self.incompatibility_store[incompat_id])
+                {
+                    continue;
+                }
+                let current_incompat = &self.incompatibility_store[incompat_id];
+                match self.partial_solution.relation(current_incompat) {
+                    // If the partial solution satisfies the incompatibility
+                    // we must perform conflict resolution.
+                    Relation::Satisfied => {
+                        log::info!(
+                            "Start conflict resolution because incompat satisfied:\n   {}",
+                            current_incompat.display(&self.package_store)
+                        );
+                        conflict_id = Some(incompat_id);
+                        break;
+                    }
+                    Relation::AlmostSatisfied(package_almost) => {
+                        // Add `package_almost` to the `unit_propagation_buffer` set.
+                        // Putting items in `unit_propagation_buffer` more than once waste cycles,
+                        // but so does allocating a hash map and hashing each item.
+                        // In practice `unit_propagation_buffer` is small enough that we can just do a linear scan.
+                        if !self.unit_propagation_buffer.contains(&package_almost) {
+                            self.unit_propagation_buffer.push(package_almost);
+                        }
+                        // Add (not term) to the partial solution with incompat as cause.
+                        self.partial_solution.add_derivation(
+                            package_almost,
+                            incompat_id,
+                            &self.incompatibility_store,
+                        );
+                        // With the partial solution updated, the incompatibility is now contradicted.
+                        self.partial_solution
+                            .mark_contradicted(&mut self.incompatibility_store[incompat_id]);
+                    }
+                    Relation::Contradicted(_) => {
+                        self.partial_solution
+                            .mark_contradicted(&mut self.incompatibility_store[incompat_id]);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(incompat_id) = conflict_id {
+                let (package_almost, root_cause) = self
+                    .conflict_resolution(incompat_id, &mut satisfier_causes)
+                    .map_err(|terminal_incompat_id| {
+                        self.build_derivation_tree(terminal_incompat_id)
+                    })?;
+                self.unit_propagation_buffer.clear();
+                self.unit_propagation_buffer.push(package_almost);
+                // Add to the partial solution with incompat as cause.
+                self.partial_solution.add_derivation(
+                    package_almost,
+                    root_cause,
+                    &self.incompatibility_store,
+                );
+                // After conflict resolution and the partial solution update,
+                // the root cause incompatibility is now contradicted.
+                self.partial_solution
+                    .mark_contradicted(&mut self.incompatibility_store[root_cause]);
+            }
+        }
+        // If there are no more changed packages, unit propagation is done.
+        Ok(satisfier_causes)
+    }
+
+    /// Return the root cause or the terminal incompatibility. CF
+    /// <https://github.com/dart-lang/pub/blob/master/doc/solver.md#unit-propagation>
+    ///
+    /// When we found a conflict, we want to learn as much as possible from it, to avoid making (or
+    /// keeping) decisions that will be rejected. Say we found that the dependency requirements on X and the
+    /// dependency requirements on Y are incompatible. We may find that the decisions on earlier packages B and C
+    /// require us to make incompatible requirements on X and Y, so we backtrack until either B or C
+    /// can be revisited. To make it practical, we really only need one of the terms to be a
+    /// decision. We may as well leave the other terms general. Something like "the dependency on
+    /// the package X is incompatible with the decision on C" tends to work out pretty well. Then if
+    /// A turns out to also have a dependency on X the resulting root cause is still useful.
+    /// (`unit_propagation` will ensure we don't try that version of C.)
+    /// Of course, this is more heuristics than science. If the output is too general, then
+    /// `unit_propagation` will handle the confusion by calling us again with the next most specific
+    /// conflict it comes across. If the output is too specific, then the outer `solver` loop will
+    /// eventually end up calling us again until all possibilities are enumerated.
+    ///
+    /// To end up with a more useful incompatibility, this function combines incompatibilities into
+    /// derivations. Fulfilling this derivation implies the later conflict. By banning it, we
+    /// prevent the intermediate steps from occurring again, at least in the exact same way.
+    /// However, the statistics collected for `prioritize` may want to analyze those intermediate
+    /// steps. For example we might start with "there is no version 1 of Z", and
+    /// `conflict_resolution` may be able to determine that "that was inevitable when we picked
+    /// version 1 of X" which was inevitable when we picked W and so on, until version 1 of B, which
+    /// was depended on by version 1 of A. Therefore the root cause may simplify all the way down to
+    /// "we cannot pick version 1 of A". This will prevent us going down this path again. However
+    /// when we start looking at version 2 of A, and discover that it depends on version 2 of B, we
+    /// will want to prioritize the chain of intermediate steps to check if it has a problem with
+    /// the same shape. The `satisfier_causes` argument keeps track of these intermediate steps so
+    /// that the caller can use them for prioritization.
+    #[allow(clippy::type_complexity)]
+    #[cold]
+    fn conflict_resolution(
+        &mut self,
+        incompatibility: IncompDpId<DP>,
+        satisfier_causes: &mut SmallVec<(Id<DP::P>, IncompDpId<DP>)>,
+    ) -> Result<(Id<DP::P>, IncompDpId<DP>), IncompDpId<DP>> {
+        let mut current_incompat_id = incompatibility;
+        let mut current_incompat_changed = false;
+        loop {
+            if self.incompatibility_store[current_incompat_id]
+                .is_terminal(self.root_package, &self.root_version)
+            {
+                return Err(current_incompat_id);
+            } else {
+                let (package, satisfier_search_result) = self.partial_solution.satisfier_search(
+                    &self.incompatibility_store[current_incompat_id],
+                    &self.incompatibility_store,
+                );
+                match satisfier_search_result {
+                    SatisfierSearch::DifferentDecisionLevels {
+                        previous_satisfier_level,
+                    } => {
+                        self.backtrack(
+                            current_incompat_id,
+                            current_incompat_changed,
+                            previous_satisfier_level,
+                        );
+                        log::info!("backtrack to {previous_satisfier_level:?}");
+                        satisfier_causes.push((package, current_incompat_id));
+                        return Ok((package, current_incompat_id));
+                    }
+                    SatisfierSearch::SameDecisionLevels { satisfier_cause } => {
+                        let prior_cause = Incompatibility::prior_cause(
+                            current_incompat_id,
+                            satisfier_cause,
+                            package,
+                            &self.incompatibility_store,
+                        );
+                        log::info!("prior cause: {}", prior_cause.display(&self.package_store));
+                        current_incompat_id = self.incompatibility_store.alloc(prior_cause);
+                        satisfier_causes.push((package, current_incompat_id));
+                        current_incompat_changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// After a conflict occurred, backtrack the partial solution to a given decision level, and add
+    /// the incompatibility if it was new.
+    fn backtrack(
+        &mut self,
+        incompat: IncompDpId<DP>,
+        incompat_changed: bool,
+        decision_level: DecisionLevel,
+    ) {
+        self.partial_solution.backtrack(decision_level);
+        if incompat_changed {
+            self.merge_incompatibility(incompat);
+        }
+    }
+
+    /// Manually backtrack before the given package was selected.
+    ///
+    /// This can be used to switch the order of packages if the previous prioritization was bad.
+    ///
+    /// Returns the number of the decisions that were backtracked, or `None` if the package was not
+    /// decided on yet.
+    pub fn backtrack_package(&mut self, package: Id<DP::P>) -> Option<u32> {
+        let base_decision_level = self.partial_solution.current_decision_level();
+        let new_decision_level = self.partial_solution.backtrack_package(package).ok()?;
+        Some(base_decision_level.get() - new_decision_level.get())
+    }
+
+    /// Add this incompatibility into the set of all incompatibilities.
+    ///
+    /// PubGrub collapses identical dependencies from adjacent package versions
+    /// into individual incompatibilities.
+    /// This substantially reduces the total number of incompatibilities
+    /// and makes it much easier for PubGrub to reason about multiple versions of packages at once.
+    ///
+    /// For example, rather than representing
+    /// foo 1.0.0 depends on bar ^1.0.0 and
+    /// foo 1.1.0 depends on bar ^1.0.0
+    /// as two separate incompatibilities,
+    /// they are collapsed together into the single incompatibility {foo ^1.0.0, not bar ^1.0.0}
+    /// (provided that no other version of foo exists between 1.0.0 and 2.0.0).
+    /// We could collapse them into { foo (1.0.0 ∪ 1.1.0), not bar ^1.0.0 }
+    /// without having to check the existence of other versions though.
+    fn merge_incompatibility(&mut self, mut id: IncompDpId<DP>) {
+        if let Some((p1, p2, dependency_range)) = self.incompatibility_store[id].as_dependency() {
+            // Self-dependencies cannot be merged.
+            if p1 != p2 {
+                let deps_lookup = self.merged_dependencies.bucket(p1, p2, &dependency_range);
+                if let Some((past, merged)) =
+                    deps_lookup.as_mut_slice().iter_mut().find_map(|past| {
+                        self.incompatibility_store[id]
+                            .merge_dependents(&self.incompatibility_store[*past])
+                            .map(|merged| (past, merged))
+                    })
+                {
+                    let new = self.incompatibility_store.alloc(merged);
+                    for (pkg, _) in self.incompatibility_store[new].iter() {
+                        self.incompatibilities
+                            .entry(pkg)
+                            .or_default()
+                            .retain(|id| id != past);
+                    }
+                    *past = new;
+                    id = new;
+                } else {
+                    deps_lookup.push(id);
+                }
+            }
+        }
+        for (pkg, term) in self.incompatibility_store[id].iter() {
+            if cfg!(debug_assertions) {
+                assert_ne!(term, &crate::term::Term::any());
+            }
+            self.incompatibilities.entry(pkg).or_default().push(id);
+        }
+    }
+
+    // Error reporting #########################################################
+
+    fn build_derivation_tree(
+        &self,
+        incompat: IncompDpId<DP>,
+    ) -> DerivationTree<DP::P, DP::VS, DP::M> {
+        let mut all_ids: Set<IncompDpId<DP>> = Set::default();
+        let mut shared_ids = Set::default();
+        let mut stack = vec![incompat];
+        while let Some(i) = stack.pop() {
+            if let Some((id1, id2)) = self.incompatibility_store[i].causes() {
+                if all_ids.contains(&i) {
+                    shared_ids.insert(i);
+                } else {
+                    stack.push(id1);
+                    stack.push(id2);
+                }
+            }
+            all_ids.insert(i);
+        }
+        // To avoid recursion we need to generate trees in topological order.
+        // That is to say we need to ensure that the causes are processed before the incompatibility they effect.
+        // It happens to be that sorting by their ID maintains this property.
+        let mut sorted_ids = all_ids.into_iter().collect::<Vec<_>>();
+        sorted_ids.sort_unstable_by_key(|id| id.into_raw());
+        let mut precomputed = Map::default();
+        for id in sorted_ids {
+            let tree = Incompatibility::build_derivation_tree(
+                id,
+                &shared_ids,
+                &self.incompatibility_store,
+                &self.package_store,
+                &precomputed,
+            );
+            precomputed.insert(id, Arc::new(tree));
+        }
+        // Now the user can refer to the entire tree from its root.
+        Arc::into_inner(precomputed.remove(&incompat).unwrap()).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod dependency_merge_tests {
+    use std::fmt::{self, Display};
+    use std::hash::{Hash, Hasher};
+
+    use crate::{OfflineDependencyProvider, Ranges, VersionSet};
+
+    use super::State;
+
+    #[test]
+    fn merge_dependencies_with_hash_collisions() {
+        let mut state: State<OfflineDependencyProvider<&str, CollidingRanges>> =
+            State::init("root", 0);
+        let package = state.package_store.alloc("package");
+
+        // Alternate two pairs of constraints so equal ranges recur non-adjacently, while every
+        // range shares the same hash.
+        for version in 0..10 {
+            let first = (version % 2) * 2;
+            state.add_incompatibility_from_dependencies(
+                package,
+                CollidingRanges::singleton(version),
+                [
+                    ("dependency", CollidingRanges::singleton(first)),
+                    ("dependency", CollidingRanges::singleton(first + 1)),
+                ],
+            );
+        }
+
+        let dependency = state.package_store.alloc("dependency");
+        assert_eq!(state.incompatibilities[&package].len(), 4);
+        assert_eq!(state.incompatibilities[&dependency].len(), 4);
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct CollidingRanges(Ranges<u32>);
+
+    impl Display for CollidingRanges {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            Display::fmt(&self.0, f)
+        }
+    }
+
+    impl Hash for CollidingRanges {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            0u8.hash(state);
+        }
+    }
+
+    impl VersionSet for CollidingRanges {
+        type V = u32;
+
+        fn empty() -> Self {
+            Self(Ranges::empty())
+        }
+
+        fn singleton(v: Self::V) -> Self {
+            Self(Ranges::singleton(v))
+        }
+
+        fn complement(&self) -> Self {
+            Self(self.0.complement())
+        }
+
+        fn intersection(&self, other: &Self) -> Self {
+            Self(self.0.intersection(&other.0))
+        }
+
+        fn contains(&self, v: &Self::V) -> bool {
+            self.0.contains(v)
+        }
+    }
+}

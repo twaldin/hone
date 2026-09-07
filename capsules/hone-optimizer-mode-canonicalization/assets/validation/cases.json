@@ -1,0 +1,86 @@
+[
+  {
+    "id": "host-a",
+    "input": [
+      {
+        "path": "a",
+        "mode": 388
+      },
+      {
+        "path": "b",
+        "mode": 453
+      }
+    ],
+    "expected": [
+      {
+        "path": "a",
+        "mode": 420
+      },
+      {
+        "path": "b",
+        "mode": 493
+      }
+    ]
+  },
+  {
+    "id": "host-b",
+    "input": [
+      {
+        "path": "x",
+        "mode": 292
+      },
+      {
+        "path": "y",
+        "mode": 365
+      }
+    ],
+    "expected": [
+      {
+        "path": "x",
+        "mode": 420
+      },
+      {
+        "path": "y",
+        "mode": 493
+      }
+    ]
+  },
+  {
+    "id": "special-bits",
+    "input": [
+      {
+        "path": "plain",
+        "mode": 1440
+      },
+      {
+        "path": "exec",
+        "mode": 2536
+      }
+    ],
+    "expected": [
+      {
+        "path": "exec",
+        "mode": 493
+      },
+      {
+        "path": "plain",
+        "mode": 420
+      }
+    ]
+  },
+  {
+    "id": "baseline-anchor",
+    "input": [
+      {
+        "path": "plain",
+        "mode": 420
+      }
+    ],
+    "expected": [
+      {
+        "path": "plain",
+        "mode": 420
+      }
+    ]
+  }
+]

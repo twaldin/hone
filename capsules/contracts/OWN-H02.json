@@ -1,0 +1,22 @@
+{
+  "contractVersion": 1,
+  "taskId": "OWN-H02",
+  "capsule": "flt-workflow-parser",
+  "cohort": "terminal",
+  "stratum": "owner",
+  "panel": null,
+  "status": "existing-admitted",
+  "objective": "Improve legacy/DAG/gate/reference/preset/generated YAML parsing with exact AST, localized errors, and round-trip stability.",
+  "source": {
+    "visibility": "owner-licensed",
+    "existingCapsuleId": "cap_ec5c5ad0ad97",
+    "existingCapsuleDigest": "sha256:1c86d9618e0dc2afb37ad22933b82260d37d90d68a06991f28161f3813378872"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
+    "workloadHashes": "see capsule manifest contentHashes"
+  },
+  "publication": "license-dependent"
+}

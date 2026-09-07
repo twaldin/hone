@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "repetitions": 5,
+  "jobs": [
+    {"id": "mixed-deep", "kind": "mixed", "modules": 780, "fanout": 2},
+    {"id": "ts-deep", "kind": "ts-esm", "modules": 1050, "fanout": 2}
+  ]
+}

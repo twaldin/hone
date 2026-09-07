@@ -1,0 +1,45 @@
+[package]
+name = "quick-junit"
+description = "Data model, serializer, and deserializer for JUnit/XUnit XML"
+version = "0.6.0"
+readme = "README.md"
+repository = "https://github.com/nextest-rs/quick-junit"
+documentation = "https://docs.rs/quick-junit"
+keywords = ["junit", "xunit", "xml", "serializer", "flaky-tests"]
+categories = ["encoding", "development-tools"]
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "generate-junit-corpus"
+required-features = ["internal-testing"]
+path = "src/bin/generate-junit-corpus.rs"
+
+[dependencies]
+chrono.workspace = true
+indexmap.workspace = true
+newtype-uuid.workspace = true
+proptest = { workspace = true, optional = true }
+quick-xml.workspace = true
+strip-ansi-escapes.workspace = true
+test-strategy = { workspace = true, optional = true }
+thiserror.workspace = true
+uuid.workspace = true
+xxhash-rust = { workspace = true, optional = true }
+
+[features]
+proptest = ["dep:proptest", "dep:test-strategy", "newtype-uuid/proptest1"]
+# Note: Not part of the public API.
+internal-testing = ["proptest", "dep:xxhash-rust"]
+
+[dev-dependencies]
+newtype-uuid = { workspace = true, features = ["proptest1"] }
+proptest.workspace = true
+test-strategy.workspace = true
+
+[package.metadata.cargo-sync-rdme.badge.badges]
+license = true
+crates-io = true
+docs-rs = true
+rust-version = true

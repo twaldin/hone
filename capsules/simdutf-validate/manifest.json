@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_4d5e3d86ff3e",
+  "objective": "Improve geometric-mean UTF-8 validation and UTF-8->UTF-16LE transcoding throughput over a frozen fixed corpus of realistic mixed-script text at simdutf 1a62f928 while preserving the exact validation verdict and transcoded bytes, correct malformed-input rejection, and peak RSS.",
+  "baseline": {
+    "kind": "git",
+    "commit": "c1a7cfc84edbcbb298e3b88df5601c4825c47d12"
+  },
+  "image": "hone-simdutf-validate@sha256:8eab80f1a107ab35b53559ae55bb6ca08196b56d5d0c98899c5a5e2d3c5c8bab",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    "hone/**",
+    "include/**",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "AUTHORS",
+    "CONTRIBUTORS"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/corpus/a.txt",
+        "assets/train/corpus/b.txt",
+        "assets/train/corpus/c.txt",
+        "assets/train/expected.json"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/corpus/a.txt",
+        "assets/validation/corpus/b.txt",
+        "assets/validation/corpus/c.txt",
+        "assets/validation/expected.json"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 12000000,
+    "maxUsd": 25,
+    "maxWallClockSec": 10800,
+    "maxEvaluatorInvocations": 200
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:63fc77cd9aad50ed7a6d2cf3b6f92d58ddd3a544e2577f47ccf15aa442dfe76e"
+  },
+  "contentHashes": {
+    "assets/train/corpus/a.txt": "sha256:9449b8d2a9220e2e8ac9243c8d5640caa9b7c4690ddfdd48cdf681665e13fc46",
+    "assets/train/corpus/b.txt": "sha256:d5b8587389730bc94ba851e9cf7b32b3745aff7b2a71b07fdb93497dc204604d",
+    "assets/train/corpus/c.txt": "sha256:1f6d6bf0c68a6d4b24cd8169c35d67bf031b4896d22716e218f305034837fe0c",
+    "assets/train/expected.json": "sha256:b2cebb7ddc3d7be99d86c6de0298e7f02bebbb48159ca3b1f6a10085656a6f87",
+    "assets/validation/corpus/a.txt": "sha256:d8b42c0691d298acf7275ce745a2c9509cf709d86934c0c5fd2be3c2fe3a83ed",
+    "assets/validation/corpus/b.txt": "sha256:4edc6af68655de35616505e502b68f29d5d83810f6bc19c4139b80d45b83e40a",
+    "assets/validation/corpus/c.txt": "sha256:6e0ffd5fc077ed665a07a2df9f7ab25a3f66b44ddae21bcf6d60c4af5d183276",
+    "assets/validation/expected.json": "sha256:b2cebb7ddc3d7be99d86c6de0298e7f02bebbb48159ca3b1f6a10085656a6f87"
+  },
+  "meta": {
+    "evaluatorSource": "user",
+    "provenance": "Pinned public source simdutf/simdutf@1a62f928fcce103868d22df80376feea158060b9 (release v7.3.2 singleheader amalgamation); deterministic generated mixed-script UTF-8 corpora; current-head A-A qReference construction is frozen after local calibration.",
+    "license": "Apache-2.0 OR MIT (upstream LICENSE-APACHE and LICENSE-MIT preserved)",
+    "tags": [
+      "m2",
+      "oss",
+      "simdutf",
+      "utf8",
+      "transcode",
+      "performance"
+    ],
+    "partition": "m2-oss-train-panel-b",
+    "sourceDetails": {
+      "repository": "simdutf/simdutf",
+      "commit": "1a62f928fcce103868d22df80376feea158060b9",
+      "release": "v7.3.2",
+      "mutableSurface": "src/simdutf.cpp (the SIMD scan/transcode kernels) and src/kernel.cpp (the validation+transcode driver over them); public headers, evaluator, trusted runner, build files, fixtures, and expectations are protected",
+      "trustedHarness": "hone/runner.cpp trusted candidate-invocation driver (dlopens the candidate library only after control-channel authentication; parent-timed; no self-reported throughput consumed)"
+    },
+    "toolchain": {
+      "base": "debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+      "compiler": "GCC 12.2.0",
+      "dockerfile": "Dockerfile"
+    },
+    "measurement": {
+      "platform": "linux/arm64 Docker Desktop on Apple M3 Max",
+      "activeImplementation": "arm64 (NEON)",
+      "q": "geometric mean over the frozen corpus files of the per-file candidate/reference speed ratio for combined UTF-8 validation + UTF-8->UTF-16LE transcoding; each file ratio is a min-of-N estimator (min candidate wall over N alternating reps / min reference wall), the contention-robust choice for ~1s legs under the shared Docker VM's persistent background contention (the differential load a within-pair geomean cannot cancel); wall measured in the trusted evaluator parent around a runner that dlopens the candidate ONLY after control-channel auth and reports no timing; the reference library is built from frozen trusted sources and timed adjacently; never a self-reported number from candidate-linked code. Timed iterations are byte-distinct: the trusted runner rewrites a sparse rotating subset of code points to same-length valid code points before every iteration after the first, and folds every iteration's verdict+transcoded bytes into a go-time-nonce-bound digest validated against the reference. The reject path is exercised ON the scored path: on a go-nonce-scheduled subset of timed iterations (~1/8, plus one forced iteration per leg) the trusted runner writes a genuinely invalid UTF-8 unit (lone continuation / overlong form / surrogate in a three-byte slot / truncated multibyte) at a nonce-chosen code point and restores it afterwards; the reference deterministically rejects those iterations (verdict=0, zero units) and the verdict byte is captured by the fold, so a driver that skips validation or converts without validating diverges from the reference digest.",
+      "equalCoreBudget": "every measured launch (reference and candidate legs alike) is clamped to the same single fixed CPU by the per-launch cgroup leaf's cpuset.cpus (kernel-owned; the demoted uid cannot write the control file and sched_setaffinity from inside is clamped to the cpuset), so a thread-parallel candidate cannot buy wall-clock throughput with cores the single-threaded reference never uses; preexec sched_setaffinity is the non-cgroup developer fallback",
+      "qFail": 0,
+      "peakRssGate": "candidate whole-tree peak RSS <= per-split frozen baseline (protected asset) * 1.05, measured as the kernel-owned cgroup2 memory.peak of a fresh per-launch leaf the candidate subtree joins before the privilege drop; the baseline is frozen near the observed whole-tree baseline peak (max over all launches of a full baseline eval, plus a small cross-run noise margin) so the gate binds against the true baseline on both splits",
+      "freshProcess": true,
+      "validationOracle": "the in-eval trusted reference (built from sealed trusted sources, never candidate-linked) is the pristine payload + perturbed-digest oracle; the malformed probe corpus is synthesized PER RUN by the trusted parent from fresh randomness (kind-rotated invalid units embedded in random valid UTF-8, strict-decode-asserted invalid; never shipped as fixed fixtures, so unenumerable and disjoint across runs and splits); each candidate launch runs in a fresh SysV-IPC namespace and candidate-writable residue (/tmp, /var/tmp, /dev/shm, SysV IPC) is purged between launches",
+      "normalization": {
+        "formula": "qReference = qBase + max(5*sigma, 0.05*abs(qBase-qFail))",
+        "qBase": 1.000997,
+        "sigma": 0.011337,
+        "qReference": 1.057683,
+        "status": "provisional-local: 2x-consecutive bench-locked ordering on Apple M3 Max Docker (min-of-N, 8-lane fold, whole-tree cgroup memory.peak, single-core cpuset pin); qBase/sigma frozen from the pre-pin 6 baseline A-A aggregates; re-freeze via the planned like-for-like GCE re-baseline governs promotion (gate promotion on normalization.status==final)"
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+name: nightly
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: cargo +nightly test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly
+    - uses: taiki-e/install-action@v2
+      with: { tool: cargo-nextest }
+    - run: cargo --locked nextest run --workspace --all-features
+    - run: cargo --locked test --workspace --doc --all-features
+
+  fmt:
+    name: cargo +nightly fmt --check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly
+        components: rustfmt
+    - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo +nightly clippy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: nightly
+        components: clippy
+    - run: cargo --locked clippy --all --all-targets --all-features -- -D warnings
+
+on:
+  schedule:
+  - cron: '0 2 * * *'

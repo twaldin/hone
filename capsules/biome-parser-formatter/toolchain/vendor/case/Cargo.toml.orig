@@ -1,0 +1,9 @@
+[package]
+name = "case"
+version = "1.0.0"
+authors = ["Skyler Lipthay <skyler.lipthay@gmail.com>"]
+description = "A set of letter case string helpers"
+readme = "README.md"
+keywords = ["string", "ascii", "alphabet", "snake", "camel"]
+license = "MIT"
+repository = "https://github.com/SkylerLipthay/case"

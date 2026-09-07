@@ -1,0 +1,30 @@
+name: VS18-NoExcept-CI
+
+on: [push, pull_request]
+
+jobs:
+  ci:
+    name: windows-vs18
+    runs-on: windows-2025-vs2026
+    steps:
+    - uses: actions/checkout@v6
+    - uses: actions/cache@v5
+      with:
+        path: dependencies/.cache
+        key: ${{ hashFiles('dependencies/CMakeLists.txt') }}
+    - name: 'Run CMake with VS18'
+      uses: lukka/run-cmake@v3
+      with:
+        cmakeListsOrSettingsJson: CMakeListsTxtAdvanced
+        cmakeListsTxtPath: '${{ github.workspace }}/CMakeLists.txt'
+        buildDirectory: "${{ github.workspace }}/../../_temp/windows"
+        cmakeBuildType: Release
+        buildWithCMake: true
+        cmakeGenerator: VS18Win64
+        cmakeAppendedArgs: -DSIMDJSON_COMPETITION=OFF -DSIMDJSON_DEVELOPER_MODE=ON  -DSIMDJSON_EXCEPTIONS=OFF
+        buildWithCMakeArgs: --config Release
+
+    - name: 'Run CTest'
+      run: ctest -C Release  -LE explicitonly  --output-on-failure
+      working-directory: "${{ github.workspace }}/../../_temp/windows"
+

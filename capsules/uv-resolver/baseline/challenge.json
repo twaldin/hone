@@ -1,0 +1,31 @@
+{
+  "taskId": "OSS-T06",
+  "objective": "Improve cold and warm dependency resolution time on the frozen offline wheel index without changing exact locks or selected distributions.",
+  "upstream": {
+    "repository": "astral-sh/uv",
+    "revision": "336535f83fd933ea54685e24e3c08468339937ce",
+    "license": "MIT OR Apache-2.0"
+  },
+  "mutablePaths": [
+    "crates/uv-resolver/src/**"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "worker.py",
+    "challenge.json",
+    "UPSTREAM_REVISION",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "toolchain.lock.json",
+    ".gitignore"
+  ],
+  "build": "cargo test --locked --offline -p uv-resolver --profile profiling; cargo build --locked --offline --profile profiling --bin uv --no-default-features (Rust 1.97.0, rust-lld, vendored dependencies)",
+  "workload": "uv pip compile cold and warm against a hash-pinned PEP 503 file:// index; Manifest/Resolver execution follows crates/uv-bench/benches/uv.rs and cache preparation follows scripts/benchmark/src/benchmark/resolver.py",
+  "scalar": "1000 / geometric_mean(resolver wall milliseconds)",
+  "hardGates": [
+    "all 65 uv-resolver tests pass",
+    "requirements lock bytes are exact",
+    "selected wheel filenames and SHA-256 digests are exact",
+    "peak resolver RSS is no greater than the frozen baseline plus 2%"
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "schema": "hone-biome-parser-formatter-v1",
+  "sourceRevision": "8ebafe1c7489f1f7af379b8e52b8ad063c82d28a",
+  "qFail": 1e-12,
+  "benchmarkSamples": 5,
+  "rssLimitKb": 28000,
+  "tmpfsSize": "1536m",
+  "buildTimeoutSec": 500,
+  "benchmarkTimeoutSec": 120,
+  "repetitions": {
+    "generated.css": {
+      "parse": 24,
+      "format": 5
+    },
+    "generated.js": {
+      "parse": 43,
+      "format": 6
+    },
+    "generated.ts": {
+      "parse": 36,
+      "format": 7
+    },
+    "recovery.css": {
+      "parse": 192,
+      "format": 60
+    },
+    "recovery.js": {
+      "parse": 261,
+      "format": 52
+    },
+    "declarations.ts": {
+      "parse": 35,
+      "format": 8
+    },
+    "layout.css": {
+      "parse": 25,
+      "format": 6
+    },
+    "modules.js": {
+      "parse": 47,
+      "format": 6
+    }
+  }
+}

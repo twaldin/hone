@@ -1,0 +1,18 @@
+{
+  "provenanceVersion": 1,
+  "usage": "internal-use-only",
+  "capsule": "monoagent-context-retention",
+  "ownerSnapshot": {
+    "repository": "monoagent",
+    "commit": "03b459450875fd44d054f5af4acb594427497683",
+    "tree": "e02affd1f852f395079ff5ad76b2a0bc8f1d9460",
+    "groundingPaths": [
+      "src/front/context.ts",
+      "src/db/database.ts",
+      "test/front/context.test.ts"
+    ]
+  },
+  "derivation": "Behavior-derived deterministic structured-record retention task; no owner source files, fixtures, credentials, databases, or user data are redistributed.",
+  "fixturePolicy": "Synthetic deterministic records only; train is public, validation is protected, holdout is sealed.",
+  "licensePolicy": "Internal evaluation use only; not a redistribution of the owner repository."
+}

@@ -1,0 +1,156 @@
+use std::path::Path;
+
+use uv_cache::{Cache, CacheBucket, CacheEntry};
+use uv_cache_info::CacheInfo;
+use uv_distribution_filename::WheelFilename;
+use uv_distribution_types::{BuildInfo, CachedDirectUrlDist, CachedRegistryDist, Hashed};
+use uv_pypi_types::{HashDigest, HashDigests, VerbatimParsedUrl};
+
+use crate::archive::Archive;
+use crate::{HttpArchivePointer, PathArchivePointer};
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedWheel {
+    /// The filename of the wheel.
+    pub filename: WheelFilename,
+    /// The [`CacheEntry`] for the wheel.
+    pub entry: CacheEntry,
+}
+
+impl ResolvedWheel {
+    /// Try to parse a distribution from a cached directory name (like `typing-extensions-4.8.0-py3-none-any`).
+    pub(crate) fn from_built_source(path: impl AsRef<Path>, cache: &Cache) -> Option<Self> {
+        let path = path.as_ref();
+
+        // Determine the wheel filename.
+        let filename = path.file_name()?.to_str()?;
+        let filename = WheelFilename::from_stem(filename).ok()?;
+
+        // Convert to a cached wheel.
+        let archive = cache.resolve_link(path).ok()?;
+        let entry = CacheEntry::from_path(archive);
+        Some(Self { filename, entry })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedWheel {
+    /// The filename of the wheel.
+    pub(super) filename: WheelFilename,
+    /// The [`CacheEntry`] for the wheel.
+    pub(super) entry: CacheEntry,
+    /// The [`HashDigest`]s for the wheel.
+    pub(super) hashes: HashDigests,
+    /// The [`CacheInfo`] for the wheel.
+    pub(super) cache_info: CacheInfo,
+    /// The [`BuildInfo`] for the wheel, if it was built.
+    pub(super) build_info: Option<BuildInfo>,
+}
+
+impl CachedWheel {
+    /// Return the filename of the wheel.
+    pub fn filename(&self) -> &WheelFilename {
+        &self.filename
+    }
+
+    /// Create a [`CachedWheel`] from a [`ResolvedWheel`].
+    pub(crate) fn from_entry(
+        wheel: ResolvedWheel,
+        hashes: HashDigests,
+        cache_info: CacheInfo,
+        build_info: BuildInfo,
+    ) -> Self {
+        Self {
+            filename: wheel.filename,
+            entry: wheel.entry,
+            hashes,
+            cache_info,
+            build_info: Some(build_info),
+        }
+    }
+
+    /// Read a cached wheel from a `.http` pointer
+    pub(crate) fn from_http_pointer(path: impl AsRef<Path>, cache: &Cache) -> Option<Self> {
+        let path = path.as_ref();
+
+        // Read the pointer.
+        let pointer = HttpArchivePointer::read_from(path).ok()??;
+        let cache_info = pointer.to_cache_info();
+        let build_info = pointer.to_build_info();
+        let archive = pointer.into_archive();
+
+        // Ignore stale pointers.
+        if !archive.exists(cache) {
+            return None;
+        }
+
+        let Archive { id, hashes, .. } = archive;
+        let entry = cache.entry(CacheBucket::Archive, "", id);
+
+        // Convert to a cached wheel.
+        Some(Self {
+            filename: archive.filename,
+            entry,
+            hashes,
+            cache_info,
+            build_info,
+        })
+    }
+
+    /// Read a cached wheel from a `.rev` pointer
+    pub(crate) fn from_local_pointer(path: impl AsRef<Path>, cache: &Cache) -> Option<Self> {
+        let path = path.as_ref();
+
+        // Read the pointer.
+        let pointer = PathArchivePointer::read_from(path).ok()??;
+        let cache_info = pointer.to_cache_info();
+        let build_info = pointer.to_build_info();
+        let archive = pointer.into_archive();
+
+        // Ignore stale pointers.
+        if !archive.exists(cache) {
+            return None;
+        }
+
+        let Archive { id, hashes, .. } = archive;
+        let entry = cache.entry(CacheBucket::Archive, "", id);
+
+        // Convert to a cached wheel.
+        Some(Self {
+            filename: archive.filename,
+            entry,
+            hashes,
+            cache_info,
+            build_info,
+        })
+    }
+
+    /// Convert a [`CachedWheel`] into a [`CachedRegistryDist`].
+    pub(crate) fn into_registry_dist(self) -> CachedRegistryDist {
+        CachedRegistryDist {
+            filename: self.filename,
+            path: self.entry.into_path_buf().into_boxed_path(),
+            hashes: self.hashes,
+            cache_info: self.cache_info,
+            build_info: self.build_info,
+        }
+    }
+
+    /// Convert a [`CachedWheel`] into a [`CachedDirectUrlDist`] with the given URL.
+    pub fn into_url_dist(self, url: VerbatimParsedUrl) -> CachedDirectUrlDist {
+        CachedDirectUrlDist {
+            filename: self.filename,
+            url,
+            path: self.entry.into_path_buf().into_boxed_path(),
+            hashes: self.hashes,
+            cache_info: self.cache_info,
+            build_info: self.build_info,
+        }
+    }
+}
+
+impl Hashed for CachedWheel {
+    fn hashes(&self) -> &[HashDigest] {
+        self.hashes.as_slice()
+    }
+}

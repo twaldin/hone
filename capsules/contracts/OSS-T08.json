@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "taskId": "OSS-T08",
+  "capsule": "orjson-serialization",
+  "cohort": "train",
+  "stratum": "oss",
+  "panel": "B",
+  "status": "pending-authoring",
+  "objective": "Improve dumps+loads throughput across dataclass, datetime, NumPy, Unicode, and nested corpora using bench/.",
+  "scalarAndGates": "Geometric mean throughput; byte-exact dumps where specified, semantic hashes for loads, full tests, peak RSS \u2264 baseline +2%.",
+  "source": {
+    "repository": "ijl/orjson",
+    "revision": "705515d77b28429d0b7c30c3d781abe52e8a1e5a",
+    "url": "https://github.com/ijl/orjson/commit/705515d77b28429d0b7c30c3d781abe52e8a1e5a",
+    "visibility": "public",
+    "license": "per-upstream-license-file"
+  },
+  "authoring": {
+    "mutableSurface": "frozen at capsule authoring per plan objective",
+    "protectedSurface": "evaluator, build files, benchmark code, fixtures, tests per plan",
+    "buildTestEvalCommands": null,
+    "workloadHashes": null
+  },
+  "publication": "license-permitting-publishable"
+}

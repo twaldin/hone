@@ -1,0 +1,47 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rust:
+          - stable
+          - beta
+          - nightly
+          
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: build
+        run: cargo build --release --all-features -v
+
+      - name: test
+        run: cargo test --all-features -v
+
+      - name: fmt 
+        run: cargo fmt --all -- --check
+
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
