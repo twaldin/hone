@@ -24,6 +24,19 @@ export interface ProviderAttemptFacts {
   requestedRoute: string;
   returnedModels: readonly string[];
   malformedSuccessfulOutput: boolean;
+  noQuota: boolean;
+}
+
+/** Exact protocol code in a buffered JSON error envelope, never message text. */
+export function isNoQuotaResponse(responseText: string): boolean {
+  try {
+    const body: unknown = JSON.parse(responseText);
+    return isJsonObject(body) &&
+      isJsonObject(body["error"]) &&
+      body["error"]["code"] === "NO_QUOTA";
+  } catch {
+    return false;
+  }
 }
 
 export interface ProviderAttemptDecision {
@@ -52,6 +65,9 @@ export function classifyProviderAttempt(facts: ProviderAttemptFacts): ProviderAt
     return facts.attempt < MAX_PROVIDER_ATTEMPTS
       ? { classification: "retry" }
       : { classification: "campaign-pause", pauseReason: "provider-transport" };
+  }
+  if (facts.status === 503 && facts.noQuota) {
+    return { classification: "campaign-pause", pauseReason: "provider-rate-limit" };
   }
   if (facts.status !== null && facts.status >= 500 && facts.status <= 599) {
     return facts.attempt < MAX_PROVIDER_ATTEMPTS
