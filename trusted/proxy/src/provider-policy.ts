@@ -20,6 +20,7 @@ export interface ProviderAttemptFacts {
   attempt: number;
   status: number | null;
   transportError: boolean;
+  explicitUpstreamError: boolean;
   proxyFailover: boolean;
   requestedRoute: string;
   returnedModels: readonly string[];
@@ -37,6 +38,51 @@ export function isNoQuotaResponse(responseText: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Read only complete SSE error events, never agent-authored delta content.
+ * The first explicit error terminates the provider attempt. Its status must be
+ * a structured HTTP error number; message/type text cannot supply one.
+ */
+export function streamedUpstreamError(
+  responseText: string,
+  contentType: string,
+): { status: number | null } | undefined {
+  if (!contentType.includes("text/event-stream")) return undefined;
+  const events = responseText.split(/\r?\n\r?\n/);
+  // SSE dispatch requires a blank line, including when the connection ends.
+  events.pop();
+  for (const event of events) {
+    let errorEvent = false;
+    const data: string[] = [];
+    for (const line of event.split(/\r?\n/)) {
+      if (line.startsWith("event:")) errorEvent = line.slice(6).trim() === "error";
+      if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(data.join("\n"));
+    } catch {
+      if (errorEvent) return { status: null };
+      continue;
+    }
+    const envelope = isJsonObject(value) ? value : undefined;
+    const error = envelope?.["error"];
+    if (!errorEvent && !isJsonObject(error) && !(typeof error === "string" && error.length > 0)) {
+      continue;
+    }
+    const detail = isJsonObject(error) ? error : undefined;
+    const status = [
+      detail?.["status"], detail?.["status_code"], detail?.["code"],
+      envelope?.["status"], envelope?.["status_code"],
+    ].find((candidate): candidate is number =>
+      typeof candidate === "number" && Number.isInteger(candidate) &&
+      candidate >= 400 && candidate <= 599,
+    );
+    return { status: status ?? null };
+  }
+  return undefined;
 }
 
 export interface ProviderAttemptDecision {
@@ -73,6 +119,13 @@ export function classifyProviderAttempt(facts: ProviderAttemptFacts): ProviderAt
     return facts.attempt < MAX_PROVIDER_ATTEMPTS
       ? { classification: "retry" }
       : { classification: "campaign-pause", pauseReason: "provider-5xx" };
+  }
+  if (facts.explicitUpstreamError) {
+    // An upstream operation failed without a status handled above. Reuse the
+    // bounded transport-failure policy, not candidate/client invalidity.
+    return facts.attempt < MAX_PROVIDER_ATTEMPTS
+      ? { classification: "retry" }
+      : { classification: "campaign-pause", pauseReason: "provider-transport" };
   }
   if (facts.status !== null && facts.status >= 200 && facts.status <= 299) {
     if (facts.returnedModels.length === 0) {
