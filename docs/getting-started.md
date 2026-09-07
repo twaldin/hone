@@ -15,6 +15,8 @@ git checkout main
 
 Use a new directory for this procedure. Keep the rules when updating this checkout. The published history preserves development commits, but a historical revision may describe an earlier capsule or protocol; current instructions apply to current main.
 
+The capsule provenance tests verify historical source IDs and digests in Git. They require a full clone; a shallow checkout or downloaded source archive does not contain that evidence.
+
 ## Dependencies and source checks
 
 The workspace uses Node.js and pnpm. Its package metadata declares Node 18 or later; the launcher also needs `node:module.register`. The export is being checked with Node 26.6.0 and pnpm 10.13.1. This is a validation environment, not a claim that every earlier Node 18 release works.

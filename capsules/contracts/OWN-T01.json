@@ -19,5 +19,6 @@
     "buildTestEvalCommands": "see capsule manifest evalEntrypoint",
     "workloadHashes": "see capsule manifest contentHashes"
   },
-  "publication": "private-redacted"
+  "publication": "license-permitting-publishable",
+  "publicationNotice": "../../PUBLICATION.md"
 }

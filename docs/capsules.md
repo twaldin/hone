@@ -6,6 +6,8 @@ A runnable capsule needs its manifest, exact baseline, evaluator, declared asset
 
 The public repository includes development tasks and synthetic fixtures, including the approved bounded TradeUp, Monoagent and Floyd implementations. This release covers the derived tasks in this repository, not the complete private applications from which some tasks originated.
 
+The [publication notice](../PUBLICATION.md) records their MIT release and supersedes the earlier distribution restrictions preserved inside identity-bearing metadata. Source contracts retain historical capsule IDs and digests; a new launch takes its identity from the current admitted manifest.
+
 An asset group named `holdout` inside a development capsule describes visibility within that task's execution protocol. It is distinct from the frozen terminal evaluation set. The approved synthetic development fixtures may be public while the terminal inputs and answers remain withheld.
 
 Some baselines include a nested Git object store. Preserve its bytes using the [checkout procedure](getting-started.md#checkout). Do not reconstruct a baseline by copying only the visible working files and assuming its manifest commit still identifies that copy.
