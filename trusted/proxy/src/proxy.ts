@@ -30,6 +30,7 @@ import { extractSseUsage, isJsonObject, normalizeUsage, ZERO_USAGE, type Usage }
 import {
   classifyProviderAttempt,
   isMalformedSuccessfulAgentResponse,
+  isNoQuotaResponse,
   isProxyFailover,
   MAX_PROVIDER_ATTEMPTS,
   providerRetryDelayMs,
@@ -1070,6 +1071,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
               status: null,
               transportError: true,
               proxyFailover: false,
+              noQuota: false,
               requestedRoute: input.route.model,
               returnedModels: [],
               malformedSuccessfulOutput: false,
@@ -1162,6 +1164,12 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
             attempt: input.attempt,
             status: upstream.status,
             transportError: responseIncomplete && !responseTooLarge,
+            // A parseable prefix of an interrupted or oversized body is not an envelope.
+            noQuota:
+              upstream.status === 503 &&
+              !responseIncomplete &&
+              !contentType.includes("text/event-stream") &&
+              isNoQuotaResponse(responseText),
             proxyFailover:
               (upstream.status >= 300 && upstream.status <= 399) ||
               isProxyFailover(upstream.headers, responseText),

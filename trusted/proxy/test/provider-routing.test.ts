@@ -1,4 +1,5 @@
 import http from "node:http";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +39,11 @@ interface UpstreamReply {
   location?: string;
   paddingBytes?: number;
   sseDriftReset?: boolean;
+  body?: unknown;
+  rawBody?: string;
+  contentType?: string;
+  incomplete?: boolean;
+  trailingBytes?: number;
 }
 
 interface ScriptedUpstream {
@@ -80,12 +86,21 @@ async function startUpstream(
         return;
       }
       res.writeHead(reply.status, {
-        "content-type": "application/json",
+        "content-type": reply.contentType ?? "application/json",
         ...(reply.failover ? { "x-vibeproxy-failover": "true" } : {}),
         ...(reply.location !== undefined ? { location: reply.location } : {}),
       });
+      if (reply.rawBody !== undefined) {
+        res.write(reply.rawBody, () => {
+          setImmediate(() => {
+            if (reply.incomplete) res.destroy();
+            else res.end(" ".repeat(reply.trailingBytes ?? 0));
+          });
+        });
+        return;
+      }
       const total = reply.totalTokens ?? 10;
-      res.end(JSON.stringify({
+      res.end(reply.body !== undefined ? JSON.stringify(reply.body) : JSON.stringify({
         id: `c${calls.length}`,
         object: "chat.completion",
         model: reply.model ?? request.model,
@@ -125,6 +140,7 @@ interface Harness {
   upstream: ScriptedUpstream;
   pauses: CampaignPauseSignal[];
   resumes: CampaignResumeSignal[];
+  restart(): Promise<void>;
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -151,7 +167,7 @@ async function setup(
   const spends: SpendRecord[] = [];
   const pauses: CampaignPauseSignal[] = [];
   const resumes: CampaignResumeSignal[] = [];
-  const proxy = createProxy({
+  const config: ProxyConfig = {
     runId: "run_provider_policy",
     routing: {
       "outer-optimizer": { model: "optimizer-selected-route" },
@@ -180,13 +196,22 @@ async function setup(
       ? {}
       : { limits: { maxResponseBytes: options.maxResponseBytes } }),
     retryRandom: () => 0,
-  });
+  };
+  const proxy = createProxy(config);
   const port = await proxy.listenTcp(0);
+  const harness: Harness = {
+    proxy, port, runDir, spends, upstream, pauses, resumes,
+    async restart() {
+      await harness.proxy.close();
+      harness.proxy = createProxy(config);
+      harness.port = await harness.proxy.listenTcp(0);
+    },
+  };
   cleanups.push(async () => {
-    await proxy.close().catch(() => undefined);
+    await harness.proxy.close().catch(() => undefined);
     await upstream.close();
   });
-  return { proxy, port, runDir, spends, upstream, pauses, resumes };
+  return harness;
 }
 
 function completion(harness: Harness, role = "outer-optimizer"): Promise<Response> {
@@ -273,6 +298,125 @@ describe("frozen provider failure policy", () => {
     expect((await completion(harness)).status).toBe(503);
     expect(harness.upstream.calls).toHaveLength(1);
     expect((await harness.proxy.campaignPause())?.reason).toBe("provider-rate-limit");
+  });
+
+  it("NO_QUOTA pauses after one attempt and survives restart until explicit resume", async () => {
+    const harness = await setup(() => ({
+      status: 503,
+      body: {
+        error: {
+          code: "NO_QUOTA",
+          type: "quota_exhausted",
+          message: "no quota is available for provider scripted",
+          provider: "scripted",
+          retry_after_ms: null,
+        },
+      },
+    }));
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    const pause = await harness.proxy.campaignPause();
+    expect(pause).toMatchObject({ reason: "provider-rate-limit", status: 503, attempt: 1 });
+    expect(harness.pauses).toEqual([pause]);
+    expect(harness.spends).toHaveLength(1);
+    const state = await readDispatchJournalState(join(harness.runDir, DISPATCH_JOURNAL_FILE));
+    expect(state.poisoned).toBeUndefined();
+    expect(state.unmatched).toEqual([]);
+    expect(state.pause).toEqual(pause);
+    expect(state.records.filter((record) => record.kind === "settle")).toMatchObject([
+      { classification: "campaign-pause", outcome: "ceiling" },
+    ]);
+
+    harness.upstream.setResponder(() => ({ status: 200 }));
+    expect((await completion(harness)).status).toBe(503);
+    await harness.restart();
+    expect(await harness.proxy.campaignPause()).toEqual(pause);
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect(harness.spends).toHaveLength(1);
+
+    // Healthy upstreams and read-only preflight do not authorize resumption.
+    expect((await harness.proxy.preflight()).passed).toBe(true);
+    expect(await harness.proxy.campaignPause()).toEqual(pause);
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(3);
+    expect((await harness.proxy.resume()).passed).toBe(true);
+    expect(harness.resumes).toMatchObject([{ pauseId: pause?.pauseId }]);
+    expect((await completion(harness)).status).toBe(200);
+    expect(harness.upstream.calls).toHaveLength(6);
+    await harness.restart();
+    expect(await harness.proxy.campaignPause()).toBeUndefined();
+    expect((await completion(harness)).status).toBe(200);
+  });
+
+  it.each([
+    ["malformed JSON", '{"error":{"code":"NO_QUOTA"}'],
+    ["wrong code", '{"error":{"code":"OTHER","message":"NO_QUOTA"}}'],
+    ["wrong location", '{"code":"NO_QUOTA"}'],
+    ["array envelope", '[{"error":{"code":"NO_QUOTA"}}]'],
+    ["null error", '{"error":null}'],
+    ["array error", '{"error":[{"code":"NO_QUOTA"}]}'],
+  ])("%s retains bounded 503 retries", async (_label, rawBody) => {
+    const harness = await setup(() => ({ status: 503, rawBody }));
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(4);
+    expect((await harness.proxy.campaignPause())?.reason).toBe("provider-5xx");
+  });
+
+  it.each([
+    ["reset", { incomplete: true }, "provider-transport"],
+    ["response cap", { trailingBytes: 4096 }, "provider-5xx"],
+  ] as const)("a valid NO_QUOTA prefix followed by %s never selects quota policy", async (_label, shape, reason) => {
+    const harness = await setup(() => ({
+      status: 503, rawBody: '{"error":{"code":"NO_QUOTA"}}', ...shape,
+    }), { maxResponseBytes: 128 });
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(4);
+    expect((await harness.proxy.campaignPause())?.reason).toBe(reason);
+    // The prefix really reached the proxy; rejection is not just JSON parse failure.
+    const trace = await traces(harness.runDir);
+    const prefixDigest = `sha256:${createHash("sha256")
+      .update('{"error":{"code":"NO_QUOTA"}}').digest("hex")}`;
+    expect(trace.map((record) => record.responseBody)).toEqual(Array(4).fill(prefixDigest));
+  });
+
+  it("SSE error content does not select the JSON quota policy", async () => {
+    const harness = await setup(() => ({
+      status: 503, contentType: "text/event-stream",
+      rawBody: 'data: {"error":{"code":"NO_QUOTA"}}\n\n',
+    }));
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(4);
+    expect((await harness.proxy.campaignPause())?.reason).toBe("provider-5xx");
+  });
+
+  it("successful content cannot select NO_QUOTA policy", async () => {
+    const harness = await setup((request) => ({
+      status: 200,
+      body: {
+        model: request.model,
+        choices: [{ message: { content: '{"error":{"code":"NO_QUOTA"}}' } }],
+        error: { code: "NO_QUOTA" },
+      },
+    }));
+    const response = await completion(harness);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-hone-attempt-classification")).toBe("success");
+    expect(await harness.proxy.campaignPause()).toBeUndefined();
+    expect(harness.upstream.calls).toHaveLength(1);
+  });
+
+  it.each([
+    [503, true, undefined, "proxy-failover"],
+    [401, false, undefined, "provider-auth"],
+    [503, false, M2_INNER_MODEL_ROUTE, "returned-model-drift"],
+  ] as const)("NO_QUOTA preserves existing priority %s/%s/%s", async (status, failover, model, reason) => {
+    const harness = await setup(() => ({
+      status, failover, body: { model, error: { code: "NO_QUOTA" } },
+    }));
+    expect((await completion(harness)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect((await harness.proxy.campaignPause())?.reason).toBe(reason);
   });
 
   it("one 5xx is retried, both attempt usages are charged and journaled, then success returns", async () => {
