@@ -18,6 +18,8 @@ Campaign model routes are part of the experiment, independent of a contributor's
 
 Several preparation capabilities are library APIs with tests rather than public top-level CLI commands. A schema, draft or passing component test establishes an implementation behavior, not completion of the experiment it describes.
 
+The [M2 readiness runbook](m2-readiness.md) maps these components to remaining preparation, orchestration and owner-decision gaps, with source-backed command forms.
+
 ## Work still to complete
 
 - Public-clone admission and image bootstrap, and automatic execution of authoring sessions.
