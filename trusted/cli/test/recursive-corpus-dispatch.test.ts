@@ -202,9 +202,8 @@ beforeAll(async () => {
       writeFileSync(join(optimizerDir, path), content);
     }
     const seal = await captureMetaControlSourceSeal(optimizerDir);
-    [broken, degraded] = await Promise.all([
-      buildBrokenMetaControl(optimizerDir, seal), buildDegradedMetaControl(optimizerDir, seal),
-    ]);
+    broken = await buildBrokenMetaControl(optimizerDir, seal);
+    degraded = await buildDegradedMetaControl(optimizerDir, seal);
   } finally {
     rmSync(optimizerDir, { recursive: true, force: true });
   }
