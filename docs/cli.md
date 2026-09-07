@@ -48,6 +48,10 @@ hone resume [--pause PAUSE_ID] [--campaign CAMPAIGN_STATE_DIR]
 
 These are trusted campaign operations, not shortcuts around corpus admission. Freeze requires the appropriate output and artifact inputs; later phases require the preceding frozen state. Recursive authorization additionally validates its gate records, artifact identities and required attestations. Consult the parsers in `commands/hone.ts` and schemas in `schema/src/meta.ts` when assembling a campaign; public end-to-end onboarding is incomplete.
 
+Recursive execution requires a trusted caller to pass `recursiveCommand(args, io, { corpus })`, where `corpus` contains the existing `corpus-provenance.v1` artifact plus its exact `publicSnapshot` and `panelEvidence` document bytes (`BuildBrokerCorpusConfigInputs` without `campaignConfigHash`). The dispatcher verifies the artifact, documents, frozen cohort, capsule digests and current panel assignment, then binds the final campaign hash and passes `corpus`/`corpusCohort` to outer and child runs, including resumes. Missing or drifted inputs refuse before launch.
+
+The public CLI does not yet load these private preparation inputs; its recursive `search`, `confirmation` and `terminal` phases therefore fail closed. `freeze` and `authorize` do not require document bytes. This trusted API does not add a public corpus format, preparation flag or campaign authorization.
+
 `hone resume` releases a durable campaign pause. It is distinct from `hone run … --resume`, which resumes an individual run. A provider interruption should be understood from its persisted pause or error record before resuming.
 
 Exit codes are 0 for success, 1 for error or decline, 2 for usage errors and 3 for an autonomy-ladder refusal.

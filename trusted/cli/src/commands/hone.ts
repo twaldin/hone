@@ -21,6 +21,7 @@ import {
   readBrokerJournalEvaluations,
   type BrokerJournalEvaluationSnapshot,
   type BrokerRecursiveConfig,
+  type BrokerCorpusConfig,
   type ChildRunLaunchInput,
   type ChildRunLaunchOutcome,
   type TrustedChildAdmissionInput,
@@ -94,6 +95,11 @@ import {
   type TrustedMetaMeasurementRow,
 } from "@hone/scoring";
 import { UsageError, boolFlag, parseFlags, strFlag } from "../args.js";
+import {
+  buildBrokerCorpusConfig,
+  corpusCohortFenceError,
+  type BuildBrokerCorpusConfigInputs,
+} from "../corpus-provenance.js";
 import { EVENTS_FILE, bestArtifact, readEvents, replayRun, writeFileDurable } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
 import { MetaJournalV1, metaWorkKey } from "../meta-journal.js";
@@ -799,6 +805,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
     private readonly baseSnapshot: OptimizerSnapshot,
     private readonly modelRegistry: CampaignModelRegistry,
     private readonly campaignPauseAuthority?: CampaignPauseAuthority,
+    private readonly corpus?: BrokerCorpusConfig,
   ) {}
 
   async run(request: MetaChildRunRequest): Promise<MetaChildRunOutcome> {
@@ -812,6 +819,15 @@ export class CliChildSupervisor implements MetaChildSupervisor {
     request: MetaChildRunRequest,
     campaignConfigHash?: Sha256Digest,
   ): Promise<MetaChildRunOutcome> {
+    if (this.config.version === 2) {
+      if (this.corpus === undefined) throw new UsageError("recursive child requires verified corpus provenance");
+      if (campaignConfigHash !== metaCampaignConfigHash(this.config)
+        || this.corpus.provenance.campaignConfigHash !== campaignConfigHash) {
+        throw new UsageError("recursive child corpus campaign identity drift");
+      }
+      const corpusError = corpusCohortFenceError(this.corpus, this.config.corpusCohort);
+      if (corpusError !== null) throw new UsageError(corpusError);
+    }
     if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
       return this.notRun(request, "campaign child admission is durably paused pending trusted frozen-route preflight");
     }
@@ -855,6 +871,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
             ? {}
             : { campaignPauseAuthority: this.campaignPauseAuthority }),
           ...(campaignConfigHash === undefined ? {} : { campaignConfigHash }),
+          ...(this.config.version === 2 ? { corpus: this.corpus, corpusCohort: this.config.corpusCohort } : {}),
         },
       );
       if (code !== 0 && !existsSync(join(runDir, EVENTS_FILE))) {
@@ -888,6 +905,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
               ? {}
               : { campaignPauseAuthority: this.campaignPauseAuthority }),
             ...(campaignConfigHash === undefined ? {} : { campaignConfigHash }),
+            ...(this.config.version === 2 ? { corpus: this.corpus, corpusCohort: this.config.corpusCohort } : {}),
           },
         );
         if (code !== 0) {
@@ -2297,8 +2315,36 @@ function recursivePhaseReceipt(
   return output;
 }
 
+export interface TrustedRecursiveOptions {
+  /** Existing assembled artifact and exact document bytes; never read from optimizer flags/config. */
+  corpus?: Omit<BuildBrokerCorpusConfigInputs, "campaignConfigHash">;
+}
+
+function recursiveCorpus(config: RecursiveMetaCampaignConfig, inputs: TrustedRecursiveOptions["corpus"]): BrokerCorpusConfig {
+  if (inputs === undefined) throw new UsageError("recursive execution requires verified corpus provenance and document bytes");
+  const corpus = buildBrokerCorpusConfig({ ...inputs, campaignConfigHash: metaCampaignConfigHash(config) });
+  const cohortError = corpusCohortFenceError(corpus, config.corpusCohort);
+  if (cohortError !== null) throw new UsageError(cohortError);
+  for (const [entries, role] of [[config.train, "development"], [config.holdout, "terminal"]] as const) {
+    for (const entry of entries) {
+      const record = inputs.provenance.capsules.find((capsule) => capsule.id === entry.capsuleId);
+      if (record?.digest !== entry.capsuleDigest || record.role !== role) {
+        throw new UsageError(`recursive corpus capsule ${entry.capsuleId} differs from the frozen ${role} identity`);
+      }
+    }
+  }
+  const panelIds = new Set(config.developmentPanel.members.map((member) => member.capsule.capsuleId));
+  const panel = config.developmentPanel.panel === "A" ? "panel-a" : "panel-b";
+  for (const document of corpus.panelEvidence) {
+    if ((document.provenance.cohort === panel) !== panelIds.has(document.provenance.capsuleId)) {
+      throw new UsageError(`recursive corpus document ${document.id} differs from the frozen panel assignment`);
+    }
+  }
+  return corpus;
+}
+
 /** Execute one frozen recursive generation cell; orchestration composes these durable cells. */
-export async function recursiveCommand(args: string[], io: CmdIo): Promise<number> {
+export async function recursiveCommand(args: string[], io: CmdIo, trusted: TrustedRecursiveOptions = {}): Promise<number> {
   const { positionals, flags } = parseFlags(args, {
     booleans: ["headless", "attest-diff-confined", "attest-mechanism-plausible"],
     strings: [
@@ -2330,6 +2376,9 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
 
   const campaignPath = resolve(io.root, campaignFlag);
   let config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+  // Non-executing freeze/authorization remain independent of document availability.
+  // Every executing phase verifies before optimizer preparation or any child dispatch.
+  const corpus = phase === "freeze" || phase === "authorize" ? undefined : recursiveCorpus(config, trusted.corpus);
   assertCleanSourceTree(io.root);
   const commit = sourceCommit(io.root);
   const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
@@ -2443,6 +2492,7 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
     target.snapshot,
     modelRegistry,
     campaignPauseAuthority,
+    corpus,
   );
   const recursiveResourceLedger = RecursiveResourceLedger.open(
     join(campaignDir, "recursive-resource.v1.ndjson"),
@@ -2673,6 +2723,8 @@ export async function recursiveCommand(args: string[], io: CmdIo): Promise<numbe
       proxyRole: "outer-optimizer",
       campaignPauseAuthority,
       campaignConfigHash: configHash,
+      corpus,
+      corpusCohort: config.corpusCohort,
       // The synthetic outer task is trusted campaign machinery rather than a
       // corpus capsule; its manifest bytes were validated before campaign seal.
       admissionReview: "off",
