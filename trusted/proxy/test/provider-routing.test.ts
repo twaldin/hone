@@ -9,7 +9,7 @@ import {
   type CampaignPauseSignal,
   type CampaignResumeSignal,
 } from "@hone/schema";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createProxy,
   DISPATCH_JOURNAL_FILE,
@@ -389,11 +389,31 @@ describe("frozen provider failure policy", () => {
       status: 200, contentType: "text/event-stream",
       rawBody: ssePrefix(request.model) + 'data: {"error":{"status":401}}\n\n' + " ".repeat(4096),
     }), { maxResponseBytes: 512 });
-    const response = await completion(harness, "outer-optimizer", true);
-    expect(response.status).toBe(503);
-    expect(harness.upstream.calls).toHaveLength(1);
-    expect(await harness.proxy.campaignPause()).toMatchObject({ reason: "provider-auth", status: 401 });
-    expect(harness.spends).toEqual([{ tokens: 10, usd: 0 }]);
+    const originalFetch = globalThis.fetch;
+    const controlledFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const response = await originalFetch(input, init);
+      if (input.toString() !== `http://127.0.0.1:${harness.upstream.port}/v1/chat/completions`) {
+        return response;
+      }
+      // Preserve the real upstream exchange, but remove TCP chunking from this
+      // regression: the proxy must consume the error and excess in one read.
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }), { status: response.status, headers: response.headers });
+    });
+    try {
+      const response = await completion(harness, "outer-optimizer", true);
+      expect(response.status).toBe(503);
+      expect(harness.upstream.calls).toHaveLength(1);
+      expect(await harness.proxy.campaignPause()).toMatchObject({ reason: "provider-auth", status: 401 });
+      expect(harness.spends).toEqual([{ tokens: 10, usd: 0 }]);
+    } finally {
+      controlledFetch.mockRestore();
+    }
   });
 
   it("an unterminated error frame cannot manufacture an auth status", async () => {
