@@ -597,8 +597,8 @@ describe("unix socket", () => {
   });
 });
 
-describe("live smoke (skip-if-unreachable)", () => {
-  it("1-token completion against vibeproxy :8317 / glm-5.2", { timeout: 60_000 }, async (t) => {
+describe("live smoke (explicit opt-in; skip-if-unreachable)", () => {
+  it.skipIf(process.env.HONE_LIVE_PROXY_TEST !== "1")("1-token completion against vibeproxy :8317 / glm-5.2", { timeout: 60_000 }, async (t) => {
     let reachable = true;
     try {
       await fetch("http://127.0.0.1:8317/v1/models", { signal: AbortSignal.timeout(2000) });
