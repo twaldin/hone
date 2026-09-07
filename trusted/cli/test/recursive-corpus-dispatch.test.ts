@@ -3,7 +3,7 @@ import type * as OptimizerDigestModule from "../src/optimizer-digest.js";
 import type * as AdmissionModule from "../src/admission.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Broker, CasStore, packDirAsArtifact } from "@hone/broker";
@@ -181,13 +181,33 @@ let broken: MetaControlArtifact;
 let degraded: MetaControlArtifact;
 
 beforeAll(async () => {
-  const actual = await vi.importActual<typeof OptimizerDigestModule>("../src/optimizer-digest.js");
-  snapshot = actual.collectOptimizerSnapshot(repoRoot);
-  const optimizerDir = join(repoRoot, "optimizer");
-  const seal = await captureMetaControlSourceSeal(optimizerDir);
-  [broken, degraded] = await Promise.all([
-    buildBrokenMetaControl(optimizerDir, seal), buildDegradedMetaControl(optimizerDir, seal),
-  ]);
+  // Dispatch does not need the installed dependency closure. Keep only a small
+  // source fixture plus the three files the real control transforms consume.
+  const sources: Record<string, string> = {
+    "package.json": "{}\n",
+    "tsconfig.json": "{}\n",
+    "src/main.ts": "export {};\n",
+    "worker/mutate.ts": "export {};\n",
+  };
+  for (const path of ["src/loop.ts", "assets/context.ts", "assets/policy.ts"]) {
+    sources[path] = readFileSync(join(repoRoot, "optimizer", path), "utf8");
+  }
+  snapshot = { files: new Map(Object.entries(sources).map(([path, content]) => [
+    `optimizer/${path}`, { bytes: Buffer.from(content), mode: 0o644 },
+  ])) };
+  const optimizerDir = makeRoot();
+  try {
+    for (const [path, content] of Object.entries(sources)) {
+      mkdirSync(dirname(join(optimizerDir, path)), { recursive: true });
+      writeFileSync(join(optimizerDir, path), content);
+    }
+    const seal = await captureMetaControlSourceSeal(optimizerDir);
+    [broken, degraded] = await Promise.all([
+      buildBrokenMetaControl(optimizerDir, seal), buildDegradedMetaControl(optimizerDir, seal),
+    ]);
+  } finally {
+    rmSync(optimizerDir, { recursive: true, force: true });
+  }
 });
 beforeEach(() => {
   vi.mocked(collectOptimizerSnapshot).mockReturnValue(snapshot);
