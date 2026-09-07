@@ -65,7 +65,7 @@ function recursiveFixture(): RecursiveMetaCampaignConfig {
     scalarizerDigest: digest(`recursive:scalarizer:${index}`),
   });
   const train = Array.from({ length: 8 }, (_, index) => capsule(index + 1));
-  const holdout = Array.from({ length: 12 }, (_, index) => capsule(index + 101));
+  const holdout = Array.from({ length: 11 }, (_, index) => capsule(index + 101));
   const child = { ...legacy.budgets.child };
   const multiply = (budget: BudgetEnvelope, factor: number): BudgetEnvelope => ({
     maxTokens: budget.maxTokens * factor,
