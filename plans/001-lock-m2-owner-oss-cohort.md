@@ -1,3 +1,5 @@
+> Historical design record. This file preserves an earlier plan and its review discussion. See [current methodology and status](../docs/methodology.md) for implemented behavior and remaining work.
+
 # Plan 001: Lock the M2 owner + OSS capsule cohort
 > **Status:** Reviewed and accepted. The task identities below are locked by this document; capsule bytes/digests freeze only after every task passes admission. If a listed task fails, stop and revise this plan—do not silently substitute a reserve.
 > 

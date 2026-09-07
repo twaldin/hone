@@ -1,3 +1,5 @@
+> Historical design record. This file preserves an earlier plan and its review discussion. See [current methodology and status](docs/methodology.md) for implemented behavior and remaining work.
+
 # Hone RFC 0001 — Council Review
 **Reviewed:** `hone-rfc-0001(1).md` (1039 lines), 2026-07-14 **Method:** Six parallel independent reviewers (research lineage, evaluation validity, seed minimalism, systems/cost, red team, product), each reading the full RFC, plus synthesis. External claims verified against primary sources during review. **Lens:** The whole plan — but weighted toward the first build: a low-opinionated seed that makes `hone "hone"` real early, so dogfooding drives the system's own construction instead of a hand-built waterfall.
 

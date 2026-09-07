@@ -1,3 +1,5 @@
+> Historical design record. This file preserves an earlier plan and its review discussion. See [current methodology and status](docs/methodology.md) for implemented behavior and remaining work.
+
 # Hone Build Plan — Seed (M0 → M1)
 **Scope:** everything needed to run the first `hone "hone"` campaign and hit the five-point evidence bar. Nothing else. Companion to `hone-rfc-0001-review.md` (Parts VI–VII); RFC section refs are to RFC 0001. **Repo:** `~/hone-full-rewrite` (empty). **Stack:** TypeScript, Node LTS, pnpm workspace, Docker. SQLite deferred (JSONL + CAS). Pi SDK pinned.
 

@@ -1,3 +1,5 @@
+> Historical design record. This file preserves an earlier plan and its review discussion. See [current methodology and status](docs/methodology.md) for implemented behavior and remaining work.
+
 # Hone M1, RelayBench, and Monoagent Integration Plan
 **Date:** 2026-07-15  
 **Starting point:** M0 release commit `9f48cd1`  
