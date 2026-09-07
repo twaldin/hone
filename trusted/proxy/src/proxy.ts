@@ -35,6 +35,7 @@ import {
   MAX_PROVIDER_ATTEMPTS,
   providerRetryDelayMs,
   responseModelIdentities,
+  streamedUpstreamError,
 } from "./provider-policy.js";
 
 export const DEFAULT_UPSTREAM = "http://127.0.0.1:8317";
@@ -1070,6 +1071,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
               attempt: input.attempt,
               status: null,
               transportError: true,
+              explicitUpstreamError: false,
               proxyFailover: false,
               noQuota: false,
               requestedRoute: input.route.model,
@@ -1139,6 +1141,10 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           for await (const chunk of upstream.body) {
             const buf = Buffer.from(chunk);
             if (received + buf.length > limits.maxResponseBytes) {
+              // Preserve complete evidence within the cap even when one read
+              // also contains excess bytes.
+              const remaining = limits.maxResponseBytes - received;
+              if (remaining > 0) chunks.push(buf.subarray(0, remaining));
               responseIncomplete = true;
               responseTooLarge = true;
               controller.abort();
@@ -1158,12 +1164,17 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       const observedDrift = returnedModels.some(
         (identity) => identity !== input.route.model,
       );
-      const policyDecision = closing && responseIncomplete && !observedDrift
+      const streamError = upstream.status >= 200 && upstream.status <= 299
+        ? streamedUpstreamError(responseText, contentType)
+        : undefined;
+      const providerStatus = streamError === undefined ? upstream.status : streamError.status;
+      const policyDecision = closing && responseIncomplete && !observedDrift && streamError === undefined
         ? { classification: "client-invalidity" as const }
         : classifyProviderAttempt({
             attempt: input.attempt,
-            status: upstream.status,
+            status: providerStatus,
             transportError: responseIncomplete && !responseTooLarge,
+            explicitUpstreamError: streamError !== undefined,
             // A parseable prefix of an interrupted or oversized body is not an envelope.
             noQuota:
               upstream.status === 503 &&
@@ -1182,6 +1193,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           });
       const decision =
         responseTooLarge &&
+        streamError === undefined &&
         upstream.status >= 200 &&
         upstream.status <= 299 &&
         !observedDrift
@@ -1222,7 +1234,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           role: input.role,
           requestedRoute: input.route.model,
           returnedModel,
-          status: upstream.status,
+          status: providerStatus,
           attempt: input.attempt,
         });
       }
@@ -1261,7 +1273,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
         kind: "attempt",
         dispatchId,
         status: upstream.status,
-        providerStatus: upstream.status,
+        providerStatus,
         contentType,
         body: responseText,
         classification: decision.classification,

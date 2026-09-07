@@ -25,6 +25,14 @@ The run's durable broker journal is the authority for accepted candidates. Statu
 
 Runs and artifacts remain in operator-local state. A public evidence bundle is a separately reviewed projection of those records; it must not expose protected data, provider secrets or raw private execution context.
 
+### Provider failures
+
+The trusted proxy classifies explicit provider errors separately from malformed agent output. For HTTP-success SSE responses, a complete top-level JSON `error` envelope or `event: error` marks a failed upstream operation, even after a valid model chunk. Agent-authored text inside a choice remains opaque.
+
+Structured numeric HTTP error statuses are read from `error.status`, `error.status_code`, `error.code`, then envelope `status` or `status_code`. Auth (`401`/`403`), payment (`402`) and rate-limit (`429`) errors pause immediately; `5xx` errors retain at most three retries before pausing. Explicit failures without a recognized status policy use the same bounded retry limit and then pause as `provider-transport`. Missing or invalid status remains `null`; status is never guessed from a message or error-type string.
+
+Pause and preflight records retain the provider status, while traces retain the HTTP transport status and the response body digest. Each attempt remains charged, including failed streamed attempts. A durable pause blocks further dispatch across restart until explicit resume passes both frozen-route preflights.
+
 ## Optimization levels
 
 A single-candidate probe exercises a capsule. An M1 campaign evaluates changes to the optimizer across a frozen task set. M2 adds recursive optimization and transfer evaluation under a separate frozen protocol. The code includes authority-bearing corpus and nested-run operations; these are not unrestricted public CLI calls.
