@@ -70,6 +70,7 @@ Use the [CLI reference](docs/cli.md) for command forms, inspection and delivery.
 | [Architecture](docs/architecture.md) | Trusted execution, optimizer boundaries and retained state. |
 | [Capsules](docs/capsules.md) | Task packages, admission and terminal source references. |
 | [Methodology](docs/methodology.md) | Experiment levels and current implementation status. |
+| [M2 readiness](docs/m2-readiness.md) | Implemented prerequisites, remaining decisions and bounded next work. |
 | [Results](docs/results.md) | Evidence requirements and what a published result can support. |
 
 ## License and publication
