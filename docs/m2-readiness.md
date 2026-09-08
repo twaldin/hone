@@ -88,7 +88,7 @@ hone resume --campaign "$CELL_STATE_DIR" --pause "$PAUSE_ID"
 
 `$A_STATE_DIR` is the retained `recursive-cell-<config-hash>` directory under `.hone-runs`, not the config file. Stage-B search above represents one cell only, not construction/comparison of both controller cells. Obtain owner review before `approve-search`; each destination cell needs its own identity-bound approval. Confirmation still requires the preceding search journal and later artifact-bound authorization. `resume` releases a durable campaign pause; it is not `run --resume`. Check its persisted cause before release.
 
-The executing recursive templates also require the trusted corpus handoff described in [CLI](cli.md#campaigns). The public parser has no corpus-loading flags and refuses execution without those inputs; these templates are not currently an end-to-end launch path.
+The recursive `search`, `confirmation` and `terminal` templates require the trusted corpus handoff described in [CLI](cli.md#campaigns). The public parser has no corpus-loading flags and refuses those phases without the required inputs. `freeze`, `approve-search` and `authorize` do not require document bytes. These templates are not currently an end-to-end launch path.
 
 **Missing supported command gaps:** public-clone admission/image bootstrap; calibration execution; corpus assembly/draft generation; full cross-cell orchestration; complete M2 evidence export/RelayBench ingest and M2b trigger evaluation. Library APIs and private historical scripts are not public command aliases.
 
