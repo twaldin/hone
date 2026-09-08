@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_586d89dc214c",
+  "objective": "Maximize hit rate on synthetic traces of at most 10000 requests under hard cache capacity, without future-request access. Fresh calibration-only task; excluded from development and terminal cohorts. Only task.py may change.",
+  "baseline": {
+    "kind": "git",
+    "commit": "86c97485e534f5821b2e9730579a617f71415252"
+  },
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "checker.py",
+    "contract.json"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "protected",
+      "paths": [
+        "assets/train/cases.json.gz"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/cases.json.gz"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 600000,
+    "maxUsd": 10,
+    "maxWallClockSec": 7200,
+    "maxEvaluatorInvocations": 49
+  },
+  "sandbox": {
+    "memoryBytes": 2147483648,
+    "cpus": 2
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:dfee2b42bfd61611adf373a4d7d7aeadab4e11d28bdc02b3dcb4ecbd442ea1e6"
+  },
+  "contentHashes": {
+    "assets/train/cases.json.gz": "sha256:75da3c0fd65a4479f90a3a04e6e2de513ddf2246cf9c89c5d0698a5590770bc5",
+    "assets/validation/cases.json.gz": "sha256:1a552bd838bbbc873d88d1299c7f489e0c616dfb7174546cfaec66a99fafc162"
+  },
+  "meta": {
+    "evaluatorSource": "inferred",
+    "provenance": "Fresh TWA-90 implementation of the TWA-59 approved task; no cohort code or fixtures reused.",
+    "license": "MIT",
+    "tags": [
+      "calibration-only",
+      "fresh-synthetic",
+      "python-stdlib"
+    ],
+    "admissionStatus": "offline-authored-not-admitted",
+    "excludedCohorts": [
+      "development",
+      "terminal"
+    ],
+    "imageStatus": "approved pin; target-host/runtime validation required before admission"
+  }
+}

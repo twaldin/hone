@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_9b8301b01d23",
+  "objective": "Maximize covered weight over at most 256 elements and 128 candidate sets under a hard cost budget. Fresh calibration-only task; excluded from development and terminal cohorts. Only task.py may change.",
+  "baseline": {
+    "kind": "git",
+    "commit": "7f4f230c1bf8db0e942f7c20df006a450e83d84d"
+  },
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "checker.py",
+    "contract.json"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/cases.json.gz"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/cases.json.gz"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 600000,
+    "maxUsd": 10,
+    "maxWallClockSec": 7200,
+    "maxEvaluatorInvocations": 49
+  },
+  "sandbox": {
+    "memoryBytes": 2147483648,
+    "cpus": 2
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:59fd8d266eec0f7c194e6543b71defaadfd8e3c16a6fa05ade8146d20d0abc9b"
+  },
+  "contentHashes": {
+    "assets/train/cases.json.gz": "sha256:2be8d6e0f648684f03a88a30da64b1f40d32f9d2dd16e48d1d5659484d4ce9f9",
+    "assets/validation/cases.json.gz": "sha256:3c42aaa79f0d2682c44f6d8fef0be47d801fd1fe3f682c87a1dc38b4e6c18003"
+  },
+  "meta": {
+    "evaluatorSource": "inferred",
+    "provenance": "Fresh TWA-90 implementation of the TWA-59 approved task; no cohort code or fixtures reused.",
+    "license": "MIT",
+    "tags": [
+      "calibration-only",
+      "fresh-synthetic",
+      "python-stdlib"
+    ],
+    "admissionStatus": "offline-authored-not-admitted",
+    "excludedCohorts": [
+      "development",
+      "terminal"
+    ],
+    "imageStatus": "approved pin; target-host/runtime validation required before admission"
+  }
+}

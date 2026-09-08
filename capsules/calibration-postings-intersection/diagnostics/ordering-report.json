@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "variants": {
+    "baseline": {
+      "train": 0.2685832508666158,
+      "validation": 0.25585462736494374,
+      "combined": 0.26221893911577976,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    },
+    "broken": {
+      "train": 0,
+      "validation": 0,
+      "combined": 0,
+      "trainTestsPass": false,
+      "validationTestsPass": false
+    },
+    "naive": {
+      "train": 0.231621048794097,
+      "validation": 0.2514460009597921,
+      "combined": 0.24153352487694454,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    },
+    "shortcut": {
+      "train": 0.2612759614807977,
+      "validation": 0,
+      "combined": 0.13063798074039884,
+      "trainTestsPass": true,
+      "validationTestsPass": false
+    },
+    "improved": {
+      "train": 0.26664812187918996,
+      "validation": 0.20639384231557698,
+      "combined": 0.23652098209738348,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    }
+  },
+  "stability": {
+    "aggregates": [
+      0.26221893911577976,
+      0.2472488684908362,
+      0.2589983840345753
+    ],
+    "spread": 0.05844136328094962,
+    "band": 0.15
+  },
+  "failures": [
+    "Offline cooperative observations only: not target-host isolated ordering or admission evidence.",
+    "baseline(0.26221893911577976) < improved(0.23652098209738348) violated",
+    "shortcut must beat baseline on train (0.2612759614807977 > 0.2685832508666158) violated"
+  ]
+}

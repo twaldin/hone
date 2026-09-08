@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 2,
+  "id": "cap_3c0ab827f200",
+  "objective": "Accelerate exact sorted document-ID intersection for up to eight lists of 20000 entries each. Fresh calibration-only task; excluded from development and terminal cohorts. Only task.py may change.",
+  "baseline": {
+    "kind": "git",
+    "commit": "890f681e578a9c5a2c6b24a301c19b848aeb3115"
+  },
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "checker.py",
+    "contract.json"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/cases.json.gz"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/cases.json.gz"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 600000,
+    "maxUsd": 10,
+    "maxWallClockSec": 7200,
+    "maxEvaluatorInvocations": 49
+  },
+  "sandbox": {
+    "memoryBytes": 2147483648,
+    "cpus": 2
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json",
+    "hash": "sha256:c014d896ae703346d8b1166c4fa32e66b276bb1556715640fd1239500341c409"
+  },
+  "contentHashes": {
+    "assets/train/cases.json.gz": "sha256:09a2e22ee43bc30554de33a1e512d71e39df86e3eb1d35ff981c5dcb48b8f3c2",
+    "assets/validation/cases.json.gz": "sha256:98b58444ea29223bfde8228e78187533d875c41953f4ad43860ca215c48c6173"
+  },
+  "meta": {
+    "evaluatorSource": "inferred",
+    "provenance": "Fresh TWA-90 implementation of the TWA-59 approved task; no cohort code or fixtures reused.",
+    "license": "MIT",
+    "tags": [
+      "calibration-only",
+      "fresh-synthetic",
+      "python-stdlib"
+    ],
+    "admissionStatus": "offline-authored-not-admitted",
+    "excludedCohorts": [
+      "development",
+      "terminal"
+    ],
+    "imageStatus": "approved pin; target-host/runtime validation required before admission"
+  }
+}

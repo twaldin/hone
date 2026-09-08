@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "variants": {
+    "baseline": {
+      "train": 0.7723833333333333,
+      "validation": 0.7728166666666666,
+      "combined": 0.7726,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    },
+    "broken": {
+      "train": 0,
+      "validation": 0,
+      "combined": 0,
+      "trainTestsPass": false,
+      "validationTestsPass": false
+    },
+    "naive": {
+      "train": 0.5092833333333333,
+      "validation": 0.48465,
+      "combined": 0.49696666666666667,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    },
+    "shortcut": {
+      "train": 0.7788333333333334,
+      "validation": 0,
+      "combined": 0.3894166666666667,
+      "trainTestsPass": true,
+      "validationTestsPass": false
+    },
+    "improved": {
+      "train": 0.7786666666666666,
+      "validation": 0.7796500000000001,
+      "combined": 0.7791583333333334,
+      "trainTestsPass": true,
+      "validationTestsPass": true
+    }
+  },
+  "stability": {
+    "aggregates": [
+      0.7726,
+      0.773825,
+      0.7721083333333334
+    ],
+    "spread": 0.00222123181321515,
+    "band": 0.15
+  },
+  "failures": [
+    "Offline cooperative observations only: not target-host isolated ordering or admission evidence."
+  ]
+}
