@@ -137,13 +137,19 @@ def cases(seed: int) -> list[dict]:
 
 
 if __name__ == "__main__":
+    import argparse
     import json
     import sys
 
-    seed = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    for row in cases(seed):
-        before = row["input"]["before"]
-        after = row["input"]["after"]
-        print(f"{row['id']:<24} before={len(before):>4} after={len(after):>4}")
-    if "--json" in sys.argv:
-        json.dump(cases(seed), sys.stdout)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("seed", type=int, nargs="?", default=0)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    rows = cases(args.seed)
+    if args.json:
+        json.dump(rows, sys.stdout)
+    else:
+        for row in rows:
+            before = row["input"]["before"]
+            after = row["input"]["after"]
+            print(f"{row['id']:<24} before={len(before):>4} after={len(after):>4}")

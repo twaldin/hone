@@ -127,6 +127,49 @@ class CalibrationChecks(unittest.TestCase):
             finally:
                 worker.close()
 
+    def test_worker_resolves_relative_data_in_candidate_workspace(self):
+        runtime = module("online-cache", "eval.py")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "marker.txt").write_text("candidate data")
+            (workspace / "task.py").write_text(
+                'def solve(payload):\n    with open("marker.txt") as source:\n        return source.read()\n')
+            worker = runtime.Worker(workspace, offline=True)
+            try:
+                self.assertEqual(worker.call({}), "candidate data")
+            finally:
+                worker.close()
+
+    def test_online_deadline_is_shared_across_requests(self):
+        runtime = module("online-cache", "eval.py")
+        runtime.CALL_SECONDS = 1
+        case = {"input": {"capacity": 0, "phases": [
+            {"length": 8, "pages": [1], "weights": [1]}]}}
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "task.py").write_text(
+                "import time\ndef solve(payload):\n    time.sleep(0.2)\n    return None\n")
+            ok, score, _ = runtime.evaluate_case(workspace, module("online-cache"), case, "online", True)
+            self.assertFalse(ok)
+            self.assertEqual(score, 0)
+
+    def test_near_miss_fixture_preserves_seven_of_eight_spoilers(self):
+        from collections import Counter
+        generator = load(ROOT / "calibration-postings-intersection/tools/fixtures.py")
+        near_miss = next(row for row in generator.cases(0) if row["id"] == "near-miss-max")
+        counts = Counter(value for member in near_miss["input"]["lists"] for value in member)
+        self.assertEqual(sum(count == 8 for count in counts.values()), 500)
+        self.assertGreaterEqual(sum(count == 7 for count in counts.values()), 800)
+
+    def test_sequence_fixture_json_cli_is_machine_readable(self):
+        generator_path = ROOT / "calibration-sequence-diff/tools/fixtures.py"
+        generator = load(generator_path)
+        for arguments, seed in ((["--json"], 0), (["7", "--json"], 7)):
+            with self.subTest(arguments=arguments):
+                output = subprocess.check_output(
+                    [sys.executable, "-I", "-B", str(generator_path), *arguments], text=True, timeout=5)
+                self.assertEqual(json.loads(output), generator.cases(seed))
+
     def test_production_refuses_unsealed_host_execution(self):
         completed = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "calibration-online-cache/baseline/eval.py")],
                                    capture_output=True, text=True, timeout=5)

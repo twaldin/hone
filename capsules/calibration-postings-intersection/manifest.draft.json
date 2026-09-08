@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_06d52e4b338e",
+  "id": "cap_a002e80535e7",
   "objective": "Accelerate exact sorted document-ID intersection for up to eight lists of 20000 entries each. Fresh calibration-only task; excluded from development and terminal cohorts. Only task.py may change.",
   "baseline": {
     "kind": "git",
-    "commit": "d656a178301822c1bbfb9a638d24fa801905d940"
+    "commit": "88e939b3a9e34cb0ddd74993fc99b22dc2899692"
   },
   "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
   "evalEntrypoint": [
@@ -46,11 +46,11 @@
   },
   "diagnosticOrdering": {
     "path": "diagnostics/ordering-report.json",
-    "hash": "sha256:21f651130b8017b3215219f40fa22f9757588de1ee7dfb67c6d673e324bb8a15"
+    "hash": "sha256:c014d896ae703346d8b1166c4fa32e66b276bb1556715640fd1239500341c409"
   },
   "contentHashes": {
-    "assets/train/cases.json.gz": "sha256:762830eb3abf9efb081f18698c2748685602a2735b21eefed45c3c4ebd16e367",
-    "assets/validation/cases.json.gz": "sha256:092ed2fa501622e10dd7ee08db25e2fc95e6356c26e354f848bd144ff4560456"
+    "assets/train/cases.json.gz": "sha256:09a2e22ee43bc30554de33a1e512d71e39df86e3eb1d35ff981c5dcb48b8f3c2",
+    "assets/validation/cases.json.gz": "sha256:98b58444ea29223bfde8228e78187533d875c41953f4ad43860ca215c48c6173"
   },
   "meta": {
     "evaluatorSource": "inferred",

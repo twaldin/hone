@@ -48,12 +48,16 @@ def _sorted_sample(rng: random.Random, hi: int, n: int) -> list[int]:
     return sorted(rng.sample(range(hi + 1), n))
 
 
-def _list_with(rng: random.Random, hi: int, n: int, planted: set[int]) -> list[int]:
-    """Exactly ``n`` distinct ids in ``[0, hi]`` that include ``planted``."""
+def _list_with(rng: random.Random, hi: int, n: int, planted: set[int],
+               excluded: set[int] | frozenset[int] = frozenset()) -> list[int]:
+    """Exactly ``n`` distinct ids including ``planted`` and omitting ``excluded``."""
     chosen = set(planted)
-    chosen.update(rng.sample(range(hi + 1), n - len(planted)))
+    chosen.update(value for value in rng.sample(range(hi + 1), n - len(planted))
+                  if value not in excluded)
     while len(chosen) < n:
-        chosen.add(rng.randrange(hi + 1))
+        value = rng.randrange(hi + 1)
+        if value not in excluded:
+            chosen.add(value)
     return sorted(chosen)
 
 
@@ -148,7 +152,7 @@ def cases(seed: int) -> list[dict]:
         for j, spoiler in enumerate(spoilers):
             if j != i:
                 must |= spoiler
-        near_miss.append(_list_with(rng, 200_000, MAX_LEN, must))
+        near_miss.append(_list_with(rng, 200_000, MAX_LEN, must, spoilers[i]))
     out.append(_case("near-miss-max", near_miss))
 
     return out

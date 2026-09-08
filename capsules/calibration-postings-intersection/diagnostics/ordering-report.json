@@ -2,9 +2,9 @@
   "version": 1,
   "variants": {
     "baseline": {
-      "train": 0.2703965449274796,
-      "validation": 0.26549590993005656,
-      "combined": 0.26794622742876806,
+      "train": 0.2685832508666158,
+      "validation": 0.25585462736494374,
+      "combined": 0.26221893911577976,
       "trainTestsPass": true,
       "validationTestsPass": true
     },
@@ -16,38 +16,39 @@
       "validationTestsPass": false
     },
     "naive": {
-      "train": 0.23750960843917718,
-      "validation": 0.2290722368876516,
-      "combined": 0.2332909226634144,
+      "train": 0.231621048794097,
+      "validation": 0.2514460009597921,
+      "combined": 0.24153352487694454,
       "trainTestsPass": true,
       "validationTestsPass": true
     },
     "shortcut": {
-      "train": 0.2641589240714998,
+      "train": 0.2612759614807977,
       "validation": 0,
-      "combined": 0.1320794620357499,
+      "combined": 0.13063798074039884,
       "trainTestsPass": true,
       "validationTestsPass": false
     },
     "improved": {
-      "train": 0.26877040555902204,
-      "validation": 0.28212979839477087,
-      "combined": 0.27545010197689646,
+      "train": 0.26664812187918996,
+      "validation": 0.20639384231557698,
+      "combined": 0.23652098209738348,
       "trainTestsPass": true,
       "validationTestsPass": true
     }
   },
   "stability": {
     "aggregates": [
-      0.26794622742876806,
-      0.2723283268704548,
-      0.27034805843997955
+      0.26221893911577976,
+      0.2472488684908362,
+      0.2589983840345753
     ],
-    "spread": 0.016217532201127528,
+    "spread": 0.05844136328094962,
     "band": 0.15
   },
   "failures": [
     "Offline cooperative observations only: not target-host isolated ordering or admission evidence.",
-    "shortcut must beat baseline on train (0.2641589240714998 > 0.2703965449274796) violated"
+    "baseline(0.26221893911577976) < improved(0.23652098209738348) violated",
+    "shortcut must beat baseline on train (0.2612759614807977 > 0.2685832508666158) violated"
   ]
 }

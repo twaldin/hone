@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_5631929850c6",
+  "id": "cap_d1df90926763",
   "objective": "Maximize covered weight over at most 256 elements and 128 candidate sets under a hard cost budget. Fresh calibration-only task; excluded from development and terminal cohorts. Only task.py may change.",
   "baseline": {
     "kind": "git",
-    "commit": "543e9abdf55142fd6dce0456d1cc41a285a49ef5"
+    "commit": "7c3c75cf1946a1f04ca4ec3a8982d4ff88701783"
   },
   "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
   "evalEntrypoint": [

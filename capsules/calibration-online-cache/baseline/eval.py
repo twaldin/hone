@@ -46,10 +46,11 @@ def confine_worker():
     # Seccomp rejects process creation and cross-process/network access. File reads
     # remain available for stdlib imports; /capsule's root-owned 0700 parent seals assets.
     machine = platform.machine()
+    # Also deny io_uring setup/enter/register: async socket operations bypass socket().
     if machine == "x86_64":
-        arch, denied = 0xC000003E, [56, 57, 58, 435, 101, 310, 311, 41, 53]
+        arch, denied = 0xC000003E, [56, 57, 58, 435, 101, 310, 311, 41, 53, 425, 426, 427]
     elif machine in ("aarch64", "arm64"):
-        arch, denied = 0xC00000B7, [220, 435, 117, 270, 271, 198, 199]
+        arch, denied = 0xC00000B7, [220, 435, 117, 270, 271, 198, 199, 425, 426, 427]
     else:
         raise RuntimeError("unsupported seccomp architecture")
 
@@ -92,11 +93,12 @@ def worker_main(candidate, offline):
 
 class Worker:
     def __init__(self, workspace, offline=False):
+        workspace = Path(workspace).resolve()
         self.proc = subprocess.Popen(
             [sys.executable, "-I", "-B", str(ROOT / "eval.py"), "--worker", str(workspace)]
             + (["--offline"] if offline else []),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            cwd=ROOT, env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+            cwd=workspace, env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
             start_new_session=True, bufsize=0,
         )
         self.buffer = b""
@@ -127,11 +129,12 @@ class Worker:
             raise ValueError("unsolicited candidate output")
         return json.loads(line)
 
-    def call(self, payload):
+    def call(self, payload, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + CALL_SECONDS
         request_id = secrets.token_hex(16)
         data = memoryview((json.dumps({"id": request_id, "input": payload},
                                      separators=(",", ":")) + "\n").encode())
-        deadline = time.monotonic() + CALL_SECONDS
         # Bound writes too: a candidate may stop reading a large postings request.
         with selectors.DefaultSelector() as writable:
             writable.register(self.proc.stdin, selectors.EVENT_WRITE)
@@ -176,7 +179,9 @@ def evaluate_case(workspace, checker, case, mode, offline):
         worker = Worker(workspace, offline)
         started = time.perf_counter()
         if mode == "online":
-            ok, quality, detail = checker.evaluate(case["input"], worker.call)
+            deadline = time.monotonic() + CALL_SECONDS
+            ok, quality, detail = checker.evaluate(
+                case["input"], lambda payload: worker.call(payload, deadline))
         else:
             result = worker.call(case["input"])
             elapsed = (time.perf_counter() - started) * 1000
