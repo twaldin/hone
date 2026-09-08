@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import {
@@ -905,6 +905,12 @@ function readG1SearchApproval(campaignDir: string): VerifiedG1SearchApproval {
   return verifyG1SearchApproval(parsed.data, path);
 }
 
+function assertSearchSourceDirectory(directory: string): void {
+  if (lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() !== true) {
+    refuse(`source G1 record directory ${directory} must be a real directory, not a symlink`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Human authorization assembly.
 // ---------------------------------------------------------------------------
@@ -1035,6 +1041,7 @@ export function assembleG1SearchApproval(inputs: G1SearchApprovalInputs): Verifi
   const record = verifyG1Record(inputs.record, "G1 record for search approval");
   if (!record.pass) refuse("G1 statistical gate did not pass — Stage-B search cannot be approved");
   const sourceRecordDir = resolve(inputs.recordDir);
+  assertSearchSourceDirectory(sourceRecordDir);
   if (readG1Record(sourceRecordDir).inputsDigest !== record.inputsDigest) {
     refuse(`${sourceRecordDir} holds a different G1 record than the one being approved`);
   }
@@ -1179,6 +1186,7 @@ export function assertG1SearchApproved(campaignDir: string, config: MetaCampaign
   if (approval.configHash !== configHash) {
     refuse(`G1 search approval is bound to ${approval.configHash}, not the dispatched campaign ${configHash}`);
   }
+  assertSearchSourceDirectory(approval.sourceRecordDir);
   const sourcePath = join(approval.sourceRecordDir, G1_RECORD_FILE);
   if (!existsSync(sourcePath)) refuse(`source G1 record ${sourcePath} named by the search approval is absent — Stage-B search fails closed`);
   const record = readG1Record(approval.sourceRecordDir);

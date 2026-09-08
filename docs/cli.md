@@ -63,6 +63,8 @@ These are templates for separately authorized campaign work, not permission to e
 
 **Compatibility boundary:** existing `g1-authorization.v1.json` records still authorize the later artifact-bound confirmation, and G1/G2 authorization checks still guard terminal dispatch. They do not substitute for pre-search approval; the new approval does not authorize confirmation or terminal work. No `controlWinner` or `generation2` is needed to approve search. Approval retains an absolute Stage-A record-directory path and re-reads the record there: moving/removing that directory or regenerating the record requires fresh owner approval. A changed destination cell also requires fresh approval; there is no automatic migration or invented time-based expiry. As with existing authorizations, these are trusted-local attestations and digest bindings, not cryptographic proof of the named person's identity.
 
+The source record directory itself must be a real directory, not a symlink, at approval and dispatch. Replacing its recorded path with a symlink to relocated records does not preserve approval.
+
 `hone resume` releases a durable campaign pause. It is distinct from `hone run … --resume`, which resumes an individual run. A provider interruption should be understood from its persisted pause or error record before resuming.
 
 Exit codes are 0 for success, 1 for error or decline, 2 for usage errors and 3 for an autonomy-ladder refusal.

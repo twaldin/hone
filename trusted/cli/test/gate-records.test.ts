@@ -728,9 +728,9 @@ describe("G1 search approval gates Stage-B search without Stage-B products", () 
     const record = passingG1(stageADir);
     const config = buildConfig("B");
     const rejected = { ...HUMAN, decision: "rejected" } as unknown as typeof HUMAN;
-    expect(() => assembleG1SearchApproval({ config, record, recordDir: stageADir, humanDecision: rejected })).toThrow();
+    expect(() => assembleG1SearchApproval({ config, record, recordDir: stageADir, humanDecision: rejected })).toThrow(/decision/);
     const unconfined = { ...HUMAN, diffConfinedIntelligible: false } as unknown as typeof HUMAN;
-    expect(() => assembleG1SearchApproval({ config, record, recordDir: stageADir, humanDecision: unconfined })).toThrow();
+    expect(() => assembleG1SearchApproval({ config, record, recordDir: stageADir, humanDecision: unconfined })).toThrow(/diffConfinedIntelligible/);
   });
 
   it("refuses a failing G1 record and a non-stage-B destination", () => {
