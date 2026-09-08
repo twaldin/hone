@@ -22,12 +22,26 @@ export interface CalibrationTask {
   orderingReport: DiagnosticOrderingReport;
   admission: "draft" | "admitted";
 }
+/** Observed native-host isolation, rechecked before every production dispatch. */
+export interface CalibrationHostBinding {
+  cgroupParent: string;
+  cgroupPath: string;
+  cgroupDriver: "systemd" | "cgroupfs";
+  bootId: string;
+  dockerId: string;
+  imageId: string;
+  architecture: string;
+  memoryBytes: number;
+  cpuQuota: number;
+  cpuPeriod: number;
+}
 export interface CalibrationPlanInputs {
   tasks: CalibrationTask[];
   corpus: CorpusProvenanceV1;
   image: string;
   optimizerDigest: string;
   runtimeDigest: string;
+  host?: CalibrationHostBinding;
 }
 export interface CalibrationCell {
   key: string;

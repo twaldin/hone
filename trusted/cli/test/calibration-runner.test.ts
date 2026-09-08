@@ -12,7 +12,9 @@ import { CapsuleManifest, DiagnosticOrderingReport, RunConfig, capsuleDigest, de
 import { admitCapsule } from "../src/admission.js";
 import { createCalibrationPlan } from "../src/calibration.js";
 import { createCalibrationRunner, calibrationMeasurementEpoch } from "../src/calibration-runner.js";
-import { CALIBRATION_BUDGET, CALIBRATION_TASKS, type CalibrationRunRequest } from "../src/calibration-types.js";
+import { inspectCalibrationHost } from "../src/calibration-host.js";
+import { openDockerCreateGate } from "../src/docker-create-gate.js";
+import { CALIBRATION_BUDGET, CALIBRATION_TASKS, type CalibrationHostBinding, type CalibrationRunRequest } from "../src/calibration-types.js";
 import { corpusProvenanceInputsDigest, type CorpusProvenanceV1 } from "../src/corpus-provenance.js";
 import { contractHash, renderContract } from "../src/contract.js";
 import { runCommand } from "../src/supervisor.js";
@@ -33,11 +35,22 @@ vi.mock("../src/runtime-digest.js", async (original) => ({
   ...await original<typeof RuntimeDigestModule>(),
   verifiedBootRuntimeDigest: () => `sha256:${"b".repeat(64)}`,
 }));
+vi.mock("../src/calibration-host.js", () => ({ inspectCalibrationHost: vi.fn() }));
 
 const sourceRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const temporary: string[] = [];
 const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
-beforeEach(() => { vi.mocked(runCommand).mockReset(); vi.mocked(admitCapsule).mockReset(); });
+const host: CalibrationHostBinding = {
+  cgroupParent: "/hone-calibration", cgroupPath: "/hone-calibration", cgroupDriver: "cgroupfs",
+  bootId: "01234567-89ab-4cde-8f01-23456789abcd", dockerId: "calibration-test-engine",
+  imageId: digest("native-image"), architecture: "amd64", memoryBytes: 2147483648,
+  cpuQuota: 200000, cpuPeriod: 100000,
+};
+beforeEach(() => {
+  vi.mocked(runCommand).mockReset();
+  vi.mocked(admitCapsule).mockReset();
+  vi.mocked(inspectCalibrationHost).mockReset().mockReturnValue(host);
+});
 afterEach(() => { for (const dir of temporary.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 function fixture(draft = false) {
@@ -69,7 +82,8 @@ function fixture(draft = false) {
     docHashes: {}, panelDocs: [], generatedAt: "2026-09-07T00:00:00.000Z",
   };
   const plan = createCalibrationPlan({ tasks, corpus: { ...corpus, inputsDigest: corpusProvenanceInputsDigest(corpus) },
-    image: tasks[0]!.manifest.image, optimizerDigest: `sha256:${"a".repeat(64)}`, runtimeDigest: `sha256:${"b".repeat(64)}` });
+    image: tasks[0]!.manifest.image, optimizerDigest: `sha256:${"a".repeat(64)}`, runtimeDigest: `sha256:${"b".repeat(64)}`,
+    ...(draft ? {} : { host }) });
   const request: CalibrationRunRequest = { plan, cell: plan.cells[0]!, task: tasks[0]!, runId: "run_cal_evidence", resume: false,
     remainingBudget: { ...CALIBRATION_BUDGET }, stateDir };
   const runner = createCalibrationRunner({ root, env: {}, isTTY: false, out: () => {}, err: () => {} });
@@ -101,6 +115,8 @@ function recordRun(root: string, request: CalibrationRunRequest, epoch = calibra
   writeFileSync(join(runDir, ".hone-version"), request.plan.runtimeDigest + "\n");
   writeFileSync(join(runDir, "campaign-session.v1.json"), JSON.stringify({ version: 1, campaignConfigHash: request.plan.planDigest,
     authorityPath: join(request.stateDir, "campaign-pause.v1.json"), proxyRole: "inner-capsule-improvement" }));
+  writeFileSync(join(runDir, "docker-engine.json"), JSON.stringify({ v: 1, engineId: host.dockerId, endpointKind: "local-unix" }));
+  openDockerCreateGate(runDir, request.runId, { cgroupParent: host.cgroupParent, bootId: host.bootId, endpointIsLocal: true });
   writeFileSync(join(runDir, "broker-state.ndjson"), JSON.stringify({ t: "eval", measurementEpoch: epoch, record: {
     capsuleId: request.cell.capsuleId, artifactHash: artifact.hash, assetGroupId: "train", seed: request.cell.seed,
     output: { valid: true, objectives: { q: 0.6 }, constraints: { correct: true }, perExample: {} },
@@ -148,6 +164,24 @@ describe("calibration production adapter with offline run records", () => {
     expect(result).toMatchObject({ status: "incomplete", resumable: false, usage: null });
     expect(runCommand).not.toHaveBeenCalled();
     await runner.verify(request, result);
+  });
+
+  it("refuses changed host isolation before creating execution authority", async () => {
+    const { root, request, runner } = fixture();
+    vi.mocked(inspectCalibrationHost).mockReturnValue({ ...host, bootId: "abcdef01-2345-4678-9abc-def012345678" });
+    await expect(runner.run(request)).rejects.toThrow(/host.*drifted/);
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(existsSync(join(root, ".hone-runs"))).toBe(false);
+    expect(existsSync(join(request.stateDir, "campaign-pause.v1.json"))).toBe(false);
+  });
+
+  it("invalidates otherwise valid results when their aggregate resource seal disappears", async () => {
+    const { root, request, runner } = fixture();
+    vi.mocked(runCommand).mockImplementation(async () => { recordRun(root, request); return 0; });
+    const outcome = await runner.run(request);
+    expect(outcome.status).toBe("valid");
+    rmSync(join(root, ".hone-runs", request.runId, "docker-creates.ndjson"));
+    await expect(runner.verify(request, outcome)).rejects.toThrow(/does not match/);
   });
 
   it("refuses draft admission before any run or provider authority is created", async () => {

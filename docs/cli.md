@@ -54,17 +54,21 @@ hone calibration status --state .hone-runs/calibration
 hone calibration --help
 ```
 
-`--drafts` reads only the four named packages' `manifest.draft.json` files, retaining their failed diagnostic evidence and marking the state `offline`. It neither issues admission receipts nor promotes draft identities. Without `--drafts`, planning requires full, non-provisional Gate-2 admission and a positive pinned train normalization scale. Plans bind the exact manifests, ordering reports, shared `seeded-astar` image reference, optimizer/runtime digests, cohort provenance and matrix; changed inputs require a separately reviewed plan, not an in-place edit.
+`--drafts` reads only the four named packages' `manifest.draft.json` files, retaining their failed diagnostic evidence and marking the state `offline`. It neither issues admission receipts nor promotes draft identities. Without `--drafts`, planning requires `--cgroup-parent`, full non-provisional Gate-2 admission and a positive pinned train normalization scale. Plans bind the exact manifests, ordering reports, shared `seeded-astar` image reference, optimizer/runtime digests, cohort provenance and matrix; changed inputs require a separately reviewed plan, not an in-place edit.
 
 The fixed matrix is **80 cells**: four tasks × episode caps **2/4/8/12** × matched seeds **104729, 130363, 155921, 181081, 206369**. Every cap has the same metered maxima: **600,000 tokens, $10, 7,200 seconds and 49 evaluator invocations**. The sandbox setting is **2 GiB / 2 CPUs**. Aggregate upper reservations are **48M tokens, $800 and 160 serial run-hours**, excluding preparation; they are neither measured requirements nor permission to spend.
 
-The existing runtime meters each run's four budget dimensions and applies the sandbox limits **per container**, not as an aggregate process-tree cgroup. Selected-host admission must establish the approved cell isolation/resource conditions. Planning and offline tests do not establish that host evidence.
+Production requires an **aggregate native Linux cgroup-v2 boundary**, not merely per-container flags. The nominated group must already contain the coordinator process, with `memory.max` at most 2 GiB, `memory.swap.max` zero and a finite `cpu.max` quota/period ratio at most 2. Use a system slice name such as `hone-calibration.slice` with Docker's systemd driver, or an absolute kernel cgroup path such as `/hone-calibration` with its cgroupfs driver. Host provisioning is an operator prerequisite; these commands neither create a cgroup nor move a process into one.
+
+Admitted planning inspects the actual kernel hierarchy/membership, limits, local Docker engine and exact image's native architecture. Each dispatch rechecks the pinned boot/engine/image/resource binding. The existing Docker creation gate forces the same parent on every optimizer, mutation, evaluator and helper container and seals it in the create journal; resume cannot add, change or drop it. Host-side helpers inherit the coordinator's group. macOS, Docker Desktop, remote/rootless daemons, missing caps and out-of-group coordinators refuse rather than falling back to per-container limits. These implementation checks do not replace separately authorized selected-host performance/stability validation or task admission.
 
 ### Later, separately authorized execution
 
-After the tasks and selected host are admitted, create a new admitted plan/state without `--drafts`. Do not relabel an offline state. Keep production state directly under `.hone-runs` so the existing provider-pause discovery command can find it.
+After the tasks and selected host are admitted, start the command inside the pre-provisioned group and create a new admitted plan/state without `--drafts`. Do not relabel an offline state. Keep production state directly under `.hone-runs` so the existing provider-pause discovery command can find it.
 
 ```text
+hone calibration plan --corpus "$CORPUS" --out "$PLAN" --cgroup-parent "$CALIBRATION_CGROUP_PARENT"
+hone calibration init --plan "$PLAN" --state .hone-runs/calibration
 hone calibration run --state .hone-runs/calibration --acknowledge-execution
 hone calibration run --state .hone-runs/calibration --acknowledge-execution --max-cells N
 hone calibration run --state .hone-runs/calibration --acknowledge-execution --cell KEY --resume

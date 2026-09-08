@@ -19,12 +19,14 @@ import {
 } from "@hone/schema";
 import { CAPSULE_SNAPSHOT_FILE, admitCapsule } from "./admission.js";
 import { UsageError } from "./args.js";
+import { inspectCalibrationHost } from "./calibration-host.js";
 import {
   CALIBRATION_BUDGET,
   CALIBRATION_CAPS,
   CALIBRATION_SANDBOX,
   CALIBRATION_SEEDS,
   CALIBRATION_TASKS,
+  type CalibrationHostBinding,
   type CalibrationOutcome,
   type CalibrationPlanInputs,
   type CalibrationRunRequest,
@@ -35,6 +37,8 @@ import {
 import { loadCapsule } from "./capsule.js";
 import { DurableCampaignPauseAuthorityV1 } from "./commands/hone.js";
 import { readCorpusProvenanceArtifact } from "./corpus-provenance.js";
+import { DOCKER_CREATE_WAL, readDockerCgroupParent } from "./docker-create-gate.js";
+import { DOCKER_ENGINE_SEAL } from "./docker-engine-seal.js";
 import { EVENTS_FILE, bestArtifact, readEvents, replayRun, writeFileDurable, type RunState } from "./eventlog.js";
 import type { CmdIo } from "./io.js";
 import {
@@ -58,12 +62,10 @@ import { resumeSealError } from "./resume-seal.js";
  * from the run's durable records (event log, broker journal, proxy trace,
  * sealed contract/config/manifest files) — never from optimizer reports.
  *
- * Resource boundary, exactly as the existing APIs enforce it: the
- * four-dimensional budget is metered per run by the supervisor/broker/proxy;
- * the 2 GiB / 2 CPU ceiling is applied PER CONTAINER (each mutation/eval
- * sandbox and the optimizer container individually). No aggregate per-cell
- * process-tree cap exists in the trusted runtime, and this adapter does not
- * claim one.
+ * Production additionally requires the coordinator to already reside inside
+ * a verified native-host cgroup capped at 2 GiB / 2 CPUs. The same parent is
+ * forced on every container through the existing Docker creation gate, so
+ * host helpers and optimizer/mutation/eval containers share the cell ceiling.
  */
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
@@ -191,9 +193,16 @@ function loadAdmittedTask(capsuleDir: string, task: CalibrationTask["task"]): Ca
 export function loadCalibrationPlanInputs(
   root: string,
   corpusPath: string,
-  options: { drafts?: boolean } = {},
+  options: { drafts?: boolean; cgroupParent?: string; env?: NodeJS.ProcessEnv } = {},
 ): CalibrationPlanInputs {
   const image = pinnedImage(root);
+  if (options.drafts === true && options.cgroupParent !== undefined) refuse("--cgroup-parent is for admitted planning, not offline drafts");
+  if (options.drafts !== true && options.cgroupParent === undefined) {
+    refuse("admitted planning requires --cgroup-parent and a pre-provisioned aggregate 2 GiB / 2 CPU native-host cgroup");
+  }
+  const host = options.cgroupParent === undefined
+    ? undefined
+    : inspectCalibrationHost(image, options.cgroupParent, options.env ?? process.env);
   const corpus = readCorpusProvenanceArtifact(resolve(root, corpusPath));
   const cohortIds = new Set([...corpus.developmentCapsuleIds, ...corpus.terminalCapsuleIds, ...corpus.capsules.map((capsule) => capsule.id)]);
   const cohortDigests = new Set(corpus.capsules.map((capsule) => capsule.digest));
@@ -220,6 +229,7 @@ export function loadCalibrationPlanInputs(
     image,
     optimizerDigest: computeOptimizerDigest(image),
     runtimeDigest: verifiedBootRuntimeDigest(),
+    ...(host === undefined ? {} : { host }),
   };
 }
 
@@ -289,6 +299,7 @@ function collect(io: CmdIo, request: CalibrationRunRequest, dispatch: Calibratio
     maxPublicCandidateEvaluations: 2 * cell.cap,
     seed: cell.seed,
     measurementEpoch,
+    host: plan.host ?? null,
   };
   const evidence: Record<string, unknown> = {
     version: CALIBRATION_EVIDENCE_VERSION,
@@ -341,6 +352,8 @@ function collect(io: CmdIo, request: CalibrationRunRequest, dispatch: Calibratio
     optimizerComplete: fileEvidence(join(runDir, OPTIMIZER_COMPLETE_FILE)),
     brokerJournal: fileEvidence(join(runDir, BROKER_JOURNAL_FILE)),
     proxyTrace: fileEvidence(join(runDir, PROXY_TRACE_FILE)),
+    dockerCreates: fileEvidence(join(runDir, DOCKER_CREATE_WAL)),
+    dockerEngine: fileEvidence(join(runDir, DOCKER_ENGINE_SEAL)),
   };
 
   let state: RunState;
@@ -378,6 +391,17 @@ function collect(io: CmdIo, request: CalibrationRunRequest, dispatch: Calibratio
   const pinPath = join(runDir, RUNTIME_PIN_FILE);
   const pinned = existsSync(pinPath) ? readFileSync(pinPath, "utf8").trim() : null;
   if (pinned !== plan.runtimeDigest) drift.push(`runtime pin ${pinned ?? "absent"} != plan ${plan.runtimeDigest}`);
+  try {
+    if (plan.host === undefined || readDockerCgroupParent(runDir) !== plan.host.cgroupParent) {
+      drift.push("Docker create journal lacks the plan's aggregate cgroup seal");
+    }
+  } catch (error) {
+    drift.push(`Docker cgroup seal is corrupt: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const engineSeal = readJson(join(runDir, DOCKER_ENGINE_SEAL)) as Record<string, unknown> | undefined;
+  if (engineSeal?.["engineId"] !== plan.host?.dockerId || engineSeal?.["endpointKind"] !== "local-unix") {
+    drift.push("Docker engine seal differs from the inspected native host");
+  }
   const snapshot = CapsuleManifest.safeParse(readJson(join(runDir, CAPSULE_SNAPSHOT_FILE)));
   if (!snapshot.success) drift.push("capsule snapshot is missing or unparseable");
   else if (capsuleDigest(snapshot.data) !== task.manifestDigest || !sameCanonical(snapshot.data, task.manifest)) {
@@ -565,7 +589,7 @@ function observeRoute(traceBytes: Buffer): {
 }
 
 /** Everything a dispatch needs to have re-proven before the supervisor is invoked. */
-function assertDispatchContract(io: CmdIo, request: CalibrationRunRequest, snapshot: OptimizerSnapshot): CalibrationTask {
+function assertDispatchContract(io: CmdIo, request: CalibrationRunRequest, snapshot: OptimizerSnapshot): { task: CalibrationTask; host: CalibrationHostBinding } {
   const { plan, cell, task } = request;
   for (const name of FORBIDDEN_ENV) {
     if (io.env[name] !== undefined) refuse(`${name} is set — calibration executes only the built-in local backend and the sealed default optimizer`);
@@ -584,6 +608,9 @@ function assertDispatchContract(io: CmdIo, request: CalibrationRunRequest, snaps
   const planTask = plan.tasks.find((candidate) => candidate.task === cell.task);
   if (planTask === undefined || !sameCanonical(planTask, task)) refuse(`task ${cell.task} is not the plan's task record`);
   if (task.admission !== "admitted") refuse(`${task.task} is an offline draft (${task.manifest.id}); drafts are never dispatched`);
+  if (plan.host === undefined) refuse("production calibration requires a verified aggregate host resource binding");
+  const currentHost = inspectCalibrationHost(plan.image, plan.host.cgroupParent, io.env);
+  if (!sameCanonical(currentHost, plan.host)) refuse("selected-host resource/runtime binding drifted from the plan");
   if (task.manifest.id !== cell.capsuleId) refuse(`cell capsule ${cell.capsuleId} != task manifest ${task.manifest.id}`);
   if (deriveCapsuleId({ ...task.manifest }) !== task.manifest.id) refuse(`task manifest id ${task.manifest.id} does not recompute`);
   if (capsuleDigest(task.manifest) !== task.manifestDigest) refuse(`task manifest digest ${task.manifestDigest} does not recompute`);
@@ -612,7 +639,7 @@ function assertDispatchContract(io: CmdIo, request: CalibrationRunRequest, snaps
   if (optimizerDigest !== plan.optimizerDigest) refuse(`optimizer drift: ${optimizerDigest} != plan ${plan.optimizerDigest}`);
   const runtimeDigest = verifiedBootRuntimeDigest();
   if (runtimeDigest !== plan.runtimeDigest) refuse(`trusted runtime drift: ${runtimeDigest} != plan ${plan.runtimeDigest}`);
-  return { ...task, capsuleDir };
+  return { task: { ...task, capsuleDir }, host: plan.host };
 }
 
 class ProductionCalibrationRunner implements CalibrationRunner {
@@ -641,7 +668,7 @@ class ProductionCalibrationRunner implements CalibrationRunner {
 
   async run(request: CalibrationRunRequest): Promise<CalibrationOutcome> {
     const snapshot = this.optimizerSnapshot();
-    const task = assertDispatchContract(this.io, request, snapshot);
+    const { task, host } = assertDispatchContract(this.io, request, snapshot);
     const { plan, cell } = request;
     const authority = DurableCampaignPauseAuthorityV1.open(
       join(request.stateDir, CALIBRATION_PAUSE_AUTHORITY_FILE),
@@ -655,6 +682,8 @@ class ProductionCalibrationRunner implements CalibrationRunner {
       runId: request.runId,
       measurementEpoch: calibrationMeasurementEpoch(plan.planDigest, cell.key),
       optimizerEpisodesMax: cell.cap,
+      sandboxCgroupParent: host.cgroupParent,
+      sandboxDockerEngineId: host.dockerId,
       maxPublicCandidateEvaluations: 2 * cell.cap,
       optimizerBaseSnapshot: snapshot,
       proxyRole: CALIBRATION_PROXY_ROLE,

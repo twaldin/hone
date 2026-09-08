@@ -140,6 +140,19 @@ const CalibrationTaskSchema = z
   })
   .strict();
 
+const CalibrationHostSchema = z.object({
+  cgroupParent: z.string().min(1),
+  cgroupPath: z.string().startsWith("/"),
+  cgroupDriver: z.enum(["systemd", "cgroupfs"]),
+  bootId: z.string().uuid(),
+  dockerId: z.string().min(1),
+  imageId: SHA256,
+  architecture: z.string().min(1),
+  memoryBytes: z.number().int().positive().max(CALIBRATION_SANDBOX.memoryBytes),
+  cpuQuota: z.number().int().positive(),
+  cpuPeriod: z.number().int().positive(),
+}).strict().refine((host) => host.cpuQuota / host.cpuPeriod <= CALIBRATION_SANDBOX.cpus, "aggregate CPU quota exceeds the cell ceiling");
+
 const CalibrationPlanInputsSchema = z
   .object({
     tasks: z.array(CalibrationTaskSchema).length(CALIBRATION_TASKS.length),
@@ -147,6 +160,7 @@ const CalibrationPlanInputsSchema = z
     image: z.string().regex(IMAGE_DIGEST_REF),
     optimizerDigest: SHA256,
     runtimeDigest: SHA256,
+    host: CalibrationHostSchema.optional(),
   })
   .strict();
 
@@ -273,6 +287,7 @@ export function createCalibrationPlan(inputs: CalibrationPlanInputs): Calibratio
     image: parsed.image,
     optimizerDigest: parsed.optimizerDigest,
     runtimeDigest: parsed.runtimeDigest,
+    ...(parsed.host === undefined ? {} : { host: parsed.host }),
     budget: copyBudget(CALIBRATION_BUDGET),
     sandbox: { memoryBytes: CALIBRATION_SANDBOX.memoryBytes, cpus: CALIBRATION_SANDBOX.cpus },
     concurrency: 1,
@@ -292,6 +307,7 @@ export function validateCalibrationPlan(value: unknown): CalibrationPlan {
     image: plan.image,
     optimizerDigest: plan.optimizerDigest,
     runtimeDigest: plan.runtimeDigest,
+    ...(plan.host === undefined ? {} : { host: plan.host }),
   });
   if (canonicalJson(recomputed) !== canonicalJson(plan)) {
     refuse(`calibration plan ${plan.planDigest} does not match its deterministic recomputation (${recomputed.planDigest}); refusing a drifted or hand-edited plan`);
@@ -563,6 +579,7 @@ export function validateCalibrationState(value: unknown): CalibrationState {
     for (const task of plan.tasks) {
       if (task.admission !== "admitted") refuse(`trusted state carries draft task ${task.task}; only admitted tasks may execute`);
     }
+    if (plan.host === undefined) refuse("trusted calibration requires a verified aggregate host resource binding");
   }
   const priorsByCell = new Map<string, CalibrationAttempt[]>();
   let unsettled: CalibrationAttempt | null = null;
@@ -640,6 +657,7 @@ export async function initializeCalibration(
         refuse(`task ${task.task} is a draft (${task.capsuleDir}); trusted calibration executes admitted tasks only`);
       }
     }
+    if (validated.host === undefined) refuse("trusted calibration requires a verified aggregate host resource binding");
   }
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   return withStateLock(stateDir, validated.planDigest, async () => {

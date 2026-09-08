@@ -743,7 +743,7 @@ function cappedDiagnosticAppender(
 export async function runOptimizer(ctx: RunnerBackendContext, runtime: OptimizerRuntime, opts: { maxEpisodes?: number } = {}): Promise<void> {
   const name = optimizerRunName(runtime.safeRunId, ++runtime.invocation);
   runtime.spawnedNames.push(name);
-  const createArgv = optimizerCreateArgs({
+  const createArgv = runtime.gate.containerArgv(optimizerCreateArgs({
     name,
     runId: ctx.runId,
     image: runtime.image,
@@ -765,7 +765,7 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
       HONE_RESUME: JSON.stringify(resumeHint(ctx.runDir)),
     },
     containerLease: runtime.containerLease,
-  });
+  }));
   // ONE frozen docker client env for every channel (endpoint pinned at
   // startup), plus the broker capability (BOTH transports) resolved by the
   // value-less -e — the token never enters argv and is never logged. It must
@@ -1340,14 +1340,30 @@ export function createBackend(
         // only meaningful against the sealed Engine — a resume under a
         // different DOCKER_HOST/context refuses here, nonterminal.
         const seal = await sealDockerEngine(ctx.runDir, ctx.runId, prun, frozen.endpointKind);
+        if (ctx.sandboxCgroupParent !== undefined) {
+          // Calibration host binding (fail closed): the group's limits were
+          // inspected on ONE local engine. A different daemon (or a remote/
+          // unverified endpoint) could honor the same parent string with
+          // unverified limits — refuse BEFORE the create journal opens.
+          if (seal.endpointKind !== "local-unix") {
+            throw new Error("sandbox cgroup parent requires a local unix Docker endpoint; refusing to create outside the inspected host");
+          }
+          if (ctx.sandboxDockerEngineId === undefined || seal.engineId !== ctx.sandboxDockerEngineId) {
+            throw new Error(
+              `sandbox cgroup parent was inspected on Docker engine ${ctx.sandboxDockerEngineId ?? "<unbound>"} but the sealed daemon is ${seal.engineId}; refusing to create under an uninspected engine`,
+            );
+          }
+        }
         // P1 create fence: every docker resource create from here on (donor,
         // relays, broker keeper/sandboxes/evals, optimizer build) flows
         // through the gate — write-ahead latched, joined to a definitive
-        // daemon response, `docker run` rewritten two-phase.
+        // daemon response, `docker run` rewritten two-phase, and (grouped
+        // runs) forced under the sealed `--cgroup-parent`.
         gate = openDockerCreateGate(ctx.runDir, ctx.runId, {
           ...(deps.createHelper !== undefined ? { helper: deps.createHelper } : {}),
           clientEnv: frozen.env,
           endpointIsLocal: seal.endpointKind === "local-unix",
+          ...(ctx.sandboxCgroupParent !== undefined ? { cgroupParent: ctx.sandboxCgroupParent } : {}),
         });
         grun = gate.wrap(prun);
         // Open intents inherited from a crashed attempt: observe/reap them

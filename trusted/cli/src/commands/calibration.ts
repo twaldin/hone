@@ -11,7 +11,7 @@ import { writeFileDurable } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
 
 const USAGE = `usage:
-  hone calibration plan --corpus FILE --out FILE [--drafts]
+  hone calibration plan --corpus FILE --out FILE [--drafts | --cgroup-parent PATH_OR_SLICE]
   hone calibration init --plan FILE --state DIR
   hone calibration status --state DIR
   hone calibration run --state DIR --acknowledge-execution [--max-cells N]
@@ -20,9 +20,11 @@ const USAGE = `usage:
   hone calibration verify --state DIR --bundle FILE
 
 Planning reserves no resources and grants no execution authority. Current task drafts
-cannot run. Real execution requires separately authorized scope, admitted tasks and
-selected-host/runtime validation. Runs default to one cell. Retries are supplementary;
-they never replace a failed primary score. Keep state, run evidence and reports private.`;
+cannot run. Admitted planning requires a pre-provisioned native-host aggregate
+cgroup containing this process; real execution also requires separately authorized
+scope, admitted tasks and selected-host/runtime validation. Runs default to one cell.
+Retries are supplementary; they never replace a failed primary score.
+Keep state, run evidence and reports private.`;
 
 function required(flags: Flags, name: string): string {
   const value = strFlag(flags, name);
@@ -44,16 +46,19 @@ export async function calibrationCommand(args: string[], io: CmdIo): Promise<num
   }
   switch (action) {
     case "plan": {
-      const { flags, positionals } = parseFlags(rest, { strings: ["corpus", "out"], booleans: ["drafts"] });
+      const { flags, positionals } = parseFlags(rest, { strings: ["corpus", "out", "cgroup-parent"], booleans: ["drafts"] });
       if (positionals.length !== 0) throw new UsageError(USAGE);
       const output = resolve(io.root, required(flags, "out"));
+      const cgroupParent = strFlag(flags, "cgroup-parent");
       const inputs = loadCalibrationPlanInputs(io.root, resolve(io.root, required(flags, "corpus")), {
         drafts: boolFlag(flags, "drafts"),
+        ...(cgroupParent === undefined ? {} : { cgroupParent }),
+        env: io.env,
       });
       const plan = createCalibrationPlan(inputs);
       writeNewJson(output, plan);
       io.out(canonicalJson({ plan: output, planDigest: plan.planDigest, cells: plan.cells.length,
-        executable: plan.tasks.every((task) => task.admission === "admitted"),
+        executable: plan.host !== undefined && plan.tasks.every((task) => task.admission === "admitted"),
         reservations: plan.reservations, authorization: "none" }));
       return 0;
     }
