@@ -38,6 +38,71 @@ A bare positional argument naming a directory with `manifest.json` selects `run`
 
 Operator-local state lives under `.hone-runs`, `.hone-cas` and `.hone-sources`. Event and status output is reconciled with the durable broker journal before delivery. These directories are ignored by Git and are not public result bundles.
 
+## Saturation calibration
+
+`calibration` coordinates the four calibration-only tasks approved in TWA-59. **These commands do not authorize a campaign or provider spending.** The checked-in tasks are non-admitted drafts; they can be planned, but cannot execute.
+
+Planning requires an existing, digest-verified `corpus-provenance.v1` artifact describing the full 16-development/11-terminal cohort. The coordinator rejects calibration identities or manifest digests in either cohort, and rejects calibration assets matching recorded terminal-content hashes. It does not load terminal document bytes or change cohort membership.
+
+Safe planning/inspection, with private paths supplied by the operator:
+
+```sh
+mkdir -p .hone-runs
+hone calibration plan --drafts --corpus "$CORPUS" --out .hone-runs/calibration-plan.json
+hone calibration init --plan .hone-runs/calibration-plan.json --state .hone-runs/calibration
+hone calibration status --state .hone-runs/calibration
+hone calibration --help
+```
+
+`--drafts` reads only the four named packages' `manifest.draft.json` files, retaining their failed diagnostic evidence and marking the state `offline`. It neither issues admission receipts nor promotes draft identities. Without `--drafts`, planning requires full, non-provisional Gate-2 admission and a positive pinned train normalization scale. Plans bind the exact manifests, ordering reports, shared `seeded-astar` image reference, optimizer/runtime digests, cohort provenance and matrix; changed inputs require a separately reviewed plan, not an in-place edit.
+
+The fixed matrix is **80 cells**: four tasks × episode caps **2/4/8/12** × matched seeds **104729, 130363, 155921, 181081, 206369**. Every cap has the same metered maxima: **600,000 tokens, $10, 7,200 seconds and 49 evaluator invocations**. The sandbox setting is **2 GiB / 2 CPUs**. Aggregate upper reservations are **48M tokens, $800 and 160 serial run-hours**, excluding preparation; they are neither measured requirements nor permission to spend.
+
+The existing runtime meters each run's four budget dimensions and applies the sandbox limits **per container**, not as an aggregate process-tree cgroup. Selected-host admission must establish the approved cell isolation/resource conditions. Planning and offline tests do not establish that host evidence.
+
+### Later, separately authorized execution
+
+After the tasks and selected host are admitted, create a new admitted plan/state without `--drafts`. Do not relabel an offline state. Keep production state directly under `.hone-runs` so the existing provider-pause discovery command can find it.
+
+```text
+hone calibration run --state .hone-runs/calibration --acknowledge-execution
+hone calibration run --state .hone-runs/calibration --acknowledge-execution --max-cells N
+hone calibration run --state .hone-runs/calibration --acknowledge-execution --cell KEY --resume
+hone calibration run --state .hone-runs/calibration --acknowledge-execution --cell KEY --retry-reason "recorded infrastructure diagnosis"
+```
+
+The CLI defaults to **one cell per invocation**. `--max-cells` bounds a serial batch; an OS-backed state lock remains held until the runner settles, including across awaits. There is no scheduler service. The adapter uses the existing local supervisor, frozen inner model route, provider-pause authority, admission checks and broker limits. Delivery is `none`; custom backends, optimizer overrides and paid fallback are not exposed.
+
+`status` lists cell keys, run IDs, dispatches, outcomes and primary-result counts. Dispatch intent is durable **before** launch. A crash leaves an incomplete cell; normal execution refuses to move past unresolved work. `--resume` reconciles or continues the **same run ID and sealed budget**, retaining prior incomplete observations. Downtime counts against the cell's wall-clock envelope. A terminal failure is not resumed automatically.
+
+Retries require an explicit cell and reason. They retain separate run IDs and consume the remaining per-cell envelope across all attempts; unknown spend blocks a retry, and decreasing cumulative meters invalidate a resumed result. **Retries are supplementary and never replace the primary attempt in the scorer**, even when a retry improves. A valid primary cannot be retried. Never reset state or rerun cells until favorable.
+
+A provider pause uses the existing recovery path, followed by explicit same-run reconciliation:
+
+```text
+hone resume --campaign .hone-runs/calibration --pause PAUSE_ID
+hone calibration run --state .hone-runs/calibration --acknowledge-execution --cell KEY --resume
+```
+
+The first command can perform frozen-route preflight; it is not part of offline validation and needs the execution scope.
+
+### Report binding and offline verification
+
+```text
+hone calibration report --state .hone-runs/calibration --out PRIVATE_BUNDLE.json
+hone calibration verify --state .hone-runs/calibration --bundle PRIVATE_BUNDLE.json
+```
+
+These commands launch no runs. They re-read the retained supervisor/broker/proxy evidence and validate contracts, measurement epochs, capsule/seed/asset coordinates and normalization inputs. The bundle embeds the plan and complete attempt history, plus the unchanged scorer report and canonical report/bundle digests. Missing primary cells stay `incomplete`; invalid primary cells stay `invalid`. The existing scorer uses **10,000** stratified bootstrap samples, RNG seed **20260907**, p75 marginal gain, its 90% upper bound and the strict **`<0.02`** rule (ceilings 4/8/12, fallback 12).
+
+Failures can make the selected ceiling shallower. A generated report is not proof of a complete or successful matrix. Inspect all invalid/incomplete cells and unavailable evidence before using its `report` with `generateM2LaunchDraft`; supply the four designated excluded IDs from the verified plan. Its `reportDigest` is the existing launch/freeze binding. Preserve the full bundle and run directories: the vanilla scorer report alone does not carry execution provenance, and freeze does not independently reconstruct those runs. Offline fake-runner bundles are never launch evidence.
+
+The trusted library seam is `initializeCalibration` / `executeCalibration` / `buildCalibrationReport` in `trusted/cli/src/calibration.ts`, with a `CalibrationRunner` implementing `run` and read-only `verify`. The runner mode is pinned to state; offline and trusted records cannot mix. Reproduce planning, limits, process interruption/resume, retries and evidence-drift checks without Docker or providers:
+
+```sh
+pnpm --filter @hone/cli exec vitest run test/calibration.test.ts test/calibration-runner.test.ts
+```
+
 ## Campaigns
 
 ```text

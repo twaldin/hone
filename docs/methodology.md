@@ -12,7 +12,7 @@ The schemas enforce experiment cardinalities, budgets, artifact identities and a
 
 ## Implemented components
 
-The source includes separate outer and inner model-route observations, corpus provenance assembly and verification, launch-draft generation, saturation scoring, search trajectories, phase dispatch and G1/G2 authorization records. Runtime checks bind those records to the appropriate campaign and artifacts.
+The source includes separate outer and inner model-route observations, corpus provenance assembly and verification, launch-draft generation, bounded calibration coordination and saturation report binding, search trajectories, phase dispatch and G1/G2 authorization records. Runtime checks bind those records to the appropriate campaign and artifacts.
 
 Campaign model routes are part of the experiment, independent of a contributor's usual coding-agent settings. Keep the declared route, observed provider identity, budget and environment bound to each result. Do not substitute a convenient local default and report the same frozen experiment.
 
@@ -23,7 +23,7 @@ The [M2 readiness runbook](m2-readiness.md) maps these components to remaining p
 ## Work still to complete
 
 - Public-clone admission and image bootstrap, and automatic execution of authoring sessions.
-- The saturation calibration cohort and coordinator, with the required environment validation.
+- Admission of the four calibration-only task drafts, required environment/resource validation and separately authorized execution through the offline-tested coordinator.
 - Provider integration and the remaining frozen-campaign smoke and execution work.
 - The complete replay/evidence publisher and RelayBench publication pipeline.
 - M2b trigger evaluation and results-based release writing.
