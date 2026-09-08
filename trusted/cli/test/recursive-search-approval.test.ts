@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -157,6 +157,23 @@ describe("recursive Stage-B search owner handoff", () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
+  it("refuses a symlinked source directory when recording approval", async () => {
+    const alias = join(root, "stage-a-alias");
+    symlinkSync(recordDir, alias, "dir");
+    recordDir = alias;
+    await expect(approve()).rejects.toThrow(/source G1 record directory.*symlink/i);
+    expectNoWork();
+  });
+
+  it("launches nothing when the approved source directory is replaced by a symlink", async () => {
+    await approve();
+    const moved = join(root, "relocated-stage-a");
+    renameSync(recordDir, moved);
+    symlinkSync(moved, recordDir, "dir");
+    await expect(search()).rejects.toThrow(/source G1 record directory.*symlink/i);
+    expectNoWork();
+  });
+
   it("requires both explicit owner attestations before recording approval", async () => {
     await expect(search(["--phase", "approve-search", "--record-dir", recordDir, "--approver", "synthetic-test-owner", "--reason", "test"]))
       .rejects.toThrow(/attest/);
@@ -193,7 +210,7 @@ describe("recursive Stage-B search owner handoff", () => {
     mkdirSync(campaignDir, { recursive: true });
     writeFileSync(join(campaignDir, "g1-search-approval.v1.json"), approval);
     vi.clearAllMocks();
-    await expect(search()).rejects.toThrow(/config|campaign|cell/i);
+    await expect(search()).rejects.toThrow(/not the dispatched campaign/);
     expectNoWork();
   });
 
@@ -208,7 +225,7 @@ describe("recursive Stage-B search owner handoff", () => {
     writeG1Record(recordDir, record);
     mkdirSync(join(root, ".hone-runs", `run_recursive_outer_${metaCampaignConfigHash(config).slice(7)}`));
     vi.clearAllMocks();
-    await expect(search()).rejects.toThrow(/drift|digest|stale/i);
+    await expect(search()).rejects.toThrow(/stale approval/);
     expectNoWork();
   });
 });
