@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_32a0cfd0d6cd",
+  "id": "cap_bc978d49af3d",
   "objective": "Accelerate minimal insert/delete scripts for sequences of up to 1024 tokens, preserving exact reconstruction and minimality. Fresh calibration-only task; excluded from development and terminal cohorts. Only task.py may change.",
   "baseline": {
     "kind": "git",
-    "commit": "880ad6e780d07b99af647a8631364f2e7b05ff32"
+    "commit": "d70eca78e26096e43c8caf84431e8e769bf5178c"
   },
   "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
   "evalEntrypoint": [

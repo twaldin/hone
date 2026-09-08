@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
-  "id": "cap_579fab0d8c4b",
+  "id": "cap_586d89dc214c",
   "objective": "Maximize hit rate on synthetic traces of at most 10000 requests under hard cache capacity, without future-request access. Fresh calibration-only task; excluded from development and terminal cohorts. Only task.py may change.",
   "baseline": {
     "kind": "git",
-    "commit": "2fc03f5946481b791bbe21fed5b0bf74a3bf2fc0"
+    "commit": "86c97485e534f5821b2e9730579a617f71415252"
   },
   "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
   "evalEntrypoint": [

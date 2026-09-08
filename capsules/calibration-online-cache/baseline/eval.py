@@ -47,10 +47,14 @@ def confine_worker():
     # remain available for stdlib imports; /capsule's root-owned 0700 parent seals assets.
     machine = platform.machine()
     # Also deny io_uring setup/enter/register: async socket operations bypass socket().
+    # Deny kill/tkill/tgkill, rt_sigqueueinfo/rt_tgsigqueueinfo and pidfd_send_signal.
+    # Parent cleanup stays privileged and unfiltered; workers cannot signal peers.
     if machine == "x86_64":
-        arch, denied = 0xC000003E, [56, 57, 58, 435, 101, 310, 311, 41, 53, 425, 426, 427]
+        arch, denied = 0xC000003E, [56, 57, 58, 435, 101, 310, 311, 41, 53, 425, 426, 427,
+                                  62, 200, 234, 129, 297, 424]
     elif machine in ("aarch64", "arm64"):
-        arch, denied = 0xC00000B7, [220, 435, 117, 270, 271, 198, 199, 425, 426, 427]
+        arch, denied = 0xC00000B7, [220, 435, 117, 270, 271, 198, 199, 425, 426, 427,
+                                  129, 130, 131, 138, 240, 424]
     else:
         raise RuntimeError("unsupported seccomp architecture")
 

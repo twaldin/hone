@@ -10,6 +10,7 @@ import { assertBaselineMatchesGitCommit } from "../../trusted/cli/src/git-baseli
 import { loadDiagnosticOrdering } from "../tools/scaffold.js";
 const root = resolve(__dirname, "..");
 const names = ["postings-intersection", "sequence-diff", "weighted-coverage", "online-cache"];
+const approvedImage = JSON.parse(readFileSync(join(root, "seeded-astar/manifest.json"), "utf8")).image;
 
 describe("fresh calibration-only capsule authoring", () => {
   it("preserves pinned baseline/asset identities outside both cohorts without permitting draft admission", () => {
@@ -17,7 +18,6 @@ describe("fresh calibration-only capsule authoring", () => {
     const cohortNames = new Set(contracts.map((contract) => contract.capsule));
     const cohortIds = new Set(contracts.map((contract) => contract.source.existingCapsuleId));
     const ids = new Set<string>();
-    const approvedImage = JSON.parse(readFileSync(join(root, "seeded-astar/manifest.json"), "utf8")).image;
     for (const name of names) {
       const directory = join(root, `calibration-${name}`);
       const manifest = CapsuleManifest.parse(JSON.parse(readFileSync(join(directory, "manifest.draft.json"), "utf8")));
@@ -50,4 +50,15 @@ describe("fresh calibration-only capsule authoring", () => {
   it("checks exact outputs, hard bounds, online transitions, fixtures and worker protocol", () => {
     execFileSync("python3", ["-I", "-B", join(root, "test/calibration_checks.py")], { timeout: 120_000, stdio: "pipe" });
   }, 130_000);
+
+  it("prevents confined same-UID workers from signalling each other", () => {
+    execFileSync("docker", [
+      "run", "--rm", "--pull", "never", "--network", "none", "--memory", "2g", "--cpus", "2",
+      "--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL",
+      "--security-opt", "no-new-privileges", "--security-opt", "seccomp=unconfined",
+      "--read-only", "--tmpfs", "/tmp:size=16m,nosuid,nodev,noexec", "--user", "0:0",
+      "-v", `${root}:/capsules:ro`, approvedImage,
+      "python3", "-I", "-B", "/capsules/test/calibration_signal_check.py",
+    ], { timeout: 30_000, stdio: "pipe" });
+  }, 40_000);
 });
