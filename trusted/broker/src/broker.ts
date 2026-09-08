@@ -805,6 +805,8 @@ export function readBrokerJournalEvents(runDir: string): RunEvent[] | null {
 
 export interface BrokerJournalEvaluationSnapshot {
   records: readonly EvaluationRecord[];
+  /** Parallel to records; legacy/M0 facts have no trusted measurement epoch. */
+  measurementEpochs: readonly (string | null)[];
   journalHash: `sha256:${string}`;
   lineCount: number;
 }
@@ -819,6 +821,7 @@ export function readBrokerJournalEvaluations(runDir: string): BrokerJournalEvalu
   const rawLines = content.toString("utf8").split("\n");
   rawLines.pop();
   const records: EvaluationRecord[] = [];
+  const measurementEpochs: (string | null)[] = [];
   for (const [index, raw] of rawLines.entries()) {
     let line: StateLine;
     try {
@@ -826,10 +829,14 @@ export function readBrokerJournalEvaluations(runDir: string): BrokerJournalEvalu
     } catch {
       throw new BrokerError("INTERNAL", `run state log corrupt at line ${index + 1}: ${filePath}`);
     }
-    if (line.t === "eval") records.push(line.record);
+    if (line.t === "eval") {
+      records.push(line.record);
+      measurementEpochs.push(line.measurementEpoch ?? null);
+    }
   }
   return {
     records,
+    measurementEpochs,
     journalHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
     lineCount: rawLines.length,
   };

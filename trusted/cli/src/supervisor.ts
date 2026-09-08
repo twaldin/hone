@@ -481,6 +481,9 @@ export interface TrustedRunOptions {
   corpus?: BrokerCorpusConfig | undefined;
   /** The frozen campaign config's corpusCohort block — fenced against the corpus wire config before supervision. */
   corpusCohort?: CorpusCohortBinding | undefined;
+  /** Calibration host binding: sandbox cgroup parent + inspected engine id; trusted plan only, never CLI flags/config/optimizer. */
+  sandboxCgroupParent?: string | undefined;
+  sandboxDockerEngineId?: string | undefined;
 }
 
 export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunOptions = {}): Promise<number> {
@@ -910,6 +913,8 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ...(trusted.recursiveBroker !== undefined ? { recursiveBroker: trusted.recursiveBroker } : {}),
       ...(trusted.corpus !== undefined ? { corpus: trusted.corpus } : {}),
       ...(trusted.corpusCohort !== undefined ? { corpusCohort: trusted.corpusCohort } : {}),
+      ...(trusted.sandboxCgroupParent !== undefined ? { sandboxCgroupParent: trusted.sandboxCgroupParent } : {}),
+      ...(trusted.sandboxDockerEngineId !== undefined ? { sandboxDockerEngineId: trusted.sandboxDockerEngineId } : {}),
     },
     io,
   );
@@ -1437,6 +1442,8 @@ export interface SuperviseExtra {
   proxyRole?: M2ProxyRole | undefined;
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
   admissionReview?: "required" | "off" | undefined;
+  sandboxCgroupParent?: string | undefined;
+  sandboxDockerEngineId?: string | undefined;
 }
 
 /** Late-binding relay from the run lock's stop channel to the supervisor's signal handler. */
@@ -1773,6 +1780,8 @@ async function superviseLocked(
     ...(extra.admissionReview !== undefined ? { admissionReview: extra.admissionReview } : {}),
     ...(extra.recursiveBroker !== undefined ? { recursiveBroker: extra.recursiveBroker } : {}),
     ...(extra.corpus !== undefined ? { corpus: extra.corpus } : {}),
+    ...(extra.sandboxCgroupParent !== undefined ? { sandboxCgroupParent: extra.sandboxCgroupParent } : {}),
+    ...(extra.sandboxDockerEngineId !== undefined ? { sandboxDockerEngineId: extra.sandboxDockerEngineId } : {}),
     replayed,
     signal: abort.signal,
     emit: (event) => (backendFenced ? RunEvent.parse(event) : emit(event)),
