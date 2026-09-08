@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, lstatSync, readFileSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import {
   M2_PANEL_A_TASK_IDS,
@@ -16,10 +16,9 @@ import { writeFileDurable } from "./eventlog.js";
 /**
  * M2 G1/G2 statistical + human authorization records (launch-tooling item 4).
  *
- * The recursive confirmation phase writes only confirmation-receipt.json — a
- * bare measurement digest with NO gate calculation and NO authorization, and
- * Stage-B / terminal dispatch require neither today. This module is the
- * additive gate plane that consumes those confirmations:
+ * Recursive confirmation persists the measurement receipt and statistical
+ * record. Separate owner decisions authorize search, later artifact-bound
+ * confirmation, and terminal dispatch:
  *
  *   1. assembleG1Record  — the digest-bound Stage-A statistical record derived
  *      from the 96 Stage-A confirmations (arms seed / winner / broken-control /
@@ -35,9 +34,18 @@ import { writeFileDurable } from "./eventlog.js";
  *   3. assembleG1Authorization / assembleG2Authorization — the durable human
  *      approval binding the accepted artifacts (statistical-record digest,
  *      control-winner + generation2 for G1; generation0/1/2 for G2). Stage-B
- *      and terminal dispatch call assertG1Authorized / assertG2Authorized and
- *      FAIL CLOSED when the record is absent, drifted, unapproved, statistically
- *      failing, or bound to different artifacts than the dispatch requested.
+ *      CONFIRMATION and terminal dispatch call assertG1Authorized /
+ *      assertG2Authorized and FAIL CLOSED when the record is absent, drifted,
+ *      unapproved, statistically failing, or bound to different artifacts than
+ *      the dispatch requested. The G1 authorization binds --generation2, which
+ *      only exists AFTER Stage-B search — so it cannot gate that search.
+ *   4. assembleG1SearchApproval — the durable owner approval that opens
+ *      Stage-B SEARCH. It binds the destination Stage-B cell (configHash,
+ *      target, controller) to a passing Stage-A G1 record at an absolute source
+ *      recordDir. assertG1SearchApproved re-reads that source record at dispatch
+ *      and FAILS CLOSED when the approval is absent, drifted, bound to another
+ *      cell, or the source record is gone, changed, failing or names different
+ *      identities than the cell being searched.
  *
  * OWNER-OPEN thresholds. launch-spec flags the Panel-A "2*SE analysis details",
  * the Stage-B pairing/tie-break and the durable G1/G2 approval record as open
@@ -53,6 +61,7 @@ export const G1_RECORD_FILE = "g1-statistical-record.v1.json";
 export const G2_RECORD_FILE = "g2-statistical-record.v1.json";
 export const G1_AUTHORIZATION_FILE = "g1-authorization.v1.json";
 export const G2_AUTHORIZATION_FILE = "g2-authorization.v1.json";
+export const G1_SEARCH_APPROVAL_FILE = "g1-search-approval.v1.json";
 
 /** launch-spec §4/§5 spec-pinned cardinalities (stated exactly, not owner-open). */
 export const PANEL_CAPSULE_COUNT = 8;
@@ -325,10 +334,43 @@ export const AuthorizationGateRecordV1 = z.discriminatedUnion("gate", [
 ]);
 export type AuthorizationGateRecordV1 = z.infer<typeof AuthorizationGateRecordV1>;
 
+/**
+ * Owner approval to open Stage-B SEARCH in one destination cell. Unlike the G1
+ * authorization it names no Stage-B products (there are none yet): it binds the
+ * destination cell to the passing Stage-A record it was approved from, and
+ * records where that source record lives so dispatch can re-read it.
+ */
+export const G1SearchApprovalV1 = z
+  .object({
+    version: z.literal(`${GATE_RECORDS_VERSION}/g1-search-approval`),
+    gate: z.literal("G1"),
+    /** configHash of the STAGE-B destination cell this approval opens for search. */
+    configHash: SHA256,
+    /** Absolute campaign directory holding the Stage-A G1 statistical record; re-read at dispatch. */
+    sourceRecordDir: z.string().min(1).refine(isAbsolute, "sourceRecordDir must be absolute"),
+    /** inputsDigest of the Stage-A G1 statistical record this approval certifies. */
+    statisticalRecordDigest: SHA256,
+    statisticalPass: z.literal(true),
+    acceptedArtifacts: z
+      .object({
+        /** The destination seedOptimizer; MUST equal the Stage-A validated winner (record.winner). */
+        target: OptimizerIdentity,
+        /** The destination controllerOptimizer; record.seed for controllerGeneration 0, record.winner for 1. */
+        controller: OptimizerIdentity,
+      })
+      .strict(),
+    humanDecision: HumanDecision,
+    generatedAt: ISO,
+    inputsDigest: SHA256,
+  })
+  .strict();
+export type G1SearchApprovalV1 = z.infer<typeof G1SearchApprovalV1>;
+
 declare const GATE_RECORD_VERIFIED: unique symbol;
 export type VerifiedG1Record = G1StatisticalRecordV1 & { readonly [GATE_RECORD_VERIFIED]: "g1" };
 export type VerifiedG2Record = G2StatisticalRecordV1 & { readonly [GATE_RECORD_VERIFIED]: "g2" };
 export type VerifiedAuthorization = AuthorizationGateRecordV1 & { readonly [GATE_RECORD_VERIFIED]: "auth" };
+export type VerifiedG1SearchApproval = G1SearchApprovalV1 & { readonly [GATE_RECORD_VERIFIED]: "search" };
 
 function refuse(why: string): never {
   throw new UsageError(`gate record refused: ${why}`);
@@ -793,6 +835,12 @@ export function verifyAuthorization(record: AuthorizationGateRecordV1, source = 
   return parsed as VerifiedAuthorization;
 }
 
+export function verifyG1SearchApproval(record: G1SearchApprovalV1, source = "G1 search approval"): VerifiedG1SearchApproval {
+  const parsed = G1SearchApprovalV1.parse(record);
+  if (inputsDigestOf(parsed) !== parsed.inputsDigest) refuse(`${source} inputsDigest mismatch — drifted since assembly`);
+  return parsed as VerifiedG1SearchApproval;
+}
+
 function writeRecord(path: string, record: unknown): string {
   writeFileDurable(path, `${canonicalJson(record)}\n`);
   chmodSync(path, 0o600);
@@ -845,6 +893,24 @@ function readAuthorization(campaignDir: string, gate: "G1" | "G2"): VerifiedAuth
   return verified;
 }
 
+export function writeG1SearchApproval(campaignDir: string, approval: G1SearchApprovalV1): string {
+  return writeRecord(join(campaignDir, G1_SEARCH_APPROVAL_FILE), verifyG1SearchApproval(approval, "G1 search approval to persist"));
+}
+
+function readG1SearchApproval(campaignDir: string): VerifiedG1SearchApproval {
+  const path = join(campaignDir, G1_SEARCH_APPROVAL_FILE);
+  if (!existsSync(path)) refuse(`G1 search approval ${path} is absent — Stage-B search fails closed`);
+  const parsed = G1SearchApprovalV1.safeParse(readJson(path));
+  if (!parsed.success) refuse(`${path} is not a valid G1 search approval`);
+  return verifyG1SearchApproval(parsed.data, path);
+}
+
+function assertSearchSourceDirectory(directory: string): void {
+  if (lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() !== true) {
+    refuse(`source G1 record directory ${directory} must be a real directory, not a symlink`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Human authorization assembly.
 // ---------------------------------------------------------------------------
@@ -860,7 +926,7 @@ export interface G1AuthorizationInputs {
   generatedAt?: string;
 }
 
-/** Human authorization to open Stage B. Fails closed if the G1 statistics did not pass. */
+/** Human authorization for Stage-B confirmation with its selected artifacts; requires passing G1 statistics. */
 export function assembleG1Authorization(inputs: G1AuthorizationInputs): VerifiedAuthorization {
   const record = verifyG1Record(inputs.record, "G1 record for authorization");
   if (!record.pass) refuse("G1 statistical gate did not pass — Stage B cannot be authorized");
@@ -927,6 +993,77 @@ export function assembleG2Authorization(inputs: G2AuthorizationInputs): Verified
   );
 }
 
+export interface G1SearchApprovalInputs {
+  /** The STAGE-B destination cell this approval opens for search. */
+  config: MetaCampaignConfigV2;
+  /** The Stage-A G1 statistical record being certified. */
+  record: G1StatisticalRecordV1;
+  /** Campaign directory the record was read from; bound as an absolute path and re-read at dispatch. */
+  recordDir: string;
+  humanDecision: HumanDecision;
+  generatedAt?: string;
+}
+
+/**
+ * The destination cell's registered target/controller identities, refused
+ * unless they are exactly what the Stage-A record validated: the target MUST be
+ * the G1 winner; the controller MUST be the G0 seed (controllerGeneration 0) or
+ * that same winner (controllerGeneration 1).
+ */
+function acceptedSearchArtifacts(
+  config: MetaCampaignConfigV2,
+  record: VerifiedG1Record,
+): { target: OptimizerIdentity; controller: OptimizerIdentity } {
+  const target = OptimizerIdentity.parse({
+    sourceArtifact: config.seedOptimizer.sourceArtifact,
+    bundleDigest: config.seedOptimizer.bundleDigest,
+  });
+  const controller = OptimizerIdentity.parse({
+    sourceArtifact: config.controllerOptimizer.sourceArtifact,
+    bundleDigest: config.controllerOptimizer.bundleDigest,
+  });
+  if (!sameIdentity(target, record.winner)) refuse("Stage-B target is not the G1 winner the Stage-A record validated");
+  const generation = config.generation.controllerGeneration;
+  if (!sameIdentity(controller, generation === 0 ? record.seed : record.winner)) {
+    refuse(`Stage-B controller is not the ${generation === 0 ? "G0 seed" : "G1 winner"} the Stage-A record validated for controllerGeneration ${generation}`);
+  }
+  return { target, controller };
+}
+
+/**
+ * Owner approval to open Stage-B search. Fails closed if the destination is not
+ * a stage-B cell, the G1 statistics did not pass, the recordDir does not hold
+ * that exact record, or the destination identities are not the ones it validated.
+ */
+export function assembleG1SearchApproval(inputs: G1SearchApprovalInputs): VerifiedG1SearchApproval {
+  const { config } = inputs;
+  if (config.version !== 2 || config.generation.stage !== "B") refuse("G1 search approval requires a stage-B M2 campaign config");
+  const record = verifyG1Record(inputs.record, "G1 record for search approval");
+  if (!record.pass) refuse("G1 statistical gate did not pass — Stage-B search cannot be approved");
+  const sourceRecordDir = resolve(inputs.recordDir);
+  assertSearchSourceDirectory(sourceRecordDir);
+  if (readG1Record(sourceRecordDir).inputsDigest !== record.inputsDigest) {
+    refuse(`${sourceRecordDir} holds a different G1 record than the one being approved`);
+  }
+  const acceptedArtifacts = acceptedSearchArtifacts(config, record);
+  const humanDecision = HumanDecision.parse(inputs.humanDecision);
+  const body = {
+    version: `${GATE_RECORDS_VERSION}/g1-search-approval` as const,
+    gate: "G1" as const,
+    configHash: metaCampaignConfigHash(config),
+    sourceRecordDir,
+    statisticalRecordDigest: record.inputsDigest,
+    statisticalPass: true as const,
+    acceptedArtifacts,
+    humanDecision,
+    generatedAt: inputs.generatedAt ?? new Date().toISOString(),
+  };
+  return verifyG1SearchApproval(
+    G1SearchApprovalV1.parse({ ...body, inputsDigest: sha256Text(canonicalJson(body)) }),
+    "assembled G1 search approval",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch guards — fail closed when the accepted authorization is missing or
 // bound to different artifacts than the dispatch requested.
@@ -944,7 +1081,7 @@ export interface StageBExpectation {
 }
 
 /**
- * Stage-B dispatch guard. Returns the verified G1 authorization or throws.
+ * Stage-B confirmation guard. Returns the verified G1 authorization or throws.
  * The G1 statistical record is produced in the (separate) stage-A cell, so the
  * authorization is self-sufficient: its schema pins statisticalPass to true,
  * assembleG1Authorization refuses a failing record, and inputsDigest binds the
@@ -1032,6 +1169,39 @@ export function assertG2Authorized(
     refuse("terminal --generation2 does not match the generation2 accepted at the G1 gate");
   }
   return authorization;
+}
+
+/**
+ * Stage-B SEARCH dispatch guard. Returns the verified G1 search approval or
+ * throws. Unlike assertG1Authorized this needs no Stage-B products: it binds
+ * the destination cell (configHash + registered target/controller) and
+ * RE-READS the Stage-A G1 record at the recorded absolute sourceRecordDir, so a
+ * source record that is gone, rewritten, failing, or validating different
+ * identities fails closed even though the approval's own digest still verifies.
+ */
+export function assertG1SearchApproved(campaignDir: string, config: MetaCampaignConfigV2): VerifiedG1SearchApproval {
+  if (config.version !== 2 || config.generation.stage !== "B") refuse("G1 search approval guards stage-B search only");
+  const approval = readG1SearchApproval(campaignDir);
+  const configHash = metaCampaignConfigHash(config);
+  if (approval.configHash !== configHash) {
+    refuse(`G1 search approval is bound to ${approval.configHash}, not the dispatched campaign ${configHash}`);
+  }
+  assertSearchSourceDirectory(approval.sourceRecordDir);
+  const sourcePath = join(approval.sourceRecordDir, G1_RECORD_FILE);
+  if (!existsSync(sourcePath)) refuse(`source G1 record ${sourcePath} named by the search approval is absent — Stage-B search fails closed`);
+  const record = readG1Record(approval.sourceRecordDir);
+  if (record.inputsDigest !== approval.statisticalRecordDigest) {
+    refuse(`source G1 record ${sourcePath} is not the record the search approval certified — stale approval`);
+  }
+  if (!record.pass) refuse("source G1 statistical record does not pass — Stage-B search fails closed");
+  const accepted = acceptedSearchArtifacts(config, record);
+  if (!sameIdentity(approval.acceptedArtifacts.target, accepted.target)) {
+    refuse("G1 search approval target does not match the dispatched Stage-B target");
+  }
+  if (!sameIdentity(approval.acceptedArtifacts.controller, accepted.controller)) {
+    refuse("G1 search approval controller does not match the dispatched Stage-B controller");
+  }
+  return approval;
 }
 
 /** Load + validate the owner-supplied gate-thresholds file; fails closed if any block is unset. */

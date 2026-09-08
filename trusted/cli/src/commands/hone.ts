@@ -95,6 +95,7 @@ import {
   type TrustedMetaMeasurementRow,
 } from "@hone/scoring";
 import { UsageError, boolFlag, parseFlags, strFlag } from "../args.js";
+import type { Flags } from "../args.js";
 import {
   buildBrokerCorpusConfig,
   corpusCohortFenceError,
@@ -107,9 +108,11 @@ import { persistMetaSearchTrajectory } from "../meta-trajectory.js";
 import {
   assembleG1Authorization,
   assembleG1Record,
+  assembleG1SearchApproval,
   assembleG2Authorization,
   assembleG2Record,
   assertG1Authorized,
+  assertG1SearchApproved,
   assertG2Authorized,
   readG1Record,
   readG2Record,
@@ -117,6 +120,7 @@ import {
   readGateThresholdsFile,
   writeAuthorization,
   writeG1Record,
+  writeG1SearchApproval,
   writeG2Record,
   type HumanDecision,
 } from "../gate-records.js";
@@ -2242,11 +2246,28 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
 
 const RECURSIVE_USAGE =
   "usage: hone recursive --campaign <path> --headless "
-  + "[--phase freeze|search|confirmation|terminal|authorize] "
+  + "[--phase freeze|search|approve-search|confirmation|terminal|authorize] "
   + "[--out <gitignored-path>] [--target-artifact sha256:<64hex>] [--controller-artifact sha256:<64hex>] "
   + "[--control-winner sha256:<64hex>] [--generation0 sha256:<64hex>] [--generation1 sha256:<64hex>] "
   + "[--generation2 sha256:<64hex>] [--gate-thresholds <path>] [--gate G1|G2] [--approver <name>] "
   + "[--reason <text>] [--record-dir <stage-a-cell-dir>] [--attest-diff-confined] [--attest-mechanism-plausible]";
+
+function recursiveHumanDecision(flags: Flags): HumanDecision {
+  const approver = strFlag(flags, "approver");
+  const reason = strFlag(flags, "reason");
+  if (approver === undefined || reason === undefined) throw new UsageError(RECURSIVE_USAGE);
+  if (!boolFlag(flags, "attest-diff-confined") || !boolFlag(flags, "attest-mechanism-plausible")) {
+    throw new UsageError("authorization requires --attest-diff-confined and --attest-mechanism-plausible");
+  }
+  return {
+    approver,
+    decision: "approved",
+    diffConfinedIntelligible: true,
+    mechanismPlausible: true,
+    reason,
+    decidedAt: new Date().toISOString(),
+  };
+}
 
 function digestFlag(value: string | undefined, label: string): Sha256Digest | undefined {
   if (value === undefined) return undefined;
@@ -2368,20 +2389,47 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
   const campaignFlag = strFlag(flags, "campaign");
   if (campaignFlag === undefined) throw new UsageError(RECURSIVE_USAGE);
   const phaseFlag = strFlag(flags, "phase") ?? "search";
-  if (!["freeze", "search", "confirmation", "terminal", "authorize"].includes(phaseFlag)) throw new UsageError(RECURSIVE_USAGE);
-  const phase = phaseFlag as "freeze" | "search" | "confirmation" | "terminal" | "authorize";
+  if (!["freeze", "search", "approve-search", "confirmation", "terminal", "authorize"].includes(phaseFlag)) throw new UsageError(RECURSIVE_USAGE);
+  const phase = phaseFlag as "freeze" | "search" | "approve-search" | "confirmation" | "terminal" | "authorize";
   const outFlag = strFlag(flags, "out");
   if ((phase === "freeze") !== (outFlag !== undefined)) throw new UsageError(RECURSIVE_USAGE);
   if (optimizerOverridden(io.env)) throw new UsageError("official recursive campaigns refuse HONE_OPTIMIZER_CMD");
 
   const campaignPath = resolve(io.root, campaignFlag);
   let config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
-  // Non-executing freeze/authorization remain independent of document availability.
+  const configHash = metaCampaignConfigHash(config);
+  const hashBody = configHash.slice("sha256:".length);
+  const campaignDir = join(runsRoot(io.root), `recursive-cell-${hashBody}`);
+  if (phase === "search" && config.generation.stage === "B") {
+    // Refuse before preparing optimizers, controls, ledgers or resumed work.
+    assertG1SearchApproved(campaignDir, config);
+  }
+  // Non-executing freeze/approval/authorization remain independent of document availability.
   // Every executing phase verifies before optimizer preparation or any child dispatch.
-  const corpus = phase === "freeze" || phase === "authorize" ? undefined : recursiveCorpus(config, trusted.corpus);
+  const corpus = phase === "search" || phase === "confirmation" || phase === "terminal"
+    ? recursiveCorpus(config, trusted.corpus) : undefined;
   assertCleanSourceTree(io.root);
   const commit = sourceCommit(io.root);
   const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
+  if (phase !== "freeze" && (config.trustedRuntime.sourceCommit !== commit || config.trustedRuntime.digest !== runtimeDigest)) {
+    throw new UsageError("recursive campaign trusted runtime identity drift");
+  }
+  if (phase === "approve-search") {
+    const recordDir = strFlag(flags, "record-dir");
+    if (recordDir === undefined) throw new UsageError(RECURSIVE_USAGE);
+    const sourceRecordDir = resolve(io.root, recordDir);
+    const approval = assembleG1SearchApproval({
+      config,
+      record: readG1Record(sourceRecordDir),
+      recordDir: sourceRecordDir,
+      humanDecision: recursiveHumanDecision(flags),
+    });
+    mkdirSync(campaignDir, { recursive: true, mode: 0o700 });
+    chmodSync(campaignDir, 0o700);
+    const approvalPath = writeG1SearchApproval(campaignDir, approval);
+    io.out(canonicalJson({ configHash, phase, gate: "G1", approvalPath }));
+    return 0;
+  }
   const casDir = casRoot(io.root);
   const cas = new CasStore(casDir);
   const rootSnapshot = collectOptimizerSnapshot(io.root);
@@ -2434,9 +2482,6 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     return 0;
   }
 
-  if (config.trustedRuntime.sourceCommit !== commit || config.trustedRuntime.digest !== runtimeDigest) {
-    throw new UsageError("recursive campaign trusted runtime identity drift");
-  }
   const comparisonImage = recursiveOptimizerImage(config);
   const target = await resolveRegisteredOptimizer(config.seedOptimizer, commit, rootSnapshot, casDir, comparisonImage);
   const controller = await resolveRegisteredOptimizer(config.controllerOptimizer, commit, rootSnapshot, casDir, comparisonImage);
@@ -2450,9 +2495,6 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     throw new UsageError("recursive trusted controls do not match the frozen target-specific controls");
   }
   const capsules = resolveRegisteredCapsules(io.root, config);
-  const configHash = metaCampaignConfigHash(config);
-  const hashBody = configHash.slice("sha256:".length);
-  const campaignDir = join(runsRoot(io.root), `recursive-cell-${hashBody}`);
   mkdirSync(campaignDir, { recursive: true, mode: 0o700 });
   chmodSync(campaignDir, 0o700);
   const registeredConfigPath = join(campaignDir, "campaign.json");
@@ -2565,7 +2607,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
       if (controlWinner === undefined || generation2 === undefined) throw new UsageError(RECURSIVE_USAGE);
       const controlWinnerIdentity = await checkedPublicIdentity(controlWinner, gate);
       const generation2Identity = await checkedPublicIdentity(generation2, gate);
-      // Fail closed: Stage B cannot run without the accepted G1 human authorization.
+      // The later artifact-bound G1 authorization remains required for confirmation.
       assertG1Authorized(campaignDir, configHash, {
         target: targetIdentity,
         controlWinner: controlWinnerIdentity,
@@ -2630,20 +2672,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     if (phase === "authorize") {
       const gateFlag = strFlag(flags, "gate");
       if (gateFlag !== "G1" && gateFlag !== "G2") throw new UsageError(RECURSIVE_USAGE);
-      const approver = strFlag(flags, "approver");
-      const reason = strFlag(flags, "reason");
-      if (approver === undefined || reason === undefined) throw new UsageError(RECURSIVE_USAGE);
-      if (!boolFlag(flags, "attest-diff-confined") || !boolFlag(flags, "attest-mechanism-plausible")) {
-        throw new UsageError("authorization requires --attest-diff-confined and --attest-mechanism-plausible");
-      }
-      const humanDecision: HumanDecision = {
-        approver,
-        decision: "approved",
-        diffConfinedIntelligible: true,
-        mechanismPlausible: true,
-        reason,
-        decidedAt: new Date().toISOString(),
-      };
+      const humanDecision = recursiveHumanDecision(flags);
       if (gateFlag === "G1") {
         const controlWinner = digestFlag(strFlag(flags, "control-winner"), "--control-winner");
         const generation2 = digestFlag(strFlag(flags, "generation2"), "--generation2");
@@ -2714,6 +2743,8 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     const commandArgs = resume
       ? [syntheticCapsule, "--headless", "--resume", "--optimizer-artifact", controller.sourceArtifact]
       : [syntheticCapsule, "--headless", "--config", outerConfigPath, "--optimizer-artifact", controller.sourceArtifact];
+    // Preparation awaits artifact resolution; refresh approval at the launch boundary.
+    if (config.generation.stage === "B") assertG1SearchApproved(campaignDir, config);
     const code = await runCommand(commandArgs, io, {
       runId: outerRunId,
       recursiveBroker,
