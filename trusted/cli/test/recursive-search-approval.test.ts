@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { metaCampaignConfigHash } from "@hone/meta";
-import { canonicalJson, MetaCampaignConfigV2 } from "@hone/schema";
+import { canonicalJson, CapsuleManifest, capsuleDigest, MetaCampaignConfigV2 } from "@hone/schema";
 import { recursiveCommand } from "../src/commands/hone.js";
 import { assembleG1Record, writeG1Record } from "../src/gate-records.js";
 import { collectOptimizerSnapshot } from "../src/optimizer-digest.js";
@@ -13,6 +13,8 @@ import { runCommand } from "../src/supervisor.js";
 import type { CmdIo } from "../src/io.js";
 import type * as OptimizerDigestModule from "../src/optimizer-digest.js";
 import { buildConfig, buildMeasurements, digest, passingG1Specs, receiptFor, G1_THRESHOLDS, ID } from "./helpers/gate-fixtures.js";
+import { assembleCorpusProvenance, type BuildBrokerCorpusConfigInputs, type PanelEvidenceDocumentInput } from "../src/corpus-provenance.js";
+import { manifestRaw } from "./helpers.js";
 
 // Keep command parsing, approval persistence, schemas, identity guards and dispatch
 // real. Replace only installed-artifact/admission and execution boundaries; no
@@ -56,6 +58,7 @@ function control(kind: "broken" | "degraded") {
 let entries: MetaCampaignConfigV2["train"] = [];
 let root: string;
 let config: MetaCampaignConfigV2;
+let corpus: Omit<BuildBrokerCorpusConfigInputs, "campaignConfigHash">;
 let recordDir: string;
 let campaignDir: string;
 let io: CmdIo;
@@ -65,13 +68,13 @@ function writeConfig() {
   writeFileSync(join(root, "campaign.json"), JSON.stringify(config));
   campaignDir = join(root, ".hone-runs", `recursive-cell-${metaCampaignConfigHash(config).slice(7)}`);
 }
-function search(phase: string[] = ["--phase", "search"]) {
-  return recursiveCommand(["--campaign", "campaign.json", "--headless", ...phase], io);
+function search(phase: string[] = ["--phase", "search"], withCorpus = true) {
+  return recursiveCommand(["--campaign", "campaign.json", "--headless", ...phase], io, withCorpus ? { corpus } : {});
 }
 function approve(extra: string[] = []) {
   return search(["--phase", "approve-search", "--record-dir", recordDir,
     "--approver", "synthetic-test-owner", "--reason", "isolated test approval, not campaign authority",
-    "--attest-diff-confined", "--attest-mechanism-plausible", ...extra]);
+    "--attest-diff-confined", "--attest-mechanism-plausible", ...extra], false);
 }
 function expectNoWork() {
   expect(runCommand).not.toHaveBeenCalled();
@@ -100,6 +103,34 @@ beforeEach(() => {
       degradedSourceArtifact: digest("degraded"), degradedBundleDigest: digest("degraded-bundle"),
     },
   });
+  const development = Array.from({ length: 16 }, (_, i) => `dev-${i}`);
+  const terminal = Array.from({ length: 11 }, (_, i) => `terminal-${i}`);
+  const capsules = Object.fromEntries([...development, ...terminal].map((label) => {
+    const manifest = CapsuleManifest.parse(manifestRaw({
+      objective: `Synthetic owner-handoff fixture ${label}.`,
+      contentHashes: { "data.txt": digest(`synthetic data for ${label}`) },
+    }));
+    return [label, { manifest, digest: capsuleDigest(manifest), provisional: false }];
+  }));
+  const entry = (label: string) => ({
+    ...base.train[0]!, capsuleId: capsules[label]!.manifest.id,
+    capsuleDigest: capsules[label]!.digest, image: capsules[label]!.manifest.image,
+  });
+  config.train = development.slice(0, 8).map(entry);
+  config.holdout = terminal.map(entry);
+  config.developmentPanel.members.forEach((member, i) => { member.capsule = config.train[i]!; });
+  const publicSnapshot = [{ id: "public-history", content: "verified synthetic owner-handoff history" }];
+  const panelEvidence: PanelEvidenceDocumentInput[] = [];
+  const provenance = assembleCorpusProvenance({
+    capsules, mapping: { development, terminal }, publicSnapshot, panelEvidence,
+    generatedAt: "2026-07-24T00:00:00.000Z",
+  });
+  corpus = { provenance, publicSnapshot, panelEvidence };
+  config.corpusCohort = {
+    developmentCapsuleIds: [...provenance.developmentCapsuleIds],
+    terminalCapsuleIds: [...provenance.terminalCapsuleIds],
+    provenanceInputsDigest: provenance.inputsDigest,
+  };
   const snapshot = { files: new Map([...config.mutablePaths, ...config.protectedPaths]
     .filter((path) => path.startsWith("optimizer/"))
     .map((path) => [path, { bytes: Buffer.from("fixture"), mode: 0o644 as const }])) };
@@ -128,7 +159,13 @@ afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 describe("recursive Stage-B search owner handoff", () => {
   it.each([{ phase: [] }, { phase: ["--phase", "search"] }])("unapproved search launches nothing ($phase)", async ({ phase }) => {
-    await expect(search(phase)).rejects.toThrow(/G1.*search.*approval.*absent/i);
+    await expect(search(phase, false)).rejects.toThrow(/G1.*search.*approval.*absent/i);
+    expectNoWork();
+  });
+
+  it("does not let owner approval bypass verified corpus requirements", async () => {
+    await approve();
+    await expect(search(["--phase", "search"], false)).rejects.toThrow(/requires verified corpus provenance/);
     expectNoWork();
   });
 
@@ -182,7 +219,8 @@ describe("recursive Stage-B search owner handoff", () => {
   it("keeps Stage-A search outside the G1 approval boundary", async () => {
     const stageA = buildConfig("A");
     config = MetaCampaignConfigV2.parse({
-      ...config, generation: stageA.generation, developmentPanel: stageA.developmentPanel,
+      ...config, generation: stageA.generation,
+      developmentPanel: { ...stageA.developmentPanel, members: stageA.developmentPanel.members.map((member, i) => ({ ...member, capsule: config.train[i]! })) },
       controllerOptimizer: config.seedOptimizer, recursiveBudgets: stageA.recursiveBudgets,
     });
     writeConfig();
