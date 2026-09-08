@@ -1,0 +1,60 @@
+{
+  "objective": "Maximize covered weight over at most 256 elements and 128 candidate sets under a hard cost budget. Fresh calibration-only task; excluded from development and terminal cohorts. Only task.py may change.",
+  "image": "hone-mutation@sha256:f680ddc7c1d5facfec0cce238784ab459bc4d54221e64a262101f20d575252f7",
+  "evalEntrypoint": [
+    "python3",
+    "-I",
+    "-B",
+    "eval.py"
+  ],
+  "protectedPaths": [
+    "eval.py",
+    "checker.py",
+    "contract.json"
+  ],
+  "assetGroups": [
+    {
+      "id": "train",
+      "visibility": "public",
+      "paths": [
+        "assets/train/cases.json.gz"
+      ]
+    },
+    {
+      "id": "validation",
+      "visibility": "protected",
+      "paths": [
+        "assets/validation/cases.json.gz"
+      ]
+    }
+  ],
+  "budget": {
+    "maxTokens": 600000,
+    "maxUsd": 10,
+    "maxWallClockSec": 7200,
+    "maxEvaluatorInvocations": 49
+  },
+  "sandbox": {
+    "memoryBytes": 2147483648,
+    "cpus": 2
+  },
+  "diagnosticOrdering": {
+    "path": "diagnostics/ordering-report.json"
+  },
+  "meta": {
+    "evaluatorSource": "inferred",
+    "license": "MIT",
+    "tags": [
+      "calibration-only",
+      "fresh-synthetic",
+      "python-stdlib"
+    ],
+    "provenance": "Fresh TWA-90 implementation of the TWA-59 approved task; no cohort code or fixtures reused.",
+    "admissionStatus": "offline-authored-not-admitted",
+    "excludedCohorts": [
+      "development",
+      "terminal"
+    ],
+    "imageStatus": "approved pin; target-host/runtime validation required before admission"
+  }
+}
