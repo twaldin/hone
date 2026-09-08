@@ -12,6 +12,7 @@ import { resolveCandidateOptimizer } from "../src/optimizer-artifact.js";
 import { runCommand } from "../src/supervisor.js";
 import type { CmdIo } from "../src/io.js";
 import type * as OptimizerDigestModule from "../src/optimizer-digest.js";
+import type * as RuntimeDigestModule from "../src/runtime-digest.js";
 import { buildConfig, buildMeasurements, digest, passingG1Specs, receiptFor, G1_THRESHOLDS, ID } from "./helpers/gate-fixtures.js";
 import { assembleCorpusProvenance, type BuildBrokerCorpusConfigInputs, type PanelEvidenceDocumentInput } from "../src/corpus-provenance.js";
 import { manifestRaw } from "./helpers.js";
@@ -20,7 +21,10 @@ import { manifestRaw } from "./helpers.js";
 // real. Replace only installed-artifact/admission and execution boundaries; no
 // Docker, provider, campaign measurement or terminal input is used by this suite.
 vi.mock("../src/supervisor.js", () => ({ runCommand: vi.fn(async () => 1) }));
-vi.mock("../src/runtime-digest.js", () => ({ verifiedBootRuntimeDigest: () => `sha256:${"1".repeat(64)}` }));
+vi.mock("../src/runtime-digest.js", async (original) => ({
+  ...await original<typeof RuntimeDigestModule>(),
+  verifiedBootRuntimeDigest: () => `sha256:${"1".repeat(64)}`,
+}));
 vi.mock("../src/optimizer-digest.js", async (original) => ({
   ...await original<typeof OptimizerDigestModule>(),
   collectOptimizerSnapshot: vi.fn(),
