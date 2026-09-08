@@ -103,6 +103,13 @@ export interface RunnerBackendContext {
   recursiveBroker?: BrokerRecursiveConfig | undefined;
   /** Frozen development-corpus wire config (M2); trusted-only, never from CLI flags or run config. */
   corpus?: BrokerCorpusConfig | undefined;
+  /**
+   * Calibration host binding (trusted plan only): the aggregate cgroup parent
+   * every sandbox container is created under, and the exact Docker engine
+   * id the binding was inspected on. Absent on ungrouped M0/M1 runs.
+   */
+  sandboxCgroupParent?: string | undefined;
+  sandboxDockerEngineId?: string | undefined;
   /** State replayed from the event log — resume dedupe starts here (nextEpisode, incumbent, budget). */
   replayed: RunState;
   /** Aborted on stop request or budget exhaustion; backends must wind down. */

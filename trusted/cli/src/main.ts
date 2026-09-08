@@ -5,6 +5,7 @@ import { UsageError } from "./args.js";
 import { applyCommand } from "./commands/apply.js";
 import { authorCommand } from "./commands/author.js";
 import { bestCommand } from "./commands/best.js";
+import { calibrationCommand } from "./commands/calibration.js";
 import { diffCommand } from "./commands/diff.js";
 import { honeCommand, recursiveCommand } from "./commands/hone.js";
 import { resumeCampaignCommand } from "./commands/resume.js";
@@ -24,6 +25,7 @@ usage:
   hone author <capsule-objective> [--repo DIR] [--headless] [--acknowledge-dirty]
   hone hone --campaign <path> --headless
   hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal]
+  hone calibration plan|init|status|run|report|verify [flags]
   hone resume [--pause PAUSE_ID] [--campaign CAMPAIGN_STATE_DIR]
   hone status [--run ID]
   hone best [--run ID]
@@ -50,6 +52,8 @@ export async function main(argv: string[], io: CmdIo): Promise<number> {
         return await honeCommand(rest, io);
       case "recursive":
         return await recursiveCommand(rest, io);
+      case "calibration":
+        return await calibrationCommand(rest, io);
       case "resume":
         return await resumeCampaignCommand(rest, io);
       case "status":
