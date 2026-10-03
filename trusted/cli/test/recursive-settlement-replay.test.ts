@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { approveFixtureCapsule, makeCapsule } from "./helpers.js";
+import { syntheticFrozenCampaign, writeSyntheticFrozenCampaign } from "./support/synthetic-campaign.js";
 import {
   MetaCampaignConfigV2,
   canonicalJson,
@@ -46,33 +47,26 @@ import type { CampaignPauseAuthority } from "../src/types.js";
 import { deferred } from "../src/promise.js";
 
 /*
- * Preserved launch evidence, m2-exec-runtime-2, config bd7654d7…:
+ * Replays the shape of a preserved m2-exec-runtime-2 launch against a
+ * synthetic frozen recursive campaign:
  * outer events cursors 0 run.started, 2 episode.started, 5 run.resumed;
  * child cursors 6 run.paused(provider-transport), 8 run.resumed;
  * meta-journal seq 1 reservation, seq 2 erroneous infrastructure_not_run
  * failure settlement. Replaying the child then raised exactly
- * `conflicting duplicate settlement for sha256:de507175…`.
+ * `conflicting duplicate settlement for <work key>`.
  */
-const frozenConfigPath = fileURLToPath(new URL(
-  "../../../data/m2-refreeze-final/campaign-frozen-recursive-capacity.json",
-  import.meta.url,
-));
 const pendingJournalFixturePath = fileURLToPath(new URL("./fixtures/pending-journal-process.ts", import.meta.url));
 const cliPackageDir = fileURLToPath(new URL("../", import.meta.url));
 const pendingOuterFixturePath = fileURLToPath(new URL("./fixtures/pending-child-outer-process.ts", import.meta.url));
 const tsxPath = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
-const config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(frozenConfigPath, "utf8")));
+const config = MetaCampaignConfigV2.parse(syntheticFrozenCampaign());
 const configHash = metaCampaignConfigHash(config) as Sha256Digest;
 const member = config.developmentPanel.members[0]!;
 const sourceArtifact = config.seedOptimizer.sourceArtifact as Sha256Digest;
 const bundleDigest = config.seedOptimizer.bundleDigest as Sha256Digest;
 const SKEW_BUNDLE = `sha256:${"e".repeat(64)}` as Sha256Digest;
-const reservation: BudgetEnvelope = {
-  maxTokens: 12_000_000,
-  maxUsd: 25,
-  maxWallClockSec: 10_800,
-  maxEvaluatorInvocations: 200,
-};
+// The child reserves its full calibrated inner ceiling, as the preserved launch did.
+const reservation: BudgetEnvelope = { ...member.calibratedInnerCeiling };
 const schedule = { candidateOrdinal: 0, allocationOrdinal: 0, innerEpisodesMax: 4 } as const;
 const identity: MetaWorkIdentityV1 = {
   phase: "search",
@@ -429,7 +423,7 @@ async function killPendingJournalProcess(root: string): Promise<NodeJS.Signals |
     throw new Error("pending replay fixture could not recover the durable reservation");
   }
   const payload = {
-    configPath: frozenConfigPath,
+    configPath: writeSyntheticFrozenCampaign(join(root, "campaign-frozen-recursive.json")),
     journalPath,
     identity: reservationFact.reservation.identity,
     envelope: reservationFact.reservation.envelope,
@@ -746,8 +740,13 @@ async function exercisePauseResume(killDuringPause: boolean): Promise<void> {
 
 describe("recursive child nonterminal settlement replay", () => {
   it("replays provider gateway absence into one full terminal settlement after recovery", { timeout: 30_000 }, async () => {
-    expect(configHash).toBe("sha256:bd7654d7c2967fdcb01131cf29507e0286762d3c2e452185f1840c1aa102d300");
-    expect(workKey).toBe("sha256:de50717555fa81039f155e7a9df2efcbde237def09a84c3c258e620747963973");
+    // Replay processes reopen the frozen config from disk; it must bind the same campaign and work key.
+    const frozenPath = writeSyntheticFrozenCampaign(
+      join(mkdtempSync(join(tmpdir(), "hone-settlement-config-")), "campaign-frozen-recursive.json"),
+    );
+    const reopenedHash = metaCampaignConfigHash(MetaCampaignConfigV2.parse(JSON.parse(readFileSync(frozenPath, "utf8"))));
+    expect(reopenedHash).toBe(configHash);
+    expect(metaWorkKey(reopenedHash as Sha256Digest, identity)).toBe(workKey);
     await exercisePauseResume(false);
   });
 

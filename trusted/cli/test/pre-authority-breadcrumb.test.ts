@@ -22,12 +22,9 @@ import {
   PreAuthorityRefusalBreadcrumbV1,
 } from "../src/pre-authority-breadcrumb.js";
 import type { TrustedRunOptions } from "../src/supervisor.js";
+import { syntheticFrozenCampaign } from "./support/synthetic-campaign.js";
 
 const SESSION_NO_YIELD_MAX_TOKENS = 1_700_000;
-const frozenConfigPath = fileURLToPath(new URL(
-  "../../../data/m2-refreeze-final/campaign-frozen-recursive-capacity.json",
-  import.meta.url,
-));
 const m1Config = MetaCampaignConfigV1.parse({
   ...JSON.parse(readFileSync(fileURLToPath(new URL(
     "../../../schema/fixtures/meta-campaign.m1.json",
@@ -36,7 +33,7 @@ const m1Config = MetaCampaignConfigV1.parse({
   sessionNoYieldMaxTokens: SESSION_NO_YIELD_MAX_TOKENS,
 });
 const config = MetaCampaignConfigV2.parse({
-  ...JSON.parse(readFileSync(frozenConfigPath, "utf8")),
+  ...syntheticFrozenCampaign(),
   sessionNoYieldMaxTokens: SESSION_NO_YIELD_MAX_TOKENS,
 });
 const configHash = metaCampaignConfigHash(config) as Sha256Digest;
