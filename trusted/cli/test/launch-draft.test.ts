@@ -481,7 +481,6 @@ describe("generateM2LaunchDraft", () => {
     const derivation = deriveM2OuterDirectEnvelope(12);
     expect(derivation).toMatchObject({
       projectionBasis: "campaign-8-observed-panel-mean",
-      projectionReceiptPath: "data/m2-refreeze-final/campaign-8-abandonment-receipt.v1.json",
       projectionReceiptSha256: "sha256:c5c474a3b1f5b9721e2b049a672124e69665524970e2c0ba8f60e592fabea77b",
       projectionReceiptCommit: "d91251332",
       projectionMeanField: "outerEnvelopeArithmetic.firstTwoProjectionMeanSec",
@@ -492,6 +491,7 @@ describe("generateM2LaunchDraft", () => {
       searchChildConcurrency: 3,
       confirmationTerminalChildConcurrency: 4,
     });
+    expect(derivation).not.toHaveProperty("projectionReceiptPath");
     expect(derivation.derived).toEqual({
       maxTokens: 22_500_000,
       maxUsd: 113,
@@ -506,17 +506,14 @@ describe("generateM2LaunchDraft", () => {
       observedPlannedWall * 1.25,
     );
 
-    const preservedPath = fileURLToPath(new URL(
-      "../../../data/m2-refreeze-final/campaign-frozen.json",
-      import.meta.url,
-    ));
-    const preserved = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedPath, "utf8")));
-    expect(preserved.budgets.outer).toEqual({
+    // The Campaign-11 freeze carried the pre-derivation $25/5M outer envelope.
+    const preserved = structuredClone(generateM2LaunchDraft(fixture().inputs).config);
+    preserved.budgets.outer = {
       maxTokens: 5_000_000,
       maxUsd: 25,
       maxWallClockSec: 86_400,
       maxEvaluatorInvocations: 25,
-    });
+    };
     expect(() => assertM2OuterDirectEnvelope(preserved)).toThrow(
       /frozen outer direct maxTokens 5000000 cannot cover the planned search phase/,
     );

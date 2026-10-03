@@ -395,7 +395,6 @@ function assertSafeBudget(budget: BudgetEnvelope, label: string): void {
  */
 export const M2_OUTER_DIRECT_ENVELOPE_POLICY = {
   projectionBasis: "campaign-8-observed-panel-mean" as const,
-  projectionReceiptPath: "data/m2-refreeze-final/campaign-8-abandonment-receipt.v1.json" as const,
   projectionReceiptSha256:
     "sha256:c5c474a3b1f5b9721e2b049a672124e69665524970e2c0ba8f60e592fabea77b" as const,
   projectionReceiptCommit: "d91251332" as const,
