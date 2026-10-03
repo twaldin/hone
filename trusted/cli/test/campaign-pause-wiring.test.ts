@@ -96,8 +96,8 @@ describe("campaign-wide proxy pause wiring", () => {
           {
             role: "outer-optimizer",
             dispatchId: "dispatch-outer",
-            requestedRoute: "gpt-5.6-sol",
-            returnedModel: "gpt-5.6-sol",
+            requestedRoute: "openai-codex/gpt-5.6-sol",
+            returnedModel: "openai-codex/gpt-5.6-sol",
             status: 200,
             passed: true,
           },

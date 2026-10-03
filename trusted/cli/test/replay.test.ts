@@ -55,6 +55,48 @@ describe("event log replay", () => {
     expect(st.finished?.best?.hash).toBe(fakeHash("d"));
   });
 
+  it("advances an optimizer seal only from a durable pause and exact prior identity", () => {
+    const runId = "run_optimizer_migration";
+    const events = fixtureEvents({
+      runId,
+      baselineHash: fakeHash("b"),
+      bestHash: fakeHash("d"),
+      finished: false,
+    });
+    const before = replay(events);
+    events.push({
+      runId,
+      at: new Date().toISOString(),
+      type: "run.paused",
+      reason: "operator",
+    }, {
+      runId,
+      at: new Date().toISOString(),
+      type: "run.optimizer-migrated",
+      fromSourceArtifact: fakeHash("1"),
+      sourceArtifact: fakeHash("2"),
+      fromBaseDigest: fakeHash("3"),
+      baseDigest: fakeHash("4"),
+      fromOptimizerDigest: before.optimizerDigest!,
+      optimizerDigest: fakeHash("5"),
+      fromContractHash: before.contractHash!,
+      contractHash: fakeHash("6"),
+      sourceMigrationRecordDigest: fakeHash("7"),
+    });
+    const migrated = replay(events);
+    expect(migrated.status).toBe("paused");
+    expect(migrated.optimizerDigest).toBe(fakeHash("5"));
+    expect(migrated.contractHash).toBe(fakeHash("6"));
+
+    expect(() => replay(events.filter((event) => event.type !== "run.paused")))
+      .toThrow("requires a durably paused run");
+    const forged = structuredClone(events);
+    const migration = forged.at(-1);
+    if (migration?.type !== "run.optimizer-migrated") throw new Error("fixture lost optimizer migration");
+    migration.fromOptimizerDigest = fakeHash("8");
+    expect(() => replay(forged)).toThrow("does not extend the run's sealed optimizer");
+  });
+
   it("tolerates a torn trailing line (crash mid-append)", () => {
     const root = makeRoot();
     const runDir = writeEvents(root, "run_torn", fixtureEvents({ runId: "run_torn", baselineHash: fakeHash("b"), bestHash: fakeHash("d"), finished: false }));

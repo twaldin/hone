@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,12 +7,14 @@ import type { CapsuleManifest } from "@hone/schema";
 import {
   Broker,
   SCRATCH_INODE_LIMIT,
+  SCRATCH_SNAPSHOT_DIGEST_PREFIX,
   SCRATCH_SNAPSHOT_DEADLINE_SEC,
   SCRATCH_SNAPSHOT_SCRIPT,
   SCRATCH_SNAPSHOT_TMP_PREFIX,
   finalizeScratchSnapshot,
   newScratchSnapshotAttemptName,
   scratchSnapshotArchiveCapBytes,
+  scratchRestoreMemoryBytes,
   type BrokerConfig,
 } from "../src/broker.js";
 import { CasStore, durability } from "../src/cas.js";
@@ -40,6 +42,9 @@ afterAll(async () => {
 function fakeRes(overrides: Partial<CmdResult> = {}): CmdResult {
   return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false, ...overrides };
 }
+
+const snapshotDigestMarker = (bytes: string | Buffer): string =>
+  `${SCRATCH_SNAPSHOT_DIGEST_PREFIX}${createHash("sha256").update(bytes).digest("hex")}`;
 
 interface FakeDockerHarness {
   broker: Broker;
@@ -82,7 +87,7 @@ async function makeFakeDockerBroker(
     calls.push([...argv]);
     if (argv[0] !== "docker") return Promise.resolve(fakeRes());
     if (argv[1] === "run") return Promise.resolve(fakeRes({ stdout: Buffer.from(`cid-${++cid}\n`) }));
-    if (argv[1] === "rm" && argv[2] === "-f" && opts.failRemove?.has(argv[3] ?? "")) {
+    if (argv[1] === "rm" && argv[2] === "-f" && argv.slice(2).some((target) => opts.failRemove?.has(target))) {
       return Promise.resolve(fakeRes({ exitCode: 1, stderr: Buffer.from("cannot remove: device busy") }));
     }
     if (argv[1] === "exec" && argv.includes(SCRATCH_SNAPSHOT_SCRIPT)) {
@@ -109,10 +114,10 @@ async function makeFakeDockerBroker(
     manifest,
     capsuleRootDir: capsule.capsuleRootDir,
     baselineArtifactHash: baselineHash,
-    capsuleDigest: TEST_CAPSULE_DIGEST,
+    admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
     optimizerDigest: TEST_OPTIMIZER_DIGEST,
     holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
-    image: TEST_IMAGE,
+    executionImage: TEST_IMAGE,
     runDir,
     casDir: path.join(base, "cas"),
     onEvent: () => {},
@@ -139,6 +144,16 @@ describe("scratch snapshot bounds (kernel cap + deadline wired into the keeper)"
     expect(cap).toBe(quota + SCRATCH_INODE_LIMIT * 2048 + 10240);
     // The in-container deadline must sit strictly below the 300s host exec timeout.
     expect(SCRATCH_SNAPSHOT_DEADLINE_SEC * 1000).toBeLessThan(300_000);
+    const measuredArchiveBytes = 247_235_840;
+    const adversarialEntries = 30_000;
+    const measuredRestoreMemory = scratchRestoreMemoryBytes(measuredArchiveBytes, adversarialEntries);
+    expect(measuredRestoreMemory).toBe(
+      Math.ceil(
+        (measuredArchiveBytes * 2 + adversarialEntries * 6 * 1024 + 64 * 1024 * 1024) / (1024 * 1024),
+      ) * 1024 * 1024,
+    );
+    expect(scratchRestoreMemoryBytes(2 * 1024 * 1024 * 1024, SCRATCH_INODE_LIMIT))
+      .toBeGreaterThan(measuredRestoreMemory);
 
     const h = await makeFakeDockerBroker("bounds", { scratchQuotaBytes: quota, containerLease: "hone-lease-x" });
     const volumeCreate = h.calls[findCall(h.calls, "docker", "volume", "create")];
@@ -149,6 +164,8 @@ describe("scratch snapshot bounds (kernel cap + deadline wired into the keeper)"
     expect(hasPair(keeperRun ?? [], "-e", `HONE_SCRATCH_QUOTA_BYTES=${quota}`)).toBe(true);
     expect(hasPair(keeperRun ?? [], "-e", `HONE_SCRATCH_SNAPSHOT_MAX_BYTES=${cap}`)).toBe(true);
     expect(hasPair(keeperRun ?? [], "-e", `HONE_SCRATCH_SNAPSHOT_DEADLINE_SEC=${SCRATCH_SNAPSHOT_DEADLINE_SEC}`)).toBe(true);
+    expect(hasPair(keeperRun ?? [], "--memory", String(scratchRestoreMemoryBytes(0, 0)))).toBe(true);
+    expect(hasPair(keeperRun ?? [], "--memory-swap", String(scratchRestoreMemoryBytes(0, 0)))).toBe(true);
     expect(hasPair(keeperRun ?? [], "--volumes-from", "hone-lease-x:ro")).toBe(true);
     expect(hasPair(keeperRun ?? [], "--cap-add", "DAC_OVERRIDE")).toBe(true);
     // GNU tar restores ownership before final modes. The trusted keeper must
@@ -177,8 +194,13 @@ describe("scratch snapshot bounds (kernel cap + deadline wired into the keeper)"
     const snapshotExec = h.calls.find((c) => c.includes(SCRATCH_SNAPSHOT_SCRIPT));
     expect(hasPair(snapshotExec ?? [], "-e", `HONE_SCRATCH_SNAPSHOT_OUT=${attemptName}`)).toBe(true);
     expect((await readFile(path.join(h.runDir, "scratch-snapshot", "scratch.tar"), "utf8"))).toBe("fake-tar-bytes");
-    // Nothing but the published snapshot survives: the attempt temp is swept.
-    expect(await readdir(path.join(h.runDir, "scratch-snapshot"))).toEqual(["scratch.tar"]);
+    const marker = snapshotDigestMarker("fake-tar-bytes");
+    expect((await readdir(path.join(h.runDir, "scratch-snapshot"))).sort()).toEqual(
+      ["checksum-authority-v1", "scratch.tar", marker].sort(),
+    );
+    expect(await readFile(path.join(h.runDir, "scratch-snapshot", marker), "utf8")).toBe(
+      `sha256:${marker.slice(SCRATCH_SNAPSHOT_DIGEST_PREFIX.length)}\n`,
+    );
   });
 
   it("attaches the docker-run lease to mutation sandbox containers", async () => {
@@ -201,7 +223,7 @@ describe("scratch snapshot bounds (kernel cap + deadline wired into the keeper)"
     // preserved intact for the next strict resume sweep: no snapshot exec, no
     // keeper removal, no volume removal.
     expect(h.calls.some((c) => c.includes(SCRATCH_SNAPSHOT_SCRIPT))).toBe(false);
-    expect(findCall(h.calls, "docker", "rm", "-f", h.keeperName)).toBe(-1);
+    expect(findCall(h.calls, "docker", "rm", "-f", "-v", h.keeperName)).toBe(-1);
     expect(findCall(h.calls, "docker", "volume", "rm")).toBe(-1);
   });
 });
@@ -252,7 +274,9 @@ describe("per-attempt snapshot outputs (a late-writing orphaned exec is inert)",
     // is inert garbage and the sweep removed it.
     const snapshotDir = path.join(h.runDir, "scratch-snapshot");
     expect(await readFile(path.join(snapshotDir, "scratch.tar"), "utf8")).toBe("fresh-attempt-bytes");
-    expect(await readdir(snapshotDir)).toEqual(["scratch.tar"]);
+    expect((await readdir(snapshotDir)).sort()).toEqual(
+      ["checksum-authority-v1", "scratch.tar", snapshotDigestMarker("fresh-attempt-bytes")].sort(),
+    );
   });
 });
 
@@ -261,7 +285,7 @@ describe("finalizeScratchSnapshot power-loss ordering", () => {
     vi.restoreAllMocks();
   });
 
-  it("publishes fsync(attempt temp) → rename → fsync(parent dir), atomically replacing the previous snapshot", async () => {
+  it("durably publishes the checksum authority before atomically replacing the snapshot", async () => {
     const dir = path.join(tmpBase, "finalize", "ok");
     await mkdir(dir, { recursive: true });
     const attemptName = newScratchSnapshotAttemptName();
@@ -286,15 +310,38 @@ describe("finalizeScratchSnapshot power-loss ordering", () => {
     });
 
     await finalizeScratchSnapshot(dir, attemptName);
-    // The temp bytes are durable BEFORE the rename publishes them, and the
-    // rename is durable (dir fsync) before the caller may thaw or journal.
+    const marker = snapshotDigestMarker("next");
+    // The checksum authority is durable before the archive rename, and the
+    // archive rename is durable before the caller may thaw or journal.
     expect(order).toEqual([
       `syncFile:${attemptName}`,
+      `syncFile:${marker}`,
+      "syncFile:checksum-authority-v1",
+      "syncDir:ok",
       `rename:${attemptName}->scratch.tar`,
       "syncDir:ok",
     ]);
     expect(await readFile(path.join(dir, "scratch.tar"), "utf8")).toBe("next");
+    expect(await readFile(path.join(dir, "checksum-authority-v1"), "utf8")).toBe(
+      "scratch-snapshot-checksum-authority-v1\n",
+    );
+    expect(await readFile(path.join(dir, marker), "utf8")).toBe(
+      `sha256:${marker.slice(SCRATCH_SNAPSHOT_DIGEST_PREFIX.length)}\n`,
+    );
     await expect(stat(path.join(dir, attemptName))).rejects.toThrow();
+  });
+
+  it("keeps only the current checksum marker across repeated snapshots", async () => {
+    const dir = path.join(tmpBase, "finalize", "marker-cleanup");
+    await mkdir(dir, { recursive: true });
+    for (const bytes of ["first", "second"]) {
+      const attemptName = newScratchSnapshotAttemptName();
+      await writeFile(path.join(dir, attemptName), bytes);
+      await finalizeScratchSnapshot(dir, attemptName);
+    }
+    expect((await readdir(dir)).sort()).toEqual(
+      ["checksum-authority-v1", "scratch.tar", snapshotDigestMarker("second")].sort(),
+    );
   });
 
   it("refuses to publish anything but a per-attempt basename (no legacy shared temp, no traversal, no self-rename)", async () => {
@@ -405,7 +452,7 @@ describe("scratch snapshot script semantics (real container)", () => {
       const live = ps.stdout.toString("utf8").split("\n").filter((line) => !/\[\w+\]\s*$/.test(line));
       expect(live.join("\n")).not.toMatch(/sleep 1000|tar -cf|find \/scratch/);
     } finally {
-      await runCommand(["docker", "rm", "-f", keeper], { timeoutMs: 30_000 });
+      await runCommand(["docker", "rm", "-f", "-v", keeper], { timeoutMs: 30_000 });
     }
   }, 180_000);
 
@@ -441,7 +488,7 @@ describe("scratch snapshot script semantics (real container)", () => {
       const live = ps.stdout.toString("utf8").split("\n").filter((line) => !/\[\w+\]\s*$/.test(line));
       expect(live.join("\n")).not.toMatch(/sleep 1000|find \/scratch|awk/);
     } finally {
-      await runCommand(["docker", "rm", "-f", keeper], { timeoutMs: 30_000 });
+      await runCommand(["docker", "rm", "-f", "-v", keeper], { timeoutMs: 30_000 });
     }
   }, 180_000);
 

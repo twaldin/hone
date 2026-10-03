@@ -349,7 +349,8 @@ describe("optimizer stdout is diagnostic-only — no event authority", () => {
       runDir,
       casDir: join(root, ".hone-cas"),
       capsuleDir: join(root, "capsule"),
-      manifest,
+      admittedManifest: manifest,
+      runtimeIdentity: { admittedCapsuleDigest: fakeHash("f"), executionImage: manifest.image },
       config: RunConfig.parse({
         version: 1,
         capsuleId: manifest.id,
@@ -360,7 +361,6 @@ describe("optimizer stdout is diagnostic-only — no event authority", () => {
       env: {
         PATH: process.env["PATH"] ?? "",
       },
-      capsuleDigest: fakeHash("f"),
       optimizerDigest: fakeHash("0"),
       replayed: replay([]),
       signal: new AbortController().signal,
@@ -371,6 +371,7 @@ describe("optimizer stdout is diagnostic-only — no event authority", () => {
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: () => {},
       registerCleanupBarrier: () => {},
     };

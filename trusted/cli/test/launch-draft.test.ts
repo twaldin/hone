@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import {
   M2_CALIBRATION_DEFERRED_BINDING,
@@ -11,13 +12,20 @@ import {
   M2_PANEL_B_TASK_IDS,
   MetaCampaignConfigV2,
   MetaCampaignConfigV2Draft,
+  admissionReceiptRecordHash,
   canonicalJson,
+  type AdmissionReceiptRecord,
+  type AdmissionReceiptRecordBody,
   type BudgetEnvelope,
   type CapsuleManifest,
+  type M2AuthorizedAdmittedCapsule,
+  type M2AuthorizedDeferredCapsule,
+  type M2PanelTaskId,
   type DiagnosticOrderingReport,
 } from "@hone/schema";
 import { selectSaturationCeiling, type SaturationCeilingReport, type SaturationCell } from "@hone/scoring";
 import { describe, expect, it } from "vitest";
+import { assertM2OuterAncestorCapacity } from "../src/commands/hone.js";
 import { corpusProvenanceInputsDigest, type CorpusProvenanceV1 } from "../src/corpus-provenance.js";
 import {
   DRAFT_WITHOUT_CALIBRATION_FLAG,
@@ -26,6 +34,9 @@ import {
   M2_DRAFT_PROTECTED_PATHS,
   M2_LAUNCH_DRAFT_DOCUMENT_VERSION,
   M2_LAUNCH_DRAFT_RECORD_VERSION,
+  M2_OUTER_DIRECT_ENVELOPE_POLICY,
+  assertM2OuterDirectEnvelope,
+  deriveM2OuterDirectEnvelope,
   generateM2LaunchDraft,
   writeM2LaunchDraft,
   type M2DraftAdmittedCapsule,
@@ -44,8 +55,13 @@ const TERMINAL_LABELS = Array.from({ length: 11 }, (_, index) => `terminal-${ind
 const capsuleId = (label: string): string =>
   `cap_${createHash("sha256").update(`id:${label}`).digest("hex").slice(0, 12)}`;
 
-/** Real calibration capsules carry cap_ identities like every other capsule. */
-const CALIBRATION_CAPSULE_IDS = ["cal-a", "cal-b", "cal-c", "cal-d"].map((label) => capsuleId(label));
+/** Canonical identities of the four committed calibration-only capsules. */
+const CALIBRATION_CAPSULE_IDS = [
+  "cap_c09ffd33ce1d",
+  "cap_7cd6e3af94d7",
+  "cap_d413ec4d77c5",
+  "cap_8ac06369aa07",
+];
 
 function orderingReport(): DiagnosticOrderingReport {
   const variant = (train: number) => ({
@@ -189,10 +205,9 @@ function fixture(): Fixture {
     calibrationCapsuleIds: CALIBRATION_CAPSULE_IDS,
     parameters: {
       optimizerImage: `hone-optimizer@${digest("optimizer-image")}`,
-      // Evaluator floors: child must fund a complete run even at the deferred
-      // ceiling of 12 (4*12+1 = 49); outer must fund candidateAttemptsMax + 1 = 25.
+      // Evaluator floor: a child must fund a complete run even at the
+      // deferred ceiling of 12 (4*12+1 = 49). Outer is plan-derived below.
       childBudget: { maxTokens: 1_000_000, maxUsd: 2, maxWallClockSec: 1800, maxEvaluatorInvocations: 49 },
-      outerBudget: { maxTokens: 5_000_000, maxUsd: 25, maxWallClockSec: 86_400, maxEvaluatorInvocations: 25 },
       calibratedInnerCeilings: Object.fromEntries(
         Object.values(panelA).map((id) => [id, ceiling]),
       ),
@@ -201,6 +216,143 @@ function fixture(): Fixture {
     },
   };
   return { inputs, admittedByLabel };
+}
+
+function partialFixture(): Fixture {
+  const base = fixture();
+  const deferredLabels = new Set<string>([
+    "panel-a-OSS-T01",
+    "panel-a-OSS-T03",
+    "panel-b-OSS-T08",
+    "terminal-8",
+    "terminal-9",
+    "terminal-10",
+  ]);
+  const authorization = {
+    decisionKey: "bun-image-blocker" as const,
+    decidedAt: "2026-08-12T18:15:41Z",
+    owner: { identity: "captain" as const, kind: "owner" as const },
+    deliveredVia: "first-mate" as const,
+    ruling: "ADMIT THE 21 NOW, DEFER THE SIX EXPLICITLY" as const,
+    supersedes: {
+      rule: "atomic-16-development-11-terminal" as const,
+      scope: "this-cohort-only" as const,
+    },
+    evidence: [{ path: "plans/m2-native-amd64-admission-evidence.json", digest: digest("authorization") }],
+  };
+  const taskByLabel: ReadonlyMap<string, M2PanelTaskId> = new Map([
+    ...M2_PANEL_A_TASK_IDS.map((taskId) => [`panel-a-${taskId}`, taskId] as const),
+    ...M2_PANEL_B_TASK_IDS.map((taskId) => [`panel-b-${taskId}`, taskId] as const),
+  ]);
+  const admitted: M2DraftAdmittedCapsule[] = [];
+  const policyAdmitted: M2AuthorizedAdmittedCapsule[] = [];
+  const policyDeferred: M2AuthorizedDeferredCapsule[] = [];
+  for (const [index, [label, capsule]] of [...base.admittedByLabel.entries()].entries()) {
+    const taskId = taskByLabel.get(label);
+    if (deferredLabels.has(label)) {
+      const binding = {
+        label: label.toLowerCase(),
+        capsuleId: capsule.manifest.id,
+        capsuleDigest: capsule.digest,
+        reason: "recorded native blocker",
+        evidence: [{ path: `capsules/${label}/diagnostics/blocker.json`, digest: digest(`blocker:${label}`) }],
+      };
+      policyDeferred.push(taskId === undefined
+        ? { ...binding, role: "terminal" }
+        : { ...binding, role: "development", taskId });
+      continue;
+    }
+    const body: AdmissionReceiptRecordBody = {
+      v: 1,
+      sequence: 1,
+      previousReceiptHash: digest(`gate1:${label}`),
+      capsuleDigest: capsule.digest,
+      action: "gate2-approve",
+      identities: {
+        author: { identity: "hone-native-migration", kind: "agent" },
+        "adversarial-validator": { identity: "hone-native-migration-adv-f1", kind: "agent" },
+        "final-reviewer": { identity: "captain", kind: "owner" },
+      },
+      approvalBasis: {
+        authorizationKey: authorization.decisionKey,
+        authorizedBy: authorization.owner,
+        authorizedAt: authorization.decidedAt,
+        deliveredVia: authorization.deliveredVia,
+        reviewEvidence: [
+          "data/hone-native-migration/review-f1.md",
+          "data/hone-native-migration/review-f2.md",
+        ],
+      },
+      provisional: false,
+      timestamp: new Date(Date.parse("2026-08-13T00:00:00Z") + index * 1_000).toISOString(),
+    };
+    const receipt: AdmissionReceiptRecord = {
+      ...body,
+      recordHash: admissionReceiptRecordHash(body),
+    };
+    admitted.push({ ...capsule, approval: { approved: true as const, receipt } });
+    const binding = {
+      label: label.toLowerCase(),
+      capsuleId: capsule.manifest.id,
+      capsuleDigest: capsule.digest,
+      gate2ReceiptHash: receipt.recordHash,
+    };
+    policyAdmitted.push(taskId === undefined
+      ? { ...binding, role: "terminal" }
+      : { ...binding, role: "development", taskId });
+  }
+  const partialCohort = {
+    version: "m2-authorized-partial-cohort.v1" as const,
+    authorization,
+    admitted: policyAdmitted,
+    deferred: policyDeferred,
+  };
+  const admittedIds = new Set(policyAdmitted.map((capsule) => capsule.capsuleId));
+  const original = base.inputs.provenance as CorpusProvenanceV1;
+  const capsules = original.capsules.filter((capsule) => admittedIds.has(capsule.id));
+  const developmentCapsuleIds = capsules.filter((capsule) => capsule.role === "development").map((capsule) => capsule.id);
+  const terminalCapsuleIds = capsules.filter((capsule) => capsule.role === "terminal").map((capsule) => capsule.id);
+  const admittedTerminalLabels = policyAdmitted
+    .filter((capsule) => capsule.role === "terminal")
+    .map((capsule) => capsule.label);
+  const terminalContentHashes = [
+    ...new Set(
+      admittedTerminalLabels.flatMap((label) =>
+        Object.values(base.admittedByLabel.get(label)!.manifest.contentHashes)
+      ),
+    ),
+  ].sort();
+  const provenance = bindProvenance({
+    ...original,
+    capsules,
+    developmentCapsuleIds,
+    terminalCapsuleIds,
+    terminalContentHashes,
+    partialCohort,
+  });
+  const deferredPanelAIds = new Set(
+    policyDeferred
+      .filter((capsule) => capsule.role === "development" && capsule.label.startsWith("panel-a-"))
+      .map((capsule) => capsule.capsuleId),
+  );
+  return {
+    admittedByLabel: new Map(admitted.map((capsule) => [
+      policyAdmitted.find((binding) => binding.capsuleId === capsule.manifest.id)!.label,
+      capsule,
+    ])),
+    inputs: {
+      ...base.inputs,
+      provenance,
+      admitted,
+      parameters: {
+        ...base.inputs.parameters,
+        calibratedInnerCeilings: Object.fromEntries(
+          Object.entries(base.inputs.parameters.calibratedInnerCeilings)
+            .filter(([capsuleId]) => !deferredPanelAIds.has(capsuleId)),
+        ),
+      },
+    },
+  };
 }
 
 const DIMENSIONS = ["maxTokens", "maxUsd", "maxWallClockSec", "maxEvaluatorInvocations"] as const;
@@ -259,6 +411,41 @@ describe("generateM2LaunchDraft", () => {
         + config.recursiveBudgets.terminal.budget[dimension],
       );
     }
+    expect(config.counts).toMatchObject({ searchChildConcurrency: 3, childConcurrency: 4 });
+    expect(config.outerBudgetDerivation).toEqual(deriveM2OuterDirectEnvelope(12));
+    expect(config.budgets.outer).toEqual({
+      maxTokens: 22_500_000,
+      maxUsd: 113,
+      maxWallClockSec: 137_343,
+      maxEvaluatorInvocations: 27,
+    });
+    expect(assertM2OuterDirectEnvelope(config)).toEqual(config.outerBudgetDerivation);
+    const ancestorCapacity = assertM2OuterAncestorCapacity(config);
+    expect(ancestorCapacity.plannedChildren).toEqual({
+      search: 12 * config.developmentPanel.members.length,
+      confirmation: 4 * config.train.length * 3,
+      terminal: 3 * config.holdout.length * 3,
+      total:
+        12 * config.developmentPanel.members.length
+        + 4 * config.train.length * 3
+        + 3 * config.holdout.length * 3,
+    });
+    expect(ancestorCapacity.ancestorEnvelope).toEqual(config.budgets.campaign);
+    expect(ancestorCapacity.directOuterBudget).toEqual(config.budgets.outer);
+    expect(ancestorCapacity.requiredEnvelope).toEqual(config.budgets.campaign);
+    const undersizedAncestor = {
+      ...config,
+      budgets: {
+        ...config.budgets,
+        campaign: {
+          ...config.budgets.campaign,
+          maxTokens: config.budgets.campaign.maxTokens - 1,
+        },
+      },
+    };
+    expect(() => assertM2OuterAncestorCapacity(undersizedAncestor)).toThrow(
+      "cannot admit the full planned recursive sequence",
+    );
     const envelopeIds = [
       search.identity.envelopeId,
       config.recursiveBudgets.confirmation.identity.envelopeId,
@@ -288,6 +475,87 @@ describe("generateM2LaunchDraft", () => {
       provenanceInputsDigest: provenance.inputsDigest,
     });
     expect(draft.unresolvedDecisions).toEqual([]);
+  });
+
+  it("derives Campaign-8's outer direct envelope and rejects the preserved insufficient freeze", () => {
+    const derivation = deriveM2OuterDirectEnvelope(12);
+    expect(derivation).toMatchObject({
+      projectionBasis: "campaign-8-observed-panel-mean",
+      projectionReceiptPath: "data/m2-refreeze-final/campaign-8-abandonment-receipt.v1.json",
+      projectionReceiptSha256: "sha256:c5c474a3b1f5b9721e2b049a672124e69665524970e2c0ba8f60e592fabea77b",
+      projectionReceiptCommit: "d91251332",
+      projectionMeanField: "outerEnvelopeArithmetic.firstTwoProjectionMeanSec",
+      plannedEpisodes: 12,
+      plannedDirectEvaluations: 24,
+      retryHeadroomEvaluations: 3,
+      totalDirectEvaluations: 27,
+      searchChildConcurrency: 3,
+      confirmationTerminalChildConcurrency: 4,
+    });
+    expect(derivation.derived).toEqual({
+      maxTokens: 22_500_000,
+      maxUsd: 113,
+      maxWallClockSec: 137_343,
+      maxEvaluatorInvocations: 27,
+    });
+    const observedPlannedWall =
+      M2_OUTER_DIRECT_ENVELOPE_POLICY.projectedPanelMeanWallClockSec
+      * derivation.plannedDirectEvaluations;
+    expect(observedPlannedWall).toBeCloseTo(97_666.08, 6);
+    expect(derivation.derived.maxWallClockSec).toBeGreaterThanOrEqual(
+      observedPlannedWall * 1.25,
+    );
+
+    const preservedPath = fileURLToPath(new URL(
+      "../../../data/m2-refreeze-final/campaign-frozen.json",
+      import.meta.url,
+    ));
+    const preserved = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedPath, "utf8")));
+    expect(preserved.budgets.outer).toEqual({
+      maxTokens: 5_000_000,
+      maxUsd: 25,
+      maxWallClockSec: 86_400,
+      maxEvaluatorInvocations: 25,
+    });
+    expect(() => assertM2OuterDirectEnvelope(preserved)).toThrow(
+      /frozen outer direct maxTokens 5000000 cannot cover the planned search phase/,
+    );
+  });
+
+  it("makes every outer derivation and concurrency guard load-bearing", () => {
+    const config = generateM2LaunchDraft(fixture().inputs).config;
+    for (const dimension of DIMENSIONS) {
+      const mutated = structuredClone(config);
+      mutated.budgets.outer[dimension] -= 1;
+      expect(() => assertM2OuterDirectEnvelope(mutated)).toThrow(
+        new RegExp(`outer direct ${dimension}|must equal the freeze-time derivation`),
+      );
+    }
+
+    const oversized = structuredClone(config);
+    oversized.budgets.outer.maxTokens += 1;
+    expect(() => assertM2OuterDirectEnvelope(oversized)).toThrow(
+      /must equal the freeze-time derivation exactly/,
+    );
+
+    const missingEvidence = structuredClone(config);
+    delete missingEvidence.outerBudgetDerivation;
+    expect(() => assertM2OuterDirectEnvelope(missingEvidence)).toThrow(
+      /missing its exact freeze-time derivation evidence/,
+    );
+
+    const missingSearchBound = structuredClone(config);
+    delete missingSearchBound.counts.searchChildConcurrency;
+    expect(() => assertM2OuterDirectEnvelope(missingSearchBound)).toThrow(
+      /SEARCH\/judging concurrency bounds/,
+    );
+
+    const forgedArithmetic = structuredClone(config);
+    forgedArithmetic.outerBudgetDerivation!.derived.maxWallClockSec -= 1;
+    forgedArithmetic.budgets.outer.maxWallClockSec -= 1;
+    expect(() => MetaCampaignConfigV2.parse(forgedArithmetic)).toThrow(
+      /derived maxWallClockSec must equal/,
+    );
   });
 
   it("populates both frozen observation routes (outer=sol, inner=terra)", () => {
@@ -427,7 +695,7 @@ describe("generateM2LaunchDraft", () => {
     expect(explicit.unresolvedDecisions).toEqual([]);
   });
 
-  it("refuses per-run budgets below the evaluator floors before any arithmetic", () => {
+  it("refuses per-child budgets below the evaluator floors before aggregate arithmetic", () => {
     const { inputs, admittedByLabel } = fixture();
     // Floor at the calibrated ceiling of 8 is 4*8+1 = 33.
     expect(() =>
@@ -440,15 +708,6 @@ describe("generateM2LaunchDraft", () => {
       }),
     ).toThrow(/cannot fund one complete run at innerEpisodesMax 8 \(needs 33\)/);
 
-    expect(() =>
-      generateM2LaunchDraft({
-        ...inputs,
-        parameters: {
-          ...inputs.parameters,
-          outerBudget: { ...inputs.parameters.outerBudget, maxEvaluatorInvocations: 24 },
-        },
-      }),
-    ).toThrow(/candidateAttemptsMax \+ 1 evaluations \(needs 25\)/);
 
     const panelId = admittedByLabel.get("panel-a-OWN-T01")!.manifest.id;
     expect(() =>
@@ -623,6 +882,21 @@ describe("generateM2LaunchDraft", () => {
     expect(() => generateM2LaunchDraft({ ...base.inputs, admitted: flat })).toThrow(/no positive train reference scale/);
   });
 
+  it("accepts nonnegative raw performance scalars above one before normalization", () => {
+    const base = fixture();
+    const targetId = base.admittedByLabel.get("panel-a-OWN-T06")!.manifest.id;
+    const rawPerformance = base.inputs.admitted.map((capsule) => {
+      if (capsule.manifest.id !== targetId) return capsule;
+      const report = orderingReport();
+      report.variants.baseline.train = 100;
+      report.variants.improved.train = 125;
+      return { ...capsule, orderingReport: report };
+    });
+    const draft = generateM2LaunchDraft({ ...base.inputs, admitted: rawPerformance });
+    const entry = draft.config.train.find((capsule) => capsule.capsuleId === targetId);
+    expect(entry).toMatchObject({ qBase: 100, qReference: 125, scale: 25 });
+  });
+
   it("rejects a provenance cohort with broken cardinality", () => {
     const { inputs } = fixture();
     const provenance = inputs.provenance as CorpusProvenanceV1;
@@ -634,7 +908,71 @@ describe("generateM2LaunchDraft", () => {
       developmentCapsuleIds: provenance.developmentCapsuleIds.filter((id) => id !== dropped),
     });
     expect(() => generateM2LaunchDraft({ ...inputs, provenance: truncated }))
-      .toThrow(/exactly 16 development capsules/);
+      .toThrow(/exactly 16 admitted development capsules/);
+  });
+
+  it("generates and round-trips the authorized 21-capsule cohort with deferrals excluded", () => {
+    const { inputs } = partialFixture();
+    const draft = generateM2LaunchDraft(inputs);
+    expect(draft.config.corpusCohort).toMatchObject({ mode: "owner-authorized-partial" });
+    expect(draft.config.train).toHaveLength(6);
+    expect(draft.config.holdout).toHaveLength(8);
+    expect(draft.config.developmentPanel.members.map((member) => member.taskId))
+      .not.toContain("OSS-T01");
+    expect(draft.config.developmentPanel.members.map((member) => member.taskId))
+      .not.toContain("OSS-T03");
+    expect(MetaCampaignConfigV2.parse(JSON.parse(JSON.stringify(draft.config)))).toEqual(draft.config);
+  });
+
+  it("refuses a partial cohort when an actual Gate-2 receipt or owner basis drifts", () => {
+    const receiptDrift = partialFixture();
+    const driftedAdmissions = receiptDrift.inputs.admitted.map((capsule, index) =>
+      index === 0 && capsule.approval !== null && capsule.approval.receipt !== undefined
+        ? {
+            ...capsule,
+            approval: {
+              ...capsule.approval,
+              receipt: { ...capsule.approval.receipt, recordHash: digest("foreign-receipt") },
+            },
+          }
+        : capsule
+    );
+    expect(() => generateM2LaunchDraft({ ...receiptDrift.inputs, admitted: driftedAdmissions }))
+      .toThrow(/does not reproduce its authorized Gate-2 receipt/);
+
+    const basisDrift = partialFixture();
+    const wrongBasis = basisDrift.inputs.admitted.map((capsule, index) =>
+      index === 0 && capsule.approval !== null && capsule.approval.receipt !== undefined
+        ? {
+            ...capsule,
+            approval: {
+              ...capsule.approval,
+              receipt: {
+                ...capsule.approval.receipt,
+                approvalBasis: {
+                  ...capsule.approval.receipt.approvalBasis!,
+                  authorizationKey: "unrelated-decision",
+                },
+              },
+            },
+          }
+        : capsule
+    );
+    expect(() => generateM2LaunchDraft({ ...basisDrift.inputs, admitted: wrongBasis }))
+      .toThrow(/does not cite the owner authorization/);
+  });
+
+  it("refuses a panel assignment that tries to seat a deferred task under another capsule", () => {
+    const { inputs } = partialFixture();
+    const assignments = {
+      ...inputs.assignments,
+      panelA: {
+        ...inputs.assignments.panelA,
+        "OSS-T01": inputs.assignments.panelA["OWN-T01"]!,
+      },
+    };
+    expect(() => generateM2LaunchDraft({ ...inputs, assignments }))
+      .toThrow(/authorized 21\+6 cohort partition|more than one panel task/);
   });
 });
 

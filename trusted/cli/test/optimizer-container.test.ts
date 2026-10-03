@@ -1,26 +1,41 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { CapsuleManifest, RunConfig, capsuleDigest } from "@hone/schema";
+import { CapsuleManifest, DEFAULT_PROMOTION_RULE, RunConfig, capsuleDigest } from "@hone/schema";
 import { runCommand } from "@hone/broker";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend, runOptimizer } from "../src/backends/local.js";
 import {
+  OPTIMIZER_CONTAINER_UID,
   optimizerBuildArgs,
   optimizerCreateArgs,
   optimizerStartArgs,
+  parseMutationToolbeltSmoke,
+  runMutationToolbeltSmoke,
   prepareOptimizerRuntime,
+  stageMutationRuntime,
   verifyOptimizerBundleSeal,
 } from "../src/backends/optimizer-container.js";
 import type { OptimizerBundleSeal, OptimizerRuntime } from "../src/backends/optimizer-container.js";
+import { CampaignModelRegistry, CliChildSupervisor } from "../src/commands/hone.js";
 import { openDockerCreateGate } from "../src/docker-create-gate.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
-import { collectOptimizerSnapshot, computeOptimizerDigest, snapshotDigest } from "../src/optimizer-digest.js";
+import {
+  MUTATION_RUNTIME_MANIFEST,
+  OPTIMIZER_BUILD_CONTRACT,
+  OPTIMIZER_BUNDLE_FILES,
+  OPTIMIZER_RUNTIME_MANIFEST,
+  collectOptimizerSnapshot,
+  computeOptimizerDigest,
+  snapshotDigest,
+} from "../src/optimizer-digest.js";
+import type { OptimizerSnapshot } from "../src/optimizer-digest.js";
+import type { CmdIo } from "../src/io.js";
 import type { RunnerBackendContext } from "../src/types.js";
 import {
   scriptedCreateHelper,
@@ -47,6 +62,84 @@ function res(overrides: Partial<CmdResult> = {}): CmdResult {
   return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false, ...overrides };
 }
 
+const validToolbeltResult = {
+  type: "hone-mutation-toolbelt-selftest.v1",
+  home: "/home/hone",
+  modelCalls: 0,
+  tools: ["bash", "write", "edit"],
+  outputs: {
+    bash: "bash-ok\n",
+    write: "write-ok\n",
+    edit: "edit-ok\n",
+  },
+};
+
+describe("mutation toolbelt result gate", () => {
+  it("accepts only the final machine-readable zero-spend record", () => {
+    expect(
+      parseMutationToolbeltSmoke(
+        Buffer.from(`ignored diagnostic\n${JSON.stringify(validToolbeltResult)}\n`, "utf8"),
+      ),
+    ).toEqual(validToolbeltResult);
+  });
+
+  it.each([
+    ["wrong record type", { ...validToolbeltResult, type: "other" }],
+    ["wrong HOME", { ...validToolbeltResult, home: "/" }],
+    ["non-zero model spend", { ...validToolbeltResult, modelCalls: 1 }],
+    ["missing bash", { ...validToolbeltResult, tools: ["write", "edit"] }],
+    ["wrong tool order", { ...validToolbeltResult, tools: ["write", "bash", "edit"] }],
+    ["extra tool", { ...validToolbeltResult, tools: ["bash", "write", "edit", "read"] }],
+    ["non-object outputs", { ...validToolbeltResult, outputs: [] }],
+    ["failed bash output", { ...validToolbeltResult, outputs: { ...validToolbeltResult.outputs, bash: "wrong\n" } }],
+    ["failed write output", { ...validToolbeltResult, outputs: { ...validToolbeltResult.outputs, write: "wrong\n" } }],
+    ["failed edit output", { ...validToolbeltResult, outputs: { ...validToolbeltResult.outputs, edit: "wrong\n" } }],
+  ])("rejects %s", (_name, value) => {
+    expect(() => parseMutationToolbeltSmoke(Buffer.from(`${JSON.stringify(value)}\n`))).toThrow(
+      /failed validation/,
+    );
+  });
+
+  it("rejects missing, malformed, and non-object output", () => {
+    expect(() => parseMutationToolbeltSmoke(Buffer.alloc(0))).toThrow(/no output/);
+    expect(() => parseMutationToolbeltSmoke(Buffer.from("{"))).toThrow(/malformed JSON/);
+    expect(() => parseMutationToolbeltSmoke(Buffer.from("[]"))).toThrow(/not an object/);
+  });
+});
+
+const TEST_RUNTIME_SOURCE = "/tmp/hone-runtime-test-fixture";
+
+function writeRuntimeFixtures(out: string): void {
+  writeFileSync(join(out, OPTIMIZER_RUNTIME_MANIFEST.node.bundleName), "node runtime fixture");
+  writeFileSync(join(out, MUTATION_RUNTIME_MANIFEST.bun.bundleName), "compressed bun fixture");
+  for (const file of MUTATION_RUNTIME_MANIFEST.pi.files) {
+    writeFileSync(join(out, file.bundleName), `compressed ${file.sourceName} fixture`);
+  }
+}
+
+function writeBuiltArtifacts(out: string, optimizer = "// bundle\n", worker = "// worker bundle\n"): void {
+  writeFileSync(join(out, "optimizer.mjs"), optimizer);
+  writeFileSync(join(out, "worker.mjs"), worker);
+  writeRuntimeFixtures(out);
+}
+
+class RecursiveChildEnvironmentProbe extends CliChildSupervisor {
+  constructor(io: CmdIo, root: string) {
+    const optimizerSnapshot: OptimizerSnapshot = { files: new Map() };
+    super(
+      io,
+      { promotion: DEFAULT_PROMOTION_RULE },
+      join(root, "campaign"),
+      new Map(),
+      optimizerSnapshot,
+      {} as CampaignModelRegistry,
+    );
+  }
+
+  inheritedEnv(): NodeJS.ProcessEnv {
+    return this.childIo().env;
+  }
+}
 /** All -v mount specs in a docker argv. */
 function mountsOf(argv: readonly string[]): string[] {
   const out: string[] = [];
@@ -71,6 +164,7 @@ describe("build container argv exactness", () => {
       safeRunId: "run_b",
       image: FIX_IMAGE,
       stagingDir: "/tmp/src",
+      runtimeDir: "/tmp/runtime",
       outDir: "/tmp/out",
       containerLease: "hone-lease-run_b-e1",
       hostUid: 1234,
@@ -90,7 +184,7 @@ describe("build container argv exactness", () => {
     expect(flagValue(argv, "--security-opt")).toBe("no-new-privileges");
     expect(flagValue(argv, "--pids-limit")).toBe("512");
     expect(flagValue(argv, "--label")).toBe("hone.runId=run_b");
-    expect(mountsOf(argv)).toEqual(["/tmp/src:/hone/src:ro", "/tmp/out:/hone/out"]);
+    expect(mountsOf(argv)).toEqual(["/tmp/src:/hone/src:ro", "/tmp/out:/hone/out", "/tmp/runtime:/hone/runtime:ro"]);
     // The donor lease attach is REQUIRED (production omission was a P1).
     expect(argv[argv.indexOf("--volumes-from") + 1]).toBe("hone-lease-run_b-e1:ro");
     // The compiler runs INSIDE the pinned image on the staged tree only, and
@@ -103,6 +197,9 @@ describe("build container argv exactness", () => {
     expect(build[2]).toContain("--outfile=/hone/out/optimizer.mjs");
     expect(build[2]).toContain("bun build /hone/src/optimizer/worker/mutate.ts");
     expect(build[2]).toContain("--outfile=/hone/out/worker.mjs");
+    expect(build[2]).toContain(`${OPTIMIZER_RUNTIME_MANIFEST.node.sha256}  /hone/runtime/node`);
+    expect(build[2]).toContain(`node --version)\" = \"v${OPTIMIZER_RUNTIME_MANIFEST.node.version}`);
+    expect(build[2]).toContain(`> /hone/out/${OPTIMIZER_RUNTIME_MANIFEST.node.bundleName}`);
   });
 
   it("attaches the docker-run lease as `--volumes-from <lease>:ro` BEFORE the image", () => {
@@ -111,6 +208,7 @@ describe("build container argv exactness", () => {
       safeRunId: "run_b",
       image: FIX_IMAGE,
       stagingDir: "/tmp/src",
+      runtimeDir: "/tmp/runtime",
       outDir: "/tmp/out",
       containerLease: "hone-lease-run_b",
       hostUid: 1234,
@@ -129,12 +227,12 @@ describe("run container create/start argv exactness (two-phase)", () => {
     runId: "run_r",
     image: FIX_IMAGE,
     bundleDir: "/tmp/bundle",
-    runArgv: ["node", "/hone/bundle/optimizer.mjs"],
+    runArgv: [...OPTIMIZER_BUILD_CONTRACT.run],
     env: { HONE_BROKER_SOCK: "/run/hone/broker.sock", HONE_RUN_ID: "run_r", HONE_SEED: "0", HONE_RESUME: "{}" },
     containerLease: "hone-lease-run_r-e1",
   };
 
-  it("linux/unix transport: --network none, ONLY bundle + public broker.sock mounted, uid 2000; token is value-less env, NEVER argv", () => {
+  it("linux/unix transport: --network none, ONLY bundle + public broker.sock mounted, reserved optimizer uid; token is value-less env, NEVER argv", () => {
     // Distinct from FIX_IMAGE's a-repeated digest: a colliding token would
     // vacuously satisfy the not-in-argv assertion's inverse.
     const token = "b".repeat(64);
@@ -149,7 +247,7 @@ describe("run container create/start argv exactness (two-phase)", () => {
     expect(pullIdx).toBeLessThan(argv.indexOf(FIX_IMAGE));
     expect(flagValue(argv, "--network")).toBe("none");
     expect(argv).toContain("--read-only");
-    expect(flagValue(argv, "--user")).toBe("2000:2000");
+    expect(flagValue(argv, "--user")).toBe(`${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`);
     expect(flagValue(argv, "--cap-drop")).toBe("ALL");
     // The FULL mount set: bundle (ro) and the public broker socket. Nothing else —
     // no repo, no runDir, no CAS, no capsule, no holdout ledger, no docker.sock.
@@ -219,8 +317,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         expect(existsSync(join(src, "optimizer", "node_modules", "@hone", "schema", "package.json"))).toBe(true);
         // The staged Pi closure resolves THROUGH the optimizer's node_modules link.
         expect(existsSync(join(src, "optimizer", "node_modules", "@oh-my-pi", "pi-coding-agent", "package.json"))).toBe(true);
-        writeFileSync(join(out, "optimizer.mjs"), "// bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeBuiltArtifacts(out);
       }
       return Promise.resolve(res());
     };
@@ -232,13 +329,15 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
       containerLease: "hone-lease-run_prep-e1",
       gate: testGate("run_prep"),
       clientEnv: { PATH: process.env["PATH"] ?? "" },
+      runtimeSourceDir: TEST_RUNTIME_SOURCE,
     });
     expect(argvs.filter(isBuild).length).toBe(1);
     expect(runtime.bundleDir).not.toBeNull();
-    expect(runtime.runArgv).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
+    expect(runtime.runArgv).toEqual(OPTIMIZER_BUILD_CONTRACT.run);
     const bundleDir = runtime.bundleDir ?? "";
     expect(existsSync(join(bundleDir, "optimizer.mjs"))).toBe(true);
     expect(existsSync(join(bundleDir, "worker.mjs"))).toBe(true);
+    expect(existsSync(join(bundleDir, OPTIMIZER_RUNTIME_MANIFEST.node.bundleName))).toBe(true);
     await runtime.cleanup();
     // Temp staging/output trees are gone; containers were rm -f'd by name.
     expect(existsSync(bundleDir)).toBe(false);
@@ -251,6 +350,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
         writeFileSync(join(out, "optimizer.mjs"), "// bundle\n"); // worker.mjs deliberately absent
       }
+
       return Promise.resolve(res());
     };
     await expect(
@@ -262,8 +362,141 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         containerLease: "hone-lease-run_prep-e1",
         gate: testGate("run_prep"),
         clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
       }),
     ).rejects.toThrow(/produced no .*worker\.mjs/);
+  });
+  let smokeOrdinal = 0;
+  async function preparedSmokeRuntime(
+    smokeResult: CmdResult | Error,
+  ): Promise<{ runtime: OptimizerRuntime; argvs: string[][] }> {
+    const runId = `run_toolbelt_unit_${++smokeOrdinal}`;
+    const argvs: string[][] = [];
+    const run: RunCommand = (argv) => {
+      argvs.push([...argv]);
+      if (isBuild(argv)) {
+        const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
+        writeBuiltArtifacts(out);
+        return Promise.resolve(res());
+      }
+      if (argv[1] === "run" && argv.includes(`hone-toolbelt-${runId}`)) {
+        if (smokeResult instanceof Error) return Promise.reject(smokeResult);
+        return Promise.resolve(smokeResult);
+      }
+      return Promise.resolve(res());
+    };
+    const runtime = await prepareOptimizerRuntime(
+      {
+        runId,
+        env: {},
+        optimizerDigest: computeOptimizerDigest(FIX_IMAGE),
+      },
+      {
+        image: FIX_IMAGE,
+        transport: { kind: "unix", hostSocketPath: "/dev/null", token: "a".repeat(64) },
+        run,
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE),
+        containerLease: `hone-lease-${runId}`,
+        gate: testGate(runId),
+        clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
+      },
+    );
+    return { runtime, argvs };
+  }
+
+  it("runs the zero-spend worker smoke under the production uid, HOME, mounts, image, and sealed bundle", async () => {
+    const expected = Buffer.from(`${JSON.stringify(validToolbeltResult)}\n`);
+    const { runtime, argvs } = await preparedSmokeRuntime(res({ stdout: expected }));
+    try {
+      await expect(runMutationToolbeltSmoke(runtime)).resolves.toEqual(validToolbeltResult);
+      const argv = argvs.find((entry) => entry[1] === "run" && entry.includes(`hone-toolbelt-${runtime.safeRunId}`)) ?? [];
+      expect(flagValue(argv, "--user")).toBe("1000:1000");
+      expect(argv).toContain("/home/hone:rw,exec,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000");
+      expect(argv.flatMap((value, index) => value === "-e" ? [argv[index + 1]] : [])).toEqual([
+        "HOME=/home/hone",
+      ]);
+      expect(argv[argv.indexOf("--volumes-from") + 1]).toBe(`${runtime.containerLease}:ro`);
+      expect(mountsOf(argv)).toEqual([`${runtime.bundleDir}:/hone/bundle:ro`]);
+      expect(argv.indexOf(runtime.image)).toBeGreaterThan(argv.indexOf("--volumes-from"));
+      expect(argv.slice(argv.indexOf(runtime.image) + 1, argv.indexOf(runtime.image) + 3)).toEqual(["sh", "-c"]);
+      expect(argv.at(-1)).toContain("--toolbelt-selftest");
+      expect(argv.join("\0")).not.toContain("HONE_PROXY");
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+
+  it("runs the exact-identity legacy selftest without proxy access or model dispatch", async () => {
+    const { runtime, argvs } = await preparedSmokeRuntime(res({
+      stdout: Buffer.from("hone-mutation selftest ok\n"),
+    }));
+    try {
+      await expect(runMutationToolbeltSmoke(runtime, "legacy-selftest")).resolves.toEqual({
+        type: "hone-mutation-legacy-selftest.v1",
+        contract: "legacy-selftest",
+        modelCalls: 0,
+        output: "hone-mutation selftest ok",
+      });
+      const argv = argvs.find(
+        (entry) => entry[1] === "run" && entry.includes(`hone-toolbelt-${runtime.safeRunId}`),
+      ) ?? [];
+      expect(argv.at(-1)).toContain("--selftest");
+      expect(argv.at(-1)).not.toContain("--toolbelt-selftest");
+      expect(argv).toContain("none");
+      expect(argv.join("\0")).not.toContain("HONE_PROXY");
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+
+  it("refuses a broken legacy worker even when its container exits zero", async () => {
+    const { runtime } = await preparedSmokeRuntime(res({
+      stdout: Buffer.from("broken frozen worker\n"),
+    }));
+    try {
+      await expect(runMutationToolbeltSmoke(runtime, "legacy-selftest"))
+        .rejects.toThrow("mutation legacy selftest failed validation");
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+
+  it.each([
+    ["non-zero exit", res({ exitCode: 9, stderr: Buffer.from("toolbelt failed") })],
+    ["timeout", res({ exitCode: -1, timedOut: true, stderr: Buffer.from("toolbelt stalled") })],
+  ])("refuses a %s and reaps the one-shot container", async (_name, failure) => {
+    const { runtime, argvs } = await preparedSmokeRuntime(failure);
+    try {
+      await expect(runMutationToolbeltSmoke(runtime)).rejects.toThrow(/mutation toolbelt preflight failed/);
+      expect(argvs.some((argv) =>
+        argv[1] === "rm"
+        && argv[2] === "-f"
+        && argv.at(-1) === `hone-toolbelt-${runtime.safeRunId}`
+      )).toBe(true);
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+
+  it("reaps after a docker-client throw and refuses an optimizer override with no sealed worker", async () => {
+    const failure = new Error("docker transport failed");
+    const { runtime, argvs } = await preparedSmokeRuntime(failure);
+    try {
+      await expect(runMutationToolbeltSmoke(runtime)).rejects.toThrow(failure);
+      expect(argvs.some((argv) =>
+        argv[1] === "rm"
+        && argv[2] === "-f"
+        && argv.at(-1) === `hone-toolbelt-${runtime.safeRunId}`
+      )).toBe(true);
+    } finally {
+      await runtime.cleanup();
+    }
+    await expect(
+      runMutationToolbeltSmoke(
+        testOptimizerRuntime({ runId: "run_toolbelt_override", argv: ["node", "optimizer.mjs"] }),
+      ),
+    ).rejects.toThrow(/requires a sealed optimizer bundle/);
   });
 
   it("threads the docker-run lease into the build argv and the runtime", async () => {
@@ -272,8 +505,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
       argvs.push([...argv]);
       if (isBuild(argv)) {
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
-        writeFileSync(join(out, "optimizer.mjs"), "// bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeBuiltArtifacts(out);
       }
       return Promise.resolve(res());
     };
@@ -285,6 +517,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
       containerLease: "hone-lease-run_prep",
       gate: testGate("run_prep"),
       clientEnv: { PATH: process.env["PATH"] ?? "" },
+      runtimeSourceDir: TEST_RUNTIME_SOURCE,
     });
     const build = argvs.find(isBuild) ?? [];
     const leaseIdx = build.indexOf("--volumes-from");
@@ -308,8 +541,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         const src = mountsOf(argv)[0]?.split(":")[0] ?? "";
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
         expect(readFileSync(join(src, "optimizer", "src", "main.ts"), "utf8")).toBe("export const capturedCandidate = true;\n");
-        writeFileSync(join(out, "optimizer.mjs"), "// candidate bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeBuiltArtifacts(out, "// candidate bundle\n");
       }
       return Promise.resolve(res());
     };
@@ -323,10 +555,23 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         containerLease: "hone-lease-run_candidate-e1",
         gate: testGate("run_candidate"),
         clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
       },
     );
-    expect(runtime.runArgv).toEqual(["node", "/hone/bundle/optimizer.mjs"]);
+    expect(runtime.runArgv).toEqual(OPTIMIZER_BUILD_CONTRACT.run);
     await runtime.cleanup();
+  });
+
+  it("fails closed before build when staged Node bytes do not match the pin", async () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), "hone-node-source-"));
+    const runtimeRoot = mkdtempSync(join(tmpdir(), "hone-runtime-target-"));
+    const nodePath = join(sourceRoot, "node");
+    writeFileSync(nodePath, "not the pinned Node runtime");
+    await expect(
+      stageMutationRuntime({ HONE_NODE_RUNTIME_PATH: nodePath }, runtimeRoot),
+    ).rejects.toThrow(/pinned runtime source .* hashes .* != pinned .* refusing/);
+    rmSync(sourceRoot, { recursive: true, force: true });
+    rmSync(runtimeRoot, { recursive: true, force: true });
   });
 
   it("builds an admission-captured base snapshot without a launch-time repo recollection", async () => {
@@ -342,8 +587,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         const src = mountsOf(argv)[0]?.split(":")[0] ?? "";
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
         expect(readFileSync(join(src, "optimizer", "src", "main.ts"), "utf8")).toBe("export const campaignCapturedBase = true;\n");
-        writeFileSync(join(out, "optimizer.mjs"), "// campaign base bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeBuiltArtifacts(out, "// campaign base bundle\n");
       }
       return Promise.resolve(res());
     };
@@ -357,6 +601,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         containerLease: "hone-lease-run_campaign_base-e1",
         gate: testGate("run_campaign_base"),
         clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
       },
     );
     await runtime.cleanup();
@@ -455,6 +700,62 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
     expect(seen.argvs[0]?.slice(0, 2)).toEqual(["docker", "create"]);
     expect(seen.argvs[1]?.slice(0, 3)).toEqual(["docker", "start", "-a"]);
     expect(seen.argvs[1]?.[3]).toBe("hone-opt-run_host-1");
+  });
+
+  it("forwards the sealed run-config session no-yield ceiling into the optimizer", async () => {
+    const root = makeRoot();
+    const runDir = join(root, ".hone-runs", "run_session_bound");
+    mkdirSync(runDir, { recursive: true });
+    const seen = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] };
+    const script = join(root, "optimizer.mjs");
+    writeFileSync(script, "process.exit(0);\n");
+    const ctx = optCtx(root, runDir, "run_session_bound");
+    ctx.config = RunConfig.parse({ ...ctx.config, sessionNoYieldMaxTokens: 1_700_000 });
+    ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] = "2500000";
+
+    await runOptimizer(
+      ctx,
+      testOptimizerRuntime({
+        runId: "run_session_bound",
+        argv: [process.execPath, script],
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE, seen),
+      }),
+    );
+
+    expect(seen.argvs[0]).toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=1700000");
+    expect(seen.argvs[0]).not.toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=2500000");
+  });
+
+  it("carries the no-yield ceiling through recursive child IO into the sealed optimizer", async () => {
+    const root = makeRoot();
+    const runDir = join(root, ".hone-runs", "run_recursive_session_bound");
+    mkdirSync(runDir, { recursive: true });
+    const seen = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] };
+    const script = join(root, "recursive-optimizer.mjs");
+    writeFileSync(script, "process.exit(0);\n");
+    const parentIo: CmdIo = {
+      root,
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        HONE_SESSION_NO_YIELD_MAX_TOKENS: "2750000",
+      },
+      isTTY: false,
+      out: () => {},
+      err: () => {},
+    };
+    const ctx = optCtx(root, runDir, "run_recursive_session_bound");
+    ctx.env = new RecursiveChildEnvironmentProbe(parentIo, root).inheritedEnv();
+
+    await runOptimizer(
+      ctx,
+      testOptimizerRuntime({
+        runId: "run_recursive_session_bound",
+        argv: [process.execPath, script],
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE, seen),
+      }),
+    );
+
+    expect(seen.argvs[0]).toContain("HONE_SESSION_NO_YIELD_MAX_TOKENS=2750000");
   });
 
   it("the TCP token reaches the container env but never argv, optimizer.log, or events", async () => {
@@ -624,6 +925,7 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
 
     const invocations = join(root, "invocations.ndjson");
     const argvs: string[][] = [];
+    const toolbeltContainerId = "t00lbe1tc1d";
     const run: RunCommand = (argv) => {
       argvs.push([...argv]);
       if (argv[1] === "info") return Promise.resolve(res({ stdout: Buffer.from("ENGINE-TEST\n") }));
@@ -645,10 +947,19 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
           ].join("\n"),
         );
         writeFileSync(join(out, "worker.mjs"), "// worker bundle\n");
+        writeRuntimeFixtures(out);
         return Promise.resolve(res({ stdout: Buffer.from("bu1ldc1d\n") }));
+      }
+      // The gate rewrites the one-shot smoke from `run` to daemon-id create/start.
+      const createdName = argv[argv.indexOf("--name") + 1];
+      if (argv[1] === "create" && createdName?.startsWith("hone-toolbelt-") === true) {
+        return Promise.resolve(res({ stdout: Buffer.from(`${toolbeltContainerId}\n`) }));
       }
       // Every other create (donor, relays, keeper) answers with a container id.
       if (argv[1] === "create") return Promise.resolve(res({ stdout: Buffer.from("d0n0r1d\n") }));
+      if (argv[1] === "start" && argv.at(-1) === toolbeltContainerId) {
+        return Promise.resolve(res({ stdout: Buffer.from(`${JSON.stringify(validToolbeltResult)}\n`) }));
+      }
       const outArg = argv.find((a) => typeof a === "string" && a.startsWith("HONE_SCRATCH_SNAPSHOT_OUT="));
       if (argv[1] === "exec" && outArg !== undefined) {
         // Model the keeper's snapshot exec: the in-container tar publishes
@@ -668,7 +979,8 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
       runDir,
       casDir: join(root, ".hone-cas"),
       capsuleDir,
-      manifest,
+      admittedManifest: manifest,
+      runtimeIdentity: { admittedCapsuleDigest: digest, executionImage: manifest.image },
       config: RunConfig.parse({
         version: 1,
         capsuleId: manifest.id,
@@ -678,7 +990,6 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
         headless: true,
       }),
       env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network" },
-      capsuleDigest: digest,
       // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
       admissionReview: "off",
       optimizerDigest: computeOptimizerDigest(FIX_IMAGE),
@@ -688,6 +999,7 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: () => {},
       registerCleanupBarrier: () => {},
     };
@@ -699,6 +1011,11 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
     // survives.
     expect(argvs.filter((a) => a[1] === "create" && a.some((x) => x.includes("bun build"))).length).toBe(1);
     expect(argvs.filter((a) => a[1] === "run")).toEqual([]);
+    const toolbeltCreates = argvs.filter(
+      (a) => a[1] === "create" && a[a.indexOf("--name") + 1]?.startsWith("hone-toolbelt-") === true,
+    );
+    expect(toolbeltCreates).toHaveLength(1);
+    expect(argvs.filter((a) => a[1] === "start" && a.at(-1) === toolbeltContainerId)).toHaveLength(1);
     // M0 one-shot: the probe IS the run — exactly one two-phase optimizer
     // invocation (create + start -a); approval never launches a second.
     const optCreates = seen.argvs.filter((a) => a[1] === "create");
@@ -743,8 +1060,7 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
     const run: RunCommand = (argv) => {
       if (argv[1] === "run" && argv.some((a) => a.includes("bun build"))) {
         const out = mountsOf(argv)[1]?.split(":")[0] ?? "";
-        writeFileSync(join(out, "optimizer.mjs"), "// sealed bundle\n");
-        writeFileSync(join(out, "worker.mjs"), "// sealed worker\n");
+        writeBuiltArtifacts(out, "// sealed bundle\n", "// sealed worker\n");
       }
       return Promise.resolve(res());
     };
@@ -758,6 +1074,7 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
         containerLease: `hone-lease-${runId}-e1`,
         gate: testGate(runId),
         clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
       },
     );
   }
@@ -776,11 +1093,11 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
     // NEVER 0777 again: after sealing, nothing below is writable by ANYONE.
     expect(statSync(dir).mode & 0o777).toBe(0o555);
     expect(seal.uid).toBe(OUR_UID);
-    expect(seal.files.map((f) => f.name)).toEqual(["optimizer.mjs", "worker.mjs"]);
+    expect(seal.files.map((file) => file.name)).toEqual(OPTIMIZER_BUNDLE_FILES);
     for (const f of seal.files) {
       const st = lstatSync(join(dir, f.name));
       expect(st.isFile()).toBe(true);
-      expect(st.mode & 0o777).toBe(0o444);
+      expect(st.mode & 0o777).toBe(f.mode);
       expect(st.uid).toBe(OUR_UID);
       expect(st.ino).toBe(f.ino);
       expect(f.size).toBe(st.size);
@@ -821,7 +1138,9 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
     const target = join(seal.dir, "worker.mjs");
     const bytes = readFileSync(target);
     chmodSync(seal.dir, 0o700);
-    rmSync(target);
+    // Keep the old inode allocated so the filesystem cannot immediately
+    // recycle its number and make a replacement look identical.
+    renameSync(target, join(seal.root, "retired-worker.mjs"));
     writeFileSync(target, bytes);
     chmodSync(target, 0o444);
     chmodSync(seal.dir, 0o555);
@@ -859,6 +1178,12 @@ describe("bundle handoff seal: 0700-rooted output, frozen modes, pre-create re-p
     expect(() => verifyOptimizerBundleSeal(runtime)).toThrow(/regained write permission/);
     chmodSync(seal.dir, 0o700);
     chmodSync(target, 0o444);
+    const nodeTarget = join(seal.dir, OPTIMIZER_RUNTIME_MANIFEST.node.bundleName);
+    chmodSync(nodeTarget, 0o444); // removing execute does not add write, but still drifts from the exact seal
+    chmodSync(seal.dir, 0o555);
+    expect(() => verifyOptimizerBundleSeal(runtime)).toThrow(/mode drifted/);
+    chmodSync(seal.dir, 0o700);
+    chmodSync(nodeTarget, OPTIMIZER_RUNTIME_MANIFEST.node.mode);
     chmodSync(seal.dir, 0o755); // dir regained write
     expect(() => verifyOptimizerBundleSeal(runtime)).toThrow(/regained write permission/);
     chmodSync(seal.dir, 0o555);
@@ -947,8 +1272,8 @@ describe("REAL docker: host-uid build into the 0700-rooted handoff", () => {
           expect(f.size).toBeGreaterThan(0);
           const st = lstatSync(join(seal.dir, f.name));
           expect(st.isFile()).toBe(true);
-          expect(st.uid).toBe(OUR_UID); // --user <host uid>:<host gid> wrote as US, not 2000
-          expect(st.mode & 0o777).toBe(0o444);
+          expect(st.uid).toBe(OUR_UID); // --user <host uid>:<host gid> wrote as us, never the reserved runtime uid
+          expect(st.mode & 0o777).toBe(f.mode);
         }
         verifyOptimizerBundleSeal(rt);
         // Simulated replacement between build and run refuses at the pre-create gate.
@@ -961,7 +1286,7 @@ describe("REAL docker: host-uid build into the 0700-rooted handoff", () => {
         expect(() => verifyOptimizerBundleSeal(rt)).toThrow(/sealed bundle bytes drifted/);
       } finally {
         await runtime?.cleanup();
-        await runCommand(["docker", "rm", "-f", lease], { timeoutMs: 60_000 });
+        await runCommand(["docker", "rm", "-f", "-v", lease], { timeoutMs: 60_000 });
       }
     },
   );
@@ -975,7 +1300,8 @@ function optCtx(root: string, runDir: string, runId: string): RunnerBackendConte
     runDir,
     casDir: join(root, ".hone-cas"),
     capsuleDir: join(root, "capsule"),
-    manifest,
+    admittedManifest: manifest,
+    runtimeIdentity: { admittedCapsuleDigest: fakeHash("f"), executionImage: manifest.image },
     config: RunConfig.parse({
       version: 1,
       capsuleId: manifest.id,
@@ -984,7 +1310,6 @@ function optCtx(root: string, runDir: string, runId: string): RunnerBackendConte
       routing: { mutation: { model: "m" } },
     }),
     env: { PATH: process.env["PATH"] ?? "" },
-    capsuleDigest: fakeHash("f"),
     // Direct backend fixture used after frozen setup; no production admission boundary is exercised.
     admissionReview: "off",
     optimizerDigest: fakeHash("0"),
@@ -994,6 +1319,7 @@ function optCtx(root: string, runDir: string, runId: string): RunnerBackendConte
     registerChild: () => () => {},
     probeGate: () => Promise.resolve(true),
     requestStop: () => {},
+    requestPause: () => {},
     registerAuthorityBarrier: () => {},
     registerCleanupBarrier: () => {},
   };

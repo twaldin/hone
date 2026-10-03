@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "recordedAt": "2026-08-21T02:45:33.500Z",
+  "runId": "run_mt2cjsof5700cf",
+  "zeroModelCalls": true,
+  "cwd": "/home/tim/omp-firstmate/worktrees/hone-durable-runs/fixtures/data/hone-durable-runs/provider-pause",
+  "pauseCommand": "HONE_UNSAFE_BACKEND=1 /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/node_modules/.bin/tsx /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/src/main.ts run capsule --headless --backend ./provider-limit-backend.mjs",
+  "pauseExitCode": 0,
+  "resumeCommand": "HONE_UNSAFE_BACKEND=1 /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/node_modules/.bin/tsx /home/tim/omp-firstmate/worktrees/hone-durable-runs/trusted/cli/src/main.ts run capsule --headless --resume",
+  "resumeExitCode": 0,
+  "records": {
+    "events": ".hone-runs/run_mt2cjsof5700cf/events.ndjson",
+    "simulatedProvider": "provider-limit-backend.mjs"
+  },
+  "assertions": {
+    "run.started": 1,
+    "run.paused": 1,
+    "pauseReason": "provider-rate-limit",
+    "pauseStatus": 429,
+    "pauseId": "pause_live_429",
+    "run.resumed": 1,
+    "run.finished": 1,
+    "finishedStatus": "completed"
+  }
+}

@@ -3,3 +3,8 @@ packages:
   - trusted/*
   - optimizer
   - capsules
+allowBuilds:
+  esbuild: false
+  onnxruntime-node: false
+  protobufjs: false
+  sharp: false

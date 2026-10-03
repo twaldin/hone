@@ -7,6 +7,7 @@ import {
   capsuleDigest,
 } from "@hone/schema";
 import { describe, expect, it } from "vitest";
+import { validateCapsule } from "../src/backends/local.js";
 import { admitCapsule } from "../src/admission.js";
 import { discoverCapsules } from "../src/commands/hone.js";
 import { loadRunConfigFile } from "../src/runs.js";
@@ -15,7 +16,7 @@ import {
   appendAdmissionReceipt,
   verifyAdmissionApproval,
 } from "../src/admission-receipts.js";
-import { makeCapsule, makeIo, makeRoot, manifestObject } from "./helpers.js";
+import { makeCapsule, makeGitBaselineCapsule, makeIo, makeRoot, manifestObject } from "./helpers.js";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const OTHER_DIGEST = `sha256:${"b".repeat(64)}`;
@@ -100,6 +101,55 @@ describe("admission receipt ledger", () => {
       receipt,
     });
     expect(statSync(ledgerPath(casRoot)).mode & 0o777).toBe(0o600);
+  });
+
+  it("writes a required receipt owner-only and re-admits it under a permissive umask", () => {
+    const root = makeRoot();
+    const capsuleDir = makeCapsule(root);
+    const digest = capsuleDigest(manifestObject());
+    const casRoot = join(root, ".hone-cas");
+    const [gate1, approval] = approvalHistory({ capsuleDigest: digest });
+    const priorUmask = process.umask(0o022);
+    try {
+      appendAdmissionReceipt(casRoot, gate1);
+      appendAdmissionReceipt(casRoot, approval);
+    } finally {
+      process.umask(priorUmask);
+    }
+
+    expect(statSync(casRoot).mode & 0o777).toBe(0o700);
+    expect(statSync(dirname(ledgerPath(casRoot, digest))).mode & 0o777).toBe(0o700);
+    expect(statSync(ledgerPath(casRoot, digest)).mode & 0o777).toBe(0o600);
+    expect(() => validateCapsule(capsuleDir, digest, "required")).not.toThrow();
+  });
+
+  it("hash-binds the named owner authorization and review evidence", () => {
+    const receipt = makeReceipt(0, null, "gate1-accept", {
+      approvalBasis: {
+        authorizationKey: "bun-image-blocker",
+        authorizedBy: { identity: "captain", kind: "owner" },
+        authorizedAt: "2026-08-12T18:15:41Z",
+        deliveredVia: "first-mate",
+        reviewEvidence: [
+          "data/hone-native-migration/review-f1.md",
+          "data/hone-native-migration/review-f2.md",
+        ],
+      },
+    });
+    expect(receipt.approvalBasis?.authorizationKey).toBe("bun-image-blocker");
+    expect(() => AdmissionReceiptRecord.parse({
+      ...receipt,
+      approvalBasis: {
+        ...receipt.approvalBasis!,
+        reviewEvidence: ["data/hone-native-migration/review-f1.md"],
+      },
+    })).toThrow(/recordHash/);
+    expect(() => makeReceipt(0, null, "gate1-accept", {
+      approvalBasis: {
+        ...receipt.approvalBasis!,
+        authorizedBy: { identity: "not-an-owner", kind: "agent" },
+      },
+    })).toThrow(/must name an owner/);
   });
 
   it("requires an agent approval to carry a complete hard-budget delegation and surfaces it as provisional", () => {
@@ -316,7 +366,50 @@ describe("admitCapsule review gate", () => {
     appendAdmissionReceipt(join(root, ".hone-cas"), approval);
     expect(admitCapsule(capsuleDir, { review: "required" }).provisional).toBe(true);
   });
+  it("uses a bound non-provisional owner receipt when a clean archive omits the ignored git store", () => {
+    const root = makeRoot();
+    const { capsuleDir } = makeGitBaselineCapsule(root);
+    const technical = admitCapsule(capsuleDir, { review: "off" });
+    const [gate1, approval] = approvalHistory({
+      capsuleDigest: technical.digest,
+      approvalBasis: {
+        authorizationKey: "bun-image-blocker",
+        authorizedBy: { identity: "repository-owner", kind: "owner" },
+        authorizedAt: "2026-08-12T18:15:41Z",
+        deliveredVia: "first-mate",
+        reviewEvidence: [
+          "data/hone-native-migration/review-f1.md",
+          "data/hone-native-migration/review-f2.md",
+        ],
+      },
+    });
+    appendAdmissionReceipt(join(root, ".hone-cas"), gate1);
+    appendAdmissionReceipt(join(root, ".hone-cas"), approval);
+    rmSync(join(capsuleDir, "baseline", ".git"), { recursive: true, force: true });
+
+    expect(() => admitCapsule(capsuleDir, { review: "required" })).toThrow(/baseline git inspection failed/);
+    expect(admitCapsule(capsuleDir, {
+      review: "required",
+      allowMissingGitBaselineWithOwnerReceipt: true,
+    }).approval?.receipt.recordHash).toBe(approval.recordHash);
+  });
+
+  it("does not let a receipt without named owner authority cover a missing git store", () => {
+    const root = makeRoot();
+    const { capsuleDir } = makeGitBaselineCapsule(root);
+    const technical = admitCapsule(capsuleDir, { review: "off" });
+    const [gate1, approval] = approvalHistory({ capsuleDigest: technical.digest });
+    appendAdmissionReceipt(join(root, ".hone-cas"), gate1);
+    appendAdmissionReceipt(join(root, ".hone-cas"), approval);
+    rmSync(join(capsuleDir, "baseline", ".git"), { recursive: true, force: true });
+
+    expect(() => admitCapsule(capsuleDir, {
+      review: "required",
+      allowMissingGitBaselineWithOwnerReceipt: true,
+    })).toThrow(/not covered by a non-provisional owner Gate-2 receipt/);
+  });
 });
+
 describe("production receipt enforcement", () => {
   it("refuses an unreceipted capsule before run creation", async () => {
     const root = makeRoot();

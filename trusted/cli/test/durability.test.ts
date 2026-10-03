@@ -1,7 +1,19 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, truncateSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { appendEvent, eventsPath, readEvents, syncDir, writeAllSync, writeFileDurable } from "../src/eventlog.js";
+import {
+  appendEvent,
+  ensureTerminalReserve,
+  eventsPath,
+  readEvents,
+  releaseTerminalReserve,
+  syncDir,
+  TERMINAL_RESERVE_BYTES,
+  TERMINAL_RESERVE_FILE,
+  writeAllSync,
+  writeFileDurable,
+} from "../src/eventlog.js";
+import { mintRunDirDurable, runsRoot } from "../src/runs.js";
 import { CAP_ID, FIX_OPTIMIZER_DIGEST, at, fakeHash, makeRoot } from "./helpers.js";
 
 /**
@@ -65,6 +77,53 @@ describe("writeFileDurable (whole-or-absent publication)", () => {
     writeFileDurable(path, `${JSON.stringify({ v: 1 })}\n`);
     writeFileDurable(path, `${JSON.stringify({ v: 2 })}\n`);
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ v: 2 });
+  });
+});
+
+describe("run directory custody", () => {
+  it("mints the complete run directory chain as owner-only under a permissive umask", () => {
+    const root = makeRoot();
+    const priorUmask = process.umask(0o022);
+    try {
+      const runDir = mintRunDirDurable(root, "run_owner_only");
+      expect(statSync(runsRoot(root)).mode & 0o777).toBe(0o700);
+      expect(statSync(runDir).mode & 0o777).toBe(0o700);
+    } finally {
+      process.umask(priorUmask);
+    }
+  });
+});
+
+describe("terminal storage reserve", () => {
+  it("physically allocates idempotent terminal capacity and releases only that reserve", () => {
+    const root = makeRoot();
+    const keep = join(root, "keep");
+    writeFileSync(keep, "state");
+    ensureTerminalReserve(root);
+    const reservePath = join(root, TERMINAL_RESERVE_FILE);
+    const first = statSync(reservePath);
+    expect(first.size).toBe(TERMINAL_RESERVE_BYTES);
+    expect(first.blocks * 512).toBeGreaterThanOrEqual(TERMINAL_RESERVE_BYTES);
+
+    ensureTerminalReserve(root);
+    expect(statSync(reservePath).ino).toBe(first.ino);
+    releaseTerminalReserve(root);
+    expect(existsSync(reservePath)).toBe(false);
+    expect(readFileSync(keep, "utf8")).toBe("state");
+    expect(() => releaseTerminalReserve(root)).not.toThrow();
+  });
+
+  it("replaces an exact-size sparse reserve before treating capacity as guaranteed", () => {
+    const root = makeRoot();
+    const reservePath = join(root, TERMINAL_RESERVE_FILE);
+    writeFileSync(reservePath, "");
+    truncateSync(reservePath, TERMINAL_RESERVE_BYTES);
+    expect(statSync(reservePath).blocks * 512).toBeLessThan(TERMINAL_RESERVE_BYTES);
+
+    ensureTerminalReserve(root);
+    const allocated = statSync(reservePath);
+    expect(allocated.size).toBe(TERMINAL_RESERVE_BYTES);
+    expect(allocated.blocks * 512).toBeGreaterThanOrEqual(TERMINAL_RESERVE_BYTES);
   });
 });
 

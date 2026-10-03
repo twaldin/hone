@@ -10,6 +10,7 @@ export interface ExitReport {
   aggregate: number | null;
   deltaVsBaseline: number | null;
   spend: { tokens: number; usd: number; wallClockSec: number; evaluatorInvocations: number } | null;
+  lifetimeSec: number | null;
 }
 
 export function exitReport(runId: string, state: RunState): ExitReport {
@@ -20,13 +21,17 @@ export function exitReport(runId: string, state: RunState): ExitReport {
     aggregate: state.incumbent?.aggregate ?? null,
     deltaVsBaseline: state.incumbent?.deltaVsBaseline ?? null,
     spend: state.lastBudget?.spent ?? null,
+    lifetimeSec: state.lastBudget?.lifetimeSec ?? null,
   };
 }
 
 export function formatSpend(budget: BudgetState | null): string {
   if (budget === null) return "(no budget.snapshot yet)";
   const { spent, envelope } = budget;
-  return `$${spent.usd.toFixed(2)} of $${envelope.maxUsd} · ${spent.tokens} tokens · ${Math.round(spent.wallClockSec)}s wall · ${spent.evaluatorInvocations} evals`;
+  const lifetime = budget.lifetimeSec === undefined
+    ? ""
+    : ` · ${Math.round(budget.lifetimeSec)}s lifetime · ${Math.round(Math.max(0, budget.lifetimeSec - spent.wallClockSec))}s paused/offline`;
+  return `$${spent.usd.toFixed(2)} of $${envelope.maxUsd} · ${spent.tokens} tokens · ${Math.round(spent.wallClockSec)}s active wall${lifetime} · ${spent.evaluatorInvocations} evals`;
 }
 
 export function formatDelta(delta: number): string {

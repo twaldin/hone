@@ -1,10 +1,25 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { RunConfig, RunEvent } from "@hone/schema";
+import {
+  OPTIMIZER_CHILD_PENDING_EXIT_CODE,
+  OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE,
+  RunConfig,
+  RunEvent,
+} from "@hone/schema";
 import type { RunnerBackendContext } from "../src/types.js";
-import { runOptimizer } from "../src/backends/local.js";
-import { replay, replayRun } from "../src/eventlog.js";
+import {
+  OptimizerChildPendingError,
+  OptimizerStorageExhaustedError,
+  runOptimizer,
+} from "../src/backends/local.js";
+import {
+  appendEvent,
+  ensureTerminalReserve,
+  replay,
+  replayRun,
+  TERMINAL_RESERVE_FILE,
+} from "../src/eventlog.js";
 import { stopCommand } from "../src/commands/stop.js";
 import { pidAlive, runCommand as cliRunCommand, readSupervisorPid } from "../src/supervisor.js";
 import { sleep } from "../src/promise.js";
@@ -45,6 +60,69 @@ function soleRunId(root: string): string {
   const id = entries[0];
   if (id === undefined) throw new Error("unreachable");
   return id;
+}
+
+function optimizerContext(root: string, runId: string): RunnerBackendContext {
+  const runDir = join(root, ".hone-runs", runId);
+  mkdirSync(runDir, { recursive: true });
+  const manifest = manifestObject();
+  return {
+    runId,
+    root,
+    runDir,
+    casDir: join(root, ".hone-cas"),
+    capsuleDir: join(root, "capsule"),
+    admittedManifest: manifest,
+    runtimeIdentity: { admittedCapsuleDigest: fakeHash("f"), executionImage: manifest.image },
+    config: RunConfig.parse({
+      version: 1,
+      capsuleId: manifest.id,
+      objective: manifest.objective,
+      budget: manifest.budget,
+      routing: { mutation: { model: "m" } },
+    }),
+    env: { PATH: process.env["PATH"] ?? "" },
+    optimizerDigest: fakeHash("0"),
+    replayed: replay([]),
+    signal: new AbortController().signal,
+    emit: (event) => event,
+    registerChild: () => () => {},
+    probeGate: () => Promise.resolve(true),
+    requestStop: () => {},
+    requestPause: () => {},
+    registerAuthorityBarrier: () => {},
+    registerCleanupBarrier: () => {},
+  };
+}
+
+function noYieldBackendSource(options: { startFile?: string; pause?: boolean } = {}): string {
+  const importStart = options.startFile === undefined ? "" : `import { appendFileSync } from "node:fs";`;
+  const markStart = options.startFile === undefined
+    ? ""
+    : `appendFileSync(${JSON.stringify(options.startFile)}, "start\\n");`;
+  const pause = options.pause === true ? `ctx.requestPause({ reason: "operator" });` : "";
+  return `${importStart}
+  export function createBackend() {
+    return {
+      async start(ctx) {
+        ${markStart}
+        ctx.emit({
+          runId: ctx.runId,
+          at: new Date().toISOString(),
+          type: "mutation.no-yield-bound",
+          episode: 0,
+          sandboxId: "sb-no-yield",
+          limitTokens: 1500000,
+          modelCalls: 152,
+          promptTokens: 1499359,
+          completionTokens: 7320,
+          consumedTokens: 1506679,
+        });
+        ${pause}
+      },
+    };
+  }
+  `;
 }
 
 describe("terminal-order fence", () => {
@@ -91,6 +169,332 @@ describe("terminal-order fence", () => {
     const state = replayRun(join(root, ".hone-runs", runId));
     expect(state.finished?.status).toBe("budget");
   });
+
+  it("terminalizes a backend-emitted no-yield bound as a distinct stopped reason", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(join(root, "bounded-backend.mjs"), noYieldBackendSource());
+    const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    const code = await cliRunCommand(["capsule", "--headless", "--backend", "./bounded-backend.mjs"], io);
+    expect(code, err.join("\n")).toBe(0);
+
+    const runId = soleRunId(root);
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    const boundIndex = events.findIndex((event) => event.type === "mutation.no-yield-bound");
+    const finishedIndex = events.findIndex((event) => event.type === "run.finished");
+    expect(boundIndex).toBeGreaterThanOrEqual(0);
+    expect(boundIndex).toBeLessThan(finishedIndex);
+    expect(events.filter((event) => event.type === "run.finished")).toEqual([
+      expect.objectContaining({
+        status: "stopped",
+        reason: "session-no-yield-bound",
+      }),
+    ]);
+    expect(events.at(-1)?.type).toBe("run.finished");
+  });
+
+  it("resumes a durable no-yield marker without starting the backend again", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const startFile = join(root, "backend-starts.txt");
+    writeFileSync(
+      join(root, "pausing-bounded-backend.mjs"),
+      noYieldBackendSource({ startFile, pause: true }),
+    );
+    const firstIo = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--backend", "./pausing-bounded-backend.mjs"], firstIo.io),
+      firstIo.err.join("\n"),
+    ).toBe(0);
+    const runId = soleRunId(root);
+    expect(eventTypes(root, runId)).not.toContain("run.finished");
+    expect(readFileSync(startFile, "utf8")).toBe("start\n");
+
+    const resumedIo = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--resume"], resumedIo.io),
+      resumedIo.err.join("\n"),
+    ).toBe(0);
+    expect(readFileSync(startFile, "utf8")).toBe("start\n");
+
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "run.finished")).toEqual([
+      expect.objectContaining({
+        status: "stopped",
+        reason: "session-no-yield-bound",
+      }),
+    ]);
+    expect(events.at(-1)?.type).toBe("run.finished");
+  });
+
+  it("terminalizes a rejected no-yield report as failed instead of completed", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(
+      join(root, "rejected-bound-report-backend.mjs"),
+      `export function createBackend() {
+        return {
+          async start() {
+            throw new Error("mutation no-yield bound tripped but durable report was rejected");
+          },
+        };
+      }
+      `,
+    );
+    const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    const code = await cliRunCommand(
+      ["capsule", "--headless", "--backend", "./rejected-bound-report-backend.mjs"],
+      io,
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain("durable report was rejected");
+
+    const runId = soleRunId(root);
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "run.finished")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        reason: "crash",
+      }),
+    ]);
+    expect(events.at(-1)?.type).toBe("run.finished");
+  });
+
+  it("spends the terminal reserve to fail a storage-exhausted run even inside an active episode", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const localBackendModule = new URL("../src/backends/local.ts", import.meta.url).href;
+    writeFileSync(
+      join(root, "storage-exhausted-backend.mjs"),
+      `import { OptimizerStorageExhaustedError } from ${JSON.stringify(localBackendModule)};
+      export function createBackend() {
+        return {
+          async start(ctx) {
+            ctx.emit({
+              runId: ctx.runId,
+              at: new Date().toISOString(),
+              type: "episode.started",
+              episode: 0,
+              parent: { hash: "${fakeHash("b")}" },
+            });
+            throw new OptimizerStorageExhaustedError("synthetic ENOSPC after candidate evaluation");
+          },
+        };
+      }
+      `,
+    );
+    const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--backend", "./storage-exhausted-backend.mjs"], io),
+      err.join("\n"),
+    ).toBe(1);
+    const runId = soleRunId(root);
+    const runDir = join(root, ".hone-runs", runId);
+    expect(replayRun(runDir)).toMatchObject({ status: "failed", outcomeReason: "crash" });
+    expect(eventTypes(root, runId).at(-1)).toBe("run.finished");
+    expect(existsSync(join(runDir, TERMINAL_RESERVE_FILE))).toBe(false);
+  });
+
+  it("adjudicates a stale unpaused recursive child negative without restarting its backend", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const starts = join(root, "interrupted-child-starts");
+    writeFileSync(
+      join(root, "interrupted-child-backend.mjs"),
+      `import { appendFileSync } from "node:fs";
+      export function createBackend() {
+        return {
+          async start(ctx) {
+            appendFileSync(${JSON.stringify(starts)}, "start\\n");
+            ctx.emit({
+              runId: ctx.runId,
+              at: new Date().toISOString(),
+              type: "episode.started",
+              episode: 0,
+              parent: { hash: "${fakeHash("b")}" },
+            });
+            throw new Error("synthetic child process disappeared");
+          },
+        };
+      }
+      `,
+    );
+    const initial = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--backend", "./interrupted-child-backend.mjs"], initial.io),
+    ).toBe(1);
+    const runId = soleRunId(root);
+    expect(eventTypes(root, runId)).not.toContain("run.finished");
+    expect(readFileSync(starts, "utf8")).toBe("start\n");
+
+    const resumed = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(
+      await cliRunCommand(
+        ["capsule", "--headless", "--resume"],
+        resumed.io,
+        { adjudicateInterruptedChild: true },
+      ),
+      resumed.err.join("\n"),
+    ).toBe(1);
+    expect(readFileSync(starts, "utf8")).toBe("start\n");
+    const runDir = join(root, ".hone-runs", runId);
+    expect(replayRun(runDir)).toMatchObject({ status: "failed", outcomeReason: "crash" });
+    expect(eventTypes(root, runId).filter((type) => type === "run.resumed")).toHaveLength(1);
+    expect(eventTypes(root, runId).at(-1)).toBe("run.finished");
+  });
+
+  it("rechecks a raced durable pause under the run lock and preserves its retry", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const starts = join(root, "raced-pause-starts");
+    writeFileSync(
+      join(root, "raced-pause-backend.mjs"),
+      `import { appendFileSync } from "node:fs";
+      export function createBackend() {
+        return {
+          async start(ctx) {
+            appendFileSync(${JSON.stringify(starts)}, "start\\n");
+            if (ctx.replayed.resumeCount === 0) {
+              ctx.emit({ runId: ctx.runId, at: new Date().toISOString(), type: "episode.started", episode: 0, parent: { hash: "${fakeHash("b")}" } });
+              throw new Error("synthetic pre-lock interruption");
+            }
+            ctx.emit({ runId: ctx.runId, at: new Date().toISOString(), type: "episode.completed", episode: 0 });
+          },
+        };
+      }`,
+    );
+    const initial = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(await cliRunCommand(["capsule", "--headless", "--backend", "./raced-pause-backend.mjs"], initial.io)).toBe(1);
+    const runId = soleRunId(root);
+    const runDir = join(root, ".hone-runs", runId);
+    appendEvent(runDir, { runId, at: new Date().toISOString(), type: "run.paused", reason: "operator" });
+
+    const resumed = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--resume"], resumed.io, { adjudicateInterruptedChild: true }),
+      resumed.err.join("\n"),
+    ).toBe(0);
+    expect(readFileSync(starts, "utf8")).toBe("start\nstart\n");
+    expect(replayRun(runDir).finished?.status).toBe("completed");
+  });
+
+  it("durably pauses a vanished recursive child for deterministic retry instead of crashing the outer run", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const localBackendModule = new URL("../src/backends/local.ts", import.meta.url).href;
+    writeFileSync(
+      join(root, "pending-child-backend.mjs"),
+      `import { OptimizerChildPendingError } from ${JSON.stringify(localBackendModule)};
+      export function createBackend() {
+        return {
+          async start() {
+            throw new OptimizerChildPendingError("synthetic child vanished without a terminal event");
+          },
+        };
+      }
+      `,
+    );
+    const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    const code = await cliRunCommand(
+      ["capsule", "--headless", "--backend", "./pending-child-backend.mjs"],
+      io,
+      { hasUnsettledPendingChild: () => true },
+    );
+    expect(code, err.join("\n")).toBe(0);
+
+    const runId = soleRunId(root);
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.at(-1)).toMatchObject({
+      type: "run.paused",
+      reason: "recursive-child-pending",
+    });
+    expect(events.some((event) => event.type === "run.finished")).toBe(false);
+    expect(replayRun(join(root, ".hone-runs", runId)).status).toBe("paused");
+    expect(existsSync(join(root, ".hone-runs", runId, TERMINAL_RESERVE_FILE))).toBe(true);
+  });
+
+  it("refuses a pending-child control exit without durable pending authority", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const localBackendModule = new URL("../src/backends/local.ts", import.meta.url).href;
+    writeFileSync(
+      join(root, "spoofed-pending-child-backend.mjs"),
+      `import { OptimizerChildPendingError } from ${JSON.stringify(localBackendModule)};
+      export function createBackend() {
+        return { async start() { throw new OptimizerChildPendingError("spoofed pending exit"); } };
+      }`,
+    );
+    const { io, err } = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--backend", "./spoofed-pending-child-backend.mjs"], io),
+      err.join("\n"),
+    ).toBe(1);
+    const runId = soleRunId(root);
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.some((event) => event.type === "run.paused")).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "failed", reason: "crash" });
+  });
+
+  it("leaves an optimizer crash inside an incomplete episode resumable", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(
+      join(root, "resumable-episode-crash-backend.mjs"),
+      `export function createBackend() {
+        return {
+          async start(ctx) {
+            const active = ctx.replayed.activeEpisode;
+            if (active === null) {
+              ctx.emit({
+                runId: ctx.runId,
+                at: new Date().toISOString(),
+                type: "episode.started",
+                episode: 0,
+                parent: { hash: "${fakeHash("b")}" },
+              });
+              throw new Error("injected crash after all external work settled");
+            }
+            ctx.emit({
+              runId: ctx.runId,
+              at: new Date().toISOString(),
+              type: "episode.completed",
+              episode: active.episode,
+            });
+          },
+        };
+      }
+      `,
+    );
+    const firstIo = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--backend", "./resumable-episode-crash-backend.mjs"], firstIo.io),
+    ).toBe(1);
+    const runId = soleRunId(root);
+    expect(firstIo.err.join("\n")).toContain("injected crash after all external work settled");
+    expect(eventTypes(root, runId)).toContain("episode.started");
+    expect(eventTypes(root, runId)).not.toContain("episode.completed");
+    expect(eventTypes(root, runId)).not.toContain("run.finished");
+
+    const resumedIo = makeIo(root, { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" });
+    expect(
+      await cliRunCommand(["capsule", "--headless", "--resume"], resumedIo.io),
+      resumedIo.err.join("\n"),
+    ).toBe(0);
+
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(events.filter((event) => event.type === "episode.started")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "episode.completed")).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "completed" });
+  });
 });
 
 describe("optimizer process-group kill", () => {
@@ -119,7 +523,8 @@ describe("optimizer process-group kill", () => {
       runDir,
       casDir: join(root, ".hone-cas"),
       capsuleDir: join(root, "capsule"),
-      manifest,
+      admittedManifest: manifest,
+      runtimeIdentity: { admittedCapsuleDigest: fakeHash("f"), executionImage: manifest.image },
       config: RunConfig.parse({
         version: 1,
         capsuleId: manifest.id,
@@ -130,7 +535,6 @@ describe("optimizer process-group kill", () => {
       env: {
         PATH: process.env["PATH"] ?? "",
       },
-      capsuleDigest: fakeHash("f"),
       optimizerDigest: fakeHash("0"),
       replayed: replay([]),
       signal: abort.signal,
@@ -141,6 +545,7 @@ describe("optimizer process-group kill", () => {
       },
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: () => {},
       registerCleanupBarrier: () => {},
     };
@@ -163,6 +568,52 @@ describe("optimizer process-group kill", () => {
     // The whole point: a direct child.kill would have orphaned the grandchild.
     expect(pidAlive(pids.grandchild)).toBe(false);
     await done; // aborted wind-down resolves rather than rejects
+  });
+});
+
+describe("optimizer control exits", () => {
+  it("releases terminal capacity only for storage exhaustion", async () => {
+    const storageRoot = makeRoot();
+    const storageCtx = optimizerContext(storageRoot, "run_storage_exit");
+    ensureTerminalReserve(storageCtx.runDir);
+    await expect(
+      runOptimizer(
+        storageCtx,
+        testOptimizerRuntime({
+          runId: storageCtx.runId,
+          argv: [process.execPath, "-e", `process.exit(${OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE})`],
+        }),
+      ),
+    ).rejects.toBeInstanceOf(OptimizerStorageExhaustedError);
+    expect(existsSync(join(storageCtx.runDir, TERMINAL_RESERVE_FILE))).toBe(false);
+
+    const pendingRoot = makeRoot();
+    const pendingCtx = optimizerContext(pendingRoot, "run_pending_exit");
+    ensureTerminalReserve(pendingCtx.runDir);
+    await expect(
+      runOptimizer(
+        pendingCtx,
+        testOptimizerRuntime({
+          runId: pendingCtx.runId,
+          argv: [process.execPath, "-e", `process.exit(${OPTIMIZER_CHILD_PENDING_EXIT_CODE})`],
+        }),
+      ),
+    ).rejects.toBeInstanceOf(OptimizerChildPendingError);
+    expect(existsSync(join(pendingCtx.runDir, TERMINAL_RESERVE_FILE))).toBe(true);
+
+    const crashRoot = makeRoot();
+    const crashCtx = optimizerContext(crashRoot, "run_generic_exit");
+    ensureTerminalReserve(crashCtx.runDir);
+    await expect(
+      runOptimizer(
+        crashCtx,
+        testOptimizerRuntime({
+          runId: crashCtx.runId,
+          argv: [process.execPath, "-e", "process.exit(1)"],
+        }),
+      ),
+    ).rejects.toThrow(/optimizer exited 1/);
+    expect(existsSync(join(crashCtx.runDir, TERMINAL_RESERVE_FILE))).toBe(true);
   });
 });
 

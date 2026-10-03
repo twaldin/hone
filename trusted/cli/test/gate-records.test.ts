@@ -1,7 +1,11 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { canonicalJson } from "@hone/schema";
-import { metaCampaignConfigHash, type MetaMeasurement } from "@hone/meta";
+import { MetaCampaignConfigV2, canonicalJson, type MetaCampaignConfigV2 as RecursiveConfig } from "@hone/schema";
+import {
+  campaignImageRepinRecordDigest,
+  metaCampaignConfigHash,
+  type MetaMeasurement,
+} from "@hone/meta";
 import { describe, expect, it } from "vitest";
 import {
   G1_RECORD_FILE,
@@ -42,6 +46,43 @@ import {
   sha,
   tmp,
 } from "./helpers/gate-fixtures.js";
+
+function withImageRepin(config: RecursiveConfig): RecursiveConfig {
+  const capsule = config.train[0]!;
+  const toImage = `hone-repinned@${digest(`repinned:${capsule.capsuleId}`)}`;
+  const body = {
+    version: 1,
+    at: "2026-08-27T02:00:00.000Z",
+    capsuleId: capsule.capsuleId,
+    fromImage: capsule.image,
+    toImage,
+    evidencePath: "image-equivalence.v1.json",
+    evidenceSha256: digest("image-equivalence"),
+    reason: "gate evidence propagation",
+    previousRecordDigest: null,
+  } as const;
+  const record = { ...body, recordDigest: campaignImageRepinRecordDigest(body) };
+  return MetaCampaignConfigV2.parse({
+    ...config,
+    train: config.train.map((entry) => (
+      entry.capsuleId === capsule.capsuleId ? { ...entry, image: toImage } : entry
+    )),
+    developmentPanel: {
+      ...config.developmentPanel,
+      members: config.developmentPanel.members.map((member) => ({
+        ...member,
+        capsule: member.capsule.capsuleId === capsule.capsuleId
+          ? { ...member.capsule, image: toImage }
+          : member.capsule,
+      })),
+    },
+    imageRepinJournal: {
+      version: 1,
+      campaignConfigHash: metaCampaignConfigHash(config),
+      repins: [record],
+    },
+  });
+}
 
 describe("assembleG1Record: Stage-A statistical gate", () => {
   it("passes when winner beats seed across every capsule with controls below", () => {
@@ -405,7 +446,7 @@ describe("digest tamper refusal", () => {
       winner: ID.winner,
     });
     const authorization = assembleG1Authorization({
-      configHash: metaCampaignConfigHash(buildConfig("B")),
+      config: buildConfig("B"),
       record,
       controlWinner: ID.controlWinner,
       generation2: ID.gen2,
@@ -438,7 +479,7 @@ describe("human authorization assembly fails closed on failing statistics", () =
     expect(record.pass).toBe(false);
     expect(() =>
       assembleG1Authorization({
-        configHash: metaCampaignConfigHash(buildConfig("B")),
+        config: buildConfig("B"),
         record,
         controlWinner: ID.controlWinner,
         generation2: ID.gen2,
@@ -464,7 +505,7 @@ describe("dispatch guards fail closed", () => {
       winner: ID.winner,
     });
     const authorization = assembleG1Authorization({
-      configHash: stageBHash,
+      config: stageB,
       record,
       controlWinner: ID.controlWinner,
       generation2: ID.gen2,
@@ -493,7 +534,7 @@ describe("dispatch guards fail closed", () => {
     });
     writeG2Record(dir, g2Record);
     writeAuthorization(dir, assembleG2Authorization({
-      configHash: stageBHash,
+      config: stageB,
       record: g2Record,
       generation0: ID.controlWinner,
       generation1: ID.target,
@@ -578,15 +619,14 @@ describe("dispatch guards fail closed", () => {
       controlWinner: ID.controlWinner,
       generation2: ID.gen2,
     });
-    const configHash = metaCampaignConfigHash(stageB);
     // Wrong G2 (generation2 != record.generation2).
-    expect(() => assembleG2Authorization({ configHash, record: g2Record, generation0: ID.controlWinner, generation1: ID.target, generation2: ID.gen0, humanDecision: HUMAN }))
+    expect(() => assembleG2Authorization({ config: stageB, record: g2Record, generation0: ID.controlWinner, generation1: ID.target, generation2: ID.gen0, humanDecision: HUMAN }))
       .toThrow(/generation2 is not the G2/);
     // Wrong G1 (generation1 != record.target).
-    expect(() => assembleG2Authorization({ configHash, record: g2Record, generation0: ID.controlWinner, generation1: ID.gen1, generation2: ID.gen2, humanDecision: HUMAN }))
+    expect(() => assembleG2Authorization({ config: stageB, record: g2Record, generation0: ID.controlWinner, generation1: ID.gen1, generation2: ID.gen2, humanDecision: HUMAN }))
       .toThrow(/generation1 is not the G1 target/);
     // Wrong G0 (generation0 != record.controlWinner).
-    expect(() => assembleG2Authorization({ configHash, record: g2Record, generation0: ID.gen0, generation1: ID.target, generation2: ID.gen2, humanDecision: HUMAN }))
+    expect(() => assembleG2Authorization({ config: stageB, record: g2Record, generation0: ID.gen0, generation1: ID.target, generation2: ID.gen2, humanDecision: HUMAN }))
       .toThrow(/generation0 is not the G0 controller/);
   });
 
@@ -714,7 +754,7 @@ describe("G1 search approval gates Stage-B search without Stage-B products", () 
     const config = buildConfig("B");
     expect(() => assertG1SearchApproved(stageBDir, config)).toThrow(/absent/);
     writeAuthorization(stageBDir, assembleG1Authorization({
-      configHash: metaCampaignConfigHash(config),
+      config,
       record,
       controlWinner: ID.controlWinner,
       generation2: ID.gen2,
@@ -813,5 +853,53 @@ describe("G1 search approval gates Stage-B search without Stage-B products", () 
     const onDisk = JSON.parse(readFileSync(path, "utf8"));
     writeFileSync(path, canonicalJson({ ...onDisk, pass: false }));
     expect(() => assertG1SearchApproved(stageBDir, config)).toThrow(/inputsDigest mismatch/);
+  });
+});
+
+describe("gate evidence exposes campaign image re-pins", () => {
+  it("carries the re-pin journal through both statistical records and authorization seals", () => {
+    const stageA = withImageRepin(buildConfig("A"));
+    const g1Measurements = buildMeasurements(stageA, passingG1Specs());
+    const g1Record = assembleG1Record({
+      config: stageA,
+      measurements: g1Measurements,
+      receipt: receiptFor(g1Measurements),
+      thresholds: G1_THRESHOLDS,
+      seed: ID.seed,
+      winner: ID.winner,
+    });
+    expect(g1Record.imageRepinJournal).toEqual(stageA.imageRepinJournal);
+
+    const stageB = withImageRepin(buildConfig("B"));
+    const g1Authorization = assembleG1Authorization({
+      config: stageB,
+      record: g1Record,
+      controlWinner: ID.controlWinner,
+      generation2: ID.gen2,
+      humanDecision: HUMAN,
+    });
+    expect(g1Authorization.imageRepinJournal).toEqual(stageB.imageRepinJournal);
+
+    const g2Measurements = buildMeasurements(stageB, passingG2Specs());
+    const g2Record = assembleG2Record({
+      config: stageB,
+      measurements: g2Measurements,
+      receipt: receiptFor(g2Measurements),
+      thresholds: G2_THRESHOLDS,
+      target: ID.target,
+      controlWinner: ID.controlWinner,
+      generation2: ID.gen2,
+    });
+    expect(g2Record.imageRepinJournal).toEqual(stageB.imageRepinJournal);
+
+    const g2Authorization = assembleG2Authorization({
+      config: stageB,
+      record: g2Record,
+      generation0: ID.controlWinner,
+      generation1: ID.target,
+      generation2: ID.gen2,
+      humanDecision: HUMAN,
+    });
+    expect(g2Authorization.imageRepinJournal).toEqual(stageB.imageRepinJournal);
   });
 });

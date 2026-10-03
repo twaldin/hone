@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
   CasStore,
   RecursiveResourceLedger,
@@ -37,7 +37,11 @@ import {
   MetaCampaignRunner,
   MetaEnvelopeFileRecordPortV1,
   MetaResourceEnvelopeLedger,
+  campaignRecordExtends,
+  campaignImageRepinRecordDigest,
+  campaignSourceMigrationRecordDigest,
   metaCampaignConfigHash,
+  mapBounded,
   selectDeterministicBest,
   trustedPhaseMeasurementEpoch,
   type CandidateGateResult,
@@ -49,6 +53,7 @@ import {
   type MetaChildRunRequest,
   type MetaChildSupervisor,
   type MetaControlTransformationReceipt,
+  type MetaFailureSettlement,
   type MetaMeasurement,
   type MetaReservation,
   type MetaResourceUsage,
@@ -64,12 +69,23 @@ import {
   CapsuleManifest,
   DiagnosticOrderingReport,
   EvaluationRecord,
+  CampaignImageEquivalenceEvidenceV1,
+  CampaignImageDistributionPreregistrationV1,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
   ProxyTraceRecord,
+  RecursiveEvaluationPlan,
   SpawnRunParams,
+  campaignSourceCommits,
   canonicalJson,
+  capsuleDigest,
   deriveCapsuleId,
+  type CampaignImageRepinV1,
+  type CampaignImageStructuralNondeterminismProofV1,
+  type CampaignOptimizerRefreezeV1,
+  type CampaignOptimizerRunRefreezeV1,
+  type CampaignSourceMigrationV1,
+  type CampaignRuntimeClosureCaptureV1,
   type BudgetEnvelope,
   type ChildRunAdmission as ChildRunAdmissionRecord,
   type CampaignPauseSignal as CampaignPauseSignalRecord,
@@ -79,10 +95,20 @@ import {
   type MetaCampaignConfigV1 as MetaCampaignConfig,
   type MetaCampaignConfig as AnyMetaCampaignConfig,
   type MetaCampaignConfigV2 as RecursiveMetaCampaignConfig,
+  type M2CorpusCohort,
   type SpawnRunParams as SpawnRunRequest,
 } from "@hone/schema";
 import { extractWorkspaceArtifact } from "../artifact.js";
-import { admitCapsule, capsuleOracleDigest, capsuleScalarizerDigest, type AdmittedCapsule } from "../admission.js";
+import {
+  admitCapsule,
+  authenticateCapsuleSnapshot,
+  capsuleOracleDigest,
+  capsuleScalarizerDigest,
+  readCapsuleSnapshot,
+  type AdmittedCapsule,
+} from "../admission.js";
+import { loadCapsule } from "../capsule.js";
+import { gate2ReceiptCitesAuthorizedBasis, verifyM2AuthorizedPartialCohort } from "../m2-cohort.js";
 import {
   finalizeMetaHoldout,
   selectMetaTrainWinner,
@@ -100,11 +126,20 @@ import {
   buildBrokerCorpusConfig,
   corpusCohortFenceError,
   type BuildBrokerCorpusConfigInputs,
+  type CorpusCohortBinding,
 } from "../corpus-provenance.js";
-import { EVENTS_FILE, bestArtifact, readEvents, replayRun, writeFileDurable } from "../eventlog.js";
+import { appendEvent, EVENTS_FILE, bestArtifact, readEvents, replayRun, writeFileDurable } from "../eventlog.js";
+import { contractHash } from "../contract.js";
 import type { CmdIo } from "../io.js";
 import { MetaJournalV1, metaWorkKey } from "../meta-journal.js";
-import { persistMetaSearchTrajectory } from "../meta-trajectory.js";
+import {
+  assertM2OuterDirectEnvelope,
+  deriveM2OuterDirectEnvelope,
+} from "../launch-draft.js";
+import {
+  persistMetaSearchTrajectory,
+  persistTrajectoryWithoutMaskingSearchFailure,
+} from "../meta-trajectory.js";
 import {
   assembleG1Authorization,
   assembleG1Record,
@@ -131,7 +166,13 @@ import {
   type MetaControlArtifact,
   type MetaControlSourceSeal,
 } from "../meta-controls.js";
-import { resolveCandidateOptimizer, type ResolvedCandidateOptimizer } from "../optimizer-artifact.js";
+import {
+  readOptimizerArtifactSeal,
+  replaceOptimizerArtifactSeal,
+  resolveCandidateOptimizer,
+  type OptimizerArtifactSeal,
+  type ResolvedCandidateOptimizer,
+} from "../optimizer-artifact.js";
 import {
   collectOptimizerSnapshot,
   optimizerOverridden,
@@ -142,13 +183,51 @@ import {
   conformCandidateOptimizer,
   type CandidateConformanceReceipt,
 } from "../optimizer-conformance.js";
-import { casRoot, loadRunConfigFile, runsRoot } from "../runs.js";
+import { CONTRACT_FILE, casRoot, loadRunConfigFile, runsRoot } from "../runs.js";
 import { verifiedBootRuntimeDigest } from "../runtime-digest.js";
-import { runCommand } from "../supervisor.js";
+import {
+  acquireCampaignRecordLock,
+  appendRuntimeClosureCaptureRecord,
+  captureRuntimeClosure,
+  parseSha256Sidecar,
+  restoreRuntimeClosure,
+  runtimeClosureCaptureRecord,
+  withRuntimeClosureCapture,
+} from "../runtime-closure.js";
+import {
+  assertRequiredPanelCapsuleSmoke,
+  runPanelCapsuleSmoke,
+} from "../campaign-capsule-smoke.js";
+import type { CaptureRuntimeClosureResult } from "../runtime-closure.js";
+import { RUNTIME_PIN_FILE, acquireRunLock, runCommand, type TrustedRunOptions } from "../supervisor.js";
+import {
+  appendPreAuthorityRefusalBreadcrumb,
+  classifyPreAuthorityRefusal,
+  extendPreAuthorityStderrTail,
+} from "../pre-authority-breadcrumb.js";
 import { z } from "zod";
-import type { CampaignPauseAuthority } from "../types.js";
+import type { CampaignPauseAuthority, MutationWorkerPreflightContract } from "../types.js";
 
 const HONE_USAGE = "usage: hone hone --campaign <path> --headless [--phase freeze|search|confirmation|holdout] [--out <gitignored-path>]";
+const CAMPAIGN_MIGRATE_SOURCE_USAGE =
+  "usage: hone campaign migrate-source --campaign <frozen.json> "
+  + "--from <oldSourceCommit> --to <newSourceCommit> --reason <text> "
+  + "[--refreeze-optimizer --sealed-base <dir>]";
+const CAMPAIGN_REPIN_IMAGE_USAGE =
+  "usage: hone campaign repin-image --campaign <frozen.json> --capsule <id> "
+  + "--from-image <immutable-image> --to-image <immutable-image> "
+  + "--evidence <equivalence-record.json> --reason <text>";
+const CAMPAIGN_CAPTURE_CLOSURE_USAGE =
+  "usage: hone campaign capture-closure --campaign <frozen.json> --source <git-worktree> "
+  + "[--source-commit <historicalCommit>] [--cas <dir>] "
+  + "[--node-modules-archive <tar.zst> --archive-sha256 <sidecar>] "
+  + "[--optimizer-base-digest sha256:<64hex>] [--at <iso-time>] [--restore <target> "
+  + "--verify-image <immutable-image> --verify-digest sha256:<64hex>] [--dry-run]";
+const CAMPAIGN_RESTORE_CLOSURE_USAGE =
+  "usage: hone campaign restore-closure --campaign <frozen.json> --target <empty-path> "
+  + "[--cas <dir>] [--manifest sha256:<64hex>]";
+const CAMPAIGN_SMOKE_CAPSULES_USAGE =
+  "usage: hone campaign smoke-capsules --campaign <frozen.json> --evidence <receipt.json>";
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const PROXY_TRACE_FILE = "proxy-trace.ndjson";
 const CampaignPauseAuthorityFileV1 = z.object({
@@ -187,6 +266,7 @@ export interface CampaignResumeProxy {
   dispatchRecovery(): Promise<DispatchRecoveryReport>;
   resume(): Promise<ProxyPreflightResult>;
   close(): Promise<void>;
+  listenTcp(port: number, host?: string): Promise<number>;
 }
 
 export interface CampaignResumeCoordinatorRequest {
@@ -265,6 +345,7 @@ export async function coordinateCampaignResume(
     recordCampaignPause: (signal) => authority.recordCampaignPause(signal),
     recordCampaignResume: (signal) => authority.recordCampaignResume(signal),
   });
+  await proxy.listenTcp(0);
   try {
     const recovery = await proxy.dispatchRecovery();
     if (recovery.poisoned !== undefined) {
@@ -493,9 +574,10 @@ export class DurableCampaignPauseAuthorityV1 implements CampaignPauseAuthority {
 export function campaignChildAdmissionAllowed(authority: CampaignPauseAuthority): boolean {
   return !authority.isCampaignPaused();
 }
-interface CapsuleLocation {
+export interface CapsuleLocation {
   dir: string;
   digest: string;
+  executionImage: string;
   terminalHoldoutAssetGroupIds: readonly string[];
 }
 
@@ -628,8 +710,15 @@ function exactControlReceipt(left: MetaControlTransformationReceipt, right: Meta
   return canonicalJson(left) === canonicalJson(right);
 }
 
-function conformanceFile(campaignDir: string, sourceArtifact: Sha256Digest): string {
-  return join(campaignDir, `conformance-${sourceArtifact.slice("sha256:".length)}.json`);
+function conformanceFile(
+  campaignDir: string,
+  sourceArtifact: Sha256Digest,
+  baseDigest: Sha256Digest,
+): string {
+  return join(
+    campaignDir,
+    `conformance-${sourceArtifact.slice("sha256:".length)}-${baseDigest.slice("sha256:".length)}.json`,
+  );
 }
 
 function readConformanceReceipt(file: string): CandidateConformanceReceipt {
@@ -651,22 +740,44 @@ interface CandidateGateOptions {
   readonly controls: readonly RegisteredControl[];
 }
 
-class CliCandidateGate implements MetaCandidateGate {
+/** Seal accepted candidate bytes against the image that will actually boot them. */
+export function imageBoundCandidateBundleDigest(
+  snapshot: OptimizerSnapshot,
+  image: string,
+): Sha256Digest {
+  return snapshotDigest(image, snapshot) as Sha256Digest;
+}
+
+interface RecursiveCandidateGate extends MetaCandidateGate {
+  bundleDigestForImage(sourceArtifact: Sha256Digest, image: string): Sha256Digest;
+}
+
+class CliCandidateGate implements RecursiveCandidateGate {
   private readonly baseDigest: Sha256Digest;
   private readonly controls = new Map<Sha256Digest, RegisteredControl>();
   private readonly receipts = new Map<Sha256Digest, CandidateConformanceReceipt>();
   private readonly bundleOwners = new Map<Sha256Digest, Sha256Digest>();
+  private readonly resolvedCandidateSnapshots = new Map<Sha256Digest, OptimizerSnapshot>();
   private readonly inFlight = new Map<Sha256Digest, Promise<CandidateGateResult>>();
 
   constructor(private readonly opts: CandidateGateOptions) {
     this.baseDigest = snapshotDigest(opts.comparisonImage, opts.baseSnapshot) as Sha256Digest;
     for (const control of opts.controls) this.controls.set(control.sourceArtifact, control);
+    const historicalBaseDigests = new Set(
+      (opts.config.sourceMigrationJournal?.migrations ?? [])
+        .flatMap((migration) => migration.optimizerRefreeze === undefined
+          ? []
+          : [migration.optimizerRefreeze.fromOptimizerBaseDigest]),
+    );
     for (const entry of readdirSync(opts.campaignDir)) {
-      if (!/^conformance-[0-9a-f]{64}\.json$/.test(entry)) continue;
+      if (!/^conformance-[0-9a-f]{64}(?:-[0-9a-f]{64})?\.json$/.test(entry)) continue;
       const receipt = readConformanceReceipt(join(opts.campaignDir, entry));
+      if (receipt.baseDigest !== this.baseDigest) {
+        if (historicalBaseDigests.has(receipt.baseDigest)) continue;
+        throw new UsageError(`candidate conformance receipt ${entry} has an unjournaled optimizer base`);
+      }
       if (
-        receipt.baseDigest !== this.baseDigest
-        || receipt.runtime.image !== opts.comparisonImage
+        receipt.runtime.image !== opts.comparisonImage
         || receipt.runtime.optimizerDigest.length === 0
       ) {
         throw new UsageError(`candidate conformance receipt ${entry} does not belong to the frozen campaign seed/image`);
@@ -692,6 +803,19 @@ class CliCandidateGate implements MetaCandidateGate {
     } finally {
       if (this.inFlight.get(request.sourceArtifact) === pending) this.inFlight.delete(request.sourceArtifact);
     }
+  }
+
+  /**
+   * Conformance runs once on the comparison image, while snapshot identity
+   * deliberately includes the target image. Child receipts must therefore
+   * seal this image-bound digest, not the comparison-image digest.
+   */
+  bundleDigestForImage(sourceArtifact: Sha256Digest, image: string): Sha256Digest {
+    const snapshot = this.resolvedCandidateSnapshots.get(sourceArtifact);
+    if (snapshot === undefined) {
+      throw new UsageError(`candidate ${sourceArtifact} has no accepted conformance result`);
+    }
+    return imageBoundCandidateBundleDigest(snapshot, image);
   }
 
   private async checkOnce(request: MetaCandidateGateRequest): Promise<CandidateGateResult> {
@@ -738,6 +862,7 @@ class CliCandidateGate implements MetaCandidateGate {
       return { ok: false, feedback: bounded(`candidate conformance failed: ${error instanceof Error ? error.message : String(error)}`) };
     }
     this.bundleOwners.set(bundleDigest, request.sourceArtifact);
+    this.resolvedCandidateSnapshots.set(request.sourceArtifact, selected.snapshot);
     const changedCount = changedOptimizerPaths(this.opts.baseSnapshot, selected.snapshot).length;
     return {
       ok: true,
@@ -768,7 +893,7 @@ class CliCandidateGate implements MetaCandidateGate {
     if (receipt.receiptDigest !== conformanceReceiptDigest(receipt)) {
       throw new UsageError("candidate conformance returned an invalid receipt digest");
     }
-    const file = conformanceFile(this.opts.campaignDir, sourceArtifact);
+    const file = conformanceFile(this.opts.campaignDir, sourceArtifact, candidate.baseDigest as Sha256Digest);
     writeFileDurable(file, `${canonicalJson(receipt)}\n`);
     chmodSync(file, 0o600);
     this.receipts.set(sourceArtifact, receipt);
@@ -799,37 +924,150 @@ function addUsage(left: MetaResourceUsage, right: MetaResourceUsage): MetaResour
     evaluatorInvocations: left.evaluatorInvocations + right.evaluatorInvocations,
   };
 }
+export interface TrustedChildDispatchPolicy {
+  readonly promotion: AnyMetaCampaignConfig["promotion"];
+  readonly proxyRole?: "inner-capsule-improvement";
+  readonly campaignConfigHash?: Sha256Digest;
+  readonly mutationWorkerPreflightContract?: MutationWorkerPreflightContract;
+  readonly evaluatorTimeoutSec?: number;
+  readonly sessionNoYieldMaxTokens?: number;
+  /** Verified corpus handoff served to every child run; absent when no trusted corpus was supplied. */
+  readonly corpus?: { readonly config: BrokerCorpusConfig; readonly cohort: CorpusCohortBinding };
+}
+
+export function campaignChildDispatchPolicy(
+  config: AnyMetaCampaignConfig,
+  trusted: Omit<TrustedChildDispatchPolicy, "promotion" | "sessionNoYieldMaxTokens"> = {},
+): TrustedChildDispatchPolicy {
+  return {
+    promotion: config.promotion,
+    ...(config.sessionNoYieldMaxTokens === undefined
+      ? {}
+      : { sessionNoYieldMaxTokens: config.sessionNoYieldMaxTokens }),
+    ...trusted,
+  };
+}
+
+export function writeCampaignOuterRunConfig(
+  configPath: string,
+  config: AnyMetaCampaignConfig,
+  seed?: number,
+): void {
+  writeFileDurable(configPath, `${JSON.stringify({
+    routing: { mutation: { model: config.routing.outerMutation } },
+    apply: "none",
+    headless: true,
+    ...(seed === undefined ? {} : { seed }),
+    budget: config.budgets.outer,
+    promotion: config.promotion,
+    ...(config.sessionNoYieldMaxTokens === undefined
+      ? {}
+      : { sessionNoYieldMaxTokens: config.sessionNoYieldMaxTokens }),
+  }, null, 2)}\n`);
+  chmodSync(configPath, 0o600);
+}
+
 
 export class CliChildSupervisor implements MetaChildSupervisor {
   constructor(
     private readonly io: CmdIo,
-    private readonly config: AnyMetaCampaignConfig,
+    private readonly dispatchPolicy: TrustedChildDispatchPolicy,
     private readonly campaignDir: string,
     private readonly capsules: ReadonlyMap<string, CapsuleLocation>,
     private readonly baseSnapshot: OptimizerSnapshot,
     private readonly modelRegistry: CampaignModelRegistry,
     private readonly campaignPauseAuthority?: CampaignPauseAuthority,
-    private readonly corpus?: BrokerCorpusConfig,
+    private readonly breadcrumbDir: string = campaignDir,
   ) {}
 
   async run(request: MetaChildRunRequest): Promise<MetaChildRunOutcome> {
-    return await this.runLaunched(
-      request,
-      this.config.version === 2 ? metaCampaignConfigHash(this.config) : undefined,
-    );
+    return await this.runLaunched(request, this.dispatchPolicy.campaignConfigHash);
+  }
+
+  /** Production child-command seam; overridden only by boundary tests. */
+  protected async runChildCommand(args: string[], io: CmdIo, trusted: TrustedRunOptions): Promise<number> {
+    return await runCommand(args, io, trusted);
+  }
+
+  private async runChildProcess(
+    request: MetaChildRunRequest,
+    executionRunId: string,
+    runDir: string,
+    mode: "start" | "resume",
+    args: string[],
+    trusted: TrustedRunOptions,
+  ): Promise<number> {
+    let stderrTail = "";
+    const baseIo = this.childIo();
+    const diagnosticIo: CmdIo = {
+      ...baseIo,
+      err: (line) => {
+        baseIo.err(line);
+        stderrTail = extendPreAuthorityStderrTail(stderrTail, line);
+      },
+    };
+    let code: number;
+    try {
+      code = await this.runChildCommand(args, diagnosticIo, trusted);
+    } catch (error) {
+      diagnosticIo.err(
+        `child command failed before terminalization: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      code = 1;
+    }
+    if (code === 0) return code;
+
+    let journalAuthorityEstablished = false;
+    try {
+      readBrokerJournalEvaluations(runDir);
+      journalAuthorityEstablished = true;
+    } catch {
+      // Absence, a torn tail, or an unreadable journal is not established authority.
+    }
+    if (journalAuthorityEstablished) return code;
+
+    const diagnostic = stderrTail.length > 0
+      ? stderrTail
+      : `child command exited ${code} without diagnostic stderr\n`;
+    try {
+      appendPreAuthorityRefusalBreadcrumb(this.breadcrumbDir, {
+        childRunId: request.reservation.childRunId,
+        exitCode: code,
+        reasonClass: classifyPreAuthorityRefusal(diagnostic),
+        stderrTail: diagnostic,
+        launch: {
+          executionRunId,
+          mode,
+          attempt: request.attempt,
+          phase: request.identity.phase,
+          arm: request.identity.arm,
+          replicate: request.identity.replicate,
+          measurementEpoch: request.identity.measurementEpoch,
+          capsuleId: request.capsule.capsuleId,
+          capsuleDigest: request.capsule.capsuleDigest,
+          sourceArtifact: request.sourceArtifact,
+          bundleDigest: request.bundleDigest,
+          requestedModel: request.requestedModel,
+          innerEpisodesMax: request.innerEpisodesMax,
+          campaignConfigHash: trusted.campaignConfigHash ?? null,
+        },
+      });
+    } catch {
+      // Diagnostic persistence never participates in child settlement or resume.
+    }
+    return code;
   }
 
   async runLaunched(
     request: MetaChildRunRequest,
     campaignConfigHash?: Sha256Digest,
   ): Promise<MetaChildRunOutcome> {
-    if (this.config.version === 2) {
-      if (this.corpus === undefined) throw new UsageError("recursive child requires verified corpus provenance");
-      if (campaignConfigHash !== metaCampaignConfigHash(this.config)
-        || this.corpus.provenance.campaignConfigHash !== campaignConfigHash) {
+    const corpus = this.dispatchPolicy.corpus;
+    if (corpus !== undefined) {
+      if (campaignConfigHash === undefined || corpus.config.provenance.campaignConfigHash !== campaignConfigHash) {
         throw new UsageError("recursive child corpus campaign identity drift");
       }
-      const corpusError = corpusCohortFenceError(this.corpus, this.config.corpusCohort);
+      const corpusError = corpusCohortFenceError(corpus.config, corpus.cohort);
       if (corpusError !== null) throw new UsageError(corpusError);
     }
     if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
@@ -852,30 +1090,43 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         headless: true,
         seed: request.identity.replicate,
         budget: request.remainingBudget,
-        promotion: this.config.promotion,
+        promotion: this.dispatchPolicy.promotion,
+        ...(this.dispatchPolicy.sessionNoYieldMaxTokens === undefined
+          ? {}
+          : { sessionNoYieldMaxTokens: this.dispatchPolicy.sessionNoYieldMaxTokens }),
       }, null, 2)}\n`);
       chmodSync(configPath, 0o600);
       if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
         return this.notRun(request, "campaign child admission paused before durable run start", runDir);
       }
-      const code = await runCommand(
+      const code = await this.runChildProcess(
+        request,
+        executionRunId,
+        runDir,
+        "start",
         [location.dir, "--headless", "--config", configPath, "--optimizer-artifact", request.sourceArtifact],
-        this.childIo(),
         {
           runId: executionRunId,
+          executionImageOverride: location.executionImage,
           measurementEpoch: request.identity.measurementEpoch,
+          ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
+            ? {}
+            : { evalTimeoutSec: this.dispatchPolicy.evaluatorTimeoutSec }),
           optimizerEpisodesMax: request.innerEpisodesMax,
           maxPublicCandidateEvaluations: 2 * request.innerEpisodesMax,
           ...(request.identity.phase === "holdout"
             ? { terminalHoldoutAssetGroupIds: location.terminalHoldoutAssetGroupIds }
             : {}),
           optimizerBaseSnapshot: this.baseSnapshot,
-          ...(this.config.version === 2 ? { proxyRole: "inner-capsule-improvement" as const } : {}),
+          ...(this.dispatchPolicy.mutationWorkerPreflightContract === undefined
+            ? {}
+            : { mutationWorkerPreflightContract: this.dispatchPolicy.mutationWorkerPreflightContract }),
+          ...(this.dispatchPolicy.proxyRole === undefined ? {} : { proxyRole: this.dispatchPolicy.proxyRole }),
           ...(this.campaignPauseAuthority === undefined
             ? {}
             : { campaignPauseAuthority: this.campaignPauseAuthority }),
           ...(campaignConfigHash === undefined ? {} : { campaignConfigHash }),
-          ...(this.config.version === 2 ? { corpus: this.corpus, corpusCohort: this.config.corpusCohort } : {}),
+          ...(corpus === undefined ? {} : { corpus: corpus.config, corpusCohort: corpus.cohort }),
         },
       );
       if (code !== 0 && !existsSync(join(runDir, EVENTS_FILE))) {
@@ -883,8 +1134,15 @@ export class CliChildSupervisor implements MetaChildSupervisor {
       }
     } else {
       let terminal = false;
+      let interrupted = false;
       try {
-        terminal = replayRun(runDir).finished !== null;
+        const replayed = replayRun(runDir);
+        terminal = replayed.finished !== null;
+        // A durably paused child owns an explicit retry. A replayed child
+        // still marked running has lost its prior supervisor: adjudicate that
+        // stale attempt negative under the run lock without starting another
+        // optimizer or provider dispatch.
+        interrupted = request.resume && replayed.status === "running";
       } catch {
         return this.notRun(request, "child durable state cannot be replayed", runDir);
       }
@@ -892,24 +1150,35 @@ export class CliChildSupervisor implements MetaChildSupervisor {
         if (this.campaignPauseAuthority !== undefined && !campaignChildAdmissionAllowed(this.campaignPauseAuthority)) {
           return this.notRun(request, "campaign child admission paused before durable run resume", runDir);
         }
-        const code = await runCommand(
+        const code = await this.runChildProcess(
+          request,
+          executionRunId,
+          runDir,
+          "resume",
           [location.dir, "--headless", "--resume", "--optimizer-artifact", request.sourceArtifact],
-          this.childIo(),
           {
             runId: executionRunId,
+            executionImageOverride: location.executionImage,
             measurementEpoch: request.identity.measurementEpoch,
+            ...(this.dispatchPolicy.evaluatorTimeoutSec === undefined
+              ? {}
+              : { evalTimeoutSec: this.dispatchPolicy.evaluatorTimeoutSec }),
             optimizerEpisodesMax: request.innerEpisodesMax,
             maxPublicCandidateEvaluations: 2 * request.innerEpisodesMax,
             ...(request.identity.phase === "holdout"
               ? { terminalHoldoutAssetGroupIds: location.terminalHoldoutAssetGroupIds }
               : {}),
             optimizerBaseSnapshot: this.baseSnapshot,
-            ...(this.config.version === 2 ? { proxyRole: "inner-capsule-improvement" as const } : {}),
+            ...(this.dispatchPolicy.mutationWorkerPreflightContract === undefined
+              ? {}
+              : { mutationWorkerPreflightContract: this.dispatchPolicy.mutationWorkerPreflightContract }),
+            ...(this.dispatchPolicy.proxyRole === undefined ? {} : { proxyRole: this.dispatchPolicy.proxyRole }),
             ...(this.campaignPauseAuthority === undefined
               ? {}
               : { campaignPauseAuthority: this.campaignPauseAuthority }),
+            ...(interrupted ? { adjudicateInterruptedChild: true } : {}),
             ...(campaignConfigHash === undefined ? {} : { campaignConfigHash }),
-            ...(this.config.version === 2 ? { corpus: this.corpus, corpusCohort: this.config.corpusCohort } : {}),
+            ...(corpus === undefined ? {} : { corpus: corpus.config, corpusCohort: corpus.cohort }),
           },
         );
         if (code !== 0) {
@@ -926,10 +1195,13 @@ export class CliChildSupervisor implements MetaChildSupervisor {
     return await this.collectOutcome(request, runDir);
   }
 
-  private childIo(): CmdIo {
+  protected childIo(): CmdIo {
     return {
       root: this.io.root,
-      env: this.io.env,
+      // Recursive M2 children execute the normal command path in-process.
+      // Preserve operator runtime controls, including the per-session
+      // no-yield ceiling, rather than silently reverting children to defaults.
+      env: { ...this.io.env },
       isTTY: false,
       out: () => {},
       err: () => {},
@@ -1103,22 +1375,361 @@ const SCHEDULED_BUDGET_DIMENSIONS = [
   "maxEvaluatorInvocations",
 ] as const;
 
+export interface M2OuterAncestorCapacity {
+  readonly ancestorEnvelope: BudgetEnvelope;
+  readonly directOuterBudget: BudgetEnvelope;
+  readonly childReservation: BudgetEnvelope;
+  readonly plannedChildren: {
+    readonly search: number;
+    readonly confirmation: number;
+    readonly terminal: number;
+    readonly total: number;
+  };
+  readonly plannedChildReservations: BudgetEnvelope;
+  readonly requiredEnvelope: BudgetEnvelope;
+}
+
+function addBudgetEnvelopes(envelopes: readonly BudgetEnvelope[]): BudgetEnvelope {
+  return BudgetEnvelopeSchema.parse({
+    maxTokens: envelopes.reduce((sum, envelope) => sum + envelope.maxTokens, 0),
+    maxUsd: envelopes.reduce((sum, envelope) => sum + envelope.maxUsd, 0),
+    maxWallClockSec: envelopes.reduce((sum, envelope) => sum + envelope.maxWallClockSec, 0),
+    maxEvaluatorInvocations: envelopes.reduce((sum, envelope) => sum + envelope.maxEvaluatorInvocations, 0),
+  });
+}
+
+/**
+ * Freeze/launch gate for the real M2 recursive resource tree.
+ *
+ * The outer optimizer keeps its direct `budgets.outer` cap. The root recursive
+ * ledger separately owns `budgets.campaign`, which must admit every planned
+ * child reservation plus that direct outer allowance.
+ */
+export function assertM2OuterAncestorCapacity(
+  config: RecursiveMetaCampaignConfig,
+): M2OuterAncestorCapacity {
+  const searchChildren = config.counts.candidates * config.developmentPanel.members.length;
+  const confirmationChildren =
+    (config.generation.stage === "A" ? 4 : 5) *
+    config.train.length *
+    config.counts.confirmationReplicates;
+  const terminalChildren = 3 * config.holdout.length * config.counts.holdoutReplicates;
+  const plannedChildren = {
+    search: searchChildren,
+    confirmation: confirmationChildren,
+    terminal: terminalChildren,
+    total: searchChildren + confirmationChildren + terminalChildren,
+  };
+  const plannedChildReservations = addBudgetEnvelopes([
+    config.recursiveBudgets.search.outerTrajectory,
+    config.recursiveBudgets.confirmation.budget,
+    config.recursiveBudgets.terminal.budget,
+  ]);
+  const requiredEnvelope = addBudgetEnvelopes([
+    config.budgets.outer,
+    plannedChildReservations,
+  ]);
+  const ancestorEnvelope = config.budgets.campaign;
+  for (const dimension of SCHEDULED_BUDGET_DIMENSIONS) {
+    if (requiredEnvelope[dimension] > ancestorEnvelope[dimension]) {
+      throw new UsageError(
+        `frozen outer ancestor ${dimension} ${ancestorEnvelope[dimension]} cannot admit the full planned recursive sequence ${requiredEnvelope[dimension]}`,
+      );
+    }
+  }
+  config.developmentPanel.members.forEach((member) => {
+    for (const dimension of SCHEDULED_BUDGET_DIMENSIONS) {
+      if (member.calibratedInnerCeiling[dimension] > ancestorEnvelope[dimension]) {
+        throw new UsageError(
+          `first real child reservation ${member.taskId} ${dimension} ${member.calibratedInnerCeiling[dimension]} exceeds frozen outer ancestor ${ancestorEnvelope[dimension]}`,
+        );
+      }
+    }
+  });
+  return {
+    ancestorEnvelope,
+    directOuterBudget: config.budgets.outer,
+    childReservation: config.budgets.child,
+    plannedChildren,
+    plannedChildReservations,
+    requiredEnvelope,
+  };
+}
+
 /**
  * Per-spawn M2 bridge. Search allocation is admitted and measured one child
  * at a time; panel completeness is derived later from the durable trajectory.
  */
 export class RecursiveSearchChildLauncher {
+  private readonly candidateOrdinals = new Map<Sha256Digest, number>();
+  private nextCandidateOrdinal = 0;
+
   constructor(
     private readonly root: string,
     private readonly campaignDir: string,
     private readonly config: RecursiveMetaCampaignConfig,
     private readonly configHash: Sha256Digest,
     private readonly journal: MetaJournalV1,
-    private readonly gate: MetaCandidateGate,
+    private readonly gate: RecursiveCandidateGate,
     private readonly childSupervisor: CliChildSupervisor,
     private readonly envelopeLedger: MetaResourceEnvelopeLedger,
     private readonly campaignPauseAuthority: CampaignPauseAuthority,
-  ) {}
+  ) {
+    const terminalMeasurements = new Set(
+      this.journal.queryTrainMeasurements().map((measurement) => measurement.childRunId),
+    );
+    const terminalFailures = new Set(
+      this.journal.queryFailureSettlements().map((failure) => failure.childRunId),
+    );
+    const groups = new Map<number, { artifact: Sha256Digest; childRunIds: string[] }>();
+    for (const entry of readdirSync(this.campaignDir)) {
+      if (!entry.startsWith("child-launch-") || !entry.endsWith(".json")) continue;
+      const receipt = ChildRunLaunchReceipt.parse(
+        JSON.parse(readFileSync(join(this.campaignDir, entry), "utf8")),
+      );
+      const schedule = receipt.child.schedule;
+      if (schedule === undefined || receipt.child.purpose !== "capsule" || receipt.depth !== 1) continue;
+      const artifact = receipt.child.sourceArtifact.hash as Sha256Digest;
+      const group = groups.get(schedule.candidateOrdinal);
+      if (group !== undefined && group.artifact !== artifact) {
+        throw new Error("durable recursive child receipts disagree on candidate ordinal identity");
+      }
+      const resolved = group ?? { artifact, childRunIds: [] };
+      if (!resolved.childRunIds.includes(receipt.child.runId)) resolved.childRunIds.push(receipt.child.runId);
+      groups.set(schedule.candidateOrdinal, resolved);
+      this.nextCandidateOrdinal = Math.max(this.nextCandidateOrdinal, schedule.candidateOrdinal + 1);
+    }
+    const latestByArtifact = new Map<Sha256Digest, { ordinal: number; childRunIds: string[] }>();
+    for (const [ordinal, group] of groups) {
+      const current = latestByArtifact.get(group.artifact);
+      if (current === undefined || ordinal > current.ordinal) {
+        latestByArtifact.set(group.artifact, { ordinal, childRunIds: group.childRunIds });
+      }
+    }
+    for (const [artifact, latest] of latestByArtifact) {
+      const hasOpenChild = latest.childRunIds.some(
+        (childRunId) => !terminalMeasurements.has(childRunId) && !terminalFailures.has(childRunId),
+      );
+      const hasFailedChild = latest.childRunIds.some((childRunId) => terminalFailures.has(childRunId));
+      // An incomplete attempt must resume its durable work identities. A
+      // settled successful panel remains memoizable. A settled failed panel
+      // is deliberately absent so the next outer coordinate mints a new
+      // ordinal rather than replaying the same terminal child settlement.
+      if (hasOpenChild || !hasFailedChild) this.candidateOrdinals.set(artifact, latest.ordinal);
+    }
+  }
+
+  /**
+   * Trusted adapter for the generic optimizer's evaluate request. The
+   * optimizer chooses the development-panel allocation; trust derives child
+   * identities, dispatches through spawnRun, and aggregates only journaled
+   * normalized settlements.
+   */
+  evaluationStrategy(): TrustedEvaluationStrategy {
+    return async (input) => {
+      const started = Date.now();
+      if (input.recursivePlan === undefined) {
+        throw new Error(
+          "recursive search evaluation requires an optimizer-authored allocation plan; refusing the synthetic capsule evaluator",
+        );
+      }
+      const plan = RecursiveEvaluationPlan.parse(input.recursivePlan);
+      const members = new Map(
+        this.config.developmentPanel.members.map((member) => [member.capsule.capsuleId, member]),
+      );
+      if (plan.allocations.length > members.size) {
+        throw new Error("recursive allocation plan exceeds the frozen development panel");
+      }
+      const seenCapsules = new Set<string>();
+      const seenOrdinals = new Set<number>();
+      for (const allocation of plan.allocations) {
+        const member = members.get(allocation.capsuleId);
+        if (member === undefined) {
+          throw new Error(`recursive allocation names non-panel capsule ${allocation.capsuleId}`);
+        }
+        if (seenCapsules.has(allocation.capsuleId)) {
+          throw new Error(`recursive allocation double-counts capsule ${allocation.capsuleId}`);
+        }
+        if (seenOrdinals.has(allocation.allocationOrdinal)) {
+          throw new Error(`recursive allocation ordinal ${allocation.allocationOrdinal} is duplicated`);
+        }
+        seenCapsules.add(allocation.capsuleId);
+        seenOrdinals.add(allocation.allocationOrdinal);
+        if (allocation.innerEpisodesMax > this.config.counts.innerEpisodesMax) {
+          throw new Error(
+            `recursive allocation for ${allocation.capsuleId} exceeds the frozen inner episode ceiling`,
+          );
+        }
+        for (const dimension of SCHEDULED_BUDGET_DIMENSIONS) {
+          if (allocation.reservation[dimension] > member.calibratedInnerCeiling[dimension]) {
+            throw new Error(
+              `recursive allocation for ${allocation.capsuleId} exceeds ${dimension} ceiling`,
+            );
+          }
+        }
+      }
+
+      const sourceArtifact = input.artifact.hash as Sha256Digest;
+      let checked: CandidateGateResult;
+      try {
+        checked = await this.gate.check({ mode: "public-mutable", sourceArtifact });
+      } catch (error) {
+        checked = {
+          ok: false,
+          feedback: `conformance gate failed closed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      if (!checked.ok) {
+        return EvaluationRecord.parse({
+          capsuleId: input.capsuleId,
+          artifactHash: sourceArtifact,
+          assetGroupId: input.assetGroupId,
+          seed: input.seed,
+          output: {
+            valid: false,
+            objectives: {},
+            constraints: { conformance: false },
+            diagnostics: { summary: bounded(checked.feedback) },
+          },
+          costUsd: 0,
+          durationMs: Math.max(0, Date.now() - started),
+          cached: false,
+          evaluatedAt: new Date().toISOString(),
+        });
+      }
+
+      let candidateOrdinal = this.candidateOrdinals.get(sourceArtifact);
+      if (candidateOrdinal === undefined) {
+        candidateOrdinal = this.nextCandidateOrdinal;
+        this.nextCandidateOrdinal += 1;
+        this.candidateOrdinals.set(sourceArtifact, candidateOrdinal);
+      }
+
+      const childResults = await mapBounded(
+        plan.allocations,
+        this.config.counts.searchChildConcurrency ?? 1,
+        async (allocation): Promise<
+          | { kind: "measurement"; value: MetaMeasurement }
+          | { kind: "failure"; value: MetaFailureSettlement }
+        > => {
+          const member = members.get(allocation.capsuleId);
+          if (member === undefined) throw new Error(`recursive allocation lost panel capsule ${allocation.capsuleId}`);
+          const runtimeBundleDigest = this.gate.bundleDigestForImage(sourceArtifact, member.capsule.image);
+          const identity: MetaWorkIdentity = {
+            phase: "search",
+            arm: "candidate",
+            sourceArtifact,
+            bundleDigest: runtimeBundleDigest,
+            capsuleId: allocation.capsuleId,
+            replicate: 0,
+            measurementEpoch: `m2:${sha256(canonicalJson({
+              candidateOrdinal,
+              allocationOrdinal: allocation.allocationOrdinal,
+              innerEpisodesMax: allocation.innerEpisodesMax,
+              reserved: allocation.reservation,
+            })).slice("sha256:".length)}`,
+          };
+          const runId = `run_meta_${metaWorkKey(this.configHash, identity).slice("sha256:".length)}`;
+          await input.spawnRun(SpawnRunParams.parse({
+            child: {
+              runId,
+              capsuleId: allocation.capsuleId,
+              sourceArtifact: { hash: sourceArtifact },
+              optimizerArtifact: { hash: runtimeBundleDigest },
+              purpose: "capsule",
+              schedule: {
+                candidateOrdinal,
+                allocationOrdinal: allocation.allocationOrdinal,
+                innerEpisodesMax: allocation.innerEpisodesMax,
+              },
+            },
+            depth: 1,
+            reservation: allocation.reservation,
+          }));
+          const workKey = metaWorkKey(this.configHash, identity);
+          const measurement = this.journal.queryTrainMeasurements().find((row) => row.workKey === workKey);
+          if (measurement !== undefined) return { kind: "measurement", value: measurement };
+          const failure = this.journal.queryFailureSettlements().find((row) => row.workKey === workKey);
+          if (failure === undefined) {
+            throw new Error(`recursive child ${runId} returned without a trusted settlement`);
+          }
+          return { kind: "failure", value: failure };
+        },
+      );
+      const measurements: MetaMeasurement[] = [];
+      const failures: string[] = [];
+      let costUsd = 0;
+      for (const result of childResults) {
+        costUsd += result.value.observed.usd;
+        if (result.kind === "measurement") measurements.push(result.value);
+        else failures.push(`${result.value.capsuleId}=${result.value.status}`);
+      }
+
+      if (
+        failures.length > 0
+        && this.candidateOrdinals.get(sourceArtifact) === candidateOrdinal
+      ) {
+        this.candidateOrdinals.delete(sourceArtifact);
+      }
+      if (failures.length > 0) {
+        return EvaluationRecord.parse({
+          capsuleId: input.capsuleId,
+          artifactHash: sourceArtifact,
+          assetGroupId: input.assetGroupId,
+          seed: input.seed,
+          output: {
+            valid: false,
+            objectives: {},
+            constraints: { allChildrenValid: false },
+            diagnostics: { summary: bounded(`recursive child settlement failed: ${failures.join("; ")}`) },
+          },
+          costUsd,
+          durationMs: Math.max(0, Date.now() - started),
+          cached: false,
+          evaluatedAt: new Date().toISOString(),
+        });
+      }
+      if (measurements.length !== plan.allocations.length) {
+        throw new Error("recursive evaluation settlement cardinality mismatch");
+      }
+      const normalizedGain =
+        measurements.reduce((sum, measurement) => sum + measurement.qNormalized, 0) / measurements.length;
+      const perExample = Object.fromEntries(
+        measurements.map((measurement) => [
+          measurement.capsuleId,
+          {
+            score: measurement.qNormalized,
+            feedback: `${measurement.capsuleId}: trusted normalized gain ${measurement.qNormalized}`,
+          },
+        ]),
+      );
+      return EvaluationRecord.parse({
+        capsuleId: input.capsuleId,
+        artifactHash: sourceArtifact,
+        assetGroupId: input.assetGroupId,
+        seed: input.seed,
+        output: {
+          valid: true,
+          objectives: { normalizedGain },
+          constraints: {
+            allChildrenValid: true,
+            fullPanel: measurements.length === members.size,
+          },
+          perExample,
+          diagnostics: {
+            summary: bounded(
+              `recursive development evaluation scored ${measurements.length}/${members.size} frozen panel capsules`,
+            ),
+          },
+        },
+        costUsd,
+        durationMs: Math.max(0, Date.now() - started),
+        cached: false,
+        evaluatedAt: new Date().toISOString(),
+      });
+    };
+  }
+
 
   brokerConfig(
     ledger: BrokerRecursiveConfig["ledger"],
@@ -1129,6 +1740,19 @@ export class RecursiveSearchChildLauncher {
       depth,
       ancestors,
       ledger,
+      ...(depth === 0
+        ? {
+            resourceEnvelope: assertM2OuterAncestorCapacity(this.config).ancestorEnvelope,
+            evaluationTask: {
+              depth,
+              innerEpisodesMax: this.config.counts.innerEpisodesMax,
+              members: this.config.developmentPanel.members.map((member) => ({
+                capsuleId: member.capsule.capsuleId,
+                calibratedInnerCeiling: member.calibratedInnerCeiling,
+              })),
+            },
+          }
+        : {}),
       admitChildRun: (input) => this.admitChildRun(input),
       launchChildRun: (input) => this.launchChildRun(input),
     };
@@ -1173,12 +1797,19 @@ export class RecursiveSearchChildLauncher {
     }
     const identity = this.scheduledIdentity(request);
     if (identity === null) throw new Error("recursive search child has no valid schedule identity");
+    const capsule = this.config.developmentPanel.members.find(
+      (member) => member.capsule.capsuleId === request.child.capsuleId,
+    )?.capsule;
+    if (capsule === undefined) throw new Error("recursive launch capsule left the frozen panel");
     const gate = await this.gate.check({
       mode: "public-mutable",
       sourceArtifact: identity.sourceArtifact,
     });
-    if (!gate.ok || gate.bundleDigest !== identity.bundleDigest) {
+    if (!gate.ok) {
       throw new Error(`recursive child optimizer conformance refused: ${gate.feedback}`);
+    }
+    if (this.gate.bundleDigestForImage(identity.sourceArtifact, capsule.image) !== identity.bundleDigest) {
+      throw new Error("recursive child optimizer conformance does not match its image-bound launch digest");
     }
 
     const envelopeRequest: MetaChildEnvelopeRequest = {
@@ -1224,10 +1855,6 @@ export class RecursiveSearchChildLauncher {
       chmodSync(receiptPath, 0o600);
     }
 
-    const capsule = this.config.developmentPanel.members.find(
-      (member) => member.capsule.capsuleId === request.child.capsuleId,
-    )?.capsule;
-    if (capsule === undefined) throw new Error("recursive launch capsule left the frozen panel");
     const outcome = await this.childSupervisor.runLaunched({
       identity,
       reservation,
@@ -1256,6 +1883,26 @@ export class RecursiveSearchChildLauncher {
       reservation,
       outcome,
     }));
+    const terminalEventPath = join(runsRoot(this.root), request.child.runId, EVENTS_FILE);
+    let childFinished = false;
+    try {
+      childFinished = replayRun(join(runsRoot(this.root), request.child.runId)).finished !== null;
+    } catch {
+      // Missing or unreplayable child state is necessarily nonterminal.
+    }
+    if (!childFinished) {
+      this.journal.recordChildPending(identity, {
+        evidenceHash,
+        observed: outcome.spend,
+      });
+      return {
+        launchReceiptPath: receiptPath,
+        terminalEventPath,
+        usage: { ...outcome.spend },
+        finalizeSettlement: () => {},
+      };
+    }
+    let finalizeMetaSettlement: () => void;
     if (outcome.status === "completed" && outcome.finalEvaluation !== null) {
       const finalEvaluation = EvaluationRecord.parse(outcome.finalEvaluation);
       const objectives = Object.values(finalEvaluation.output.objectives);
@@ -1270,33 +1917,43 @@ export class RecursiveSearchChildLauncher {
       ) {
         throw new Error("recursive child final evaluation is not a finite scalar");
       }
-      if (outcome.responseModel === null || outcome.modelDriftSentinel === null) {
+      const responseModel = outcome.responseModel;
+      const modelDriftSentinel = outcome.modelDriftSentinel;
+      if (responseModel === null || modelDriftSentinel === null) {
         throw new Error("recursive child completion has no authenticated model observation");
       }
-      this.journal.settleChild(identity, {
-        evidenceHash,
-        observed: outcome.spend,
-        qRaw,
-        responseModel: outcome.responseModel,
-        providerFingerprint: outcome.providerFingerprint,
-        modelDriftSentinel: outcome.modelDriftSentinel,
-      });
+      finalizeMetaSettlement = () => {
+        this.journal.settleChild(identity, {
+          evidenceHash,
+          observed: outcome.spend,
+          qRaw,
+          responseModel,
+          providerFingerprint: outcome.providerFingerprint,
+          modelDriftSentinel,
+        });
+      };
     } else {
-      this.journal.settleChildFailure(identity, {
-        evidenceHash,
-        observed: outcome.spend,
-        status: outcome.status === "budget"
-          ? "budget"
-          : outcome.status === "infrastructure_not_run"
-            ? "infrastructure_not_run"
-            : "candidate_failed",
-      });
+      finalizeMetaSettlement = () => {
+        this.journal.settleChildFailure(identity, {
+          evidenceHash,
+          observed: outcome.spend,
+          status: outcome.status === "budget"
+            ? "budget"
+            : outcome.status === "infrastructure_not_run"
+              ? "infrastructure_not_run"
+              : "candidate_failed",
+        });
+      };
     }
-    this.envelopeLedger.settleDescendant(envelopeRequest.reservationId, outcome.spend);
+    const finalizeSettlement = (): void => {
+      finalizeMetaSettlement();
+      this.envelopeLedger.settleDescendant(envelopeRequest.reservationId, outcome.spend);
+    };
     return {
       launchReceiptPath: receiptPath,
-      terminalEventPath: join(runsRoot(this.root), request.child.runId, EVENTS_FILE),
+      terminalEventPath,
       usage: { ...outcome.spend },
+      finalizeSettlement,
     };
   }
 
@@ -1342,7 +1999,7 @@ const ModelIdentitySchema = z.object({
 
 type CampaignModelIdentity = z.infer<typeof ModelIdentitySchema>;
 
-class CampaignModelRegistry {
+export class CampaignModelRegistry {
   private readonly file: string;
   private identity: CampaignModelIdentity | null;
 
@@ -1449,15 +2106,57 @@ function parseResponseObservations(body: string): Array<{ model: string | null; 
   return observations;
 }
 
-interface DiscoveredCapsule {
+export interface DiscoveredCapsule {
   readonly dir: string;
   readonly admitted: AdmittedCapsule;
 }
 
 
-export function discoverCapsules(root: string): Map<string, DiscoveredCapsule> {
+export function discoverCapsules(
+  root: string,
+  cohort?: M2CorpusCohort,
+): Map<string, DiscoveredCapsule> {
   const found = new Map<string, DiscoveredCapsule>();
   const capsuleRoot = join(root, "capsules");
+  if (cohort !== undefined && "mode" in cohort) {
+    const policy = verifyM2AuthorizedPartialCohort(root, cohort.partialCohort);
+    for (const deferred of policy.deferred) {
+      const dir = join(capsuleRoot, deferred.label);
+      const manifest = loadCapsule(dir);
+      if (
+        manifest.id !== deferred.capsuleId
+        || capsuleDigest(manifest) !== deferred.capsuleDigest
+      ) {
+        throw new UsageError(`deferred capsule ${deferred.label} does not match its authorized identity`);
+      }
+    }
+    for (const authorized of policy.admitted) {
+      const dir = join(capsuleRoot, authorized.label);
+      const admitted = admitCapsule(dir, {
+        review: "required",
+        allowMissingGitBaselineWithOwnerReceipt: true,
+      });
+      if (admitted.provisional) {
+        throw new UsageError(`authorized cohort capsule ${authorized.label} is provisional`);
+      }
+      if (
+        admitted.manifest.id !== authorized.capsuleId
+        || admitted.digest !== authorized.capsuleDigest
+        || admitted.approval?.receipt.recordHash !== authorized.gate2ReceiptHash
+      ) {
+        throw new UsageError(`authorized cohort capsule ${authorized.label} does not reproduce its Gate-2 receipt binding`);
+      }
+      const basis = admitted.approval.receipt.approvalBasis;
+      if (!gate2ReceiptCitesAuthorizedBasis(policy, authorized, basis)) {
+        throw new UsageError(`authorized cohort capsule ${authorized.label} receipt does not cite the owner authorization`);
+      }
+      if (found.has(admitted.manifest.id)) {
+        throw new UsageError(`duplicate admitted capsule id ${admitted.manifest.id}`);
+      }
+      found.set(admitted.manifest.id, { dir, admitted });
+    }
+    return found;
+  }
   for (const entry of readdirSync(capsuleRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const dir = join(capsuleRoot, entry.name);
@@ -1489,7 +2188,7 @@ interface FrozenCorpus {
 }
 
 function freezeCorpusEntries(root: string, config: AnyMetaCampaignConfig): FrozenCorpus {
-  const discovered = discoverCapsules(root);
+  const discovered = discoverCapsules(root, config.version === 2 ? config.corpusCohort : undefined);
   const normalize = (entry: MetaCapsuleEntry): MetaCapsuleEntry => {
     const found = discovered.get(entry.capsuleId);
     if (found === undefined) throw new UsageError(`campaign capsule id ${entry.capsuleId} is not installed`);
@@ -1516,47 +2215,75 @@ function freezeCorpusEntries(root: string, config: AnyMetaCampaignConfig): Froze
   };
 }
 
-function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
-  const discovered = discoverCapsules(root);
+export function campaignAdmittedCapsuleImage(
+  config: AnyMetaCampaignConfig,
+  capsuleId: string,
+  registeredImage: string,
+): string {
+  return config.imageRepinJournal?.repins
+    .find((repin) => repin.capsuleId === capsuleId)?.fromImage
+    ?? registeredImage;
+}
+
+export function resolveRegisteredCapsuleLocation(
+  config: AnyMetaCampaignConfig,
+  registered: MetaCapsuleEntry,
+  capsule: DiscoveredCapsule,
+): CapsuleLocation {
+  const admitted = capsule.admitted;
+  const admittedImage = campaignAdmittedCapsuleImage(
+    config,
+    registered.capsuleId,
+    registered.image,
+  );
+  if (
+    admitted.digest !== registered.capsuleDigest
+    || admitted.manifest.image !== admittedImage
+    || capsuleOracleDigest(admitted) !== registered.oracleDigest
+    || capsuleScalarizerDigest(admitted) !== registered.scalarizerDigest
+  ) {
+    throw new UsageError(`registered campaign capsule ${registered.capsuleId} has identity drift`);
+  }
+  const terminalHoldoutAssetGroupIds = admitted.manifest.assetGroups
+    .filter((group) => group.visibility === "holdout")
+    .map((group) => group.id);
+  if (config.holdout.some((entry) => entry.capsuleId === registered.capsuleId)) {
+    const terminalArms = config.version === 2 ? 3 : 2;
+    const requiredLifetimeAccesses =
+      (4 * config.counts.innerEpisodesMax + 1) * terminalArms * config.counts.holdoutReplicates;
+    if (terminalHoldoutAssetGroupIds.length === 0) {
+      throw new UsageError(`terminal holdout capsule ${registered.capsuleId} has no holdout asset group`);
+    }
+    if (admitted.manifest.budget.maxEvaluatorInvocations < requiredLifetimeAccesses) {
+      throw new UsageError(
+        `terminal holdout capsule ${registered.capsuleId} lifetime budget ${admitted.manifest.budget.maxEvaluatorInvocations} cannot cover ${requiredLifetimeAccesses} accesses`,
+      );
+    }
+  }
+  return {
+    dir: capsule.dir,
+    digest: admitted.digest,
+    executionImage: registered.image,
+    terminalHoldoutAssetGroupIds,
+  };
+}
+
+export function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
+  metaCampaignConfigHash(config);
+  const discovered = discoverCapsules(root, config.version === 2 ? config.corpusCohort : undefined);
   const found = new Map<string, CapsuleLocation>();
   for (const registered of [...config.train, ...config.holdout]) {
     const capsule = discovered.get(registered.capsuleId);
     if (capsule === undefined) throw new UsageError(`registered campaign capsule ${registered.capsuleId} is not installed`);
-    const admitted = capsule.admitted;
-    if (
-      admitted.digest !== registered.capsuleDigest
-      || admitted.manifest.image !== registered.image
-      || capsuleOracleDigest(admitted) !== registered.oracleDigest
-      || capsuleScalarizerDigest(admitted) !== registered.scalarizerDigest
-    ) {
-      throw new UsageError(`registered campaign capsule ${registered.capsuleId} has identity drift`);
-    }
-    const terminalHoldoutAssetGroupIds = admitted.manifest.assetGroups
-      .filter((group) => group.visibility === "holdout")
-      .map((group) => group.id);
-    if (config.holdout.some((entry) => entry.capsuleId === registered.capsuleId)) {
-      const terminalArms = config.version === 2 ? 3 : 2;
-      const requiredLifetimeAccesses =
-        (4 * config.counts.innerEpisodesMax + 1) * terminalArms * config.counts.holdoutReplicates;
-      if (terminalHoldoutAssetGroupIds.length === 0) {
-        throw new UsageError(`terminal holdout capsule ${registered.capsuleId} has no holdout asset group`);
-      }
-      if (admitted.manifest.budget.maxEvaluatorInvocations < requiredLifetimeAccesses) {
-        throw new UsageError(
-          `terminal holdout capsule ${registered.capsuleId} lifetime budget ${admitted.manifest.budget.maxEvaluatorInvocations} cannot cover ${requiredLifetimeAccesses} accesses`,
-        );
-      }
-    }
-    found.set(registered.capsuleDigest, {
-      dir: capsule.dir,
-      digest: admitted.digest,
-      terminalHoldoutAssetGroupIds,
-    });
+    found.set(
+      registered.capsuleDigest,
+      resolveRegisteredCapsuleLocation(config, registered, capsule),
+    );
   }
   return found;
 }
 
-async function captureSeedCandidate(root: string, cas: CasStore): Promise<{ artifactHash: Sha256Digest }> {
+export async function captureSeedCandidate(root: string, cas: CasStore): Promise<{ artifactHash: Sha256Digest }> {
   const snapshot = collectOptimizerSnapshot(root);
   const staging = mkdtempSync(join(tmpdir(), "hone-meta-seed-"));
   chmodSync(staging, 0o700);
@@ -1614,8 +2341,7 @@ async function resolveRegisteredOptimizer(
   }
   return resolved;
 }
-
-function sourceCommit(root: string): string {
+export function sourceCommit(root: string): string {
   try {
     return execFileSync("git", ["-C", root, "rev-parse", "--verify", "HEAD^{commit}"], {
       encoding: "utf8",
@@ -1626,7 +2352,7 @@ function sourceCommit(root: string): string {
   }
 }
 
-function assertCleanSourceTree(root: string): void {
+export function assertCleanSourceTree(root: string): void {
   let status: string;
   try {
     status = execFileSync("git", ["-C", root, "status", "--porcelain=v1", "--untracked-files=all"], {
@@ -1637,6 +2363,1525 @@ function assertCleanSourceTree(root: string): void {
     throw new UsageError("official meta campaigns could not verify source worktree cleanliness");
   }
   if (status.length > 0) throw new UsageError("official meta campaigns require a clean source worktree");
+}
+
+/** A tracked campaign would make the post-migration coordinator tree dirty forever. */
+export function assertCampaignPathUntracked(root: string, campaignPath: string): void {
+  const repoRelative = relative(resolve(root), resolve(campaignPath));
+  if (repoRelative === ".." || repoRelative.startsWith(`..${sep}`)) return;
+  let tracked: string;
+  try {
+    tracked = execFileSync("git", ["-C", root, "ls-files", "-z", "--", repoRelative], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    throw new UsageError("campaign source migration could not verify that the campaign file is runtime state");
+  }
+  if (tracked.length > 0) {
+    throw new UsageError(
+      `campaign file ${campaignPath} is git-tracked; migration would dirty the coordinator worktree — `
+      + "copy it to an ignored runtime path such as .hone-runs/campaign-frozen.json and retry",
+    );
+  }
+}
+
+const CAMPAIGN_SESSION_FILE = "campaign-session.v1.json";
+
+/**
+ * The ordinary recursive coordinator's fail-closed source gate. Calling the
+ * campaign hash first also authenticates an optional migration journal.
+ */
+export function assertRecursiveCampaignSourceIdentity(
+  configInput: RecursiveMetaCampaignConfig,
+  commit: string,
+  bootDigest: string,
+): void {
+  const config = MetaCampaignConfigV2.parse(configInput);
+  metaCampaignConfigHash(config);
+  if (
+    campaignSourceCommits(config).some((pin) => pin !== commit)
+    || config.trustedRuntime.digest !== bootDigest
+  ) {
+    throw new UsageError("recursive campaign trusted runtime identity drift");
+  }
+}
+
+function sourceMigrationFrozenProjection(configInput: RecursiveMetaCampaignConfig): string {
+  const config = MetaCampaignConfigV2.parse(configInput);
+  const {
+    sourceMigrationJournal: _journal,
+    seedOptimizer: _seedOptimizer,
+    controllerOptimizer: _controllerOptimizer,
+    trustedRuntime: _trustedRuntime,
+    controls: _controls,
+    ...frozen
+  } = config;
+  return canonicalJson(frozen);
+}
+
+/** Mutation guard: migration may touch only journal-authenticated engine identities. */
+export function assertCampaignSourceMigrationOnly(
+  before: RecursiveMetaCampaignConfig,
+  after: RecursiveMetaCampaignConfig,
+): void {
+  if (sourceMigrationFrozenProjection(before) !== sourceMigrationFrozenProjection(after)) {
+    throw new UsageError("source migration attempted to alter frozen campaign fields");
+  }
+}
+
+interface CampaignRunPin {
+  readonly runDir: string;
+  readonly runId: string;
+  readonly pinPath: string;
+  readonly pinnedDigest: string;
+}
+
+function campaignSealedRun(runDir: string, campaignConfigHash: Sha256Digest): boolean {
+  const sealPath = join(runDir, CAMPAIGN_SESSION_FILE);
+  if (!existsSync(sealPath)) return false;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(sealPath, "utf8"));
+  } catch (error) {
+    throw new UsageError(
+      `cannot authenticate campaign run seal ${sealPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (raw === null || typeof raw !== "object") {
+    throw new UsageError(`cannot authenticate campaign run seal ${sealPath}: expected an object`);
+  }
+  return (raw as Record<string, unknown>)["campaignConfigHash"] === campaignConfigHash;
+}
+
+function nonterminalCampaignRunPins(
+  root: string,
+  campaignConfigHash: Sha256Digest,
+  fromBootDigest: string,
+  toBootDigest: string,
+): CampaignRunPin[] {
+  const base = runsRoot(root);
+  if (!existsSync(base)) return [];
+  const pins: CampaignRunPin[] = [];
+  for (const entry of readdirSync(base, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const runDir = join(base, entry.name);
+    if (!campaignSealedRun(runDir, campaignConfigHash)) continue;
+    const eventPath = join(runDir, EVENTS_FILE);
+    if (existsSync(eventPath)) {
+      let terminal: boolean;
+      try {
+        terminal = replayRun(runDir).finished !== null;
+      } catch (error) {
+        throw new UsageError(
+          `cannot replay campaign run ${entry.name} before source migration: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      if (terminal) continue;
+    }
+    const pinPath = join(runDir, RUNTIME_PIN_FILE);
+    if (!existsSync(pinPath)) {
+      throw new UsageError(`nonterminal campaign run ${entry.name} has no ${RUNTIME_PIN_FILE}; refusing migration`);
+    }
+    const pinnedDigest = readFileSync(pinPath, "utf8").trim();
+    if (pinnedDigest !== fromBootDigest && pinnedDigest !== toBootDigest) {
+      throw new UsageError(
+        `nonterminal campaign run ${entry.name} has foreign runtime pin ${pinnedDigest}; `
+        + `restore it to the campaign source digest ${fromBootDigest} before retrying `
+        + `(only that digest or the exact target digest ${toBootDigest} is accepted)`,
+      );
+    }
+    pins.push({ runDir, runId: entry.name, pinPath, pinnedDigest });
+  }
+  return pins.sort((left, right) => left.runId.localeCompare(right.runId));
+}
+
+function registeredCampaignConfigNeedsReconciliation(
+  registeredConfigPath: string,
+  config: RecursiveMetaCampaignConfig,
+): boolean {
+  if (!existsSync(registeredConfigPath)) return false;
+  const registered = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(registeredConfigPath, "utf8")));
+  if (canonicalJson(registered) === canonicalJson(config)) return false;
+  if (!campaignRecordExtends(registered, config)) {
+    throw new UsageError("recursive cell state belongs to a different configuration");
+  }
+  return true;
+}
+
+function reconcileRegisteredCampaignConfig(
+  registeredConfigPath: string,
+  config: RecursiveMetaCampaignConfig,
+  preflightResult?: boolean,
+): void {
+  const needsReconciliation = preflightResult
+    ?? registeredCampaignConfigNeedsReconciliation(registeredConfigPath, config);
+  if (!needsReconciliation) return;
+  writeFileDurable(registeredConfigPath, `${JSON.stringify(config, null, 2)}\n`);
+  chmodSync(registeredConfigPath, 0o600);
+}
+
+export interface CampaignSourceMigrationRequest {
+  readonly root: string;
+  readonly campaignPath: string;
+  readonly from: string;
+  readonly to: string;
+  readonly reason: string;
+  readonly at: string;
+  readonly bootDigest: Sha256Digest;
+  readonly operator?: string;
+  readonly refreezeOptimizer?: boolean;
+  readonly sealedBase?: string;
+}
+
+interface PreparedCampaignOptimizerRefreeze {
+  readonly baseSnapshot: OptimizerSnapshot;
+  readonly fromOptimizerBaseDigest: Sha256Digest;
+  readonly optimizerBaseDigest: Sha256Digest;
+  readonly seed: ResolvedCandidateOptimizer;
+  readonly controller: ResolvedCandidateOptimizer;
+  readonly broken: RegisteredControl;
+  readonly degraded: RegisteredControl;
+}
+
+export interface PlannedOptimizerRunRefreeze {
+  readonly runDir: string;
+  readonly pauseBeforeMigration: boolean;
+  readonly record: CampaignOptimizerRunRefreezeV1;
+  readonly expectedSeal: OptimizerArtifactSeal;
+  readonly replacement: ResolvedCandidateOptimizer;
+  readonly oldContract: string;
+  readonly newContract: string;
+}
+
+async function prepareCampaignOptimizerRefreeze(
+  root: string,
+  config: RecursiveMetaCampaignConfig,
+  sealedBase: string,
+): Promise<PreparedCampaignOptimizerRefreeze> {
+  const priorClosure = config.runtimeClosureJournal?.captures.at(-1);
+  if (priorClosure === undefined) {
+    throw new UsageError("optimizer refreeze requires a captured current runtime closure");
+  }
+  const image = config.optimizerRuntime.image;
+  const baseSnapshot = collectOptimizerSnapshot(sealedBase);
+  const optimizerBaseDigest = snapshotDigest(image, baseSnapshot) as Sha256Digest;
+  if (optimizerBaseDigest !== priorClosure.optimizerBaseDigest) {
+    throw new UsageError("optimizer refreeze sealed base does not match the captured optimizer base digest");
+  }
+  const casDir = casRoot(root);
+  const cas = new CasStore(casDir);
+  const localSeed = await captureSeedCandidate(root, cas);
+  const seedSource = config.generation.stage === "A"
+    ? localSeed.artifactHash
+    : config.seedOptimizer.sourceArtifact as Sha256Digest;
+  const controllerSource = config.generation.controllerGeneration === 0
+    ? localSeed.artifactHash
+    : config.controllerOptimizer.sourceArtifact as Sha256Digest;
+  const seed = await resolveCandidateOptimizer({
+    casDir,
+    artifactHash: seedSource,
+    image,
+    baseSnapshot,
+  });
+  const controller = await resolveCandidateOptimizer({
+    casDir,
+    artifactHash: controllerSource,
+    image,
+    baseSnapshot,
+  });
+  // The journal explicitly authorizes engine-source changes. Scientific
+  // candidate diffs remain governed by the frozen mutable allowlist after
+  // the refreeze; this seed/controller rebuild is not a candidate admission.
+  const controls = await prepareRecursiveControls(seed.snapshot, cas, casDir, image);
+  return {
+    baseSnapshot,
+    fromOptimizerBaseDigest: priorClosure.optimizerBaseDigest as Sha256Digest,
+    optimizerBaseDigest,
+    seed,
+    controller,
+    broken: controls.broken,
+    degraded: controls.degraded,
+  };
+}
+
+function migratedRunSourceArtifact(
+  config: RecursiveMetaCampaignConfig,
+  configHash: Sha256Digest,
+  runId: string,
+  sourceArtifact: string,
+  prepared: PreparedCampaignOptimizerRefreeze,
+): Sha256Digest {
+  if (runId === `run_recursive_outer_${configHash.slice("sha256:".length)}`) {
+    return prepared.controller.sourceArtifact as Sha256Digest;
+  }
+  if (sourceArtifact === config.seedOptimizer.sourceArtifact) {
+    return prepared.seed.sourceArtifact as Sha256Digest;
+  }
+  if (sourceArtifact === config.controllerOptimizer.sourceArtifact) {
+    return prepared.controller.sourceArtifact as Sha256Digest;
+  }
+  if (sourceArtifact === config.controls.brokenSourceArtifact) {
+    return prepared.broken.sourceArtifact;
+  }
+  if (sourceArtifact === config.controls.degradedSourceArtifact) {
+    return prepared.degraded.sourceArtifact;
+  }
+  return sourceArtifact as Sha256Digest;
+}
+
+function migratedContract(
+  oldContract: string,
+  fromOptimizerDigest: string,
+  optimizerDigest: string,
+): string {
+  const oldLine = `- optimizer digest: \`${fromOptimizerDigest}\``;
+  const newLine = `- optimizer digest: \`${optimizerDigest}\``;
+  if (oldContract.split(oldLine).length !== 2) {
+    throw new UsageError("run contract does not contain exactly one sealed optimizer digest");
+  }
+  return oldContract.replace(oldLine, newLine);
+}
+
+async function planOptimizerRunRefreezes(
+  root: string,
+  config: RecursiveMetaCampaignConfig,
+  configHash: Sha256Digest,
+  runs: readonly CampaignRunPin[],
+  prepared: PreparedCampaignOptimizerRefreeze,
+): Promise<PlannedOptimizerRunRefreeze[]> {
+  const planned: PlannedOptimizerRunRefreeze[] = [];
+  for (const run of runs) {
+    const state = replayRun(run.runDir);
+    if ((state.status !== "paused" && state.status !== "running") || state.finished !== null) {
+      throw new UsageError(`optimizer refreeze requires nonterminal run ${run.runId} to be paused or lock-proven offline`);
+    }
+    const expectedSeal = readOptimizerArtifactSeal(run.runDir);
+    if (expectedSeal === null) {
+      throw new UsageError(`optimizer refreeze run ${run.runId} has no optimizer artifact seal`);
+    }
+    if (
+      expectedSeal.runId !== run.runId
+      || expectedSeal.mergedDigest !== state.optimizerDigest
+      || expectedSeal.sourceMigrationRecordDigest !== undefined
+    ) {
+      throw new UsageError(`optimizer refreeze run ${run.runId} does not match its current event seal`);
+    }
+    const image = authenticateCapsuleSnapshot(run.runDir).image;
+    const sourceArtifact = migratedRunSourceArtifact(
+      config,
+      configHash,
+      run.runId,
+      expectedSeal.sourceArtifact,
+      prepared,
+    );
+    const replacement = await resolveCandidateOptimizer({
+      casDir: casRoot(root),
+      artifactHash: sourceArtifact,
+      image,
+      baseSnapshot: prepared.baseSnapshot,
+    });
+    const forbidden = changedOptimizerPaths(prepared.baseSnapshot, replacement.snapshot)
+      .filter((candidatePath) => !registeredMutablePath(config, candidatePath));
+    if (forbidden.length > 0) {
+      throw new UsageError(
+        `refrozen run ${run.runId} changes paths outside the frozen mutable allowlist: ${forbidden.join(", ")}`,
+      );
+    }
+    const oldContract = readFileSync(join(run.runDir, CONTRACT_FILE), "utf8");
+    if (contractHash(oldContract) !== state.contractHash) {
+      throw new UsageError(`optimizer refreeze run ${run.runId} contract does not match its event seal`);
+    }
+    const newContract = migratedContract(oldContract, expectedSeal.mergedDigest, replacement.mergedDigest);
+    planned.push({
+      pauseBeforeMigration: state.status === "running",
+      runDir: run.runDir,
+      expectedSeal,
+      replacement,
+      oldContract,
+      newContract,
+      record: {
+        runId: run.runId,
+        image,
+        from: {
+          sourceArtifact: expectedSeal.sourceArtifact,
+          baseDigest: expectedSeal.baseDigest,
+          bundleDigest: expectedSeal.mergedDigest,
+          contractHash: state.contractHash as Sha256Digest,
+        },
+        to: {
+          sourceArtifact: replacement.sourceArtifact,
+          baseDigest: replacement.baseDigest,
+          bundleDigest: replacement.mergedDigest,
+          contractHash: contractHash(newContract) as Sha256Digest,
+        },
+      },
+    });
+  }
+  return planned.sort((left, right) => left.record.runId.localeCompare(right.record.runId));
+}
+
+function applyOptimizerRunRefreeze(
+  plan: PlannedOptimizerRunRefreeze,
+  migration: CampaignSourceMigrationV1,
+): void {
+  const { record, runDir } = plan;
+  const contractPath = join(runDir, CONTRACT_FILE);
+  const currentContract = readFileSync(contractPath, "utf8");
+  const currentContractHash = contractHash(currentContract);
+  if (
+    currentContractHash !== record.from.contractHash
+    && currentContractHash !== record.to.contractHash
+  ) {
+    throw new UsageError(`optimizer refreeze run ${record.runId} contract changed before commit`);
+  }
+  if (currentContractHash === record.from.contractHash) {
+    writeFileDurable(contractPath, plan.newContract);
+    chmodSync(contractPath, 0o600);
+  }
+  replaceOptimizerArtifactSeal(
+    runDir,
+    plan.expectedSeal,
+    plan.replacement,
+    migration.recordDigest,
+  );
+
+  let before = replayRun(runDir);
+  if (
+    before.optimizerDigest === record.to.bundleDigest
+    && before.contractHash === record.to.contractHash
+  ) {
+    const linked = readEvents(runDir).some((event) =>
+      event.type === "run.optimizer-migrated"
+      && event.sourceMigrationRecordDigest === migration.recordDigest
+    );
+    if (!linked) {
+      throw new UsageError(`optimizer refreeze run ${record.runId} lacks its journal-linked event`);
+    }
+    return;
+  }
+  if (before.status === "running" && plan.pauseBeforeMigration) {
+    appendEvent(runDir, {
+      type: "run.paused",
+      runId: record.runId,
+      at: migration.at,
+      reason: "operator",
+    });
+    before = replayRun(runDir);
+  }
+  if (
+    before.status !== "paused"
+    || before.optimizerDigest !== record.from.bundleDigest
+    || before.contractHash !== record.from.contractHash
+  ) {
+    throw new UsageError(`optimizer refreeze run ${record.runId} event seal changed before commit`);
+  }
+  appendEvent(runDir, {
+    type: "run.optimizer-migrated",
+    runId: record.runId,
+    at: migration.at,
+    fromSourceArtifact: record.from.sourceArtifact,
+    sourceArtifact: record.to.sourceArtifact,
+    fromBaseDigest: record.from.baseDigest,
+    baseDigest: record.to.baseDigest,
+    fromOptimizerDigest: record.from.bundleDigest,
+    optimizerDigest: record.to.bundleDigest,
+    fromContractHash: record.from.contractHash,
+    contractHash: record.to.contractHash,
+    sourceMigrationRecordDigest: migration.recordDigest,
+  });
+  const after = replayRun(runDir);
+  if (
+    after.optimizerDigest !== record.to.bundleDigest
+    || after.contractHash !== record.to.contractHash
+    || after.status !== "paused"
+  ) {
+    throw new UsageError(`optimizer refreeze run ${record.runId} did not seal the replacement`);
+  }
+}
+
+export function applyOptimizerRunRefreezes(
+  plans: readonly PlannedOptimizerRunRefreeze[],
+  migration: CampaignSourceMigrationV1,
+): void {
+  for (const plan of plans) applyOptimizerRunRefreeze(plan, migration);
+}
+
+async function recoverOptimizerRunRefreezes(
+  root: string,
+  config: RecursiveMetaCampaignConfig,
+  runs: readonly CampaignRunPin[],
+  migration: CampaignSourceMigrationV1,
+  sealedBase: string,
+): Promise<void> {
+  const refreeze = migration.optimizerRefreeze;
+  if (refreeze === undefined) return;
+  const byRunId = new Map(runs.map((run) => [run.runId, run]));
+  if (
+    canonicalJson([...byRunId.keys()].sort())
+    !== canonicalJson(refreeze.runs.map((run) => run.runId))
+  ) {
+    throw new UsageError("campaign run set does not match the recorded optimizer refreeze");
+  }
+  const completelyApplied = refreeze.runs.every((record) => {
+    const run = byRunId.get(record.runId);
+    if (run === undefined) return false;
+    const state = replayRun(run.runDir);
+    const seal = readOptimizerArtifactSeal(run.runDir);
+    const contract = readFileSync(join(run.runDir, CONTRACT_FILE), "utf8");
+    return state.status === "paused"
+      && state.optimizerDigest === record.to.bundleDigest
+      && state.contractHash === record.to.contractHash
+      && seal?.sourceArtifact === record.to.sourceArtifact
+      && seal.baseDigest === record.to.baseDigest
+      && seal.mergedDigest === record.to.bundleDigest
+      && seal.sourceMigrationRecordDigest === migration.recordDigest
+      && contractHash(contract) === record.to.contractHash
+      && readEvents(run.runDir).some((event) =>
+        event.type === "run.optimizer-migrated"
+        && event.sourceMigrationRecordDigest === migration.recordDigest
+      );
+  });
+  if (completelyApplied) return;
+
+  const prepared = await prepareCampaignOptimizerRefreeze(root, config, sealedBase);
+  if (
+    prepared.optimizerBaseDigest !== refreeze.optimizerBaseDigest
+    || prepared.fromOptimizerBaseDigest !== refreeze.fromOptimizerBaseDigest
+    || prepared.seed.sourceArtifact !== refreeze.seed.to.sourceArtifact
+    || prepared.seed.mergedDigest !== refreeze.seed.to.bundleDigest
+    || prepared.controller.sourceArtifact !== refreeze.controller.to.sourceArtifact
+    || prepared.controller.mergedDigest !== refreeze.controller.to.bundleDigest
+    || prepared.broken.sourceArtifact !== refreeze.controls.broken.to.sourceArtifact
+    || prepared.broken.bundleDigest !== refreeze.controls.broken.to.bundleDigest
+    || prepared.degraded.sourceArtifact !== refreeze.controls.degraded.to.sourceArtifact
+    || prepared.degraded.bundleDigest !== refreeze.controls.degraded.to.bundleDigest
+  ) {
+    throw new UsageError("recorded optimizer refreeze does not reproduce from the current source");
+  }
+  for (const record of refreeze.runs) {
+    const run = byRunId.get(record.runId);
+    if (run === undefined) throw new UsageError(`recorded optimizer run ${record.runId} is missing`);
+    if (readCapsuleSnapshot(run.runDir).image !== record.image) {
+      throw new UsageError(`recorded optimizer run ${record.runId} image changed during recovery`);
+    }
+    const currentSeal = readOptimizerArtifactSeal(run.runDir);
+    if (currentSeal === null || currentSeal.runId !== record.runId) {
+      throw new UsageError(`recorded optimizer run ${record.runId} has no matching artifact seal`);
+    }
+    const currentIsFrom =
+      currentSeal.sourceArtifact === record.from.sourceArtifact
+      && currentSeal.baseDigest === record.from.baseDigest
+      && currentSeal.mergedDigest === record.from.bundleDigest
+      && currentSeal.sourceMigrationRecordDigest === undefined;
+    const currentIsTo =
+      currentSeal.sourceArtifact === record.to.sourceArtifact
+      && currentSeal.baseDigest === record.to.baseDigest
+      && currentSeal.mergedDigest === record.to.bundleDigest
+      && currentSeal.sourceMigrationRecordDigest === migration.recordDigest;
+    if (!currentIsFrom && !currentIsTo) {
+      throw new UsageError(`recorded optimizer run ${record.runId} artifact seal diverged during recovery`);
+    }
+    const replacement = await resolveCandidateOptimizer({
+      casDir: casRoot(root),
+      artifactHash: record.to.sourceArtifact,
+      image: record.image,
+      baseSnapshot: prepared.baseSnapshot,
+    });
+    if (
+      replacement.baseDigest !== record.to.baseDigest
+      || replacement.mergedDigest !== record.to.bundleDigest
+    ) {
+      throw new UsageError(`recorded optimizer run ${record.runId} replacement no longer reproduces`);
+    }
+    const currentContract = readFileSync(join(run.runDir, CONTRACT_FILE), "utf8");
+    const currentContractHash = contractHash(currentContract);
+    if (
+      currentContractHash !== record.from.contractHash
+      && currentContractHash !== record.to.contractHash
+    ) {
+      throw new UsageError(`recorded optimizer run ${record.runId} contract diverged during recovery`);
+    }
+    const newContract = currentContractHash === record.to.contractHash
+      ? currentContract
+      : migratedContract(currentContract, record.from.bundleDigest, record.to.bundleDigest);
+    if (contractHash(newContract) !== record.to.contractHash) {
+      throw new UsageError(`recorded optimizer run ${record.runId} contract does not reproduce`);
+    }
+    applyOptimizerRunRefreeze({
+      pauseBeforeMigration: replayRun(run.runDir).status === "running",
+      runDir: run.runDir,
+      record,
+      expectedSeal: currentSeal,
+      replacement,
+      oldContract: currentContract,
+      newContract,
+    }, migration);
+  }
+}
+
+export interface CampaignSourceMigrationResult {
+  readonly configHash: Sha256Digest;
+  readonly campaignPath: string;
+  readonly migration: CampaignSourceMigrationV1;
+  readonly repinnedRuns: readonly string[];
+}
+
+/**
+ * Sanctioned frozen-campaign source transition. Every guard and run pin is
+ * preflighted before mutation; the campaign file is the durable commit point.
+ *
+ * On the supported single-operator host, write authority over the campaign
+ * file is the migration trust anchor. Record digests authenticate continuity
+ * and tamper evidence; they deliberately do not claim a separate signer.
+ * A retry accepts only the exact journal head and completes any run-seal or
+ * runtime-pin writes named by that record. Every foreign pin or divergent
+ * sidecar refuses, so a killed transaction remains fail-closed and recoverable.
+ */
+export async function migrateCampaignSource(
+  request: CampaignSourceMigrationRequest,
+): Promise<CampaignSourceMigrationResult> {
+  if (!/^[0-9a-f]{40}$/.test(request.from) || !/^[0-9a-f]{40}$/.test(request.to)) {
+    throw new UsageError("--from and --to must be full lowercase git commit ids");
+  }
+  if (request.from === request.to) throw new UsageError("source migration requires different --from and --to commits");
+  if (request.reason.trim().length === 0) throw new UsageError("--reason must contain non-whitespace text");
+  if ((request.refreezeOptimizer === true) !== (request.sealedBase !== undefined)) {
+    throw new UsageError("--refreeze-optimizer requires exactly one --sealed-base <dir>");
+  }
+
+  const campaignRecordLock = acquireCampaignRecordLock(request.campaignPath);
+  try {
+    const originalBytes = readFileSync(request.campaignPath);
+    const config = MetaCampaignConfigV2.parse(JSON.parse(originalBytes.toString("utf8")));
+    const configHash = metaCampaignConfigHash(config);
+    const lastMigration = config.sourceMigrationJournal?.migrations.at(-1);
+    const recovering =
+      lastMigration?.from === request.from
+      && lastMigration.to === request.to
+      && lastMigration.bootDigest === request.bootDigest
+      && lastMigration.reason === request.reason
+      && campaignSourceCommits(config).every((pin) => pin === request.to);
+    if (recovering && lastMigration !== undefined) {
+      if ((lastMigration.optimizerRefreeze !== undefined) !== (request.refreezeOptimizer === true)) {
+        throw new UsageError("migration recovery must repeat the original --refreeze-optimizer choice");
+      }
+      const plannedRuns = nonterminalCampaignRunPins(
+        request.root,
+        configHash,
+        lastMigration.fromBootDigest,
+        lastMigration.bootDigest,
+      );
+      const releases: Array<() => Promise<void>> = [];
+      try {
+        for (const run of plannedRuns) releases.push(await acquireRunLock(run.runDir, run.runId));
+        const lockedRuns = nonterminalCampaignRunPins(
+          request.root,
+          configHash,
+          lastMigration.fromBootDigest,
+          lastMigration.bootDigest,
+        );
+        if (
+          canonicalJson(lockedRuns.map(({ runId, pinnedDigest }) => ({ runId, pinnedDigest })))
+          !== canonicalJson(plannedRuns.map(({ runId, pinnedDigest }) => ({ runId, pinnedDigest })))
+        ) {
+          throw new UsageError("campaign run set changed during source migration recovery; retry");
+        }
+        await recoverOptimizerRunRefreezes(
+          request.root,
+          config,
+          lockedRuns,
+          lastMigration,
+          request.sealedBase!,
+        );
+        for (const run of lockedRuns) {
+          writeFileDurable(run.pinPath, `${request.bootDigest}\n`);
+        }
+        const registeredConfigPath = join(
+          runsRoot(request.root),
+          `recursive-cell-${configHash.slice("sha256:".length)}`,
+          "campaign.json",
+        );
+        reconcileRegisteredCampaignConfig(registeredConfigPath, config);
+        return {
+          configHash,
+          campaignPath: request.campaignPath,
+          migration: lastMigration,
+          repinnedRuns: lockedRuns.map(({ runId }) => runId),
+        };
+      } finally {
+        for (const release of releases.reverse()) await release();
+      }
+    }
+    const pins = campaignSourceCommits(config);
+    if (pins.some((pin) => pin !== request.from)) {
+      throw new UsageError(
+        `--from ${request.from} does not exactly match the campaign's current sourceCommit`,
+      );
+    }
+
+    const prepared = request.refreezeOptimizer === true
+      ? await prepareCampaignOptimizerRefreeze(request.root, config, request.sealedBase!)
+      : undefined;
+    const plannedRuns = nonterminalCampaignRunPins(
+      request.root,
+      configHash,
+      config.trustedRuntime.digest,
+      request.bootDigest,
+    );
+    const releases: Array<() => Promise<void>> = [];
+    try {
+      for (const run of plannedRuns) releases.push(await acquireRunLock(run.runDir, run.runId));
+      const lockedRuns = nonterminalCampaignRunPins(
+        request.root,
+        configHash,
+        config.trustedRuntime.digest,
+        request.bootDigest,
+      );
+      if (
+        canonicalJson(lockedRuns.map(({ runId, pinnedDigest }) => ({ runId, pinnedDigest })))
+        !== canonicalJson(plannedRuns.map(({ runId, pinnedDigest }) => ({ runId, pinnedDigest })))
+      ) {
+        throw new UsageError("campaign run set changed during source migration; retry");
+      }
+      if (prepared !== undefined) {
+        const outerRunId = `run_recursive_outer_${configHash.slice("sha256:".length)}`;
+        const nonterminalChildren = lockedRuns
+          .map((run) => run.runId)
+          .filter((runId) => runId !== outerRunId);
+        if (nonterminalChildren.length > 0) {
+          throw new UsageError(
+            `optimizer refreeze requires every child run to be terminal; still open: ${nonterminalChildren.join(", ")}`,
+          );
+        }
+      }
+      const runRefreezes = prepared === undefined
+        ? []
+        : await planOptimizerRunRefreezes(request.root, config, configHash, lockedRuns, prepared);
+      const optimizerRefreeze = prepared === undefined
+        ? undefined
+        : {
+          optimizerImage: config.optimizerRuntime.image,
+          fromOptimizerBaseDigest: prepared.fromOptimizerBaseDigest,
+          optimizerBaseDigest: prepared.optimizerBaseDigest,
+          seed: {
+            from: {
+              sourceArtifact: config.seedOptimizer.sourceArtifact,
+              bundleDigest: config.seedOptimizer.bundleDigest,
+            },
+            to: {
+              sourceArtifact: prepared.seed.sourceArtifact,
+              bundleDigest: prepared.seed.mergedDigest,
+            },
+          },
+          controller: {
+            from: {
+              sourceArtifact: config.controllerOptimizer.sourceArtifact,
+              bundleDigest: config.controllerOptimizer.bundleDigest,
+            },
+            to: {
+              sourceArtifact: prepared.controller.sourceArtifact,
+              bundleDigest: prepared.controller.mergedDigest,
+            },
+          },
+          controls: {
+            broken: {
+              from: {
+                sourceArtifact: config.controls.brokenSourceArtifact,
+                bundleDigest: config.controls.brokenBundleDigest,
+              },
+              to: {
+                sourceArtifact: prepared.broken.sourceArtifact,
+                bundleDigest: prepared.broken.bundleDigest,
+              },
+            },
+            degraded: {
+              from: {
+                sourceArtifact: config.controls.degradedSourceArtifact,
+                bundleDigest: config.controls.degradedBundleDigest,
+              },
+              to: {
+                sourceArtifact: prepared.degraded.sourceArtifact,
+                bundleDigest: prepared.degraded.bundleDigest,
+              },
+            },
+          },
+          runs: runRefreezes.map(({ record }) => record),
+        } satisfies CampaignOptimizerRefreezeV1;
+      const previous = config.sourceMigrationJournal?.migrations.at(-1);
+      const body = {
+        version: 1,
+        at: request.at,
+        from: request.from,
+        to: request.to,
+        fromBootDigest: config.trustedRuntime.digest,
+        bootDigest: request.bootDigest,
+        reason: request.reason,
+        ...(optimizerRefreeze === undefined ? {} : { optimizerRefreeze }),
+        ...(request.operator === undefined ? {} : { operator: request.operator }),
+        previousRecordDigest: previous?.recordDigest ?? null,
+      } as const;
+      const migration = {
+        ...body,
+        recordDigest: campaignSourceMigrationRecordDigest(body),
+      } satisfies CampaignSourceMigrationV1;
+      const migrated = MetaCampaignConfigV2.parse({
+        ...config,
+        seedOptimizer: {
+          ...config.seedOptimizer,
+          sourceCommit: request.to,
+          ...(optimizerRefreeze === undefined ? {} : optimizerRefreeze.seed.to),
+        },
+        controllerOptimizer: {
+          ...config.controllerOptimizer,
+          sourceCommit: request.to,
+          ...(optimizerRefreeze === undefined ? {} : optimizerRefreeze.controller.to),
+        },
+        trustedRuntime: {
+          ...config.trustedRuntime,
+          sourceCommit: request.to,
+          digest: request.bootDigest,
+        },
+        controls: optimizerRefreeze === undefined
+          ? config.controls
+          : {
+            brokenSourceArtifact: optimizerRefreeze.controls.broken.to.sourceArtifact,
+            brokenBundleDigest: optimizerRefreeze.controls.broken.to.bundleDigest,
+            degradedSourceArtifact: optimizerRefreeze.controls.degraded.to.sourceArtifact,
+            degradedBundleDigest: optimizerRefreeze.controls.degraded.to.bundleDigest,
+          },
+        sourceMigrationJournal: {
+          version: 1,
+          campaignConfigHash: config.sourceMigrationJournal?.campaignConfigHash ?? configHash,
+          migrations: [...(config.sourceMigrationJournal?.migrations ?? []), migration],
+        },
+      });
+      assertCampaignSourceMigrationOnly(config, migrated);
+      if (metaCampaignConfigHash(migrated) !== configHash) {
+        throw new UsageError("source migration changed the frozen campaign identity");
+      }
+      const registeredConfigPath = join(
+        runsRoot(request.root),
+        `recursive-cell-${configHash.slice("sha256:".length)}`,
+        "campaign.json",
+      );
+      if (!readFileSync(request.campaignPath).equals(originalBytes)) {
+        throw new UsageError("campaign file changed during source migration; retry");
+      }
+      const registeredNeedsReconciliation =
+        registeredCampaignConfigNeedsReconciliation(registeredConfigPath, migrated);
+
+      // The journal is the transaction commit point. Any interruption after
+      // this write is fail-closed: ordinary resume sees a mismatched run seal
+      // or runtime pin until this same command completes the recorded plan.
+      writeFileDurable(request.campaignPath, `${JSON.stringify(migrated, null, 2)}\n`);
+      chmodSync(request.campaignPath, 0o600);
+      applyOptimizerRunRefreezes(runRefreezes, migration);
+      for (const run of lockedRuns) {
+        writeFileDurable(run.pinPath, `${request.bootDigest}\n`);
+      }
+      reconcileRegisteredCampaignConfig(
+        registeredConfigPath,
+        migrated,
+        registeredNeedsReconciliation,
+      );
+      return {
+        configHash,
+        campaignPath: request.campaignPath,
+        migration,
+        repinnedRuns: lockedRuns.map(({ runId }) => runId),
+      };
+    } finally {
+      for (const release of releases.reverse()) await release();
+    }
+  } finally {
+    campaignRecordLock.release();
+  }
+}
+
+function repinCampaignCapsuleImage(
+  config: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+  image: string,
+): RecursiveMetaCampaignConfig {
+  const replace = <T extends MetaCapsuleEntry>(capsule: T): T => (
+    capsule.capsuleId === capsuleId ? { ...capsule, image } : capsule
+  );
+  return MetaCampaignConfigV2.parse({
+    ...config,
+    train: config.train.map(replace),
+    holdout: config.holdout.map(replace),
+    developmentPanel: {
+      ...config.developmentPanel,
+      members: config.developmentPanel.members.map((member) => ({
+        ...member,
+        capsule: replace(member.capsule),
+      })),
+    },
+  });
+}
+
+function imageRepinFrozenProjection(
+  configInput: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+): string {
+  const config = MetaCampaignConfigV2.parse(configInput);
+  const { imageRepinJournal: _journal, ...withoutJournal } = config;
+  return canonicalJson(repinCampaignCapsuleImage(
+    MetaCampaignConfigV2.parse(withoutJournal),
+    capsuleId,
+    "hone-repin-projection@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  ));
+}
+
+/** Mutation guard: an image re-pin may touch only one capsule image and its journal. */
+export function assertCampaignImageRepinOnly(
+  before: RecursiveMetaCampaignConfig,
+  after: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+): void {
+  if (imageRepinFrozenProjection(before, capsuleId) !== imageRepinFrozenProjection(after, capsuleId)) {
+    throw new UsageError("campaign image re-pin attempted to alter frozen campaign fields");
+  }
+}
+
+function currentCampaignCapsuleImage(
+  config: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+): string {
+  const matches = [...config.train, ...config.holdout]
+    .filter((capsule) => capsule.capsuleId === capsuleId);
+  if (matches.length !== 1) {
+    throw new UsageError(`--capsule ${capsuleId} must name exactly one campaign corpus entry`);
+  }
+  return matches[0]!.image;
+}
+
+export interface CampaignImageRepinRequest {
+  readonly root: string;
+  readonly campaignPath: string;
+  readonly capsuleId: string;
+  readonly fromImage: string;
+  readonly toImage: string;
+  readonly evidencePath: string;
+  readonly reason: string;
+  readonly at: string;
+  readonly operator?: string;
+}
+
+export interface CampaignImageRepinResult {
+  readonly configHash: Sha256Digest;
+  readonly campaignPath: string;
+  readonly repin: CampaignImageRepinV1;
+}
+
+type DistributionEvidence = Extract<
+  z.infer<typeof CampaignImageEquivalenceEvidenceV1>,
+  { evidenceMode: "distribution" }
+>;
+
+interface VerifiedDistributionEvidenceFiles {
+  readonly files: readonly { path: string; bytes: Buffer }[];
+}
+
+function installedCampaignCapsule(
+  root: string,
+  config: RecursiveMetaCampaignConfig,
+  capsuleId: string,
+): DiscoveredCapsule {
+  const registered = [...config.train, ...config.holdout]
+    .find((entry) => entry.capsuleId === capsuleId);
+  if (registered === undefined) {
+    throw new UsageError(`distribution evidence names unknown capsule ${capsuleId}`);
+  }
+  if ("mode" in config.corpusCohort) {
+    const policy = verifyM2AuthorizedPartialCohort(root, config.corpusCohort.partialCohort);
+    const authorized = policy.admitted.find((entry) => entry.capsuleId === capsuleId);
+    if (authorized === undefined) {
+      throw new UsageError(`distribution evidence capsule ${capsuleId} is not admitted`);
+    }
+    const dir = join(root, "capsules", authorized.label);
+    const admitted = admitCapsule(dir, {
+      review: "required",
+      allowMissingGitBaselineWithOwnerReceipt: true,
+    });
+    if (
+      admitted.provisional
+      || admitted.manifest.id !== authorized.capsuleId
+      || admitted.digest !== authorized.capsuleDigest
+      || admitted.approval?.receipt.recordHash !== authorized.gate2ReceiptHash
+      || !gate2ReceiptCitesAuthorizedBasis(
+        policy,
+        authorized,
+        admitted.approval.receipt.approvalBasis,
+      )
+    ) {
+      throw new UsageError(`distribution evidence capsule ${capsuleId} failed admission binding`);
+    }
+    const capsule = { dir, admitted };
+    resolveRegisteredCapsuleLocation(config, registered, capsule);
+    return capsule;
+  }
+  const capsule = discoverCapsules(root).get(capsuleId);
+  if (capsule === undefined) {
+    throw new UsageError(`distribution evidence capsule ${capsuleId} is not installed`);
+  }
+  resolveRegisteredCapsuleLocation(config, registered, capsule);
+  return capsule;
+}
+
+function installedEvaluatorSourcePath(capsule: DiscoveredCapsule): string {
+  const entrypoint = capsule.admitted.manifest.evalEntrypoint;
+  const source = [...entrypoint].reverse().find((arg) => !arg.startsWith("-"));
+  if (source === undefined || source === entrypoint[0]) {
+    throw new UsageError("distribution evidence requires a capsule evaluator source entrypoint");
+  }
+  if (source.startsWith("/trusted/baseline/")) {
+    return resolve(capsule.dir, "baseline", source.slice("/trusted/baseline/".length));
+  }
+  if (source.startsWith("/trusted/")) {
+    return resolve(capsule.dir, source.slice("/trusted/".length));
+  }
+  return resolve(capsule.dir, "baseline", source);
+}
+
+function evidenceFileWithin(root: string, input: string, label: string): string {
+  const path = resolve(root, input);
+  const rel = relative(root, path);
+  if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`)) {
+    throw new UsageError(`${label} must stay inside ${root}`);
+  }
+  if (!existsSync(path) || !statSync(path).isFile()) {
+    throw new UsageError(`${label} must name an existing regular file`);
+  }
+  return path;
+}
+
+export function verifyStructuralNondeterminism(
+  root: string,
+  proof: CampaignImageStructuralNondeterminismProofV1,
+  installedEvaluatorPath: string,
+): { path: string; bytes: Buffer } {
+  const sourcePath = evidenceFileWithin(root, proof.evaluatorSourcePath, "evaluator source");
+  if (sourcePath !== installedEvaluatorPath) {
+    throw new UsageError("structural proof source must match the installed capsule evaluator");
+  }
+  const sourceBytes = readFileSync(sourcePath);
+  if (sha256(sourceBytes) !== proof.evaluatorSourceSha256) {
+    throw new UsageError("evaluator source hash does not match structural nondeterminism proof");
+  }
+  const source = sourceBytes.toString("utf8");
+  if (source.includes(proof.seedEnvironmentVariable)) {
+    throw new UsageError(
+      `distribution evidence is forbidden because the evaluator reads ${proof.seedEnvironmentVariable}`,
+    );
+  }
+  const lines = source.split(/\r?\n/);
+  const verifyCitations = (
+    citations: readonly { line: number; exactSourceLine: string }[],
+    label: string,
+    signal: RegExp,
+  ): void => {
+    for (const citation of citations) {
+      if (lines[citation.line - 1] !== citation.exactSourceLine) {
+        throw new UsageError(`${label} source citation does not match evaluator line ${citation.line}`);
+      }
+      if (!signal.test(citation.exactSourceLine)) {
+        throw new UsageError(`${label} source citation does not contain the required nondeterminism signal`);
+      }
+    }
+  };
+  verifyCitations(proof.entropySources, "entropy", /secrets\.|random\.|urandom|nonce/i);
+  verifyCitations(proof.timingSources, "timing", /time\.|monotonic|perf_counter|elapsed|wall/i);
+  return { path: sourcePath, bytes: sourceBytes };
+}
+
+function verifyDistributionEvidence(
+  request: CampaignImageRepinRequest,
+  evidence: DistributionEvidence,
+  config: RecursiveMetaCampaignConfig,
+): VerifiedDistributionEvidenceFiles {
+  const evidenceDir = dirname(request.evidencePath);
+  const preRegistrationPath = evidenceFileWithin(
+    evidenceDir,
+    evidence.preRegistrationPath,
+    "distribution pre-registration",
+  );
+  const preRegistrationBytes = readFileSync(preRegistrationPath);
+  if (sha256(preRegistrationBytes) !== evidence.preRegistrationSha256) {
+    throw new UsageError("distribution pre-registration hash does not match evidence");
+  }
+  let preRegistration: z.infer<typeof CampaignImageDistributionPreregistrationV1>;
+  try {
+    preRegistration = CampaignImageDistributionPreregistrationV1.parse(
+      JSON.parse(preRegistrationBytes.toString("utf8")),
+    );
+  } catch (error) {
+    throw new UsageError(
+      `invalid distribution pre-registration: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (
+    preRegistration.capsuleId !== evidence.capsuleId
+    || preRegistration.fromImage !== evidence.fromImage
+    || preRegistration.toImage !== evidence.toImage
+    || preRegistration.baseline.artifact !== evidence.baseline.artifact
+    || preRegistration.baseline.historicalScore !== evidence.baseline.historicalScore
+    || preRegistration.settledCandidate.artifact !== evidence.settledCandidate.artifact
+    || preRegistration.settledCandidate.historicalScore !== evidence.settledCandidate.historicalScore
+    || canonicalJson(preRegistration.structuralNondeterminism)
+      !== canonicalJson(evidence.structuralNondeterminism)
+  ) {
+    throw new UsageError("distribution evidence does not match its pre-registration");
+  }
+  if (
+    preRegistration.measurementPlan.k !== evidence.k
+    || evidence.baseline.rawScores.length < preRegistration.measurementPlan.replicatesPerArtifact
+    || evidence.settledCandidate.rawScores.length < preRegistration.measurementPlan.replicatesPerArtifact
+  ) {
+    throw new UsageError("distribution evidence does not satisfy its pre-registered measurement plan");
+  }
+  const registeredAt = Date.parse(preRegistration.registeredAt);
+  const measurementStartedAt = Date.parse(evidence.measurementStartedAt);
+  const measurementCompletedAt = Date.parse(evidence.measurementCompletedAt);
+  const generatedAt = Date.parse(evidence.generatedAt);
+  if (!(
+    registeredAt < measurementStartedAt
+    && measurementStartedAt <= measurementCompletedAt
+    && measurementCompletedAt <= generatedAt
+  )) {
+    throw new UsageError("distribution measurement was not performed after pre-registration");
+  }
+  const capsule = installedCampaignCapsule(request.root, config, evidence.capsuleId);
+  const source = verifyStructuralNondeterminism(
+    request.root,
+    evidence.structuralNondeterminism,
+    installedEvaluatorSourcePath(capsule),
+  );
+  return {
+    files: [
+      { path: preRegistrationPath, bytes: preRegistrationBytes },
+      source,
+    ],
+  };
+}
+
+/**
+ * Sanctioned frozen-campaign image replacement. Exact replay remains the
+ * default; the distribution arm additionally verifies a prior registration
+ * and evaluator-source proof. Evidence bytes are hashed before the append-only
+ * record becomes the durable commit point under the shared campaign lock.
+ */
+export function repinCampaignImage(request: CampaignImageRepinRequest): CampaignImageRepinResult {
+  if (!/^cap_[0-9a-f]{12}$/.test(request.capsuleId)) {
+    throw new UsageError("--capsule must be a canonical capsule id");
+  }
+  if (request.fromImage === request.toImage) {
+    throw new UsageError("campaign image re-pin requires different --from-image and --to-image");
+  }
+  if (request.reason.trim().length === 0) throw new UsageError("--reason must contain non-whitespace text");
+  if (!existsSync(request.evidencePath) || !statSync(request.evidencePath).isFile()) {
+    throw new UsageError("--evidence must name an existing regular file");
+  }
+
+  const evidenceBytes = readFileSync(request.evidencePath);
+  let evidence: z.infer<typeof CampaignImageEquivalenceEvidenceV1>;
+  try {
+    evidence = CampaignImageEquivalenceEvidenceV1.parse(JSON.parse(evidenceBytes.toString("utf8")));
+  } catch (error) {
+    throw new UsageError(
+      `invalid image equivalence evidence: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (
+    evidence.capsuleId !== request.capsuleId
+    || evidence.fromImage !== request.fromImage
+    || evidence.toImage !== request.toImage
+  ) {
+    throw new UsageError("image equivalence evidence identity does not match the requested re-pin");
+  }
+  let distributionFiles: VerifiedDistributionEvidenceFiles = { files: [] };
+  const evidenceSha256 = sha256(evidenceBytes);
+  const evidencePath = relative(dirname(request.campaignPath), request.evidencePath).split(sep).join("/");
+  if (evidencePath.length === 0) throw new UsageError("--evidence must not be the campaign file");
+
+  const campaignRecordLock = acquireCampaignRecordLock(request.campaignPath);
+  try {
+    const originalBytes = readFileSync(request.campaignPath);
+    const config = MetaCampaignConfigV2.parse(JSON.parse(originalBytes.toString("utf8")));
+    const configHash = metaCampaignConfigHash(config);
+    const currentImage = currentCampaignCapsuleImage(config, request.capsuleId);
+    if (currentImage !== request.fromImage) {
+      throw new UsageError(
+        `--from-image ${request.fromImage} does not exactly match capsule ${request.capsuleId} image ${currentImage}`,
+      );
+    }
+    if ("evidenceMode" in evidence && evidence.evidenceMode === "distribution") {
+      distributionFiles = verifyDistributionEvidence(request, evidence, config);
+    }
+
+    const previous = config.imageRepinJournal?.repins.at(-1);
+    const body = {
+      version: 1,
+      at: request.at,
+      capsuleId: request.capsuleId,
+      fromImage: request.fromImage,
+      toImage: request.toImage,
+      evidencePath,
+      evidenceSha256,
+      reason: request.reason,
+      ...(request.operator === undefined ? {} : { operator: request.operator }),
+      previousRecordDigest: previous?.recordDigest ?? null,
+    } as const;
+    const repin = {
+      ...body,
+      recordDigest: campaignImageRepinRecordDigest(body),
+    } satisfies CampaignImageRepinV1;
+    const migrated = MetaCampaignConfigV2.parse({
+      ...repinCampaignCapsuleImage(config, request.capsuleId, request.toImage),
+      imageRepinJournal: {
+        version: 1,
+        campaignConfigHash: config.imageRepinJournal?.campaignConfigHash ?? configHash,
+        repins: [...(config.imageRepinJournal?.repins ?? []), repin],
+      },
+    });
+    assertCampaignImageRepinOnly(config, migrated, request.capsuleId);
+    if (metaCampaignConfigHash(migrated) !== configHash) {
+      throw new UsageError("campaign image re-pin changed the frozen campaign identity");
+    }
+
+    const registeredConfigPath = join(
+      runsRoot(request.root),
+      `recursive-cell-${configHash.slice("sha256:".length)}`,
+      "campaign.json",
+    );
+    const registeredNeedsReconciliation =
+      registeredCampaignConfigNeedsReconciliation(registeredConfigPath, migrated);
+    if (!readFileSync(request.campaignPath).equals(originalBytes)) {
+      throw new UsageError("campaign file changed during image re-pin; retry");
+    }
+    if (!readFileSync(request.evidencePath).equals(evidenceBytes)) {
+      throw new UsageError("image equivalence evidence changed during re-pin; retry");
+    }
+    for (const file of distributionFiles.files) {
+      if (!readFileSync(file.path).equals(file.bytes)) {
+        throw new UsageError("distribution evidence input changed during re-pin; retry");
+      }
+    }
+    writeFileDurable(request.campaignPath, `${JSON.stringify(migrated, null, 2)}\n`);
+    chmodSync(request.campaignPath, 0o600);
+    reconcileRegisteredCampaignConfig(
+      registeredConfigPath,
+      migrated,
+      registeredNeedsReconciliation,
+    );
+    return { configHash, campaignPath: request.campaignPath, repin };
+  } finally {
+    campaignRecordLock.release();
+  }
+}
+
+
+/** Explicit operator front door for frozen-campaign source and closure records. */
+export async function campaignCommand(args: string[], io: CmdIo): Promise<number> {
+  const [subcommand, ...rest] = args;
+  if (subcommand === "migrate-source") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: ["refreeze-optimizer"],
+      strings: ["campaign", "from", "to", "reason", "sealed-base"],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const from = strFlag(flags, "from");
+    const to = strFlag(flags, "to");
+    const reason = strFlag(flags, "reason");
+    const sealedBaseFlag = strFlag(flags, "sealed-base");
+    if (
+      positionals.length !== 0
+      || campaignFlag === undefined
+      || from === undefined
+      || to === undefined
+      || reason === undefined
+    ) {
+      throw new UsageError(CAMPAIGN_MIGRATE_SOURCE_USAGE);
+    }
+    if (!/^[0-9a-f]{40}$/.test(from) || !/^[0-9a-f]{40}$/.test(to)) {
+      throw new UsageError("--from and --to must be full lowercase git commit ids");
+    }
+
+    assertCleanSourceTree(io.root);
+    const resolvedCommit = sourceCommit(io.root);
+    if (resolvedCommit !== to) {
+      throw new UsageError(`--to ${to} does not resolve to the clean working tree HEAD ${resolvedCommit}`);
+    }
+    const campaignPath = resolve(io.root, campaignFlag);
+    assertCampaignPathUntracked(io.root, campaignPath);
+    const bootDigest = verifiedBootRuntimeDigest() as Sha256Digest;
+    const operator = io.env["USER"] ?? io.env["LOGNAME"];
+    const result = await migrateCampaignSource({
+      root: io.root,
+      campaignPath,
+      from,
+      to,
+      reason,
+      at: new Date().toISOString(),
+      bootDigest,
+      ...(operator === undefined || operator.trim().length === 0 ? {} : { operator }),
+      ...(boolFlag(flags, "refreeze-optimizer") ? { refreezeOptimizer: true } : {}),
+      ...(sealedBaseFlag === undefined ? {} : { sealedBase: resolve(io.root, sealedBaseFlag) }),
+    });
+    io.out(canonicalJson({
+      command: "campaign.migrate-source",
+      ...result,
+    }));
+    return 0;
+  }
+
+  if (subcommand === "repin-image") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: [],
+      strings: ["campaign", "capsule", "from-image", "to-image", "evidence", "reason"],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const capsuleId = strFlag(flags, "capsule");
+    const fromImage = strFlag(flags, "from-image");
+    const toImage = strFlag(flags, "to-image");
+    const evidenceFlag = strFlag(flags, "evidence");
+    const reason = strFlag(flags, "reason");
+    if (
+      positionals.length !== 0
+      || campaignFlag === undefined
+      || capsuleId === undefined
+      || fromImage === undefined
+      || toImage === undefined
+      || evidenceFlag === undefined
+      || reason === undefined
+    ) {
+      throw new UsageError(CAMPAIGN_REPIN_IMAGE_USAGE);
+    }
+    const campaignPath = resolve(io.root, campaignFlag);
+    assertCampaignPathUntracked(io.root, campaignPath);
+    const operator = io.env["USER"] ?? io.env["LOGNAME"];
+    const result = repinCampaignImage({
+      root: io.root,
+      campaignPath,
+      capsuleId,
+      fromImage,
+      toImage,
+      evidencePath: resolve(io.root, evidenceFlag),
+      reason,
+      at: new Date().toISOString(),
+      ...(operator === undefined || operator.trim().length === 0 ? {} : { operator }),
+    });
+    io.out(canonicalJson({ command: "campaign.repin-image", ...result }));
+    return 0;
+  }
+
+  if (subcommand === "capture-closure") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: ["dry-run"],
+      strings: [
+        "campaign",
+        "source",
+        "source-commit",
+        "cas",
+        "node-modules-archive",
+        "archive-sha256",
+        "optimizer-base-digest",
+        "at",
+        "restore",
+        "verify-image",
+        "verify-digest",
+      ],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const sourceFlag = strFlag(flags, "source");
+    const casFlag = strFlag(flags, "cas");
+    const archiveFlag = strFlag(flags, "node-modules-archive");
+    const sidecarFlag = strFlag(flags, "archive-sha256");
+    const restoreFlag = strFlag(flags, "restore");
+    const verifyImage = strFlag(flags, "verify-image");
+    const verifyDigest = digestFlag(strFlag(flags, "verify-digest"), "--verify-digest");
+    const dryRun = boolFlag(flags, "dry-run");
+    if (
+      positionals.length !== 0
+      || campaignFlag === undefined
+      || sourceFlag === undefined
+      || (archiveFlag === undefined) !== (sidecarFlag === undefined)
+      || (dryRun && casFlag === undefined)
+      || ((verifyImage === undefined) !== (verifyDigest === undefined))
+      || (verifyImage !== undefined && restoreFlag === undefined)
+    ) {
+      throw new UsageError(CAMPAIGN_CAPTURE_CLOSURE_USAGE);
+    }
+
+    const campaignPath = resolve(io.root, campaignFlag);
+    const originalBytes = readFileSync(campaignPath);
+    const config = MetaCampaignConfigV2.parse(JSON.parse(originalBytes.toString("utf8")));
+    const configHash = metaCampaignConfigHash(config);
+    if (!dryRun) assertCampaignPathUntracked(io.root, campaignPath);
+    const sourceCommitFlag = strFlag(flags, "source-commit");
+    if (sourceCommitFlag !== undefined && !/^[0-9a-f]{40}$/.test(sourceCommitFlag)) {
+      throw new UsageError("--source-commit must be a full lowercase git commit id");
+    }
+    const captureSourceCommit = sourceCommitFlag ?? config.trustedRuntime.sourceCommit;
+    const campaignSourceLineage = new Set<string>([config.trustedRuntime.sourceCommit]);
+    for (const migration of config.sourceMigrationJournal?.migrations ?? []) {
+      campaignSourceLineage.add(migration.from);
+      campaignSourceLineage.add(migration.to);
+    }
+    if (!campaignSourceLineage.has(captureSourceCommit)) {
+      throw new UsageError("--source-commit is not present in the campaign source-migration lineage");
+    }
+    const priorCapture = config.runtimeClosureJournal?.captures.at(-1);
+    const explicitBaseDigest = digestFlag(
+      strFlag(flags, "optimizer-base-digest"),
+      "--optimizer-base-digest",
+    );
+    const optimizerBaseDigest = explicitBaseDigest
+      ?? (priorCapture?.optimizerBaseDigest as Sha256Digest | undefined)
+      ?? config.seedOptimizer.bundleDigest as Sha256Digest;
+    const casDir = casFlag === undefined ? casRoot(io.root) : resolve(io.root, casFlag);
+    const sourceRoot = resolve(io.root, sourceFlag);
+    const archivePath = archiveFlag === undefined ? undefined : resolve(io.root, archiveFlag);
+    const sidecarPath = sidecarFlag === undefined ? undefined : resolve(io.root, sidecarFlag);
+    const capture = await captureRuntimeClosure({
+      sourceRoot,
+      sourceCommit: captureSourceCommit,
+      campaignBootDigest: config.trustedRuntime.digest as Sha256Digest,
+      ...(captureSourceCommit === config.trustedRuntime.sourceCommit
+        ? { expectedBootDigest: config.trustedRuntime.digest as Sha256Digest }
+        : {}),
+      optimizerImage: config.optimizerRuntime.image,
+      optimizerBaseDigest,
+      campaignConfigHash: configHash,
+      capturedAt: strFlag(flags, "at") ?? new Date().toISOString(),
+      casDir,
+      previousRecordDigest: priorCapture?.recordDigest as Sha256Digest | undefined ?? null,
+      ...(archivePath === undefined || sidecarPath === undefined
+        ? {}
+        : {
+          nodeModulesArchive: archivePath,
+          nodeModulesArchiveSha256: parseSha256Sidecar(sidecarPath, archivePath),
+        }),
+    });
+    withRuntimeClosureCapture(config, capture.record);
+
+    let verifiedOptimizerIdentity: { image: string; digest: string } | undefined;
+    const restored = restoreFlag === undefined
+      ? undefined
+      : restoreRuntimeClosure({
+        casDir,
+        targetDir: resolve(io.root, restoreFlag),
+        campaignConfigHash: configHash,
+        record: capture.record,
+      });
+    if (restored !== undefined && verifyImage !== undefined && verifyDigest !== undefined) {
+      const digest = snapshotDigest(
+        verifyImage,
+        collectOptimizerSnapshot(restored.targetDir),
+      );
+      if (digest !== verifyDigest) {
+        throw new UsageError(`restored optimizer identity mismatch: ${digest} != sealed ${verifyDigest}`);
+      }
+      verifiedOptimizerIdentity = { image: verifyImage, digest };
+    }
+    if (!dryRun) {
+      const acquired = acquireCampaignRecordLock(campaignPath);
+      try {
+        appendRuntimeClosureCaptureRecord(campaignPath, capture.record, acquired.lock, originalBytes);
+      } finally {
+        acquired.release();
+      }
+    }
+    io.out(canonicalJson({
+      command: "campaign.capture-closure",
+      campaignPath,
+      casDir,
+      configHash,
+      dryRun,
+      recordAppended: !dryRun,
+      marginalBytes: capture.marginalBytes,
+      reusedBytes: capture.reusedBytes,
+      record: capture.record,
+      ...(restored === undefined ? {} : { restored }),
+      ...(verifiedOptimizerIdentity === undefined ? {} : { verifiedOptimizerIdentity }),
+    }));
+    return 0;
+  }
+
+  if (subcommand === "smoke-capsules") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: [],
+      strings: ["campaign", "evidence"],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const evidenceFlag = strFlag(flags, "evidence");
+    if (positionals.length !== 0 || campaignFlag === undefined || evidenceFlag === undefined) {
+      throw new UsageError(CAMPAIGN_SMOKE_CAPSULES_USAGE);
+    }
+    assertCleanSourceTree(io.root);
+    const campaignPath = resolve(io.root, campaignFlag);
+    const config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+    const source = sourceCommit(io.root);
+    const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
+    const result = await runPanelCapsuleSmoke({
+      root: io.root,
+      config,
+      sourceCommit: source,
+      runtimeDigest,
+      evidencePath: resolve(io.root, evidenceFlag),
+      capsules: resolveRegisteredCapsules(io.root, config),
+    });
+    io.out(canonicalJson({
+      command: "campaign.smoke-capsules",
+      campaignPath,
+      evidencePath: resolve(io.root, evidenceFlag),
+      guardPath: result.guardPath,
+      campaignConfigHash: result.receipt.campaignConfigHash,
+      capsules: result.receipt.capsules.length,
+      dispatch: result.receipt.dispatch,
+      ignitionEligible: result.receipt.ignitionEligible,
+    }));
+    return 0;
+  }
+
+  if (subcommand === "restore-closure") {
+    const { positionals, flags } = parseFlags(rest, {
+      booleans: [],
+      strings: ["campaign", "target", "cas", "manifest"],
+    });
+    const campaignFlag = strFlag(flags, "campaign");
+    const targetFlag = strFlag(flags, "target");
+    if (positionals.length !== 0 || campaignFlag === undefined || targetFlag === undefined) {
+      throw new UsageError(CAMPAIGN_RESTORE_CLOSURE_USAGE);
+    }
+    const campaignPath = resolve(io.root, campaignFlag);
+    const config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
+    const configHash = metaCampaignConfigHash(config);
+    const record = runtimeClosureCaptureRecord(config, strFlag(flags, "manifest"));
+    const casFlag = strFlag(flags, "cas");
+    const result = restoreRuntimeClosure({
+      casDir: casFlag === undefined ? casRoot(io.root) : resolve(io.root, casFlag),
+      targetDir: resolve(io.root, targetFlag),
+      campaignConfigHash: configHash,
+      record,
+    });
+    io.out(canonicalJson({
+      command: "campaign.restore-closure",
+      campaignPath,
+      manifestArtifact: record.manifestArtifact,
+      ...result,
+    }));
+    return 0;
+  }
+
+  throw new UsageError(
+    `${CAMPAIGN_MIGRATE_SOURCE_USAGE}\n${CAMPAIGN_REPIN_IMAGE_USAGE}\n`
+    + `${CAMPAIGN_CAPTURE_CLOSURE_USAGE}\n${CAMPAIGN_RESTORE_CLOSURE_USAGE}\n`
+    + CAMPAIGN_SMOKE_CAPSULES_USAGE,
+  );
 }
 
 async function prepareControl(
@@ -1791,15 +4036,49 @@ interface FrozenRecursiveIdentities {
   readonly degradedControl: RegisteredControl;
 }
 
-function freezeRecursiveCampaignConfig(
+export function freezeRecursiveCampaignConfig(
   draft: RecursiveMetaCampaignConfig,
   corpus: FrozenCorpus,
   identities: FrozenRecursiveIdentities,
+  enforceOuterEnvelope: typeof assertM2OuterDirectEnvelope = assertM2OuterDirectEnvelope,
 ): RecursiveMetaCampaignConfig {
+  const outerBudgetDerivation = deriveM2OuterDirectEnvelope(draft.counts.candidates);
+  if (draft.counts.childConcurrency !== outerBudgetDerivation.confirmationTerminalChildConcurrency) {
+    throw new UsageError(
+      `recursive freeze requires confirmation/terminal child concurrency `
+      + `${outerBudgetDerivation.confirmationTerminalChildConcurrency}`,
+    );
+  }
+  const campaignBudget = Object.fromEntries(SCHEDULED_BUDGET_DIMENSIONS.map((dimension) => {
+    const derived =
+      draft.budgets.campaign[dimension]
+      - draft.budgets.outer[dimension]
+      + outerBudgetDerivation.derived[dimension];
+    if (!Number.isFinite(derived) || Math.abs(derived) > Number.MAX_SAFE_INTEGER || derived <= 0) {
+      throw new UsageError(`derived recursive campaign ${dimension} is not a safe positive value`);
+    }
+    return [dimension, derived];
+  })) as BudgetEnvelope;
   const identified = {
     ...draft,
     train: corpus.train,
     holdout: corpus.holdout,
+    counts: {
+      ...draft.counts,
+      searchChildConcurrency: outerBudgetDerivation.searchChildConcurrency,
+    },
+    budgets: {
+      ...draft.budgets,
+      campaign: campaignBudget,
+      outer: outerBudgetDerivation.derived,
+    },
+    outerBudgetDerivation,
+    preIgnitionGates: {
+      panelCapsuleSmoke: {
+        version: 1,
+        required: true,
+      },
+    },
     seedOptimizer: {
       sourceCommit: identities.sourceCommit,
       sourceArtifact: identities.target.sourceArtifact,
@@ -1821,6 +4100,7 @@ function freezeRecursiveCampaignConfig(
       degradedBundleDigest: identities.degradedControl.bundleDigest,
     },
   };
+  enforceOuterEnvelope(identified);
   const { protocolHash: _protocolHash, analysisConfigHash: _analysisConfigHash, ...protocolFields } = identified;
   const protocolHash = sha256(canonicalJson({ domain: "hone-m2-recursive-protocol-v1", config: protocolFields }));
   const analysisConfigHash = sha256(canonicalJson({
@@ -1873,6 +4153,17 @@ function writeFrozenCampaign(root: string, outFlag: string, config: AnyMetaCampa
   writeFileDurable(outputPath, `${JSON.stringify(config, null, 2)}\n`);
   chmodSync(outputPath, 0o600);
   return outputPath;
+}
+
+/** The only freeze publication path: a recursive frozen config cannot be written before its closure record is attached. */
+export function writeFrozenRecursiveCampaignWithClosure(
+  root: string,
+  outFlag: string,
+  frozenConfig: RecursiveMetaCampaignConfig,
+  closureRecord: CampaignRuntimeClosureCaptureV1,
+): { config: RecursiveMetaCampaignConfig; outputPath: string } {
+  const config = withRuntimeClosureCapture(frozenConfig, closureRecord);
+  return { config, outputPath: writeFrozenCampaign(root, outFlag, config) };
 }
 
 function phaseEpochs(
@@ -1961,6 +4252,41 @@ function assertExactSearchCardinality(journal: MetaJournalV1, config: AnyMetaCam
       `search admitted ${sourceArtifacts.size} unique optimizer source artifacts; frozen campaign requires exactly ${config.counts.candidates}`,
     );
   }
+}
+
+export interface SearchCommandRunBoundaryInput {
+  readonly exitCode: number;
+  readonly outerRunDir: string;
+  readonly persistTrajectory: () => string;
+  readonly reportSecondaryFailure: (message: string) => void;
+}
+
+/**
+ * Shared legacy/recursive CLI boundary. Partial trajectory evidence must be
+ * attempted after a failed optimizer run without replacing its exit status.
+ */
+export function completeSearchCommandRun(input: SearchCommandRunBoundaryInput): number {
+  const hasPartialTrajectory = existsSync(join(input.outerRunDir, EVENTS_FILE))
+    && readEvents(input.outerRunDir).some(
+      (event) => event.type === "eval.completed" || event.type === "episode.invalid",
+    );
+  if (input.exitCode !== 0) {
+    if (hasPartialTrajectory) {
+      const persistence = persistTrajectoryWithoutMaskingSearchFailure(
+        input.exitCode,
+        input.persistTrajectory,
+      );
+      if (persistence.persistenceError !== null) {
+        input.reportSecondaryFailure(
+          `search optimizer exited ${input.exitCode}; partial trajectory persistence also failed `
+          + `without replacing the primary failure: ${persistence.persistenceError}`,
+        );
+      }
+    }
+    return input.exitCode;
+  }
+  if (hasPartialTrajectory) input.persistTrajectory();
+  return input.exitCode;
 }
 
 /** Official train-only outer campaign entrypoint. Confirmation/holdout remain separate trusted runner methods. */
@@ -2100,12 +4426,23 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     controls: [brokenControl, degradedControl],
   });
   const modelRegistry = new CampaignModelRegistry(campaignDir, configHash, io.root);
+  const outerRunId = `run_meta_outer_${configHash.slice("sha256:".length)}`;
+  const outerRunDir = join(runsRoot(io.root), outerRunId);
   const runner = new MetaCampaignRunner({
     config,
     journal,
     joinPath: join(campaignDir, "candidate-child-joins.ndjson"),
     candidateGate: gate,
-    childSupervisor: new CliChildSupervisor(io, config, campaignDir, capsules, seedSnapshot, modelRegistry),
+    childSupervisor: new CliChildSupervisor(
+      io,
+      campaignChildDispatchPolicy(config),
+      campaignDir,
+      capsules,
+      seedSnapshot,
+      modelRegistry,
+      undefined,
+      outerRunDir,
+    ),
   });
   const strategy: TrustedEvaluationStrategy = async (request) => await runner.evaluateSearchCandidate({
     sourceArtifact: request.artifact.hash as Sha256Digest,
@@ -2113,8 +4450,6 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     assetGroupId: request.assetGroupId,
     seed: request.seed,
   });
-  const outerRunId = `run_meta_outer_${configHash.slice("sha256:".length)}`;
-  const outerRunDir = join(runsRoot(io.root), outerRunId);
   try {
     const seedIdentity: MetaOptimizerIdentity = {
       sourceArtifact: config.seedOptimizer.sourceArtifact as Sha256Digest,
@@ -2193,14 +4528,7 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     }
     const configFile = join(campaignDir, "outer-config.json");
     if (!existsSync(configFile)) {
-      writeFileDurable(configFile, `${JSON.stringify({
-        routing: { mutation: { model: config.routing.outerMutation } },
-        apply: "none",
-        headless: true,
-        budget: config.budgets.outer,
-        promotion: config.promotion,
-      }, null, 2)}\n`);
-      chmodSync(configFile, 0o600);
+      writeCampaignOuterRunConfig(configFile, config);
     }
     const resume = existsSync(outerRunDir);
     const code = await runCommand(
@@ -2219,25 +4547,25 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
         admissionReview: "off",
       },
     );
-    if (
-      existsSync(join(outerRunDir, EVENTS_FILE))
-      && readEvents(outerRunDir).some((event) => event.type === "eval.completed" || event.type === "episode.invalid")
-    ) {
-      persistMetaSearchTrajectory({
+    const boundaryCode = completeSearchCommandRun({
+      exitCode: code,
+      outerRunDir,
+      persistTrajectory: () => persistMetaSearchTrajectory({
         root: io.root,
         campaignDir,
         outerRunId,
         configHash,
         config,
         journal,
-      });
-    }
-    if (code === 0) {
+      }),
+      reportSecondaryFailure: io.err,
+    });
+    if (boundaryCode === 0) {
       const terminal = replayRun(outerRunDir).finished;
       if (terminal?.status !== "completed") throw new UsageError("search returned success without a completed terminal event");
       assertExactSearchCardinality(journal, config);
     }
-    return code;
+    return boundaryCode;
   } finally {
     runner.close();
     journal.close();
@@ -2247,7 +4575,8 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
 const RECURSIVE_USAGE =
   "usage: hone recursive --campaign <path> --headless "
   + "[--phase freeze|search|approve-search|confirmation|terminal|authorize] "
-  + "[--out <gitignored-path>] [--target-artifact sha256:<64hex>] [--controller-artifact sha256:<64hex>] "
+  + "[--out <gitignored-path>] [--sealed-base <dir>] "
+  + "[--target-artifact sha256:<64hex>] [--controller-artifact sha256:<64hex>] "
   + "[--control-winner sha256:<64hex>] [--generation0 sha256:<64hex>] [--generation1 sha256:<64hex>] "
   + "[--generation2 sha256:<64hex>] [--gate-thresholds <path>] [--gate G1|G2] [--approver <name>] "
   + "[--reason <text>] [--record-dir <stage-a-cell-dir>] [--attest-diff-confined] [--attest-mechanism-plausible]";
@@ -2277,6 +4606,108 @@ function digestFlag(value: string | undefined, label: string): Sha256Digest | un
 
 function recursiveOptimizerImage(config: RecursiveMetaCampaignConfig): string {
   return config.optimizerRuntime.image;
+}
+
+/**
+ * Select the optimizer base closure for recursive coordination.
+ *
+ * An unmigrated campaign may continue from its authenticated live tree. A
+ * source migration still forbids that fallback. An explicit --sealed-base is
+ * accepted when either the historical outer optimizer seal or a durable
+ * runtime-closure record binds its digest; when both exist they must agree.
+ */
+export function recursiveOptimizerBaseSnapshot(
+  configInput: RecursiveMetaCampaignConfig,
+  root: string,
+  outerRunDir: string,
+  sealedBaseFlag: string | undefined,
+): OptimizerSnapshot {
+  const config = MetaCampaignConfigV2.parse(configInput);
+  metaCampaignConfigHash(config);
+  const closureRecord = config.runtimeClosureJournal?.captures.at(-1);
+  if (config.sourceMigrationJournal === undefined && sealedBaseFlag === undefined) {
+    return collectOptimizerSnapshot(root);
+  }
+  if (
+    config.sourceMigrationJournal === undefined
+    && sealedBaseFlag !== undefined
+    && closureRecord === undefined
+  ) {
+    throw new UsageError(
+      "--sealed-base is valid only after an explicit campaign source migration or runtime closure capture",
+    );
+  }
+  if (config.sourceMigrationJournal !== undefined && sealedBaseFlag === undefined) {
+    throw new UsageError(
+      "migrated recursive campaigns require --sealed-base <dir>; refusing to fall back to the current source tree",
+    );
+  }
+  if (sealedBaseFlag === undefined) throw new UsageError("sealed optimizer base path is missing");
+
+  const outerSeal = readOptimizerArtifactSeal(outerRunDir);
+  if (outerSeal !== null && (
+    outerSeal.runId !== basename(outerRunDir)
+    || outerSeal.sourceArtifact !== config.controllerOptimizer.sourceArtifact
+    || outerSeal.mergedDigest !== config.controllerOptimizer.bundleDigest
+  )) {
+    throw new UsageError("sealed outer optimizer identity does not match the frozen campaign controller");
+  }
+  if (
+    outerSeal === null
+    && closureRecord === undefined
+    && config.sourceMigrationJournal !== undefined
+  ) {
+    throw new UsageError(
+      `migrated recursive campaign has no sealed outer optimizer base identity in ${outerRunDir}`,
+    );
+  }
+  if (
+    outerSeal !== null
+    && closureRecord !== undefined
+    && outerSeal.baseDigest !== closureRecord.optimizerBaseDigest
+  ) {
+    throw new UsageError("runtime closure optimizer identity disagrees with the sealed outer base");
+  }
+
+  const expectedDigest = closureRecord?.optimizerBaseDigest ?? outerSeal?.baseDigest;
+  if (expectedDigest === undefined) throw new UsageError("campaign has no sealed optimizer base identity");
+  const sealedBaseRoot = resolve(root, sealedBaseFlag);
+  const snapshot = collectOptimizerSnapshot(sealedBaseRoot);
+  const actualDigest = snapshotDigest(recursiveOptimizerImage(config), snapshot);
+  if (actualDigest !== expectedDigest) {
+    throw new UsageError(
+      `sealed optimizer base digest mismatch: ${actualDigest} != campaign seal ${expectedDigest}`,
+    );
+  }
+  return snapshot;
+}
+
+const LEGACY_CAMPAIGN11_SOURCE_ARTIFACT =
+  "sha256:499ee208f5b7376a3cfc583e44b7971f7b1b9d378499429ddd67caf04d5f36e2";
+const LEGACY_CAMPAIGN11_BUNDLE_DIGEST =
+  "sha256:fe92e17955adebe53c9ed4076ae1dcdfb2e328d19818d7273fb4f4d850f0d6dc";
+
+/**
+ * Exact compatibility allowlist for Campaign 11's migrated pre-toolbelt
+ * worker. The base closure has already been authenticated against the outer
+ * optimizer seal before this check. No migration record or any identity drift
+ * leaves the modern full-toolbelt contract in force.
+ */
+export function recursiveMutationWorkerPreflightContract(
+  config: RecursiveMetaCampaignConfig,
+  baseSnapshot: OptimizerSnapshot,
+): MutationWorkerPreflightContract | undefined {
+  if (
+    config.sourceMigrationJournal !== undefined
+    && config.seedOptimizer.sourceArtifact === LEGACY_CAMPAIGN11_SOURCE_ARTIFACT
+    && config.seedOptimizer.bundleDigest === LEGACY_CAMPAIGN11_BUNDLE_DIGEST
+    && config.controllerOptimizer.sourceArtifact === LEGACY_CAMPAIGN11_SOURCE_ARTIFACT
+    && config.controllerOptimizer.bundleDigest === LEGACY_CAMPAIGN11_BUNDLE_DIGEST
+    && snapshotDigest(config.optimizerRuntime.image, baseSnapshot) === LEGACY_CAMPAIGN11_BUNDLE_DIGEST
+  ) {
+    return "legacy-selftest";
+  }
+  return undefined;
 }
 
 async function prepareRecursiveControls(
@@ -2318,16 +4749,19 @@ async function checkedPublicIdentity(
   return { sourceArtifact, bundleDigest: checked.bundleDigest };
 }
 
-function recursivePhaseReceipt(
+export function recursivePhaseReceipt(
   campaignDir: string,
   phase: string,
-  configHash: Sha256Digest,
+  config: RecursiveMetaCampaignConfig,
   body: Record<string, unknown>,
 ): string {
   const receipt = {
     version: 1,
-    configHash,
+    configHash: metaCampaignConfigHash(config),
     phase,
+    sourceMigrationJournal: config.sourceMigrationJournal ?? null,
+    imageRepinJournal: config.imageRepinJournal ?? null,
+    runtimeClosureJournal: config.runtimeClosureJournal ?? null,
     ...body,
   };
   const output = join(campaignDir, `${phase}-receipt.json`);
@@ -2336,13 +4770,33 @@ function recursivePhaseReceipt(
   return output;
 }
 
-export interface TrustedRecursiveOptions {
-  /** Existing assembled artifact and exact document bytes; never read from optimizer flags/config. */
-  corpus?: Omit<BuildBrokerCorpusConfigInputs, "campaignConfigHash">;
+export interface RecursiveCommandOptions {
+  /**
+   * Trusted corpus handoff: an existing assembled provenance artifact and exact
+   * document bytes, never read from optimizer flags or config. When supplied,
+   * every executing phase verifies it against the frozen cell and serves it to
+   * the outer optimizer and every child run.
+   */
+  readonly corpus?: Omit<BuildBrokerCorpusConfigInputs, "campaignConfigHash">;
+  /** Test-only observation at the trusted dispatch-policy boundary. */
+  readonly observeMutationWorkerPreflightContract?: (
+    contract: MutationWorkerPreflightContract | undefined,
+  ) => void;
+  /** Test seam at the freeze-time CAS capture boundary; production always uses the durable capturer. */
+  readonly captureFrozenRuntimeClosure?: typeof captureRuntimeClosure;
+  /** Test-only prepared freeze inputs; publication still traverses the command's production call site. */
+  readonly preparedFreezePublication?: {
+    readonly frozenConfig: RecursiveMetaCampaignConfig;
+    readonly closureCapture: CaptureRuntimeClosureResult;
+  };
+  /** Test-only boundary proving SEARCH traverses the pre-ignition gate wiring. */
+  readonly stopAfterPreIgnitionGate?: boolean;
 }
 
-function recursiveCorpus(config: RecursiveMetaCampaignConfig, inputs: TrustedRecursiveOptions["corpus"]): BrokerCorpusConfig {
-  if (inputs === undefined) throw new UsageError("recursive execution requires verified corpus provenance and document bytes");
+function recursiveCorpus(
+  config: RecursiveMetaCampaignConfig,
+  inputs: NonNullable<RecursiveCommandOptions["corpus"]>,
+): BrokerCorpusConfig {
   const corpus = buildBrokerCorpusConfig({ ...inputs, campaignConfigHash: metaCampaignConfigHash(config) });
   const cohortError = corpusCohortFenceError(corpus, config.corpusCohort);
   if (cohortError !== null) throw new UsageError(cohortError);
@@ -2365,13 +4819,18 @@ function recursiveCorpus(config: RecursiveMetaCampaignConfig, inputs: TrustedRec
 }
 
 /** Execute one frozen recursive generation cell; orchestration composes these durable cells. */
-export async function recursiveCommand(args: string[], io: CmdIo, trusted: TrustedRecursiveOptions = {}): Promise<number> {
+export async function recursiveCommand(
+  args: string[],
+  io: CmdIo,
+  options: RecursiveCommandOptions = {},
+): Promise<number> {
   const { positionals, flags } = parseFlags(args, {
     booleans: ["headless", "attest-diff-confined", "attest-mechanism-plausible"],
     strings: [
       "campaign",
       "phase",
       "out",
+      "sealed-base",
       "target-artifact",
       "controller-artifact",
       "control-winner",
@@ -2392,6 +4851,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
   if (!["freeze", "search", "approve-search", "confirmation", "terminal", "authorize"].includes(phaseFlag)) throw new UsageError(RECURSIVE_USAGE);
   const phase = phaseFlag as "freeze" | "search" | "approve-search" | "confirmation" | "terminal" | "authorize";
   const outFlag = strFlag(flags, "out");
+  const sealedBaseFlag = strFlag(flags, "sealed-base");
   if ((phase === "freeze") !== (outFlag !== undefined)) throw new UsageError(RECURSIVE_USAGE);
   if (optimizerOverridden(io.env)) throw new UsageError("official recursive campaigns refuse HONE_OPTIMIZER_CMD");
 
@@ -2405,15 +4865,13 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     assertG1SearchApproved(campaignDir, config);
   }
   // Non-executing freeze/approval/authorization remain independent of document availability.
-  // Every executing phase verifies before optimizer preparation or any child dispatch.
-  const corpus = phase === "search" || phase === "confirmation" || phase === "terminal"
-    ? recursiveCorpus(config, trusted.corpus) : undefined;
+  // A supplied corpus is verified before optimizer preparation or any child dispatch.
+  const corpus = (phase === "search" || phase === "confirmation" || phase === "terminal")
+    && options.corpus !== undefined ? recursiveCorpus(config, options.corpus) : undefined;
   assertCleanSourceTree(io.root);
   const commit = sourceCommit(io.root);
   const runtimeDigest = verifiedBootRuntimeDigest() as Sha256Digest;
-  if (phase !== "freeze" && (config.trustedRuntime.sourceCommit !== commit || config.trustedRuntime.digest !== runtimeDigest)) {
-    throw new UsageError("recursive campaign trusted runtime identity drift");
-  }
+  if (phase !== "freeze") assertRecursiveCampaignSourceIdentity(config, commit, runtimeDigest);
   if (phase === "approve-search") {
     const recordDir = strFlag(flags, "record-dir");
     if (recordDir === undefined) throw new UsageError(RECURSIVE_USAGE);
@@ -2430,46 +4888,99 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     io.out(canonicalJson({ configHash, phase, gate: "G1", approvalPath }));
     return 0;
   }
+  if (phase === "search") {
+    assertRequiredPanelCapsuleSmoke(io.root, config);
+    if (options.stopAfterPreIgnitionGate === true) return 0;
+  }
+  let rootSnapshot: OptimizerSnapshot;
+  if (phase === "freeze") {
+    if (sealedBaseFlag !== undefined) {
+      throw new UsageError("--sealed-base is valid only after an explicit campaign source migration");
+    }
+    rootSnapshot = collectOptimizerSnapshot(io.root);
+  } else {
+    const preflightRegisteredConfigPath = join(campaignDir, "campaign.json");
+    if (existsSync(preflightRegisteredConfigPath)) {
+      registeredCampaignConfigNeedsReconciliation(preflightRegisteredConfigPath, config);
+    }
+    rootSnapshot = recursiveOptimizerBaseSnapshot(
+      config,
+      io.root,
+      join(runsRoot(io.root), `run_recursive_outer_${hashBody}`),
+      sealedBaseFlag,
+    );
+  }
+  const mutationWorkerPreflightContract = phase === "freeze"
+    ? undefined
+    : recursiveMutationWorkerPreflightContract(config, rootSnapshot);
+  options.observeMutationWorkerPreflightContract?.(mutationWorkerPreflightContract);
   const casDir = casRoot(io.root);
   const cas = new CasStore(casDir);
-  const rootSnapshot = collectOptimizerSnapshot(io.root);
   assertMutablePathsResolve(config.mutablePaths, rootSnapshot);
   assertOptimizerProtectedPathsResolve(config.protectedPaths, rootSnapshot);
-  const localSeed = await captureSeedCandidate(io.root, cas);
 
   if (phase === "freeze") {
-    const corpus = freezeCorpusEntries(io.root, config);
-    config = MetaCampaignConfigV2.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
-    const comparisonImage = recursiveOptimizerImage(config);
-    const explicitTarget = digestFlag(strFlag(flags, "target-artifact"), "--target-artifact");
-    const targetSource = explicitTarget
-      ?? (config.generation.stage === "A" ? localSeed.artifactHash : config.seedOptimizer.sourceArtifact as Sha256Digest);
-    const explicitController = digestFlag(strFlag(flags, "controller-artifact"), "--controller-artifact");
-    const controllerSource = explicitController
-      ?? (config.generation.controllerGeneration === 1 ? targetSource : localSeed.artifactHash);
-    const target = await resolveCandidateOptimizer({
-      casDir,
-      artifactHash: targetSource,
-      image: comparisonImage,
-      baseSnapshot: rootSnapshot,
-    });
-    const controller = await resolveCandidateOptimizer({
-      casDir,
-      artifactHash: controllerSource,
-      image: comparisonImage,
-      baseSnapshot: rootSnapshot,
-    });
-    const controls = await prepareRecursiveControls(target.snapshot, cas, casDir, comparisonImage);
-    const frozen = freezeRecursiveCampaignConfig(config, corpus, {
-      sourceCommit: commit,
-      runtimeDigest,
-      target,
-      controller,
-      brokenControl: controls.broken,
-      degradedControl: controls.degraded,
-    });
+    let frozenConfig: RecursiveMetaCampaignConfig;
+    let closureCapture: CaptureRuntimeClosureResult;
+    if (options.preparedFreezePublication !== undefined) {
+      frozenConfig = options.preparedFreezePublication.frozenConfig;
+      closureCapture = options.preparedFreezePublication.closureCapture;
+    } else {
+      const localSeed = await captureSeedCandidate(io.root, cas);
+      const corpus = freezeCorpusEntries(io.root, config);
+      config = MetaCampaignConfigV2.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
+      const comparisonImage = recursiveOptimizerImage(config);
+      const explicitTarget = digestFlag(strFlag(flags, "target-artifact"), "--target-artifact");
+      const targetSource = explicitTarget
+        ?? (config.generation.stage === "A" ? localSeed.artifactHash : config.seedOptimizer.sourceArtifact as Sha256Digest);
+      const explicitController = digestFlag(strFlag(flags, "controller-artifact"), "--controller-artifact");
+      const controllerSource = explicitController
+        ?? (config.generation.controllerGeneration === 1 ? targetSource : localSeed.artifactHash);
+      const target = await resolveCandidateOptimizer({
+        casDir,
+        artifactHash: targetSource,
+        image: comparisonImage,
+        baseSnapshot: rootSnapshot,
+      });
+      const controller = await resolveCandidateOptimizer({
+        casDir,
+        artifactHash: controllerSource,
+        image: comparisonImage,
+        baseSnapshot: rootSnapshot,
+      });
+      const controls = await prepareRecursiveControls(target.snapshot, cas, casDir, comparisonImage);
+      frozenConfig = freezeRecursiveCampaignConfig(config, corpus, {
+        sourceCommit: commit,
+        runtimeDigest,
+        target,
+        controller,
+        brokenControl: controls.broken,
+        degradedControl: controls.degraded,
+      });
+      const frozenConfigHash = metaCampaignConfigHash(frozenConfig);
+      closureCapture = await (options.captureFrozenRuntimeClosure ?? captureRuntimeClosure)({
+        sourceRoot: io.root,
+        sourceCommit: commit,
+        campaignBootDigest: runtimeDigest,
+        expectedBootDigest: runtimeDigest,
+        optimizerImage: comparisonImage,
+        optimizerBaseDigest: snapshotDigest(comparisonImage, rootSnapshot) as Sha256Digest,
+        campaignConfigHash: frozenConfigHash,
+        capturedAt: new Date().toISOString(),
+        casDir,
+        previousRecordDigest: null,
+      });
+    }
     if (outFlag === undefined) throw new UsageError(RECURSIVE_USAGE);
-    const outputPath = writeFrozenCampaign(io.root, outFlag, frozen);
+    const publication = writeFrozenRecursiveCampaignWithClosure(
+      io.root,
+      outFlag,
+      frozenConfig,
+      closureCapture.record,
+    );
+    const frozen = publication.config;
+    const outputPath = publication.outputPath;
+    const outerAncestorCapacity = assertM2OuterAncestorCapacity(frozen);
     io.out(canonicalJson({
       phase,
       outputPath,
@@ -2478,10 +4989,18 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
       target: frozen.seedOptimizer,
       controller: frozen.controllerOptimizer,
       controls: frozen.controls,
+      outerAncestorCapacity,
+      runtimeClosure: {
+        manifestArtifact: closureCapture.record.manifestArtifact,
+        closureDigest: closureCapture.record.closureDigest,
+        marginalBytes: closureCapture.marginalBytes,
+        reusedBytes: closureCapture.reusedBytes,
+      },
     }));
     return 0;
   }
 
+  assertM2OuterAncestorCapacity(config);
   const comparisonImage = recursiveOptimizerImage(config);
   const target = await resolveRegisteredOptimizer(config.seedOptimizer, commit, rootSnapshot, casDir, comparisonImage);
   const controller = await resolveRegisteredOptimizer(config.controllerOptimizer, commit, rootSnapshot, casDir, comparisonImage);
@@ -2495,12 +5014,13 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     throw new UsageError("recursive trusted controls do not match the frozen target-specific controls");
   }
   const capsules = resolveRegisteredCapsules(io.root, config);
+  const outerRunId = `run_recursive_outer_${hashBody}`;
+  const outerRunDir = join(runsRoot(io.root), outerRunId);
   mkdirSync(campaignDir, { recursive: true, mode: 0o700 });
   chmodSync(campaignDir, 0o700);
   const registeredConfigPath = join(campaignDir, "campaign.json");
   if (existsSync(registeredConfigPath)) {
-    const registered = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(registeredConfigPath, "utf8")));
-    if (canonicalJson(registered) !== canonicalJson(config)) throw new UsageError("recursive cell state belongs to a different configuration");
+    reconcileRegisteredCampaignConfig(registeredConfigPath, config);
   } else {
     writeFileDurable(registeredConfigPath, `${JSON.stringify(config, null, 2)}\n`);
     chmodSync(registeredConfigPath, 0o600);
@@ -2528,13 +5048,21 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
   const modelRegistry = new CampaignModelRegistry(campaignDir, configHash, io.root);
   const childSupervisor = new CliChildSupervisor(
     io,
-    config,
+    campaignChildDispatchPolicy(config, {
+      proxyRole: "inner-capsule-improvement",
+      campaignConfigHash: configHash,
+      evaluatorTimeoutSec: config.evaluatorTimeoutSec,
+      ...(mutationWorkerPreflightContract === undefined
+        ? {}
+        : { mutationWorkerPreflightContract }),
+      ...(corpus === undefined ? {} : { corpus: { config: corpus, cohort: config.corpusCohort } }),
+    }),
     campaignDir,
     capsules,
     target.snapshot,
     modelRegistry,
     campaignPauseAuthority,
-    corpus,
+    outerRunDir,
   );
   const recursiveResourceLedger = RecursiveResourceLedger.open(
     join(campaignDir, "recursive-resource.v1.ndjson"),
@@ -2551,6 +5079,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     campaignPauseAuthority,
   );
   const recursiveBroker = recursiveLauncher.brokerConfig(recursiveResourceLedger);
+  const recursiveEvaluationStrategy = recursiveLauncher.evaluationStrategy();
   const runner = new MetaCampaignRunner({
     config,
     journal,
@@ -2559,8 +5088,6 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     childSupervisor,
     envelopeLedger,
   });
-  const outerRunId = `run_recursive_outer_${hashBody}`;
-  const outerRunDir = join(runsRoot(io.root), outerRunId);
 
   try {
     const targetIdentity: MetaOptimizerIdentity = {
@@ -2581,7 +5108,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
           degradedControl: controls.degraded,
         });
         const measurementHash = sha256(canonicalJson(result.measurements));
-        const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+        const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
           generation: config.generation,
           winner,
           measurementCount: result.measurements.length,
@@ -2621,7 +5148,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
         degradedControl: controls.degraded,
       });
       const measurementHash = sha256(canonicalJson(result.measurements));
-      const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+      const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
         generation: config.generation,
         controlWinner: controlWinnerIdentity,
         generation2: generation2Identity,
@@ -2659,7 +5186,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
         generation2: identities.generation2,
       });
       const result = await runner.runRecursiveTerminal(identities);
-      const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+      const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
         generation: config.generation,
         artifacts: identities,
         measurementCount: result.measurements.length,
@@ -2680,7 +5207,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
         if (controlWinner === undefined || generation2 === undefined || recordDir === undefined) throw new UsageError(RECURSIVE_USAGE);
         // The G1 statistical record lives in the (separate) stage-A cell directory.
         const authorization = assembleG1Authorization({
-          configHash,
+          config,
           record: readG1Record(resolve(io.root, recordDir)),
           controlWinner: await checkedPublicIdentity(controlWinner, gate),
           generation2: await checkedPublicIdentity(generation2, gate),
@@ -2695,7 +5222,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
       const generation2 = digestFlag(strFlag(flags, "generation2"), "--generation2");
       if (generation0 === undefined || generation1 === undefined || generation2 === undefined) throw new UsageError(RECURSIVE_USAGE);
       const authorization = assembleG2Authorization({
-        configHash,
+        config,
         record: readG2Record(campaignDir),
         generation0: await checkedPublicIdentity(generation0, gate),
         generation1: await checkedPublicIdentity(generation1, gate),
@@ -2716,7 +5243,7 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
       assertExactSearchCardinality(journal, config);
       const trajectoryPath = persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal });
       const winner = await selectedSearchWinner(outerRunDir, config, gate);
-      const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+      const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
         generation: config.generation,
         target: targetIdentity,
         controller: config.controllerOptimizer,
@@ -2729,15 +5256,11 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
 
     const outerConfigPath = join(campaignDir, "outer-config.json");
     if (!existsSync(outerConfigPath)) {
-      writeFileDurable(outerConfigPath, `${JSON.stringify({
-        routing: { mutation: { model: config.routing.outerMutation } },
-        apply: "none",
-        headless: true,
-        seed: config.generation.outerReplicate,
-        budget: config.budgets.outer,
-        promotion: config.promotion,
-      }, null, 2)}\n`);
-      chmodSync(outerConfigPath, 0o600);
+      writeCampaignOuterRunConfig(
+        outerConfigPath,
+        config,
+        config.generation.outerReplicate,
+      );
     }
     const resume = existsSync(outerRunDir);
     const commandArgs = resume
@@ -2747,32 +5270,38 @@ export async function recursiveCommand(args: string[], io: CmdIo, trusted: Trust
     if (config.generation.stage === "B") assertG1SearchApproved(campaignDir, config);
     const code = await runCommand(commandArgs, io, {
       runId: outerRunId,
+      evalTimeoutSec: config.evaluatorTimeoutSec,
       recursiveBroker,
+      evaluationStrategy: recursiveEvaluationStrategy,
       optimizerEpisodesMax: config.counts.candidateAttemptsMax,
       maxPublicCandidateEvaluations: config.counts.candidateAttemptsMax,
       optimizerBaseSnapshot: rootSnapshot,
+      ...(mutationWorkerPreflightContract === undefined
+        ? {}
+        : { mutationWorkerPreflightContract }),
       proxyRole: "outer-optimizer",
       campaignPauseAuthority,
       campaignConfigHash: configHash,
-      corpus,
-      corpusCohort: config.corpusCohort,
+      ...(corpus === undefined ? {} : { corpus, corpusCohort: config.corpusCohort }),
+      hasUnsettledPendingChild: () => journal.queryPendingChildren().length !== 0,
       // The synthetic outer task is trusted campaign machinery rather than a
       // corpus capsule; its manifest bytes were validated before campaign seal.
       admissionReview: "off",
     });
-    if (
-      existsSync(join(outerRunDir, EVENTS_FILE))
-      && readEvents(outerRunDir).some((event) => event.type === "eval.completed" || event.type === "episode.invalid")
-    ) {
-      persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal });
-    }
-    if (code !== 0) return code;
+    const boundaryCode = completeSearchCommandRun({
+      exitCode: code,
+      outerRunDir,
+      persistTrajectory: () =>
+        persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal }),
+      reportSecondaryFailure: io.err,
+    });
+    if (boundaryCode !== 0) return boundaryCode;
     const terminal = replayRun(outerRunDir).finished;
     if (terminal?.status !== "completed") throw new UsageError("recursive search returned success without a completed terminal event");
     assertExactSearchCardinality(journal, config);
     const trajectoryPath = persistMetaSearchTrajectory({ root: io.root, campaignDir, outerRunId, configHash, config, journal });
     const winner = await selectedSearchWinner(outerRunDir, config, gate);
-    const receiptPath = recursivePhaseReceipt(campaignDir, phase, configHash, {
+    const receiptPath = recursivePhaseReceipt(campaignDir, phase, config, {
       generation: config.generation,
       target: targetIdentity,
       controller: config.controllerOptimizer,

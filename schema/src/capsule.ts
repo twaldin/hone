@@ -18,6 +18,18 @@ export const SCHEMA_VERSION = 2;
 export const IMAGE_DIGEST_REF =
   /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*@sha256:[0-9a-f]{64}$/;
 
+/**
+ * Runtime identity is deliberately mixed: admission content-addresses the
+ * admitted manifest, while execution may use a separately authorised image.
+ * Naming both halves prevents an overridden manifest object from erasing the
+ * distinction.
+ */
+export const CapsuleRuntimeIdentity = z.object({
+  admittedCapsuleDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  executionImage: z.string().min(1).refine((value) => !/^sha256:/.test(value), "execution image cannot be an admitted digest"),
+}).strict();
+export type CapsuleRuntimeIdentity = z.infer<typeof CapsuleRuntimeIdentity>;
+
 /** Visibility of an asset group relative to the mutable optimizer. */
 export const AssetVisibility = z.enum([
   /** Visible to mutation sessions and evaluators. */

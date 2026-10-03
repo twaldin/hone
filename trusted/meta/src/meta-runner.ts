@@ -17,8 +17,12 @@ import {
   EvaluationRecord,
   MetaCampaignConfig as MetaCampaignConfigSchema,
   M2EnvelopeIdentity as M2EnvelopeIdentitySchema,
+  campaignSourceCommits,
   canonicalJson,
   type MetaCampaignConfig,
+  type CampaignImageRepinV1,
+  type CampaignSourceMigrationV1,
+  type CampaignRuntimeClosureCaptureV1,
   type M2EnvelopeIdentity,
 } from "@hone/schema";
 import { z } from "zod";
@@ -1668,10 +1672,341 @@ export function recursiveEnvelopeReservationId(
   return sha256(canonicalJson({ version: 1, configHash, purpose, identity }));
 }
 
+type CampaignImageRepinRecordBody = Omit<CampaignImageRepinV1, "recordDigest">;
+type CampaignSourceMigrationRecordBody = Omit<CampaignSourceMigrationV1, "recordDigest">;
+type CampaignRuntimeClosureRecordBody = Omit<CampaignRuntimeClosureCaptureV1, "recordDigest">;
 
+/** Hash one image re-pin record without its self-authenticating digest field. */
+export function campaignImageRepinRecordDigest(
+  record: CampaignImageRepinRecordBody,
+): Sha256Digest {
+  return sha256(canonicalJson(record));
+}
+
+/** Hash one migration record without its self-authenticating digest field. */
+export function campaignSourceMigrationRecordDigest(
+  record: CampaignSourceMigrationRecordBody,
+): Sha256Digest {
+  return sha256(canonicalJson(record));
+}
+
+/** Hash one closure-capture record without its self-authenticating digest field. */
+export function campaignRuntimeClosureRecordDigest(
+  record: CampaignRuntimeClosureRecordBody,
+): Sha256Digest {
+  return sha256(canonicalJson(record));
+}
+
+interface OriginalCampaignIdentity {
+  readonly configHash: Sha256Digest;
+  readonly sourceCommits: ReadonlySet<string>;
+  readonly bootDigests: ReadonlySet<string>;
+}
+
+function replaceCampaignCapsuleImages(
+  config: MetaCampaignConfig,
+  replacements: ReadonlyMap<string, string>,
+): MetaCampaignConfig {
+  const replace = <T extends { capsuleId: string; image: string }>(capsule: T): T => ({
+    ...capsule,
+    image: replacements.get(capsule.capsuleId) ?? capsule.image,
+  });
+  return MetaCampaignConfigSchema.parse({
+    ...config,
+    train: config.train.map(replace),
+    holdout: config.holdout.map(replace),
+    ...(config.version === 2
+      ? {
+        developmentPanel: {
+          ...config.developmentPanel,
+          members: config.developmentPanel.members.map((member) => ({
+            ...member,
+            capsule: replace(member.capsule),
+          })),
+        },
+      }
+      : {}),
+  });
+}
+
+function restoreOriginalCampaignImages(
+  current: MetaCampaignConfig,
+  sourceOriginal: MetaCampaignConfig,
+): MetaCampaignConfig {
+  const journal = current.imageRepinJournal;
+  if (journal === undefined) return sourceOriginal;
+
+  let previous: CampaignImageRepinV1 | undefined;
+  for (const record of journal.repins) {
+    const { recordDigest, ...body } = record;
+    if (record.fromImage === record.toImage) {
+      throw new Error("campaign image re-pin must change the pinned image");
+    }
+    if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) {
+      throw new Error("campaign image re-pin journal record chain is not append-only");
+    }
+    if (recordDigest !== campaignImageRepinRecordDigest(body)) {
+      throw new Error("campaign image re-pin journal record digest mismatch");
+    }
+    previous = record;
+  }
+
+  const currentImages = new Map(
+    [...current.train, ...current.holdout].map((capsule) => [capsule.capsuleId, capsule.image]),
+  );
+  for (const record of [...journal.repins].reverse()) {
+    const image = currentImages.get(record.capsuleId);
+    if (image === undefined) {
+      throw new Error(`campaign image re-pin names unknown capsule ${record.capsuleId}`);
+    }
+    if (image !== record.toImage) {
+      throw new Error("campaign image re-pin journal provenance is discontinuous");
+    }
+    currentImages.set(record.capsuleId, record.fromImage);
+  }
+  return replaceCampaignCapsuleImages(sourceOriginal, currentImages);
+}
+
+type BundleIdentity = { sourceArtifact: string; bundleDigest: string };
+
+function sameBundleIdentity(left: BundleIdentity, right: BundleIdentity): boolean {
+  return left.sourceArtifact === right.sourceArtifact && left.bundleDigest === right.bundleDigest;
+}
+
+function restoreOriginalOptimizerIdentities(
+  config: MetaCampaignConfig,
+  migrations: readonly CampaignSourceMigrationV1[],
+): MetaCampaignConfig {
+  let restored = config;
+  for (const record of [...migrations].reverse()) {
+    const refreeze = record.optimizerRefreeze;
+    if (refreeze === undefined) continue;
+    if (restored.version !== 2) {
+      throw new Error("optimizer refreeze provenance is valid only for recursive campaigns");
+    }
+    if (refreeze.optimizerImage !== restored.optimizerRuntime.image) {
+      throw new Error("optimizer refreeze image does not match the recursive campaign runtime");
+    }
+    if (refreeze.fromOptimizerBaseDigest !== refreeze.optimizerBaseDigest) {
+      throw new Error("optimizer refreeze must retain the authenticated optimizer base digest");
+    }
+    if (
+      !sameBundleIdentity(restored.seedOptimizer, refreeze.seed.to)
+      || !sameBundleIdentity(restored.controllerOptimizer, refreeze.controller.to)
+      || !sameBundleIdentity(
+        {
+          sourceArtifact: restored.controls.brokenSourceArtifact,
+          bundleDigest: restored.controls.brokenBundleDigest,
+        },
+        refreeze.controls.broken.to,
+      )
+      || !sameBundleIdentity(
+        {
+          sourceArtifact: restored.controls.degradedSourceArtifact,
+          bundleDigest: restored.controls.degradedBundleDigest,
+        },
+        refreeze.controls.degraded.to,
+      )
+    ) {
+      throw new Error("optimizer refreeze journal provenance is discontinuous");
+    }
+    const runIds = refreeze.runs.map((run) => run.runId);
+    if (
+      new Set(runIds).size !== runIds.length
+      || canonicalJson(runIds) !== canonicalJson([...runIds].sort())
+    ) {
+      throw new Error("optimizer refreeze run records must be unique and sorted");
+    }
+    for (const run of refreeze.runs) {
+      if (
+        run.from.baseDigest !== run.to.baseDigest
+        || run.from.bundleDigest === run.to.bundleDigest
+        || run.from.contractHash === run.to.contractHash
+      ) {
+        throw new Error(`optimizer refreeze run ${run.runId} must retain its base and change its bundle and contract digests`);
+      }
+    }
+    restored = MetaCampaignConfigSchema.parse({
+      ...restored,
+      seedOptimizer: { ...restored.seedOptimizer, ...refreeze.seed.from },
+      controllerOptimizer: { ...restored.controllerOptimizer, ...refreeze.controller.from },
+      controls: {
+        brokenSourceArtifact: refreeze.controls.broken.from.sourceArtifact,
+        brokenBundleDigest: refreeze.controls.broken.from.bundleDigest,
+        degradedSourceArtifact: refreeze.controls.degraded.from.sourceArtifact,
+        degradedBundleDigest: refreeze.controls.degraded.from.bundleDigest,
+      },
+    });
+  }
+  return restored;
+}
+
+
+function validateOriginalCampaignIdentity(config: MetaCampaignConfig): OriginalCampaignIdentity {
+  const migrationJournal = config.sourceMigrationJournal;
+  const imageRepinJournal = config.imageRepinJournal;
+  const {
+    sourceMigrationJournal: _migrationJournal,
+    imageRepinJournal: _imageRepinJournal,
+    runtimeClosureJournal: _closureJournal,
+    ...withoutJournals
+  } = config;
+  const sourceCommits = new Set<string>();
+  const bootDigests = new Set<string>();
+  let sourceOriginal: MetaCampaignConfig;
+
+  if (migrationJournal === undefined) {
+    const currentCommit = campaignSourceCommits(config)[0];
+    if (currentCommit === undefined) throw new Error("campaign has no source identity");
+    sourceCommits.add(currentCommit);
+    bootDigests.add(config.trustedRuntime.digest);
+    sourceOriginal = MetaCampaignConfigSchema.parse(withoutJournals);
+  } else {
+    const first = migrationJournal.migrations[0];
+    const last = migrationJournal.migrations[migrationJournal.migrations.length - 1];
+    if (first === undefined || last === undefined) throw new Error("source migration journal is empty");
+
+    let previous: CampaignSourceMigrationV1 | undefined;
+    sourceCommits.add(first.from);
+    bootDigests.add(first.fromBootDigest);
+    for (const record of migrationJournal.migrations) {
+      const { recordDigest, ...body } = record;
+      if (record.from === record.to) throw new Error("source migration must change the pinned commit");
+      if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) {
+        throw new Error("source migration journal record chain is not append-only");
+      }
+      if (
+        previous !== undefined
+        && (record.from !== previous.to || record.fromBootDigest !== previous.bootDigest)
+      ) {
+        throw new Error("source migration journal provenance is discontinuous");
+      }
+      if (recordDigest !== campaignSourceMigrationRecordDigest(body)) {
+        throw new Error("source migration journal record digest mismatch");
+      }
+      sourceCommits.add(record.to);
+      bootDigests.add(record.bootDigest);
+      previous = record;
+    }
+
+    if (
+      campaignSourceCommits(config).some((pin) => pin !== last.to)
+      || config.trustedRuntime.digest !== last.bootDigest
+    ) {
+      throw new Error("source migration journal head does not match the campaign source identity");
+    }
+
+    const originalOptimizerIdentities = restoreOriginalOptimizerIdentities(
+      MetaCampaignConfigSchema.parse(withoutJournals),
+      migrationJournal.migrations,
+    );
+    sourceOriginal = MetaCampaignConfigSchema.parse({
+      ...originalOptimizerIdentities,
+      seedOptimizer: { ...originalOptimizerIdentities.seedOptimizer, sourceCommit: first.from },
+      trustedRuntime: {
+        ...originalOptimizerIdentities.trustedRuntime,
+        sourceCommit: first.from,
+        digest: first.fromBootDigest,
+      },
+      ...(originalOptimizerIdentities.version === 2
+        ? {
+          controllerOptimizer: {
+            ...originalOptimizerIdentities.controllerOptimizer,
+            sourceCommit: first.from,
+          },
+        }
+        : {}),
+    });
+  }
+
+  const original = restoreOriginalCampaignImages(config, sourceOriginal);
+  const configHash = sha256(canonicalJson(original));
+  if (
+    migrationJournal !== undefined
+    && configHash !== migrationJournal.campaignConfigHash
+  ) {
+    throw new Error("source migration altered frozen campaign fields outside the sanctioned source identity");
+  }
+  if (
+    imageRepinJournal !== undefined
+    && configHash !== imageRepinJournal.campaignConfigHash
+  ) {
+    throw new Error("campaign image re-pin altered frozen fields outside the sanctioned image reference");
+  }
+  return { configHash, sourceCommits, bootDigests };
+}
+
+function validateRuntimeClosureJournal(
+  config: MetaCampaignConfig,
+  original: OriginalCampaignIdentity,
+): void {
+  const journal = config.runtimeClosureJournal;
+  if (journal === undefined) return;
+  if (journal.campaignConfigHash !== original.configHash) {
+    throw new Error("runtime closure journal belongs to a different frozen campaign");
+  }
+
+  let previous: CampaignRuntimeClosureCaptureV1 | undefined;
+  for (const record of journal.captures) {
+    const { recordDigest, ...body } = record;
+    if (record.previousRecordDigest !== (previous?.recordDigest ?? null)) {
+      throw new Error("runtime closure journal record chain is not append-only");
+    }
+    if (recordDigest !== campaignRuntimeClosureRecordDigest(body)) {
+      throw new Error("runtime closure journal record digest mismatch");
+    }
+    if (!original.sourceCommits.has(record.sourceCommit)) {
+      throw new Error("runtime closure record source commit is not in the campaign lineage");
+    }
+    if (!original.bootDigests.has(record.campaignBootDigest)) {
+      throw new Error("runtime closure record is not bound to a campaign boot identity");
+    }
+    if (config.version === 2 && record.optimizerImage !== config.optimizerRuntime.image) {
+      throw new Error("runtime closure record optimizer image does not match the campaign");
+    }
+    previous = record;
+  }
+}
+
+/**
+ * Frozen campaign identity. Both sanctioned journals authenticate against the
+ * same original whole-config hash and therefore compose in either append order.
+ */
 export function metaCampaignConfigHash(configInput: MetaCampaignConfig): Sha256Digest {
   const config = MetaCampaignConfigSchema.parse(configInput);
-  return sha256(canonicalJson(config));
+  const original = validateOriginalCampaignIdentity(config);
+  validateRuntimeClosureJournal(config, original);
+  return original.configHash;
+}
+
+/** True only when `current` is the same campaign with append-only record journals. */
+export function campaignRecordExtends(
+  registeredInput: MetaCampaignConfig,
+  currentInput: MetaCampaignConfig,
+): boolean {
+  const registered = MetaCampaignConfigSchema.parse(registeredInput);
+  const current = MetaCampaignConfigSchema.parse(currentInput);
+  if (metaCampaignConfigHash(registered) !== metaCampaignConfigHash(current)) return false;
+  const priorMigrations = registered.sourceMigrationJournal?.migrations ?? [];
+  const nextMigrations = current.sourceMigrationJournal?.migrations ?? [];
+  const priorRepins = registered.imageRepinJournal?.repins ?? [];
+  const nextRepins = current.imageRepinJournal?.repins ?? [];
+  const priorCaptures = registered.runtimeClosureJournal?.captures ?? [];
+  const nextCaptures = current.runtimeClosureJournal?.captures ?? [];
+  if (
+    priorMigrations.length > nextMigrations.length
+    || priorRepins.length > nextRepins.length
+    || priorCaptures.length > nextCaptures.length
+  ) {
+    return false;
+  }
+  return priorMigrations.every(
+    (record, index) => canonicalJson(record) === canonicalJson(nextMigrations[index]),
+  ) && priorRepins.every(
+    (record, index) => canonicalJson(record) === canonicalJson(nextRepins[index]),
+  ) && priorCaptures.every(
+    (record, index) => canonicalJson(record) === canonicalJson(nextCaptures[index]),
+  );
 }
 
 export function metaEvidenceHash(evidence: MetaChildEvidenceV1): Sha256Digest {
@@ -1701,7 +2036,7 @@ export function selectDeterministicBest(records: readonly EvaluationRecord[]): E
   return eligible[0]!.record;
 }
 
-async function mapBounded<T, R>(items: readonly T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+export async function mapBounded<T, R>(items: readonly T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
   const worker = async (): Promise<void> => {

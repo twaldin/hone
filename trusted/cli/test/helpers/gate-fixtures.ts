@@ -87,6 +87,15 @@ function multiply(budget: BudgetEnvelope, factor: number): BudgetEnvelope {
   };
 }
 
+function add(left: BudgetEnvelope, right: BudgetEnvelope): BudgetEnvelope {
+  return {
+    maxTokens: left.maxTokens + right.maxTokens,
+    maxUsd: left.maxUsd + right.maxUsd,
+    maxWallClockSec: left.maxWallClockSec + right.maxWallClockSec,
+    maxEvaluatorInvocations: left.maxEvaluatorInvocations + right.maxEvaluatorInvocations,
+  };
+}
+
 const SOURCE_COMMIT = "1".repeat(40);
 
 export interface BuildConfigOptions {
@@ -130,6 +139,7 @@ export function buildConfig(stage: "A" | "B", options: BuildConfigOptions = {}):
   return MetaCampaignConfigV2.parse({
     ...legacy,
     version: 2,
+    evaluatorTimeoutSec: 2700,
     seedOptimizer: target,
     controllerOptimizer: controller,
     optimizerRuntime: { image: `hone-optimizer@${digest("recursive:optimizer-image")}` },
@@ -168,7 +178,15 @@ export function buildConfig(stage: "A" | "B", options: BuildConfigOptions = {}):
       holdoutReplicates: 3,
       childConcurrency: 2,
     },
-    budgets: { ...legacy.budgets, outer: { ...legacy.budgets.outer, maxEvaluatorInvocations: 92 } },
+    budgets: {
+      ...legacy.budgets,
+      outer: { ...legacy.budgets.outer, maxEvaluatorInvocations: 92 },
+      // The root ledger admits the direct outer allowance plus every planned child reservation.
+      campaign: add(
+        { ...legacy.budgets.outer, maxEvaluatorInvocations: 92 },
+        multiply(child, 12 * 8 + confirmationRuns + 3 * 11 * 3),
+      ),
+    },
     developmentPanel: {
       panel: stage,
       members: train.map((entry, index) => ({

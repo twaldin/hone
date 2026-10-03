@@ -311,6 +311,64 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
     expect(eventTypes).not.toContain("run.finished");
   });
 
+  it("seals a campaign image re-pin while retaining the admitted capsule snapshot", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const configHash = `sha256:${"c".repeat(64)}` as const;
+    const repinnedImage = `hone-repinned@sha256:${"e".repeat(64)}`;
+    let pauseChecks = 0;
+    const authority: CampaignPauseAuthority = {
+      path: join(root, "campaign-pause.v1.json"),
+      configHash,
+      isCampaignPaused: () => {
+        pauseChecks += 1;
+        return pauseChecks >= 3;
+      },
+      recordCampaignPause: () => undefined,
+      recordCampaignResume: () => undefined,
+    };
+    const captured = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    expect(await cliRunCommand(
+      ["capsule", "--headless", "--backend", "stub"],
+      captured.io,
+      {
+        campaignConfigHash: configHash,
+        campaignPauseAuthority: authority,
+        proxyRole: "inner-capsule-improvement",
+        executionImageOverride: repinnedImage,
+      },
+    )).toBe(1);
+
+    const runsDir = join(root, ".hone-runs");
+    const runDir = join(runsDir, readdirOnly(runsDir));
+    const snapshot = CapsuleManifest.parse(JSON.parse(
+      readFileSync(join(runDir, "capsule-manifest.json"), "utf8"),
+    ));
+    const session = JSON.parse(readFileSync(join(runDir, "campaign-session.v1.json"), "utf8"));
+    expect(snapshot.image).toBe(manifestObject().image);
+    expect(session).toMatchObject({ version: 2, executionImage: repinnedImage });
+    const contract = readFileSync(join(runDir, "contract.md"), "utf8");
+    expect(contract).toContain(snapshot.image);
+    expect(contract).not.toContain(repinnedImage);
+
+    const before = readFileSync(join(runDir, "events.ndjson"), "utf8");
+    const openAuthority: CampaignPauseAuthority = {
+      ...authority,
+      isCampaignPaused: () => false,
+    };
+    await expect(cliRunCommand(
+      ["capsule", "--headless", "--backend", "stub", "--resume"],
+      captured.io,
+      {
+        campaignConfigHash: configHash,
+        campaignPauseAuthority: openAuthority,
+        proxyRole: "inner-capsule-improvement",
+        executionImageOverride: `hone-foreign@sha256:${"f".repeat(64)}`,
+      },
+    )).rejects.toThrow("campaign execution image changed since the run started");
+    expect(readFileSync(join(runDir, "events.ndjson"), "utf8")).toBe(before);
+  });
+
   it("refuses a generic resume of a campaign-sealed child before appending any event", async () => {
     const root = makeRoot();
     makeCapsule(root);

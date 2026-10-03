@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import {
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   M2_CANDIDATE_ATTEMPTS_MAX,
   M2_CANDIDATE_COUNT,
+  M2_EVALUATOR_TIMEOUT_SEC,
   M2_INNER_MODEL_ROUTE,
   M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
@@ -13,14 +15,17 @@ import {
   M2_TERMINAL_CAPSULE_COUNT,
   M2_CALIBRATION_DEFERRED_BINDING,
   MetaCampaignConfigV2,
+  M2OuterDirectEnvelopeDerivation,
   MetaCampaignConfigV2Draft,
   canonicalJson,
+  type AdmissionReceiptRecord,
   type BudgetEnvelope,
   type CapsuleManifest,
   type DiagnosticOrderingReport,
   type M2CalibrationBinding,
   type MetaCapsuleEntry,
   type MetaCampaignConfigV2 as RecursiveMetaCampaignConfig,
+  type M2OuterDirectEnvelopeDerivation as M2OuterDirectEnvelopeDerivationRecord,
   type PromotionRule,
 } from "@hone/schema";
 import { z } from "zod";
@@ -29,6 +34,7 @@ import { CorpusProvenanceV1, verifyCorpusProvenance } from "./corpus-provenance.
 import { selectSaturationCeiling, type SaturationCeilingReport, type SaturationCell } from "@hone/scoring";
 import { UsageError } from "./args.js";
 import { writeFileDurable } from "./eventlog.js";
+import { gate2ReceiptCitesAuthorizedBasis } from "./m2-cohort.js";
 
 /**
  * Initial M2 launch draft generator (launch-tooling item 3).
@@ -62,12 +68,9 @@ const BUDGET_DIMENSIONS = [
 ] as const;
 
 /**
- * The corpus assembler's frozen artifact schema (./corpus-provenance.ts) does
- * not enforce launch cardinalities; the generator does, fail closed: exactly
- * 16 development + 11 terminal capsules, distinct identities, and role lists
- * consistent with the per-capsule role records. The inputsDigest self-binding
- * is enforced separately by verifyCorpusProvenance — the single trusted
- * chokepoint — before any drafting decision reads the artifact.
+ * The verified provenance artifact may carry either the original atomic
+ * 16+11 cohort or the exact owner-authorized 13+8 admission partition. Any
+ * other cardinality is a silent shrink and refuses.
  */
 export const LaunchCorpusProvenance = CorpusProvenanceV1.superRefine((provenance, ctx) => {
   const ids = new Set(provenance.capsules.map((capsule) => capsule.id));
@@ -78,18 +81,21 @@ export const LaunchCorpusProvenance = CorpusProvenanceV1.superRefine((provenance
   if (digests.size !== provenance.capsules.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["capsules"], message: "capsule digests are not distinct" });
   }
-  if (provenance.developmentCapsuleIds.length !== M2_DEVELOPMENT_CAPSULE_COUNT) {
+  const partial = provenance.partialCohort;
+  const expectedDevelopment = partial === undefined ? M2_DEVELOPMENT_CAPSULE_COUNT : 13;
+  const expectedTerminal = partial === undefined ? M2_TERMINAL_CAPSULE_COUNT : 8;
+  if (provenance.developmentCapsuleIds.length !== expectedDevelopment) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["developmentCapsuleIds"],
-      message: `launch cohort requires exactly ${M2_DEVELOPMENT_CAPSULE_COUNT} development capsules, got ${provenance.developmentCapsuleIds.length}`,
+      message: `launch cohort requires exactly ${expectedDevelopment} admitted development capsules, got ${provenance.developmentCapsuleIds.length}`,
     });
   }
-  if (provenance.terminalCapsuleIds.length !== M2_TERMINAL_CAPSULE_COUNT) {
+  if (provenance.terminalCapsuleIds.length !== expectedTerminal) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["terminalCapsuleIds"],
-      message: `launch cohort requires exactly ${M2_TERMINAL_CAPSULE_COUNT} terminal capsules, got ${provenance.terminalCapsuleIds.length}`,
+      message: `launch cohort requires exactly ${expectedTerminal} admitted terminal capsules, got ${provenance.terminalCapsuleIds.length}`,
     });
   }
   const byRole = (role: "development" | "terminal") =>
@@ -113,6 +119,20 @@ export const LaunchCorpusProvenance = CorpusProvenanceV1.superRefine((provenance
         path: [path],
         message: `${path} must list exactly the capsules with role "${role}"`,
       });
+    }
+  }
+  if (partial !== undefined) {
+    const authorized = new Map(partial.admitted.map((capsule) => [capsule.capsuleId, capsule]));
+    if (
+      authorized.size !== provenance.capsules.length
+      || provenance.capsules.some((capsule) => {
+        const binding = authorized.get(capsule.id);
+        return binding === undefined
+          || binding.capsuleDigest !== capsule.digest
+          || binding.role !== capsule.role;
+      })
+    ) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["partialCohort", "admitted"], message: "provenance capsules must match the authorized Gate-2 receipt set exactly" });
     }
   }
 });
@@ -177,7 +197,10 @@ export interface M2DraftAdmittedCapsule {
   readonly orderingReport: DiagnosticOrderingReport;
   readonly provisional: boolean;
   /** Verified Gate-2 approval; null = review-off authoring path (refused here). */
-  readonly approval: { readonly approved: true } | null;
+  readonly approval: {
+    readonly approved: true;
+    readonly receipt?: AdmissionReceiptRecord;
+  } | null;
 }
 
 /** Frozen Panel-A/Panel-B task-to-capsule assignment (plan §corpus, launch-spec §3). */
@@ -191,8 +214,6 @@ export interface M2LaunchDraftParameters {
   readonly optimizerImage: string;
   /** One child run's four-dimensional budget slice. */
   readonly childBudget: BudgetEnvelope;
-  /** Outer trajectory-generation budget. */
-  readonly outerBudget: BudgetEnvelope;
   /**
    * Complete-run resource vector per Panel-A capsule at the frozen calibrated
    * inner ceiling, keyed by capsule id. Launch open decision: these vectors
@@ -361,6 +382,108 @@ function assertSafeBudget(budget: BudgetEnvelope, label: string): void {
   }
 }
 
+/**
+ * Campaign-8's abandonment receipt measured 4,069.42 elapsed active seconds
+ * per direct recursive panel across its first two projections. The outer
+ * budget also meters elapsed active seconds, not summed evaluator durations.
+ * SEARCH concurrency 3 should reduce elapsed panel time, but freeze refuses to
+ * bank an ideal speedup: every planned/retry panel retains the measured serial
+ * mean, then receives a 25% wall margin. Sol mutation sessions retain the
+ * optimizer's 1.5M-token no-yield ceiling plus a 25% token margin; the
+ * $5/MTok exchange rate is the conservative ratio already used by the prior
+ * $25/5M direct envelope.
+ */
+export const M2_OUTER_DIRECT_ENVELOPE_POLICY = {
+  projectionBasis: "campaign-8-observed-panel-mean" as const,
+  projectionReceiptPath: "data/m2-refreeze-final/campaign-8-abandonment-receipt.v1.json" as const,
+  projectionReceiptSha256:
+    "sha256:c5c474a3b1f5b9721e2b049a672124e69665524970e2c0ba8f60e592fabea77b" as const,
+  projectionReceiptCommit: "d91251332" as const,
+  projectionMeanField: "outerEnvelopeArithmetic.firstTwoProjectionMeanSec" as const,
+  directEvaluationsPerEpisode: 2 as const,
+  retryHeadroomEvaluations: 3,
+  searchChildConcurrency: 3 as const,
+  confirmationTerminalChildConcurrency: 4 as const,
+  projectedPanelMeanWallClockSec: 4_069.42,
+  wallClockMarginBps: 2_500,
+  mutationSessionsPerEpisode: 1 as const,
+  mutationSessionMaxTokens: DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
+  tokenMarginBps: 2_500,
+  usdPerMillionTokens: 5,
+};
+
+export function deriveM2OuterDirectEnvelope(
+  plannedEpisodes: number,
+): M2OuterDirectEnvelopeDerivationRecord {
+  if (!Number.isSafeInteger(plannedEpisodes) || plannedEpisodes <= 0) {
+    throw new UsageError(`outer direct-envelope planned episodes must be a positive integer, got ${plannedEpisodes}`);
+  }
+  const plannedDirectEvaluations =
+    plannedEpisodes * M2_OUTER_DIRECT_ENVELOPE_POLICY.directEvaluationsPerEpisode;
+  const totalDirectEvaluations =
+    plannedDirectEvaluations + M2_OUTER_DIRECT_ENVELOPE_POLICY.retryHeadroomEvaluations;
+  const maxTokens = Math.ceil(
+    plannedEpisodes
+    * M2_OUTER_DIRECT_ENVELOPE_POLICY.mutationSessionsPerEpisode
+    * M2_OUTER_DIRECT_ENVELOPE_POLICY.mutationSessionMaxTokens
+    * (10_000 + M2_OUTER_DIRECT_ENVELOPE_POLICY.tokenMarginBps)
+    / 10_000,
+  );
+  return M2OuterDirectEnvelopeDerivation.parse({
+    method: "m2-outer-direct-envelope.v1",
+    ...M2_OUTER_DIRECT_ENVELOPE_POLICY,
+    plannedEpisodes,
+    plannedDirectEvaluations,
+    totalDirectEvaluations,
+    derived: {
+      maxTokens,
+      maxUsd: Math.ceil(
+        maxTokens * M2_OUTER_DIRECT_ENVELOPE_POLICY.usdPerMillionTokens / 1_000_000,
+      ),
+      maxWallClockSec: Math.ceil(
+        totalDirectEvaluations
+        * M2_OUTER_DIRECT_ENVELOPE_POLICY.projectedPanelMeanWallClockSec
+        * (10_000 + M2_OUTER_DIRECT_ENVELOPE_POLICY.wallClockMarginBps)
+        / 10_000,
+      ),
+      maxEvaluatorInvocations: totalDirectEvaluations,
+    },
+  });
+}
+
+/**
+ * Static freeze gate. Historical evidence remains parseable, but it can
+ * never be re-frozen until every direct dimension covers the current
+ * derivation and the arithmetic evidence is present byte-for-byte.
+ */
+export function assertM2OuterDirectEnvelope(
+  config: Pick<RecursiveMetaCampaignConfig, "counts" | "budgets" | "outerBudgetDerivation">,
+): M2OuterDirectEnvelopeDerivationRecord {
+  const expected = deriveM2OuterDirectEnvelope(config.counts.candidates);
+  for (const dimension of BUDGET_DIMENSIONS) {
+    if (config.budgets.outer[dimension] < expected.derived[dimension]) {
+      throw new UsageError(
+        `frozen outer direct ${dimension} ${config.budgets.outer[dimension]} cannot cover the planned search phase `
+        + `(needs ${expected.derived[dimension]} from ${expected.plannedDirectEvaluations} planned panels `
+        + `+ ${expected.retryHeadroomEvaluations} retry panels)`,
+      );
+    }
+  }
+  if (canonicalJson(config.budgets.outer) !== canonicalJson(expected.derived)) {
+    throw new UsageError("frozen outer direct envelope must equal the freeze-time derivation exactly");
+  }
+  if (canonicalJson(config.outerBudgetDerivation) !== canonicalJson(expected)) {
+    throw new UsageError("frozen outer direct envelope is missing its exact freeze-time derivation evidence");
+  }
+  if (
+    config.counts.searchChildConcurrency !== expected.searchChildConcurrency
+    || config.counts.childConcurrency !== expected.confirmationTerminalChildConcurrency
+  ) {
+    throw new UsageError("frozen SEARCH/judging concurrency bounds do not match the outer-envelope derivation");
+  }
+  return expected;
+}
+
 function envelopeIdentity(purpose: "search" | "confirmation" | "terminal", inputsDigest: string): string {
   return sha256String(canonicalJson({
     domain: "hone-m2-launch-envelope-v1",
@@ -382,8 +505,8 @@ function corpusEntry(admitted: M2DraftAdmittedCapsule): MetaCapsuleEntry {
     throw new UsageError(`capsule ${id} has no positive train reference scale (baseline ${baseline}, improved ${reference})`);
   }
   for (const [label, value] of [["baseline", baseline], ["improved", reference]] as const) {
-    if (value < 0 || value > 1) {
-      throw new UsageError(`capsule ${id} ${label} train aggregate ${value} is outside the registered [0, 1] range`);
+    if (!Number.isFinite(value) || value < 0) {
+      throw new UsageError(`capsule ${id} ${label} train aggregate ${value} must be a finite nonnegative oriented scalar`);
     }
   }
   return {
@@ -523,6 +646,10 @@ function indexAdmitted(
     if (byId.has(id)) throw new UsageError(`duplicate admission output for capsule ${id}`);
     byId.set(id, capsule);
   }
+  const partial = provenance.partialCohort;
+  const authorizedById = partial === undefined
+    ? null
+    : new Map(partial.admitted.map((capsule) => [capsule.capsuleId, capsule]));
   for (const registered of provenance.capsules) {
     const found = byId.get(registered.id);
     if (found === undefined) {
@@ -539,6 +666,27 @@ function indexAdmitted(
         `capsule ${registered.id} identity drift: admission digest ${found.digest} != provenance digest ${registered.digest}`,
       );
     }
+    if (partial !== undefined && authorizedById !== null) {
+      const authorized = authorizedById.get(registered.id);
+      const receipt = found.approval.receipt;
+      if (
+        authorized === undefined
+        || authorized.capsuleDigest !== found.digest
+        || receipt === undefined
+        || receipt.action !== "gate2-approve"
+        || receipt.capsuleDigest !== found.digest
+        || receipt.recordHash !== authorized.gate2ReceiptHash
+      ) {
+        throw new UsageError(`capsule ${registered.id} admission does not reproduce its authorized Gate-2 receipt`);
+      }
+      const basis = receipt.approvalBasis;
+      if (!gate2ReceiptCitesAuthorizedBasis(partial, authorized, basis)) {
+        throw new UsageError(`capsule ${registered.id} Gate-2 receipt does not cite the owner authorization`);
+      }
+    }
+  }
+  if (byId.size !== provenance.capsules.length) {
+    throw new UsageError("admission outputs must match the provenance admitted set exactly");
   }
   return byId;
 }
@@ -547,7 +695,16 @@ function resolvePanelAssignment(
   assignments: M2LaunchPanelAssignments,
   provenance: CorpusProvenanceV1,
 ): { panelA: ReadonlyMap<string, string> } {
-  const development = new Set(provenance.developmentCapsuleIds);
+  const admittedDevelopment = new Set(provenance.developmentCapsuleIds);
+  const partial = provenance.partialCohort;
+  const authorizedDevelopmentByTask: ReadonlyMap<string, { readonly capsuleId: string }> | null =
+    partial === undefined
+      ? null
+      : new Map(
+          [...partial.admitted, ...partial.deferred].flatMap((capsule) =>
+            capsule.role === "development" ? [[capsule.taskId, capsule] as const] : []
+          ),
+        );
   const seen = new Set<string>();
   const resolve = (
     mapping: Readonly<Record<string, string>>,
@@ -568,22 +725,30 @@ function resolvePanelAssignment(
     const resolved = new Map<string, string>();
     for (const taskId of expected) {
       const capsuleId = mapping[taskId]!;
-      if (!development.has(capsuleId)) {
-        throw new UsageError(`${label} task ${taskId} maps to ${capsuleId}, which is not a development capsule`);
-      }
       if (seen.has(capsuleId)) {
         throw new UsageError(`capsule ${capsuleId} is assigned to more than one panel task`);
       }
       seen.add(capsuleId);
-      resolved.set(taskId, capsuleId);
+      if (authorizedDevelopmentByTask !== null) {
+        const authorized = authorizedDevelopmentByTask.get(taskId);
+        if (authorized === undefined || authorized.capsuleId !== capsuleId) {
+          throw new UsageError(`${label} task ${taskId} does not match the authorized 21+6 cohort partition`);
+        }
+        if (admittedDevelopment.has(capsuleId)) resolved.set(taskId, capsuleId);
+      } else {
+        if (!admittedDevelopment.has(capsuleId)) {
+          throw new UsageError(`${label} task ${taskId} maps to ${capsuleId}, which is not a development capsule`);
+        }
+        resolved.set(taskId, capsuleId);
+      }
     }
     return resolved;
   };
   const panelA = resolve(assignments.panelA, M2_PANEL_A_TASK_IDS, "Panel-A");
   resolve(assignments.panelB, M2_PANEL_B_TASK_IDS, "Panel-B");
-  if (seen.size !== M2_DEVELOPMENT_CAPSULE_COUNT) {
-    const unassigned = provenance.developmentCapsuleIds.filter((id) => !seen.has(id));
-    throw new UsageError(`development capsules missing a panel assignment: ${unassigned.join(", ")}`);
+  const expectedAssignments = partial === undefined ? M2_DEVELOPMENT_CAPSULE_COUNT : 16;
+  if (seen.size !== expectedAssignments) {
+    throw new UsageError(`development panel assignments must cover all ${expectedAssignments} locked task identities`);
   }
   return { panelA };
 }
@@ -627,7 +792,10 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     ),
     "corpus provenance artifact",
   );
-  const corpusCapsuleIds = new Set(provenance.capsules.map((capsule) => capsule.id));
+  const corpusCapsuleIds = new Set([
+    ...provenance.capsules.map((capsule) => capsule.id),
+    ...(provenance.partialCohort?.deferred.map((capsule) => capsule.capsuleId) ?? []),
+  ]);
 
   const calibration = resolveCalibration(inputs, corpusCapsuleIds, openDecisions);
   const admittedById = indexAdmitted(inputs.admitted, provenance);
@@ -642,8 +810,9 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     );
   }
 
-  // Train = Panel A in frozen task order; holdout = the provenance terminal order.
-  const train = M2_PANEL_A_TASK_IDS.map((taskId) => corpusEntry(admittedById.get(panelA.get(taskId)!)!));
+  // Train contains only admitted Panel-A tasks in frozen task order.
+  const panelAEntries = [...panelA.entries()];
+  const train = panelAEntries.map(([, capsuleId]) => corpusEntry(admittedById.get(capsuleId)!));
   const holdout = provenance.terminalCapsuleIds.map((capsuleId) => corpusEntry(admittedById.get(capsuleId)!));
 
   const parameters = inputs.parameters;
@@ -663,6 +832,13 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
   // trajectory needs candidateAttemptsMax + 1 (every attempt plus baseline).
   // The M2 schema superRefine rechecks the same invariants at freeze.
   const candidateAttemptsMax = parameters.candidateAttemptsMax ?? M2_CANDIDATE_ATTEMPTS_MAX;
+  const candidates = parameters.candidates ?? M2_CANDIDATE_COUNT;
+  const outerBudgetDerivation = deriveM2OuterDirectEnvelope(candidates);
+  if (parameters.childConcurrency !== outerBudgetDerivation.confirmationTerminalChildConcurrency) {
+    throw new UsageError(
+      `confirmation/terminal child concurrency must remain ${outerBudgetDerivation.confirmationTerminalChildConcurrency}`,
+    );
+  }
   const perRunEvaluatorFloor = 4 * calibration.innerEpisodesMax + 1;
   if (parameters.childBudget.maxEvaluatorInvocations < perRunEvaluatorFloor) {
     throw new UsageError(
@@ -670,9 +846,9 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
       + `complete run at innerEpisodesMax ${calibration.innerEpisodesMax} (needs ${perRunEvaluatorFloor})`,
     );
   }
-  if (parameters.outerBudget.maxEvaluatorInvocations < candidateAttemptsMax + 1) {
+  if (outerBudgetDerivation.derived.maxEvaluatorInvocations < candidateAttemptsMax + 1) {
     throw new UsageError(
-      `outer budget maxEvaluatorInvocations ${parameters.outerBudget.maxEvaluatorInvocations} cannot fund `
+      `derived outer budget maxEvaluatorInvocations ${outerBudgetDerivation.derived.maxEvaluatorInvocations} cannot fund `
       + `candidateAttemptsMax + 1 evaluations (needs ${candidateAttemptsMax + 1})`,
     );
   }
@@ -686,21 +862,21 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     }
   }
 
-  const members = M2_PANEL_A_TASK_IDS.map((taskId, index) => ({
+  const members = panelAEntries.map(([taskId, capsuleId], index) => ({
     taskId,
     capsule: train[index]!,
-    calibratedInnerCeiling: ceilings[panelA.get(taskId)!]!,
+    calibratedInnerCeiling: ceilings[capsuleId]!,
   }));
 
   const calibratedPanelCandidate = addBudgets(members.map((member) => member.calibratedInnerCeiling));
   const outerTrajectory = multiplyBudget(calibratedPanelCandidate, M2_SEARCH_CANDIDATE_EQUIVALENTS);
   assertSafeBudget(outerTrajectory, "search outer trajectory");
-  const confirmationRuns = 4 * M2_PANEL_CAPSULE_COUNT * 3;
-  const terminalRuns = 3 * M2_TERMINAL_CAPSULE_COUNT * 3;
+  const confirmationRuns = 4 * train.length * 3;
+  const terminalRuns = 3 * holdout.length * 3;
   const confirmationBudget = multiplyBudget(parameters.childBudget, confirmationRuns);
   const terminalBudget = multiplyBudget(parameters.childBudget, terminalRuns);
   const campaignBudget = addBudgets([
-    parameters.outerBudget,
+    outerBudgetDerivation.derived,
     outerTrajectory,
     confirmationBudget,
     terminalBudget,
@@ -730,7 +906,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
   if (parameters.promotion === undefined) {
     recordDefault(
       "promotion",
-      "promotion rule defaulted to the M2 G1 gate reading (delta > 2*SE, >=6/8 sign consistency, 3 replicates)",
+      "promotion rule defaulted to the M2 G1 gate reading (delta > 2*SE, >=75% sign consistency, 3 replicates)",
     );
   }
   if (parameters.mutablePaths === undefined || parameters.protectedPaths === undefined) {
@@ -746,7 +922,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     );
   }
   openDecisions.push(
-    "budget vectors (child/outer/per-capsule calibrated ceilings) are launch open decision #4 — caller-supplied, not plan-frozen",
+    "child/per-capsule calibrated budget vectors are launch open decision #4; the outer direct vector is freeze-derived",
   );
 
   const config = {
@@ -783,23 +959,33 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
       driftSentinel: true,
     },
     calibration: calibration.configBinding,
-    corpusCohort: {
-      developmentCapsuleIds: [...provenance.developmentCapsuleIds],
-      terminalCapsuleIds: [...provenance.terminalCapsuleIds],
-      provenanceInputsDigest: provenance.inputsDigest,
-    },
+    corpusCohort: provenance.partialCohort === undefined
+      ? {
+          developmentCapsuleIds: [...provenance.developmentCapsuleIds],
+          terminalCapsuleIds: [...provenance.terminalCapsuleIds],
+          provenanceInputsDigest: provenance.inputsDigest,
+        }
+      : {
+          mode: "owner-authorized-partial",
+          developmentCapsuleIds: [...provenance.developmentCapsuleIds],
+          terminalCapsuleIds: [...provenance.terminalCapsuleIds],
+          partialCohort: provenance.partialCohort,
+          provenanceInputsDigest: provenance.inputsDigest,
+        },
     counts: {
-      candidates: parameters.candidates ?? M2_CANDIDATE_COUNT,
+      candidates,
       candidateAttemptsMax,
       innerEpisodesMax: calibration.innerEpisodesMax,
       searchReplicates: 1,
+      searchChildConcurrency: outerBudgetDerivation.searchChildConcurrency,
       confirmationReplicates: 3,
       holdoutReplicates: 3,
       childConcurrency: parameters.childConcurrency,
     },
+    evaluatorTimeoutSec: M2_EVALUATOR_TIMEOUT_SEC,
     budgets: {
       campaign: campaignBudget,
-      outer: parameters.outerBudget,
+      outer: outerBudgetDerivation.derived,
       child: parameters.childBudget,
     },
     developmentPanel: {
@@ -821,6 +1007,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
         budget: terminalBudget,
       },
     },
+    outerBudgetDerivation,
     controls: {
       brokenSourceArtifact: placeholderDigest("broken-source"),
       brokenBundleDigest: placeholderDigest("broken-bundle"),

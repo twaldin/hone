@@ -195,10 +195,17 @@ export function hone(args: string[], opts: { cwd: string; env?: Record<string, s
   return promise;
 }
 
-/** Spawn without waiting — caller drives lifecycle (kill tests). Detached so the whole tree can be nuked. */
-export function honeSpawn(args: string[], opts: { cwd: string; env?: Record<string, string> }): ChildProcess {
+/** Spawn without waiting — caller drives lifecycle. The sealed launcher option
+ * puts Hone itself at the process-group root, so OS signals reach Hone's
+ * durable-pause handler directly instead of racing tsx's 30 ms relay ack. */
+export function honeSpawn(
+  args: string[],
+  opts: { cwd: string; env?: Record<string, string>; sealedLauncher?: boolean },
+): ChildProcess {
   approveFixtureCapsule(opts.cwd);
-  return spawn(tsxBin, [mainTs, ...args], {
+  const application = opts.sealedLauncher ? process.execPath : tsxBin;
+  const argv = opts.sealedLauncher ? [join(pkgRoot, "bin", "hone.js"), ...args] : [mainTs, ...args];
+  return spawn(application, argv, {
     cwd: opts.cwd,
     env: { ...process.env, ...opts.env },
     detached: true,
@@ -565,7 +572,16 @@ export function fakeOptimizerSpawn(image: string, seen?: { argvs: string[][]; en
         return arg;
       };
       const name = argv[argv.indexOf("--name") + 1] ?? "";
-      created.set(name, { env, containerArgv: argv.slice(imageIdx + 1).map(mapPath) });
+      const requestedArgv = argv.slice(imageIdx + 1);
+      const containerArgv =
+        requestedArgv[0] === "/bin/sh" && requestedArgv[2]?.includes("/hone/bundle/optimizer.mjs") === true
+          // Production's shell preamble verifies/materializes the pinned Node
+          // binary. This host-process fake has no container filesystem, so the
+          // contract tests cover that preamble while lifecycle tests execute
+          // the mounted optimizer under the current test interpreter.
+          ? [process.execPath, mapPath("/hone/bundle/optimizer.mjs")]
+          : requestedArgv.map(mapPath);
+      created.set(name, { env, containerArgv });
       return scriptedClientChild(`${name.replace(/[^a-zA-Z0-9]/g, "")}cid\n`);
     }
     if (cmd === "docker" && argv[1] === "start") {

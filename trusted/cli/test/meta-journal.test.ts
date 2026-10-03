@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import {
   MetaJournalV1,
   metaCampaignConfigHash,
+  metaWorkKey,
   type MetaResourceUsageV1,
   type MetaSha256DigestV1,
   type MetaSettlementInputV1,
@@ -57,6 +58,7 @@ function recursiveConfig(): RecursiveConfig {
   return MetaCampaignConfigV2.parse({
     ...legacy,
     version: 2,
+    evaluatorTimeoutSec: 2700,
     seedOptimizer: optimizer,
     controllerOptimizer: optimizer,
     optimizerRuntime: { image: `hone-optimizer@${digest("recursive:optimizer-image")}` },
@@ -175,6 +177,22 @@ function settlement(qRaw: number, overrides: Partial<MetaSettlementInputV1> = {}
     providerFingerprint: null,
     modelDriftSentinel: "start=gpt-5.6-sol;end=gpt-5.6-sol",
     ...overrides,
+  };
+}
+
+function usage(value: number): MetaResourceUsageV1 {
+  return {
+    tokens: value,
+    usd: value,
+    wallClockSec: value,
+    evaluatorInvocations: value,
+  };
+}
+
+function pending(value: string, observed: MetaResourceUsageV1) {
+  return {
+    evidenceHash: digest(`pending-${value}`),
+    observed,
   };
 }
 
@@ -367,6 +385,118 @@ describe("MetaJournalV1 durable identity and idempotency", () => {
       /recursive meta journals require every reservation to carry its durable envelope binding/,
     );
   });
+  it("keeps pending usage monotonic and clears it only through terminal settlement", async () => {
+    const path = await journalPath("pending-live");
+    const cfg = config();
+    const journal = MetaJournalV1.open(path, cfg);
+    const measuredWork = identity("pending-measurement");
+    journal.reserveChild(measuredWork);
+    const firstPending = journal.recordChildPending(measuredWork, pending("first", usage(4)));
+    expect(journal.recordChildPending(measuredWork, pending("first", usage(4)))).toEqual(firstPending);
+    expect(lines(path).filter((line) => JSON.parse(line).t === "pending")).toHaveLength(1);
+    expect(journal.queryPendingChildren()).toEqual([firstPending]);
+    for (const dimension of ["tokens", "usd", "wallClockSec", "evaluatorInvocations"] as const) {
+      expect(() => journal.recordChildPending(measuredWork, pending(`rewound-${dimension}`, {
+        ...usage(4),
+        [dimension]: 3,
+      }))).toThrow(new RegExp(`rewound ${dimension}`));
+    }
+    expect(() => journal.settleChild(
+      measuredWork,
+      settlement(0.7, { observed: { ...usage(4), tokens: 3 } }),
+    )).toThrow(/rewound tokens/);
+    journal.settleChild(measuredWork, settlement(0.7, { observed: usage(5) }));
+    expect(journal.queryPendingChildren()).toEqual([]);
+    expect(() => journal.recordChildPending(measuredWork, pending("after-measurement", usage(5)))).toThrow(
+      /cannot record nonterminal child state after settlement/,
+    );
+
+    const failedWork = identity("pending-failure");
+    journal.reserveChild(failedWork);
+    journal.recordChildPending(failedWork, pending("failure", usage(4)));
+    expect(() => journal.settleChildFailure(failedWork, {
+      evidenceHash: digest("failure-rewind"),
+      observed: { ...usage(4), usd: 3 },
+      status: "candidate_failed",
+    })).toThrow(/rewound usd/);
+    journal.settleChildFailure(failedWork, {
+      evidenceHash: digest("failure-terminal"),
+      observed: usage(5),
+      status: "candidate_failed",
+    });
+    expect(journal.queryPendingChildren()).toEqual([]);
+    expect(() => journal.recordChildPending(failedWork, pending("after-failure", usage(5)))).toThrow(
+      /cannot record nonterminal child state after settlement/,
+    );
+    journal.close();
+
+    const replayed = MetaJournalV1.open(path, cfg);
+    expect(replayed.queryPendingChildren()).toEqual([]);
+    expect(replayed.queryTrainMeasurements()).toHaveLength(1);
+    expect(replayed.queryFailureSettlements()).toHaveLength(1);
+    replayed.close();
+  });
+
+  it("replays two interleaved open children and settles each pending identity exactly once", async () => {
+    const path = await journalPath("interleaved-open-children");
+    const cfg = recursiveConfig();
+    const firstWork = identity("interleaved-first", {
+      capsuleId: cfg.developmentPanel.members[0]!.capsule.capsuleId,
+      measurementEpoch: "m2:interleaved-first",
+    });
+    const secondWork = identity("interleaved-second", {
+      capsuleId: cfg.developmentPanel.members[1]!.capsule.capsuleId,
+      measurementEpoch: "m2:interleaved-second",
+    });
+    const envelopeFor = (label: string) => ({
+      purpose: "search" as const,
+      envelope: cfg.recursiveBudgets.search.identity,
+      reservationId: `interleaved-${label}`,
+      parentReservationId: null,
+      reserved: { ...cfg.budgets.child },
+    });
+
+    const first = MetaJournalV1.open(path, cfg);
+    first.reserveChild(firstWork, envelopeFor("first"));
+    first.reserveChild(secondWork, envelopeFor("second"));
+    first.recordChildPending(firstWork, pending("first-open", usage(4)));
+    first.recordChildPending(secondWork, pending("second-open", usage(4)));
+    expect(first.budgetState()).toMatchObject({ reservations: 2, openReservations: 2 });
+    first.close();
+
+    const replayed = MetaJournalV1.open(path, cfg);
+    expect(new Set(replayed.queryPendingChildren().map((row) => row.workKey))).toEqual(
+      new Set([metaWorkKey(replayed.configHash, firstWork), metaWorkKey(replayed.configHash, secondWork)]),
+    );
+    replayed.settleChildFailure(secondWork, {
+      evidenceHash: digest("interleaved-second-terminal"),
+      observed: usage(5),
+      status: "candidate_failed",
+    });
+    replayed.settleChild(firstWork, settlement(0.7, {
+      evidenceHash: digest("interleaved-first-terminal"),
+      observed: usage(5),
+    }));
+    expect(replayed.queryPendingChildren()).toEqual([]);
+    expect(replayed.budgetState()).toMatchObject({ settlements: 2, openReservations: 0 });
+    expect(() => replayed.settleChildFailure(secondWork, {
+      evidenceHash: digest("conflicting-interleaved-second"),
+      observed: usage(5),
+      status: "candidate_failed",
+    })).toThrow(/conflicting duplicate settlement/);
+    replayed.close();
+
+    expect(lines(path).map((line) => JSON.parse(line).t)).toEqual([
+      "header",
+      "reservation",
+      "reservation",
+      "pending",
+      "pending",
+      "failure-settlement",
+      "settlement",
+      "measurement",
+    ]);
+  });
 });
 
 describe("MetaJournalV1 componentwise campaign admission", () => {
@@ -413,6 +543,70 @@ describe("MetaJournalV1 replay and terminal holdout authority", () => {
     expect(replayed.budgetState()).toMatchObject({ committed: before, reservations: 1, settlements: 0, openReservations: 1 });
     expect(replayed.reserveChild(identity("crashed-child"))).toEqual(reservation);
     replayed.close();
+  });
+
+  it("refuses rewound pending and terminal usage during replay", async () => {
+    const cfg = config();
+    const pendingPath = await journalPath("pending-replay-rewind");
+    const pendingJournal = MetaJournalV1.open(pendingPath, cfg);
+    const pendingWork = identity("pending-replay-rewind");
+    pendingJournal.reserveChild(pendingWork);
+    pendingJournal.recordChildPending(pendingWork, pending("before", usage(4)));
+    pendingJournal.recordChildPending(pendingWork, pending("after", usage(5)));
+    pendingJournal.close();
+    const pendingLines = lines(pendingPath).map((line) => JSON.parse(line));
+    pendingLines[3].pending.observed.tokens = 3;
+    writeFileSync(pendingPath, `${pendingLines.map((line) => JSON.stringify(line)).join("\n")}\n`, { mode: 0o600 });
+    expect(() => MetaJournalV1.open(pendingPath, cfg)).toThrow(/rewound tokens/);
+
+    const settlementPath = await journalPath("pending-replay-settlement");
+    const settlementJournal = MetaJournalV1.open(settlementPath, cfg);
+    const settlementWork = identity("pending-replay-settlement");
+    settlementJournal.reserveChild(settlementWork);
+    settlementJournal.recordChildPending(settlementWork, pending("settlement", usage(4)));
+    settlementJournal.settleChild(settlementWork, settlement(0.7, { observed: usage(5) }));
+    settlementJournal.close();
+    const settlementLines = lines(settlementPath).map((line) => JSON.parse(line));
+    settlementLines[3].measurement.observed.tokens = 3;
+    writeFileSync(
+      settlementPath,
+      `${settlementLines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+      { mode: 0o600 },
+    );
+    expect(() => MetaJournalV1.open(settlementPath, cfg)).toThrow(/rewound tokens/);
+
+    const failurePath = await journalPath("pending-replay-failure");
+    const failureJournal = MetaJournalV1.open(failurePath, cfg);
+    const failureWork = identity("pending-replay-failure");
+    failureJournal.reserveChild(failureWork);
+    failureJournal.recordChildPending(failureWork, pending("failure", usage(4)));
+    failureJournal.settleChildFailure(failureWork, {
+      evidenceHash: digest("replay-failure"),
+      observed: usage(5),
+      status: "candidate_failed",
+    });
+    failureJournal.close();
+    const failureLines = lines(failurePath).map((line) => JSON.parse(line));
+    failureLines[3].failure.observed.tokens = 3;
+    writeFileSync(failurePath, `${failureLines.map((line) => JSON.stringify(line)).join("\n")}\n`, { mode: 0o600 });
+    expect(() => MetaJournalV1.open(failurePath, cfg)).toThrow(/rewound tokens/);
+  });
+
+  it("refuses a replayed pending fact after a durable terminal settlement", async () => {
+    const path = await journalPath("pending-after-settlement-replay");
+    const cfg = config();
+    const work = identity("pending-after-settlement-replay");
+    const journal = MetaJournalV1.open(path, cfg);
+    journal.reserveChild(work);
+    journal.recordChildPending(work, pending("before-terminal", usage(4)));
+    journal.settleChild(work, settlement(0.7, { observed: usage(5) }));
+    journal.close();
+    const durable = lines(path).map((line) => JSON.parse(line));
+    const replayedPending = structuredClone(durable[2]);
+    replayedPending.seq = 5;
+    durable.push(replayedPending);
+    writeFileSync(path, `${durable.map((line) => JSON.stringify(line)).join("\n")}\n`, { mode: 0o600 });
+    expect(() => MetaJournalV1.open(path, cfg)).toThrow(/nonterminal child state follows settlement/);
   });
 
   it("idempotently republishes a measurement when a crash left only its durable settlement", async () => {

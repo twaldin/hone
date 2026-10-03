@@ -1,0 +1,146 @@
+{
+  "allowedProofs": [
+    {
+      "capsule": "uv-resolver",
+      "observed": "rw,relatime,size=1638400k,nr_inodes=300000,mode=755,uid=2000,gid=2000",
+      "operation": "build tmpfs",
+      "target": "/tmp/hone-uv-build"
+    },
+    {
+      "capsule": "uv-resolver",
+      "observed": "ro,nosuid,nodev,relatime,size=524288k,nr_inodes=40000,mode=755",
+      "operation": "sealed tmpfs then read-only remount",
+      "target": "/mnt"
+    },
+    {
+      "capsule": "uv-resolver",
+      "observed": "rw,nosuid,nodev,noexec,relatime,size=524288k,nr_inodes=120000,mode=755,uid=2000,gid=2000",
+      "operation": "bench tmpfs",
+      "target": "/srv"
+    },
+    {
+      "capsule": "uv-resolver",
+      "observed": "ro,nosuid,nodev,noexec,relatime,size=1024k,nr_inodes=64,mode=555",
+      "operation": "persistent-state hide",
+      "target": "/opt"
+    },
+    {
+      "capsule": "uv-resolver",
+      "observedEach": "rw,nosuid,nodev,noexec,relatime,size=16384k",
+      "operation": "fresh repetition tmpfs",
+      "targets": [
+        "/tmp",
+        "/var/tmp",
+        "/dev/shm"
+      ]
+    },
+    {
+      "capsule": "ripgrep-search",
+      "observed": "rw,nosuid,nodev,relatime,size=1433600k,mode=755",
+      "operation": "build tmpfs",
+      "target": "/mnt"
+    },
+    {
+      "capsule": "ripgrep-search",
+      "observed": "rw,nosuid,nodev,relatime,size=65536k,mode=700,uid=2000,gid=2000",
+      "operation": "prefix-constrained command scratch",
+      "target": "/mnt/command-proof/scratch"
+    },
+    {
+      "capsule": "ripgrep-search",
+      "observedEach": "rw,nosuid,nodev,noexec,relatime,size=65536k",
+      "operation": "fresh repetition tmpfs",
+      "targets": [
+        "/tmp",
+        "/var/tmp",
+        "/dev/shm"
+      ]
+    },
+    {
+      "capsule": "biome-parser-formatter",
+      "executionProbe": "/tmp/probe printed biome-exec-ok",
+      "observed": "rw,nosuid,nodev,relatime,size=1572864k",
+      "operation": "exec remount",
+      "target": "/tmp"
+    }
+  ],
+  "completedAt": "2026-08-11T18:19:11.519970Z",
+  "deniedProofs": [
+    {
+      "attempt": "approved source and flags at /var/tmp instead of /tmp/hone-uv-build",
+      "capsule": "uv-resolver",
+      "result": "EACCES / denied"
+    },
+    {
+      "attempt": "noexec/nosuid/nodev flag expansion at /tmp/hone-uv-build",
+      "capsule": "uv-resolver",
+      "result": "EACCES / denied"
+    },
+    {
+      "attempt": "scratch target /mnt/not-command/scratch outside command-* prefix",
+      "capsule": "ripgrep-search",
+      "result": "EACCES / denied"
+    },
+    {
+      "attempt": "exec remount at /dev/shm instead of /tmp",
+      "capsule": "biome-parser-formatter",
+      "result": "EACCES / denied"
+    }
+  ],
+  "host": {
+    "apparmorMode": "enforce",
+    "dockerEngine": "29.1.3",
+    "hostname": "deckbox",
+    "kernel": "Linux 6.8.0-31-generic x86_64"
+  },
+  "mediationBoundary": "AppArmor mediates source, target, fstype, and mount flags. The kernel/AppArmor mount rule language does not mediate tmpfs data strings; exact size/mode/inode caps are pinned by the protected evaluator source hashes above and were runtime-verified through findmnt.",
+  "profile": {
+    "loadCommand": "sudo apparmor_parser -r trusted/broker/host/apparmor/hone-evaluator-cgroup",
+    "path": "trusted/broker/host/apparmor/hone-evaluator-cgroup",
+    "proofImage": "hone-simdutf-validate@sha256:3597c97ac57b3f2bcf71723902b693097103ae1a856c2b3234127d7461c2fb47",
+    "sha256": "sha256:b9f4c71236e6f6aa327bd26f57be30fa39f0ac0635fb189c216764985749f1ac"
+  },
+  "protectedEvaluatorSources": {
+    "biome-parser-formatter": {
+      "caps": {
+        "tmpRemount": "size=1536m,exec"
+      },
+      "path": "capsules/biome-parser-formatter/baseline/eval.py",
+      "sha256": "sha256:87456a4be5e1090391ee9b393a4d49eb1587c105e077c7d5f731b2300545acf5"
+    },
+    "ripgrep-search": {
+      "caps": {
+        "build": "size=1400m,mode=0755",
+        "commandScratch": "size=64m,mode=0700,uid=2000,gid=2000",
+        "freshScratch": "size=64m,mode=1777"
+      },
+      "cgroupRoot": "/mnt/hone-ripgrep-cg",
+      "cgroupSourceAudit": "Only this /mnt path occurs in the capsule; no /tmp/hone-ripgrep-cg caller exists.",
+      "path": "capsules/ripgrep-search/baseline/eval.py",
+      "sha256": "sha256:24af5e81714036b45f57fcda0054b77541abfe6be5d995fecf06d89c3c304ea7"
+    },
+    "uv-resolver": {
+      "caps": {
+        "bench": "size=512m,mode=0755,uid=2000,gid=2000,nr_inodes=120000",
+        "build": "size=1600m,mode=0755,uid=2000,gid=2000,nr_inodes=300000",
+        "freshScratch": "size=16m,mode=1777",
+        "hiddenOpt": "size=1m,mode=0555,nr_inodes=64",
+        "sealed": "size=512m,mode=0755,nr_inodes=40000"
+      },
+      "path": "capsules/uv-resolver/baseline/eval.py",
+      "sha256": "sha256:24f66cd44dda5ed961064a36a58e597bdc667db03e916a5a793c2205cc61c32d"
+    }
+  },
+  "runtimeEvaluation": {
+    "capsule": "ripgrep-search",
+    "command": "HONE_CAPSULE_DIR=capsules/ripgrep-search pnpm exec tsx capsules/tools/ordering-check.ts --report",
+    "evalInvocations": 14,
+    "orderingReportSha256": "sha256:cd1c36625bef3c04e6cbcb424ef5a292766ed3ba5e00a8ada08a6f67b462081b",
+    "stabilitySpread": 0.036615498703408265,
+    "status": "passed",
+    "wallSeconds": 760.27
+  },
+  "schemaVersion": 1,
+  "sourceCommit": "5a635b3fe",
+  "ticket": "HONE-41"
+}

@@ -23,8 +23,8 @@ import time
 from pathlib import Path
 
 TRUSTED_DIR = Path(__file__).resolve().parent
-WORKER = TRUSTED_DIR / "worker.py"
-CHALLENGE = json.loads((TRUSTED_DIR / "challenge.json").read_text())
+WORKER = Path(os.environ.get("CAPSULE_WORKER_PATH", str(TRUSTED_DIR / "worker.py")))
+CHALLENGE = json.loads(Path(os.environ.get("CAPSULE_CHALLENGE_PATH", str(TRUSTED_DIR / "challenge.json"))).read_text())
 INNER_REPS = int(CHALLENGE.get("innerReps", 3))
 CALL_TIMEOUT_SEC = float(os.environ.get("CAPSULE_CALL_TIMEOUT_SEC", CHALLENGE.get("timeoutSec", 10)))
 MAX_RESPONSE_BYTES = int(os.environ.get("CAPSULE_MAX_RESPONSE_BYTES", "8000000"))

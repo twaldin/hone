@@ -1,9 +1,11 @@
-import { mkdirSync } from "node:fs";
+import { createServer } from "node:http";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ProxyPreflightResult, RunConfig } from "@hone/schema";
 import { describe, expect, it } from "vitest";
 import { DurableCampaignPauseAuthorityV1 } from "../src/commands/hone.js";
 import { resumeCampaignCommand, type TrustedCampaignResumeOptions } from "../src/commands/resume.js";
+import { createProxy } from "@hone/proxy";
 import { replayRun } from "../src/eventlog.js";
 import { statusCommand } from "../src/commands/status.js";
 import { writeRunConfigFile } from "../src/runs.js";
@@ -96,6 +98,7 @@ function proxyOptions(passes: boolean): TrustedCampaignResumeOptions {
           pause: PAUSE,
         }),
         campaignPause: () => Promise.resolve(PAUSE),
+        listenTcp: () => Promise.resolve(0),
         resume: async () => {
           if (preflight.passed) {
             await config.recordCampaignResume({
@@ -160,6 +163,7 @@ describe("campaign pause status and trusted resume", () => {
           },
           pause: PAUSE,
         }),
+        listenTcp: () => Promise.resolve(0),
         campaignPause: () => Promise.resolve(PAUSE),
         resume: async () => {
           const first = await config.checkBudget();
@@ -200,6 +204,41 @@ describe("campaign pause status and trusted resume", () => {
     expect(firstRemaining).toBe(budget.envelope.maxTokens - budget.spent.tokens - 3);
     expect(secondRemaining).toBe(0);
     expect(route2Dispatched).toBe(false);
+  });
+
+  it("surfaces a real failed preflight instead of masking it during proxy close", async () => {
+    const root = makeRoot();
+    const campaignDir = pausedCampaign(root, true);
+    writeFileSync(
+      join(root, ".hone-runs", PAUSE.runId, "proxy-dispatch.ndjson"),
+      `${JSON.stringify({ ...PAUSE, v: 1, kind: "pause" })}\n`,
+    );
+    const upstream = createServer((_request, response) => {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "provider credentials rejected" } }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once("error", reject);
+      upstream.listen(0, "127.0.0.1", resolve);
+    });
+    const address = upstream.address();
+    if (address === null || typeof address === "string") throw new Error("upstream did not bind TCP");
+    const captured = makeIo(root, {
+      HONE_UPSTREAM_BASE_URL: `http://127.0.0.1:${address.port}`,
+      HONE_UPSTREAM_API_KEY: undefined,
+    });
+    try {
+      expect(await resumeCampaignCommand(["--campaign", campaignDir], captured.io, { createProxy })).toBe(1);
+      expect(captured.err.join("\n")).toContain("frozen-route preflight failed");
+      expect(captured.err.join("\n")).toContain("status=401");
+      expect(DurableCampaignPauseAuthorityV1.openExisting(
+        join(campaignDir, "campaign-pause.v1.json"),
+      ).isCampaignPaused()).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        upstream.close((error) => error === undefined ? resolve() : reject(error));
+      });
+    }
   });
 
 

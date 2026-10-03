@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -99,6 +99,7 @@ function makeBroker(options: {
   recursive?: BrokerConfig["recursive"];
   corpus?: BrokerCorpusConfig;
   events?: RunEvent[];
+  now?: () => number;
 }): Broker {
   const runDir = options.runDir ?? path.join(tmpBase, `run-${sequence++}`);
   const events = options.events ?? [];
@@ -107,14 +108,14 @@ function makeBroker(options: {
     manifest: manifest(options.budget),
     capsuleRootDir: capsuleRoot,
     baselineArtifactHash: HASH_A,
-    capsuleDigest: HASH_A,
+    admittedCapsuleDigest: HASH_A,
     optimizerDigest: HASH_B,
     holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
-    image: IMAGE,
+    executionImage: IMAGE,
     runDir,
     casDir: path.join(tmpBase, "cas"),
     onEvent: (event) => events.push(event),
-    now: () => 0,
+    now: options.now ?? (() => 0),
     ...(options.recursive === undefined ? {} : { recursive: options.recursive }),
     ...(options.corpus === undefined ? {} : { corpus: options.corpus }),
   });
@@ -181,7 +182,195 @@ afterEach(async () => {
   await rm(tmpBase, { recursive: true, force: true });
 });
 
+
+describe("recursive ancestor resource authority", () => {
+  it("keeps the direct optimizer budget while registering a larger descendant envelope", () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "resource-envelope.ndjson"));
+    ledgers.push(ledger);
+    const direct: BudgetEnvelope = {
+      maxTokens: 10,
+      maxUsd: 10,
+      maxWallClockSec: 10,
+      maxEvaluatorInvocations: 10,
+    };
+    const broker = makeBroker({
+      runId: "resource-root",
+      budget: direct,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        resourceEnvelope: LARGE,
+        admitChildRun: () => undefined,
+        launchChildRun: vi.fn<ChildRunLauncher>(),
+      },
+    });
+
+    expect(broker.getBudget(ADMIN)).toMatchObject({ envelope: direct });
+    expect(ledger.budgetState("resource-root")).toMatchObject({
+      envelope: LARGE,
+      remaining: LARGE,
+    });
+  });
+
+  it("admits a child reservation larger than the direct optimizer budget when aggregate authority covers it", async () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "larger-child-resource-envelope.ndjson"));
+    ledgers.push(ledger);
+    const direct: BudgetEnvelope = {
+      maxTokens: 10,
+      maxUsd: 10,
+      maxWallClockSec: 10,
+      maxEvaluatorInvocations: 10,
+    };
+    const reservation: BudgetEnvelope = {
+      maxTokens: 20,
+      maxUsd: 20,
+      maxWallClockSec: 20,
+      maxEvaluatorInvocations: 20,
+    };
+    const usage: ResourceUsage = {
+      tokens: 1,
+      usd: 1,
+      wallClockSec: 1,
+      evaluatorInvocations: 1,
+    };
+    const launcher: ChildRunLauncher = async ({ request, admission }) => ({
+      ...(await writeChildEvidence(request, admission, "larger-than-direct")),
+      usage,
+      finalizeSettlement: () => {},
+    });
+    const broker = makeBroker({
+      runId: "larger-child-root",
+      budget: direct,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        resourceEnvelope: LARGE,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: launcher,
+      },
+    });
+
+    const result = await broker.spawnRun(
+      childRequest("larger-than-direct-child", 1, reservation, "capsule"),
+      CLIENT,
+    );
+
+    expect(result.child.runId).toBe("larger-than-direct-child");
+    expect(broker.getBudget(ADMIN)).toMatchObject({ envelope: direct });
+    expect(ledger.budgetState("larger-child-root")).toMatchObject({
+      openReservations: 0,
+      remaining: {
+        maxTokens: 199,
+        maxUsd: 199,
+        maxWallClockSec: 199,
+        maxEvaluatorInvocations: 199,
+      },
+    });
+  });
+
+  it("rejects a recursive resource envelope smaller than the direct optimizer budget", () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "undersized-resource-envelope.ndjson"));
+    ledgers.push(ledger);
+    expect(() => makeBroker({
+      runId: "undersized-resource-root",
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        resourceEnvelope: { ...LARGE, maxTokens: LARGE.maxTokens - 1 },
+        admitChildRun: () => undefined,
+        launchChildRun: vi.fn<ChildRunLauncher>(),
+      },
+    })).toThrow("recursive resource envelope cannot be smaller than the direct broker budget");
+  });
+});
 describe("recursive spawnRun authority", () => {
+  it("checkpoints active time before recursive usage so a post-sync crash resumes", async () => {
+    let nowMs = 0;
+    const runId = "recursive-clock-crash";
+    const runDir = path.join(tmpBase, "recursive-clock-crash");
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "recursive-clock-crash.ndjson"));
+    ledgers.push(ledger);
+    const recursive = {
+      depth: 0 as const,
+      ancestors: [],
+      ledger,
+      admitChildRun: () => undefined,
+      launchChildRun: vi.fn<ChildRunLauncher>(),
+    };
+    const sync = ledger.syncRunUsage.bind(ledger);
+    let failAfterSync = false;
+    const syncSpy = vi.spyOn(ledger, "syncRunUsage").mockImplementation((syncedRunId, usage) => {
+      sync(syncedRunId, usage);
+      if (failAfterSync) throw new Error("injected crash after recursive usage fsync");
+    });
+    const first = makeBroker({ runId, runDir, budget: LARGE, recursive, now: () => nowMs });
+
+    nowMs = 2_000;
+    failAfterSync = true;
+    await expect(
+      first.createSandbox({ artifact: { hash: HASH_A }, role: "mutation" }, { privileged: false }),
+    ).rejects.toThrow("injected crash after recursive usage fsync");
+    syncSpy.mockRestore();
+    const beforeCrash = (await readFile(path.join(runDir, "broker-state.ndjson"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(beforeCrash.at(-1)).toEqual({ t: "clock", activeMs: 2_000 });
+    expect(ledger.budgetState(runId).directUsage.wallClockSec).toBe(2);
+
+    nowMs = 100_000;
+    const resumed = makeBroker({ runId, runDir, budget: LARGE, recursive, now: () => nowMs });
+    expect(resumed.getBudget({ privileged: true })).toMatchObject({
+      spent: { wallClockSec: 2 },
+      lifetimeSec: 100,
+    });
+  });
+
+  it("migrates a legacy recursive lifetime charge as a conservative active floor", async () => {
+    let nowMs = 100_000;
+    const runId = "recursive-clock-legacy";
+    const runDir = path.join(tmpBase, "recursive-clock-legacy");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "broker-state.ndjson"), `${JSON.stringify({ t: "start", atMs: 0 })}\n`);
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "recursive-clock-legacy.ndjson"));
+    ledgers.push(ledger);
+    ledger.registerRun(runId, 0, [], LARGE);
+    ledger.syncRunUsage(runId, { tokens: 0, usd: 0, wallClockSec: 5, evaluatorInvocations: 0 });
+    const broker = makeBroker({
+      runId,
+      runDir,
+      budget: LARGE,
+      now: () => nowMs,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        admitChildRun: () => undefined,
+        launchChildRun: vi.fn<ChildRunLauncher>(),
+      },
+    });
+    expect(broker.getBudget({ privileged: true })).toMatchObject({
+      spent: { wallClockSec: 5 },
+      lifetimeSec: 100,
+    });
+    const migrated = (await readFile(path.join(runDir, "broker-state.ndjson"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(migrated.at(-1)).toEqual({ t: "clock", activeMs: 5_000 });
+
+    nowMs = 101_000;
+    broker.recordSpend({ tokens: 0, usd: 0 }, { privileged: true });
+    expect(broker.getBudget({ privileged: true })).toMatchObject({
+      spent: { wallClockSec: 6 },
+      lifetimeSec: 101,
+    });
+    expect(ledger.budgetState(runId).directUsage.wallClockSec).toBe(6);
+  });
   it("runs frozen child membership and artifact-provenance admission before reserving", async () => {
     const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "admission-ledger.ndjson"));
     ledgers.push(ledger);
@@ -232,7 +421,7 @@ describe("recursive spawnRun authority", () => {
         status: "completed",
       };
       await writeFile(evidence.terminalEventPath, `${JSON.stringify(terminalOnly)}\n`);
-      return { ...evidence, usage };
+      return { ...evidence, usage, finalizeSettlement: () => {} };
     };
     const broker = makeBroker({
       runId: "root",
@@ -284,6 +473,7 @@ describe("recursive spawnRun authority", () => {
       return {
         ...evidence,
         usage: { tokens: 1, usd: 1, wallClockSec: 1, evaluatorInvocations: 1 },
+        finalizeSettlement: () => {},
       };
     };
     const broker = makeBroker({
@@ -304,7 +494,167 @@ describe("recursive spawnRun authority", () => {
       remaining: { maxTokens: 170, maxUsd: 170, maxWallClockSec: 170, maxEvaluatorInvocations: 170 },
     });
   });
+  it("refuses optimizer digest skew before committing any trusted settlement", async () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "optimizer-skew-ledger.ndjson"));
+    ledgers.push(ledger);
+    const reservation = { ...LARGE, maxTokens: 30, maxUsd: 30, maxWallClockSec: 30, maxEvaluatorInvocations: 30 };
+    const request = childRequest("optimizer-skew-child", 1, reservation, "capsule");
+    const finalizeSettlement = vi.fn();
+    const launcher: ChildRunLauncher = async ({ request: launchedRequest, admission }) => {
+      const evidence = await writeChildEvidence(launchedRequest, admission, "optimizer-skew");
+      const events: RunEvent[] = [
+        {
+          runId: launchedRequest.child.runId,
+          at: "1970-01-01T00:00:00.000Z",
+          type: "run.started",
+          capsuleId: launchedRequest.child.capsuleId,
+          contractHash: admission.campaignConfigHash,
+          optimizerDigest: CONFIG_HASH,
+          checkpointVersion: 1,
+          campaignConfigHash: admission.campaignConfigHash,
+        },
+        {
+          runId: launchedRequest.child.runId,
+          at: "1970-01-01T00:00:01.000Z",
+          type: "run.finished",
+          status: "completed",
+        },
+      ];
+      await writeFile(evidence.terminalEventPath, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+      return {
+        ...evidence,
+        usage: { tokens: 1, usd: 1, wallClockSec: 1, evaluatorInvocations: 1 },
+        finalizeSettlement,
+      };
+    };
+    const broker = makeBroker({
+      runId: "optimizer-skew-root",
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: launcher,
+      },
+    });
+
+    await expect(broker.spawnRun(request, CLIENT)).rejects.toThrow(
+      `child ${request.child.runId} event stream is not bound to its launch receipt`,
+    );
+    expect(finalizeSettlement).not.toHaveBeenCalled();
+    expect(ledger.budgetState("optimizer-skew-root")).toMatchObject({
+      reservations: 1,
+      openReservations: 1,
+    });
+  });
+  it("classifies an authenticated child without a terminal as pending and keeps its reservation open", async () => {
+    const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "pending-terminal-ledger.ndjson"));
+    ledgers.push(ledger);
+    ledger.registerRun("pending-terminal-root", 0, [], LARGE);
+    const request = childRequest("pending-terminal-child", 1, {
+      maxTokens: 30,
+      maxUsd: 30,
+      maxWallClockSec: 30,
+      maxEvaluatorInvocations: 30,
+    }, "capsule");
+    const finalizeSettlement = vi.fn();
+    const launcher: ChildRunLauncher = async ({ request: launchedRequest, admission }) => {
+      const evidence = await writeChildEvidence(launchedRequest, admission, "pending-terminal");
+      const started: RunEvent = {
+        runId: launchedRequest.child.runId,
+        at: "1970-01-01T00:00:00.000Z",
+        type: "run.started",
+        capsuleId: launchedRequest.child.capsuleId,
+        contractHash: contentHash("child-run-contract"),
+        optimizerDigest: launchedRequest.child.optimizerArtifact.hash,
+        campaignConfigHash: admission.campaignConfigHash,
+      };
+      await writeFile(evidence.terminalEventPath, `${JSON.stringify(started)}\n`);
+      return {
+        ...evidence,
+        usage: { tokens: 1, usd: 1, wallClockSec: 1, evaluatorInvocations: 1 },
+        finalizeSettlement,
+      };
+    };
+    const broker = makeBroker({
+      runId: "pending-terminal-root",
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: launcher,
+      },
+    });
+
+    const error = await broker.spawnRun(request, CLIENT).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    );
+    expect(error).toMatchObject({
+      code: "CHILD_PENDING",
+      message: `child ${request.child.runId} has no durable terminal event`,
+    });
+    expect(finalizeSettlement).not.toHaveBeenCalled();
+    expect(ledger.budgetState("pending-terminal-root")).toMatchObject({
+      reservations: 1,
+      openReservations: 1,
+    });
+  });
+
+  it.each(["missing", "empty"] as const)(
+    "classifies a %s child event journal as pending and keeps its reservation open",
+    async (journalState) => {
+      const ledger = RecursiveResourceLedger.open(path.join(tmpBase, `${journalState}-terminal-ledger.ndjson`));
+      ledgers.push(ledger);
+      const rootRunId = `${journalState}-terminal-root`;
+      ledger.registerRun(rootRunId, 0, [], LARGE);
+      const request = childRequest(`${journalState}-terminal-child`, 1, {
+        maxTokens: 30,
+        maxUsd: 30,
+        maxWallClockSec: 30,
+        maxEvaluatorInvocations: 30,
+      }, "capsule");
+      const finalizeSettlement = vi.fn();
+      const launcher: ChildRunLauncher = async ({ request: launchedRequest, admission }) => {
+        const evidence = await writeChildEvidence(launchedRequest, admission, `${journalState}-terminal`);
+        if (journalState === "missing") await rm(evidence.terminalEventPath);
+        else await writeFile(evidence.terminalEventPath, "");
+        return {
+          ...evidence,
+          usage: { tokens: 1, usd: 1, wallClockSec: 1, evaluatorInvocations: 1 },
+          finalizeSettlement,
+        };
+      };
+      const broker = makeBroker({
+        runId: rootRunId,
+        budget: LARGE,
+        recursive: {
+          depth: 0,
+          ancestors: [],
+          ledger,
+          admitChildRun: ADMIT_CHILD,
+          launchChildRun: launcher,
+        },
+      });
+
+      const error = await broker.spawnRun(request, CLIENT).then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+      expect(error).toMatchObject({
+        code: "CHILD_PENDING",
+        message: `child ${request.child.runId} has no durable terminal event`,
+      });
+      expect(finalizeSettlement).not.toHaveBeenCalled();
+      expect(ledger.budgetState(rootRunId)).toMatchObject({ reservations: 1, openReservations: 1 });
+    },
+  );
+
   it("refuses spawnRun at depth 2 before invoking the trusted launcher", async () => {
+
     const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "depth-ledger.ndjson"));
     ledgers.push(ledger);
     ledger.registerRun("root", 0, [], LARGE);
@@ -432,7 +782,11 @@ describe("recursive spawnRun authority", () => {
     const replayFlags: boolean[] = [];
     const secondLauncher: ChildRunLauncher = async ({ replay, request: launchedRequest, admission }) => {
       replayFlags.push(replay);
-      return { ...(await writeChildEvidence(launchedRequest, admission, "durable-child")), usage };
+      return {
+        ...(await writeChildEvidence(launchedRequest, admission, "durable-child")),
+        usage,
+        finalizeSettlement: () => {},
+      };
     };
     const second = makeBroker({
       runId: "root",
@@ -462,6 +816,124 @@ describe("recursive spawnRun authority", () => {
     });
   });
 
+  it("replays and independently settles two crash-open siblings through the real broker path", async () => {
+    const ledgerPath = path.join(tmpBase, "two-open-crash-ledger.ndjson");
+    const runDir = path.join(tmpBase, "two-open-root-run");
+    const reservation = {
+      ...LARGE,
+      maxTokens: 50,
+      maxUsd: 50,
+      maxWallClockSec: 50,
+      maxEvaluatorInvocations: 50,
+    };
+    const requests = [
+      childRequest("two-open-first", 1, reservation, "capsule"),
+      childRequest("two-open-second", 1, reservation, "capsule"),
+    ];
+    const firstLedger = RecursiveResourceLedger.open(ledgerPath);
+    ledgers.push(firstLedger);
+    let entered = 0;
+    let releaseCrash!: () => void;
+    const bothEntered = new Promise<void>((resolve) => {
+      releaseCrash = resolve;
+    });
+    const firstLauncher: ChildRunLauncher = async () => {
+      entered += 1;
+      if (entered === 2) releaseCrash();
+      await bothEntered;
+      throw new Error("simulated panel crash with two durable reservations");
+    };
+    const first = makeBroker({
+      runId: "two-open-root",
+      runDir,
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger: firstLedger,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: firstLauncher,
+      },
+    });
+
+    const crashed = await Promise.allSettled(requests.map((request) => first.spawnRun(request, CLIENT)));
+    expect(crashed.every((result) => result.status === "rejected")).toBe(true);
+    expect(firstLedger.budgetState("two-open-root")).toMatchObject({
+      reservations: 2,
+      openReservations: 2,
+      remaining: { maxTokens: 100 },
+    });
+    await first.close();
+    brokers.splice(brokers.indexOf(first), 1);
+    firstLedger.close();
+    ledgers.splice(ledgers.indexOf(firstLedger), 1);
+
+    const replayedLedger = RecursiveResourceLedger.open(ledgerPath);
+    ledgers.push(replayedLedger);
+    const usage: ResourceUsage = { tokens: 10, usd: 2, wallClockSec: 3, evaluatorInvocations: 4 };
+    const replayedChildren: string[] = [];
+    const finalized: string[] = [];
+    let releaseFirst!: () => void;
+    const secondSettled = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const replayLauncher: ChildRunLauncher = async ({ replay, request, admission }) => {
+      expect(replay).toBe(true);
+      replayedChildren.push(request.child.runId);
+      if (request.child.runId === "two-open-first") await secondSettled;
+      return {
+        ...(await writeChildEvidence(request, admission, request.child.runId)),
+        usage,
+        finalizeSettlement: () => {
+          finalized.push(request.child.runId);
+          if (request.child.runId === "two-open-second") releaseFirst();
+        },
+      };
+    };
+    const resumed = makeBroker({
+      runId: "two-open-root",
+      runDir,
+      budget: LARGE,
+      recursive: {
+        depth: 0,
+        ancestors: [],
+        ledger: replayedLedger,
+        admitChildRun: ADMIT_CHILD,
+        launchChildRun: replayLauncher,
+      },
+    });
+
+    const results = await Promise.all(requests.map((request) => resumed.spawnRun(request, CLIENT)));
+    expect(new Set(replayedChildren)).toEqual(new Set(["two-open-first", "two-open-second"]));
+    expect(finalized).toEqual(["two-open-second", "two-open-first"]);
+    expect(results.map((result) => result.child.runId).sort()).toEqual(
+      ["two-open-first", "two-open-second"],
+    );
+    expect(replayedLedger.budgetState("two-open-root")).toMatchObject({
+      reservations: 2,
+      openReservations: 0,
+      remaining: {
+        maxTokens: 180,
+        maxUsd: 196,
+        maxWallClockSec: 194,
+        maxEvaluatorInvocations: 192,
+      },
+    });
+    const durableTypes = (await readFile(ledgerPath, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line).t);
+    expect(durableTypes).toEqual([
+      "account",
+      "reservation",
+      "reservation",
+      "usage",
+      "settlement",
+      "usage",
+      "settlement",
+    ]);
+  });
+
   it("holds the full reservation until the child terminal event is durable, then returns only unused resources", async () => {
     const ledger = RecursiveResourceLedger.open(path.join(tmpBase, "settlement-ledger.ndjson"));
     ledgers.push(ledger);
@@ -477,7 +949,11 @@ describe("recursive spawnRun authority", () => {
     const launcher: ChildRunLauncher = async ({ request: launchedRequest, admission }) => {
       announceStarted?.();
       await gate;
-      return { ...(await writeChildEvidence(launchedRequest, admission, "settling-child")), usage };
+      return {
+        ...(await writeChildEvidence(launchedRequest, admission, "settling-child")),
+        usage,
+        finalizeSettlement: () => {},
+      };
     };
     const broker = makeBroker({
       runId: "root",

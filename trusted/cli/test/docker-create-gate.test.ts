@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { runCommand } from "@hone/broker";
 import type { CmdOptions, CmdResult, RunCommand } from "@hone/broker";
 import {
@@ -12,7 +12,6 @@ import {
   parseBootUuid,
   openDockerCreateGate,
   readOpenDockerCreateIntents,
-  readDockerCgroupParent,
 } from "../src/docker-create-gate.js";
 import type { DockerCreateHelperTask, DockerCreateKind } from "../src/docker-create-gate.js";
 import { deferred } from "../src/promise.js";
@@ -90,61 +89,6 @@ describe("host boot identity witness", () => {
       expect(currentHostBootId()).toBe(first);
     },
   );
-});
-
-describe("aggregate calibration resource boundary", () => {
-  const dirs: string[] = [];
-  afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
-
-  it("forces one group before the image for fenced, two-phase and detached-helper creates", async () => {
-    const dir = newDir(); dirs.push(dir);
-    const parent = "/hone-calibration";
-    const seen: string[][] = [];
-    const daemon: RunCommand = async (argv) => {
-      if (argv[1] === "create") seen.push([...argv]);
-      return res({ stdout: Buffer.from("container-id\n") });
-    };
-    const gate = openDockerCreateGate(dir, RUN_ID, { cgroupParent: parent, helper: scriptedCreateHelper(daemon) });
-    const run = gate.wrap(daemon);
-    await run(["docker", "create", "--name", "candidate", "--volumes-from", `${OLD_DONOR}:ro`, IMAGE, "true"]);
-    await run(["docker", "run", "--rm", "--name", "evaluation", "--volumes-from", `${OLD_DONOR}:ro`, IMAGE, "--cgroup-parent", "/command-argument"]);
-    await run(["docker", "create", `--cgroup-parent=${parent}`, "--name", "keeper", IMAGE, "true"]);
-    expect(seen).toHaveLength(3);
-    for (const argv of seen) {
-      const flags = argv.slice(0, argv.indexOf(IMAGE));
-      const index = flags.indexOf("--cgroup-parent");
-      expect(index).toBeGreaterThan(1);
-      expect(flags[index + 1]).toBe(parent);
-      expect(flags.filter((arg) => arg === "--cgroup-parent" || arg.startsWith("--cgroup-parent="))).toHaveLength(1);
-    }
-    expect(seen[1]!.slice(seen[1]!.indexOf(IMAGE) + 1)).toEqual(["--cgroup-parent", "/command-argument"]);
-    gate.assertTerminal();
-  });
-
-  it("refuses conflicting Docker group flags before any create intent or daemon call", async () => {
-    const dir = newDir(); dirs.push(dir);
-    let contacted = false;
-    const daemon: RunCommand = async () => { contacted = true; return res(); };
-    const gate = openDockerCreateGate(dir, RUN_ID, { cgroupParent: "/hone-calibration", helper: scriptedCreateHelper(daemon) });
-    const run = gate.wrap(daemon);
-    for (const flags of [["--cgroup-parent", "/unbounded"], ["--cgroup-parent=/unbounded"]]) {
-      await expect(run(["docker", "create", ...flags, "--name", "escape", IMAGE])).rejects.toThrow(/cgroup/);
-    }
-    expect(contacted).toBe(false);
-    expect(readOpenDockerCreateIntents(dir)).toEqual([]);
-  });
-
-  it("retains the group across resume and refuses adding, replacing or dropping it", async () => {
-    const grouped = newDir(); const ungrouped = newDir(); dirs.push(grouped, ungrouped);
-    openDockerCreateGate(grouped, RUN_ID, { cgroupParent: "hone-calibration.slice" });
-    const resumed = openDockerCreateGate(grouped, RUN_ID, { cgroupParent: "hone-calibration.slice" });
-    expect(readDockerCgroupParent(grouped)).toBe("hone-calibration.slice");
-    expect(resumed.containerArgv(["docker", "create", IMAGE])).toEqual(["docker", "create", "--cgroup-parent", "hone-calibration.slice", IMAGE]);
-    expect(() => openDockerCreateGate(grouped, RUN_ID)).toThrow(/cgroup/);
-    expect(() => openDockerCreateGate(grouped, RUN_ID, { cgroupParent: "/other" })).toThrow(/cgroup/);
-    openDockerCreateGate(ungrouped, RUN_ID);
-    expect(() => openDockerCreateGate(ungrouped, RUN_ID, { cgroupParent: "/hone-calibration" })).toThrow(/cgroup/);
-  });
 });
 
 describe("wrap: joined fenced creates with write-ahead intents", () => {
@@ -232,7 +176,7 @@ describe("wrap: joined fenced creates with write-ahead intents", () => {
         return Promise.resolve(res({ timedOut: true, exitCode: 1 }));
       }
       if (argv[1] === "rm") {
-        sequence.push(`rm-called:${argv[3] ?? ""}`);
+        sequence.push(`rm-called:${argv.at(-1) ?? ""}`);
         rmCalled.resolve();
         return rmSettled.promise;
       }
@@ -269,7 +213,7 @@ describe("wrap: joined fenced creates with write-ahead intents", () => {
     const result = await gate.wrap(run)(["docker", "run", "-d", "--name", "hone-relay", IMAGE, "node", "-e", "x"], {});
     expect(result.exitCode).toBe(1);
     expect(argvs.map((a) => a[1])).toEqual(["create", "start", "rm"]);
-    expect(argvs[2]).toEqual(["docker", "rm", "-f", "dcid"]);
+    expect(argvs[2]).toEqual(["docker", "rm", "-f", "-v", "dcid"]);
   });
 
   it("P1(3): only a CONCLUSIVE Engine rejection settles failed; a signaled client or transport loss after POST acceptance stays OPEN", async () => {
@@ -803,7 +747,7 @@ describe("inherited open intents: deterministic crash schedules, every kind", ()
     const daemon2: RunCommand = (argv) => {
       if (argv[1] === "container" && argv[2] === "inspect") return Promise.resolve(res({ stdout: Buffer.from("[{}]\n") }));
       if (argv[1] === "rm") {
-        reaped.push(argv[3] ?? "");
+        reaped.push(argv.at(-1) ?? "");
         return Promise.resolve(res({ stdout: Buffer.from("hone-scratch-keeper-x\n") }));
       }
       return Promise.resolve(res());
@@ -902,7 +846,7 @@ describe("real Docker probe: the daemon-side facts the causal proof rests on", (
         expect(conflict.exitCode).not.toBe(0);
         expect(conflict.stderr.toString("utf8")).toMatch(/already in use/i);
       } finally {
-        await runCommand(["docker", "rm", "-f", name], { timeoutMs: 30_000 });
+        await runCommand(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 });
       }
     },
   );

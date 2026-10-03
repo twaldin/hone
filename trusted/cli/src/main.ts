@@ -3,11 +3,11 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { UsageError } from "./args.js";
 import { applyCommand } from "./commands/apply.js";
+import { calibrationCommand } from "./commands/calibration.js";
 import { authorCommand } from "./commands/author.js";
 import { bestCommand } from "./commands/best.js";
-import { calibrationCommand } from "./commands/calibration.js";
 import { diffCommand } from "./commands/diff.js";
-import { honeCommand, recursiveCommand } from "./commands/hone.js";
+import { campaignCommand, honeCommand, recursiveCommand } from "./commands/hone.js";
 import { resumeCampaignCommand } from "./commands/resume.js";
 import { statusCommand } from "./commands/status.js";
 import { stopCommand } from "./commands/stop.js";
@@ -24,8 +24,16 @@ usage:
            [--backend stub|local] [--config <json>]
   hone author <capsule-objective> [--repo DIR] [--headless] [--acknowledge-dirty]
   hone hone --campaign <path> --headless
-  hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal]
-  hone calibration plan|init|status|run|report|verify [flags]
+  hone calibration --campaign <path> --headless [--state <.hone-runs/path>] [--resume] [--dry-structure] [--smoke-cell N]
+  hone recursive --campaign <path> --headless [--phase freeze|search|confirmation|terminal] [--sealed-base <dir>]
+  hone campaign migrate-source --campaign <frozen.json> --from <oldSourceCommit> --to <newSourceCommit> --reason <text> [--refreeze-optimizer --sealed-base <dir>]
+  hone campaign repin-image --campaign <frozen.json> --capsule <id> --from-image <image> --to-image <image>
+           --evidence <equivalence-record.json> --reason <text>
+  hone campaign capture-closure --campaign <frozen.json> --source <git-worktree> [--source-commit <commit>]
+           [--cas <dir>] [--node-modules-archive <tar.zst> --archive-sha256 <sidecar>]
+           [--restore <target> --verify-image <image> --verify-digest sha256:<64hex>] [--dry-run]
+  hone campaign restore-closure --campaign <frozen.json> --target <dir> [--cas <dir>] [--manifest sha256:<64hex>]
+  hone campaign smoke-capsules --campaign <frozen.json> --evidence <receipt.json>
   hone resume [--pause PAUSE_ID] [--campaign CAMPAIGN_STATE_DIR]
   hone status [--run ID]
   hone best [--run ID]
@@ -50,10 +58,12 @@ export async function main(argv: string[], io: CmdIo): Promise<number> {
         return await authorCommand(rest, io);
       case "hone":
         return await honeCommand(rest, io);
-      case "recursive":
-        return await recursiveCommand(rest, io);
       case "calibration":
         return await calibrationCommand(rest, io);
+      case "recursive":
+        return await recursiveCommand(rest, io);
+      case "campaign":
+        return await campaignCommand(rest, io);
       case "resume":
         return await resumeCampaignCommand(rest, io);
       case "status":

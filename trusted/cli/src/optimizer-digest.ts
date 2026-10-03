@@ -42,6 +42,49 @@ import { trustedRepoRoot } from "./runtime-digest.js";
 
 export const OPTIMIZER_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
+/**
+ * Platform runtimes shipped with the sealed optimizer. The Bun and Pi bytes
+ * execute the mutation worker; Node executes the trusted optimizer bundle.
+ * Every hash is part of OPTIMIZER_BUILD_CONTRACT and therefore every
+ * optimizer digest.
+ */
+export const MUTATION_RUNTIME_MANIFEST = {
+  version: 1,
+  bun: {
+    version: "1.3.14",
+    sourceName: "bun",
+    bundleName: "bun.gz",
+    sandboxName: "bun",
+    sha256: "9fd36f87e4b90b07632b987a2e4ec81ca15a62c81bf983190cea6d715be2ad74",
+    mode: 0o500,
+  },
+  pi: {
+    version: "16.5.2",
+    files: [
+      {
+        sourceName: "pi_natives.linux-x64-baseline.node",
+        bundleName: "pi_natives.linux-x64-baseline.node.gz",
+        sandboxName: "pi_natives.linux-x64-baseline.node",
+        sha256: "c6fccbbfb79fd27c50a6eb73ae6ab3d973cee268a9b7e39fb1745efd24779526",
+        mode: 0o400,
+      },
+    ],
+  },
+} as const;
+
+export const OPTIMIZER_RUNTIME_MANIFEST = {
+  version: 1,
+  node: {
+    version: "18.20.4",
+    sourceName: "node",
+    bundleName: "node",
+    runtimePath: "/hone/bundle/node",
+    sha256: "8e1afa69ff9b0f33a4dd5f16cf3eba4a10d5e4f2a9209f95ce9dd1e446378268",
+    mode: 0o555,
+  },
+} as const;
+export const MUTATION_RUNTIME_MANIFEST_FILE = "mutation-runtime.json";
+
 /** Entries under the optimizer trees that never affect the executed loop. */
 export const OPTIMIZER_SKIP: Record<string, true> = {
   test: true,
@@ -79,25 +122,58 @@ export interface OptimizerSnapshot {
  * is not part of the sealed closure and is never loaded by the worker.
  */
 export const OPTIMIZER_BUILD_CONTRACT = {
-  version: 2,
+  version: 4,
   layout: {
     optimizer: "optimizer",
     schema: "optimizer/node_modules/@hone/schema",
     zod: "optimizer/node_modules/zod",
     pi: "pi-store",
+    runtime: "/hone/runtime",
     "pnpm-lock.yaml": "pnpm-lock.yaml",
   },
+  mutationRuntime: MUTATION_RUNTIME_MANIFEST,
+  optimizerRuntime: OPTIMIZER_RUNTIME_MANIFEST,
   build: [
     "/bin/sh",
     "-c",
-    "bun build /hone/src/optimizer/src/main.ts --target=node --outfile=/hone/out/optimizer.mjs && " +
-      "bun build /hone/src/optimizer/worker/mutate.ts --target=bun --external omp-legacy-pi-modules --outfile=/hone/out/worker.mjs",
+    `echo "${MUTATION_RUNTIME_MANIFEST.bun.sha256}  /hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName}" | sha256sum -c - && ` +
+      `test "$(/hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} --version)" = "${MUTATION_RUNTIME_MANIFEST.bun.version}" && ` +
+      `echo "${MUTATION_RUNTIME_MANIFEST.pi.files[0].sha256}  /hone/runtime/${MUTATION_RUNTIME_MANIFEST.pi.files[0].sourceName}" | sha256sum -c - && ` +
+      `/hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} -e 'const n=require(process.argv[1]); if(typeof n.__piNativesV16_5_2!=="function") process.exit(1)' /hone/runtime/${MUTATION_RUNTIME_MANIFEST.pi.files[0].sourceName} && ` +
+      `echo "${OPTIMIZER_RUNTIME_MANIFEST.node.sha256}  /hone/runtime/${OPTIMIZER_RUNTIME_MANIFEST.node.sourceName}" | sha256sum -c - && ` +
+      `test "$(/hone/runtime/${OPTIMIZER_RUNTIME_MANIFEST.node.sourceName} --version)" = "v${OPTIMIZER_RUNTIME_MANIFEST.node.version}" && ` +
+      `/hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} build /hone/src/optimizer/src/main.ts --target=node --outfile=/hone/out/optimizer.mjs && ` +
+      `/hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} build /hone/src/optimizer/worker/mutate.ts --target=bun --external omp-legacy-pi-modules --outfile=/hone/out/worker.mjs && ` +
+      `gzip -1 -n -c /hone/runtime/${MUTATION_RUNTIME_MANIFEST.bun.sourceName} > /hone/out/${MUTATION_RUNTIME_MANIFEST.bun.bundleName} && ` +
+      `gzip -1 -n -c /hone/runtime/${MUTATION_RUNTIME_MANIFEST.pi.files[0].sourceName} > /hone/out/${MUTATION_RUNTIME_MANIFEST.pi.files[0].bundleName} && ` +
+      `cat /hone/runtime/${OPTIMIZER_RUNTIME_MANIFEST.node.sourceName} > /hone/out/${OPTIMIZER_RUNTIME_MANIFEST.node.bundleName}`,
   ],
-  run: ["node", "/hone/bundle/optimizer.mjs"],
+  run: [
+    "/bin/sh",
+    "-c",
+    `echo "${OPTIMIZER_RUNTIME_MANIFEST.node.sha256}  ${OPTIMIZER_RUNTIME_MANIFEST.node.runtimePath}" | sha256sum -c - && ` +
+      `test "$(${OPTIMIZER_RUNTIME_MANIFEST.node.runtimePath} --version)" = "v${OPTIMIZER_RUNTIME_MANIFEST.node.version}" && ` +
+      `printf '%s\\n' '${JSON.stringify({
+        type: "optimizer.runtime",
+        node: {
+          version: OPTIMIZER_RUNTIME_MANIFEST.node.version,
+          path: OPTIMIZER_RUNTIME_MANIFEST.node.runtimePath,
+          sha256: OPTIMIZER_RUNTIME_MANIFEST.node.sha256,
+        },
+      })}' && ` +
+      `exec ${OPTIMIZER_RUNTIME_MANIFEST.node.runtimePath} /hone/bundle/optimizer.mjs`,
+  ],
 } as const;
 
 /** Bundle filenames the build emits into /hone/out (mounted at /hone/bundle for the run). */
-export const OPTIMIZER_BUNDLE_FILES = ["optimizer.mjs", "worker.mjs"] as const;
+export const OPTIMIZER_BUNDLE_FILES = [
+  "optimizer.mjs",
+  "worker.mjs",
+  OPTIMIZER_RUNTIME_MANIFEST.node.bundleName,
+  MUTATION_RUNTIME_MANIFEST_FILE,
+  MUTATION_RUNTIME_MANIFEST.bun.bundleName,
+  MUTATION_RUNTIME_MANIFEST.pi.files[0].bundleName,
+] as const;
 
 /** The hone repo root of the LIVE repository. Pinned at boot (bin/hone.js)
  * so the value stays correct even though the trusted runtime executes from

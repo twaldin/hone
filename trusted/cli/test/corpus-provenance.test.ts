@@ -4,7 +4,21 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { hashCorpusSnapshot } from "@hone/broker";
 import type { BrokerCorpusConfig, CmdResult, RunCommand } from "@hone/broker";
-import { AdmissionReceiptRecord, CapsuleManifest, RunConfig, admissionReceiptRecordHash, canonicalJson, capsuleDigest, type AdmissionReceiptRecordBody } from "@hone/schema";
+import {
+  AdmissionReceiptRecord,
+  CapsuleManifest,
+  M2_PANEL_A_TASK_IDS,
+  M2_PANEL_B_TASK_IDS,
+  RunConfig,
+  admissionReceiptRecordHash,
+  canonicalJson,
+  capsuleDigest,
+  type AdmissionReceiptRecord as AdmissionReceipt,
+  type AdmissionReceiptRecordBody,
+  type M2AuthorizedAdmittedCapsule,
+  type M2AuthorizedDeferredCapsule,
+  type M2AuthorizedPartialCohort,
+} from "@hone/schema";
 import { appendAdmissionReceipt } from "../src/admission-receipts.js";
 import { freezeCapsuleAssets, writeCapsuleSnapshot } from "../src/admission.js";
 import { createBackend } from "../src/backends/local.js";
@@ -15,6 +29,7 @@ import {
   corpusCohortFenceError,
   readCorpusProvenanceArtifact,
   writeCorpusProvenanceArtifact,
+  verifyCorpusProvenance,
   type AdmittedCorpusCapsule,
   type CorpusCohortBinding,
   type CorpusProvenanceInputs,
@@ -72,6 +87,135 @@ function fixtureInputs(): CorpusProvenanceInputs & { capsules: Record<string, Ad
       { id: "panel/dev-a-1", content: "panel transcript for dev-a\n", cohort: "panel-a" as const, capsuleLabel: "dev-a", usage: USAGE },
     ],
     generatedAt: "2026-07-22T00:00:00.000Z",
+  };
+}
+
+function partialFixtureInputs(): CorpusProvenanceInputs & {
+  capsules: Record<string, AdmittedCorpusCapsule>;
+} {
+  const authorization = {
+    decisionKey: "bun-image-blocker" as const,
+    decidedAt: "2026-08-12T18:15:41Z",
+    owner: { identity: "captain" as const, kind: "owner" as const },
+    deliveredVia: "first-mate" as const,
+    ruling: "ADMIT THE 21 NOW, DEFER THE SIX EXPLICITLY" as const,
+    supersedes: {
+      rule: "atomic-16-development-11-terminal" as const,
+      scope: "this-cohort-only" as const,
+    },
+    evidence: [{ path: "plans/m2-native-amd64-admission-evidence.json", digest: sha("authorization") }],
+  };
+  const developmentLabels = Array.from({ length: 13 }, (_, index) => `dev-${index}`);
+  const terminalLabels = Array.from({ length: 8 }, (_, index) => `term-${index}`);
+  const deferredDevelopmentLabels = Array.from({ length: 3 }, (_, index) => `deferred-dev-${index}`);
+  const deferredTerminalLabels = Array.from({ length: 3 }, (_, index) => `deferred-term-${index}`);
+  const admittedBindings: M2AuthorizedAdmittedCapsule[] = [];
+  const deferredBindings: M2AuthorizedDeferredCapsule[] = [];
+  const capsules: Record<string, AdmittedCorpusCapsule> = {};
+  const developmentTaskIds = [...M2_PANEL_A_TASK_IDS, ...M2_PANEL_B_TASK_IDS];
+  const allDevelopmentLabels = [...developmentLabels, ...deferredDevelopmentLabels];
+  for (const [index, label] of allDevelopmentLabels.entries()) {
+    const capsule = admittedFixture(label, ["content"]);
+    if (index >= developmentLabels.length) {
+      deferredBindings.push({
+        label,
+        capsuleId: capsule.manifest.id,
+        capsuleDigest: capsule.digest,
+        reason: "recorded native blocker",
+        evidence: [{ path: `capsules/${label}/diagnostics/blocker.json`, digest: sha(`blocker:${label}`) }],
+        role: "development",
+        taskId: developmentTaskIds[index]!,
+      });
+      continue;
+    }
+    const body: AdmissionReceiptRecordBody = {
+      v: 1,
+      sequence: 1,
+      previousReceiptHash: sha(`gate1:${label}`),
+      capsuleDigest: capsule.digest,
+      action: "gate2-approve",
+      identities: {
+        author: { identity: "hone-native-migration", kind: "agent" },
+        "adversarial-validator": { identity: "hone-native-migration-adv-f1", kind: "agent" },
+        "final-reviewer": { identity: "captain", kind: "owner" },
+      },
+      approvalBasis: {
+        authorizationKey: authorization.decisionKey,
+        authorizedBy: authorization.owner,
+        authorizedAt: authorization.decidedAt,
+        deliveredVia: authorization.deliveredVia,
+        reviewEvidence: ["data/hone-native-migration/review-f1.md", "data/hone-native-migration/review-f2.md"],
+      },
+      provisional: false,
+      timestamp: new Date(Date.parse("2026-08-13T00:00:00Z") + index * 1_000).toISOString(),
+    };
+    const receipt: AdmissionReceipt = { ...body, recordHash: admissionReceiptRecordHash(body) };
+    capsules[label] = { ...capsule, approval: { approved: true, receipt } };
+    admittedBindings.push({
+      label,
+      capsuleId: capsule.manifest.id,
+      capsuleDigest: capsule.digest,
+      gate2ReceiptHash: receipt.recordHash,
+      role: "development",
+      taskId: developmentTaskIds[index]!,
+    });
+  }
+  for (const [index, label] of [...terminalLabels, ...deferredTerminalLabels].entries()) {
+    const capsule = admittedFixture(label, ["content"]);
+    if (index >= terminalLabels.length) {
+      deferredBindings.push({
+        label,
+        capsuleId: capsule.manifest.id,
+        capsuleDigest: capsule.digest,
+        reason: "recorded native blocker",
+        evidence: [{ path: `capsules/${label}/diagnostics/blocker.json`, digest: sha(`blocker:${label}`) }],
+        role: "terminal",
+      });
+      continue;
+    }
+    const body: AdmissionReceiptRecordBody = {
+      v: 1,
+      sequence: 1,
+      previousReceiptHash: sha(`gate1:${label}`),
+      capsuleDigest: capsule.digest,
+      action: "gate2-approve",
+      identities: {
+        author: { identity: "hone-native-migration", kind: "agent" },
+        "adversarial-validator": { identity: "hone-native-migration-adv-f1", kind: "agent" },
+        "final-reviewer": { identity: "captain", kind: "owner" },
+      },
+      approvalBasis: {
+        authorizationKey: authorization.decisionKey,
+        authorizedBy: authorization.owner,
+        authorizedAt: authorization.decidedAt,
+        deliveredVia: authorization.deliveredVia,
+        reviewEvidence: ["data/hone-native-migration/review-f1.md", "data/hone-native-migration/review-f2.md"],
+      },
+      provisional: false,
+      timestamp: new Date(Date.parse("2026-08-13T01:00:00Z") + index * 1_000).toISOString(),
+    };
+    const receipt: AdmissionReceipt = { ...body, recordHash: admissionReceiptRecordHash(body) };
+    capsules[label] = { ...capsule, approval: { approved: true, receipt } };
+    admittedBindings.push({
+      label,
+      capsuleId: capsule.manifest.id,
+      capsuleDigest: capsule.digest,
+      gate2ReceiptHash: receipt.recordHash,
+      role: "terminal",
+    });
+  }
+  return {
+    capsules,
+    mapping: { development: developmentLabels, terminal: terminalLabels },
+    publicSnapshot: [],
+    panelEvidence: [],
+    partialCohort: {
+      version: "m2-authorized-partial-cohort.v1",
+      authorization,
+      admitted: admittedBindings,
+      deferred: deferredBindings,
+    },
+    generatedAt: "2026-08-13T02:00:00.000Z",
   };
 }
 
@@ -148,6 +292,19 @@ describe("corpus provenance assembly: partition and hash derivation", () => {
     expect(third.inputsDigest).not.toBe(first.inputsDigest);
     expect(third.publicSnapshotDigest).not.toBe(first.publicSnapshotDigest);
   });
+
+  it("binds the explicit 21+6 policy and its receipt set into provenance", () => {
+    const artifact = assembleCorpusProvenance(partialFixtureInputs());
+    expect(artifact.capsules).toHaveLength(21);
+    expect(artifact.developmentCapsuleIds).toHaveLength(13);
+    expect(artifact.terminalCapsuleIds).toHaveLength(8);
+    expect(artifact.partialCohort?.deferred).toHaveLength(6);
+
+    const drifted = structuredClone(artifact);
+    if (drifted.partialCohort === undefined) throw new Error("fixture lost partial cohort");
+    drifted.partialCohort.authorization.evidence[0]!.digest = sha("foreign-authorization");
+    expect(() => verifyCorpusProvenance(drifted)).toThrow(/inputsDigest mismatch/);
+  });
 });
 
 describe("corpus provenance assembly: refusals", () => {
@@ -173,6 +330,80 @@ describe("corpus provenance assembly: refusals", () => {
     const inputs = fixtureInputs();
     inputs.mapping = { development: ["dev-a", "dev-b"], terminal: ["term-a", "term-b", "dev-a"] };
     expect(() => assembleCorpusProvenance(inputs)).toThrow(/more than once/);
+  });
+
+  it("refuses a partial cohort whose actual Gate-2 receipt or owner basis does not match", () => {
+    const receiptDrift = partialFixtureInputs();
+    const firstLabel = receiptDrift.mapping.development[0]!;
+    const first = receiptDrift.capsules[firstLabel]!;
+    if (first.approval?.receipt === undefined) throw new Error("fixture lost approval");
+    receiptDrift.capsules[firstLabel] = {
+      ...first,
+      approval: {
+        approved: true,
+        receipt: { ...first.approval.receipt, recordHash: sha("foreign-receipt") },
+      },
+    };
+    expect(() => assembleCorpusProvenance(receiptDrift)).toThrow(/does not reproduce its authorized Gate-2 receipt/);
+
+    const basisDrift = partialFixtureInputs();
+    const basisLabel = basisDrift.mapping.development[0]!;
+    const basisCapsule = basisDrift.capsules[basisLabel]!;
+    if (basisCapsule.approval?.receipt === undefined) throw new Error("fixture lost approval");
+    basisDrift.capsules[basisLabel] = {
+      ...basisCapsule,
+      approval: {
+        approved: true,
+        receipt: {
+          ...basisCapsule.approval.receipt,
+          approvalBasis: {
+            ...basisCapsule.approval.receipt.approvalBasis!,
+            authorizationKey: "foreign-decision",
+          },
+        },
+      },
+    };
+    expect(() => assembleCorpusProvenance(basisDrift)).toThrow(/does not cite the cohort owner authorization/);
+  });
+
+  it("accepts a receipt-bound later owner authority for a re-admitted identity", () => {
+    const inputs = partialFixtureInputs();
+    const label = inputs.mapping.development[0]!;
+    const capsule = inputs.capsules[label]!;
+    if (capsule.approval?.receipt === undefined) throw new Error("fixture lost approval");
+    const policy = structuredClone(inputs.partialCohort as M2AuthorizedPartialCohort);
+    const authorized = policy.admitted.find((entry) => entry.label === label);
+    if (authorized === undefined) throw new Error("fixture policy lost admitted capsule");
+    const gate2Authorization = {
+      authorizationKey: "m2-wave-gate2",
+      authorizedBy: { identity: "captain", kind: "owner" } as const,
+      authorizedAt: "2026-08-23T06:33:44Z",
+      deliveredVia: "first-mate",
+      reviewEvidence: ["plans/m2-readmission-wave-evidence.v1.json"],
+    };
+    const { recordHash: _recordHash, ...priorBody } = capsule.approval.receipt;
+    const body = { ...priorBody, approvalBasis: gate2Authorization };
+    const receipt = AdmissionReceiptRecord.parse({
+      ...body,
+      recordHash: admissionReceiptRecordHash(body),
+    });
+    authorized.gate2ReceiptHash = receipt.recordHash;
+    authorized.gate2Authorization = gate2Authorization;
+    inputs.partialCohort = policy;
+    inputs.capsules[label] = {
+      ...capsule,
+      approval: { approved: true, receipt },
+    };
+    expect(assembleCorpusProvenance(inputs).partialCohort?.admitted)
+      .toContainEqual(expect.objectContaining({ label, gate2Authorization }));
+  });
+
+  it("refuses a policy whose admitted labels do not exactly cover provenance inputs", () => {
+    const inputs = partialFixtureInputs();
+    const policy = structuredClone(inputs.partialCohort as M2AuthorizedPartialCohort);
+    policy.admitted[0]!.label = "foreign-label";
+    inputs.partialCohort = policy;
+    expect(() => assembleCorpusProvenance(inputs)).toThrow(/labels must match.*exactly/);
   });
 
   it("refuses a digest that does not match the manifest (digest binding at assembly)", () => {
@@ -434,7 +665,8 @@ describe("broker wiring: ctx.corpus reaches the broker", () => {
       runDir,
       casDir: join(root, ".hone-cas"),
       capsuleDir,
-      manifest,
+      admittedManifest: manifest,
+      runtimeIdentity: { admittedCapsuleDigest: capsuleDigest(manifest), executionImage: manifest.image },
       config: RunConfig.parse({
         version: 1,
         capsuleId: manifest.id,
@@ -444,7 +676,6 @@ describe("broker wiring: ctx.corpus reaches the broker", () => {
         headless: true,
       }),
       env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network" },
-      capsuleDigest: capsuleDigest(manifest),
       admissionReview: "off",
       optimizerDigest: fakeHash("0"),
       corpus,
@@ -454,6 +685,7 @@ describe("broker wiring: ctx.corpus reaches the broker", () => {
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: (b) => {
         void b.catch(() => {});
       },

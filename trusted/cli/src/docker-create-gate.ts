@@ -92,14 +92,6 @@ import { deferred } from "./promise.js";
  * O_APPEND would otherwise fuse the next record onto the fragment and
  * permanently corrupt replay. A TERMINATED corrupt line is real corruption
  * and fails closed.
- *
- * Sandbox cgroup seal (calibration): when opened with `cgroupParent`, every
- * epoch record carries `cgroup` and EVERY container create the gate
- * dispatches (wrapped create/run, detached helper, optimizer spawn via
- * `containerArgv`, inherited-intent claims) is forced under
- * `--cgroup-parent <sealed>` before the image. The seal is fixed at the
- * first open: a later open that changes, drops, or adds a parent refuses
- * before any append. `readDockerCgroupParent` exposes it read-only.
  */
 
 export const DOCKER_CREATE_WAL = "docker-creates.ndjson";
@@ -107,37 +99,6 @@ export const DOCKER_CREATE_WAL = "docker-creates.ndjson";
 export const DOCKER_CREATE_SIDECAR = "docker-creates.d";
 
 export type DockerCreateKind = "container" | "volume" | "network";
-
-/** systemd slice unit name: nonempty hyphen-nested components, `.slice` suffix (docker requires exactly `xxx.slice` under the systemd driver). */
-const CGROUP_SLICE_RE = /^[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*\.slice$/;
-/** One kernel-relative cgroupfs path segment (dot segments rejected separately). */
-const CGROUP_SEGMENT_RE = /^[A-Za-z0-9_.@:-]+$/;
-
-/**
- * The ONLY shapes a sandbox cgroup parent may take: an absolute kernel-relative
- * cgroupfs path (`/hone/calibration`) or a systemd slice name
- * (`hone-calibration.slice`). Anything else (relative paths, dot segments, the
- * root cgroup, shell/option-looking tokens) is refused before it can reach a
- * `--cgroup-parent` argv or the journal seal.
- */
-export function parseSandboxCgroupParent(value: string, source: string): string {
-  if (CGROUP_SLICE_RE.test(value)) return value;
-  if (value.startsWith("/") && value.length > 1) {
-    const segments = value.slice(1).split("/");
-    if (segments.every((s) => s !== "." && s !== ".." && CGROUP_SEGMENT_RE.test(s))) return value;
-  }
-  throw new Error(`${source}: sandbox cgroup parent ${JSON.stringify(value)} is neither an absolute cgroupfs path nor a systemd .slice name`);
-}
-
-/**
- * The cgroup parent this run's create journal is sealed to: null when the
- * journal is absent or was opened ungrouped (legacy/M0/M1). Read-only — no
- * writes, no truncation, no daemon probes; throws on a corrupt journal or an
- * inconsistent seal. Trusted collectors compare it against the plan.
- */
-export function readDockerCgroupParent(runDir: string): string | null {
-  return loadWal(join(runDir, DOCKER_CREATE_WAL)).cgroup;
-}
 
 /**
  * Conclusive Engine evidence that a create was REJECTED (or provably never
@@ -273,14 +234,6 @@ export interface DockerCreateGate {
   wrap(run: RunCommand): RunCommand;
   /** Explicit write-ahead intent for creates dispatched outside the wrapped RunCommand (optimizer spawn path). */
   begin(kind: DockerCreateKind, name: string | null, fence: string | null): CreateIntent;
-  /**
-   * The `docker create|run` argv to dispatch for a create issued outside the
-   * wrapped RunCommand (optimizer spawn path): the sealed `--cgroup-parent`
-   * is forced before the image; a conflicting explicit parent throws. MUST be
-   * applied before `begin` so a refusal never mints an intent. Ungrouped
-   * gates return argv unchanged.
-   */
-  containerArgv(argv: readonly string[]): readonly string[];
   /** Join every create the wrapper still has in flight (never kills a client). */
   drain(): Promise<void>;
   /** Open (unsettled, unproven) intents, inherited and current. */
@@ -331,11 +284,6 @@ const CONTAINER_VALUE_FLAGS: Record<string, true> = Object.fromEntries([
   "--restart", "--platform", "--cidfile", "--gpus", "--runtime", "--isolation",
   "--health-cmd", "--health-interval", "--health-retries", "--health-timeout", "--health-start-period",
   "-p", "--publish", "--expose", "--sysctl", "--ulimit", "--group-add", "--storage-opt",
-  "--cgroup-parent", "--cgroupns", "--userns", "--uts", "-a", "--attach", "--annotation",
-  "--cpu-period", "--cpu-quota", "--cpuset-mems", "--memory-swappiness", "--oom-score-adj",
-  "--blkio-weight", "--device-cgroup-rule", "--device-read-bps", "--device-write-bps",
-  "--device-read-iops", "--device-write-iops", "--dns-option", "--dns-search", "--domainname",
-  "--ip", "--ip6", "--link", "--link-local-ip", "--mac-address", "--network-alias", "--volume-driver",
 ].map((flag) => [flag, true]));
 
 const VOLUME_VALUE_FLAGS: Record<string, true> = { "-d": true, "--driver": true, "-o": true, "--opt": true, "--label": true };
@@ -349,21 +297,12 @@ interface ContainerArgvInfo {
   name: string | null;
   fence: string | null;
   detach: boolean;
-  /** True when argv[1] was "run" (rewritten two-phase: create, then a bounded start). */
-  rewritten: boolean;
-  /** The `docker create` argv to dispatch: run→create rewrite, detach flags dropped, the sealed `--cgroup-parent` injected before the image. */
-  argv: readonly string[];
+  /** argv with `docker run` → `docker create` and detach flags removed; null when argv[1] is already "create". */
+  createArgv: string[] | null;
 }
 
-/**
- * Parse the flag region of a `docker create|run` argv (flags precede the
- * image, as docker requires). With a sealed cgroup parent, every produced argv
- * carries exactly one `--cgroup-parent <sealed>` immediately before the image
- * (or before `--`): an identical explicit nomination collapses into it, any
- * other explicit nomination (space or `=` form) is refused BEFORE an intent
- * is minted. Ungrouped gates leave argv untouched.
- */
-function parseContainerArgv(argv: readonly string[], cgroupParent: string | null): ContainerArgvInfo {
+/** Parse the flag region of a `docker create|run` argv (flags precede the image, as docker requires). */
+function parseContainerArgv(argv: readonly string[]): ContainerArgvInfo {
   const rewrite = argv[1] === "run";
   const out: string[] = ["docker", "create"];
   let name: string | null = null;
@@ -377,13 +316,6 @@ function parseContainerArgv(argv: readonly string[], cgroupParent: string | null
         detach = true;
         continue; // dropped from the create argv
       }
-      if (tok === "--") {
-        // End of flags: the image follows; a value after `--` is positional.
-        if (cgroupParent !== null) out.push("--cgroup-parent", cgroupParent);
-        out.push(tok);
-        flagsDone = true;
-        continue;
-      }
       const eq = tok.indexOf("=");
       const flag = eq >= 0 ? tok.slice(0, eq) : tok;
       const inlineValue = eq >= 0 ? tok.slice(eq + 1) : null;
@@ -392,16 +324,6 @@ function parseContainerArgv(argv: readonly string[], cgroupParent: string | null
         const raw = inlineValue ?? (argv[i + 1] as string | undefined);
         if (raw !== undefined) fence = raw.replace(/:(ro|rw)$/, "");
       }
-      if (flag === "--cgroup-parent" && cgroupParent !== null) {
-        const nominated = inlineValue ?? (argv[i + 1] as string | undefined);
-        if (nominated !== cgroupParent) {
-          throw new Error(
-            `docker ${argv[1]} argv nominates cgroup parent ${nominated === undefined ? "<missing>" : JSON.stringify(nominated)} but this run is sealed to ${JSON.stringify(cgroupParent)}; refusing to create outside the sealed group`,
-          );
-        }
-        if (inlineValue === null) i += 1; // identical nomination: collapsed into the injected one
-        continue;
-      }
       out.push(tok);
       if (inlineValue === null && CONTAINER_VALUE_FLAGS[flag] === true && i + 1 < argv.length) {
         out.push(argv[i + 1] as string);
@@ -409,15 +331,10 @@ function parseContainerArgv(argv: readonly string[], cgroupParent: string | null
       }
       continue;
     }
-    if (!flagsDone) {
-      flagsDone = true; // image + command
-      if (cgroupParent !== null) out.push("--cgroup-parent", cgroupParent);
-    }
+    flagsDone = true; // image + command
     out.push(tok);
   }
-  // No image token at all: docker rejects the argv anyway; keep the sealed parent visible.
-  if (!flagsDone && cgroupParent !== null) out.push("--cgroup-parent", cgroupParent);
-  return { name, fence, detach, rewritten: rewrite, argv: rewrite || cgroupParent !== null ? out : argv };
+  return { name, fence, detach, createArgv: rewrite ? out : null };
 }
 
 /** Last positional token of a `docker volume|network create` argv (the deterministic resource name). */
@@ -443,10 +360,6 @@ interface Wal {
   durableBytes: number;
   /** Total file length — greater than durableBytes iff a torn tail exists. */
   totalBytes: number;
-  /** Sealed sandbox cgroup parent (epoch records); null = ungrouped/legacy. Meaningful only when `sealed`. */
-  cgroup: string | null;
-  /** True once any epoch record exists — the journal has been opened before and its group is fixed. */
-  sealed: boolean;
 }
 
 function loadWal(path: string): Wal {
@@ -455,8 +368,6 @@ function loadWal(path: string): Wal {
   let nextSeq = 1;
   let durableBytes = 0;
   let totalBytes = 0;
-  let cgroup: string | null = null;
-  let sealed = false;
   if (existsSync(path)) {
     const raw = readFileSync(path);
     totalBytes = raw.length;
@@ -481,14 +392,6 @@ function loadWal(path: string): Wal {
       if (t === "epoch") {
         const e = record["epoch"];
         if (typeof e === "number" && e > epoch) epoch = e;
-        const c = record["cgroup"];
-        if (c !== undefined && typeof c !== "string") throw new Error(`docker create journal epoch carries a malformed cgroup seal at line ${i + 1}`);
-        const recordCgroup = c === undefined ? null : parseSandboxCgroupParent(c, `docker create journal line ${i + 1}`);
-        if (sealed && recordCgroup !== cgroup) {
-          throw new Error(`docker create journal cgroup seal is inconsistent at line ${i + 1}: ${JSON.stringify(recordCgroup)} after ${JSON.stringify(cgroup)}`);
-        }
-        cgroup = recordCgroup;
-        sealed = true;
       } else if (t === "intent") {
         const seq = record["seq"];
         if (typeof seq !== "number") throw new Error(`docker create journal intent without seq at line ${i + 1}`);
@@ -526,7 +429,7 @@ function loadWal(path: string): Wal {
   const open = [...states.values()]
     .filter((s) => !s.settled && !s.proven)
     .map((s) => ({ seq: s.seq, kind: s.kind, name: s.name, fence: s.fence, boot: s.boot, dispatched: s.dispatched }));
-  return { epoch, states, open, nextSeq, durableBytes, totalBytes, cgroup, sealed };
+  return { epoch, states, open, nextSeq, durableBytes, totalBytes };
 }
 
 function noTimeout(opts: CmdOptions | undefined): CmdOptions {
@@ -629,15 +532,7 @@ function readHelperOutcome(outcomePath: string): HelperOutcome | null {
 export function openDockerCreateGate(
   runDir: string,
   runId: string,
-  deps: {
-    io?: DockerCreateJournalIo;
-    helper?: DockerCreateHelper;
-    bootId?: string;
-    clientEnv?: NodeJS.ProcessEnv;
-    endpointIsLocal?: boolean;
-    /** Sealed sandbox cgroup parent: forced onto EVERY container create; fixed for the run's lifetime at first open. */
-    cgroupParent?: string;
-  } = {},
+  deps: { io?: DockerCreateJournalIo; helper?: DockerCreateHelper; bootId?: string; clientEnv?: NodeJS.ProcessEnv; endpointIsLocal?: boolean } = {},
 ): DockerCreateGate {
   const path = join(runDir, DOCKER_CREATE_WAL);
   const sidecar = join(runDir, DOCKER_CREATE_SIDECAR);
@@ -645,18 +540,8 @@ export function openDockerCreateGate(
   const ioWrite = deps.io?.write ?? ((fd: number, buf: Buffer, offset: number, length: number) => writeSync(fd, buf, offset, length));
   const ioFsync = deps.io?.fsync ?? ((fd: number) => fsyncSync(fd));
 
-  // The sealed group is fixed at the FIRST open: a later open that drops,
-  // adds, or changes it refuses BEFORE any truncation, append, or dispatch —
-  // a resumed run can never attach to a calibration group it did not start
-  // in, nor escape the one it did.
-  const cgroupParent = deps.cgroupParent === undefined ? null : parseSandboxCgroupParent(deps.cgroupParent, "docker create gate");
   const existed = existsSync(path);
   const wal = loadWal(path);
-  if (wal.sealed && wal.cgroup !== cgroupParent) {
-    throw new Error(
-      `run ${runId} create journal is sealed to cgroup parent ${wal.cgroup === null ? "<none>" : JSON.stringify(wal.cgroup)} but this attempt supplies ${cgroupParent === null ? "<none>" : JSON.stringify(cgroupParent)}; refusing to open the docker create gate`,
-    );
-  }
   if (wal.totalBytes > wal.durableBytes) {
     // Physically truncate the torn tail BEFORE any append: O_APPEND would
     // fuse the next record onto the fragment, and the fused line would be a
@@ -699,7 +584,7 @@ export function openDockerCreateGate(
   };
 
   const epoch = wal.epoch + 1;
-  append({ v: 1, t: "epoch", epoch, ...(cgroupParent !== null ? { cgroup: cgroupParent } : {}), at: new Date().toISOString() });
+  append({ v: 1, t: "epoch", epoch, at: new Date().toISOString() });
   const states = wal.states;
   let nextSeq = wal.nextSeq;
   const inflight = new Set<Promise<unknown>>();
@@ -776,7 +661,7 @@ export function openDockerCreateGate(
   /** Joined daemon-side reap of a registered container — the client's death never stops a container. */
   const reap = async (run: RunCommand, ref: string): Promise<void> => {
     try {
-      await run(["docker", "rm", "-f", ref], {});
+      await run(["docker", "rm", "-f", "-v", ref], {});
     } catch {
       // The container is REGISTERED (visible to the strict sweeps); a failed
       // reap here surfaces at the final sweep, never as silent success.
@@ -834,25 +719,25 @@ export function openDockerCreateGate(
     const dispatch = async (argv: readonly string[], opts?: CmdOptions): Promise<CmdResult> => {
       if (argv[0] !== "docker") return run(argv, opts);
       if (argv[1] === "create" || argv[1] === "run") {
-        const info = parseContainerArgv(argv, cgroupParent);
+        const info = parseContainerArgv(argv);
         const intent = begin("container", info.name, info.fence);
-        if (!info.rewritten && info.fence === null) {
+        if (info.createArgv === null && info.fence === null) {
           // UNCLAIMABLE (donor-style) create: no fence exists to prove a
           // crashed request dead, so the detached helper guarantees a
           // durable outcome under kill+resume.
-          const result = await dispatchViaHelper(intent, info.argv);
+          const result = await dispatchViaHelper(intent, argv);
           return result ?? { exitCode: -1, stdout: Buffer.alloc(0), stderr: Buffer.from("docker create helper produced no durable outcome"), truncated: false, timedOut: false };
         }
-        if (!info.rewritten) {
+        if (info.createArgv === null) {
           // Plain fenced `docker create`: join the daemon's definitive response.
           intent.dispatched();
-          const result = await run(info.argv, noTimeout(opts));
+          const result = await run(argv, noTimeout(opts));
           settleFromResult(intent, { exitCode: result.exitCode, timedOut: result.timedOut, stderrText: result.stderr.toString("utf8") });
           return result;
         }
         // `docker run` → two-phase: joined create, bounded (killable) start.
         intent.dispatched();
-        const created = await run(info.argv, noTimeout({ ...opts, stdin: undefined, stdinFile: undefined }));
+        const created = await run(info.createArgv, noTimeout({ ...opts, stdin: undefined, stdinFile: undefined }));
         settleFromResult(intent, { exitCode: created.exitCode, timedOut: created.timedOut, stderrText: created.stderr.toString("utf8") });
         if (created.timedOut || created.exitCode !== 0) return created;
         const id = created.stdout.toString("utf8").trim().split("\n").pop() ?? "";
@@ -1000,7 +885,7 @@ export function openDockerCreateGate(
       }
       const rmArgv =
         kind === "container"
-          ? ["docker", "rm", "-f", name]
+          ? ["docker", "rm", "-f", "-v", name]
           : kind === "volume"
             ? ["docker", "volume", "rm", "-f", name]
             : ["docker", "network", "rm", name];
@@ -1044,7 +929,7 @@ export function openDockerCreateGate(
       }
       // Reap any registration that landed since the observation phase
       // (cleanup, not proof), then claim.
-      const reReap = await run(["docker", "rm", "-f", name], {});
+      const reReap = await run(["docker", "rm", "-f", "-v", name], {});
       if (reReap.exitCode !== 0 && !MISSING_RE.test(reReap.stderr.toString("utf8"))) {
         throw new Error(`removing crashed create "${name}" failed: ${reReap.stderr.toString("utf8").slice(0, 2000)}`);
       }
@@ -1064,7 +949,6 @@ export function openDockerCreateGate(
           "--cpus", "0.1",
           "--log-driver", "none",
           "--volumes-from", `${opts.donorName}:ro`,
-          ...(cgroupParent !== null ? ["--cgroup-parent", cgroupParent] : []),
           opts.image,
           "true",
         ],
@@ -1086,7 +970,7 @@ export function openDockerCreateGate(
       // epoch is gone — which the strict sweep guaranteed and epoch
       // monotonicity keeps true forever.
       for (const intent of group) prove(intent.seq, "fenced");
-      const unclaim = await run(["docker", "rm", "-f", name], {});
+      const unclaim = await run(["docker", "rm", "-f", "-v", name], {});
       if (unclaim.exitCode !== 0 && !MISSING_RE.test(unclaim.stderr.toString("utf8"))) {
         throw new Error(`removing docker create claim "${name}" failed: ${unclaim.stderr.toString("utf8").slice(0, 2000)}`);
       }
@@ -1097,7 +981,6 @@ export function openDockerCreateGate(
     epoch,
     wrap,
     begin,
-    containerArgv: (argv: readonly string[]): readonly string[] => parseContainerArgv(argv, cgroupParent).argv,
     drain: async (): Promise<void> => {
       while (inflight.size > 0) {
         await Promise.allSettled([...inflight]);

@@ -5,9 +5,12 @@ import type {
   CampaignPauseSignal,
   CampaignResumeSignal,
   CapsuleManifest,
+  CapsuleRuntimeIdentity,
   M2ProxyRole,
   RunConfig,
   RunEvent,
+  RunPauseReason,
+  PromotionHoldoutSplit,
 } from "@hone/schema";
 import type { RunState } from "./eventlog.js";
 import type { OptimizerSnapshot } from "./optimizer-digest.js";
@@ -59,6 +62,15 @@ export interface CampaignPauseAuthority {
   recordCampaignResume(signal: CampaignResumeSignal): void | Promise<void>;
 }
 
+export interface RunPauseRequest {
+  reason: RunPauseReason;
+  pauseId?: string | undefined;
+  providerStatus?: number | null | undefined;
+}
+
+/** Trusted worker preflight contract; absence always means the full modern toolbelt smoke. */
+export type MutationWorkerPreflightContract = "legacy-selftest";
+
 /**
  * Everything a backend needs, injected by the supervisor. WP7's real backend
  * composes broker + proxy + optimizer behind this same interface; this
@@ -70,19 +82,24 @@ export interface RunnerBackendContext {
   runDir: string;
   casDir: string;
   capsuleDir: string;
-  manifest: CapsuleManifest;
+  /** Immutable admitted manifest; never overwritten with an execution image. */
+  admittedManifest: CapsuleManifest;
+  /** Explicit mixed tuple: admitted digest + actually executed image. */
+  runtimeIdentity: CapsuleRuntimeIdentity;
   config: RunConfig;
   env: NodeJS.ProcessEnv;
-  /** Canonical digest of the admitted capsule manifest (sha256:<64 hex>). */
-  capsuleDigest: string;
   /** Sealed optimizer digest (sha256:<64 hex>) — computed or explicitly pinned. */
   optimizerDigest: string;
   /** Candidate-selected merged closure; takes precedence over the captured base at execution. */
   optimizerSnapshot?: OptimizerSnapshot | undefined;
   /** Exact campaign/default base closure captured once during trusted admission. */
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+  /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
+  mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
   /** Trusted M1 full-run replicate identity, absent on M0. */
   measurementEpoch?: string | undefined;
+  /** Trusted per-evaluation wall-time cap, frozen by M2 campaign orchestration. */
+  evalTimeoutSec?: number | undefined;
   /** Trusted outer-broker evaluator; never serialized or exposed to a sandbox. */
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   /** Total optimizer episodes for this trusted run. M0 leaves this absent. */
@@ -93,6 +110,8 @@ export interface RunnerBackendContext {
   trustedValidPublicCandidateTarget?: number | undefined;
   /** Holdout groups released only inside a terminal-latched child run. */
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
+  /** Frozen promotion holdout; trusted-only and never returned to the optimizer. */
+  promotionHoldoutSplit?: PromotionHoldoutSplit | undefined;
   /** Frozen M2 proxy bearer role. Absent only for legacy M0/M1 mutation routing. */
   proxyRole?: M2ProxyRole | undefined;
   /** Shared durable M2 provider-pause authority. */
@@ -103,16 +122,9 @@ export interface RunnerBackendContext {
   recursiveBroker?: BrokerRecursiveConfig | undefined;
   /** Frozen development-corpus wire config (M2); trusted-only, never from CLI flags or run config. */
   corpus?: BrokerCorpusConfig | undefined;
-  /**
-   * Calibration host binding (trusted plan only): the aggregate cgroup parent
-   * every sandbox container is created under, and the exact Docker engine
-   * id the binding was inspected on. Absent on ungrouped M0/M1 runs.
-   */
-  sandboxCgroupParent?: string | undefined;
-  sandboxDockerEngineId?: string | undefined;
   /** State replayed from the event log — resume dedupe starts here (nextEpisode, incumbent, budget). */
   replayed: RunState;
-  /** Aborted on stop request or budget exhaustion; backends must wind down. */
+  /** Aborted on pause, stop, or budget exhaustion; backends must wind down. */
   signal: AbortSignal;
   /** Validate + append to events.ndjson (and stream in headless mode). */
   emit(event: RunEvent): RunEvent;
@@ -137,6 +149,11 @@ export interface RunnerBackendContext {
    * terminalizes the run with status "stopped" (same path as SIGTERM).
    */
   requestStop(): void;
+  /**
+   * Request a resumable durable pause. Unlike requestStop, this writes no
+   * terminal event; a later trusted resume continues from the checkpoint.
+   */
+  requestPause(request: RunPauseRequest): void;
   /**
    * Trusted-authority barrier. A backend that recovers durable authority
    * (broker journal reconciliation) MUST register a promise SYNCHRONOUSLY

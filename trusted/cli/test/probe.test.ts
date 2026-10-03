@@ -6,6 +6,7 @@ import type { BudgetState } from "@hone/schema";
 import { readBrokerJournalEvaluations, type CmdResult, type RunCommand } from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend, deriveProbeReport } from "../src/backends/local.js";
+import { MUTATION_WORKER_PREFLIGHT_FILE } from "../src/backends/optimizer-container.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
 import { runCommand as cliRunCommand } from "../src/supervisor.js";
 import type { ProbeReport, RunnerBackendContext } from "../src/types.js";
@@ -78,6 +79,15 @@ describe("deriveProbeReport (trusted paired measurement from broker events)", ()
     const report = deriveProbeReport(events, BUDGET);
     expect(report.candidate).toBeNull();
     expect(report.baseline.aggregate).toBe(0.5);
+  });
+
+  it("refuses to turn a null aggregate into probe authority", () => {
+    const events: RunEvent[] = [
+      { runId: "run_p", at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } },
+      { runId: "run_p", at: at(), type: "eval.completed", episode: 0, artifact: { hash: fakeHash("b") }, assetGroupId: "train", seed: 1, aggregate: null, cached: false },
+    ];
+
+    expect(() => deriveProbeReport(events, BUDGET)).toThrow(/null aggregate/);
   });
 
   it("fails closed when nothing was measured — an incomplete episode is never a probe", () => {
@@ -290,6 +300,8 @@ interface ProbeFlow {
   invocationsPath: string;
   probeReports: ProbeReport[];
   stops: number;
+  toolbeltPreflights: Array<{ image: string; optimizerStarted: boolean }>;
+  startError: Error | null;
   events(): RunEvent[];
   invocations(): { maxEpisodes: string | null; resume: { nextEpisode: number } }[];
 }
@@ -303,6 +315,10 @@ async function runProbeFlow(opts: {
   verdict: boolean;
   abortOnGate?: boolean;
   m1?: { episodes: number; strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> };
+  toolbeltFailure?: Error;
+  toolbeltResult?: unknown;
+  mutationWorkerPreflightContract?: RunnerBackendContext["mutationWorkerPreflightContract"];
+  captureStartError?: boolean;
 }): Promise<ProbeFlow> {
   const root = makeRoot();
   const runId = "run_probe";
@@ -341,6 +357,8 @@ async function runProbeFlow(opts: {
     invocationsPath,
     probeReports: [],
     stops: 0,
+    startError: null,
+    toolbeltPreflights: [],
     events: () => readEvents(runDir),
     invocations: () =>
       existsSync(invocationsPath)
@@ -369,7 +387,19 @@ async function runProbeFlow(opts: {
   };
   // In-container argv override + fake docker spawn: the backend believes it
   // launched the sealed container; lifecycle (env wiring, exit codes) is real.
-  const backend = createBackend({ run, spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE), createHelper: scriptedCreateHelper(run) });
+  const backend = createBackend({
+    run,
+    spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE),
+    createHelper: scriptedCreateHelper(run),
+    mutationToolbeltSmoke: async (runtime) => {
+      flow.toolbeltPreflights.push({
+        image: runtime.image,
+        optimizerStarted: existsSync(invocationsPath),
+      });
+      if (opts.toolbeltFailure !== undefined) throw opts.toolbeltFailure;
+      return opts.toolbeltResult;
+    },
+  });
   const abort = new AbortController();
   const ctx: RunnerBackendContext = {
     runId,
@@ -377,7 +407,8 @@ async function runProbeFlow(opts: {
     runDir,
     casDir: join(root, ".hone-cas"),
     capsuleDir,
-    manifest,
+    admittedManifest: manifest,
+    runtimeIdentity: { admittedCapsuleDigest: digest, executionImage: manifest.image },
     config: RunConfig.parse({
       version: 1,
       capsuleId: manifest.id,
@@ -391,7 +422,6 @@ async function runProbeFlow(opts: {
       HONE_EGRESS: "socket",
       HONE_OPTIMIZER_CMD: `${process.execPath} ${optimizerEntry}`,
     },
-    capsuleDigest: digest,
     // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
     admissionReview: "off",
     optimizerDigest: fakeHash("0"),
@@ -415,14 +445,23 @@ async function runProbeFlow(opts: {
           optimizerEpisodesMax: opts.m1.episodes,
           maxPublicCandidateEvaluations: Math.max(1, opts.m1.episodes),
         }),
+    ...(opts.mutationWorkerPreflightContract === undefined
+      ? {}
+      : { mutationWorkerPreflightContract: opts.mutationWorkerPreflightContract }),
     requestStop: () => {
       flow.stops++;
     },
+    requestPause: () => {},
     registerAuthorityBarrier: () => {},
     registerCleanupBarrier: () => {},
   };
 
-  await backend.start(ctx);
+  try {
+    await backend.start(ctx);
+  } catch (error) {
+    if (opts.captureStartError !== true) throw error;
+    flow.startError = error instanceof Error ? error : new Error(String(error));
+  }
   return flow;
 }
 
@@ -467,11 +506,113 @@ describe("trusted M1 fixed-work local branch", () => {
     });
 
     expect(flow.invocations()).toEqual([{ maxEpisodes: "3", resume: expect.objectContaining({ nextEpisode: 0 }) }]);
+    expect(flow.toolbeltPreflights).toEqual([{ image: FIX_IMAGE, optimizerStarted: false }]);
     expect(flow.probeReports).toHaveLength(0);
     expect(flow.events().some((event) => event.type === "probe.completed")).toBe(false);
     expect(calls).toBe(1);
     expect(seenEpoch).toBe("m1:test-epoch");
     expect(readBrokerJournalEvaluations(flow.runDir).records).toHaveLength(1);
+  });
+
+  it("durably records both full-toolbelt and legacy-selftest preflight contracts", { timeout: 30_000 }, async () => {
+    const strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> = async (input) =>
+      EvaluationRecord.parse({
+        runId: input.runId,
+        capsuleId: input.capsuleId,
+        artifactHash: input.artifact.hash,
+        assetGroupId: input.assetGroupId,
+        seed: input.seed,
+        output: {
+          valid: true,
+          aggregate: 0.5,
+          objectives: { meta: 0.5 },
+          constraints: {},
+          perExample: {},
+          diagnostics: { summary: "preflight record fixture" },
+        },
+        costUsd: 0,
+        durationMs: 1,
+        cached: false,
+        evaluatedAt: new Date().toISOString(),
+      });
+    const cases = [
+      {
+        contract: undefined,
+        result: {
+          type: "hone-mutation-toolbelt-selftest.v1",
+          home: "/home/hone",
+          modelCalls: 0,
+          tools: ["bash", "write", "edit"],
+          outputs: { bash: "bash-ok\n", write: "write-ok\n", edit: "edit-ok\n" },
+        },
+        expected: "full-toolbelt",
+      },
+      {
+        contract: "legacy-selftest" as const,
+        result: {
+          type: "hone-mutation-legacy-selftest.v1",
+          contract: "legacy-selftest",
+          modelCalls: 0,
+          output: "hone-mutation selftest ok",
+        },
+        expected: "legacy-selftest",
+      },
+    ];
+    for (const fixture of cases) {
+      const flow = await runProbeFlow({
+        seed: [{
+          runId: "run_probe",
+          at: at(),
+          type: "run.started",
+          capsuleId: CAP_ID,
+          contractHash: fakeHash("c"),
+          optimizerDigest: fakeHash("0"),
+        }],
+        verdict: false,
+        m1: { episodes: 1, strategy },
+        toolbeltResult: fixture.result,
+        ...(fixture.contract === undefined
+          ? {}
+          : { mutationWorkerPreflightContract: fixture.contract }),
+      });
+      const record = JSON.parse(readFileSync(
+        join(flow.runDir, MUTATION_WORKER_PREFLIGHT_FILE),
+        "utf8",
+      ));
+      expect(record).toEqual({
+        version: 1,
+        runId: "run_probe",
+        optimizerDigest: fakeHash("0"),
+        contract: fixture.expected,
+        result: fixture.result,
+      });
+    }
+  });
+
+  it("refuses at zero spend when the mutation toolbelt smoke rejects", { timeout: 30_000 }, async () => {
+    const toolbeltFailure = new Error("mutation toolbelt unavailable");
+    const strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> = async () => {
+      throw new Error("evaluation must not start after a toolbelt refusal");
+    };
+    const flow = await runProbeFlow({
+      seed: [{
+        runId: "run_probe",
+        at: at(),
+        type: "run.started",
+        capsuleId: CAP_ID,
+        contractHash: fakeHash("c"),
+        optimizerDigest: fakeHash("0"),
+      }],
+      verdict: false,
+      m1: { episodes: 3, strategy },
+      toolbeltFailure,
+      captureStartError: true,
+    });
+
+    expect(flow.startError).toBe(toolbeltFailure);
+    expect(flow.toolbeltPreflights).toEqual([{ image: FIX_IMAGE, optimizerStarted: false }]);
+    expect(flow.invocations()).toEqual([]);
+    expect(flow.events().some((event) => event.type === "episode.started")).toBe(false);
   });
 });
 

@@ -61,6 +61,19 @@ describe("bare run: default mutation route", () => {
     expect(await cliRunCommand(["capsule", "--headless", "--backend", "stub", "--config", "cfg.json"], io)).toBe(0);
     expect(soleRunConfig(root).routing["mutation"]?.model).toBe("picked-explicitly");
   });
+
+  it("seals a schema-valid session no-yield override from --config into the run", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(join(root, "cfg.json"), JSON.stringify({ sessionNoYieldMaxTokens: 1_700_000 }));
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+
+    expect(await cliRunCommand(
+      ["capsule", "--headless", "--backend", "stub", "--config", "cfg.json"],
+      io,
+    )).toBe(0);
+    expect(soleRunConfig(root).sessionNoYieldMaxTokens).toBe(1_700_000);
+  });
 });
 
 describe("promotion rule: frozen into runconfig persistence at campaign start", () => {
@@ -118,17 +131,17 @@ describe("trusted proxy role capabilities", () => {
     });
     expect(issueProxySessionCapability(proxy, routing, "outer-optimizer")).toEqual({
       role: "outer-optimizer",
-      model: "gpt-5.6-sol",
+      model: "openai-codex/gpt-5.6-sol",
       token: "token-outer-optimizer",
     });
     expect(issueProxySessionCapability(proxy, routing, "capsule-author")).toEqual({
       role: "capsule-author",
-      model: "gpt-5.6-sol",
+      model: "openai-codex/gpt-5.6-sol",
       token: "token-capsule-author",
     });
     expect(issueProxySessionCapability(proxy, routing, "inner-capsule-improvement")).toEqual({
       role: "inner-capsule-improvement",
-      model: "gpt-5.6-terra",
+      model: "openai-codex/gpt-5.6-luna",
       token: "token-inner-capsule-improvement",
     });
     expect(issued).toEqual([
@@ -185,7 +198,8 @@ describe("image wiring: manifest.image is THE image, no environment override", (
       runDir,
       casDir: join(root, ".hone-cas"),
       capsuleDir,
-      manifest,
+      admittedManifest: manifest,
+      runtimeIdentity: { admittedCapsuleDigest: capsuleDigest(manifest), executionImage: manifest.image },
       config: RunConfig.parse({
         version: 1,
         capsuleId: manifest.id,
@@ -199,7 +213,6 @@ describe("image wiring: manifest.image is THE image, no environment override", (
         HONE_EGRESS: "network", // exercise the relay container path
         HONE_MUTATION_IMAGE: "evil:latest", // MUST be ignored
       },
-      capsuleDigest: capsuleDigest(manifest),
       // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
       admissionReview: "off",
       optimizerDigest: fakeHash("0"),
@@ -209,6 +222,7 @@ describe("image wiring: manifest.image is THE image, no environment override", (
       registerChild: () => () => {},
       probeGate: () => Promise.resolve(true),
       requestStop: () => {},
+      requestPause: () => {},
       registerAuthorityBarrier: (b) => {
         void b.catch(() => {});
       },

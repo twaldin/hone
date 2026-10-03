@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+cd "$root"
+export HONE_CAMPAIGN_SHAKEDOWN=1
+export HONE_WORKER_TOOLBELT_SMOKE=1
+exec ./node_modules/.bin/vitest run --root trusted/cli \
+  test/mutation-toolbelt-smoke.test.ts \
+  test/campaign-shakedown.test.ts

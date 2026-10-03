@@ -1,50 +1,66 @@
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, createReadStream, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Stats } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RunCommand } from "@hone/broker";
+import {
+  MUTATION_SANDBOX_HOME,
+  MUTATION_SANDBOX_USER,
+  WORKSPACE_TMPFS_INODES,
+  type RunCommand,
+} from "@hone/broker";
 import type { DockerCreateGate } from "../docker-create-gate.js";
 import {
+  MUTATION_RUNTIME_MANIFEST,
+  MUTATION_RUNTIME_MANIFEST_FILE,
   OPTIMIZER_BUILD_CONTRACT,
+  OPTIMIZER_RUNTIME_MANIFEST,
   OPTIMIZER_BUNDLE_FILES,
   collectOptimizerSnapshot,
   optimizerOverridden,
+  repoRootFromHere,
   snapshotDigest,
   writeOptimizerStaging,
 } from "../optimizer-digest.js";
-import type { RunnerBackendContext } from "../types.js";
+import type { MutationWorkerPreflightContract, RunnerBackendContext } from "../types.js";
 
 /**
  * Containerized optimizer execution (trusted boundary): the loop NEVER runs as a
  * host process. Backend setup recollects the allowlisted snapshot, proves it
  * still hashes to the digest sealed into run.started, writes the captured
- * bytes to a staging tree, and compiles them with `bun build` inside the
- * pinned manifest image — no network, read-only source mount, isolated
- * writable output, no repo mount, no host env. The build container runs as
- * the invoking NUMERIC host uid/gid and writes into a host-created,
- * 0700-rooted output tree: no other host UID can traverse, list, unlink, or
- * replace the bundle (never a world-writable handoff dir). Trusted code then
+ * bytes to a staging tree, compiles them with the separately hash-pinned Bun
+ * runtime, and packages the pinned Node interpreter inside the sealed output
+ * — no network, read-only source/runtime mounts, isolated writable output,
+ * no repo mount, no host env.
+ * The build container runs as the invoking NUMERIC host uid/gid and writes
+ * into a host-created, 0700-rooted output tree: no other host UID can
+ * traverse, list, unlink, or replace the bundle (never a world-writable
+ * handoff dir). Trusted code then
  * SEALS the output — lstats each required file (regular, single-link,
  * owner-owned), captures its exact bytes and SHA-256, freezes all write
- * permission — and re-verifies that seal immediately before EVERY run
- * container create: path existence alone grants no authority. The bundle
- * runs in a separate labeled, read-only, uid/gid 2000 container with
- * resource caps and ONLY the bundle (plus, on Linux, the public broker
- * socket) mounted. It receives runId/seed/resume/maxEpisodes and the public
- * broker capability; never the host repo, runDir, CAS, capsule, holdout
- * ledger, proxy credentials, or the Docker socket.
+ * permission — and re-verifies that seal immediately before EVERY run.
+ * Runtime: each captured bundle runs in a separate labeled, read-only,
+ * uid/gid 3000 container with resource caps and ONLY the bundle (plus, on
+ * Linux, the public broker socket) mounted. Candidate evaluators reserve uid
+ * 2000 (and a few frozen contracts use 2001/2002), so optimizer/model threads
+ * must never join their host-wide RLIMIT_NPROC pools. The optimizer receives
+ * runId/seed/resume/maxEpisodes and the public broker capability; never the
+ * host repo, runDir, CAS, capsule, holdout ledger, proxy credentials, or the
+ * Docker socket.
  */
 
 /** In-container mount points fixed by OPTIMIZER_BUILD_CONTRACT. */
 const SRC_MOUNT = "/hone/src";
 const OUT_MOUNT = "/hone/out";
 const BUNDLE_MOUNT = "/hone/bundle";
+const RUNTIME_MOUNT = "/hone/runtime";
 /** Linux transport: the public broker socket's in-container path. */
 export const CONTAINER_BROKER_SOCK = "/run/hone/broker.sock";
+/** Fixed unprivileged identity kept outside every frozen evaluator uid pool. */
+export const OPTIMIZER_CONTAINER_UID = 3000;
 const MISSING_CONTAINER_RE = /no such container|is not running|no such object/i;
 
-/** Shared hard caps for both optimizer containers; each argv pins its own --user (build: numeric host uid/gid; run: 2000:2000). */
+/** Shared hard caps for both optimizer containers; each argv pins its own --user (build: numeric host uid/gid; run: 3000:3000). */
 const HARDENING_ARGS = [
   "--cap-drop", "ALL",
   "--security-opt", "no-new-privileges",
@@ -95,6 +111,8 @@ export interface SealedBundleFile {
   /** SHA-256 (hex) of the captured bytes — the run mounts ONLY content that still hashes to this. */
   sha256: string;
   size: number;
+  /** Frozen executable/read mode; exact mode drift refuses before create. */
+  mode: number;
   /** Inode identity at capture: a swapped-in file refuses even when its bytes happen to match. */
   ino: number;
   dev: number;
@@ -155,6 +173,7 @@ export function optimizerBuildArgs(opts: {
   safeRunId: string;
   image: string;
   stagingDir: string;
+  runtimeDir: string;
   outDir: string;
   /** Docker-run lease (stopped per-epoch donor) name; attaches `--volumes-from <lease>:ro` before the image. */
   containerLease: string;
@@ -178,6 +197,7 @@ export function optimizerBuildArgs(opts: {
     ...HARDENING_ARGS,
     "-v", `${opts.stagingDir}:${SRC_MOUNT}:ro`,
     "-v", `${opts.outDir}:${OUT_MOUNT}`,
+    "-v", `${opts.runtimeDir}:${RUNTIME_MOUNT}:ro`,
     "--volumes-from", `${opts.containerLease}:ro`,
     opts.image,
     ...OPTIMIZER_BUILD_CONTRACT.build,
@@ -221,7 +241,7 @@ function optimizerCreateArgsWithToken(opts: OptimizerCreateOptions, tokenEnv: st
     "--tmpfs", "/tmp:rw,size=268435456",
     "-w", "/tmp",
     "-e", "HOME=/tmp",
-    "--user", "2000:2000",
+    "--user", `${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`,
     ...HARDENING_ARGS,
   ];
   if (opts.bundleDir !== null) argv.push("-v", `${opts.bundleDir}:${BUNDLE_MOUNT}:ro`);
@@ -287,10 +307,11 @@ function mustLstat(abs: string, what: string): Stats {
 /**
  * Trusted capture of the build output, taken ONCE right after a successful
  * build and BEFORE any run container may mount the dir: lstat each required
- * file (regular — a symlink/special refuses; single hard link; owned by the
- * invoking uid), read and hash its exact bytes, freeze it read-only (0444),
+ * file (regular — symlink/special refused; single hard link; owned by the
+ * invoking uid), read and hash its exact bytes, freeze regular artifacts
+ * read-only (0444) and the pinned Node interpreter read/execute-only (0555),
  * then remove the directory's write permission (0555: the run container's
- * uid 2000 keeps r-x through the bind mount; nothing below can be created,
+ * uid 3000 keeps r-x through the bind mount; nothing below can be created,
  * unlinked, or renamed). The 0700 `root` umbrella already denies every other
  * host UID traversal, so listing/unlinking/replacing is impossible for them
  * outright; the seal additionally pins inode identities and hashes so even a
@@ -310,8 +331,9 @@ export function sealOptimizerBundleDir(root: string, dir: string, uid: number): 
     if (st.nlink !== 1) throw new Error(`optimizer bundle output has ${st.nlink} hard links — refusing aliased ${abs}`);
     if (st.uid !== uid) throw new Error(`optimizer bundle output ${abs} is owned by uid ${st.uid}, not the invoking uid ${uid} — refusing`);
     const bytes = readFileSync(abs);
-    chmodSync(abs, 0o444);
-    files.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length, ino: st.ino, dev: st.dev });
+    const mode = name === OPTIMIZER_RUNTIME_MANIFEST.node.bundleName ? OPTIMIZER_RUNTIME_MANIFEST.node.mode : 0o444;
+    chmodSync(abs, mode);
+    files.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length, mode, ino: st.ino, dev: st.dev });
   }
   chmodSync(dir, 0o555);
   const dirSt = lstatSync(dir);
@@ -321,7 +343,7 @@ export function sealOptimizerBundleDir(root: string, dir: string, uid: number): 
 /**
  * Refuse-to-launch gate, called immediately before EVERY run-container
  * `docker create`: path existence grants no authority. The 0700 umbrella,
- * the mounted dir, and both bundle files must still be the exact inodes
+ * the mounted dir, and every bundle file must still be the exact inodes
  * trusted code sealed — regular, owned by the invoking uid, stripped of all
  * write permission — and the file bytes must re-hash to the captured
  * SHA-256s. Any symlink, inode replacement, owner, mode, or content swap
@@ -357,11 +379,255 @@ export function verifyOptimizerBundleSeal(runtime: Pick<OptimizerRuntime, "bundl
     if ((st.mode & 0o222) !== 0) {
       throw new Error(`sealed bundle file ${abs} regained write permission (mode ${(st.mode & 0o777).toString(8)}) — refusing`);
     }
+    if ((st.mode & 0o777) !== f.mode) {
+      throw new Error(
+        `sealed bundle file ${abs} mode drifted to ${(st.mode & 0o777).toString(8)} != ${f.mode.toString(8)} — refusing`,
+      );
+    }
     const digest = createHash("sha256").update(readFileSync(abs)).digest("hex");
     if (digest !== f.sha256) {
       throw new Error(`sealed bundle bytes drifted: ${abs} hashes ${digest} != sealed ${f.sha256} — refusing to execute`);
     }
   }
+}
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+/**
+ * Copy the separately pinned platform artifacts into an owner-only build
+ * handoff. The fixed expected hashes live in OPTIMIZER_BUILD_CONTRACT, hence
+ * in every optimizer digest; a path override can relocate identical bytes but
+ * can never steer the measurement to a different interpreter or native addon.
+ * The build emits compressed Bun/Pi transfer artifacts and seals the exact
+ * executable Node bytes into the run bundle.
+ */
+export async function stageMutationRuntime(env: NodeJS.ProcessEnv, runtimeDir: string): Promise<void> {
+  if (process.platform !== "linux" || process.arch !== "x64") {
+    throw new Error(`pinned runtime injection supports linux/x64, got ${process.platform}/${process.arch}`);
+  }
+  const nodePath =
+    env["HONE_NODE_RUNTIME_PATH"] ??
+    join(
+      homedir(),
+      ".nvm",
+      "versions",
+      "node",
+      `v${OPTIMIZER_RUNTIME_MANIFEST.node.version}`,
+      "bin",
+      OPTIMIZER_RUNTIME_MANIFEST.node.sourceName,
+    );
+  const bunPath = env["HONE_BUN_RUNTIME_PATH"] ?? join(homedir(), ".bun", "bin", MUTATION_RUNTIME_MANIFEST.bun.sourceName);
+  const nativeDir =
+    env["HONE_PI_NATIVES_RUNTIME_DIR"] ??
+    join(
+      repoRootFromHere(),
+      "node_modules",
+      ".pnpm",
+      `@oh-my-pi+pi-natives-linux-x64@${MUTATION_RUNTIME_MANIFEST.pi.version}`,
+      "node_modules",
+      "@oh-my-pi",
+      "pi-natives-linux-x64",
+    );
+  const sources = [
+    {
+      path: nodePath,
+      name: OPTIMIZER_RUNTIME_MANIFEST.node.sourceName,
+      sha256: OPTIMIZER_RUNTIME_MANIFEST.node.sha256,
+      mode: 0o555,
+    },
+    { path: bunPath, name: MUTATION_RUNTIME_MANIFEST.bun.sourceName, sha256: MUTATION_RUNTIME_MANIFEST.bun.sha256, mode: 0o555 },
+    ...MUTATION_RUNTIME_MANIFEST.pi.files.map((file) => ({
+      path: join(nativeDir, file.sourceName),
+      name: file.sourceName,
+      sha256: file.sha256,
+      mode: 0o444,
+    })),
+  ];
+  for (const source of sources) {
+    const sourceStat = mustLstat(source.path, "pinned runtime source");
+    if (!sourceStat.isFile()) throw new Error(`pinned runtime source is not a regular file: ${source.path}`);
+    const target = join(runtimeDir, source.name);
+    copyFileSync(source.path, target);
+    chmodSync(target, source.mode);
+    const digest = await sha256File(target);
+    if (digest !== source.sha256) {
+      throw new Error(`pinned runtime source ${source.path} hashes ${digest} != pinned ${source.sha256} — refusing`);
+    }
+  }
+}
+
+export interface MutationToolbeltSmokeResult {
+  readonly type: "hone-mutation-toolbelt-selftest.v1";
+  readonly home: string;
+  readonly modelCalls: 0;
+  readonly tools: readonly ["bash", "write", "edit"];
+  readonly outputs: {
+    readonly bash: string;
+    readonly write: string;
+    readonly edit: string;
+  };
+}
+
+export interface MutationLegacySelftestResult {
+  readonly type: "hone-mutation-legacy-selftest.v1";
+  readonly contract: "legacy-selftest";
+  readonly modelCalls: 0;
+  readonly output: "hone-mutation selftest ok";
+}
+
+export type MutationWorkerPreflightResult =
+  | MutationToolbeltSmokeResult
+  | MutationLegacySelftestResult;
+
+export const MUTATION_WORKER_PREFLIGHT_FILE = "mutation-worker-preflight.v1.json";
+
+export function parseMutationToolbeltSmoke(stdout: Buffer): MutationToolbeltSmokeResult {
+  const line = stdout
+    .toString("utf8")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .at(-1);
+  if (line === undefined) throw new Error("mutation toolbelt preflight returned no output");
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    throw new Error(`mutation toolbelt preflight returned malformed JSON: ${line.slice(0, 1_000)}`);
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("mutation toolbelt preflight result is not an object");
+  }
+  const record = value as Record<string, unknown>;
+  const outputs = record["outputs"];
+  if (
+    record["type"] !== "hone-mutation-toolbelt-selftest.v1"
+    || record["home"] !== MUTATION_SANDBOX_HOME
+    || record["modelCalls"] !== 0
+    || !Array.isArray(record["tools"])
+    || record["tools"].length !== 3
+    || record["tools"][0] !== "bash"
+    || record["tools"][1] !== "write"
+    || record["tools"][2] !== "edit"
+    || outputs === null
+    || typeof outputs !== "object"
+    || Array.isArray(outputs)
+    || (outputs as Record<string, unknown>)["bash"] !== "bash-ok\n"
+    || (outputs as Record<string, unknown>)["write"] !== "write-ok\n"
+    || (outputs as Record<string, unknown>)["edit"] !== "edit-ok\n"
+  ) {
+    throw new Error(`mutation toolbelt preflight result failed validation: ${line.slice(0, 1_000)}`);
+  }
+  return value as MutationToolbeltSmokeResult;
+}
+
+export function parseMutationLegacySelftest(stdout: Buffer): MutationLegacySelftestResult {
+  const line = stdout
+    .toString("utf8")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .at(-1);
+  if (line !== "hone-mutation selftest ok") {
+    throw new Error(`mutation legacy selftest failed validation: ${line ?? "(no output)"}`);
+  }
+  return {
+    type: "hone-mutation-legacy-selftest.v1",
+    contract: "legacy-selftest",
+    modelCalls: 0,
+    output: "hone-mutation selftest ok",
+  };
+}
+
+/**
+ * Zero-provider standing gate for the exact mutation-worker image and bundle.
+ * Modern workers execute the real bash/write/edit implementations. The one
+ * trusted legacy contract executes the frozen worker's own registry/settings/
+ * bridge selftest instead. Both use the production uid, read-only root,
+ * writable home and workspace tmpfs with `--network none`; neither prompts a
+ * model or receives a proxy capability.
+ */
+type MutationSmokeRuntime = Pick<
+  OptimizerRuntime,
+  "image" | "runId" | "safeRunId" | "bundleDir" | "bundleSeal" | "containerLease" | "run"
+>;
+
+export function runMutationToolbeltSmoke(
+  runtime: MutationSmokeRuntime,
+): Promise<MutationToolbeltSmokeResult>;
+export function runMutationToolbeltSmoke(
+  runtime: MutationSmokeRuntime,
+  contract: MutationWorkerPreflightContract,
+): Promise<MutationLegacySelftestResult>;
+export async function runMutationToolbeltSmoke(
+  runtime: MutationSmokeRuntime,
+  contract?: MutationWorkerPreflightContract,
+): Promise<MutationWorkerPreflightResult> {
+  if (runtime.bundleDir === null || runtime.bundleSeal === null) {
+    throw new Error("mutation toolbelt preflight requires a sealed optimizer bundle");
+  }
+  verifyOptimizerBundleSeal(runtime);
+  const name = `hone-toolbelt-${runtime.safeRunId}`;
+  const runtimeDir = "/scratch/.hone-runtime";
+  const bun = MUTATION_RUNTIME_MANIFEST.bun;
+  const native = MUTATION_RUNTIME_MANIFEST.pi.files[0];
+  const selftestFlag = contract === "legacy-selftest" ? "--selftest" : "--toolbelt-selftest";
+  const script = [
+    "set -eu",
+    `mkdir -p ${runtimeDir}`,
+    `gzip -dc /hone/bundle/${bun.bundleName} > ${runtimeDir}/${bun.sandboxName}`,
+    `chmod ${bun.mode.toString(8)} ${runtimeDir}/${bun.sandboxName}`,
+    `gzip -dc /hone/bundle/${native.bundleName} > ${runtimeDir}/${native.sandboxName}`,
+    `chmod ${native.mode.toString(8)} ${runtimeDir}/${native.sandboxName}`,
+    `exec env HONE_WORKDIR=/workspace HONE_AGENT_DIR=/scratch/omp-agent PI_NATIVE_VARIANT=baseline ` +
+      `${runtimeDir}/${bun.sandboxName} /hone/bundle/worker.mjs ${selftestFlag}`,
+  ].join(" && ");
+  const argv = [
+    "docker", "run", "--rm",
+    "--pull=never",
+    "--log-driver", "none",
+    "--name", name,
+    "--label", `hone.runId=${runtime.runId}`,
+    "--network", "none",
+    "--pids-limit", "512",
+    "--memory", "2147483648",
+    "--cpus", "2",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--user", MUTATION_SANDBOX_USER,
+    "--read-only",
+    "--tmpfs", `/workspace:rw,exec,nosuid,nodev,size=1073741824,nr_inodes=${WORKSPACE_TMPFS_INODES},mode=1777`,
+    "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777",
+    "--tmpfs", "/scratch:rw,exec,nosuid,nodev,size=1073741824,mode=0700,uid=1000,gid=1000",
+    "--tmpfs", `${MUTATION_SANDBOX_HOME}:rw,exec,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000`,
+    "-w", "/workspace",
+    "-e", `HOME=${MUTATION_SANDBOX_HOME}`,
+    "-v", `${runtime.bundleDir}:${BUNDLE_MOUNT}:ro`,
+    "--volumes-from", `${runtime.containerLease}:ro`,
+    runtime.image,
+    "sh", "-c", script,
+  ];
+  let result;
+  try {
+    result = await runtime.run(argv, { timeoutMs: 120_000 });
+  } catch (error) {
+    await runtime.run(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 }).catch(() => {});
+    throw error;
+  }
+  if (result.exitCode !== 0 || result.timedOut) {
+    await runtime.run(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 }).catch(() => {});
+    const detail = result.stderr.toString("utf8").trim().slice(-4_000);
+    throw new Error(
+      `mutation toolbelt preflight failed in ${runtime.image} (exit ${result.exitCode}${result.timedOut ? ", timed out" : ""}): ${detail}`,
+    );
+  }
+  return contract === "legacy-selftest"
+    ? parseMutationLegacySelftest(result.stdout)
+    : parseMutationToolbeltSmoke(result.stdout);
 }
 
 /**
@@ -371,7 +637,17 @@ export function verifyOptimizerBundleSeal(runtime: Pick<OptimizerRuntime, "bundl
  */
 export async function prepareOptimizerRuntime(
   ctx: Pick<RunnerBackendContext, "runId" | "env" | "optimizerDigest" | "optimizerSnapshot" | "optimizerBaseSnapshot">,
-  opts: { image: string; transport: OptimizerTransport; run: RunCommand; spawnImpl: OptimizerSpawn; containerLease: string; gate: DockerCreateGate; clientEnv: NodeJS.ProcessEnv },
+  opts: {
+    image: string;
+    transport: OptimizerTransport;
+    run: RunCommand;
+    spawnImpl: OptimizerSpawn;
+    containerLease: string;
+    gate: DockerCreateGate;
+    clientEnv: NodeJS.ProcessEnv;
+    /** Unit-test seam: production always stages and verifies the pinned sources. */
+    runtimeSourceDir?: string;
+  },
 ): Promise<OptimizerRuntime> {
   const safeRunId = ctx.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
   const tempDirs: string[] = [];
@@ -381,7 +657,7 @@ export async function prepareOptimizerRuntime(
     const failures: string[] = [];
     for (const name of [optimizerBuildName(safeRunId), ...runtime.spawnedNames]) {
       try {
-        const result = await opts.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 });
+        const result = await opts.run(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 });
         if (result.exitCode !== 0 && !MISSING_CONTAINER_RE.test(result.stderr.toString("utf8"))) {
           failures.push(`container ${name}: ${result.stderr.toString("utf8").trim() || `exit ${result.exitCode}`}`);
         }
@@ -455,12 +731,25 @@ export async function prepareOptimizerRuntime(
   // uid, so nothing needs to be opened to other users.
   const stagingDir = mkdtempSync(join(tmpdir(), "hone-optsrc-"));
   tempDirs.push(stagingDir);
+  let runtimeDir: string;
+  if (opts.runtimeSourceDir !== undefined) {
+    runtimeDir = opts.runtimeSourceDir;
+  } else {
+    runtimeDir = mkdtempSync(join(tmpdir(), "hone-optruntime-"));
+    tempDirs.push(runtimeDir);
+    try {
+      await stageMutationRuntime(ctx.env, runtimeDir);
+    } catch (err) {
+      await runtime.cleanup();
+      throw err;
+    }
+  }
   // Output: a 0700 owner-only umbrella (mkdtemp default) with the actual
   // mount dir nested below it. No other host UID can traverse the umbrella —
   // list, unlink, or replace anything — while the nested dir itself can drop
-  // to r-x after sealing so the run container's uid 2000 still reads the
+  // to r-x after sealing so the run container's uid 3000 still reads the
   // bundle through the bind mount (the daemon resolves the mount path as
-  // root; traversal of the 0700 umbrella never involves uid 2000).
+  // root; traversal of the 0700 umbrella never involves uid 3000).
   const outRoot = mkdtempSync(join(tmpdir(), "hone-optout-"));
   tempDirs.push(outRoot);
   const outDir = join(outRoot, "out");
@@ -476,6 +765,7 @@ export async function prepareOptimizerRuntime(
         image: opts.image,
         stagingDir,
         outDir,
+        runtimeDir,
         containerLease: opts.containerLease,
         hostUid: uid,
         hostGid: gid,
@@ -485,6 +775,11 @@ export async function prepareOptimizerRuntime(
     if (built.exitCode !== 0) {
       throw new Error(`optimizer bundle build failed (exit ${built.exitCode}): ${built.stderr.toString("utf8").slice(0, 2000)}`);
     }
+    writeFileSync(
+      join(outDir, MUTATION_RUNTIME_MANIFEST_FILE),
+      `${JSON.stringify(MUTATION_RUNTIME_MANIFEST)}\n`,
+      { mode: 0o600 },
+    );
     // Seal the handoff: capture exact bytes + hashes, pin inode identities,
     // and strip all write permission before anything may mount the dir.
     runtime.bundleSeal = sealOptimizerBundleDir(outRoot, outDir, uid);

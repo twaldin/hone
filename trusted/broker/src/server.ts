@@ -116,10 +116,43 @@ function buildMethodTable(broker: Broker): Map<string, MethodEntry> {
     adminOnly: false,
     handler: async (raw, ctx) => m.evaluate.result.parse(await broker.evaluate(parseParams(m.evaluate.params, raw), ctx)),
   });
+  table.set("getPromotionVerdict", {
+    adminOnly: false,
+    handler: async (raw, ctx) =>
+      m.getPromotionVerdict.result.parse(
+        broker.getPromotionVerdict(parseParams(m.getPromotionVerdict.params, raw), ctx),
+      ),
+  });
   table.set("reportIncumbent", {
     adminOnly: false,
     handler: async (raw, ctx) =>
       m.reportIncumbent.result.parse(broker.reportIncumbent(parseParams(m.reportIncumbent.params, raw), ctx)),
+  });
+  table.set("recordHoldoutNullControl", {
+    adminOnly: true,
+    handler: async (raw, ctx) =>
+      m.recordHoldoutNullControl.result.parse(
+        broker.recordHoldoutNullControl(parseParams(m.recordHoldoutNullControl.params, raw), ctx),
+      ),
+  });
+  table.set("recordPromotionHoldout", {
+    adminOnly: true,
+    handler: async (raw, ctx) =>
+      m.recordPromotionHoldout.result.parse(
+        broker.recordPromotionHoldout(parseParams(m.recordPromotionHoldout.params, raw), ctx),
+      ),
+  });
+  table.set("reportSessionNoYieldBound", {
+    adminOnly: false,
+    handler: async (raw, ctx) =>
+      m.reportSessionNoYieldBound.result.parse(
+        broker.reportSessionNoYieldBound(parseParams(m.reportSessionNoYieldBound.params, raw), ctx),
+      ),
+  });
+  table.set("completeEpisode", {
+    adminOnly: false,
+    handler: async (raw, ctx) =>
+      m.completeEpisode.result.parse(await broker.completeEpisode(parseParams(m.completeEpisode.params, raw), ctx)),
   });
   table.set("getBudget", {
     adminOnly: false,
@@ -812,6 +845,20 @@ export class BrokerServer {
             code: BROKER_ERROR_NUMBER[err.code],
             message: err.message,
             data: { code: err.code, ...(err.detail !== undefined ? { detail: err.detail } : {}) },
+          },
+        });
+      }
+      if (
+        err !== null
+        && typeof err === "object"
+        && "code" in err
+        && err.code === "ENOSPC"
+      ) {
+        return respond({
+          error: {
+            code: BROKER_ERROR_NUMBER.STORAGE_EXHAUSTED,
+            message: err instanceof Error ? err.message : "storage exhausted",
+            data: { code: "STORAGE_EXHAUSTED" },
           },
         });
       }

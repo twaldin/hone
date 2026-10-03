@@ -6,10 +6,13 @@ import { join } from "node:path";
 import { z } from "zod";
 import {
   M2_MODEL_ROUTING,
+  OPTIMIZER_CHILD_PENDING_EXIT_CODE,
+  OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE,
   RunEvent,
   type ArtifactRef,
   type BudgetState,
   type CapsuleManifest,
+  type CampaignPauseSignal,
   type M2ProxyRole,
   type ModelRouting,
 } from "@hone/schema";
@@ -30,7 +33,7 @@ import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from 
 import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
 import type { BudgetDecision, BudgetDimension, ProxyHandle } from "@hone/proxy";
 import { admitCapsule, authenticateFrozenCapsuleAssets } from "../admission.js";
-import { readEvents, replayRun } from "../eventlog.js";
+import { readEvents, releaseTerminalReserve, replayActiveClock, replayRun, writeFileDurable } from "../eventlog.js";
 import { makeDockerRunLease, type DockerRunLease } from "../docker-lease.js";
 import {
   CONCLUSIVE_ENGINE_REJECTION_RE,
@@ -43,10 +46,12 @@ import { freezeDockerClientEnv, dockerEngineSealError, sealDockerEngine } from "
 import { materializeGitCommit } from "../git-baseline.js";
 import type { ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "../types.js";
 import {
+  MUTATION_WORKER_PREFLIGHT_FILE,
   optimizerCreateArgs,
   optimizerRunName,
   optimizerStartArgs,
   prepareOptimizerRuntime,
+  runMutationToolbeltSmoke,
   transportEndpoint,
   verifyOptimizerBundleSeal,
 } from "./optimizer-container.js";
@@ -321,7 +326,7 @@ export async function sweepStaleRunResources(
   };
   const removeWriters = async (ids: readonly string[]): Promise<boolean> => {
     if (ids.length === 0) return true;
-    const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", ...ids], "labeled containers");
+    const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", "-v", ...ids], "labeled containers");
     if (failure === undefined) return true;
     if (strict) throw new Error(`stale run cleanup incomplete: ${failure}`);
     return false;
@@ -415,9 +420,8 @@ export async function sweepStaleRunResources(
     const ids = await listLabeledContainers();
     if (ids !== null && !(await removeWriters(ids))) return;
   }
-
   for (const name of [scratchKeeper, relay, brokerRelay]) {
-    const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", name], `container ${name}`);
+    const failure = await dockerRemovalFailure(run, ["docker", "rm", "-f", "-v", name], `container ${name}`);
     if (failure !== undefined) failures.push(failure);
   }
 
@@ -558,8 +562,8 @@ export async function setupEgress(
   const cleanup = async (): Promise<void> => {
     const failures: string[] = [];
     for (const [argv, what] of [
-      [["docker", "rm", "-f", brokerRelay], `container ${brokerRelay}`],
-      [["docker", "rm", "-f", relay], `container ${relay}`],
+      [["docker", "rm", "-f", "-v", brokerRelay], `container ${brokerRelay}`],
+      [["docker", "rm", "-f", "-v", relay], `container ${relay}`],
       [["docker", "network", "rm", network], `network ${network}`],
     ] as const) {
       const failure = await dockerRemovalFailure(run, [...argv], what);
@@ -615,7 +619,7 @@ export async function setupEgress(
       brokerRelayStarted = true;
       return `tcp://${brokerRelay}:${RELAY_PORT}`;
     } catch (err) {
-      const cleanupFailure = await dockerRemovalFailure(run, ["docker", "rm", "-f", brokerRelay], `container ${brokerRelay}`);
+      const cleanupFailure = await dockerRemovalFailure(run, ["docker", "rm", "-f", "-v", brokerRelay], `container ${brokerRelay}`);
       if (cleanupFailure !== undefined) {
         throw new Error(`${err instanceof Error ? err.message : String(err)}; ${cleanupFailure}`);
       }
@@ -631,12 +635,72 @@ export async function setupEgress(
   };
 }
 
-/** Optimizer resume payload, always from the on-disk log (post-reconciliation truth). */
-function resumeHint(runDir: string): { nextEpisode: number; incumbent: { artifact: ArtifactRef; aggregate: number } | null } {
+const MutateCheckpointResult = z.object({
+  summary: z.string(),
+  approach: z.string(),
+  filesChanged: z.array(z.string()),
+}).strict();
+
+/** Optimizer resume payload, always from post-reconciliation durable authority. */
+async function resumeHint(
+  runDir: string,
+  casDir: string,
+): Promise<{
+  nextEpisode: number;
+  incumbent: { artifact: ArtifactRef; aggregate: number } | null;
+  activeEpisode?: {
+    episode: number;
+    parent: ArtifactRef;
+    candidate: {
+      artifact: ArtifactRef;
+      sessionTrace: string;
+      result: z.infer<typeof MutateCheckpointResult>;
+    } | null;
+    invalid?: { reason: string; repaired: boolean };
+  };
+}> {
   const replayed = replayRun(runDir);
-  return {
+  const base = {
     nextEpisode: replayed.nextEpisode,
-    incumbent: replayed.incumbent === null ? null : { artifact: replayed.incumbent.artifact, aggregate: replayed.incumbent.aggregate },
+    incumbent: replayed.incumbent === null ? null : {
+      artifact: replayed.incumbent.artifact,
+      aggregate: replayed.incumbent.aggregate,
+    },
+  };
+  const active = replayed.activeEpisode;
+  if (active === null) return base;
+  if (active.candidate === null) {
+    return {
+      ...base,
+      activeEpisode: {
+        episode: active.episode,
+        parent: active.parent,
+        candidate: null,
+        ...(active.invalid === undefined ? {} : { invalid: active.invalid }),
+      },
+    };
+  }
+  const trace = (await new CasStore(casDir).readBuffer(active.candidate.sessionTrace)).toString("utf8");
+  const last = trace.split("\n").filter((line) => line.trim().length > 0).at(-1);
+  if (last === undefined) throw new Error(`empty session trace ${active.candidate.sessionTrace}`);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(last);
+  } catch {
+    throw new Error(`session trace ${active.candidate.sessionTrace} has no durable result`);
+  }
+  return {
+    ...base,
+    activeEpisode: {
+      episode: active.episode,
+      parent: active.parent,
+      candidate: {
+        artifact: active.candidate.artifact,
+        sessionTrace: active.candidate.sessionTrace,
+        result: MutateCheckpointResult.parse(raw),
+      },
+      ...(active.invalid === undefined ? {} : { invalid: active.invalid }),
+    },
   };
 }
 
@@ -663,7 +727,7 @@ function containerKillHandle(child: OptimizerChildLike, name: string, run: RunCo
     pid: child.pid,
     kill(signal?: NodeJS.Signals): boolean {
       const sig = signal ?? "SIGTERM";
-      void run(sig === "SIGKILL" ? ["docker", "rm", "-f", name] : ["docker", "kill", "-s", "TERM", name], { timeoutMs: 30_000 }).catch(() => {});
+      void run(sig === "SIGKILL" ? ["docker", "rm", "-f", "-v", name] : ["docker", "kill", "-s", "TERM", name], { timeoutMs: 30_000 }).catch(() => {});
       // A reaped client needs no signal — its number may already belong to
       // someone else.
       if (!clientAlive) return true;
@@ -723,6 +787,28 @@ function cappedDiagnosticAppender(
   };
 }
 
+export class OptimizerStorageExhaustedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OptimizerStorageExhaustedError";
+  }
+}
+
+export class OptimizerChildPendingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OptimizerChildPendingError";
+  }
+}
+
+export function isOptimizerStorageExhaustedError(error: unknown): error is OptimizerStorageExhaustedError {
+  return error instanceof OptimizerStorageExhaustedError;
+}
+
+export function isOptimizerChildPendingError(error: unknown): error is OptimizerChildPendingError {
+  return error instanceof OptimizerChildPendingError;
+}
+
 /**
  * Launch ONE invocation of the sealed optimizer container. Exported for the
  * trusted-boundary tests: optimizer stdout must never become events.
@@ -743,7 +829,7 @@ function cappedDiagnosticAppender(
 export async function runOptimizer(ctx: RunnerBackendContext, runtime: OptimizerRuntime, opts: { maxEpisodes?: number } = {}): Promise<void> {
   const name = optimizerRunName(runtime.safeRunId, ++runtime.invocation);
   runtime.spawnedNames.push(name);
-  const createArgv = runtime.gate.containerArgv(optimizerCreateArgs({
+  const createArgv = optimizerCreateArgs({
     name,
     runId: ctx.runId,
     image: runtime.image,
@@ -754,6 +840,11 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
       HONE_BROKER_SOCK: transportEndpoint(runtime.transport),
       HONE_RUN_ID: ctx.runId,
       HONE_SEED: String(ctx.config.seed),
+      ...(ctx.config.sessionNoYieldMaxTokens !== undefined
+        ? { HONE_SESSION_NO_YIELD_MAX_TOKENS: String(ctx.config.sessionNoYieldMaxTokens) }
+        : ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] !== undefined
+          ? { HONE_SESSION_NO_YIELD_MAX_TOKENS: ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] }
+          : {}),
       // The M0 probe is the entire one-candidate campaign. The mutable loop
       // gets both advisory values; broker-side caps remain authoritative.
       ...(opts.maxEpisodes !== undefined
@@ -762,10 +853,10 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
       // Events.ndjson is the store of record and reconciliation may have just
       // appended recovered incumbents — replay from disk, not the supervisor's
       // pre-backend snapshot, so the resume hint sees the durable authority.
-      HONE_RESUME: JSON.stringify(resumeHint(ctx.runDir)),
+      HONE_RESUME: JSON.stringify(await resumeHint(ctx.runDir, ctx.casDir)),
     },
     containerLease: runtime.containerLease,
-  }));
+  });
   // ONE frozen docker client env for every channel (endpoint pinned at
   // startup), plus the broker capability (BOTH transports) resolved by the
   // value-less -e — the token never enters argv and is never logged. It must
@@ -777,14 +868,14 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
   /** Joined daemon-side reap by name, AWAITED before the invocation settles; strict sweeps + cleanup() backstop failures. */
   const reap = async (): Promise<void> => {
     try {
-      await runtime.run(["docker", "rm", "-f", name], { timeoutMs: 30_000 });
+      await runtime.run(["docker", "rm", "-f", "-v", name], { timeoutMs: 30_000 });
     } catch {
       // cleanup() and the strict final sweep re-attempt and surface failures.
     }
   };
 
   // Sealed-bundle re-proof, BEFORE the WAL dispatch marker: the mounted dir
-  // and both bundle files must still be the exact inodes/bytes trusted code
+  // and every bundle file must still be the exact inodes/bytes trusted code
   // captured after the build — a tamper refusal never consumes a create
   // intent and the daemon never sees the argv.
   verifyOptimizerBundleSeal(runtime);
@@ -874,6 +965,25 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
       settleAfterLog(() => {
         if (ctx.signal.aborted) return done.resolve();
         if (code === 0) return done.resolve();
+        if (code === OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE) {
+          try {
+            releaseTerminalReserve(ctx.runDir);
+          } catch (error) {
+            return done.reject(new OptimizerStorageExhaustedError(
+              `optimizer exhausted storage and terminal reserve release failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ));
+          }
+          return done.reject(new OptimizerStorageExhaustedError(
+            `optimizer exhausted storage — terminal reserve released; see ${join(ctx.runDir, "optimizer.log")}`,
+          ));
+        }
+        if (code === OPTIMIZER_CHILD_PENDING_EXIT_CODE) {
+          return done.reject(new OptimizerChildPendingError(
+            `optimizer deferred to a pending recursive child; see ${join(ctx.runDir, "optimizer.log")}`,
+          ));
+        }
         done.reject(new Error(`optimizer exited ${code ?? `signal ${signal ?? "?"}`} — see ${join(ctx.runDir, "optimizer.log")}`));
       }),
     );
@@ -1059,7 +1169,13 @@ export function deriveProbeReport(events: readonly RunEvent[], budget: BudgetSta
     let memo: { aggregate: number; assetGroupId: string; seed: number } | null = null;
     for (let i = started.index + 1; i < events.length; i++) {
       const e = events[i];
-      if (e !== undefined && e.type === "eval.completed" && e.episode === undefined && e.artifact.hash === started.parent.hash) {
+      if (
+        e !== undefined
+        && e.type === "eval.completed"
+        && e.episode === undefined
+        && e.artifact.hash === started.parent.hash
+        && e.aggregate !== null
+      ) {
         memo = { aggregate: e.aggregate, assetGroupId: e.assetGroupId, seed: e.seed };
       }
     }
@@ -1091,6 +1207,9 @@ export function deriveProbeReport(events: readonly RunEvent[], budget: BudgetSta
     } else if (e.type === "gate.paired" && e.episode === episode) {
       gates.push({ parentScore: e.parentScore, childScore: e.childScore, passed: e.passed });
     } else if (e.type === "eval.completed" && e.episode === episode) {
+      if (e.aggregate === null) {
+        throw new Error(`probe episode ${episode} has a null aggregate — cannot derive a paired report`);
+      }
       const prior = evals.get(e.artifact.hash);
       if (prior !== undefined && (prior.aggregate !== e.aggregate || prior.assetGroupId !== e.assetGroupId || prior.seed !== e.seed)) {
         throw new Error(`probe episode ${episode} holds conflicting trusted evaluations of ${e.artifact.hash} — ambiguous, cannot derive a paired report`);
@@ -1169,7 +1288,12 @@ export function deriveProbeReport(events: readonly RunEvent[], budget: BudgetSta
 }
 
 export function createBackend(
-  deps: { run?: RunCommand; spawnOptimizer?: OptimizerSpawn; createHelper?: DockerCreateHelper } = {},
+  deps: {
+    run?: RunCommand;
+    spawnOptimizer?: OptimizerSpawn;
+    createHelper?: DockerCreateHelper;
+    mutationToolbeltSmoke?: (runtime: OptimizerRuntime) => Promise<unknown>;
+  } = {},
 ): RunnerBackend {
   const run = deps.run ?? runCommand;
   const spawnImpl: OptimizerSpawn = deps.spawnOptimizer ?? ((cmd, args, opts) => spawn(cmd, args, opts));
@@ -1183,26 +1307,27 @@ export function createBackend(
     // supervisor would terminalize a STALE event-log best while the
     // journal holds a newer durable incumbent (permanently, since a
     // finished run never resumes). Abort is honored only after reconcile.
-    validateCapsule(ctx.capsuleDir, ctx.capsuleDigest, ctx.admissionReview ?? "required");
+    validateCapsule(ctx.capsuleDir, ctx.runtimeIdentity.admittedCapsuleDigest, ctx.admissionReview ?? "required");
 
 
       const cas = new CasStore(ctx.casDir);
       let baselineArtifactHash: string;
       let evaluatorBaselineArtifactHash: string | undefined;
       if (ctx.terminalHoldoutAssetGroupIds === undefined) {
-        baselineArtifactHash = await measureBaseline(ctx.capsuleDir, ctx.manifest, cas);
+        baselineArtifactHash = await measureBaseline(ctx.capsuleDir, ctx.admittedManifest, cas);
       } else {
         if (ctx.config.apply !== "none") {
           throw new Error("terminal holdout evaluator isolation requires apply:none");
         }
-        const measured = await measureTerminalHoldoutBaseline(ctx.capsuleDir, ctx.manifest, cas);
+        const measured = await measureTerminalHoldoutBaseline(ctx.capsuleDir, ctx.admittedManifest, cas);
         baselineArtifactHash = measured.mutationArtifactHash;
         evaluatorBaselineArtifactHash = measured.evaluatorArtifactHash;
       }
-      const frozenAssetRoot = authenticateFrozenCapsuleAssets(ctx.runDir, ctx.manifest);
+      const frozenAssetRoot = authenticateFrozenCapsuleAssets(ctx.runDir, ctx.admittedManifest);
       // Broker + proxy are mutually referential (proxy meters INTO the broker,
       // broker env points sandboxes AT the proxy); the late-bound ref breaks the cycle.
       let running: RunningBroker | null = null;
+      const activeClockFailures: Error[] = [];
       // The proxy's dispatch-journal recovery starts AT CONSTRUCTION and may
       // deliver recovered ceiling charges before the broker exists — and a
       // durable recovered fact whose callback a prior crash swallowed will
@@ -1213,6 +1338,7 @@ export function createBackend(
       let spendDirect = false;
       const queuedSpend: { tokens: number; usd: number }[] = [];
       const queuedExhaustion: BudgetDimension[] = [];
+      let queuedPause: CampaignPauseSignal | undefined;
       const localPauseIds = new Set<string>();
       let localPauseEpoch = 0;
       const campaignPauseAuthority = ctx.campaignPauseAuthority ?? {
@@ -1283,7 +1409,18 @@ export function createBackend(
         upstreamBaseUrl: ctx.env["HONE_UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM,
         ...(ctx.env["HONE_UPSTREAM_API_KEY"] !== undefined ? { upstreamApiKey: ctx.env["HONE_UPSTREAM_API_KEY"] } : {}),
         checkBudget,
-        recordCampaignPause: (signal) => campaignPauseAuthority.recordCampaignPause(signal),
+        recordCampaignPause: async (signal) => {
+          await campaignPauseAuthority.recordCampaignPause(signal);
+          if (!spendDirect) {
+            queuedPause ??= signal;
+            return;
+          }
+          ctx.requestPause({
+            reason: signal.reason,
+            pauseId: signal.pauseId,
+            providerStatus: signal.status,
+          });
+        },
         recordCampaignResume: (signal) => campaignPauseAuthority.recordCampaignResume(signal),
         captureCampaignDispatchFence,
         validateCampaignDispatchFence,
@@ -1308,11 +1445,10 @@ export function createBackend(
       });
       const proxySession = issueProxySessionCapability(proxy, ctx.config.routing, ctx.proxyRole);
 
-      // The frozen manifest's immutable image is THE image — mutation
-      // sandboxes, eval sandboxes, the macOS relay, AND both optimizer
-      // containers (build + run) all run it. There is deliberately no
-      // environment override.
-      const image = ctx.manifest.image;
+      // Admission seals the immutable manifest/digest. A separately named
+      // execution image — possibly a campaign-authorised override — runs every
+      // mutation, evaluator, relay, and optimizer container.
+      const executionImage = ctx.runtimeIdentity.executionImage;
       let egress: Egress | null = null;
       let optimizer: OptimizerRuntime | null = null;
       let containerLease: DockerRunLease | null = null;
@@ -1340,30 +1476,14 @@ export function createBackend(
         // only meaningful against the sealed Engine — a resume under a
         // different DOCKER_HOST/context refuses here, nonterminal.
         const seal = await sealDockerEngine(ctx.runDir, ctx.runId, prun, frozen.endpointKind);
-        if (ctx.sandboxCgroupParent !== undefined) {
-          // Calibration host binding (fail closed): the group's limits were
-          // inspected on ONE local engine. A different daemon (or a remote/
-          // unverified endpoint) could honor the same parent string with
-          // unverified limits — refuse BEFORE the create journal opens.
-          if (seal.endpointKind !== "local-unix") {
-            throw new Error("sandbox cgroup parent requires a local unix Docker endpoint; refusing to create outside the inspected host");
-          }
-          if (ctx.sandboxDockerEngineId === undefined || seal.engineId !== ctx.sandboxDockerEngineId) {
-            throw new Error(
-              `sandbox cgroup parent was inspected on Docker engine ${ctx.sandboxDockerEngineId ?? "<unbound>"} but the sealed daemon is ${seal.engineId}; refusing to create under an uninspected engine`,
-            );
-          }
-        }
         // P1 create fence: every docker resource create from here on (donor,
         // relays, broker keeper/sandboxes/evals, optimizer build) flows
         // through the gate — write-ahead latched, joined to a definitive
-        // daemon response, `docker run` rewritten two-phase, and (grouped
-        // runs) forced under the sealed `--cgroup-parent`.
+        // daemon response, `docker run` rewritten two-phase.
         gate = openDockerCreateGate(ctx.runDir, ctx.runId, {
           ...(deps.createHelper !== undefined ? { helper: deps.createHelper } : {}),
           clientEnv: frozen.env,
           endpointIsLocal: seal.endpointKind === "local-unix",
-          ...(ctx.sandboxCgroupParent !== undefined ? { cgroupParent: ctx.sandboxCgroupParent } : {}),
         });
         grun = gate.wrap(prun);
         // Open intents inherited from a crashed attempt: observe/reap them
@@ -1378,14 +1498,14 @@ export function createBackend(
         // crash-window create from THIS attempt is provably dead once a
         // later claim shows its name unreserved (moby resolves volumes-from
         // after name reservation, before Register).
-        containerLease = makeDockerRunLease(ctx.runId, image, grun, gate.epoch);
+        containerLease = makeDockerRunLease(ctx.runId, executionImage, grun, gate.epoch);
         await containerLease.start();
         // Claim-prove the remaining inherited intents BEFORE any same-named
         // resource (keeper/relay names are deterministic) can be re-minted.
         // A name still reserved daemon-side refuses startup; an unprovable
         // latch (donor/volume/network) stays open and blocks terminal only.
-        await gate.proveInheritedIntents(grun, { runId: ctx.runId, image, donorName: containerLease.name });
-        egress = await setupEgress(ctx, proxy, image, grun, containerLease.name);
+        await gate.proveInheritedIntents(grun, { runId: ctx.runId, image: executionImage, donorName: containerLease.name });
+        egress = await setupEgress(ctx, proxy, executionImage, grun, containerLease.name);
 
         // Both transports need a short public Unix socket. sockaddr_un cannot
         // represent deep campaign run paths on either Darwin or Linux; Linux
@@ -1397,7 +1517,10 @@ export function createBackend(
           `hone-broker-${createHash("sha256").update(ctx.runId).digest("hex").slice(0, 24)}.sock`,
         );
 
-
+        const activeClock = replayActiveClock(readEvents(ctx.runDir));
+        if (activeClock.runStartedAtMs === null || activeClock.activeStartedAtMs === null) {
+          throw new Error("broker startup requires an open durable run.started/run.resumed active interval");
+        }
         const brokerConfig = {
           runId: ctx.runId,
           // The RUN config is what the broker enforces: its envelope may
@@ -1406,14 +1529,17 @@ export function createBackend(
           // serves manifest.objective). The frozen snapshot keeps the
           // capsule's original identity; the contract hash seals this run's
           // overrides.
-          manifest: { ...ctx.manifest, objective: ctx.config.objective, budget: ctx.config.budget },
+          manifest: { ...ctx.admittedManifest, objective: ctx.config.objective, budget: ctx.config.budget },
           capsuleRootDir: frozenAssetRoot,
           baselineArtifactHash,
-          image,
+          ...ctx.runtimeIdentity,
           ...(evaluatorBaselineArtifactHash === undefined ? {} : { evaluatorBaselineArtifactHash }),
-          capsuleDigest: ctx.capsuleDigest,
           optimizerDigest: ctx.optimizerDigest,
           ...(ctx.measurementEpoch !== undefined ? { measurementEpoch: ctx.measurementEpoch } : {}),
+          ...(ctx.evalTimeoutSec !== undefined ? { evalTimeoutSec: ctx.evalTimeoutSec } : {}),
+          runStartedAtMs: activeClock.runStartedAtMs,
+          activeStartedAtMs: activeClock.activeStartedAtMs,
+          initialActiveWallClockSec: activeClock.accumulatedActiveWallClockSec,
           ...(ctx.evaluationStrategy !== undefined ? { evaluationStrategy: ctx.evaluationStrategy } : {}),
           ...(ctx.recursiveBroker !== undefined ? { recursive: ctx.recursiveBroker } : {}),
           // Frozen development corpus (M2 queryCorpus): trusted campaign
@@ -1422,22 +1548,25 @@ export function createBackend(
           ...(ctx.terminalHoldoutAssetGroupIds !== undefined
             ? { terminalHoldoutAssetGroupIds: ctx.terminalHoldoutAssetGroupIds }
             : {}),
+          ...(ctx.promotionHoldoutSplit !== undefined
+            ? { promotionHoldoutSplit: ctx.promotionHoldoutSplit }
+            : {}),
           // Per-capsule sandbox resource requirements (manifest-core, sealed
           // in the digest). Absent => broker defaults (2 GiB / 2 cpus).
-          ...(ctx.manifest.sandbox === undefined
+          ...(ctx.admittedManifest.sandbox === undefined
             ? {}
             : {
-                sandboxMemoryBytes: ctx.manifest.sandbox.memoryBytes,
-                ...(ctx.manifest.sandbox.cpus === undefined ? {} : { sandboxCpus: ctx.manifest.sandbox.cpus }),
+                sandboxMemoryBytes: ctx.admittedManifest.sandbox.memoryBytes,
+                ...(ctx.admittedManifest.sandbox.cpus === undefined ? {} : { sandboxCpus: ctx.admittedManifest.sandbox.cpus }),
               }),
           // Repo-lifetime holdout ledger, keyed by capsule digest so every
           // run of this exact capsule draws from ONE budget. Lives under the
           // CAS root (broker creates the file and parents).
-          holdoutLedgerPath: join(ctx.casDir, "ledgers", `${ctx.capsuleDigest.replace(/^sha256:/, "")}.ndjson`),
+          holdoutLedgerPath: join(ctx.casDir, "ledgers", `${ctx.runtimeIdentity.admittedCapsuleDigest.replace(/^sha256:/, "")}.ndjson`),
           // The lifetime ledger budget is pinned to the FROZEN capsule
           // envelope, never the editable per-run budget — the shared ledger
           // header must stay identical across every run of this capsule.
-          holdoutBudget: ctx.manifest.budget.maxEvaluatorInvocations,
+          holdoutBudget: ctx.admittedManifest.budget.maxEvaluatorInvocations,
           runDir: ctx.runDir,
           casDir: ctx.casDir,
           runCommand: grun,
@@ -1488,6 +1617,15 @@ export function createBackend(
         // best/status/delivery and the resume hint all see the durable
         // incumbent exactly once — even when a stop aborted mid-startup.
         reconcileBrokerAuthority(ctx.runDir, running.broker, ctx.emit, ctx.runId);
+        const pauseBrokerClock = (): void => {
+          try {
+            running?.broker.pauseActiveTime();
+          } catch (error) {
+            activeClockFailures.push(error instanceof Error ? error : new Error(String(error)));
+          }
+        };
+        ctx.signal.addEventListener("abort", pauseBrokerClock, { once: true });
+        if (ctx.signal.aborted) pauseBrokerClock();
 
         // Dispatch-charge reconciliation (P1): the proxy journal's cumulative
         // charge LEVEL is an absolute lower bound on token/usd spend — a
@@ -1511,16 +1649,25 @@ export function createBackend(
           // A poisoned dispatch journal is handled at teardown: proxy.close()
           // rejects, the cleanup barrier rejects, the run stays non-terminal.
         });
-        if (await proxy.campaignPause() !== undefined) {
+        const activePause = await proxy.campaignPause();
+        if (activePause !== undefined) {
           trustedResumePreflight = true;
           try {
             const preflight = await proxy.resume();
             if (!preflight.passed) {
+              ctx.requestPause({
+                reason: activePause.reason,
+                pauseId: activePause.pauseId,
+                providerStatus: activePause.status,
+              });
               throw new Error("campaign remains paused because frozen-route preflight did not pass");
             }
+            queuedPause = undefined;
           } finally {
             trustedResumePreflight = false;
           }
+        } else if (queuedPause !== undefined) {
+          throw new Error("proxy pause callback had no matching durable dispatch-journal pause");
         }
 
         // Only AFTER durable authority is reconciled may a stop short-circuit:
@@ -1548,7 +1695,7 @@ export function createBackend(
         // One-time exact-snapshot proof + container build for the single M0
         // probe invocation.
         optimizer = await prepareOptimizerRuntime(ctx, {
-          image,
+          image: executionImage,
           transport,
           run: grun,
           spawnImpl,
@@ -1556,6 +1703,49 @@ export function createBackend(
           gate,
           clientEnv: frozen.env,
         });
+        // No model prompt can begin until the exact worker bundle passes its
+        // trusted preflight contract (modern full toolbelt, or the one
+        // exact-identity legacy selftest). An explicit optimizer argv override
+        // has no sealed worker to prove and remains a dev/test-only seam.
+        if (optimizer.bundleDir !== null || deps.mutationToolbeltSmoke !== undefined) {
+          let result: unknown;
+          if (deps.mutationToolbeltSmoke !== undefined) {
+            result = await deps.mutationToolbeltSmoke(optimizer);
+          } else {
+            result = ctx.mutationWorkerPreflightContract === undefined
+              ? await runMutationToolbeltSmoke(optimizer)
+              : await runMutationToolbeltSmoke(
+                optimizer,
+                ctx.mutationWorkerPreflightContract,
+              );
+          }
+          if (result !== undefined) {
+            const contract = ctx.mutationWorkerPreflightContract ?? "full-toolbelt";
+            const expectedType = contract === "legacy-selftest"
+              ? "hone-mutation-legacy-selftest.v1"
+              : "hone-mutation-toolbelt-selftest.v1";
+            if (
+              result === null
+              || typeof result !== "object"
+              || !("type" in result)
+              || result.type !== expectedType
+              || !("modelCalls" in result)
+              || result.modelCalls !== 0
+            ) {
+              throw new Error(`mutation worker preflight result does not prove ${contract}`);
+            }
+            writeFileDurable(
+              join(ctx.runDir, MUTATION_WORKER_PREFLIGHT_FILE),
+              `${JSON.stringify({
+                version: 1,
+                runId: ctx.runId,
+                optimizerDigest: ctx.optimizerDigest,
+                contract,
+                result,
+              })}\n`,
+            );
+          }
+        }
         if (ctx.signal.aborted) return;
 
         if (ctx.optimizerEpisodesMax !== undefined) {
@@ -1574,8 +1764,8 @@ export function createBackend(
             // M2 outer sessions instead settle each optimizer-authored
             // spawnRun allocation through the recursive launcher.
             const finalGroup =
-              ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout" && group.id === "train")
-              ?? ctx.manifest.assetGroups.find((group) => group.visibility !== "holdout");
+              ctx.admittedManifest.assetGroups.find((group) => group.visibility !== "holdout" && group.id === "train")
+              ?? ctx.admittedManifest.assetGroups.find((group) => group.visibility !== "holdout");
             if (finalGroup === undefined) throw new Error("M1 child has no registered non-holdout evaluation coordinate");
             const finalArtifact = {
               hash: running.broker.trustedIncumbent?.hash ?? baselineArtifactHash,
@@ -1627,6 +1817,10 @@ export function createBackend(
           }
         }
 
+        if (ctx.promotionHoldoutSplit !== undefined) {
+          await running.broker.assessPromotionHoldouts({ privileged: true });
+        }
+
 
         // Final budget is authority too: journal before public delivery so a
         // transient append failure is repaired by the final reconcile below.
@@ -1647,6 +1841,9 @@ export function createBackend(
           // event. Broker.close collects teardown errors but always drains
           // operations and closes the journal before returning.
           await running.close().catch((e: unknown) => failures.push(`broker: ${message(e)}`));
+          if (activeClockFailures.length > 0) {
+            failures.push(`active clock: ${activeClockFailures.map((failure) => failure.message).join("; ")}`);
+          }
           try {
             // No broker fact can be appended after close has drained. Repair
             // the exact journal suffix, then and only then release the

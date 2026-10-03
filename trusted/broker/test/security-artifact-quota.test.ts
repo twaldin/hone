@@ -90,10 +90,10 @@ async function boot(
     manifest,
     capsuleRootDir,
     baselineArtifactHash: baselineHash,
-    capsuleDigest: TEST_CAPSULE_DIGEST,
+    admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
     optimizerDigest: TEST_OPTIMIZER_DIGEST,
     holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
-    image: TEST_IMAGE,
+    executionImage: TEST_IMAGE,
     runDir,
     casDir,
     onEvent: (_e: RunEvent) => {},
@@ -110,12 +110,19 @@ async function boot(
   return b;
 }
 
-/** Save `tar` from a fresh baseline sandbox (repair path — no exec needed; admission charges either way). */
-async function save(b: Booted, tar: Buffer): Promise<string> {
+/** Save `tar` from one complete baseline episode (repair path — no exec needed; admission charges either way). */
+async function save(b: Booted, tar: Buffer, episode: number): Promise<string> {
   b.ctl.saveTar = tar;
   const { sandboxId } = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
-  const ref = await b.broker.saveArtifact({ sandboxId }, CLIENT);
-  return ref.hash;
+  let hash: string;
+  try {
+    hash = (await b.broker.saveArtifact({ sandboxId }, CLIENT)).hash;
+  } catch (error) {
+    await b.broker.completeEpisode({ episode, releaseSandboxId: sandboxId }, CLIENT);
+    throw error;
+  }
+  await b.broker.completeEpisode({ episode }, CLIENT);
+  return hash;
 }
 
 async function casBlobCount(casDir: string): Promise<number> {
@@ -224,10 +231,10 @@ describe("aggregate candidate entry budget", () => {
   it("charges admissions, rejects the overflowing artifact, and leaves CAS untouched on rejection", async () => {
     // Each candidate canonicalizes to exactly 3 entries (workspace, d, d/x.txt).
     const b = await boot({ maxCandidateArtifactEntries: 7 });
-    const savedA = await save(b, tarA); // 3/7
-    const savedB = await save(b, tarB); // 6/7
+    const savedA = await save(b, tarA, 0); // 3/7
+    const savedB = await save(b, tarB, 1); // 6/7
     const blobsBefore = await casBlobCount(b.casDir);
-    await expect(save(b, tarC)).rejects.toThrow(/candidate artifact entry cap reached \(7\)/); // 9 > 7
+    await expect(save(b, tarC, 2)).rejects.toThrow(/candidate artifact entry cap reached \(7\)/); // 9 > 7
     // Admission is charged BEFORE the canonical blob is stored: the rejected
     // candidate must not grow CAS, the journal, or the unpack cache.
     expect(await casBlobCount(b.casDir)).toBe(blobsBefore);
@@ -239,8 +246,8 @@ describe("aggregate candidate entry budget", () => {
 
   it("survives resume: the replayed charge still blocks the next admission", async () => {
     const b = await boot({ maxCandidateArtifactEntries: 7 });
-    await save(b, tarA);
-    await save(b, tarB); // 6/7 charged and journaled
+    await save(b, tarA, 0);
+    await save(b, tarB, 1); // 6/7 charged and journaled
     await b.broker.close();
 
     const resumed = await boot({
@@ -251,16 +258,16 @@ describe("aggregate candidate entry budget", () => {
     });
     // A restart must replay to EXACTLY the charged budget — a fresh in-memory
     // counter would grant the whole quota again.
-    await expect(save(resumed, tarD)).rejects.toThrow(/candidate artifact entry cap reached \(7\)/);
+    await expect(save(resumed, tarD, 2)).rejects.toThrow(/candidate artifact entry cap reached \(7\)/);
     // Re-saving an already-admitted hash is idempotent: no second charge.
-    expect(await save(resumed, tarA)).toBe(hashA);
+    expect(await save(resumed, tarA, 3)).toBe(hashA);
     expect((await journalArtifactLines(resumed.runDir)).length).toBe(2);
   });
 
   it("never charges the trusted baseline artifact", async () => {
     // Budget of 1 entry: ANY candidate charge would overflow instantly.
     const b = await boot({ maxCandidateArtifactEntries: 1 });
-    const saved = await save(b, baselineTar);
+    const saved = await save(b, baselineTar, 0);
     expect(saved).toBe(baselineHash);
     expect(await journalArtifactLines(b.runDir)).toEqual([]);
   });

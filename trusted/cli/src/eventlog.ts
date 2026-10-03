@@ -1,7 +1,7 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, openSync, readFileSync, readSync, renameSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, openSync, readFileSync, readSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { RunEvent } from "@hone/schema";
-import type { ApplyMode, ArtifactRef, BudgetState } from "@hone/schema";
+import type { ApplyMode, ArtifactRef, BudgetState, RunOutcomeReason } from "@hone/schema";
 
 /**
  * Append-only NDJSON event log — the ONLY run-state store (contract 4).
@@ -9,6 +9,50 @@ import type { ApplyMode, ArtifactRef, BudgetState } from "@hone/schema";
  */
 
 export const EVENTS_FILE = "events.ndjson";
+export const TERMINAL_RESERVE_FILE = "terminal-reserve.bin";
+export const TERMINAL_RESERVE_BYTES = 4 * 1024 * 1024;
+const TERMINAL_RESERVE_CHUNK = Buffer.alloc(64 * 1024);
+
+/**
+ * Physically allocate a small run-local reserve while capacity exists. The
+ * block-count proof assumes a non-compressing filesystem (production uses
+ * ext4); compressed filesystems may conservatively rewrite the reserve. A
+ * storage-exhausted optimizer releases it before broker teardown so the
+ * trusted supervisor can still append and fsync the terminal event.
+ */
+export function ensureTerminalReserve(runDir: string): void {
+  const reservePath = join(runDir, TERMINAL_RESERVE_FILE);
+  if (existsSync(reservePath)) {
+    const existing = lstatSync(reservePath);
+    if (
+      existing.isFile()
+      && existing.nlink === 1
+      && existing.size === TERMINAL_RESERVE_BYTES
+      && existing.blocks * 512 >= TERMINAL_RESERVE_BYTES
+    ) {
+      return;
+    }
+    rmSync(reservePath, { force: true });
+  }
+  const fd = openSync(reservePath, "w", 0o600);
+  try {
+    for (let offset = 0; offset < TERMINAL_RESERVE_BYTES; offset += TERMINAL_RESERVE_CHUNK.length) {
+      writeAllSync(fd, TERMINAL_RESERVE_CHUNK);
+    }
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  syncDir(runDir);
+}
+
+/** Release the preallocated blocks exactly once; named run state is untouched. */
+export function releaseTerminalReserve(runDir: string): void {
+  const reservePath = join(runDir, TERMINAL_RESERVE_FILE);
+  if (!existsSync(reservePath)) return;
+  rmSync(reservePath);
+  syncDir(runDir);
+}
 
 export function eventsPath(runDir: string): string {
   return join(runDir, EVENTS_FILE);
@@ -104,7 +148,7 @@ export function appendEvent(runDir: string, event: RunEvent, sync: (dir: string)
  * hard-rejects. Truncate (+fsync) to the last complete line first — the torn
  * bytes were never acknowledged, so dropping them is the resume contract.
  */
-function repairTornTail(fd: number): void {
+export function repairTornTail(fd: number): void {
   const size = fstatSync(fd).size;
   if (size === 0) return;
   const probe = Buffer.alloc(1);
@@ -158,7 +202,63 @@ export function readEvents(runDir: string): RunEvent[] {
   return events;
 }
 
-export type RunStatus = "pending" | "running" | "completed" | "stopped" | "failed" | "budget";
+export interface ActiveClockReplay {
+  /** Durable run.started origin for the separate operator lifetime signal. */
+  runStartedAtMs: number | null;
+  /** Current open run.started/run.resumed interval, or null while paused/terminal. */
+  activeStartedAtMs: number | null;
+  /** Closed active intervals only; safe as a legacy broker-journal bootstrap. */
+  accumulatedActiveWallClockSec: number;
+  /** Closed intervals plus the current open interval through nowMs. */
+  activeWallClockSec: number;
+  lifetimeSec: number;
+}
+
+/**
+ * Reconstructs active time from the public durable lifecycle. A clean pause
+ * closes at run.paused. If a process dies without pausing, the next resume
+ * closes the abandoned interval at its final journaled event: acknowledged
+ * work is charged, while the process-down gap and unacknowledged work are not.
+ */
+export function replayActiveClock(events: readonly RunEvent[], nowMs: number = Date.now()): ActiveClockReplay {
+  let runStartedAtMs: number | null = null;
+  let activeStartedAtMs: number | null = null;
+  let lastEvidenceAtMs: number | null = null;
+  let accumulatedActiveMs = 0;
+
+  const closeActive = (atMs: number): void => {
+    if (activeStartedAtMs === null) return;
+    accumulatedActiveMs += Math.max(0, atMs - activeStartedAtMs);
+    activeStartedAtMs = null;
+  };
+
+  for (const event of events) {
+    const atMs = Date.parse(event.at);
+    if (event.type === "run.started") {
+      runStartedAtMs ??= atMs;
+      if (activeStartedAtMs === null) activeStartedAtMs = atMs;
+    } else if (event.type === "run.resumed") {
+      // No clean pause: the prior boot's final acknowledged event is the
+      // crash boundary. Never bridge its process-down gap into this boot.
+      if (activeStartedAtMs !== null) closeActive(lastEvidenceAtMs ?? atMs);
+      activeStartedAtMs = atMs;
+    } else if (event.type === "run.paused" || event.type === "run.finished") {
+      closeActive(atMs);
+    }
+    lastEvidenceAtMs = atMs;
+  }
+
+  const liveActiveMs = activeStartedAtMs === null ? 0 : Math.max(0, nowMs - activeStartedAtMs);
+  return {
+    runStartedAtMs,
+    activeStartedAtMs,
+    accumulatedActiveWallClockSec: accumulatedActiveMs / 1000,
+    activeWallClockSec: (accumulatedActiveMs + liveActiveMs) / 1000,
+    lifetimeSec: runStartedAtMs === null ? 0 : Math.max(0, nowMs - runStartedAtMs) / 1000,
+  };
+}
+
+export type RunStatus = "pending" | "running" | "paused" | "completed" | "stopped" | "failed" | "budget";
 
 export interface IncumbentState {
   artifact: ArtifactRef;
@@ -173,28 +273,43 @@ export interface FinishedState {
   at: string;
 }
 
+export interface EpisodeCheckpointState {
+  episode: number;
+  parent: ArtifactRef;
+  candidate: { artifact: ArtifactRef; sessionTrace: string } | null;
+  invalid?: { reason: string; repaired: boolean };
+}
+
 export interface RunState {
   runId: string | null;
   capsuleId: string | null;
   contractHash: string | null;
-  /** Optimizer digest sealed by run.started (null before the run started). */
+  /** Optimizer digest sealed by run.started or the latest journal-linked engine migration. */
   optimizerDigest: string | null;
   /** Last probe.completed outcome (null when no probe has been decided). */
   probe: { approved: boolean } | null;
   /** Number of events consumed = the next event's 0-based line index. */
   cursor: number;
   status: RunStatus;
+  /** New logs advance nextEpisode only at a durable episode.completed boundary. */
+  checkpointVersion: 1 | null;
   episodes: Set<number>;
   nextEpisode: number;
+  /** Journaled work in the one episode that has started but not completed. */
+  activeEpisode: EpisodeCheckpointState | null;
   /** Parent artifact of the earliest episode — the baseline snapshot. */
   baselineArtifact: ArtifactRef | null;
   incumbent: IncumbentState | null;
   lastBudget: BudgetState | null;
   /** Durable broker-authored exhaustion latch, even before run.finished. */
   budgetExhaustedDimension: string | null;
+  /** Durable mutation-session stop latch, even before run.finished. */
+  sessionNoYieldBound: boolean;
   /** Trusted delivery outcome already made durable before run.finished. */
   delivery: { mode: ApplyMode; ref: string | null } | null;
   finished: FinishedState | null;
+  /** Machine-readable pause/stop/failure cause from the shared taxonomy. */
+  outcomeReason: RunOutcomeReason | null;
   resumeCount: number;
   evalCount: number;
 }
@@ -208,14 +323,18 @@ export function replay(events: RunEvent[]): RunState {
     probe: null,
     cursor: 0,
     status: "pending",
+    checkpointVersion: null,
     episodes: new Set<number>(),
     nextEpisode: 0,
+    activeEpisode: null,
     baselineArtifact: null,
     incumbent: null,
     lastBudget: null,
     budgetExhaustedDimension: null,
+    sessionNoYieldBound: false,
     delivery: null,
     finished: null,
+    outcomeReason: null,
     resumeCount: 0,
     evalCount: 0,
   };
@@ -228,21 +347,69 @@ export function replay(events: RunEvent[]): RunState {
         state.capsuleId = event.capsuleId;
         state.contractHash = event.contractHash;
         state.optimizerDigest = event.optimizerDigest;
+        state.checkpointVersion = event.checkpointVersion ?? null;
         state.status = "running";
         break;
       case "run.resumed":
         state.resumeCount++;
+        state.status = "running";
+        state.outcomeReason = null;
+        break;
+      case "run.optimizer-migrated":
+        if (state.status !== "paused") {
+          throw new Error("optimizer migration requires a durably paused run");
+        }
+        if (
+          state.optimizerDigest !== event.fromOptimizerDigest
+          || state.contractHash !== event.fromContractHash
+        ) {
+          throw new Error("optimizer migration does not extend the run's sealed optimizer and contract identity");
+        }
+        if (
+          event.fromSourceArtifact === event.sourceArtifact
+          && event.fromBaseDigest === event.baseDigest
+          && event.fromOptimizerDigest === event.optimizerDigest
+        ) {
+          throw new Error("optimizer migration must change the sealed optimizer identity");
+        }
+        state.optimizerDigest = event.optimizerDigest;
+        state.contractHash = event.contractHash;
+        break;
+      case "run.paused":
+        state.status = "paused";
+        state.outcomeReason = event.reason;
         break;
       case "probe.completed":
         state.probe = { approved: event.approved };
         break;
       case "episode.started":
         state.episodes.add(event.episode);
-        state.nextEpisode = Math.max(state.nextEpisode, event.episode + 1);
+        if (state.checkpointVersion === null) {
+          state.nextEpisode = Math.max(state.nextEpisode, event.episode + 1);
+        } else {
+          state.activeEpisode = { episode: event.episode, parent: event.parent, candidate: null };
+        }
         if (event.episode < minEpisode) {
           minEpisode = event.episode;
           state.baselineArtifact = event.parent;
         }
+        break;
+      case "episode.candidate":
+        if (state.activeEpisode?.episode === event.episode) {
+          state.activeEpisode.candidate = {
+            artifact: event.candidate,
+            sessionTrace: event.sessionTrace,
+          };
+        }
+        break;
+      case "episode.invalid":
+        if (state.activeEpisode?.episode === event.episode) {
+          state.activeEpisode.invalid = { reason: event.reason, repaired: event.repaired };
+        }
+        break;
+      case "episode.completed":
+        state.nextEpisode = Math.max(state.nextEpisode, event.episode + 1);
+        if (state.activeEpisode?.episode === event.episode) state.activeEpisode = null;
         break;
       case "eval.completed":
         state.evalCount++;
@@ -254,6 +421,9 @@ export function replay(events: RunEvent[]): RunState {
           deltaVsBaseline: event.deltaVsBaseline,
           episode: event.episode,
         };
+        break;
+      case "mutation.no-yield-bound":
+        state.sessionNoYieldBound = true;
         break;
       case "budget.snapshot":
         state.lastBudget = event.budget;
@@ -283,6 +453,16 @@ export function replay(events: RunEvent[]): RunState {
       case "run.finished":
         state.finished = { status: event.status, best: event.best ?? null, at: event.at };
         state.status = event.status;
+        state.outcomeReason =
+          event.reason
+          ?? (event.status === "budget"
+            ? "budget-exhausted"
+            : event.status === "stopped"
+              ? "operator"
+              : event.status === "failed"
+                ? "crash"
+                : null);
+        state.activeEpisode = null;
         break;
       default:
         break;

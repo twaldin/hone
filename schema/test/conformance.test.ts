@@ -6,6 +6,7 @@ import {
   BrokerMethods,
   CapsuleManifest,
   DEFAULT_PROMOTION_RULE,
+  DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   DiagnosticOrderingReport,
   EvaluatorOutput,
   PromotionRule,
@@ -310,6 +311,40 @@ describe("contract 2: broker protocol", () => {
       }),
     ).toThrow();
   });
+
+  it("carries a typed recursive task and optimizer-authored allocation plan on evaluate", () => {
+    const ceiling = { maxTokens: 10, maxUsd: 1, maxWallClockSec: 60, maxEvaluatorInvocations: 5 };
+    const task = BrokerMethods.getTask.result.parse({
+      capsuleId: "cap_000000000000",
+      objective: "improve the optimizer",
+      baselineArtifact: { hash: `sha256:${"a".repeat(64)}` },
+      visibleAssetGroups: ["meta-train"],
+      promotionGateCalibrations: [],
+      budget: {
+        envelope: ceiling,
+        spent: { tokens: 0, usd: 0, wallClockSec: 0, evaluatorInvocations: 0 },
+      },
+      recursiveTask: {
+        depth: 0,
+        innerEpisodesMax: 4,
+        members: [{ capsuleId: "cap_000000000001", calibratedInnerCeiling: ceiling }],
+      },
+    });
+    const params = BrokerMethods.evaluate.params.parse({
+      artifact: task.baselineArtifact,
+      assetGroupId: "meta-train",
+      seed: 0,
+      recursivePlan: {
+        allocations: [{
+          capsuleId: "cap_000000000001",
+          allocationOrdinal: 0,
+          innerEpisodesMax: 4,
+          reservation: ceiling,
+        }],
+      },
+    });
+    expect(params.recursivePlan?.allocations).toHaveLength(1);
+  });
 });
 
 describe("contract 5: run config", () => {
@@ -337,6 +372,28 @@ describe("contract 5: run config", () => {
     expect(rc.backend).toBe("local");
     // Campaign field: required after parse, pre-registered defaults when absent.
     expect(rc.promotion).toEqual(DEFAULT_PROMOTION_RULE);
+    expect(rc.sessionNoYieldMaxTokens).toBeUndefined();
+  });
+
+  it("schema-validates a sealed no-yield ceiling without changing the default", () => {
+    const base = {
+      version: 1,
+      capsuleId: "cap_000000000000",
+      objective: "x",
+      budget: { maxTokens: 2_000_000, maxUsd: 1, maxWallClockSec: 60, maxEvaluatorInvocations: 1 },
+      routing: {},
+    };
+    expect(RunConfig.parse({
+      ...base,
+      sessionNoYieldMaxTokens: 1_700_000,
+    }).sessionNoYieldMaxTokens).toBe(1_700_000);
+    for (const invalid of [
+      DEFAULT_SESSION_NO_YIELD_MAX_TOKENS - 1,
+      1_700_000.5,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      expect(() => RunConfig.parse({ ...base, sessionNoYieldMaxTokens: invalid })).toThrow();
+    }
   });
 
   it("rejects an empty backend spec — the sealed backend must name something", () => {
@@ -386,6 +443,70 @@ describe("contract 4: event log", () => {
       episode: 4,
     });
     expect(e.type).toBe("incumbent.new");
+  });
+
+  it("round-trips a settled evaluation with no eligible aggregate", () => {
+    const event = RunEvent.parse({
+      runId: "run_null",
+      at: new Date().toISOString(),
+      type: "eval.completed",
+      episode: 0,
+      artifact: { hash: "sha256:" + "b".repeat(64) },
+      assetGroupId: "meta-train",
+      seed: 0,
+      aggregate: null,
+      cached: false,
+    });
+
+    expect(event).toMatchObject({ type: "eval.completed", aggregate: null });
+  });
+
+  it("no-yield bound events carry a complete, named trigger record", () => {
+    const record = {
+      type: "hone.mutation.no-yield-bound.v1" as const,
+      limitTokens: 1_500_000,
+      modelCalls: 152,
+      promptTokens: 1_499_359,
+      completionTokens: 7_320,
+      consumedTokens: 1_506_679,
+    };
+    const report = { sandboxId: "sb_bound", ...record };
+    const { type: _wireType, ...trigger } = record;
+    expect(RunEvent.parse({
+      runId: "run_1",
+      at: new Date().toISOString(),
+      type: "mutation.no-yield-bound",
+      episode: 2,
+      sandboxId: report.sandboxId,
+      ...trigger,
+    })).toMatchObject({
+      type: "mutation.no-yield-bound",
+      episode: 2,
+      sandboxId: report.sandboxId,
+      ...trigger,
+    });
+    expect(BrokerMethods.reportSessionNoYieldBound.params.parse(report)).toEqual(report);
+    expect(() => BrokerMethods.reportSessionNoYieldBound.params.parse({
+      ...report,
+      consumedTokens: record.limitTokens - 1,
+    })).toThrow(/consumedTokens must reach limitTokens/);
+  });
+
+  it("usage anomalies remain durable even when the mutation session yields", () => {
+    expect(RunEvent.parse({
+      runId: "run_1",
+      at: new Date().toISOString(),
+      type: "mutation.usage-anomaly",
+      episode: 2,
+      sandboxId: "sb_usage",
+      zeroUsageTurns: 3,
+      normalizedUsageTurns: 1,
+    })).toMatchObject({
+      type: "mutation.usage-anomaly",
+      sandboxId: "sb_usage",
+      zeroUsageTurns: 3,
+      normalizedUsageTurns: 1,
+    });
   });
 
   it("holdout access events carry the ledger count — no unlogged holdout reads", () => {

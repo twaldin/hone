@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import { RunConfig, RunEvent } from "@hone/schema";
 import { UsageError } from "../src/args.js";
 import { remainingWallBudgetMs, runCommand } from "../src/supervisor.js";
+import { replayActiveClock } from "../src/eventlog.js";
+import { formatSpend } from "../src/report.js";
 import { hone, honeSpawn, killTree, makeCapsule, makeIo, makeRoot, readLogLines, sleep } from "./helpers.js";
 
 /** The one persisted runconfig.json — asserts exactly one run was minted. */
@@ -51,6 +53,13 @@ describe("wall-clock budget enforcement", () => {
     expect(finished?.type).toBe("run.finished");
     if (finished?.type === "run.finished") expect(finished.status).toBe("budget");
   });
+  it("shows inactive lifetime explicitly beside active wall spend", () => {
+    expect(formatSpend({
+      envelope: { maxTokens: 100, maxUsd: 10, maxWallClockSec: 200, maxEvaluatorInvocations: 5 },
+      spent: { tokens: 0, usd: 0, wallClockSec: 8, evaluatorInvocations: 0 },
+      lifetimeSec: 103,
+    })).toBe("$0.00 of $10 · 0 tokens · 8s active wall · 103s lifetime · 95s paused/offline · 0 evals");
+  });
 });
 
 describe("broker-authored budget boundaries", () => {
@@ -87,7 +96,7 @@ describe("broker-authored budget boundaries", () => {
     expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "budget" });
   });
 
-  it("resume restores a durable exhaustion latch before backend work and never duplicates the event", { timeout: 30_000 }, async () => {
+  it("resume restores a durable exhaustion latch before backend work and never duplicates the event", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     makeCapsule(root);
     writeFileSync(
@@ -110,40 +119,171 @@ describe("broker-authored budget boundaries", () => {
       cwd: root,
       env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10000" },
     });
-    let runId = "";
-    for (let attempt = 0; attempt < 500; attempt++) {
-      const runsDir = join(root, ".hone-runs");
-      const entries = existsSync(runsDir) ? readdirSync(runsDir) : [];
-      const candidate = entries.length === 1 ? entries[0] : undefined;
-      if (candidate !== undefined) {
-        const eventFile = join(runsDir, candidate, "events.ndjson");
-        if (existsSync(eventFile) && readFileSync(eventFile, "utf8").includes('"type":"budget.exhausted"')) {
-          runId = candidate;
-          break;
-        }
-      }
-      await sleep(10);
-    }
-    expect(runId).not.toBe("");
-    const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
-    killTree(child);
-    await exited;
-
-    const resumed = await hone(["run", "capsule", "--headless", "--resume"], {
-      cwd: root,
-      env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" },
+    let launchStderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      launchStderr += chunk.toString("utf8");
     });
-    expect(resumed.code, resumed.stderr).toBe(0);
-    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
-    expect(events.filter((event) => event.type === "budget.exhausted")).toHaveLength(1);
-    expect(events.some((event) => event.type === "run.resumed")).toBe(true);
-    expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "budget" });
+    let childClosed = false;
+    const exited = new Promise<void>((resolve) => child.once("close", () => {
+      childClosed = true;
+      resolve();
+    }));
+    let runId = "";
+    try {
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          throw new Error(
+            `initial budget-latch run exited before its durable boundary ` +
+            `(code ${String(child.exitCode)}, signal ${String(child.signalCode)}): ${launchStderr}`,
+          );
+        }
+        const runsDir = join(root, ".hone-runs");
+        const entries = existsSync(runsDir) ? readdirSync(runsDir) : [];
+        const candidate = entries.length === 1 ? entries[0] : undefined;
+        if (candidate !== undefined) {
+          const eventFile = join(runsDir, candidate, "events.ndjson");
+          if (existsSync(eventFile) && readFileSync(eventFile, "utf8").includes('"type":"budget.exhausted"')) {
+            runId = candidate;
+            break;
+          }
+        }
+        // CLI startup includes loading TypeScript under tsx. On a loaded host
+        // that can exceed five seconds, so wait for the durable record rather
+        // than treating a fixed iteration count as process readiness.
+        await sleep(10);
+      }
+      expect(runId, launchStderr).not.toBe("");
+      killTree(child);
+      await exited;
+
+      const resumed = await hone(["run", "capsule", "--headless", "--resume"], {
+        cwd: root,
+        env: { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" },
+      });
+      expect(resumed.code, resumed.stderr).toBe(0);
+      const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+      expect(events.filter((event) => event.type === "budget.exhausted")).toHaveLength(1);
+      expect(events.some((event) => event.type === "run.resumed")).toBe(true);
+      expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "budget" });
+    } finally {
+      killTree(child);
+      if (!childClosed) await exited;
+    }
   });
 
-  it("resume wall time includes time elapsed while no supervisor was running", () => {
-    const startedAt = "2026-07-15T00:00:00.000Z";
-    expect(remainingWallBudgetMs(10, 2, startedAt, Date.parse(startedAt) + 5_000)).toBe(5_000);
-    expect(remainingWallBudgetMs(10, 2, startedAt, Date.parse(startedAt) + 11_000)).toBe(0);
+  it("preserves active wall spend across a real paused process restart", { timeout: 30_000 }, async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(
+      join(root, "active-pause.mjs"),
+      `export function createBackend() {
+        return {
+          async start(ctx) {
+            const baseWallClockSec = ctx.replayed.lastBudget?.spent.wallClockSec ?? 0;
+            ctx.emit({
+              runId: ctx.runId,
+              at: new Date().toISOString(),
+              type: "budget.snapshot",
+              budget: {
+                envelope: ctx.config.budget,
+                spent: {
+                  tokens: 0,
+                  usd: 0,
+                  wallClockSec: baseWallClockSec + 0.1,
+                  evaluatorInvocations: 0,
+                },
+              },
+            });
+            if (ctx.replayed.resumeCount === 0) ctx.requestPause({ reason: "operator" });
+          },
+        };
+      }
+      `,
+    );
+    writeFileSync(join(root, "active-pause.json"), JSON.stringify({ budget: { maxWallClockSec: 1 } }));
+    const env = { HONE_UNSAFE_BACKEND: "1", HONE_KILL_GRACE_MS: "10" };
+
+    const first = await hone(
+      ["run", "capsule", "--headless", "--backend", "./active-pause.mjs", "--config", "active-pause.json"],
+      { cwd: root, env },
+    );
+    expect(first.code, first.stderr).toBe(0);
+    const runId = readdirSync(join(root, ".hone-runs"))[0] ?? "";
+    expect(runId).not.toBe("");
+    expect(readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line))).at(-1)).toMatchObject({
+      type: "run.paused",
+      reason: "operator",
+    });
+
+    // A deterministic fake clock cannot cross a real OS process boundary:
+    // this deliberate integration delay keeps the supervisor absent for
+    // longer than the whole envelope (and >10x either active slice).
+    await sleep(1_200);
+    const resumed = await hone(["run", "capsule", "--headless", "--resume"], { cwd: root, env });
+    expect(resumed.code, resumed.stderr).toBe(0);
+    const events = readLogLines(root, runId).map((line) => RunEvent.parse(JSON.parse(line)));
+    const started = events.find((event) => event.type === "run.started");
+    const resumedEvent = events.find((event) => event.type === "run.resumed");
+    expect(started?.type).toBe("run.started");
+    expect(resumedEvent?.type).toBe("run.resumed");
+    if (started?.type === "run.started" && resumedEvent?.type === "run.resumed") {
+      // The old lifetime implementation necessarily exhausted this 1s cap.
+      expect((Date.parse(resumedEvent.at) - Date.parse(started.at)) / 1000).toBeGreaterThan(1);
+    }
+    expect(events.filter((event) => event.type === "run.resumed")).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: "run.finished", status: "completed" });
+    const finalBudget = events.filter((event) => event.type === "budget.snapshot").at(-1);
+    expect(finalBudget?.type).toBe("budget.snapshot");
+    if (finalBudget?.type === "budget.snapshot") {
+      expect(finalBudget.budget.spent.wallClockSec).toBeCloseTo(0.2, 6);
+    }
+    expect(events.some((event) => event.type === "budget.exhausted")).toBe(false);
+  });
+
+
+  it("computes remaining wall budget from accumulated active time only", () => {
+    expect(remainingWallBudgetMs(10, 2)).toBe(8_000);
+    expect(remainingWallBudgetMs(10, 11)).toBe(0);
+  });
+
+  it("bounds an unpaused crash at the final journaled activity before resume", () => {
+    const hash = `sha256:${"a".repeat(64)}`;
+    const events = [
+      RunEvent.parse({
+        runId: "run-crash-clock",
+        at: "2026-08-23T00:00:00.000Z",
+        type: "run.started",
+        capsuleId: "cap_0123456789ab",
+        contractHash: hash,
+        optimizerDigest: hash,
+      }),
+      RunEvent.parse({
+        runId: "run-crash-clock",
+        at: "2026-08-23T00:00:05.000Z",
+        type: "episode.started",
+        episode: 0,
+        parent: { hash },
+      }),
+      RunEvent.parse({
+        runId: "run-crash-clock",
+        at: "2026-08-23T00:01:40.000Z",
+        type: "run.resumed",
+        fromCursor: 2,
+      }),
+      RunEvent.parse({
+        runId: "run-crash-clock",
+        at: "2026-08-23T00:01:43.000Z",
+        type: "run.paused",
+        reason: "operator",
+      }),
+    ];
+
+    expect(replayActiveClock(events, Date.parse("2026-08-23T00:01:43.000Z"))).toMatchObject({
+      accumulatedActiveWallClockSec: 8,
+      activeWallClockSec: 8,
+      lifetimeSec: 103,
+    });
   });
 });
 

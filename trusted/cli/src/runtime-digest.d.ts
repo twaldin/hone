@@ -51,6 +51,9 @@ export function collectTsconfigClosure(repoRoot: string, packageRoots: string[])
 /** Deterministic digest of the complete trusted runtime closure (v3; symlinks refuse). */
 export function computeTrustedRuntimeDigest(): string;
 
+/** Deterministic trusted-runtime digest rooted at a restored repository closure. */
+export function computeTrustedRuntimeDigestAt(repoRoot: string): string;
+
 /** Compute-and-seal the immutable boot digest (idempotent; seals on first use when no bootstrap ran). */
 export function sealBootRuntimeDigest(): string;
 

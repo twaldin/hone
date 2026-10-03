@@ -110,10 +110,10 @@ describe("wire integration + unix socket modes", () => {
       manifest: capsule.manifest,
       capsuleRootDir: capsule.capsuleRootDir,
       baselineArtifactHash: `sha256:${"0".repeat(64)}`,
-      capsuleDigest: TEST_CAPSULE_DIGEST,
+      admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
       optimizerDigest: TEST_OPTIMIZER_DIGEST,
       holdoutLedgerPath: path.join(base, "run", "holdout-ledger.ndjson"),
-      image: TEST_IMAGE,
+      executionImage: TEST_IMAGE,
       runDir: path.join(base, "run"),
       casDir: path.join(base, "cas"),
       onEvent: () => {},
@@ -165,6 +165,46 @@ describe("wire integration + unix socket modes", () => {
     expect(new Set(responses.map((r) => r.id))).toEqual(new Set([1, 2, 3]));
     for (const r of responses) expect(r.error?.code).toBe(-32601); // reassembled into valid requests
     sock.destroy();
+  });
+
+  it("maps a host ENOSPC write failure to the optimizer storage control code", async () => {
+    const originalGetBudget = broker.getBudget;
+    broker.getBudget = () => {
+      throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    };
+    const { socketPath } = await makeServer();
+    const sock = net.connect(socketPath);
+    try {
+      const connected = deferred<void>();
+      sock.once("connect", connected.resolve);
+      sock.once("error", connected.reject);
+      await connected.promise;
+      const response = deferred<{
+        error?: { code?: number; data?: { code?: string }; message?: string };
+      }>();
+      let buf = "";
+      sock.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf8");
+        const newline = buf.indexOf("\n");
+        if (newline >= 0) response.resolve(JSON.parse(buf.slice(0, newline)));
+      });
+      sock.write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "getBudget",
+        params: {},
+        token: PUBLIC_TOKEN,
+      })}\n`);
+      const reply = await response.promise;
+      expect(reply.error).toMatchObject({
+        code: -32012,
+        data: { code: "STORAGE_EXHAUSTED" },
+        message: "ENOSPC: no space left on device, write",
+      });
+    } finally {
+      broker.getBudget = originalGetBudget;
+      sock.destroy();
+    }
   });
 
   it("public socket is 0666 (cross-uid optimizer can connect); admin socket stays owner-only 0600", async () => {

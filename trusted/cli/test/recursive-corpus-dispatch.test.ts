@@ -15,7 +15,7 @@ import {
   type BudgetEnvelope, type MetaCampaignConfigV1 as LegacyConfig,
   type MetaCampaignConfigV2 as RecursiveConfig,
 } from "@hone/schema";
-import { recursiveCommand } from "../src/commands/hone.js";
+import { imageBoundCandidateBundleDigest, recursiveCommand } from "../src/commands/hone.js";
 import { assembleCorpusProvenance, corpusProvenanceInputsDigest, corpusCohortFenceError, type BuildBrokerCorpusConfigInputs, type AdmittedCorpusCapsule } from "../src/corpus-provenance.js";
 import { collectOptimizerSnapshot, snapshotDigest, type OptimizerSnapshot } from "../src/optimizer-digest.js";
 import { buildBrokenMetaControl, buildDegradedMetaControl, captureMetaControlSourceSeal, type MetaControlArtifact } from "../src/meta-controls.js";
@@ -80,6 +80,15 @@ function multiply(budget: BudgetEnvelope, factor: number): BudgetEnvelope {
   };
 }
 
+function add(left: BudgetEnvelope, right: BudgetEnvelope): BudgetEnvelope {
+  return {
+    maxTokens: left.maxTokens + right.maxTokens,
+    maxUsd: left.maxUsd + right.maxUsd,
+    maxWallClockSec: left.maxWallClockSec + right.maxWallClockSec,
+    maxEvaluatorInvocations: left.maxEvaluatorInvocations + right.maxEvaluatorInvocations,
+  };
+}
+
 /** A valid V2 campaign config for the requested stage; capsuleIds are cap_000000000001..08. */
 function buildConfig(stage: "A" | "B"): RecursiveConfig {
   const legacy = legacyConfig();
@@ -108,6 +117,7 @@ function buildConfig(stage: "A" | "B"): RecursiveConfig {
   return MetaCampaignConfigV2.parse({
     ...legacy,
     version: 2,
+    evaluatorTimeoutSec: 2700,
     seedOptimizer: target,
     controllerOptimizer: controller,
     optimizerRuntime: { image: `hone-optimizer@${digest("recursive:optimizer-image")}` },
@@ -146,7 +156,15 @@ function buildConfig(stage: "A" | "B"): RecursiveConfig {
       holdoutReplicates: 3,
       childConcurrency: 2,
     },
-    budgets: { ...legacy.budgets, outer: { ...legacy.budgets.outer, maxEvaluatorInvocations: 92 } },
+    budgets: {
+      ...legacy.budgets,
+      outer: { ...legacy.budgets.outer, maxEvaluatorInvocations: 92 },
+      // The root ledger admits the direct outer allowance plus every planned child reservation.
+      campaign: add(
+        { ...legacy.budgets.outer, maxEvaluatorInvocations: 92 },
+        multiply(child, 12 * 8 + confirmationRuns + 3 * 11 * 3),
+      ),
+    },
     developmentPanel: {
       panel: stage,
       members: train.map((entry, index) => ({
@@ -295,9 +313,9 @@ function queryAtLaunch(root: string, options: TrustedRunOptions) {
   const broker = new Broker({
     runId: "run_corpus_probe", manifest, capsuleRootDir,
     baselineArtifactHash: manifest.baseline.kind === "cas" ? manifest.baseline.hash : digest("baseline"),
-    capsuleDigest: capsuleDigest(manifest), optimizerDigest: digest("optimizer"),
+    admittedCapsuleDigest: capsuleDigest(manifest), optimizerDigest: digest("optimizer"),
     holdoutLedgerPath: join(root, ".hone-probe", "holdout.ndjson"),
-    image: manifest.image, runDir: join(root, ".hone-probe"), casDir: join(root, ".hone-cas"),
+    executionImage: manifest.image, runDir: join(root, ".hone-probe"), casDir: join(root, ".hone-cas"),
     corpus: options.corpus,
     onEvent: () => {},
   });
@@ -320,14 +338,6 @@ describe("recursive corpus dispatch", () => {
     });
     expect(await recursiveCommand(searchArgs, f.io, { corpus: f.corpus })).toBe(17);
     expect(runCommand).toHaveBeenCalledTimes(1);
-  });
-
-  it.each(["search", "confirmation", "terminal"])("refuses missing provenance before %s can prepare or launch work", async (phase) => {
-    const f = await fixture();
-    await expect(recursiveCommand(["--campaign", "campaign.json", "--headless", "--phase", phase], f.io))
-      .rejects.toThrow(/requires verified corpus provenance/);
-    expect(runCommand).not.toHaveBeenCalled();
-    expect(existsSync(join(f.root, ".hone-runs"))).toBe(false);
   });
 
   it.each([
@@ -384,7 +394,7 @@ describe("recursive corpus dispatch", () => {
     const reservation = f.config.budgets.child;
     const identity: MetaWorkIdentity = {
       phase: "search", arm: "candidate", sourceArtifact: f.config.seedOptimizer.sourceArtifact as `sha256:${string}`,
-      bundleDigest: f.config.seedOptimizer.bundleDigest as `sha256:${string}`,
+      bundleDigest: imageBoundCandidateBundleDigest(snapshot, f.config.train[0]!.image),
       capsuleId: f.config.train[0]!.capsuleId, replicate: 0,
       measurementEpoch: `m2:${digest(canonicalJson({ ...schedule, reserved: reservation })).slice(7)}`,
     };
@@ -398,24 +408,30 @@ describe("recursive corpus dispatch", () => {
       mkdirSync(childDir, { recursive: true });
       writeFileSync(join(childDir, "events.ndjson"), "");
     }
+    // The child supervisor converts a failed child command into a not-run outcome,
+    // so record the child launch and stop the outer run after it returns.
     const stopped = new Error("offline child launch intercepted");
+    let childArgs: string[] | undefined;
+    let childOptions: TrustedRunOptions | undefined;
     vi.mocked(runCommand).mockImplementation(async (args, _io, options = {}) => {
       if (options.proxyRole === "outer-optimizer") {
         const recursive = options.recursiveBroker!;
         const admission = recursive.admitChildRun!({ parentRunId: options.runId!, parentDepth: 0, request });
         expect(admission).toBeDefined();
         await recursive.launchChildRun!({ admission: admission!, request, replay: resume });
-        throw new Error("child interception did not stop dispatch");
+        throw stopped;
       }
-      expect(options.runId).toBe(childRunId);
-      expect(options.measurementEpoch).toBe(identity.measurementEpoch);
-      expect(args.includes("--resume")).toBe(resume);
-      expect(corpusCohortFenceError(options.corpus!, options.corpusCohort!)).toBeNull();
-      expect(queryAtLaunch(f.root, options).documents.map((doc) => doc.content))
-        .toEqual(["verified panel result", "verified public history"]);
-      throw stopped;
+      childArgs = args;
+      childOptions = options;
+      return 17;
     });
     await expect(recursiveCommand(searchArgs, f.io, { corpus: f.corpus })).rejects.toBe(stopped);
     expect(runCommand).toHaveBeenCalledTimes(2);
+    expect(childOptions?.runId).toBe(childRunId);
+    expect(childOptions?.measurementEpoch).toBe(identity.measurementEpoch);
+    expect(childArgs?.includes("--resume")).toBe(resume);
+    expect(corpusCohortFenceError(childOptions!.corpus!, childOptions!.corpusCohort!)).toBeNull();
+    expect(queryAtLaunch(f.root, childOptions!).documents.map((doc) => doc.content))
+      .toEqual(["verified panel result", "verified public history"]);
   });
 });

@@ -1,0 +1,156 @@
+#include <tunables/global>
+
+# Evaluator-only extension of Docker's default confinement. The broker applies
+# this profile only to trusted scorer containers; mutation sandboxes retain
+# docker-default. cgroup2 authority is limited to the enumerated frozen
+# evaluator contracts and exact option sets. The /sys/fs/cgroup
+# remount is the evaluator container's private cgroup namespace root
+# (Docker cgroupns=private), never the host hierarchy; it permits the frozen
+# hone-eval-supervisor child only.
+profile hone-evaluator-cgroup flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  signal (receive) peer=unconfined,
+  signal (send,receive) peer=hone-evaluator-cgroup,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-bun-cg -> /tmp/hone-bun-cg/,
+  umount /tmp/hone-bun-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-simdutf-cg -> /tmp/hone-simdutf-cg/,
+  umount /tmp/hone-simdutf-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-biome-cg -> /tmp/hone-biome-cg/,
+  umount /tmp/hone-biome-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-ripgrep-cg -> /mnt/hone-ripgrep-cg/,
+  umount /mnt/hone-ripgrep-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-simdjson-cg -> /tmp/hone-simdjson-cg/,
+  umount /tmp/hone-simdjson-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-uv-cg -> /tmp/hone-uv-cg/,
+  umount /tmp/hone-uv-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-orjson-cg -> /tmp/hone-orjson-cg/,
+  umount /tmp/hone-orjson-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-duckdb-cg -> /tmp/hone-duckdb-cg/,
+  umount /tmp/hone-duckdb-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-mimalloc-cg -> /tmp/hone-mimalloc-cg/,
+  umount /tmp/hone-mimalloc-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-node-url-cg -> /tmp/hone-node-url-cg/,
+  umount /tmp/hone-node-url-cg/,
+
+  mount fstype=cgroup2 options=(rw,nosuid,nodev,noexec) hone-sqlite-cg -> /tmp/hone-sqlite-cg/,
+  umount /tmp/hone-sqlite-cg/,
+
+  mount options=(rprivate) -> /,
+
+  # The captain-authorized terminal diagnostic runs execute the exact frozen
+  # evaluator build mounts below. The evaluators pin each size and mode in
+  # protected source; AppArmor constrains source names, targets, and flags.
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-duckdb-filter -> /tmp/hone-duckdb-filter/,
+  umount /tmp/hone-duckdb-filter/,
+  # After copying and sealing its selected inputs, DuckDB's protected
+  # evaluator detaches the broker-mounted asset view before candidate build.
+  umount /capsule/assets/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-mimalloc-build -> /tmp/hone-mimalloc-build/,
+  umount /tmp/hone-mimalloc-build/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-quickjs-build -> /tmp/hone-quickjs-build/,
+  umount /tmp/hone-quickjs-build/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-sqlite-build -> /tmp/hone-sqlite-build/,
+  umount /tmp/hone-sqlite-build/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-brotli-build -> /tmp/hone-brotli-build/,
+  umount /tmp/hone-brotli-build/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-tree-sitter-build -> /tmp/hone-tree-sitter-build-*/,
+  umount /tmp/hone-tree-sitter-build-*/,
+
+  # The terminal query evaluator binds one already-open sealed database into
+  # each prefix-constrained, one-shot sample directory, then remounts it
+  # read-only before the unprivileged worker can traverse the directory.
+  mount options=(bind) /proc/self/fd/* -> /tmp/tradeup-latency-*/sample-*/market.sqlite3,
+  # AppArmor resolves the already-open proc fd to its sealed backing inode.
+  mount options=(bind) /capsule/assets/assets/train/market.sqlite3 -> /tmp/tradeup-latency-*/sample-*/market.sqlite3,
+  mount options=(bind) /capsule/assets/assets/validation/market.sqlite3 -> /tmp/tradeup-latency-*/sample-*/market.sqlite3,
+  remount options=(ro,nosuid,nodev,noexec,bind) /tmp/tradeup-latency-*/sample-*/market.sqlite3,
+  umount /tmp/tradeup-latency-*/sample-*/market.sqlite3,
+
+  # UV's protected evaluator pins the data caps for these exact tmpfs
+  # operations: 1600m build, 512m sealed/bench, 1m /opt hide, and 16m
+  # per-repetition scratch. AppArmor mediates the exact flags and targets.
+  mount fstype=tmpfs options=(rw) hone-uv-eval -> /tmp/hone-uv-build/,
+  umount /tmp/hone-uv-build/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-uv-eval -> /mnt/,
+  remount options=(ro,nosuid,nodev) /mnt/,
+  umount /mnt/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-uv-eval -> /srv/,
+  umount /srv/,
+  mount fstype=tmpfs options=(ro,nosuid,nodev,noexec) hone-hidden-opt -> /opt/,
+
+  # Ripgrep's protected evaluator pins the build tmpfs to 1400m and each
+  # per-command scratch tmpfs to 64m. The command-* target is the only
+  # wildcarded authority and is prefix-constrained beneath the build root.
+  mount fstype=tmpfs options=(rw,nosuid,nodev) tmpfs -> /mnt/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) tmpfs -> /tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) tmpfs -> /var/tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) tmpfs -> /dev/shm/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) tmpfs -> /mnt/command-*/scratch/,
+
+  # Biome's protected evaluator pins these three fresh tmpfs mounts to
+  # 64m, 16m, and 16m respectively. Only the staged runner tmpfs is
+  # executable; the shared-memory and var-tmp views remain noexec.
+  # The same protected evaluator's previously approved build phase first
+  # restores exec on the container-private 1536m /tmp mount; the later staged
+  # runner bind retains that source superblock's execution policy.
+  remount options=(rw,nosuid,nodev,relatime) /tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-biome-stage -> /dev/hone-biome-stage/,
+  mount options=(bind) /tmp/hone-sealed/hone_biome_bench -> /dev/hone-biome-stage/bin/runner,
+  mount options=(bind) /opt/target-seed/release/hone_biome_bench -> /dev/hone-biome-stage/bin/runner,
+  mount options=(bind) /tmp/hone-work-*/** -> /dev/hone-biome-stage/input/*,
+  mount options=(move) /dev/hone-biome-stage/ -> /tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-biome-shm -> /dev/shm/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-biome-vartmp -> /var/tmp/,
+  mount options=(bind) /workspace/mutable/biome_js_parser/src/ -> /opt/biome/crates/biome_js_parser/src/,
+  mount options=(bind) /workspace/mutable/biome_js_formatter/src/ -> /opt/biome/crates/biome_js_formatter/src/,
+  mount options=(bind) /workspace/mutable/biome_css_parser/src/ -> /opt/biome/crates/biome_css_parser/src/,
+  mount options=(bind) /workspace/mutable/biome_css_formatter/src/ -> /opt/biome/crates/biome_css_formatter/src/,
+  # AppArmor mediates source, target, fstype, and flags. Protected evaluators
+  # separately pin their data caps (esbuild 512m, UV 16m).
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /tmp/hone-home/,
+  umount /tmp/hone-home/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /var/tmp/,
+  umount /var/tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev) hone-fresh-scratch -> /dev/shm/,
+  umount /dev/shm/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /var/tmp/,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec) hone-fresh-scratch -> /dev/shm/,
+
+  remount options=(rw,nosuid,nodev,noexec) /sys/fs/cgroup/,
+  # Floyd's frozen terminal evaluator requests only rw on the container-private
+  # cgroup namespace root; runtime evidence proves it differs from the host.
+  remount options=(rw) /sys/fs/cgroup/,
+
+  # Retain Docker's host-kernel and host-firmware write barriers.
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9][^0-9][^0-9],[^1-9][^0-9][^0-9][^0-9]}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+  deny @{PROC}/mem rwklx,
+  deny @{PROC}/kmem rwklx,
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+}

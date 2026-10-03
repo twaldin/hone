@@ -76,6 +76,7 @@ describe("hone hone campaign command", () => {
     const baseline = await packDirAsArtifact(seedDir, new CasStore(casDir));
     const capsuleDir = createSyntheticCapsule(root, config, baseline as `sha256:${string}`, casDir);
     expect(existsSync(join(capsuleDir, "manifest.json"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(capsuleDir, "manifest.json"), "utf8")).evalEntrypoint).toEqual(["/bin/false"]);
     expect(existsSync(join(capsuleDir, "capsule.json"))).toBe(false);
     expect(readFileSync(join(capsuleDir, "baseline", "package.json"), "utf8")).toBe("{}\n");
   });

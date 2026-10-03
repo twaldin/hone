@@ -58,7 +58,7 @@ describe("makeDockerRunLease (per-epoch donor create/remove semantics)", () => {
     await expect(lease.start()).rejects.toThrow(/already started/);
 
     await lease.close();
-    expect(argvs.at(-1)).toEqual(["docker", "rm", "-f", DONOR]);
+    expect(argvs.at(-1)).toEqual(["docker", "rm", "-f", "-v", DONOR]);
   });
 
   it("close tolerates an already-missing donor but never a live removal failure", async () => {
@@ -94,6 +94,7 @@ describe("optimizer container argv (donor attach + --pull=never)", () => {
       safeRunId: RUN_ID,
       image: "img@sha256:deadbeef",
       stagingDir: "/tmp/stage",
+      runtimeDir: "/tmp/runtime",
       outDir: "/tmp/out",
       containerLease: DONOR,
       hostUid: 501,
@@ -145,7 +146,8 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
     runDir,
     casDir: join(root, ".hone-cas"),
     capsuleDir,
-    manifest,
+    admittedManifest: manifest,
+    runtimeIdentity: { admittedCapsuleDigest: capsuleDigest(manifest), executionImage: manifest.image },
     config: RunConfig.parse({
       version: 1,
       capsuleId: manifest.id,
@@ -158,7 +160,6 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
       PATH: process.env["PATH"] ?? "",
       HONE_EGRESS: "network", // exercise the relay-container path
     },
-    capsuleDigest: capsuleDigest(manifest),
     // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
     admissionReview: "off",
     optimizerDigest: fakeHash("0"),
@@ -168,6 +169,7 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
     registerChild: () => () => {},
     probeGate: () => Promise.resolve(true),
     requestStop: () => {},
+    requestPause: () => {},
     registerAuthorityBarrier: (b) => {
       void b.catch(() => {});
     },

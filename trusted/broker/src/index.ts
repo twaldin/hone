@@ -1,13 +1,19 @@
 export {
   Broker,
   RecordSpendParams,
+  MUTATION_SANDBOX_HOME,
+  MUTATION_SANDBOX_USER,
+  WORKSPACE_TMPFS_INODES,
   MAX_CORPUS_JOURNAL_BYTES,
   MAX_CORPUS_PAGE_BYTES,
   SCRATCH_SNAPSHOT_SCRIPT,
+  SCRATCH_RESTORE_SCRIPT,
+  SCRATCH_SNAPSHOT_DIGEST_PREFIX,
   SCRATCH_SNAPSHOT_TMP_PREFIX,
   finalizeScratchSnapshot,
   newScratchSnapshotAttemptName,
   scratchSnapshotArchiveCapBytes,
+  scratchRestoreMemoryBytes,
   isBrokerAuthoredEvent,
   hashCorpusSnapshot,
   hashChildRunLaunchReceipt,
@@ -40,3 +46,24 @@ export { packDirAsArtifact, unpackArtifact, diffProtectedPaths, findProtectedPat
 export { runCommand, type RunCommand, type CmdOptions, type CmdResult } from "./command.js";
 export { globToRegExp, matchesAnyGlob } from "./glob.js";
 export { deferred, type Deferred } from "./deferred.js";
+export {
+  CAMPAIGN_12_CALIBRATION_EVIDENCE_VERSION,
+  CAMPAIGN_12_CALIBRATED_AT,
+  CAMPAIGN_12_JOURNAL_NOISE_EVIDENCE_V2,
+  CAMPAIGN_12_PROMOTION_NOISE_CALIBRATION_V3,
+  CAMPAIGN_12_JOURNAL_OBSERVATIONS_SHA256,
+  CAMPAIGN_12_LOCAL_NULL_SOURCE_COMMIT,
+  CAMPAIGN_12_LOCAL_NULL_SHA256,
+  campaign12PromotionNoiseCalibration,
+  type PromotionCalibrationIdentity,
+} from "./promotion-noise-calibration.js";
+export {
+  assertPromotionHoldoutSplitIdentity,
+  buildHoldoutNullControl,
+  buildPromotionHoldoutRecord,
+  createPromotionHoldoutSplit,
+  derivePromotionHoldoutSeed,
+  promotionHoldoutSplitSummary,
+  type CreatePromotionHoldoutSplitInput,
+  type PromotionHoldoutSourceUnit,
+} from "./promotion-holdout.js";

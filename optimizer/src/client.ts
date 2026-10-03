@@ -1,6 +1,12 @@
 import net from "node:net";
 import { z } from "zod";
-import { BrokerErrorCode, BrokerMethods, EvaluationRecord } from "@hone/schema";
+import {
+  BrokerErrorCode,
+  BrokerMethods,
+  EvaluationRecord,
+  OPTIMIZER_CHILD_PENDING_EXIT_CODE,
+  OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE,
+} from "@hone/schema";
 import { deferred } from "./deferred.js";
 
 /**
@@ -45,6 +51,14 @@ export class BrokerRpcError extends Error {
     const parsed = BrokerErrorCode.safeParse(brokerCode);
     this.brokerCode = parsed.success ? parsed.data : undefined;
   }
+}
+
+/** Convert only trusted, resumable control failures into reserved process exits. */
+export function brokerControlExitCode(error: unknown): number | undefined {
+  if (!(error instanceof BrokerRpcError)) return undefined;
+  if (error.brokerCode === "STORAGE_EXHAUSTED") return OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE;
+  if (error.brokerCode === "CHILD_PENDING") return OPTIMIZER_CHILD_PENDING_EXIT_CODE;
+  return undefined;
 }
 
 interface Pending {
@@ -176,6 +190,10 @@ export class BrokerClient {
     await this.call("putFile", params);
   }
 
+  async getFile(params: ParamsOf<"getFile">): Promise<ResultOf<"getFile">> {
+    return this.call("getFile", params);
+  }
+
   async saveArtifact(params: ParamsOf<"saveArtifact">): Promise<ResultOf<"saveArtifact">> {
     return this.call("saveArtifact", params);
   }
@@ -185,8 +203,22 @@ export class BrokerClient {
     return EvaluationRecord.parse(await this.call("evaluate", params));
   }
 
+  async getPromotionVerdict(
+    params: ParamsOf<"getPromotionVerdict">,
+  ): Promise<ResultOf<"getPromotionVerdict">> {
+    return this.call("getPromotionVerdict", params);
+  }
+
   async reportIncumbent(params: ParamsOf<"reportIncumbent">): Promise<void> {
     await this.call("reportIncumbent", params);
+  }
+  async reportSessionNoYieldBound(params: ParamsOf<"reportSessionNoYieldBound">): Promise<void> {
+    await this.call("reportSessionNoYieldBound", params);
+  }
+
+
+  async completeEpisode(params: ParamsOf<"completeEpisode">): Promise<void> {
+    await this.call("completeEpisode", params);
   }
 
   async getBudget(): Promise<ResultOf<"getBudget">> {

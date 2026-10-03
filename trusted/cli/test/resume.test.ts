@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { RunEvent } from "@hone/schema";
 import { RUNTIME_PIN_FILE, trustedRuntimeDigest } from "../src/supervisor.js";
 import { honeSpawn, hone, killTree, makeCapsule, makeRoot, pkgRoot, sleep } from "./helpers.js";
+import { replay } from "../src/eventlog.js";
 
 function runIds(root: string): string[] {
   const dir = join(root, ".hone-runs");
@@ -16,30 +17,71 @@ function logText(root: string, runId: string): string {
   return existsSync(p) ? readFileSync(p, "utf8") : "";
 }
 
+describe("incomplete repair replay", () => {
+  it("keeps a journaled unrepaired decision in the active episode checkpoint", () => {
+    const runId = "run_repair_checkpoint";
+    const at = "2026-08-21T00:00:00.000Z";
+    const parent = { hash: `sha256:${"a".repeat(64)}` };
+    const candidate = { hash: `sha256:${"b".repeat(64)}` };
+    const events = [
+      RunEvent.parse({
+        runId,
+        at,
+        type: "run.started",
+        capsuleId: "cap_000000000000",
+        contractHash: `sha256:${"c".repeat(64)}`,
+        optimizerDigest: `sha256:${"d".repeat(64)}`,
+        checkpointVersion: 1,
+      }),
+      RunEvent.parse({ runId, at, type: "episode.started", episode: 0, parent }),
+      RunEvent.parse({
+        runId,
+        at,
+        type: "episode.candidate",
+        episode: 0,
+        candidate,
+        sessionTrace: `sha256:${"e".repeat(64)}`,
+      }),
+      RunEvent.parse({
+        runId,
+        at,
+        type: "episode.invalid",
+        episode: 0,
+        reason: "repair failed",
+        repaired: false,
+      }),
+    ];
+
+    expect(replay(events).activeEpisode).toMatchObject({
+      episode: 0,
+      parent,
+      candidate: { artifact: candidate },
+      invalid: { reason: "repair failed", repaired: false },
+    });
+  });
+});
+
 describe("kill -9 mid-run + hone run --resume", () => {
-  it("continues from the replayed cursor without duplicating episodes", { timeout: 60_000 }, async () => {
+  it("reuses a journaled evaluator checkpoint and budget after SIGKILL", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     makeCapsule(root);
-    const total = 40;
+    const total = 1;
 
-    // phase 1: slow scripted run, killed after >=2 episodes have started
+    // Phase 1: kill the real CLI process after the evaluator checkpoint is
+    // durable but before the episode commit boundary.
     const child = honeSpawn(["run", "capsule", "--headless", "--backend", "stub"], {
       cwd: root,
-      env: { HONE_STUB_EPISODES: String(total), HONE_STUB_DELAY_MS: "100" },
+      env: { HONE_STUB_EPISODES: String(total), HONE_STUB_CHECKPOINT_DELAY_MS: "10000" },
     });
     try {
       const deadline = Date.now() + 20_000;
       let killed = false;
       while (Date.now() < deadline) {
-        const ids = runIds(root);
-        const id = ids[0];
-        if (id !== undefined) {
-          const started = (logText(root, id).match(/"episode\.started"/g) ?? []).length;
-          if (started >= 2) {
-            killTree(child);
-            killed = true;
-            break;
-          }
+        const id = runIds(root)[0];
+        if (id !== undefined && logText(root, id).includes('"eval.completed"')) {
+          killTree(child);
+          killed = true;
+          break;
         }
         await sleep(50);
       }
@@ -57,10 +99,10 @@ describe("kill -9 mid-run + hone run --resume", () => {
     // hard kill: no run.finished was written
     expect(logText(root, runId)).not.toContain('"run.finished"');
 
-    // phase 2: resume, fast
+    // Phase 2: the same run resumes from the incomplete episode checkpoint.
     const r = await hone(["run", "capsule", "--headless", "--backend", "stub", "--resume"], {
       cwd: root,
-      env: { HONE_STUB_EPISODES: String(total), HONE_STUB_DELAY_MS: "0" },
+      env: { HONE_STUB_EPISODES: String(total), HONE_STUB_CHECKPOINT_DELAY_MS: "0" },
     });
     expect(r.code, r.stderr).toBe(0);
 
@@ -72,17 +114,25 @@ describe("kill -9 mid-run + hone run --resume", () => {
       .filter((l) => l.trim() !== "");
     const events = lines.map((l) => RunEvent.parse(JSON.parse(l)));
 
-    // exactly one run.started, at least one run.resumed with a sane cursor
-    expect(events.filter((e) => e.type === "run.started").length).toBe(1);
+    // One start/candidate/evaluator/dispatch charge survives across both
+    // processes; resume only seals selection and the episode boundary.
+    expect(events.filter((e) => e.type === "run.started")).toHaveLength(1);
     const resumed = events.filter((e) => e.type === "run.resumed");
-    expect(resumed.length).toBeGreaterThanOrEqual(1);
-    const first = resumed[0];
-    if (first?.type === "run.resumed") expect(first.fromCursor).toBeGreaterThanOrEqual(2);
-
-    // no duplicated episodes; the full schedule completed
-    const episodes = events.flatMap((e) => (e.type === "episode.started" ? [e.episode] : []));
-    expect(new Set(episodes).size).toBe(episodes.length);
-    expect(episodes.length).toBe(total);
+    expect(resumed).toHaveLength(1);
+    expect(events.filter((e) => e.type === "episode.started")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "episode.candidate")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "eval.completed")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "episode.completed")).toHaveLength(1);
+    const budget = events.filter((e) => e.type === "budget.snapshot").at(-1);
+    if (budget?.type === "budget.snapshot") {
+      expect(budget.budget.spent.evaluatorInvocations).toBe(1);
+      expect(budget.budget.spent.tokens).toBe(1000);
+    }
+    const dispatches = readFileSync(join(root, ".hone-runs", runId, "proxy-dispatch.ndjson"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string });
+    expect(dispatches.filter((entry) => entry.kind === "intent")).toHaveLength(1);
 
     const finished = events[events.length - 1];
     expect(finished?.type).toBe("run.finished");
@@ -94,6 +144,57 @@ describe("kill -9 mid-run + hone run --resume", () => {
     expect(report.status).toBe("completed");
     expect(report.runId).toBe(runId);
   });
+
+describe("provider-limit auto-pause", () => {
+  it("durably pauses on a simulated 429 and later resumes to completion", { timeout: 60_000 }, async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(
+      join(root, "provider-limit-backend.mjs"),
+      `export function createBackend() {
+        return {
+          async start(ctx) {
+            if (ctx.replayed.resumeCount === 0) {
+              ctx.requestPause({
+                reason: "provider-rate-limit",
+                pauseId: "pause_test_429",
+                providerStatus: 429,
+              });
+            }
+          },
+        };
+      }\n`,
+    );
+
+    const pausedRun = await hone(
+      ["run", "capsule", "--headless", "--backend", "./provider-limit-backend.mjs"],
+      { cwd: root, env: { HONE_UNSAFE_BACKEND: "1" } },
+    );
+    expect(pausedRun.code, pausedRun.stderr).toBe(0);
+    const runId = runIds(root)[0];
+    expect(runId).toBeDefined();
+    if (runId === undefined) throw new Error("unreachable");
+    const pausedEvents = logText(root, runId).trim().split("\n").map((line) => RunEvent.parse(JSON.parse(line)));
+    const paused = pausedEvents.at(-1);
+    expect(paused).toMatchObject({
+      type: "run.paused",
+      reason: "provider-rate-limit",
+      pauseId: "pause_test_429",
+      providerStatus: 429,
+    });
+    expect(pausedEvents.some((event) => event.type === "run.finished")).toBe(false);
+
+    const resumedRun = await hone(
+      ["run", "capsule", "--headless", "--resume"],
+      { cwd: root, env: { HONE_UNSAFE_BACKEND: "1" } },
+    );
+    expect(resumedRun.code, resumedRun.stderr).toBe(0);
+    const finishedEvents = logText(root, runId).trim().split("\n").map((line) => RunEvent.parse(JSON.parse(line)));
+    expect(finishedEvents.filter((event) => event.type === "run.started")).toHaveLength(1);
+    expect(finishedEvents.filter((event) => event.type === "run.resumed")).toHaveLength(1);
+    expect(finishedEvents.at(-1)).toMatchObject({ type: "run.finished", status: "completed" });
+  });
+});
 
   it("--resume with nothing to resume is a usage error", { timeout: 60_000 }, async () => {
     const root = makeRoot();

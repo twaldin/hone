@@ -10,8 +10,8 @@
   "character": "Current product, open quality, private.",
   "source": {
     "visibility": "private",
-    "existingCapsuleId": "cap_5c967d0f3b0d",
-    "existingCapsuleDigest": "sha256:fd36f7f50dcedd6a38d1f6751a6135f26d29c3e71235c59875e6c2cdcd84f932"
+    "existingCapsuleId": "cap_c50f80b4b6f1",
+    "existingCapsuleDigest": "sha256:02bfd3b55ea717eb9c42f18a203804c5f4e3276da01cb1822f96227ed500368b"
   },
   "authoring": {
     "mutableSurface": "frozen at capsule authoring per plan objective",

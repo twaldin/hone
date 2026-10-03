@@ -1,17 +1,44 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { once } from "node:events";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, link, lstat, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import net from "node:net";
+import { tmpdir } from "node:os";
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CapsuleManifest, RunEvent } from "@hone/schema";
+import {
+  RESERVED_EVALUATOR_UID_MAX,
+  RESERVED_EVALUATOR_UID_MIN,
+  SandboxRef,
+  PROMOTION_GATE_VERSION,
+  type CapsuleManifest,
+  type RunEvent,
+  type PromotionHoldoutSplit,
+} from "@hone/schema";
 import { Broker, type BrokerConfig, type CallContext } from "../src/broker.js";
 import { packDirAsArtifact } from "../src/artifact.js";
 import { CasStore } from "../src/cas.js";
 import { runCommand, type CmdResult, type RunCommand } from "../src/command.js";
 import { BrokerError } from "../src/errors.js";
 import { deferred } from "../src/deferred.js";
-import { WORKSPACE_TMPFS_INODES } from "../src/broker.js";
-import { MANIFEST_IMAGE, TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST, ensureImage, waitForDocker } from "./helpers.js";
+import { BrokerServer } from "../src/server.js";
+import { createPromotionHoldoutSplit } from "../src/promotion-holdout.js";
+import {
+  MUTATION_SANDBOX_HOME,
+  MUTATION_SANDBOX_USER,
+  WORKSPACE_TMPFS_INODES,
+} from "../src/broker.js";
+import { acquireHostEvaluatorGate, acquireReservedEvaluatorUid } from "../src/host-evaluator-gate.js";
+import {
+  MANIFEST_IMAGE,
+  RpcClient,
+  TEST_CAPSULE_DIGEST,
+  TEST_IMAGE,
+  TEST_OPTIMIZER_DIGEST,
+  ensureImage,
+  waitForDocker,
+} from "./helpers.js";
 import { SCRATCH_SNAPSHOT_SCRIPT } from "../src/broker.js";
 
 /**
@@ -19,6 +46,10 @@ import { SCRATCH_SNAPSHOT_SCRIPT } from "../src/broker.js";
  * final live-docker smoke runs against a FAKE docker CLI — the broker's
  * behavior at its trust boundaries is what is under test, not docker.
  */
+// Host-evaluator cases still use the process TMPDIR for their real shared
+// socket/claim queue. Run this file with an isolated TMPDIR when a live
+// campaign is holding reserved evaluator UIDs; otherwise its host-wide
+// contention is intentional production behavior, not a fake-Docker seam.
 
 const CLIENT: CallContext = { privileged: false };
 const ADMIN: CallContext = { privileged: true };
@@ -38,7 +69,7 @@ let candidateHash: string;
 let candidate2Tar: Buffer;
 let candidate2Hash: string;
 
-function sha256(content: string): string {
+function sha256(content: string | Buffer): string {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
@@ -124,6 +155,8 @@ interface FakeCtl {
   execExit: number | "timeout";
   /** Stdout bytes client execs produce — session-trace fixture material. */
   execStdout: Buffer;
+  /** Stderr bytes client execs produce — structured worker telemetry plus diagnostics. */
+  execStderr: Buffer;
   /** When true, client execs report output hit the size cap (truncated capture). */
   execTruncated: boolean;
   /** Tar bytes in-container `tar -c /workspace` returns for saveArtifact. */
@@ -140,6 +173,9 @@ interface FakeCtl {
   evalHangsUntilReaped: boolean;
   /** Container ids whose `docker rm -f` fails (terminal-save fail-closed simulation). */
   rmFailFor: Set<string>;
+  /** Container ids whose `docker rm -f` command throws before proving absence. */
+  rmThrowFor: Set<string>;
+
   /** Exact run-labeled container ids returned to evaluator quiescence scans. */
   quiesceContainers: string[];
   pauseFailFor: Set<string>;
@@ -169,20 +205,31 @@ async function boot(
     runDir?: string;
     casDir?: string;
     holdoutBudget?: number;
-    capsuleDigest?: string;
+    admittedCapsuleDigest?: string;
     optimizerDigest?: string;
     evaluatorBaselineArtifactHash?: string;
     holdoutLedgerPath?: string;
     maxActiveSandboxes?: number;
+    maxPublicCandidateEvaluations?: number;
     scratchQuotaBytes?: number;
     scratchVolume?: boolean;
     sessionTraceQuotaBytes?: number;
     volumeCreateFails?: boolean;
     evalTimeoutSec?: number;
+    reaperIntervalMs?: number;
+    mutationEnv?: Record<string, string>;
+
     runId?: string;
     measurementEpoch?: string;
+    promotionNoiseSd?: number;
+    omitPromotionCalibration?: boolean;
+    promotionHoldoutSplit?: PromotionHoldoutSplit;
+    terminalHoldoutAssetGroupIds?: readonly string[];
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
     probeBound?: boolean;
+    now?: () => number;
+    /** Production event-side-effect seam (for synchronous supervisor abort/re-entry). */
+    onEvent?: (event: RunEvent, broker: Broker) => void;
   } = {},
 ): Promise<Booted> {
   const id = randomBytes(4).toString("hex");
@@ -196,12 +243,15 @@ async function boot(
     execStdout: Buffer.alloc(0),
     execTruncated: false,
     saveTar: candidateTar,
+    execStderr: Buffer.alloc(0),
     evalOutputs: new Map(),
     evalMode: "normal",
     execBarrier: null,
     evalInspect: null,
     evalHangsUntilReaped: false,
     rmFailFor: new Set(),
+    rmThrowFor: new Set(),
+
     quiesceContainers: [],
     pauseFailFor: new Set(),
     unpauseFailFor: new Set(),
@@ -279,7 +329,12 @@ async function boot(
         await barrier.gate;
       }
       if (ctl.execExit === "timeout") return fakeResult({ exitCode: -1, timedOut: true });
-      return fakeResult({ exitCode: ctl.execExit, stdout: Buffer.from(ctl.execStdout), truncated: ctl.execTruncated });
+      return fakeResult({
+        exitCode: ctl.execExit,
+        stdout: Buffer.from(ctl.execStdout),
+        stderr: Buffer.from(ctl.execStderr),
+        truncated: ctl.execTruncated,
+      });
     }
     if (sub === "volume" && argv[2] === "create") {
       return opts.volumeCreateFails === true
@@ -290,6 +345,9 @@ async function boot(
       for (const target of argv.slice(2)) {
         reapGates.get(target)?.();
         reapGates.delete(target);
+        if (ctl.rmThrowFor.has(target)) {
+          throw new Error(`docker rm transport failed for ${target}`);
+        }
         if (ctl.rmFailFor.has(target)) {
           return fakeResult({ exitCode: 1, stderr: Buffer.from(`cannot remove container ${target}: driver busy`) });
         }
@@ -299,32 +357,76 @@ async function boot(
     return fakeResult(); // volume rm, ...
   };
 
+  let broker: Broker;
   const config: BrokerConfig = {
     runId,
     manifest: opts.manifest ?? makeManifest(),
     capsuleRootDir: opts.capsuleRootDir ?? capsuleRootDir,
     baselineArtifactHash: baselineHash,
-    capsuleDigest: opts.capsuleDigest ?? TEST_CAPSULE_DIGEST,
+    admittedCapsuleDigest: opts.admittedCapsuleDigest ?? TEST_CAPSULE_DIGEST,
     optimizerDigest: opts.optimizerDigest ?? TEST_OPTIMIZER_DIGEST,
     ...(opts.evaluatorBaselineArtifactHash === undefined
       ? {}
       : { evaluatorBaselineArtifactHash: opts.evaluatorBaselineArtifactHash }),
     holdoutLedgerPath: opts.holdoutLedgerPath ?? path.join(runDir, "holdout-ledger.ndjson"),
-    image: TEST_IMAGE,
+    executionImage: TEST_IMAGE,
     runDir,
     casDir,
-    onEvent: (e) => events.push(e),
+    onEvent: (e) => {
+      events.push(e);
+      opts.onEvent?.(e, broker);
+    },
     runCommand: run,
     ...(opts.holdoutBudget !== undefined ? { holdoutBudget: opts.holdoutBudget } : {}),
     ...(opts.maxActiveSandboxes !== undefined ? { maxActiveSandboxes: opts.maxActiveSandboxes } : {}),
+    ...(opts.maxPublicCandidateEvaluations === undefined
+      ? {}
+      : { maxPublicCandidateEvaluations: opts.maxPublicCandidateEvaluations }),
     ...(opts.scratchQuotaBytes !== undefined ? { scratchQuotaBytes: opts.scratchQuotaBytes } : {}),
     ...(opts.scratchVolume !== undefined ? { scratchVolume: opts.scratchVolume } : {}),
     ...(opts.sessionTraceQuotaBytes !== undefined ? { sessionTraceQuotaBytes: opts.sessionTraceQuotaBytes } : {}),
     ...(opts.evalTimeoutSec !== undefined ? { evalTimeoutSec: opts.evalTimeoutSec } : {}),
+    ...(opts.reaperIntervalMs !== undefined ? { reaperIntervalMs: opts.reaperIntervalMs } : {}),
+    ...(opts.mutationEnv === undefined ? {} : { mutationEnv: opts.mutationEnv }),
+
     ...(opts.measurementEpoch !== undefined ? { measurementEpoch: opts.measurementEpoch } : {}),
+    ...(opts.omitPromotionCalibration === true
+      ? {}
+      : {
+          promotionNoiseCalibrations: [{
+            gateVersion: PROMOTION_GATE_VERSION,
+            evidenceVersion: "broker-test-calibration-v3",
+            calibratedAt: "2026-08-28T00:00:00.000Z",
+            capsuleId: (opts.manifest ?? makeManifest()).id,
+            admittedCapsuleDigest: opts.admittedCapsuleDigest ?? TEST_CAPSULE_DIGEST,
+            executionImage: TEST_IMAGE,
+            assetGroupId: "train",
+            measurementEpoch: opts.measurementEpoch ?? null,
+            sourceCohortSha256: [`sha256:${"a".repeat(64)}`],
+            maxObservedPairDelta: 0,
+            estimator: "pooled-within-coordinate-sd-v1",
+            estimatorMinRepeatsPerCoordinate: 3,
+            sampleDepths: [7, 7, 7],
+            informationFreeMeasurements: 21,
+            coordinateGroups: 3,
+            pooledDegreesOfFreedom: 18,
+            pooledWithinCoordinateSd: opts.promotionNoiseSd ?? 0,
+            noiseFloor: 3 * (opts.promotionNoiseSd ?? 0),
+            noiseEnvelope: 4.5 * (opts.promotionNoiseSd ?? 0),
+            informationFreePairs: 3,
+            informationFreePositive: 0,
+          }],
+        }),
+    ...(opts.promotionHoldoutSplit === undefined
+      ? {}
+      : { promotionHoldoutSplit: opts.promotionHoldoutSplit }),
+    ...(opts.terminalHoldoutAssetGroupIds === undefined
+      ? {}
+      : { terminalHoldoutAssetGroupIds: opts.terminalHoldoutAssetGroupIds }),
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
     maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
   };
-  const broker = new Broker(config);
+  broker = new Broker(config);
   await broker.init();
   // Seed the (fresh) CAS with the shared fixture artifacts.
   await broker.cas.putBuffer(baselineTar);
@@ -343,6 +445,23 @@ async function saveCandidate(b: Booted, tar: Buffer, parent: string = baselineHa
   await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT);
   const ref = await b.broker.saveArtifact({ sandboxId }, CLIENT);
   return ref.hash;
+}
+
+const NO_YIELD_RECORD = {
+  type: "hone.mutation.no-yield-bound.v1" as const,
+  limitTokens: 1_500_000,
+  modelCalls: 152,
+  promptTokens: 1_499_359,
+  completionTokens: 7_320,
+  consumedTokens: 1_506_679,
+};
+
+async function tripNoYieldBound(b: Booted, sandboxId: string): Promise<void> {
+  b.ctl.execExit = 4;
+  b.ctl.execStdout = Buffer.from(`${JSON.stringify(NO_YIELD_RECORD)}\n`);
+  await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+  b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+  expect(b.broker.reportSessionNoYieldBound({ sandboxId, ...NO_YIELD_RECORD }, CLIENT)).toEqual({});
 }
 
 function score(n: number): unknown {
@@ -395,7 +514,7 @@ afterAll(async () => {
 // ---------- durable run state ----------
 
 describe("durable run state (resume cannot reset authority or budgets)", () => {
-  it("replays spend, evaluator invocations, holdout charges, and episode numbering across restarts", async () => {
+  it("replays spend, evaluator invocations, holdout charges, and incomplete episode identity across restarts", async () => {
     const shared = { runDir: path.join(tmpBase, "runs", "resume-a"), casDir: path.join(tmpBase, "cas", "resume-a"), runId: "run-resume-a" };
     const a = await boot({ ...shared, holdoutBudget: 1 });
     a.broker.recordSpend({ tokens: 100, usd: 5 }, ADMIN);
@@ -416,11 +535,275 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
       b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 99 }, ADMIN),
     ).rejects.toThrow(/holdout ledger budget exhausted/);
 
-    // Episode numbering continues; it never restarts at 0.
-    await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
-    const started = b.events.filter((e) => e.type === "episode.started");
-    expect(started).toHaveLength(1);
-    expect(started[0]).toMatchObject({ episode: 1 });
+    // The incomplete checkpoint keeps its episode identity on restart; a
+    // resume claim must not mint or charge a replacement episode.
+    await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
+  });
+
+  it("rehydrates a failed-exec repair as an exact-episode continuation after restart", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "resume-repair-binding"),
+      casDir: path.join(tmpBase, "cas", "resume-repair-binding"),
+      runId: "run-resume-repair-binding",
+    };
+    const first = await boot(shared);
+    const sandbox = await first.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    first.ctl.execExit = 7;
+    first.ctl.saveTar = candidateTar;
+    await first.broker.exec({ sandboxId: sandbox.sandboxId, argv: ["false"] }, CLIENT);
+    const repair = await first.broker.saveArtifact({ sandboxId: sandbox.sandboxId }, CLIENT);
+    expect(repair).toEqual({ hash: candidateHash });
+    await first.broker.close();
+
+    const resumed = await boot(shared);
+    const continued = await resumed.broker.createSandbox(
+      { artifact: repair, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    expect(resumed.events.filter((event) => event.type === "episode.started")).toHaveLength(0);
+    await resumed.broker.completeEpisode({
+      episode: 0,
+      releaseSandboxId: continued.sandboxId,
+    }, CLIENT);
+  });
+
+  it("rejects continuation replay facts for a wrong parent, completed episode, or unknown episode", async () => {
+    const appendContinuation = async (
+      runDir: string,
+      fact: { hash: string; parent: string; episode: number },
+    ): Promise<void> => {
+      await appendFile(
+        path.join(runDir, "broker-state.ndjson"),
+        `${JSON.stringify({ t: "continuation", ...fact })}\n`,
+      );
+    };
+
+    const wrongParentShared = {
+      runDir: path.join(tmpBase, "runs", "poison-continuation-parent"),
+      casDir: path.join(tmpBase, "cas", "poison-continuation-parent"),
+      runId: "run-poison-continuation-parent",
+    };
+    const wrongParent = await boot(wrongParentShared);
+    await wrongParent.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await wrongParent.broker.close();
+    await appendContinuation(wrongParent.runDir, {
+      hash: candidateHash,
+      parent: candidate2Hash,
+      episode: 0,
+    });
+    await expect(boot(wrongParentShared)).rejects.toThrow(
+      `run state log corrupt: continuation ${candidateHash} does not match active episode 0`,
+    );
+
+    const completedShared = {
+      runDir: path.join(tmpBase, "runs", "poison-continuation-completed"),
+      casDir: path.join(tmpBase, "cas", "poison-continuation-completed"),
+      runId: "run-poison-continuation-completed",
+    };
+    const completed = await boot(completedShared);
+    const completedSandbox = await completed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await completed.broker.completeEpisode({
+      episode: 0,
+      releaseSandboxId: completedSandbox.sandboxId,
+    }, CLIENT);
+    await completed.broker.close();
+    await appendContinuation(completed.runDir, {
+      hash: candidateHash,
+      parent: baselineHash,
+      episode: 0,
+    });
+    await expect(boot(completedShared)).rejects.toThrow(
+      `run state log corrupt: continuation ${candidateHash} does not match active episode 0`,
+    );
+
+    const unknownShared = {
+      runDir: path.join(tmpBase, "runs", "poison-continuation-unknown"),
+      casDir: path.join(tmpBase, "cas", "poison-continuation-unknown"),
+      runId: "run-poison-continuation-unknown",
+    };
+    const unknown = await boot(unknownShared);
+    await unknown.broker.close();
+    await appendContinuation(unknown.runDir, {
+      hash: candidateHash,
+      parent: baselineHash,
+      episode: 99,
+    });
+    await expect(boot(unknownShared)).rejects.toThrow(
+      `run state log corrupt: continuation ${candidateHash} does not match active episode 99`,
+    );
+  });
+
+  it("does not persist an unreplayable continuation for a checkpoint-less legacy repair", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "legacy-repair-continuation"),
+      casDir: path.join(tmpBase, "cas", "legacy-repair-continuation"),
+      runId: "run-legacy-repair-continuation",
+    };
+    const seeded = await boot(shared);
+    await seeded.broker.close();
+    await appendFile(
+      path.join(seeded.runDir, "broker-state.ndjson"),
+      [
+        JSON.stringify({
+          t: "lineage",
+          candidate: candidate2Hash,
+          parent: baselineHash,
+          episode: 0,
+        }),
+        JSON.stringify({
+          t: "repair",
+          hash: candidateHash,
+          parent: baselineHash,
+          episode: 7,
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    const legacy = await boot(shared);
+    const sandbox = await legacy.broker.createSandbox(
+      { artifact: { hash: candidateHash }, role: "mutation" },
+      CLIENT,
+    );
+    legacy.ctl.execExit = 7;
+    legacy.ctl.saveTar = candidate2Tar;
+    await legacy.broker.exec({ sandboxId: sandbox.sandboxId, argv: ["false"] }, CLIENT);
+    expect(await legacy.broker.saveArtifact({ sandboxId: sandbox.sandboxId }, CLIENT)).toEqual({
+      hash: candidate2Hash,
+    });
+    expect(
+      (await stateLines(legacy)).filter((line) => line["t"] === "continuation"),
+    ).toHaveLength(0);
+    await legacy.broker.close();
+
+    // A process-local compatibility binding must not poison the next replay.
+    await boot(shared);
+  });
+
+  it("returns the same resumed sandbox when the first RPC response is lost", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "resume-response-loss"),
+      casDir: path.join(tmpBase, "cas", "resume-response-loss"),
+      runId: "run-resume-response-loss",
+    };
+    const first = await boot(shared);
+    await first.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await first.broker.close();
+
+    const resumed = await boot(shared);
+    const socketStem = path.join("/tmp", `hone-response-loss-${randomBytes(4).toString("hex")}`);
+    const socketPath = `${socketStem}.sock`;
+    const adminSocketPath = `${socketStem}-admin.sock`;
+    const token = "response-loss-public-token".padEnd(64, "r");
+    const server = new BrokerServer(resumed.broker, { socketPath, adminSocketPath, publicToken: token });
+    await server.listen();
+    const lostSocket = net.connect(socketPath);
+    let retry: RpcClient | undefined;
+    try {
+      await once(lostSocket, "connect");
+      const response = once(lostSocket, "data");
+      lostSocket.write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "createSandbox",
+        params: {
+          artifact: { hash: baselineHash },
+          role: "mutation",
+          continueEpisode: 0,
+        },
+        token,
+      })}\n`);
+      const [chunk] = await response;
+      const close = once(lostSocket, "close");
+      lostSocket.destroy();
+      await close;
+      const lostResponse: unknown = JSON.parse(String(chunk).trim());
+      if (typeof lostResponse !== "object" || lostResponse === null || !("result" in lostResponse)) {
+        throw new Error("lost createSandbox response has no result");
+      }
+      const original = SandboxRef.parse(lostResponse.result);
+      const dockerCreates = resumed.log.filter(
+        (argv) => argv[1] === "run" && argv.includes("-d"),
+      ).length;
+
+      retry = await RpcClient.connect(socketPath, token);
+      const replayed = SandboxRef.parse(await retry.call("createSandbox", {
+        artifact: { hash: baselineHash },
+        role: "mutation",
+        continueEpisode: 0,
+      }));
+      expect(replayed).toEqual(original);
+      expect(resumed.log.filter(
+        (argv) => argv[1] === "run" && argv.includes("-d"),
+      )).toHaveLength(dockerCreates);
+    } finally {
+      lostSocket.destroy();
+      retry?.close();
+      if (retry !== undefined) await retry.closed;
+      await server.close();
+    }
+  });
+
+  it("reclaims a resumed parent after its timed-out sandbox is proved retired and completes", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "resume-timeout-repair"),
+      casDir: path.join(tmpBase, "cas", "resume-timeout-repair"),
+      runId: "run-resume-timeout-repair",
+    };
+    const first = await boot(shared);
+    await first.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await first.broker.close();
+
+    const resumed = await boot(shared);
+    const claimed = await resumed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    resumed.ctl.execExit = "timeout";
+    await expect(
+      resumed.broker.exec({ sandboxId: claimed.sandboxId, argv: ["mutate"] }, CLIENT),
+    ).resolves.toMatchObject({ exitCode: 124 });
+    await expect(
+      resumed.broker.saveArtifact({ sandboxId: claimed.sandboxId }, CLIENT),
+    ).rejects.toThrow(/sandbox/i);
+
+    resumed.ctl.execExit = 0;
+    resumed.ctl.saveTar = candidateTar;
+    const repaired = await resumed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    expect(repaired).not.toEqual(claimed);
+    await resumed.broker.exec({ sandboxId: repaired.sandboxId, argv: ["repair"] }, CLIENT);
+    await expect(
+      resumed.broker.saveArtifact({ sandboxId: repaired.sandboxId }, CLIENT),
+    ).resolves.toEqual({ hash: candidateHash });
+    await resumed.broker.completeEpisode({ episode: 0 }, CLIENT);
+
+    expect(resumed.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    )).toHaveLength(2);
+    expect(resumed.events.filter((event) => event.type === "episode.completed")).toHaveLength(1);
+    expect((await stateLines(resumed)).filter((fact) => fact["t"] === "episodeComplete")).toHaveLength(1);
   });
 
   it("persists a trusted proxy admission refusal and blocks retries after restart", async () => {
@@ -443,6 +826,201 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
     expect(b.broker.getBudgetExhaustion(ADMIN)).toBe("tokens");
     expect(b.broker.recordBudgetExhaustion("tokens", ADMIN)).toEqual({});
     expect(b.events.filter((event) => event.type === "budget.exhausted")).toHaveLength(0);
+  });
+
+  it("durably emits a distinct no-yield bound event with the triggering usage", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await tripNoYieldBound(b, sandboxId);
+
+    const bounded = b.events.filter((event) => event.type === "mutation.no-yield-bound");
+    expect(bounded).toHaveLength(1);
+    expect(bounded[0]).toMatchObject({
+      ...NO_YIELD_RECORD,
+      type: "mutation.no-yield-bound",
+      sandboxId,
+      episode: 0,
+    });
+    expect(b.events.some((event) => event.type === "episode.candidate")).toBe(false);
+    expect(b.events.some((event) => event.type === "budget.exhausted")).toBe(false);
+
+    // RPC response loss/retry cannot duplicate or rewrite the durable reason.
+    const report = { sandboxId, ...NO_YIELD_RECORD };
+    expect(b.broker.reportSessionNoYieldBound(report, CLIENT)).toEqual({});
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toHaveLength(1);
+    expect(() => b.broker.reportSessionNoYieldBound({ ...report, modelCalls: 153 }, CLIENT)).toThrow(
+      /contradictory no-yield bound report/,
+    );
+  });
+
+  it("rejects a forged report and cannot rewrite the exact exec-time worker record", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT);
+    b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+    expect(() => b.broker.reportSessionNoYieldBound(
+      { sandboxId, ...NO_YIELD_RECORD },
+      CLIENT,
+    )).toThrow(/last exited 0, not 4/);
+
+    b.ctl.execExit = 4;
+    b.ctl.execStdout = Buffer.from(JSON.stringify({ ...NO_YIELD_RECORD, modelCalls: 151 }));
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    expect(() => b.broker.reportSessionNoYieldBound(
+      { sandboxId, ...NO_YIELD_RECORD },
+      CLIENT,
+    )).toThrow(/contradictory no-yield bound report/);
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId, modelCalls: 151 }),
+    ]);
+  });
+
+  it("journals a bound before an unchanged-workspace save retires its sandbox", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    b.ctl.execExit = 4;
+    b.ctl.execStdout = Buffer.from(`${JSON.stringify(NO_YIELD_RECORD)}\n`);
+    b.ctl.saveTar = baselineTar;
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    expect((await b.broker.saveArtifact({ sandboxId }, CLIENT)).hash).toBe(baselineHash);
+    expect(b.broker.reportSessionNoYieldBound({ sandboxId, ...NO_YIELD_RECORD }, CLIENT)).toEqual({});
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId, episode: 0 }),
+    ]);
+  });
+
+  it("journals a bound before a dirty-workspace save retires its sandbox", async () => {
+    const b = await boot({
+      manifest: makeManifest({
+        budget: { maxTokens: 12_000_000, maxUsd: 25, maxWallClockSec: 10_800, maxEvaluatorInvocations: 200 },
+      }),
+    });
+    b.ctl.execExit = 4;
+    b.ctl.execStdout = Buffer.from(`${JSON.stringify(NO_YIELD_RECORD)}\n`);
+    b.ctl.saveTar = candidateTar;
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    b.broker.recordSpend({ tokens: NO_YIELD_RECORD.consumedTokens, usd: 0 }, ADMIN);
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    expect((await b.broker.saveArtifact({ sandboxId }, CLIENT)).hash).toBe(candidateHash);
+    expect(b.broker.reportSessionNoYieldBound({ sandboxId, ...NO_YIELD_RECORD }, CLIENT)).toEqual({});
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId, episode: 0 }),
+    ]);
+  });
+
+
+  it("durably aggregates zeroed and normalized usage telemetry from a healthy worker", async () => {
+    const b = await boot();
+    b.ctl.execExit = 0;
+    b.ctl.execStdout = Buffer.from("healthy yield\n");
+    b.ctl.execStderr = Buffer.from([
+      JSON.stringify({
+        type: "hone.mutation.usage-anomaly.v1",
+        zeroUsageTurns: 1,
+        normalizedUsageTurns: 0,
+      }),
+      "ordinary worker diagnostic",
+      JSON.stringify({
+        type: "hone.mutation.usage-anomaly.v1",
+        zeroUsageTurns: 1,
+        normalizedUsageTurns: 1,
+      }),
+      "",
+    ].join("\n"));
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    await b.broker.exec({ sandboxId, argv: ["bun", "/scratch/hone-worker.mjs"] }, CLIENT);
+    await b.broker.saveArtifact({ sandboxId }, CLIENT);
+
+    expect(b.events.filter((event) => event.type === "mutation.usage-anomaly")).toEqual([
+      expect.objectContaining({
+        sandboxId,
+        episode: 0,
+        zeroUsageTurns: 2,
+        normalizedUsageTurns: 1,
+      }),
+    ]);
+  });
+
+  it("attributes a bound on a no-change repair to its broker-authoritative continued episode", async () => {
+    const b = await boot();
+    b.ctl.execExit = 1;
+    b.ctl.saveTar = baselineTar;
+    const first = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId: first.sandboxId, argv: ["false"] }, CLIENT);
+    const unchanged = await b.broker.saveArtifact({ sandboxId: first.sandboxId }, CLIENT);
+    expect(unchanged.hash).toBe(baselineHash);
+
+    const repair = await b.broker.createSandbox(
+      { artifact: unchanged, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await tripNoYieldBound(b, repair.sandboxId);
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId: repair.sandboxId, episode: 0 }),
+    ]);
+  });
+
+  it("attributes a bound on an evaluator-rejected candidate repair to its continued episode", async () => {
+    const b = await boot();
+    const rejectedCandidate = await saveCandidate(b, candidateTar);
+    expect(rejectedCandidate).toBe(candidateHash);
+    const repair = await b.broker.createSandbox(
+      { artifact: { hash: rejectedCandidate }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await tripNoYieldBound(b, repair.sandboxId);
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId: repair.sandboxId, episode: 0 }),
+    ]);
+  });
+
+  it("attributes a later first-attempt bound after a no-change ordinal desync", async () => {
+    const b = await boot();
+    b.ctl.execExit = 1;
+    b.ctl.saveTar = baselineTar;
+    const first = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await b.broker.exec({ sandboxId: first.sandboxId, argv: ["false"] }, CLIENT);
+    const unchanged = await b.broker.saveArtifact({ sandboxId: first.sandboxId }, CLIENT);
+    await b.broker.createSandbox({ artifact: unchanged, role: "mutation" }, CLIENT);
+
+    const later = await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await tripNoYieldBound(b, later.sandboxId);
+
+    expect(b.events.filter((event) => event.type === "mutation.no-yield-bound")).toEqual([
+      expect.objectContaining({ sandboxId: later.sandboxId, episode: 2 }),
+    ]);
   });
 
   it("replays promotion authority and the incumbent", async () => {
@@ -581,11 +1159,13 @@ describe("durable run state (resume cannot reset authority or budgets)", () => {
       expect(budget.spent.tokens).toBe(7 + cycle); // 999999 never replays, even after re-append
       expect(budget.spent.usd).toBe(1);
       b.broker.recordSpend({ tokens: 1, usd: 0 }, ADMIN);
-      // Episode numbering also survives: next episode continues, never resets.
-      await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
-      const started = b.events.filter((e) => e.type === "episode.started");
-      expect(started).toHaveLength(1);
-      expect(started[0]).toMatchObject({ episode: 1 + cycle });
+      // The same incomplete episode remains resumable across repeated boots;
+      // claiming it never appends a replacement episode.started fact.
+      await b.broker.createSandbox(
+        { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+        CLIENT,
+      );
+      expect(b.events.filter((e) => e.type === "episode.started")).toHaveLength(0);
       await b.broker.close();
     }
     const raw = await readFile(stateFile, "utf8");
@@ -610,7 +1190,7 @@ describe("run-scoped derived cache recovery", () => {
     ];
     const snapshotDir = path.join(shared.runDir, "scratch-snapshot");
     await mkdir(snapshotDir, { recursive: true });
-    await writeFile(path.join(snapshotDir, "scratch.tar"), "durable");
+    await writeFile(path.join(snapshotDir, "scratch.tar"), baselineTar);
     await writeFile(path.join(snapshotDir, "scratch.tar.tmp.dead"), "stranded");
     for (const dir of stale) {
       await mkdir(dir, { recursive: true });
@@ -661,8 +1241,63 @@ describe("promotion authority (reportIncumbent is only a hint)", () => {
     await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
     await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
     expect(() => b.broker.reportIncumbent({ artifact: { hash: cand }, claimed: { score: 9000 } }, CLIENT)).toThrow(
-      /no positive trusted delta/,
+      /calibrated gate refused.*refuse-no-improvement/,
     );
+  });
+
+  it("enforces a non-zero noise scale through the broker and records confidence decisions", async () => {
+    const probe = async (childScore: number) => {
+      const b = await boot({ promotionNoiseSd: 0.01 });
+      b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(childScore));
+      const cand = await saveCandidate(b, candidateTar);
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+      await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
+      return { b, cand, gate: b.events.find((event) => event.type === "gate.paired") };
+    };
+    const noise = await probe(1.02);
+    expect(noise.gate).toMatchObject({
+      delta: expect.closeTo(0.02),
+      noiseFloor: 0.03,
+      noiseEnvelope: 0.045,
+      decision: "refuse-within-noise",
+      passed: false,
+    });
+    const confidence = await probe(1.04);
+    expect(confidence.gate).toMatchObject({
+      delta: expect.closeTo(0.04),
+      noiseFloor: 0.03,
+      noiseEnvelope: 0.045,
+      decision: "refuse-indeterminate",
+      passed: false,
+    });
+    const headroom = await probe(1.05);
+    expect(headroom.gate).toMatchObject({
+      delta: expect.closeTo(0.05),
+      noiseFloor: 0.03,
+      noiseEnvelope: 0.045,
+      decision: "promote",
+      passed: true,
+    });
+    expect(headroom.b.broker.reportIncumbent({ artifact: { hash: headroom.cand } }, CLIENT)).toEqual({});
+  });
+
+  it("fails closed with an auditable event when the evaluator identity is uncalibrated", async () => {
+    const b = await boot({ omitPromotionCalibration: true });
+    b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const cand = await saveCandidate(b, candidateTar);
+    await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
+    expect(b.events.find((event) => event.type === "gate.paired")).toMatchObject({
+      delta: 1,
+      noiseFloor: null,
+      noiseEnvelope: null,
+      decision: "refuse-uncalibrated",
+      passed: false,
+    });
+    expect(b.broker.getPromotionVerdict({ artifact: { hash: cand } }, CLIENT)).toMatchObject({
+      status: "not-promotable",
+      decision: "refuse-uncalibrated",
+    });
   });
 
   it("rejects every later candidate before evaluator spawn once the M0 promotion slot is consumed", async () => {
@@ -691,6 +1326,467 @@ describe("promotion authority (reportIncumbent is only a hint)", () => {
     await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "holdout", seed: 0 }, ADMIN);
     expect(b.events.filter((e) => e.type === "eval.completed")).toHaveLength(0);
     expect(() => b.broker.reportIncumbent({ artifact: { hash: cand } }, CLIENT)).toThrow(/no trusted evaluation/);
+  });
+});
+
+describe("durable promotion verdict query", () => {
+  it("distinguishes never-paired, promotable, calibrated refusal, and other trusted refusals", async () => {
+    const neverPaired = await boot();
+    const savedOnly = await saveCandidate(neverPaired, candidateTar);
+    expect(neverPaired.broker.getPromotionVerdict({ artifact: { hash: savedOnly } }, CLIENT)).toEqual({
+      status: "never-paired",
+    });
+    expect(neverPaired.broker.getPromotionVerdict({ artifact: { hash: baselineHash } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-lineage",
+    });
+
+    const noPair = await boot();
+    noPair.ctl.evalOutputs.set(candidateHash, score(2));
+    const unpaired = await saveCandidate(noPair, candidateTar);
+    await noPair.broker.evaluate({ artifact: { hash: unpaired }, assetGroupId: "train", seed: 0 }, CLIENT);
+    expect(noPair.broker.getPromotionVerdict({ artifact: { hash: unpaired } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-persisted-pair",
+    });
+
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "negative-verdict-replay"),
+      casDir: path.join(tmpBase, "cas", "negative-verdict-replay"),
+      runId: "run-negative-verdict-replay",
+    };
+    const negative = await boot(shared);
+    negative.ctl.evalOutputs.set(baselineHash, score(2)).set(candidateHash, score(1));
+    const losing = await saveCandidate(negative, candidateTar);
+    await negative.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await negative.broker.evaluate({ artifact: { hash: losing }, assetGroupId: "train", seed: 0 }, CLIENT);
+    const losingVerdict = {
+      status: "not-promotable",
+      parent: { hash: baselineHash },
+      parentScore: 2,
+      childScore: 1,
+      delta: -1,
+      gateVersion: PROMOTION_GATE_VERSION,
+      calibrationEvidenceVersion: "broker-test-calibration-v3",
+      noiseFloor: 0,
+      noiseEnvelope: 0,
+      decision: "refuse-no-improvement",
+    };
+    expect(negative.broker.getPromotionVerdict({ artifact: { hash: losing } }, CLIENT)).toEqual(losingVerdict);
+    await negative.broker.close();
+    const replayed = await boot(shared);
+    expect(replayed.broker.getPromotionVerdict({ artifact: { hash: losing } }, CLIENT)).toEqual(losingVerdict);
+
+    const positive = await boot();
+    positive.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const winner = await saveCandidate(positive, candidateTar);
+    await positive.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await positive.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "train", seed: 0 }, CLIENT);
+    expect(positive.broker.getPromotionVerdict({ artifact: { hash: winner } }, CLIENT)).toEqual({
+      status: "promotable",
+      parent: { hash: baselineHash },
+      parentScore: 1,
+      childScore: 2,
+      delta: 1,
+      gateVersion: PROMOTION_GATE_VERSION,
+      calibrationEvidenceVersion: "broker-test-calibration-v3",
+      noiseFloor: 0,
+      noiseEnvelope: 0,
+      decision: "promote",
+    });
+    expect(positive.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT)).toEqual({});
+  });
+  it("keeps a frozen holdout invisible to the optimizer and journals terminal generalization proof", async () => {
+    const frozenHoldoutCapsuleRootDir = path.join(tmpBase, "capsule-frozen-holdout");
+    const baseManifest = makeManifest();
+    for (const fixturePath of Object.keys(baseManifest.contentHashes)) {
+      const isolatedFixturePath = path.join(frozenHoldoutCapsuleRootDir, fixturePath);
+      await mkdir(path.dirname(isolatedFixturePath), { recursive: true });
+      await copyFile(path.join(capsuleRootDir, fixturePath), isolatedFixturePath);
+    }
+
+    const sourceUnits = Array.from({ length: 25 }, (_, index) => ({
+      id: `holdout-case-${index}`,
+      content: `sealed-${index}`,
+      contentHash: sha256(`sealed-${index}`),
+      achievableScoreMax: 1,
+      selector: "",
+      trainContainerHash: sha256(`sealed-${index}`),
+      holdoutContainerHash: sha256(`sealed-${index}`),
+      trainPath: `train/holdout-case-${index}.txt`,
+      holdoutPath: `holdout/holdout-case-${index}.txt`,
+    }));
+    const split = createPromotionHoldoutSplit({
+      capsuleId: "cap_0123456789ab",
+      capsuleDigest: TEST_CAPSULE_DIGEST,
+      campaignIdentity: `sha256:${"c".repeat(64)}`,
+      frozenAt: "2026-08-28T00:00:00.000Z",
+      trainAssetGroupId: "train",
+      holdoutAssetGroupId: "holdout",
+      units: sourceUnits,
+      holdoutUnits: 20,
+      noiseClass: "deterministic-zero-noise",
+      noiseEnvelope: 0,
+      evaluationRepeats: 1,
+      minimumDetectableEffect: 0.05,
+    });
+    const contentById = new Map(sourceUnits.map((unit) => [unit.id, unit.content]));
+    const splitHashes: Record<string, string> = {};
+    for (const unit of [...split.train.units, ...split.holdout.units]) {
+      await writeFile(path.join(frozenHoldoutCapsuleRootDir, unit.path), contentById.get(unit.id)!);
+      splitHashes[unit.path] = unit.contentHash;
+    }
+    const contentHashes = { ...baseManifest.contentHashes, ...splitHashes };
+    await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
+      manifest: makeManifest({ contentHashes }),
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const aliasManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "holdout-mirror", visibility: "holdout", paths: ["holdout"] },
+      ],
+      contentHashes,
+    });
+    await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
+      manifest: aliasManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout-mirror"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const mirrorRoot = path.join(frozenHoldoutCapsuleRootDir, "holdout-hardlink-mirror");
+    await mkdir(mirrorRoot, { recursive: true });
+    const hardlinkHashes: Record<string, string> = {};
+    const sealedIdentities = new Set<string>();
+    const mirrorIdentities = new Set<string>();
+    for (const unit of split.holdout.units) {
+      const source = path.join(frozenHoldoutCapsuleRootDir, unit.path);
+      const mirrorRel = `holdout-hardlink-mirror/${unit.id}.txt`;
+      const mirror = path.join(frozenHoldoutCapsuleRootDir, mirrorRel);
+      await link(source, mirror);
+      hardlinkHashes[mirrorRel] = unit.contentHash;
+      const sourceStat = await stat(source);
+      const mirrorStat = await stat(mirror);
+      sealedIdentities.add(`${sourceStat.dev}:${sourceStat.ino}`);
+      mirrorIdentities.add(`${mirrorStat.dev}:${mirrorStat.ino}`);
+    }
+    expect([...sealedIdentities].every((identity) => mirrorIdentities.has(identity))).toBe(true);
+    const hardlinkManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "holdout-hardlink-mirror", visibility: "holdout", paths: ["holdout-hardlink-mirror"] },
+      ],
+      contentHashes: { ...contentHashes, ...hardlinkHashes },
+    });
+    await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
+      manifest: hardlinkManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout-hardlink-mirror"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const copyRoot = path.join(frozenHoldoutCapsuleRootDir, "holdout-copy-mirror");
+    await mkdir(copyRoot, { recursive: true });
+    const copyHashes: Record<string, string> = {};
+    for (const unit of split.holdout.units) {
+      const source = path.join(frozenHoldoutCapsuleRootDir, unit.path);
+      const copyRel = `holdout-copy-mirror/${unit.id}.txt`;
+      const copy = path.join(frozenHoldoutCapsuleRootDir, copyRel);
+      await copyFile(source, copy);
+      copyHashes[copyRel] = unit.containerHash;
+      const sourceStat = await stat(source);
+      const copyStat = await stat(copy);
+      expect(`${copyStat.dev}:${copyStat.ino}`).not.toBe(`${sourceStat.dev}:${sourceStat.ino}`);
+      expect(sha256(await readFile(copy))).toBe(unit.containerHash);
+    }
+    const copyManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "holdout-copy-mirror", visibility: "holdout", paths: ["holdout-copy-mirror"] },
+      ],
+      contentHashes: { ...contentHashes, ...copyHashes },
+    });
+    await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
+      manifest: copyManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["holdout-copy-mirror"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const disjointRoot = path.join(frozenHoldoutCapsuleRootDir, "terminal-disjoint");
+    await mkdir(disjointRoot, { recursive: true });
+    await writeFile(path.join(disjointRoot, "data.txt"), "unrelated terminal bytes");
+    const disjointManifest = makeManifest({
+      assetGroups: [
+        ...baseManifest.assetGroups,
+        { id: "terminal-disjoint", visibility: "holdout", paths: ["terminal-disjoint"] },
+      ],
+      contentHashes: {
+        ...contentHashes,
+        "terminal-disjoint/data.txt": sha256("unrelated terminal bytes"),
+      },
+    });
+    await expect(boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
+      manifest: disjointManifest,
+      promotionHoldoutSplit: split,
+      terminalHoldoutAssetGroupIds: ["terminal-disjoint"],
+    })).rejects.toThrow(/mutually exclusive.*semantic re-encoding.*undecidable/);
+
+    const b = await boot({
+      capsuleRootDir: frozenHoldoutCapsuleRootDir,
+      manifest: makeManifest({
+        contentHashes: { ...baseManifest.contentHashes, ...splitHashes },
+      }),
+      promotionHoldoutSplit: split,
+    });
+    const sealedContentHashes = new Set(split.holdout.units.flatMap((unit) => [
+      unit.contentHash,
+      unit.containerHash,
+    ]));
+    b.ctl.evalInspect = async (argv) => {
+      const mount = argv.find((arg) => arg.endsWith(":/capsule/assets:ro"));
+      expect(mount).toBeDefined();
+      const stagedRoot = mount?.slice(0, -":/capsule/assets:ro".length) ?? "";
+      const pending = [stagedRoot];
+      while (pending.length > 0) {
+        const current = pending.pop()!;
+        const currentStat = await stat(current);
+        if (currentStat.isDirectory()) {
+          for (const entry of await readdir(current)) pending.push(path.join(current, entry));
+        } else if (currentStat.isFile()) {
+          expect(sealedContentHashes.has(sha256(await readFile(current)))).toBe(false);
+        }
+      }
+    };
+    b.ctl.evalOutputs.set(baselineHash, score(0.2)).set(candidateHash, score(0.4));
+    const winner = await saveCandidate(b, candidateTar);
+    const visibleGroups = b.broker.getTask(CLIENT).visibleAssetGroups;
+    for (const [seed, assetGroupId] of visibleGroups.entries()) {
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId, seed }, CLIENT);
+    }
+    await b.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "train", seed: 0 }, CLIENT);
+    b.broker.reportIncumbent({ artifact: { hash: winner } }, CLIENT);
+
+    expect(b.broker.getTask(CLIENT).visibleAssetGroups).not.toContain("holdout");
+    await expect(
+      b.broker.evaluate({ artifact: { hash: winner }, assetGroupId: "holdout", seed: 0 }, CLIENT),
+    ).rejects.toMatchObject({ code: "HOLDOUT_ACCESS_DENIED" });
+    expect(() => b.broker.recordPromotionHoldout({
+      splitId: split.splitId,
+      artifactHash: winner,
+      assetGroupId: "holdout",
+      seeds: [0],
+      nullControlId: sha256("not-a-control"),
+    }, CLIENT)).toThrow(/trusted authority/);
+    b.ctl.evalInspect = null;
+
+    const records = await b.broker.assessPromotionHoldouts(ADMIN);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      artifactHash: winner,
+      parentArtifactHash: baselineHash,
+      splitId: split.splitId,
+      training: { delta: 0.2, noiseDecision: "promote" },
+      holdout: { delta: 0.2, seeds: [0], headroom: 0.8, designEligibility: "claim-capable" },
+      generalizationGap: 0,
+      status: "supported",
+      claimable: true,
+      nullControl: { informationFree: true, estimator: "sample-sd-v1", sampleStandardDeviation: 0 },
+    });
+    expect(b.events.filter((event) => event.type === "holdout.split.frozen")).toHaveLength(1);
+    const splitEvent = b.events.find((event) => event.type === "holdout.split.frozen");
+    expect(JSON.stringify(splitEvent)).not.toContain("holdout-case-");
+    expect(b.events.filter((event) => event.type === "holdout.eval.completed")).toHaveLength(3);
+    expect(b.events.filter((event) => event.type === "holdout.null-control.completed")).toHaveLength(1);
+    expect(b.events.filter((event) => event.type === "promotion.holdout.completed")).toHaveLength(1);
+  });
+  it("replays a pre-versioned gate as readable but never silently grants new authority", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "legacy-gate-replay"),
+      casDir: path.join(tmpBase, "cas", "legacy-gate-replay"),
+      runId: "run-legacy-gate-replay",
+    };
+    const original = await boot(shared);
+    original.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const candidate = await saveCandidate(original, candidateTar);
+    await original.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await original.broker.evaluate({ artifact: { hash: candidate }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await original.broker.close();
+    const statePath = path.join(shared.runDir, "broker-state.ndjson");
+    const legacyLines = (await readFile(statePath, "utf8")).trimEnd().split("\n").map((text) => {
+      const line = JSON.parse(text) as {
+        gate?: { parent: string; parentScore: number; childScore: number; passed: boolean };
+      };
+      if (line.gate !== undefined) {
+        line.gate = {
+          parent: line.gate.parent,
+          parentScore: line.gate.parentScore,
+          childScore: line.gate.childScore,
+          passed: line.gate.passed,
+        };
+      }
+      return JSON.stringify(line);
+    });
+    await writeFile(statePath, `${legacyLines.join("\n")}\n`);
+    const replayed = await boot(shared);
+    expect(replayed.broker.getPromotionVerdict({ artifact: { hash: candidate } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "legacy-unversioned-gate",
+    });
+  });
+
+
+  it("refuses a trusted candidate measurement that has no public evaluation admission", async () => {
+    const b = await boot();
+    b.ctl.evalOutputs.set(candidateHash, score(2));
+    const candidate = await saveCandidate(b, candidateTar);
+    await b.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 0 },
+      ADMIN,
+    );
+    expect(b.broker.getPromotionVerdict({ artifact: { hash: candidate } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-public-admission",
+    });
+    expect(() => b.broker.reportIncumbent({ artifact: { hash: candidate } }, CLIENT)).toThrow(
+      /artifact has no public candidate evaluation admission/,
+    );
+  });
+
+  it("blocks public score-shopping after an earlier privileged candidate measurement", async () => {
+    const b = await boot();
+    b.ctl.evalOutputs.set(candidateHash, score(-4));
+    const candidate = await saveCandidate(b, candidateTar);
+
+    const privileged = await b.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 0 },
+      ADMIN,
+    );
+    expect(privileged.output.objectives.score).toBe(-4);
+    expect(b.broker.getPromotionVerdict({ artifact: { hash: candidate } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-public-admission",
+    });
+
+    // The optimizer can request a fresh coordinate where the same artifact
+    // scores much better, but the earlier privileged measurement permanently
+    // taints it: the favorable public result is measurement, not authority.
+    b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(9));
+    await b.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 1 },
+      CLIENT,
+    );
+    const shopped = await b.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 1 },
+      CLIENT,
+    );
+    expect(shopped.output.objectives.score).toBe(9);
+    expect(b.broker.getPromotionVerdict({ artifact: { hash: candidate } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-persisted-pair",
+    });
+    const candidateFacts = (await stateLines(b)).filter((line) =>
+      line["t"] === "eval"
+      && (line["record"] as { artifactHash?: string } | undefined)?.artifactHash === candidate
+    );
+    expect(candidateFacts).toHaveLength(2);
+    expect(candidateFacts.some((line) => "gate" in line)).toBe(false);
+    expect(() => b.broker.reportIncumbent({ artifact: { hash: candidate } }, CLIENT)).toThrow(
+      /no persisted same-epoch parent-first gate pairing/,
+    );
+  });
+
+  it("preserves legitimate privileged-only and public-only evaluation paths", async () => {
+    const privilegedOnly = await boot();
+    privilegedOnly.ctl.evalOutputs.set(candidateHash, score(4));
+    const measured = await saveCandidate(privilegedOnly, candidateTar);
+    await expect(
+      privilegedOnly.broker.evaluate(
+        { artifact: { hash: measured }, assetGroupId: "train", seed: 0 },
+        ADMIN,
+      ),
+    ).resolves.toMatchObject({ artifactHash: measured, output: { objectives: { score: 4 } } });
+    expect(privilegedOnly.broker.getPromotionVerdict({ artifact: { hash: measured } }, CLIENT)).toEqual({
+      status: "refused",
+      reason: "no-public-admission",
+    });
+
+    const publicOnly = await boot();
+    publicOnly.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const promotable = await saveCandidate(publicOnly, candidateTar);
+    await publicOnly.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    await publicOnly.broker.evaluate(
+      { artifact: { hash: promotable }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    expect(publicOnly.broker.getPromotionVerdict({ artifact: { hash: promotable } }, CLIENT)).toEqual({
+      status: "promotable",
+      parent: { hash: baselineHash },
+      parentScore: 1,
+      childScore: 2,
+      delta: 1,
+      gateVersion: PROMOTION_GATE_VERSION,
+      calibrationEvidenceVersion: "broker-test-calibration-v3",
+      noiseFloor: 0,
+      noiseEnvelope: 0,
+      decision: "promote",
+    });
+    expect(publicOnly.broker.reportIncumbent({ artifact: { hash: promotable } }, CLIENT)).toEqual({});
+  });
+
+  it("refuses a replayed positive gate whose parent disagrees with immutable lineage", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "lineage-mismatch-verdict"),
+      casDir: path.join(tmpBase, "cas", "lineage-mismatch-verdict"),
+      runId: "run-lineage-mismatch-verdict",
+    };
+    const original = await boot(shared);
+    original.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
+    const candidate = await saveCandidate(original, candidateTar);
+    await original.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    await original.broker.evaluate(
+      { artifact: { hash: candidate }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    const lines = await stateLines(original);
+    const candidateEvaluation = lines.find((line) =>
+      line["t"] === "eval"
+      && (line["record"] as { artifactHash?: string } | undefined)?.artifactHash === candidate
+    );
+    if (candidateEvaluation === undefined) throw new Error("fixture lost candidate evaluation");
+    const gate = candidateEvaluation["gate"] as { parent?: string } | undefined;
+    if (gate === undefined) throw new Error("fixture lost candidate gate");
+    gate.parent = candidate2Hash;
+    await original.broker.close();
+    await writeFile(
+      path.join(shared.runDir, "broker-state.ndjson"),
+      `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+    );
+
+    const replayedMismatch = await boot(shared);
+    expect(replayedMismatch.broker.getPromotionVerdict(
+      { artifact: { hash: candidate } },
+      CLIENT,
+    )).toEqual({
+      status: "refused",
+      reason: "lineage-mismatch",
+    });
+    expect(() => replayedMismatch.broker.reportIncumbent(
+      { artifact: { hash: candidate } },
+      CLIENT,
+    )).toThrow(/no persisted same-epoch parent-first gate pairing/);
   });
 });
 
@@ -783,6 +1879,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     a.ctl.evalOutputs.set(candidateHash, { valid: false, objectives: {} }).set(candidate2Hash, score(9));
     const cprobe = await saveCandidate(a, candidateTar);
     await a.broker.evaluate({ artifact: { hash: cprobe }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await a.broker.completeEpisode({ episode: 0 }, CLIENT);
     const cpromote = await saveCandidate(a, candidate2Tar);
     const spawns = a.log.filter((argv) => argv[1] === "run" && argv.includes("--rm")).length;
     await expect(
@@ -802,11 +1899,114 @@ describe("M0 one-shot candidate evaluation authority", () => {
       b.broker.evaluate({ artifact: { hash: cpromote }, assetGroupId: "train", seed: 2 }, CLIENT),
     ).rejects.toThrow(/attempt already consumed/);
   });
+
+  it("keeps one episode epoch through an invalid-candidate repair, crash, and evaluator replay", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "repair-resume"),
+      casDir: path.join(tmpBase, "cas", "repair-resume"),
+      runId: "run-repair-resume",
+      maxPublicCandidateEvaluations: 4,
+    };
+    const first = await boot(shared);
+    first.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, {
+      valid: false,
+      objectives: {},
+      constraints: {},
+      perExample: {},
+    });
+    const invalidCandidate = await saveCandidate(first, candidateTar);
+    await first.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    await expect(
+      first.broker.createSandbox({ artifact: { hash: invalidCandidate }, role: "mutation" }, CLIENT),
+    ).rejects.toThrow(/incomplete checkpoint-v1 episode/);
+    const invalid = await first.broker.evaluate(
+      { artifact: { hash: invalidCandidate }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    expect(invalid.output.valid).toBe(false);
+    await first.broker.close();
+
+    // Real one-repair: reopen the invalid candidate inside episode 0, execute,
+    // and save a distinct repaired artifact without minting episode 1.
+    const repairing = await boot(shared);
+    repairing.ctl.evalOutputs.set(candidate2Hash, score(2));
+    const parentClaim = await repairing.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    const dockerCreatesAfterClaim = repairing.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    ).length;
+    await expect(
+      repairing.broker.createSandbox(
+        { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+        CLIENT,
+      ),
+    ).resolves.toEqual(parentClaim);
+    expect(repairing.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    )).toHaveLength(dockerCreatesAfterClaim);
+    const repairSandbox = await repairing.broker.createSandbox(
+      { artifact: { hash: invalidCandidate }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await repairing.broker.exec({ sandboxId: repairSandbox.sandboxId, argv: ["true"] }, CLIENT);
+    repairing.ctl.saveTar = candidate2Tar;
+    const repaired = await repairing.broker.saveArtifact({ sandboxId: repairSandbox.sandboxId }, CLIENT);
+    expect(repaired.hash).toBe(candidate2Hash);
+    await repairing.broker.evaluate(
+      { artifact: repaired, assetGroupId: "train", seed: 0, resume: true },
+      CLIENT,
+    );
+    expect(repairing.broker.getBudget(CLIENT).spent.evaluatorInvocations).toBe(3);
+    await repairing.broker.close();
+
+    // A second restart reconstructs exactly one incomplete checkpoint and
+    // replays every pre-crash evaluator fact without a fourth invocation.
+    const resumed = await boot(shared);
+    const claimed = await resumed.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    await expect(
+      resumed.broker.evaluate(
+        { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0, resume: true },
+        CLIENT,
+      ),
+    ).resolves.toMatchObject({ cached: true, artifactHash: baselineHash });
+    await expect(
+      resumed.broker.evaluate(
+        { artifact: { hash: invalidCandidate }, assetGroupId: "train", seed: 0, resume: true },
+        CLIENT,
+      ),
+    ).resolves.toMatchObject({ cached: true, artifactHash: invalidCandidate, output: { valid: false } });
+    await expect(
+      resumed.broker.evaluate(
+        { artifact: repaired, assetGroupId: "train", seed: 0, resume: true },
+        CLIENT,
+      ),
+    ).resolves.toMatchObject({ cached: true, artifactHash: candidate2Hash });
+    expect(resumed.broker.getBudget(CLIENT).spent.evaluatorInvocations).toBe(3);
+    await resumed.broker.completeEpisode(
+      { episode: 0, releaseSandboxId: claimed.sandboxId },
+      CLIENT,
+    );
+    const facts = await stateLines(resumed);
+    expect(facts.filter((line) => line["t"] === "episode")).toHaveLength(1);
+    expect(facts.filter((line) => line["t"] === "eval")).toHaveLength(3);
+    expect(facts.filter((line) => line["t"] === "episodeComplete")).toHaveLength(1);
+    expect(facts.find((line) => line["t"] === "episodeComplete")).toMatchObject({
+      t: "episodeComplete",
+      episode: 0,
+    });
+    expect(resumed.events.filter((event) => event.type === "episode.completed")).toHaveLength(1);
+  });
   it("journals the attempt before a timed-out spawn and never permits a retry after replay", async () => {
     const shared = {
       runDir: path.join(tmpBase, "runs", "slot-wal"),
       casDir: path.join(tmpBase, "cas", "slot-wal"),
       runId: "run-slot-wal",
+      now: () => 0,
     };
     const a = await boot(shared);
     const cand = await saveCandidate(a, candidateTar);
@@ -814,7 +2014,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     await expect(
       a.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT),
     ).rejects.toThrow();
-    expect((await stateLines(a)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: cand }]);
+    expect((await stateLines(a)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: cand, activeMs: 0 }]);
     await a.broker.close();
     const b = await boot(shared);
     await expect(
@@ -822,7 +2022,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     ).rejects.toThrow(/attempt already consumed/);
   });
   it("serializes racing candidate admissions so exactly one evaluator can start", async () => {
-    const b = await boot();
+    const b = await boot({ now: () => 0 });
     b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2)).set(candidate2Hash, score(3));
     const a = await saveCandidate(b, candidateTar);
     const c = await saveCandidate(b, candidate2Tar);
@@ -833,7 +2033,7 @@ describe("M0 one-shot candidate evaluation authority", () => {
     ]);
     expect(outcomes.filter((x) => x.status === "fulfilled")).toHaveLength(1);
     expect(outcomes.filter((x) => x.status === "rejected")).toHaveLength(1);
-    expect((await stateLines(b)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: a }]);
+    expect((await stateLines(b)).filter((l) => l["t"] === "slot")).toEqual([{ t: "slot", hash: a, activeMs: 0 }]);
   });
   it("rejects duplicate or contradictory persisted attempt facts", async () => {
     const shared = {
@@ -853,6 +2053,36 @@ describe("M0 one-shot candidate evaluation authority", () => {
 // ---------- event derivation ----------
 
 describe("trusted event ordering and candidacy", () => {
+  it("publishes a trusted null evaluation event after an episode starts without granting promotion authority", async () => {
+    const b = await boot({ maxPublicCandidateEvaluations: 4 });
+    b.ctl.evalOutputs.set(baselineHash, {
+      valid: false,
+      objectives: {},
+      constraints: {},
+      perExample: {},
+    });
+    const { sandboxId } = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+
+    await expect(
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT),
+    ).resolves.toMatchObject({ artifactHash: baselineHash, output: { valid: false } });
+    const evaluations = b.events.filter((event) => event.type === "eval.completed");
+    expect(evaluations).toEqual([
+      expect.objectContaining({
+        artifact: { hash: baselineHash },
+        aggregate: null,
+        cached: false,
+      }),
+    ]);
+    expect(evaluations[0]).not.toHaveProperty("episode");
+    expect(b.events.filter((event) => event.type === "gate.paired")).toHaveLength(0);
+    expect(b.events.filter((event) => event.type === "incumbent.new")).toHaveLength(0);
+    await b.broker.completeEpisode({ episode: 0, releaseSandboxId: sandboxId }, CLIENT);
+  });
+
   it("pre-episode parent evidence cannot rescue a child-first one-shot candidate", async () => {
     const b = await boot();
     b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2)).set(candidate2Hash, score(3));
@@ -923,13 +2153,15 @@ describe("trusted event ordering and candidacy", () => {
     const graduated = await b.broker.saveArtifact({ sandboxId: second.sandboxId }, CLIENT);
     expect(graduated.hash).toBe(candidateHash);
     expect(b.events.filter((e) => e.type === "episode.candidate")).toHaveLength(1);
+    await b.broker.completeEpisode({ episode: 0 }, CLIENT);
 
     // Sandboxes from the graduated candidate must NOT reuse the stale repair
     // episode/parent: a fresh episode starts with the candidate as parent.
-    await b.broker.createSandbox({ artifact: { hash: candidateHash }, role: "mutation" }, CLIENT);
+    const third = await b.broker.createSandbox({ artifact: { hash: candidateHash }, role: "mutation" }, CLIENT);
     const started = b.events.filter((e) => e.type === "episode.started");
     expect(started).toHaveLength(2);
     expect(started[1]).toMatchObject({ episode: 1, parent: { hash: candidateHash } });
+    await b.broker.completeEpisode({ episode: 1, releaseSandboxId: third.sandboxId }, CLIENT);
 
     // And the graduation survives a restart (lineage line is the tombstone).
     await b.broker.close();
@@ -938,6 +2170,90 @@ describe("trusted event ordering and candidacy", () => {
     const restarted = c.events.filter((e) => e.type === "episode.started");
     expect(restarted).toHaveLength(1);
     expect(restarted[0]).toMatchObject({ episode: 2, parent: { hash: candidateHash } });
+  });
+
+  it("continues a failed episode from bytes first produced in a completed episode while refusing foreign bytes", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "cross-episode-continuation"),
+      casDir: path.join(tmpBase, "cas", "cross-episode-continuation"),
+      runId: "run-cross-episode-continuation",
+    };
+    const b = await boot(shared);
+
+    // Episode 0 reproduces the incident's first failure/repair: the failed
+    // snapshot is repaired successfully without changing its canonical bytes,
+    // so the hash graduates to immutable candidate lineage for episode 0.
+    const first = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    b.ctl.execExit = 7;
+    b.ctl.saveTar = candidateTar;
+    await b.broker.exec({ sandboxId: first.sandboxId, argv: ["false"] }, CLIENT);
+    const firstFailure = await b.broker.saveArtifact({ sandboxId: first.sandboxId }, CLIENT);
+    const firstRepair = await b.broker.createSandbox(
+      { artifact: firstFailure, role: "mutation", continueEpisode: 0 },
+      CLIENT,
+    );
+    b.ctl.execExit = 0;
+    await b.broker.exec({ sandboxId: firstRepair.sandboxId, argv: ["true"] }, CLIENT);
+    expect(await b.broker.saveArtifact({ sandboxId: firstRepair.sandboxId }, CLIENT)).toEqual(firstFailure);
+    await b.broker.completeEpisode({ episode: 0 }, CLIENT);
+
+    // Episode 1 fails after producing the exact same canonical bytes. The hash
+    // is old lineage, but this save is fresh durable provenance that authorizes
+    // it as this episode's continuation artifact.
+    const second = await b.broker.createSandbox(
+      { artifact: { hash: baselineHash }, role: "mutation" },
+      CLIENT,
+    );
+    // Membership is episode-exact, not "this hash appeared somewhere": before
+    // episode 1 reproduces these bytes, its episode-0 binding must be refused
+    // before any Docker create side effect.
+    const dockerCreatesBeforeEpisodeBinding = b.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    ).length;
+    await expect(
+      b.broker.createSandbox(
+        { artifact: firstFailure, role: "mutation", continueEpisode: 1 },
+        CLIENT,
+      ),
+    ).rejects.toThrow(`continuation artifact ${firstFailure.hash} does not belong to episode 1`);
+    expect(b.log.filter(
+      (argv) => argv[1] === "run" && argv.includes("-d"),
+    )).toHaveLength(dockerCreatesBeforeEpisodeBinding);
+    b.ctl.execExit = 7;
+    await b.broker.exec({ sandboxId: second.sandboxId, argv: ["false"] }, CLIENT);
+    const secondFailure = await b.broker.saveArtifact({ sandboxId: second.sandboxId }, CLIENT);
+    expect(secondFailure).toEqual(firstFailure);
+
+    // Crash after the failed snapshot is durable but before the repair
+    // sandbox exists. Replay must recover the episode-local binding and make
+    // the incomplete checkpoint genuinely resumable.
+    await b.broker.close();
+    const resumed = await boot(shared);
+
+    await expect(
+      resumed.broker.createSandbox(
+        { artifact: { hash: candidate2Hash }, role: "mutation", continueEpisode: 1 },
+        CLIENT,
+      ),
+    ).rejects.toThrow(`continuation artifact ${candidate2Hash} does not belong to episode 1`);
+    const continued = await resumed.broker.createSandbox(
+      { artifact: secondFailure, role: "mutation", continueEpisode: 1 },
+      CLIENT,
+    );
+    expect(
+      (await stateLines(resumed)).filter((line) => line["t"] === "continuation"),
+    ).toEqual([
+      expect.objectContaining({
+        t: "continuation",
+        hash: secondFailure.hash,
+        parent: baselineHash,
+        episode: 1,
+      }),
+    ]);
+    await resumed.broker.completeEpisode({ episode: 1, releaseSandboxId: continued.sandboxId }, CLIENT);
   });
 
   it("deltaVsBaseline is the paired mean and later artifacts cannot enter the evaluator", async () => {
@@ -992,6 +2308,7 @@ describe("trusted event ordering and candidacy", () => {
       runDir: path.join(tmpBase, "runs", "recover-all"),
       casDir: path.join(tmpBase, "cas", "recover-all"),
       runId: "run-recover-all",
+      now: () => 0,
     };
     const a = await boot(shared);
     a.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2));
@@ -1001,8 +2318,8 @@ describe("trusted event ordering and candidacy", () => {
     a.broker.reportIncumbent({ artifact: { hash: cand } }, CLIENT);
     await a.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "holdout", seed: 0 }, ADMIN);
     a.broker.recordSpend({ tokens: a.broker.manifest.budget.maxTokens, usd: 0 }, ADMIN);
-    const published = [...a.events];
-    expect(published.map((event) => event.type)).toEqual(expect.arrayContaining([
+    const beforeClose = [...a.events];
+    expect(beforeClose.map((event) => event.type)).toEqual(expect.arrayContaining([
       "episode.started",
       "episode.candidate",
       "eval.completed",
@@ -1012,7 +2329,15 @@ describe("trusted event ordering and candidacy", () => {
       "budget.snapshot",
       "budget.exhausted",
     ]));
+    const expectedCloseSnapshot: RunEvent = {
+      runId: a.runId,
+      at: new Date(0).toISOString(),
+      type: "budget.snapshot",
+      budget: a.broker.getBudget(ADMIN),
+    };
     await a.broker.close();
+    const published = [...a.events];
+    expect(published).toEqual([...beforeClose, expectedCloseSnapshot]);
 
     const b = await boot(shared);
     expect(b.broker.replayJournalEvents(published)).toBe(0);
@@ -1026,6 +2351,175 @@ describe("trusted event ordering and candidacy", () => {
     const withGap = published.filter((_event, index) => index !== gapAt);
     const c = await boot(shared);
     expect(() => c.broker.replayJournalEvents(withGap)).toThrow(/non-prefix gap/);
+  });
+  it("keeps the authority order when exact-cap delivery synchronously re-enters the broker", async () => {
+    let clockPaused = false;
+    let now = 0;
+    const a = await boot({
+      manifest: makeManifest({
+        budget: { ...GENEROUS_BUDGET, maxEvaluatorInvocations: 1 },
+      }),
+      now: () => now++,
+      onEvent: (event, broker) => {
+        if (
+          !clockPaused
+          && event.type === "budget.snapshot"
+          && event.budget.spent.evaluatorInvocations === 1
+        ) {
+          clockPaused = true;
+          broker.pauseActiveTime();
+        }
+      },
+    });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+
+    await a.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+
+    const isolationAt = a.events.findIndex((event) => event.type === "evaluator.isolation");
+    expect(isolationAt).toBeGreaterThanOrEqual(0);
+    expect(a.events.slice(isolationAt, isolationAt + 5).map((event) => event.type)).toEqual([
+      "evaluator.isolation",
+      "budget.snapshot",
+      "budget.exhausted",
+      "budget.snapshot",
+      "eval.completed",
+    ]);
+  });
+
+  it("does not let a later immediate event overtake an unready journal transaction", async () => {
+    const a = await boot();
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    a.ctl.evalInspect = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+
+    const evaluating = a.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    await entered.promise;
+    a.broker.pauseActiveTime();
+    expect(a.events.some((event) => event.type === "evaluator.isolation")).toBe(false);
+    expect(a.events.some((event) => event.type === "budget.snapshot")).toBe(false);
+
+    release.resolve();
+    await evaluating;
+    const isolationAt = a.events.findIndex((event) => event.type === "evaluator.isolation");
+    expect(a.events.slice(isolationAt, isolationAt + 4).map((event) => event.type)).toEqual([
+      "evaluator.isolation",
+      "budget.snapshot",
+      "budget.snapshot",
+      "eval.completed",
+    ]);
+  });
+
+  it("finalizes a rejected evaluator transaction before delivering later events", async () => {
+    const a = await boot();
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    a.ctl.evalInspect = () => {
+      throw new Error("rejected evaluator spawn");
+    };
+
+    await expect(
+      a.broker.evaluate(
+        { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+        CLIENT,
+      ),
+    ).rejects.toThrow(/rejected evaluator spawn/);
+    expect(a.events.some((event) => event.type === "evaluator.isolation")).toBe(true);
+    const deliveredAfterFailure = a.events.length;
+
+    a.broker.pauseActiveTime();
+    expect(a.events).toHaveLength(deliveredAfterFailure + 1);
+    expect(a.events.at(-1)?.type).toBe("budget.snapshot");
+  });
+
+  it("accepts only a complete exact shared-budget reorder from a historical journal", async () => {
+    const shared = {
+      runDir: path.join(tmpBase, "runs", "recover-shared-reentry"),
+      casDir: path.join(tmpBase, "cas", "recover-shared-reentry"),
+      runId: "run-recover-shared-reentry",
+      manifest: makeManifest({
+        budget: { ...GENEROUS_BUDGET, maxEvaluatorInvocations: 1 },
+      }),
+      holdoutBudget: 1,
+    };
+    let clockPaused = false;
+    const a = await boot({
+      ...shared,
+      now: () => 0,
+      onEvent: (event, broker) => {
+        if (
+          !clockPaused
+          && event.type === "budget.snapshot"
+          && event.budget.spent.evaluatorInvocations === 1
+        ) {
+          clockPaused = true;
+          broker.pauseActiveTime();
+        }
+      },
+    });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    await a.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    await a.broker.evaluate(
+      { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
+    const published = [...a.events];
+    await a.broker.close();
+
+    const exhaustedAt = published.findIndex((event) => event.type === "budget.exhausted");
+    const laterSnapshotAt = published.findIndex(
+      (event, index) => index > exhaustedAt && event.type === "budget.snapshot",
+    );
+    const laterExclusiveAt = published.findIndex(
+      (event, index) => index > laterSnapshotAt && event.type === "eval.completed",
+    );
+    expect(exhaustedAt).toBeGreaterThanOrEqual(0);
+    expect(laterSnapshotAt).toBeGreaterThan(exhaustedAt);
+    expect(laterExclusiveAt).toBeGreaterThan(laterSnapshotAt);
+    const reordered = [...published];
+    const [nestedSnapshot] = reordered.splice(laterSnapshotAt, 1);
+    expect(nestedSnapshot?.type).toBe("budget.snapshot");
+    reordered.splice(exhaustedAt, 0, nestedSnapshot as RunEvent);
+
+    const recovered = await boot(shared);
+    expect(recovered.broker.replayJournalEvents(reordered)).toBe(0);
+    expect(recovered.events).toEqual([]);
+
+    const truncatedAt = reordered.findIndex((event) => event.type === "eval.completed");
+    expect(truncatedAt).toBeGreaterThan(exhaustedAt);
+    const truncatedAfterInversion = reordered.slice(0, truncatedAt);
+    const rejectsTruncatedInversion = await boot(shared);
+    expect(() => rejectsTruncatedInversion.broker.replayJournalEvents(truncatedAfterInversion)).toThrow(
+      /non-prefix gap/,
+    );
+
+    const tampered = reordered.map((event) =>
+      event === nestedSnapshot && event.type === "budget.snapshot"
+        ? {
+            ...event,
+            budget: {
+              ...event.budget,
+              spent: { ...event.budget.spent, evaluatorInvocations: 0 },
+            },
+          }
+        : event
+    );
+    const rejectsTamper = await boot(shared);
+    expect(() => rejectsTamper.broker.replayJournalEvents(tampered)).toThrow(/non-prefix gap/);
+
+    const missing = reordered.filter((event) => event !== nestedSnapshot);
+    const rejectsMissing = await boot(shared);
+    expect(() => rejectsMissing.broker.replayJournalEvents(missing)).toThrow(/non-prefix gap/);
   });
 });
 
@@ -1148,7 +2642,7 @@ describe("evaluation memo provenance (digests key the cache)", () => {
     expect(evalRuns(a)).toBe(1);
 
     // Different CAPSULE digest, same CAS: miss — a real evaluation runs.
-    const c = await boot({ casDir, capsuleDigest: `sha256:${"1".repeat(64)}` });
+    const c = await boot({ casDir, admittedCapsuleDigest: `sha256:${"1".repeat(64)}` });
     c.ctl.evalOutputs.set(baselineHash, score(1));
     expect((await c.broker.evaluate(coord, CLIENT)).cached).toBe(false);
     expect(evalRuns(c)).toBe(1);
@@ -1176,7 +2670,7 @@ describe("evaluation memo provenance (digests key the cache)", () => {
     const evalRuns = (b: Booted): number => b.log.filter((argv) => argv[1] === "run" && !argv.includes("-d")).length;
     const coord = { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 7 } as const;
 
-    // Same artifact/capsuleDigest/optimizerDigest/group/seed throughout —
+    // Same artifact/admittedCapsuleDigest/optimizerDigest/group/seed throughout —
     // only the evaluator wall-time cap (docker timeout) differs.
     const a = await boot({ casDir, evalTimeoutSec: 600 });
     a.ctl.evalOutputs.set(baselineHash, score(1));
@@ -1402,7 +2896,10 @@ describe("evaluator containment", () => {
     const b = await boot();
     b.ctl.evalOutputs.set(candidateHash, score(2));
     const cand = await saveCandidate(b, candidateTar);
-    await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
+    const record = await b.broker.evaluate(
+      { artifact: { hash: cand }, assetGroupId: "train", seed: 0 },
+      CLIENT,
+    );
     const evalArgv = b.log.find((a) => a[1] === "run" && a.includes("--rm"));
     expect(evalArgv).toBeDefined();
     const argv = evalArgv ?? [];
@@ -1417,6 +2914,9 @@ describe("evaluator containment", () => {
     expect(argv).toContain("--memory");
     expect(argv).toContain("--cpus");
     expect(argv).toContain("no-new-privileges");
+    const apparmorIdx = argv.indexOf("apparmor=hone-evaluator-cgroup");
+    expect(apparmorIdx).toBeGreaterThan(0);
+    expect(argv[apparmorIdx - 1]).toBe("--security-opt");
     // The trusted scorer runs as root so it can drop candidate workers to an
     // unprivileged uid — candidate-to-scorer signal//proc reach is severed.
     const userIdx = argv.indexOf("--user");
@@ -1430,7 +2930,19 @@ describe("evaluator containment", () => {
     // Namespace-unshare authority for the trusted scorer's per-rep preexec
     // isolation; the candidate worker loses it on setuid + no-new-privileges.
     expect(argv).toContain("SYS_ADMIN");
-    const stateTmpfsIdx = argv.indexOf("/tmp:size=16m,nosuid,nodev,noexec");
+    const libmountEnvIdx = argv.indexOf("LIBMOUNT_FORCE_MOUNT2=always");
+    expect(libmountEnvIdx).toBeGreaterThan(0);
+    expect(argv[libmountEnvIdx - 1]).toBe("-e");
+    const workerUidIdx = argv.findIndex((arg) => arg.startsWith("CAPSULE_WORKER_UID="));
+    expect(argv[workerUidIdx]).toBe("CAPSULE_WORKER_UID=2000");
+    expect(argv[workerUidIdx - 1]).toBe("-e");
+    expect(b.events.filter((event) => event.type === "evaluator.queue.entered")).toHaveLength(1);
+    expect(b.events.filter((event) => event.type === "evaluator.queue.acquired")).toHaveLength(1);
+    expect(b.events.find((event) => event.type === "evaluator.isolation")).toMatchObject({
+      isolation: { mode: "shared-uid-lease", workerUid: 2000 },
+    });
+    expect(record.isolation).toMatchObject({ mode: "shared-uid-lease", workerUid: 2000 });
+    const stateTmpfsIdx = argv.indexOf("/tmp:size=2g,nosuid,nodev,noexec");
     expect(stateTmpfsIdx).toBeGreaterThan(0);
     expect(argv[stateTmpfsIdx - 1]).toBe("--tmpfs");
     const shmSizeIdx = argv.indexOf("--shm-size");
@@ -1449,6 +2961,38 @@ describe("evaluator containment", () => {
     expect(argv[tmpfsIdx - 1]).toBe("--tmpfs");
     expect(argv.every((a) => !a.includes("holdout"))).toBe(true);
     expect(argv.every((a) => !a.includes("protected"))).toBe(true);
+  });
+
+  it("runs reviewed dynamic-uid evaluators concurrently on distinct recorded host uids", async () => {
+    const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+    const b = await boot({ manifest });
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const observedUids: number[] = [];
+    const bothStarted = deferred<void>();
+    const release = deferred<void>();
+    b.ctl.evalInspect = async (argv) => {
+      const value = argv.find((arg) => arg.startsWith("CAPSULE_WORKER_UID="));
+      observedUids.push(Number(value?.split("=")[1]));
+      if (observedUids.length === 2) bothStarted.resolve();
+      await release.promise;
+    };
+
+    const evaluations = Promise.all([
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT),
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 1 }, CLIENT),
+    ]);
+    await bothStarted.promise;
+    expect(new Set(observedUids).size).toBe(2);
+    expect(observedUids.every((uid) => uid >= 20_000 && uid <= 20_031)).toBe(true);
+    release.resolve();
+    const records = await evaluations;
+    expect(records.map((record) => record.isolation?.workerUid).sort()).toEqual([...observedUids].sort());
+    expect(records.every((record) => record.isolation?.mode === "reserved-uid")).toBe(true);
+
+    const isolation = b.events.filter((event) => event.type === "evaluator.isolation");
+    expect(isolation).toHaveLength(2);
+    expect(isolation.every((event) => event.isolation.mode === "reserved-uid")).toBe(true);
+    expect(b.events.some((event) => event.type === "evaluator.queue.entered")).toBe(false);
   });
 
   it("terminal holdout mounts the full evaluator artifact separately and rejects protected-path reintroduction", async () => {
@@ -1496,8 +3040,46 @@ describe("evaluator containment", () => {
     );
   });
 
-  it("shares one pause lease across concurrent evaluators and blocks mutation Docker work until the last reap", async () => {
+  it("serializes concurrent evaluator Docker sections through the host-wide uid gate", async () => {
     const b = await boot();
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const firstStarted = deferred<void>();
+    const secondStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const releaseSecond = deferred<void>();
+    let started = 0;
+    b.ctl.evalInspect = async () => {
+      started += 1;
+      if (started === 1) {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+      } else {
+        secondStarted.resolve();
+        await releaseSecond.promise;
+      }
+    };
+
+    const evalA = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 10 }, CLIENT);
+    const evalB = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 11 }, CLIENT);
+    await firstStarted.promise;
+    // Exercise the real abstract-socket bind race for one event-loop turn:
+    // without the Broker integration the second fake evaluator enters now.
+    const contendersRan = deferred<void>();
+    setImmediate(contendersRan.resolve);
+    await contendersRan.promise;
+    const serializedBeforeRelease = started === 1;
+
+    releaseFirst.resolve();
+    await secondStarted.promise;
+    releaseSecond.resolve();
+    await Promise.all([evalA, evalB]);
+    expect(serializedBeforeRelease).toBe(true);
+    expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(2);
+  });
+
+  it("shares one pause lease across concurrent reserved-uid evaluators and blocks mutation Docker work until the last reap", async () => {
+    const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+    const b = await boot({ manifest });
     const optimizer = "e".repeat(64);
     b.ctl.quiesceContainers = [optimizer];
     b.ctl.evalOutputs.set(baselineHash, score(1));
@@ -1523,6 +3105,247 @@ describe("evaluator containment", () => {
     expect(b.log.filter((argv) => argv[1] === "pause" && argv[2] === optimizer)).toHaveLength(1);
     expect(b.log.filter((argv) => argv[1] === "unpause" && argv[2] === optimizer)).toHaveLength(1);
     expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(2);
+  });
+
+  it(
+    "quarantines an isolation lease after failed evaluator removal until a later sweep proves the container gone",
+    { timeout: 10_000 },
+    async () => {
+      // Occupy all but one slot. The failed evaluator takes the sole
+      // remainder; its successor must queue until a DIFFERENT slot is freed.
+      // This deterministically kills a premature-release mutant.
+      const heldLeases = await Promise.all(Array.from(
+        { length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN },
+        (_, index) => acquireReservedEvaluatorUid({
+          evaluatorContainer: `hone-test-quarantine-holder-eval-${index.toString(16).padStart(12, "0")}`,
+        }),
+      ));
+      try {
+        const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+        const b = await boot({ manifest, reaperIntervalMs: 10 });
+        b.ctl.evalOutputs.set(baselineHash, score(1));
+        const workerUids: number[] = [];
+        const secondStarted = deferred<void>();
+        let failedContainer = "";
+        b.ctl.evalInspect = (argv) => {
+          const uidEnv = argv.find((arg) => arg.startsWith("CAPSULE_WORKER_UID="));
+          workerUids.push(Number(uidEnv?.split("=")[1]));
+          if (failedContainer.length === 0) {
+            const nameIndex = argv.indexOf("--name");
+            failedContainer = argv[nameIndex + 1] ?? "";
+            b.ctl.rmThrowFor.add(failedContainer);
+          } else {
+            secondStarted.resolve();
+          }
+        };
+
+        await expect(
+          b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 20 }, CLIENT),
+        ).rejects.toThrow(/evaluator cleanup failed/);
+        expect(b.events).toContainEqual(
+          expect.objectContaining({
+            type: "evaluator.isolation.quarantined",
+            evaluatorContainer: failedContainer,
+            isolation: expect.objectContaining({ mode: "reserved-uid", workerUid: workerUids[0] }),
+          }),
+        );
+
+        const secondEvaluation = b.broker.evaluate(
+          { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 21 },
+          CLIENT,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(workerUids).toHaveLength(1);
+        const releasedUids = new Set(heldLeases.map((lease) => lease.uid));
+        await Promise.all(heldLeases.map((lease) => lease.release()));
+        heldLeases.length = 0;
+        await secondStarted.promise;
+        await secondEvaluation;
+        expect(workerUids).toHaveLength(2);
+        expect(workerUids[1]).not.toBe(workerUids[0]);
+        expect(releasedUids.has(workerUids[1] ?? -1)).toBe(true);
+
+        b.ctl.rmThrowFor.delete(failedContainer);
+        await vi.waitFor(() => {
+          expect(b.events).toContainEqual(
+            expect.objectContaining({
+              type: "evaluator.isolation.released",
+              evaluatorContainer: failedContainer,
+              isolation: expect.objectContaining({ workerUid: workerUids[0] }),
+            }),
+          );
+        });
+        const durableEvents = (await stateLines(b)).filter((line) => line.t === "event").map((line) => line.event);
+        expect(durableEvents).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: "evaluator.isolation.quarantined", evaluatorContainer: failedContainer }),
+            expect.objectContaining({ type: "evaluator.isolation.released", evaluatorContainer: failedContainer }),
+          ]),
+        );
+      } finally {
+        await Promise.all(heldLeases.map((lease) => lease.release()));
+      }
+    },
+  );
+
+  it("durably diagnoses and takes over an ownerless evaluator claim after Docker proves its container absent", async () => {
+    const heldLeases = await Promise.all(Array.from(
+      { length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN },
+      (_, index) => acquireReservedEvaluatorUid({
+        evaluatorContainer: `hone-test-takeover-holder-eval-${index.toString(16).padStart(12, "0")}`,
+      }),
+    ));
+    let claimPath = "";
+    try {
+      const occupied = new Set(heldLeases.map((lease) => lease.uid));
+      const ownerUid = Array.from(
+        { length: RESERVED_EVALUATOR_UID_MAX - RESERVED_EVALUATOR_UID_MIN + 1 },
+        (_, index) => RESERVED_EVALUATOR_UID_MIN + index,
+      ).find((uid) => !occupied.has(uid));
+      expect(ownerUid).toBeDefined();
+      const ownerAllocationId = "d".repeat(32);
+      const ownerContainer = "hone-crashed-owner-eval-deadbeef0001";
+      claimPath = path.join(tmpdir(), "hone-evaluator-nproc-v2.queue", `.uid-claim-${ownerUid}.json`);
+      await writeFile(
+        claimPath,
+        `${JSON.stringify({
+          version: 1,
+          uid: ownerUid,
+          allocationId: ownerAllocationId,
+          evaluatorContainer: ownerContainer,
+          createdAt: "2026-08-21T00:00:00.000Z",
+        })}\n`,
+        { encoding: "utf8", mode: 0o600, flag: "wx" },
+      );
+
+      const manifest = makeManifest({ id: "cap_21e8600c6f5a" });
+      const b = await boot({ manifest });
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 22 }, CLIENT);
+
+      expect(b.log).toContainEqual(["docker", "rm", "-f", "-v", ownerContainer]);
+      const durableFacts = await stateLines(b);
+      const blocked = durableFacts.find((line) => line.t === "uidClaimBlocked");
+      const takenOver = durableFacts.find((line) => line.t === "uidClaimTakeover");
+      expect(blocked).toMatchObject({
+        t: "uidClaimBlocked",
+        claimPath,
+        workerUid: ownerUid,
+        ownerAllocationId,
+        evaluatorContainer: ownerContainer,
+      });
+      expect(takenOver).toMatchObject({
+        t: "uidClaimTakeover",
+        claimPath,
+        workerUid: ownerUid,
+        ownerAllocationId,
+        evaluatorContainer: ownerContainer,
+        newEvaluatorContainer: expect.stringMatching(/^hone-.*-eval-[0-9a-f]{12}$/),
+      });
+    } finally {
+      await rm(claimPath, { force: true });
+      await Promise.all(heldLeases.map((lease) => lease.release()));
+    }
+  });
+
+  it("aborts a queued host-gate acquisition when the broker closes without burning an invocation", async () => {
+    const gateLease = await acquireHostEvaluatorGate({
+      evaluatorContainer: "hone-test-close-gate-eval-000000000001",
+    });
+    try {
+      const b = await boot();
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      const evaluation = b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 12 }, CLIENT);
+      const rejected = expect(evaluation).rejects.toThrow("host evaluator gate acquisition aborted");
+      await b.broker.close();
+      await rejected;
+      expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(0);
+      expect(b.log.some((argv) => argv[1] === "run" && argv.includes("--rm"))).toBe(false);
+    } finally {
+      await gateLease.release();
+    }
+  });
+
+  it("rechecks wall-clock budget after shared-uid queue acquisition before burning an invocation", async () => {
+    let nowMs = 0;
+    const gateLease = await acquireHostEvaluatorGate({
+      evaluatorContainer: "hone-test-budget-gate-eval-000000000001",
+    });
+    try {
+      const manifest = makeManifest({ budget: { ...GENEROUS_BUDGET, maxWallClockSec: 1 } });
+      const b = await boot({ manifest, now: () => nowMs });
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      const evaluation = b.broker.evaluate(
+        { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 13 },
+        CLIENT,
+      );
+      await vi.waitFor(() => {
+        expect(b.events.some((event) => event.type === "evaluator.queue.entered")).toBe(true);
+      });
+      nowMs = 2_000;
+      await gateLease.release();
+      await expect(evaluation).rejects.toThrow("budget dimension exhausted: wallClockSec");
+      expect(b.events).toContainEqual(expect.objectContaining({
+        type: "evaluator.queue.acquired",
+      }));
+      expect(b.events).toContainEqual(expect.objectContaining({
+        type: "budget.exhausted",
+        dimension: "wallClockSec",
+      }));
+      expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(0);
+      expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(0);
+    } finally {
+      await gateLease.release();
+    }
+  });
+
+  it("preserves active spend across a durable pause/restart without charging the offline gap", async () => {
+    let nowMs = 0;
+    const manifest = makeManifest({
+      budget: { ...GENEROUS_BUDGET, maxWallClockSec: 2 },
+    });
+    const shared = {
+      manifest,
+      runId: "run-active-wallclock-restart",
+      runDir: path.join(tmpBase, "runs", "active-wallclock-restart"),
+      casDir: path.join(tmpBase, "cas", "active-wallclock-restart"),
+      now: () => nowMs,
+    };
+    const first = await boot(shared);
+
+    nowMs = 600;
+    first.broker.recordSpend({ tokens: 1, usd: 0 }, ADMIN);
+    nowMs = 800;
+    first.broker.pauseActiveTime();
+    expect(first.broker.getBudget(ADMIN)).toMatchObject({
+      spent: { wallClockSec: 0.8 },
+      lifetimeSec: 0.8,
+    });
+    await first.broker.close();
+
+    // The process is absent for 100x the active interval. Lifetime retains
+    // that operator signal, but the budget level resumes exactly at 0.8s.
+    nowMs = 100_800;
+    const resumed = await boot(shared);
+    expect(resumed.broker.getBudget(ADMIN)).toMatchObject({
+      spent: { wallClockSec: 0.8 },
+      lifetimeSec: 100.8,
+    });
+
+    nowMs = 101_200;
+    expect(resumed.broker.getBudget(ADMIN)).toMatchObject({
+      spent: { wallClockSec: 1.2 },
+      lifetimeSec: 101.2,
+    });
+    expect(resumed.broker.getBudgetExhaustion(ADMIN)).toBeUndefined();
+    resumed.broker.snapshotBudget(ADMIN);
+    expect(resumed.events.at(-1)).toMatchObject({
+      type: "budget.snapshot",
+      budget: {
+        spent: { wallClockSec: 1.2 },
+        lifetimeSec: 101.2,
+      },
+    });
   });
 
   it("poisons further broker operations when a paused container cannot be released", async () => {
@@ -1572,10 +3395,10 @@ describe("evaluator containment", () => {
           manifest,
           capsuleRootDir,
           baselineArtifactHash: baselineHash,
-          capsuleDigest: TEST_CAPSULE_DIGEST,
+          admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
           optimizerDigest: TEST_OPTIMIZER_DIGEST,
           holdoutLedgerPath: path.join(tmpBase, "runs", "overlap", "holdout-ledger.ndjson"),
-          image: TEST_IMAGE,
+          executionImage: TEST_IMAGE,
           runDir: path.join(tmpBase, "runs", "overlap"),
           casDir: path.join(tmpBase, "cas", "overlap"),
           onEvent: () => {},
@@ -1601,10 +3424,10 @@ describe("evaluator containment", () => {
         }),
         capsuleRootDir: evilRoot,
         baselineArtifactHash: baselineHash,
-        capsuleDigest: TEST_CAPSULE_DIGEST,
+        admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
         optimizerDigest: TEST_OPTIMIZER_DIGEST,
         holdoutLedgerPath: path.join(tmpBase, "runs", "symlink", "holdout-ledger.ndjson"),
-        image: TEST_IMAGE,
+        executionImage: TEST_IMAGE,
         runDir: path.join(tmpBase, "runs", "symlink"),
         casDir: path.join(tmpBase, "cas", "symlink"),
         onEvent: () => {},
@@ -1635,10 +3458,10 @@ describe("evaluator containment", () => {
           }),
           capsuleRootDir: evilRoot,
           baselineArtifactHash: baselineHash,
-          capsuleDigest: TEST_CAPSULE_DIGEST,
+          admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
           optimizerDigest: TEST_OPTIMIZER_DIGEST,
           holdoutLedgerPath: path.join(tmpBase, "runs", "hardlink", "holdout-ledger.ndjson"),
-          image: TEST_IMAGE,
+          executionImage: TEST_IMAGE,
           runDir: path.join(tmpBase, "runs", "hardlink"),
           casDir: path.join(tmpBase, "cas", "hardlink"),
           onEvent: () => {},
@@ -1667,10 +3490,10 @@ describe("evaluator containment", () => {
           }),
           capsuleRootDir: evilRoot,
           baselineArtifactHash: baselineHash,
-          capsuleDigest: TEST_CAPSULE_DIGEST,
+          admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
           optimizerDigest: TEST_OPTIMIZER_DIGEST,
           holdoutLedgerPath: path.join(tmpBase, "runs", "nested-hardlink", "holdout-ledger.ndjson"),
-          image: TEST_IMAGE,
+          executionImage: TEST_IMAGE,
           runDir: path.join(tmpBase, "runs", "nested-hardlink"),
           casDir: path.join(tmpBase, "cas", "nested-hardlink"),
           onEvent: () => {},
@@ -1682,6 +3505,16 @@ describe("evaluator containment", () => {
 // ---------- lifecycle and resources ----------
 
 describe("sandbox lifecycle and resource ceilings", () => {
+  it("refuses a forged sandbox reference before invoking Docker", async () => {
+    const b = await boot();
+    const callsBefore = b.log.length;
+
+    await expect(
+      b.broker.exec({ sandboxId: "sb_forged", argv: ["true"] }, CLIENT),
+    ).rejects.toThrow("unknown sandbox: sb_forged");
+    expect(b.log).toHaveLength(callsBefore);
+  });
+
   it("caps concurrently active sandboxes", async () => {
     const b = await boot({ maxActiveSandboxes: 2 });
     await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
@@ -1699,6 +3532,7 @@ describe("sandbox lifecycle and resource ceilings", () => {
     expect(argv).toContain("--memory");
     expect(argv).toContain("--cpus");
     expect(argv).toContain("no-new-privileges");
+    expect(argv).not.toContain("apparmor=hone-evaluator-cgroup");
     // SYS_ADMIN is trusted-evaluator-only authority — a mutation sandbox
     // (candidate-controlled code) must never receive it.
     expect(argv).not.toContain("SYS_ADMIN");
@@ -1710,7 +3544,7 @@ describe("sandbox lifecycle and resource ceilings", () => {
     b.ctl.execExit = "timeout";
     const res = await b.broker.exec({ sandboxId, argv: ["sleep", "999"], timeoutSec: 1 }, CLIENT);
     expect(res.exitCode).toBe(124);
-    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "c_0")).toBe(true);
+    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v" && a[4] === "c_0")).toBe(true);
     await expect(b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT)).rejects.toThrow(/unknown sandbox/);
   });
 
@@ -1723,7 +3557,7 @@ describe("sandbox lifecycle and resource ceilings", () => {
     const evalArgv = b.log.find((a) => a[1] === "run" && a.includes("--rm")) ?? [];
     const evalName = evalArgv[evalArgv.indexOf("--name") + 1] ?? "";
     expect(evalName).toMatch(/-eval-/);
-    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === evalName)).toBe(true);
+    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v" && a[4] === evalName)).toBe(true);
     expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(1);
   });
 
@@ -1734,6 +3568,21 @@ describe("sandbox lifecycle and resource ceilings", () => {
     expect(argv).toContain("--read-only");
     expect(argv).toContain(`/workspace:rw,exec,nosuid,nodev,size=1073741824,nr_inodes=${WORKSPACE_TMPFS_INODES},mode=1777`);
     expect(argv).toContain("/tmp:rw,exec,nosuid,nodev,size=67108864,mode=1777");
+  });
+  it("forces the uid-1000 writable home for every image and ignores mutation-env HOME overrides", async () => {
+    const b = await boot({ mutationEnv: { HOME: "/image-or-caller-home", OTHER: "kept" } });
+    await b.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const argv = b.log.find((entry) => entry[1] === "run" && entry.includes("-d")) ?? [];
+    const user = argv.indexOf("--user");
+    expect(argv[user + 1]).toBe(MUTATION_SANDBOX_USER);
+    expect(argv).toContain(
+      `${MUTATION_SANDBOX_HOME}:rw,exec,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000`,
+    );
+    const environment = argv.flatMap((value, index) => value === "-e" ? [argv[index + 1]] : []);
+    expect(environment).toContain("OTHER=kept");
+    expect(environment.filter((value) => value?.startsWith("HOME="))).toEqual([
+      `HOME=${MUTATION_SANDBOX_HOME}`,
+    ]);
   });
   it("extracts mutation artifacts inside /workspace as the fixed uid", async () => {
     const b = await boot();
@@ -1939,13 +3788,22 @@ describe("trusted probe evidence (episode-tagged evals + broker-authored gate.pa
     const gates = b.events.filter((e) => e.type === "gate.paired");
     expect(gates).toHaveLength(1);
     // Broker-authored scores from the trusted table — never optimizer claims.
-    expect(gates[0]).toMatchObject({ episode: 0, parentScore: 1, childScore: 2, passed: true });
+    expect(gates[0]).toMatchObject({
+      episode: 0,
+      parentScore: 1,
+      childScore: 2,
+      delta: 1,
+      noiseFloor: 0,
+      noiseEnvelope: 0,
+      decision: "promote",
+      passed: true,
+    });
     const types = b.events.map((e) => e.type);
     expect(types.indexOf("gate.paired")).toBe(types.lastIndexOf("eval.completed") + 1);
     expect(types.indexOf("incumbent.new")).toBeGreaterThan(types.indexOf("gate.paired"));
   });
 
-  it("greedy gate: a child that does not strictly beat its parent pairs with passed:false", async () => {
+  it("calibrated gate records why a child did not beat its parent", async () => {
     const b = await boot();
     b.ctl.evalOutputs.set(baselineHash, score(2)).set(candidateHash, score(2));
     const cand = await saveCandidate(b, candidateTar);
@@ -1953,7 +3811,16 @@ describe("trusted probe evidence (episode-tagged evals + broker-authored gate.pa
     await b.broker.evaluate({ artifact: { hash: cand }, assetGroupId: "train", seed: 0 }, CLIENT);
     const gates = b.events.filter((e) => e.type === "gate.paired");
     expect(gates).toHaveLength(1);
-    expect(gates[0]).toMatchObject({ episode: 0, parentScore: 2, childScore: 2, passed: false });
+    expect(gates[0]).toMatchObject({
+      episode: 0,
+      parentScore: 2,
+      childScore: 2,
+      delta: 0,
+      noiseFloor: 0,
+      noiseEnvelope: 0,
+      decision: "refuse-no-improvement",
+      passed: false,
+    });
   });
 
   it("no same-coordinate parent score → tagged eval but NO gate is authored", async () => {
@@ -2153,10 +4020,11 @@ describe("terminal saveArtifact (a successful save retires the sandbox)", () => 
     const saved = await b.broker.saveArtifact({ sandboxId }, CLIENT);
     expect(saved.hash).toBe(candidateHash);
     // The container (c_0: first -d spawn of this boot) was removed BEFORE the ack.
-    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "c_0")).toBe(true);
+    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v" && a[4] === "c_0")).toBe(true);
     // The entry is gone — the slot and its proxy bearer are released.
     await expect(b.broker.exec({ sandboxId, argv: ["true"] }, CLIENT)).rejects.toThrow(/sandbox/i);
     // Iteration resumes from the saved CAS artifact in a FRESH sandbox.
+    await b.broker.completeEpisode({ episode: 0 }, CLIENT);
     const next = await b.broker.createSandbox({ artifact: { hash: saved.hash }, role: "mutation" }, CLIENT);
     expect(next.sandboxId).not.toBe(sandboxId);
   });
@@ -2187,7 +4055,11 @@ describe("terminal saveArtifact (a successful save retires the sandbox)", () => 
     // survives to retain /scratch, an active slot, or the injected proxy token.
     const spawned = b.log.filter((a) => a[1] === "run" && a.includes("-d"));
     expect(spawned).toHaveLength(8);
-    const removed = new Set(b.log.filter((a) => a[1] === "rm" && a[2] === "-f").map((a) => a[3]));
+    const removed = new Set(
+      b.log
+        .filter((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v")
+        .map((a) => a[4]),
+    );
     for (let i = 0; i < 8; i++) expect(removed.has(`c_${i}`), `container c_${i} must be removed`).toBe(true);
   });
 
@@ -2267,7 +4139,7 @@ describe("broker close quiescence", () => {
     const evalRun = b.log.find((a) => a[1] === "run" && !a.includes("-d"));
     const evalName = evalRun?.[evalRun.indexOf("--name") + 1] ?? "";
     expect(evalName).toMatch(/-eval-/);
-    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === evalName)).toBe(true);
+    expect(b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v" && a[4] === evalName)).toBe(true);
     // The staged assets were torn down even on the aborted path.
     expect((await readdir(path.join(b.runDir, "tmp"))).filter((e) => e.startsWith("assets-"))).toHaveLength(0);
   });
@@ -2277,7 +4149,7 @@ describe("broker close quiescence", () => {
     // c_0 is the scratch keeper's daemon id; the sandbox container is c_1.
     b.ctl.rmFailFor.add("c_1");
     await expect(b.broker.close()).rejects.toThrow(/containers still live: c_1/);
-    expect(b.log.filter((argv) => argv[1] === "rm" && argv[3] === "c_1").length).toBeGreaterThanOrEqual(2);
+    expect(b.log.filter((argv) => argv[1] === "rm" && argv[3] === "-v" && argv[4] === "c_1").length).toBeGreaterThanOrEqual(2);
     expect(
       b.log.some(
         (argv) => argv[1] === "exec" && argv.includes(`hone-scratch-keeper-${b.runId}`) && argv.includes("/bin/sh"),
@@ -2310,10 +4182,10 @@ describe("live docker smoke (quota volume + full loop, no leaks)", () => {
       manifest: makeManifest(),
       capsuleRootDir,
       baselineArtifactHash: baselineHash,
-      capsuleDigest: TEST_CAPSULE_DIGEST,
+      admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
       optimizerDigest: TEST_OPTIMIZER_DIGEST,
       holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
-      image: TEST_IMAGE,
+      executionImage: TEST_IMAGE,
       runDir,
       casDir,
       onEvent: (e) => events.push(e),

@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { BudgetEnvelope, IMAGE_DIGEST_REF } from "./capsule.js";
+import { AdmissionApprovalBasis } from "./admission.js";
 import { M2_INNER_MODEL_ROUTE, M2_OUTER_MODEL_ROUTE } from "./proxy.js";
 import { canonicalJson } from "./canonical.js";
-import { PromotionRule } from "./runconfig.js";
+import { PromotionRule, SessionNoYieldMaxTokens } from "./runconfig.js";
 
 /**
  * Contract 6 — M1 meta-campaign config (WP-M1-0).
@@ -33,6 +34,311 @@ export const M1_ALLOWED_CLAIM = "directional-reversible-frozen-corpus";
 const SHA256 = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 const GIT_COMMIT = z.string().regex(/^[0-9a-f]{40}$/);
 
+export const CampaignOptimizerBundleIdentityV1 = z.object({
+  sourceArtifact: SHA256,
+  bundleDigest: SHA256,
+}).strict();
+export type CampaignOptimizerBundleIdentityV1 = z.infer<typeof CampaignOptimizerBundleIdentityV1>;
+
+export const CampaignOptimizerRunRefreezeV1 = z.object({
+  runId: z.string().min(1),
+  image: z.string().regex(IMAGE_DIGEST_REF),
+  from: z.object({
+    sourceArtifact: SHA256,
+    baseDigest: SHA256,
+    bundleDigest: SHA256,
+    contractHash: SHA256,
+  }).strict(),
+  to: z.object({
+    sourceArtifact: SHA256,
+    baseDigest: SHA256,
+    bundleDigest: SHA256,
+    contractHash: SHA256,
+  }).strict(),
+}).strict();
+export type CampaignOptimizerRunRefreezeV1 = z.infer<typeof CampaignOptimizerRunRefreezeV1>;
+
+/**
+ * An optimizer refreeze is an engine migration, not a capsule image re-pin.
+ * It rebuilds target/controller/control bundles over the retained authenticated
+ * optimizer base, so the scientific base stays byte-identical while engine
+ * source artifacts advance through the source-migration record chain.
+ */
+export const CampaignOptimizerRefreezeV1 = z.object({
+  optimizerImage: z.string().regex(IMAGE_DIGEST_REF),
+  fromOptimizerBaseDigest: SHA256,
+  optimizerBaseDigest: SHA256,
+  seed: z.object({
+    from: CampaignOptimizerBundleIdentityV1,
+    to: CampaignOptimizerBundleIdentityV1,
+  }).strict(),
+  controller: z.object({
+    from: CampaignOptimizerBundleIdentityV1,
+    to: CampaignOptimizerBundleIdentityV1,
+  }).strict(),
+  controls: z.object({
+    broken: z.object({
+      from: CampaignOptimizerBundleIdentityV1,
+      to: CampaignOptimizerBundleIdentityV1,
+    }).strict(),
+    degraded: z.object({
+      from: CampaignOptimizerBundleIdentityV1,
+      to: CampaignOptimizerBundleIdentityV1,
+    }).strict(),
+  }).strict(),
+  runs: z.array(CampaignOptimizerRunRefreezeV1),
+}).strict();
+export type CampaignOptimizerRefreezeV1 = z.infer<typeof CampaignOptimizerRefreezeV1>;
+
+/**
+ * Explicit provenance for the only sanctioned mutation of a frozen campaign:
+ * moving its trusted source closure to a new commit. The record digests are
+ * checked by the trusted meta runner; the schema keeps the persisted surface
+ * narrow and rejects unregistered migration metadata.
+ */
+export const CampaignSourceMigrationV1 = z.object({
+  version: z.literal(1),
+  at: z.string().datetime({ offset: true }),
+  from: GIT_COMMIT,
+  to: GIT_COMMIT,
+  fromBootDigest: SHA256,
+  bootDigest: SHA256,
+  reason: z.string().min(1).max(4_096),
+  optimizerRefreeze: CampaignOptimizerRefreezeV1.optional(),
+  operator: z.string().min(1).max(256).optional(),
+  previousRecordDigest: SHA256.nullable(),
+  recordDigest: SHA256,
+}).strict();
+export type CampaignSourceMigrationV1 = z.infer<typeof CampaignSourceMigrationV1>;
+
+export const CampaignSourceMigrationJournalV1 = z.object({
+  version: z.literal(1),
+  /** Hash of the exact pre-migration frozen config; remains the campaign identity. */
+  campaignConfigHash: SHA256,
+  migrations: z.array(CampaignSourceMigrationV1).min(1),
+}).strict();
+export type CampaignSourceMigrationJournalV1 = z.infer<typeof CampaignSourceMigrationJournalV1>;
+
+/**
+ * Provenance for a sanctioned replacement of one capsule's unavailable image.
+ * The equivalence record is hashed as exact bytes before this record is
+ * appended; consumers can therefore distinguish re-pinned campaigns from the
+ * original image-bound freeze.
+ */
+export const CampaignImageRepinV1 = z.object({
+  version: z.literal(1),
+  at: z.string().datetime({ offset: true }),
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  fromImage: z.string().regex(IMAGE_DIGEST_REF),
+  toImage: z.string().regex(IMAGE_DIGEST_REF),
+  evidencePath: z.string().min(1).max(4_096),
+  evidenceSha256: SHA256,
+  reason: z.string().min(1).max(4_096),
+  operator: z.string().min(1).max(256).optional(),
+  previousRecordDigest: SHA256.nullable(),
+  recordDigest: SHA256,
+}).strict();
+export type CampaignImageRepinV1 = z.infer<typeof CampaignImageRepinV1>;
+
+export const CampaignImageRepinJournalV1 = z.object({
+  version: z.literal(1),
+  /** Hash of the exact pre-repin frozen config; remains the campaign identity. */
+  campaignConfigHash: SHA256,
+  repins: z.array(CampaignImageRepinV1).min(1),
+}).strict();
+export type CampaignImageRepinJournalV1 = z.infer<typeof CampaignImageRepinJournalV1>;
+
+const CampaignImageEquivalenceReplayV1 = z.object({
+  artifact: SHA256,
+  recordedScore: z.number().finite(),
+  reproducedScores: z.array(z.number().finite()).min(3),
+}).strict().superRefine((replay, ctx) => {
+  for (const [index, score] of replay.reproducedScores.entries()) {
+    if (score !== replay.recordedScore) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reproducedScores", index],
+        message: `reproduced score ${score} does not exactly match recorded score ${replay.recordedScore}`,
+      });
+    }
+  }
+});
+
+const SourceLineCitationV1 = z.object({
+  line: z.number().int().positive(),
+  exactSourceLine: z.string().min(1).max(4_096),
+}).strict();
+
+export const CampaignImageStructuralNondeterminismProofV1 = z.object({
+  evaluatorSourcePath: z.string().min(1).max(4_096),
+  evaluatorSourceSha256: SHA256,
+  seedEnvironmentVariable: z.literal("HONE_SEED"),
+  entropySources: z.array(SourceLineCitationV1).min(1),
+  timingSources: z.array(SourceLineCitationV1).min(1),
+}).strict();
+export type CampaignImageStructuralNondeterminismProofV1 =
+  z.infer<typeof CampaignImageStructuralNondeterminismProofV1>;
+
+export const CampaignImageDistributionPreregistrationV1 = z.object({
+  version: z.literal(1),
+  evidenceMode: z.literal("distribution-preregistration"),
+  registeredAt: z.string().datetime({ offset: true }),
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  fromImage: z.string().regex(IMAGE_DIGEST_REF),
+  toImage: z.string().regex(IMAGE_DIGEST_REF),
+  structuralNondeterminism: CampaignImageStructuralNondeterminismProofV1,
+  measurementPlan: z.object({
+    replicatesPerArtifact: z.number().int().min(12),
+    k: z.literal(0.5),
+  }).strict(),
+  baseline: z.object({
+    artifact: SHA256,
+    historicalScore: z.number().finite(),
+  }).strict(),
+  settledCandidate: z.object({
+    artifact: SHA256,
+    historicalScore: z.number().finite(),
+  }).strict(),
+}).strict();
+export type CampaignImageDistributionPreregistrationV1 =
+  z.infer<typeof CampaignImageDistributionPreregistrationV1>;
+
+const CampaignImageDistributionReplayV1 = z.object({
+  artifact: SHA256,
+  historicalScore: z.number().finite(),
+  rawScores: z.array(z.number().finite()).min(12),
+  min: z.number().finite(),
+  max: z.number().finite(),
+  mean: z.number().finite(),
+  selfSpread: z.number().finite().nonnegative(),
+  relativeMeanOffset: z.number().finite().nonnegative(),
+}).strict().superRefine((replay, ctx) => {
+  const min = Math.min(...replay.rawScores);
+  const max = Math.max(...replay.rawScores);
+  const mean = replay.rawScores.reduce((sum, score) => sum + score, 0) / replay.rawScores.length;
+  const denominator = Math.abs(mean);
+  const selfSpread = denominator === 0 ? 0 : (max - min) / denominator;
+  const relativeMeanOffset = denominator === 0
+    ? Math.abs(replay.historicalScore - mean)
+    : Math.abs(replay.historicalScore - mean) / denominator;
+  for (const [path, actual, expected] of [
+    ["min", replay.min, min],
+    ["max", replay.max, max],
+    ["mean", replay.mean, mean],
+    ["selfSpread", replay.selfSpread, selfSpread],
+    ["relativeMeanOffset", replay.relativeMeanOffset, relativeMeanOffset],
+  ] as const) {
+    if (!Object.is(actual, expected)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [path],
+        message: `${path} does not match the raw score distribution`,
+      });
+    }
+  }
+  if (replay.historicalScore < min || replay.historicalScore > max) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["historicalScore"],
+      message: "historical score is outside the rebuilt distribution range",
+    });
+  }
+  if (!(relativeMeanOffset < 0.5 * selfSpread)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["relativeMeanOffset"],
+      message: "relative mean offset must be less than 0.5 times self-spread",
+    });
+  }
+});
+
+const CampaignImageExactEquivalenceEvidenceV1 = z.object({
+  version: z.literal(1),
+  generatedAt: z.string().datetime({ offset: true }),
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  fromImage: z.string().regex(IMAGE_DIGEST_REF),
+  toImage: z.string().regex(IMAGE_DIGEST_REF),
+  baseline: CampaignImageEquivalenceReplayV1,
+  settledCandidate: CampaignImageEquivalenceReplayV1,
+  tripwires: z.array(z.object({
+    name: z.string().min(1).max(512),
+    passed: z.literal(true),
+  }).strict()).min(1),
+  modelCalls: z.literal(0),
+  result: z.literal("passed"),
+}).strict();
+
+const CampaignImageDistributionEquivalenceEvidenceV1 = z.object({
+  version: z.literal(1),
+  evidenceMode: z.literal("distribution"),
+  generatedAt: z.string().datetime({ offset: true }),
+  measurementStartedAt: z.string().datetime({ offset: true }),
+  measurementCompletedAt: z.string().datetime({ offset: true }),
+  capsuleId: z.string().regex(/^cap_[0-9a-f]{12}$/),
+  fromImage: z.string().regex(IMAGE_DIGEST_REF),
+  toImage: z.string().regex(IMAGE_DIGEST_REF),
+  preRegistrationPath: z.string().min(1).max(4_096),
+  preRegistrationSha256: SHA256,
+  structuralNondeterminism: CampaignImageStructuralNondeterminismProofV1,
+  k: z.literal(0.5),
+  exploratoryMeasurements: z.object({
+    excluded: z.literal(true),
+    statement: z.literal(
+      "Pre-registration measurements were exploratory and are excluded; only post-pre-registration measurements are confirmatory.",
+    ),
+  }).strict(),
+  baseline: CampaignImageDistributionReplayV1,
+  settledCandidate: CampaignImageDistributionReplayV1,
+  tripwires: z.array(z.object({
+    name: z.string().min(1).max(512),
+    passed: z.literal(true),
+  }).strict()).min(1),
+  modelCalls: z.literal(0),
+  result: z.literal("passed"),
+}).strict();
+
+/**
+ * Exact replay remains the default. Distribution evidence is a separate,
+ * fail-closed arm for evaluators proven not to consume HONE_SEED.
+ */
+export const CampaignImageEquivalenceEvidenceV1 = z.union([
+  CampaignImageExactEquivalenceEvidenceV1,
+  CampaignImageDistributionEquivalenceEvidenceV1,
+]);
+export type CampaignImageEquivalenceEvidenceV1 = z.infer<typeof CampaignImageEquivalenceEvidenceV1>;
+
+/**
+ * Durable binding from one frozen campaign to a content-addressed copy of
+ * the exact source and installed dependency bytes needed to reconstruct its
+ * optimizer base. The referenced manifest and tree live in the campaign CAS;
+ * the trusted runtime verifies those artifacts before restore.
+ */
+export const CampaignRuntimeClosureCaptureV1 = z.object({
+  version: z.literal(1),
+  at: z.string().datetime({ offset: true }),
+  sourceCommit: GIT_COMMIT,
+  bootDigest: SHA256,
+  /** Campaign engine boot identity in force when this historical base was captured. */
+  campaignBootDigest: SHA256,
+  optimizerImage: z.string().min(1).max(4_096),
+  optimizerBaseDigest: SHA256,
+  closureDigest: SHA256,
+  manifestArtifact: SHA256,
+  fileCount: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  previousRecordDigest: SHA256.nullable(),
+  recordDigest: SHA256,
+}).strict();
+export type CampaignRuntimeClosureCaptureV1 = z.infer<typeof CampaignRuntimeClosureCaptureV1>;
+
+export const CampaignRuntimeClosureJournalV1 = z.object({
+  version: z.literal(1),
+  /** Original frozen campaign identity, shared with the source-migration journal. */
+  campaignConfigHash: SHA256,
+  captures: z.array(CampaignRuntimeClosureCaptureV1).min(1),
+}).strict();
+export type CampaignRuntimeClosureJournalV1 = z.infer<typeof CampaignRuntimeClosureJournalV1>;
+
 /**
  * One registered corpus entry. Everything the trusted meta-runner needs to
  * normalize a child run is frozen here BEFORE any outer search:
@@ -50,11 +356,11 @@ export const MetaCapsuleEntry = z.object({
   /** Digest of the frozen scalarizer producing the single oriented q_i. */
   scalarizerDigest: SHA256,
   /** q_i for invalid output or a failed required constraint (normally 0). */
-  qFail: z.number().finite().min(0).max(1),
-  /** Trusted baseline measurement q_i(base). */
-  qBase: z.number().finite().min(0).max(1),
-  /** Trusted reference measurement q_i(ref). */
-  qReference: z.number().finite().min(0).max(1),
+  qFail: z.number().finite().nonnegative(),
+  /** Trusted baseline measurement q_i(base); M2 performance scalars may exceed 1. */
+  qBase: z.number().finite().nonnegative(),
+  /** Trusted reference measurement q_i(ref); not itself a normalized score. */
+  qReference: z.number().finite().nonnegative(),
   /** Registered scale s_i; MUST equal qReference - qBase and be > 0. */
   scale: z.number().finite().positive(),
 });
@@ -178,6 +484,11 @@ const MetaCampaignConfigShape = z.object({
   modelObservation: ModelObservationPolicy,
   counts: MetaCampaignCounts,
   budgets: MetaCampaignBudgets,
+  /**
+   * Optional campaign-wide ceiling inherited by outer and child mutation
+   * sessions. Omission preserves the 1.5M engine default.
+   */
+  sessionNoYieldMaxTokens: SessionNoYieldMaxTokens.optional(),
   /** Exact canonical-source + image-bound-bundle pairs for both real controls. */
   controls: z
     .object({
@@ -201,6 +512,22 @@ const MetaCampaignConfigShape = z.object({
   protocolHash: SHA256,
   /** Hash of the frozen analysis configuration. */
   analysisConfigHash: SHA256,
+  /**
+   * Append-only source-closure migration provenance. It is absent on the
+   * original frozen config and authenticated against that config's hash.
+   */
+  sourceMigrationJournal: CampaignSourceMigrationJournalV1.optional(),
+  /**
+   * Append-only image replacement provenance. Each record binds one capsule's
+   * old and new immutable image references to exact equivalence-evidence bytes.
+   */
+  imageRepinJournal: CampaignImageRepinJournalV1.optional(),
+  /**
+   * Append-only runtime-closure captures. This provenance is intentionally
+   * orthogonal to source migration: both journals authenticate against the
+   * same original frozen campaign identity and may be appended independently.
+   */
+  runtimeClosureJournal: CampaignRuntimeClosureJournalV1.optional(),
   invariants: MetaCampaignInvariants,
 });
 
@@ -389,12 +716,14 @@ export const M2_SEARCH_CANDIDATE_EQUIVALENTS = 12;
 export const M2_CANDIDATE_COUNT = M2_SEARCH_CANDIDATE_EQUIVALENTS;
 export const M2_CANDIDATE_ATTEMPTS_MAX = 24;
 export const M2_INNER_EPISODES_MAX = 4;
+/** Owner-ratified wall-time cap for one evaluator invocation (key: m2-eval-cap). */
+export const M2_EVALUATOR_TIMEOUT_SEC = 2700;
 export const M2_ALLOWED_CLAIM = "recursive-transfer-frozen-corpus";
 
 /**
  * M2 two-role model observation policy. The frozen contract routes outer /
  * capsule-author reasoning and inner capsule improvement to SEPARATE observed
- * routes (outer = gpt-5.6-sol, inner = gpt-5.6-terra). Requested and returned
+ * routes (outer = openai-codex/gpt-5.6-sol, inner = openai-codex/gpt-5.6-luna). Requested and returned
  * model identity is recorded per role; drift fails closed. Like M1, identity
  * without provider attestation is an alias observation — never a snapshot.
  */
@@ -484,19 +813,147 @@ export const M2_CALIBRATION_DEFERRED_BINDING: M2CalibrationBinding = {
   ),
 };
 
+const M2CapsuleId = z.string().regex(/^cap_[0-9a-f]{12}$/);
+const M2EvidencePath = z.string().min(1).refine(
+  (path) => !path.startsWith("/") && !path.split("/").some((part) => part === "" || part === "." || part === ".."),
+  "evidence path must be a normalized repository-relative path",
+);
+
+/** Byte-verifiable repository evidence cited by an owner cohort ruling. */
+export const M2CohortEvidencePointer = z.object({
+  path: M2EvidencePath,
+  digest: SHA256,
+}).strict();
+export type M2CohortEvidencePointer = z.infer<typeof M2CohortEvidencePointer>;
+
 /**
- * The complete frozen launch cohort, bound INTO the config from the verified
- * corpus-provenance artifact: all 16 development capsules (both panels) and
- * all 11 terminal capsules, plus the provenance self-binding digest. Freeze
- * revalidates train/holdout membership and calibration exclusion against the
- * FULL cohort — an off-panel development capsule is still a cohort member.
+ * The named owner decision that supersedes the atomic 16+11 rule for this
+ * cohort only. This is intentionally exact: a different partial cohort needs
+ * a different reviewed schema record, not a looser count override.
  */
-export const M2CorpusCohort = z.object({
-  developmentCapsuleIds: z.array(z.string().regex(/^cap_[0-9a-f]{12}$/)).length(16),
-  terminalCapsuleIds: z.array(z.string().regex(/^cap_[0-9a-f]{12}$/)).length(M2_TERMINAL_CAPSULE_COUNT),
+export const M2PartialCohortAuthorization = z.object({
+  decisionKey: z.literal("bun-image-blocker"),
+  decidedAt: z.string().datetime({ offset: true }),
+  owner: z.object({
+    identity: z.literal("captain"),
+    kind: z.literal("owner"),
+  }).strict(),
+  deliveredVia: z.literal("first-mate"),
+  ruling: z.literal("ADMIT THE 21 NOW, DEFER THE SIX EXPLICITLY"),
+  supersedes: z.object({
+    rule: z.literal("atomic-16-development-11-terminal"),
+    scope: z.literal("this-cohort-only"),
+  }).strict(),
+  evidence: z.array(M2CohortEvidencePointer).min(1),
+}).strict();
+export type M2PartialCohortAuthorization = z.infer<typeof M2PartialCohortAuthorization>;
+
+const M2AuthorizedAdmittedCapsuleBase = z.object({
+  label: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+  capsuleId: M2CapsuleId,
+  capsuleDigest: SHA256,
+  gate2ReceiptHash: SHA256,
+  /**
+   * A capsule re-admitted after the cohort ruling may cite a later, distinct
+   * owner Gate-2 authority. Absent means the cohort authorization remains the
+   * expected receipt basis (the original 21+6 record).
+   */
+  gate2Authorization: AdmissionApprovalBasis.optional(),
+});
+const M2AuthorizedDeferredCapsuleBase = z.object({
+  label: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+  capsuleId: M2CapsuleId,
+  capsuleDigest: SHA256,
+  reason: z.string().min(1),
+  evidence: z.array(M2CohortEvidencePointer).min(1),
+});
+
+export const M2AuthorizedAdmittedCapsule = z.discriminatedUnion("role", [
+  M2AuthorizedAdmittedCapsuleBase.extend({
+    role: z.literal("development"),
+    taskId: M2PanelTaskId,
+  }).strict(),
+  M2AuthorizedAdmittedCapsuleBase.extend({
+    role: z.literal("terminal"),
+  }).strict(),
+]);
+export type M2AuthorizedAdmittedCapsule = z.infer<typeof M2AuthorizedAdmittedCapsule>;
+
+export const M2AuthorizedDeferredCapsule = z.discriminatedUnion("role", [
+  M2AuthorizedDeferredCapsuleBase.extend({
+    role: z.literal("development"),
+    taskId: M2PanelTaskId,
+  }).strict(),
+  M2AuthorizedDeferredCapsuleBase.extend({
+    role: z.literal("terminal"),
+  }).strict(),
+]);
+export type M2AuthorizedDeferredCapsule = z.infer<typeof M2AuthorizedDeferredCapsule>;
+
+export const M2AuthorizedPartialCohort = z.object({
+  version: z.literal("m2-authorized-partial-cohort.v1"),
+  authorization: M2PartialCohortAuthorization,
+  admitted: z.array(M2AuthorizedAdmittedCapsule).length(21),
+  deferred: z.array(M2AuthorizedDeferredCapsule).length(6),
+}).strict().superRefine((cohort, ctx) => {
+  const all = [...cohort.admitted, ...cohort.deferred];
+  for (const key of ["label", "capsuleId", "capsuleDigest"] as const) {
+    if (new Set(all.map((capsule) => capsule[key])).size !== all.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: `authorized cohort ${key} values must partition 27 distinct capsules` });
+    }
+  }
+  if (new Set(cohort.admitted.map((capsule) => capsule.gate2ReceiptHash)).size !== cohort.admitted.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["admitted"], message: "every admitted capsule requires its own distinct Gate-2 receipt" });
+  }
+  for (const [partition, role, expected] of [
+    ["admitted", "development", 13],
+    ["admitted", "terminal", 8],
+    ["deferred", "development", 3],
+    ["deferred", "terminal", 3],
+  ] as const) {
+    const rows = cohort[partition];
+    if (rows.filter((capsule) => capsule.role === role).length !== expected) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [partition], message: `${partition} must contain exactly ${expected} ${role} capsules` });
+    }
+  }
+  const developmentTasks = all.flatMap((capsule) =>
+    capsule.role === "development" ? [capsule.taskId] : []
+  );
+  const expectedTasks = new Set<string>(M2_TASK_IDS);
+  if (
+    developmentTasks.length !== M2_TASK_IDS.length
+    || new Set(developmentTasks).size !== developmentTasks.length
+    || developmentTasks.some((taskId) => !expectedTasks.has(taskId))
+  ) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [], message: "authorized cohort must partition all 16 frozen development task ids exactly once" });
+  }
+});
+export type M2AuthorizedPartialCohort = z.infer<typeof M2AuthorizedPartialCohort>;
+
+const M2AtomicCorpusCohort = z.object({
+  developmentCapsuleIds: z.array(M2CapsuleId).length(16),
+  terminalCapsuleIds: z.array(M2CapsuleId).length(M2_TERMINAL_CAPSULE_COUNT),
   /** inputsDigest of the corpus-provenance.v1 artifact these identities came from. */
   provenanceInputsDigest: SHA256,
 }).strict();
+
+const M2AuthorizedPartialCorpusCohort = z.object({
+  mode: z.literal("owner-authorized-partial"),
+  developmentCapsuleIds: z.array(M2CapsuleId).length(13),
+  terminalCapsuleIds: z.array(M2CapsuleId).length(8),
+  /** The complete 21-admitted/6-deferred owner record, including receipt bindings. */
+  partialCohort: M2AuthorizedPartialCohort,
+  /** inputsDigest of the corpus-provenance.v1 artifact these identities came from. */
+  provenanceInputsDigest: SHA256,
+}).strict();
+
+/**
+ * The frozen launch cohort is either the original atomic 16+11 shape or the
+ * explicit owner-authorized 21+6 partition. A shortened atomic shape is never
+ * schema-legal: partial membership necessarily carries authority, deferral
+ * evidence, and one Gate-2 receipt binding per admitted capsule.
+ */
+export const M2CorpusCohort = z.union([M2AtomicCorpusCohort, M2AuthorizedPartialCorpusCohort]);
 export type M2CorpusCohort = z.infer<typeof M2CorpusCohort>;
 
 export const M2PanelMember = z.object({
@@ -509,10 +966,10 @@ export type M2PanelMember = z.infer<typeof M2PanelMember>;
 
 const M2DevelopmentPanelShape = z.object({
   panel: z.enum(["A", "B"]),
-  members: z.array(M2PanelMember).length(M2_PANEL_CAPSULE_COUNT),
+  members: z.array(M2PanelMember).min(1).max(M2_PANEL_CAPSULE_COUNT),
 }).strict();
 
-/** Exact frozen Panel-A/Panel-B membership, bound to eight distinct capsule identities. */
+/** Frozen panel membership; authorized deferrals may reduce a panel below eight. */
 export const M2DevelopmentPanel = M2DevelopmentPanelShape.superRefine((panel, ctx) => {
   const expected = panel.panel === "A" ? M2_PANEL_A_TASK_IDS : M2_PANEL_B_TASK_IDS;
   const expectedTasks = new Set<string>(expected);
@@ -540,11 +997,8 @@ export const M2DevelopmentPanel = M2DevelopmentPanelShape.superRefine((panel, ct
     seenIds.add(member.capsule.capsuleId);
     seenDigests.add(member.capsule.capsuleDigest);
   });
-  for (const taskId of expected) {
-    if (!seenTasks.has(taskId)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["members"], message: `frozen panel task ${taskId} is missing` });
-    }
-  }
+  // Exact expected membership is cohort-dependent and is enforced by the
+  // enclosing MetaCampaignConfigV2 refinement below.
 });
 export type M2DevelopmentPanel = z.infer<typeof M2DevelopmentPanel>;
 
@@ -556,14 +1010,14 @@ export type M2CapsuleNormalizedScore = z.infer<typeof M2CapsuleNormalizedScore>;
 
 export const M2PanelAggregationShape = z.object({
   valid: z.boolean(),
-  perCapsule: z.array(M2CapsuleNormalizedScore).length(M2_PANEL_CAPSULE_COUNT),
+  perCapsule: z.array(M2CapsuleNormalizedScore).min(1).max(M2_PANEL_CAPSULE_COUNT),
   panelMean: z.number().finite().nullable(),
 }).strict();
 
 export const M2PanelAggregation = M2PanelAggregationShape.superRefine((aggregation, ctx) => {
   const ids = new Set(aggregation.perCapsule.map((row) => row.capsuleId));
-  if (ids.size !== M2_PANEL_CAPSULE_COUNT) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "panel scores must contain eight distinct capsule identities" });
+  if (ids.size !== aggregation.perCapsule.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "panel scores must contain distinct capsule identities" });
   }
   const scores = aggregation.perCapsule.map((row) => row.normalizedScore);
   if (!aggregation.valid) {
@@ -573,10 +1027,10 @@ export const M2PanelAggregation = M2PanelAggregationShape.superRefine((aggregati
     return;
   }
   if (scores.some((score) => score === null)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "a valid panel requires all eight normalized scores" });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["perCapsule"], message: "a valid panel requires every normalized score" });
     return;
   }
-  const expected = scores.reduce<number>((sum, score) => sum + (score ?? 0), 0) / M2_PANEL_CAPSULE_COUNT;
+  const expected = scores.reduce<number>((sum, score) => sum + (score ?? 0), 0) / scores.length;
   if (aggregation.panelMean === null || aggregation.panelMean !== expected) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["panelMean"], message: `panel mean must equal ${expected}` });
   }
@@ -673,12 +1127,102 @@ export const RecursiveCampaignCounts = z.object({
   /** Frozen trusted safety ceiling; an optimizer may allocate fewer episodes. */
   innerEpisodesMax: z.union([z.literal(4), z.literal(8), z.literal(12)]),
   searchReplicates: z.number().int().positive(),
+  /** SEARCH-only child bound; absent only on pre-concurrency frozen evidence. */
+  searchChildConcurrency: z.literal(3).optional(),
   /** Fixed scientific-shell judging replication. */
   confirmationReplicates: z.literal(3),
   holdoutReplicates: z.literal(3),
   childConcurrency: z.number().int().positive(),
 }).strict();
 export type RecursiveCampaignCounts = z.infer<typeof RecursiveCampaignCounts>;
+
+const M2OuterDirectEnvelopeDerivationShape = z.object({
+  method: z.literal("m2-outer-direct-envelope.v1"),
+  projectionBasis: z.literal("campaign-8-observed-panel-mean"),
+  projectionReceiptPath: z.literal("data/m2-refreeze-final/campaign-8-abandonment-receipt.v1.json"),
+  projectionReceiptSha256: z.literal("sha256:c5c474a3b1f5b9721e2b049a672124e69665524970e2c0ba8f60e592fabea77b"),
+  projectionReceiptCommit: z.literal("d91251332"),
+  projectionMeanField: z.literal("outerEnvelopeArithmetic.firstTwoProjectionMeanSec"),
+  plannedEpisodes: z.number().int().positive(),
+  directEvaluationsPerEpisode: z.literal(2),
+  retryHeadroomEvaluations: z.number().int().positive(),
+  searchChildConcurrency: z.literal(3),
+  confirmationTerminalChildConcurrency: z.literal(4),
+  projectedPanelMeanWallClockSec: z.number().finite().positive(),
+  wallClockMarginBps: z.number().int().nonnegative(),
+  mutationSessionsPerEpisode: z.literal(1),
+  mutationSessionMaxTokens: z.number().int().positive(),
+  tokenMarginBps: z.number().int().nonnegative(),
+  usdPerMillionTokens: z.number().finite().positive(),
+  plannedDirectEvaluations: z.number().int().positive(),
+  totalDirectEvaluations: z.number().int().positive(),
+  derived: BudgetEnvelope,
+}).strict();
+
+/**
+ * Freeze evidence for the outer controller's DIRECT budget. Recursive child
+ * reservations live in separate envelopes; this derivation funds the Sol
+ * mutation sessions and the direct panel evaluations that drive search.
+ */
+export const M2OuterDirectEnvelopeDerivation = M2OuterDirectEnvelopeDerivationShape.superRefine(
+  (derivation, ctx) => {
+    const plannedDirectEvaluations =
+      derivation.plannedEpisodes * derivation.directEvaluationsPerEpisode;
+    const totalDirectEvaluations =
+      plannedDirectEvaluations + derivation.retryHeadroomEvaluations;
+    const derived = {
+      maxTokens: Math.ceil(
+        derivation.plannedEpisodes
+        * derivation.mutationSessionsPerEpisode
+        * derivation.mutationSessionMaxTokens
+        * (10_000 + derivation.tokenMarginBps)
+        / 10_000,
+      ),
+      maxUsd: 0,
+      maxWallClockSec: Math.ceil(
+        totalDirectEvaluations
+        * derivation.projectedPanelMeanWallClockSec
+        * (10_000 + derivation.wallClockMarginBps)
+        / 10_000,
+      ),
+      maxEvaluatorInvocations: totalDirectEvaluations,
+    };
+    derived.maxUsd = Math.ceil(derived.maxTokens * derivation.usdPerMillionTokens / 1_000_000);
+    if (derivation.plannedDirectEvaluations !== plannedDirectEvaluations) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["plannedDirectEvaluations"],
+        message: `planned direct evaluations must equal ${plannedDirectEvaluations}`,
+      });
+    }
+    if (derivation.totalDirectEvaluations !== totalDirectEvaluations) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["totalDirectEvaluations"],
+        message: `total direct evaluations must equal ${totalDirectEvaluations}`,
+      });
+    }
+    for (const dimension of BUDGET_DIMENSIONS) {
+      if (!Number.isSafeInteger(derived[dimension]) || derivation.derived[dimension] !== derived[dimension]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["derived", dimension],
+          message: `derived ${dimension} must equal ${String(derived[dimension])}`,
+        });
+      }
+    }
+  },
+);
+export type M2OuterDirectEnvelopeDerivation = z.infer<typeof M2OuterDirectEnvelopeDerivation>;
+
+export const M2PreIgnitionGates = z.object({
+  panelCapsuleSmoke: z.object({
+    version: z.literal(1),
+    required: z.literal(true),
+  }).strict(),
+}).strict();
+export type M2PreIgnitionGates = z.infer<typeof M2PreIgnitionGates>;
+
 
 const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   version: z.literal(META_CAMPAIGN_CONFIG_V2),
@@ -689,11 +1233,20 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   train: z.array(MetaCapsuleEntry),
   holdout: z.array(MetaCapsuleEntry),
   counts: RecursiveCampaignCounts,
+  /** Frozen wall-time cap for each individual evaluator invocation. */
+  evaluatorTimeoutSec: z.literal(M2_EVALUATOR_TIMEOUT_SEC),
   calibration: M2CalibrationBinding,
   corpusCohort: M2CorpusCohort,
   modelObservation: M2ModelObservationPolicy,
   developmentPanel: M2DevelopmentPanel,
   recursiveBudgets: M2RecursiveBudgets,
+  /** Freeze-derived outer direct-envelope arithmetic; absent on historical frozen evidence only. */
+  outerBudgetDerivation: M2OuterDirectEnvelopeDerivation.optional(),
+  /**
+   * Freeze-time declaration of the pre-ignition sidecar gates required by
+   * this engine. Omission is accepted only for historical frozen evidence.
+   */
+  preIgnitionGates: M2PreIgnitionGates.optional(),
   allowedClaim: z.literal(M2_ALLOWED_CLAIM),
 }).strict();
 
@@ -702,18 +1255,31 @@ function refineMetaCampaignV2(
   ctx: z.RefinementCtx,
   official: boolean,
 ): void {
-  if (cfg.train.length !== M2_PANEL_CAPSULE_COUNT) {
+  const partialCohort = "mode" in cfg.corpusCohort
+    ? cfg.corpusCohort.partialCohort
+    : null;
+  const frozenPanelTasks = cfg.generation.panel === "A" ? M2_PANEL_A_TASK_IDS : M2_PANEL_B_TASK_IDS;
+  const frozenPanelTaskSet = new Set<string>(frozenPanelTasks);
+  const expectedPanelTasks = partialCohort === null
+    ? [...frozenPanelTasks]
+    : partialCohort.admitted.flatMap((capsule) =>
+        capsule.role === "development" && frozenPanelTaskSet.has(capsule.taskId)
+          ? [capsule.taskId]
+          : []
+      );
+  if (cfg.train.length !== expectedPanelTasks.length) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["train"],
-      message: `M2 requires exactly ${M2_PANEL_CAPSULE_COUNT} panel capsules, got ${cfg.train.length}`,
+      message: `M2 panel ${cfg.generation.panel} requires exactly ${expectedPanelTasks.length} admitted capsules, got ${cfg.train.length}`,
     });
   }
-  if (cfg.holdout.length !== M2_TERMINAL_CAPSULE_COUNT) {
+  const expectedTerminalCount = partialCohort === null ? M2_TERMINAL_CAPSULE_COUNT : 8;
+  if (cfg.holdout.length !== expectedTerminalCount) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["holdout"],
-      message: `M2 requires exactly ${M2_TERMINAL_CAPSULE_COUNT} terminal capsules, got ${cfg.holdout.length}`,
+      message: `M2 requires exactly ${expectedTerminalCount} admitted terminal capsules, got ${cfg.holdout.length}`,
     });
   }
 
@@ -733,6 +1299,45 @@ function refineMetaCampaignV2(
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [partition, index, "scale"], message: "scale must equal qReference - qBase" });
       }
     });
+
+  }
+  if (
+    cfg.counts.searchChildConcurrency !== undefined
+    && cfg.counts.searchChildConcurrency > cfg.counts.childConcurrency
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["counts", "searchChildConcurrency"],
+      message: "search child concurrency cannot exceed the confirmation/terminal child concurrency",
+    });
+  }
+  if (cfg.outerBudgetDerivation !== undefined) {
+    if (cfg.outerBudgetDerivation.plannedEpisodes !== cfg.counts.candidates) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["outerBudgetDerivation", "plannedEpisodes"],
+        message: "outer direct-envelope planned episodes must equal counts.candidates",
+      });
+    }
+    if (
+      cfg.counts.searchChildConcurrency !== cfg.outerBudgetDerivation.searchChildConcurrency
+      || cfg.counts.childConcurrency !== cfg.outerBudgetDerivation.confirmationTerminalChildConcurrency
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["outerBudgetDerivation"],
+        message: "outer direct-envelope concurrency evidence must match the frozen search and judging bounds",
+      });
+    }
+    for (const dimension of BUDGET_DIMENSIONS) {
+      if (cfg.budgets.outer[dimension] !== cfg.outerBudgetDerivation.derived[dimension]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["budgets", "outer", dimension],
+          message: `outer direct budget must equal its freeze derivation (${cfg.outerBudgetDerivation.derived[dimension]})`,
+        });
+      }
+    }
   }
 
   const development = new Set(cfg.corpusCohort.developmentCapsuleIds);
@@ -758,6 +1363,31 @@ function refineMetaCampaignV2(
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["holdout", index, "capsuleId"], message: "holdout capsule is not a registered terminal cohort capsule" });
     }
   });
+  if (partialCohort !== null) {
+    const policyDevelopment = partialCohort.admitted
+      .filter((capsule) => capsule.role === "development")
+      .map((capsule) => capsule.capsuleId);
+    const policyTerminal = partialCohort.admitted
+      .filter((capsule) => capsule.role === "terminal")
+      .map((capsule) => capsule.capsuleId);
+    const sameSet = (actual: ReadonlySet<string>, expected: readonly string[]): boolean =>
+      actual.size === expected.length && expected.every((capsuleId) => actual.has(capsuleId));
+    if (!sameSet(development, policyDevelopment)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["corpusCohort", "developmentCapsuleIds"], message: "development cohort must match the authorized admitted receipt set" });
+    }
+    if (!sameSet(terminal, policyTerminal)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["corpusCohort", "terminalCapsuleIds"], message: "terminal cohort must match the authorized admitted receipt set" });
+    }
+    const admittedById = new Map(partialCohort.admitted.map((capsule) => [capsule.capsuleId, capsule]));
+    for (const [partition, entries] of [["train", cfg.train], ["holdout", cfg.holdout]] as const) {
+      entries.forEach((entry, index) => {
+        const authorized = admittedById.get(entry.capsuleId);
+        if (authorized !== undefined && authorized.capsuleDigest !== entry.capsuleDigest) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [partition, index, "capsuleDigest"], message: "campaign capsule digest does not match its Gate-2 receipt binding" });
+        }
+      });
+    }
+  }
 
   if (official && cfg.calibration.reportDigest === M2_CALIBRATION_DEFERRED_REPORT_DIGEST) {
     ctx.addIssue({
@@ -770,10 +1400,11 @@ function refineMetaCampaignV2(
   if (excludedIds.size !== cfg.calibration.excludedCapsuleIds.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["calibration", "excludedCapsuleIds"], message: "excluded calibration capsules must be four distinct identities" });
   }
-  // Compare against the FULL 28-capsule cohort, not just the cell's train+holdout:
-  // an off-panel development capsule (the other panel) is still a cohort member.
+  // Compare against the complete locked cohort, including authorized
+  // deferrals and the other development panel, not just train+holdout.
+  const deferredIds = new Set(partialCohort?.deferred.map((capsule) => capsule.capsuleId) ?? []);
   cfg.calibration.excludedCapsuleIds.forEach((capsuleId, index) => {
-    if (development.has(capsuleId) || terminal.has(capsuleId)) {
+    if (development.has(capsuleId) || terminal.has(capsuleId) || deferredIds.has(capsuleId)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["calibration", "excludedCapsuleIds", index],
@@ -815,6 +1446,19 @@ function refineMetaCampaignV2(
   if (cfg.developmentPanel.panel !== cfg.generation.panel) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["developmentPanel", "panel"], message: "development panel must match the trajectory generation cell" });
     }
+  const actualPanelTasks = cfg.developmentPanel.members.map((member) => member.taskId);
+  const expectedPanelTaskSet = new Set<string>(expectedPanelTasks);
+  if (
+    actualPanelTasks.length !== expectedPanelTasks.length
+    || new Set(actualPanelTasks).size !== actualPanelTasks.length
+    || actualPanelTasks.some((taskId) => !expectedPanelTaskSet.has(taskId))
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["developmentPanel", "members"],
+      message: "development panel must contain exactly the admitted frozen tasks; deferred tasks are structurally excluded",
+    });
+  }
     const trainById = new Map(cfg.train.map((capsule) => [capsule.capsuleId, capsule]));
     cfg.developmentPanel.members.forEach((member, index) => {
       const registered = trainById.get(member.capsule.capsuleId);
@@ -908,6 +1552,15 @@ export type MetaCampaignConfigV2Draft = z.infer<typeof MetaCampaignConfigV2Draft
 
 export const MetaCampaignConfig = z.union([MetaCampaignConfigV1, MetaCampaignConfigV2]);
 export type MetaCampaignConfig = z.infer<typeof MetaCampaignConfig>;
+
+/** Every source-commit pin that a sanctioned campaign source migration advances together. */
+export function campaignSourceCommits(config: MetaCampaignConfig): readonly string[] {
+  return [
+    config.seedOptimizer.sourceCommit,
+    config.trustedRuntime.sourceCommit,
+    ...(config.version === 2 ? [config.controllerOptimizer.sourceCommit] : []),
+  ];
+}
 
 function canonicalIdentity(identity: z.infer<typeof RecursiveOptimizerIdentity>): string {
   return `${identity.sourceCommit}\n${identity.sourceArtifact}\n${identity.bundleDigest}`;

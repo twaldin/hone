@@ -1,12 +1,24 @@
 import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { mkdtempSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { BrokerMethods, EvaluationRecord, type BudgetEnvelope, type BudgetState } from "@hone/schema";
+import {
+  BrokerMethods,
+  EvaluationRecord,
+  canonicalJson,
+  PROMOTION_GATE_VERSION,
+  type BudgetEnvelope,
+  type BudgetState,
+  type RecursiveEvaluationPlan,
+  type RecursiveTask,
+  type PromotionVerdict,
+} from "@hone/schema";
 import { deferred } from "../src/deferred.js";
-import { SANDBOX_WORKER_PATH, WORKER_PART_DIR } from "../src/loop.js";
+import { EVALUATOR_RECORD_PATH } from "../assets/context.js";
+import { RUNTIME_PART_DIR, SANDBOX_WORKER_PATH, WORKER_PART_DIR } from "../src/loop.js";
 
 /**
  * In-process scripted broker: a real net.Server speaking the newline JSON-RPC
@@ -34,15 +46,38 @@ export interface StubScript {
   baselineHash: string;
   /** Objectives returned for the baseline artifact. */
   baselineObjectives: Record<string, number>;
+  /** False models a trusted panel that settled but could not produce an aggregate. */
+  baselineValid?: boolean;
+  /** Seeds where the trusted baseline panel settles without an aggregate. */
+  invalidBaselineSeeds?: number[];
+  /** Saved-artifact/seed coordinates whose trusted panels settle without an aggregate. */
+  invalidSaveIndexSeeds?: string[];
   /** Objectives per saveArtifact call index (1-based). Missing index => evaluating it is a test failure. */
   objectivesBySaveIndex: Record<number, Record<string, number>>;
   /** Seed-specific override: objectives keyed `${saveIndex}:${seed}`, consulted before objectivesBySaveIndex. */
   objectivesBySaveIndexAndSeed?: Record<string, Record<string, number>>;
+  /** Optional exact hash returned by each saveArtifact call (1-based by array position). */
+  saveArtifactHashes?: string[];
   /** saveArtifact indices whose evaluation comes back output.valid=false. */
   invalidSaveIndices?: number[];
   /** Consumed in exec-call order; running past the end fails the test. */
   execPlan: ExecStep[];
+  /** Trusted evaluation duration used by the sandbox-lifetime simulation. */
+  evaluationDurationMs?: number;
+  /** Broker default when createSandbox omits ttlSec. */
+  defaultSandboxTtlSec?: number;
+  /** When set, reportSessionNoYieldBound fails as if durable journaling were unavailable. */
+  reportNoYieldError?: string;
+  /** Production-shaped reportIncumbent refusal keyed by artifact hash. */
+  reportIncumbentErrorsByHash?: Record<string, string>;
+  /** Durable first-pair verdict keyed by candidate hash. */
+  promotionVerdictsByHash?: Record<string, PromotionVerdict>;
+  /** Save indices explicitly granted a positive first-pair verdict. Omission fails closed. */
+  promotableSaveIndices?: number[];
+  /** Capsule-specific pooled within-coordinate score SD exposed by getTask. */
+  promotionNoiseSd?: number;
   envelope: BudgetEnvelope;
+  recursiveTask?: RecursiveTask;
 }
 
 export function stubHash(n: number): string {
@@ -63,21 +98,34 @@ export class StubBroker {
   readonly socketPath: string;
   /** Episode-context putFiles only; worker-bundle chunks land in workerParts. */
   readonly putFiles: PutFileRecord[] = [];
+  /** Full trusted parent records staged outside /workspace for session drill-down. */
+  readonly evaluationRecords: PutFileRecord[] = [];
+  readonly createdSandboxParams: Array<z.infer<typeof BrokerMethods.createSandbox.params>> = [];
   readonly savedArtifacts: string[] = [];
   /** Artifact hashes evaluated fresh (memo misses), in order. */
   readonly evaluated: string[] = [];
   /** Every evaluate ask (memo hits included) as `hash@seed`, in call order. */
   readonly evaluateAsks: string[] = [];
+  /** Recursive allocation plan attached to every evaluate request, if any. */
+  readonly recursivePlans: Array<RecursiveEvaluationPlan | undefined> = [];
+  readonly promotionVerdictAsks: string[] = [];
   readonly reportedIncumbents: string[] = [];
+  readonly reportedNoYieldBounds: Array<z.infer<typeof BrokerMethods.reportSessionNoYieldBound.params>> = [];
   readonly finished: string[] = [];
+  readonly completedEpisodes: number[] = [];
+  readonly completedEpisodeParams: Array<{ episode: number; releaseSandboxId?: string | undefined }> = [];
   /** Mutation-session execs only; worker probe/assembly execs are emulated structurally. */
   readonly execArgvs: string[][] = [];
   /** Every call in arrival order — `createSandbox:<id>`, `putFile:<sbId>:<path>`, `exec:<sbId>:<argv0>`, `evaluate:<hash>@<seed>`, ... */
   readonly ops: string[] = [];
   /** Worker-bundle chunk putFiles in arrival order (raw bytes preserved). */
   readonly workerParts: { sandboxId: string; path: string; bytes: Buffer }[] = [];
-  /** One entry per successful in-sandbox assembly: the exact assembled bytes. */
+  /** Compressed platform-runtime chunks in arrival order. */
+  readonly runtimeParts: { sandboxId: string; path: string; bytes: Buffer }[] = [];
+  /** One entry per successful worker assembly: the exact assembled bytes. */
   readonly workerTransfers: { sandboxId: string; bytes: Buffer }[] = [];
+  /** One entry per successful platform-runtime materialization. */
+  readonly runtimeTransfers: { sandboxId: string; path: string; bytes: Buffer }[] = [];
   /** The run's shared /scratch state: path -> bytes. Persists across sandboxes like the real volume. */
   readonly scratch = new Map<string, Buffer>();
 
@@ -87,6 +135,8 @@ export class StubBroker {
   private sandboxSeq = 0;
   private readonly sandboxParent = new Map<string, string>();
   private readonly saveIndexByHash = new Map<string, number>();
+  private readonly sandboxExpiresAt = new Map<string, number>();
+  private nowMs = 0;
   private readonly memo = new Map<string, EvaluationRecord>();
 
   constructor(private readonly script: StubScript) {
@@ -151,12 +201,41 @@ export class StubBroker {
           baselineArtifact: { hash: this.script.baselineHash },
           visibleAssetGroups: ["train", "validation"],
           budget: this.budgetNow(),
+          promotionGateCalibrations: [{
+            gateVersion: PROMOTION_GATE_VERSION,
+            evidenceVersion: "optimizer-test-calibration-v3",
+            calibratedAt: "2026-08-28T00:00:00.000Z",
+            capsuleId: "cap_000000000000",
+            admittedCapsuleDigest: `sha256:${"c".repeat(64)}`,
+            executionImage: "test-evaluator",
+            assetGroupId: "train",
+            measurementEpoch: null,
+            sourceCohortSha256: [`sha256:${"a".repeat(64)}`],
+            maxObservedPairDelta: 0,
+            estimator: "pooled-within-coordinate-sd-v1",
+            estimatorMinRepeatsPerCoordinate: 3,
+            sampleDepths: [7, 7, 7],
+            informationFreeMeasurements: 21,
+            coordinateGroups: 3,
+            pooledDegreesOfFreedom: 18,
+            pooledWithinCoordinateSd: this.script.promotionNoiseSd ?? 0,
+            noiseFloor: 3 * (this.script.promotionNoiseSd ?? 0),
+            noiseEnvelope: 4.5 * (this.script.promotionNoiseSd ?? 0),
+            informationFreePairs: 3,
+            informationFreePositive: 0,
+          }],
+          ...(this.script.recursiveTask === undefined ? {} : { recursiveTask: this.script.recursiveTask }),
         });
       }
       case "createSandbox": {
         const params = BrokerMethods.createSandbox.params.parse(rawParams);
+        this.createdSandboxParams.push(params);
         const sandboxId = `sb_${String(++this.sandboxSeq).padStart(12, "0")}`;
         this.sandboxParent.set(sandboxId, params.artifact.hash);
+        this.sandboxExpiresAt.set(
+          sandboxId,
+          this.nowMs + (params.ttlSec ?? this.script.defaultSandboxTtlSec ?? 3_600) * 1_000,
+        );
         this.ops.push(`createSandbox:${sandboxId}`);
         return { sandboxId };
       }
@@ -165,15 +244,34 @@ export class StubBroker {
         this.ops.push(`putFile:${params.sandboxId}:${params.path}`);
         const bytes = Buffer.from(params.contentBase64, "base64");
         if (params.path.startsWith("/scratch/")) this.scratch.set(params.path, bytes);
+        if (params.path === EVALUATOR_RECORD_PATH) {
+          this.evaluationRecords.push({
+            sandboxId: params.sandboxId,
+            path: params.path,
+            content: bytes.toString("utf8"),
+          });
+          return {};
+        }
         if (params.path.startsWith(`${WORKER_PART_DIR}/`)) {
           this.workerParts.push({ sandboxId: params.sandboxId, path: params.path, bytes });
+          return {};
+        }
+        if (params.path.startsWith(`${RUNTIME_PART_DIR}/`)) {
+          this.runtimeParts.push({ sandboxId: params.sandboxId, path: params.path, bytes });
           return {};
         }
         this.putFiles.push({ sandboxId: params.sandboxId, path: params.path, content: bytes.toString("utf8") });
         return {};
       }
+      case "getFile": {
+        const params = BrokerMethods.getFile.params.parse(rawParams);
+        const bytes = this.scratch.get(params.path);
+        if (bytes === undefined) throw new Error(`missing file ${params.path}`);
+        return { contentBase64: bytes.toString("base64") };
+      }
       case "exec": {
         const params = BrokerMethods.exec.params.parse(rawParams);
+        this.requireSandbox(params.sandboxId);
         this.ops.push(`exec:${params.sandboxId}:${params.argv.join(" ")}`);
         const emulated = this.workerProtocolExec(params.sandboxId, params.argv);
         if (emulated !== null) return BrokerMethods.exec.result.parse(emulated);
@@ -190,15 +288,19 @@ export class StubBroker {
       case "saveArtifact": {
         const params = BrokerMethods.saveArtifact.params.parse(rawParams);
         if (!this.sandboxParent.has(params.sandboxId)) throw new Error(`unknown sandbox ${params.sandboxId}`);
-        const hash = stubHash(this.savedArtifacts.length + 1);
+        const saveIndex = this.savedArtifacts.length + 1;
+        const hash = this.script.saveArtifactHashes?.[saveIndex - 1] ?? stubHash(saveIndex);
         this.savedArtifacts.push(hash);
-        this.saveIndexByHash.set(hash, this.savedArtifacts.length);
+        this.saveIndexByHash.set(hash, saveIndex);
         return { hash };
       }
       case "evaluate": {
         const params = BrokerMethods.evaluate.params.parse(rawParams);
-        const key = `${params.artifact.hash}|${params.assetGroupId}|${params.seed}`;
+        const key =
+          `${params.artifact.hash}|${params.assetGroupId}|${params.seed}|` +
+          (params.recursivePlan === undefined ? "" : canonicalJson(params.recursivePlan));
         this.evaluateAsks.push(`${params.artifact.hash}@${params.seed}`);
+        this.recursivePlans.push(params.recursivePlan);
         this.ops.push(`evaluate:${params.artifact.hash}@${params.seed}`);
         const memoized = this.memo.get(key);
         if (memoized !== undefined) return { ...memoized, cached: true };
@@ -215,12 +317,65 @@ export class StubBroker {
           cached: false,
           evaluatedAt: new Date().toISOString(),
         });
+        this.nowMs += this.script.evaluationDurationMs ?? 5;
+        for (const [sandboxId, expiresAt] of this.sandboxExpiresAt) {
+          if (this.nowMs >= expiresAt) {
+            this.sandboxExpiresAt.delete(sandboxId);
+            this.sandboxParent.delete(sandboxId);
+          }
+        }
         this.memo.set(key, record);
         return record;
       }
+      case "getPromotionVerdict": {
+        const params = BrokerMethods.getPromotionVerdict.params.parse(rawParams);
+        this.promotionVerdictAsks.push(params.artifact.hash);
+        const saveIndex = this.saveIndexByHash.get(params.artifact.hash);
+        const explicitlyPromotable =
+          saveIndex !== undefined && this.script.promotableSaveIndices?.includes(saveIndex) === true;
+        const verdict = this.script.promotionVerdictsByHash?.[params.artifact.hash]
+          ?? (explicitlyPromotable
+            ? {
+                status: "promotable" as const,
+                parent: { hash: this.script.baselineHash },
+                parentScore: 0,
+                childScore: 1,
+                delta: 1,
+                gateVersion: PROMOTION_GATE_VERSION,
+                calibrationEvidenceVersion: "optimizer-test-calibration-v3",
+                noiseFloor: 3 * (this.script.promotionNoiseSd ?? 0),
+                noiseEnvelope: 4.5 * (this.script.promotionNoiseSd ?? 0),
+                decision: "promote" as const,
+              }
+            : { status: "never-paired" as const });
+        return BrokerMethods.getPromotionVerdict.result.parse(verdict);
+      }
       case "reportIncumbent": {
         const params = BrokerMethods.reportIncumbent.params.parse(rawParams);
+        const refusal = this.script.reportIncumbentErrorsByHash?.[params.artifact.hash];
+        if (refusal !== undefined) throw new Error(refusal);
         this.reportedIncumbents.push(params.artifact.hash);
+        return {};
+      }
+      case "reportSessionNoYieldBound": {
+        const params = BrokerMethods.reportSessionNoYieldBound.params.parse(rawParams);
+        if (this.script.reportNoYieldError !== undefined) {
+          throw new Error(this.script.reportNoYieldError);
+        }
+        this.reportedNoYieldBounds.push(params);
+        return {};
+      }
+      case "completeEpisode": {
+        const params = BrokerMethods.completeEpisode.params.parse(rawParams);
+        if (params.releaseSandboxId !== undefined) {
+          this.requireSandbox(params.releaseSandboxId);
+          this.sandboxExpiresAt.delete(params.releaseSandboxId);
+          this.sandboxParent.delete(params.releaseSandboxId);
+        }
+        this.completedEpisodeParams.push(params);
+        if (!this.completedEpisodes.includes(params.episode)) {
+          this.completedEpisodes.push(params.episode);
+        }
         return {};
       }
       case "getBudget": {
@@ -236,53 +391,81 @@ export class StubBroker {
         throw new Error(`unexpected method: ${method}`);
     }
   }
+  private requireSandbox(sandboxId: string): void {
+    if (!this.sandboxParent.has(sandboxId)) throw new Error(`unknown sandbox: ${sandboxId}`);
+  }
+
 
   /**
-   * Emulate the loop's worker-transfer protocol against the shared /scratch
-   * state: the sha256sum probe and the explicit-part-list assembly. Returns
-   * null for anything else (a real mutation-session exec, scripted by
-   * execPlan). Keeps existing tests' exec/putFile ledgers session-only.
+   * Emulate the loop's sealed-artifact transfer protocol against shared
+   * /scratch: sha256sum probes plus explicit-part-list assembly/decompression.
+   * Returns null for the real mutation-session exec scripted by execPlan.
    */
   private workerProtocolExec(
     sandboxId: string,
     argv: string[],
   ): { exitCode: number; stdout: string; stderr: string; truncated: false } | null {
-    const shaLine = (bytes: Buffer): string =>
-      `${createHash("sha256").update(bytes).digest("hex")}  ${SANDBOX_WORKER_PATH}\n`;
-    if (argv.length === 2 && argv[0] === "sha256sum" && argv[1] === SANDBOX_WORKER_PATH) {
-      const bytes = this.scratch.get(SANDBOX_WORKER_PATH);
+    const shaLine = (path: string, bytes: Buffer): string =>
+      `${createHash("sha256").update(bytes).digest("hex")}  ${path}\n`;
+    if (argv.length === 2 && argv[0] === "sha256sum" && argv[1]?.startsWith("/scratch/") === true) {
+      const path = argv[1];
+      const bytes = this.scratch.get(path);
       if (bytes === undefined) {
-        return { exitCode: 1, stdout: "", stderr: `sha256sum: ${SANDBOX_WORKER_PATH}: No such file or directory`, truncated: false };
+        return { exitCode: 1, stdout: "", stderr: `sha256sum: ${path}: No such file or directory`, truncated: false };
       }
-      return { exitCode: 0, stdout: shaLine(bytes), stderr: "", truncated: false };
+      return { exitCode: 0, stdout: shaLine(path, bytes), stderr: "", truncated: false };
     }
-    if (argv[0] === "sh" && argv[1] === "-c" && argv[2] !== undefined && argv[2].includes(`> ${SANDBOX_WORKER_PATH}`)) {
-      const catList = (argv[2].split(" > ")[0] ?? "").split(/\s+/).slice(1);
-      const chunks: Buffer[] = [];
-      for (const part of catList) {
-        const bytes = this.scratch.get(part);
-        if (bytes === undefined) {
-          return { exitCode: 1, stdout: "", stderr: `cat: ${part}: No such file or directory`, truncated: false };
-        }
-        chunks.push(bytes);
+    const script = argv[0] === "sh" && argv[1] === "-c" ? argv[2] : undefined;
+    const target = script?.match(/ > (\/scratch\/[^ ]+) && chmod /)?.[1];
+    if (script === undefined || target === undefined) return null;
+    const compressed = script.includes(" | gzip -dc) > ");
+    const afterCat = script.slice(script.indexOf("cat ") + 4);
+    const partList = (afterCat.split(compressed ? " | gzip -dc) > " : " > ")[0] ?? "").trim().split(/\s+/);
+    const chunks: Buffer[] = [];
+    for (const part of partList) {
+      const bytes = this.scratch.get(part);
+      if (bytes === undefined) {
+        return { exitCode: 1, stdout: "", stderr: `cat: ${part}: No such file or directory`, truncated: false };
       }
-      const assembled = Buffer.concat(chunks);
-      this.scratch.set(SANDBOX_WORKER_PATH, assembled);
+      chunks.push(bytes);
+    }
+    const transferred = Buffer.concat(chunks);
+    const assembled = compressed ? gunzipSync(transferred) : transferred;
+    this.scratch.set(target, assembled);
+    const partDir = partList[0]?.slice(0, partList[0].lastIndexOf("/"));
+    if (partDir !== undefined) {
       for (const path of [...this.scratch.keys()]) {
-        if (path.startsWith(`${WORKER_PART_DIR}/`)) this.scratch.delete(path);
+        if (path.startsWith(`${partDir}/`)) this.scratch.delete(path);
       }
-      this.workerTransfers.push({ sandboxId, bytes: assembled });
-      return { exitCode: 0, stdout: shaLine(assembled), stderr: "", truncated: false };
     }
-    return null;
+    if (target === SANDBOX_WORKER_PATH) this.workerTransfers.push({ sandboxId, bytes: assembled });
+    else this.runtimeTransfers.push({ sandboxId, path: target, bytes: assembled });
+    return { exitCode: 0, stdout: shaLine(target, assembled), stderr: "", truncated: false };
   }
 
   private outputFor(hash: string, seed: number): Record<string, unknown> {
     if (hash === this.script.baselineHash) {
-      return { valid: true, objectives: this.script.baselineObjectives, constraints: {}, perExample: {} };
+      return this.script.baselineValid === false || this.script.invalidBaselineSeeds?.includes(seed) === true
+        ? {
+            valid: false,
+            objectives: {},
+            constraints: { allChildrenValid: false },
+            perExample: {},
+            diagnostics: { summary: "recursive child settlement failed: cap_000000000002=candidate_failed" },
+          }
+        : { valid: true, objectives: this.script.baselineObjectives, constraints: {}, perExample: {} };
     }
     const index = this.saveIndexByHash.get(hash);
     if (index === undefined) throw new Error(`evaluate of unknown artifact ${hash}`);
+    if (this.script.invalidSaveIndexSeeds?.includes(`${index}:${seed}`) === true) {
+      return {
+        valid: false,
+        objectives: {},
+        constraints: { allChildrenValid: false },
+        perExample: {},
+        diagnostics: { summary: "trusted recursive panel could not aggregate a failed child" },
+      };
+    }
     if (this.script.invalidSaveIndices?.includes(index) === true) {
       return {
         valid: false,

@@ -7,8 +7,18 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { ApplyMode, BudgetEnvelope, M2ProxyRole, ModelRouting, PromotionRule, RunConfig, RunEvent } from "@hone/schema";
-import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue } from "@hone/schema";
+import {
+  ApplyMode,
+  BudgetEnvelope,
+  IMAGE_DIGEST_REF,
+  M2ProxyRole,
+  ModelRouting,
+  PromotionRule,
+  RunConfig,
+  RunEvent,
+  SessionNoYieldMaxTokens,
+} from "@hone/schema";
+import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue, PromotionHoldoutSplit } from "@hone/schema";
 import type { BrokerCorpusConfig, BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
 import {
   admitCapsule,
@@ -18,14 +28,26 @@ import {
   writeCapsuleSnapshot,
 } from "./admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "./args.js";
-import { createBackend as createLocalBackend } from "./backends/local.js";
+import {
+  createBackend as createLocalBackend,
+  isOptimizerChildPendingError,
+  isOptimizerStorageExhaustedError,
+} from "./backends/local.js";
 import { createBackend as createStubBackend } from "./backends/stub.js";
 import { applyContractRevision, budgetEnvelopeError, contractHash, renderContract } from "./contract.js";
 import { brokerCorpusConfigDigest, corpusCohortFenceError, type CorpusCohortBinding } from "./corpus-provenance.js";
 import { LadderLockedError, deliver, ladderLocked, LADDER_REFUSAL } from "./deliver.js";
 import { DELIVERY_TARGET_FILE, assertTargetIdentity, isEmbeddedBaselineTarget, readSealedDeliveryTarget, sealDeliveryTarget } from "./delivery-target.js";
 import type { DeliveryTarget } from "./delivery-target.js";
-import { appendEvent, readEvents, replayRun, writeFileDurable } from "./eventlog.js";
+import {
+  appendEvent,
+  ensureTerminalReserve,
+  readEvents,
+  releaseTerminalReserve,
+  replayActiveClock,
+  replayRun,
+  writeFileDurable,
+} from "./eventlog.js";
 import type { RunState } from "./eventlog.js";
 import type { CmdIo } from "./io.js";
 import {
@@ -59,7 +81,15 @@ import {
   runsRoot,
   writeRunConfigFile,
 } from "./runs.js";
-import type { CampaignPauseAuthority, ChildLike, ProbeReport, RunnerBackend, RunnerBackendContext } from "./types.js";
+import type {
+  CampaignPauseAuthority,
+  ChildLike,
+  MutationWorkerPreflightContract,
+  ProbeReport,
+  RunnerBackend,
+  RunnerBackendContext,
+  RunPauseRequest,
+} from "./types.js";
 
 const RUN_USAGE =
   "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume] [--backend stub|local] [--config <json>] [--optimizer-artifact sha256:<64hex>]";
@@ -69,10 +99,20 @@ const CampaignSessionSealV1 = z.object({
   campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   authorityPath: z.string().min(1),
   proxyRole: M2ProxyRole,
-  /** Canonical digest of the exact frozen corpus wire config, when the run carries one. */
   corpusDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+  /** Legacy name; this was always the executed image. */
+  capsuleImage: z.string().regex(IMAGE_DIGEST_REF).optional(),
 }).strict();
-type CampaignSessionSealV1 = z.infer<typeof CampaignSessionSealV1>;
+const CampaignSessionSealV2 = z.object({
+  version: z.literal(2),
+  campaignConfigHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  authorityPath: z.string().min(1),
+  proxyRole: M2ProxyRole,
+  corpusDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+  executionImage: z.string().regex(IMAGE_DIGEST_REF),
+}).strict();
+const CampaignSessionSeal = z.discriminatedUnion("version", [CampaignSessionSealV1, CampaignSessionSealV2]);
+type CampaignSessionSeal = z.infer<typeof CampaignSessionSeal>;
 
 function assertCampaignAuthority(
   campaignConfigHash: `sha256:${string}`,
@@ -87,10 +127,11 @@ function assertCampaignAuthority(
   }
 }
 
-function readCampaignSessionSeal(runDir: string): CampaignSessionSealV1 {
+function readCampaignSessionSeal(runDir: string): CampaignSessionSeal & { executionImage?: string | undefined } {
   const path = join(runDir, CAMPAIGN_SESSION_FILE);
   if (!existsSync(path)) throw new UsageError(`campaign-sealed run is missing ${CAMPAIGN_SESSION_FILE}`);
-  return CampaignSessionSealV1.parse(JSON.parse(readFileSync(path, "utf8")));
+  const seal = CampaignSessionSeal.parse(JSON.parse(readFileSync(path, "utf8")));
+  return seal.version === 1 ? { ...seal, executionImage: seal.capsuleImage } : seal;
 }
 function campaignSessionFenceError(
   runDir: string,
@@ -145,6 +186,7 @@ const ConfigOverrides = z
     headless: z.boolean().optional(),
     improverSeat: z.boolean().optional(),
     seed: z.number().int().nonnegative().optional(),
+    sessionNoYieldMaxTokens: SessionNoYieldMaxTokens.optional(),
     budget: BudgetEnvelope.partial().optional(),
     promotion: PromotionRule.optional(),
   })
@@ -244,6 +286,9 @@ function buildConfig(
     backend: flags.backend,
     improverSeat: overrides.improverSeat ?? false,
     seed: overrides.seed ?? 0,
+    ...(overrides.sessionNoYieldMaxTokens === undefined
+      ? {}
+      : { sessionNoYieldMaxTokens: overrides.sessionNoYieldMaxTokens }),
     ...(overrides.promotion !== undefined ? { promotion: overrides.promotion } : {}),
   });
   // Hard upper envelope (same validator as interactive E-edits): a --config or
@@ -455,6 +500,8 @@ export interface TrustedRunOptions {
   /** Deterministic child/outer id from a durable meta receipt. */
   runId?: string | undefined;
   measurementEpoch?: string | undefined;
+  /** Trusted per-evaluation wall-time cap; never accepted from CLI flags or run config. */
+  evalTimeoutSec?: number | undefined;
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   optimizerEpisodesMax?: number | undefined;
   maxPublicCandidateEvaluations?: number | undefined;
@@ -462,12 +509,22 @@ export interface TrustedRunOptions {
   trustedValidPublicCandidateTarget?: number | undefined;
   /** Narrow holdout capability released only by terminal-latched meta orchestration. */
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
+  /** Frozen promotion holdout; host-only and absent from optimizer-authored config. */
+  promotionHoldoutSplit?: PromotionHoldoutSplit | undefined;
   /** Internal campaign seed closure; never serialized or re-collected from repoRoot. */
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+  /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
+  mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
+  /** Authenticated campaign-only execution image; admitted manifest/digest remain unchanged. */
+  executionImageOverride?: string | undefined;
   /** Frozen model capability for this trusted session. Omit only on legacy M0/M1 runs. */
   proxyRole?: M2ProxyRole | undefined;
   /** Shared recursive-campaign provider pause authority. */
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
+  /** Trusted recursive journal authority; true leaves an INTERNAL child crash resumable. */
+  hasUnsettledPendingChild?: (() => boolean) | undefined;
+  /** Resume-only negative adjudication for a stale, unpaused recursive child. */
+  adjudicateInterruptedChild?: boolean | undefined;
   /**
    * Review bypass for the trusted synthetic meta capsule only: its authoring
    * validation and later frozen-byte recheck precede/replace Gate 2.
@@ -481,9 +538,6 @@ export interface TrustedRunOptions {
   corpus?: BrokerCorpusConfig | undefined;
   /** The frozen campaign config's corpusCohort block — fenced against the corpus wire config before supervision. */
   corpusCohort?: CorpusCohortBinding | undefined;
-  /** Calibration host binding: sandbox cgroup parent + inspected engine id; trusted plan only, never CLI flags/config/optimizer. */
-  sandboxCgroupParent?: string | undefined;
-  sandboxDockerEngineId?: string | undefined;
 }
 
 export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunOptions = {}): Promise<number> {
@@ -533,13 +587,27 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
   // sole bypass is an explicit trusted synthetic-meta authoring/recheck path.
   const admissionReview = trusted.admissionReview ?? "required";
   const admitted = admitCapsule(capsuleDir, { review: admissionReview });
-  const manifest = admitted.manifest;
+  const admittedManifest = admitted.manifest;
+  if (
+    trusted.executionImageOverride !== undefined
+    && !IMAGE_DIGEST_REF.test(trusted.executionImageOverride)
+  ) {
+    throw new UsageError("trusted execution image override must be an immutable digest reference");
+  }
+  const executionImage = trusted.executionImageOverride ?? admittedManifest.image;
+  if (
+    trusted.executionImageOverride !== undefined
+    && trusted.campaignConfigHash === undefined
+  ) {
+    throw new UsageError("trusted execution image override requires a campaign-sealed run");
+  }
   if (
     admitted.provisional
     && (
       trusted.evaluationStrategy !== undefined
       || trusted.trustedValidPublicCandidateTarget !== undefined
       || trusted.terminalHoldoutAssetGroupIds !== undefined
+      || trusted.promotionHoldoutSplit !== undefined
       || trusted.corpus !== undefined
     )
   ) {
@@ -555,25 +623,25 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       if (trusted.optimizerBaseSnapshot !== undefined) {
         throw new UsageError("an internal optimizer base snapshot cannot be combined with HONE_OPTIMIZER_CMD");
       }
-      return resolveOptimizerDigest(io.env, manifest.image);
+      return resolveOptimizerDigest(io.env, executionImage);
     }
     optimizerBaseSnapshot = trusted.optimizerBaseSnapshot ?? collectOptimizerSnapshot();
-    return resolveOptimizerSnapshotDigest(io.env, manifest.image, optimizerBaseSnapshot);
+    return resolveOptimizerSnapshotDigest(io.env, executionImage, optimizerBaseSnapshot);
   };
 
   let plan: RunPlan;
   if (resumeRequested) {
     const found = trusted.runId === undefined
-      ? findResumableRun(io.root, manifest.id)
+      ? findResumableRun(io.root, admittedManifest.id)
       : (() => {
           if (!/^run_[a-zA-Z0-9_.-]+$/.test(trusted.runId)) throw new UsageError("trusted run id is invalid");
           const runDir = join(runsRoot(io.root), trusted.runId);
           if (!existsSync(runDir)) return null;
           const state = replayRun(runDir);
-          if (state.runId !== trusted.runId || state.capsuleId !== manifest.id || state.finished !== null) return null;
+          if (state.runId !== trusted.runId || state.capsuleId !== admittedManifest.id || state.finished !== null) return null;
           return { runDir, runId: trusted.runId, state };
         })();
-    if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${manifest.id} under ${runsRoot(io.root)}`);
+    if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${admittedManifest.id} under ${runsRoot(io.root)}`);
     const started = readEvents(found.runDir)[0];
     const sealedCampaignHash = started?.type === "run.started" ? started.campaignConfigHash : undefined;
     if (sealedCampaignHash === undefined) {
@@ -617,6 +685,15 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         const cohortError = corpusCohortFenceError(trusted.corpus, trusted.corpusCohort);
         if (cohortError !== null) throw new UsageError(cohortError);
       }
+      // Legacy v1 seals may predate execution-image recording; absent means
+      // unconstrained, not changed. Corpus-specific mismatches above retain
+      // their precise refusal reasons.
+      if (
+        campaignSeal.executionImage !== undefined
+        && campaignSeal.executionImage !== executionImage
+      ) {
+        throw new UsageError("campaign execution image changed since the run started");
+      }
     }
     // Resume replays Gate 2 again: revocation or a delegation change refuses
     // before the run lock, event append, backend spawn, or delivery.
@@ -635,7 +712,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       runId: found.runId,
       ...(optimizerArtifactFlag !== undefined ? { artifactHash: optimizerArtifactFlag } : {}),
       casDir: casRoot(io.root),
-      image: manifest.image,
+      image: executionImage,
       ...(trusted.optimizerBaseSnapshot !== undefined ? { baseSnapshot: trusted.optimizerBaseSnapshot } : {}),
     });
     if (selected === null) {
@@ -741,7 +818,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       }
     }
     let config = buildConfig(
-      manifest,
+      admittedManifest,
       overrides,
       {
         headless: boolFlag(flags, "headless"),
@@ -787,7 +864,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     if (config.apply === "none" && repoFlag !== undefined) {
       throw new UsageError("--repo binds a delivery target and requires --apply branch|pr|auto");
     }
-    if (config.apply !== "none" && manifest.baseline.kind !== "git") {
+    if (config.apply !== "none" && admittedManifest.baseline.kind !== "git") {
       throw new UsageError(`--apply ${config.apply} needs a git-baseline capsule — this capsule's baseline is a CAS artifact, which binds no delivery target`);
     }
     // Embedded capsule-baseline stores (.gitdir) carry no checkout for auto
@@ -808,7 +885,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       selectedCandidate = await resolveCandidateOptimizer({
         casDir: casRoot(io.root),
         artifactHash: optimizerArtifactFlag,
-        image: manifest.image,
+        image: executionImage,
         ...(trusted.optimizerBaseSnapshot !== undefined ? { baseSnapshot: trusted.optimizerBaseSnapshot } : {}),
       });
       assertCandidateOptimizerEnvironment(io.env, selectedCandidate.mergedDigest);
@@ -821,18 +898,20 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     if (existsSync(join(runsRoot(io.root), runId))) throw new UsageError(`run ${runId} already exists`);
     const runDir = mintRunDirDurable(io.root, runId);
     if (trusted.campaignConfigHash !== undefined) {
-      writeFileDurable(join(runDir, CAMPAIGN_SESSION_FILE), `${JSON.stringify(CampaignSessionSealV1.parse({
-        version: 1,
+      writeFileDurable(join(runDir, CAMPAIGN_SESSION_FILE), `${JSON.stringify(CampaignSessionSealV2.parse({
+        version: 2,
         campaignConfigHash: trusted.campaignConfigHash,
         authorityPath: trusted.campaignPauseAuthority?.path,
         proxyRole: trusted.proxyRole,
+        executionImage,
         ...(trusted.corpus !== undefined ? { corpusDigest: brokerCorpusConfigDigest(trusted.corpus) } : {}),
       }))}\n`);
     }
-    // Snapshot the ADMITTED manifest: resume proves capsule identity against it.
-    writeCapsuleSnapshot(runDir, manifest);
+    // Snapshot the ADMITTED manifest. The separate campaign session seal binds
+    // a sanctioned execution-image override without changing capsule identity.
+    writeCapsuleSnapshot(runDir, admittedManifest);
     try {
-      freezeCapsuleAssets(runDir, capsuleDir, manifest);
+      freezeCapsuleAssets(runDir, capsuleDir, admittedManifest);
     } catch (error) {
       rmSync(runDir, { recursive: true, force: true });
       throw error;
@@ -865,7 +944,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     // The sealed delivery target is RENDERED into the owner-approved
     // contract, so the contract hash binds exactly where the run may
     // deliver; the resume re-render re-binds it (resume-seal.ts).
-    const seal = { runId, manifest, capsuleDigest: admitted.digest, optimizerDigest, orderingReport: admitted.orderingReport, deliveryTarget };
+    const seal = { runId, manifest: admittedManifest, capsuleDigest: admitted.digest, optimizerDigest, orderingReport: admitted.orderingReport, deliveryTarget };
     writeFileDurable(join(runDir, CONTRACT_FILE), renderContract({ ...seal, config }));
     if (!config.headless) {
       const approved = await promptApproval(join(runDir, CONTRACT_FILE), seal, config, io);
@@ -881,18 +960,26 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     plan = { runId, runDir, config, resumed: false };
   }
 
+
   return superviseRun(
     plan,
     {
-      manifest,
+      admittedManifest,
+      runtimeIdentity: {
+        admittedCapsuleDigest: admitted.digest,
+        executionImage,
+      },
       capsuleDir,
-      capsuleDigest: admitted.digest,
       optimizerDigest,
       orderingReport: admitted.orderingReport,
       ...(optimizerSnapshot !== undefined ? { optimizerSnapshot } : {}),
       ...(optimizerBaseSnapshot !== undefined ? { optimizerBaseSnapshot } : {}),
+      ...(trusted.mutationWorkerPreflightContract !== undefined
+        ? { mutationWorkerPreflightContract: trusted.mutationWorkerPreflightContract }
+        : {}),
       optimizerArtifactSeal,
       ...(trusted.measurementEpoch !== undefined ? { measurementEpoch: trusted.measurementEpoch } : {}),
+      ...(trusted.evalTimeoutSec !== undefined ? { evalTimeoutSec: trusted.evalTimeoutSec } : {}),
       ...(trusted.evaluationStrategy !== undefined ? { evaluationStrategy: trusted.evaluationStrategy } : {}),
       ...(trusted.optimizerEpisodesMax !== undefined ? { optimizerEpisodesMax: trusted.optimizerEpisodesMax } : {}),
       ...(trusted.maxPublicCandidateEvaluations !== undefined
@@ -904,17 +991,22 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ...(trusted.terminalHoldoutAssetGroupIds !== undefined
         ? { terminalHoldoutAssetGroupIds: trusted.terminalHoldoutAssetGroupIds }
         : {}),
+      ...(trusted.promotionHoldoutSplit !== undefined
+        ? { promotionHoldoutSplit: trusted.promotionHoldoutSplit }
+        : {}),
       ...(trusted.proxyRole !== undefined ? { proxyRole: trusted.proxyRole } : {}),
       ...(trusted.campaignPauseAuthority !== undefined
         ? { campaignPauseAuthority: trusted.campaignPauseAuthority }
         : {}),
+      ...(trusted.hasUnsettledPendingChild !== undefined
+        ? { hasUnsettledPendingChild: trusted.hasUnsettledPendingChild }
+        : {}),
+      ...(trusted.adjudicateInterruptedChild === true ? { adjudicateInterruptedChild: true } : {}),
       ...(trusted.admissionReview !== undefined ? { admissionReview: trusted.admissionReview } : {}),
       ...(trusted.campaignConfigHash !== undefined ? { campaignConfigHash: trusted.campaignConfigHash } : {}),
       ...(trusted.recursiveBroker !== undefined ? { recursiveBroker: trusted.recursiveBroker } : {}),
       ...(trusted.corpus !== undefined ? { corpus: trusted.corpus } : {}),
       ...(trusted.corpusCohort !== undefined ? { corpusCohort: trusted.corpusCohort } : {}),
-      ...(trusted.sandboxCgroupParent !== undefined ? { sandboxCgroupParent: trusted.sandboxCgroupParent } : {}),
-      ...(trusted.sandboxDockerEngineId !== undefined ? { sandboxDockerEngineId: trusted.sandboxDockerEngineId } : {}),
     },
     io,
   );
@@ -1403,47 +1495,46 @@ function exhaustedBudgetDimension(budget: BudgetState): string | null {
   return null;
 }
 
-/** Wall budget is measured from run.started, including time spent offline between supervisors. */
+/** Remaining active-time budget; paused/offline lifetime is deliberately absent. */
 export function remainingWallBudgetMs(
   maxWallClockSec: number,
-  lastSpentWallSec: number,
-  runStartedAt: string | undefined,
-  nowMs: number = Date.now(),
+  spentActiveWallSec: number,
 ): number {
-  const parsedStart = runStartedAt === undefined ? Number.NaN : Date.parse(runStartedAt);
-  const elapsedSinceStart = Number.isFinite(parsedStart) ? Math.max(0, (nowMs - parsedStart) / 1000) : 0;
-  const spent = Math.max(lastSpentWallSec, elapsedSinceStart);
-  return Math.max(0, (maxWallClockSec - spent) * 1000);
+  return Math.max(0, (maxWallClockSec - Math.max(0, spentActiveWallSec)) * 1000);
 }
 
 /** Frozen inputs superviseRun carries beside the plan (all admission-derived). */
 export interface SuperviseExtra {
-  manifest: CapsuleManifest;
+  admittedManifest: CapsuleManifest;
+  runtimeIdentity: RunnerBackendContext["runtimeIdentity"];
   capsuleDir: string;
-  capsuleDigest: string;
   optimizerDigest: string;
   orderingReport: DiagnosticOrderingReport;
   /** Candidate-selected merged captured closure. */
   optimizerSnapshot?: OptimizerSnapshot | undefined;
   /** Exact default/campaign seed closure captured during admission. */
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
+  /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
+  mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
   /** Exact durable selection receipt, or null/absent for the M0 default optimizer. */
   optimizerArtifactSeal?: OptimizerArtifactSeal | null | undefined;
   measurementEpoch?: string | undefined;
+  evalTimeoutSec?: number | undefined;
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   optimizerEpisodesMax?: number | undefined;
   maxPublicCandidateEvaluations?: number | undefined;
   campaignConfigHash?: `sha256:${string}` | undefined;
   trustedValidPublicCandidateTarget?: number | undefined;
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
+  promotionHoldoutSplit?: PromotionHoldoutSplit | undefined;
   recursiveBroker?: BrokerRecursiveConfig | undefined;
   corpus?: BrokerCorpusConfig | undefined;
   corpusCohort?: CorpusCohortBinding | undefined;
   proxyRole?: M2ProxyRole | undefined;
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
+  hasUnsettledPendingChild?: (() => boolean) | undefined;
+  adjudicateInterruptedChild?: boolean | undefined;
   admissionReview?: "required" | "off" | undefined;
-  sandboxCgroupParent?: string | undefined;
-  sandboxDockerEngineId?: string | undefined;
 }
 
 /** Late-binding relay from the run lock's stop channel to the supervisor's signal handler. */
@@ -1503,7 +1594,7 @@ async function superviseLocked(
   stopChannel: SupervisorStopChannel,
 ): Promise<number> {
   const { runId, runDir, config } = plan;
-  const { manifest, capsuleDir, capsuleDigest, optimizerDigest } = extra;
+  const { admittedManifest, runtimeIdentity, capsuleDir, optimizerDigest } = extra;
   const headless = config.headless;
   const casDir = casRoot(io.root);
   mkdirSync(casDir, { recursive: true });
@@ -1514,20 +1605,30 @@ async function superviseLocked(
   // sentinel. A dead/stale sentinel is tiny and safe (same semantics as a
   // SIGKILL leftover); consumers gate on pidAlive AND the lock identity
   // probe (a bare PID is meaningless — PIDs recycle, nonces do not).
+  ensureTerminalReserve(runDir);
   writeFileSync(join(runDir, SUPERVISOR_FILE), `${JSON.stringify({ pid: process.pid, runId, nonce })}\n`);
   const initialReplay = replayRun(runDir);
+  if (extra.adjudicateInterruptedChild === true && initialReplay.status !== "running") {
+    extra.adjudicateInterruptedChild = false;
+  }
 
   // Terminal-status flags, declared BEFORE the emit closure (TDZ) so it can
   // normalize a broker-authored budget.exhausted into the terminal status.
   let budgetDimension: string | null = initialReplay.budgetExhaustedDimension;
   let budgetEventLogged = budgetDimension !== null;
+  let sessionNoYieldBound = initialReplay.sessionNoYieldBound;
   let stopRequested = false;
+  const pauseState: { requested: RunPauseRequest | null } = { requested: null };
+  const currentPause = (): RunPauseRequest | null => pauseState.requested;
   // Bound after the AbortController/termination barrier exist. Broker events
   // cannot arrive before backend.start, so this placeholder is never the
   // active path; it keeps event normalization linear during setup.
   let requestBudgetAbort = (dimension: string): void => {
     budgetDimension ??= dimension;
   };
+  // Rebound after the active watchdog exists. Broker events cannot arrive
+  // before backend.start, so setup-time snapshots never hit this placeholder.
+  let rearmWallBudget = (_spentActiveWallSec: number): void => {};
 
   let liveBudget = initialReplay.lastBudget;
   const emit = (event: RunEvent): RunEvent => {
@@ -1536,6 +1637,7 @@ async function superviseLocked(
       liveBudget = parsed.budget;
       const dimension = exhaustedBudgetDimension(parsed.budget);
       if (dimension !== null) requestBudgetAbort(dimension);
+      rearmWallBudget(parsed.budget.spent.wallClockSec);
     }
     if (parsed.type === "budget.exhausted") {
       // Trusted broker budget authority: ANY logged exhaustion normalizes the
@@ -1543,6 +1645,9 @@ async function superviseLocked(
       // registered process tree. An explicit operator stop still wins status.
       budgetEventLogged = true;
       requestBudgetAbort(parsed.dimension);
+    }
+    if (parsed.type === "mutation.no-yield-bound") {
+      sessionNoYieldBound = true;
     }
     if (headless) {
       io.out(JSON.stringify(parsed));
@@ -1555,6 +1660,8 @@ async function superviseLocked(
       io.out(`run ${runId} resumed from cursor ${parsed.fromCursor}`);
     } else if (parsed.type === "budget.exhausted") {
       io.out(`budget exhausted: ${parsed.dimension}`);
+    } else if (parsed.type === "run.paused") {
+      io.out(`run ${runId} paused: ${parsed.reason}`);
     }
     return parsed;
   };
@@ -1593,8 +1700,8 @@ async function superviseLocked(
       runId,
       runDir,
       config,
-      manifest,
-      capsuleDigest,
+      manifest: admittedManifest,
+      capsuleDigest: runtimeIdentity.admittedCapsuleDigest,
       optimizerDigest,
       orderingReport: extra.orderingReport,
       deliveryTarget: sealedTarget,
@@ -1614,7 +1721,7 @@ async function superviseLocked(
     // The run-local asset tree is the only capsule asset authority accepted
     // after admission. Authenticate it while holding the run lock, after all
     // flag/config seals but before run.resumed or any backend work.
-    authenticateFrozenCapsuleAssets(runDir, manifest);
+    authenticateFrozenCapsuleAssets(runDir, admittedManifest);
     // Boot-bound runtime recheck IMMEDIATELY before the durable run event:
     // recompute the closure, compare against the boot seal and the run's
     // pin, then append — no await between the comparison and the append.
@@ -1654,10 +1761,11 @@ async function superviseLocked(
       runId,
       at: new Date().toISOString(),
       type: "run.started",
-      capsuleId: manifest.id,
+      capsuleId: admittedManifest.id,
       contractHash: contractHash(readFileSync(join(runDir, CONTRACT_FILE), "utf8")),
       ...(extra.campaignConfigHash !== undefined ? { campaignConfigHash: extra.campaignConfigHash } : {}),
       optimizerDigest,
+      checkpointVersion: 1,
     });
   }
 
@@ -1665,11 +1773,14 @@ async function superviseLocked(
   // The backend is the SEALED one from the run config — never a flag. A
   // durably sealed optimizer completion skips the backend outright: no
   // optimizer rerun, no container/broker/proxy resource is ever spawned.
-  const backend = optimizerAlreadyComplete ? null : await loadBackend(config.backend, io.root, io.env);
+  const backend = optimizerAlreadyComplete || sessionNoYieldBound || extra.adjudicateInterruptedChild === true
+    ? null
+    : await loadBackend(config.backend, io.root, io.env);
 
   const abort = new AbortController();
   const children = new Set<ChildLike>();
   const timers: NodeJS.Timeout[] = [];
+  let wallBudgetTimer: NodeJS.Timeout | undefined;
   const graceMs = Number(io.env["HONE_KILL_GRACE_MS"] ?? 5000);
 
   // Watchdog timers stay referenced (they must keep a headless process alive
@@ -1716,6 +1827,14 @@ async function superviseLocked(
     if (!abort.signal.aborted) abort.abort(new Error(`budget exhausted: ${dimension}`));
     void termThenKill();
   };
+  rearmWallBudget = (spentActiveWallSec: number): void => {
+    clearTimeout(wallBudgetTimer);
+    if (abort.signal.aborted || currentPause() !== null || stopRequested) return;
+    wallBudgetTimer = setTimeout(
+      () => requestBudgetAbort("wallClockSec"),
+      remainingWallBudgetMs(config.budget.maxWallClockSec, spentActiveWallSec),
+    );
+  };
   // A broker-authored exhaustion may have been public-log durable before a
   // crash. Re-latch the abort before backend.start, and remember that the
   // public event already exists so terminalization never emits a duplicate.
@@ -1723,23 +1842,43 @@ async function superviseLocked(
     abort.abort(new Error(`budget exhausted: ${budgetDimension}`));
   }
 
-  // Wall clock is run lifetime, not supervisor uptime: resume includes the
-  // offline interval since the durable run.started timestamp.
-  const runStartedAt = readEvents(runDir).find((event) => event.type === "run.started")?.at;
-  const spentWallSec = replayed.lastBudget?.spent.wallClockSec ?? 0;
-  const remainMs = remainingWallBudgetMs(config.budget.maxWallClockSec, spentWallSec, runStartedAt);
-  armTimer(() => requestBudgetAbort("wallClockSec"), remainMs);
+  // Start/resume opens a fresh active interval. New budget snapshots carry
+  // the broker's durable active total; legacy snapshots used lifetime
+  // semantics, so their bootstrap is reconstructed from lifecycle events.
+  const clockNowMs = Date.now();
+  const activeClock = replayActiveClock(readEvents(runDir), clockNowMs);
+  const currentIntervalSec = activeClock.activeStartedAtMs === null
+    ? 0
+    : Math.max(0, clockNowMs - activeClock.activeStartedAtMs) / 1000;
+  const priorActiveSec = replayed.lastBudget?.lifetimeSec === undefined
+    ? activeClock.accumulatedActiveWallClockSec
+    : Math.max(replayed.lastBudget.spent.wallClockSec, activeClock.accumulatedActiveWallClockSec);
+  rearmWallBudget(priorActiveSec + currentIntervalSec);
 
-  const onSignal = (): void => {
+  const onStop = (): void => {
     stopRequested = true;
     abort.abort(new Error("stop requested"));
     void termThenKill();
   };
-  process.on("SIGTERM", onSignal);
-  process.on("SIGINT", onSignal);
-  // The lock's lease connections carry trusted stop requests (`hone stop`
-  // never signals a PID); a request buffered before this bind fires now.
-  stopChannel.bind(onSignal);
+  const onPause = (request: RunPauseRequest): void => {
+    if (pauseState.requested !== null) return;
+    pauseState.requested = request;
+    emit({
+      runId,
+      at: new Date().toISOString(),
+      type: "run.paused",
+      reason: request.reason,
+      ...(request.pauseId === undefined ? {} : { pauseId: request.pauseId }),
+      ...(request.providerStatus === undefined ? {} : { providerStatus: request.providerStatus }),
+    });
+    abort.abort(new Error(`run paused: ${request.reason}`));
+    void termThenKill();
+  };
+  const onOperatorPause = (): void => onPause({ reason: "operator" });
+  process.on("SIGTERM", onOperatorPause);
+  process.on("SIGINT", onOperatorPause);
+  // The lock lease is an explicit `hone stop`, not an OS lifecycle signal.
+  stopChannel.bind(onStop);
 
   // Terminal-order fence: once the backend settled or the hard-stop deadline
   // passed, a late ctx.emit from an abort-ignoring backend (or a straggler
@@ -1756,14 +1895,18 @@ async function superviseLocked(
     runDir,
     casDir,
     capsuleDir,
-    manifest,
+    admittedManifest,
+    runtimeIdentity,
     config,
     env: io.env,
-    capsuleDigest,
     optimizerDigest,
     ...(extra.optimizerSnapshot !== undefined ? { optimizerSnapshot: extra.optimizerSnapshot } : {}),
     ...(extra.optimizerBaseSnapshot !== undefined ? { optimizerBaseSnapshot: extra.optimizerBaseSnapshot } : {}),
+    ...(extra.mutationWorkerPreflightContract !== undefined
+      ? { mutationWorkerPreflightContract: extra.mutationWorkerPreflightContract }
+      : {}),
     ...(extra.measurementEpoch !== undefined ? { measurementEpoch: extra.measurementEpoch } : {}),
+    ...(extra.evalTimeoutSec !== undefined ? { evalTimeoutSec: extra.evalTimeoutSec } : {}),
     ...(extra.evaluationStrategy !== undefined ? { evaluationStrategy: extra.evaluationStrategy } : {}),
     ...(extra.optimizerEpisodesMax !== undefined ? { optimizerEpisodesMax: extra.optimizerEpisodesMax } : {}),
     ...(extra.maxPublicCandidateEvaluations !== undefined
@@ -1775,13 +1918,14 @@ async function superviseLocked(
     ...(extra.terminalHoldoutAssetGroupIds !== undefined
       ? { terminalHoldoutAssetGroupIds: extra.terminalHoldoutAssetGroupIds }
       : {}),
+    ...(extra.promotionHoldoutSplit !== undefined
+      ? { promotionHoldoutSplit: extra.promotionHoldoutSplit }
+      : {}),
     ...(extra.proxyRole !== undefined ? { proxyRole: extra.proxyRole } : {}),
     ...(extra.campaignPauseAuthority !== undefined ? { campaignPauseAuthority: extra.campaignPauseAuthority } : {}),
     ...(extra.admissionReview !== undefined ? { admissionReview: extra.admissionReview } : {}),
     ...(extra.recursiveBroker !== undefined ? { recursiveBroker: extra.recursiveBroker } : {}),
     ...(extra.corpus !== undefined ? { corpus: extra.corpus } : {}),
-    ...(extra.sandboxCgroupParent !== undefined ? { sandboxCgroupParent: extra.sandboxCgroupParent } : {}),
-    ...(extra.sandboxDockerEngineId !== undefined ? { sandboxDockerEngineId: extra.sandboxDockerEngineId } : {}),
     replayed,
     signal: abort.signal,
     emit: (event) => (backendFenced ? RunEvent.parse(event) : emit(event)),
@@ -1792,7 +1936,8 @@ async function superviseLocked(
       };
     },
     probeGate: (report) => (headless ? Promise.resolve(headlessProbeVerdict(report)) : promptProbe(report, io, abort.signal)),
-    requestStop: () => onSignal(),
+    requestStop: () => onStop(),
+    requestPause: (request) => onPause(request),
     registerAuthorityBarrier: (barrier) => {
       authorityBarrier = barrier;
       // A rejection may land before anything awaits it — keep it handled.
@@ -1804,7 +1949,9 @@ async function superviseLocked(
     },
   };
 
-  let failure: Error | null = null;
+  let failure: Error | null = extra.adjudicateInterruptedChild === true
+    ? new Error("interrupted recursive child adjudicated as a trusted negative")
+    : null;
   let authorityFailure: Error | null = null;
   try {
     if (backend !== null) {
@@ -1876,10 +2023,31 @@ async function superviseLocked(
       io.err(`backend cleanup incomplete: ${cleanupFailure.message} — run left unfinished (resume with \`hone run --resume\`)`);
       return 1;
     }
+    if (isOptimizerChildPendingError(failure)) {
+      if (extra.hasUnsettledPendingChild?.() !== true) {
+        failure = new Error("optimizer reported a pending recursive child without durable pending authority");
+      } else {
+        onPause({ reason: "recursive-child-pending" });
+        await termThenKill();
+        io.err("recursive child remains durably pending — outer run paused for deterministic retry");
+        return 0;
+      }
+    }
+
+    // The trusted backend and every resource are now terminated. Delivery
+    // and reporting do not consume the optimizer/evaluator wall envelope.
+    clearTimeout(wallBudgetTimer);
+    rearmWallBudget = () => {};
 
     if (failure !== null) {
       const err: Error = failure;
       io.err(`backend failed: ${err.message}`);
+    }
+
+    const pauseAfterBackend = currentPause();
+    if (pauseAfterBackend !== null) {
+      io.err(`run durably paused (${pauseAfterBackend.reason}); resume with \`hone run --resume\``);
+      return 0;
     }
 
     const preFinish = replayRun(runDir);
@@ -1976,29 +2144,59 @@ async function superviseLocked(
         }
       }
     }
-
-    // Drain the signal queue: a SIGTERM raised during the synchronous
-    // delivery is only DISPATCHED in a later poll phase — a single
-    // setImmediate can land in the same iteration's check phase and miss it
-    // (verified empirically). A timer forces at least one full iteration
-    // through poll, so the handler runs before the terminal status is
-    // chosen: delivery finishes atomically, the run still stops.
+    // Drain two poll/check passes. A stop byte on an already-accepted lease
+    // is consumed in the first poll; a stop connection still pending accept
+    // may need that poll to install its data handler and the next to consume
+    // its queued byte. Wall time is not a correctness barrier under scheduler
+    // starvation, so each pass is fenced by the check phase instead.
     await sleep(25);
+    await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
+    await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate));
 
     // A signal that landed during delivery (or between backend settle and
     // the drain) started the barrier but nothing awaited it yet — the same
     // idempotent barrier guarantees children are reaped before the terminal.
     if (abort.signal.aborted) await termThenKill();
+    const pauseAfterDelivery = currentPause();
+    if (pauseAfterDelivery !== null) {
+      io.err(`run durably paused (${pauseAfterDelivery.reason}); resume with \`hone run --resume\``);
+      return 0;
+    }
 
     if (extra.campaignPauseAuthority?.isCampaignPaused() === true) {
       io.err("campaign remains durably paused after backend teardown — run left unfinished for trusted resume");
       return 1;
     }
+
     let status: "completed" | "stopped" | "failed" | "budget";
-    if (stopRequested) status = "stopped";
-    else if (budgetDimension !== null) status = "budget";
-    else if (failure !== null) status = "failed";
-    else status = "completed";
+    let reason: "operator" | "budget-exhausted" | "session-no-yield-bound" | "crash" | undefined;
+    if (stopRequested) {
+      status = "stopped";
+      reason = "operator";
+    } else if (budgetDimension !== null) {
+      status = "budget";
+      reason = "budget-exhausted";
+    } else if (sessionNoYieldBound) {
+      status = "stopped";
+      reason = "session-no-yield-bound";
+    } else if (failure !== null) {
+      if (!isOptimizerStorageExhaustedError(failure) && extra.adjudicateInterruptedChild !== true) {
+        if (extra.hasUnsettledPendingChild?.() === true) {
+          io.err("recursive child remains durably pending — run left unfinished for trusted resume");
+          return 1;
+        }
+        if (preFinish.activeEpisode !== null) {
+          io.err(
+            `optimizer episode ${preFinish.activeEpisode.episode} remains durably incomplete — run left unfinished for trusted resume`,
+          );
+          return 1;
+        }
+      }
+      status = "failed";
+      reason = "crash";
+    } else {
+      status = "completed";
+    }
 
     if (budgetDimension !== null && !budgetEventLogged) {
       emit({ runId, at: new Date().toISOString(), type: "budget.exhausted", dimension: budgetDimension });
@@ -2010,7 +2208,13 @@ async function superviseLocked(
       type: "run.finished",
       ...(best !== null ? { best } : {}),
       status,
+      ...(reason === undefined ? {} : { reason }),
     });
+    try {
+      releaseTerminalReserve(runDir);
+    } catch (error) {
+      io.err(`terminal reserve cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
 
     const report = exitReport(runId, replayRun(runDir));
     if (headless) {
@@ -2022,9 +2226,10 @@ async function superviseLocked(
   } finally {
     // Handlers and timers live through delivery, the terminal event, and the
     // report — removed only once no further trusted append can happen.
+    clearTimeout(wallBudgetTimer);
     for (const t of timers) clearTimeout(t);
-    process.removeListener("SIGTERM", onSignal);
-    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onOperatorPause);
+    process.removeListener("SIGINT", onOperatorPause);
     stopChannel.bind(() => {}); // late stop bytes after the terminal are inert
   }
 }

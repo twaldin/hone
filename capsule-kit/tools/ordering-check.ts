@@ -19,10 +19,10 @@
  *   2. shortcut > baseline on TRAIN, but NOT on validation — the memorizing
  *      cheat inverts across the split boundary, which is the split-integrity
  *      proof
- *   3. stability: 3 evaluations of the baseline stay within a relative spread
- *      band of 0.15 on aggregate ((max-min)/mean). Measured spread through
- *      the broker Docker path on an M3 Max: ~0.02, dominated by wall-clock
- *      noise in the 1/(1+ms) term — the band leaves >7x headroom.
+ *   3. stability: at least 3 evaluations of the baseline stay within a
+ *      relative spread band of 0.15 on aggregate ((max-min)/mean). Measured
+ *      spread through the broker Docker path on an M3 Max is ~0.02, dominated
+ *      by noise in the 1/(1+ms) term — the band leaves >7x headroom.
  *   4. sanity: baseline and improved pass the trusted correctness constraint
  *      with quality 1.0
  *
@@ -40,8 +40,11 @@
  *     the run, on success AND on failure.
  *
  * Usage: npx tsx capsules/tools/ordering-check.ts [--report [path]]
+ *   [--stability-runs count] [--raw-measurements path]
  *   --report writes the schema-validated compact aggregate JSON summary
  *   (default path: <capsule>/diagnostics/ordering-report.json) on success.
+ *   --stability-runs raises the repeated baseline count (minimum 3), while
+ *   --raw-measurements records every evaluator output in execution order.
  *
  * Capsule selection: the check targets capsules/seeded-astar by default. Set
  * HONE_CAPSULE_DIR to the absolute path of another capsule directory (with
@@ -100,10 +103,8 @@ const DEFAULT_CAPSULE_DIR = resolve(TOOL_DIR, "..", "seeded-astar");
 const TMP_ROOT = resolve(TOOL_DIR, "..", "..", "tmp");
 const SPLITS = ["train", "validation"] as const;
 const DIAGNOSTICS = ["broken", "naive", "shortcut", "improved"] as const;
-const STABILITY_RUNS = 3;
+const DEFAULT_STABILITY_RUNS = 3;
 const STABILITY_BAND = 0.15;
-/** Every ordering datapoint is a fresh container eval: (baseline + 4 diagnostics + 2 extra stability passes) x 2 splits. */
-const EXPECTED_EVALS = (1 + DIAGNOSTICS.length + (STABILITY_RUNS - 1)) * SPLITS.length;
 
 /** Environment override consumed by {@link resolveCapsuleDir}. */
 export const CAPSULE_DIR_ENV_VAR = "HONE_CAPSULE_DIR";
@@ -137,6 +138,33 @@ export function resolveTerminalHoldoutDiagnosticMode(
   }
   return hasFlag;
 }
+
+function requiredFlagValue(
+  args: readonly string[],
+  flag: string,
+): string | undefined {
+  const index = args.indexOf(flag);
+  if (index === -1) return undefined;
+  if (args.lastIndexOf(flag) !== index) {
+    throw new Error(`ordering-check: ${flag} may be specified only once`);
+  }
+  const value = args[index + 1];
+  if (value === undefined || value.startsWith("--")) {
+    throw new Error(`ordering-check: ${flag} requires a value`);
+  }
+  return value;
+}
+
+export function resolveStabilityRuns(args: readonly string[]): number {
+  const value = requiredFlagValue(args, "--stability-runs");
+  if (value === undefined) return DEFAULT_STABILITY_RUNS;
+  const runs = Number(value);
+  if (!Number.isSafeInteger(runs) || runs < 3) {
+    throw new Error("ordering-check: --stability-runs must be a safe integer >= 3");
+  }
+  return runs;
+}
+
 
 /**
  * Resolve the capsule directory this check targets. Deterministic in its
@@ -204,8 +232,20 @@ export function resolveCapsuleDir(source: NodeJS.ProcessEnv | string): string {
 /** Resolved once at module load: an invalid override fails right here, before any CAS/Docker setup can exist. */
 const CAPSULE_DIR = resolveCapsuleDir(process.env);
 
-type Split = (typeof SPLITS)[number];
-type Variant = "baseline" | (typeof DIAGNOSTICS)[number];
+export type Split = (typeof SPLITS)[number];
+export type Variant = "baseline" | (typeof DIAGNOSTICS)[number];
+
+export interface OrderingMeasurement {
+  variant: Variant;
+  split: Split;
+  seed: number;
+  output: EvaluatorOutput;
+}
+
+export interface RunOrderingCheckOptions {
+  stabilityRuns?: number;
+  onMeasurement?: (measurement: OrderingMeasurement) => void;
+}
 
 /**
  * This tool IS the trusted admission side (admin-socket equivalent): it needs
@@ -447,6 +487,7 @@ async function evaluateVariant(
   cas: CasStore,
   variant: Variant,
   seed: number,
+  onMeasurement?: (measurement: OrderingMeasurement) => void,
 ): Promise<VariantResult> {
   const artifactDir = composeArtifact(variant);
   let hash: string;
@@ -464,6 +505,7 @@ async function evaluateVariant(
       );
     }
     bySplit[split] = record.output;
+    onMeasurement?.({ variant, split, seed, output: record.output });
   }
   return {
     bySplit,
@@ -542,13 +584,21 @@ export interface OrderingReport {
   stabilityAggregates: number[];
   stabilitySpread: number;
   failures: string[];
-  /** Real broker eval containers spawned — asserted equal to EXPECTED_EVALS (no memo hits, no host evals). */
+  /** Real broker eval containers spawned; the exact count is derived from the requested stability runs. */
   evalInvocations: number;
   /** Wall-clock duration of the full check, ms. */
   wallMs: number;
 }
 
-export async function runOrderingCheck(): Promise<OrderingReport> {
+export async function runOrderingCheck(
+  options: RunOrderingCheckOptions = {},
+): Promise<OrderingReport> {
+  const stabilityRuns = options.stabilityRuns ?? DEFAULT_STABILITY_RUNS;
+  if (!Number.isSafeInteger(stabilityRuns) || stabilityRuns < 3) {
+    throw new Error("ordering-check: stabilityRuns must be a safe integer >= 3");
+  }
+  const expectedEvals =
+    (1 + DIAGNOSTICS.length + (stabilityRuns - 1)) * SPLITS.length;
   const startedMs = Date.now();
   const terminalHoldoutDiagnostic = resolveTerminalHoldoutDiagnosticMode(
     process.argv.slice(2),
@@ -588,17 +638,17 @@ export async function runOrderingCheck(): Promise<OrderingReport> {
       manifest,
       capsuleRootDir: CAPSULE_DIR,
       baselineArtifactHash: baselineHash,
-      capsuleDigest: capsuleDigest(manifest),
+      admittedCapsuleDigest: capsuleDigest(manifest),
       optimizerDigest: ORDERING_TOOL_DIGEST,
       holdoutLedgerPath: join(tempRoot, "holdout-ledger.ndjson"),
-      ...(terminalHoldoutDiagnostic ? { holdoutBudget: EXPECTED_EVALS } : {}),
+      ...(terminalHoldoutDiagnostic ? { holdoutBudget: expectedEvals } : {}),
       ...(config.sandbox === undefined
         ? {}
         : {
             sandboxMemoryBytes: config.sandbox.memoryBytes,
             ...(config.sandbox.cpus === undefined ? {} : { sandboxCpus: config.sandbox.cpus }),
           }),
-      image: manifest.image,
+      executionImage: manifest.image,
       runDir: join(tempRoot, "run"),
       casDir,
       onEvent: () => {},
@@ -613,7 +663,13 @@ export async function runOrderingCheck(): Promise<OrderingReport> {
 
     const results = {} as Record<Variant, VariantResult>;
     for (const variant of ["baseline", ...DIAGNOSTICS] as const) {
-      results[variant] = await evaluateVariant(broker, cas, variant, 0);
+      results[variant] = await evaluateVariant(
+        broker,
+        cas,
+        variant,
+        0,
+        options.onMeasurement,
+      );
     }
 
     // 1. Discrimination ordering on the combined train+validation aggregate.
@@ -644,8 +700,10 @@ export async function runOrderingCheck(): Promise<OrderingReport> {
     //    Distinct seeds keep the memo key distinct — each pass is a fresh
     //    container measurement of the SAME baseline artifact.
     const stabilityAggregates = [results.baseline.combined];
-    for (let i = 1; i < STABILITY_RUNS; i += 1) {
-      stabilityAggregates.push((await evaluateVariant(broker, cas, "baseline", i)).combined);
+    for (let i = 1; i < stabilityRuns; i += 1) {
+      stabilityAggregates.push(
+        (await evaluateVariant(broker, cas, "baseline", i, options.onMeasurement)).combined,
+      );
     }
     const mean =
       stabilityAggregates.reduce((a, b) => a + b, 0) / stabilityAggregates.length;
@@ -691,9 +749,9 @@ export async function runOrderingCheck(): Promise<OrderingReport> {
     // they THROW): every datapoint was a distinct real container eval and the
     // host transcript is clean.
     const evalInvocations = commands.filter((c) => c[0] === "docker" && c[1] === "run").length;
-    if (evalInvocations !== EXPECTED_EVALS) {
+    if (evalInvocations !== expectedEvals) {
       throw new Error(
-        `ordering-check: expected exactly ${EXPECTED_EVALS} container evaluations, observed ${evalInvocations}`,
+        `ordering-check: expected exactly ${expectedEvals} container evaluations, observed ${evalInvocations}`,
       );
     }
     assertHostTranscriptClean(commands);
@@ -806,8 +864,25 @@ if (invokedDirectly) {
         ? join(CAPSULE_DIR, "diagnostics", "ordering-report.json")
         : reportArg);
 
-  const report = await runOrderingCheck();
+  const stabilityRuns = resolveStabilityRuns(args);
+  const rawMeasurementsArg = requiredFlagValue(args, "--raw-measurements");
+  const measurements: OrderingMeasurement[] = [];
+  const report = await runOrderingCheck({
+    stabilityRuns,
+    ...(rawMeasurementsArg === undefined
+      ? {}
+      : { onMeasurement: (measurement: OrderingMeasurement) => measurements.push(measurement) }),
+  });
   console.log(formatReport(report));
+  if (rawMeasurementsArg !== undefined) {
+    const rawMeasurementsPath = resolve(rawMeasurementsArg);
+    mkdirSync(dirname(rawMeasurementsPath), { recursive: true });
+    writeFileSync(
+      rawMeasurementsPath,
+      `${canonicalJson({ schemaVersion: 1, stabilityRuns, measurements })}\n`,
+    );
+    console.log(`\nraw measurements -> ${rawMeasurementsPath}`);
+  }
   if (report.failures.length > 0) {
     console.error(`\nORDERING CHECK FAILED:\n- ${report.failures.join("\n- ")}`);
     process.exit(1);

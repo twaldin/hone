@@ -1,21 +1,37 @@
 import { existsSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
-import { EvaluationRecord } from "@hone/schema";
+import { EvaluationRecord, type RecursiveEvaluationPlan, type RecursiveTask } from "@hone/schema";
+import { CasStore } from "../src/cas.js";
+import { packDirAsArtifact } from "../src/artifact.js";
 import {
   Broker,
   readBrokerJournalEvaluations,
   type BrokerConfig,
   type TrustedEvaluationStrategyInput,
 } from "../src/broker.js";
+import { RecursiveResourceLedger } from "../src/recursive.js";
 import { startBroker } from "../src/server.js";
 import { TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST, buildTestCapsule } from "./helpers.js";
 
 const BUDGET = { maxTokens: 1_000, maxUsd: 10, maxWallClockSec: 60, maxEvaluatorInvocations: 10 };
 const BASELINE = `sha256:${"a".repeat(64)}`;
 const AT = "2026-07-17T00:00:00.000Z";
+const RECURSIVE_TASK: RecursiveTask = {
+  depth: 0,
+  innerEpisodesMax: 4,
+  members: [{ capsuleId: "cap_000000000001", calibratedInnerCeiling: BUDGET }],
+};
+const RECURSIVE_PLAN: RecursiveEvaluationPlan = {
+  allocations: [{
+    capsuleId: "cap_000000000001",
+    allocationOrdinal: 0,
+    innerEpisodesMax: 4,
+    reservation: BUDGET,
+  }],
+};
 
 async function configFor(
   name: string,
@@ -29,13 +45,20 @@ async function configFor(
     manifest: capsule.manifest,
     capsuleRootDir: capsule.capsuleRootDir,
     baselineArtifactHash: BASELINE,
-    capsuleDigest: TEST_CAPSULE_DIGEST,
+    admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
     optimizerDigest: TEST_OPTIMIZER_DIGEST,
     holdoutLedgerPath: path.join(runDir, "holdout.ndjson"),
-    image: TEST_IMAGE,
+    executionImage: TEST_IMAGE,
     runDir,
     casDir: path.join(root, "cas"),
     onEvent: () => {},
+    runCommand: async () => ({
+      exitCode: 0,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      timedOut: false,
+      truncated: false,
+    }),
     evaluationStrategy: strategy,
   };
 }
@@ -69,7 +92,15 @@ describe("trusted broker evaluation strategy", () => {
     const broker = new Broker(config);
     const result = await broker.evaluate({ artifact: { hash: BASELINE }, assetGroupId: "train", seed: 4 }, { privileged: false });
     expect(result.output.objectives.normalizedGain).toBe(1.25);
-    expect(seen).toEqual([{ runId: "run_strategy", capsuleId: config.manifest.id, artifact: { hash: BASELINE }, assetGroupId: "train", seed: 4 }]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      runId: "run_strategy",
+      capsuleId: config.manifest.id,
+      artifact: { hash: BASELINE },
+      assetGroupId: "train",
+      seed: 4,
+    });
+    expect(seen[0]?.spawnRun).toBeTypeOf("function");
     const evidence = readBrokerJournalEvaluations(config.runDir);
     expect(evidence.records).toEqual([result]);
     expect(evidence.journalHash).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -90,6 +121,167 @@ describe("trusted broker evaluation strategy", () => {
     expect(second.cached).toBe(true);
     expect(calls).toBe(1);
     await broker.close();
+  });
+
+  test("replays a journaled evaluator result inside an incomplete episode without charging again", async () => {
+    let strategyCalls = 0;
+    const config = await configFor("resume-evaluator", async (input) => {
+      strategyCalls += 1;
+      return recordFor(input);
+    });
+    const cas = new CasStore(config.casDir);
+    const workspace = path.join(path.dirname(config.runDir), "workspace");
+    await mkdir(workspace);
+    const parent = { hash: await packDirAsArtifact(workspace, cas) };
+    config.baselineArtifactHash = parent.hash;
+    config.runCommand = async (argv) => ({
+      exitCode: argv[1] === "run" ? 0 : 0,
+      stdout: Buffer.from(argv[1] === "run" ? "container-resume\n" : ""),
+      stderr: Buffer.alloc(0),
+      timedOut: false,
+      truncated: false,
+    });
+
+    const firstBroker = new Broker(config);
+    await firstBroker.init();
+    await firstBroker.createSandbox(
+      { artifact: parent, role: "mutation" },
+      { privileged: false },
+    );
+    const first = await firstBroker.evaluate(
+      { artifact: parent, assetGroupId: "train", seed: 4 },
+      { privileged: false },
+    );
+    expect(strategyCalls).toBe(1);
+    expect(first.cached).toBe(false);
+    await firstBroker.close();
+
+    const resumedBroker = new Broker({
+      ...config,
+      evaluationStrategy: async () => {
+        throw new Error("journaled evaluator work was re-spent");
+      },
+    });
+    await resumedBroker.init();
+    await resumedBroker.createSandbox(
+      { artifact: parent, role: "mutation", continueEpisode: 0 },
+      { privileged: false },
+    );
+    const replayed = await resumedBroker.evaluate(
+      { artifact: parent, assetGroupId: "train", seed: 4, resume: true },
+      { privileged: false },
+    );
+    expect(replayed).toEqual({ ...first, cached: true });
+    expect(resumedBroker.getBudget({ privileged: false }).spent.evaluatorInvocations).toBe(1);
+    expect(readBrokerJournalEvaluations(config.runDir).records).toEqual([first]);
+    await resumedBroker.close();
+  });
+
+  test("does not replay an incomplete episode under a different recursive plan", async () => {
+    let strategyCalls = 0;
+    const config = await configFor("resume-recursive-plan", async (input) => {
+      strategyCalls += 1;
+      return recordFor(input);
+    });
+    const cas = new CasStore(config.casDir);
+    const workspace = path.join(path.dirname(config.runDir), "workspace-recursive");
+    await mkdir(workspace);
+    const parent = { hash: await packDirAsArtifact(workspace, cas) };
+    config.baselineArtifactHash = parent.hash;
+    config.runCommand = async (argv) => ({
+      exitCode: 0,
+      stdout: Buffer.from(argv[1] === "run" ? "container-resume\n" : ""),
+      stderr: Buffer.alloc(0),
+      timedOut: false,
+      truncated: false,
+    });
+    const changedPlan: RecursiveEvaluationPlan = {
+      allocations: [{ ...RECURSIVE_PLAN.allocations[0]!, innerEpisodesMax: 3 }],
+    };
+
+    const firstBroker = new Broker(config);
+    await firstBroker.init();
+    await firstBroker.createSandbox({ artifact: parent, role: "mutation" }, { privileged: false });
+    await firstBroker.evaluate(
+      { artifact: parent, assetGroupId: "train", seed: 4, recursivePlan: RECURSIVE_PLAN },
+      { privileged: false },
+    );
+    await firstBroker.close();
+
+    const resumedBroker = new Broker(config);
+    await resumedBroker.init();
+    await resumedBroker.createSandbox(
+      { artifact: parent, role: "mutation", continueEpisode: 0 },
+      { privileged: false },
+    );
+    const fresh = await resumedBroker.evaluate(
+      { artifact: parent, assetGroupId: "train", seed: 4, recursivePlan: changedPlan, resume: true },
+      { privileged: false },
+    );
+    expect(fresh.cached).toBe(false);
+    expect(strategyCalls).toBe(2);
+    expect(resumedBroker.getBudget({ privileged: false }).spent.evaluatorInvocations).toBe(2);
+    await resumedBroker.close();
+  });
+
+  test("keys strategy memoization by the optimizer-authored recursive plan", async () => {
+    let calls = 0;
+    const config = await configFor("recursive-memo", async (input) => {
+      calls += 1;
+      return recordFor(input);
+    });
+    const broker = new Broker(config);
+    const first = RECURSIVE_PLAN;
+    const second: RecursiveEvaluationPlan = {
+      allocations: [{ ...first.allocations[0]!, innerEpisodesMax: 3 }],
+    };
+    await broker.evaluate(
+      { artifact: { hash: BASELINE }, assetGroupId: "train", seed: 0, recursivePlan: first },
+      { privileged: false },
+    );
+    await broker.evaluate(
+      { artifact: { hash: BASELINE }, assetGroupId: "train", seed: 0, recursivePlan: second },
+      { privileged: false },
+    );
+    expect(calls).toBe(2);
+    await broker.close();
+  });
+
+  test("exposes the development task and refuses recursive search without its trusted strategy", async () => {
+    const configured = await configFor("recursive-task", async (input) => recordFor(input));
+    const ledger = RecursiveResourceLedger.open(path.join(configured.runDir, "recursive.ndjson"));
+    configured.recursive = {
+      depth: 0,
+      ancestors: [],
+      ledger,
+      evaluationTask: RECURSIVE_TASK,
+      admitChildRun: () => undefined,
+      launchChildRun: async () => {
+        throw new Error("not reached");
+      },
+    };
+    const broker = new Broker(configured);
+    expect(broker.getTask({ privileged: false }).recursiveTask).toEqual(RECURSIVE_TASK);
+    await broker.close();
+    ledger.close();
+
+    const unwired = await configFor("recursive-tripwire", async (input) => recordFor(input));
+    const unwiredLedger = RecursiveResourceLedger.open(path.join(unwired.runDir, "recursive.ndjson"));
+    unwired.evaluationStrategy = undefined;
+    unwired.recursive = {
+      depth: 0,
+      ancestors: [],
+      ledger: unwiredLedger,
+      evaluationTask: RECURSIVE_TASK,
+      admitChildRun: () => undefined,
+      launchChildRun: async () => {
+        throw new Error("not reached");
+      },
+    };
+    expect(() => new Broker(unwired)).toThrow(
+      /recursive search requires a trusted evaluation strategy; refusing the synthetic capsule evaluator/,
+    );
+    unwiredLedger.close();
   });
 
   test("rejects a strategy record joined to a different request identity", async () => {

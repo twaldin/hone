@@ -10,6 +10,7 @@ import {
   type MetaCampaignConfig,
   type MetaChildTrajectoryV1,
   type MetaOuterTrajectoryPointV1,
+  type RunEvent,
 } from "@hone/schema";
 import {
   buildMetaCandidateTrajectoryPoints,
@@ -20,7 +21,7 @@ import {
   type TrustedMetaCandidateEvent,
 } from "@hone/meta";
 import type { MetaJournalV1 } from "./meta-journal.js";
-import { EVENTS_FILE, readEvents, writeFileDurable } from "./eventlog.js";
+import { EVENTS_FILE, readEvents, replayRun, writeFileDurable } from "./eventlog.js";
 import { runsRoot } from "./runs.js";
 
 const ZERO_USAGE: Readonly<MetaResourceUsage> = {
@@ -57,6 +58,22 @@ function sha256(bytes: Buffer | string): Sha256Digest {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
+export function trajectoryCampaignJournals(
+  config: Pick<MetaCampaignConfig, "sourceMigrationJournal" | "imageRepinJournal">,
+): {
+  sourceMigrationJournal?: MetaCampaignConfig["sourceMigrationJournal"];
+  imageRepinJournal?: MetaCampaignConfig["imageRepinJournal"];
+} {
+  return {
+    ...(config.sourceMigrationJournal === undefined
+      ? {}
+      : { sourceMigrationJournal: config.sourceMigrationJournal }),
+    ...(config.imageRepinJournal === undefined
+      ? {}
+      : { imageRepinJournal: config.imageRepinJournal }),
+  };
+}
+
 function addUsage(left: MetaResourceUsage, right: MetaResourceUsage): MetaResourceUsage {
   return {
     tokens: left.tokens + right.tokens,
@@ -70,12 +87,58 @@ function sumUsage(rows: readonly SearchSettlement[]): MetaResourceUsage {
   return rows.reduce<MetaResourceUsage>((sum, row) => addUsage(sum, row.observed), { ...ZERO_USAGE });
 }
 
-export function extractAnytimePoints(events: ReturnType<typeof readEvents>): AnytimeSearchPointV1[] {
+export function controllerSpendDelta(
+  current: MetaResourceUsage,
+  prior: MetaResourceUsage,
+  candidateOrdinal: number,
+): MetaResourceUsage {
+  const delta: MetaResourceUsage = {
+    tokens: current.tokens - prior.tokens,
+    usd: current.usd - prior.usd,
+    wallClockSec: current.wallClockSec - prior.wallClockSec,
+    evaluatorInvocations: current.evaluatorInvocations - prior.evaluatorInvocations,
+  };
+  if (Object.values(delta).some((value) => value < 0)) {
+    throw new Error(`candidate ordinal ${candidateOrdinal} regresses trusted controller spend`);
+  }
+  return delta;
+}
+export interface FailedSearchTrajectoryPersistence {
+  readonly exitCode: number;
+  readonly persistenceError: string | null;
+}
+
+/**
+ * A partial trajectory is useful failure evidence, but it is secondary to the
+ * optimizer/Broker failure that stopped the run. Never let evidence
+ * materialization replace that primary replay signal on the CLI boundary.
+ */
+export function persistTrajectoryWithoutMaskingSearchFailure(
+  exitCode: number,
+  persist: () => void,
+): FailedSearchTrajectoryPersistence {
+  if (!Number.isInteger(exitCode) || exitCode === 0) {
+    throw new Error(`failed search persistence requires a nonzero integer exit code, got ${exitCode}`);
+  }
+  try {
+    persist();
+    return { exitCode, persistenceError: null };
+  } catch (error) {
+    return {
+      exitCode,
+      persistenceError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export function extractAnytimePoints(events: readonly RunEvent[]): AnytimeSearchPointV1[] {
   const points: MutablePoint[] = [];
   const byEpisode = new Map<number, MutablePoint>();
   const pending = new Set<MutablePoint>();
+  const trustedEvaluationPoints = new Set<MutablePoint>();
   let baseline: MutablePoint | null = null;
   let lastSpent: MetaResourceUsage = { ...ZERO_USAGE };
+  let activeEpisode: number | null = null;
 
   const episodePoint = (episode: number, cursor: number): MutablePoint => {
     const existing = byEpisode.get(episode);
@@ -95,16 +158,63 @@ export function extractAnytimePoints(events: ReturnType<typeof readEvents>): Any
     points.push(point);
     return point;
   };
+  const candidatePoint = (
+    episode: number,
+    cursor: number,
+    artifact: Sha256Digest,
+  ): MutablePoint => {
+    const current = episodePoint(episode, cursor);
+    // Candidate bytes and their immutable lineage episode are not an attempt
+    // identity. A failed panel can be retried byte-for-byte without another
+    // episode.candidate event; each trusted evaluation occurrence must
+    // therefore advance to its own point after the prior point settles.
+    if (
+      current.candidateArtifact === null
+      || (
+        current.candidateArtifact === artifact
+        && !trustedEvaluationPoints.has(current)
+      )
+    ) {
+      return current;
+    }
+    const point: MutablePoint = {
+      ordinal: points.length,
+      eventCursor: cursor,
+      episode,
+      candidateArtifact: artifact,
+      status: "invalid",
+      score: null,
+      bestScore: null,
+      cached: null,
+      spent: { ...lastSpent },
+    };
+    byEpisode.set(episode, point);
+    points.push(point);
+    return point;
+  };
 
   for (const [cursor, event] of events.entries()) {
     if (event.type === "episode.started") {
       episodePoint(event.episode, cursor);
+      activeEpisode = event.episode;
+      continue;
+    }
+    if (event.type === "episode.completed") {
+      if (activeEpisode === event.episode) activeEpisode = null;
       continue;
     }
     if (event.type === "episode.candidate") {
-      const point = episodePoint(event.episode, cursor);
+      const artifact = event.candidate.hash as Sha256Digest;
+      const point = candidatePoint(event.episode, cursor, artifact);
       point.eventCursor = cursor;
-      point.candidateArtifact = event.candidate.hash as Sha256Digest;
+      point.candidateArtifact = artifact;
+      // Trusted strategy evaluations are intentionally emitted without an
+      // episode field. `episode.candidate` is the durable episode binding and
+      // occurs before the following budget snapshot, so charge that snapshot
+      // to this point. Without this, a refused/null panel kept the stale
+      // episode-start spend and made a later valid monotonicity guard report a
+      // false controller-spend regression.
+      pending.add(point);
       continue;
     }
     if (event.type === "episode.invalid") {
@@ -119,29 +229,64 @@ export function extractAnytimePoints(events: ReturnType<typeof readEvents>): Any
     if (event.type === "eval.completed") {
       let point: MutablePoint;
       if (event.episode === undefined) {
-        if (baseline !== null) continue;
-        baseline = {
-          ordinal: 0,
-          eventCursor: cursor,
-          episode: null,
-          candidateArtifact: event.artifact.hash as Sha256Digest,
-          status: "evaluated",
-          score: event.aggregate,
-          bestScore: null,
-          cached: event.cached,
-          spent: { ...lastSpent },
-        };
-        points.unshift(baseline);
-        for (const [ordinal, current] of points.entries()) current.ordinal = ordinal;
-        point = baseline;
+        if (baseline === null) {
+          baseline = {
+            ordinal: 0,
+            eventCursor: cursor,
+            episode: null,
+            candidateArtifact: event.artifact.hash as Sha256Digest,
+            status: event.aggregate === null ? "invalid" : "evaluated",
+            score: event.aggregate,
+            bestScore: null,
+            cached: event.cached,
+            spent: { ...lastSpent },
+          };
+          points.unshift(baseline);
+          for (const [ordinal, current] of points.entries()) current.ordinal = ordinal;
+          point = baseline;
+        } else {
+          // A retried seed panel is a distinct admission even though its
+          // source artifact is unchanged. Keep it separate from the episode's
+          // later saved candidate so the two candidate ordinals cannot
+          // overwrite one another. Other unscoped records are comparator
+          // probes and do not mint trajectory candidates.
+          if (activeEpisode === null) continue;
+          const artifact = event.artifact.hash as Sha256Digest;
+          const hasEligiblePoint = points.some(
+            (candidatePoint) =>
+              candidatePoint.candidateArtifact === artifact
+              && candidatePoint.status === "evaluated",
+          );
+          if (
+            hasEligiblePoint
+            || baseline.candidateArtifact !== artifact
+            || baseline.status !== "invalid"
+          ) {
+            continue;
+          }
+          point = {
+            ordinal: points.length,
+            eventCursor: cursor,
+            episode: activeEpisode,
+            candidateArtifact: artifact,
+            status: event.aggregate === null ? "invalid" : "evaluated",
+            score: event.aggregate,
+            bestScore: null,
+            cached: event.cached,
+            spent: { ...lastSpent },
+          };
+          points.push(point);
+        }
       } else {
-        point = episodePoint(event.episode, cursor);
-        point.candidateArtifact = event.artifact.hash as Sha256Digest;
+        const artifact = event.artifact.hash as Sha256Digest;
+        point = candidatePoint(event.episode, cursor, artifact);
+        point.candidateArtifact = artifact;
       }
       point.eventCursor = cursor;
-      point.status = "evaluated";
+      point.status = event.aggregate === null ? "invalid" : "evaluated";
       point.score = event.aggregate;
       point.cached = event.cached;
+      trustedEvaluationPoints.add(point);
       pending.add(point);
       continue;
     }
@@ -153,8 +298,16 @@ export function extractAnytimePoints(events: ReturnType<typeof readEvents>): Any
   }
   for (const point of pending) point.spent = { ...lastSpent };
 
+  const ordered = baseline === null
+    ? [...points].sort((left, right) => left.eventCursor - right.eventCursor)
+    : [
+        baseline,
+        ...points
+          .filter((point) => point !== baseline)
+          .sort((left, right) => left.eventCursor - right.eventCursor),
+      ];
   let best: number | null = null;
-  return points.map((point, ordinal) => {
+  return ordered.map((point, ordinal) => {
     if (point.status === "evaluated" && point.score !== null) best = best === null ? point.score : Math.max(best, point.score);
     return {
       ...point,
@@ -162,6 +315,51 @@ export function extractAnytimePoints(events: ReturnType<typeof readEvents>): Any
       bestScore: best,
     };
   });
+}
+
+export interface RecursiveCandidateOuterGroup {
+  artifact: Sha256Digest;
+  childRunIds: string[];
+}
+
+/** Bind every durable candidate admission, including retried null panels, to trusted outer events in order. */
+export function bindRecursiveOuterEvents(
+  grouped: ReadonlyMap<number, RecursiveCandidateOuterGroup>,
+  outerEvents: readonly RunEvent[],
+): TrustedMetaCandidateEvent[] {
+  if (grouped.size === 0) throw new Error("recursive trajectory has no durable spawnRun candidate admissions");
+  const terminalCandidateOrdinal = Math.max(...grouped.keys());
+  const outerPoints = extractAnytimePoints(outerEvents);
+  const events: TrustedMetaCandidateEvent[] = [];
+  let priorCursor = -1;
+  let priorControllerSpent: MetaResourceUsage = { ...ZERO_USAGE };
+  for (let candidateOrdinal = 0; candidateOrdinal <= terminalCandidateOrdinal; candidateOrdinal += 1) {
+    const group = grouped.get(candidateOrdinal);
+    if (group === undefined) {
+      throw new Error(`recursive trajectory is missing candidate ordinal ${candidateOrdinal}`);
+    }
+    const outerPoint = outerPoints.find(
+      (point) => point.eventCursor > priorCursor && point.candidateArtifact === group.artifact,
+    );
+    if (outerPoint === undefined) {
+      throw new Error(`candidate ordinal ${candidateOrdinal} has no matching trusted outer event`);
+    }
+    const controllerSpent = controllerSpendDelta(
+      outerPoint.spent,
+      priorControllerSpent,
+      candidateOrdinal,
+    );
+    priorCursor = outerPoint.eventCursor;
+    priorControllerSpent = { ...outerPoint.spent };
+    events.push({
+      candidateOrdinal,
+      eventCursor: outerPoint.eventCursor,
+      candidateArtifact: group.artifact,
+      childRunIds: [...group.childRunIds].sort(),
+      controllerSpent,
+    });
+  }
+  return events;
 }
 
 function childExecutionDir(root: string, childRunId: string): string | null {
@@ -198,7 +396,7 @@ function childTrajectory(root: string, settlement: SearchSettlement): MetaChildT
 }
 function persistRecursiveTrajectory(
   opts: PersistMetaSearchTrajectoryOptions,
-  started: Extract<ReturnType<typeof readEvents>[number], { type: "run.started" }>,
+  controllerBundleDigest: Sha256Digest,
   outerEventBytes: Buffer,
   outerEvents: ReturnType<typeof readEvents>,
   children: readonly MetaChildTrajectoryV1[],
@@ -222,43 +420,8 @@ function persistRecursiveTrajectory(
     group.childRunIds.push(receipt.child.runId);
     grouped.set(schedule.candidateOrdinal, group);
   }
-  if (grouped.size === 0) throw new Error("recursive trajectory has no durable spawnRun candidate admissions");
+  const events = bindRecursiveOuterEvents(grouped, outerEvents);
   const terminalCandidateOrdinal = Math.max(...grouped.keys());
-  const outerPoints = extractAnytimePoints(outerEvents);
-  const events: TrustedMetaCandidateEvent[] = [];
-  let priorCursor = -1;
-  let priorControllerSpent: MetaResourceUsage = { ...ZERO_USAGE };
-  for (let candidateOrdinal = 0; candidateOrdinal <= terminalCandidateOrdinal; candidateOrdinal += 1) {
-    const group = grouped.get(candidateOrdinal);
-    if (group === undefined) {
-      throw new Error(`recursive trajectory is missing candidate ordinal ${candidateOrdinal}`);
-    }
-    const outerPoint = outerPoints.find(
-      (point) => point.eventCursor > priorCursor && point.candidateArtifact === group.artifact,
-    );
-    if (outerPoint === undefined) {
-      throw new Error(`candidate ordinal ${candidateOrdinal} has no matching trusted outer event`);
-    }
-    const controllerSpent: MetaResourceUsage = {
-      tokens: outerPoint.spent.tokens - priorControllerSpent.tokens,
-      usd: outerPoint.spent.usd - priorControllerSpent.usd,
-      wallClockSec: outerPoint.spent.wallClockSec - priorControllerSpent.wallClockSec,
-      evaluatorInvocations:
-        outerPoint.spent.evaluatorInvocations - priorControllerSpent.evaluatorInvocations,
-    };
-    if (Object.values(controllerSpent).some((value) => value < 0)) {
-      throw new Error(`candidate ordinal ${candidateOrdinal} regresses trusted controller spend`);
-    }
-    priorCursor = outerPoint.eventCursor;
-    priorControllerSpent = { ...outerPoint.spent };
-    events.push({
-      candidateOrdinal,
-      eventCursor: outerPoint.eventCursor,
-      candidateArtifact: group.artifact,
-      childRunIds: group.childRunIds.sort(),
-      controllerSpent,
-    });
-  }
   const points = buildMetaCandidateTrajectoryPoints(
     opts.config.developmentPanel.members.map((member) => member.capsule.capsuleId),
     events,
@@ -270,10 +433,11 @@ function persistRecursiveTrajectory(
   const trajectory = MetaSearchTrajectoryV2.parse({
     version: 2,
     configHash: opts.configHash,
+    ...trajectoryCampaignJournals(opts.config),
     outerRunId: opts.outerRunId,
     searchEnvelope: opts.config.recursiveBudgets.search.identity,
     panel: opts.config.developmentPanel,
-    controllerBundleDigest: started.optimizerDigest,
+    controllerBundleDigest,
     targetSourceArtifact: opts.config.seedOptimizer.sourceArtifact,
     targetBundleDigest: opts.config.seedOptimizer.bundleDigest,
     createdAt: lastEvent.at,
@@ -299,6 +463,22 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
   if (started === undefined || !/^sha256:[0-9a-f]{64}$/.test(started.optimizerDigest)) {
     throw new Error("outer trajectory has no sealed controller optimizer digest");
   }
+  const effectiveControllerDigest = replayRun(outerRunDir).optimizerDigest;
+  if (
+    effectiveControllerDigest === null
+    || !/^sha256:[0-9a-f]{64}$/.test(effectiveControllerDigest)
+  ) {
+    throw new Error("outer trajectory has no effective sealed controller optimizer digest");
+  }
+  if (
+    opts.config.version === 2
+    && opts.config.sourceMigrationJournal?.migrations.some(
+      (migration) => migration.optimizerRefreeze !== undefined,
+    ) === true
+    && effectiveControllerDigest !== opts.config.controllerOptimizer.bundleDigest
+  ) {
+    throw new Error("outer trajectory controller optimizer does not match the journaled campaign head");
+  }
 
   const settlements: SearchSettlement[] = [
     ...opts.journal.queryTrainMeasurements().filter((row) => row.phase === "search"),
@@ -311,7 +491,13 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
   );
   const children = settlements.map((settlement) => childTrajectory(opts.root, settlement));
   if (opts.config.version === 2) {
-    return persistRecursiveTrajectory(opts, started, outerEventBytes, outerEvents, children);
+    return persistRecursiveTrajectory(
+      opts,
+      effectiveControllerDigest as Sha256Digest,
+      outerEventBytes,
+      outerEvents,
+      children,
+    );
   }
   const childrenByArtifact = new Map<string, MetaChildTrajectoryV1[]>();
   for (const child of children) {
@@ -351,8 +537,9 @@ export function persistMetaSearchTrajectory(opts: PersistMetaSearchTrajectoryOpt
   const trajectory = MetaSearchTrajectoryV1.parse({
     version: 1,
     configHash: opts.configHash,
+    ...trajectoryCampaignJournals(opts.config),
     outerRunId: opts.outerRunId,
-    controllerBundleDigest: started.optimizerDigest,
+    controllerBundleDigest: effectiveControllerDigest,
     targetSourceArtifact: opts.config.seedOptimizer.sourceArtifact,
     targetBundleDigest: opts.config.seedOptimizer.bundleDigest,
     createdAt: lastEvent.at,

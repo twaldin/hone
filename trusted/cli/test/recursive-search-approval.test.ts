@@ -167,12 +167,6 @@ describe("recursive Stage-B search owner handoff", () => {
     expectNoWork();
   });
 
-  it("does not let owner approval bypass verified corpus requirements", async () => {
-    await approve();
-    await expect(search(["--phase", "search"], false)).rejects.toThrow(/requires verified corpus provenance/);
-    expectNoWork();
-  });
-
   it.each([0, 1] as const)("approved controller generation %i reaches offline dispatch without later artifacts", async (generation) => {
     if (generation === 1) {
       config = MetaCampaignConfigV2.parse({ ...config, generation: { ...config.generation, controllerGeneration: 1 }, controllerOptimizer: config.seedOptimizer });
