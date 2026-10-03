@@ -13,7 +13,7 @@ This repository holds only the engine, so an ordinary clone is enough. Capsules 
 
 ## Dependencies and source checks
 
-The workspace uses Node.js and pnpm. Its package metadata declares Node 18 or later; the launcher also needs `node:module.register`. It is checked with Node 26 and pnpm 10. This is a validation environment, not a claim that every earlier Node 18 release works.
+The workspace uses Node.js and pnpm. Its package metadata declares Node 18 or later; the launcher also needs `node:module.register`. The split was checked with pnpm 10.13.1 on Node 18.20.8 (macOS, full suite) and Node 24.18.0 (Linux, broker suite). Those are validation environments, not a claim that every Node 18 release works.
 
 ```sh
 pnpm install --frozen-lockfile
