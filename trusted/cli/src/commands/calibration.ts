@@ -40,6 +40,7 @@ import { createProxy, DEFAULT_UPSTREAM, type DurablePauseProxyHandle, type Proxy
 import { z } from "zod";
 import { admitCapsule, capsuleOracleDigest, capsuleScalarizerDigest, type AdmittedCapsule } from "../admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "../args.js";
+import { capsulePaths, resolveRepoPath, type CapsulePaths } from "../capsules-root.js";
 import { EVENTS_FILE, readEvents, writeFileDurable } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
 import { collectOptimizerSnapshot, type OptimizerSnapshot } from "../optimizer-digest.js";
@@ -194,11 +195,16 @@ function distinctSeeds(values: readonly number[]): number[] {
   return sorted;
 }
 
-function resolveCapsuleDirectory(root: string, candidate: string): string {
-  const capsuleRoot = resolve(root, "capsules");
-  const resolved = resolve(root, candidate);
-  if (dirname(resolved) !== capsuleRoot || relative(capsuleRoot, resolved).includes(sep)) {
-    throw new UsageError(`calibration capsule directory must be a direct child of ${capsuleRoot}: ${candidate}`);
+/**
+ * Selection entries are repository-relative (`capsules/<label>`, the frozen
+ * form) and resolve inside the capsules root; any other form resolves against
+ * the state root. Either way the result must be a direct child of the
+ * capsules root.
+ */
+function resolveCapsuleDirectory(paths: CapsulePaths, candidate: string): string {
+  const resolved = resolveRepoPath(paths, candidate);
+  if (dirname(resolved) !== paths.capsulesRoot || relative(paths.capsulesRoot, resolved).includes(sep)) {
+    throw new UsageError(`calibration capsule directory must be a direct child of ${paths.capsulesRoot}: ${candidate}`);
   }
   return resolved;
 }
@@ -275,19 +281,21 @@ function componentwiseBudget(
 }
 
 export async function buildCalibrationPlan(
-  root: string,
+  paths: CapsulePaths,
   selectionInput: unknown,
   dependencies: CalibrationDependencies = {},
 ): Promise<{ readonly plan: CalibrationPlanV1; readonly optimizer: PreparedOptimizer; readonly prepared: readonly PreparedCapsule[] }> {
   const selection = CalibrationSelectionV1.parse(selectionInput);
   const caps = exactDistinct(selection.episodeCaps, CAPS, "calibration episode caps") as Array<(typeof CAPS)[number]>;
   const seeds = distinctSeeds(selection.seeds);
-  const capsuleDirs = selection.capsuleDirs.map((dir) => resolveCapsuleDirectory(root, dir));
+  const { root } = paths;
+  const capsuleDirs = selection.capsuleDirs.map((dir) => resolveCapsuleDirectory(paths, dir));
   if (new Set(capsuleDirs).size !== 4) throw new UsageError("calibration capsule directories must be four distinct paths");
 
   const admit = dependencies.admit ?? admitCapsule;
   const inspectImage = dependencies.inspectImage ?? defaultInspectImage;
-  const admitted = capsuleDirs.map((dir) => ({ dir, admitted: admit(dir, { review: "required" }) }));
+  const casDir = casRoot(root);
+  const admitted = capsuleDirs.map((dir) => ({ dir, admitted: admit(dir, { review: "required", casDir }) }));
   if (new Set(admitted.map(({ admitted: item }) => item.manifest.id)).size !== 4) {
     throw new UsageError("calibration capsules must have four distinct real content-addressed identities");
   }
@@ -721,7 +729,7 @@ export async function calibrationCommand(
   if (campaignFlag === undefined) throw new UsageError(CALIBRATION_USAGE);
   const campaignPath = resolve(io.root, campaignFlag);
   const selection = JSON.parse(readFileSync(campaignPath, "utf8")) as unknown;
-  const { plan, optimizer, prepared } = await buildCalibrationPlan(io.root, selection, dependencies);
+  const { plan, optimizer, prepared } = await buildCalibrationPlan(capsulePaths(io), selection, dependencies);
   const stateDir = stateDirectory(io.root, strFlag(flags, "state"), plan.configHash);
   const resume = boolFlag(flags, "resume");
   const dryStructure = boolFlag(flags, "dry-structure");

@@ -49,6 +49,12 @@ export const FROZEN_CAPSULE_ASSETS_DIR = "capsule-assets";
 export interface AdmitCapsuleOptions {
   review?: "required" | "off";
   /**
+   * CAS root whose admission-receipts/ ledger holds the Gate-2 chain: the
+   * hone state root's `.hone-cas` (casRoot(io.root)), never derived from the
+   * capsule's location. Required when `review` is "required".
+   */
+  casDir?: string;
+  /**
    * A clean source archive omits ignored nested git object stores. The
    * non-provisional owner Gate-2 receipt may stand for the baseline check
    * already performed when that receipt was minted, but only when no store is
@@ -270,7 +276,7 @@ function checkAssetHashes(capsuleDir: string, manifest: CapsuleManifest): void {
     const abs = insideCapsule(capsuleDir, rel);
     if (!existsSync(abs)) refuse(capsuleDir, `asset missing on disk: ${rel}`);
     const actual = sha256File(abs);
-    if (actual !== expected) refuse(capsuleDir, `asset drift: ${rel} hashes ${actual}, manifest pins ${expected} — re-run capsules/tools/scaffold.ts`);
+    if (actual !== expected) refuse(capsuleDir, `asset drift: ${rel} hashes ${actual}, manifest pins ${expected} — re-run capsule-kit/tools/scaffold.ts`);
   }
 }
 
@@ -330,9 +336,10 @@ export function admitCapsule(
   const digest = capsuleDigest(manifest);
   let approval: VerifiedAdmissionApproval | null = null;
   if ((options.review ?? "off") === "required") {
-    const capsuleParent = dirname(resolve(capsuleDir));
-    const root = capsuleParent.endsWith(`${sep}capsules`) ? dirname(capsuleParent) : capsuleParent;
-    approval = verifyAdmissionApproval(join(root, ".hone-cas"), digest);
+    if (options.casDir === undefined) {
+      throw new Error("required admission review needs the state root's CAS directory (casDir)");
+    }
+    approval = verifyAdmissionApproval(options.casDir, digest);
   }
   if (options.allowMissingGitBaselineWithOwnerReceipt === true && approval === null) {
     refuse(capsuleDir, "a missing git baseline store may be covered only by a required owner Gate-2 receipt");
@@ -444,7 +451,7 @@ export function authenticateCapsuleSnapshot(runDir: string): CapsuleManifest {
 export function revalidateForResume(
   runDir: string,
   capsuleDir: string,
-  options: AdmitCapsuleOptions = { review: "required" },
+  options: AdmitCapsuleOptions,
 ): AdmittedCapsule {
   const snapshot = readCapsuleSnapshot(runDir);
   const admitted = admitCapsule(capsuleDir, options);

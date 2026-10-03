@@ -26,6 +26,7 @@ import { z } from "zod";
 import { admitCapsule } from "../admission.js";
 import { appendAdmissionReceipt } from "../admission-receipts.js";
 import { UsageError, boolFlag, parseFlags, strFlag, type Flags } from "../args.js";
+import { resolveCapsulesRoot } from "../capsules-root.js";
 import { loadCapsule } from "../capsule.js";
 import { assertTreeMatchesStage } from "../deliver.js";
 import { writeFileDurable } from "../eventlog.js";
@@ -534,7 +535,7 @@ function finalizeGate2(root: string, state: AuthorWorkflowState, now: () => stri
   if (state.capsuleDir === null || state.capsuleDigest === null) {
     throw new UsageError("author workflow lost its capsule identity");
   }
-  const admitted = admitCapsule(state.capsuleDir, { review: "required" });
+  const admitted = admitCapsule(state.capsuleDir, { review: "required", casDir: casRoot(root) });
   if (admitted.digest !== state.capsuleDigest) throw new UsageError("Gate-2 admission returned a foreign capsule digest");
   const finalized: AuthorWorkflowState = { ...state, status: "admitted", feedback: null, updatedAt: now() };
   persistWorkflow(root, finalized);
@@ -600,7 +601,7 @@ export async function authorCommand(
       });
       workflowDir = mintRunDirDurable(io.root, workflowId);
       const snapshotDir = join(workflowDir, "source");
-      outputDir = join(io.root, "capsules", workflowId);
+      outputDir = join(resolveCapsulesRoot(io, { allowMissingDefault: true }), workflowId);
       chmodSync(temporarySnapshot, 0o700);
       renameSync(temporarySnapshot, snapshotDir);
       makeReadOnlyTree(snapshotDir);

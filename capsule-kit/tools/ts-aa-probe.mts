@@ -5,7 +5,8 @@
  * cheaply before spending full ordering passes. Trusted admission-side
  * debugging tool only; never optimizer-facing.
  *
- * Usage: npx tsx .campaign/round7/ts-aa-probe.mts <variant> <split> <reps>
+ * Usage: npx tsx capsule-kit/tools/ts-aa-probe.mts <variant> <split> <reps>
+ *   (capsules root: HONE_CAPSULES_ROOT, else ./capsules under the working directory)
  */
 import { createHash, randomBytes } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -20,8 +21,9 @@ import {
   type RunCommand,
 } from "@hone/broker";
 import { CapsuleManifest, SCHEMA_VERSION, capsuleDigest, deriveCapsuleId } from "@hone/schema";
+import { resolveCapsulesRoot } from "@hone/cli/capsules-root";
 
-const CAPSULE_DIR = resolve("capsules/tree-sitter-parse");
+const CAPSULE_DIR = join(resolveCapsulesRoot({ root: process.cwd(), env: process.env }), "tree-sitter-parse");
 const TMP_ROOT = resolve("tmp");
 const variant = process.argv[2] ?? "baseline";
 const split = process.argv[3] ?? "train";

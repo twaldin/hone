@@ -15,8 +15,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import { CapsuleManifest, MetaCampaignConfigV2, capsuleDigest, type EvaluatorOutput } from "@hone/schema";
+import { resolveCapsulesRoot } from "@hone/cli/capsules-root";
 import {
   CasStore,
   packDirAsArtifact,
@@ -27,9 +27,13 @@ import {
   type RunCommand,
 } from "@hone/broker";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_CAMPAIGN = "data/m2-refreeze-final/campaign-frozen.json";
-const DEFAULT_CONFIG = "data/m2-refreeze-final/terminal-authority-preflight.config.json";
+/**
+ * Hone state root (the working directory, like the hone CLI's io.root):
+ * campaign data, the preflight config and the report resolve here.
+ */
+const STATE_ROOT = process.cwd();
+/** Capsules come from the same root resolution as the hone CLI. */
+const CAPSULES_ROOT = resolveCapsulesRoot({ root: STATE_ROOT, env: process.env });
 const DEFAULT_OUTPUT = "tmp/m2-terminal-authority-preflight.evidence.v1.json";
 const SYNTHETIC_GROUP_ID = "synthetic-terminal-preflight";
 const WORKER_UID_MIN = 20_000;
@@ -92,22 +96,23 @@ type CommandRecord = {
 
 function usage(): string {
   return [
-    "usage: bun capsules/tools/preflight-m2-terminal-authority.mts",
-    "  [--campaign PATH] [--config PATH] [--output PATH]",
+    "usage: bun capsule-kit/tools/preflight-m2-terminal-authority.mts",
+    "  --campaign PATH --config PATH [--output PATH]",
     "  [--evaluator-timeout-sec SECONDS] [--negative-probe CAPSULE_LABEL]",
     "",
     "Runs the frozen terminal cohort through the real trusted Broker staging and",
     "Docker evaluator path using generated synthetic assets only. The probe score",
     "is structural evidence, is always marked meaningless, and is never a campaign",
     "measurement. --negative-probe corrupts the named generated probe after creation",
-    "to prove that evaluator failure is reported fail-closed.",
+    "to prove that evaluator failure is reported fail-closed. Paths resolve against",
+    "the working directory; capsules come from HONE_CAPSULES_ROOT, else ./capsules.",
   ].join("\n");
 }
 
 function parseArgs(argv: string[]): Args {
   const parsed: Args = {
-    campaign: DEFAULT_CAMPAIGN,
-    config: DEFAULT_CONFIG,
+    campaign: "",
+    config: "",
     output: DEFAULT_OUTPUT,
     evaluatorTimeoutExplicit: false,
   };
@@ -143,12 +148,13 @@ function parseArgs(argv: string[]): Args {
     }
     throw new Error(`unknown argument: ${arg}`);
   }
+  if (parsed.campaign === "" || parsed.config === "") throw new Error(`--campaign and --config are required\n${usage()}`);
   return parsed;
 }
 
 function repoPath(input: string, label: string): string {
-  const path = resolve(REPO_ROOT, input);
-  if (path !== REPO_ROOT && !path.startsWith(`${REPO_ROOT}${sep}`)) throw new Error(`${label} escapes repository root`);
+  const path = resolve(STATE_ROOT, input);
+  if (path !== STATE_ROOT && !path.startsWith(`${STATE_ROOT}${sep}`)) throw new Error(`${label} escapes the state root`);
   return path;
 }
 
@@ -581,7 +587,7 @@ function generateTradeup(root: string, baselineDir: string): void {
   writeProbeFile(root, "oracle.json", `${JSON.stringify(oracle)}\n`);
 }
 function generatorSourceReadPaths(definition: ProbeDefinition): string[] {
-  const paths = ["capsules/tools/preflight-m2-terminal-authority.mts"];
+  const paths = ["capsule-kit/tools/preflight-m2-terminal-authority.mts"];
   if (definition.label === "duckdb-tpch") {
     paths.push("capsules/duckdb-tpch/generate_sf1.cpp", "capsules/duckdb-tpch/baseline/** (source build input)");
   } else if (definition.label === "quickjs-interpreter") {
@@ -742,10 +748,14 @@ function finiteProbeScore(output: EvaluatorOutput): number | undefined {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+/** Report paths stay repository-relative: `capsules/...` for capsule files, state-root-relative otherwise. */
 function relativeCommand(command: CommandRecord): CommandRecord {
   return {
     ...command,
-    argv: command.argv.map((part) => part.startsWith(REPO_ROOT) ? relative(REPO_ROOT, part) : part),
+    argv: command.argv.map((part) => {
+      if (part.startsWith(`${CAPSULES_ROOT}${sep}`)) return `capsules/${relative(CAPSULES_ROOT, part)}`;
+      return part.startsWith(STATE_ROOT) ? relative(STATE_ROOT, part) : part;
+    }),
   };
 }
 
@@ -761,7 +771,7 @@ async function runOne(
   reportRoot: string,
   evaluatorTimeoutSec: number,
 ): Promise<Record<string, unknown>> {
-  const capsuleRoot = join(REPO_ROOT, "capsules", definition.label);
+  const capsuleRoot = join(CAPSULES_ROOT, definition.label);
   const manifestPath = join(capsuleRoot, "manifest.json");
   const originalManifest = CapsuleManifest.parse(readJson<unknown>(manifestPath));
   const originalDigest = capsuleDigest(originalManifest);
@@ -972,7 +982,7 @@ async function main(): Promise<void> {
   if (config.schemaVersion !== 1 || config.synthetic !== true || config.derivedFromHoldout !== false || config.assetGroupId !== SYNTHETIC_GROUP_ID) {
     throw new Error("terminal preflight config does not declare the synthetic/no-holdout contract");
   }
-  if (config.campaign !== relative(REPO_ROOT, campaignPath).split(sep).join("/")) throw new Error("config campaign path drift");
+  if (config.campaign !== relative(STATE_ROOT, campaignPath).split(sep).join("/")) throw new Error("config campaign path drift");
   const terminalIds = campaign.corpusCohort?.terminalCapsuleIds;
   if (!Array.isArray(terminalIds) || terminalIds.length !== 8 || new Set(terminalIds).size !== 8) {
     throw new Error("frozen campaign must contain exactly eight unique terminal capsule ids");
@@ -1005,7 +1015,7 @@ async function main(): Promise<void> {
       try {
         results.push(await runOne(definition, negative, reportRoot, evaluatorTimeoutSec));
       } catch (error) {
-        const failedCapsuleRoot = join(REPO_ROOT, "capsules", definition.label);
+        const failedCapsuleRoot = join(CAPSULES_ROOT, definition.label);
         const failedManifest = CapsuleManifest.parse(readJson<unknown>(join(failedCapsuleRoot, "manifest.json")));
         const failedBaselineCommit = failedManifest.baseline.kind === "git"
           ? failedManifest.baseline.commit
@@ -1050,10 +1060,10 @@ async function main(): Promise<void> {
     gate: "terminal-authority-preflight",
     generatedAt: new Date().toISOString(),
     gateInvocation: args.evaluatorTimeoutExplicit
-      ? `bun capsules/tools/preflight-m2-terminal-authority.mts --evaluator-timeout-sec ${evaluatorTimeoutSec}`
-      : "bun capsules/tools/preflight-m2-terminal-authority.mts",
-    campaign: relative(REPO_ROOT, campaignPath).split(sep).join("/"),
-    config: relative(REPO_ROOT, configPath).split(sep).join("/"),
+      ? `bun capsule-kit/tools/preflight-m2-terminal-authority.mts --evaluator-timeout-sec ${evaluatorTimeoutSec}`
+      : "bun capsule-kit/tools/preflight-m2-terminal-authority.mts",
+    campaign: relative(STATE_ROOT, campaignPath).split(sep).join("/"),
+    config: relative(STATE_ROOT, configPath).split(sep).join("/"),
     parameters: {
       evaluatorTimeoutSec,
       evaluatorTimeoutSource: args.evaluatorTimeoutExplicit ? "explicit-cli-override" : "campaign-faithful-default",
@@ -1114,7 +1124,7 @@ async function main(): Promise<void> {
     },
   };
   writeJson(outputPath, report);
-  console.log(`report: ${relative(REPO_ROOT, outputPath)}`);
+  console.log(`report: ${relative(STATE_ROOT, outputPath)}`);
   console.log(`${report.summary.accountedAuthorities}/${report.summary.selectedCount} selected accounted; ${report.summary.provenExecutable} PASS; ${report.summary.executesRefusesSynthetic} EXECUTES-REFUSES-SYNTHETIC; ${report.summary.fail} FAIL; ${report.summary.spendViolations} spend violations; ${report.summary.holdoutCommandOrMountViolations} holdout command/mount violations`);
   if (args.negativeProbe !== undefined) {
     process.exitCode = report.negativeProbe?.gateFailedClosed === true ? 0 : 1;

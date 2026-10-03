@@ -15,14 +15,18 @@
  * Re-running over an unchanged tree yields byte-identical output — the id is
  * reproducible because nothing time- or machine-dependent enters the hash.
  *
- * Usage: npx tsx capsules/tools/scaffold.ts <task-dir>
+ * Usage: npx tsx capsule-kit/tools/scaffold.ts <capsule-dir>
+ *   An absolute <capsule-dir> is used as given; a relative one names a
+ *   directory under the capsules root (HONE_CAPSULES_ROOT, else ./capsules
+ *   under the working directory — the same resolution as the hone CLI).
  */
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { resolveCapsulesRoot } from "@hone/cli/capsules-root";
 import {
   CapsuleManifest,
   DiagnosticOrderingReport,
@@ -220,11 +224,14 @@ const invokedDirectly =
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (invokedDirectly) {
-  const taskDir = process.argv[2];
-  if (!taskDir) {
-    console.error("usage: tsx capsules/tools/scaffold.ts <task-dir>");
+  const taskDirArg = process.argv[2];
+  if (!taskDirArg) {
+    console.error("usage: tsx capsule-kit/tools/scaffold.ts <capsule-dir>");
     process.exit(2);
   }
+  const taskDir = isAbsolute(taskDirArg)
+    ? taskDirArg
+    : join(resolveCapsulesRoot({ root: process.cwd(), env: process.env }), taskDirArg);
   const manifest = scaffold(taskDir);
-  console.log(`${manifest.id}  ->  ${join(resolve(taskDir), "manifest.json")}`);
+  console.log(`${manifest.id}  ->  ${join(taskDir, "manifest.json")}`);
 }

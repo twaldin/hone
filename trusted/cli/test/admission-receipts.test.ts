@@ -120,7 +120,7 @@ describe("admission receipt ledger", () => {
     expect(statSync(casRoot).mode & 0o777).toBe(0o700);
     expect(statSync(dirname(ledgerPath(casRoot, digest))).mode & 0o777).toBe(0o700);
     expect(statSync(ledgerPath(casRoot, digest)).mode & 0o777).toBe(0o600);
-    expect(() => validateCapsule(capsuleDir, digest, "required")).not.toThrow();
+    expect(() => validateCapsule(capsuleDir, digest, "required", casRoot)).not.toThrow();
   });
 
   it("hash-binds the named owner authorization and review evidence", () => {
@@ -349,7 +349,7 @@ describe("admitCapsule review gate", () => {
       "adversarial-validator": { identity: "red-team", kind: "agent" },
       "final-reviewer": { identity: "independent-reviewer", kind: "agent" },
     };
-    expect(() => admitCapsule(capsuleDir, { review: "required" })).toThrow(/admission receipt|approval/);
+    expect(() => admitCapsule(capsuleDir, { review: "required", casDir: join(root, ".hone-cas") })).toThrow(/admission receipt|approval/);
 
     const [gate1, approval] = approvalHistory({
       capsuleDigest: digest,
@@ -364,7 +364,7 @@ describe("admitCapsule review gate", () => {
     });
     appendAdmissionReceipt(join(root, ".hone-cas"), gate1);
     appendAdmissionReceipt(join(root, ".hone-cas"), approval);
-    expect(admitCapsule(capsuleDir, { review: "required" }).provisional).toBe(true);
+    expect(admitCapsule(capsuleDir, { review: "required", casDir: join(root, ".hone-cas") }).provisional).toBe(true);
   });
   it("uses a bound non-provisional owner receipt when a clean archive omits the ignored git store", () => {
     const root = makeRoot();
@@ -387,9 +387,10 @@ describe("admitCapsule review gate", () => {
     appendAdmissionReceipt(join(root, ".hone-cas"), approval);
     rmSync(join(capsuleDir, "baseline", ".git"), { recursive: true, force: true });
 
-    expect(() => admitCapsule(capsuleDir, { review: "required" })).toThrow(/baseline git inspection failed/);
+    expect(() => admitCapsule(capsuleDir, { review: "required", casDir: join(root, ".hone-cas") })).toThrow(/baseline git inspection failed/);
     expect(admitCapsule(capsuleDir, {
       review: "required",
+      casDir: join(root, ".hone-cas"),
       allowMissingGitBaselineWithOwnerReceipt: true,
     }).approval?.receipt.recordHash).toBe(approval.recordHash);
   });
@@ -405,6 +406,7 @@ describe("admitCapsule review gate", () => {
 
     expect(() => admitCapsule(capsuleDir, {
       review: "required",
+      casDir: join(root, ".hone-cas"),
       allowMissingGitBaselineWithOwnerReceipt: true,
     })).toThrow(/not covered by a non-provisional owner Gate-2 receipt/);
   });
@@ -465,7 +467,7 @@ describe("production receipt enforcement", () => {
     const unreceipted = makeCapsule(unreceiptedRoot);
     mkdirSync(join(unreceiptedRoot, "capsules"));
     renameSync(unreceipted, join(unreceiptedRoot, "capsules", "unreceipted"));
-    expect(() => discoverCapsules(unreceiptedRoot)).toThrow(/admission receipt/);
+    expect(() => discoverCapsules({ root: unreceiptedRoot, capsulesRoot: join(unreceiptedRoot, "capsules") })).toThrow(/admission receipt/);
 
     const provisionalRoot = makeRoot();
     const provisional = makeCapsule(provisionalRoot);
@@ -490,6 +492,6 @@ describe("production receipt enforcement", () => {
     appendAdmissionReceipt(join(provisionalRoot, ".hone-cas"), approval);
     mkdirSync(join(provisionalRoot, "capsules"));
     renameSync(provisional, join(provisionalRoot, "capsules", "provisional"));
-    expect(discoverCapsules(provisionalRoot).size).toBe(0);
+    expect(discoverCapsules({ root: provisionalRoot, capsulesRoot: join(provisionalRoot, "capsules") }).size).toBe(0);
   });
 });

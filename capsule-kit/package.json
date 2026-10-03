@@ -1,16 +1,17 @@
 {
-  "name": "@hone/capsules",
+  "name": "@hone/capsule-kit",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "scaffold": "tsx tools/scaffold.ts seeded-astar",
+    "scaffold": "tsx tools/scaffold.ts",
     "ordering-check": "tsx tools/ordering-check.ts"
   },
   "dependencies": {
     "@hone/broker": "workspace:*",
+    "@hone/cli": "workspace:*",
     "@hone/schema": "workspace:*"
   },
   "devDependencies": {

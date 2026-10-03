@@ -96,7 +96,7 @@ import type { OptimizerChildLike, OptimizerRuntime, OptimizerSpawn, OptimizerTra
  * the broker from the method calls it serves.
  */
 
-/** Entries never packed into a NON-git (cas) baseline artifact (mirrors capsules/tools/ordering-check.ts). */
+/** Entries never packed into a NON-git (cas) baseline artifact (mirrors capsule-kit/tools/ordering-check.ts). */
 const BASELINE_SKIP: Record<string, true> = { ".git": true, ".gitdir": true, __pycache__: true, ".pytest_cache": true };
 
 const RELAY_PORT = 8080;
@@ -134,11 +134,12 @@ const RELAY_JS = [
 export function validateCapsule(
   capsuleDir: string,
   expectedDigest: string,
-  review: "required" | "off" = "required",
+  review: "required" | "off",
+  casDir: string,
 ): void {
-  const admitted = admitCapsule(capsuleDir, { review });
+  const admitted = admitCapsule(capsuleDir, { review, casDir });
   if (admitted.digest !== expectedDigest) {
-    throw new Error(`capsule drift: digest ${admitted.digest} != sealed ${expectedDigest} — start a fresh run (or re-run capsules/tools/scaffold.ts)`);
+    throw new Error(`capsule drift: digest ${admitted.digest} != sealed ${expectedDigest} — start a fresh run (or re-run capsule-kit/tools/scaffold.ts)`);
   }
 }
 export interface ProxySessionCapability {
@@ -1307,7 +1308,7 @@ export function createBackend(
     // supervisor would terminalize a STALE event-log best while the
     // journal holds a newer durable incumbent (permanently, since a
     // finished run never resumes). Abort is honored only after reconcile.
-    validateCapsule(ctx.capsuleDir, ctx.runtimeIdentity.admittedCapsuleDigest, ctx.admissionReview ?? "required");
+    validateCapsule(ctx.capsuleDir, ctx.runtimeIdentity.admittedCapsuleDigest, ctx.admissionReview ?? "required", ctx.casDir);
 
 
       const cas = new CasStore(ctx.casDir);

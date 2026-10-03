@@ -39,25 +39,27 @@
  *     rejected) and the container/volume/temp footprint must be zero after
  *     the run, on success AND on failure.
  *
- * Usage: npx tsx capsules/tools/ordering-check.ts [--report [path]]
+ * Usage: npx tsx capsule-kit/tools/ordering-check.ts [--report [path]]
  *   [--stability-runs count] [--raw-measurements path]
  *   --report writes the schema-validated compact aggregate JSON summary
  *   (default path: <capsule>/diagnostics/ordering-report.json) on success.
  *   --stability-runs raises the repeated baseline count (minimum 3), while
  *   --raw-measurements records every evaluator output in execution order.
  *
- * Capsule selection: the check targets capsules/seeded-astar by default. Set
- * HONE_CAPSULE_DIR to the absolute path of another capsule directory (with
- * capsule.config.json, baseline/, diagnostics/{broken,naive,shortcut,improved})
- * to run the identical trusted check against it:
+ * Capsule selection: the check targets seeded-astar under the capsules root
+ * by default (HONE_CAPSULES_ROOT, else ./capsules under the working
+ * directory — the same resolution as the hone CLI). Set HONE_CAPSULE_DIR to
+ * the absolute path of another capsule directory (with capsule.config.json,
+ * baseline/, diagnostics/{broken,naive,shortcut,improved}) to run the
+ * identical trusted check against it:
  *
- *   HONE_CAPSULE_DIR=/abs/path/to/capsule npx tsx capsules/tools/ordering-check.ts --report
+ *   HONE_CAPSULE_DIR=/abs/path/to/capsule npx tsx capsule-kit/tools/ordering-check.ts --report
  *
  * Owner-only pre-freeze terminal-holdout admission diagnostic:
  *
  *   HONE_CAPSULE_DIR=/abs/path/to/capsule \
  *   HONE_TERMINAL_HOLDOUT_DIAGNOSTIC=1 \
- *   npx tsx capsules/tools/ordering-check.ts --holdout-diagnostic --report
+ *   npx tsx capsule-kit/tools/ordering-check.ts --holdout-diagnostic --report
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -95,10 +97,11 @@ import {
   deriveCapsuleId,
   type EvaluatorOutput,
 } from "@hone/schema";
+import { resolveCapsulesRoot } from "@hone/cli/capsules-root";
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
-/** Frozen default target: the seeded-astar capsule this tool was originally built around (WP6). */
-const DEFAULT_CAPSULE_DIR = resolve(TOOL_DIR, "..", "seeded-astar");
+/** Frozen default target name: the seeded-astar capsule this tool was originally built around (WP6). */
+const DEFAULT_CAPSULE_NAME = "seeded-astar";
 /** Throwaway roots live under <repo>/tmp: gitignored AND under /Users, so Docker Desktop file sharing covers every bind-mount source. */
 const TMP_ROOT = resolve(TOOL_DIR, "..", "..", "tmp");
 const SPLITS = ["train", "validation"] as const;
@@ -167,11 +170,11 @@ export function resolveStabilityRuns(args: readonly string[]): number {
 
 
 /**
- * Resolve the capsule directory this check targets. Deterministic in its
- * argument — it never reads ambient process state: pass a NodeJS env object
- * (or the raw override string directly) and get back either the frozen
- * seeded-astar default (override unset) or the canonical absolute path of
- * the override capsule.
+ * Resolve the capsule directory this check targets. Pass a NodeJS env object
+ * (or the raw override string directly) and get back either the seeded-astar
+ * default under the capsules root (override unset; the root comes from the
+ * passed env's HONE_CAPSULES_ROOT, else ./capsules under the working
+ * directory) or the canonical absolute path of the override capsule.
  *
  * An override is validated up front, before any CAS/Docker setup exists:
  *   - it must already be absolute, with no ".." traversal segments;
@@ -181,8 +184,11 @@ export function resolveStabilityRuns(args: readonly string[]): number {
  * Violations throw an error naming the offending path — never file contents.
  */
 export function resolveCapsuleDir(source: NodeJS.ProcessEnv | string): string {
-  const raw = typeof source === "string" ? source : source[CAPSULE_DIR_ENV_VAR];
-  if (raw === undefined) return DEFAULT_CAPSULE_DIR;
+  if (typeof source !== "string" && source[CAPSULE_DIR_ENV_VAR] === undefined) {
+    const capsulesRoot = resolveCapsulesRoot({ root: process.cwd(), env: source }, { allowMissingDefault: true });
+    return join(capsulesRoot, DEFAULT_CAPSULE_NAME);
+  }
+  const raw = typeof source === "string" ? source : source[CAPSULE_DIR_ENV_VAR]!;
 
   const fail = (problem: string): never => {
     throw new Error(`${CAPSULE_DIR_ENV_VAR} ${problem}`);

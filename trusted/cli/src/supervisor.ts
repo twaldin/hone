@@ -586,7 +586,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
   // Production intake always requires the exact Gate-2 receipt chain. The
   // sole bypass is an explicit trusted synthetic-meta authoring/recheck path.
   const admissionReview = trusted.admissionReview ?? "required";
-  const admitted = admitCapsule(capsuleDir, { review: admissionReview });
+  const admitted = admitCapsule(capsuleDir, { review: admissionReview, casDir: casRoot(io.root) });
   const admittedManifest = admitted.manifest;
   if (
     trusted.executionImageOverride !== undefined
@@ -697,7 +697,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     }
     // Resume replays Gate 2 again: revocation or a delegation change refuses
     // before the run lock, event append, backend spawn, or delivery.
-    revalidateForResume(found.runDir, capsuleDir, { review: admissionReview });
+    revalidateForResume(found.runDir, capsuleDir, { review: admissionReview, casDir: casRoot(io.root) });
     // The trusted runtime itself is sealed at run creation: a resume from
     // drifted (or partially rebuilt) trusted source refuses BEFORE any event
     // is appended or a backend launches — a run never mixes trusted source.

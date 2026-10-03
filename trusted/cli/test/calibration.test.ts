@@ -120,8 +120,8 @@ describe("trusted calibration coordinator", () => {
     const root = mkdtempSync(join(tmpdir(), "hone-calibration-plan-"));
     mkdirSync(join(root, "capsules"), { recursive: true });
     const capsules = [admitted(0), admitted(1), admitted(2), admitted(3)];
-    const first = await buildCalibrationPlan(root, selection(), dependencies(capsules));
-    const second = await buildCalibrationPlan(root, selection(), dependencies(capsules));
+    const first = await buildCalibrationPlan({ root, capsulesRoot: join(root, "capsules") }, selection(), dependencies(capsules));
+    const second = await buildCalibrationPlan({ root, capsulesRoot: join(root, "capsules") }, selection(), dependencies(capsules));
 
     expect(first.plan).toEqual(second.plan);
     expect(first.plan.cells).toHaveLength(80);
@@ -163,7 +163,7 @@ describe("trusted calibration coordinator", () => {
     const campaignPath = join(root, "selection.json");
     writeFileSync(campaignPath, JSON.stringify(selection()));
     const deps = dependencies([admitted(0), admitted(1), admitted(2), admitted(3)]);
-    const { plan } = await buildCalibrationPlan(root, selection(), deps);
+    const { plan } = await buildCalibrationPlan({ root, capsulesRoot: join(root, "capsules") }, selection(), deps);
     const stateDir = join(root, ".hone-runs", "resume-reuse");
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, "calibration-plan.json"), JSON.stringify(plan));
@@ -270,15 +270,15 @@ describe("trusted calibration coordinator", () => {
     mkdirSync(join(root, "capsules"), { recursive: true });
     const base = [admitted(0), admitted(1), admitted(2), admitted(3)];
     const provisional = { ...base[0]!, provisional: true };
-    await expect(buildCalibrationPlan(root, selection(), dependencies([provisional, ...base.slice(1)]))).rejects.toThrow(/non-provisional Gate-2/);
+    await expect(buildCalibrationPlan({ root, capsulesRoot: join(root, "capsules") }, selection(), dependencies([provisional, ...base.slice(1)]))).rejects.toThrow(/non-provisional Gate-2/);
 
     const holdoutManifest = CapsuleManifest.parse({
       ...base[0]!.manifest,
       assetGroups: [{ id: "terminal", visibility: "holdout", paths: ["assets/train/cases.json"] }],
     });
-    await expect(buildCalibrationPlan(root, selection(), dependencies([{ ...base[0]!, manifest: holdoutManifest }, ...base.slice(1)]))).rejects.toThrow(/terminal holdout/);
+    await expect(buildCalibrationPlan({ root, capsulesRoot: join(root, "capsules") }, selection(), dependencies([{ ...base[0]!, manifest: holdoutManifest }, ...base.slice(1)]))).rejects.toThrow(/terminal holdout/);
 
     const bunManifest = CapsuleManifest.parse({ ...base[0]!.manifest, image: `hone-bun-module-loader@${digest("bun")}` });
-    await expect(buildCalibrationPlan(root, selection(), dependencies([{ ...base[0]!, manifest: bunManifest }, ...base.slice(1)]))).rejects.toThrow(/Bun runtime digest/);
+    await expect(buildCalibrationPlan({ root, capsulesRoot: join(root, "capsules") }, selection(), dependencies([{ ...base[0]!, manifest: bunManifest }, ...base.slice(1)]))).rejects.toThrow(/Bun runtime digest/);
   });
 });

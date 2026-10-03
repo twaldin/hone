@@ -158,7 +158,7 @@ describe("durable two-gate capsule authoring", () => {
     expect(workflow.status).toBe("awaiting-gate1");
     if (workflow.capsuleDir === null) throw new Error("capsule-author did not publish a capsule");
     const proposedCapsuleDir = workflow.capsuleDir;
-    expect(() => admitCapsule(proposedCapsuleDir, { review: "required" })).toThrow(/no admission (approval|receipt ledger)/);
+    expect(() => admitCapsule(proposedCapsuleDir, { review: "required", casDir: join(root, ".hone-cas") })).toThrow(/no admission (approval|receipt ledger)/);
 
     await expect(authorCommand([
       "--workflow", workflowId,
@@ -186,7 +186,7 @@ describe("durable two-gate capsule authoring", () => {
       "evaluator-author",
       "adversarial-validator",
     ]);
-    expect(() => admitCapsule(workflow.capsuleDir!, { review: "required" })).toThrow(/latest receipt action is gate1-accept/);
+    expect(() => admitCapsule(workflow.capsuleDir!, { review: "required", casDir: join(root, ".hone-cas") })).toThrow(/latest receipt action is gate1-accept/);
 
     expect(await authorCommand(["--workflow", workflowId, "--gate2", "approve"], captured.io, {
       sessions,
@@ -194,7 +194,7 @@ describe("durable two-gate capsule authoring", () => {
     })).toBe(0);
     workflow = readAuthorWorkflow(root, workflowId);
     expect(workflow.status).toBe("admitted");
-    expect(admitCapsule(workflow.capsuleDir!, { review: "required" }).approval?.approved).toBe(true);
+    expect(admitCapsule(workflow.capsuleDir!, { review: "required", casDir: join(root, ".hone-cas") }).approval?.approved).toBe(true);
   });
 
   it("leaves a real durable session request when no sealed session worker is attached", async () => {

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { UsageError } from "./args.js";
+import { CAPSULES_ROOT_ENV, extractCapsulesRootFlag, resolveCapsulesRoot } from "./capsules-root.js";
 import { applyCommand } from "./commands/apply.js";
 import { calibrationCommand } from "./commands/calibration.js";
 import { authorCommand } from "./commands/author.js";
@@ -19,6 +20,7 @@ import { runCommand } from "./supervisor.js";
 const USAGE = `hone — trusted run supervisor + anytime surface
 
 usage:
+  hone [--capsules-root <dir>] <command> ...
   hone "<objective>" [author/run flags]
   hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume]
            [--backend stub|local] [--config <json>]
@@ -42,6 +44,11 @@ usage:
   hone stop [--take-best --repo DIR] [--run ID]
   hone off [--run ID]
 
+global:
+  --capsules-root <dir>  directory whose children are capsule dirs; overrides ${CAPSULES_ROOT_ENV};
+                         default ./capsules under the working directory. Run state stays in the
+                         working directory.
+
 exit codes: 0 ok · 1 error/declined · 2 usage · 3 autonomy-ladder refusal`;
 
 export function classifyBareObjective(objective: string, root: string): "run" | "author" {
@@ -49,8 +56,13 @@ export function classifyBareObjective(objective: string, root: string): "run" | 
 }
 
 export async function main(argv: string[], io: CmdIo): Promise<number> {
-  const [command, ...rest] = argv;
   try {
+    const global = extractCapsulesRootFlag(argv);
+    if (global.capsulesRoot !== undefined) {
+      // An explicit flag is validated up front, whichever command runs.
+      io = { ...io, capsulesRoot: resolveCapsulesRoot({ ...io, capsulesRoot: global.capsulesRoot }) };
+    }
+    const [command, ...rest] = global.argv;
     switch (command) {
       case "run":
         return await runCommand(rest, io);

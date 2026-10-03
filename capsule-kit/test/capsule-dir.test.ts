@@ -15,8 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, join } from "node:path";
 import type { EvaluatorOutput } from "@hone/schema";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { OrderingReport } from "../tools/ordering-check.js";
@@ -58,11 +57,6 @@ vi.mock("@hone/broker", () => {
 });
 
 const DIAGNOSTIC_NAMES = ["broken", "naive", "shortcut", "improved"] as const;
-const SEEDED_ASTAR_DIR = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "seeded-astar",
-);
 
 let root: string;
 
@@ -123,9 +117,11 @@ afterEach(() => {
 });
 
 describe("resolveCapsuleDir", () => {
-  it("returns the seeded-astar default when the override is unset", () => {
-    expect(resolveCapsuleDir({})).toBe(SEEDED_ASTAR_DIR);
-    expect(resolveCapsuleDir({ UNRELATED_VAR: "x" })).toBe(SEEDED_ASTAR_DIR);
+  it("returns seeded-astar under the capsules root when the override is unset", () => {
+    const underCwd = join(process.cwd(), "capsules", "seeded-astar");
+    expect(resolveCapsuleDir({})).toBe(underCwd);
+    expect(resolveCapsuleDir({ UNRELATED_VAR: "x" })).toBe(underCwd);
+    expect(resolveCapsuleDir({ HONE_CAPSULES_ROOT: root })).toBe(join(root, "seeded-astar"));
   });
 
   it("accepts a valid capsule structure, from env object or raw string", () => {

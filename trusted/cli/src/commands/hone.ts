@@ -123,6 +123,13 @@ import {
 import { UsageError, boolFlag, parseFlags, strFlag } from "../args.js";
 import type { Flags } from "../args.js";
 import {
+  CAPSULES_DIR_NAME,
+  capsulePaths,
+  resolveCapsulesRoot,
+  resolveRepoPath,
+  type CapsulePaths,
+} from "../capsules-root.js";
+import {
   buildBrokerCorpusConfig,
   corpusCohortFenceError,
   type BuildBrokerCorpusConfigInputs,
@@ -1202,6 +1209,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
       // Preserve operator runtime controls, including the per-session
       // no-yield ceiling, rather than silently reverting children to defaults.
       env: { ...this.io.env },
+      capsulesRoot: this.io.capsulesRoot,
       isTTY: false,
       out: () => {},
       err: () => {},
@@ -2112,16 +2120,21 @@ export interface DiscoveredCapsule {
 }
 
 
+/**
+ * Admit every capsule directly under the capsules root (or exactly the
+ * authorized partial cohort). Gate-2 receipts come from the state root's CAS.
+ */
 export function discoverCapsules(
-  root: string,
+  paths: CapsulePaths,
   cohort?: M2CorpusCohort,
 ): Map<string, DiscoveredCapsule> {
   const found = new Map<string, DiscoveredCapsule>();
-  const capsuleRoot = join(root, "capsules");
+  const { capsulesRoot } = paths;
+  const casDir = casRoot(paths.root);
   if (cohort !== undefined && "mode" in cohort) {
-    const policy = verifyM2AuthorizedPartialCohort(root, cohort.partialCohort);
+    const policy = verifyM2AuthorizedPartialCohort(paths, cohort.partialCohort);
     for (const deferred of policy.deferred) {
-      const dir = join(capsuleRoot, deferred.label);
+      const dir = join(capsulesRoot, deferred.label);
       const manifest = loadCapsule(dir);
       if (
         manifest.id !== deferred.capsuleId
@@ -2131,9 +2144,10 @@ export function discoverCapsules(
       }
     }
     for (const authorized of policy.admitted) {
-      const dir = join(capsuleRoot, authorized.label);
+      const dir = join(capsulesRoot, authorized.label);
       const admitted = admitCapsule(dir, {
         review: "required",
+        casDir,
         allowMissingGitBaselineWithOwnerReceipt: true,
       });
       if (admitted.provisional) {
@@ -2157,11 +2171,11 @@ export function discoverCapsules(
     }
     return found;
   }
-  for (const entry of readdirSync(capsuleRoot, { withFileTypes: true })) {
+  for (const entry of readdirSync(capsulesRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    const dir = join(capsuleRoot, entry.name);
+    const dir = join(capsulesRoot, entry.name);
     try {
-      const admitted = admitCapsule(dir, { review: "required" });
+      const admitted = admitCapsule(dir, { review: "required", casDir });
       // Delegated Gate-2 approvals are private quarantine only: they cannot
       // contribute corpus statistics, optimizer promotion, or terminal work.
       if (admitted.provisional) continue;
@@ -2187,8 +2201,8 @@ interface FrozenCorpus {
   readonly holdout: MetaCapsuleEntry[];
 }
 
-function freezeCorpusEntries(root: string, config: AnyMetaCampaignConfig): FrozenCorpus {
-  const discovered = discoverCapsules(root, config.version === 2 ? config.corpusCohort : undefined);
+function freezeCorpusEntries(paths: CapsulePaths, config: AnyMetaCampaignConfig): FrozenCorpus {
+  const discovered = discoverCapsules(paths, config.version === 2 ? config.corpusCohort : undefined);
   const normalize = (entry: MetaCapsuleEntry): MetaCapsuleEntry => {
     const found = discovered.get(entry.capsuleId);
     if (found === undefined) throw new UsageError(`campaign capsule id ${entry.capsuleId} is not installed`);
@@ -2268,9 +2282,9 @@ export function resolveRegisteredCapsuleLocation(
   };
 }
 
-export function resolveRegisteredCapsules(root: string, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
+export function resolveRegisteredCapsules(paths: CapsulePaths, config: AnyMetaCampaignConfig): Map<string, CapsuleLocation> {
   metaCampaignConfigHash(config);
-  const discovered = discoverCapsules(root, config.version === 2 ? config.corpusCohort : undefined);
+  const discovered = discoverCapsules(paths, config.version === 2 ? config.corpusCohort : undefined);
   const found = new Map<string, CapsuleLocation>();
   for (const registered of [...config.train, ...config.holdout]) {
     const capsule = discovered.get(registered.capsuleId);
@@ -3260,7 +3274,10 @@ function currentCampaignCapsuleImage(
 }
 
 export interface CampaignImageRepinRequest {
+  /** Hone state root. */
   readonly root: string;
+  /** Absolute capsules root (resolveCapsulesRoot). */
+  readonly capsulesRoot: string;
   readonly campaignPath: string;
   readonly capsuleId: string;
   readonly fromImage: string;
@@ -3287,7 +3304,7 @@ interface VerifiedDistributionEvidenceFiles {
 }
 
 function installedCampaignCapsule(
-  root: string,
+  paths: CapsulePaths,
   config: RecursiveMetaCampaignConfig,
   capsuleId: string,
 ): DiscoveredCapsule {
@@ -3297,14 +3314,15 @@ function installedCampaignCapsule(
     throw new UsageError(`distribution evidence names unknown capsule ${capsuleId}`);
   }
   if ("mode" in config.corpusCohort) {
-    const policy = verifyM2AuthorizedPartialCohort(root, config.corpusCohort.partialCohort);
+    const policy = verifyM2AuthorizedPartialCohort(paths, config.corpusCohort.partialCohort);
     const authorized = policy.admitted.find((entry) => entry.capsuleId === capsuleId);
     if (authorized === undefined) {
       throw new UsageError(`distribution evidence capsule ${capsuleId} is not admitted`);
     }
-    const dir = join(root, "capsules", authorized.label);
+    const dir = join(paths.capsulesRoot, authorized.label);
     const admitted = admitCapsule(dir, {
       review: "required",
+      casDir: casRoot(paths.root),
       allowMissingGitBaselineWithOwnerReceipt: true,
     });
     if (
@@ -3324,7 +3342,7 @@ function installedCampaignCapsule(
     resolveRegisteredCapsuleLocation(config, registered, capsule);
     return capsule;
   }
-  const capsule = discoverCapsules(root).get(capsuleId);
+  const capsule = discoverCapsules(paths).get(capsuleId);
   if (capsule === undefined) {
     throw new UsageError(`distribution evidence capsule ${capsuleId} is not installed`);
   }
@@ -3349,6 +3367,11 @@ function installedEvaluatorSourcePath(capsule: DiscoveredCapsule): string {
 
 function evidenceFileWithin(root: string, input: string, label: string): string {
   const path = resolve(root, input);
+  assertEvidenceFile(root, path, label);
+  return path;
+}
+
+function assertEvidenceFile(root: string, path: string, label: string): void {
   const rel = relative(root, path);
   if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`)) {
     throw new UsageError(`${label} must stay inside ${root}`);
@@ -3356,15 +3379,24 @@ function evidenceFileWithin(root: string, input: string, label: string): string 
   if (!existsSync(path) || !statSync(path).isFile()) {
     throw new UsageError(`${label} must name an existing regular file`);
   }
-  return path;
 }
 
+/**
+ * `evaluatorSourcePath` is repository-relative: `capsules/<label>/...` names
+ * a file inside the capsules root, so recorded proofs stay valid whichever
+ * checkout holds the capsules.
+ */
 export function verifyStructuralNondeterminism(
-  root: string,
+  paths: CapsulePaths,
   proof: CampaignImageStructuralNondeterminismProofV1,
   installedEvaluatorPath: string,
 ): { path: string; bytes: Buffer } {
-  const sourcePath = evidenceFileWithin(root, proof.evaluatorSourcePath, "evaluator source");
+  const sourcePath = resolveRepoPath(paths, proof.evaluatorSourcePath);
+  assertEvidenceFile(
+    proof.evaluatorSourcePath.startsWith(`${CAPSULES_DIR_NAME}/`) ? paths.capsulesRoot : paths.root,
+    sourcePath,
+    "evaluator source",
+  );
   if (sourcePath !== installedEvaluatorPath) {
     throw new UsageError("structural proof source must match the installed capsule evaluator");
   }
@@ -3454,9 +3486,10 @@ function verifyDistributionEvidence(
   )) {
     throw new UsageError("distribution measurement was not performed after pre-registration");
   }
-  const capsule = installedCampaignCapsule(request.root, config, evidence.capsuleId);
+  const paths: CapsulePaths = { root: request.root, capsulesRoot: request.capsulesRoot };
+  const capsule = installedCampaignCapsule(paths, config, evidence.capsuleId);
   const source = verifyStructuralNondeterminism(
-    request.root,
+    paths,
     evidence.structuralNondeterminism,
     installedEvaluatorSourcePath(capsule),
   );
@@ -3665,6 +3698,8 @@ export async function campaignCommand(args: string[], io: CmdIo): Promise<number
     const operator = io.env["USER"] ?? io.env["LOGNAME"];
     const result = repinCampaignImage({
       root: io.root,
+      // Only distribution evidence reads capsules; exact replay must not need them.
+      capsulesRoot: resolveCapsulesRoot(io, { allowMissingDefault: true }),
       campaignPath,
       capsuleId,
       fromImage,
@@ -3832,7 +3867,7 @@ export async function campaignCommand(args: string[], io: CmdIo): Promise<number
       sourceCommit: source,
       runtimeDigest,
       evidencePath: resolve(io.root, evidenceFlag),
-      capsules: resolveRegisteredCapsules(io.root, config),
+      capsules: resolveRegisteredCapsules(capsulePaths(io), config),
     });
     io.out(canonicalJson({
       command: "campaign.smoke-capsules",
@@ -4307,7 +4342,7 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
   const campaignPath = resolve(io.root, campaignFlag);
   let config = MetaCampaignConfigV1.parse(JSON.parse(readFileSync(campaignPath, "utf8")));
   if (phase === "freeze") {
-    const corpus = freezeCorpusEntries(io.root, config);
+    const corpus = freezeCorpusEntries(capsulePaths(io), config);
     config = MetaCampaignConfigV1.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
   }
   const requiredOuterEvaluations = config.counts.candidateAttemptsMax + 1;
@@ -4338,7 +4373,7 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     }
   }
 
-  const capsules = resolveRegisteredCapsules(io.root, config);
+  const capsules = resolveRegisteredCapsules(capsulePaths(io), config);
   const casDir = casRoot(io.root);
   const cas = new CasStore(casDir);
   const seedSnapshot = collectOptimizerSnapshot(io.root);
@@ -4927,7 +4962,7 @@ export async function recursiveCommand(
       closureCapture = options.preparedFreezePublication.closureCapture;
     } else {
       const localSeed = await captureSeedCandidate(io.root, cas);
-      const corpus = freezeCorpusEntries(io.root, config);
+      const corpus = freezeCorpusEntries(capsulePaths(io), config);
       config = MetaCampaignConfigV2.parse({ ...config, train: corpus.train, holdout: corpus.holdout });
       const comparisonImage = recursiveOptimizerImage(config);
       const explicitTarget = digestFlag(strFlag(flags, "target-artifact"), "--target-artifact");
@@ -5013,7 +5048,7 @@ export async function recursiveCommand(
   ) {
     throw new UsageError("recursive trusted controls do not match the frozen target-specific controls");
   }
-  const capsules = resolveRegisteredCapsules(io.root, config);
+  const capsules = resolveRegisteredCapsules(capsulePaths(io), config);
   const outerRunId = `run_recursive_outer_${hashBody}`;
   const outerRunDir = join(runsRoot(io.root), outerRunId);
   mkdirSync(campaignDir, { recursive: true, mode: 0o700 });

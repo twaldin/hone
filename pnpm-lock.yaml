@@ -15,11 +15,14 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@18.19.130)(lightningcss@1.32.0)
 
-  capsules:
+  capsule-kit:
     dependencies:
       '@hone/broker':
         specifier: workspace:*
         version: link:../trusted/broker
+      '@hone/cli':
+        specifier: workspace:*
+        version: link:../trusted/cli
       '@hone/schema':
         specifier: workspace:*
         version: link:../schema

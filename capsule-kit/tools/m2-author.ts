@@ -7,11 +7,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveCapsulesRoot } from "@hone/cli/capsules-root";
 
 const TOOLS_DIR = dirname(fileURLToPath(import.meta.url));
-const CAPSULES_DIR = resolve(TOOLS_DIR, "..");
 const IMAGE = "hone-task@sha256:a5f37a994ab2c4c44a05b3d679fd743245431f98355db37e106fd86daa1169d0";
 
 export interface ExactCase {
@@ -88,7 +88,7 @@ function commitBaseline(baselineDir: string): void {
 }
 
 export function authorM2Capsule(definition: M2CapsuleDefinition): string {
-  const taskDir = join(CAPSULES_DIR, definition.name);
+  const taskDir = join(resolveCapsulesRoot({ root: process.cwd(), env: process.env }), definition.name);
   if (existsSync(taskDir)) {
     throw new Error(`refusing to replace existing capsule: ${taskDir}`);
   }
@@ -166,5 +166,5 @@ export function authorM2Capsule(definition: M2CapsuleDefinition): string {
 }
 
 export function removeAuthoredCapsule(name: string): void {
-  rmSync(join(CAPSULES_DIR, name), { recursive: true, force: true });
+  rmSync(join(resolveCapsulesRoot({ root: process.cwd(), env: process.env }), name), { recursive: true, force: true });
 }

@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import {
   M2AuthorizedPartialCohort,
   canonicalJson,
@@ -10,8 +9,8 @@ import {
   type M2CohortEvidencePointer,
 } from "@hone/schema";
 import { UsageError } from "./args.js";
+import { resolveRepoPath, type CapsulePaths } from "./capsules-root.js";
 
-export const M2_AUTHORIZED_PARTIAL_COHORT_FILE = "plans/m2-authorized-partial-cohort.v1.json";
 /**
  * Match a Gate-2 receipt to the authority frozen for this admitted identity.
  * The original cohort inherits its one cohort-wide ruling; later re-admissions
@@ -34,8 +33,8 @@ export function gate2ReceiptCitesAuthorizedBasis(
 }
 
 
-function verifyEvidencePointer(root: string, pointer: M2CohortEvidencePointer): void {
-  const pathname = resolve(root, pointer.path);
+function verifyEvidencePointer(paths: CapsulePaths, pointer: M2CohortEvidencePointer): void {
+  const pathname = resolveRepoPath(paths, pointer.path);
   let content: Buffer;
   try {
     content = readFileSync(pathname);
@@ -52,31 +51,19 @@ function verifyEvidencePointer(root: string, pointer: M2CohortEvidencePointer): 
   }
 }
 
-/** Parse the exact 21+6 owner record and verify every cited repository byte. */
+/**
+ * Parse the exact 21+6 owner record and verify every cited repository byte.
+ * `capsules/...` evidence resolves inside the capsules root; other paths
+ * resolve against the state root.
+ */
 export function verifyM2AuthorizedPartialCohort(
-  root: string,
+  paths: CapsulePaths,
   input: unknown,
 ): AuthorizedPartialCohort {
   const cohort = M2AuthorizedPartialCohort.parse(input);
-  for (const pointer of cohort.authorization.evidence) verifyEvidencePointer(root, pointer);
+  for (const pointer of cohort.authorization.evidence) verifyEvidencePointer(paths, pointer);
   for (const deferred of cohort.deferred) {
-    for (const pointer of deferred.evidence) verifyEvidencePointer(root, pointer);
+    for (const pointer of deferred.evidence) verifyEvidencePointer(paths, pointer);
   }
   return cohort;
-}
-
-/** Load the committed, owner-authorized M2 partial-cohort record. */
-export function readM2AuthorizedPartialCohort(
-  root: string,
-  pathname = join(root, M2_AUTHORIZED_PARTIAL_COHORT_FILE),
-): AuthorizedPartialCohort {
-  let input: unknown;
-  try {
-    input = JSON.parse(readFileSync(pathname, "utf8"));
-  } catch (error) {
-    throw new UsageError(
-      `authorized partial cohort record ${pathname} is unreadable JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  return verifyM2AuthorizedPartialCohort(root, input);
 }

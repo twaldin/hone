@@ -74,7 +74,7 @@ function closeEnough(recomputed: number, recorded: number): boolean {
  * aggregates, never trusted from `failures: []` or the recorded booleans
  * alone. Returns human-readable labels of every violated invariant; empty
  * means the report is internally consistent with the ordering tool's
- * contract (capsules/tools/ordering-check.ts):
+ * contract (capsule-kit/tools/ordering-check.ts):
  *
  *  1. discrimination — broken < naive < baseline < improved on the combined
  *     train+validation aggregate;

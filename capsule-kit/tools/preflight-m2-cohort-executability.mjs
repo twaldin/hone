@@ -7,29 +7,49 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_CAMPAIGN = "data/m2-refreeze/campaign-frozen.json";
-const DEFAULT_CONFIG = "data/m2-refreeze/cohort-executability-preflight.config.json";
+/** The engine's own launcher, independent of the working directory. */
+const HONE_BIN = resolve(dirname(fileURLToPath(import.meta.url)), "../../trusted/cli/bin/hone.js");
+/**
+ * Hone state root (the working directory, like the hone CLI's io.root):
+ * campaign data, the preflight config, .hone-runs and the report live here.
+ */
+const STATE_ROOT = process.cwd();
 const DEFAULT_OUTPUT = "tmp/m2-cohort-executability-results.json";
 const UPSTREAM_URL = "http://127.0.0.1:1";
 const MAX_DIAGNOSTIC_CHARS = 16_384;
 const WORKER_UID = 2000;
 const UID_TASK_SAMPLE_MS = 250;
 
+/**
+ * Plain-node mirror of resolveCapsulesRoot (trusted/cli/src/capsules-root.ts):
+ * HONE_CAPSULES_ROOT, else ./capsules under the state root; must be a directory.
+ */
+function resolveCapsulesRoot(root, env) {
+  const raw = env.HONE_CAPSULES_ROOT;
+  if (raw === "") throw new Error("HONE_CAPSULES_ROOT is set but empty");
+  const dir = resolve(root, raw ?? "capsules");
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+    throw new Error(`capsules root ${dir} is not an existing directory; set HONE_CAPSULES_ROOT`);
+  }
+  return dir;
+}
+
 function usage() {
   return [
-    "usage: node capsules/tools/preflight-m2-cohort-executability.mjs",
-    "       [--campaign PATH] [--config PATH] [--output PATH]",
+    "usage: node capsule-kit/tools/preflight-m2-cohort-executability.mjs",
+    "       --campaign PATH --config PATH [--output PATH]",
     "",
     "Runs every development and terminal capsule from the frozen M2 campaign",
     "through the real trusted CLI, Docker staging, and evaluator path. The",
     "upstream is pinned to unreachable 127.0.0.1:1 and any non-zero model",
-    "token or USD spend stops the gate immediately.",
+    "token or USD spend stops the gate immediately. Paths resolve against the",
+    "working directory; capsules come from HONE_CAPSULES_ROOT, else ./capsules.",
     "Host uid-2000 task counts are sampled around each run so concurrent",
     "evaluator interference remains visible in the report.",
   ].join("\n");
@@ -37,8 +57,8 @@ function usage() {
 
 function parseArgs(argv) {
   const values = {
-    campaign: DEFAULT_CAMPAIGN,
-    config: DEFAULT_CONFIG,
+    campaign: "",
+    config: "",
     output: DEFAULT_OUTPUT,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -57,6 +77,7 @@ function parseArgs(argv) {
     values[arg.slice(2)] = value;
     i += 1;
   }
+  if (values.campaign === "" || values.config === "") throw new Error(`--campaign and --config are required\n${usage()}`);
   return values;
 }
 
@@ -82,9 +103,9 @@ function appendBounded(current, chunk) {
 }
 
 function assertRelativeToRepo(path, label) {
-  const rel = relative(REPO_ROOT, path);
-  if (rel === "" || rel === ".." || rel.startsWith("../")) {
-    throw new Error(`${label} must be a file under ${REPO_ROOT}`);
+  const rel = relative(STATE_ROOT, path);
+  if (rel === "" || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
+    throw new Error(`${label} must be a file under ${STATE_ROOT}`);
   }
   return rel;
 }
@@ -115,17 +136,19 @@ function probeUnreachableUpstream() {
 function findCapsules(capsuleIds) {
   const wanted = new Set(capsuleIds);
   const found = new Map();
-  for (const entry of readdirSync(join(REPO_ROOT, "capsules"), { withFileTypes: true })) {
+  for (const entry of readdirSync(CAPSULES_ROOT, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    const manifestPath = join(REPO_ROOT, "capsules", entry.name, "manifest.json");
+    const manifestPath = join(CAPSULES_ROOT, entry.name, "manifest.json");
     if (!existsSync(manifestPath)) continue;
     const manifest = readJson(manifestPath);
     if (!wanted.has(manifest.id)) continue;
     if (found.has(manifest.id)) throw new Error(`duplicate capsule id ${manifest.id}`);
     found.set(manifest.id, {
       capsuleId: manifest.id,
+      // Repository-relative descriptors (`capsules/<label>`) keep reports checkout-independent.
       capsuleDir: `capsules/${entry.name}`,
       manifestPath: `capsules/${entry.name}/manifest.json`,
+      absoluteDir: join(CAPSULES_ROOT, entry.name),
       image: manifest.image,
       assetGroups: manifest.assetGroups,
     });
@@ -137,21 +160,21 @@ function findCapsules(capsuleIds) {
   return found;
 }
 
-function baselineStoreRecord(capsuleDir) {
-  const base = join(REPO_ROOT, capsuleDir, "baseline");
+function baselineStoreRecord(capsule) {
+  const base = join(capsule.absoluteDir, "baseline");
   const store = [".gitdir", ".git"].find((name) => existsSync(join(base, name)));
   if (store === undefined) {
     return { present: false, tracked: false, path: null, coreWorktree: null };
   }
-  const storeRel = `${capsuleDir}/baseline/${store}`;
-  const trackedCheck = spawnSync("git", ["ls-files", storeRel], {
-    cwd: REPO_ROOT,
+  const storeRel = `${capsule.capsuleDir}/baseline/${store}`;
+  const trackedCheck = spawnSync("git", ["ls-files", join(base, store)], {
+    cwd: CAPSULES_ROOT,
     encoding: "utf8",
   });
   if (trackedCheck.status !== 0) {
     throw new Error(`git ls-files failed for ${storeRel}: ${trackedCheck.stderr}`);
   }
-  const configPath = join(REPO_ROOT, storeRel, "config");
+  const configPath = join(base, store, "config");
   let coreWorktree = null;
   if (existsSync(configPath)) {
     const match = readFileSync(configPath, "utf8").match(/^\s*worktree\s*=\s*(.+)$/mi);
@@ -181,7 +204,7 @@ function parseJsonLines(value) {
 
 function readRunText(runId, filename) {
   if (runId === null) return "";
-  const path = join(REPO_ROOT, ".hone-runs", runId, filename);
+  const path = join(STATE_ROOT, ".hone-runs", runId, filename);
   return existsSync(path) ? readFileSync(path, "utf8") : "";
 }
 
@@ -217,7 +240,7 @@ function uidTaskCount(uid) {
 function execute(command, monitorUid = null) {
   return new Promise((resolveExecution, rejectExecution) => {
     const child = spawn("sg", ["docker", "-c", command.inner], {
-      cwd: REPO_ROOT,
+      cwd: STATE_ROOT,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -311,9 +334,10 @@ function writeReport(path, report) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const campaignPath = resolve(REPO_ROOT, args.campaign);
-const configPath = resolve(REPO_ROOT, args.config);
-const outputPath = resolve(REPO_ROOT, args.output);
+const CAPSULES_ROOT = resolveCapsulesRoot(STATE_ROOT, process.env);
+const campaignPath = resolve(STATE_ROOT, args.campaign);
+const configPath = resolve(STATE_ROOT, args.config);
+const outputPath = resolve(STATE_ROOT, args.output);
 const campaignRel = assertRelativeToRepo(campaignPath, "campaign");
 const configRel = assertRelativeToRepo(configPath, "config");
 assertRelativeToRepo(outputPath, "output");
@@ -345,7 +369,7 @@ for (const image of [...new Set(capsuleIds.map((id) => capsules.get(id).image))]
 const report = {
   schemaVersion: 1,
   generatedAt: new Date().toISOString(),
-  gateInvocation: "node capsules/tools/preflight-m2-cohort-executability.mjs",
+  gateInvocation: "node capsule-kit/tools/preflight-m2-cohort-executability.mjs",
   campaign: campaignRel,
   config: configRel,
   upstreamProbe,
@@ -362,12 +386,12 @@ const report = {
 
 for (const capsuleId of capsuleIds) {
   const capsule = capsules.get(capsuleId);
-  const baselineStore = baselineStoreRecord(capsule.capsuleDir);
+  const baselineStore = baselineStoreRecord(capsule);
   const inner = `HONE_UPSTREAM_BASE_URL=${UPSTREAM_URL} ${[
     "node",
-    "trusted/cli/bin/hone.js",
+    HONE_BIN,
     "run",
-    capsule.capsuleDir,
+    capsule.absoluteDir,
     "--headless",
     "--apply",
     "none",
@@ -515,7 +539,7 @@ for (const capsuleId of capsuleIds) {
   });
   writeReport(outputPath, report);
   if (verdict === "SPEND_VIOLATION") {
-    throw new Error(`${capsuleId} violated the zero-spend guard; stopped after writing ${relative(REPO_ROOT, outputPath)}`);
+    throw new Error(`${capsuleId} violated the zero-spend guard; stopped after writing ${relative(STATE_ROOT, outputPath)}`);
   }
 }
 
@@ -537,6 +561,6 @@ report.summary = {
   ),
 };
 writeReport(outputPath, report);
-console.log(`\npreflight report: ${relative(REPO_ROOT, outputPath)}`);
+console.log(`\npreflight report: ${relative(STATE_ROOT, outputPath)}`);
 console.log(`${report.summary.provenExecutable}/${report.summary.authorizedCount} proven executable; ${report.summary.failedAfterEvaluatorInvocation} FAIL; ${report.summary.cachedWithoutExecution} CACHED_RESULT; ${report.summary.untestedBeforeEvaluatorInvocation} UNTESTED; ${report.summary.spendViolations} spend violations`);
 process.exitCode = report.summary.provenExecutable === report.summary.authorizedCount ? 0 : 1;

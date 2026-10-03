@@ -6,6 +6,9 @@
   "bin": {
     "hone": "./bin/hone.js"
   },
+  "exports": {
+    "./capsules-root": "./src/capsules-root.ts"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
