@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { campaignSourceMigrationRecordDigest, metaCampaignConfigHash } from "@hone/meta";
 import {
   MetaCampaignConfigV2,
@@ -21,11 +20,8 @@ import type { CmdIo } from "../src/io.js";
 import { MetaJournalV1 } from "../src/meta-journal.js";
 import { verifiedBootRuntimeDigest } from "../src/runtime-digest.js";
 import { makeRoot } from "./helpers.js";
+import { syntheticFrozenCampaign, writeSyntheticFrozenCampaign } from "./support/synthetic-campaign.js";
 
-const preservedPath = fileURLToPath(new URL(
-  "../../../data/m2-refreeze-final/campaign-frozen.json",
-  import.meta.url,
-));
 const TO_COMMIT = "f".repeat(40);
 const NEXT_COMMIT = "e".repeat(40);
 const TO_BOOT_DIGEST = `sha256:${"9".repeat(64)}` as const;
@@ -33,10 +29,6 @@ const NEXT_BOOT_DIGEST = `sha256:${"8".repeat(64)}` as const;
 
 function digest(character: string): `sha256:${string}` {
   return `sha256:${character.repeat(64)}`;
-}
-
-function preservedConfig(): RecursiveConfig {
-  return MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedPath, "utf8")));
 }
 
 function writeCampaignRun(
@@ -129,7 +121,7 @@ describe("campaign migrate-source", () => {
   test("migrates a crashed recursive campaign, preserves frozen identity, and re-pins only nonterminal runs", async () => {
     const root = makeRoot();
     const campaignPath = join(root, "campaign-frozen.json");
-    const before = preservedConfig();
+    const before = syntheticFrozenCampaign();
     const from = before.trustedRuntime.sourceCommit;
     const fromBootDigest = before.trustedRuntime.digest;
     const configHash = metaCampaignConfigHash(before);
@@ -218,7 +210,7 @@ describe("campaign migrate-source", () => {
   test("appends every migration and kills journal-integrity and frozen-field mutants", async () => {
     const root = makeRoot();
     const campaignPath = join(root, "campaign-frozen.json");
-    const before = preservedConfig();
+    const before = syntheticFrozenCampaign();
     const from = before.trustedRuntime.sourceCommit;
     writeFileSync(campaignPath, `${JSON.stringify(before, null, 2)}\n`);
 
@@ -302,7 +294,7 @@ describe("campaign migrate-source", () => {
   });
 
   test("authenticates optimizer refreeze identities through the source migration journal", () => {
-    const before = preservedConfig();
+    const before = syntheticFrozenCampaign();
     const configHash = metaCampaignConfigHash(before);
     const optimizerRefreeze = {
       optimizerImage: before.optimizerRuntime.image,
@@ -397,7 +389,7 @@ describe("campaign migrate-source", () => {
   test("refuses a foreign nonterminal runtime pin before changing the campaign", async () => {
     const root = makeRoot();
     const campaignPath = join(root, "campaign-frozen.json");
-    const before = preservedConfig();
+    const before = syntheticFrozenCampaign();
     const originalBytes = `${JSON.stringify(before, null, 2)}\n`;
     const configHash = metaCampaignConfigHash(before);
     writeFileSync(campaignPath, originalBytes);
@@ -424,6 +416,8 @@ describe("campaign migrate-source", () => {
   });
 
   test("CLI refuses dirty trees and a --to that is not the resolved clean HEAD", async () => {
+    const preservedPath = writeSyntheticFrozenCampaign(join(makeRoot(), "campaign-frozen.json"));
+    const from = syntheticFrozenCampaign().trustedRuntime.sourceCommit;
     const dirtyRoot = makeRoot();
     const dirtyHead = initializeGitRoot(dirtyRoot);
     writeFileSync(join(dirtyRoot, "untracked.txt"), "dirty\n");
@@ -434,7 +428,7 @@ describe("campaign migrate-source", () => {
       "--campaign",
       preservedPath,
       "--from",
-      preservedConfig().trustedRuntime.sourceCommit,
+      from,
       "--to",
       dirtyHead,
       "--reason",
@@ -452,7 +446,7 @@ describe("campaign migrate-source", () => {
       "--campaign",
       preservedPath,
       "--from",
-      preservedConfig().trustedRuntime.sourceCommit,
+      from,
       "--to",
       "a".repeat(40),
       "--reason",
@@ -466,7 +460,8 @@ describe("campaign migrate-source", () => {
     const root = makeRoot();
     initializeGitRoot(root);
     const campaignPath = join(root, "tracked-campaign.json");
-    const originalBytes = `${JSON.stringify(preservedConfig(), null, 2)}\n`;
+    const original = syntheticFrozenCampaign();
+    const originalBytes = `${JSON.stringify(original, null, 2)}\n`;
     writeFileSync(campaignPath, originalBytes);
     execFileSync("git", ["add", "tracked-campaign.json"], { cwd: root });
     execFileSync("git", ["commit", "-qm", "track frozen campaign"], { cwd: root });
@@ -482,7 +477,7 @@ describe("campaign migrate-source", () => {
       "--campaign",
       campaignPath,
       "--from",
-      preservedConfig().trustedRuntime.sourceCommit,
+      original.trustedRuntime.sourceCommit,
       "--to",
       head,
       "--reason",
@@ -499,7 +494,7 @@ describe("campaign migrate-source", () => {
     const head = initializeGitRoot(root);
     const campaignPath = join(root, ".hone-runs", "campaign-frozen.json");
     mkdirSync(dirname(campaignPath), { recursive: true });
-    const original = preservedConfig();
+    const original = syntheticFrozenCampaign();
     writeFileSync(campaignPath, `${JSON.stringify(original, null, 2)}\n`);
     const lines = { out: [] as string[], err: [] as string[] };
 
@@ -535,7 +530,7 @@ describe("campaign migrate-source", () => {
     const root = makeRoot();
     initializeGitRoot(root);
     const fixturePath = join(makeRoot(), "migrated.json");
-    const original = preservedConfig();
+    const original = syntheticFrozenCampaign();
     writeFileSync(fixturePath, `${JSON.stringify(original, null, 2)}\n`);
     await migrateCampaignSource({
       root,
@@ -566,7 +561,7 @@ describe("campaign migrate-source", () => {
     const fixtureRoot = makeRoot();
     const registeredFixturePath = join(fixtureRoot, "registered.json");
     const currentFixturePath = join(fixtureRoot, "current.json");
-    const original = preservedConfig();
+    const original = syntheticFrozenCampaign();
     writeFileSync(registeredFixturePath, `${JSON.stringify(original, null, 2)}\n`);
     writeFileSync(currentFixturePath, `${JSON.stringify(original, null, 2)}\n`);
     await migrateCampaignSource({
@@ -614,7 +609,7 @@ describe("campaign migrate-source", () => {
 
   test("help publishes the exact operator command", async () => {
     const lines = { out: [] as string[], err: [] as string[] };
-    const code = await main(["help"], commandIo(resolve(dirname(preservedPath), "..", ".."), lines));
+    const code = await main(["help"], commandIo(makeRoot(), lines));
     expect(code).toBe(0);
     expect(lines.out.join("\n")).toContain(
       "hone campaign migrate-source --campaign <frozen.json> --from <oldSourceCommit> --to <newSourceCommit> --reason <text>",
@@ -628,7 +623,7 @@ describe("campaign migrate-source refreeze CLI", () => {
     const head = initializeGitRoot(root);
     const campaignPath = join(root, ".hone-runs", "campaign-refreeze.json");
     mkdirSync(dirname(campaignPath), { recursive: true });
-    const original = preservedConfig();
+    const original = syntheticFrozenCampaign();
     writeFileSync(campaignPath, `${JSON.stringify(original, null, 2)}\n`);
     const lines = { out: [] as string[], err: [] as string[] };
 

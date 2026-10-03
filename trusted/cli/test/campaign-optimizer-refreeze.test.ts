@@ -1,7 +1,6 @@
 // r1 adversarial probes: every refreeze journal-binding arm must FIRE.
-// Runs against the preserved campaign-11 frozen config fixture.
+// Runs against the synthetic frozen recursive campaign fixture.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
@@ -24,11 +23,8 @@ import {
   writeOptimizerArtifactSeal,
 } from "../src/optimizer-artifact.js";
 import { makeRoot, writeEvents } from "./helpers.js";
+import { syntheticFrozenCampaign } from "./support/synthetic-campaign.js";
 
-const preservedPath = fileURLToPath(new URL(
-  "../../../data/m2-refreeze-final/campaign-frozen.json",
-  import.meta.url,
-));
 const digest = (c: string): `sha256:${string}` => `sha256:${c.repeat(64)}`;
 const TO_COMMIT = "f".repeat(40);
 const TO_BOOT_DIGEST = digest("9");
@@ -96,9 +92,6 @@ const parseJson = (config: JsonConfig) =>
   MetaCampaignConfigV2.parse(JSON.parse(JSON.stringify(config)));
 const hashJson = (config: JsonConfig) => metaCampaignConfigHash(parseJson(config));
 
-const preservedJson = (): JsonConfig =>
-  JSON.parse(readFileSync(preservedPath, "utf8")) as JsonConfig;
-
 function rehash(record: MigrationRecord): void {
   const { recordDigest: _dropped, ...body } = record;
   record.recordDigest = campaignSourceMigrationRecordDigest(
@@ -126,7 +119,7 @@ function runRecord(runId: string, to?: RunTransitionSide): RunRefreezeRecord {
 }
 
 function refrozenCampaign(mutate?: (refreeze: RefreezePayload, migrated: JsonConfig) => void): JsonConfig {
-  const before = preservedJson();
+  const before = syntheticFrozenCampaign() as JsonConfig;
   const configHash = hashJson(before);
   const optimizerRefreeze: RefreezePayload = {
     optimizerImage: before.optimizerRuntime.image,
@@ -203,7 +196,7 @@ function refrozenCampaign(mutate?: (refreeze: RefreezePayload, migrated: JsonCon
 
 describe("refreeze journal binding arms", () => {
   test("baseline refrozen config with run records retains identity", () => {
-    expect(hashJson(refrozenCampaign())).toBe(hashJson(preservedJson()));
+    expect(hashJson(refrozenCampaign())).toBe(hashJson(syntheticFrozenCampaign() as JsonConfig));
   });
 
   test("mutating a refreeze field without rehash dies on record digest", () => {

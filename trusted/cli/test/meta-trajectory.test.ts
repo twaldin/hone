@@ -28,6 +28,7 @@ import {
   persistTrajectoryWithoutMaskingSearchFailure,
 } from "../src/meta-trajectory.js";
 import { makeRoot } from "./helpers.js";
+import { syntheticFrozenCampaign } from "./support/synthetic-campaign.js";
 const hash = `sha256:${"a".repeat(64)}` as RecursiveCandidateOuterGroup["artifact"];
 const candidate = `sha256:${"b".repeat(64)}`;
 const at = "2026-07-15T00:00:00.000Z";
@@ -425,13 +426,7 @@ function writeOuterEvents(
     const root = makeRoot();
     const campaignDir = join(root, "campaign");
     mkdirSync(campaignDir, { recursive: true });
-    const recursiveFixturePath = fileURLToPath(new URL(
-      "../../../data/m2-refreeze-final/campaign-frozen.json",
-      import.meta.url,
-    ));
-    const config = repinRecursive(MetaCampaignConfigV2.parse(JSON.parse(
-      readFileSync(recursiveFixturePath, "utf8"),
-    )));
+    const config = repinRecursive(syntheticFrozenCampaign());
     const trajectoryConfig = structuredClone(config);
     const usedTaskIds = new Set(
       trajectoryConfig.developmentPanel.members.map((member) => member.taskId),

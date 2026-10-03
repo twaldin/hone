@@ -1,15 +1,14 @@
 import { execFileSync } from "node:child_process";
 import {
   afterEach,
+  beforeAll,
   describe,
   expect,
   test,
+  vi,
 } from "vitest";
 import {
   appendFileSync,
-  copyFileSync,
-  cpSync,
-  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,8 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, join, relative } from "node:path";
 import { metaCampaignConfigHash } from "@hone/meta";
 import { MetaCampaignConfigV2, type MetaCampaignConfigV2 as RecursiveConfig } from "@hone/schema";
 import {
@@ -31,18 +29,34 @@ import {
 import { main } from "../src/main.js";
 import { writeOptimizerArtifactSeal } from "../src/optimizer-artifact.js";
 import { collectOptimizerSnapshot, snapshotDigest } from "../src/optimizer-digest.js";
+import type * as OptimizerDigest from "../src/optimizer-digest.js";
 import { verifiedBootRuntimeDigest } from "../src/runtime-digest.js";
 import type { CmdIo } from "../src/io.js";
+import { syntheticFrozenCampaign, writeSyntheticFrozenCampaign } from "./support/synthetic-campaign.js";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const preservedConfigPath = join(repoRoot, "data", "m2-refreeze-final", "campaign-frozen.json");
-const reviewedBaseRoot = "/home/tim/omp-firstmate/data/hone-child-terminal-crash/scratch-r1/base-124b";
-const preservedRuntimeRoot = "/home/tim/omp-firstmate/worktrees/m2-exec-runtime-10";
-const campaign11BaseDigest = "sha256:fe92e17955adebe53c9ed4076ae1dcdfb2e328d19818d7273fb4f4d850f0d6dc";
+// The engine pins Campaign 11's reviewed optimizer base by digest
+// (LEGACY_CAMPAIGN11_* in commands/hone.ts). Those historical bytes are not
+// part of this repository, so a small synthetic base closure stands in for
+// them: its true snapshot digest is aliased to the pinned Campaign 11 digest.
+// Every other snapshot — including any mutated copy of the stand-in — keeps
+// its real digest, so seal authentication and allowlist arms stay exercised.
+const standIn = vi.hoisted(() => ({
+  campaign11BaseDigest: "sha256:fe92e17955adebe53c9ed4076ae1dcdfb2e328d19818d7273fb4f4d850f0d6dc",
+  digest: undefined as string | undefined,
+}));
+vi.mock("../src/optimizer-digest.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof OptimizerDigest>();
+  return {
+    ...actual,
+    snapshotDigest: (...args: Parameters<typeof actual.snapshotDigest>): string => {
+      const digest = actual.snapshotDigest(...args);
+      return digest === standIn.digest ? standIn.campaign11BaseDigest : digest;
+    },
+  };
+});
+const campaign11BaseDigest = standIn.campaign11BaseDigest;
 const campaign11SourceArtifact = "sha256:499ee208f5b7376a3cfc583e44b7971f7b1b9d378499429ddd67caf04d5f36e2";
-const reviewedBaseAvailable = existsSync(reviewedBaseRoot)
-  && existsSync(join(preservedRuntimeRoot, "node_modules"))
-  && existsSync(join(preservedRuntimeRoot, "optimizer", "node_modules"));
+
 const scratchRoots: string[] = [];
 
 function scratch(prefix: string): string {
@@ -54,10 +68,6 @@ function scratch(prefix: string): string {
 afterEach(() => {
   for (const root of scratchRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
-
-function preservedConfig(): RecursiveConfig {
-  return MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedConfigPath, "utf8")));
-}
 
 function initializeGitRoot(): { root: string; head: string } {
   const root = scratch("hone-migrated-base-root-");
@@ -82,26 +92,49 @@ function commandIo(root: string, lines: { out: string[]; err: string[] }): CmdIo
   };
 }
 
-function copyReviewedBase(): string {
-  const destination = scratch("hone-reviewed-base-copy-");
-  cpSync(join(reviewedBaseRoot, "optimizer"), join(destination, "optimizer"), {
-    recursive: true,
-    verbatimSymlinks: true,
-  });
-  rmSync(join(destination, "optimizer", "node_modules"), { recursive: true, force: true });
-  cpSync(
-    join(preservedRuntimeRoot, "optimizer", "node_modules"),
-    join(destination, "optimizer", "node_modules"),
-    { recursive: true, verbatimSymlinks: true },
-  );
-  cpSync(join(reviewedBaseRoot, "schema"), join(destination, "schema"), {
-    recursive: true,
-    verbatimSymlinks: true,
-  });
-  copyFileSync(join(reviewedBaseRoot, "pnpm-lock.yaml"), join(destination, "pnpm-lock.yaml"));
-  symlinkSync(join(preservedRuntimeRoot, "node_modules"), join(destination, "node_modules"), "dir");
-  return destination;
+/**
+ * Fresh copy of the stand-in sealed optimizer base: optimizer sources, sealed
+ * schema, lockfile, and a pnpm-shaped store holding the zod and Pi closures.
+ */
+function sealedBaseCopy(): string {
+  const base = scratch("hone-sealed-base-copy-");
+  const write = (rel: string, bytes: string): void => {
+    mkdirSync(dirname(join(base, rel)), { recursive: true });
+    writeFileSync(join(base, rel), bytes);
+  };
+  const link = (target: string, rel: string): void => {
+    mkdirSync(dirname(join(base, rel)), { recursive: true });
+    symlinkSync(relative(dirname(join(base, rel)), join(base, target)), join(base, rel), "dir");
+  };
+  write("pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+  write("optimizer/package.json", JSON.stringify({ name: "@hone/optimizer", type: "module" }));
+  write("optimizer/tsconfig.json", "{}\n");
+  // Every frozen mutable and protected optimizer source path must select a sealed file.
+  const { mutablePaths, protectedPaths } = syntheticFrozenCampaign();
+  for (const rel of [...mutablePaths, ...protectedPaths]) {
+    if (/^optimizer\/(src|assets)\/.+\.ts$/.test(rel)) write(rel, `export const surface = ${JSON.stringify(rel)};\n`);
+  }
+  write("optimizer/worker/mutate.ts", "export const mutate = 'legacy selftest worker';\n");
+  write("schema/package.json", JSON.stringify({ name: "@hone/schema", type: "module" }));
+  write("schema/src/index.ts", "export const schema = true;\n");
+  const zod = "node_modules/.pnpm/zod@3.25.76/node_modules/zod";
+  write(`${zod}/package.json`, JSON.stringify({ name: "zod", version: "3.25.76" }));
+  write(`${zod}/index.js`, "export const z = 1;\n");
+  const pi = "node_modules/.pnpm/pi@1.0.0/node_modules/@oh-my-pi/pi-coding-agent";
+  write(`${pi}/package.json`, JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "1.0.0" }));
+  write(`${pi}/index.js`, "export const pi = 1;\n");
+  link(zod, "optimizer/node_modules/zod");
+  link(pi, "optimizer/node_modules/@oh-my-pi/pi-coding-agent");
+  return base;
 }
+
+beforeAll(() => {
+  // Real digest of the stand-in base under the campaign's optimizer image.
+  standIn.digest = snapshotDigest(
+    syntheticFrozenCampaign().optimizerRuntime.image,
+    collectOptimizerSnapshot(sealedBaseCopy()),
+  );
+});
 
 async function migratedFixture(campaign11Identity = false): Promise<{
   root: string;
@@ -111,7 +144,7 @@ async function migratedFixture(campaign11Identity = false): Promise<{
 }> {
   const { root, head } = initializeGitRoot();
   const configPath = join(scratch("hone-migrated-config-"), "campaign.json");
-  const original = preservedConfig();
+  const original = syntheticFrozenCampaign();
   if (campaign11Identity) {
     original.seedOptimizer.sourceArtifact = campaign11SourceArtifact;
     original.seedOptimizer.bundleDigest = campaign11BaseDigest;
@@ -162,7 +195,7 @@ describe("migrated recursive optimizer base", () => {
 
   test("coordinator refuses --sealed-base when the campaign has no migration record", async () => {
     const { root, head } = initializeGitRoot();
-    const config = preservedConfig();
+    const config = syntheticFrozenCampaign();
     config.seedOptimizer.sourceCommit = head;
     config.controllerOptimizer.sourceCommit = head;
     config.trustedRuntime.sourceCommit = head;
@@ -176,7 +209,7 @@ describe("migrated recursive optimizer base", () => {
       "--campaign",
       configPath,
       "--sealed-base",
-      reviewedBaseRoot,
+      sealedBaseCopy(),
       "--headless",
     ], commandIo(root, lines));
 
@@ -193,13 +226,13 @@ describe("migrated recursive optimizer base", () => {
     const code = await main([
       "recursive",
       "--campaign",
-      preservedConfigPath,
+      writeSyntheticFrozenCampaign(join(scratch("hone-frozen-config-"), "campaign.json")),
       "--phase",
       "freeze",
       "--out",
       ".hone-runs/refrozen.json",
       "--sealed-base",
-      reviewedBaseRoot,
+      sealedBaseCopy(),
       "--headless",
     ], commandIo(root, lines));
 
@@ -209,9 +242,9 @@ describe("migrated recursive optimizer base", () => {
     );
   });
 
-  test.skipIf(!reviewedBaseAvailable)("authenticates a copied sealed base against the campaign-bound outer run seal", async () => {
+  test("authenticates a copied sealed base against the campaign-bound outer run seal", async () => {
     const fixture = await migratedFixture();
-    const sealedBase = copyReviewedBase();
+    const sealedBase = sealedBaseCopy();
     const snapshot = recursiveOptimizerBaseSnapshot(
       fixture.config,
       fixture.root,
@@ -222,9 +255,9 @@ describe("migrated recursive optimizer base", () => {
     expect(snapshotDigest(fixture.config.optimizerRuntime.image, snapshot)).toBe(campaign11BaseDigest);
   });
 
-  test.skipIf(!reviewedBaseAvailable)("coordinator uses an authenticated preserved base instead of live optimizer bytes", async () => {
+  test("coordinator uses an authenticated preserved base instead of live optimizer bytes", async () => {
     const fixture = await migratedFixture();
-    const sealedBase = copyReviewedBase();
+    const sealedBase = sealedBaseCopy();
     const lines = { out: [] as string[], err: [] as string[] };
 
     const code = await main([
@@ -244,9 +277,9 @@ describe("migrated recursive optimizer base", () => {
     expect(lines.err.join("\n")).not.toContain("sealed optimizer base digest mismatch");
   });
 
-  test.skipIf(!reviewedBaseAvailable)("coordinator refuses base bytes that do not reproduce the campaign digest", async () => {
+  test("coordinator refuses base bytes that do not reproduce the campaign digest", async () => {
     const fixture = await migratedFixture();
-    const sealedBase = copyReviewedBase();
+    const sealedBase = sealedBaseCopy();
     appendFileSync(join(sealedBase, "optimizer", "worker", "mutate.ts"), "\n// digest mutant\n");
     const lines = { out: [] as string[], err: [] as string[] };
 
@@ -263,9 +296,9 @@ describe("migrated recursive optimizer base", () => {
     expect(lines.err.join("\n")).toContain("sealed optimizer base digest mismatch");
   });
 
-  test.skipIf(!reviewedBaseAvailable)("refuses a self-consistent base seal that is foreign to the frozen controller", async () => {
+  test("refuses a self-consistent base seal that is foreign to the frozen controller", async () => {
     const fixture = await migratedFixture();
-    const sealedBase = copyReviewedBase();
+    const sealedBase = sealedBaseCopy();
     rmSync(join(fixture.outerRunDir, "optimizer-artifact.json"));
     writeOptimizerArtifactSeal(fixture.outerRunDir, basename(fixture.outerRunDir), {
       sourceArtifact: `sha256:${"a".repeat(64)}`,
@@ -282,9 +315,9 @@ describe("migrated recursive optimizer base", () => {
     )).toThrow("sealed outer optimizer identity does not match the frozen campaign controller");
   });
 
-  test.skipIf(!reviewedBaseAvailable)("refuses a correctly identified base seal borrowed from a foreign run", async () => {
+  test("refuses a correctly identified base seal borrowed from a foreign run", async () => {
     const fixture = await migratedFixture();
-    const sealedBase = copyReviewedBase();
+    const sealedBase = sealedBaseCopy();
     rmSync(join(fixture.outerRunDir, "optimizer-artifact.json"));
     writeOptimizerArtifactSeal(fixture.outerRunDir, "run_recursive_outer_foreign", {
       sourceArtifact: fixture.config.controllerOptimizer.sourceArtifact,
@@ -301,9 +334,9 @@ describe("migrated recursive optimizer base", () => {
     )).toThrow("sealed outer optimizer identity does not match the frozen campaign controller");
   });
 
-  test.skipIf(!reviewedBaseAvailable)("legacy worker compatibility requires migration plus every exact Campaign 11 identity", async () => {
+  test("legacy worker compatibility requires migration plus every exact Campaign 11 identity", async () => {
     const fixture = await migratedFixture();
-    const sealedBase = copyReviewedBase();
+    const sealedBase = sealedBaseCopy();
     const snapshot = recursiveOptimizerBaseSnapshot(
       fixture.config,
       fixture.root,
@@ -340,7 +373,7 @@ describe("migrated recursive optimizer base", () => {
       expect(recursiveMutationWorkerPreflightContract(foreign, snapshot)).toBeUndefined();
     }
 
-    const mutatedBase = copyReviewedBase();
+    const mutatedBase = sealedBaseCopy();
     appendFileSync(join(mutatedBase, "optimizer", "worker", "mutate.ts"), "\n// identity mismatch\n");
     expect(recursiveMutationWorkerPreflightContract(
       exact,
@@ -348,9 +381,9 @@ describe("migrated recursive optimizer base", () => {
     )).toBeUndefined();
   });
 
-  test.skipIf(!reviewedBaseAvailable)("recursive dispatch receives the exact legacy compatibility contract", async () => {
+  test("recursive dispatch receives the exact legacy compatibility contract", async () => {
     const fixture = await migratedFixture(true);
-    const sealedBase = copyReviewedBase();
+    const sealedBase = sealedBaseCopy();
     let observed: string | undefined;
 
     await expect(recursiveCommand([

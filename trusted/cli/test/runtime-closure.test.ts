@@ -9,8 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join, relative } from "node:path";
 import {
   campaignRuntimeClosureRecordDigest,
   metaCampaignConfigHash,
@@ -38,9 +37,8 @@ import {
   withRuntimeClosureCapture,
 } from "../src/runtime-closure.js";
 import { computeTrustedRuntimeDigestAt } from "../src/runtime-digest.js";
+import { syntheticFrozenCampaign } from "./support/synthetic-campaign.js";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const preservedConfigPath = join(repoRoot, "data", "m2-refreeze-final", "campaign-frozen.json");
 const roots: string[] = [];
 
 function scratch(prefix: string): string {
@@ -130,7 +128,7 @@ function syntheticClosure(): SyntheticClosure {
   relativeLink(zod, join(root, "optimizer/node_modules/zod"));
   relativeLink(pi, join(root, "optimizer/node_modules/@oh-my-pi/pi-coding-agent"));
 
-  const config = MetaCampaignConfigV2.parse(JSON.parse(readFileSync(preservedConfigPath, "utf8")));
+  const config = syntheticFrozenCampaign();
   config.seedOptimizer.sourceCommit = head;
   config.controllerOptimizer.sourceCommit = head;
   config.trustedRuntime.sourceCommit = head;
