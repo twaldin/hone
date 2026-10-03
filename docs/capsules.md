@@ -1,58 +1,57 @@
-# Capsules and public data
+# Capsules
 
-A runnable capsule needs its manifest, exact baseline, evaluator, declared assets, pinned image and valid admission receipt chain. Files alone are not a new admission. Changing a protected baseline file or restoring assets beneath a different evaluator cannot reuse the original exact-tree approval.
+A capsule is a task package: objective, pinned baseline, evaluator, declared assets, execution image and budget, bound together by a content-addressed `manifest.json`. A runnable capsule also needs its pinned image and a valid admission receipt chain. Files alone are not a new admission. Changing a protected baseline file or restoring assets beneath a different evaluator cannot reuse the original exact-tree approval.
+
+## Where capsules live
+
+The engine does not ship capsules. Public capsules are in [twaldin/hone-capsules](https://github.com/twaldin/hone-capsules), under its `capsules/` directory, with the same bytes they had when they lived in this repository, so their IDs and manifest digests are unchanged. Point Hone at that directory with `--capsules-root` or `HONE_CAPSULES_ROOT` (see [Getting started](getting-started.md#pointing-hone-at-capsules)). Without either, Hone uses `./capsules` under the directory it runs from.
+
+hone-capsules holds:
+
+- the sixteen development capsules of the recursive cohort, plus `seeded-astar`, the first capsule written for the TypeScript rewrite;
+- four calibration capsules (`calibration-bitset-rank`, `calibration-byte-escape`, `calibration-interval-merge`, `calibration-varint-decode`), their shared `calibration-runtime` image definition and the `m2-calibration-selection.json` used by the August 2026 calibration;
+- eleven terminal source references (below);
+- the improved Leduc CFR+ solver artifacts, without the sealed capsule;
+- integration tests that check real capsules against this engine, and the publication notice and per-capsule licenses.
+
+Some baselines include a nested Git object store. Clone hone-capsules with the procedure in its README. Do not reconstruct a baseline by copying only the visible working files and assuming its manifest commit still identifies that copy.
 
 ## Development tasks
 
-The public repository includes development tasks and synthetic fixtures, including the approved bounded TradeUp, Monoagent and Floyd implementations. This release covers the derived tasks in this repository, not the complete private applications from which some tasks originated.
+The development capsules include the approved bounded TradeUp, Monoagent and Floyd implementations. That release covers the derived tasks, not the complete private applications some tasks came from; hone-capsules' `PUBLICATION.md` records it. Source contracts keep historical capsule IDs and digests; a new launch takes its identity from the current admitted manifest.
 
-The [publication notice](../PUBLICATION.md) records their MIT release and supersedes the earlier distribution restrictions preserved inside identity-bearing metadata. Source contracts retain historical capsule IDs and digests; a new launch takes its identity from the current admitted manifest.
+An asset group named `holdout` inside a development capsule describes visibility within that task's execution protocol. It is distinct from the frozen terminal evaluation set.
 
-An asset group named `holdout` inside a development capsule describes visibility within that task's execution protocol. It is distinct from the frozen terminal evaluation set. The approved synthetic development fixtures may be public while the terminal inputs and answers remain withheld.
+## capsule-kit
 
-Some baselines include a nested Git object store. Preserve its bytes using the [checkout procedure](getting-started.md#checkout). Do not reconstruct a baseline by copying only the visible working files and assuming its manifest commit still identifies that copy.
+[`capsule-kit/`](../capsule-kit/) is the workspace package `@hone/capsule-kit`: the tools for building and checking capsules, and the frozen task contracts.
 
-## Calibration-only task drafts
-
-Four fresh Python-stdlib packages implement the task choices approved in TWA-59. They reuse neither development/terminal task code nor cohort fixtures and are excluded from both cohorts:
-
-| Package | Objective and hard checks |
+| Path | What it is |
 | --- | --- |
-| `calibration-postings-intersection` | Exact sorted intersection of up to eight strictly increasing document-ID lists, each at most 20,000 entries. Zero lists or an empty member yields an empty intersection. Latency objective; independent occurrence-count oracle. |
-| `calibration-sequence-diff` | Minimal insert/delete scripts for two sequences of at most 1,024 string tokens each. `equal`, `delete`, and `insert` operations must reconstruct both sequences; an independent LCS-length calculation checks minimality without requiring a particular tie-break. Latency objective. |
-| `calibration-weighted-coverage` | Select distinct sets within a hard total cost budget, from at most 128 sets over at most 256 weighted elements. Quality is covered union weight divided by total weight; valid zero-total-weight cases score 1. Optimal selection is an objective, not a validity requirement. |
-| `calibration-online-cache` | Hit-rate objective over at most 10,000 requests, with capacity at most 256. The evaluator owns membership, insertion, hit counting and eviction validation. Only a full-cache miss permits one resident eviction; prefetch and exceeding capacity are invalid. |
+| `tools/scaffold.ts` | Writes a capsule's `manifest.json`: hashes every asset, reads the baseline Git commit, embeds the ordering report's hash and derives the content-addressed ID. Re-running over an unchanged tree gives byte-identical output. Admission errors about asset drift point here. |
+| `tools/ordering-check.ts` | The trusted ordering check: runs naive, improved, broken and shortcut diagnostics through the broker and writes `ordering-report.json`. `schema/src/ordering.ts` validates its report. |
+| `tools/m2-author.ts`, `tools/author-m2-owner-train.ts`, `tools/m2-generic-*.py` | Authoring helpers used to build the M2 cohort capsules. |
+| `tools/preflight-m2-*.m*ts`, `tools/ts-aa-probe.mts` | Host preflights and an A-A noise probe used before the M2 campaigns. |
+| `contracts/` | The frozen OSS and owner-task contracts (`OSS-*`, `OWN-*`) the cohort capsules were built against. |
 
-Fixtures and their generators are fresh and deterministic. Online fixtures specify deterministic weighted distribution schedules, **not published future-request traces**: the trusted parent samples each request with a private OS random source only after the preceding decision. The worker receives only the current request, resident cache, capacity and hit flag. Realized traces vary between invocations; offline deterministic transition tests do not establish target-host score stability.
-
-The protected evaluator executes candidate code in a separate process rooted in the candidate workspace. Production requires Linux root and root-owned mode-0700 `/capsule` assets; it drops the worker to UID 2000 and applies a fail-closed seccomp filter denying process creation, cross-process reads and signal delivery, and networking, including the `io_uring` entry points. Candidate IPC has a 15-second deadline; all requests in an online case share one deadline rather than restarting it per request. `--offline` is explicitly cooperative, unconfined authoring verification—not a production fallback. A violation in any case invalidates and zero-scores the whole query batch.
-
-Each package has a content-addressed **`manifest.draft.json`**, pinned baseline Git store, hashed compressed fixtures and recorded offline diagnostic observations. There is deliberately no active `manifest.json`: discovery skips the drafts, and the existing scaffold/admission checks reject their explicitly failed ordering reports even if a draft is renamed. Draft IDs will change when baseline or ordering evidence changes; they must not be frozen as admitted calibration IDs.
-
-The approved immutable image reference remains the one in `seeded-astar/manifest.json`. Its local ARM64 launch and isolated baseline checks are preparation evidence, **not validation of the selected execution host**. Full admission still requires target-host image/runtime and resource evidence, isolated diagnostic ordering and stability, independent admission reviews and the Gate-2 receipt chain. The retained offline reports also fail postings shortcut/improved separation and sequence-diff naïve-before-baseline ordering; these gaps remain unresolved, not waived. No image substitution, calibration run, provider call or campaign launch is implied.
-
-Authoring commands, run from the repository root after dependency installation:
+The tools take the capsules root from the same `--capsules-root` flag and `HONE_CAPSULES_ROOT` variable as the CLI. Run them from the engine root, for example:
 
 ```sh
-python3 -I -B capsules/tools/prepare-calibration.py
-python3 -I -B capsules/test/calibration_checks.py
-# Optional offline diagnostic observations; not campaign calibration or admission:
-python3 -I -B capsules/tools/prepare-calibration.py --measure
-pnpm --filter @hone/capsules exec tsx tools/pin-calibration-drafts.ts
+HONE_CAPSULES_ROOT="$PWD/../hone-capsules/capsules" pnpm --filter @hone/capsule-kit scaffold <capsule-dir>
 ```
 
-Preparation regenerates only these four packages. Pinning commits changed baseline files using the configured Git identity and writes only draft manifests; it never issues an admission receipt. The per-task envelopes retain the approved maxima: 600,000 tokens, $10, two hours, 49 evaluator invocations, 2 GiB and two CPUs. These are limits, not spending or execution authorization. Campaign seeds, bootstrap settings, routes, thresholds and cohort identities are unchanged.
+A relative `<capsule-dir>` resolves under the capsules root.
 
 ## Terminal source references
 
-The terminal evaluator and task source is inspectable, but private terminal assets, answer banks and selected reconstruction inputs are excluded from the public tree and its published history. Affected source files use explicit unavailable-input placeholders instead of embedded frozen constants.
+Eleven capsules form the terminal set of the recursive experiment: `brotli-codec`, `duckdb-tpch`, `floyd-custom-scoreboard-render`, `flt-workflow-parser`, `harness-pi-readiness`, `mimalloc-allocator`, `node-url`, `quickjs-interpreter`, `sqlite-speedtest1`, `tradeup-query-latency` and `tree-sitter-parse`. Their evaluator and task source is inspectable in hone-capsules, but private terminal assets, answer banks and selected reconstruction inputs are not published. Affected source files use explicit unavailable-input placeholders instead of embedded frozen constants.
 
-Terminal directories use `manifest.reference.json`. This records the original contract for inspection; it is not an active admission or a claim that the public directory is executable. Corpus discovery skips directories without an active `manifest.json`.
+Terminal directories use `manifest.reference.json`. It records the original contract for inspection; it is not an active admission or a claim that the public directory is executable. Corpus discovery skips directories without an active `manifest.json`.
 
-Complete original terminal bundles remain private, including their original baseline files and Git stores, assets, images and admission records. Do not rename a reference manifest to enable it, or combine the public edited baseline with a subset of private files. Terminal execution uses the complete original bundle through the trusted terminal path.
+Complete original terminal bundles stay private, including their original baseline files and Git stores, assets, images and admission records. Do not rename a reference manifest to enable it, or combine the public edited baseline with a subset of private files. Terminal execution uses the complete original bundle through the trusted terminal path.
 
 ## Admission and authoring
 
-The production `run` path verifies Gate-2 approval and reads the operator's local admission receipts. Authoring records the source and required identities, runs its gate workflow and appends receipts only for valid transitions. The default authoring boundary still needs an integration to execute queued role requests.
+The production `run` path verifies Gate-2 approval and reads the operator's local admission receipts from `.hone-cas` under the directory Hone runs from. Authoring records the source and required identities, runs its gate workflow, appends receipts only for valid transitions and writes the new capsule under the capsules root. The default authoring boundary still needs an integration to execute queued role requests.
 
 Historical ordering reports describe the inputs and environment of their original check. They are useful evidence, not a portable certificate for a different host, image or edited capsule. Public-clone admission and image preparation remain documented gaps until their supported workflow is validated.

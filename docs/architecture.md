@@ -15,7 +15,10 @@ The **trusted supervisor** admits the capsule, seals run configuration and manag
 | `trusted/scoring/` | Scoring and saturation calculations. |
 | `trusted/meta/` | Campaign support. |
 | `optimizer/` | Mutable optimization code and worker packaging. |
-| `capsules/` | Tasks, evaluators, fixtures and source references. |
+| `capsule-kit/` | Capsule scaffolding, the ordering check, authoring helpers and frozen task contracts. |
+| `fixtures/` | Small synthetic capsules and run records used by the tests. |
+
+Capsules themselves live in [hone-capsules](https://github.com/twaldin/hone-capsules); the CLI finds them through `--capsules-root`, `HONE_CAPSULES_ROOT` or `./capsules`.
 
 The CLI launcher snapshots and seals its runtime dependency closure before loading the trusted implementation. Local execution binds the capsule image and Docker engine. Protected paths and asset visibility constrain what the optimizer may change or observe.
 
@@ -37,4 +40,4 @@ Pause and preflight records retain the provider status, while traces retain the 
 
 A single-candidate probe exercises a capsule. An M1 campaign evaluates changes to the optimizer across a frozen task set. M2 adds recursive optimization and transfer evaluation under a separate frozen protocol. The code includes authority-bearing corpus and nested-run operations; these are not unrestricted public CLI calls.
 
-The authoring workflow can queue and advance sealed agent work through gate decisions. The default CLI boundary currently records requests without launching the agents. The [calibration coordinator](cli.md#saturation-calibration) serializes existing supervised runs and binds retained attempts to the existing scorer; it is not a scheduler service or execution authorization. Public onboarding, calibration admission/host validation and complete evidence publication remain integration work. See [Methodology](methodology.md).
+The authoring workflow can queue and advance sealed agent work through gate decisions. The default CLI boundary currently records requests without launching the agents. The [calibration coordinator](cli.md#saturation-calibration) serializes supervised runs over a frozen selection and binds them to the existing scorer; it is not a scheduler service or execution authorization. Public onboarding and complete evidence publication remain integration work. See [Methodology](methodology.md).

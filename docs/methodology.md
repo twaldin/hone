@@ -8,7 +8,7 @@ Hone's claims depend on a fixed task and measurement contract. The source distin
 | M1 | Changes to an optimizer across a frozen development and holdout protocol. |
 | M2 | Recursive optimizer improvement and transfer to a frozen terminal cohort. |
 
-The schemas enforce experiment cardinalities, budgets, artifact identities and allowed claims. Current M2 contracts require an eight-capsule development panel and eleven terminal capsules, bound to the declared cohort. The public development material is not sufficient to execute that official terminal protocol.
+The schemas enforce experiment cardinalities, budgets, artifact identities and allowed claims. Current M2 contracts require an eight-capsule development panel and eleven terminal capsules, bound to the declared cohort. The public development material in [hone-capsules](https://github.com/twaldin/hone-capsules) is not sufficient to execute that official terminal protocol.
 
 ## Implemented components
 
@@ -20,14 +20,17 @@ Several preparation capabilities are library APIs with tests rather than public 
 
 The [M2 readiness runbook](m2-readiness.md) maps these components to remaining preparation, orchestration and owner-decision gaps, with source-backed command forms.
 
+## What has been run
+
+In August 2026 the calibration coordinator completed its 80-cell matrix and selected an inner ceiling of four episodes, and several recursive campaigns ran on a 21-capsule cohort. They exercised pauses, resumes, source migration and failure accounting end to end. The promotion decisions in the main campaign were scored on training cases, so they establish nothing about transfer. The [README](../README.md#results-so-far) lists the results that do hold up, and how narrow each is.
+
 ## Work still to complete
 
 - Public-clone admission and image bootstrap, and automatic execution of authoring sessions.
-- Admission of the four calibration-only task drafts, required environment/resource validation and separately authorized execution through the offline-tested coordinator.
-- Provider integration and the remaining frozen-campaign smoke and execution work.
+- A recursive campaign whose promotion decisions are scored on held-out work, followed by the terminal evaluation it exists for.
 - The complete replay/evidence publisher and RelayBench publication pipeline.
 - M2b trigger evaluation and results-based release writing.
 
-Historical plans in this repository record the design's development. Current parsers, schemas and enforced runtime checks take precedence over obsolete milestones or inline review discussions in those plans. Published results must identify the exact revision and protocol they tested.
+The design plans that guided the rewrite are not published. Current parsers, schemas and enforced runtime checks are the reference; older commits may describe obsolete milestones. Published results must identify the exact revision and protocol they tested.
 
-No M2 success claim follows from publishing the rewrite. See [Results](results.md) for the intended evidence format and its current limits.
+No M2 success claim follows from this source. See [Results](results.md) for the intended evidence format and its current limits.

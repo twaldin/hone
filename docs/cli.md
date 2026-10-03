@@ -2,6 +2,8 @@
 
 Invoke the source CLI with `node trusted/cli/bin/hone.js`. The examples below abbreviate that launcher as `hone`; they assume workspace dependencies are installed. Command parsers in `trusted/cli/src/commands/` and `trusted/cli/src/supervisor.ts` define the accepted options.
 
+Every command accepts `--capsules-root <dir>`, which names the directory holding capsules (normally `hone-capsules/capsules`). Without it, `HONE_CAPSULES_ROOT` is used, and without that, `./capsules` under the current directory. See [Getting started](getting-started.md#pointing-hone-at-capsules).
+
 ## Runs and authoring
 
 ```text
@@ -40,86 +42,34 @@ Operator-local state lives under `.hone-runs`, `.hone-cas` and `.hone-sources`. 
 
 ## Saturation calibration
 
-`calibration` coordinates the four calibration-only tasks approved in TWA-59. **These commands do not authorize a campaign or provider spending.** The checked-in tasks are non-admitted drafts; they can be planned, but cannot execute.
-
-Planning requires an existing, digest-verified `corpus-provenance.v1` artifact describing the full 16-development/11-terminal cohort. The coordinator rejects calibration identities or manifest digests in either cohort, and rejects calibration assets matching recorded terminal-content hashes. It does not load terminal document bytes or change cohort membership.
-
-Safe planning/inspection, with private paths supplied by the operator:
-
-```sh
-mkdir -p .hone-runs
-hone calibration plan --drafts --corpus "$CORPUS" --out .hone-runs/calibration-plan.json
-hone calibration init --plan .hone-runs/calibration-plan.json --state .hone-runs/calibration
-hone calibration status --state .hone-runs/calibration
-hone calibration --help
-```
-
-`--drafts` reads only the four named packages' `manifest.draft.json` files, retaining their failed diagnostic evidence and marking the state `offline`. It neither issues admission receipts nor promotes draft identities. Without `--drafts`, planning requires `--cgroup-parent`, full non-provisional Gate-2 admission and a positive pinned train normalization scale. Plans bind the exact manifests, ordering reports, shared `seeded-astar` image reference, optimizer/runtime digests, cohort provenance and matrix; changed inputs require a separately reviewed plan, not an in-place edit.
-
-The fixed matrix is **80 cells**: four tasks × episode caps **2/4/8/12** × matched seeds **104729, 130363, 155921, 181081, 206369**. Every cap has the same metered maxima: **600,000 tokens, $10, 7,200 seconds and 49 evaluator invocations**. The sandbox setting is **2 GiB / 2 CPUs**. Aggregate upper reservations are **48M tokens, $800 and 160 serial run-hours**, excluding preparation; they are neither measured requirements nor permission to spend.
-
-Production requires an **aggregate native Linux cgroup-v2 boundary**, not merely per-container flags. The nominated group must already contain the coordinator process, with `memory.max` at most 2 GiB, `memory.swap.max` zero and a finite `cpu.max` quota/period ratio at most 2. Use a system slice name such as `hone-calibration.slice` with Docker's systemd driver, or an absolute kernel cgroup path such as `/hone-calibration` with its cgroupfs driver. Host provisioning is an operator prerequisite; these commands neither create a cgroup nor move a process into one.
-
-Admitted planning inspects the actual kernel hierarchy/membership, limits, local Docker engine and exact image's native architecture. Each dispatch rechecks the pinned boot/engine/image/resource binding. The existing Docker creation gate forces the same parent on every optimizer, mutation, evaluator and helper container and seals it in the create journal; resume cannot add, change or drop it. Host-side helpers inherit the coordinator's group. macOS, Docker Desktop, remote/rootless daemons, missing caps and out-of-group coordinators refuse rather than falling back to per-container limits. These implementation checks do not replace separately authorized selected-host performance/stability validation or task admission.
-
-### Later, separately authorized execution
-
-After the tasks and selected host are admitted, start the command inside the pre-provisioned group and create a new admitted plan/state without `--drafts`. Do not relabel an offline state. Keep production state directly under `.hone-runs` so the existing provider-pause discovery command can find it.
+`calibration` measures how many inner optimizer episodes are worth paying for before a recursive campaign is frozen. It runs a fixed ladder over four calibration-only capsules that share no source, fixtures or objectives with the campaign cohort.
 
 ```text
-hone calibration plan --corpus "$CORPUS" --out "$PLAN" --cgroup-parent "$CALIBRATION_CGROUP_PARENT"
-hone calibration init --plan "$PLAN" --state .hone-runs/calibration
-hone calibration run --state .hone-runs/calibration --acknowledge-execution
-hone calibration run --state .hone-runs/calibration --acknowledge-execution --max-cells N
-hone calibration run --state .hone-runs/calibration --acknowledge-execution --cell KEY --resume
-hone calibration run --state .hone-runs/calibration --acknowledge-execution --cell KEY --retry-reason "recorded infrastructure diagnosis"
+hone calibration --campaign <selection.json> --headless [--state <.hone-runs/path>] [--resume] [--dry-structure] [--smoke-cell N]
 ```
 
-The CLI defaults to **one cell per invocation**. `--max-cells` bounds a serial batch; an OS-backed state lock remains held until the runner settles, including across awaits. There is no scheduler service. The adapter uses the existing local supervisor, frozen inner model route, provider-pause authority, admission checks and broker limits. Delivery is `none`; custom backends, optimizer overrides and paid fallback are not exposed.
+The selection file names the capsules, episode caps, matched seeds and bootstrap settings. The one used in August 2026 is [`capsules/m2-calibration-selection.json`](https://github.com/twaldin/hone-capsules/blob/main/capsules/m2-calibration-selection.json) in hone-capsules. It selects `calibration-bitset-rank`, `calibration-varint-decode`, `calibration-byte-escape` and `calibration-interval-merge`, caps **2/4/8/12**, seeds **110729, 221447, 442903, 885811, 1771637** and 10,000 bootstrap samples with RNG seed 1295205714. That is **80 cells**; each cell reserves the capsule's full budget vector. Every listed capsule must be a direct child of the capsules root.
 
-`status` lists cell keys, run IDs, dispatches, outcomes and primary-result counts. Dispatch intent is durable **before** launch. A crash leaves an incomplete cell; normal execution refuses to move past unresolved work. `--resume` reconciles or continues the **same run ID and sealed budget**, retaining prior incomplete observations. Downtime counts against the cell's wall-clock envelope. A terminal failure is not resumed automatically.
+Every capsule must pass non-provisional admission and bind the native `linux/amd64` calibration runtime image before planning. The command freezes a plan under the state directory (default `.hone-runs/m2-calibration-<config-hash prefix>`); an existing plan for a different selection or identity set is refused. `--dry-structure` writes and prints the frozen cell coordinates without any model call. `--smoke-cell N` runs exactly one coordinate.
 
-Retries require an explicit cell and reason. They retain separate run IDs and consume the remaining per-cell envelope across all attempts; unknown spend blocks a retry, and decreasing cumulative meters invalidate a resumed result. **Retries are supplementary and never replace the primary attempt in the scorer**, even when a retry improves. A valid primary cannot be retried. Never reset state or rerun cells until favorable.
+Before the first cell, the coordinator runs a trusted preflight of both frozen model routes through the broker. Route drift and `401`/`402`/`403`/`429` responses durably pause the calibration; ordinary `5xx` errors get at most three bounded retries before the same pause. A paused calibration continues only with `--resume`, which repeats the frozen-route preflight before admitting another cell. Interrupted cells are terminalized from their durable journals rather than silently rerun.
 
-A provider pause uses the existing recovery path, followed by explicit same-run reconciliation:
+When all 80 cells are terminal, the coordinator scores them with the registered scorer in [`trusted/scoring/src/saturation.ts`](../trusted/scoring/src/saturation.ts) (p75 stratified paired marginal gain, 90% bootstrap upper bound, strict `< 0.02` rule, fallback 12) and writes `saturation-report.json`. Its canonical digest is what a frozen recursive campaign binds as `calibration.reportDigest`. Invalid cells stay in the scorer input; nothing is trimmed or replaced by a retry.
 
-```text
-hone resume --campaign .hone-runs/calibration --pause PAUSE_ID
-hone calibration run --state .hone-runs/calibration --acknowledge-execution --cell KEY --resume
-```
-
-The first command can perform frozen-route preflight; it is not part of offline validation and needs the execution scope.
-
-### Report binding and offline verification
-
-```text
-hone calibration report --state .hone-runs/calibration --out PRIVATE_BUNDLE.json
-hone calibration verify --state .hone-runs/calibration --bundle PRIVATE_BUNDLE.json
-```
-
-These commands launch no runs. They re-read the retained supervisor/broker/proxy evidence and validate contracts, measurement epochs, capsule/seed/asset coordinates and normalization inputs. The bundle embeds the plan and complete attempt history, plus the unchanged scorer report and canonical report/bundle digests. Missing primary cells stay `incomplete`; invalid primary cells stay `invalid`. The existing scorer uses **10,000** stratified bootstrap samples, RNG seed **20260907**, p75 marginal gain, its 90% upper bound and the strict **`<0.02`** rule (ceilings 4/8/12, fallback 12).
-
-Failures can make the selected ceiling shallower. A generated report is not proof of a complete or successful matrix. Inspect all invalid/incomplete cells and unavailable evidence before using its `report` with `generateM2LaunchDraft`; supply the four designated excluded IDs from the verified plan. Its `reportDigest` is the existing launch/freeze binding. Preserve the full bundle and run directories: the vanilla scorer report alone does not carry execution provenance, and freeze does not independently reconstruct those runs. Offline fake-runner bundles are never launch evidence.
-
-The trusted library seam is `initializeCalibration` / `executeCalibration` / `buildCalibrationReport` in `trusted/cli/src/calibration.ts`, with a `CalibrationRunner` implementing `run` and read-only `verify`. The runner mode is pinned to state; offline and trusted records cannot mix. Reproduce planning, limits, process interruption/resume, retries and evidence-drift checks without Docker or providers:
-
-```sh
-pnpm --filter @hone/cli exec vitest run test/calibration.test.ts test/calibration-runner.test.ts
-```
+The August 2026 calibration completed 80/80 cells (55 valid, 25 invalid) and selected an inner ceiling of **4** episodes. Its plan, run state and per-cell evidence are private.
 
 ## Campaigns
 
 ```text
 hone hone --campaign PATH --headless --phase freeze|search|confirmation|holdout
-hone recursive --campaign PATH --headless --phase freeze|search|approve-search|confirmation|terminal|authorize
+hone recursive --campaign PATH --headless --phase freeze|search|approve-search|confirmation|terminal|authorize [--sealed-base DIR]
+hone campaign migrate-source|repin-image|capture-closure|restore-closure|smoke-capsules …
 hone resume [--pause PAUSE_ID] [--campaign CAMPAIGN_STATE_DIR]
 ```
 
-These are trusted campaign operations, not shortcuts around corpus admission. Freeze requires the appropriate output and artifact inputs; later phases require the preceding frozen state. Recursive authorization additionally validates its gate records, artifact identities and required attestations. Consult the parsers in `commands/hone.ts` and schemas in `schema/src/meta.ts` when assembling a campaign; public end-to-end onboarding is incomplete.
+These are trusted campaign operations, not shortcuts around corpus admission. Freeze requires the appropriate output and artifact inputs; later phases require the preceding frozen state. Recursive authorization additionally validates its gate records, artifact identities and required attestations. Consult the parsers in `commands/hone.ts` and schemas in `schema/src/meta.ts` when assembling a campaign; public end-to-end onboarding is incomplete. The `campaign` subcommands maintain an already-frozen campaign: [Durable runs](durable-runs.md) explains source migration, image re-pins and closure capture/restore, and `smoke-capsules` checks that every development-panel capsule of a frozen campaign is installed and settles once before ignition.
 
-Recursive execution requires a trusted caller to pass `recursiveCommand(args, io, { corpus })`, where `corpus` contains the existing `corpus-provenance.v1` artifact plus its exact `publicSnapshot` and `panelEvidence` document bytes (`BuildBrokerCorpusConfigInputs` without `campaignConfigHash`). The dispatcher verifies the artifact, documents, frozen cohort, capsule digests and current panel assignment, then binds the final campaign hash and passes `corpus`/`corpusCohort` to outer and child runs, including resumes. Missing or drifted inputs refuse before launch.
-
-The public CLI does not yet load these private preparation inputs; its recursive `search`, `confirmation` and `terminal` phases therefore fail closed. `freeze`, `approve-search` and `authorize` do not require document bytes. This trusted API does not add a public corpus format, preparation flag or campaign authorization.
+A trusted caller can also pass a corpus to `recursiveCommand(args, io, { corpus })`, where `corpus` contains an existing `corpus-provenance.v1` artifact plus its exact `publicSnapshot` and `panelEvidence` document bytes (`BuildBrokerCorpusConfigInputs` without `campaignConfigHash`). When it is supplied, every executing phase verifies the artifact, documents, frozen cohort, capsule digests and current panel assignment, binds the final campaign hash and serves the corpus to the outer run and every child run, including resumes. Missing or drifted inputs refuse before launch. The corpus is optional: without it, recursive phases run as the August 2026 campaigns did. The public CLI has no flag for loading a corpus.
 
 ### G1 owner approval before Stage-B search
 

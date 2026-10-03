@@ -1,6 +1,6 @@
 # Results and evidence
 
-GitHub is the maintained source repository as Hone develops. Reviewed public result summaries may live under `results/<run-id>/` alongside the code. There are no newly completed M2 results established by this source release, and the complete evidence publisher is still unfinished.
+This repository holds Hone's code and docs; result bundles are not kept here. The [README](../README.md#results-so-far) summarizes the results that have retained evidence, and the evidence itself stays private where it contains sealed cases or operator records. There is no completed M2 result, and the complete evidence publisher is still unfinished.
 
 A useful public result bundle should identify:
 

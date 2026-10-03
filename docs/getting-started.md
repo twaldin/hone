@@ -1,25 +1,19 @@
 # Getting started
 
-Start by inspecting and testing the source. Running a real optimization task has additional admission, image and provider requirements described below.
+Start by inspecting and testing the engine. Running a real optimization task has additional capsule, admission, image and provider requirements described below.
 
 ## Checkout
 
-Some capsules contain a nested Git object store at `baseline/.gitdir`. Upstream attributes inside the baseline can otherwise normalize those binary files during checkout. Install the repository's rules at Git's highest local precedence first:
-
 ```sh
-git clone --no-checkout https://github.com/twaldin/hone.git
+git clone https://github.com/twaldin/hone.git
 cd hone
-git show HEAD:.gitattributes > .git/info/attributes
-git checkout main
 ```
 
-Use a new directory for this procedure. Keep the rules when updating this checkout. The published history preserves development commits, but a historical revision may describe an earlier capsule or protocol; current instructions apply to current main.
-
-The capsule provenance tests verify historical source IDs and digests in Git. They require a full clone; a shallow checkout or downloaded source archive does not contain that evidence.
+This repository holds only the engine, so an ordinary clone is enough. Capsules live in [twaldin/hone-capsules](https://github.com/twaldin/hone-capsules); you only need that checkout to run a task, not to build or test the engine. The published history keeps development commits back to the original Python Hone, but a historical revision may describe an earlier layout or protocol; current instructions apply to current main.
 
 ## Dependencies and source checks
 
-The workspace uses Node.js and pnpm. Its package metadata declares Node 18 or later; the launcher also needs `node:module.register`. The export is being checked with Node 26.6.0 and pnpm 10.13.1. This is a validation environment, not a claim that every earlier Node 18 release works.
+The workspace uses Node.js and pnpm. Its package metadata declares Node 18 or later; the launcher also needs `node:module.register`. It is checked with Node 26 and pnpm 10. This is a validation environment, not a claim that every earlier Node 18 release works.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -28,11 +22,31 @@ pnpm test
 node trusted/cli/bin/hone.js --help
 ```
 
-Packages expose TypeScript source; there is no root `build` script. Tests run workspaces sequentially. Some CLI integration tests exercise Docker when it is available, and some deliberately modify temporary workspace state. Use an isolated checkout for validation.
+Packages expose TypeScript source; there is no root `build` script. Tests run workspaces sequentially and use synthetic fixtures under `fixtures/`, never a capsules checkout. Some CLI integration tests exercise Docker when it is available, and some deliberately modify temporary workspace state. Use an isolated checkout for validation. The broker's end-to-end tests need Linux (abstract Unix sockets) and Docker; on other hosts they are skipped or fail at setup, which says nothing about the code under test.
 
 The proxy's live model-provider smoke test is skipped unless `HONE_LIVE_PROXY_TEST=1` is explicitly set. That opt-in test targets the local proxy on port 8317 and requests a one-token completion; it can consume provider quota. Ordinary proxy tests use local mocks.
 
 These commands check implementation behavior. They do not run or establish an M2 experiment.
+
+## Pointing Hone at capsules
+
+Commands that discover capsules by name (campaign freeze, corpus discovery, calibration, authoring output) read them from a **capsules root**:
+
+1. `--capsules-root <dir>` on the command line, if given;
+2. otherwise the `HONE_CAPSULES_ROOT` environment variable;
+3. otherwise `./capsules` under the directory Hone runs from.
+
+A relative value resolves against the current directory. An explicit flag or variable must name an existing directory, or the command stops with a usage error. Records written before the split name repository paths such as `capsules/biome-parser-formatter/baseline/eval.py` (in an image re-pin's evidence) or `capsules/calibration-bitset-rank` (in the calibration selection); Hone maps any recorded `capsules/<rest>` path to `<capsules root>/<rest>`, so those records keep working whatever the root is called.
+
+With hone-capsules cloned next to the engine:
+
+```sh
+export HONE_CAPSULES_ROOT=../hone-capsules/capsules
+```
+
+`hone run <capsule-dir>` takes the capsule directory directly and works with any path. Run state (`.hone-runs`, `.hone-cas` with its admission receipts, `.hone-sources`) stays under the directory Hone runs from, not in the capsules checkout.
+
+Follow the hone-capsules README to clone it: some capsules embed a Git object store under `baseline/.gitdir` that a plain clone can corrupt, and a capsule whose bytes changed no longer matches its manifest digest.
 
 ## Before a real run
 

@@ -28,16 +28,10 @@ hone resume --campaign <campaign-state-dir> --pause <pause-id>
 
 Migrate a paused recursive campaign only from an **untracked, ignored runtime
 config**. A tracked config is refused because rewriting it would dirty the
-working tree that every later coordinator phase requires clean. Campaign 11's
-runtime path is `data/m2-refreeze-final/campaign-frozen-cycle11.json`; that
-exact path is ignored after its tracked pre-migration bytes were retained in
-Git history. If the runtime copy is absent after landing the untracking commit,
-restore it once from the preceding revision:
-
-```sh
-git show 8280c569f324a62530ab555b5346ac2237213201:data/m2-refreeze-final/campaign-frozen-cycle11.json \
-  > data/m2-refreeze-final/campaign-frozen-cycle11.json
-```
+working tree that every later coordinator phase requires clean. Keep the
+runtime copy of a frozen campaign in an ignored path, and keep its
+pre-migration bytes somewhere durable (the August 2026 campaign configs and
+their history live in the private run-data repository, not here).
 
 Before migration, every nonterminal campaign run's `.hone-version` must equal
 the frozen config's current `trustedRuntime.digest`. If a fix lane pre-pinned a
@@ -57,7 +51,7 @@ After checking out the required engine fix, run:
 
 ```sh
 hone campaign migrate-source \
-  --campaign data/m2-refreeze-final/campaign-frozen-cycle11.json \
+  --campaign <runtime-campaign.json> \
   --from <currently-pinned-full-commit> \
   --to <checked-out-full-commit> \
   --reason "<operator reason>"
@@ -136,17 +130,17 @@ store and source bytes instead of copying a worktree per cycle. The command
 reports `marginalBytes` and `reusedBytes`.
 
 For an already-frozen campaign, append the same digest-chained record with the
-operator front door. Campaign 11's sanctioned backfill command is:
+operator front door:
 
 ```sh
 hone campaign capture-closure \
-  --campaign /home/tim/omp-firstmate/worktrees/m2-exec-runtime-11/data/m2-refreeze-final/campaign-frozen-cycle11.json \
-  --source /home/tim/omp-firstmate/worktrees/m2-exec-runtime-10 \
-  --source-commit 124b249df3bdef1943b5661dc835689d54e8477d \
-  --cas /home/tim/omp-firstmate/worktrees/m2-exec-runtime-11/.hone-cas \
-  --node-modules-archive /home/tim/omp-firstmate/data/hone-closure-evidence/m2-exec-runtime-10-node_modules.tar.zst \
-  --archive-sha256 /home/tim/omp-firstmate/data/hone-closure-evidence/m2-exec-runtime-10-node_modules.tar.zst.sha256 \
-  --optimizer-base-digest sha256:fe92e17955adebe53c9ed4076ae1dcdfb2e328d19818d7273fb4f4d850f0d6dc
+  --campaign <runtime-campaign.json> \
+  --source <clean-worktree-at-source-commit> \
+  --source-commit <full-commit> \
+  --cas <campaign-root>/.hone-cas \
+  --node-modules-archive <node_modules.tar.zst> \
+  --archive-sha256 <node_modules.tar.zst.sha256> \
+  --optimizer-base-digest sha256:<64hex>
 ```
 
 The source commit may be an earlier source-migration lineage member: capture
@@ -159,7 +153,7 @@ campaign-record lock. Source migration takes the same record lock, so the two
 append-only journals compose in either order.
 
 `--dry-run` suppresses only the campaign-record append: it still populates the
-named `--cas` with the complete closure (about 4.2 GB for Campaign 11). Always
+named `--cas` with the complete closure (about 4.2 GB for the August 2026 campaign). Always
 name a scratch CAS for a proof run unless populating the live CAS is intended.
 A killed capture or migration deliberately leaves
 `<campaign>.campaign-record.lock` behind. After proving no capture or migration
@@ -173,13 +167,13 @@ and only then renames the target into place:
 
 ```sh
 hone campaign restore-closure \
-  --campaign data/m2-refreeze-final/campaign-frozen-cycle11.json \
+  --campaign <runtime-campaign.json> \
   --cas .hone-cas \
-  --target /srv/hone-closures/campaign-11
+  --target /srv/hone-closures/<campaign>
 
 hone recursive \
-  --campaign data/m2-refreeze-final/campaign-frozen-cycle11.json \
-  --sealed-base /srv/hone-closures/campaign-11 \
+  --campaign <runtime-campaign.json> \
+  --sealed-base /srv/hone-closures/<campaign> \
   --headless
 ```
 
