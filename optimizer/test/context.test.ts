@@ -125,7 +125,7 @@ describe("buildEpisodeContext", () => {
 
   it("keeps a real small-example M2 evaluation section byte-identical to the legacy rendering", () => {
     const output = JSON.parse(readFileSync(
-      new URL("../../capsules/biome-parser-formatter/diagnostics/baseline-train.json", import.meta.url),
+      new URL("../../fixtures/optimizer/m2-evaluation-output.json", import.meta.url),
       "utf8",
     )) as EvaluationRecord["output"];
     const ctx = buildEpisodeContext({

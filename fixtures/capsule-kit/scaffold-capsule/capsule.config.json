@@ -1,0 +1,18 @@
+{
+  "objective": "Synthetic scaffold fixture: make solve() in solve.py return the sum of its inputs faster without changing results.",
+  "image": "hone-test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "evalEntrypoint": ["python3", "-I", "-B", "eval.py"],
+  "protectedPaths": ["eval.py"],
+  "assetGroups": [
+    { "id": "train", "visibility": "public", "paths": ["assets/train"] },
+    { "id": "validation", "visibility": "protected", "paths": ["assets/validation"] },
+    { "id": "holdout", "visibility": "holdout", "paths": ["assets/holdout"] }
+  ],
+  "budget": {
+    "maxTokens": 1000,
+    "maxUsd": 1,
+    "maxWallClockSec": 60,
+    "maxEvaluatorInvocations": 10
+  },
+  "diagnosticOrdering": { "path": "diagnostics/ordering-report.json" }
+}

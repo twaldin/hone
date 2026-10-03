@@ -161,7 +161,7 @@ describe("diagnostic ordering semantic invariants (validateDiagnosticOrdering)",
     const seeded = DiagnosticOrderingReport.parse(
       JSON.parse(
         readFileSync(
-          join(fixtures, "..", "..", "capsules", "seeded-astar", "diagnostics", "ordering-report.json"),
+          join(fixtures, "ordering-report.json"),
           "utf8",
         ),
       ),

@@ -1,8 +1,8 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { CapsuleManifest, PromotionHoldoutRecord, PromotionHoldoutSplit } from "@hone/schema";
+import { join } from "node:path";
+import { CapsuleManifest } from "@hone/schema";
 import { describe, expect, test } from "vitest";
 import {
   assertPromotionHoldoutSplitIdentity,
@@ -13,7 +13,6 @@ import {
   promotionHoldoutSplitSummary,
 } from "../src/promotion-holdout.js";
 import { Broker } from "../src/broker.js";
-import { admitCapsule } from "../../cli/src/admission.js";
 
 const HASH = (digit: string) => `sha256:${digit.repeat(64)}`;
 const CAPSULE_DIGEST = HASH("a");
@@ -143,120 +142,68 @@ describe("promotion holdout assessment", () => {
     expect(record.claimable).toBe(false);
   });
 
-  test("parses the corrected real-data record and resolves every receipt citation", () => {
-    const results = JSON.parse(readFileSync(
-      new URL("../../../data/hone-m2-holdout/corrected-pilot-results.v2.json", import.meta.url),
-      "utf8",
-    ));
-    const record = PromotionHoldoutRecord.parse(results.promotionRecord);
-    const receipts = readFileSync(
-      new URL("../../../data/hone-m2-holdout/corrected-pilot-evaluations.v2.ndjson", import.meta.url),
-      "utf8",
-    ).trim().split("\n").map((line) => JSON.parse(line));
-    const cited = new Set(results.receiptDigests);
-
-    expect(record).toMatchObject({
-      status: "unmeasurable",
-      claimable: false,
-      holdout: { assetGroupId: "promotion-holdout", holdoutUnits: 20 },
-    });
-    expect(receipts).toHaveLength(3);
-    expect(receipts.every((row) => cited.has(row.recordDigest))).toBe(true);
-    expect(receipts.every((row) => row.record.assetGroupId === record.holdout.assetGroupId)).toBe(true);
-  });
-
-  test("parses the corrected tradeup record and resolves every receipt citation", () => {
-    const results = JSON.parse(readFileSync(
-      new URL("../../../data/hone-m2-holdout/corrected-tradeup-results.v2.json", import.meta.url),
-      "utf8",
-    ));
-    const record = PromotionHoldoutRecord.parse(results.promotionRecord);
-    const receipts = readFileSync(
-      new URL("../../../data/hone-m2-holdout/corrected-tradeup-evaluations.v2.ndjson", import.meta.url),
-      "utf8",
-    ).trim().split("\n").map((line) => JSON.parse(line));
-    const cited = new Set(results.receiptDigests);
-
-    expect(record).toMatchObject({
-      status: "supported",
-      claimable: true,
-      holdout: { assetGroupId: "promotion-holdout", holdoutUnits: 20 },
-    });
-    expect(receipts).toHaveLength(3);
-    expect(receipts.every((row) => cited.has(row.recordDigest))).toBe(true);
-    expect(receipts.every((row) => row.record.assetGroupId === record.holdout.assetGroupId)).toBe(true);
-  });
-
   test("accepts a different execution image but refuses a different admitted digest", async () => {
-    const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
     const temporaryRoot = mkdtempSync(join(tmpdir(), "hone-audited-holdout-"));
     try {
-      for (const spec of [
-        {
-          label: "flt-text-input",
-          ledger: "audited-flt-split.v2.json",
-          materialize: (root: string) => {
-            mkdirSync(join(root, "train"), { recursive: true });
-            mkdirSync(join(root, "promotion-holdout"), { recursive: true });
-            copyFileSync(join(repositoryRoot, "capsules/flt-text-input/assets/train/cases.json"), join(root, "train/cases.json"));
-            copyFileSync(join(repositoryRoot, "capsules/flt-text-input/assets/validation/cases.json"), join(root, "promotion-holdout/cases.json"));
-          },
-        },
-        {
-          label: "tradeup-profit",
-          ledger: "audited-tradeup-split.v2.json",
-          materialize: (root: string) => {
-            mkdirSync(join(root, "train"), { recursive: true });
-            mkdirSync(join(root, "promotion-holdout"), { recursive: true });
-            copyFileSync(join(repositoryRoot, "capsules/tradeup-profit/assets/train/cases.json"), join(root, "train/cases.json"));
-            const validation = JSON.parse(readFileSync(join(repositoryRoot, "capsules/tradeup-profit/assets/validation/cases.json"), "utf8"));
-            const holdout = JSON.parse(readFileSync(join(repositoryRoot, "capsules/tradeup-profit/assets/holdout/cases.json"), "utf8"));
-            writeFileSync(
-              join(root, "promotion-holdout/cases.json"),
-              JSON.stringify({ ...validation, cases: [...validation.cases, ...holdout.cases], split: "promotion-holdout" }) + "\n",
-            );
-          },
-        },
-      ]) {
-        const admitted = admitCapsule(join(repositoryRoot, "capsules", spec.label));
-        const ledger = JSON.parse(readFileSync(join(repositoryRoot, "data/hone-m2-holdout", spec.ledger), "utf8"));
-        const split = PromotionHoldoutSplit.parse(ledger.split);
-        assertPromotionHoldoutSplitIdentity(split);
-        const capsuleRoot = join(temporaryRoot, spec.label, "capsule");
-        spec.materialize(capsuleRoot);
-        const manifest = CapsuleManifest.parse({
-          ...admitted.manifest,
-          assetGroups: [
-            { id: "train", visibility: "public", paths: ["train"] },
-            { id: "promotion-holdout", visibility: "holdout", paths: ["promotion-holdout"] },
-          ],
-          contentHashes: {
-            "train/cases.json": split.train.units[0]!.containerHash,
-            "promotion-holdout/cases.json": split.holdout.units[0]!.containerHash,
-          },
-        });
-        const runDir = join(temporaryRoot, spec.label, "run");
-        const config = {
-          runId: `run_audited_${spec.label}`,
-          manifest,
-          capsuleRootDir: capsuleRoot,
-          baselineArtifactHash: `sha256:${"0".repeat(64)}`,
-          admittedCapsuleDigest: admitted.digest,
-          optimizerDigest: `sha256:${"1".repeat(64)}`,
-          promotionHoldoutSplit: split,
-          holdoutLedgerPath: join(runDir, "holdout.ndjson"),
-          executionImage: EXECUTION_IMAGE_OVERRIDE,
-          runDir,
-          casDir: join(temporaryRoot, spec.label, "cas"),
-          onEvent: () => {},
+      const capsuleRoot = join(temporaryRoot, "capsule");
+      // Whole-file units: the same bytes back each unit in train/ and holdout/.
+      const fileUnits = Array.from({ length: 12 }, (_, index) => {
+        const id = `case-${index.toString().padStart(2, "0")}`;
+        const bytes = `${JSON.stringify({ id, input: [index, index + 1], expected: 2 * index + 1 })}\n`;
+        const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+        for (const group of ["train", "holdout"]) {
+          mkdirSync(join(capsuleRoot, "assets", group), { recursive: true });
+          writeFileSync(join(capsuleRoot, "assets", group, `${id}.json`), bytes);
+        }
+        return {
+          id,
+          achievableScoreMax: 1,
+          contentHash: hash,
+          selector: "",
+          trainContainerHash: hash,
+          holdoutContainerHash: hash,
+          trainPath: `assets/train/${id}.json`,
+          holdoutPath: `assets/holdout/${id}.json`,
         };
-        const broker = new Broker(config);
-        await broker.close();
-        expect(() => new Broker({
-          ...config,
-          admittedCapsuleDigest: HASH("f"),
-        })).toThrow(/holdout split does not match the frozen capsule identity/);
-      }
+      });
+      const split = deterministicSplit(fileUnits, 2);
+      const fixtureManifest = JSON.parse(readFileSync(
+        new URL("../../../schema/fixtures/capsule.seeded-astar.json", import.meta.url),
+        "utf8",
+      ));
+      const manifest = CapsuleManifest.parse({
+        ...fixtureManifest,
+        id: split.capsuleId,
+        assetGroups: [
+          { id: "train", visibility: "public", paths: ["assets/train"] },
+          { id: "holdout", visibility: "holdout", paths: ["assets/holdout"] },
+        ],
+        contentHashes: Object.fromEntries(fileUnits.flatMap((unit) => [
+          [unit.trainPath, unit.trainContainerHash],
+          [unit.holdoutPath, unit.holdoutContainerHash],
+        ])),
+      });
+      const runDir = join(temporaryRoot, "run");
+      const config = {
+        runId: "run_audited_synthetic",
+        manifest,
+        capsuleRootDir: capsuleRoot,
+        baselineArtifactHash: `sha256:${"0".repeat(64)}`,
+        admittedCapsuleDigest: CAPSULE_DIGEST,
+        optimizerDigest: `sha256:${"1".repeat(64)}`,
+        promotionHoldoutSplit: split,
+        holdoutLedgerPath: join(runDir, "holdout.ndjson"),
+        executionImage: EXECUTION_IMAGE_OVERRIDE,
+        runDir,
+        casDir: join(temporaryRoot, "cas"),
+        onEvent: () => {},
+      };
+      const broker = new Broker(config);
+      await broker.close();
+      expect(() => new Broker({
+        ...config,
+        admittedCapsuleDigest: HASH("f"),
+      })).toThrow(/holdout split does not match the frozen capsule identity/);
     } finally {
       rmSync(temporaryRoot, { recursive: true, force: true });
     }

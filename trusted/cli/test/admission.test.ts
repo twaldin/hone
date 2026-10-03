@@ -176,9 +176,9 @@ describe("frozen capsule admission", () => {
     expect(() => admitCapsule(dir)).toThrow(/semantic invariant.*strictly under band/);
   });
 
-  it("admits the real seeded-astar ordering report end to end", () => {
+  it("admits a complete recorded ordering report end to end", () => {
     const seededBody = readFileSync(
-      join(pkgRoot, "..", "..", "capsules", "seeded-astar", "diagnostics", "ordering-report.json"),
+      join(pkgRoot, "..", "..", "schema", "fixtures", "ordering-report.json"),
       "utf8",
     );
     const root = makeRoot();
@@ -259,7 +259,7 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
   it("refuses resume when the snapshot is missing (identity cannot be proven)", () => {
     const root = makeRoot();
     const dir = makeCapsule(root);
-    expect(() => revalidateForResume(makeRoot(), dir)).toThrow(/cannot prove capsule identity/);
+    expect(() => revalidateForResume(makeRoot(), dir, { review: "off" })).toThrow(/cannot prove capsule identity/);
   });
 
   it("hone run writes the admitted-manifest snapshot into the run dir", async () => {

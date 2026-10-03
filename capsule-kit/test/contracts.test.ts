@@ -1,17 +1,15 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { capsuleDigest, deriveCapsuleId, type CapsuleManifest } from "@hone/schema";
 import { describe, expect, it } from "vitest";
 
 /**
  * Current cohort: 16 development and 11 terminal task contracts. Contract
  * source IDs identify historical inputs; current launch IDs come from
- * admitted manifests. Verify those two boundaries separately.
+ * admitted manifests (checked against the capsule tree in the capsules
+ * repository's integration tests).
  */
 
 const CONTRACT_DIR = join(__dirname, "..", "contracts");
-const REPO_ROOT = join(__dirname, "..", "..");
 
 const PANEL_A = ["OWN-T01", "OWN-T03", "OWN-T06", "OWN-T08", "OSS-T01", "OSS-T03", "OSS-T05", "OSS-T07"];
 const PANEL_B = ["OWN-T02", "OWN-T04", "OWN-T05", "OWN-T07", "OSS-T02", "OSS-T04", "OSS-T06", "OSS-T08"];
@@ -102,44 +100,6 @@ describe("M2 task contracts", () => {
         expect(c.source.url).toContain(c.source.revision);
         expect(c.publication).toBe("license-permitting-publishable");
       }
-    }
-  });
-
-  it("keeps development manifests and terminal source references distinct", () => {
-    for (const c of all) {
-      const filename = c.cohort === "terminal" ? "manifest.reference.json" : "manifest.json";
-      const manifestPath = join(__dirname, "..", c.capsule, filename);
-      expect(existsSync(manifestPath)).toBe(true);
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as CapsuleManifest;
-      expect(manifest.id).toMatch(/^cap_[0-9a-f]{12}$/);
-      if (c.cohort === "terminal") {
-        expect(existsSync(join(__dirname, "..", c.capsule, "manifest.json"))).toBe(false);
-      } else {
-        expect(deriveCapsuleId(manifest)).toBe(manifest.id);
-      }
-    }
-  });
-
-  it("preserves the historical source IDs and supplied digests without re-labeling them as current admissions", () => {
-    const git = (...args: string[]) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-    let shallow: string;
-    try {
-      shallow = git("rev-parse", "--is-shallow-repository");
-    } catch {
-      throw new Error("Contract provenance tests require a full Git clone; see docs/getting-started.md");
-    }
-    expect(shallow, "Contract provenance tests require full Git history; see docs/getting-started.md").toBe("false");
-    for (const c of all.filter((x) => x.status === "existing-admitted")) {
-      const filename = c.cohort === "terminal" ? "manifest.reference.json" : "manifest.json";
-      const path = `capsules/${c.capsule}/${filename}`;
-      const commits = git("log", "--format=%H", "--diff-filter=AM", "HEAD", "--", path).split("\n").filter(Boolean);
-      const versions = commits.map((commit) => JSON.parse(git("show", `${commit}:${path}`)) as CapsuleManifest);
-      const matching = versions.find((manifest) => manifest.id === c.source.existingCapsuleId
-        && (c.source.existingCapsuleDigest === undefined || capsuleDigest(manifest) === c.source.existingCapsuleDigest));
-      expect(matching, `${c.taskId}: historical source identity must remain in Git`).toBeDefined();
-      expect(deriveCapsuleId(matching!)).toBe(c.source.existingCapsuleId);
-      expect(c.authoring.buildTestEvalCommands).not.toBeNull();
-      expect(c.authoring.workloadHashes).not.toBeNull();
     }
   });
 });
