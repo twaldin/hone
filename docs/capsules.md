@@ -34,7 +34,7 @@ An asset group named `holdout` inside a development capsule describes visibility
 | `tools/preflight-m2-*.m*ts`, `tools/ts-aa-probe.mts` | Host preflights and an A-A noise probe used before the M2 campaigns. |
 | `contracts/` | The frozen OSS and owner-task contracts (`OSS-*`, `OWN-*`) the cohort capsules were built against. |
 
-The tools take the capsules root from the same `--capsules-root` flag and `HONE_CAPSULES_ROOT` variable as the CLI. Run them from the engine root, for example:
+The tools read the capsules root from `HONE_CAPSULES_ROOT`, falling back to `./capsules` under the working directory. The CLI's `--capsules-root` flag does not apply to them. Run them from the engine root, for example:
 
 ```sh
 HONE_CAPSULES_ROOT="$PWD/../hone-capsules/capsules" pnpm --filter @hone/capsule-kit scaffold <capsule-dir>
