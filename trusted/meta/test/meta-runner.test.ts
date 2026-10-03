@@ -85,6 +85,8 @@ function recursiveFixture(): RecursiveMetaCampaignConfig {
     seedOptimizer: target,
     controllerOptimizer: target,
     optimizerRuntime: { image: `hone-optimizer@${digest("recursive:optimizer-image")}` },
+    // Frozen per-invocation evaluator cap (M2_EVALUATOR_TIMEOUT_SEC), required since 27410e63f.
+    evaluatorTimeoutSec: 2700,
     generation: {
       stage: "A",
       panel: "A",
