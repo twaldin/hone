@@ -43,6 +43,7 @@ import {
   type MetaWorkIdentityV1,
 } from "../src/meta-journal.js";
 import type { CampaignPauseAuthority } from "../src/types.js";
+import { deferred } from "../src/promise.js";
 
 /*
  * Preserved launch evidence, m2-exec-runtime-2, config bd7654d7…:
@@ -395,7 +396,7 @@ async function runFixtureChild(
 async function waitForChildOutput(child: ChildProcess, marker: string): Promise<void> {
   const stdout = child.stdout;
   if (stdout === null) throw new Error("fixture child has no stdout");
-  const { promise, resolve, reject } = Promise.withResolvers!<void>();
+  const { promise, resolve, reject } = deferred<void>();
   let text = "";
   const onData = (chunk: Buffer): void => {
     text += chunk.toString("utf8");

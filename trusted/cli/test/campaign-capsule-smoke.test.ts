@@ -194,6 +194,7 @@ describe("campaign panel capsule smoke eligibility", () => {
       seedOptimizer: { ...base.seedOptimizer, sourceCommit: commit },
       controllerOptimizer: { ...base.controllerOptimizer, sourceCommit: commit },
     });
+    mkdirSync(join(repoRoot, ".hone-runs"), { recursive: true });
     const campaign = join(repoRoot, ".hone-runs", `panel-wiring-${process.pid}.json`);
     writeFileSync(campaign, `${canonicalJson(config)}\n`);
     roots.push(campaign);

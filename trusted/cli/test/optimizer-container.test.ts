@@ -294,6 +294,10 @@ describe("run container create/start argv exactness (two-phase)", () => {
   });
 });
 
+// The pinned mutation runtime is injected only on linux/x64 hosts; elsewhere
+// staging refuses before the checks these tests exercise.
+const pinnedRuntimeHost = process.platform === "linux" && process.arch === "x64";
+
 describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () => {
   const ctxSlice = (digest: string): Pick<RunnerBackendContext, "runId" | "env" | "optimizerDigest"> => ({
     runId: "run_prep",
@@ -562,7 +566,7 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
     await runtime.cleanup();
   });
 
-  it("fails closed before build when staged Node bytes do not match the pin", async () => {
+  it.runIf(pinnedRuntimeHost)("fails closed before build when staged Node bytes do not match the pin", async () => {
     const sourceRoot = mkdtempSync(join(tmpdir(), "hone-node-source-"));
     const runtimeRoot = mkdtempSync(join(tmpdir(), "hone-runtime-target-"));
     const nodePath = join(sourceRoot, "node");
@@ -904,7 +908,7 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
 });
 
 describe("full local backend: TCP broker + one build feeding the single one-shot probe invocation", () => {
-  it("network egress opens the authenticated public TCP listener; the one-shot probe is the only optimizer invocation", { timeout: 60_000 }, async () => {
+  it.runIf(pinnedRuntimeHost)("network egress opens the authenticated public TCP listener; the one-shot probe is the only optimizer invocation", { timeout: 60_000 }, async () => {
     const root = makeRoot();
     const runId = "run_tcpflow";
     const runDir = join(root, ".hone-runs", runId);
