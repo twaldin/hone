@@ -217,6 +217,7 @@ async function boot(
     volumeCreateFails?: boolean;
     evalTimeoutSec?: number;
     reaperIntervalMs?: number;
+    sandboxCpuset?: string;
     mutationEnv?: Record<string, string>;
 
     runId?: string;
@@ -386,6 +387,7 @@ async function boot(
     ...(opts.scratchVolume !== undefined ? { scratchVolume: opts.scratchVolume } : {}),
     ...(opts.sessionTraceQuotaBytes !== undefined ? { sessionTraceQuotaBytes: opts.sessionTraceQuotaBytes } : {}),
     ...(opts.evalTimeoutSec !== undefined ? { evalTimeoutSec: opts.evalTimeoutSec } : {}),
+    ...(opts.sandboxCpuset !== undefined ? { sandboxCpuset: opts.sandboxCpuset } : {}),
     ...(opts.reaperIntervalMs !== undefined ? { reaperIntervalMs: opts.reaperIntervalMs } : {}),
     ...(opts.mutationEnv === undefined ? {} : { mutationEnv: opts.mutationEnv }),
 
@@ -3605,6 +3607,29 @@ describe("sandbox lifecycle and resource ceilings", () => {
     // SYS_ADMIN is trusted-evaluator-only authority — a mutation sandbox
     // (candidate-controlled code) must never receive it.
     expect(argv).not.toContain("SYS_ADMIN");
+  });
+
+  it("pins mutation sandboxes and evaluators to the operator cpuset, and only when one is set", async () => {
+    const pinned = await boot({ sandboxCpuset: "1-4" });
+    await pinned.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    pinned.ctl.evalOutputs.set(baselineHash, score(1));
+    await pinned.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+    const mutationArgv = pinned.log.find((a) => a[1] === "run" && a.includes("-d")) ?? [];
+    const evalArgv = pinned.log.find((a) => a[1] === "run" && a.includes("--rm") && a.includes("--read-only")) ?? [];
+    for (const argv of [mutationArgv, evalArgv]) {
+      expect(argv[argv.indexOf("--cpuset-cpus") + 1]).toBe("1-4");
+    }
+
+    const free = await boot();
+    await free.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    expect(free.log.find((a) => a[1] === "run" && a.includes("-d"))).not.toContain("--cpuset-cpus");
+
+    await expect(boot({ sandboxCpuset: "1-4; --privileged" })).rejects.toThrow(/cpuset list/);
+    await expect(boot({ sandboxCpuset: "0,4-1" })).rejects.toThrow(/cpuset list/);
+    const equalEnds = await boot({ sandboxCpuset: "0,3-3,5-7" });
+    await equalEnds.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const equalArgv = equalEnds.log.find((a) => a[1] === "run" && a.includes("-d"))!;
+    expect(equalArgv[equalArgv.indexOf("--cpuset-cpus") + 1]).toBe("0,3-3,5-7");
   });
 
   it("a timed-out exec invalidates and removes the sandbox — no orphan keeps computing", async () => {
