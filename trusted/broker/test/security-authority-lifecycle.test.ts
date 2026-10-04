@@ -3625,6 +3625,11 @@ describe("sandbox lifecycle and resource ceilings", () => {
     expect(free.log.find((a) => a[1] === "run" && a.includes("-d"))).not.toContain("--cpuset-cpus");
 
     await expect(boot({ sandboxCpuset: "1-4; --privileged" })).rejects.toThrow(/cpuset list/);
+    await expect(boot({ sandboxCpuset: "0,4-1" })).rejects.toThrow(/cpuset list/);
+    const equalEnds = await boot({ sandboxCpuset: "0,3-3,5-7" });
+    await equalEnds.broker.createSandbox({ artifact: { hash: baselineHash }, role: "mutation" }, CLIENT);
+    const equalArgv = equalEnds.log.find((a) => a[1] === "run" && a.includes("-d"))!;
+    expect(equalArgv[equalArgv.indexOf("--cpuset-cpus") + 1]).toBe("0,3-3,5-7");
   });
 
   it("a timed-out exec invalidates and removes the sandbox — no orphan keeps computing", async () => {

@@ -425,6 +425,13 @@ export function newScratchSnapshotAttemptName(): string {
 }
 /** docker --cpuset-cpus list syntax: comma-separated CPU numbers or inclusive ranges. */
 const CPUSET_LIST = /^\d+(-\d+)?(,\d+(-\d+)?)*$/;
+/** CPUSET_LIST syntax plus ascending ranges — docker's cpuset parser rejects "4-1". */
+function isCpusetList(value: string): boolean {
+  return CPUSET_LIST.test(value) && value.split(",").every((part) => {
+    const [start, end] = part.split("-");
+    return end === undefined || BigInt(start!) <= BigInt(end);
+  });
+}
 /** tmpfs inode cap for the /scratch volume — bounds how many archive entries a hostile tree can mint. */
 export const SCRATCH_INODE_LIMIT = 131072;
 /**
@@ -1904,7 +1911,7 @@ export class Broker {
     this.sandboxPidsLimit = config.sandboxPidsLimit ?? 512;
     this.sandboxMemoryBytes = config.sandboxMemoryBytes ?? 2 * 1024 * 1024 * 1024;
     this.sandboxCpus = config.sandboxCpus ?? 2;
-    if (config.sandboxCpuset !== undefined && !CPUSET_LIST.test(config.sandboxCpuset)) {
+    if (config.sandboxCpuset !== undefined && !isCpusetList(config.sandboxCpuset)) {
       throw new Error(`sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got ${JSON.stringify(config.sandboxCpuset)}`);
     }
     this.sandboxCpuset = config.sandboxCpuset;
