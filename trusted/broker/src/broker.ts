@@ -348,6 +348,12 @@ export interface BrokerConfig {
   /** docker --cpus for every container this broker spawns. Default 2. */
   sandboxCpus?: number | undefined;
   /**
+   * docker --cpuset-cpus for every mutation sandbox and evaluator container
+   * (cpuset list syntax, e.g. "1-4" or "1,3"). Absent => no affinity: the
+   * containers may run on any host CPU under their --cpus quota.
+   */
+  sandboxCpuset?: string | undefined;
+  /**
    * Name of the run's stopped docker-run lease (donor) container. When set,
    * every container this broker spawns (keeper, mutation sandboxes,
    * evaluators) declares `--volumes-from <lease>:ro`, so removing the donor
@@ -417,6 +423,8 @@ const SCRATCH_SNAPSHOT_AUTHORITY_FILE = "checksum-authority-v1";
 export function newScratchSnapshotAttemptName(): string {
   return `${SCRATCH_SNAPSHOT_TMP_PREFIX}${randomBytes(16).toString("hex")}`;
 }
+/** docker --cpuset-cpus list syntax: comma-separated CPU numbers or inclusive ranges. */
+const CPUSET_LIST = /^\d+(-\d+)?(,\d+(-\d+)?)*$/;
 /** tmpfs inode cap for the /scratch volume — bounds how many archive entries a hostile tree can mint. */
 export const SCRATCH_INODE_LIMIT = 131072;
 /**
@@ -1338,6 +1346,7 @@ export class Broker {
   private readonly sandboxPidsLimit: number;
   private readonly sandboxMemoryBytes: number;
   private readonly sandboxCpus: number;
+  private readonly sandboxCpuset: string | undefined;
   /** `--volumes-from <lease>:ro` when a docker-run lease fences creates; empty otherwise. */
   private readonly leaseArgs: readonly string[];
   /** Optional trusted M1 replicate identity, independent of the broker's boot/episode gate epoch. */
@@ -1895,6 +1904,10 @@ export class Broker {
     this.sandboxPidsLimit = config.sandboxPidsLimit ?? 512;
     this.sandboxMemoryBytes = config.sandboxMemoryBytes ?? 2 * 1024 * 1024 * 1024;
     this.sandboxCpus = config.sandboxCpus ?? 2;
+    if (config.sandboxCpuset !== undefined && !CPUSET_LIST.test(config.sandboxCpuset)) {
+      throw new Error(`sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got ${JSON.stringify(config.sandboxCpuset)}`);
+    }
+    this.sandboxCpuset = config.sandboxCpuset;
     this.leaseArgs = config.containerLease !== undefined ? ["--volumes-from", `${config.containerLease}:ro`] : [];
     this.episodeOrdinal = config.episodeOrigin ?? 0;
     this.measurementEpoch = `${this.bootNonce}:startup`;
@@ -3412,6 +3425,7 @@ export class Broker {
       "--pids-limit", String(this.sandboxPidsLimit),
       "--memory", String(this.sandboxMemoryBytes),
       "--cpus", String(this.sandboxCpus),
+      ...(this.sandboxCpuset === undefined ? [] : ["--cpuset-cpus", this.sandboxCpuset]),
       "--security-opt", "no-new-privileges",
       "--cap-drop", "ALL",
       ...this.leaseArgs,
