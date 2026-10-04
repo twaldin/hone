@@ -1567,9 +1567,10 @@ export function createBackend(
                 ...(ctx.admittedManifest.sandbox.cpus === undefined ? {} : { sandboxCpus: ctx.admittedManifest.sandbox.cpus }),
               }),
           // Operator CPU placement (HONE_SANDBOX_CPUSET, e.g. "1-4"): pins every
-          // mutation sandbox and evaluator to those host CPUs so parallel runs,
-          // or other work on the host, get disjoint cores. Not part of the
-          // capsule digest; absent => no affinity.
+          // mutation sandbox and evaluator to those host CPUs. It reserves
+          // nothing: operators assign disjoint sets to concurrent runs and keep
+          // other host work off them. Not part of the capsule digest; absent =>
+          // no affinity.
           ...(ctx.env["HONE_SANDBOX_CPUSET"] === undefined || ctx.env["HONE_SANDBOX_CPUSET"] === ""
             ? {}
             : { sandboxCpuset: ctx.env["HONE_SANDBOX_CPUSET"] }),
