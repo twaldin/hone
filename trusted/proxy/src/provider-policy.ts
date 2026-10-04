@@ -111,7 +111,10 @@ const STREAM_ERROR_TYPE_STATUS: Readonly<Record<string, number>> = {
   authentication_error: 401,
   permission_error: 403,
 };
-const STREAM_RATE_LIMIT_TEXT = /usage limit|rate[- _]?limit|quota|too many requests/i;
+// Genuine exhaustion phrases only: a bare "quota" also appears in unrelated
+// failures such as "quota check service unavailable".
+const STREAM_RATE_LIMIT_TEXT =
+  /usage limit|rate[- _]?limit|too many requests|insufficient[_ ]quota|quota[- _]exceeded|exceeded\b[^.]*\bquota/i;
 const STREAM_AUTH_TEXT = /unauthori[sz]ed|forbidden|\b401\b|\b403\b/i;
 
 /**

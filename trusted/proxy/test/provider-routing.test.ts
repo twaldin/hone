@@ -28,6 +28,7 @@ interface UpstreamRequest {
   role: string | undefined;
   route: string | undefined;
   reasoningEffort?: unknown;
+  reasoning?: unknown;
 }
 
 interface UpstreamReply {
@@ -65,7 +66,7 @@ async function startUpstream(
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
-      const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model?: string; reasoning_effort?: unknown };
+      const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model?: string; reasoning_effort?: unknown; reasoning?: unknown };
       const request: UpstreamRequest = {
         model: parsed.model ?? "",
         role: typeof req.headers["x-hone-requested-role"] === "string"
@@ -75,6 +76,7 @@ async function startUpstream(
           ? req.headers["x-hone-requested-route"]
           : undefined,
         ...(parsed.reasoning_effort === undefined ? {} : { reasoningEffort: parsed.reasoning_effort }),
+        ...(parsed.reasoning === undefined ? {} : { reasoning: parsed.reasoning }),
       };
       calls.push(request);
       const reply = responder(request, calls.length - 1);
@@ -220,14 +222,19 @@ async function setup(
   return harness;
 }
 
-function completion(harness: Harness, role = "outer-optimizer", stream = false): Promise<Response> {
+function completion(
+  harness: Harness,
+  role = "outer-optimizer",
+  stream = false,
+  extraBody: Record<string, unknown> = {},
+): Promise<Response> {
   return fetch(`http://127.0.0.1:${harness.port}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${harness.proxy.tokenFor(role)}`,
     },
-    body: JSON.stringify({ model: "optimizer-selected-route", messages: [], max_tokens: 8, stream }),
+    body: JSON.stringify({ model: "optimizer-selected-route", messages: [], max_tokens: 8, stream, ...extraBody }),
   });
 }
 
@@ -375,6 +382,9 @@ describe("frozen provider failure policy", () => {
     ['{"type":"rate_limit_error","message":"slow down"}', 429, "provider-rate-limit"],
     ['{"type":"authentication_error","message":"No credential available for provider openai-codex"}', 401, "provider-auth"],
     ['{"type":"upstream_error","code":"NO_QUOTA"}', 429, "provider-rate-limit"],
+    ['{"type":"upstream_error","message":"You exceeded your current quota, please check your plan"}', 429, "provider-rate-limit"],
+    ['{"type":"upstream_error","message":"Quota exceeded for this account"}', 429, "provider-rate-limit"],
+    ['{"type":"upstream_error","message":"insufficient_quota"}', 429, "provider-rate-limit"],
   ] as const)("a statusless gateway stream error %s pauses after one attempt", async (error, status, reason) => {
     const harness = await setup((request) => ({
       status: 200, contentType: "text/event-stream", incomplete: false,
@@ -383,6 +393,16 @@ describe("frozen provider failure policy", () => {
     expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
     expect(harness.upstream.calls).toHaveLength(1);
     expect(await harness.proxy.campaignPause()).toMatchObject({ reason, status, attempt: 1 });
+  });
+
+  it("an unrelated upstream_error that merely mentions quota does not pause the campaign", async () => {
+    const harness = await setup((request) => ({
+      status: 200, contentType: "text/event-stream", incomplete: false,
+      rawBody: `${ssePrefix(request.model)}data: {"error":{"type":"upstream_error","message":"quota check service unavailable"}}\n\n`,
+    }));
+    expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
+    expect(harness.upstream.calls.length).toBeGreaterThan(1);
+    expect(await harness.proxy.campaignPause()).toMatchObject({ reason: "provider-transport" });
   });
 
   it("reads a complete multiline CRLF error event", async () => {
@@ -886,6 +906,17 @@ describe("M2 route preflight and frozen role routing", () => {
       "openai-codex/gpt-6.1-sol",
     ]);
     expect(harness.upstream.calls[2]?.reasoningEffort).toBe("high");
+  });
+
+  it("a caller-supplied reasoning control is dropped, and only the sealed effort is forwarded", async () => {
+    const callerControls = { reasoning_effort: "max", reasoning: { effort: "max" } };
+    const unsealed = await setup(() => ({ status: 200 }), { campaignRoutes: ASTRA_SOL });
+    expect((await completion(unsealed, "inner-capsule-improvement", false, callerControls)).status).toBe(200);
+    expect(unsealed.upstream.calls[0]).not.toHaveProperty("reasoningEffort");
+
+    const sealed = await setup(() => ({ status: 200 }), { campaignRoutes: ASTRA_SOL });
+    expect((await completion(sealed, "outer-optimizer", false, callerControls)).status).toBe(200);
+    expect(sealed.upstream.calls[0]?.reasoningEffort).toBe("high");
   });
 
   it("the gateway's resolved-model header binds identity even when the body echoes the route", async () => {

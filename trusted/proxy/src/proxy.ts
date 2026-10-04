@@ -1399,8 +1399,11 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       return;
     }
 
+    // Reasoning controls are sealed with the route; a caller-supplied value
+    // (either the flat or the nested form) never reaches the upstream.
+    const { reasoning_effort: _callerEffort, reasoning: _callerReasoning, ...callerBody } = parsed;
     const forward: Record<string, unknown> = {
-      ...parsed,
+      ...callerBody,
       model: route.model,
       ...(route.reasoningEffort === undefined ? {} : { reasoning_effort: route.reasoningEffort }),
     };
