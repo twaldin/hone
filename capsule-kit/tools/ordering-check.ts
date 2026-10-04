@@ -309,7 +309,7 @@ function composeArtifact(variant: Variant): string {
  * Semantic validation happens in CapsuleManifest.parse on the provisional
  * manifest below.
  */
-interface CapsuleConfig {
+export interface CapsuleConfig {
   objective: string;
   image: string;
   evalEntrypoint: string[];
@@ -318,6 +318,8 @@ interface CapsuleConfig {
   budget: Record<string, number>;
   diagnosticOrdering: { path: string };
   sandbox?: { memoryBytes: number; cpus?: number };
+  /** Per-call evaluator wall-clock cap; scaffold emits it into the manifest verbatim. */
+  evaluatorTimeoutSec?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -328,13 +330,13 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((x) => typeof x === "string");
 }
 
-function loadCapsuleConfig(): CapsuleConfig {
+export function loadCapsuleConfig(capsuleDir: string = CAPSULE_DIR): CapsuleConfig {
   const fail = (field: string): never => {
     throw new Error(`capsule.config.json: invalid or missing "${field}"`);
   };
-  const raw: unknown = JSON.parse(readFileSync(join(CAPSULE_DIR, "capsule.config.json"), "utf8"));
+  const raw: unknown = JSON.parse(readFileSync(join(capsuleDir, "capsule.config.json"), "utf8"));
   if (!isRecord(raw)) return fail("<root>");
-  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, sandbox } = raw;
+  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, sandbox, evaluatorTimeoutSec } = raw;
   if (typeof objective !== "string" || objective.length === 0) return fail("objective");
   if (typeof image !== "string" || image.length === 0) return fail("image");
   if (!isStringArray(evalEntrypoint) || evalEntrypoint.length === 0) return fail("evalEntrypoint");
@@ -363,6 +365,7 @@ function loadCapsuleConfig(): CapsuleConfig {
     if (sandbox.cpus !== undefined && (typeof sandbox.cpus !== "number" || sandbox.cpus <= 0)) return fail("sandbox.cpus");
     sandboxParsed = { memoryBytes: sandbox.memoryBytes, ...(sandbox.cpus === undefined ? {} : { cpus: sandbox.cpus }) };
   }
+  if (evaluatorTimeoutSec !== undefined && typeof evaluatorTimeoutSec !== "number") return fail("evaluatorTimeoutSec");
   return {
     objective,
     image,
@@ -372,6 +375,29 @@ function loadCapsuleConfig(): CapsuleConfig {
     budget: budgetNumbers,
     diagnosticOrdering: { path: diagnosticOrdering.path },
     ...(sandboxParsed === undefined ? {} : { sandbox: sandboxParsed }),
+    ...(evaluatorTimeoutSec === undefined ? {} : { evaluatorTimeoutSec }),
+  };
+}
+
+/**
+ * Broker resource settings for the ordering measurement: the same sandbox and
+ * per-call evaluator timeout the admitted manifest will give real runs, so a
+ * capsule whose evaluator legitimately needs longer than the broker's default
+ * 600 s can be admitted at all.
+ */
+export function orderingBrokerResources(manifest: CapsuleManifest): {
+  sandboxMemoryBytes?: number;
+  sandboxCpus?: number;
+  evalTimeoutSec?: number;
+} {
+  return {
+    ...(manifest.sandbox === undefined
+      ? {}
+      : {
+          sandboxMemoryBytes: manifest.sandbox.memoryBytes,
+          ...(manifest.sandbox.cpus === undefined ? {} : { sandboxCpus: manifest.sandbox.cpus }),
+        }),
+    ...(manifest.evaluatorTimeoutSec === undefined ? {} : { evalTimeoutSec: manifest.evaluatorTimeoutSec }),
   };
 }
 type ExpandedAssetGroup = CapsuleConfig["assetGroups"][number];
@@ -435,10 +461,11 @@ function expandPaths(rel: string): string[] {
  * setup. Default mode supplies only non-holdout groups; the explicit trusted
  * terminal mode supplies only all-holdout train+validation groups.
  */
-function provisionalManifest(
+export function provisionalManifest(
   config: CapsuleConfig,
   baselineHash: string,
   assetGroups: ExpandedAssetGroup[],
+  capsuleDir: string = CAPSULE_DIR,
 ): CapsuleManifest {
   for (const split of SPLITS) {
     if (!assetGroups.some((g) => g.id === split)) {
@@ -448,7 +475,7 @@ function provisionalManifest(
   const contentHashes: Record<string, string> = {};
   for (const group of assetGroups) {
     for (const rel of group.paths) {
-      contentHashes[rel] = `sha256:${createHash("sha256").update(readFileSync(join(CAPSULE_DIR, rel))).digest("hex")}`;
+      contentHashes[rel] = `sha256:${createHash("sha256").update(readFileSync(join(capsuleDir, rel))).digest("hex")}`;
     }
   }
   const sansId: Record<string, unknown> = {
@@ -461,6 +488,7 @@ function provisionalManifest(
     assetGroups,
     budget: config.budget,
     ...(config.sandbox === undefined ? {} : { sandbox: config.sandbox }),
+    ...(config.evaluatorTimeoutSec === undefined ? {} : { evaluatorTimeoutSec: config.evaluatorTimeoutSec }),
     diagnosticOrdering: { path: config.diagnosticOrdering.path, hash: PROVISIONAL_ORDERING_HASH },
     contentHashes,
   };
@@ -648,12 +676,7 @@ export async function runOrderingCheck(
       optimizerDigest: ORDERING_TOOL_DIGEST,
       holdoutLedgerPath: join(tempRoot, "holdout-ledger.ndjson"),
       ...(terminalHoldoutDiagnostic ? { holdoutBudget: expectedEvals } : {}),
-      ...(config.sandbox === undefined
-        ? {}
-        : {
-            sandboxMemoryBytes: config.sandbox.memoryBytes,
-            ...(config.sandbox.cpus === undefined ? {} : { sandboxCpus: config.sandbox.cpus }),
-          }),
+      ...orderingBrokerResources(manifest),
       executionImage: manifest.image,
       runDir: join(tempRoot, "run"),
       casDir,

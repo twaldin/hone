@@ -29,7 +29,7 @@ An asset group named `holdout` inside a development capsule describes visibility
 | Path | What it is |
 | --- | --- |
 | `tools/scaffold.ts` | Writes a capsule's `manifest.json`: hashes every asset, reads the baseline Git commit, embeds the ordering report's hash and derives the content-addressed ID. Re-running over an unchanged tree gives byte-identical output. Admission errors about asset drift point here. |
-| `tools/ordering-check.ts` | The trusted ordering check: runs naive, improved, broken and shortcut diagnostics through the broker and writes `ordering-report.json`. `schema/src/ordering.ts` validates its report. |
+| `tools/ordering-check.ts` | The trusted ordering check: runs naive, improved, broken and shortcut diagnostics through the broker and writes `ordering-report.json`. `schema/src/ordering.ts` validates its report. Each evaluation gets the capsule's `sandbox` and `evaluatorTimeoutSec` from `capsule.config.json`, as a real run of the scaffolded manifest would. |
 | `tools/m2-author.ts`, `tools/author-m2-owner-train.ts`, `tools/m2-generic-*.py` | Authoring helpers used to build the M2 cohort capsules. |
 | `tools/preflight-m2-*.m*ts`, `tools/ts-aa-probe.mts` | Host preflights and an A-A noise probe used before the M2 campaigns. |
 | `contracts/` | The frozen OSS and owner-task contracts (`OSS-*`, `OWN-*`) the cohort capsules were built against. |
