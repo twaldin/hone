@@ -28,6 +28,8 @@ export {
   MAX_PROVIDER_ATTEMPTS,
   MAX_PROVIDER_RETRIES,
   providerRetryDelayMs,
+  RESOLVED_MODEL_HEADER,
+  resolvedModelMatchesRoute,
   responseModelIdentities,
   type ProviderAttemptDecision,
   type ProviderAttemptFacts,
@@ -35,7 +37,6 @@ export {
 export {
   createProxy,
   DEFAULT_LIMITS,
-  DEFAULT_UPSTREAM,
   PROMPT_FRAMING_BASE_TOKENS,
   PROMPT_FRAMING_PER_MESSAGE_TOKENS,
   promptTokenUpperBound,
@@ -52,3 +53,12 @@ export {
   type ProxyLimits,
   type SpendRecord,
 } from "./proxy.js";
+export {
+  resolveUpstreamConfig,
+  UPSTREAM_API_KEY_ENV,
+  UPSTREAM_API_KEY_FILE_ENV,
+  UPSTREAM_BASE_URL_ENV,
+  UpstreamConfigError,
+  upstreamEndpoint,
+  type UpstreamConfig,
+} from "./upstream.js";

@@ -37,6 +37,7 @@ import {
   EvaluatorOutput,
   ExecParams,
   ExecResult,
+  DEFAULT_EVALUATOR_TIMEOUT_SEC,
   FinishParams,
   GetPromotionVerdictParams,
   GetFileParams,
@@ -1820,7 +1821,11 @@ export class Broker {
       throw new BrokerError("INTERNAL", "workspaceQuotaBytes must be a positive safe integer");
     }
     this.defaultTtlSec = config.defaultTtlSec ?? 3_600;
-    this.evalTimeoutSec = config.evalTimeoutSec ?? 600;
+    // Trusted campaign cap first, then the capsule's own (digest-bound)
+    // declaration, then the engine default.
+    this.evalTimeoutSec = config.evalTimeoutSec
+      ?? this.manifest.evaluatorTimeoutSec
+      ?? DEFAULT_EVALUATOR_TIMEOUT_SEC;
     this.execOutputLimitBytes = config.execOutputLimitBytes ?? 1024 * 1024;
     this.sessionTraceQuotaBytes = config.sessionTraceQuotaBytes ?? 64 * 1024 * 1024;
     if (!Number.isSafeInteger(this.sessionTraceQuotaBytes) || this.sessionTraceQuotaBytes <= 0) {

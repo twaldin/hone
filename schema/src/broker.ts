@@ -83,8 +83,12 @@ export const GetTaskResult = z.object({
   recursiveTask: RecursiveTask.optional(),
 });
 
-/** Longest authenticated mutation-sandbox claim the public wire admits. */
-export const MAX_SANDBOX_TTL_SEC = 86_400;
+/**
+ * Longest authenticated mutation-sandbox claim the public wire admits: 14
+ * days. An episode's sandbox outlives every evaluation in that episode, so
+ * the cap must clear several multi-hour (or multi-day) evaluator invocations.
+ */
+export const MAX_SANDBOX_TTL_SEC = 1_209_600;
 
 export const CreateSandboxParams = z.object({
   /** Artifact to unpack into /workspace inside the sandbox. */

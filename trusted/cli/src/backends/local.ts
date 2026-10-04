@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import {
-  M2_MODEL_ROUTING,
+  m2ModelRouting,
   OPTIMIZER_CHILD_PENDING_EXIT_CODE,
   OPTIMIZER_STORAGE_EXHAUSTED_EXIT_CODE,
   RunEvent,
   type ArtifactRef,
   type BudgetState,
+  type CampaignModelRoutes,
   type CapsuleManifest,
   type CampaignPauseSignal,
   type M2ProxyRole,
@@ -30,7 +31,7 @@ import {
   startBroker,
 } from "@hone/broker";
 import type { CallContext, RunCommand, RunningBroker, SandboxNetworkMode } from "@hone/broker";
-import { createProxy, DEFAULT_UPSTREAM } from "@hone/proxy";
+import { createProxy, resolveUpstreamConfig } from "@hone/proxy";
 import type { BudgetDecision, BudgetDimension, ProxyHandle } from "@hone/proxy";
 import { admitCapsule, authenticateFrozenCapsuleAssets } from "../admission.js";
 import { readEvents, releaseTerminalReserve, replayActiveClock, replayRun, writeFileDurable } from "../eventlog.js";
@@ -148,14 +149,19 @@ export interface ProxySessionCapability {
   readonly token: string;
 }
 
-/** Issue exactly one trusted session bearer against the frozen role table. */
+/** Issue exactly one trusted session bearer against the sealed role table. */
 export function issueProxySessionCapability(
   proxy: Pick<ProxyHandle, "tokenFor">,
   routing: ModelRouting,
   roleInput?: M2ProxyRole,
+  campaignRoutes?: CampaignModelRoutes,
 ): ProxySessionCapability {
   const role = roleInput ?? "mutation";
-  const route = role === "mutation" ? routing["mutation"] : M2_MODEL_ROUTING[role];
+  if (role !== "mutation") {
+    if (campaignRoutes === undefined) throw new Error(`campaign proxy role "${role}" requires the sealed campaign model routes`);
+    return { role, model: m2ModelRouting(campaignRoutes)[role].model, token: proxy.tokenFor(role) };
+  }
+  const route = routing["mutation"];
   if (route === undefined) {
     throw new Error('legacy run config has no "mutation" model route — pass --config with {"routing":{"mutation":{"model":"…"}}}');
   }
@@ -1405,10 +1411,10 @@ export function createBackend(
       const proxy = createProxy({
         runId: ctx.runId,
         routing: ctx.config.routing,
+        ...(ctx.campaignRoutes === undefined ? {} : { campaignRoutes: ctx.campaignRoutes }),
         runDir: ctx.runDir,
         casDir: ctx.casDir,
-        upstreamBaseUrl: ctx.env["HONE_UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM,
-        ...(ctx.env["HONE_UPSTREAM_API_KEY"] !== undefined ? { upstreamApiKey: ctx.env["HONE_UPSTREAM_API_KEY"] } : {}),
+        ...resolveUpstreamConfig(ctx.env),
         checkBudget,
         recordCampaignPause: async (signal) => {
           await campaignPauseAuthority.recordCampaignPause(signal);
@@ -1444,7 +1450,7 @@ export function createBackend(
           running.broker.recordBudgetExhaustion(dimension, { privileged: true });
         },
       });
-      const proxySession = issueProxySessionCapability(proxy, ctx.config.routing, ctx.proxyRole);
+      const proxySession = issueProxySessionCapability(proxy, ctx.config.routing, ctx.proxyRole, ctx.campaignRoutes);
 
       // Admission seals the immutable manifest/digest. A separately named
       // execution image — possibly a campaign-authorised override — runs every

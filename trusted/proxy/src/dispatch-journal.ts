@@ -3,14 +3,18 @@ import { resolve } from "node:path";
 import { type DurableIo } from "./durable-io.js";
 import { DurableLineLog } from "./tracelog.js";
 import {
-  M2_INNER_MODEL_ROUTE,
-  M2_OUTER_MODEL_ROUTE,
   type CampaignPauseReason,
   type CampaignPauseSignal,
   type CampaignResumeSignal,
   type ProviderAttemptClassification,
   type ProxyPreflightObservation,
 } from "@hone/schema";
+
+/** The sealed outer/inner model ids a resume's preflight proofs must name. */
+export interface DispatchJournalFrozenRoutes {
+  outer: string;
+  inner: string;
+}
 
 /**
  * Versioned durable dispatch journal — the proxy's crash-safe budget/trace
@@ -444,8 +448,16 @@ async function readJournalLines(filePath: string): Promise<string[]> {
   return lines.filter((l) => l !== "");
 }
 
-/** Replay the journal into its terminal state. Never writes. */
-export async function readDispatchJournalState(filePath: string): Promise<DispatchJournalState> {
+/**
+ * Replay the journal into its terminal state. Never writes. With
+ * `frozenRoutes`, a resume must prove exactly those routes; without them
+ * (read-only inspection) each proof must still be a self-consistent,
+ * drift-free preflight of the route its own durable intent requested.
+ */
+export async function readDispatchJournalState(
+  filePath: string,
+  frozenRoutes?: DispatchJournalFrozenRoutes,
+): Promise<DispatchJournalState> {
   const lines = await readJournalLines(filePath);
   const records: DispatchRecord[] = [];
   const intents = new Map<string, DispatchIntentRecord>();
@@ -516,14 +528,14 @@ export async function readDispatchJournalState(filePath: string): Promise<Dispat
         const hasDurablePreflightProof = (
           observation: ProxyPreflightObservation | undefined,
           expectedRole: ProxyPreflightObservation["role"],
-          expectedRoute: string,
+          expectedRoute: string | undefined,
         ): boolean => {
           if (
             observation === undefined ||
             observation.dispatchId === null ||
             observation.role !== expectedRole ||
-            observation.requestedRoute !== expectedRoute ||
-            observation.returnedModel !== expectedRoute ||
+            (expectedRoute !== undefined && observation.requestedRoute !== expectedRoute) ||
+            observation.returnedModel !== observation.requestedRoute ||
             observation.status === null ||
             observation.status < 200 ||
             observation.status > 299 ||
@@ -537,10 +549,10 @@ export async function readDispatchJournalState(filePath: string): Promise<Dispat
             intent?.purpose === "preflight" &&
             intent.runId === record.runId &&
             intent.role === expectedRole &&
-            intent.requestedRoute === expectedRoute &&
+            intent.requestedRoute === observation.requestedRoute &&
             settlement?.kind === "settle" &&
             settlement.status === observation.status &&
-            settlement.returnedModel === expectedRoute &&
+            settlement.returnedModel === observation.requestedRoute &&
             settlement.classification === "success" &&
             settlement.traced
           );
@@ -553,8 +565,8 @@ export async function readDispatchJournalState(filePath: string): Promise<Dispat
         ) {
           poison(`resume ${record.pauseId} does not match active pause ${activePause.pauseId}`);
         } else if (
-          !hasDurablePreflightProof(outer, "outer-optimizer", M2_OUTER_MODEL_ROUTE) ||
-          !hasDurablePreflightProof(inner, "inner-capsule-improvement", M2_INNER_MODEL_ROUTE)
+          !hasDurablePreflightProof(outer, "outer-optimizer", frozenRoutes?.outer) ||
+          !hasDurablePreflightProof(inner, "inner-capsule-improvement", frozenRoutes?.inner)
         ) {
           poison(`resume ${record.pauseId} lacks both durable frozen-route preflight proofs`);
         } else {
@@ -608,10 +620,12 @@ export interface DispatchRecoveryReport {
 export class DispatchJournal {
   readonly filePath: string;
   private readonly log: DurableLineLog;
+  private readonly frozenRoutes: DispatchJournalFrozenRoutes | undefined;
 
-  constructor(filePath: string, io?: Partial<DurableIo>) {
+  constructor(filePath: string, io?: Partial<DurableIo>, frozenRoutes?: DispatchJournalFrozenRoutes) {
     this.filePath = resolve(filePath);
     this.log = new DurableLineLog(this.filePath, io);
+    this.frozenRoutes = frozenRoutes;
   }
 
   /** Live (in-memory) poison of the underlying log, if any append/open ever failed. */
@@ -661,7 +675,7 @@ export class DispatchJournal {
   async recover(
     recordSpend: (spend: { tokens: number; usd: number }) => void | Promise<void>,
   ): Promise<DispatchRecoveryReport> {
-    const state = await readDispatchJournalState(this.filePath);
+    const state = await readDispatchJournalState(this.filePath, this.frozenRoutes);
     let poisoned = state.poisoned;
     const recovered: RecoveredCharge[] = [];
     let tokens = state.chargedTotals.tokens;

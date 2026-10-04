@@ -26,17 +26,17 @@ import { selectSaturationCeiling, type SaturationCell } from "@hone/scoring";
 import {
   BudgetEnvelope,
   DEFAULT_PROMOTION_RULE,
-  M2_INNER_MODEL_ROUTE,
-  M2_MODEL_ROUTING,
-  M2_OUTER_MODEL_ROUTE,
+  LEGACY_M2_INNER_MODEL_ROUTE,
+  LEGACY_M2_OUTER_MODEL_ROUTE,
   MetaCapsuleEntry,
   ProxyTraceRecord,
   canonicalJson,
   type BudgetEnvelope as BudgetEnvelopeValue,
+  type CampaignModelRoutes,
   type MetaCapsuleEntry as MetaCapsuleEntryValue,
   type ProxyPreflightResult,
 } from "@hone/schema";
-import { createProxy, DEFAULT_UPSTREAM, type DurablePauseProxyHandle, type ProxyConfig } from "@hone/proxy";
+import { createProxy, resolveUpstreamConfig, type DurablePauseProxyHandle, type ProxyConfig } from "@hone/proxy";
 import { z } from "zod";
 import { admitCapsule, capsuleOracleDigest, capsuleScalarizerDigest, type AdmittedCapsule } from "../admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "../args.js";
@@ -79,6 +79,13 @@ const CalibrationSelectionV1 = z.object({
     samples: z.number().int().positive(),
   }).strict(),
   cellBudget: BudgetEnvelope.optional(),
+  /**
+   * Outer/inner model ids for preflight and every cell. Absent means the
+   * routes calibration used before they were configurable
+   * (openai-codex/gpt-5.6-sol / openai-codex/gpt-5.6-luna), so existing
+   * selections keep their frozen plan.
+   */
+  routes: z.object({ outer: z.string().min(1), inner: z.string().min(1) }).strict().optional(),
 }).strict();
 export type CalibrationSelectionV1 = z.infer<typeof CalibrationSelectionV1>;
 
@@ -129,8 +136,8 @@ export interface CalibrationPlanV1 {
     readonly bootstrap: { readonly rngSeed: number; readonly samples: number };
   };
   readonly routes: {
-    readonly outer: typeof M2_OUTER_MODEL_ROUTE;
-    readonly inner: typeof M2_INNER_MODEL_ROUTE;
+    readonly outer: string;
+    readonly inner: string;
   };
   readonly source: {
     readonly commit: string;
@@ -340,7 +347,7 @@ export async function buildCalibrationPlan(
       seeds,
       bootstrap: selection.bootstrap,
     },
-    routes: { outer: M2_OUTER_MODEL_ROUTE, inner: M2_INNER_MODEL_ROUTE },
+    routes: selection.routes ?? { outer: LEGACY_M2_OUTER_MODEL_ROUTE, inner: LEGACY_M2_INNER_MODEL_ROUTE },
     source: {
       commit: optimizer.sourceCommit,
       trustedRuntimeDigest: optimizer.trustedRuntimeDigest,
@@ -502,7 +509,7 @@ function cellRequest(
     bundleDigest: cell.bundleDigest,
     capsule: cell.capsule,
     innerEpisodesMax: cell.cap,
-    requestedModel: M2_INNER_MODEL_ROUTE,
+    requestedModel: plan.routes.inner,
     remainingBudget: remainingBudget(cell.budget, priorSpend),
     attempt,
     resume,
@@ -546,6 +553,11 @@ async function preflightIdentityEvidence(root: string, proxyDir: string): Promis
   return evidence;
 }
 
+/** A calibration plan's frozen model ids as sealed campaign routes (no reasoning effort). */
+function calibrationCampaignRoutes(plan: CalibrationPlanV1): CampaignModelRoutes {
+  return { outer: { model: plan.routes.outer }, inner: { model: plan.routes.inner } };
+}
+
 async function runPreflight(
   root: string,
   stateDir: string,
@@ -563,11 +575,11 @@ async function runPreflight(
   const spend = { tokens: 0, usd: 0 };
   const proxy = create({
     runId,
-    routing: M2_MODEL_ROUTING,
+    routing: {},
+    campaignRoutes: calibrationCampaignRoutes(plan),
     runDir: proxyDir,
     casDir: casRoot(root),
-    upstreamBaseUrl: env["HONE_UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM,
-    ...(env["HONE_UPSTREAM_API_KEY"] === undefined ? {} : { upstreamApiKey: env["HONE_UPSTREAM_API_KEY"] }),
+    ...resolveUpstreamConfig(env),
     checkBudget: () => ({
       allowed: true,
       remaining: {
@@ -595,7 +607,7 @@ async function runPreflight(
     const evidence = {
       version: 1,
       configHash: plan.configHash,
-      requestedRoutes: { outer: M2_OUTER_MODEL_ROUTE, inner: M2_INNER_MODEL_ROUTE },
+      requestedRoutes: plan.routes,
       result,
       usage: {
         recovered: recoverySpend,
@@ -814,7 +826,12 @@ export async function calibrationCommand(
       plan.configHash,
     ) ?? new CliChildSupervisor(
       io,
-      { promotion: DEFAULT_PROMOTION_RULE, proxyRole: "inner-capsule-improvement", campaignConfigHash: plan.configHash },
+      {
+        promotion: DEFAULT_PROMOTION_RULE,
+        proxyRole: "inner-capsule-improvement",
+        campaignRoutes: calibrationCampaignRoutes(plan),
+        campaignConfigHash: plan.configHash,
+      },
       stateDir,
       capsuleLocations,
       optimizer.baseSnapshot,

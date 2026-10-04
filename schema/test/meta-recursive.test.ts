@@ -2,8 +2,11 @@ import { readFileSync } from "node:fs";
 import {
   M2_CALIBRATION_DEFERRED_BINDING,
   M2_CALIBRATION_DEFERRED_REPORT_DIGEST,
-  M2_INNER_MODEL_ROUTE,
-  M2_OUTER_MODEL_ROUTE,
+  LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
+  LEGACY_M2_INNER_MODEL_ROUTE,
+  LEGACY_M2_OUTER_MODEL_ROUTE,
+  DEFAULT_MODEL_ROUTE,
+  campaignModelRoutes,
   M2_PANEL_A_TASK_IDS,
   M2_PANEL_B_TASK_IDS,
   M2AuthorizedPartialCohort,
@@ -70,12 +73,12 @@ function draft() {
     train,
     holdout,
     routing: {
-      outerMutation: M2_OUTER_MODEL_ROUTE,
-      innerMutation: M2_INNER_MODEL_ROUTE,
+      outerMutation: LEGACY_M2_OUTER_MODEL_ROUTE,
+      innerMutation: LEGACY_M2_INNER_MODEL_ROUTE,
     },
     modelObservation: {
-      outerRequestedRoute: M2_OUTER_MODEL_ROUTE,
-      innerRequestedRoute: M2_INNER_MODEL_ROUTE,
+      outerRequestedRoute: LEGACY_M2_OUTER_MODEL_ROUTE,
+      innerRequestedRoute: LEGACY_M2_INNER_MODEL_ROUTE,
       identity: "alias-observation" as const,
       recordResponseModel: true,
       recordProviderFingerprint: true,
@@ -234,9 +237,16 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
     expect(parsed.counts).toMatchObject({ candidates: 12, candidateAttemptsMax: 24, innerEpisodesMax: 4 });
   });
 
-  it("pins the recursive campaign evaluator timeout to the owner-ratified cap", () => {
+  it("bounds the evaluator timeout and defaults it to the owner-ratified 2700", () => {
     expect(MetaCampaignConfigV2.parse(draft()).evaluatorTimeoutSec).toBe(2700);
-    expect(() => MetaCampaignConfigV2.parse({ ...draft(), evaluatorTimeoutSec: 600 })).toThrow();
+    const { evaluatorTimeoutSec: _omitted, ...withoutTimeout } = draft();
+    expect(MetaCampaignConfigV2.parse(withoutTimeout).evaluatorTimeoutSec).toBe(2700);
+    for (const seconds of [60, 600, 28_800, 266_400, 604_800]) {
+      expect(MetaCampaignConfigV2.parse({ ...draft(), evaluatorTimeoutSec: seconds }).evaluatorTimeoutSec).toBe(seconds);
+    }
+    for (const seconds of [59, 604_801, 2700.5, 0, -1]) {
+      expect(() => MetaCampaignConfigV2.parse({ ...draft(), evaluatorTimeoutSec: seconds })).toThrow();
+    }
   });
 
   it("requires a stage-B G1 controller to equal the exact G1 target", () => {
@@ -268,39 +278,56 @@ describe("MetaCampaignConfigV2 recursive cells", () => {
     expect(() => MetaCampaignConfigV2.parse(inexact)).toThrow(/must equal 12 complete-panel/);
   });
 
-  it("accepts the frozen two-role observation policy (outer=sol, inner=terra)", () => {
-    const parsed = MetaCampaignConfigV2.parse(draft());
-    expect(parsed.modelObservation.outerRequestedRoute).toBe(M2_OUTER_MODEL_ROUTE);
-    expect(parsed.modelObservation.innerRequestedRoute).toBe(M2_INNER_MODEL_ROUTE);
-    expect(parsed.routing.outerMutation).toBe(M2_OUTER_MODEL_ROUTE);
-    expect(parsed.routing.innerMutation).toBe(M2_INNER_MODEL_ROUTE);
+  it("keeps a frozen legacy-route config byte-stable and resolving to its original routes", () => {
+    const frozen = draft();
+    const parsed = MetaCampaignConfigV2.parse(frozen);
+    expect(parsed.routing).toEqual({
+      outerMutation: LEGACY_M2_OUTER_MODEL_ROUTE,
+      innerMutation: LEGACY_M2_INNER_MODEL_ROUTE,
+    });
+    expect(parsed.modelObservation).toEqual(frozen.modelObservation);
+    expect(campaignModelRoutes(parsed.routing)).toEqual(LEGACY_M2_CAMPAIGN_MODEL_ROUTES);
   });
 
   it("rejects routing drift away from the frozen per-role observation routes", () => {
     const innerDrift = draft();
-    innerDrift.routing.innerMutation = M2_OUTER_MODEL_ROUTE;
+    innerDrift.routing.innerMutation = LEGACY_M2_OUTER_MODEL_ROUTE;
     expect(() => MetaCampaignConfigV2.parse(innerDrift)).toThrow(/inner.*route/i);
 
     const outerDrift = draft();
-    outerDrift.routing.outerMutation = M2_INNER_MODEL_ROUTE;
+    outerDrift.routing.outerMutation = LEGACY_M2_INNER_MODEL_ROUTE;
     expect(() => MetaCampaignConfigV2.parse(outerDrift)).toThrow(/outer.*route/i);
   });
 
-  it("rejects observed model-identity drift in the frozen policy literals", () => {
-    const swapped = draft();
-    swapped.modelObservation = {
-      ...swapped.modelObservation,
-      outerRequestedRoute: M2_INNER_MODEL_ROUTE,
-      innerRequestedRoute: M2_OUTER_MODEL_ROUTE,
+  it("accepts configured per-tier routes with reasoning effort", () => {
+    const base = draft();
+    const astra = {
+      ...base,
+      modelObservation: {
+        ...base.modelObservation,
+        outerRequestedRoute: "openai-codex/gpt-6-astra",
+        innerRequestedRoute: DEFAULT_MODEL_ROUTE,
+      },
+      routing: {
+        outerMutation: "openai-codex/gpt-6-astra",
+        innerMutation: DEFAULT_MODEL_ROUTE,
+        outerReasoningEffort: "xhigh",
+      },
     };
-    swapped.routing = { outerMutation: M2_INNER_MODEL_ROUTE, innerMutation: M2_OUTER_MODEL_ROUTE };
-    expect(() => MetaCampaignConfigV2.parse(swapped)).toThrow();
+    expect(campaignModelRoutes(MetaCampaignConfigV2.parse(astra).routing)).toEqual({
+      outer: { model: "openai-codex/gpt-6-astra", reasoningEffort: "xhigh" },
+      inner: { model: DEFAULT_MODEL_ROUTE },
+    });
+    expect(() => MetaCampaignConfigV2.parse({
+      ...astra,
+      routing: { ...astra.routing, innerReasoningEffort: "extreme" },
+    })).toThrow();
   });
 
   it("rejects an M1-style single-route observation policy on a V2 config", () => {
     const single = draft();
     const m1Policy = {
-      requestedRoute: M2_OUTER_MODEL_ROUTE,
+      requestedRoute: LEGACY_M2_OUTER_MODEL_ROUTE,
       identity: "alias-observation",
       recordResponseModel: true,
       recordProviderFingerprint: true,

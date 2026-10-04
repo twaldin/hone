@@ -29,7 +29,7 @@ import {
 } from "@hone/broker";
 import {
   createProxy,
-  DEFAULT_UPSTREAM,
+  resolveUpstreamConfig,
   type DispatchRecoveryReport,
   type ProxyConfig,
 } from "@hone/proxy";
@@ -76,6 +76,7 @@ import {
   ProxyTraceRecord,
   RecursiveEvaluationPlan,
   SpawnRunParams,
+  campaignModelRoutes,
   campaignSourceCommits,
   canonicalJson,
   capsuleDigest,
@@ -87,6 +88,7 @@ import {
   type CampaignSourceMigrationV1,
   type CampaignRuntimeClosureCaptureV1,
   type BudgetEnvelope,
+  type CampaignModelRoutes,
   type ChildRunAdmission as ChildRunAdmissionRecord,
   type CampaignPauseSignal as CampaignPauseSignalRecord,
   type CampaignResumeSignal as CampaignResumeSignalRecord,
@@ -206,7 +208,7 @@ import {
   runPanelCapsuleSmoke,
 } from "../campaign-capsule-smoke.js";
 import type { CaptureRuntimeClosureResult } from "../runtime-closure.js";
-import { RUNTIME_PIN_FILE, acquireRunLock, runCommand, type TrustedRunOptions } from "../supervisor.js";
+import { RUNTIME_PIN_FILE, acquireRunLock, readSealedCampaignRoutes, runCommand, type TrustedRunOptions } from "../supervisor.js";
 import {
   appendPreAuthorityRefusalBreadcrumb,
   classifyPreAuthorityRefusal,
@@ -325,12 +327,10 @@ export async function coordinateCampaignResume(
   const proxy = (options.createProxy ?? createProxy)({
     runId: pause.runId,
     routing: config.routing,
+    campaignRoutes: readSealedCampaignRoutes(runDir),
     runDir,
     casDir: casRoot(request.root),
-    upstreamBaseUrl: request.env["HONE_UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM,
-    ...(request.env["HONE_UPSTREAM_API_KEY"] === undefined
-      ? {}
-      : { upstreamApiKey: request.env["HONE_UPSTREAM_API_KEY"] }),
+    ...resolveUpstreamConfig(request.env),
     checkBudget: () => ({
       allowed: true,
       remaining: {
@@ -934,6 +934,8 @@ function addUsage(left: MetaResourceUsage, right: MetaResourceUsage): MetaResour
 export interface TrustedChildDispatchPolicy {
   readonly promotion: AnyMetaCampaignConfig["promotion"];
   readonly proxyRole?: "inner-capsule-improvement";
+  /** Sealed campaign outer/inner routes; required with `proxyRole`. */
+  readonly campaignRoutes?: CampaignModelRoutes;
   readonly campaignConfigHash?: Sha256Digest;
   readonly mutationWorkerPreflightContract?: MutationWorkerPreflightContract;
   readonly evaluatorTimeoutSec?: number;
@@ -1129,6 +1131,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
             ? {}
             : { mutationWorkerPreflightContract: this.dispatchPolicy.mutationWorkerPreflightContract }),
           ...(this.dispatchPolicy.proxyRole === undefined ? {} : { proxyRole: this.dispatchPolicy.proxyRole }),
+          ...(this.dispatchPolicy.campaignRoutes === undefined ? {} : { campaignRoutes: this.dispatchPolicy.campaignRoutes }),
           ...(this.campaignPauseAuthority === undefined
             ? {}
             : { campaignPauseAuthority: this.campaignPauseAuthority }),
@@ -1180,6 +1183,7 @@ export class CliChildSupervisor implements MetaChildSupervisor {
               ? {}
               : { mutationWorkerPreflightContract: this.dispatchPolicy.mutationWorkerPreflightContract }),
             ...(this.dispatchPolicy.proxyRole === undefined ? {} : { proxyRole: this.dispatchPolicy.proxyRole }),
+            ...(this.dispatchPolicy.campaignRoutes === undefined ? {} : { campaignRoutes: this.dispatchPolicy.campaignRoutes }),
             ...(this.campaignPauseAuthority === undefined
               ? {}
               : { campaignPauseAuthority: this.campaignPauseAuthority }),
@@ -5085,6 +5089,7 @@ export async function recursiveCommand(
     io,
     campaignChildDispatchPolicy(config, {
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: campaignModelRoutes(config.routing),
       campaignConfigHash: configHash,
       evaluatorTimeoutSec: config.evaluatorTimeoutSec,
       ...(mutationWorkerPreflightContract === undefined
@@ -5315,6 +5320,7 @@ export async function recursiveCommand(
         ? {}
         : { mutationWorkerPreflightContract }),
       proxyRole: "outer-optimizer",
+      campaignRoutes: campaignModelRoutes(config.routing),
       campaignPauseAuthority,
       campaignConfigHash: configHash,
       ...(corpus === undefined ? {} : { corpus, corpusCohort: config.corpusCohort }),

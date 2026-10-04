@@ -18,6 +18,8 @@ import {
   type M2AuthorizedAdmittedCapsule,
   type M2AuthorizedDeferredCapsule,
   type M2AuthorizedPartialCohort,
+  LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
+  DEFAULT_CAMPAIGN_MODEL_ROUTES,
 } from "@hone/schema";
 import { appendAdmissionReceipt } from "../src/admission-receipts.js";
 import { freezeCapsuleAssets, writeCapsuleSnapshot } from "../src/admission.js";
@@ -675,7 +677,7 @@ describe("broker wiring: ctx.corpus reaches the broker", () => {
         routing: { mutation: { model: "m" } },
         headless: true,
       }),
-      env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network" },
+      env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network", HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9" },
       admissionReview: "off",
       optimizerDigest: fakeHash("0"),
       corpus,
@@ -749,6 +751,7 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(root),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       corpus,
       corpusCohort: cohortOf(corpus),
     })).toBe(0);
@@ -767,6 +770,7 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(root),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       corpus: mintCorpus(CONFIG_HASH),
     })).rejects.toThrow(/requires the campaign corpusCohort binding/);
     expect(existsSync(join(root, ".hone-runs"))).toBe(false);
@@ -790,6 +794,7 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(root),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       corpus: mintCorpus(fakeHash("e")),
     })).rejects.toThrow(/does not carry the trusted campaign config hash/);
   });
@@ -802,6 +807,7 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(matchedRoot),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       corpus,
       corpusCohort: cohortOf(corpus),
     })).toBe(0);
@@ -814,6 +820,7 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(foreignRoot),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       corpus: mintCorpus(CONFIG_HASH),
       corpusCohort: foreignCohort,
     })).rejects.toThrow(/different provenance artifacts/);
@@ -826,6 +833,7 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(unpairedRoot),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       corpusCohort: cohortOf(mintCorpus(CONFIG_HASH)),
     })).rejects.toThrow(/requires the frozen corpus wire config/);
     expect(existsSync(join(unpairedRoot, ".hone-runs"))).toBe(false);
@@ -843,6 +851,7 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(root),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       corpus,
       corpusCohort: { ...cohort, developmentCapsuleIds: cohort.developmentCapsuleIds.slice(0, 1) },
     })).rejects.toThrow(/development capsule ids differ/);
@@ -879,6 +888,7 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(root),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       ...(corpus === undefined ? {} : { corpus, corpusCohort: cohortOf(corpus) }),
     });
   }
@@ -894,9 +904,34 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(root),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       corpus,
     })).rejects.toThrow(/requires the campaign corpusCohort binding/);
     expect(readFileSync(join(runDir, "events.ndjson"), "utf8")).toBe(before);
+  });
+
+  it("a seal written before routes were configurable resumes only on the legacy routes", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const corpus = mintCorpus(CONFIG_HASH);
+    const runDir = sealedResumeFixture(root, corpus);
+    const before = readFileSync(join(runDir, "events.ndjson"), "utf8");
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    await expect(cliRunCommand(["capsule", "--headless", "--backend", "stub", "--resume"], io, {
+      campaignConfigHash: CONFIG_HASH,
+      campaignPauseAuthority: pauseAuthority(root),
+      proxyRole: "inner-capsule-improvement",
+      campaignRoutes: DEFAULT_CAMPAIGN_MODEL_ROUTES,
+      corpus,
+      corpusCohort: cohortOf(corpus),
+    })).rejects.toThrow(/campaign model routes changed since the run started/);
+    expect(readFileSync(join(runDir, "events.ndjson"), "utf8")).toBe(before);
+    // The legacy routes pass the route gate: whatever later fixture gap
+    // stops this synthetic resume, it is never a route refusal.
+    const outcome = await resumeWith(root, corpus).then(() => null, (error: unknown) => error);
+    if (outcome !== null) {
+      expect(outcome instanceof Error ? outcome.message : String(outcome)).not.toMatch(/model routes/);
+    }
   });
 
   it("resume refuses a missing or different corpus and accepts only the exact sealed digest", async () => {
@@ -989,6 +1024,7 @@ describe("campaign corpus seal: durable digest at creation, exact match on resum
       campaignConfigHash: CONFIG_HASH,
       campaignPauseAuthority: pauseAuthority(root),
       proxyRole: "inner-capsule-improvement",
+      campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       corpus: mintCorpus(CONFIG_HASH),
     })).rejects.toThrow(/provisional capsule quarantine/);
     expect(existsSync(join(root, ".hone-runs"))).toBe(false);

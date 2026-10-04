@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { BudgetEnvelope, IMAGE_DIGEST_REF } from "./capsule.js";
+import { BudgetEnvelope, EvaluatorTimeoutSec, IMAGE_DIGEST_REF } from "./capsule.js";
 import { AdmissionApprovalBasis } from "./admission.js";
-import { M2_INNER_MODEL_ROUTE, M2_OUTER_MODEL_ROUTE } from "./proxy.js";
+import { type CampaignModelRoutes, ReasoningEffort } from "./proxy.js";
 import { canonicalJson } from "./canonical.js";
 import { PromotionRule, SessionNoYieldMaxTokens } from "./runconfig.js";
 
@@ -716,26 +716,57 @@ export const M2_SEARCH_CANDIDATE_EQUIVALENTS = 12;
 export const M2_CANDIDATE_COUNT = M2_SEARCH_CANDIDATE_EQUIVALENTS;
 export const M2_CANDIDATE_ATTEMPTS_MAX = 24;
 export const M2_INNER_EPISODES_MAX = 4;
-/** Owner-ratified wall-time cap for one evaluator invocation (key: m2-eval-cap). */
+/**
+ * Owner-ratified evaluator wall-time cap (key: m2-eval-cap). It is the
+ * default for `evaluatorTimeoutSec`; every frozen M2 config pins it.
+ */
 export const M2_EVALUATOR_TIMEOUT_SEC = 2700;
 export const M2_ALLOWED_CLAIM = "recursive-transfer-frozen-corpus";
 
 /**
- * M2 two-role model observation policy. The frozen contract routes outer /
- * capsule-author reasoning and inner capsule improvement to SEPARATE observed
- * routes (outer = openai-codex/gpt-5.6-sol, inner = openai-codex/gpt-5.6-luna). Requested and returned
- * model identity is recorded per role; drift fails closed. Like M1, identity
- * without provider attestation is an alias observation — never a snapshot.
+ * M2 two-role model observation policy. Outer / capsule-author reasoning and
+ * inner capsule improvement use SEPARATE observed routes, named by the frozen
+ * config (historical configs name openai-codex/gpt-5.6-sol and
+ * openai-codex/gpt-5.6-luna). Requested and returned model identity is
+ * recorded per role; drift fails closed. Like M1, identity without provider
+ * attestation is an alias observation — never a snapshot.
  */
 export const M2ModelObservationPolicy = z.object({
-  outerRequestedRoute: z.literal(M2_OUTER_MODEL_ROUTE),
-  innerRequestedRoute: z.literal(M2_INNER_MODEL_ROUTE),
+  outerRequestedRoute: z.string().min(1),
+  innerRequestedRoute: z.string().min(1),
   identity: z.enum(["alias-observation", "provider-snapshot"]),
   recordResponseModel: z.literal(true),
   recordProviderFingerprint: z.literal(true),
   driftSentinel: z.literal(true),
 }).strict();
 export type M2ModelObservationPolicy = z.infer<typeof M2ModelObservationPolicy>;
+
+/**
+ * M2 per-tier routing. The model ids must equal the observation policy's
+ * requested routes. Reasoning efforts are optional; absence forwards none
+ * and leaves the upstream default (historical configs carry none).
+ */
+export const M2CampaignRouting = z.object({
+  outerMutation: z.string().min(1),
+  innerMutation: z.string().min(1),
+  outerReasoningEffort: ReasoningEffort.optional(),
+  innerReasoningEffort: ReasoningEffort.optional(),
+});
+export type M2CampaignRouting = z.infer<typeof M2CampaignRouting>;
+
+/** The sealed outer/inner routes a frozen M2 config resolves to. */
+export function campaignModelRoutes(routing: M2CampaignRouting): CampaignModelRoutes {
+  return {
+    outer: {
+      model: routing.outerMutation,
+      ...(routing.outerReasoningEffort === undefined ? {} : { reasoningEffort: routing.outerReasoningEffort }),
+    },
+    inner: {
+      model: routing.innerMutation,
+      ...(routing.innerReasoningEffort === undefined ? {} : { reasoningEffort: routing.innerReasoningEffort }),
+    },
+  };
+}
 
 export const M2_PANEL_A_TASK_IDS = [
   "OWN-T01",
@@ -1238,8 +1269,13 @@ const MetaCampaignConfigV2Shape = MetaCampaignConfigShape.extend({
   train: z.array(MetaCapsuleEntry),
   holdout: z.array(MetaCapsuleEntry),
   counts: RecursiveCampaignCounts,
-  /** Frozen wall-time cap for each individual evaluator invocation. */
-  evaluatorTimeoutSec: z.literal(M2_EVALUATOR_TIMEOUT_SEC),
+  /** Per-tier model routes and optional reasoning efforts. */
+  routing: M2CampaignRouting,
+  /**
+   * Frozen wall-time cap for each individual evaluator invocation. Absent
+   * means the owner-ratified 2700 s; every historical frozen config pins it.
+   */
+  evaluatorTimeoutSec: EvaluatorTimeoutSec.default(M2_EVALUATOR_TIMEOUT_SEC),
   calibration: M2CalibrationBinding,
   corpusCohort: M2CorpusCohort,
   modelObservation: M2ModelObservationPolicy,

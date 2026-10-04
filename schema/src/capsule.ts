@@ -63,6 +63,24 @@ export const BudgetEnvelope = z.object({
 });
 export type BudgetEnvelope = z.infer<typeof BudgetEnvelope>;
 
+/** Broker per-invocation evaluator wall cap when neither the capsule nor a campaign declares one. */
+export const DEFAULT_EVALUATOR_TIMEOUT_SEC = 600;
+/** Shortest declarable evaluator wall cap. */
+export const MIN_EVALUATOR_TIMEOUT_SEC = 60;
+/**
+ * Longest declarable evaluator wall cap: 7 days. That covers multi-hour
+ * evaluations and a ~74 h full validation, and stays far below the ~24.8-day
+ * ceiling of a Node timer.
+ */
+export const MAX_EVALUATOR_TIMEOUT_SEC = 604_800;
+/** Wall-time cap for ONE evaluator invocation, in seconds. */
+export const EvaluatorTimeoutSec = z
+  .number()
+  .int()
+  .min(MIN_EVALUATOR_TIMEOUT_SEC)
+  .max(MAX_EVALUATOR_TIMEOUT_SEC);
+export type EvaluatorTimeoutSec = z.infer<typeof EvaluatorTimeoutSec>;
+
 export const CapsuleManifest = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION),
   /** Content-addressed capsule id: "cap_" + first 12 hex of sha256 over canonical manifest sans id. */
@@ -96,6 +114,13 @@ export const CapsuleManifest = z.object({
     })
     .strict()
     .optional(),
+  /**
+   * Optional wall-time cap for one evaluator invocation. Core (inside the
+   * digest): an evaluation that needs hours is a different task than one
+   * that fits the broker's 600 s default. Absent keeps that default. A
+   * campaign's frozen `evaluatorTimeoutSec` governs its own runs instead.
+   */
+  evaluatorTimeoutSec: EvaluatorTimeoutSec.optional(),
   /**
    * Reference to the persisted diagnostic-ordering report proving the
    * evaluator discriminates (broken < naive < baseline < improved, split

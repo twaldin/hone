@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { BudgetExceededError, ProxyTraceRecord } from "@hone/schema";
+import { BudgetExceededError, DEFAULT_CAMPAIGN_MODEL_ROUTES, DEFAULT_MODEL_ROUTE, ProxyTraceRecord } from "@hone/schema";
 import {
   createProxy,
+  extractSseUsage,
   promptTokenUpperBound,
+  resolveUpstreamConfig,
   type BudgetDecision,
   type ProxyConfig,
   type DurablePauseProxyHandle,
@@ -16,7 +18,7 @@ import {
 } from "../src/index.js";
 
 // ---------------------------------------------------------------------------
-// mock upstream (stands in for vibeproxy :8317)
+// mock OpenAI-compatible upstream
 // ---------------------------------------------------------------------------
 
 const UPSTREAM_KEY = "sk-super-secret-upstream-credential";
@@ -300,8 +302,13 @@ describe("auth", () => {
     expect(ctx.upstream.calls).toHaveLength(0);
   });
 
-  it("mints configured roles plus every frozen M2 capability", async () => {
+  it("mints only configured roles outside a campaign", async () => {
     const ctx = await setup();
+    expect(ctx.proxy.tokens.map((t) => t.role).sort()).toEqual(["evaluator", "mutation"]);
+  });
+
+  it("mints configured roles plus every M2 capability for sealed campaign routes", async () => {
+    const ctx = await setup({ campaignRoutes: DEFAULT_CAMPAIGN_MODEL_ROUTES });
     const roles = ctx.proxy.tokens.map((t) => t.role).sort();
     expect(roles).toEqual([
       "capsule-author",
@@ -597,27 +604,19 @@ describe("unix socket", () => {
   });
 });
 
-describe("live smoke (explicit opt-in; skip-if-unreachable)", () => {
-  it.skipIf(process.env.HONE_LIVE_PROXY_TEST !== "1")("1-token completion against vibeproxy :8317 / glm-5.2", { timeout: 60_000 }, async (t) => {
-    let reachable = true;
-    try {
-      await fetch("http://127.0.0.1:8317/v1/models", { signal: AbortSignal.timeout(2000) });
-    } catch {
-      reachable = false;
-    }
-    if (!reachable) {
-      t.skip();
-      return;
-    }
-
+describe("live smoke (explicit opt-in)", () => {
+  // HONE_LIVE_PROXY_TEST=1 plus HONE_UPSTREAM_BASE_URL and HONE_UPSTREAM_API_KEY_FILE
+  // (or HONE_UPSTREAM_API_KEY). Spends one small streamed completion.
+  it.skipIf(process.env.HONE_LIVE_PROXY_TEST !== "1")("streams a small completion through the configured upstream", { timeout: 120_000 }, async () => {
+    const model = process.env.HONE_LIVE_PROXY_MODEL ?? DEFAULT_MODEL_ROUTE;
     const base = await mkdtemp(join(tmpdir(), "hone-live-"));
     const spends: SpendRecord[] = [];
     const proxy = createProxy({
       runId: "run_live",
-      routing: { mutation: { model: "glm-5.2" } },
+      routing: { mutation: { model, reasoningEffort: "low" } },
       runDir: join(base, "run"),
       casDir: join(base, "cas"),
-      upstreamBaseUrl: "http://127.0.0.1:8317",
+      ...resolveUpstreamConfig(process.env),
       captureCampaignDispatchFence: () => ({ epoch: "0", paused: false }),
       validateCampaignDispatchFence: () => true,
       checkBudget: () => ({ allowed: true, remaining: GENEROUS_REMAINING }),
@@ -638,18 +637,21 @@ describe("live smoke (explicit opt-in; skip-if-unreachable)", () => {
       },
       body: JSON.stringify({
         model: "ignored",
-        max_tokens: 1,
-        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        max_tokens: 64,
+        messages: [{ role: "user", content: "Reply with exactly: ok" }],
       }),
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { usage?: { total_tokens?: number } };
-    expect(body.usage?.total_tokens).toBeGreaterThan(0);
+    expect(res.headers.get("x-hone-attempt-classification")).toBe("success");
+    const streamed = await res.text();
+    expect(streamed).toContain("data: [DONE]");
+    expect(extractSseUsage(streamed)?.totalTokens).toBeGreaterThan(0);
     expect(spends[0]?.tokens).toBeGreaterThan(0);
 
     const raw = await readFile(join(base, "run", "proxy-trace.ndjson"), "utf8");
     const rec = ProxyTraceRecord.parse(JSON.parse(raw.trim()));
-    expect(rec.model).toBe("glm-5.2");
+    expect(rec).toMatchObject({ version: 2, requestedRoute: model, returnedModel: model, classification: "success" });
     expect(rec.usage.totalTokens).toBeGreaterThan(0);
   });
 });
@@ -1134,7 +1136,7 @@ describe("active request slots", () => {
   });
 
   it("slot releases after retried transport resets and durable resume", async () => {
-    const ctx = await setup({ limits: { maxActiveRequests: 1 } });
+    const ctx = await setup({ limits: { maxActiveRequests: 1 }, campaignRoutes: DEFAULT_CAMPAIGN_MODEL_ROUTES });
     const token = ctx.proxy.tokenFor("mutation");
     const res = await postCompletions(ctx, token, {
       messages: [{ role: "user", content: "reset" }],

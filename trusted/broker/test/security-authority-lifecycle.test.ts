@@ -2787,6 +2787,20 @@ describe("evaluation memo provenance (digests key the cache)", () => {
     expect(journal).not.toContain('"measurementEpoch"');
   });
 
+  it("caps each evaluation by the campaign's timeout, else the capsule's declaration, else 600 s", async () => {
+    const wallOf = async (opts: { manifest?: CapsuleManifest; evalTimeoutSec?: number }): Promise<string | undefined> => {
+      const b = await boot(opts);
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      const lookup = vi.spyOn(b.broker.cas, "indexGet");
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 27 }, CLIENT);
+      return /\|wall:(\d+)$/.exec(String(lookup.mock.calls[0]?.[1]))?.[1];
+    };
+    const longEval = makeManifest({ evaluatorTimeoutSec: 28_800 });
+    expect(await wallOf({})).toBe("600");
+    expect(await wallOf({ manifest: longEval })).toBe("28800");
+    expect(await wallOf({ manifest: longEval, evalTimeoutSec: 2_700 })).toBe("2700");
+  });
+
   it("rejects empty, oversized, and control-character trusted epochs before evaluation", async () => {
     for (const measurementEpoch of ["", "x".repeat(257), `m1${String.fromCharCode(10)}evil`]) {
       await expect(boot({ measurementEpoch })).rejects.toThrow(

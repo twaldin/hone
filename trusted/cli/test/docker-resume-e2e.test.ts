@@ -163,6 +163,7 @@ describe.skipIf(!ENABLED)("real Docker backend interrupted-run durability", () =
       HONE_OPTIMIZER_CMD: optimizerCommand,
       HONE_OPTIMIZER_DIGEST: `sha256:${"f".repeat(64)}`,
       HONE_MUTATION_TIMEOUT_SEC: "180",
+      HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9",
       HONE_KILL_GRACE_MS: "2000",
     };
 

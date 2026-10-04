@@ -10,13 +10,12 @@ import { join } from "node:path";
 import {
   CampaignPauseSignal,
   CampaignResumeSignal,
-  M2_INNER_MODEL_ROUTE,
-  M2_MODEL_ROUTING,
-  M2_OUTER_MODEL_ROUTE,
+  m2ModelRouting,
   PROXY_TRACE_VERSION,
   ProxyPreflightResult,
   ProxyTraceRecord,
   type BudgetExceededError,
+  type CampaignModelRoutes,
   type CampaignPauseReason,
   type ModelRouting,
   type ProviderAttemptClassification,
@@ -35,10 +34,11 @@ import {
   MAX_PROVIDER_ATTEMPTS,
   providerRetryDelayMs,
   responseModelIdentities,
+  resolvedModelMatchesRoute,
+  RESOLVED_MODEL_HEADER,
   streamedUpstreamError,
 } from "./provider-policy.js";
-
-export const DEFAULT_UPSTREAM = "http://127.0.0.1:8317";
+import { upstreamEndpoint } from "./upstream.js";
 
 /** Per-run trace log file name, appended under `runDir`. */
 export const PROXY_TRACE_FILE = "proxy-trace.ndjson";
@@ -99,6 +99,12 @@ export interface ProxyLimits {
   maxActiveRequests: number;
   /** Socket-level connection ceiling — fd/header-buffer backstop behind maxActiveRequests. */
   maxConnections: number;
+  /**
+   * Client-socket inactivity ceiling. The proxy answers only after the whole
+   * upstream response is buffered and classified, so the socket is silent for
+   * the full generation; this bounds one model call, not the session.
+   */
+  socketIdleTimeoutMs: number;
 }
 
 export const DEFAULT_LIMITS: ProxyLimits = {
@@ -107,6 +113,7 @@ export const DEFAULT_LIMITS: ProxyLimits = {
   maxCompletionTokens: 32_768,
   maxActiveRequests: 16,
   maxConnections: 256,
+  socketIdleTimeoutMs: 1_800_000,
 };
 
 /**
@@ -117,12 +124,21 @@ export interface ProxyConfig {
   runId: string;
   /** Per-role model routing (@hone/schema). The proxy OVERWRITES the request's model field. */
   routing: ModelRouting;
+  /**
+   * Sealed campaign outer/inner routes. When present they mint the three M2
+   * role capabilities and override any same-named `routing` key; preflight
+   * and resume require them. Absent on runs outside a campaign.
+   */
+  campaignRoutes?: CampaignModelRoutes;
   /** Per-run dir (`.hone-runs/<runId>`); `proxy-trace.ndjson` is appended here. */
   runDir: string;
   /** CAS root (the `.hone-cas` directory): `sha256/<first2>/<fullhash>`. */
   casDir: string;
-  /** Default vibeproxy at :8317. Sandboxes never see this URL or the key. */
-  upstreamBaseUrl?: string;
+  /**
+   * OpenAI-compatible upstream (`HONE_UPSTREAM_BASE_URL`), with or without a
+   * trailing `/v1`. Sandboxes never see this URL or the key.
+   */
+  upstreamBaseUrl: string;
   /** Injected as `Authorization: Bearer <key>` upstream; never surfaces client-side. */
   upstreamApiKey?: string;
   pricing?: PricingTable;
@@ -432,9 +448,12 @@ function readRequestBody(req: IncomingMessage, maxBytes: number): Promise<BodyRe
 
 export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
   const limits: ProxyLimits = { ...DEFAULT_LIMITS, ...config.limits };
-  // Frozen M2 authorities always win over mutable/general run routing. The
+  // Sealed campaign routes always win over mutable/general run routing. The
   // optimizer never supplies a route for these bearer capabilities.
-  const routing: ModelRouting = { ...config.routing, ...M2_MODEL_ROUTING };
+  const routing: ModelRouting = {
+    ...config.routing,
+    ...(config.campaignRoutes === undefined ? {} : m2ModelRouting(config.campaignRoutes)),
+  };
 
   const tokens: ProxyAuthToken[] = Object.keys(routing).map((role) => ({
     token: `hone_${randomBytes(24).toString("hex")}`,
@@ -567,7 +586,13 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
   // new headroom is computed and a poisoned journal can never silently
   // restart as a healthy log.
   // -------------------------------------------------------------------------
-  const journal = new DispatchJournal(join(config.runDir, DISPATCH_JOURNAL_FILE), config.journalIo);
+  const journal = new DispatchJournal(
+    join(config.runDir, DISPATCH_JOURNAL_FILE),
+    config.journalIo,
+    config.campaignRoutes === undefined
+      ? undefined
+      : { outer: config.campaignRoutes.outer.model, inner: config.campaignRoutes.inner.model },
+  );
   let dispatchPoison: string | undefined;
   let activeCampaignPause: CampaignPauseSignal | undefined;
   let pausePending = false;
@@ -1046,11 +1071,10 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
         };
       }
 
-      const base =
-        input.route.upstreamBaseUrl ?? config.upstreamBaseUrl ?? DEFAULT_UPSTREAM;
+      const base = input.route.upstreamBaseUrl ?? config.upstreamBaseUrl;
       let upstream: Response;
       try {
-        upstream = await fetch(new URL("/v1/chat/completions", base), {
+        upstream = await fetch(upstreamEndpoint(base, "chat/completions"), {
           method: "POST",
           headers: upstreamHeaders(input.role, input.route.model),
           body: forwardText,
@@ -1160,8 +1184,13 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       }
       const responseText = Buffer.concat(chunks).toString("utf8");
       const returnedModels = responseModelIdentities(responseText, contentType);
-      const returnedModel = returnedModels[0] ?? null;
-      const observedDrift = returnedModels.some(
+      // The gateway echoes the requested id in the body; its resolved-model
+      // header, when present, is the independent identity observation. A
+      // mismatch is recorded as the returned identity.
+      const resolvedModel = upstream.headers.get(RESOLVED_MODEL_HEADER);
+      const resolvedDrift = resolvedModel !== null && !resolvedModelMatchesRoute(resolvedModel, input.route.model);
+      const returnedModel = resolvedDrift ? resolvedModel.trim() : returnedModels[0] ?? null;
+      const observedDrift = resolvedDrift || returnedModels.some(
         (identity) => identity !== input.route.model,
       );
       const streamError = upstream.status >= 200 && upstream.status <= 299
@@ -1186,6 +1215,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
               isProxyFailover(upstream.headers, responseText),
             requestedRoute: input.route.model,
             returnedModels,
+            resolvedModel,
             malformedSuccessfulOutput:
               upstream.status >= 200 &&
               upstream.status <= 299 &&
@@ -1369,7 +1399,11 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       return;
     }
 
-    const forward: Record<string, unknown> = { ...parsed, model: route.model };
+    const forward: Record<string, unknown> = {
+      ...parsed,
+      model: route.model,
+      ...(route.reasoningEffort === undefined ? {} : { reasoning_effort: route.reasoningEffort }),
+    };
     delete forward["max_tokens"];
     delete forward["max_completion_tokens"];
     if (forward["stream"] === true) {
@@ -1461,14 +1495,19 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
   }
 
   async function preflightFrozenRoutes(): Promise<ProxyPreflightResult> {
+    const campaignRoutes = config.campaignRoutes;
+    if (campaignRoutes === undefined) {
+      throw new Error("frozen-route preflight requires the sealed campaign routes");
+    }
     const targets = [
-      { role: "outer-optimizer", model: M2_OUTER_MODEL_ROUTE },
-      { role: "inner-capsule-improvement", model: M2_INNER_MODEL_ROUTE },
+      { role: "outer-optimizer", route: campaignRoutes.outer },
+      { role: "inner-capsule-improvement", route: campaignRoutes.inner },
     ] as const;
     const observations: ProxyPreflightObservation[] = [];
     for (const [targetIndex, target] of targets.entries()) {
       const forward: Record<string, unknown> = {
-        model: target.model,
+        model: target.route.model,
+        ...(target.route.reasoningEffort === undefined ? {} : { reasoning_effort: target.route.reasoningEffort }),
         messages: [{ role: "user", content: "Reply with exactly: HONE_PREFLIGHT_OK" }],
         temperature: 0,
       };
@@ -1478,12 +1517,12 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       for (let attempt = 1; attempt <= MAX_PROVIDER_ATTEMPTS; attempt += 1) {
         const result = await dispatchProviderAttempt({
           role: target.role,
-          route: { model: target.model },
+          route: target.route,
           forward,
           completionField: "max_completion_tokens",
           requestedCompletion: 8,
           promptTokens,
-          pricing: config.pricing?.[target.model],
+          pricing: config.pricing?.[target.route.model],
           attempt,
           purpose: "preflight",
           allowPaused: true,
@@ -1499,7 +1538,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
       observations.push({
         role: target.role,
         dispatchId: final?.kind === "attempt" ? final.dispatchId : null,
-        requestedRoute: target.model,
+        requestedRoute: target.route.model,
         returnedModel: final?.kind === "attempt" ? final.returnedModel : null,
         status: final?.kind === "attempt" ? final.providerStatus : null,
         passed:
@@ -1508,14 +1547,14 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
           final.providerStatus !== null &&
           final.providerStatus >= 200 &&
           final.providerStatus <= 299 &&
-          final.returnedModel === target.model,
+          final.returnedModel === target.route.model,
       });
       if (final?.kind === "attempt" && final.classification === "campaign-pause") {
         for (const skipped of targets.slice(targetIndex + 1)) {
           observations.push({
             role: skipped.role,
             dispatchId: null,
-            requestedRoute: skipped.model,
+            requestedRoute: skipped.route.model,
             returnedModel: null,
             status: null,
             passed: false,
@@ -1563,11 +1602,11 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
 
   const loadModels = (): Promise<CachedModelsResponse> => {
     modelsResponse ??= (async () => {
-      const base = config.upstreamBaseUrl ?? DEFAULT_UPSTREAM;
+      const base = config.upstreamBaseUrl;
       const controller = new AbortController();
       upstreamControllers.add(controller);
       try {
-        const upstream = await fetch(new URL("/v1/models", base), {
+        const upstream = await fetch(upstreamEndpoint(base, "models"), {
           headers: upstreamHeaders(),
           redirect: "manual",
           signal: controller.signal,
@@ -1779,7 +1818,7 @@ export function createProxy(config: ProxyConfig): DurablePauseProxyHandle {
   server.maxHeadersCount = 128;
   server.headersTimeout = 30_000;
   server.requestTimeout = 300_000;
-  server.setTimeout(300_000, (socket) => socket.destroy());
+  server.setTimeout(limits.socketIdleTimeoutMs, (socket) => socket.destroy());
 
   function bound(listenArgs: () => void): Promise<void> {
     return new Promise<void>((resolve, reject) => {

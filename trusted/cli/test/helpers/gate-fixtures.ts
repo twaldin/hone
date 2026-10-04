@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  M2_INNER_MODEL_ROUTE,
-  M2_OUTER_MODEL_ROUTE,
+  LEGACY_M2_INNER_MODEL_ROUTE,
+  LEGACY_M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
   M2_PANEL_B_TASK_IDS,
   MetaCampaignConfigV1,
@@ -160,10 +160,10 @@ export function buildConfig(stage: "A" | "B", options: BuildConfigOptions = {}):
     },
     train,
     holdout,
-    routing: { outerMutation: M2_OUTER_MODEL_ROUTE, innerMutation: M2_INNER_MODEL_ROUTE },
+    routing: { outerMutation: LEGACY_M2_OUTER_MODEL_ROUTE, innerMutation: LEGACY_M2_INNER_MODEL_ROUTE },
     modelObservation: {
-      outerRequestedRoute: M2_OUTER_MODEL_ROUTE,
-      innerRequestedRoute: M2_INNER_MODEL_ROUTE,
+      outerRequestedRoute: LEGACY_M2_OUTER_MODEL_ROUTE,
+      innerRequestedRoute: LEGACY_M2_INNER_MODEL_ROUTE,
       identity: "alias-observation",
       recordResponseModel: true,
       recordProviderFingerprint: true,
@@ -243,8 +243,8 @@ function makeMeasurement(
     capsuleDigest: member.capsule.capsuleDigest as `sha256:${string}`,
     replicate,
     measurementEpoch: `m2:${key}`,
-    requestedModel: M2_INNER_MODEL_ROUTE,
-    responseModel: M2_INNER_MODEL_ROUTE,
+    requestedModel: LEGACY_M2_INNER_MODEL_ROUTE,
+    responseModel: LEGACY_M2_INNER_MODEL_ROUTE,
     providerFingerprint: null,
     modelDriftSentinel: "stable:x",
     workKey: sha(`workkey:${key}`),

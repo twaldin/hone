@@ -23,6 +23,44 @@ hone author --workflow ID
 
 Run configuration is sealed at creation. `run --resume` uses that stored configuration and rejects another `--config` argument.
 
+## Model routes and the upstream
+
+Every model call leaves through hone's trusted proxy, which overwrites the requested model with the sealed route for the caller's role, sets `reasoning_effort` when the route names one, and forwards to `HONE_UPSTREAM_BASE_URL` with the bearer from `HONE_UPSTREAM_API_KEY_FILE` (or `HONE_UPSTREAM_API_KEY`). The upstream URL is required; see [Getting started](getting-started.md#before-a-real-run). On the tailnet, the omp gateway is:
+
+```sh
+export HONE_UPSTREAM_BASE_URL=http://twaldin-home:4000/v1
+export HONE_UPSTREAM_API_KEY_FILE=~/.config/hone/upstream.token   # mode 600
+```
+
+Routes are configuration, never request data:
+
+| Where | Keys | Default |
+| --- | --- | --- |
+| `hone run --config` (sealed run config) | `routing.mutation.model`, `routing.mutation.reasoningEffort` | `HONE_MODEL_ID` at run creation, else `openai-codex/gpt-6.1-sol`; no effort |
+| Recursive campaign config (V2) | `routing.outerMutation`, `routing.innerMutation`, `routing.outerReasoningEffort`, `routing.innerReasoningEffort`; `modelObservation.outerRequestedRoute` / `innerRequestedRoute` must repeat the two model ids | launch drafts use `openai-codex/gpt-6.1-sol` for both tiers |
+| Calibration selection | `routes.outer`, `routes.inner` | `openai-codex/gpt-5.6-sol` / `openai-codex/gpt-5.6-luna`, so the August 2026 selection keeps its frozen plan |
+
+`outer` serves the outer optimizer and capsule author; `inner` serves inner capsule improvement. Reasoning effort is one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. To put the outer tier on astra, freeze a campaign with:
+
+```json
+"routing": { "outerMutation": "openai-codex/gpt-6-astra", "innerMutation": "openai-codex/gpt-6.1-sol", "outerReasoningEffort": "high" },
+"modelObservation": { "outerRequestedRoute": "openai-codex/gpt-6-astra", "innerRequestedRoute": "openai-codex/gpt-6.1-sol", "...": "…" }
+```
+
+A campaign's routes are sealed into every outer and child run (`campaign-session.v1.json`), and resume refuses a run whose routes changed. Configs and run seals frozen before routes were configurable still validate and resolve to their original `openai-codex/gpt-5.6-sol` (outer) and `openai-codex/gpt-5.6-luna` (inner). The M1 (`hone hone`, config V1) protocol stays pinned to `gpt-5.6-sol`.
+
+Identity binding records the requested route and the returned model on every call and pauses a campaign on drift. The omp gateway echoes the requested id verbatim, so hone additionally compares its `x-litellm-model-id` header with the route's bare model name.
+
+## Evaluator time limits
+
+Each evaluator invocation runs under one wall-time cap, chosen in this order:
+
+1. a recursive campaign's frozen `evaluatorTimeoutSec` (default 2700; any integer from 60 to 604800);
+2. the capsule manifest's optional `evaluatorTimeoutSec` (same bounds; part of the capsule digest, set through `capsule.config.json` and `scaffold`);
+3. the broker default of 600 seconds.
+
+A plain `hone run` therefore uses the capsule's declaration or 600 seconds; the capsule budget's `maxWallClockSec` is the separate whole-run active-time envelope and must cover every evaluation the run may perform. Multi-hour evaluations (for example a ~7 h L2 measurement, `"evaluatorTimeoutSec": 28800`) are supported directly. The 604800-second ceiling also admits a ~74 h full validation (`266400` plus margin), but such a one-shot check is better run outside the optimization loop: every episode would repeat it. An episode's mutation sandbox lives for the whole run wall envelope up to 14 days, so it outlasts long evaluations, and wall envelopes longer than Node's ~24.8-day timer limit are honoured. Each in-sandbox mutation session is still bounded by the optimizer's own `mutationTimeoutSec` (1800 s, at most 3600 s on the broker wire), and one proxied model call by a 30-minute idle socket.
+
 A bare positional argument naming a directory with `manifest.json` selects `run`; otherwise it selects `author`. Authoring captures a source baseline and queues durable role requests. With the default boundary, `awaiting-sealed-session` means the requested agent work is still pending. Gate decisions follow the workflow's required state and reviewer identities; the parser also supports explicitly bounded provisional delegation.
 
 ## Inspect and deliver

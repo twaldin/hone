@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProxy } from "@hone/proxy";
+import { DEFAULT_CAMPAIGN_MODEL_ROUTES } from "@hone/schema";
 import { describe, expect, it } from "vitest";
 import {
   DurableCampaignPauseAuthorityV1,
@@ -30,6 +31,7 @@ describe("campaign-wide proxy pause wiring", () => {
     const proxy = createProxy({
       runId: "run_recursive_pause",
       routing: {},
+      campaignRoutes: DEFAULT_CAMPAIGN_MODEL_ROUTES,
       runDir: root,
       casDir: join(root, "cas"),
       upstreamBaseUrl: `http://127.0.0.1:${address.port}`,

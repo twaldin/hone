@@ -2,6 +2,7 @@ import type { BrokerCorpusConfig, BrokerRecursiveConfig, TrustedEvaluationStrate
 import type {
   ArtifactRef,
   BudgetState,
+  CampaignModelRoutes,
   CampaignPauseSignal,
   CampaignResumeSignal,
   CapsuleManifest,
@@ -98,7 +99,7 @@ export interface RunnerBackendContext {
   mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
   /** Trusted M1 full-run replicate identity, absent on M0. */
   measurementEpoch?: string | undefined;
-  /** Trusted per-evaluation wall-time cap, frozen by M2 campaign orchestration. */
+  /** Trusted per-evaluation wall-time cap, frozen by M2 campaign orchestration (else the capsule's own). */
   evalTimeoutSec?: number | undefined;
   /** Trusted outer-broker evaluator; never serialized or exposed to a sandbox. */
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
@@ -114,6 +115,8 @@ export interface RunnerBackendContext {
   promotionHoldoutSplit?: PromotionHoldoutSplit | undefined;
   /** Frozen M2 proxy bearer role. Absent only for legacy M0/M1 mutation routing. */
   proxyRole?: M2ProxyRole | undefined;
+  /** Sealed campaign outer/inner model routes; present exactly when `proxyRole` is. */
+  campaignRoutes?: CampaignModelRoutes | undefined;
   /** Shared durable M2 provider-pause authority. */
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
   /** Explicitly off only for a trusted synthetic capsule's post-seal byte validation. */
