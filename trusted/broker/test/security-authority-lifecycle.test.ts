@@ -169,6 +169,8 @@ interface FakeCtl {
   execBarrier: { entered: () => void; gate: Promise<void> } | null;
   /** Inspection hook invoked with the eval `docker run` argv while the staged assets still exist on disk. */
   evalInspect: ((argv: readonly string[]) => Promise<void> | void) | null;
+  /** When set, answers every eval `docker run` (two-phase protocol cases); receives the run's timeout. */
+  evalRun: ((argv: readonly string[], timeoutMs: number | undefined) => Promise<CmdResult> | CmdResult) | null;
   /** When set, eval containers block until `docker rm -f <name>` reaps them (simulates the CLI dying with its container). */
   evalHangsUntilReaped: boolean;
   /** Container ids whose `docker rm -f` fails (terminal-save fail-closed simulation). */
@@ -249,6 +251,7 @@ async function boot(
     evalMode: "normal",
     execBarrier: null,
     evalInspect: null,
+    evalRun: null,
     evalHangsUntilReaped: false,
     rmFailFor: new Set(),
     rmThrowFor: new Set(),
@@ -297,6 +300,7 @@ async function boot(
         return fakeResult({ exitCode: 137, stderr: Buffer.from("container removed") });
       }
       if (ctl.evalInspect) await ctl.evalInspect(argv);
+      if (ctl.evalRun) return await ctl.evalRun(argv, cmdOpts?.timeoutMs);
       if (ctl.evalMode === "timeout") return fakeResult({ exitCode: -1, timedOut: true });
       const wsMount = argv.find((a) => a.endsWith(":/workspace:ro")) ?? "";
       let output: unknown = { valid: true, objectives: { score: 0 } };
@@ -3032,6 +3036,10 @@ describe("evaluator containment", () => {
     expect(argv[tmpfsIdx - 1]).toBe("--tmpfs");
     expect(argv.every((a) => !a.includes("holdout"))).toBe(true);
     expect(argv.every((a) => !a.includes("protected"))).toBe(true);
+    // Single-phase capsules keep the one-container argv: no phase env,
+    // handoff mount, or IPC override.
+    expect(argv).not.toContain("--ipc");
+    expect(argv.some((a) => a.startsWith("HONE_EVAL_PHASE=") || a.includes(":/capsule/handoff"))).toBe(false);
   });
 
   it("runs reviewed dynamic-uid evaluators concurrently on distinct recorded host uids", async () => {
@@ -4256,6 +4264,176 @@ describe("broker close quiescence", () => {
   });
 });
 
+// ---------- two-phase evaluator ----------
+
+describe("two-phase evaluator (fresh decode container)", () => {
+  const PHASED = makeManifest({ evalPhases: ["encode", "decode"] });
+  const MARKER = { honeEvalContinue: "decode" };
+  const phaseOf = (argv: readonly string[]): string | undefined =>
+    argv.find((a) => a.startsWith("HONE_EVAL_PHASE="))?.slice("HONE_EVAL_PHASE=".length);
+  const handoffMount = (argv: readonly string[]): string => argv.find((a) => a.includes(":/capsule/handoff:")) ?? "";
+  const handoffHost = (argv: readonly string[]): string => handoffMount(argv).split(":")[0] ?? "";
+  const nameOf = (argv: readonly string[]): string => argv[argv.indexOf("--name") + 1] ?? "";
+  const evalRuns = (b: Booted): string[][] => b.log.filter((a) => a[1] === "run" && a.includes("--rm"));
+  const reaped = (b: Booted, name: string): boolean =>
+    b.log.some((a) => a[1] === "rm" && a[2] === "-f" && a[3] === "-v" && a[4] === name);
+  const json = (value: unknown): CmdResult => fakeResult({ stdout: Buffer.from(JSON.stringify(value)) });
+  const evaluate = (b: Booted) =>
+    b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+
+  it("runs encode, then a fresh decode container with private IPC, no workspace and a read-only handoff, under one invocation", async () => {
+    const b = await boot({ manifest: PHASED });
+    const timeouts: Array<number | undefined> = [];
+    let handoffMode = 0;
+    // The shared wall-clock cap is measured with Date.now(); jump it forward
+    // while encode "runs" instead of sleeping.
+    const realNow = Date.now.bind(Date);
+    let encodeElapsedMs = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + encodeElapsedMs);
+    b.ctl.evalRun = async (argv, timeoutMs) => {
+      timeouts.push(timeoutMs);
+      if (phaseOf(argv) === "encode") {
+        handoffMode = (await stat(handoffHost(argv))).mode & 0o777;
+        await writeFile(path.join(handoffHost(argv), "archive.bin"), "compressed");
+        encodeElapsedMs = 120_000;
+        return json(MARKER);
+      }
+      expect(await readFile(path.join(handoffHost(argv), "archive.bin"), "utf8")).toBe("compressed");
+      return json(score(7));
+    };
+
+    const record = await evaluate(b).finally(() => nowSpy.mockRestore());
+    expect(record.output.objectives["score"]).toBe(7);
+    expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(1);
+    const runs = evalRuns(b);
+    expect(runs).toHaveLength(2);
+    const [encode = [], decode = []] = runs;
+    expect([phaseOf(encode), phaseOf(decode)]).toEqual(["encode", "decode"]);
+    expect(nameOf(decode)).not.toBe(nameOf(encode));
+    expect(handoffMode).toBe(0o700);
+    expect(encode.some((a) => a.endsWith(":/workspace:ro"))).toBe(true);
+    expect(encode).not.toContain("--ipc");
+    expect(handoffMount(encode)).toBe(`${handoffHost(encode)}:/capsule/handoff:rw`);
+    expect(handoffMount(decode)).toBe(`${handoffHost(encode)}:/capsule/handoff:ro`);
+
+    // Decode = encode's exact authority (caps, AppArmor, read-only rootfs,
+    // fresh tmpfs mounts, resources), minus the workspace, plus private IPC.
+    const expected = encode
+      .filter((arg, index) => !arg.endsWith(":/workspace:ro") && !encode[index + 1]?.endsWith(":/workspace:ro"))
+      .map((arg) => {
+        if (arg === nameOf(encode)) return nameOf(decode);
+        if (arg === "HONE_EVAL_PHASE=encode") return "HONE_EVAL_PHASE=decode";
+        if (arg === handoffMount(encode)) return handoffMount(decode);
+        return arg;
+      });
+    expected.splice(expected.indexOf("--network") + 2, 0, "--ipc", "private");
+    expect(decode).toEqual(expected);
+
+    // One shared wall-clock cap: decode gets only what encode left.
+    expect(timeouts[0]).toBe(600_000);
+    expect(timeouts[1]).toBeLessThanOrEqual(600_000 - 120_000);
+    expect(timeouts[1]).toBeGreaterThan(0);
+    expect(reaped(b, nameOf(encode))).toBe(true);
+    expect(reaped(b, nameOf(decode))).toBe(true);
+    await expect(stat(handoffHost(encode))).rejects.toThrow(/ENOENT/);
+  });
+
+  it("an invalid encode result is final: no decode container, one invocation, handoff removed", async () => {
+    const b = await boot({ manifest: PHASED });
+    b.ctl.evalRun = () => json({ valid: false, objectives: {}, diagnostics: { summary: "compressor failed to build" } });
+    const record = await evaluate(b);
+    expect(record.output.valid).toBe(false);
+    const runs = evalRuns(b);
+    expect(runs).toHaveLength(1);
+    expect(phaseOf(runs[0] ?? [])).toBe("encode");
+    expect(reaped(b, nameOf(runs[0] ?? []))).toBe(true);
+    expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(1);
+    await expect(stat(handoffHost(runs[0] ?? []))).rejects.toThrow(/ENOENT/);
+  });
+
+  it.each([
+    ["an unknown phase marker", { honeEvalContinue: "verify" }, {}, /unknown continuation marker/],
+    ["a decorated marker", { ...MARKER, valid: true, objectives: { score: 9 } }, { "archive.bin": "x" }, /unknown continuation marker/],
+    ["a valid score without decoding", { valid: true, objectives: { score: 9 } }, { "archive.bin": "x" }, /valid final output/],
+    ["non-JSON output", "not json", { "archive.bin": "x" }, /encode phase emitted invalid JSON/],
+    ["an empty handoff", MARKER, {}, /without writing a handoff file/],
+    ["a handoff directory", MARKER, { nested: "dir" }, /non-regular entries: nested/],
+    ["a handoff symlink", MARKER, { link: "symlink" }, /non-regular entries: link/],
+  ] as const)("fails closed on %s before any decode container exists", async (_label, stdout, files, error) => {
+    const b = await boot({ manifest: PHASED });
+    b.ctl.evalRun = async (argv) => {
+      for (const [name, kind] of Object.entries(files)) {
+        const target = path.join(handoffHost(argv), name);
+        if (kind === "dir") await mkdir(target);
+        else if (kind === "symlink") await symlink("/etc/passwd", target);
+        else await writeFile(target, kind);
+      }
+      return typeof stdout === "string" ? fakeResult({ stdout: Buffer.from(stdout) }) : json(stdout);
+    };
+    await expect(evaluate(b)).rejects.toThrow(error);
+    const runs = evalRuns(b);
+    expect(runs).toHaveLength(1);
+    expect(reaped(b, nameOf(runs[0] ?? []))).toBe(true);
+    expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(1);
+    await expect(stat(handoffHost(runs[0] ?? []))).rejects.toThrow(/ENOENT/);
+  });
+
+  it("rejects a decode result that asks for another phase", async () => {
+    const b = await boot({ manifest: PHASED });
+    b.ctl.evalRun = async (argv) => {
+      if (phaseOf(argv) === "decode") return json({ ...MARKER, valid: true, objectives: { score: 1 } });
+      await writeFile(path.join(handoffHost(argv), "archive.bin"), "x");
+      return json(MARKER);
+    };
+    await expect(evaluate(b)).rejects.toThrow(/decode phase emitted a continuation marker/);
+    expect(evalRuns(b)).toHaveLength(2);
+  });
+
+  it("a timed-out decode phase reaps both containers, removes the handoff and burns exactly one invocation", async () => {
+    const b = await boot({ manifest: PHASED });
+    b.ctl.evalRun = async (argv) => {
+      if (phaseOf(argv) === "decode") return fakeResult({ exitCode: -1, timedOut: true });
+      await writeFile(path.join(handoffHost(argv), "archive.bin"), "x");
+      return json(MARKER);
+    };
+    await expect(evaluate(b)).rejects.toThrow(/evaluator decode phase timed out after 600s/);
+    const [encode = [], decode = []] = evalRuns(b);
+    expect(reaped(b, nameOf(encode))).toBe(true);
+    expect(reaped(b, nameOf(decode))).toBe(true);
+    expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(1);
+    await expect(stat(handoffHost(encode))).rejects.toThrow(/ENOENT/);
+  });
+
+  it("a timed-out encode phase never starts the decode container", async () => {
+    const b = await boot({ manifest: PHASED });
+    b.ctl.evalRun = () => fakeResult({ exitCode: -1, timedOut: true });
+    await expect(evaluate(b)).rejects.toThrow(/evaluator encode phase timed out after 600s/);
+    const runs = evalRuns(b);
+    expect(runs).toHaveLength(1);
+    expect(reaped(b, nameOf(runs[0] ?? []))).toBe(true);
+    await expect(stat(handoffHost(runs[0] ?? []))).rejects.toThrow(/ENOENT/);
+  });
+
+  it("quarantines the decode container's lease when it cannot be reaped, and still removes the handoff", async () => {
+    const b = await boot({ manifest: PHASED });
+    b.ctl.evalRun = async (argv) => {
+      if (phaseOf(argv) === "decode") {
+        b.ctl.rmFailFor.add(nameOf(argv));
+        return json(score(1));
+      }
+      await writeFile(path.join(handoffHost(argv), "archive.bin"), "x");
+      return json(MARKER);
+    };
+    await expect(evaluate(b)).rejects.toThrow(/evaluator cleanup failed/);
+    const [encode = [], decode = []] = evalRuns(b);
+    expect(b.events.find((event) => event.type === "evaluator.isolation.quarantined")).toMatchObject({
+      evaluatorContainer: nameOf(decode),
+    });
+    await expect(stat(handoffHost(encode))).rejects.toThrow(/ENOENT/);
+    b.ctl.rmFailFor.clear();
+  });
+});
+
 // ---------- live docker smoke ----------
 
 describe("live docker smoke (quota volume + full loop, no leaks)", () => {
@@ -4311,5 +4489,78 @@ describe("live docker smoke (quota volume + full loop, no leaks)", () => {
     expect(ps.stdout.toString("utf8").trim()).toBe("");
     const vols = await runCommand(["docker", "volume", "ls", "--filter", `label=hone.runId=${runId}`, "--format", "{{.Name}}"]);
     expect(vols.stdout.toString("utf8").trim()).toBe("");
+  }, 300_000);
+
+  it("two-phase: decode runs in a different container and IPC namespace, with no workspace, fresh tmpfs and a read-only handoff", async () => {
+    await waitForDocker();
+    await ensureImage(TEST_IMAGE);
+    // Each phase reports its own container (hostname) and mounts; encode
+    // relays its view through the trusted handoff file. IPC isolation is
+    // proven by state, not by the nsfs inode number: the kernel recycles
+    // that number once the encode container's namespace is destroyed.
+    const script = [
+      "set -eu",
+      "ipc=$(readlink /proc/self/ns/ipc)",
+      "ws=$(awk '$2==\"/workspace\"' /proc/mounts | wc -l | tr -d ' ')",
+      "if [ \"$HONE_EVAL_PHASE\" = encode ]; then",
+      "  echo encode-state > /tmp/encode-state",
+      "  : > /dev/mqueue/hone-encode-state",
+      "  test -r /workspace/answer.txt",
+      "  printf '%s %s %s\\n' \"$(hostname)\" \"$ipc\" \"$ws\" > /capsule/handoff/encode.txt",
+      "  printf '{\"honeEvalContinue\":\"decode\"}'",
+      "  exit 0",
+      "fi",
+      "read -r eh eipc ews < /capsule/handoff/encode.txt",
+      "tmpfs=$(awk '$2==\"/tmp\"{print $3}' /proc/mounts)",
+      "hopts=$(awk '$2==\"/capsule/handoff\"{print $4}' /proc/mounts)",
+      "leak=0; [ -e /tmp/encode-state ] && leak=1",
+      "mq=0; [ -e /dev/mqueue/hone-encode-state ] && mq=1",
+      "hw=0; (: > /capsule/handoff/w) 2>/dev/null && hw=1",
+      "printf '{\"valid\":true,\"objectives\":{\"score\":1},\"diagnostics\":{\"encodeHost\":\"%s\",\"decodeHost\":\"%s\",\"encodeIpc\":\"%s\",\"decodeIpc\":\"%s\",\"encodeWorkspaceMounts\":%s,\"decodeWorkspaceMounts\":%s,\"decodeTmpFs\":\"%s\",\"handoffOpts\":\"%s\",\"encodeTmpStateVisible\":%s,\"encodeIpcStateVisible\":%s,\"handoffWritable\":%s}}' \"$eh\" \"$(hostname)\" \"$eipc\" \"$ipc\" \"$ews\" \"$ws\" \"$tmpfs\" \"$hopts\" \"$leak\" \"$mq\" \"$hw\"",
+    ].join("\n");
+
+    const runId = `run-live-phases-${randomBytes(4).toString("hex")}`;
+    const runDir = path.join(tmpBase, "runs", runId);
+    const casDir = path.join(tmpBase, "cas", runId);
+    await mkdir(runDir, { recursive: true });
+    const cas = new CasStore(casDir);
+    await cas.putBuffer(baselineTar);
+    const broker = new Broker({
+      runId,
+      manifest: makeManifest({ evalPhases: ["encode", "decode"], evalEntrypoint: ["sh", "-c", script] }),
+      capsuleRootDir,
+      baselineArtifactHash: baselineHash,
+      admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
+      optimizerDigest: TEST_OPTIMIZER_DIGEST,
+      holdoutLedgerPath: path.join(runDir, "holdout-ledger.ndjson"),
+      executionImage: TEST_IMAGE,
+      runDir,
+      casDir,
+      onEvent: () => {},
+    });
+    await broker.init();
+    let diagnostics: Record<string, unknown> | undefined;
+    try {
+      const record = await broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, ADMIN);
+      expect(record.output.valid).toBe(true);
+      diagnostics = record.output.diagnostics;
+      expect((await readdir(path.join(runDir, "tmp"))).filter((name) => name.startsWith("handoff-"))).toEqual([]);
+    } finally {
+      await broker.close();
+    }
+    expect(diagnostics?.["decodeHost"]).not.toBe(diagnostics?.["encodeHost"]);
+    // POSIX message queues live in the IPC namespace: encode's queue is
+    // invisible to decode only if decode has a different one.
+    expect(diagnostics).toMatchObject({
+      encodeWorkspaceMounts: 1,
+      decodeWorkspaceMounts: 0,
+      decodeTmpFs: "tmpfs",
+      encodeTmpStateVisible: 0,
+      encodeIpcStateVisible: 0,
+      handoffWritable: 0,
+    });
+    expect(String(diagnostics?.["handoffOpts"])).toMatch(/^ro,/);
+    const ps = await runCommand(["docker", "ps", "-a", "--filter", `label=hone.runId=${runId}`, "--format", "{{.ID}}"]);
+    expect(ps.stdout.toString("utf8").trim()).toBe("");
   }, 300_000);
 });

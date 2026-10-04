@@ -81,6 +81,23 @@ export const EvaluatorTimeoutSec = z
   .max(MAX_EVALUATOR_TIMEOUT_SEC);
 export type EvaluatorTimeoutSec = z.infer<typeof EvaluatorTimeoutSec>;
 
+/** Evaluator phases a two-phase capsule runs, each in its own fresh container. */
+export const EvalPhase = z.enum(["encode", "decode"]);
+export type EvalPhase = z.infer<typeof EvalPhase>;
+/**
+ * The only admitted phase protocol: an `encode` container that sees the
+ * candidate workspace, then a fresh `decode` container that sees only the
+ * trusted handoff files the encode phase's scorer wrote.
+ */
+export const EvalPhases = z.tuple([z.literal(EvalPhase.enum.encode), z.literal(EvalPhase.enum.decode)]);
+export type EvalPhases = z.infer<typeof EvalPhases>;
+/**
+ * The exact stdout an `encode` phase emits to request the `decode` phase.
+ * Anything else that is not an invalid EvaluatorOutput fails closed.
+ */
+export const EvalPhaseContinue = z.object({ honeEvalContinue: z.literal(EvalPhase.enum.decode) }).strict();
+export type EvalPhaseContinue = z.infer<typeof EvalPhaseContinue>;
+
 export const CapsuleManifest = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION),
   /** Content-addressed capsule id: "cap_" + first 12 hex of sha256 over canonical manifest sans id. */
@@ -121,6 +138,15 @@ export const CapsuleManifest = z.object({
    * campaign's frozen `evaluatorTimeoutSec` governs its own runs instead.
    */
   evaluatorTimeoutSec: EvaluatorTimeoutSec.optional(),
+  /**
+   * Optional two-phase evaluation. Absent runs `evalEntrypoint` once. When
+   * set, the broker runs it in an `encode` container (HONE_EVAL_PHASE=encode,
+   * workspace and a writable /capsule/handoff) and, on the exact
+   * EvalPhaseContinue marker, again in a fresh `decode` container
+   * (HONE_EVAL_PHASE=decode, private IPC, no workspace, handoff read-only).
+   * Core (inside the digest): it changes what the evaluator measures.
+   */
+  evalPhases: EvalPhases.optional(),
   /**
    * Reference to the persisted diagnostic-ordering report proving the
    * evaluator discriminates (broken < naive < baseline < improved, split

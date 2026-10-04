@@ -91,4 +91,14 @@ describe("ordering measurement evaluator timeout", () => {
     const dir = capsule({ evaluatorTimeoutSec: 30 });
     expect(() => provisionalManifest(loadCapsuleConfig(dir), BASELINE_HASH, GROUPS, dir)).toThrow();
   });
+
+  it("measures a two-phase capsule through the same phase protocol and refuses any other", () => {
+    const dir = capsule({ evalPhases: ["encode", "decode"] });
+    expect(provisionalManifest(loadCapsuleConfig(dir), BASELINE_HASH, GROUPS, dir).evalPhases).toEqual(["encode", "decode"]);
+    const plain = capsule({});
+    expect(provisionalManifest(loadCapsuleConfig(plain), BASELINE_HASH, GROUPS, plain).evalPhases).toBeUndefined();
+    expect(() => loadCapsuleConfig(capsule({ evalPhases: "encode" }))).toThrow('invalid or missing "evalPhases"');
+    const reversed = capsule({ evalPhases: ["decode", "encode"] });
+    expect(() => provisionalManifest(loadCapsuleConfig(reversed), BASELINE_HASH, GROUPS, reversed)).toThrow();
+  });
 });

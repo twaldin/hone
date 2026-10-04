@@ -139,6 +139,26 @@ describe("tamper rejection", () => {
     expect(() => scaffold(clone)).toThrow();
   });
 
+  it("emits the two-phase evaluator protocol into the digest and refuses any other phase list", () => {
+    const single = scaffold(taskDir());
+    expect(single.evalPhases).toBeUndefined();
+    const withPhases = (phases: unknown): string => {
+      const clone = taskDir();
+      const configPath = join(clone, "capsule.config.json");
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      config.evalPhases = phases;
+      writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+      return clone;
+    };
+    const phased = scaffold(withPhases(["encode", "decode"]));
+    expect(phased.evalPhases).toEqual(["encode", "decode"]);
+    expect(phased.id).not.toBe(single.id);
+    for (const phases of [["decode", "encode"], ["encode"], ["encode", "decode", "decode"], ["encode", "verify"], []]) {
+      expect(() => scaffold(withPhases(phases))).toThrow();
+    }
+    expect(() => scaffold(withPhases("encode,decode"))).toThrow('invalid or missing "evalPhases"');
+  });
+
   it("a tampered manifest no longer derives its own id", () => {
     const manifest = scaffold(taskDir());
     expect(deriveCapsuleId(manifest)).toBe(manifest.id);

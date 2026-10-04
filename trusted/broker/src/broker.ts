@@ -35,6 +35,8 @@ import {
   EvaluatorIsolationRecord,
   EvaluationRecord,
   EvaluatorOutput,
+  EvalPhaseContinue,
+  type EvalPhase,
   ExecParams,
   ExecResult,
   DEFAULT_EVALUATOR_TIMEOUT_SEC,
@@ -1722,6 +1724,9 @@ export class Broker {
         ? "eval"
         : `eval-${createHash("sha256").update(config.measurementEpoch).digest("hex")}`;
     this.evaluationStrategy = config.evaluationStrategy;
+    if (this.evaluationStrategy !== undefined && this.manifest.evalPhases !== undefined) {
+      throw new BrokerError("INTERNAL", "a trusted evaluation strategy cannot run a two-phase capsule evaluator");
+    }
     if (config.recursive === undefined) {
       this.recursive = undefined;
     } else {
@@ -3335,6 +3340,18 @@ export class Broker {
   }
 
   /**
+   * Fresh per-invocation handoff directory for a two-phase evaluator: broker
+   * owned, mode 0700, under the host-only tmp parent. Non-recursive mkdir
+   * refuses any pre-existing path, so no earlier state can be inherited.
+   */
+  private async createHandoffDir(): Promise<string> {
+    const dir = path.join(this.tmpDir, `handoff-${randomUUID()}`);
+    await mkdir(dir, { mode: 0o700 });
+    await chmod(dir, 0o700); // umask-independent
+    return dir;
+  }
+
+  /**
    * Asset confidentiality (M0 blocker): the selected group's assets are
    * STAGED — copied, never bind-mounted from the capsule root — into a
    * per-evaluation host directory that becomes the SINGLE read-only source
@@ -4340,8 +4357,19 @@ export class Broker {
     let res: CmdResult;
     let startedMs = 0;
     const evalName = `hone-${this.safeRunId}-eval-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    // Two-phase capsules: a FRESH container per phase. The decode container's
+    // name is derived so every reap path can name both.
+    const phases = this.manifest.evalPhases;
+    const decodeName = `${evalName}-decode`;
+    let handoffDir: string | undefined;
+    let finalPhase: EvalPhase | undefined;
+    let earlyOutput: EvaluatorOutput | undefined;
 
     try {
+      // Trusted-side setup, like asset staging: a fresh broker-owned 0700
+      // directory under the host-only tmp parent. Only the encode phase's
+      // root scorer may write it; the decode phase mounts it read-only.
+      if (phases !== undefined) handoffDir = await this.createHandoffDir();
       // Evaluators whose frozen contract consumes CAPSULE_WORKER_UID receive a
       // unique real uid. Frozen hard-coders retain uid 2000 behind the
       // starvation-bounded host FIFO. Queue waiting is real run wall clock,
@@ -4386,14 +4414,22 @@ export class Broker {
       this.spent.evaluatorInvocations += 1;
       this.syncRecursiveUsage();
 
-      const argv = [
+      const workerUid = isolation.workerUid;
+      const handoff = handoffDir;
+      // One argv shape for every evaluator container. Single-phase argv is
+      // unchanged. A phased capsule adds HONE_EVAL_PHASE and the handoff bind;
+      // its decode container also gets private IPC and NO workspace mount, so
+      // it sees only the frozen baseline, staged assets and the trusted
+      // handoff files — never candidate source or encode-time state.
+      const evaluatorArgv = (name: string, phase: EvalPhase | undefined): string[] => [
         "docker",
         "run",
         "--rm",
         "--name",
-        evalName,
+        name,
         "--network",
         "none",
+        ...(phase === "decode" ? ["--ipc", "private"] : []),
         "--label",
         `hone.runId=${this.config.runId}`,
         ...this.resourceArgs(),
@@ -4441,15 +4477,15 @@ export class Broker {
         "-e",
         `HONE_SEED=${params.seed}`,
         "-e",
-        `CAPSULE_WORKER_UID=${isolation.workerUid}`,
+        `CAPSULE_WORKER_UID=${workerUid}`,
         "-e",
-        `CAPSULE_WORKER_GID=${isolation.workerUid}`,
+        `CAPSULE_WORKER_GID=${workerUid}`,
         "-e",
         // libmount's fd-based move_mount path is denied by this host kernel.
         // Force the classic mount(2) path for trusted evaluator cgroup setup.
         "LIBMOUNT_FORCE_MOUNT2=always",
-        "-v",
-        `${workspaceDir}:/workspace:ro`,
+        ...(phase === undefined ? [] : ["-e", `HONE_EVAL_PHASE=${phase}`]),
+        ...(phase === "decode" ? [] : ["-v", `${workspaceDir}:/workspace:ro`]),
         "-v",
         `${baselineDir}:/trusted/baseline:ro`,
         // Asset confidentiality: the assets bind mount is parented under a
@@ -4461,8 +4497,14 @@ export class Broker {
         "/capsule:mode=0700,size=1m",
         "-v",
         `${stageDir}:/capsule/assets:ro`,
+        // The handoff shares the same root-only /capsule parent: candidate
+        // workers of either phase cannot traverse to it.
+        ...(phase === undefined || handoff === undefined
+          ? []
+          : ["-v", `${handoff}:/capsule/handoff:${phase === "encode" ? "rw" : "ro"}`]),
+        this.runtimeIdentity.executionImage,
+        ...this.manifest.evalEntrypoint,
       ];
-      argv.push(this.runtimeIdentity.executionImage, ...this.manifest.evalEntrypoint);
 
       // Registration is SYNCHRONOUS with the spawn: close() either sees this
       // name in the tracked set and reaps it, or this op threw before
@@ -4470,66 +4512,106 @@ export class Broker {
       // runs the reap finally below, so a journal append failure (which
       // throws ABOVE, before registration) can never strand a phantom
       // tracked name or repeat staging against a poisoned journal.
-      if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
-      this.trackedContainers.add(evalName);
-      startedMs = Date.now();
-      try {
-        res = await this.run(argv, { timeoutMs: this.evalTimeoutSec * 1000, maxOutputBytes: 32 * 1024 * 1024 });
-      } finally {
-        // A timed-out `docker run` kills only the local CLI; the container (and
-        // the adversarial code inside it) keeps running. Always reap by name —
-        // a no-op for containers --rm already removed.
-        let cleanupError: string | undefined;
+      const runTracked = async (name: string, argv: string[], timeoutMs: number): Promise<CmdResult> => {
+        if (this.closing) throw new BrokerError("INTERNAL", "broker is closed");
+        this.trackedContainers.add(name);
         try {
-          const retired = await this.removeTrackedContainer(evalName);
-          if (!containerGone(retired)) {
-            cleanupError = stderrText(retired) || "Docker did not prove the evaluator container absent";
+          return await this.run(argv, { timeoutMs, maxOutputBytes: 32 * 1024 * 1024 });
+        } finally {
+          // A timed-out `docker run` kills only the local CLI; the container (and
+          // the adversarial code inside it) keeps running. Always reap by name —
+          // a no-op for containers --rm already removed.
+          let cleanupError: string | undefined;
+          try {
+            const retired = await this.removeTrackedContainer(name);
+            if (!containerGone(retired)) {
+              cleanupError = stderrText(retired) || "Docker did not prove the evaluator container absent";
+            }
+          } catch (error) {
+            cleanupError = error instanceof Error ? error.message : String(error);
           }
-        } catch (error) {
-          cleanupError = error instanceof Error ? error.message : String(error);
-        }
-        if (cleanupError !== undefined) {
-          if (isolation === undefined || isolationRecord === undefined) {
-            throw new BrokerError("INTERNAL", "evaluator cleanup failed before isolation was recorded");
+          if (cleanupError !== undefined) {
+            if (isolation === undefined || isolationRecord === undefined) {
+              throw new BrokerError("INTERNAL", "evaluator cleanup failed before isolation was recorded");
+            }
+            // The container may still be running candidate code. Retain the
+            // kernel-held uid/FIFO lease, and durably name the quarantine so the
+            // next invocation cannot inherit its RLIMIT_NPROC pool.
+            this.quarantinedEvaluatorLeases.set(name, { lease: isolation, isolation: isolationRecord });
+            isolationQuarantined = true;
+            // The admitted invocation is complete enough to diagnose. Publish
+            // its earlier transaction before the later quarantine fact; the
+            // throw below skips the ordinary success-path publication.
+            this.publish(invocationEvents);
+            this.emit({
+              type: "evaluator.isolation.quarantined",
+              isolation: isolationRecord,
+              evaluatorContainer: name,
+              cleanupError: (cleanupError || "Docker cleanup failed without an error message").slice(0, 4096),
+            });
+            throw new BrokerError("INTERNAL", `evaluator cleanup failed: ${cleanupError}`);
           }
-          // The container may still be running candidate code. Retain the
-          // kernel-held uid/FIFO lease, and durably name the quarantine so the
-          // next invocation cannot inherit its RLIMIT_NPROC pool.
-          this.quarantinedEvaluatorLeases.set(evalName, { lease: isolation, isolation: isolationRecord });
-          isolationQuarantined = true;
-          // The admitted invocation is complete enough to diagnose. Publish
-          // its earlier transaction before the later quarantine fact; the
-          // throw below skips the ordinary success-path publication.
-          this.publish(invocationEvents);
-          this.emit({
-            type: "evaluator.isolation.quarantined",
-            isolation: isolationRecord,
-            evaluatorContainer: evalName,
-            cleanupError: (cleanupError || "Docker cleanup failed without an error message").slice(0, 4096),
-          });
-          throw new BrokerError("INTERNAL", `evaluator cleanup failed: ${cleanupError}`);
         }
+      };
 
+      startedMs = Date.now();
+      if (phases === undefined) {
+        res = await runTracked(evalName, evaluatorArgv(evalName, undefined), this.evalTimeoutSec * 1000);
+      } else {
+        // Both phases share ONE invocation charge (burned above) and ONE
+        // wall-clock cap: decode receives only what encode left.
+        finalPhase = "encode";
+        res = await runTracked(evalName, evaluatorArgv(evalName, "encode"), this.evalTimeoutSec * 1000);
+        if (!res.timedOut && res.exitCode === 0) {
+          const encoded = parseEncodePhaseOutput(res.stdout);
+          if (encoded.kind === "final") {
+            earlyOutput = encoded.output;
+          } else {
+            if (handoff === undefined) throw new BrokerError("INTERNAL", "two-phase evaluator lacks a handoff directory");
+            await assertTrustedHandoff(handoff);
+            const remainingMs = this.evalTimeoutSec * 1000 - (Date.now() - startedMs);
+            if (remainingMs <= 0) {
+              throw new BrokerError("INTERNAL", `evaluator timed out after ${this.evalTimeoutSec}s before the decode phase`);
+            }
+            finalPhase = "decode";
+            res = await runTracked(decodeName, evaluatorArgv(decodeName, "decode"), remainingMs);
+          }
+        }
       }
     } finally {
       try {
         if (!isolationQuarantined) await isolation?.release();
       } finally {
-        // Confidentiality teardown on EVERY path (success, error, timeout):
-        // staged fixtures disappear before any untrusted process runs again.
-        await rm(stageDir, { recursive: true, force: true });
+        try {
+          // Confidentiality teardown on EVERY path (success, error, timeout):
+          // staged fixtures disappear before any untrusted process runs again.
+          await rm(stageDir, { recursive: true, force: true });
+        } finally {
+          // Encode-time state never outlives the invocation.
+          if (handoffDir !== undefined) await rm(handoffDir, { recursive: true, force: true });
+        }
       }
     }
     const durationMs = Date.now() - startedMs;
     this.publish(invocationEvents);
-    if (res.timedOut) throw new BrokerError("INTERNAL", `evaluator timed out after ${this.evalTimeoutSec}s`);
-    if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `evaluator exited ${res.exitCode}: ${stderrText(res)}`);
+    const phaseLabel = finalPhase === undefined ? "" : ` ${finalPhase} phase`;
+    if (res.timedOut) throw new BrokerError("INTERNAL", `evaluator${phaseLabel} timed out after ${this.evalTimeoutSec}s`);
+    if (res.exitCode !== 0) throw new BrokerError("INTERNAL", `evaluator${phaseLabel} exited ${res.exitCode}: ${stderrText(res)}`);
 
     let output: EvaluatorOutput;
-    try {
-      output = EvaluatorOutput.parse(JSON.parse(res.stdout.toString("utf8")));
-    } catch (err) {
-      throw new BrokerError("INTERNAL", `evaluator emitted invalid EvaluatorOutput: ${String(err)}`);
+    if (earlyOutput !== undefined) {
+      output = earlyOutput;
+    } else {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(res.stdout.toString("utf8"));
+        output = EvaluatorOutput.parse(raw);
+      } catch (err) {
+        throw new BrokerError("INTERNAL", `evaluator${phaseLabel} emitted invalid EvaluatorOutput: ${String(err)}`);
+      }
+      if (finalPhase === "decode" && hasContinueMarker(raw)) {
+        throw new BrokerError("INTERNAL", "evaluator decode phase emitted a continuation marker; there is no later phase");
+      }
     }
     if (isolationRecord === undefined) {
       throw new BrokerError("INTERNAL", "successful evaluator invocation lacks isolation provenance");
@@ -6215,4 +6297,52 @@ function assertAssetPathsResolveSafely(manifest: CapsuleManifest, capsuleRootDir
 
 function stderrText(res: CmdResult): string {
   return res.stderr.toString("utf8").slice(0, 2_000);
+}
+
+function hasContinueMarker(raw: unknown): raw is Record<string, unknown> {
+  return raw !== null && typeof raw === "object" && !Array.isArray(raw) && Object.hasOwn(raw, "honeEvalContinue");
+}
+
+/**
+ * Encode-phase stdout is either the exact EvalPhaseContinue marker or an
+ * early invalid final EvaluatorOutput. A valid score without a decode phase,
+ * an unknown or decorated marker, or anything unparseable fails closed.
+ */
+function parseEncodePhaseOutput(stdout: Buffer): { kind: "continue" } | { kind: "final"; output: EvaluatorOutput } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stdout.toString("utf8"));
+  } catch (err) {
+    throw new BrokerError("INTERNAL", `evaluator encode phase emitted invalid JSON: ${String(err)}`);
+  }
+  if (hasContinueMarker(raw)) {
+    if (!EvalPhaseContinue.safeParse(raw).success) {
+      throw new BrokerError("INTERNAL", `evaluator encode phase emitted an unknown continuation marker: ${JSON.stringify(raw).slice(0, 200)}`);
+    }
+    return { kind: "continue" };
+  }
+  const parsed = EvaluatorOutput.safeParse(raw);
+  if (!parsed.success) {
+    throw new BrokerError("INTERNAL", `evaluator encode phase emitted invalid EvaluatorOutput: ${String(parsed.error)}`);
+  }
+  if (parsed.data.valid) {
+    throw new BrokerError("INTERNAL", "evaluator encode phase emitted a valid final output; only an invalid result may end evaluation before decode");
+  }
+  return { kind: "final", output: parsed.data };
+}
+
+/**
+ * The decode phase consumes only regular files the encode phase's root
+ * scorer wrote at the handoff top level. Directories, links and devices —
+ * or an empty handoff — fail closed before the decode container exists.
+ */
+async function assertTrustedHandoff(handoffDir: string): Promise<void> {
+  const entries = await readdir(handoffDir, { withFileTypes: true });
+  if (entries.length === 0) {
+    throw new BrokerError("INTERNAL", "evaluator encode phase requested decode without writing a handoff file");
+  }
+  const rejected = entries.filter((entry) => !entry.isFile()).map((entry) => entry.name);
+  if (rejected.length > 0) {
+    throw new BrokerError("INTERNAL", `evaluator encode phase handoff holds non-regular entries: ${rejected.join(", ").slice(0, 500)}`);
+  }
 }

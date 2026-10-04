@@ -115,6 +115,8 @@ interface CapsuleConfig {
   sandbox?: { memoryBytes: number; cpus?: number };
   /** Per-invocation evaluator wall cap (seconds); bounds are enforced by CapsuleManifest. */
   evaluatorTimeoutSec?: number;
+  /** Two-phase evaluator protocol; the exact tuple is enforced by CapsuleManifest. */
+  evalPhases?: string[];
   meta?: Record<string, unknown>;
 }
 
@@ -137,7 +139,7 @@ function parseCapsuleConfig(raw: unknown): CapsuleConfig {
     throw new Error(`capsule.config.json: invalid or missing "${field}"`);
   };
   if (!isRecord(raw)) return fail("<root>");
-  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, meta, sandbox, evaluatorTimeoutSec } = raw;
+  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, meta, sandbox, evaluatorTimeoutSec, evalPhases } = raw;
   if (typeof objective !== "string" || objective.length === 0) return fail("objective");
   if (typeof image !== "string" || image.length === 0) return fail("image");
   if (!isStringArray(evalEntrypoint) || evalEntrypoint.length === 0) return fail("evalEntrypoint");
@@ -162,6 +164,7 @@ function parseCapsuleConfig(raw: unknown): CapsuleConfig {
   }
   if (meta !== undefined && !isRecord(meta)) return fail("meta");
   if (evaluatorTimeoutSec !== undefined && typeof evaluatorTimeoutSec !== "number") return fail("evaluatorTimeoutSec");
+  if (evalPhases !== undefined && !isStringArray(evalPhases)) return fail("evalPhases");
   return {
     objective,
     image,
@@ -179,6 +182,7 @@ function parseCapsuleConfig(raw: unknown): CapsuleConfig {
         }
       : {}),
     ...(evaluatorTimeoutSec === undefined ? {} : { evaluatorTimeoutSec }),
+    ...(evalPhases === undefined ? {} : { evalPhases }),
     ...(meta !== undefined ? { meta } : {}),
   };
 }
@@ -211,6 +215,7 @@ export function scaffold(taskDirArg: string): CapsuleManifest {
     budget: config.budget,
     ...(config.sandbox === undefined ? {} : { sandbox: config.sandbox }),
     ...(config.evaluatorTimeoutSec === undefined ? {} : { evaluatorTimeoutSec: config.evaluatorTimeoutSec }),
+    ...(config.evalPhases === undefined ? {} : { evalPhases: config.evalPhases }),
     diagnosticOrdering: loadDiagnosticOrdering(taskDir, config.diagnosticOrdering.path),
     contentHashes,
     ...(config.meta !== undefined ? { meta: config.meta } : {}),
