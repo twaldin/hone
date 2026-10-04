@@ -6,8 +6,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import {
   M2_CALIBRATION_DEFERRED_BINDING,
-  M2_INNER_MODEL_ROUTE,
-  M2_OUTER_MODEL_ROUTE,
+  DEFAULT_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
   M2_PANEL_B_TASK_IDS,
   MetaCampaignConfigV2,
@@ -555,15 +554,33 @@ describe("generateM2LaunchDraft", () => {
     );
   });
 
-  it("populates both frozen observation routes (outer=sol, inner=terra)", () => {
+  it("drafts both tiers on the default route unless routes and evaluator timeout are configured", () => {
     const draft = generateM2LaunchDraft(fixture().inputs);
     expect(draft.config.routing).toEqual({
-      outerMutation: M2_OUTER_MODEL_ROUTE,
-      innerMutation: M2_INNER_MODEL_ROUTE,
+      outerMutation: DEFAULT_MODEL_ROUTE,
+      innerMutation: DEFAULT_MODEL_ROUTE,
     });
-    expect(draft.config.modelObservation.outerRequestedRoute).toBe(M2_OUTER_MODEL_ROUTE);
-    expect(draft.config.modelObservation.innerRequestedRoute).toBe(M2_INNER_MODEL_ROUTE);
+    expect(draft.config.modelObservation.outerRequestedRoute).toBe(DEFAULT_MODEL_ROUTE);
+    expect(draft.config.modelObservation.innerRequestedRoute).toBe(DEFAULT_MODEL_ROUTE);
     expect(draft.config.modelObservation.driftSentinel).toBe(true);
+    expect(draft.config.evaluatorTimeoutSec).toBe(2700);
+
+    const { inputs } = fixture();
+    const configured = generateM2LaunchDraft({
+      ...inputs,
+      parameters: {
+        ...inputs.parameters,
+        routes: { outer: { model: "openai-codex/gpt-6-astra", reasoningEffort: "high" }, inner: { model: DEFAULT_MODEL_ROUTE } },
+        evaluatorTimeoutSec: 28_800,
+      },
+    });
+    expect(configured.config.routing).toEqual({
+      outerMutation: "openai-codex/gpt-6-astra",
+      innerMutation: DEFAULT_MODEL_ROUTE,
+      outerReasoningEffort: "high",
+    });
+    expect(configured.config.modelObservation.outerRequestedRoute).toBe("openai-codex/gpt-6-astra");
+    expect(configured.config.evaluatorTimeoutSec).toBe(28_800);
   });
 
   it("is deterministic for identical inputs", () => {

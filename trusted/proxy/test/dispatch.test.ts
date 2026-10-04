@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
+import { DEFAULT_CAMPAIGN_MODEL_ROUTES } from "@hone/schema";
 import {
   createProxy,
   DEFAULT_DURABLE_IO,
@@ -362,6 +363,7 @@ describe("dispatch journal — intent barrier", () => {
     const replayedPauseIds: string[] = [];
     const resumedPauseIds: string[] = [];
     const b = await boot(dirs, upstream.port, {
+      campaignRoutes: DEFAULT_CAMPAIGN_MODEL_ROUTES,
       recordCampaignPause: (signal) => {
         replayedPauseIds.push(signal.pauseId);
       },

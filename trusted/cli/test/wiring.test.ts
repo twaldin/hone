@@ -34,15 +34,13 @@ function soleRunConfig(root: string): RunConfig {
 }
 
 describe("bare run: default mutation route", () => {
-  it("a config-less run defaults the mutation route to glm-5.2", async () => {
+  it("a config-less run defaults the mutation route to openai-codex/gpt-6.1-sol", async () => {
     const root = makeRoot();
     makeCapsule(root);
     const { io } = makeIo(root, { HONE_STUB_EPISODES: "1", HONE_MODEL_ID: undefined });
     expect(await cliRunCommand(["capsule", "--headless", "--backend", "stub"], io)).toBe(0);
     const config = soleRunConfig(root);
-    expect(config.routing["mutation"]?.model).toBe("glm-5.2");
-    // The upstream base URL stays the proxy's single configured default.
-    expect(config.routing["mutation"]?.upstreamBaseUrl).toBeUndefined();
+    expect(config.routing["mutation"]).toEqual({ model: "openai-codex/gpt-6.1-sol" });
   });
 
   it("HONE_MODEL_ID overrides the default model id", async () => {
@@ -53,13 +51,26 @@ describe("bare run: default mutation route", () => {
     expect(soleRunConfig(root).routing["mutation"]?.model).toBe("custom-model-7");
   });
 
-  it("an explicit --config mutation route wins over the default", async () => {
+  it("an explicit --config mutation route and reasoning effort win over the default and are sealed", async () => {
     const root = makeRoot();
     makeCapsule(root);
-    writeFileSync(join(root, "cfg.json"), JSON.stringify({ routing: { mutation: { model: "picked-explicitly" } } }));
+    writeFileSync(join(root, "cfg.json"), JSON.stringify({
+      routing: { mutation: { model: "openai-codex/gpt-6-astra", reasoningEffort: "xhigh" } },
+    }));
     const { io } = makeIo(root, { HONE_STUB_EPISODES: "1", HONE_MODEL_ID: "ignored" });
     expect(await cliRunCommand(["capsule", "--headless", "--backend", "stub", "--config", "cfg.json"], io)).toBe(0);
-    expect(soleRunConfig(root).routing["mutation"]?.model).toBe("picked-explicitly");
+    expect(soleRunConfig(root).routing["mutation"]).toEqual({ model: "openai-codex/gpt-6-astra", reasoningEffort: "xhigh" });
+  });
+
+  it("refuses an unknown reasoning effort before any run state exists", async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    writeFileSync(join(root, "cfg.json"), JSON.stringify({
+      routing: { mutation: { model: "openai-codex/gpt-6.1-sol", reasoningEffort: "extreme" } },
+    }));
+    const { io } = makeIo(root, { HONE_STUB_EPISODES: "1" });
+    await expect(cliRunCommand(["capsule", "--headless", "--backend", "stub", "--config", "cfg.json"], io)).rejects.toThrow();
+    expect(existsSync(join(root, ".hone-runs"))).toBe(false);
   });
 
   it("seals a schema-valid session no-yield override from --config into the run", async () => {
@@ -115,7 +126,7 @@ describe("promotion rule: frozen into runconfig persistence at campaign start", 
 });
 
 describe("trusted proxy role capabilities", () => {
-  it("issues frozen outer/author/inner roles while retaining mutation only for legacy sessions", () => {
+  it("issues campaign outer/author/inner roles from sealed routes while retaining mutation for plain runs", () => {
     const issued: string[] = [];
     const proxy = {
       tokenFor: (role: string): string => {
@@ -124,26 +135,31 @@ describe("trusted proxy role capabilities", () => {
       },
     };
     const routing = { mutation: { model: "legacy-mutable-model" } };
+    const routes = {
+      outer: { model: "openai-codex/gpt-6-astra", reasoningEffort: "high" as const },
+      inner: { model: "openai-codex/gpt-6.1-sol" },
+    };
     expect(issueProxySessionCapability(proxy, routing)).toEqual({
       role: "mutation",
       model: "legacy-mutable-model",
       token: "token-mutation",
     });
-    expect(issueProxySessionCapability(proxy, routing, "outer-optimizer")).toEqual({
+    expect(issueProxySessionCapability(proxy, routing, "outer-optimizer", routes)).toEqual({
       role: "outer-optimizer",
-      model: "openai-codex/gpt-5.6-sol",
+      model: "openai-codex/gpt-6-astra",
       token: "token-outer-optimizer",
     });
-    expect(issueProxySessionCapability(proxy, routing, "capsule-author")).toEqual({
+    expect(issueProxySessionCapability(proxy, routing, "capsule-author", routes)).toEqual({
       role: "capsule-author",
-      model: "openai-codex/gpt-5.6-sol",
+      model: "openai-codex/gpt-6-astra",
       token: "token-capsule-author",
     });
-    expect(issueProxySessionCapability(proxy, routing, "inner-capsule-improvement")).toEqual({
+    expect(issueProxySessionCapability(proxy, routing, "inner-capsule-improvement", routes)).toEqual({
       role: "inner-capsule-improvement",
-      model: "openai-codex/gpt-5.6-luna",
+      model: "openai-codex/gpt-6.1-sol",
       token: "token-inner-capsule-improvement",
     });
+    expect(() => issueProxySessionCapability(proxy, routing, "outer-optimizer")).toThrow(/sealed campaign model routes/);
     expect(issued).toEqual([
       "mutation",
       "outer-optimizer",
@@ -211,6 +227,7 @@ describe("image wiring: manifest.image is THE image, no environment override", (
       env: {
         PATH: process.env["PATH"] ?? "",
         HONE_EGRESS: "network", // exercise the relay container path
+        HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9",
         HONE_MUTATION_IMAGE: "evil:latest", // MUST be ignored
       },
       // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.

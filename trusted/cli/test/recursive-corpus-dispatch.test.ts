@@ -9,7 +9,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { Broker, CasStore, packDirAsArtifact } from "@hone/broker";
 import { metaCampaignConfigHash, type MetaWorkIdentity } from "@hone/meta";
 import {
-  CapsuleManifest, M2_INNER_MODEL_ROUTE, M2_OUTER_MODEL_ROUTE,
+  CapsuleManifest, LEGACY_M2_INNER_MODEL_ROUTE, LEGACY_M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS, M2_PANEL_B_TASK_IDS, MetaCampaignConfigV1, MetaCampaignConfigV2,
   QueryCorpusParams, SpawnRunParams, canonicalJson, capsuleDigest,
   type BudgetEnvelope, type MetaCampaignConfigV1 as LegacyConfig,
@@ -138,10 +138,10 @@ function buildConfig(stage: "A" | "B"): RecursiveConfig {
     },
     train,
     holdout,
-    routing: { outerMutation: M2_OUTER_MODEL_ROUTE, innerMutation: M2_INNER_MODEL_ROUTE },
+    routing: { outerMutation: LEGACY_M2_OUTER_MODEL_ROUTE, innerMutation: LEGACY_M2_INNER_MODEL_ROUTE },
     modelObservation: {
-      outerRequestedRoute: M2_OUTER_MODEL_ROUTE,
-      innerRequestedRoute: M2_INNER_MODEL_ROUTE,
+      outerRequestedRoute: LEGACY_M2_OUTER_MODEL_ROUTE,
+      innerRequestedRoute: LEGACY_M2_INNER_MODEL_ROUTE,
       identity: "alias-observation",
       recordResponseModel: true,
       recordProviderFingerprint: true,

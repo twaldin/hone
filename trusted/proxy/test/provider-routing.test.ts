@@ -3,9 +3,11 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  M2_INNER_MODEL_ROUTE,
-  M2_OUTER_MODEL_ROUTE,
+  LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
+  LEGACY_M2_INNER_MODEL_ROUTE,
+  LEGACY_M2_OUTER_MODEL_ROUTE,
   ProxyTraceRecord,
+  type CampaignModelRoutes,
   type CampaignPauseSignal,
   type CampaignResumeSignal,
 } from "@hone/schema";
@@ -25,6 +27,8 @@ interface UpstreamRequest {
   model: string;
   role: string | undefined;
   route: string | undefined;
+  reasoningEffort?: unknown;
+  reasoning?: unknown;
 }
 
 interface UpstreamReply {
@@ -43,6 +47,7 @@ interface UpstreamReply {
   contentType?: string;
   incomplete?: boolean;
   trailingBytes?: number;
+  headers?: Record<string, string>;
 }
 
 interface ScriptedUpstream {
@@ -61,7 +66,7 @@ async function startUpstream(
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
-      const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model?: string };
+      const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model?: string; reasoning_effort?: unknown; reasoning?: unknown };
       const request: UpstreamRequest = {
         model: parsed.model ?? "",
         role: typeof req.headers["x-hone-requested-role"] === "string"
@@ -70,6 +75,8 @@ async function startUpstream(
         route: typeof req.headers["x-hone-requested-route"] === "string"
           ? req.headers["x-hone-requested-route"]
           : undefined,
+        ...(parsed.reasoning_effort === undefined ? {} : { reasoningEffort: parsed.reasoning_effort }),
+        ...(parsed.reasoning === undefined ? {} : { reasoning: parsed.reasoning }),
       };
       calls.push(request);
       const reply = responder(request, calls.length - 1);
@@ -88,6 +95,7 @@ async function startUpstream(
         "content-type": reply.contentType ?? "application/json",
         ...(reply.failover ? { "x-vibeproxy-failover": "true" } : {}),
         ...(reply.location !== undefined ? { location: reply.location } : {}),
+        ...reply.headers,
       });
       if (reply.rawBody !== undefined) {
         res.write(reply.rawBody, () => {
@@ -147,7 +155,7 @@ afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
 });
 
-type HarnessOptions = { maxResponseBytes?: number } & Partial<
+type HarnessOptions = { maxResponseBytes?: number; campaignRoutes?: CampaignModelRoutes } & Partial<
   Pick<
     ProxyConfig,
     "captureCampaignDispatchFence" |
@@ -172,6 +180,7 @@ async function setup(
       "outer-optimizer": { model: "optimizer-selected-route" },
       "inner-capsule-improvement": { model: "optimizer-selected-route" },
     },
+    campaignRoutes: options.campaignRoutes ?? LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
     runDir,
     casDir: join(root, "cas"),
     upstreamBaseUrl: `http://127.0.0.1:${upstream.port}`,
@@ -213,14 +222,19 @@ async function setup(
   return harness;
 }
 
-function completion(harness: Harness, role = "outer-optimizer", stream = false): Promise<Response> {
+function completion(
+  harness: Harness,
+  role = "outer-optimizer",
+  stream = false,
+  extraBody: Record<string, unknown> = {},
+): Promise<Response> {
   return fetch(`http://127.0.0.1:${harness.port}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${harness.proxy.tokenFor(role)}`,
     },
-    body: JSON.stringify({ model: "optimizer-selected-route", messages: [], max_tokens: 8, stream }),
+    body: JSON.stringify({ model: "optimizer-selected-route", messages: [], max_tokens: 8, stream, ...extraBody }),
   });
 }
 
@@ -341,7 +355,8 @@ describe("frozen provider failure policy", () => {
   });
 
   it.each([
-    ['data: {"error":{"type":"authentication_error","message":"HTTP 401 payment 402 rate 429 server 503"}}\n\n', null],
+    ['data: {"error":{"type":"server_error","message":"HTTP 401 payment 402 rate limit 429 quota 503"}}\n\n', null],
+    ['data: {"error":{"type":"upstream_error","message":"stream reset by peer"}}\n\n', null],
     ['data: {"error":{"status":"401","status_code":200,"code":500.5}}\n\n', null],
     ['data: {"error":{"status":600}}\n\n', null],
     ['data: {"error":{"status":418}}\n\n', 418],
@@ -357,6 +372,37 @@ describe("frozen provider failure policy", () => {
     expect(await harness.proxy.campaignPause()).toMatchObject({
       reason: "provider-transport", status, attempt: 4,
     });
+  });
+
+  it.each([
+    ['{"type":"upstream_error","message":"You have hit your usage limit. Try again in 3h 12m."}', 429, "provider-rate-limit"],
+    ['{"type":"upstream_error","message":"Rate limit reached for gpt-6.1-sol"}', 429, "provider-rate-limit"],
+    ['{"type":"upstream_error","message":"429 Too Many Requests"}', 429, "provider-rate-limit"],
+    ['{"type":"upstream_error","message":"upstream returned 403 Forbidden"}', 401, "provider-auth"],
+    ['{"type":"rate_limit_error","message":"slow down"}', 429, "provider-rate-limit"],
+    ['{"type":"authentication_error","message":"No credential available for provider openai-codex"}', 401, "provider-auth"],
+    ['{"type":"upstream_error","code":"NO_QUOTA"}', 429, "provider-rate-limit"],
+    ['{"type":"upstream_error","message":"You exceeded your current quota, please check your plan"}', 429, "provider-rate-limit"],
+    ['{"type":"upstream_error","message":"Quota exceeded for this account"}', 429, "provider-rate-limit"],
+    ['{"type":"upstream_error","message":"insufficient_quota"}', 429, "provider-rate-limit"],
+  ] as const)("a statusless gateway stream error %s pauses after one attempt", async (error, status, reason) => {
+    const harness = await setup((request) => ({
+      status: 200, contentType: "text/event-stream", incomplete: false,
+      rawBody: `${ssePrefix(request.model)}data: {"error":${error}}\n\n`,
+    }));
+    expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
+    expect(harness.upstream.calls).toHaveLength(1);
+    expect(await harness.proxy.campaignPause()).toMatchObject({ reason, status, attempt: 1 });
+  });
+
+  it("an unrelated upstream_error that merely mentions quota does not pause the campaign", async () => {
+    const harness = await setup((request) => ({
+      status: 200, contentType: "text/event-stream", incomplete: false,
+      rawBody: `${ssePrefix(request.model)}data: {"error":{"type":"upstream_error","message":"quota check service unavailable"}}\n\n`,
+    }));
+    expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
+    expect(harness.upstream.calls.length).toBeGreaterThan(1);
+    expect(await harness.proxy.campaignPause()).toMatchObject({ reason: "provider-transport" });
   });
 
   it("reads a complete multiline CRLF error event", async () => {
@@ -429,7 +475,7 @@ describe("frozen provider failure policy", () => {
   it("model drift keeps precedence over unknown streamed failure", async () => {
     const harness = await setup(() => ({
       status: 200, contentType: "text/event-stream",
-      rawBody: ssePrefix(M2_INNER_MODEL_ROUTE) + 'data: {"error":{"type":"upstream_error"}}\n\n',
+      rawBody: ssePrefix(LEGACY_M2_INNER_MODEL_ROUTE) + 'data: {"error":{"type":"upstream_error"}}\n\n',
     }));
     expect((await completion(harness, "outer-optimizer", true)).status).toBe(503);
     expect(harness.upstream.calls).toHaveLength(1);
@@ -437,7 +483,7 @@ describe("frozen provider failure policy", () => {
   });
 
   it("normal streams keep agent-authored error text opaque", async () => {
-    const rawBody = ssePrefix(M2_OUTER_MODEL_ROUTE) +
+    const rawBody = ssePrefix(LEGACY_M2_OUTER_MODEL_ROUTE) +
       `data: ${JSON.stringify({ choices: [{ delta: { content: '{"error":{"status":401}}' } }] })}\n\n` +
       "data: [DONE]\n\n";
     const harness = await setup(() => ({ status: 200, contentType: "text/event-stream", rawBody }));
@@ -459,6 +505,22 @@ describe("frozen provider failure policy", () => {
     expect(response.headers.get("x-hone-attempt-classification")).toBe("candidate-invalidity");
     expect(harness.upstream.calls).toHaveLength(1);
     expect(await harness.proxy.campaignPause()).toBeUndefined();
+  });
+
+  it("a non-streamed tool-call turn with null content is a success, null content alone is not", async () => {
+    const reply = (message: Record<string, unknown>) => (request: UpstreamRequest): UpstreamReply => ({
+      status: 200,
+      body: {
+        id: "c1", object: "chat.completion", model: request.model,
+        choices: [{ index: 0, message: { role: "assistant", ...message }, finish_reason: "tool_calls" }],
+        usage: { prompt_tokens: 9, completion_tokens: 1, total_tokens: 10 },
+      },
+    });
+    const toolCall = { id: "call_1|fc_1", type: "function", function: { name: "read", arguments: "{}" } };
+    const harness = await setup(reply({ content: null, tool_calls: [toolCall] }));
+    expect((await completion(harness)).headers.get("x-hone-attempt-classification")).toBe("success");
+    harness.upstream.setResponder(reply({ content: null }));
+    expect((await completion(harness)).headers.get("x-hone-attempt-classification")).toBe("candidate-invalidity");
   });
 
   it("an explicit proxy failover sentinel pauses immediately", async () => {
@@ -496,7 +558,7 @@ describe("frozen provider failure policy", () => {
   it("observed SSE model drift pauses immediately even when the stream resets", async () => {
     const harness = await setup((_request, index) =>
       index === 0
-        ? { status: 200, model: M2_INNER_MODEL_ROUTE, sseDriftReset: true }
+        ? { status: 200, model: LEGACY_M2_INNER_MODEL_ROUTE, sseDriftReset: true }
         : { status: 200 },
     );
     expect((await completion(harness)).status).toBe(503);
@@ -626,7 +688,7 @@ describe("frozen provider failure policy", () => {
   it.each([
     [503, true, undefined, "proxy-failover"],
     [401, false, undefined, "provider-auth"],
-    [503, false, M2_INNER_MODEL_ROUTE, "returned-model-drift"],
+    [503, false, LEGACY_M2_INNER_MODEL_ROUTE, "returned-model-drift"],
   ] as const)("NO_QUOTA preserves existing priority %s/%s/%s", async (status, failover, model, reason) => {
     const harness = await setup(() => ({
       status, failover, body: { model, error: { code: "NO_QUOTA" } },
@@ -667,7 +729,7 @@ describe("frozen provider failure policy", () => {
   });
 
   it("returned-model drift records requested and returned identities, then pauses closed", async () => {
-    const harness = await setup(() => ({ status: 200, model: M2_INNER_MODEL_ROUTE }));
+    const harness = await setup(() => ({ status: 200, model: LEGACY_M2_INNER_MODEL_ROUTE }));
     expect((await completion(harness)).status).toBe(503);
     expect((await harness.proxy.campaignPause())?.reason).toBe("returned-model-drift");
     const journal = await readDispatchJournalState(join(harness.runDir, DISPATCH_JOURNAL_FILE));
@@ -677,13 +739,13 @@ describe("frozen provider failure policy", () => {
     const settlement = journal.records.find(
       (record): record is DispatchSettleRecord => record.kind === "settle",
     );
-    expect(intent?.requestedRoute).toBe(M2_OUTER_MODEL_ROUTE);
-    expect(settlement?.returnedModel).toBe(M2_INNER_MODEL_ROUTE);
+    expect(intent?.requestedRoute).toBe(LEGACY_M2_OUTER_MODEL_ROUTE);
+    expect(settlement?.returnedModel).toBe(LEGACY_M2_INNER_MODEL_ROUTE);
     const trace = await traces(harness.runDir);
     expect(trace[0]).toMatchObject({
       version: 2,
-      requestedRoute: M2_OUTER_MODEL_ROUTE,
-      returnedModel: M2_INNER_MODEL_ROUTE,
+      requestedRoute: LEGACY_M2_OUTER_MODEL_ROUTE,
+      returnedModel: LEGACY_M2_INNER_MODEL_ROUTE,
       classification: "campaign-pause",
     });
   });
@@ -746,18 +808,18 @@ describe("M2 route preflight and frozen role routing", () => {
     const harness = await setup(() => ({ status: 200 }));
     expect((await completion(harness)).status).toBe(200);
     expect(harness.upstream.calls[0]).toEqual({
-      model: M2_OUTER_MODEL_ROUTE,
+      model: LEGACY_M2_OUTER_MODEL_ROUTE,
       role: "outer-optimizer",
-      route: M2_OUTER_MODEL_ROUTE,
+      route: LEGACY_M2_OUTER_MODEL_ROUTE,
     });
     expect((await completion(harness, "capsule-author")).status).toBe(200);
     expect(harness.upstream.calls[1]).toMatchObject({
-      model: M2_OUTER_MODEL_ROUTE,
+      model: LEGACY_M2_OUTER_MODEL_ROUTE,
       role: "capsule-author",
-      route: M2_OUTER_MODEL_ROUTE,
+      route: LEGACY_M2_OUTER_MODEL_ROUTE,
     });
     expect((await completion(harness, "inner-capsule-improvement")).status).toBe(200);
-    expect(harness.upstream.calls[2]?.model).toBe(M2_INNER_MODEL_ROUTE);
+    expect(harness.upstream.calls[2]?.model).toBe(LEGACY_M2_INNER_MODEL_ROUTE);
   });
 
   it("preflight passes only when both frozen routes return their exact identities", async () => {
@@ -765,13 +827,13 @@ describe("M2 route preflight and frozen role routing", () => {
     const passed = await harness.proxy.preflight();
     expect(passed.passed).toBe(true);
     expect(passed.observations.map((observation) => observation.returnedModel)).toEqual([
-      M2_OUTER_MODEL_ROUTE,
-      M2_INNER_MODEL_ROUTE,
+      LEGACY_M2_OUTER_MODEL_ROUTE,
+      LEGACY_M2_INNER_MODEL_ROUTE,
     ]);
 
     harness.upstream.setResponder((request) => ({
       status: 200,
-      model: request.model === M2_INNER_MODEL_ROUTE ? M2_OUTER_MODEL_ROUTE : request.model,
+      model: request.model === LEGACY_M2_INNER_MODEL_ROUTE ? LEGACY_M2_OUTER_MODEL_ROUTE : request.model,
     }));
     const failed = await harness.proxy.preflight();
     expect(failed.passed).toBe(false);
@@ -792,7 +854,7 @@ describe("M2 route preflight and frozen role routing", () => {
     expect(result.observations[1]).toEqual({
       role: "inner-capsule-improvement",
       dispatchId: null,
-      requestedRoute: M2_INNER_MODEL_ROUTE,
+      requestedRoute: LEGACY_M2_INNER_MODEL_ROUTE,
       returnedModel: null,
       status: null,
       passed: false,
@@ -822,5 +884,67 @@ describe("M2 route preflight and frozen role routing", () => {
     expect(state.poisoned).toBeUndefined();
     expect(state.pause).toBeUndefined();
     expect(state.records.filter((record) => record.kind === "resume")).toHaveLength(1);
+  });
+
+  const ASTRA_SOL: CampaignModelRoutes = {
+    outer: { model: "openai-codex/gpt-6-astra", reasoningEffort: "high" },
+    inner: { model: "openai-codex/gpt-6.1-sol" },
+  };
+
+  it("routes, reasoning effort and preflight follow the sealed campaign routes", async () => {
+    const harness = await setup(() => ({ status: 200 }), { campaignRoutes: ASTRA_SOL });
+    expect((await completion(harness, "capsule-author")).status).toBe(200);
+    expect((await completion(harness, "inner-capsule-improvement")).status).toBe(200);
+    expect(harness.upstream.calls).toEqual([
+      { model: "openai-codex/gpt-6-astra", role: "capsule-author", route: "openai-codex/gpt-6-astra", reasoningEffort: "high" },
+      { model: "openai-codex/gpt-6.1-sol", role: "inner-capsule-improvement", route: "openai-codex/gpt-6.1-sol" },
+    ]);
+    const preflight = await harness.proxy.preflight();
+    expect(preflight.passed).toBe(true);
+    expect(preflight.observations.map((observation) => observation.requestedRoute)).toEqual([
+      "openai-codex/gpt-6-astra",
+      "openai-codex/gpt-6.1-sol",
+    ]);
+    expect(harness.upstream.calls[2]?.reasoningEffort).toBe("high");
+  });
+
+  it("a caller-supplied reasoning control is dropped, and only the sealed effort is forwarded", async () => {
+    const callerControls = { reasoning_effort: "max", reasoning: { effort: "max" } };
+    const unsealed = await setup(() => ({ status: 200 }), { campaignRoutes: ASTRA_SOL });
+    expect((await completion(unsealed, "inner-capsule-improvement", false, callerControls)).status).toBe(200);
+    expect(unsealed.upstream.calls[0]).not.toHaveProperty("reasoningEffort");
+
+    const sealed = await setup(() => ({ status: 200 }), { campaignRoutes: ASTRA_SOL });
+    expect((await completion(sealed, "outer-optimizer", false, callerControls)).status).toBe(200);
+    expect(sealed.upstream.calls[0]?.reasoningEffort).toBe("high");
+  });
+
+  it("the gateway's resolved-model header binds identity even when the body echoes the route", async () => {
+    const harness = await setup(
+      () => ({ status: 200, headers: { "x-litellm-model-id": "gpt-6.1-sol" } }),
+      { campaignRoutes: ASTRA_SOL },
+    );
+    expect((await completion(harness, "inner-capsule-improvement")).status).toBe(200);
+
+    harness.upstream.setResponder(() => ({ status: 200, headers: { "x-litellm-model-id": "gpt-6-luna" } }));
+    expect((await completion(harness, "inner-capsule-improvement")).status).toBe(503);
+    expect(await harness.proxy.campaignPause()).toMatchObject({
+      reason: "returned-model-drift",
+      requestedRoute: "openai-codex/gpt-6.1-sol",
+      returnedModel: "gpt-6-luna",
+    });
+  });
+
+  it("journal replay binds a resume's preflight proofs to the sealed routes", async () => {
+    const harness = await setup(() => ({ status: 429 }), { campaignRoutes: ASTRA_SOL });
+    expect((await completion(harness)).status).toBe(503);
+    harness.upstream.setResponder(() => ({ status: 200 }));
+    expect((await harness.proxy.resume()).passed).toBe(true);
+    const journalPath = join(harness.runDir, DISPATCH_JOURNAL_FILE);
+    const sealed = { outer: ASTRA_SOL.outer.model, inner: ASTRA_SOL.inner.model };
+    expect((await readDispatchJournalState(journalPath, sealed)).poisoned).toBeUndefined();
+    expect((await readDispatchJournalState(journalPath)).poisoned).toBeUndefined();
+    const legacy = { outer: LEGACY_M2_OUTER_MODEL_ROUTE, inner: LEGACY_M2_INNER_MODEL_ROUTE };
+    expect((await readDispatchJournalState(journalPath, legacy)).poisoned).toMatch(/frozen-route preflight proofs/);
   });
 });

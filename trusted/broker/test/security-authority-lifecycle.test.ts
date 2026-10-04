@@ -2787,6 +2787,75 @@ describe("evaluation memo provenance (digests key the cache)", () => {
     expect(journal).not.toContain('"measurementEpoch"');
   });
 
+  it("caps each evaluation by the campaign's timeout, else the capsule's declaration, else 600 s", async () => {
+    const wallOf = async (opts: { manifest?: CapsuleManifest; evalTimeoutSec?: number }): Promise<string | undefined> => {
+      const b = await boot(opts);
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      const lookup = vi.spyOn(b.broker.cas, "indexGet");
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 27 }, CLIENT);
+      return /\|wall:(\d+)$/.exec(String(lookup.mock.calls[0]?.[1]))?.[1];
+    };
+    const longEval = makeManifest({ evaluatorTimeoutSec: 28_800 });
+    expect(await wallOf({})).toBe("600");
+    expect(await wallOf({ manifest: longEval })).toBe("28800");
+    expect(await wallOf({ manifest: longEval, evalTimeoutSec: 2_700 })).toBe("2700");
+  });
+
+  describe("evaluator calls against the episode sandbox lifetime", () => {
+    const DAY_MS = 86_400_000;
+    const evaluate = (b: Booted, seed: number) =>
+      b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed }, CLIENT);
+    // The guard runs before evaluator isolation, so "admitted" means "not refused by the guard";
+    // hosts without Linux isolation fail later for an unrelated reason.
+    const refusal = async (b: Booted, seed: number): Promise<string | undefined> => {
+      try {
+        await evaluate(b, seed);
+        return undefined;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return /would outlive/.test(message) ? message : undefined;
+      }
+    };
+
+    it("refuses, before charging anything, a call that would outlive a sandbox clamped at 14 days", async () => {
+      let nowMs = 0;
+      const manifest = makeManifest({
+        budget: { ...GENEROUS_BUDGET, maxWallClockSec: 60 * 86_400 },
+      });
+      const b = await boot({ manifest, evalTimeoutSec: 604_800, now: () => nowMs });
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      await b.broker.createSandbox(
+        { artifact: { hash: baselineHash }, role: "mutation", ttlSec: 1_209_600 },
+        CLIENT,
+      );
+
+      // Day 6: a 7-day evaluator ends on day 13, inside the 14-day claim.
+      nowMs = 6 * DAY_MS;
+      expect(await refusal(b, 1)).toBeUndefined();
+
+      // Day 8: the same call would end on day 15, after the sandbox is gone.
+      nowMs = 8 * DAY_MS;
+      const before = b.broker.getBudget(ADMIN).spent.evaluatorInvocations;
+      const runsBefore = b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm")).length;
+      await expect(evaluate(b, 2)).rejects.toThrow(/would outlive episode \d+ sandbox .*expires in 518400s/);
+      expect(b.broker.getBudget(ADMIN).spent.evaluatorInvocations).toBe(before);
+      expect(b.log.filter((argv) => argv[1] === "run" && argv.includes("--rm"))).toHaveLength(runsBefore);
+    });
+
+    it("never refuses a call the run's wall budget already bounds", async () => {
+      let nowMs = 0;
+      // 1 h wall envelope, 45 min evaluator, sandbox claimed for the whole envelope.
+      const b = await boot({ evalTimeoutSec: 2_700, now: () => nowMs });
+      b.ctl.evalOutputs.set(baselineHash, score(1));
+      await b.broker.createSandbox(
+        { artifact: { hash: baselineHash }, role: "mutation", ttlSec: 3_600 },
+        CLIENT,
+      );
+      nowMs = 30 * 60_000; // 30 min in: 30 + 45 min > 60 min, but only 30 min of wall remain
+      expect(await refusal(b, 3)).toBeUndefined();
+    });
+  });
+
   it("rejects empty, oversized, and control-character trusted epochs before evaluation", async () => {
     for (const measurementEpoch of ["", "x".repeat(257), `m1${String.fromCharCode(10)}evil`]) {
       await expect(boot({ measurementEpoch })).rejects.toThrow(

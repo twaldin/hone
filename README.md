@@ -66,7 +66,7 @@ pnpm test
 node trusted/cli/bin/hone.js --help
 ```
 
-That checks the engine without running an optimization, and it needs nothing from the capsules repository. A real run additionally needs Docker on a Linux host, the capsule's exact pinned image, an OpenAI-compatible model endpoint set through `HONE_UPSTREAM_BASE_URL` (and optionally `HONE_UPSTREAM_API_KEY`), and a checkout of [hone-capsules](https://github.com/twaldin/hone-capsules) next to this one. Its README covers the clone; some capsules embed a Git object store, so follow its steps rather than a plain `git clone`. Then:
+That checks the engine without running an optimization, and it needs nothing from the capsules repository. A real run additionally needs Docker on a Linux host, the capsule's exact pinned image, an OpenAI-compatible model endpoint set through `HONE_UPSTREAM_BASE_URL` (with its bearer in a mode-600 file named by `HONE_UPSTREAM_API_KEY_FILE`, or in `HONE_UPSTREAM_API_KEY`), and a checkout of [hone-capsules](https://github.com/twaldin/hone-capsules) next to this one. Its README covers the clone; some capsules embed a Git object store, so follow its steps rather than a plain `git clone`. Then:
 
 ```sh
 export HONE_CAPSULES_ROOT=../hone-capsules/capsules   # or pass --capsules-root on each command

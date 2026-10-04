@@ -131,7 +131,7 @@ describe("campaign pause status and trusted resume", () => {
   it("keeps the campaign paused on failed preflight and resumes only after both frozen routes pass", async () => {
     const root = makeRoot();
     const campaignDir = pausedCampaign(root, true);
-    const captured = makeIo(root);
+    const captured = makeIo(root, { HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9" });
 
     expect(await resumeCampaignCommand(["--campaign", campaignDir], captured.io, proxyOptions(false))).toBe(1);
     expect(DurableCampaignPauseAuthorityV1.openExisting(join(campaignDir, "campaign-pause.v1.json")).isCampaignPaused()).toBe(true);
@@ -199,7 +199,7 @@ describe("campaign pause status and trusted resume", () => {
         close: () => Promise.resolve(),
       }),
     };
-    const captured = makeIo(root);
+    const captured = makeIo(root, { HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9" });
     expect(await resumeCampaignCommand(["--campaign", campaignDir], captured.io, options)).toBe(1);
     expect(firstRemaining).toBe(budget.envelope.maxTokens - budget.spent.tokens - 3);
     expect(secondRemaining).toBe(0);

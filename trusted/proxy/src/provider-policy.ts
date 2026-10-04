@@ -24,8 +24,26 @@ export interface ProviderAttemptFacts {
   proxyFailover: boolean;
   requestedRoute: string;
   returnedModels: readonly string[];
+  /** Upstream-resolved model id from RESOLVED_MODEL_HEADER; null when the upstream sends none. */
+  resolvedModel?: string | null;
   malformedSuccessfulOutput: boolean;
   noQuota: boolean;
+}
+
+/**
+ * Response header naming the model the gateway actually resolved. The omp
+ * auth gateway echoes the requested id verbatim in the body, so this header
+ * is the only independent identity observation it offers.
+ */
+export const RESOLVED_MODEL_HEADER = "x-litellm-model-id";
+
+/**
+ * A resolved id matches the route exactly, or equals the route's bare model
+ * name after its provider prefix (`openai-codex/gpt-6.1-sol` → `gpt-6.1-sol`).
+ */
+export function resolvedModelMatchesRoute(resolvedModel: string, route: string): boolean {
+  const resolved = resolvedModel.trim();
+  return resolved === route || resolved === route.slice(route.lastIndexOf("/") + 1);
 }
 
 /** Exact protocol code in a buffered JSON error envelope, never message text. */
@@ -42,8 +60,11 @@ export function isNoQuotaResponse(responseText: string): boolean {
 
 /**
  * Read only complete SSE error events, never agent-authored delta content.
- * The first explicit error terminates the provider attempt. Its status must be
- * a structured HTTP error number; message/type text cannot supply one.
+ * The first explicit error terminates the provider attempt. Its status comes
+ * from a structured HTTP error number when the upstream supplies one;
+ * otherwise from the gateway's structured error type or, for its generic
+ * `upstream_error`, from the provider text it relays (see
+ * gatewayStreamErrorStatus). Agent delta content never reaches this parser.
  */
 export function streamedUpstreamError(
   responseText: string,
@@ -80,9 +101,40 @@ export function streamedUpstreamError(
       typeof candidate === "number" && Number.isInteger(candidate) &&
       candidate >= 400 && candidate <= 599,
     );
-    return { status: status ?? null };
+    return { status: status ?? gatewayStreamErrorStatus(detail) };
   }
   return undefined;
+}
+
+const STREAM_ERROR_TYPE_STATUS: Readonly<Record<string, number>> = {
+  rate_limit_error: 429,
+  authentication_error: 401,
+  permission_error: 403,
+};
+// Genuine exhaustion phrases only: a bare "quota" also appears in unrelated
+// failures such as "quota check service unavailable".
+const STREAM_RATE_LIMIT_TEXT =
+  /usage limit|rate[- _]?limit|too many requests|insufficient[_ ]quota|quota[- _]exceeded|exceeded\b[^.]*\bquota/i;
+const STREAM_AUTH_TEXT = /unauthori[sz]ed|forbidden|\b401\b|\b403\b/i;
+
+/**
+ * The omp auth gateway cannot put a status into an SSE error: once its 200
+ * headers are out, an exhausted or rejected account surfaces as
+ * `{"error":{"type":"upstream_error","message":<provider text>}}` after the
+ * gateway has already failed over across every account. Map that envelope
+ * to the HTTP status it stands for so quota exhaustion pauses the campaign
+ * as a rate limit instead of being retried as a transport failure.
+ */
+function gatewayStreamErrorStatus(detail: Record<string, unknown> | undefined): number | null {
+  if (detail === undefined) return null;
+  const type = typeof detail["type"] === "string" ? detail["type"] : "";
+  const mapped = STREAM_ERROR_TYPE_STATUS[type];
+  if (mapped !== undefined) return mapped;
+  if (detail["code"] === "NO_QUOTA") return 429;
+  if (type !== "upstream_error" || typeof detail["message"] !== "string") return null;
+  if (STREAM_RATE_LIMIT_TEXT.test(detail["message"])) return 429;
+  if (STREAM_AUTH_TEXT.test(detail["message"])) return 401;
+  return null;
 }
 
 export interface ProviderAttemptDecision {
@@ -104,7 +156,10 @@ export function classifyProviderAttempt(facts: ProviderAttemptFacts): ProviderAt
     case 429:
       return { classification: "campaign-pause", pauseReason: "provider-rate-limit" };
   }
-  if (facts.returnedModels.some((identity) => identity !== facts.requestedRoute)) {
+  const drifted = facts.returnedModels.some((identity) => identity !== facts.requestedRoute) ||
+    (facts.resolvedModel !== undefined && facts.resolvedModel !== null &&
+      !resolvedModelMatchesRoute(facts.resolvedModel, facts.requestedRoute));
+  if (drifted) {
     return { classification: "campaign-pause", pauseReason: "returned-model-drift" };
   }
   if (facts.transportError) {
@@ -203,7 +258,10 @@ export function isMalformedSuccessfulAgentResponse(responseText: string, content
     }
     const choice = value["choices"][0];
     if (!isJsonObject(choice) || !isJsonObject(choice["message"])) return true;
-    return typeof choice["message"]["content"] !== "string";
+    const message = choice["message"];
+    if (typeof message["content"] === "string") return false;
+    // A tool-call turn legitimately carries `content: null`.
+    return !(message["content"] === null && Array.isArray(message["tool_calls"]) && message["tool_calls"].length > 0);
   } catch {
     return true;
   }

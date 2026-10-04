@@ -2,12 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import {
+  DEFAULT_CAMPAIGN_MODEL_ROUTES,
   DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   M2_CANDIDATE_ATTEMPTS_MAX,
   M2_CANDIDATE_COUNT,
   M2_EVALUATOR_TIMEOUT_SEC,
-  M2_INNER_MODEL_ROUTE,
-  M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
   M2_PANEL_B_TASK_IDS,
   M2_PANEL_CAPSULE_COUNT,
@@ -20,6 +19,7 @@ import {
   canonicalJson,
   type AdmissionReceiptRecord,
   type BudgetEnvelope,
+  type CampaignModelRoutes,
   type CapsuleManifest,
   type DiagnosticOrderingReport,
   type M2CalibrationBinding,
@@ -228,6 +228,10 @@ export interface M2LaunchDraftParameters {
   readonly protectedPaths?: readonly string[];
   readonly promotion?: PromotionRule;
   readonly measurementEpochNamespace?: string;
+  /** Outer/inner model routes; defaults to openai-codex/gpt-6.1-sol for both, no reasoning effort. */
+  readonly routes?: CampaignModelRoutes;
+  /** Per-invocation evaluator wall cap in seconds; defaults to the owner-ratified 2700. */
+  readonly evaluatorTimeoutSec?: number;
   /**
    * Explicit caller acknowledgments for generator defaults. A default used
    * WITHOUT its acknowledgment is a REQUIRED unresolved decision: the draft
@@ -924,6 +928,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     "child/per-capsule calibrated budget vectors are launch open decision #4; the outer direct vector is freeze-derived",
   );
 
+  const routes = parameters.routes ?? DEFAULT_CAMPAIGN_MODEL_ROUTES;
   const config = {
     version: 2,
     objective: inputs.objective,
@@ -946,12 +951,14 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
     train,
     holdout,
     routing: {
-      outerMutation: M2_OUTER_MODEL_ROUTE,
-      innerMutation: M2_INNER_MODEL_ROUTE,
+      outerMutation: routes.outer.model,
+      innerMutation: routes.inner.model,
+      ...(routes.outer.reasoningEffort === undefined ? {} : { outerReasoningEffort: routes.outer.reasoningEffort }),
+      ...(routes.inner.reasoningEffort === undefined ? {} : { innerReasoningEffort: routes.inner.reasoningEffort }),
     },
     modelObservation: {
-      outerRequestedRoute: M2_OUTER_MODEL_ROUTE,
-      innerRequestedRoute: M2_INNER_MODEL_ROUTE,
+      outerRequestedRoute: routes.outer.model,
+      innerRequestedRoute: routes.inner.model,
       identity: "alias-observation",
       recordResponseModel: true,
       recordProviderFingerprint: true,
@@ -981,7 +988,7 @@ export function generateM2LaunchDraft(inputs: M2LaunchDraftInputs): M2LaunchDraf
       holdoutReplicates: 3,
       childConcurrency: parameters.childConcurrency,
     },
-    evaluatorTimeoutSec: M2_EVALUATOR_TIMEOUT_SEC,
+    evaluatorTimeoutSec: parameters.evaluatorTimeoutSec ?? M2_EVALUATOR_TIMEOUT_SEC,
     budgets: {
       campaign: campaignBudget,
       outer: outerBudgetDerivation.derived,

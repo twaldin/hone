@@ -37,6 +37,8 @@ import {
   EvaluatorOutput,
   ExecParams,
   ExecResult,
+  DEFAULT_EVALUATOR_TIMEOUT_SEC,
+  MAX_SANDBOX_TTL_SEC,
   FinishParams,
   GetPromotionVerdictParams,
   GetFileParams,
@@ -1820,7 +1822,11 @@ export class Broker {
       throw new BrokerError("INTERNAL", "workspaceQuotaBytes must be a positive safe integer");
     }
     this.defaultTtlSec = config.defaultTtlSec ?? 3_600;
-    this.evalTimeoutSec = config.evalTimeoutSec ?? 600;
+    // Trusted campaign cap first, then the capsule's own (digest-bound)
+    // declaration, then the engine default.
+    this.evalTimeoutSec = config.evalTimeoutSec
+      ?? this.manifest.evaluatorTimeoutSec
+      ?? DEFAULT_EVALUATOR_TIMEOUT_SEC;
     this.execOutputLimitBytes = config.execOutputLimitBytes ?? 1024 * 1024;
     this.sessionTraceQuotaBytes = config.sessionTraceQuotaBytes ?? 64 * 1024 * 1024;
     if (!Number.isSafeInteger(this.sessionTraceQuotaBytes) || this.sessionTraceQuotaBytes <= 0) {
@@ -4152,6 +4158,7 @@ export class Broker {
         return this.redactRecord({ ...prior, cached: true }, group.visibility, ctx);
       }
     }
+    this.assertEvaluatorWithinSandboxLifetime(evalEpoch);
     if (group.visibility === "holdout") await this.chargeHoldout();
     // Cross-artifact evaluator cache channel: public mutation authority is
     // bounded by a trusted constructor cap. M0 defaults to exactly one;
@@ -4207,6 +4214,36 @@ export class Broker {
     } finally {
       this.pendingEvaluations -= 1;
       this.inFlightEvaluations.delete(memoKey);
+    }
+  }
+
+  /**
+   * An episode's mutation sandbox is claimed with a fixed TTL (at most
+   * MAX_SANDBOX_TTL_SEC), while `maxWallClockSec` and each evaluator call
+   * (up to MAX_EVALUATOR_TIMEOUT_SEC) are separately bounded. Refuse, before
+   * any invocation, spend or slot is charged, an evaluator call that would
+   * still be running when the episode's sandbox expires; otherwise the
+   * sandbox is reaped mid-call and the episode fails only at completion.
+   * The call's worst-case end is capped by the remaining wall budget because
+   * the run is terminated at that cap regardless, so episodes that fit the
+   * run's wall envelope are never refused.
+   */
+  private assertEvaluatorWithinSandboxLifetime(epoch: string): void {
+    const budget = this.budgetStateNow();
+    const remainingWallMs = Math.max(
+      0,
+      (budget.envelope.maxWallClockSec - budget.spent.wallClockSec) * 1000,
+    );
+    const nowMs = this.now();
+    const endsAtMs = nowMs + Math.min(this.evalTimeoutSec * 1000, remainingWallMs);
+    for (const [sandboxId, entry] of this.sandboxes) {
+      if (entry.epoch !== epoch || endsAtMs <= entry.expiresAtMs) continue;
+      throw new BrokerError(
+        "INTERNAL",
+        `evaluator call (up to ${this.evalTimeoutSec}s) would outlive episode ${entry.episode} sandbox ${sandboxId}, ` +
+          `which expires in ${Math.max(0, Math.floor((entry.expiresAtMs - nowMs) / 1000))}s; ` +
+          `a sandbox claim is capped at ${MAX_SANDBOX_TTL_SEC}s`,
+      );
     }
   }
 

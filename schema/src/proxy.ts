@@ -8,7 +8,8 @@ import { z } from "zod";
  * credentials). The proxy meters every request against the run budget across
  * the whole process tree — this is the recursion guard — and appends one
  * ProxyTraceRecord per request to CAS. Chain: sandbox -> hone-proxy ->
- * upstream (vibeproxy :8317) -> provider.
+ * operator-configured OpenAI-compatible upstream (`HONE_UPSTREAM_BASE_URL`)
+ * -> provider.
  */
 
 export const PROXY_TRACE_VERSION = 2;
@@ -21,21 +22,66 @@ export const M2ProxyRole = z.enum([
 ]);
 export type M2ProxyRole = z.infer<typeof M2ProxyRole>;
 
-export const M2_OUTER_MODEL_ROUTE = "openai-codex/gpt-5.6-sol";
-export const M2_INNER_MODEL_ROUTE = "openai-codex/gpt-5.6-luna";
+/**
+ * Reasoning effort forwarded as the top-level OpenAI `reasoning_effort` field.
+ * The trusted proxy sets it from the sealed route; the sandbox cannot choose it.
+ */
+export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
-/** The complete M2 role-to-route authority. Runtime code overwrites these keys fail closed. */
-export const M2_MODEL_ROUTING = Object.freeze({
-  "outer-optimizer": Object.freeze({ model: M2_OUTER_MODEL_ROUTE }),
-  "capsule-author": Object.freeze({ model: M2_OUTER_MODEL_ROUTE }),
-  "inner-capsule-improvement": Object.freeze({ model: M2_INNER_MODEL_ROUTE }),
+/** One requested model route: the upstream model id plus an optional reasoning effort. */
+export const ModelRoute = z.object({
+  model: z.string().min(1),
+  reasoningEffort: ReasoningEffort.optional(),
+}).strict();
+export type ModelRoute = z.infer<typeof ModelRoute>;
+
+/** Engine default for every role when no sealed configuration names a model. */
+export const DEFAULT_MODEL_ROUTE = "openai-codex/gpt-6.1-sol";
+
+/**
+ * Routes for the two reasoning tiers of a campaign. `outer` serves the
+ * outer optimizer and capsule author; `inner` serves inner capsule
+ * improvement. Both come from the sealed campaign (or calibration) config.
+ */
+export const CampaignModelRoutes = z.object({
+  outer: ModelRoute,
+  inner: ModelRoute,
+}).strict();
+export type CampaignModelRoutes = z.infer<typeof CampaignModelRoutes>;
+
+export const DEFAULT_CAMPAIGN_MODEL_ROUTES: CampaignModelRoutes = Object.freeze({
+  outer: Object.freeze({ model: DEFAULT_MODEL_ROUTE }),
+  inner: Object.freeze({ model: DEFAULT_MODEL_ROUTE }),
 });
+
+/**
+ * Historical M2 routes, hardcoded before routes became configuration. Frozen
+ * campaign configs, calibration selections and run seals written before then
+ * name (or imply) exactly these, and keep resolving to them.
+ */
+export const LEGACY_M2_OUTER_MODEL_ROUTE = "openai-codex/gpt-5.6-sol";
+export const LEGACY_M2_INNER_MODEL_ROUTE = "openai-codex/gpt-5.6-luna";
+export const LEGACY_M2_CAMPAIGN_MODEL_ROUTES: CampaignModelRoutes = Object.freeze({
+  outer: Object.freeze({ model: LEGACY_M2_OUTER_MODEL_ROUTE }),
+  inner: Object.freeze({ model: LEGACY_M2_INNER_MODEL_ROUTE }),
+});
+
+/** The complete M2 role-to-route authority for one campaign's sealed routes. */
+export function m2ModelRouting(routes: CampaignModelRoutes): Readonly<Record<M2ProxyRole, ModelRoute>> {
+  return Object.freeze({
+    "outer-optimizer": routes.outer,
+    "capsule-author": routes.outer,
+    "inner-capsule-improvement": routes.inner,
+  });
+}
 
 /** Per-role upstream routing, from trusted run config. Role names are hone roles, not harness roles. */
 export const ModelRouting = z.record(
   z.string(),
   z.object({
     model: z.string().min(1),
+    reasoningEffort: ReasoningEffort.optional(),
     /** Defaults to the single configured upstream; per-role override allowed outside frozen M2 roles. */
     upstreamBaseUrl: z.string().url().optional(),
   }),

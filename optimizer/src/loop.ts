@@ -256,9 +256,9 @@ export async function runEpisodeLoop(opts: EpisodeLoopOptions): Promise<void> {
     const task = await broker.getTask();
     // The episode boundary must precede its parent evaluation so trusted
     // pairing uses one epoch. Keep that authenticated claim alive for the
-    // run's entire wall envelope: recursive panels may legitimately outlive
-    // the broker's one-hour default, but the public contract still caps the
-    // claim at one day.
+    // run's entire wall envelope: recursive panels and multi-hour evaluators
+    // may legitimately outlive the broker's one-hour default; the public
+    // contract caps the claim at MAX_SANDBOX_TTL_SEC (14 days).
     const episodeSandboxTtlSec = Math.min(
       MAX_SANDBOX_TTL_SEC,
       Math.ceil(task.budget.envelope.maxWallClockSec),

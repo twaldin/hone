@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   EvaluationRecord,
-  M2_INNER_MODEL_ROUTE,
-  M2_OUTER_MODEL_ROUTE,
+  LEGACY_M2_INNER_MODEL_ROUTE,
+  LEGACY_M2_OUTER_MODEL_ROUTE,
   M2_PANEL_A_TASK_IDS,
   MetaCampaignConfigV1,
   MetaCampaignConfigV2,
@@ -109,12 +109,12 @@ function recursiveFixture(): RecursiveMetaCampaignConfig {
     train,
     holdout,
     routing: {
-      outerMutation: M2_OUTER_MODEL_ROUTE,
-      innerMutation: M2_INNER_MODEL_ROUTE,
+      outerMutation: LEGACY_M2_OUTER_MODEL_ROUTE,
+      innerMutation: LEGACY_M2_INNER_MODEL_ROUTE,
     },
     modelObservation: {
-      outerRequestedRoute: M2_OUTER_MODEL_ROUTE,
-      innerRequestedRoute: M2_INNER_MODEL_ROUTE,
+      outerRequestedRoute: LEGACY_M2_OUTER_MODEL_ROUTE,
+      innerRequestedRoute: LEGACY_M2_INNER_MODEL_ROUTE,
       identity: "alias-observation",
       recordResponseModel: true,
       recordProviderFingerprint: true,

@@ -24,7 +24,7 @@ node trusted/cli/bin/hone.js --help
 
 Packages expose TypeScript source; there is no root `build` script. Tests run workspaces sequentially and use synthetic fixtures under `fixtures/`, never a capsules checkout. Some CLI integration tests exercise Docker when it is available, and some deliberately modify temporary workspace state. Use an isolated checkout for validation. The broker's end-to-end tests need Linux (abstract Unix sockets) and Docker; on other hosts they are skipped or fail at setup, which says nothing about the code under test.
 
-The proxy's live model-provider smoke test is skipped unless `HONE_LIVE_PROXY_TEST=1` is explicitly set. That opt-in test targets the local proxy on port 8317 and requests a one-token completion; it can consume provider quota. Ordinary proxy tests use local mocks.
+The proxy's live model-provider smoke test is skipped unless `HONE_LIVE_PROXY_TEST=1` is explicitly set. It needs the upstream variables below, streams one small completion through a real proxy (model `HONE_LIVE_PROXY_MODEL`, default `openai-codex/gpt-6.1-sol`) and consumes provider quota. Ordinary proxy tests use local mocks.
 
 These commands check implementation behavior. They do not run or establish an M2 experiment.
 
@@ -52,7 +52,23 @@ Follow the hone-capsules README to clone it: some capsules embed a Git object st
 
 The local backend requires Git, a POSIX host, Docker and the capsule's exact pinned image already present. Image availability, architecture, toolchains and runtime capabilities are capsule-specific. Images are not automatically fetched by the optimizer's `--pull never` execution path.
 
-Mutation also requires a compatible model upstream, configured through `HONE_UPSTREAM_BASE_URL`, an optional `HONE_UPSTREAM_API_KEY`, and the appropriate model route. Keep credentials in the operator's local environment. Campaign routes belong to the frozen campaign configuration.
+Mutation also requires an OpenAI-compatible model upstream. Hone's trusted proxy forwards every model call to it, injects the bearer, rewrites the model to the sealed route and meters usage; sandboxes never see the URL or the token. There is no default upstream:
+
+| Variable | Meaning |
+| --- | --- |
+| `HONE_UPSTREAM_BASE_URL` | Required. Base URL with or without `/v1`, e.g. `http://twaldin-home:4000/v1` for the tailnet omp gateway. |
+| `HONE_UPSTREAM_API_KEY_FILE` | Preferred. Path to a file holding only the bearer token; it must be mode `600` (no group/other bits). |
+| `HONE_UPSTREAM_API_KEY` | Alternative inline bearer. Setting both variables refuses. |
+
+```sh
+install -m 600 /dev/null ~/.config/hone/upstream.token   # then write the token into it
+export HONE_UPSTREAM_BASE_URL=http://twaldin-home:4000/v1
+export HONE_UPSTREAM_API_KEY_FILE=~/.config/hone/upstream.token
+```
+
+The omp auth gateway accepts provider-qualified ids. Hone's default route for every role is `openai-codex/gpt-6.1-sol`; `openai-codex/gpt-6-astra` is the usual alternative for the outer tier. The gateway echoes the requested id in every response body, so hone also checks its `x-litellm-model-id` header (the bare resolved model) and pauses on a mismatch. Rate-limit and quota exhaustion pause a campaign: non-streamed calls report `429`, and a streamed call reports a relayed `upstream_error` whose text names the usage or rate limit. See [CLI](cli.md#model-routes-and-the-upstream) for route configuration.
+
+Keep credentials in the operator's local environment. Campaign routes belong to the frozen campaign configuration.
 
 Production execution verifies the capsule's assets, baseline and Gate-2 admission receipt chain. Publishing files does not transfer the original operator's local admission ledger or runtime images. The public-clone admission and image bootstrap is unfinished; do not disable review checks to make an example run.
 

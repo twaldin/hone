@@ -10,7 +10,11 @@ import { z } from "zod";
 import {
   ApplyMode,
   BudgetEnvelope,
+  CampaignModelRoutes,
+  canonicalJson,
+  DEFAULT_MODEL_ROUTE,
   IMAGE_DIGEST_REF,
+  LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
   M2ProxyRole,
   ModelRouting,
   PromotionRule,
@@ -110,6 +114,8 @@ const CampaignSessionSealV2 = z.object({
   proxyRole: M2ProxyRole,
   corpusDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
   executionImage: z.string().regex(IMAGE_DIGEST_REF),
+  /** Sealed outer/inner routes; absent on seals written while routes were hardcoded. */
+  modelRoutes: CampaignModelRoutes.optional(),
 }).strict();
 const CampaignSessionSeal = z.discriminatedUnion("version", [CampaignSessionSealV1, CampaignSessionSealV2]);
 type CampaignSessionSeal = z.infer<typeof CampaignSessionSeal>;
@@ -118,9 +124,10 @@ function assertCampaignAuthority(
   campaignConfigHash: `sha256:${string}`,
   proxyRole: M2ProxyRoleValue | undefined,
   authority: CampaignPauseAuthority | undefined,
+  campaignRoutes: CampaignModelRoutes | undefined,
 ): asserts authority is CampaignPauseAuthority {
-  if (proxyRole === undefined || authority === undefined) {
-    throw new UsageError("campaign-sealed runs require their trusted proxy role and campaign pause authority");
+  if (proxyRole === undefined || authority === undefined || campaignRoutes === undefined) {
+    throw new UsageError("campaign-sealed runs require their trusted proxy role, campaign model routes and campaign pause authority");
   }
   if (authority.configHash !== campaignConfigHash || authority.path === undefined) {
     throw new UsageError("trusted campaign pause authority does not match the run's sealed campaign config");
@@ -133,21 +140,42 @@ function readCampaignSessionSeal(runDir: string): CampaignSessionSeal & { execut
   const seal = CampaignSessionSeal.parse(JSON.parse(readFileSync(path, "utf8")));
   return seal.version === 1 ? { ...seal, executionImage: seal.capsuleImage } : seal;
 }
+
+/**
+ * The routes a campaign run was sealed with. Seals written while M2 routes
+ * were hardcoded carry none; those runs ran on the legacy routes.
+ */
+function campaignRoutesOf(seal: CampaignSessionSeal): CampaignModelRoutes {
+  return seal.version === 2 && seal.modelRoutes !== undefined ? seal.modelRoutes : LEGACY_M2_CAMPAIGN_MODEL_ROUTES;
+}
+
+/**
+ * Sealed routes of a campaign run, for trusted coordinators that rebuild its
+ * proxy. A run without a session seal predates seals, and so the
+ * configurable routes; it ran on the legacy routes.
+ */
+export function readSealedCampaignRoutes(runDir: string): CampaignModelRoutes {
+  return existsSync(join(runDir, CAMPAIGN_SESSION_FILE))
+    ? campaignRoutesOf(readCampaignSessionSeal(runDir))
+    : LEGACY_M2_CAMPAIGN_MODEL_ROUTES;
+}
+
 function campaignSessionFenceError(
   runDir: string,
   campaignConfigHash: `sha256:${string}` | undefined,
   proxyRole: M2ProxyRoleValue | undefined,
+  campaignRoutes: CampaignModelRoutes | undefined,
   authority: CampaignPauseAuthority | undefined,
   corpus: BrokerCorpusConfig | undefined,
   cohort: CorpusCohortBinding | undefined,
 ): string | null {
   if (campaignConfigHash === undefined) {
-    return proxyRole === undefined && authority === undefined && corpus === undefined && cohort === undefined
+    return proxyRole === undefined && campaignRoutes === undefined && authority === undefined && corpus === undefined && cohort === undefined
       ? null
-      : "legacy run acquired campaign authority, an M2 proxy role, or a frozen corpus";
+      : "legacy run acquired campaign authority, an M2 proxy role, campaign model routes, or a frozen corpus";
   }
   try {
-    assertCampaignAuthority(campaignConfigHash, proxyRole, authority);
+    assertCampaignAuthority(campaignConfigHash, proxyRole, authority, campaignRoutes);
     const seal = readCampaignSessionSeal(runDir);
     if (
       seal.campaignConfigHash !== campaignConfigHash
@@ -155,6 +183,9 @@ function campaignSessionFenceError(
       || seal.authorityPath !== authority.path
     ) {
       return "campaign session role/config/authority seal changed";
+    }
+    if (canonicalJson(campaignRoutesOf(seal)) !== canonicalJson(campaignRoutes)) {
+      return "campaign model routes changed";
     }
     if (corpus !== undefined && corpus.provenance.campaignConfigHash !== campaignConfigHash) {
       return "frozen corpus provenance does not carry the run's sealed campaign config hash";
@@ -253,8 +284,8 @@ interface RunPlan {
   resumed: boolean;
 }
 
-/** Default mutation model for a bare `hone run` (no --config): HONE_MODEL_ID or glm-5.2 via the standard upstream. */
-const DEFAULT_MUTATION_MODEL = "glm-5.2";
+/** Default mutation model for a bare `hone run` (no --config routing): HONE_MODEL_ID, else the engine default route. */
+const DEFAULT_MUTATION_MODEL = DEFAULT_MODEL_ROUTE;
 
 function buildConfig(
   manifest: CapsuleManifest,
@@ -265,8 +296,8 @@ function buildConfig(
   const routing: ModelRouting = { ...(overrides.routing ?? {}) };
   if (routing["mutation"] === undefined) {
     // Bare run: default the mutation route so `hone run <capsule>` works with
-    // zero config. The upstream base URL stays the proxy's single configured
-    // default (vibeproxy); only the model id is chosen here.
+    // zero config. The upstream is the operator's HONE_UPSTREAM_BASE_URL;
+    // only the model id is chosen (and sealed) here.
     routing["mutation"] = { model: env["HONE_MODEL_ID"] ?? DEFAULT_MUTATION_MODEL };
   }
   const config = RunConfig.parse({
@@ -519,6 +550,8 @@ export interface TrustedRunOptions {
   executionImageOverride?: string | undefined;
   /** Frozen model capability for this trusted session. Omit only on legacy M0/M1 runs. */
   proxyRole?: M2ProxyRole | undefined;
+  /** Sealed campaign outer/inner routes; required with `proxyRole`, sealed into the run. */
+  campaignRoutes?: CampaignModelRoutes | undefined;
   /** Shared recursive-campaign provider pause authority. */
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
   /** Trusted recursive journal authority; true leaves an INTERNAL child crash resumable. */
@@ -648,17 +681,18 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       if (
         trusted.campaignConfigHash !== undefined
         || trusted.proxyRole !== undefined
+        || trusted.campaignRoutes !== undefined
         || trusted.campaignPauseAuthority !== undefined
         || trusted.corpus !== undefined
         || trusted.corpusCohort !== undefined
       ) {
-        throw new UsageError("legacy run cannot acquire campaign authority, an M2 proxy role, or a frozen corpus on resume");
+        throw new UsageError("legacy run cannot acquire campaign authority, an M2 proxy role, campaign model routes, or a frozen corpus on resume");
       }
     } else {
       if (trusted.campaignConfigHash !== sealedCampaignHash) {
         throw new UsageError("campaign-sealed run requires the exact trusted campaign config hash on resume");
       }
-      assertCampaignAuthority(sealedCampaignHash, trusted.proxyRole, trusted.campaignPauseAuthority);
+      assertCampaignAuthority(sealedCampaignHash, trusted.proxyRole, trusted.campaignPauseAuthority, trusted.campaignRoutes);
       const campaignSeal = readCampaignSessionSeal(found.runDir);
       if (
         campaignSeal.campaignConfigHash !== sealedCampaignHash
@@ -666,6 +700,9 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         || campaignSeal.authorityPath !== trusted.campaignPauseAuthority.path
       ) {
         throw new UsageError("campaign session role/config/authority seal changed since the run started");
+      }
+      if (canonicalJson(campaignRoutesOf(campaignSeal)) !== canonicalJson(trusted.campaignRoutes)) {
+        throw new UsageError("campaign model routes changed since the run started — resume requires the sealed routes");
       }
       if (trusted.corpus !== undefined && trusted.corpus.provenance.campaignConfigHash !== sealedCampaignHash) {
         throw new UsageError("frozen corpus provenance does not carry the run's sealed campaign config hash");
@@ -789,17 +826,19 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     if (trusted.campaignConfigHash === undefined) {
       if (
         trusted.proxyRole !== undefined
+        || trusted.campaignRoutes !== undefined
         || trusted.campaignPauseAuthority !== undefined
         || trusted.corpus !== undefined
         || trusted.corpusCohort !== undefined
       ) {
-        throw new UsageError("M2 proxy roles, campaign pause authority, and a frozen corpus require a trusted campaign config seal");
+        throw new UsageError("M2 proxy roles, campaign model routes, campaign pause authority, and a frozen corpus require a trusted campaign config seal");
       }
     } else {
       assertCampaignAuthority(
         trusted.campaignConfigHash,
         trusted.proxyRole,
         trusted.campaignPauseAuthority,
+        trusted.campaignRoutes,
       );
       if (trusted.corpus !== undefined && trusted.corpus.provenance.campaignConfigHash !== trusted.campaignConfigHash) {
         throw new UsageError("frozen corpus provenance does not carry the trusted campaign config hash");
@@ -903,6 +942,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         campaignConfigHash: trusted.campaignConfigHash,
         authorityPath: trusted.campaignPauseAuthority?.path,
         proxyRole: trusted.proxyRole,
+        modelRoutes: trusted.campaignRoutes,
         executionImage,
         ...(trusted.corpus !== undefined ? { corpusDigest: brokerCorpusConfigDigest(trusted.corpus) } : {}),
       }))}\n`);
@@ -995,6 +1035,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
         ? { promotionHoldoutSplit: trusted.promotionHoldoutSplit }
         : {}),
       ...(trusted.proxyRole !== undefined ? { proxyRole: trusted.proxyRole } : {}),
+      ...(trusted.campaignRoutes !== undefined ? { campaignRoutes: trusted.campaignRoutes } : {}),
       ...(trusted.campaignPauseAuthority !== undefined
         ? { campaignPauseAuthority: trusted.campaignPauseAuthority }
         : {}),
@@ -1503,6 +1544,9 @@ export function remainingWallBudgetMs(
   return Math.max(0, (maxWallClockSec - Math.max(0, spentActiveWallSec)) * 1000);
 }
 
+/** Largest delay a Node timer honors; longer delays fire after 1 ms. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /** Frozen inputs superviseRun carries beside the plan (all admission-derived). */
 export interface SuperviseExtra {
   admittedManifest: CapsuleManifest;
@@ -1531,6 +1575,7 @@ export interface SuperviseExtra {
   corpus?: BrokerCorpusConfig | undefined;
   corpusCohort?: CorpusCohortBinding | undefined;
   proxyRole?: M2ProxyRole | undefined;
+  campaignRoutes?: CampaignModelRoutes | undefined;
   campaignPauseAuthority?: CampaignPauseAuthority | undefined;
   hasUnsettledPendingChild?: (() => boolean) | undefined;
   adjudicateInterruptedChild?: boolean | undefined;
@@ -1729,6 +1774,7 @@ async function superviseLocked(
       runDir,
       extra.campaignConfigHash,
       extra.proxyRole,
+      extra.campaignRoutes,
       extra.campaignPauseAuthority,
       extra.corpus,
       extra.corpusCohort,
@@ -1748,6 +1794,7 @@ async function superviseLocked(
       runDir,
       extra.campaignConfigHash,
       extra.proxyRole,
+      extra.campaignRoutes,
       extra.campaignPauseAuthority,
       extra.corpus,
       extra.corpusCohort,
@@ -1830,10 +1877,12 @@ async function superviseLocked(
   rearmWallBudget = (spentActiveWallSec: number): void => {
     clearTimeout(wallBudgetTimer);
     if (abort.signal.aborted || currentPause() !== null || stopRequested) return;
-    wallBudgetTimer = setTimeout(
-      () => requestBudgetAbort("wallClockSec"),
-      remainingWallBudgetMs(config.budget.maxWallClockSec, spentActiveWallSec),
-    );
+    const remainingMs = remainingWallBudgetMs(config.budget.maxWallClockSec, spentActiveWallSec);
+    // Node fires any delay above 2^31-1 ms (~24.8 days) immediately. A longer
+    // envelope re-arms at the ceiling instead of aborting the run at once.
+    wallBudgetTimer = remainingMs > MAX_TIMER_DELAY_MS
+      ? setTimeout(() => rearmWallBudget(spentActiveWallSec + MAX_TIMER_DELAY_MS / 1000), MAX_TIMER_DELAY_MS)
+      : setTimeout(() => requestBudgetAbort("wallClockSec"), remainingMs);
   };
   // A broker-authored exhaustion may have been public-log durable before a
   // crash. Re-latch the abort before backend.start, and remember that the
@@ -1922,6 +1971,7 @@ async function superviseLocked(
       ? { promotionHoldoutSplit: extra.promotionHoldoutSplit }
       : {}),
     ...(extra.proxyRole !== undefined ? { proxyRole: extra.proxyRole } : {}),
+    ...(extra.campaignRoutes !== undefined ? { campaignRoutes: extra.campaignRoutes } : {}),
     ...(extra.campaignPauseAuthority !== undefined ? { campaignPauseAuthority: extra.campaignPauseAuthority } : {}),
     ...(extra.admissionReview !== undefined ? { admissionReview: extra.admissionReview } : {}),
     ...(extra.recursiveBroker !== undefined ? { recursiveBroker: extra.recursiveBroker } : {}),

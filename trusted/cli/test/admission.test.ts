@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CapsuleManifest, DiagnosticOrderingReport, RunConfig, capsuleDigest } from "@hone/schema";
+import { CapsuleManifest, DiagnosticOrderingReport, LEGACY_M2_CAMPAIGN_MODEL_ROUTES, RunConfig, capsuleDigest } from "@hone/schema";
 import {
   admitCapsule,
   authenticateFrozenCapsuleAssets,
@@ -299,6 +299,7 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
         campaignConfigHash: configHash,
         campaignPauseAuthority: authority,
         proxyRole: "inner-capsule-improvement",
+        campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
       },
     )).toBe(1);
     const runsDir = join(root, ".hone-runs");
@@ -335,6 +336,7 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
         campaignConfigHash: configHash,
         campaignPauseAuthority: authority,
         proxyRole: "inner-capsule-improvement",
+        campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
         executionImageOverride: repinnedImage,
       },
     )).toBe(1);
@@ -363,6 +365,7 @@ describe("run-dir capsule snapshot + resume revalidation", () => {
         campaignConfigHash: configHash,
         campaignPauseAuthority: openAuthority,
         proxyRole: "inner-capsule-improvement",
+        campaignRoutes: LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
         executionImageOverride: `hone-foreign@sha256:${"f".repeat(64)}`,
       },
     )).rejects.toThrow("campaign execution image changed since the run started");

@@ -138,7 +138,7 @@ export function renderContract(inputs: ContractInputs): string {
     lines.push("- (none configured)");
   } else {
     for (const [role, route] of roles) {
-      lines.push(`- ${role} → ${route.model}${route.upstreamBaseUrl ? ` (${route.upstreamBaseUrl})` : ""}`);
+      lines.push(`- ${role} → ${route.model}${route.reasoningEffort ? `, reasoning effort ${route.reasoningEffort}` : ""}${route.upstreamBaseUrl ? ` (${route.upstreamBaseUrl})` : ""}`);
     }
   }
   lines.push("");
