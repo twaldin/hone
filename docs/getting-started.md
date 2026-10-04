@@ -70,6 +70,8 @@ The omp auth gateway accepts provider-qualified ids. Hone's default route for ev
 
 Keep credentials in the operator's local environment. Campaign routes belong to the frozen campaign configuration.
 
+On a shared host, `HONE_SANDBOX_CPUSET` (a cpuset list such as `1-4`) pins every mutation sandbox and evaluator container of the run to those CPUs; give concurrent runs disjoint sets. It is operator placement and not part of the capsule digest.
+
 Production execution verifies the capsule's assets, baseline and Gate-2 admission receipt chain. Publishing files does not transfer the original operator's local admission ledger or runtime images. The public-clone admission and image bootstrap is unfinished; do not disable review checks to make an example run.
 
 The authoring workflow supports gate decisions and durable session requests. Its default session boundary queues those requests rather than starting coding workers. A trusted authoring integration must complete the requested work before approval and execution are possible.
