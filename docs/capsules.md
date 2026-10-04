@@ -42,6 +42,17 @@ HONE_CAPSULES_ROOT="$PWD/../hone-capsules/capsules" pnpm --filter @hone/capsule-
 
 A relative `<capsule-dir>` resolves under the capsules root.
 
+## Two-phase evaluators
+
+A capsule whose score must come from a container that never saw the candidate (for example a compressor whose archive is decoded elsewhere) declares `"evalPhases": ["encode", "decode"]` in `capsule.config.json`. `scaffold` and the ordering check carry it into the manifest, so it is part of the capsule ID and digest. Any other list is rejected; absent keeps the single evaluator container.
+
+The broker then runs `evalEntrypoint` twice, in two fresh containers, under one evaluator invocation charge and one `evaluatorTimeoutSec` cap:
+
+1. `encode` (`HONE_EVAL_PHASE=encode`): the usual evaluator container, plus a fresh broker-owned 0700 host directory mounted read-write at `/capsule/handoff` beneath the root-only `/capsule` tmpfs. Its stdout must be either an invalid `EvaluatorOutput` (the final result; no decode runs) or exactly `{"honeEvalContinue":"decode"}`. A valid score, an unknown or decorated marker, or a handoff holding anything other than at least one top-level regular file fails the evaluation.
+2. `decode` (`HONE_EVAL_PHASE=decode`): a new container with the same capabilities, AppArmor profile, read-only root, fresh tmpfs mounts and resource limits, plus `--ipc private`. It mounts the frozen baseline, the staged assets and the handoff read-only, and no workspace. Its stdout is the final `EvaluatorOutput`; it gets only the wall time encode left.
+
+Both containers are reaped by name and the handoff directory is deleted on every path. The encode scorer writes the handoff as container root, relying on the evaluator's existing `DAC_OVERRIDE`.
+
 ## Terminal source references
 
 Eleven capsules form the terminal set of the recursive experiment: `brotli-codec`, `duckdb-tpch`, `floyd-custom-scoreboard-render`, `flt-workflow-parser`, `harness-pi-readiness`, `mimalloc-allocator`, `node-url`, `quickjs-interpreter`, `sqlite-speedtest1`, `tradeup-query-latency` and `tree-sitter-parse`. Their evaluator and task source is inspectable in hone-capsules, but private terminal assets, answer banks and selected reconstruction inputs are not published. Affected source files use explicit unavailable-input placeholders instead of embedded frozen constants.

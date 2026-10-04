@@ -320,6 +320,8 @@ export interface CapsuleConfig {
   sandbox?: { memoryBytes: number; cpus?: number };
   /** Per-call evaluator wall-clock cap; scaffold emits it into the manifest verbatim. */
   evaluatorTimeoutSec?: number;
+  /** Two-phase evaluator protocol; scaffold emits it into the manifest verbatim. */
+  evalPhases?: string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -336,7 +338,7 @@ export function loadCapsuleConfig(capsuleDir: string = CAPSULE_DIR): CapsuleConf
   };
   const raw: unknown = JSON.parse(readFileSync(join(capsuleDir, "capsule.config.json"), "utf8"));
   if (!isRecord(raw)) return fail("<root>");
-  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, sandbox, evaluatorTimeoutSec } = raw;
+  const { objective, image, evalEntrypoint, protectedPaths, assetGroups, budget, diagnosticOrdering, sandbox, evaluatorTimeoutSec, evalPhases } = raw;
   if (typeof objective !== "string" || objective.length === 0) return fail("objective");
   if (typeof image !== "string" || image.length === 0) return fail("image");
   if (!isStringArray(evalEntrypoint) || evalEntrypoint.length === 0) return fail("evalEntrypoint");
@@ -366,6 +368,7 @@ export function loadCapsuleConfig(capsuleDir: string = CAPSULE_DIR): CapsuleConf
     sandboxParsed = { memoryBytes: sandbox.memoryBytes, ...(sandbox.cpus === undefined ? {} : { cpus: sandbox.cpus }) };
   }
   if (evaluatorTimeoutSec !== undefined && typeof evaluatorTimeoutSec !== "number") return fail("evaluatorTimeoutSec");
+  if (evalPhases !== undefined && !isStringArray(evalPhases)) return fail("evalPhases");
   return {
     objective,
     image,
@@ -376,6 +379,7 @@ export function loadCapsuleConfig(capsuleDir: string = CAPSULE_DIR): CapsuleConf
     diagnosticOrdering: { path: diagnosticOrdering.path },
     ...(sandboxParsed === undefined ? {} : { sandbox: sandboxParsed }),
     ...(evaluatorTimeoutSec === undefined ? {} : { evaluatorTimeoutSec }),
+    ...(evalPhases === undefined ? {} : { evalPhases }),
   };
 }
 
@@ -489,6 +493,7 @@ export function provisionalManifest(
     budget: config.budget,
     ...(config.sandbox === undefined ? {} : { sandbox: config.sandbox }),
     ...(config.evaluatorTimeoutSec === undefined ? {} : { evaluatorTimeoutSec: config.evaluatorTimeoutSec }),
+    ...(config.evalPhases === undefined ? {} : { evalPhases: config.evalPhases }),
     diagnosticOrdering: { path: config.diagnosticOrdering.path, hash: PROVISIONAL_ORDERING_HASH },
     contentHashes,
   };
