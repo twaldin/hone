@@ -79,10 +79,11 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   Broker,
@@ -1071,6 +1072,18 @@ export interface OrderingEvidencePaths {
 }
 
 /**
+ * Absolute path with symlinks resolved through the deepest existing ancestor,
+ * so two spellings of one file (`/tmp` vs `/private/tmp`, `..` across a link)
+ * compare equal before anything is written.
+ */
+function canonicalEvidencePath(path: string): string {
+  const absolute = resolve(path);
+  let existing = absolute;
+  while (!existsSync(existing) && existing !== dirname(existing)) existing = dirname(existing);
+  return resolve(realpathSync(existing), relative(existing, absolute));
+}
+
+/**
  * The CLI's measure-and-persist flow. Evidence is written as it is produced
  * (every measurement, then the unverified report before the container-count
  * gate); ANY later failure — a thrown integrity error or failing ordering
@@ -1084,7 +1097,7 @@ export async function runOrderingWithEvidence(
   const { stabilityRuns, paths } = options;
   const named = [paths.rawPath, paths.partialPath, paths.reportPath]
     .filter((p): p is string => p !== undefined)
-    .map((p) => resolve(p));
+    .map((p) => canonicalEvidencePath(p));
   if (new Set(named).size !== named.length) {
     throw new Error("ordering-check: raw measurements, partial report and report must be three distinct files");
   }
@@ -1148,6 +1161,7 @@ export async function runOrderingWithEvidence(
   } catch (err) {
     // A report whose run could not be finalized must not look admitted; cleanup
     // trouble never hides the original error or skips recording it.
+    recordFailure(err);
     if (paths.reportPath !== undefined) {
       try {
         rmSync(paths.reportPath, { force: true });
@@ -1155,7 +1169,6 @@ export async function runOrderingWithEvidence(
         console.error(`ordering-check: could not remove unfinalized report: ${String(rmErr)}`);
       }
     }
-    recordFailure(err);
     throw err;
   }
   return report;

@@ -30,7 +30,7 @@ import {
   renameSync,
   writeSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { canonicalJson, type DiagnosticOrderingReport } from "@hone/schema";
 import type { OrderingMeasurement } from "./ordering-check.js";
 
@@ -69,10 +69,11 @@ function fsyncPath(path: string): void {
  * rename, then fsync the directory — and the parent of every directory this
  * call had to create, so the new entries themselves survive power loss.
  */
-export function writeFileAtomic(path: string, contents: string): void {
+export function writeFileAtomic(target: string, contents: string): void {
+  const path = resolve(target);
   const dir = dirname(path);
   const created: string[] = [];
-  for (let d = dir; !existsSync(d); d = dirname(d)) created.push(d);
+  for (let d = dir; !existsSync(d) && d !== dirname(d); d = dirname(d)) created.push(d);
   mkdirSync(dir, { recursive: true });
   const temp = join(dir, `.${basename(path)}.${process.pid}.tmp`);
   const bytes = Buffer.from(contents, "utf8");
@@ -89,7 +90,7 @@ export function writeFileAtomic(path: string, contents: string): void {
     closeSync(fd);
   }
   renameSync(temp, path);
-  for (const target of new Set([dir, ...created.map((d) => dirname(d))])) fsyncPath(target);
+  for (const synced of new Set([dir, ...created.map((d) => dirname(d))])) fsyncPath(synced);
 }
 
 export class OrderingEvidenceWriter {

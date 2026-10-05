@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -265,15 +265,33 @@ describe("ordering evidence writer", () => {
 });
 
 describe("ordering evidence paths", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ordering-paths-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
   it("refuses evidence files that name the same path, before any measurement", async () => {
-    const same = join(tmpdir(), "ordering-same.json");
+    const same = join(dir, "same.json");
     await expect(
       runOrderingWithEvidence({ stabilityRuns: 3, paths: { rawPath: same, reportPath: same } }),
     ).rejects.toThrow("must be three distinct files");
+  });
+
+  it("sees through `..` segments and symlinked directories", async () => {
+    mkdirSync(join(dir, "real"));
+    symlinkSync(join(dir, "real"), join(dir, "alias"));
     await expect(
       runOrderingWithEvidence({
         stabilityRuns: 3,
-        paths: { partialPath: join(tmpdir(), "a", "..", "ordering-same.json"), rawPath: same },
+        paths: { rawPath: `${dir}/real/out.json`, partialPath: `${dir}/alias/sub/../out.json` },
+      }),
+    ).rejects.toThrow("must be three distinct files");
+    // A not-yet-existing target below a symlinked parent is still the same file.
+    await expect(
+      runOrderingWithEvidence({
+        stabilityRuns: 3,
+        paths: { rawPath: `${dir}/real/new/out.json`, reportPath: `${dir}/alias/new/out.json` },
       }),
     ).rejects.toThrow("must be three distinct files");
   });
