@@ -316,6 +316,9 @@ describe("terminal holdout diagnostic admission", () => {
       stabilitySpread: 0,
       failures: [],
       evalInvocations: 14,
+      logicalEvaluations: 14,
+      decodeLaunches: 0,
+      earlyInvalidEncodes: 0,
       wallMs: 1,
     };
 
