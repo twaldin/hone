@@ -45,6 +45,11 @@
  *   (default path: <capsule>/diagnostics/ordering-report.json) on success.
  *   --stability-runs raises the repeated baseline count (minimum 3), while
  *   --raw-measurements records every evaluator output in execution order.
+ *   Both are DURABLE: the raw file is rewritten after every measurement and
+ *   `--partial-report path` (default `<report>.partial.json` when --report is
+ *   given) receives the aggregate-only report BEFORE the container-count
+ *   integrity assertions run; a later failure marks both files
+ *   `status: "failed"` with the explanation instead of losing them.
  *
  * Capsule selection: the check targets seeded-astar under the capsules root
  * by default (HONE_CAPSULES_ROOT, else ./capsules under the working
@@ -98,6 +103,7 @@ import {
   type EvaluatorOutput,
 } from "@hone/schema";
 import { resolveCapsulesRoot } from "@hone/cli/capsules-root";
+import { OrderingEvidenceWriter } from "./ordering-evidence.js";
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 /** Frozen default target name: the seeded-astar capsule this tool was originally built around (WP6). */
@@ -251,6 +257,19 @@ export interface OrderingMeasurement {
 export interface RunOrderingCheckOptions {
   stabilityRuns?: number;
   onMeasurement?: (measurement: OrderingMeasurement) => void;
+  /**
+   * Called with the fully computed report (observed container counts
+   * included) BEFORE any measurement-integrity assertion — container counts
+   * or host transcript — can throw, so a later integrity failure cannot lose
+   * what was measured.
+   */
+  onUnverifiedReport?: (report: OrderingReport) => void;
+  /**
+   * Host command executor (default: the real one). Still wrapped by the
+   * docker/tar-only guard and transcript recording; exists so tests can
+   * stand in for the docker CLI.
+   */
+  runCommand?: RunCommand;
 }
 
 /**
@@ -585,32 +604,153 @@ function assertHostTranscriptClean(commands: readonly (readonly string[])[]): vo
   }
 }
 
+/** Exact env argument the broker gives every decode-phase evaluator container. */
+const DECODE_PHASE_ENV = "HONE_EVAL_PHASE=decode";
+
+/**
+ * What the host transcript says about evaluator containers. A LOGICAL
+ * evaluation is one `broker.evaluate` call: its encode launch (the only
+ * launch of a single-phase capsule). A two-phase capsule adds one fresh
+ * decode container per evaluation that survives encode, so physical
+ * containers = logical + decode; an invalid encode result ends an evaluation
+ * after exactly one container.
+ */
+export interface EvaluatorLaunchCounts {
+  /** Evaluator launches that are not decode launches: one per broker evaluation. */
+  logical: number;
+  /** Decode-phase launches. */
+  decode: number;
+  /** Every evaluator container started (`docker run`). */
+  physical: number;
+  /** Decode launches that do not pair with exactly one earlier encode launch. */
+  pairingErrors: string[];
+}
+
+function launchName(argv: readonly string[]): string | undefined {
+  const index = argv.indexOf("--name");
+  return index === -1 ? undefined : argv[index + 1];
+}
+
+/** Pure transcript summary; never throws, so it is safe to take before persisting evidence. */
+export function countEvaluatorLaunches(
+  commands: readonly (readonly string[])[],
+): EvaluatorLaunchCounts {
+  const counts: EvaluatorLaunchCounts = { logical: 0, decode: 0, physical: 0, pairingErrors: [] };
+  const encodeNames = new Set<string>();
+  const decoded = new Set<string>();
+  for (const argv of commands) {
+    if (argv[0] !== "docker" || argv[1] !== "run") continue;
+    counts.physical += 1;
+    const name = launchName(argv);
+    if (!argv.includes(DECODE_PHASE_ENV)) {
+      counts.logical += 1;
+      if (name !== undefined) encodeNames.add(name);
+      continue;
+    }
+    counts.decode += 1;
+    // The broker derives the decode container name from its encode container.
+    const encodeName = name?.endsWith("-decode") === true ? name.slice(0, -"-decode".length) : undefined;
+    if (encodeName === undefined || !encodeNames.has(encodeName)) {
+      counts.pairingErrors.push(`decode launch ${name ?? "<unnamed>"} has no earlier encode launch`);
+    } else if (decoded.has(encodeName)) {
+      counts.pairingErrors.push(`encode launch ${encodeName} was decoded more than once`);
+    } else {
+      decoded.add(encodeName);
+    }
+  }
+  return counts;
+}
+
+/**
+ * Measurement-integrity assertion over the launch counts (a tool bug, not an
+ * ordering failure, so it THROWS). Every expected logical evaluation must
+ * have launched exactly once, every decode launch must belong to exactly one
+ * encode launch, a single-phase capsule must never decode, and a VALID result
+ * can only exist after a decode phase — so evaluations that stopped at encode
+ * (logical - decode) must all be invalid.
+ */
+export function assertEvaluatorLaunches(
+  counts: EvaluatorLaunchCounts,
+  expected: {
+    logicalEvaluations: number;
+    phased: boolean;
+    measurements: readonly OrderingMeasurement[];
+  },
+): void {
+  const observed =
+    `${counts.logical} logical evaluations in ${counts.physical} containers (${counts.decode} decode)`;
+  if (counts.pairingErrors.length > 0) {
+    throw new Error(`ordering-check: ${counts.pairingErrors.join("; ")}; observed ${observed}`);
+  }
+  if (!expected.phased && counts.decode > 0) {
+    throw new Error(`ordering-check: single-phase capsule launched decode containers; observed ${observed}`);
+  }
+  if (counts.logical !== expected.logicalEvaluations) {
+    throw new Error(
+      `ordering-check: expected exactly ${expected.logicalEvaluations} logical evaluations, observed ${observed}`,
+    );
+  }
+  if (expected.phased) {
+    const valid = expected.measurements.filter((m) => m.output.valid).length;
+    if (valid > counts.decode) {
+      throw new Error(
+        `ordering-check: ${valid} valid measurements but only ${counts.decode} decode containers; observed ${observed}`,
+      );
+    }
+  }
+}
+
+/**
+ * End-of-run integrity gate. The report is built from the observed counts and
+ * handed to `onUnverifiedReport` BEFORE any count or transcript assertion can
+ * throw, so a failing gate never discards what was already measured.
+ */
+export function verifyOrderingMeasurements(input: {
+  commands: readonly (readonly string[])[];
+  measurements: readonly OrderingMeasurement[];
+  expectedLogicalEvaluations: number;
+  phased: boolean;
+  buildReport: (launches: EvaluatorLaunchCounts) => OrderingReport;
+  onUnverifiedReport?: (report: OrderingReport) => void;
+}): OrderingReport {
+  const launches = countEvaluatorLaunches(input.commands);
+  const report = input.buildReport(launches);
+  input.onUnverifiedReport?.(report);
+  assertEvaluatorLaunches(launches, {
+    logicalEvaluations: input.expectedLogicalEvaluations,
+    phased: input.phased,
+    measurements: input.measurements,
+  });
+  assertHostTranscriptClean(input.commands);
+  return report;
+}
+
 /**
  * Zero-footprint verification + teardown, used on success AND failure:
  * containers labeled with this run, scratch volumes named for this run, and
  * the throwaway temp root must all be gone. Leaked containers/volumes are
  * reaped best-effort AFTER being reported — the leak is still an error.
  */
-async function findAndReapLeaks(runId: string, tempRoot: string): Promise<string[]> {
+async function findAndReapLeaks(runId: string, tempRoot: string, run: RunCommand): Promise<string[]> {
   const leaks: string[] = [];
-  const ps = await runCommand(["docker", "ps", "-aq", "--filter", `label=hone.runId=${runId}`]);
+  const ps = await run(["docker", "ps", "-aq", "--filter", `label=hone.runId=${runId}`]);
   if (ps.exitCode !== 0) {
     leaks.push(`docker ps leak-check failed: ${ps.stderr.toString("utf8").slice(0, 500)}`);
   } else {
     const ids = ps.stdout.toString("utf8").split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
     if (ids.length > 0) {
       leaks.push(`containers leaked (label hone.runId=${runId}): ${ids.join(", ")}`);
-      await runCommand(["docker", "rm", "-f", ...ids]);
+      await run(["docker", "rm", "-f", ...ids]);
     }
   }
-  const vol = await runCommand(["docker", "volume", "ls", "-q", "--filter", `name=hone-scratch-${runId}`]);
+  const vol = await run(["docker", "volume", "ls", "-q", "--filter", `name=hone-scratch-${runId}`]);
   if (vol.exitCode !== 0) {
     leaks.push(`docker volume leak-check failed: ${vol.stderr.toString("utf8").slice(0, 500)}`);
   } else {
     const names = vol.stdout.toString("utf8").split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
     if (names.length > 0) {
       leaks.push(`volumes leaked: ${names.join(", ")}`);
-      await runCommand(["docker", "volume", "rm", "-f", ...names]);
+      await run(["docker", "volume", "rm", "-f", ...names]);
     }
   }
   rmSync(tempRoot, { recursive: true, force: true });
@@ -623,8 +763,17 @@ export interface OrderingReport {
   stabilityAggregates: number[];
   stabilitySpread: number;
   failures: string[];
-  /** Real broker eval containers spawned; the exact count is derived from the requested stability runs. */
+  /**
+   * Evaluator containers physically started (`docker run`): logical
+   * evaluations plus decode launches. Kept as the physical metric.
+   */
   evalInvocations: number;
+  /** Broker evaluations (one per measurement); derived from the requested stability runs. */
+  logicalEvaluations: number;
+  /** Fresh decode containers started by a two-phase capsule. */
+  decodeLaunches: number;
+  /** Evaluations a two-phase capsule ended after the encode container with an invalid result. */
+  earlyInvalidEncodes: number;
   /** Wall-clock duration of the full check, ms. */
   wallMs: number;
 }
@@ -636,7 +785,7 @@ export async function runOrderingCheck(
   if (!Number.isSafeInteger(stabilityRuns) || stabilityRuns < 3) {
     throw new Error("ordering-check: stabilityRuns must be a safe integer >= 3");
   }
-  const expectedEvals =
+  const expectedLogicalEvaluations =
     (1 + DIAGNOSTICS.length + (stabilityRuns - 1)) * SPLITS.length;
   const startedMs = Date.now();
   const terminalHoldoutDiagnostic = resolveTerminalHoldoutDiagnosticMode(
@@ -661,7 +810,13 @@ export async function runOrderingCheck(
         new Error(`ordering-check: blocked host command (only docker/tar are permitted): ${argv.join(" ")}`),
       );
     }
-    return runCommand(argv, opts);
+    return (options.runCommand ?? runCommand)(argv, opts);
+  };
+
+  const measurements: OrderingMeasurement[] = [];
+  const onMeasurement = (measurement: OrderingMeasurement): void => {
+    measurements.push(measurement);
+    options.onMeasurement?.(measurement);
   };
 
   let broker: Broker | undefined;
@@ -680,7 +835,7 @@ export async function runOrderingCheck(
       admittedCapsuleDigest: capsuleDigest(manifest),
       optimizerDigest: ORDERING_TOOL_DIGEST,
       holdoutLedgerPath: join(tempRoot, "holdout-ledger.ndjson"),
-      ...(terminalHoldoutDiagnostic ? { holdoutBudget: expectedEvals } : {}),
+      ...(terminalHoldoutDiagnostic ? { holdoutBudget: expectedLogicalEvaluations } : {}),
       ...orderingBrokerResources(manifest),
       executionImage: manifest.image,
       runDir: join(tempRoot, "run"),
@@ -702,7 +857,7 @@ export async function runOrderingCheck(
         cas,
         variant,
         0,
-        options.onMeasurement,
+        onMeasurement,
       );
     }
 
@@ -736,7 +891,7 @@ export async function runOrderingCheck(
     const stabilityAggregates = [results.baseline.combined];
     for (let i = 1; i < stabilityRuns; i += 1) {
       stabilityAggregates.push(
-        (await evaluateVariant(broker, cas, "baseline", i, options.onMeasurement)).combined,
+        (await evaluateVariant(broker, cas, "baseline", i, onMeasurement)).combined,
       );
     }
     const mean =
@@ -781,23 +936,29 @@ export async function runOrderingCheck(
 
     // Measurement-integrity assertions (tool bugs, not ordering failures —
     // they THROW): every datapoint was a distinct real container eval and the
-    // host transcript is clean.
-    const evalInvocations = commands.filter((c) => c[0] === "docker" && c[1] === "run").length;
-    if (evalInvocations !== expectedEvals) {
-      throw new Error(
-        `ordering-check: expected exactly ${expectedEvals} container evaluations, observed ${evalInvocations}`,
-      );
-    }
-    assertHostTranscriptClean(commands);
-
-    return {
-      results,
-      stabilityAggregates,
-      stabilitySpread,
-      failures,
-      evalInvocations,
-      wallMs: Date.now() - startedMs,
-    };
+    // host transcript is clean. Logical evaluations (broker evaluate calls)
+    // are counted apart from physical containers: a two-phase capsule runs
+    // a fresh decode container per surviving evaluation. The unverified
+    // report is handed out FIRST so these assertions can never lose it.
+    const phased = manifest.evalPhases !== undefined;
+    return verifyOrderingMeasurements({
+      commands,
+      measurements,
+      expectedLogicalEvaluations,
+      phased,
+      ...(options.onUnverifiedReport === undefined ? {} : { onUnverifiedReport: options.onUnverifiedReport }),
+      buildReport: (launches) => ({
+        results,
+        stabilityAggregates,
+        stabilitySpread,
+        failures,
+        evalInvocations: launches.physical,
+        logicalEvaluations: launches.logical,
+        decodeLaunches: launches.decode,
+        earlyInvalidEncodes: phased ? Math.max(0, launches.logical - launches.decode) : 0,
+        wallMs: Date.now() - startedMs,
+      }),
+    });
   } catch (err) {
     failed = true;
     throw err;
@@ -808,7 +969,7 @@ export async function runOrderingCheck(
       if (!failed) throw closeErr;
       console.error(`ordering-check: broker close failed after error: ${String(closeErr)}`);
     }
-    const leaks = await findAndReapLeaks(runId, tempRoot);
+    const leaks = await findAndReapLeaks(runId, tempRoot, options.runCommand ?? runCommand);
     if (leaks.length > 0) {
       const message = `ordering-check: resource leaks detected:\n- ${leaks.join("\n- ")}`;
       // Never mask the primary failure; a leak on the success path is fatal.
@@ -878,9 +1039,97 @@ function formatReport(report: OrderingReport): string {
       .join(", ")}], spread ${report.stabilitySpread.toFixed(4)} (band ${STABILITY_BAND})`,
   );
   lines.push(
-    `measurements: ${report.evalInvocations} broker container evals (network none, host-exec free), wall ${(report.wallMs / 1000).toFixed(1)}s`,
+    `measurements: ${report.logicalEvaluations} broker evaluations in ${report.evalInvocations} containers ` +
+      `(${report.decodeLaunches} decode, ${report.earlyInvalidEncodes} ended at an invalid encode; network none, host-exec free), ` +
+      `wall ${(report.wallMs / 1000).toFixed(1)}s`,
   );
   return lines.join("\n");
+}
+
+export interface OrderingEvidencePaths {
+  /** Raw per-measurement evidence, rewritten after every measurement. */
+  rawPath?: string;
+  /** Aggregate-only report with its verification status, written before the integrity gate. */
+  partialPath?: string;
+  /** Schema-valid compact summary the manifest pins; written only after a fully verified, passing run. */
+  reportPath?: string;
+}
+
+/**
+ * The CLI's measure-and-persist flow. Evidence is written as it is produced
+ * (every measurement, then the unverified report before the container-count
+ * gate); ANY later failure — a thrown integrity error or failing ordering
+ * checks — keeps all of it and records the explanation. A thrown error is
+ * rethrown; failing ordering checks are returned in `report.failures` for the
+ * caller to act on.
+ */
+export async function runOrderingWithEvidence(
+  options: { stabilityRuns: number; paths: OrderingEvidencePaths } & Pick<RunOrderingCheckOptions, "runCommand">,
+): Promise<OrderingReport> {
+  const { stabilityRuns, paths } = options;
+  const evidence =
+    paths.rawPath === undefined && paths.partialPath === undefined
+      ? undefined
+      : new OrderingEvidenceWriter({
+          stabilityRuns,
+          ...(paths.rawPath === undefined ? {} : { rawPath: paths.rawPath }),
+          ...(paths.partialPath === undefined ? {} : { partialPath: paths.partialPath }),
+        });
+  const recordFailure = (err: unknown): void => {
+    try {
+      evidence?.fail(err);
+    } catch (writeErr) {
+      console.error(`ordering-check: could not record failure evidence: ${String(writeErr)}`);
+    }
+  };
+
+  let report: OrderingReport;
+  try {
+    report = await runOrderingCheck({
+      stabilityRuns,
+      ...(options.runCommand === undefined ? {} : { runCommand: options.runCommand }),
+      ...(evidence === undefined
+        ? {}
+        : {
+            onMeasurement: (measurement: OrderingMeasurement) => evidence.measurement(measurement),
+            onUnverifiedReport: (unverified: OrderingReport) => {
+              let summary: DiagnosticOrderingReport | string;
+              try {
+                summary = summarizeOrderingReport(unverified);
+              } catch (err) {
+                // Degenerate aggregates (e.g. a zero-mean stability sample) cannot form a
+                // schema-valid summary; that is an ordering failure the report already
+                // carries, never a reason to abort before the integrity gate.
+                summary = err instanceof Error ? err.message : String(err);
+              }
+              evidence.unverified(summary, {
+                logicalEvaluations: unverified.logicalEvaluations,
+                decodeLaunches: unverified.decodeLaunches,
+                earlyInvalidEncodes: unverified.earlyInvalidEncodes,
+                physicalContainers: unverified.evalInvocations,
+              });
+            },
+          }),
+    });
+  } catch (err) {
+    recordFailure(err);
+    throw err;
+  }
+  if (report.failures.length > 0) {
+    recordFailure(new Error(`ORDERING CHECK FAILED:\n- ${report.failures.join("\n- ")}`));
+    return report;
+  }
+  try {
+    if (paths.reportPath !== undefined) {
+      mkdirSync(dirname(paths.reportPath), { recursive: true });
+      writeFileSync(paths.reportPath, serializeOrderingReport(summarizeOrderingReport(report)));
+    }
+    evidence?.complete();
+  } catch (err) {
+    recordFailure(err);
+    throw err;
+  }
+  return report;
 }
 
 const invokedDirectly =
@@ -900,31 +1149,25 @@ if (invokedDirectly) {
 
   const stabilityRuns = resolveStabilityRuns(args);
   const rawMeasurementsArg = requiredFlagValue(args, "--raw-measurements");
-  const measurements: OrderingMeasurement[] = [];
-  const report = await runOrderingCheck({
-    stabilityRuns,
-    ...(rawMeasurementsArg === undefined
-      ? {}
-      : { onMeasurement: (measurement: OrderingMeasurement) => measurements.push(measurement) }),
-  });
+  const partialReportArg = requiredFlagValue(args, "--partial-report");
+  const paths: OrderingEvidencePaths = {
+    ...(rawMeasurementsArg === undefined ? {} : { rawPath: resolve(rawMeasurementsArg) }),
+    ...(partialReportArg !== undefined
+      ? { partialPath: resolve(partialReportArg) }
+      : reportPath === undefined
+        ? {}
+        : { partialPath: `${resolve(reportPath)}.partial.json` }),
+    ...(reportPath === undefined ? {} : { reportPath }),
+  };
+
+  const report = await runOrderingWithEvidence({ stabilityRuns, paths });
   console.log(formatReport(report));
-  if (rawMeasurementsArg !== undefined) {
-    const rawMeasurementsPath = resolve(rawMeasurementsArg);
-    mkdirSync(dirname(rawMeasurementsPath), { recursive: true });
-    writeFileSync(
-      rawMeasurementsPath,
-      `${canonicalJson({ schemaVersion: 1, stabilityRuns, measurements })}\n`,
-    );
-    console.log(`\nraw measurements -> ${rawMeasurementsPath}`);
-  }
   if (report.failures.length > 0) {
     console.error(`\nORDERING CHECK FAILED:\n- ${report.failures.join("\n- ")}`);
     process.exit(1);
   }
-  if (reportPath !== undefined) {
-    mkdirSync(dirname(reportPath), { recursive: true });
-    writeFileSync(reportPath, serializeOrderingReport(summarizeOrderingReport(report)));
-    console.log(`\nreport -> ${reportPath}`);
-  }
+  if (paths.rawPath !== undefined) console.log(`\nraw measurements -> ${paths.rawPath}`);
+  if (paths.partialPath !== undefined) console.log(`partial report -> ${paths.partialPath}`);
+  if (paths.reportPath !== undefined) console.log(`report -> ${paths.reportPath}`);
   console.log("\nordering check PASSED");
 }
