@@ -17,7 +17,8 @@
  * The partial report is deliberately NOT the schema-valid compact summary the
  * capsule manifest pins: it wraps that summary (aggregates only, never
  * per-example content) with its verification status, so it can never be
- * mistaken for an admitted `ordering-report.json`.
+ * mistaken for an admitted `ordering-report.json`. Its `failure` text is the
+ * tool's own error message (the same text printed to the console), truncated.
  */
 
 import {
@@ -50,18 +51,30 @@ export interface OrderingEvidenceOptions {
   partialPath?: string;
 }
 
-/** Durable write: temp file in the same directory, fsync, then atomic rename. */
-function writeFileAtomic(path: string, contents: string): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const temp = join(dirname(path), `.${basename(path)}.${process.pid}.tmp`);
+/** Cap on the recorded failure explanation (broker errors can embed evaluator stderr). */
+const MAX_FAILURE_CHARS = 4000;
+
+/** Durable write: temp file in the same directory, full write, fsync, atomic rename, fsync the directory. */
+export function writeFileAtomic(path: string, contents: string): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  const temp = join(dir, `.${basename(path)}.${process.pid}.tmp`);
+  const bytes = Buffer.from(contents, "utf8");
   const fd = openSync(temp, "w");
   try {
-    writeSync(fd, contents);
+    let written = 0;
+    while (written < bytes.length) written += writeSync(fd, bytes, written);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
   renameSync(temp, path);
+  const dirFd = openSync(dir, "r");
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
 }
 
 export class OrderingEvidenceWriter {
@@ -105,7 +118,7 @@ export class OrderingEvidenceWriter {
   /** Any failure after (or before) the partial report: keep everything, add the explanation. */
   fail(error: unknown): void {
     this.status = "failed";
-    this.failure = error instanceof Error ? error.message : String(error);
+    this.failure = (error instanceof Error ? error.message : String(error)).slice(0, MAX_FAILURE_CHARS);
     this.writeAll();
   }
 

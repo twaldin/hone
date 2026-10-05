@@ -40,7 +40,7 @@
  *     the run, on success AND on failure.
  *
  * Usage: npx tsx capsule-kit/tools/ordering-check.ts [--report [path]]
- *   [--stability-runs count] [--raw-measurements path]
+ *   [--stability-runs count] [--raw-measurements path] [--partial-report path]
  *   --report writes the schema-validated compact aggregate JSON summary
  *   (default path: <capsule>/diagnostics/ordering-report.json) on success.
  *   --stability-runs raises the repeated baseline count (minimum 3), while
@@ -49,7 +49,8 @@
  *   `--partial-report path` (default `<report>.partial.json` when --report is
  *   given) receives the aggregate-only report BEFORE the container-count
  *   integrity assertions run; a later failure marks both files
- *   `status: "failed"` with the explanation instead of losing them.
+ *   `status: "failed"` with the explanation instead of losing them. With
+ *   --report alone the raw file defaults to `<report>.raw-measurements.json`.
  *
  * Capsule selection: the check targets seeded-astar under the capsules root
  * by default (HONE_CAPSULES_ROOT, else ./capsules under the working
@@ -79,7 +80,6 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
@@ -103,7 +103,7 @@ import {
   type EvaluatorOutput,
 } from "@hone/schema";
 import { resolveCapsulesRoot } from "@hone/cli/capsules-root";
-import { OrderingEvidenceWriter } from "./ordering-evidence.js";
+import { OrderingEvidenceWriter, writeFileAtomic } from "./ordering-evidence.js";
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
 /** Frozen default target name: the seeded-astar capsule this tool was originally built around (WP6). */
@@ -690,6 +690,14 @@ export function assertEvaluatorLaunches(
       `ordering-check: expected exactly ${expected.logicalEvaluations} logical evaluations, observed ${observed}`,
     );
   }
+  // Each logical evaluation produced exactly one measurement, so the
+  // evaluations that stopped at encode (logical - decode) must be exactly
+  // backed by invalid results: a valid result requires a decode container.
+  if (expected.measurements.length !== counts.logical) {
+    throw new Error(
+      `ordering-check: ${expected.measurements.length} measurements recorded for ${counts.logical} logical evaluations; observed ${observed}`,
+    );
+  }
   if (expected.phased) {
     const valid = expected.measurements.filter((m) => m.output.valid).length;
     if (valid > counts.decode) {
@@ -969,7 +977,14 @@ export async function runOrderingCheck(
       if (!failed) throw closeErr;
       console.error(`ordering-check: broker close failed after error: ${String(closeErr)}`);
     }
-    const leaks = await findAndReapLeaks(runId, tempRoot, options.runCommand ?? runCommand);
+    let leaks: string[] = [];
+    try {
+      leaks = await findAndReapLeaks(runId, tempRoot, options.runCommand ?? runCommand);
+    } catch (leakCheckErr) {
+      // Never mask the primary failure with a leak-check transport error.
+      if (!failed) throw leakCheckErr;
+      console.error(`ordering-check: leak check failed after error: ${String(leakCheckErr)}`);
+    }
     if (leaks.length > 0) {
       const message = `ordering-check: resource leaks detected:\n- ${leaks.join("\n- ")}`;
       // Never mask the primary failure; a leak on the success path is fatal.
@@ -1121,8 +1136,7 @@ export async function runOrderingWithEvidence(
   }
   try {
     if (paths.reportPath !== undefined) {
-      mkdirSync(dirname(paths.reportPath), { recursive: true });
-      writeFileSync(paths.reportPath, serializeOrderingReport(summarizeOrderingReport(report)));
+      writeFileAtomic(paths.reportPath, serializeOrderingReport(summarizeOrderingReport(report)));
     }
     evidence?.complete();
   } catch (err) {
@@ -1151,7 +1165,12 @@ if (invokedDirectly) {
   const rawMeasurementsArg = requiredFlagValue(args, "--raw-measurements");
   const partialReportArg = requiredFlagValue(args, "--partial-report");
   const paths: OrderingEvidencePaths = {
-    ...(rawMeasurementsArg === undefined ? {} : { rawPath: resolve(rawMeasurementsArg) }),
+    // --report alone still records every measurement: raw evidence is never opt-in once a run is admitted.
+    ...(rawMeasurementsArg !== undefined
+      ? { rawPath: resolve(rawMeasurementsArg) }
+      : reportPath === undefined
+        ? {}
+        : { rawPath: `${resolve(reportPath)}.raw-measurements.json` }),
     ...(partialReportArg !== undefined
       ? { partialPath: resolve(partialReportArg) }
       : reportPath === undefined
@@ -1162,12 +1181,12 @@ if (invokedDirectly) {
 
   const report = await runOrderingWithEvidence({ stabilityRuns, paths });
   console.log(formatReport(report));
+  if (paths.rawPath !== undefined) console.log(`\nraw measurements -> ${paths.rawPath}`);
+  if (paths.partialPath !== undefined) console.log(`partial report -> ${paths.partialPath}`);
   if (report.failures.length > 0) {
     console.error(`\nORDERING CHECK FAILED:\n- ${report.failures.join("\n- ")}`);
     process.exit(1);
   }
-  if (paths.rawPath !== undefined) console.log(`\nraw measurements -> ${paths.rawPath}`);
-  if (paths.partialPath !== undefined) console.log(`partial report -> ${paths.partialPath}`);
   if (paths.reportPath !== undefined) console.log(`report -> ${paths.reportPath}`);
   console.log("\nordering check PASSED");
 }

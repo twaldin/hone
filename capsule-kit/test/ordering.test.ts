@@ -188,6 +188,16 @@ describe("ordering evaluator container accounting", () => {
     ).toThrow("single-phase capsule launched decode containers");
   });
 
+  it("rejects a launch count that no recorded measurement backs", () => {
+    expect(() =>
+      assertEvaluatorLaunches(countEvaluatorLaunches(transcript(13, 1)), {
+        logicalEvaluations: 14,
+        phased: true,
+        measurements: measurements(13, 0),
+      }),
+    ).toThrow("13 measurements recorded for 14 logical evaluations");
+  });
+
   it("rejects a valid result that never reached a decode container", () => {
     expect(() =>
       assertEvaluatorLaunches(countEvaluatorLaunches(transcript(13, 1)), {
@@ -201,10 +211,10 @@ describe("ordering evaluator container accounting", () => {
   it("hands out the report before a failing count check throws, and before a transcript check", () => {
     const seen: string[] = [];
     const report = { marker: true } as unknown as OrderingReport;
-    const run = (commands: string[][]) =>
+    const run = (commands: string[][], measured: number) =>
       verifyOrderingMeasurements({
         commands,
-        measurements: measurements(13, 0),
+        measurements: measurements(measured, 0),
         expectedLogicalEvaluations: 14,
         phased: true,
         buildReport: (launches) => {
@@ -213,13 +223,13 @@ describe("ordering evaluator container accounting", () => {
         },
         onUnverifiedReport: (r) => seen.push(r === report ? "persisted" : "wrong report"),
       });
-    expect(() => run(transcript(13, 0))).toThrow("expected exactly 14 logical evaluations");
+    expect(() => run(transcript(13, 0), 13)).toThrow("expected exactly 14 logical evaluations");
     expect(seen).toEqual(["built:13/26", "persisted"]);
     seen.length = 0;
     // Count passes; a later transcript violation still comes after persistence.
     const noNetwork = transcript(14, 0);
     noNetwork[1] = noNetwork[1]!.filter((a) => a !== "--network" && a !== "none");
-    expect(() => run(noNetwork)).toThrow("eval container without --network none");
+    expect(() => run(noNetwork, 14)).toThrow("eval container without --network none");
     expect(seen).toEqual(["built:14/28", "persisted"]);
   });
 });
