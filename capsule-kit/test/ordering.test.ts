@@ -9,6 +9,7 @@ import {
   orderingBrokerResources,
   provisionalManifest,
   resolveStabilityRuns,
+  runOrderingWithEvidence,
   verifyOrderingMeasurements,
   type OrderingMeasurement,
   type OrderingReport,
@@ -260,5 +261,20 @@ describe("ordering evidence writer", () => {
     expect(raw).toMatchObject({ status: "failed", failure: "evaluator exploded" });
     expect(raw.measurements).toHaveLength(2);
     expect(readdirSync(join(dir, "nested"))).toEqual(["raw.json"]);
+  });
+});
+
+describe("ordering evidence paths", () => {
+  it("refuses evidence files that name the same path, before any measurement", async () => {
+    const same = join(tmpdir(), "ordering-same.json");
+    await expect(
+      runOrderingWithEvidence({ stabilityRuns: 3, paths: { rawPath: same, reportPath: same } }),
+    ).rejects.toThrow("must be three distinct files");
+    await expect(
+      runOrderingWithEvidence({
+        stabilityRuns: 3,
+        paths: { partialPath: join(tmpdir(), "a", "..", "ordering-same.json"), rawPath: same },
+      }),
+    ).rejects.toThrow("must be three distinct files");
   });
 });

@@ -1082,6 +1082,12 @@ export async function runOrderingWithEvidence(
   options: { stabilityRuns: number; paths: OrderingEvidencePaths } & Pick<RunOrderingCheckOptions, "runCommand">,
 ): Promise<OrderingReport> {
   const { stabilityRuns, paths } = options;
+  const named = [paths.rawPath, paths.partialPath, paths.reportPath]
+    .filter((p): p is string => p !== undefined)
+    .map((p) => resolve(p));
+  if (new Set(named).size !== named.length) {
+    throw new Error("ordering-check: raw measurements, partial report and report must be three distinct files");
+  }
   const evidence =
     paths.rawPath === undefined && paths.partialPath === undefined
       ? undefined
@@ -1140,6 +1146,8 @@ export async function runOrderingWithEvidence(
     }
     evidence?.complete();
   } catch (err) {
+    // A report whose run could not be finalized must not look admitted.
+    if (paths.reportPath !== undefined) rmSync(paths.reportPath, { force: true });
     recordFailure(err);
     throw err;
   }

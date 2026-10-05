@@ -23,6 +23,7 @@
 
 import {
   closeSync,
+  existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -54,27 +55,41 @@ export interface OrderingEvidenceOptions {
 /** Cap on the recorded failure explanation (broker errors can embed evaluator stderr). */
 const MAX_FAILURE_CHARS = 4000;
 
-/** Durable write: temp file in the same directory, full write, fsync, atomic rename, fsync the directory. */
+function fsyncPath(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Durable write: temp file in the same directory, full write, fsync, atomic
+ * rename, then fsync the directory — and the parent of every directory this
+ * call had to create, so the new entries themselves survive power loss.
+ */
 export function writeFileAtomic(path: string, contents: string): void {
   const dir = dirname(path);
+  const created: string[] = [];
+  for (let d = dir; !existsSync(d); d = dirname(d)) created.push(d);
   mkdirSync(dir, { recursive: true });
   const temp = join(dir, `.${basename(path)}.${process.pid}.tmp`);
   const bytes = Buffer.from(contents, "utf8");
   const fd = openSync(temp, "w");
   try {
     let written = 0;
-    while (written < bytes.length) written += writeSync(fd, bytes, written);
+    while (written < bytes.length) {
+      const n = writeSync(fd, bytes, written);
+      if (!Number.isInteger(n) || n <= 0) throw new Error(`ordering-check: write to ${temp} stalled at ${written}/${bytes.length} bytes`);
+      written += n;
+    }
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
   renameSync(temp, path);
-  const dirFd = openSync(dir, "r");
-  try {
-    fsyncSync(dirFd);
-  } finally {
-    closeSync(dirFd);
-  }
+  for (const target of new Set([dir, ...created.map((d) => dirname(d))])) fsyncPath(target);
 }
 
 export class OrderingEvidenceWriter {
