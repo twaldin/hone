@@ -246,4 +246,18 @@ describe("ordering check on a two-phase capsule", () => {
     expect(partial.summaryError).toMatch(/spread/);
     expect(JSON.parse(readFileSync(paths.rawPath, "utf8")).measurements).toHaveLength(14);
   });
+
+  it("records the failure even when the compact report cannot be written or cleaned up", async () => {
+    const out = join(root, "finalize");
+    const reportPath = join(out, "report-is-a-directory");
+    mkdirSync(reportPath, { recursive: true });
+    const paths = { rawPath: join(out, "raw.json"), partialPath: join(out, "partial.json"), reportPath };
+    await expect(
+      tool.runOrderingWithEvidence({ stabilityRuns: 3, paths, runCommand: fakeDocker({}, []) }),
+    ).rejects.toThrow();
+    const raw = JSON.parse(readFileSync(paths.rawPath, "utf8"));
+    expect(raw.status).toBe("failed");
+    expect(raw.failure).not.toBe("");
+    expect(raw.measurements).toHaveLength(14);
+  });
 });

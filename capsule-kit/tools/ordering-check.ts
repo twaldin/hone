@@ -1146,8 +1146,15 @@ export async function runOrderingWithEvidence(
     }
     evidence?.complete();
   } catch (err) {
-    // A report whose run could not be finalized must not look admitted.
-    if (paths.reportPath !== undefined) rmSync(paths.reportPath, { force: true });
+    // A report whose run could not be finalized must not look admitted; cleanup
+    // trouble never hides the original error or skips recording it.
+    if (paths.reportPath !== undefined) {
+      try {
+        rmSync(paths.reportPath, { force: true });
+      } catch (rmErr) {
+        console.error(`ordering-check: could not remove unfinalized report: ${String(rmErr)}`);
+      }
+    }
     recordFailure(err);
     throw err;
   }
