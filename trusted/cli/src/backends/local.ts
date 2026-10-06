@@ -542,6 +542,8 @@ export async function setupEgress(
   run: RunCommand,
   /** Docker-run lease (stopped donor) name — relays attach `--volumes-from <lease>:ro` so removing it fences daemon-side creates. */
   containerLease?: string,
+  /** Operator cpuset (HONE_SANDBOX_CPUSET) captured once at backend start — the same value the donor, broker and optimizer get; the network-mode relays pin it. Validated before the network or either relay exists. Absent => no affinity. */
+  cpuset?: string | undefined,
 ): Promise<Egress> {
   const mode = ctx.env["HONE_EGRESS"] ?? (process.platform === "darwin" ? "network" : "socket");
   if (mode === "socket") {
@@ -567,8 +569,7 @@ export async function setupEgress(
     };
   }
   if (mode !== "network") throw new Error(`HONE_EGRESS must be "socket" or "network", got "${mode}"`);
-  // Operator placement (HONE_SANDBOX_CPUSET): validated before the network or either relay exists.
-  const cpuset = operatorSandboxCpuset(ctx.env);
+  // Operator placement: the caller's captured value, never a second read of ctx.env.
   const cpusetArgs = cpuset === undefined ? [] : ["--cpuset-cpus", assertSandboxCpuset(cpuset)];
 
   const { network, relay, brokerRelay } = dockerNames(ctx.runId);
@@ -1479,7 +1480,7 @@ export function createBackend(
       // execution image — possibly a campaign-authorised override — runs every
       // mutation, evaluator, relay, and optimizer container.
       const executionImage = ctx.runtimeIdentity.executionImage;
-      // Operator CPU placement: read once for the donor, the broker and the prepared optimizer runtime (setupEgress reads the same env for the relays).
+      // Operator CPU placement: the ONE read of HONE_SANDBOX_CPUSET, handed to the donor, the relays, the broker and the prepared optimizer runtime.
       const cpuset = operatorSandboxCpuset(ctx.env);
       let egress: Egress | null = null;
       let optimizer: OptimizerRuntime | null = null;
@@ -1537,7 +1538,7 @@ export function createBackend(
         // A name still reserved daemon-side refuses startup; an unprovable
         // latch (donor/volume/network) stays open and blocks terminal only.
         await gate.proveInheritedIntents(grun, { runId: ctx.runId, image: executionImage, donorName: containerLease.name });
-        egress = await setupEgress(ctx, proxy, executionImage, grun, containerLease.name);
+        egress = await setupEgress(ctx, proxy, executionImage, grun, containerLease.name, cpuset);
 
         // Both transports need a short public Unix socket. sockaddr_un cannot
         // represent deep campaign run paths on either Darwin or Linux; Linux
