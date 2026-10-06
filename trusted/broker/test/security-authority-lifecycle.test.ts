@@ -12,6 +12,7 @@ import {
   RESERVED_EVALUATOR_UID_MIN,
   SandboxRef,
   PROMOTION_GATE_VERSION,
+  canonicalJson,
   type CapsuleManifest,
   type RunEvent,
   type PromotionHoldoutSplit,
@@ -196,6 +197,41 @@ interface Booted {
 
 const booted: Booted[] = [];
 
+/** Pooled-score calibration for the fixture evaluator identity; bound fields default to the boot fixture's. */
+function fixtureCalibration(over: {
+  capsuleId?: string;
+  admittedCapsuleDigest?: string;
+  executionImage?: string;
+  assetGroupId?: string;
+  measurementEpoch?: string | null;
+  promotionNoiseSd?: number;
+} = {}): NonNullable<BrokerConfig["promotionNoiseCalibrations"]>[number] {
+  const sd = over.promotionNoiseSd ?? 0;
+  return {
+    gateVersion: PROMOTION_GATE_VERSION,
+    evidenceVersion: "broker-test-calibration-v3",
+    calibratedAt: "2026-08-28T00:00:00.000Z",
+    capsuleId: over.capsuleId ?? makeManifest().id,
+    admittedCapsuleDigest: over.admittedCapsuleDigest ?? TEST_CAPSULE_DIGEST,
+    executionImage: over.executionImage ?? TEST_IMAGE,
+    assetGroupId: over.assetGroupId ?? "train",
+    measurementEpoch: over.measurementEpoch === undefined ? null : over.measurementEpoch,
+    sourceCohortSha256: [`sha256:${"a".repeat(64)}`],
+    maxObservedPairDelta: 0,
+    estimator: "pooled-within-coordinate-sd-v1",
+    estimatorMinRepeatsPerCoordinate: 3,
+    sampleDepths: [7, 7, 7],
+    informationFreeMeasurements: 21,
+    coordinateGroups: 3,
+    pooledDegreesOfFreedom: 18,
+    pooledWithinCoordinateSd: sd,
+    noiseFloor: 3 * sd,
+    noiseEnvelope: 4.5 * sd,
+    informationFreePairs: 3,
+    informationFreePositive: 0,
+  };
+}
+
 function fakeResult(over: Partial<CmdResult> = {}): CmdResult {
   return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false, timedOut: false, ...over };
 }
@@ -224,8 +260,12 @@ async function boot(
 
     runId?: string;
     measurementEpoch?: string;
+    runScopedEvaluationCache?: boolean;
     promotionNoiseSd?: number;
     omitPromotionCalibration?: boolean;
+    /** Explicit trusted calibrations (a sealed `hone run` search), replacing the default fixture calibration. */
+    promotionNoiseCalibrations?: BrokerConfig["promotionNoiseCalibrations"];
+    maxMutationEpisodes?: number;
     promotionHoldoutSplit?: PromotionHoldoutSplit;
     terminalHoldoutAssetGroupIds?: readonly string[];
     /** M0 cap tests use one episode; other unit cases may exercise M1-sized broker mechanics. */
@@ -396,33 +436,19 @@ async function boot(
     ...(opts.mutationEnv === undefined ? {} : { mutationEnv: opts.mutationEnv }),
 
     ...(opts.measurementEpoch !== undefined ? { measurementEpoch: opts.measurementEpoch } : {}),
-    ...(opts.omitPromotionCalibration === true
-      ? {}
-      : {
-          promotionNoiseCalibrations: [{
-            gateVersion: PROMOTION_GATE_VERSION,
-            evidenceVersion: "broker-test-calibration-v3",
-            calibratedAt: "2026-08-28T00:00:00.000Z",
-            capsuleId: (opts.manifest ?? makeManifest()).id,
-            admittedCapsuleDigest: opts.admittedCapsuleDigest ?? TEST_CAPSULE_DIGEST,
-            executionImage: TEST_IMAGE,
-            assetGroupId: "train",
-            measurementEpoch: opts.measurementEpoch ?? null,
-            sourceCohortSha256: [`sha256:${"a".repeat(64)}`],
-            maxObservedPairDelta: 0,
-            estimator: "pooled-within-coordinate-sd-v1",
-            estimatorMinRepeatsPerCoordinate: 3,
-            sampleDepths: [7, 7, 7],
-            informationFreeMeasurements: 21,
-            coordinateGroups: 3,
-            pooledDegreesOfFreedom: 18,
-            pooledWithinCoordinateSd: opts.promotionNoiseSd ?? 0,
-            noiseFloor: 3 * (opts.promotionNoiseSd ?? 0),
-            noiseEnvelope: 4.5 * (opts.promotionNoiseSd ?? 0),
-            informationFreePairs: 3,
-            informationFreePositive: 0,
-          }],
-        }),
+    ...(opts.runScopedEvaluationCache !== undefined ? { runScopedEvaluationCache: opts.runScopedEvaluationCache } : {}),
+    ...(opts.promotionNoiseCalibrations !== undefined
+      ? { promotionNoiseCalibrations: opts.promotionNoiseCalibrations }
+      : opts.omitPromotionCalibration === true
+        ? {}
+        : {
+            promotionNoiseCalibrations: [fixtureCalibration({
+              capsuleId: (opts.manifest ?? makeManifest()).id,
+              admittedCapsuleDigest: opts.admittedCapsuleDigest ?? TEST_CAPSULE_DIGEST,
+              measurementEpoch: opts.measurementEpoch ?? null,
+              promotionNoiseSd: opts.promotionNoiseSd ?? 0,
+            })],
+          }),
     ...(opts.promotionHoldoutSplit === undefined
       ? {}
       : { promotionHoldoutSplit: opts.promotionHoldoutSplit }),
@@ -430,7 +456,7 @@ async function boot(
       ? {}
       : { terminalHoldoutAssetGroupIds: opts.terminalHoldoutAssetGroupIds }),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
-    maxMutationEpisodes: opts.probeBound === true ? 1 : 64,
+    maxMutationEpisodes: opts.maxMutationEpisodes ?? (opts.probeBound === true ? 1 : 64),
   };
   broker = new Broker(config);
   await broker.init();
@@ -2053,6 +2079,117 @@ describe("M0 one-shot candidate evaluation authority", () => {
     await a.broker.close();
     await appendFile(path.join(a.runDir, "broker-state.ndjson"), `${JSON.stringify({ t: "slot", hash: cand })}\n`);
     await expect(boot(shared)).rejects.toThrow(/duplicate promotion slot/);
+  });
+});
+
+// ---------- sealed `hone run` search: epoch, cache domain, calibration ----------
+
+describe("sealed hone run search authority", () => {
+  const EPOCH = "compress-2026-10";
+  const runScopedNamespace = (runId: string): string =>
+    `eval-run-${createHash("sha256").update(canonicalJson({ measurementEpoch: EPOCH, runId })).digest("hex")}`;
+
+  it("gives every run sharing an operator-chosen epoch a fresh evaluator cache domain and reuses it on resume", async () => {
+    const casDir = path.join(tmpBase, "cas", "search-shared-epoch");
+    const runDirA = path.join(tmpBase, "runs", "search-shared-epoch-a");
+    const coord = { artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 };
+    const a = await boot({ casDir, runDir: runDirA, runId: "run_search_a", measurementEpoch: EPOCH, runScopedEvaluationCache: true });
+    a.ctl.evalOutputs.set(baselineHash, score(1));
+    const indexA = vi.spyOn(a.broker.cas, "indexGet");
+    expect((await a.broker.evaluate(coord, CLIENT)).cached).toBe(false);
+    expect((await a.broker.evaluate(coord, CLIENT)).cached).toBe(true);
+    expect(indexA.mock.calls[0]?.[0]).toBe(runScopedNamespace("run_search_a"));
+
+    const b = await boot({ casDir, runId: "run_search_b", measurementEpoch: EPOCH, runScopedEvaluationCache: true });
+    b.ctl.evalOutputs.set(baselineHash, score(1));
+    const indexB = vi.spyOn(b.broker.cas, "indexGet");
+    expect((await b.broker.evaluate(coord, CLIENT)).cached).toBe(false);
+    expect(indexB.mock.calls[0]?.[0]).toBe(runScopedNamespace("run_search_b"));
+    expect(runScopedNamespace("run_search_b")).not.toBe(runScopedNamespace("run_search_a"));
+    // M1 children keep their epoch-only namespace, disjoint from both.
+    const m1 = await boot({ casDir, measurementEpoch: EPOCH });
+    const indexM1 = vi.spyOn(m1.broker.cas, "indexGet");
+    await m1.broker.evaluate(coord, CLIENT);
+    expect(indexM1.mock.calls[0]?.[0]).toBe(`eval-${createHash("sha256").update(EPOCH).digest("hex")}`);
+
+    // Resume: the sealed epoch and run id reproduce the same domain.
+    await a.broker.close();
+    const resumed = await boot({ casDir, runDir: runDirA, runId: "run_search_a", measurementEpoch: EPOCH, runScopedEvaluationCache: true });
+    const indexResumed = vi.spyOn(resumed.broker.cas, "indexGet");
+    await resumed.broker.evaluate(coord, CLIENT);
+    expect(indexResumed.mock.calls[0]?.[0]).toBe(runScopedNamespace("run_search_a"));
+    expect(await readFile(path.join(runDirA, "broker-state.ndjson"), "utf8")).toContain(`"measurementEpoch":"${EPOCH}"`);
+    await resumed.broker.close();
+    await expect(
+      boot({ casDir, runDir: runDirA, runId: "run_search_a", measurementEpoch: "another-epoch", runScopedEvaluationCache: true }),
+    ).rejects.toThrow(/measurementEpoch does not match trusted broker configuration/);
+    await expect(boot({ runScopedEvaluationCache: true })).rejects.toThrow(/requires a trusted measurement epoch/);
+  });
+
+  it("accepts a calibration only when capsule, digest, evaluator image, asset group and epoch all match", async () => {
+    const base = { measurementEpoch: EPOCH, runScopedEvaluationCache: true };
+    await expect(boot({ ...base, promotionNoiseCalibrations: [fixtureCalibration({ measurementEpoch: EPOCH })] })).resolves.toBeDefined();
+    for (const [label, mismatch] of [
+      ["epoch", { measurementEpoch: "another-epoch" }],
+      ["epoch-null", { measurementEpoch: null }],
+      ["capsule", { capsuleId: "cap_ffffffffffff" }],
+      ["digest", { admittedCapsuleDigest: `sha256:${"f".repeat(64)}` }],
+      ["image", { executionImage: `hone-task@sha256:${"f".repeat(64)}` }],
+      ["group", { assetGroupId: "unregistered" }],
+    ] as const) {
+      await expect(
+        boot({ ...base, promotionNoiseCalibrations: [fixtureCalibration(Object.assign({ measurementEpoch: EPOCH }, mismatch))] }),
+        label,
+      ).rejects.toThrow(/promotion noise calibration does not match capsule, evaluator, asset group, or measurement epoch/);
+    }
+  });
+
+  it("advances the incumbent across episodes only with a matching calibration; without one every gate refuses", async () => {
+    const search = async (calibrations: NonNullable<BrokerConfig["promotionNoiseCalibrations"]>) => {
+      const b = await boot({
+        measurementEpoch: EPOCH,
+        runScopedEvaluationCache: true,
+        maxPublicCandidateEvaluations: 4,
+        maxMutationEpisodes: 2,
+        promotionNoiseCalibrations: calibrations,
+      });
+      b.ctl.evalOutputs.set(baselineHash, score(1)).set(candidateHash, score(2)).set(candidate2Hash, score(3));
+      // Episode 0: baseline → candidate.
+      const first = await saveCandidate(b, candidateTar);
+      await b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 0 }, CLIENT);
+      await b.broker.evaluate({ artifact: { hash: first }, assetGroupId: "train", seed: 0 }, CLIENT);
+      const firstReport = (): unknown => b.broker.reportIncumbent({ artifact: { hash: first } }, CLIENT);
+      return { b, first, firstReport };
+    };
+
+    const calibrated = await search([fixtureCalibration({ measurementEpoch: EPOCH, promotionNoiseSd: 0.1 })]);
+    expect(calibrated.firstReport()).toEqual({});
+    await calibrated.b.broker.completeEpisode({ episode: 0 }, CLIENT);
+    // Episode 1: incumbent → second candidate, paired in the new episode epoch.
+    const second = await saveCandidate(calibrated.b, candidate2Tar, calibrated.first);
+    await calibrated.b.broker.evaluate({ artifact: { hash: calibrated.first }, assetGroupId: "train", seed: 1 }, CLIENT);
+    await calibrated.b.broker.evaluate({ artifact: { hash: second }, assetGroupId: "train", seed: 1 }, CLIENT);
+    expect(calibrated.b.broker.reportIncumbent({ artifact: { hash: second } }, CLIENT)).toEqual({});
+    expect(calibrated.b.events.filter((event) => event.type === "incumbent.new").map((event) => event.type === "incumbent.new" ? event.artifact.hash : null))
+      .toEqual([calibrated.first, second]);
+    expect(calibrated.b.events.filter((event) => event.type === "gate.paired")).toEqual([
+      expect.objectContaining({ episode: 0, decision: "promote", noiseEnvelope: expect.closeTo(0.45) }),
+      expect.objectContaining({ episode: 1, decision: "promote", noiseEnvelope: expect.closeTo(0.45) }),
+    ]);
+    // A third distinct episode is refused by the trusted episode cap.
+    await calibrated.b.broker.completeEpisode({ episode: 1 }, CLIENT);
+    await expect(
+      calibrated.b.broker.createSandbox({ artifact: { hash: second }, role: "mutation" }, CLIENT),
+    ).rejects.toThrow(/mutation episode cap reached \(2\)/);
+
+    const uncalibrated = await search([]);
+    expect(uncalibrated.b.events.find((event) => event.type === "gate.paired")).toMatchObject({
+      decision: "refuse-uncalibrated",
+      passed: false,
+      noiseEnvelope: null,
+    });
+    expect(() => uncalibrated.firstReport()).toThrow(/calibrated gate refused \(refuse-uncalibrated/);
+    expect(uncalibrated.b.events.some((event) => event.type === "incumbent.new")).toBe(false);
   });
 });
 

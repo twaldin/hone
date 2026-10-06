@@ -16,6 +16,7 @@ import {
   type CampaignPauseSignal,
   type M2ProxyRole,
   type ModelRouting,
+  type NoiseCalibrationRunConfig,
 } from "@hone/schema";
 import {
   CasStore,
@@ -27,6 +28,7 @@ import {
   diffProtectedPaths,
   packDirAsArtifact,
   unpackArtifact,
+  readBrokerJournalEvaluations,
   readBrokerJournalEvents,
   runCommand,
   startBroker,
@@ -842,9 +844,10 @@ export function isOptimizerChildPendingError(error: unknown): error is Optimizer
 /**
  * Launch ONE invocation of the sealed optimizer container. Exported for the
  * trusted-boundary tests: optimizer stdout must never become events.
- * `opts.maxEpisodes` bounds the invocation (probe gate); otherwise an
- * operator HONE_MAX_EPISODES passes through and the optimizer fails closed
- * on invalid values.
+ * `opts.maxEpisodes` bounds the invocation (probe gate, fixed-work runs);
+ * otherwise an operator HONE_MAX_EPISODES passes through and the optimizer
+ * fails closed on invalid values. `opts.oneShotCandidate` puts the mutable
+ * loop in M0 cache-safe mode (no repair after a candidate evaluation).
  *
  * Two-phase execution (P1 create fence): phase one is a `docker create`
  * JOINED to the daemon's definitive response — spawned through the raw
@@ -856,7 +859,11 @@ export function isOptimizerChildPendingError(error: unknown): error is Optimizer
  * that name is AWAITED before this invocation resolves — killing the start
  * client never orphans a running container past the invocation boundary.
  */
-export async function runOptimizer(ctx: RunnerBackendContext, runtime: OptimizerRuntime, opts: { maxEpisodes?: number } = {}): Promise<void> {
+export async function runOptimizer(
+  ctx: RunnerBackendContext,
+  runtime: OptimizerRuntime,
+  opts: { maxEpisodes?: number; oneShotCandidate?: boolean } = {},
+): Promise<void> {
   const name = optimizerRunName(runtime.safeRunId, ++runtime.invocation);
   runtime.spawnedNames.push(name);
   const createArgv = optimizerCreateArgs({
@@ -875,11 +882,10 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
         : ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] !== undefined
           ? { HONE_SESSION_NO_YIELD_MAX_TOKENS: ctx.env["HONE_SESSION_NO_YIELD_MAX_TOKENS"] }
           : {}),
-      // The M0 probe is the entire one-candidate campaign. The mutable loop
-      // gets both advisory values; broker-side caps remain authoritative.
-      ...(opts.maxEpisodes !== undefined
-        ? { HONE_MAX_EPISODES: String(opts.maxEpisodes), HONE_ONE_SHOT_CANDIDATE: "1" }
-        : {}),
+      // The mutable loop gets advisory values; broker-side caps remain
+      // authoritative. An M0 probe and an M1 child run one-shot-candidate.
+      ...(opts.maxEpisodes !== undefined ? { HONE_MAX_EPISODES: String(opts.maxEpisodes) } : {}),
+      ...(opts.oneShotCandidate === true ? { HONE_ONE_SHOT_CANDIDATE: "1" } : {}),
       // Events.ndjson is the store of record and reconciliation may have just
       // appended recovered incumbents — replay from disk, not the supervisor's
       // pre-backend snapshot, so the resume hint sees the durable authority.
@@ -1318,6 +1324,36 @@ export function deriveProbeReport(events: readonly RunEvent[], budget: BudgetSta
   };
 }
 
+/**
+ * Information-free noise run body: privileged measurements of the frozen
+ * baseline, one per sealed seed, in the sealed measurement epoch. Each
+ * measurement is a journaled trusted fact before `evaluate` resolves, so a
+ * resumed run skips every seed already measured and pays only for the rest.
+ */
+async function measureBaselineNoise(
+  ctx: RunnerBackendContext,
+  broker: RunningBroker["broker"],
+  baselineArtifactHash: string,
+  noise: NoiseCalibrationRunConfig,
+): Promise<void> {
+  const measured = new Set(
+    readBrokerJournalEvaluations(ctx.runDir).facts
+      .filter((fact) =>
+        fact.measurementEpoch === noise.measurementEpoch
+        && fact.record.artifactHash === baselineArtifactHash
+        && fact.record.assetGroupId === noise.assetGroupId)
+      .map((fact) => fact.record.seed),
+  );
+  for (const seed of noise.seeds) {
+    if (measured.has(seed)) continue;
+    if (ctx.signal.aborted) return;
+    await broker.evaluate(
+      { artifact: { hash: baselineArtifactHash }, assetGroupId: noise.assetGroupId, seed },
+      { privileged: true },
+    );
+  }
+}
+
 export function createBackend(
   deps: {
     run?: RunCommand;
@@ -1569,6 +1605,14 @@ export function createBackend(
           ...(evaluatorBaselineArtifactHash === undefined ? {} : { evaluatorBaselineArtifactHash }),
           optimizerDigest: ctx.optimizerDigest,
           ...(ctx.measurementEpoch !== undefined ? { measurementEpoch: ctx.measurementEpoch } : {}),
+          // Sealed `hone run` search/noise runs share an operator-chosen epoch
+          // with their calibration evidence; the memo domain stays per run.
+          ...(ctx.config.search !== undefined || ctx.config.noiseCalibration !== undefined
+            ? { runScopedEvaluationCache: true }
+            : {}),
+          ...(ctx.promotionNoiseCalibrations !== undefined
+            ? { promotionNoiseCalibrations: ctx.promotionNoiseCalibrations }
+            : {}),
           ...(ctx.evalTimeoutSec !== undefined ? { evalTimeoutSec: ctx.evalTimeoutSec } : {}),
           runStartedAtMs: activeClock.runStartedAtMs,
           activeStartedAtMs: activeClock.activeStartedAtMs,
@@ -1620,13 +1664,20 @@ export function createBackend(
           },
           ...(egress.proxySocketHostPath !== null ? { proxySocketHostPath: egress.proxySocketHostPath } : {}),
           episodeOrigin: ctx.replayed.nextEpisode,
-          // M0's evaluator cache domain is shared across containers. One
-          // probe candidate is therefore the whole campaign; M1 must provide
-          // fresh cache domains before this trusted cap can rise.
+          // Public candidate authority. Evaluator containers share host state
+          // (image layers, the read-only baseline tree, page cache) but no
+          // writable state: read-only root and mounts, private tmpfs, and
+          // per-invocation asset/handoff directories. M0 has no measurement
+          // domain of its own, so one probe candidate is the whole campaign.
+          // A trusted measurement epoch (M1 child, sealed `hone run` search)
+          // gives the run a fresh evaluator memo domain and binds its
+          // calibration; the broker then pairs each candidate's first
+          // measurement with its parent measured earlier in the same episode
+          // generation, so earlier candidates warm both sides alike.
           ...(ctx.optimizerEpisodesMax !== undefined
             ? {
                 maxMutationEpisodes: ctx.optimizerEpisodesMax,
-                maxCandidateArtifacts: Math.max(2, ctx.optimizerEpisodesMax + 1),
+                maxCandidateArtifacts: ctx.maxCandidateArtifacts ?? Math.max(2, ctx.optimizerEpisodesMax + 1),
                 maxPublicCandidateEvaluations:
                   ctx.maxPublicCandidateEvaluations ?? ctx.optimizerEpisodesMax,
               }
@@ -1636,8 +1687,7 @@ export function createBackend(
             : {}),
           ...(ctx.optimizerEpisodesMax === undefined
             ? {
-                // M0's evaluator cache domain is shared across containers.
-                // One probe candidate is therefore the whole campaign.
+                // M0: one probe candidate is the whole campaign (see above).
                 maxMutationEpisodes: 1,
                 maxCandidateArtifacts: 2,
               }
@@ -1711,6 +1761,16 @@ export function createBackend(
         // Only AFTER durable authority is reconciled may a stop short-circuit:
         // the optimizer never launches; the finally unwinds proxy/broker/egress.
         if (ctx.signal.aborted) return;
+
+        const noise = ctx.config.noiseCalibration;
+        if (noise !== undefined) {
+          // Information-free noise run: the frozen baseline is measured once
+          // per sealed seed in the sealed epoch. No optimizer is built and no
+          // model is called; a resume never re-pays a journaled seed.
+          await measureBaselineNoise(ctx, running.broker, baselineArtifactHash, noise);
+          running.broker.snapshotBudget({ privileged: true });
+          return;
+        }
 
         let transport: OptimizerTransport;
         if (wantPublicTcp && egress.sandboxNetwork.mode === "internal") {
@@ -1788,17 +1848,22 @@ export function createBackend(
         if (ctx.signal.aborted) return;
 
         if (ctx.optimizerEpisodesMax !== undefined) {
-          // Trusted M1 children are fixed-work full runs, not M0 owner probes.
-          // Resume continues from the durable episode cursor under the same
-          // child receipt and measurement epoch.
+          // Trusted M1 children and sealed `hone run` searches are fixed-work
+          // full runs, not M0 owner probes. Resume continues from the durable
+          // episode cursor under the same sealed measurement epoch.
           const nextEpisode = replayRun(ctx.runDir).nextEpisode;
           const remaining = ctx.optimizerEpisodesMax - nextEpisode;
           if (remaining > 0) {
-            await runOptimizer(ctx, optimizer, { maxEpisodes: remaining });
+            // A search keeps the seed loop's one repair after an invalid
+            // evaluation; M1 children stay in one-shot-candidate mode.
+            await runOptimizer(ctx, optimizer, {
+              maxEpisodes: remaining,
+              oneShotCandidate: ctx.config.search === undefined,
+            });
             if (ctx.signal.aborted) return;
           }
 
-          if (ctx.recursiveBroker === undefined) {
+          if (ctx.recursiveBroker === undefined && ctx.config.search === undefined) {
             // Fixed-work M1 children need a final trusted evaluator record.
             // M2 outer sessions instead settle each optimizer-authored
             // spawnRun allocation through the recursive launcher.
@@ -1831,7 +1896,7 @@ export function createBackend(
               // No complete pair exists yet: run the one-episode probe now.
             }
             if (report === undefined) {
-              await runOptimizer(ctx, optimizer, { maxEpisodes: 1 });
+              await runOptimizer(ctx, optimizer, { maxEpisodes: 1, oneShotCandidate: true });
               if (ctx.signal.aborted) return;
               report = deriveProbeReport(readEvents(ctx.runDir), running.broker.getBudget({ privileged: true }));
             }

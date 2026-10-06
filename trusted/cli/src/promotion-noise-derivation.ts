@@ -2,7 +2,15 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { CapsuleManifest, capsuleDigest } from "@hone/schema";
+import type { BrokerJournalEvaluationFact } from "@hone/broker";
+import {
+  CapsuleManifest,
+  POOLED_SCORE_SD_ESTIMATOR,
+  PROMOTION_GATE_VERSION,
+  PromotionNoiseCalibration,
+  canonicalJson,
+  capsuleDigest,
+} from "@hone/schema";
 
 export const PROMOTION_NOISE_OBSERVATIONS_VERSION =
   "campaign-12-promotion-noise-observations-v2" as const;
@@ -247,6 +255,65 @@ export function derivePromotionNoiseObservations(runsRootInput: string): Promoti
   };
 }
 
+/** Repeated scores of one measurement coordinate; only cross-run pairs are information-free nulls. */
+export interface ScoreCoordinate {
+  observations: readonly { runId: string; score: number }[];
+}
+
+export interface PooledNoiseEstimate {
+  /** Coordinates with at least ESTIMATOR_MIN_REPEATS_PER_COORDINATE repeats. */
+  sampleDepths: number[];
+  pooledDegreesOfFreedom: number;
+  pooledWithinCoordinateSd: number;
+  /** Every cross-run (later − earlier) pair delta within a coordinate. */
+  deltas: number[];
+  /** Largest within-coordinate score span (max observed pair delta). */
+  maxSpan: number;
+  observedInformationFreeMeasurements: number;
+  observedCoordinateGroups: number;
+}
+
+/** Pooled within-coordinate SD over repeated scores (the pooled-score estimator's arithmetic). */
+export function pooledNoiseEstimate(coordinates: readonly ScoreCoordinate[]): PooledNoiseEstimate {
+  const groups = coordinates.filter((group) => group.observations.length >= 2);
+  const estimatorGroups = groups.filter(
+    (group) => group.observations.length >= ESTIMATOR_MIN_REPEATS_PER_COORDINATE,
+  );
+  const deltas: number[] = [];
+  for (const group of groups) {
+    for (let parent = 0; parent < group.observations.length; parent++) {
+      for (let child = parent + 1; child < group.observations.length; child++) {
+        const parentObservation = group.observations[parent]!;
+        const childObservation = group.observations[child]!;
+        if (parentObservation.runId === childObservation.runId) continue;
+        deltas.push(childObservation.score - parentObservation.score);
+      }
+    }
+  }
+  let squaredError = 0;
+  let pooledDegreesOfFreedom = 0;
+  for (const group of estimatorGroups) {
+    const scores = group.observations.map((observation) => observation.score);
+    if (!scores.every((score) => score === scores[0])) {
+      const mean = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+      squaredError += scores.reduce((sum, score) => sum + (score - mean) ** 2, 0);
+    }
+    pooledDegreesOfFreedom += scores.length - 1;
+  }
+  return {
+    sampleDepths: estimatorGroups.map((group) => group.observations.length),
+    pooledDegreesOfFreedom,
+    pooledWithinCoordinateSd: Math.sqrt(squaredError / pooledDegreesOfFreedom),
+    deltas,
+    maxSpan: Math.max(...groups.map((group) => {
+      const scores = group.observations.map((observation) => observation.score);
+      return Math.max(...scores) - Math.min(...scores);
+    })),
+    observedInformationFreeMeasurements: groups.reduce((sum, group) => sum + group.observations.length, 0),
+    observedCoordinateGroups: groups.length,
+  };
+}
+
 /** Pure raw-observations -> convergent, minimum-powered calibration derivation. */
 export function deriveNoiseCalibrations(
   artifact: PromotionNoiseObservationsArtifact,
@@ -255,37 +322,8 @@ export function deriveNoiseCalibrations(
     throw new Error(`unsupported observation artifact ${String(artifact.version)}`);
   }
   return artifact.capsules.map((capsule) => {
-    const groups = capsule.groups.filter((group) => group.observations.length >= 2);
-    const estimatorGroups = groups.filter(
-      (group) => group.observations.length >= ESTIMATOR_MIN_REPEATS_PER_COORDINATE,
-    );
-    const deltas: number[] = [];
-    for (const group of groups) {
-      for (let parent = 0; parent < group.observations.length; parent++) {
-        for (let child = parent + 1; child < group.observations.length; child++) {
-          const parentObservation = group.observations[parent]!;
-          const childObservation = group.observations[child]!;
-          if (parentObservation.runId === childObservation.runId) continue;
-          deltas.push(childObservation.score - parentObservation.score);
-        }
-      }
-    }
-    let squaredError = 0;
-    let pooledDegreesOfFreedom = 0;
-    for (const group of estimatorGroups) {
-      const scores = group.observations.map((observation) => observation.score);
-      if (!scores.every((score) => score === scores[0])) {
-        const mean = scores.reduce((sum, score) => sum + score, 0) / scores.length;
-        squaredError += scores.reduce((sum, score) => sum + (score - mean) ** 2, 0);
-      }
-      pooledDegreesOfFreedom += scores.length - 1;
-    }
-    const pooledWithinCoordinateSd = Math.sqrt(squaredError / pooledDegreesOfFreedom);
-    const sampleDepths = estimatorGroups.map((group) => group.observations.length);
-    const maxSpan = Math.max(...groups.map((group) => {
-      const scores = group.observations.map((observation) => observation.score);
-      return Math.max(...scores) - Math.min(...scores);
-    }));
+    const { sampleDepths, pooledDegreesOfFreedom, pooledWithinCoordinateSd, deltas, maxSpan, observedInformationFreeMeasurements, observedCoordinateGroups } =
+      pooledNoiseEstimate(capsule.groups);
     return {
       capsuleId: capsule.identity.capsuleId,
       admittedCapsuleDigest: capsule.identity.admittedCapsuleDigest,
@@ -296,15 +334,15 @@ export function deriveNoiseCalibrations(
       estimatorMinRepeatsPerCoordinate: ESTIMATOR_MIN_REPEATS_PER_COORDINATE,
       sampleDepths,
       informationFreeMeasurements: sampleDepths.reduce((sum, depth) => sum + depth, 0),
-      coordinateGroups: estimatorGroups.length,
+      coordinateGroups: sampleDepths.length,
       pooledDegreesOfFreedom,
       pooledWithinCoordinateSd,
       noiseFloor: 3 * pooledWithinCoordinateSd,
       noiseEnvelope: 4.5 * pooledWithinCoordinateSd,
       informationFreePairs: deltas.length,
       informationFreePositive: deltas.filter((delta) => delta > 0).length,
-      observedInformationFreeMeasurements: groups.reduce((sum, group) => sum + group.observations.length, 0),
-      observedCoordinateGroups: groups.length,
+      observedInformationFreeMeasurements,
+      observedCoordinateGroups,
       deltaDistribution: {
         min: Math.min(...deltas),
         p05: quantile(deltas, 0.05),
@@ -321,6 +359,106 @@ export function deriveNoiseCalibrations(
       },
     };
   });
+}
+
+export const BASELINE_NOISE_EVIDENCE_VERSION = "hone-baseline-noise-v1" as const;
+export const BASELINE_NOISE_OBSERVATIONS_VERSION = "hone-baseline-noise-observations-v1" as const;
+
+/** The identity a baseline-only noise cohort is measured under; the calibration binds every field. */
+export interface BaselineNoiseIdentity {
+  capsuleId: string;
+  admittedCapsuleDigest: string;
+  executionImage: string;
+  assetGroupId: string;
+  measurementEpoch: string;
+  seeds: readonly number[];
+}
+
+/** One completed noise run: its id and its journaled trusted evaluation facts. */
+export interface BaselineNoiseRun {
+  runId: string;
+  facts: readonly BrokerJournalEvaluationFact[];
+}
+
+export interface BaselineNoiseObservations {
+  version: typeof BASELINE_NOISE_OBSERVATIONS_VERSION;
+  identity: BaselineNoiseIdentity & { baselineArtifactHash: string };
+  runIds: string[];
+  coordinates: Array<{ seed: number; observations: Array<{ runId: string; score: number }> }>;
+}
+
+/**
+ * Baseline-only noise runs -> pooled-score promotion calibration. Each run
+ * contributes exactly one fresh trusted measurement of the frozen baseline per
+ * seed, so a seed is one coordinate and its repeats come from distinct runs
+ * (broker boots). Every pair is information-free: both arms are the same
+ * artifact. The cross-boot spread is at least the within-episode spread the
+ * search gate faces, so the envelope is conservative. Schema minimums apply
+ * unchanged: a cohort below them refuses.
+ */
+export function deriveBaselineNoiseCalibration(
+  runs: readonly BaselineNoiseRun[],
+  identity: BaselineNoiseIdentity,
+  calibratedAt: string,
+): { calibration: PromotionNoiseCalibration; observations: BaselineNoiseObservations } {
+  let baselineArtifactHash: string | undefined;
+  const coordinates = identity.seeds.map((seed) => ({ seed, observations: [] as Array<{ runId: string; score: number }> }));
+  for (const run of runs) {
+    const facts = run.facts.filter((fact) =>
+      fact.measurementEpoch === identity.measurementEpoch && fact.record.assetGroupId === identity.assetGroupId);
+    for (const coordinate of coordinates) {
+      const measured = facts.filter((fact) => fact.record.seed === coordinate.seed);
+      if (measured.length !== 1) {
+        throw new Error(`noise run ${run.runId} holds ${measured.length} measurements of seed ${coordinate.seed}, expected exactly 1`);
+      }
+      const fact = measured[0]!;
+      if (fact.record.cached) throw new Error(`noise run ${run.runId} seed ${coordinate.seed} is a memo hit, not a fresh measurement`);
+      if (fact.record.capsuleId !== identity.capsuleId) {
+        throw new Error(`noise run ${run.runId} measured capsule ${fact.record.capsuleId}, expected ${identity.capsuleId}`);
+      }
+      baselineArtifactHash ??= fact.record.artifactHash;
+      if (fact.record.artifactHash !== baselineArtifactHash) {
+        throw new Error(`noise run ${run.runId} measured ${fact.record.artifactHash}, not the cohort baseline ${baselineArtifactHash}`);
+      }
+      if (fact.aggregate === null) {
+        throw new Error(`noise run ${run.runId} seed ${coordinate.seed}: the baseline measurement is not eligible (invalid output or failed constraint)`);
+      }
+      coordinate.observations.push({ runId: run.runId, score: fact.aggregate });
+    }
+  }
+  if (baselineArtifactHash === undefined) throw new Error("noise cohort holds no baseline measurement");
+  const observations: BaselineNoiseObservations = {
+    version: BASELINE_NOISE_OBSERVATIONS_VERSION,
+    identity: { ...identity, seeds: [...identity.seeds], baselineArtifactHash },
+    runIds: runs.map((run) => run.runId),
+    coordinates,
+  };
+  const estimate = pooledNoiseEstimate(coordinates);
+  const maxObservedPairDelta = estimate.maxSpan;
+  const calibration = PromotionNoiseCalibration.parse({
+    gateVersion: PROMOTION_GATE_VERSION,
+    evidenceVersion: BASELINE_NOISE_EVIDENCE_VERSION,
+    calibratedAt,
+    capsuleId: identity.capsuleId,
+    admittedCapsuleDigest: identity.admittedCapsuleDigest,
+    executionImage: identity.executionImage,
+    assetGroupId: identity.assetGroupId,
+    measurementEpoch: identity.measurementEpoch,
+    sourceCohortSha256: [sha256(Buffer.from(canonicalJson(observations), "utf8"))],
+    maxObservedPairDelta,
+    noiseFloor: 3 * estimate.pooledWithinCoordinateSd,
+    noiseEnvelope: Math.max(4.5 * estimate.pooledWithinCoordinateSd, maxObservedPairDelta),
+    informationFreePairs: estimate.deltas.length,
+    informationFreePositive: estimate.deltas.filter((delta) => delta > 0).length,
+    estimator: POOLED_SCORE_SD_ESTIMATOR,
+    estimatorMinRepeatsPerCoordinate: ESTIMATOR_MIN_REPEATS_PER_COORDINATE,
+    sampleDepths: estimate.sampleDepths,
+    informationFreeMeasurements: estimate.sampleDepths.reduce((sum, depth) => sum + depth, 0),
+    coordinateGroups: estimate.sampleDepths.length,
+    pooledDegreesOfFreedom: estimate.pooledDegreesOfFreedom,
+    pooledWithinCoordinateSd: estimate.pooledWithinCoordinateSd,
+  });
+  return { calibration, observations };
 }
 
 export interface DirectPairedDeltaScale {

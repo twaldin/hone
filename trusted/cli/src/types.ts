@@ -12,6 +12,7 @@ import type {
   RunEvent,
   RunPauseReason,
   PromotionHoldoutSplit,
+  PromotionNoiseCalibration,
 } from "@hone/schema";
 import type { RunState } from "./eventlog.js";
 import type { OptimizerSnapshot } from "./optimizer-digest.js";
@@ -97,7 +98,7 @@ export interface RunnerBackendContext {
   optimizerBaseSnapshot?: OptimizerSnapshot | undefined;
   /** Exact-identity compatibility for a migrated, pre-toolbelt worker bundle. */
   mutationWorkerPreflightContract?: MutationWorkerPreflightContract | undefined;
-  /** Trusted M1 full-run replicate identity, absent on M0. */
+  /** Trusted measurement epoch: an M1 replicate identity or a sealed `hone run` search/noise epoch; absent on M0. */
   measurementEpoch?: string | undefined;
   /** Trusted per-evaluation wall-time cap, frozen by M2 campaign orchestration (else the capsule's own). */
   evalTimeoutSec?: number | undefined;
@@ -107,6 +108,10 @@ export interface RunnerBackendContext {
   optimizerEpisodesMax?: number | undefined;
   /** Distinct public candidate admissions. M0 leaves this absent (broker default 1). */
   maxPublicCandidateEvaluations?: number | undefined;
+  /** Distinct saved candidate/repair artifacts; absent keeps the trusted default for the run kind. */
+  maxCandidateArtifacts?: number | undefined;
+  /** Sealed, identity-bound promotion calibrations; absent keeps the broker's built-in campaign-12 lookup. */
+  promotionNoiseCalibrations?: readonly PromotionNoiseCalibration[] | undefined;
   /** Trusted outer-only target of distinct valid non-baseline strategy results. */
   trustedValidPublicCandidateTarget?: number | undefined;
   /** Holdout groups released only inside a terminal-latched child run. */

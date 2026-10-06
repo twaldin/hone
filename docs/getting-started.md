@@ -76,4 +76,6 @@ Production execution verifies the capsule's assets, baseline and Gate-2 admissio
 
 The authoring workflow supports gate decisions and durable session requests. Its default session boundary queues those requests rather than starting coding workers. A trusted authoring integration must complete the requested work before approval and execution are possible.
 
+A plain `hone run` buys one candidate (the M0 probe). To search one admitted capsule over many episodes in a single durable run, first measure its noise with `hone promotion-noise <capsule> --epoch NAME --out noise.json --headless`, then run with `--config` holding `{"search": {"episodes": N, "measurementEpoch": "NAME"}}` and `--calibration noise.json`. Without a calibration a search still runs, but no candidate can become incumbent. Resume after a crash or reboot with `hone run <capsule> --headless --resume --run <runId>`. See [CLI › Search runs](cli.md#search-runs).
+
 See [Capsules](capsules.md) for the distinction between development packages and terminal source references, and [CLI](cli.md) for available command forms.

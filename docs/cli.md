@@ -8,9 +8,12 @@ Every command accepts `--capsules-root <dir>`, which names the directory holding
 
 ```text
 hone run <capsule-dir> [--headless] [--budget-usd N]
-  [--apply none|branch|pr|auto] [--repo DIR] [--resume]
-  [--backend local|stub] [--config JSON]
+  [--apply none|branch|pr|auto] [--repo DIR] [--resume [--run ID]]
+  [--backend local|stub] [--config JSON] [--calibration FILE]
   [--optimizer-artifact sha256:…]
+
+hone promotion-noise <capsule-dir> --epoch NAME --out FILE --headless
+  [--seeds K] [--repeats R]
 
 hone author <objective> [--repo DIR] [--headless] [--acknowledge-dirty]
 hone author --workflow ID
@@ -19,9 +22,61 @@ hone author --workflow ID
   [--adversarial-validator owner|agent:ID] [--final-reviewer owner|agent:ID]
 ```
 
-`run` performs a single candidate probe through the trusted supervisor. The default backend is `local`, and delivery defaults to `none`. A budget override can tighten the frozen capsule budget, not enlarge it. Delivery requires an explicit target repository. The stub backend is a controlled testing surface and does not establish production execution.
+Without a `search` block, `run` performs a single candidate probe through the trusted supervisor (M0). The default backend is `local`, and delivery defaults to `none`. A budget override can tighten the frozen capsule budget, not enlarge it. Delivery requires an explicit target repository. The stub backend is a controlled testing surface and does not establish production execution.
 
-Run configuration is sealed at creation. `run --resume` uses that stored configuration and rejects another `--config` argument.
+Run configuration is sealed at creation. `run --resume` uses that stored configuration and rejects another `--config` or `--calibration` argument. `--resume` picks the newest unfinished run of the capsule; `--resume --run ID` resumes exactly that run.
+
+### Search runs
+
+A `search` block in `--config` turns one run into a multi-episode search over one admitted capsule: the seed loop's greedy incumbent, ε-restart and one repair, up to `episodes` optimizer episodes.
+
+```json
+{ "search": { "episodes": 24, "measurementEpoch": "compress-2026-10" } }
+```
+
+```sh
+hone run capsules/compress --headless --config search.json --calibration compress-noise.json
+```
+
+| Field | Meaning |
+| --- | --- |
+| `search.episodes` | Optimizer episodes the run may attempt. The broker enforces it as the mutation episode cap; public candidate evaluations and saved candidate artifacts are capped at twice it (candidate plus one repair per episode). Creation refuses a count whose two evaluator invocations per episode exceed the run's `maxEvaluatorInvocations`. |
+| `search.measurementEpoch` | The trusted measurement epoch, 1–256 characters without control characters. Omit it and creation mints `search:<runId>`, which no calibration can match. Name it to use a calibration measured in that epoch. |
+| `--calibration FILE` | One `PromotionNoiseCalibration` (or an array). Creation applies the broker's identity binding — capsule id, admitted digest, executed image, registered asset group and `measurementEpoch` must all match — and requires coverage of the group the search gates on (`train`, else the first non-holdout group). The schema minimums are unchanged. |
+
+The episode count, epoch and calibrations are sealed into `runconfig.json` and the contract, and every resume reuses them. The capsule's admitted budget (tokens, USD, active wall time, evaluator invocations) stays the broker-enforced envelope; the run ends at whichever binds first. Search runs support `apply: none` only.
+
+Each search run gets a fresh evaluator cache domain, even when several runs and their calibration evidence share one epoch: the broker keys its memo namespace on the epoch and the run id. Candidates are paired with their parent within one episode's measurement generation, and an incumbent advances only when the paired delta clears the calibrated noise envelope. **Without a calibration the run still searches, but every gate refuses as uncalibrated and no child can become incumbent**; the run says so on stderr at start, in the contract and in the final report.
+
+Instead of the M0 probe approval, a search run ends with a report. Headless runs print it as the `search` field of the final JSON line: the best incumbent, its lineage from the baseline with each broker-paired delta and noise envelope, gate decisions by outcome, episodes completed, and budget spent. `hone best`, `hone diff` and `hone apply --best --repo DIR` work on the result as usual.
+
+### Producing a promotion calibration
+
+`hone promotion-noise` measures how much the capsule's score moves when nothing changes, in the epoch you name, and writes a calibration for `--calibration`:
+
+```sh
+hone promotion-noise capsules/compress --epoch compress-2026-10 --out compress-noise.json --headless
+```
+
+It runs `--repeats R` (default 7) sealed noise runs through the ordinary trusted `hone run` path. Each measures only the frozen baseline, once per seed `0…K−1` (`--seeds`, default 3), on the search's asset group, in the chosen epoch; no optimizer starts and no model is called. Each repeat is a separate run, so repeats land in separate broker boots. The pooled within-seed standard deviation over the K×R cross-run measurements gives the pooled-score calibration (`noiseEnvelope = max(4.5 × SD, largest observed pair delta)`). The cohort must meet the schema minimums: K ≥ 3, R ≥ 3, K×R ≥ 21 and K×(R−1) ≥ 18. Each noise run spends K evaluator invocations of the capsule's budget.
+
+Run ids derive from the capsule, epoch, seeds and repeats, so re-running the same command resumes an interrupted repeat and reuses finished ones instead of measuring again. The raw observations are kept under `.hone-runs/promotion-noise-<hash>/`. Use the same capsule digest and image for the search; a different epoch, digest or image refuses the calibration.
+
+### Resuming after a reboot
+
+A search run's state is its event log and broker journal. Resume continues from the durable episode cursor and incumbent: completed episodes are never re-run, and an evaluation journaled before the crash is replayed, not re-paid. A systemd unit can resume one run by id:
+
+```ini
+[Service]
+WorkingDirectory=%h/hone-work
+Environment=HONE_UPSTREAM_BASE_URL=http://twaldin-home:4000/v1
+Environment=HONE_UPSTREAM_API_KEY_FILE=%h/.config/hone/upstream.token
+ExecStart=/usr/bin/node %h/hone/trusted/cli/bin/hone.js run capsules/compress --headless --resume --run run_…
+Restart=on-failure
+RestartPreventExitStatus=2
+```
+
+`run --resume` exits 0 when the run finishes or durably pauses, 1 when it fails or is left unfinished for another resume, and 2 when there is nothing left to resume (`RestartPreventExitStatus=2` stops the unit then). Durable events are in `.hone-runs/<runId>/events.ndjson`: `incumbent.new` marks each promotion, `gate.paired` each paired decision, `episode.completed` the cursor, and `run.finished` the end of the run; `hone status --run ID` reads the same log.
 
 ## Model routes and the upstream
 

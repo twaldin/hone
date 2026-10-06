@@ -1,13 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { CapsuleManifest, EvaluationRecord, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
-import type { BudgetState } from "@hone/schema";
-import { readBrokerJournalEvaluations, type CmdResult, type RunCommand } from "@hone/broker";
+import { describe, expect, it, vi } from "vitest";
+import { CapsuleManifest, EvaluationRecord, PROMOTION_GATE_VERSION, RunConfig, RunEvent, capsuleDigest } from "@hone/schema";
+import type { BudgetState, NoiseCalibrationRunConfig } from "@hone/schema";
+import { readBrokerJournalEvaluations, type BrokerConfig, type CmdResult, type RunCommand } from "@hone/broker";
+import type * as BrokerModule from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
 import { createBackend, deriveProbeReport } from "../src/backends/local.js";
 import { MUTATION_WORKER_PREFLIGHT_FILE } from "../src/backends/optimizer-container.js";
 import { appendEvent, readEvents, replayRun } from "../src/eventlog.js";
+import { sealedRunAuthority } from "../src/search.js";
 import { runCommand as cliRunCommand } from "../src/supervisor.js";
 import type { ProbeReport, RunnerBackendContext } from "../src/types.js";
 import {
@@ -25,6 +27,20 @@ import {
   readLogLines,
   writeEvents,
 } from "./helpers.js";
+
+// Pass-through spy on the trusted broker constructor: the exact config the
+// local backend hands startBroker is the authority under test.
+const captured = vi.hoisted(() => ({ brokerConfigs: [] as BrokerConfig[] }));
+vi.mock("@hone/broker", async (importOriginal) => {
+  const actual = await importOriginal<typeof BrokerModule>();
+  return {
+    ...actual,
+    startBroker: (config: BrokerConfig, options: Parameters<typeof actual.startBroker>[1]) => {
+      captured.brokerConfigs.push(config);
+      return actual.startBroker(config, options);
+    },
+  };
+});
 
 /**
  * VI.4 probe gate under the M0 one-shot invariant: the run buys AT MOST one
@@ -298,25 +314,39 @@ interface ProbeFlow {
   root: string;
   runDir: string;
   invocationsPath: string;
+  capsule: { capsuleDir: string; manifest: CapsuleManifest; digest: string };
   probeReports: ProbeReport[];
   stops: number;
   toolbeltPreflights: Array<{ image: string; optimizerStarted: boolean }>;
   /** The operator cpuset the prepared optimizer runtime carried into each toolbelt preflight. */
   toolbeltCpusets: Array<string | undefined>;
   startError: Error | null;
+  /** Exact trusted configs this flow handed to startBroker. */
+  brokerConfigs: BrokerConfig[];
+  /** Evaluator container executions (`docker start -a` of an eval container). */
+  evaluatorRuns: number;
   events(): RunEvent[];
-  invocations(): { maxEpisodes: string | null; resume: { nextEpisode: number } }[];
+  invocations(): {
+    maxEpisodes: string | null;
+    oneShot: string | null;
+    resume: { nextEpisode: number; incumbent: { artifact: { hash: string } } | null };
+  }[];
 }
 
 /**
  * Run the REAL local backend (stubbed docker, unix egress, scripted optimizer
  * that records each invocation's env and exits 0) over a pre-seeded event log.
+ * `reuse` re-enters an earlier flow's run dir, as a resume after process death.
  */
 async function runProbeFlow(opts: {
   seed: RunEvent[];
   verdict: boolean;
   abortOnGate?: boolean;
   m1?: { episodes: number; strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> };
+  search?: { episodes: number; measurementEpoch: string; calibrated: boolean };
+  noise?: NoiseCalibrationRunConfig;
+  reuse?: ProbeFlow;
+  abortAfterEvaluatorRuns?: number;
   toolbeltFailure?: Error;
   toolbeltResult?: unknown;
   mutationWorkerPreflightContract?: RunnerBackendContext["mutationWorkerPreflightContract"];
@@ -324,23 +354,31 @@ async function runProbeFlow(opts: {
   /** Extra operator env for the backend context (e.g. HONE_SANDBOX_CPUSET). */
   env?: Record<string, string>;
 }): Promise<ProbeFlow> {
-  const root = makeRoot();
+  const root = opts.reuse?.root ?? makeRoot();
   const runId = "run_probe";
-  const runDir = writeEvents(root, runId, opts.seed);
-  // A crashed run's broker journal holds the durable incumbent fact BEFORE
-  // the public event exists (journalFact ordering) — seed it alongside, or
-  // the resumed broker correctly refuses a public promotion it never made.
-  const incumbentFacts = opts.seed.flatMap((e) =>
-    e.type === "incumbent.new"
-      ? [{ t: "incumbent", hash: e.artifact.hash, aggregate: e.aggregate, deltaVsBaseline: e.deltaVsBaseline, episode: e.episode }]
-      : [],
-  );
-  if (incumbentFacts.length > 0) {
-    writeFileSync(join(runDir, "broker-state.ndjson"), `${incumbentFacts.map((f) => JSON.stringify(f)).join("\n")}\n`);
+  let runDir: string;
+  let capsule: ProbeFlow["capsule"];
+  if (opts.reuse !== undefined) {
+    runDir = opts.reuse.runDir;
+    capsule = opts.reuse.capsule;
+  } else {
+    runDir = writeEvents(root, runId, opts.seed);
+    // A crashed run's broker journal holds the durable incumbent fact BEFORE
+    // the public event exists (journalFact ordering) — seed it alongside, or
+    // the resumed broker correctly refuses a public promotion it never made.
+    const incumbentFacts = opts.seed.flatMap((e) =>
+      e.type === "incumbent.new"
+        ? [{ t: "incumbent", hash: e.artifact.hash, aggregate: e.aggregate, deltaVsBaseline: e.deltaVsBaseline, episode: e.episode }]
+        : [],
+    );
+    if (incumbentFacts.length > 0) {
+      writeFileSync(join(runDir, "broker-state.ndjson"), `${incumbentFacts.map((f) => JSON.stringify(f)).join("\n")}\n`);
+    }
+    mkdirSync(join(root, ".hone-cas"), { recursive: true });
+    capsule = probeCapsule(root);
+    freezeCapsuleAssets(runDir, capsule.capsuleDir, capsule.manifest);
   }
-  mkdirSync(join(root, ".hone-cas"), { recursive: true });
-  const { capsuleDir, manifest, digest } = probeCapsule(root);
-  freezeCapsuleAssets(runDir, capsuleDir, manifest);
+  const { capsuleDir, manifest, digest } = capsule;
 
   const invocationsPath = join(root, "invocations.ndjson");
   const optimizerEntry = join(root, "opt.mjs");
@@ -350,20 +388,27 @@ async function runProbeFlow(opts: {
       'import { appendFileSync } from "node:fs";',
       `appendFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify({`,
       '  maxEpisodes: process.env.HONE_MAX_EPISODES ?? null,',
+      '  oneShot: process.env.HONE_ONE_SHOT_CANDIDATE ?? null,',
       '  resume: JSON.parse(process.env.HONE_RESUME),',
       '}) + "\\n");',
     ].join("\n"),
   );
 
+  const configsBefore = captured.brokerConfigs.length;
   const flow: ProbeFlow = {
     root,
     runDir,
     invocationsPath,
+    capsule,
     probeReports: [],
     stops: 0,
     startError: null,
     toolbeltPreflights: [],
     toolbeltCpusets: [],
+    get brokerConfigs() {
+      return captured.brokerConfigs.slice(configsBefore);
+    },
+    evaluatorRuns: 0,
     events: () => readEvents(runDir),
     invocations: () =>
       existsSync(invocationsPath)
@@ -374,12 +419,23 @@ async function runProbeFlow(opts: {
         : [],
   };
 
+  const abort = new AbortController();
   const run: RunCommand = (argv) => {
     if (argv[0] === "docker" && argv[1] === "info") {
       return Promise.resolve(res({ stdout: Buffer.from("ENGINE-TEST\n") }));
     }
     if (argv[0] === "docker" && argv[1] === "create") {
-      return Promise.resolve(res({ stdout: Buffer.from("lease-id\n") }));
+      // Evaluator containers get an addressable id so their attached start
+      // can answer with a trusted EvaluatorOutput.
+      const name = argv[argv.indexOf("--name") + 1] ?? "";
+      return Promise.resolve(res({ stdout: Buffer.from(name.includes("-eval-") ? `eval-${name}\n` : "lease-id\n") }));
+    }
+    if (argv[0] === "docker" && argv[1] === "start" && argv[2] === "-a" && (argv[3] ?? "").startsWith("eval-")) {
+      flow.evaluatorRuns += 1;
+      if (opts.abortAfterEvaluatorRuns !== undefined && flow.evaluatorRuns >= opts.abortAfterEvaluatorRuns) {
+        abort.abort(new Error("host died"));
+      }
+      return Promise.resolve(res({ stdout: Buffer.from(JSON.stringify({ valid: true, objectives: { score: 0.5 } })) }));
     }
     if (argv[0] === "docker" && argv[1] === "exec" && argv.some((arg) => arg.includes("hone-scratch-keeper-"))) {
       const out = argv.find((a) => typeof a === "string" && a.startsWith("HONE_SCRATCH_SNAPSHOT_OUT="));
@@ -406,7 +462,48 @@ async function runProbeFlow(opts: {
       return opts.toolbeltResult;
     },
   });
-  const abort = new AbortController();
+  const config = RunConfig.parse({
+    version: 1,
+    capsuleId: manifest.id,
+    objective: manifest.objective,
+    budget: manifest.budget,
+    routing: { mutation: { model: "m" } },
+    headless: true,
+    ...(opts.search === undefined
+      ? {}
+      : {
+          search: {
+            episodes: opts.search.episodes,
+            measurementEpoch: opts.search.measurementEpoch,
+            calibrations: opts.search.calibrated
+              ? [{
+                  gateVersion: PROMOTION_GATE_VERSION,
+                  evidenceVersion: "hone-baseline-noise-v1",
+                  calibratedAt: "2026-10-05T00:00:00.000Z",
+                  capsuleId: manifest.id,
+                  admittedCapsuleDigest: digest,
+                  executionImage: manifest.image,
+                  assetGroupId: "train",
+                  measurementEpoch: opts.search.measurementEpoch,
+                  sourceCohortSha256: [fakeHash("3")],
+                  maxObservedPairDelta: 0,
+                  noiseFloor: 0,
+                  noiseEnvelope: 0,
+                  informationFreePairs: 63,
+                  informationFreePositive: 0,
+                  estimator: "pooled-within-coordinate-sd-v1",
+                  estimatorMinRepeatsPerCoordinate: 3,
+                  sampleDepths: [7, 7, 7],
+                  informationFreeMeasurements: 21,
+                  coordinateGroups: 3,
+                  pooledDegreesOfFreedom: 18,
+                  pooledWithinCoordinateSd: 0,
+                }]
+              : [],
+          },
+        }),
+    ...(opts.noise === undefined ? {} : { noiseCalibration: opts.noise }),
+  });
   const ctx: RunnerBackendContext = {
     runId,
     root,
@@ -415,14 +512,7 @@ async function runProbeFlow(opts: {
     capsuleDir,
     admittedManifest: manifest,
     runtimeIdentity: { admittedCapsuleDigest: digest, executionImage: manifest.image },
-    config: RunConfig.parse({
-      version: 1,
-      capsuleId: manifest.id,
-      objective: manifest.objective,
-      budget: manifest.budget,
-      routing: { mutation: { model: "m" } },
-      headless: true,
-    }),
+    config,
     env: {
       PATH: process.env["PATH"] ?? "",
       HONE_EGRESS: "socket",
@@ -454,6 +544,8 @@ async function runProbeFlow(opts: {
           optimizerEpisodesMax: opts.m1.episodes,
           maxPublicCandidateEvaluations: Math.max(1, opts.m1.episodes),
         }),
+    // Exactly what the supervisor derives from a sealed run config.
+    ...sealedRunAuthority(config),
     ...(opts.mutationWorkerPreflightContract === undefined
       ? {}
       : { mutationWorkerPreflightContract: opts.mutationWorkerPreflightContract }),
@@ -514,7 +606,17 @@ describe("trusted M1 fixed-work local branch", () => {
       m1: { episodes: 3, strategy },
     });
 
-    expect(flow.invocations()).toEqual([{ maxEpisodes: "3", resume: expect.objectContaining({ nextEpisode: 0 }) }]);
+    // M1 children stay in one-shot-candidate mode.
+    expect(flow.invocations()).toEqual([{ maxEpisodes: "3", oneShot: "1", resume: expect.objectContaining({ nextEpisode: 0 }) }]);
+    const [brokerConfig] = flow.brokerConfigs;
+    expect(brokerConfig).toMatchObject({
+      measurementEpoch: "m1:test-epoch",
+      maxMutationEpisodes: 3,
+      maxCandidateArtifacts: 4,
+      maxPublicCandidateEvaluations: 3,
+    });
+    expect(brokerConfig).not.toHaveProperty("runScopedEvaluationCache");
+    expect(brokerConfig).not.toHaveProperty("promotionNoiseCalibrations");
     expect(flow.toolbeltPreflights).toEqual([{ image: FIX_IMAGE, optimizerStarted: false }]);
     expect(flow.probeReports).toHaveLength(0);
     expect(flow.events().some((event) => event.type === "probe.completed")).toBe(false);
@@ -653,6 +755,118 @@ describe("trusted M1 fixed-work local branch", () => {
     expect(await preflightCpusets({})).toEqual([undefined]);
     expect(await preflightCpusets({ HONE_SANDBOX_CPUSET: "" })).toEqual([undefined]); // empty == unset
   });
+});
+
+describe("sealed hone run search (real local backend)", () => {
+  const EPOCH = "compress-2026-10";
+  const started = (runId: string): RunEvent => ({
+    runId, at: at(), type: "run.started", capsuleId: CAP_ID, contractHash: fakeHash("c"), optimizerDigest: fakeHash("0"), checkpointVersion: 1,
+  });
+
+  it("hands the broker the sealed episode caps, epoch, run-scoped cache and calibration, and runs the loop without the probe", { timeout: 30_000 }, async () => {
+    const flow = await runProbeFlow({ seed: [started("run_probe")], verdict: false, search: { episodes: 5, measurementEpoch: EPOCH, calibrated: true } });
+
+    // Full multi-episode loop: no HONE_ONE_SHOT_CANDIDATE, no probe gate.
+    expect(flow.invocations()).toEqual([{ maxEpisodes: "5", oneShot: null, resume: expect.objectContaining({ nextEpisode: 0, incumbent: null }) }]);
+    expect(flow.probeReports).toHaveLength(0);
+    expect(flow.stops).toBe(0);
+    expect(flow.events().some((event) => event.type === "probe.completed")).toBe(false);
+    expect(flow.brokerConfigs).toHaveLength(1);
+    const [brokerConfig] = flow.brokerConfigs;
+    expect(brokerConfig).toMatchObject({
+      measurementEpoch: EPOCH,
+      runScopedEvaluationCache: true,
+      maxMutationEpisodes: 5,
+      maxPublicCandidateEvaluations: 10,
+      maxCandidateArtifacts: 10,
+      promotionNoiseCalibrations: [expect.objectContaining({ measurementEpoch: EPOCH, assetGroupId: "train", capsuleId: flow.capsule.manifest.id })],
+    });
+    // The admitted envelope stays the broker-enforced budget.
+    expect(brokerConfig?.manifest.budget).toEqual(flow.capsule.manifest.budget);
+    // Unlike an M1 child, a search buys no extra terminal evaluation.
+    expect(flow.evaluatorRuns).toBe(0);
+  });
+
+  it("an uncalibrated search hands the broker an explicit empty calibration list, never the built-in fallback", { timeout: 30_000 }, async () => {
+    const flow = await runProbeFlow({ seed: [started("run_probe")], verdict: false, search: { episodes: 2, measurementEpoch: EPOCH, calibrated: false } });
+    expect(flow.brokerConfigs[0]?.promotionNoiseCalibrations).toEqual([]);
+    expect(flow.invocations()).toEqual([expect.objectContaining({ maxEpisodes: "2", oneShot: null })]);
+  });
+
+  it("resumes from the durable episode cursor and incumbent without re-buying completed episodes", { timeout: 30_000 }, async () => {
+    const runId = "run_probe";
+    const [b, c, d] = [fakeHash("b"), fakeHash("c"), fakeHash("d")];
+    const flow = await runProbeFlow({
+      seed: [
+        started(runId),
+        ...episodeEvents(runId, 0, b, c),
+        { runId, at: at(), type: "episode.completed", episode: 0 },
+        { runId, at: at(), type: "episode.started", episode: 1, parent: { hash: c } },
+        { runId, at: at(), type: "episode.candidate", episode: 1, candidate: { hash: d }, sessionTrace: fakeHash("e") },
+        { runId, at: at(), type: "episode.invalid", episode: 1, reason: "evaluator rejected the candidate as invalid", repaired: false },
+        { runId, at: at(), type: "episode.completed", episode: 1 },
+      ],
+      verdict: false,
+      search: { episodes: 4, measurementEpoch: EPOCH, calibrated: true },
+    });
+    expect(flow.invocations()).toEqual([{
+      maxEpisodes: "2",
+      oneShot: null,
+      resume: expect.objectContaining({ nextEpisode: 2, incumbent: expect.objectContaining({ artifact: { hash: c } }) }),
+    }]);
+    expect(flow.brokerConfigs[0]).toMatchObject({ episodeOrigin: 2, maxMutationEpisodes: 4, measurementEpoch: EPOCH });
+    expect(flow.probeReports).toHaveLength(0);
+  });
+
+  it("a finished episode budget launches no optimizer on resume", { timeout: 30_000 }, async () => {
+    const runId = "run_probe";
+    const flow = await runProbeFlow({
+      seed: [
+        started(runId),
+        { runId, at: at(), type: "episode.started", episode: 0, parent: { hash: fakeHash("b") } },
+        { runId, at: at(), type: "episode.completed", episode: 0 },
+      ],
+      verdict: false,
+      search: { episodes: 1, measurementEpoch: EPOCH, calibrated: false },
+    });
+    expect(flow.invocations()).toEqual([]);
+    expect(flow.evaluatorRuns).toBe(0);
+  });
+
+  it("M0 without search keeps the one-shot probe under the M0 broker caps", { timeout: 30_000 }, async () => {
+    const flow = await runProbeFlow({ seed: [started("run_probe")], verdict: false, captureStartError: true });
+    // The scripted optimizer produces no pair, so the probe report refuses — the invocation shape is what matters.
+    expect(flow.startError?.message).toMatch(/no completed evaluation/);
+    expect(flow.invocations()).toEqual([expect.objectContaining({ maxEpisodes: "1", oneShot: "1" })]);
+    const [brokerConfig] = flow.brokerConfigs;
+    expect(brokerConfig).toMatchObject({ maxMutationEpisodes: 1, maxCandidateArtifacts: 2 });
+    for (const key of ["measurementEpoch", "runScopedEvaluationCache", "promotionNoiseCalibrations", "maxPublicCandidateEvaluations"]) {
+      expect(brokerConfig, key).not.toHaveProperty(key);
+    }
+  });
+
+  it.runIf(process.platform === "linux")(
+    "a noise run measures only the frozen baseline per sealed seed, calls no optimizer, and a resume after host death never re-pays a measured seed",
+    { timeout: 60_000 },
+    async () => {
+      const noise = { measurementEpoch: EPOCH, assetGroupId: "train", seeds: [0, 1, 2] };
+      const first = await runProbeFlow({ seed: [started("run_probe")], verdict: false, noise, abortAfterEvaluatorRuns: 1 });
+      expect(first.evaluatorRuns).toBe(1);
+      expect(readBrokerJournalEvaluations(first.runDir).facts.map((fact) => fact.record.seed)).toEqual([0]);
+      expect(first.brokerConfigs[0]).toMatchObject({ measurementEpoch: EPOCH, runScopedEvaluationCache: true, promotionNoiseCalibrations: [] });
+
+      const resumed = await runProbeFlow({ seed: [], verdict: false, noise, reuse: first });
+      expect(resumed.evaluatorRuns).toBe(2);
+      const facts = readBrokerJournalEvaluations(resumed.runDir).facts;
+      expect(facts.map((fact) => fact.record.seed)).toEqual([0, 1, 2]);
+      for (const fact of facts) {
+        expect(fact).toMatchObject({ measurementEpoch: EPOCH, aggregate: 0.5, record: { cached: false, assetGroupId: "train" } });
+      }
+      expect(new Set(facts.map((fact) => fact.record.artifactHash)).size).toBe(1);
+      expect(resumed.invocations()).toEqual([]);
+      expect(resumed.toolbeltPreflights).toEqual([]);
+    },
+  );
 });
 
 function seededLog(runId: string): RunEvent[] {

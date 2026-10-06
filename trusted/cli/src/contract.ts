@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { RunConfig } from "@hone/schema";
+import { RunConfig, canonicalJson } from "@hone/schema";
 import type { BudgetEnvelope, CapsuleManifest, DiagnosticOrderingReport } from "@hone/schema";
 import { LADDER_REFUSAL, ladderLocked } from "./deliver.js";
 import type { DeliveryTarget } from "./delivery-target.js";
@@ -127,9 +127,40 @@ export function renderContract(inputs: ContractInputs): string {
   lines.push(`- replicates per arm per task: **${config.promotion.replicates}**`);
   lines.push(`- negative controls required: **${config.promotion.requireNegativeControls ? "yes" : "no"}**`);
   lines.push("");
-  lines.push(
-    "_M0 is one cache-safe candidate: the approved probe is immediately finalized and delivered. Multi-episode inner search requires M1 fresh evaluator cache domains. The rule above is sealed now for the M1 outer champion decision._",
-  );
+  if (config.search !== undefined) {
+    const { search } = config;
+    lines.push(
+      "_The seed's artifact-level incumbent is gated by the broker's calibrated paired-delta gate below; the rule above is sealed for the M1 outer champion decision._",
+    );
+    lines.push("");
+    lines.push("## Search (sealed)");
+    lines.push("");
+    lines.push(`- optimizer episodes: **${search.episodes}** (each needs at least 2 evaluator invocations: parent + candidate)`);
+    lines.push(`- measurement epoch: \`${search.measurementEpoch}\` (sealed; every resume reuses it; the evaluator cache domain is fresh for this run)`);
+    if (search.calibrations.length === 0) {
+      lines.push("- promotion calibration: **none** — every candidate gate refuses as uncalibrated, so the run searches but **no child can become incumbent**");
+    } else {
+      for (const calibration of search.calibrations) {
+        lines.push(
+          `- promotion calibration for \`${calibration.assetGroupId}\`: ${calibration.evidenceVersion}, ${calibration.estimator}, noise envelope ${calibration.noiseEnvelope} (a child must beat its parent by more than this)`,
+        );
+      }
+    }
+    lines.push("- end of run: a report of the best incumbent, its paired deltas and lineage, and the budget used — no probe approval");
+  } else if (config.noiseCalibration !== undefined) {
+    const noise = config.noiseCalibration;
+    lines.push("_This run measures noise only: no candidate, no promotion._");
+    lines.push("");
+    lines.push("## Noise calibration (sealed)");
+    lines.push("");
+    lines.push(`- measures the frozen baseline once per seed on \`${noise.assetGroupId}\`: seeds ${noise.seeds.join(", ")}`);
+    lines.push(`- measurement epoch: \`${noise.measurementEpoch}\` (sealed; a search sealed in the same epoch can use the derived calibration)`);
+    lines.push("- no optimizer starts and no model is called");
+  } else {
+    lines.push(
+      "_M0 is one cache-safe candidate: the approved probe is immediately finalized and delivered. Multi-episode inner search requires M1 fresh evaluator cache domains. The rule above is sealed now for the M1 outer champion decision._",
+    );
+  }
   lines.push("");
   lines.push("## Model routing");
   lines.push("");
@@ -272,6 +303,12 @@ export function applyContractRevision(opts: {
   if (config.backend !== original.backend) return { ok: false, error: "backend is not editable mid-approval" };
   if (config.apply !== original.apply) {
     return { ok: false, error: `apply mode is frozen at run creation (${original.apply}) — the sealed delivery target is bound to it; start a fresh run to change delivery` };
+  }
+  if (canonicalJson(config.search ?? null) !== canonicalJson(original.search ?? null)) {
+    return { ok: false, error: "search is frozen at run creation (episodes, measurement epoch, calibration) — start a fresh run to change it" };
+  }
+  if (canonicalJson(config.noiseCalibration ?? null) !== canonicalJson(original.noiseCalibration ?? null)) {
+    return { ok: false, error: "noiseCalibration is frozen at run creation — start a fresh run to change it" };
   }
   if (ladderLocked(config.apply, config.improverSeat, env)) return { ok: false, error: LADDER_REFUSAL };
   return { ok: true, config };
