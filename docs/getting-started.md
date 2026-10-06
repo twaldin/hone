@@ -70,7 +70,7 @@ The omp auth gateway accepts provider-qualified ids. Hone's default route for ev
 
 Keep credentials in the operator's local environment. Campaign routes belong to the frozen campaign configuration.
 
-On a shared host, `HONE_SANDBOX_CPUSET` (a cpuset list such as `1-4`) pins the run's mutation sandbox, evaluator, scratch-keeper and optimizer containers to those CPUs; give concurrent runs disjoint sets. An invalid list is rejected rather than ignored. It is operator placement and not part of the capsule digest.
+On a shared host, `HONE_SANDBOX_CPUSET` (a cpuset list such as `1-4`) pins every container a run starts to those CPUs: the lease donor, the egress relay containers (macOS, or `HONE_EGRESS=network`), the scratch keeper, each mutation sandbox and evaluator, the optimizer build, the toolbelt preflight, and each optimizer invocation. A campaign's candidate-optimizer conformance check applies the same set to its three containers (trusted stub, build and candidate run). Give concurrent runs disjoint sets. An invalid list is rejected rather than ignored. It is operator placement and not part of the capsule digest.
 
 Production execution verifies the capsule's assets, baseline and Gate-2 admission receipt chain. Publishing files does not transfer the original operator's local admission ledger or runtime images. The public-clone admission and image bootstrap is unfinished; do not disable review checks to make an example run.
 

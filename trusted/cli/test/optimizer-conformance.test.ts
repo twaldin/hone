@@ -143,6 +143,57 @@ describe("cheap candidate optimizer conformance", () => {
     expect(networkCreate).toContain("--internal");
   });
 
+  it("pins the trusted stub, the build and the candidate run to the operator cpuset only when one is given", async () => {
+    const conform = async (cpuset: string | undefined): Promise<string[][]> => {
+      const docker = scriptedDocker();
+      await conformCandidateOptimizer(candidate(), FIX_IMAGE, {
+        run: docker.run,
+        id: "cpuset",
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
+        cpuset,
+      });
+      return docker.calls;
+    };
+    const launches = (calls: string[][]): Record<"stub" | "build" | "candidate", string[]> => ({
+      stub: calls.find((argv) => argv[1] === "run" && argv.includes("-d")) ?? [],
+      build: calls.find((argv) => argv[1] === "run" && argv.some((arg) => arg.includes("bun build"))) ?? [],
+      candidate: calls.find((argv) => argv[1] === "create") ?? [],
+    });
+    // Per-call random material (temp dirs, the stub token) is the only legitimate difference between two conformance runs.
+    const shape = (argv: readonly string[]): string[] =>
+      argv.map((arg) => arg.replace(/[0-9a-f]{64}/g, "<token>").replace(/\S*hone-optconformance-[^/:]+/g, "<tmp>"));
+    const withoutPin = (argv: readonly string[]): string[] => {
+      const at = argv.indexOf("--cpuset-cpus");
+      return [...argv.slice(0, at), ...argv.slice(at + 2)];
+    };
+
+    const free = launches(await conform(undefined));
+    const pinned = launches(await conform("1-4"));
+    for (const kind of ["stub", "build", "candidate"] as const) {
+      expect(free[kind].length, kind).toBeGreaterThan(0);
+      expect(free[kind], kind).not.toContain("--cpuset-cpus");
+      expect(pinned[kind].filter((arg) => arg === "--cpuset-cpus"), kind).toHaveLength(1);
+      expect(pinned[kind][pinned[kind].indexOf("--cpuset-cpus") + 1], kind).toBe("1-4");
+      expect(pinned[kind].indexOf("--cpuset-cpus"), kind).toBeLessThan(pinned[kind].indexOf(FIX_IMAGE));
+      // The pinned argv is the free argv plus exactly the one flag pair.
+      expect(shape(withoutPin(pinned[kind])), kind).toEqual(shape(free[kind]));
+    }
+  });
+
+  it("refuses an invalid operator cpuset before any staging or Docker call", async () => {
+    let calls = 0;
+    const never: RunCommand = () => {
+      calls += 1;
+      throw new Error("Docker must not be contacted");
+    };
+    for (const bad of ["1-4; --privileged", "0,4-1", "", "a"]) {
+      await expect(
+        conformCandidateOptimizer(candidate(), FIX_IMAGE, { run: never, id: "cpuset-bad", runtimeSourceDir: TEST_RUNTIME_SOURCE, cpuset: bad }),
+      ).rejects.toThrow(`sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got ${JSON.stringify(bad)}`);
+    }
+    expect(calls).toBe(0);
+  });
+
   it("fails a syntax/build refusal closed", async () => {
     const docker = scriptedDocker({ buildFailure: "SyntaxError: expected identifier" });
     await expect(

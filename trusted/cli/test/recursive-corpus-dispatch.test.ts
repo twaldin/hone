@@ -367,6 +367,23 @@ describe("recursive corpus dispatch", () => {
     expect(existsSync(join(f.root, ".hone-runs"))).toBe(false);
   });
 
+  it("builds the candidate gate under a valid HONE_SANDBOX_CPUSET", async () => {
+    const f = await fixture();
+    vi.mocked(runCommand).mockImplementation(async () => 17);
+    f.io.env["HONE_SANDBOX_CPUSET"] = "1-4";
+    expect(await recursiveCommand(searchArgs, f.io, { corpus: f.corpus })).toBe(17);
+    expect(runCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an invalid HONE_SANDBOX_CPUSET when the candidate gate is built — an operator error before any launch, never candidate feedback", async () => {
+    const f = await fixture();
+    f.io.env["HONE_SANDBOX_CPUSET"] = "0,4-1";
+    await expect(recursiveCommand(searchArgs, f.io, { corpus: f.corpus })).rejects.toThrow(
+      'sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got "0,4-1"',
+    );
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
   it("rebinds the same corpus on outer resume and rejects changed bytes before touching retained state", async () => {
     const f = await fixture();
     const outerDir = join(f.root, ".hone-runs", `run_recursive_outer_${metaCampaignConfigHash(f.config).slice(7)}`);

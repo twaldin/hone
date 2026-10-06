@@ -301,6 +301,8 @@ interface ProbeFlow {
   probeReports: ProbeReport[];
   stops: number;
   toolbeltPreflights: Array<{ image: string; optimizerStarted: boolean }>;
+  /** The operator cpuset the prepared optimizer runtime carried into each toolbelt preflight. */
+  toolbeltCpusets: Array<string | undefined>;
   startError: Error | null;
   events(): RunEvent[];
   invocations(): { maxEpisodes: string | null; resume: { nextEpisode: number } }[];
@@ -319,6 +321,8 @@ async function runProbeFlow(opts: {
   toolbeltResult?: unknown;
   mutationWorkerPreflightContract?: RunnerBackendContext["mutationWorkerPreflightContract"];
   captureStartError?: boolean;
+  /** Extra operator env for the backend context (e.g. HONE_SANDBOX_CPUSET). */
+  env?: Record<string, string>;
 }): Promise<ProbeFlow> {
   const root = makeRoot();
   const runId = "run_probe";
@@ -359,6 +363,7 @@ async function runProbeFlow(opts: {
     stops: 0,
     startError: null,
     toolbeltPreflights: [],
+    toolbeltCpusets: [],
     events: () => readEvents(runDir),
     invocations: () =>
       existsSync(invocationsPath)
@@ -392,6 +397,7 @@ async function runProbeFlow(opts: {
     spawnOptimizer: fakeOptimizerSpawn(FIX_IMAGE),
     createHelper: scriptedCreateHelper(run),
     mutationToolbeltSmoke: async (runtime) => {
+      flow.toolbeltCpusets.push(runtime.cpuset);
       flow.toolbeltPreflights.push({
         image: runtime.image,
         optimizerStarted: existsSync(invocationsPath),
@@ -423,6 +429,7 @@ async function runProbeFlow(opts: {
       // The upstream is required (no default); the scripted optimizer never dials it.
       HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9",
       HONE_OPTIMIZER_CMD: `${process.execPath} ${optimizerEntry}`,
+      ...opts.env,
     },
     // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
     admissionReview: "off",
@@ -615,6 +622,36 @@ describe("trusted M1 fixed-work local branch", () => {
     expect(flow.toolbeltPreflights).toEqual([{ image: FIX_IMAGE, optimizerStarted: false }]);
     expect(flow.invocations()).toEqual([]);
     expect(flow.events().some((event) => event.type === "episode.started")).toBe(false);
+  });
+
+  it("reads HONE_SANDBOX_CPUSET once at backend start and hands it to the prepared optimizer runtime the preflight uses", { timeout: 30_000 }, async () => {
+    const seed: RunEvent[] = [{
+      runId: "run_probe",
+      at: at(),
+      type: "run.started",
+      capsuleId: CAP_ID,
+      contractHash: fakeHash("c"),
+      optimizerDigest: fakeHash("0"),
+    }];
+    const strategy: NonNullable<RunnerBackendContext["evaluationStrategy"]> = async () => {
+      throw new Error("evaluation must not start after a toolbelt refusal");
+    };
+    const preflightCpusets = async (env: Record<string, string>): Promise<Array<string | undefined>> => {
+      const flow = await runProbeFlow({
+        seed,
+        verdict: false,
+        m1: { episodes: 3, strategy },
+        toolbeltFailure: new Error("stop at the preflight"),
+        captureStartError: true,
+        env,
+      });
+      expect(flow.startError?.message).toBe("stop at the preflight");
+      return flow.toolbeltCpusets;
+    };
+
+    expect(await preflightCpusets({ HONE_SANDBOX_CPUSET: "1-4" })).toEqual(["1-4"]);
+    expect(await preflightCpusets({})).toEqual([undefined]);
+    expect(await preflightCpusets({ HONE_SANDBOX_CPUSET: "" })).toEqual([undefined]); // empty == unset
   });
 });
 

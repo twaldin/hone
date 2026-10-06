@@ -1,4 +1,4 @@
-import type { RunCommand } from "@hone/broker";
+import { assertSandboxCpuset, type RunCommand } from "@hone/broker";
 
 const MISSING_CONTAINER = /no such container|no such object|not found/i;
 
@@ -22,9 +22,21 @@ export interface DockerRunLease {
  * never re-minted, so once the daemon's name reservation is proven free
  * (gate claim), the request can never register. The donor itself never
  * starts or executes.
+ *
+ * `cpuset` (HONE_SANDBOX_CPUSET) is the operator's `--cpuset-cpus` list,
+ * validated here at construction. The donor never starts, so the pin schedules
+ * nothing; it keeps the donor's recorded placement identical to every other
+ * container of the run. Absent => the create argv carries no affinity.
  */
-export function makeDockerRunLease(runId: string, image: string, run: RunCommand, epoch: number): DockerRunLease {
+export function makeDockerRunLease(
+  runId: string,
+  image: string,
+  run: RunCommand,
+  epoch: number,
+  cpuset?: string | undefined,
+): DockerRunLease {
   if (!Number.isSafeInteger(epoch) || epoch <= 0) throw new Error(`docker run lease epoch must be a positive integer, got ${epoch}`);
+  const cpusetArgs = cpuset === undefined ? [] : ["--cpuset-cpus", assertSandboxCpuset(cpuset)];
   const safeRunId = runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
   const name = `hone-lease-${safeRunId}-e${epoch}`;
   let attempted = false;
@@ -54,6 +66,7 @@ export function makeDockerRunLease(runId: string, image: string, run: RunCommand
           "--memory", "16777216",
           "--memory-swap", "16777216",
           "--cpus", "0.1",
+          ...cpusetArgs,
           "--log-driver", "none",
           image,
           "true",

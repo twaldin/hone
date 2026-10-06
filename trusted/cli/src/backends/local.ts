@@ -19,6 +19,7 @@ import {
 } from "@hone/schema";
 import {
   CasStore,
+  assertSandboxCpuset,
   SCRATCH_SNAPSHOT_SCRIPT,
   finalizeScratchSnapshot,
   newScratchSnapshotAttemptName,
@@ -127,9 +128,11 @@ const RELAY_JS = [
 ].join("");
 
 /**
- * Operator CPU placement (HONE_SANDBOX_CPUSET, e.g. "1-4"): one read for every
- * container this backend launches with the run's cpuset — the broker's
- * mutation sandboxes, evaluators, and scratch keeper, and the optimizer.
+ * Operator CPU placement (HONE_SANDBOX_CPUSET, e.g. "1-4"): the one reader of
+ * the variable, shared by every launch of this backend that carries the run's
+ * cpuset — the lease donor, the egress relays, the broker's scratch keeper,
+ * mutation sandboxes and evaluators, and the optimizer build, toolbelt
+ * preflight and invocations (the last three via the prepared runtime).
  * Unset or empty => undefined (no affinity). Validation is the consumer's
  * (the broker's assertSandboxCpuset), so every launch rejects a bad value the
  * same way. It reserves nothing: operators assign disjoint sets to concurrent
@@ -564,6 +567,9 @@ export async function setupEgress(
     };
   }
   if (mode !== "network") throw new Error(`HONE_EGRESS must be "socket" or "network", got "${mode}"`);
+  // Operator placement (HONE_SANDBOX_CPUSET): validated before the network or either relay exists.
+  const cpuset = operatorSandboxCpuset(ctx.env);
+  const cpusetArgs = cpuset === undefined ? [] : ["--cpuset-cpus", assertSandboxCpuset(cpuset)];
 
   const { network, relay, brokerRelay } = dockerNames(ctx.runId);
   const port = await proxy.listenTcp(0);
@@ -597,6 +603,7 @@ export async function setupEgress(
       [
         "docker", "run", "-d",
         ...RELAY_RESOURCE_ARGS,
+        ...cpusetArgs,
         ...(containerLease !== undefined ? ["--volumes-from", `${containerLease}:ro`] : []),
         "--name", relay,
         "--network", network,
@@ -625,6 +632,7 @@ export async function setupEgress(
         [
           "docker", "run", "-d",
           ...RELAY_RESOURCE_ARGS,
+          ...cpusetArgs,
           ...(containerLease !== undefined ? ["--volumes-from", `${containerLease}:ro`] : []),
           "--name", brokerRelay,
           "--network", network,
@@ -877,7 +885,7 @@ export async function runOptimizer(ctx: RunnerBackendContext, runtime: Optimizer
       HONE_RESUME: JSON.stringify(await resumeHint(ctx.runDir, ctx.casDir)),
     },
     containerLease: runtime.containerLease,
-    cpuset: operatorSandboxCpuset(ctx.env),
+    cpuset: runtime.cpuset,
   });
   // ONE frozen docker client env for every channel (endpoint pinned at
   // startup), plus the broker capability (BOTH transports) resolved by the
@@ -1471,6 +1479,8 @@ export function createBackend(
       // execution image — possibly a campaign-authorised override — runs every
       // mutation, evaluator, relay, and optimizer container.
       const executionImage = ctx.runtimeIdentity.executionImage;
+      // Operator CPU placement: read once for the donor, the broker and the prepared optimizer runtime (setupEgress reads the same env for the relays).
+      const cpuset = operatorSandboxCpuset(ctx.env);
       let egress: Egress | null = null;
       let optimizer: OptimizerRuntime | null = null;
       let containerLease: DockerRunLease | null = null;
@@ -1520,7 +1530,7 @@ export function createBackend(
         // crash-window create from THIS attempt is provably dead once a
         // later claim shows its name unreserved (moby resolves volumes-from
         // after name reservation, before Register).
-        containerLease = makeDockerRunLease(ctx.runId, executionImage, grun, gate.epoch);
+        containerLease = makeDockerRunLease(ctx.runId, executionImage, grun, gate.epoch, cpuset);
         await containerLease.start();
         // Claim-prove the remaining inherited intents BEFORE any same-named
         // resource (keeper/relay names are deterministic) can be re-minted.
@@ -1583,8 +1593,9 @@ export function createBackend(
               }),
           // Operator CPU placement (HONE_SANDBOX_CPUSET): the broker pins its
           // mutation sandboxes, evaluators, and scratch keeper to it; the
-          // optimizer launch (runOptimizer) applies the same set.
-          sandboxCpuset: operatorSandboxCpuset(ctx.env),
+          // optimizer build, preflight and invocations get the same set via
+          // the prepared runtime.
+          sandboxCpuset: cpuset,
           // Repo-lifetime holdout ledger, keyed by capsule digest so every
           // run of this exact capsule draws from ONE budget. Lives under the
           // CAS root (broker creates the file and parents).
@@ -1726,6 +1737,7 @@ export function createBackend(
           run: grun,
           spawnImpl,
           containerLease: containerLease.name,
+          cpuset,
           gate,
           clientEnv: frozen.env,
         });

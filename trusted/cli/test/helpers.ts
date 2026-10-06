@@ -636,6 +636,7 @@ export function testOptimizerRuntime(opts: {
   containerLease?: string;
   clientEnv?: NodeJS.ProcessEnv;
   gate?: DockerCreateGate;
+  cpuset?: string | undefined;
 }): OptimizerRuntime {
   const image = opts.image ?? FIX_IMAGE;
   const safeRunId = opts.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
@@ -654,6 +655,7 @@ export function testOptimizerRuntime(opts: {
     containerLease: opts.containerLease ?? `hone-lease-${safeRunId}-e1`,
     gate: opts.gate ?? openDockerCreateGate(mkdtempSync(join(tmpdir(), "hone-gate-")), opts.runId),
     clientEnv: opts.clientEnv ?? { PATH: process.env["PATH"] ?? "" },
+    cpuset: opts.cpuset,
     cleanup: () => Promise.resolve(),
   };
   return runtime;

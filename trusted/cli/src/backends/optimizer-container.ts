@@ -156,6 +156,11 @@ export interface OptimizerRuntime {
   gate: DockerCreateGate;
   /** Frozen docker client env — the endpoint resolution pinned at backend start; used by BOTH client spawns. */
   clientEnv: NodeJS.ProcessEnv;
+  /**
+   * Operator cpuset (HONE_SANDBOX_CPUSET), read once at backend start. Every container launched from this runtime — the build, the toolbelt preflight,
+   * and each optimizer invocation — pins it with `--cpuset-cpus`; each launch validates it through the broker's assertSandboxCpuset. Absent => no affinity.
+   */
+  cpuset?: string | undefined;
   /** Reap containers and remove temp staging/output trees. Idempotent. */
   cleanup(): Promise<void>;
 }
@@ -181,6 +186,8 @@ export function optimizerBuildArgs(opts: {
   /** Numeric invoking host uid/gid: the ONLY identity that may write the output dir. */
   hostUid: number;
   hostGid: number;
+  /** Operator cpuset (HONE_SANDBOX_CPUSET) for `--cpuset-cpus`; validated by the broker's assertSandboxCpuset. Absent => no affinity. */
+  cpuset?: string | undefined;
 }): string[] {
   return [
     "docker", "run", "--rm",
@@ -196,6 +203,7 @@ export function optimizerBuildArgs(opts: {
     "-e", "HOME=/tmp",
     "--user", `${opts.hostUid}:${opts.hostGid}`,
     ...HARDENING_ARGS,
+    ...(opts.cpuset === undefined ? [] : ["--cpuset-cpus", assertSandboxCpuset(opts.cpuset)]),
     "-v", `${opts.stagingDir}:${SRC_MOUNT}:ro`,
     "-v", `${opts.outDir}:${OUT_MOUNT}`,
     "-v", `${opts.runtimeDir}:${RUNTIME_MOUNT}:ro`,
@@ -557,7 +565,7 @@ export function parseMutationLegacySelftest(stdout: Buffer): MutationLegacySelft
  */
 type MutationSmokeRuntime = Pick<
   OptimizerRuntime,
-  "image" | "runId" | "safeRunId" | "bundleDir" | "bundleSeal" | "containerLease" | "run"
+  "image" | "runId" | "safeRunId" | "bundleDir" | "bundleSeal" | "containerLease" | "cpuset" | "run"
 >;
 
 export function runMutationToolbeltSmoke(
@@ -600,6 +608,7 @@ export async function runMutationToolbeltSmoke(
     "--pids-limit", "512",
     "--memory", "2147483648",
     "--cpus", "2",
+    ...(runtime.cpuset === undefined ? [] : ["--cpuset-cpus", assertSandboxCpuset(runtime.cpuset)]),
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
     "--user", MUTATION_SANDBOX_USER,
@@ -649,10 +658,14 @@ export async function prepareOptimizerRuntime(
     containerLease: string;
     gate: DockerCreateGate;
     clientEnv: NodeJS.ProcessEnv;
+    /** Operator cpuset (HONE_SANDBOX_CPUSET): pins the build here and is kept on the returned runtime for the preflight and every invocation. */
+    cpuset?: string | undefined;
     /** Unit-test seam: production always stages and verifies the pinned sources. */
     runtimeSourceDir?: string;
   },
 ): Promise<OptimizerRuntime> {
+  // An invalid operator cpuset refuses before anything is staged or built (each later launch validates it again).
+  if (opts.cpuset !== undefined) assertSandboxCpuset(opts.cpuset);
   const safeRunId = ctx.runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
   const tempDirs: string[] = [];
   /** Sealed (write-permission-stripped) output dir; cleanup restores OWNER mode only so removal can proceed. */
@@ -705,6 +718,7 @@ export async function prepareOptimizerRuntime(
     containerLease: opts.containerLease,
     gate: opts.gate,
     clientEnv: opts.clientEnv,
+    cpuset: opts.cpuset,
     cleanup: cleanupRuntime,
   };
 
@@ -773,6 +787,7 @@ export async function prepareOptimizerRuntime(
         containerLease: opts.containerLease,
         hostUid: uid,
         hostGid: gid,
+        cpuset: opts.cpuset,
       }),
       { timeoutMs: 600_000 },
     );

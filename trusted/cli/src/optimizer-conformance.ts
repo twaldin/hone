@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCommand } from "@hone/broker";
+import { assertSandboxCpuset, runCommand } from "@hone/broker";
 import type { RunCommand } from "@hone/broker";
 import { canonicalJson } from "@hone/schema";
 import { UsageError } from "./args.js";
@@ -145,6 +145,8 @@ export interface CandidateConformanceDeps {
   id?: string;
   /** Unit-test seam: production stages and verifies the pinned runtime. */
   runtimeSourceDir?: string;
+  /** Operator cpuset (HONE_SANDBOX_CPUSET): pins the trusted stub, the build, and the candidate run. Validated before any staging or docker call; absent => no affinity. */
+  cpuset?: string | undefined;
 }
 
 interface StubTranscript {
@@ -171,7 +173,7 @@ function safeSuffix(value: string): string {
   return safe;
 }
 
-function stubArgs(name: string, network: string, image: string, token: string): string[] {
+function stubArgs(name: string, network: string, image: string, token: string, cpuset: string | undefined): string[] {
   return [
     "docker", "run", "-d", "--pull=never",
     "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1", "--log-opt", "compress=false",
@@ -187,6 +189,7 @@ function stubArgs(name: string, network: string, image: string, token: string): 
     "--pids-limit", "64",
     "--memory", "134217728",
     "--cpus", "1",
+    ...(cpuset === undefined ? [] : ["--cpuset-cpus", assertSandboxCpuset(cpuset)]),
     image,
     "node", "-e", CONFORMANCE_STUB_JS,
   ];
@@ -285,6 +288,8 @@ export async function conformCandidateOptimizer(
   if (!Number.isSafeInteger(protocolTimeoutMs) || protocolTimeoutMs <= 0 || protocolTimeoutMs > 60_000) {
     throw new UsageError("candidate conformance protocolTimeoutMs must be an integer in 1..60000");
   }
+  // The operator's placement applies to all three containers; an invalid list is refused before anything is staged or launched.
+  const cpuset = deps.cpuset === undefined ? undefined : assertSandboxCpuset(deps.cpuset);
 
   const { uid, gid } = hostIds();
   const tempRoot = mkdtempSync(join(tmpdir(), "hone-optconformance-"));
@@ -319,7 +324,7 @@ export async function conformCandidateOptimizer(
     if (createdNetwork.timedOut || createdNetwork.exitCode !== 0) {
       throw new Error(`candidate conformance internal network create failed: ${createdNetwork.stderr.toString("utf8").slice(0, 1_000) || `exit ${createdNetwork.exitCode}`}`);
     }
-    const startedStub = await run(stubArgs(stubName, network, image, token), { timeoutMs: 30_000 });
+    const startedStub = await run(stubArgs(stubName, network, image, token, cpuset), { timeoutMs: 30_000 });
     if (startedStub.timedOut || startedStub.exitCode !== 0) {
       throw new Error(`candidate conformance stub start failed: ${startedStub.stderr.toString("utf8").slice(0, 1_000) || `exit ${startedStub.exitCode}`}`);
     }
@@ -337,6 +342,7 @@ export async function conformCandidateOptimizer(
       containerLease: stubName,
       hostUid: uid,
       hostGid: gid,
+      cpuset,
     }), { timeoutMs: 600_000 });
     if (built.timedOut) throw new Error("candidate optimizer conformance build timed out");
     if (built.exitCode !== 0) {
@@ -366,6 +372,7 @@ export async function conformCandidateOptimizer(
         HONE_MAX_EPISODES: "1",
       },
       containerLease: stubName,
+      cpuset,
     }, token), { timeoutMs: 30_000 });
     if (createdCandidate.timedOut || createdCandidate.exitCode !== 0) {
       throw new Error(`candidate optimizer conformance create failed: ${createdCandidate.stderr.toString("utf8").slice(0, 1_000) || `exit ${createdCandidate.exitCode}`}`);
