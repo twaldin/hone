@@ -159,6 +159,8 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
     env: {
       PATH: process.env["PATH"] ?? "",
       HONE_EGRESS: "network", // exercise the relay-container path
+      // The upstream is required (no default): the proxy is built before any docker call. Nothing connects to it — setup-only pass.
+      HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9",
     },
     // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
     admissionReview: "off",
