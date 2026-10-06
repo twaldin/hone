@@ -24,6 +24,7 @@ export {
   type BudgetDimension,
   type CallContext,
   type SandboxNetworkMode,
+  type BrokerJournalEvaluationFact,
   type BrokerJournalEvaluationSnapshot,
   type TrustedEvaluationStrategy,
   type TrustedEvaluationStrategyInput,
@@ -55,7 +56,9 @@ export {
   CAMPAIGN_12_JOURNAL_OBSERVATIONS_SHA256,
   CAMPAIGN_12_LOCAL_NULL_SOURCE_COMMIT,
   CAMPAIGN_12_LOCAL_NULL_SHA256,
+  bindPromotionNoiseCalibrations,
   campaign12PromotionNoiseCalibration,
+  type PromotionCalibrationBinding,
   type PromotionCalibrationIdentity,
 } from "./promotion-noise-calibration.js";
 export {

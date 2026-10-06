@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { canonicalJson } from "@hone/schema";
 import {
+  BASELINE_NOISE_EVIDENCE_VERSION,
+  deriveBaselineNoiseCalibration,
   deriveDirectPairedDeltaScales,
   deriveNoiseCalibrations,
   derivePromotionNoiseObservations,
   PROMOTION_NOISE_OBSERVATIONS_VERSION,
+  type BaselineNoiseRun,
   type PromotionNoiseObservationsArtifact,
   type RepeatedScoreGroup,
 } from "../src/promotion-noise-derivation.js";
@@ -259,5 +263,86 @@ describe("promotion-noise derivation", () => {
     expect(() => derivePromotionNoiseObservations("/definitely/missing/campaign-12-evidence")).toThrow(
       /evidence root does not exist/,
     );
+  });
+});
+
+describe("baseline-only noise runs -> sealed-epoch promotion calibration", () => {
+  const identity = {
+    capsuleId: NOISY,
+    admittedCapsuleDigest: NOISY_DIGEST,
+    executionImage: EXECUTION_IMAGE,
+    assetGroupId: "train",
+    measurementEpoch: "compress-2026-10",
+    seeds: [0, 1, 2],
+  };
+  const fact = (seed: number, score: number, over: Partial<BaselineNoiseRun["facts"][number]["record"]> = {}) => ({
+    measurementEpoch: identity.measurementEpoch,
+    aggregate: score,
+    record: {
+      capsuleId: NOISY,
+      artifactHash: BASELINE,
+      assetGroupId: "train",
+      seed,
+      output: { valid: true, objectives: { score }, constraints: {}, perExample: {} },
+      costUsd: 0,
+      durationMs: 1,
+      cached: false,
+      evaluatedAt: "2026-10-05T00:00:00.000Z",
+      ...over,
+    },
+  });
+  // R repeats × three seeds; each seed alternates ±0.01 around its own level.
+  const cohort = (repeats: number): BaselineNoiseRun[] =>
+    Array.from({ length: repeats }, (_, repeat) => ({
+      runId: `run_noise_r${repeat}`,
+      facts: identity.seeds.map((seed) => fact(seed, 0.5 + seed * 0.1 + (repeat % 2 === 0 ? 0.01 : -0.01))),
+    }));
+
+  it("derives a schema-valid pooled-score calibration bound to the sealed epoch and admitted identity", () => {
+    const { calibration, observations } = deriveBaselineNoiseCalibration(cohort(7), identity, "2026-10-05T01:00:00.000Z");
+    expect(calibration).toMatchObject({
+      evidenceVersion: BASELINE_NOISE_EVIDENCE_VERSION,
+      calibratedAt: "2026-10-05T01:00:00.000Z",
+      capsuleId: NOISY,
+      admittedCapsuleDigest: NOISY_DIGEST,
+      executionImage: EXECUTION_IMAGE,
+      assetGroupId: "train",
+      measurementEpoch: "compress-2026-10",
+      estimator: "pooled-within-coordinate-sd-v1",
+      sampleDepths: [7, 7, 7],
+      informationFreeMeasurements: 21,
+      coordinateGroups: 3,
+      pooledDegreesOfFreedom: 18,
+      informationFreePairs: 63,
+    });
+    if (calibration.estimator !== "pooled-within-coordinate-sd-v1") throw new Error("unexpected estimator");
+    // Four +0.01 and three −0.01 per coordinate: pooled variance 0.0001 × 8/7.
+    expect(calibration.pooledWithinCoordinateSd).toBeCloseTo(0.01 * Math.sqrt(8 / 7), 12);
+    expect(calibration.maxObservedPairDelta).toBeCloseTo(0.02, 12);
+    expect(calibration.noiseEnvelope).toBeCloseTo(4.5 * 0.01 * Math.sqrt(8 / 7), 12);
+    expect(calibration.sourceCohortSha256).toEqual([
+      `sha256:${createHash("sha256").update(canonicalJson(observations)).digest("hex")}`,
+    ]);
+    expect(observations.identity.baselineArtifactHash).toBe(BASELINE);
+    expect(observations.runIds).toHaveLength(7);
+  });
+
+  it("never lowers the schema minimums and refuses an unfaithful cohort", () => {
+    // Six repeats: 18 measurements, 15 degrees of freedom — below the minimums.
+    expect(() => deriveBaselineNoiseCalibration(cohort(6), identity, "2026-10-05T01:00:00.000Z")).toThrow();
+    const runs = cohort(7);
+    const replace = (index: number, facts: BaselineNoiseRun["facts"]) =>
+      runs.map((run, at) => (at === index ? { ...run, facts } : run));
+    const first = runs[0]?.facts ?? [];
+    expect(() => deriveBaselineNoiseCalibration(replace(3, first.slice(1)), identity, "t"))
+      .toThrow(/run_noise_r3 holds 0 measurements of seed 0/);
+    expect(() => deriveBaselineNoiseCalibration(replace(2, first.map((f) => ({ ...f, measurementEpoch: "other" }))), identity, "t"))
+      .toThrow(/run_noise_r2 holds 0 measurements/);
+    expect(() => deriveBaselineNoiseCalibration(replace(1, [fact(0, 0.51, { cached: true }), ...first.slice(1)]), identity, "t"))
+      .toThrow(/memo hit/);
+    expect(() => deriveBaselineNoiseCalibration(replace(4, [fact(0, 0.51, { artifactHash: ARTIFACT_1 }), ...first.slice(1)]), identity, "t"))
+      .toThrow(/not the cohort baseline/);
+    expect(() => deriveBaselineNoiseCalibration(replace(5, [{ ...fact(0, 0.51), aggregate: null }, ...first.slice(1)]), identity, "t"))
+      .toThrow(/not eligible/);
   });
 });

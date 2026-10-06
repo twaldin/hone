@@ -9,6 +9,7 @@ import { authorCommand } from "./commands/author.js";
 import { bestCommand } from "./commands/best.js";
 import { diffCommand } from "./commands/diff.js";
 import { campaignCommand, honeCommand, recursiveCommand } from "./commands/hone.js";
+import { promotionNoiseCommand } from "./commands/promotion-noise.js";
 import { resumeCampaignCommand } from "./commands/resume.js";
 import { statusCommand } from "./commands/status.js";
 import { stopCommand } from "./commands/stop.js";
@@ -22,8 +23,9 @@ const USAGE = `hone — trusted run supervisor + anytime surface
 usage:
   hone [--capsules-root <dir>] <command> ...
   hone "<objective>" [author/run flags]
-  hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume]
-           [--backend stub|local] [--config <json>]
+  hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume [--run <id>]]
+           [--backend stub|local] [--config <json>] [--calibration <file>]
+  hone promotion-noise <capsule-dir> --epoch <name> --out <calibration.json> --headless [--seeds K] [--repeats R]
   hone author <capsule-objective> [--repo DIR] [--headless] [--acknowledge-dirty]
   hone hone --campaign <path> --headless
   hone calibration --campaign <path> --headless [--state <.hone-runs/path>] [--resume] [--dry-structure] [--smoke-cell N]
@@ -72,6 +74,8 @@ export async function main(argv: string[], io: CmdIo): Promise<number> {
         return await honeCommand(rest, io);
       case "calibration":
         return await calibrationCommand(rest, io);
+      case "promotion-noise":
+        return await promotionNoiseCommand(rest, io);
       case "recursive":
         return await recursiveCommand(rest, io);
       case "campaign":

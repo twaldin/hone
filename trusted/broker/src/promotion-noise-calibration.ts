@@ -5,6 +5,7 @@ import {
   PromotionNoiseCalibration,
   type PromotionNoiseCalibration as PromotionNoiseCalibrationValue,
 } from "@hone/schema";
+import { BrokerError } from "./errors.js";
 
 export const CAMPAIGN_12_CALIBRATION_EVIDENCE_VERSION =
   "campaign-12-identity-matched-noise-v3" as const;
@@ -398,4 +399,55 @@ export function campaign12PromotionNoiseCalibration(
         pooledDegreesOfFreedom: evidence.pooledDegreesOfFreedom,
         pooledWithinCoordinateSd: evidence.pooledWithinCoordinateSd,
       });
+}
+
+export interface PromotionCalibrationBinding {
+  capsuleId: string;
+  admittedCapsuleDigest: string;
+  executionImage: string;
+  /** Asset groups registered by the admitted manifest. */
+  assetGroupIds: readonly string[];
+  /** The run's trusted measurement epoch; null when the run has none. */
+  measurementEpoch: string | null;
+}
+
+/**
+ * The broker's calibration identity binding, shared with the trusted CLI so a
+ * run refuses a mismatched calibration at creation exactly as its broker
+ * would at startup. Every calibration must parse, belong to this capsule,
+ * admitted digest, executed evaluator image and measurement epoch, name a
+ * registered asset group, and appear at most once per group.
+ */
+export function bindPromotionNoiseCalibrations(
+  inputs: readonly unknown[],
+  binding: PromotionCalibrationBinding,
+): Map<string, PromotionNoiseCalibrationValue> {
+  const calibrations = new Map<string, PromotionNoiseCalibrationValue>();
+  for (const input of inputs) {
+    const calibration = PromotionNoiseCalibration.parse(input);
+    const mismatches = [
+      calibration.capsuleId === binding.capsuleId ? null : `capsule ${calibration.capsuleId} != ${binding.capsuleId}`,
+      calibration.admittedCapsuleDigest === binding.admittedCapsuleDigest
+        ? null
+        : `admitted digest ${calibration.admittedCapsuleDigest} != ${binding.admittedCapsuleDigest}`,
+      calibration.executionImage === binding.executionImage
+        ? null
+        : `evaluator image ${calibration.executionImage} != ${binding.executionImage}`,
+      binding.assetGroupIds.includes(calibration.assetGroupId) ? null : `unregistered asset group ${calibration.assetGroupId}`,
+      calibration.measurementEpoch === binding.measurementEpoch
+        ? null
+        : `measurement epoch ${JSON.stringify(calibration.measurementEpoch)} != ${JSON.stringify(binding.measurementEpoch)}`,
+    ].filter((mismatch): mismatch is string => mismatch !== null);
+    if (mismatches.length > 0) {
+      throw new BrokerError(
+        "INTERNAL",
+        `promotion noise calibration does not match capsule, evaluator, asset group, or measurement epoch: ${mismatches.join("; ")}`,
+      );
+    }
+    if (calibrations.has(calibration.assetGroupId)) {
+      throw new BrokerError("INTERNAL", `duplicate promotion noise calibration for ${calibration.assetGroupId}`);
+    }
+    calibrations.set(calibration.assetGroupId, calibration);
+  }
+  return calibrations;
 }

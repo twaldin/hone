@@ -81,7 +81,7 @@ import { runCommand, type CmdResult, type RunCommand } from "./command.js";
 import { deferred } from "./deferred.js";
 import { acquireEvaluatorIsolation, type EvaluatorIsolationLease } from "./evaluator-isolation.js";
 import { type UidClaimRecovery } from "./host-evaluator-gate.js";
-import { campaign12PromotionNoiseCalibration } from "./promotion-noise-calibration.js";
+import { bindPromotionNoiseCalibrations, campaign12PromotionNoiseCalibration } from "./promotion-noise-calibration.js";
 import {
   assertPromotionHoldoutSplitIdentity,
   buildHoldoutNullControl,
@@ -237,14 +237,24 @@ export interface BrokerConfig {
   /** Digest of the optimizer artifact driving this run ("sha256:<64 hex>") — also memo-key material. */
   optimizerDigest: string;
   /**
-   * Trusted M1 replicate identity. Omitted for M0, preserving the exact
-   * legacy memo key and `eval` cache namespace. This value is process config,
-   * never a sandbox RPC or environment input.
+   * Trusted measurement epoch (M1 replicate identity, or a sealed `hone run`
+   * search/noise epoch). Omitted for M0, preserving the exact legacy memo key
+   * and `eval` cache namespace. This value is process config, never a sandbox
+   * RPC or environment input.
    */
   measurementEpoch?: string | undefined;
   /**
+   * Bind the evaluator memo namespace to this run as well as the measurement
+   * epoch. Sealed `hone run` search and noise runs share one operator-chosen
+   * epoch with their calibration evidence, yet each run still receives a fresh
+   * evaluator cache domain. Requires `measurementEpoch`; M1 children keep the
+   * epoch-only namespace.
+   */
+  runScopedEvaluationCache?: boolean | undefined;
+  /**
    * Trusted, identity-bound promotion calibrations. Omit to use the built-in
-   * dated campaign-12 artifact; unmatched identities remain uncalibrated.
+   * dated campaign-12 artifact; unmatched identities remain uncalibrated. An
+   * empty list means no calibration: every promotion gate refuses.
    */
   promotionNoiseCalibrations?: readonly z.infer<typeof PromotionNoiseCalibration>[] | undefined;
   /**
@@ -901,6 +911,7 @@ type EmittableEvent =
   | {
       type: "gate.paired";
       episode: number;
+      candidate: ArtifactRef;
       parentScore: number;
       childScore: number;
       passed: boolean;
@@ -1277,8 +1288,18 @@ export function readBrokerJournalEvents(runDir: string): RunEvent[] | null {
   return hasEventFormat ? events : null;
 }
 
+/** One journaled trusted evaluation fact. */
+export interface BrokerJournalEvaluationFact {
+  record: EvaluationRecord;
+  /** Trusted measurement epoch stamped on the fact; absent on M0 and legacy facts. */
+  measurementEpoch: string | undefined;
+  /** The broker's own promotion scalarization of the record; null when ineligible. */
+  aggregate: number | null;
+}
+
 export interface BrokerJournalEvaluationSnapshot {
   records: readonly EvaluationRecord[];
+  facts: readonly BrokerJournalEvaluationFact[];
   journalHash: `sha256:${string}`;
   lineCount: number;
 }
@@ -1293,6 +1314,7 @@ export function readBrokerJournalEvaluations(runDir: string): BrokerJournalEvalu
   const rawLines = content.toString("utf8").split("\n");
   rawLines.pop();
   const records: EvaluationRecord[] = [];
+  const facts: BrokerJournalEvaluationFact[] = [];
   for (const [index, raw] of rawLines.entries()) {
     let line: StateLine;
     try {
@@ -1300,10 +1322,14 @@ export function readBrokerJournalEvaluations(runDir: string): BrokerJournalEvalu
     } catch {
       throw new BrokerError("INTERNAL", `run state log corrupt at line ${index + 1}: ${filePath}`);
     }
-    if (line.t === "eval") records.push(line.record);
+    if (line.t === "eval") {
+      records.push(line.record);
+      facts.push({ record: line.record, measurementEpoch: line.measurementEpoch, aggregate: eligibleAggregate(line.record) ?? null });
+    }
   }
   return {
     records,
+    facts,
     journalHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
     lineCount: rawLines.length,
   };
@@ -1375,7 +1401,11 @@ export class Broker {
   private readonly trustedMeasurementEpoch: string | undefined;
   private readonly promotionNoiseCalibrations: ReadonlyMap<string, z.infer<typeof PromotionNoiseCalibration>>;
   private readonly promotionHoldoutSplit: z.infer<typeof PromotionHoldoutSplit> | undefined;
-  /** M0 remains `eval`; M1 receives a disjoint hash-derived cache namespace. */
+  /**
+   * M0 remains `eval`; a trusted measurement epoch receives a disjoint
+   * hash-derived namespace, additionally bound to the run id when the run
+   * shares its operator-chosen epoch with other runs (runScopedEvaluationCache).
+   */
   private readonly evaluationCacheNamespace: string;
   private readonly evaluationStrategy: TrustedEvaluationStrategy | undefined;
   private readonly recursive: BrokerRecursiveConfig | undefined;
@@ -1714,28 +1744,22 @@ export class Broker {
         });
         return calibration === null ? [] : [calibration];
       });
-    const calibrations = new Map<string, z.infer<typeof PromotionNoiseCalibration>>();
-    for (const input of configuredCalibrations) {
-      const calibration = PromotionNoiseCalibration.parse(input);
-      if (
-        calibration.capsuleId !== this.manifest.id
-        || calibration.admittedCapsuleDigest !== this.runtimeIdentity.admittedCapsuleDigest
-        || calibration.executionImage !== this.runtimeIdentity.executionImage
-        || calibration.measurementEpoch !== (config.measurementEpoch ?? null)
-        || !this.manifest.assetGroups.some((group) => group.id === calibration.assetGroupId)
-      ) {
-        throw new BrokerError("INTERNAL", "promotion noise calibration does not match capsule, evaluator, asset group, or measurement epoch");
-      }
-      if (calibrations.has(calibration.assetGroupId)) {
-        throw new BrokerError("INTERNAL", `duplicate promotion noise calibration for ${calibration.assetGroupId}`);
-      }
-      calibrations.set(calibration.assetGroupId, calibration);
+    this.promotionNoiseCalibrations = bindPromotionNoiseCalibrations(configuredCalibrations, {
+      capsuleId: this.manifest.id,
+      admittedCapsuleDigest: this.runtimeIdentity.admittedCapsuleDigest,
+      executionImage: this.runtimeIdentity.executionImage,
+      assetGroupIds: this.manifest.assetGroups.map((group) => group.id),
+      measurementEpoch: config.measurementEpoch ?? null,
+    });
+    if (config.runScopedEvaluationCache === true && config.measurementEpoch === undefined) {
+      throw new BrokerError("INTERNAL", "a run-scoped evaluation cache requires a trusted measurement epoch");
     }
-    this.promotionNoiseCalibrations = calibrations;
     this.evaluationCacheNamespace =
       config.measurementEpoch === undefined
         ? "eval"
-        : `eval-${createHash("sha256").update(config.measurementEpoch).digest("hex")}`;
+        : config.runScopedEvaluationCache === true
+          ? `eval-run-${createHash("sha256").update(canonicalJson({ measurementEpoch: config.measurementEpoch, runId: config.runId })).digest("hex")}`
+          : `eval-${createHash("sha256").update(config.measurementEpoch).digest("hex")}`;
     this.evaluationStrategy = config.evaluationStrategy;
     if (this.evaluationStrategy !== undefined && this.manifest.evalPhases !== undefined) {
       throw new BrokerError("INTERNAL", "a trusted evaluation strategy cannot run a two-phase capsule evaluator");
@@ -4210,8 +4234,9 @@ export class Broker {
     this.assertEvaluatorWithinSandboxLifetime(evalEpoch);
     if (group.visibility === "holdout") await this.chargeHoldout();
     // Cross-artifact evaluator cache channel: public mutation authority is
-    // bounded by a trusted constructor cap. M0 defaults to exactly one;
-    // M1 admits distinct hashes only after assigning fresh measurement domains.
+    // bounded by a trusted constructor cap. M0 defaults to exactly one; M1
+    // children and sealed `hone run` searches admit distinct hashes only
+    // after assigning a fresh measurement domain (trusted epoch).
     if (!ctx.privileged && params.artifact.hash !== this.config.baselineArtifactHash) {
       if (!this.lineage.has(params.artifact.hash)) {
         throw new BrokerError(
@@ -4900,6 +4925,7 @@ export class Broker {
         events.push({
           type: "gate.paired",
           episode: tagged.episode,
+          candidate: { hash: record.artifactHash },
           parentScore: gate.parentScore,
           childScore: gate.childScore,
           passed: gate.passed,

@@ -16,13 +16,15 @@ import {
   IMAGE_DIGEST_REF,
   LEGACY_M2_CAMPAIGN_MODEL_ROUTES,
   M2ProxyRole,
+  MeasurementEpoch,
   ModelRouting,
+  NoiseCalibrationRunConfig,
   PromotionRule,
   RunConfig,
   RunEvent,
   SessionNoYieldMaxTokens,
 } from "@hone/schema";
-import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue, PromotionHoldoutSplit } from "@hone/schema";
+import type { BudgetState, CapsuleManifest, DiagnosticOrderingReport, M2ProxyRole as M2ProxyRoleValue, PromotionHoldoutSplit, PromotionNoiseCalibration } from "@hone/schema";
 import type { BrokerCorpusConfig, BrokerRecursiveConfig, TrustedEvaluationStrategy } from "@hone/broker";
 import {
   admitCapsule,
@@ -48,6 +50,7 @@ import {
   ensureTerminalReserve,
   readEvents,
   releaseTerminalReserve,
+  replay,
   replayActiveClock,
   replayRun,
   writeFileDurable,
@@ -72,6 +75,14 @@ import {
 import type { OptimizerSnapshot } from "./optimizer-digest.js";
 import { deferred, sleep } from "./promise.js";
 import { exitReport, formatDelta, formatHumanReport, formatSpend } from "./report.js";
+import {
+  readCalibrationFile,
+  sealNoiseCalibrationConfig,
+  sealSearchConfig,
+  sealedRunAuthority,
+  searchCalibrationNotice,
+  searchReport,
+} from "./search.js";
 import { resumeSealError } from "./resume-seal.js";
 import { computeTrustedRuntimeDigest, verifiedBootRuntimeDigest } from "./runtime-digest.js";
 import {
@@ -96,7 +107,7 @@ import type {
 } from "./types.js";
 
 const RUN_USAGE =
-  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume] [--backend stub|local] [--config <json>] [--optimizer-artifact sha256:<64hex>]";
+  "usage: hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume [--run <id>]] [--backend stub|local] [--config <json>] [--calibration <file>] [--optimizer-artifact sha256:<64hex>]";
 const CAMPAIGN_SESSION_FILE = "campaign-session.v1.json";
 const CampaignSessionSealV1 = z.object({
   version: z.literal(1),
@@ -209,7 +220,7 @@ function campaignSessionFenceError(
   }
 }
 
-/** Optional per-run overrides (routing, seat, seed, budget dims, promotion rule) — the CLI flags cover the common ones. */
+/** Optional per-run overrides (routing, seat, seed, budget dims, promotion rule, search) — the CLI flags cover the common ones. */
 const ConfigOverrides = z
   .object({
     routing: ModelRouting.optional(),
@@ -220,6 +231,16 @@ const ConfigOverrides = z
     sessionNoYieldMaxTokens: SessionNoYieldMaxTokens.optional(),
     budget: BudgetEnvelope.partial().optional(),
     promotion: PromotionRule.optional(),
+    /** Multi-episode search; the epoch is minted at creation when omitted. Calibrations come only from --calibration. */
+    search: z
+      .object({
+        episodes: z.number().int().positive().safe(),
+        measurementEpoch: MeasurementEpoch.optional(),
+      })
+      .strict()
+      .optional(),
+    /** Baseline-only noise measurement (written by `hone promotion-noise`). */
+    noiseCalibration: NoiseCalibrationRunConfig.optional(),
   })
   .strict();
 type ConfigOverrides = z.infer<typeof ConfigOverrides>;
@@ -573,12 +594,36 @@ export interface TrustedRunOptions {
   corpusCohort?: CorpusCohortBinding | undefined;
 }
 
+/**
+ * A sealed search or noise run derives its whole trusted authority (epoch,
+ * episode caps, calibrations) from its own run config. Campaign orchestration
+ * never seals one, so the two authorities never mix.
+ */
+function assertNoCampaignAuthority(trusted: TrustedRunOptions): void {
+  if (
+    trusted.measurementEpoch !== undefined
+    || trusted.evalTimeoutSec !== undefined
+    || trusted.evaluationStrategy !== undefined
+    || trusted.optimizerEpisodesMax !== undefined
+    || trusted.maxPublicCandidateEvaluations !== undefined
+    || trusted.trustedValidPublicCandidateTarget !== undefined
+    || trusted.terminalHoldoutAssetGroupIds !== undefined
+    || trusted.promotionHoldoutSplit !== undefined
+    || trusted.executionImageOverride !== undefined
+    || trusted.campaignConfigHash !== undefined
+    || trusted.recursiveBroker !== undefined
+    || trusted.corpus !== undefined
+  ) {
+    throw new UsageError("a sealed search or noise-calibration run takes its authority from its run config, never from campaign orchestration");
+  }
+}
+
 export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunOptions = {}): Promise<number> {
   const { positionals, flags } = parseFlags(args, {
     booleans: ["headless", "resume"],
     // --repo is REQUIRED when apply != none: it seals the exact delivery
     // target at run creation — automatic delivery never defaults to io.root.
-    strings: ["budget-usd", "apply", "backend", "config", "repo", "optimizer-artifact"],
+    strings: ["budget-usd", "apply", "backend", "config", "repo", "optimizer-artifact", "calibration", "run"],
   });
   const capsuleArg = positionals[0];
   if (capsuleArg === undefined) throw new UsageError(RUN_USAGE);
@@ -592,9 +637,24 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
   if (resumeRequested && configPath !== undefined) {
     throw new UsageError("--config is sealed at run creation and cannot be re-specified on resume — the stored runconfig.json is authoritative; start a fresh run to change configuration");
   }
+  const calibrationPath = strFlag(flags, "calibration");
+  if (resumeRequested && calibrationPath !== undefined) {
+    throw new UsageError("--calibration is sealed at run creation and cannot be re-specified on resume — the stored runconfig.json is authoritative; start a fresh run to change calibration");
+  }
+  // An exact resume target (systemd units, several unfinished runs of one
+  // capsule); without it, resume picks the newest unfinished run.
+  const runFlag = strFlag(flags, "run");
+  if (runFlag !== undefined && !resumeRequested) throw new UsageError("--run selects the run to resume and requires --resume");
+  if (runFlag !== undefined && trusted.runId !== undefined && runFlag !== trusted.runId) {
+    throw new UsageError(`--run ${runFlag} conflicts with the trusted run id ${trusted.runId}`);
+  }
+  const resumeRunId = trusted.runId ?? runFlag;
   const overrides: ConfigOverrides = configPath
     ? ConfigOverrides.parse(JSON.parse(readFileSync(resolve(io.root, configPath), "utf8")))
     : {};
+  if (calibrationPath !== undefined && overrides.search === undefined) {
+    throw new UsageError("--calibration seals a promotion calibration into a search run — add `search` to --config");
+  }
   const budgetUsdRaw = strFlag(flags, "budget-usd");
   const budgetUsd = budgetUsdRaw !== undefined ? Number(budgetUsdRaw) : undefined;
   if (budgetUsd !== undefined && (!Number.isFinite(budgetUsd) || budgetUsd < 0)) {
@@ -664,17 +724,25 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
 
   let plan: RunPlan;
   if (resumeRequested) {
-    const found = trusted.runId === undefined
+    const found = resumeRunId === undefined
       ? findResumableRun(io.root, admittedManifest.id)
       : (() => {
-          if (!/^run_[a-zA-Z0-9_.-]+$/.test(trusted.runId)) throw new UsageError("trusted run id is invalid");
-          const runDir = join(runsRoot(io.root), trusted.runId);
+          if (!/^run_[a-zA-Z0-9_.-]+$/.test(resumeRunId)) {
+            throw new UsageError(trusted.runId !== undefined ? "trusted run id is invalid" : `--run ${resumeRunId} is not a run id`);
+          }
+          const runDir = join(runsRoot(io.root), resumeRunId);
           if (!existsSync(runDir)) return null;
           const state = replayRun(runDir);
-          if (state.runId !== trusted.runId || state.capsuleId !== admittedManifest.id || state.finished !== null) return null;
-          return { runDir, runId: trusted.runId, state };
+          if (state.runId !== resumeRunId || state.capsuleId !== admittedManifest.id || state.finished !== null) return null;
+          return { runDir, runId: resumeRunId, state };
         })();
-    if (found === null) throw new UsageError(`nothing to resume: no unfinished run for capsule ${admittedManifest.id} under ${runsRoot(io.root)}`);
+    if (found === null) {
+      throw new UsageError(
+        resumeRunId === undefined
+          ? `nothing to resume: no unfinished run for capsule ${admittedManifest.id} under ${runsRoot(io.root)}`
+          : `nothing to resume: ${resumeRunId} is not an unfinished run of capsule ${admittedManifest.id} under ${runsRoot(io.root)}`,
+      );
+    }
     const started = readEvents(found.runDir)[0];
     const sealedCampaignHash = started?.type === "run.started" ? started.campaignConfigHash : undefined;
     if (sealedCampaignHash === undefined) {
@@ -882,6 +950,43 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       });
     }
 
+    // Multi-episode search and baseline-only noise runs are sealed into the
+    // run config HERE, so the contract hash binds the episode count, epoch
+    // and calibration, and every resume reuses them verbatim.
+    const runId = trusted.runId ?? mintRunId();
+    if (overrides.search !== undefined || overrides.noiseCalibration !== undefined) {
+      assertNoCampaignAuthority(trusted);
+      if (admitted.provisional) {
+        throw new UsageError("provisional capsule quarantine admits only the M0 probe — search and noise-calibration runs need an approved capsule");
+      }
+      if (config.apply !== "none") {
+        throw new UsageError(`search and noise-calibration runs support --apply none only (got ${config.apply})`);
+      }
+      if (overrides.search !== undefined && overrides.noiseCalibration !== undefined) {
+        throw new UsageError("a run is either a search or a noise-calibration run, not both");
+      }
+      config = RunConfig.parse({
+        ...config,
+        ...(overrides.search === undefined
+          ? {}
+          : {
+              search: sealSearchConfig({
+                runId,
+                manifest: admittedManifest,
+                admittedCapsuleDigest: admitted.digest,
+                executionImage,
+                budget: config.budget,
+                episodes: overrides.search.episodes,
+                measurementEpoch: overrides.search.measurementEpoch,
+                calibrations: calibrationPath === undefined ? null : readCalibrationFile(resolve(io.root, calibrationPath)),
+              }),
+            }),
+        ...(overrides.noiseCalibration === undefined
+          ? {}
+          : { noiseCalibration: sealNoiseCalibrationConfig(overrides.noiseCalibration, admittedManifest, config.budget) }),
+      });
+    }
+
     // Autonomy-ladder lock (review IV.2): trusted-side, checked before ANY run state exists.
     if (ladderLocked(config.apply, config.improverSeat, io.env)) {
       io.err(LADDER_REFUSAL);
@@ -932,7 +1037,6 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       optimizerSnapshot = selectedCandidate.snapshot;
     }
 
-    const runId = trusted.runId ?? mintRunId();
     if (!/^run_[a-zA-Z0-9_.-]+$/.test(runId)) throw new UsageError("trusted run id is invalid");
     if (existsSync(join(runsRoot(io.root), runId))) throw new UsageError(`run ${runId} already exists`);
     const runDir = mintRunDirDurable(io.root, runId);
@@ -999,7 +1103,14 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
     writeRunConfigFile(runDir, config);
     plan = { runId, runDir, config, resumed: false };
   }
-
+  if (plan.config.search !== undefined || plan.config.noiseCalibration !== undefined) {
+    assertNoCampaignAuthority(trusted);
+  }
+  if (plan.config.search !== undefined) {
+    // Plain language, on stderr so a headless NDJSON stream stays parseable.
+    const notice = searchCalibrationNotice(plan.config.search, admittedManifest);
+    if (notice !== null) io.err(notice);
+  }
 
   return superviseRun(
     plan,
@@ -1048,6 +1159,7 @@ export async function runCommand(args: string[], io: CmdIo, trusted: TrustedRunO
       ...(trusted.recursiveBroker !== undefined ? { recursiveBroker: trusted.recursiveBroker } : {}),
       ...(trusted.corpus !== undefined ? { corpus: trusted.corpus } : {}),
       ...(trusted.corpusCohort !== undefined ? { corpusCohort: trusted.corpusCohort } : {}),
+      ...sealedRunAuthority(plan.config),
     },
     io,
   );
@@ -1567,6 +1679,10 @@ export interface SuperviseExtra {
   evaluationStrategy?: TrustedEvaluationStrategy | undefined;
   optimizerEpisodesMax?: number | undefined;
   maxPublicCandidateEvaluations?: number | undefined;
+  /** Sealed search: distinct saved candidate/repair artifacts. */
+  maxCandidateArtifacts?: number | undefined;
+  /** Sealed search/noise run: the run's only promotion-noise calibration authority (possibly empty). */
+  promotionNoiseCalibrations?: readonly PromotionNoiseCalibration[] | undefined;
   campaignConfigHash?: `sha256:${string}` | undefined;
   trustedValidPublicCandidateTarget?: number | undefined;
   terminalHoldoutAssetGroupIds?: readonly string[] | undefined;
@@ -1961,6 +2077,10 @@ async function superviseLocked(
     ...(extra.maxPublicCandidateEvaluations !== undefined
       ? { maxPublicCandidateEvaluations: extra.maxPublicCandidateEvaluations }
       : {}),
+    ...(extra.maxCandidateArtifacts !== undefined ? { maxCandidateArtifacts: extra.maxCandidateArtifacts } : {}),
+    ...(extra.promotionNoiseCalibrations !== undefined
+      ? { promotionNoiseCalibrations: extra.promotionNoiseCalibrations }
+      : {}),
     ...(extra.trustedValidPublicCandidateTarget !== undefined
       ? { trustedValidPublicCandidateTarget: extra.trustedValidPublicCandidateTarget }
       : {}),
@@ -2266,7 +2386,12 @@ async function superviseLocked(
       io.err(`terminal reserve cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    const report = exitReport(runId, replayRun(runDir));
+    const finalEvents = readEvents(runDir);
+    const report = exitReport(
+      runId,
+      replay(finalEvents),
+      config.search === undefined ? undefined : searchReport(finalEvents, config.search, admittedManifest),
+    );
     if (headless) {
       io.out(JSON.stringify(report));
     } else {

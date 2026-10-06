@@ -9,6 +9,7 @@ import {
   DEFAULT_SESSION_NO_YIELD_MAX_TOKENS,
   DiagnosticOrderingReport,
   EvaluatorOutput,
+  PROMOTION_GATE_VERSION,
   PromotionRule,
   RunConfig,
   RunEvent,
@@ -428,6 +429,90 @@ describe("contract 5: run config", () => {
     expect(() => PromotionRule.parse({ minDeltaOverSe: 2, minSignConsistency: 1.5, replicates: 3 })).toThrow();
     expect(() => PromotionRule.parse({ minDeltaOverSe: 2, minSignConsistency: 0.8, replicates: 0 })).toThrow();
     expect(PromotionRule.parse({ minDeltaOverSe: 2, minSignConsistency: 0.8, replicates: 3 }).requireNegativeControls).toBe(true);
+  });
+});
+
+describe("contract 5: sealed search and noise-calibration run config", () => {
+  const base = {
+    version: 1,
+    capsuleId: "cap_000000000000",
+    objective: "x",
+    budget: { maxTokens: 1, maxUsd: 0, maxWallClockSec: 1, maxEvaluatorInvocations: 10 },
+    routing: {},
+  };
+  const calibration = (over: Record<string, unknown> = {}) => ({
+    gateVersion: PROMOTION_GATE_VERSION,
+    evidenceVersion: "test-v1",
+    calibratedAt: "2026-10-05T00:00:00.000Z",
+    capsuleId: "cap_000000000000",
+    admittedCapsuleDigest: `sha256:${"1".repeat(64)}`,
+    executionImage: `hone-task@sha256:${"2".repeat(64)}`,
+    assetGroupId: "train",
+    measurementEpoch: "compress-2026-10",
+    sourceCohortSha256: [`sha256:${"3".repeat(64)}`],
+    maxObservedPairDelta: 0,
+    noiseFloor: 0,
+    noiseEnvelope: 0,
+    informationFreePairs: 63,
+    informationFreePositive: 0,
+    estimator: "pooled-within-coordinate-sd-v1",
+    estimatorMinRepeatsPerCoordinate: 3,
+    sampleDepths: [7, 7, 7],
+    informationFreeMeasurements: 21,
+    coordinateGroups: 3,
+    pooledDegreesOfFreedom: 18,
+    pooledWithinCoordinateSd: 0,
+    ...over,
+  });
+
+  it("accepts a sealed search with episodes, epoch and calibrations, and leaves M0 configs without one", () => {
+    const rc = RunConfig.parse({
+      ...base,
+      search: { episodes: 4, measurementEpoch: "compress-2026-10", calibrations: [calibration()] },
+    });
+    expect(rc.search?.episodes).toBe(4);
+    expect(rc.search?.calibrations).toHaveLength(1);
+    const m0 = RunConfig.parse(base);
+    expect(m0.search).toBeUndefined();
+    expect("search" in m0).toBe(false);
+    expect(JSON.stringify(m0)).not.toContain("search");
+  });
+
+  it("refuses degenerate episodes, epochs, unknown keys, and calibrations from another epoch or capsule", () => {
+    const search = (over: Record<string, unknown>) => ({
+      ...base,
+      search: { episodes: 2, measurementEpoch: "compress-2026-10", calibrations: [], ...over },
+    });
+    for (const episodes of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => RunConfig.parse(search({ episodes }))).toThrow();
+    }
+    for (const measurementEpoch of ["", "a\nb", "x".repeat(257)]) {
+      expect(() => RunConfig.parse(search({ measurementEpoch }))).toThrow();
+    }
+    expect(() => RunConfig.parse(search({ extra: true }))).toThrow();
+    expect(() => RunConfig.parse({ ...base, search: { episodes: 2, measurementEpoch: "e" } })).toThrow();
+    expect(() => RunConfig.parse(search({ calibrations: [calibration({ measurementEpoch: "other" })] }))).toThrow(
+      /measured in the run's measurement epoch/,
+    );
+    expect(() => RunConfig.parse(search({ calibrations: [calibration({ capsuleId: "cap_111111111111" })] }))).toThrow(
+      /belong to the run's capsule/,
+    );
+    expect(() => RunConfig.parse(search({ calibrations: [calibration(), calibration()] }))).toThrow(/duplicate calibration/);
+    // Schema minimums stay: 20 information-free measurements never seal.
+    expect(() => RunConfig.parse(search({
+      calibrations: [calibration({ sampleDepths: [7, 7, 6], informationFreeMeasurements: 20, pooledDegreesOfFreedom: 17 })],
+    }))).toThrow();
+  });
+
+  it("supports apply none only, and a run is either a search or a noise-calibration run", () => {
+    const search = { episodes: 2, measurementEpoch: "e", calibrations: [] };
+    const noiseCalibration = { measurementEpoch: "e", assetGroupId: "train", seeds: [0, 1, 2] };
+    expect(() => RunConfig.parse({ ...base, apply: "branch", search })).toThrow(/apply none only/);
+    expect(() => RunConfig.parse({ ...base, apply: "pr", noiseCalibration })).toThrow(/apply none only/);
+    expect(() => RunConfig.parse({ ...base, search, noiseCalibration })).toThrow(/not both/);
+    expect(RunConfig.parse({ ...base, noiseCalibration }).noiseCalibration?.seeds).toEqual([0, 1, 2]);
+    expect(() => RunConfig.parse({ ...base, noiseCalibration: { ...noiseCalibration, seeds: [0, 0, 1] } })).toThrow(/distinct/);
+    expect(() => RunConfig.parse({ ...base, noiseCalibration: { ...noiseCalibration, seeds: [] } })).toThrow();
   });
 });
 
