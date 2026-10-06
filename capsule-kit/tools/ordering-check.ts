@@ -405,18 +405,16 @@ export function loadCapsuleConfig(capsuleDir: string = CAPSULE_DIR): CapsuleConf
 }
 
 /**
- * Broker resource settings for the ordering measurement: the same sandbox and
- * per-call evaluator timeout the admitted manifest will give real runs, so a
- * capsule whose evaluator legitimately needs longer than the broker's default
- * 600 s can be admitted at all.
+ * Broker resource settings for ordering and baseline measurements. Manifest
+ * limits match admitted runs; operator CPU placement is captured separately
+ * and is not part of the capsule digest.
  */
-export function orderingBrokerResources(manifest: CapsuleManifest, env: NodeJS.ProcessEnv = process.env): {
+export function orderingBrokerResources(manifest: CapsuleManifest, cpuset?: string): {
   sandboxMemoryBytes?: number;
   sandboxCpus?: number;
   sandboxCpuset?: string;
   evalTimeoutSec?: number;
 } {
-  const cpuset = operatorSandboxCpuset(env);
   return {
     ...(cpuset === undefined ? {} : { sandboxCpuset: assertSandboxCpuset(cpuset) }),
     ...(manifest.sandbox === undefined
@@ -805,6 +803,8 @@ export async function runOrderingCheck(
     process.argv.slice(2),
     process.env,
   );
+  const cpuset = operatorSandboxCpuset(process.env);
+  if (cpuset !== undefined) assertSandboxCpuset(cpuset);
   const config = loadCapsuleConfig();
   const assetGroups = selectAssetGroups(config, terminalHoldoutDiagnostic);
   mkdirSync(TMP_ROOT, { recursive: true });
@@ -849,7 +849,7 @@ export async function runOrderingCheck(
       optimizerDigest: ORDERING_TOOL_DIGEST,
       holdoutLedgerPath: join(tempRoot, "holdout-ledger.ndjson"),
       ...(terminalHoldoutDiagnostic ? { holdoutBudget: expectedLogicalEvaluations } : {}),
-      ...orderingBrokerResources(manifest),
+      ...orderingBrokerResources(manifest, cpuset),
       executionImage: manifest.image,
       runDir: join(tempRoot, "run"),
       casDir,

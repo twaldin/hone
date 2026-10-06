@@ -2,8 +2,8 @@
  * Environment seam for the trusted ordering check: HONE_CAPSULE_DIR selects
  * the capsule directory the check targets. These tests pin the resolver
  * contract (default, canonicalization, and every refusal path) and prove
- * that an invalid override can never reach the CAS/Docker seam — the whole
- * "@hone/broker" surface the tool consumes is mocked to record and throw.
+ * that an invalid override can never reach the CAS/Docker seam. Pure CPU
+ * placement helpers remain real; I/O entry points are mocked to record and throw.
  */
 
 import {
@@ -17,6 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { EvaluatorOutput } from "@hone/schema";
+import type * as BrokerModule from "@hone/broker";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { OrderingReport } from "../tools/ordering-check.js";
 import {
@@ -32,15 +33,16 @@ import {
 
 const seam = vi.hoisted(() => ({ touched: [] as string[] }));
 
-// Everything ordering-check.ts imports from @hone/broker IS its CAS/Docker
-// seam. Each entry records the touch and throws, so any resolution path that
-// reaches CAS or Docker setup fails loudly and leaves evidence in `seam`.
-vi.mock("@hone/broker", () => {
+// Only the CAS/Docker I/O seam is mocked. Environment readers and validators
+// remain real so invalid operator placement follows the production refusal path.
+vi.mock("@hone/broker", async importOriginal => {
+  const actual = await importOriginal<typeof BrokerModule>();
   const touch = (name: string): never => {
     seam.touched.push(name);
     throw new Error(`CAS/Docker seam reached: ${name}`);
   };
   return {
+    ...actual,
     Broker: class {
       constructor() {
         touch("new Broker()");
@@ -421,6 +423,14 @@ describe("invalid resolution never reaches the CAS/Docker seam", () => {
     vi.stubEnv(CAPSULE_DIR_ENV_VAR, dir);
     const tool = await import("../tools/ordering-check.js");
     expect(typeof tool.runOrderingCheck).toBe("function");
+    expect(seam.touched).toEqual([]);
+  });
+});
+
+describe("invalid operator placement never reaches the CAS/Docker seam", () => {
+  it("rejects a descending range at the real ordering entry point", async () => {
+    vi.stubEnv("HONE_SANDBOX_CPUSET", "4-1");
+    await expect(runOrderingCheck()).rejects.toThrow("cpuset list");
     expect(seam.touched).toEqual([]);
   });
 });

@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Broker, CasStore, packDirAsArtifact, runCommand } from "@hone/broker";
+import { Broker, CasStore, operatorSandboxCpuset, packDirAsArtifact, runCommand } from "@hone/broker";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { capsuleDigest } from "@hone/schema";
 import { loadCapsuleConfig, orderingBrokerResources, provisionalManifest } from "../tools/ordering-check.js";
@@ -49,7 +49,7 @@ async function launches(env: NodeJS.ProcessEnv, commands: string[][] = []): Prom
     admittedCapsuleDigest: capsuleDigest(manifest), optimizerDigest: `sha256:${"c".repeat(64)}`,
     holdoutLedgerPath: join(root, "holdout.ndjson"), runDir: join(root, "run"), casDir,
     executionImage: manifest.image, onEvent: () => {}, runCommand: docker,
-    ...orderingBrokerResources(manifest, env),
+    ...orderingBrokerResources(manifest, operatorSandboxCpuset(env)),
   });
   try {
     await broker.init();
