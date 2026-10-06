@@ -147,6 +147,23 @@ describe("ordering check on a two-phase capsule", () => {
     expect(unverified).toEqual([report]);
   });
 
+  it("pins every native baseline and diagnostic phase through the ordering entry point", async () => {
+    const previous = process.env["HONE_SANDBOX_CPUSET"];
+    vi.stubEnv("HONE_SANDBOX_CPUSET", "1-4");
+    const launches: string[][] = [];
+    try {
+      await tool.runOrderingCheck({ runCommand: fakeDocker({}, launches) });
+      for (const argv of launches) {
+        expect(argv.filter(arg => arg === "--cpuset-cpus")).toEqual(["--cpuset-cpus"]);
+        expect(argv[argv.indexOf("--cpuset-cpus") + 1]).toBe("1-4");
+      }
+      expect(launches.filter(argv => argv.includes("HONE_EVAL_PHASE=encode"))).toHaveLength(14);
+      expect(launches.filter(argv => argv.includes("HONE_EVAL_PHASE=decode"))).toHaveLength(14);
+    } finally {
+      vi.stubEnv("HONE_SANDBOX_CPUSET", previous);
+    }
+  });
+
   it("counts an evaluation that ends at an invalid encode as one container", async () => {
     const report = await tool.runOrderingCheck({
       runCommand: fakeDocker({ earlyInvalid: ["broken"] }, []),

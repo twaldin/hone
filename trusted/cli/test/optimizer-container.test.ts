@@ -6,10 +6,10 @@ import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { CapsuleManifest, DEFAULT_PROMOTION_RULE, RunConfig, capsuleDigest } from "@hone/schema";
-import { runCommand } from "@hone/broker";
+import { operatorSandboxCpuset, runCommand } from "@hone/broker";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
-import { createBackend, operatorSandboxCpuset, runOptimizer } from "../src/backends/local.js";
+import { createBackend, runOptimizer } from "../src/backends/local.js";
 import {
   OPTIMIZER_CONTAINER_UID,
   optimizerBuildArgs,
