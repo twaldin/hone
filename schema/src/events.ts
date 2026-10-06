@@ -150,6 +150,8 @@ export const RunEvent = z.discriminatedUnion("type", [
     ...base,
     type: z.literal("gate.paired"),
     episode: z.number().int().nonnegative(),
+    /** The gated candidate; absent only on events recorded before it was. */
+    candidate: ArtifactRef.optional(),
     parentScore: z.number(),
     childScore: z.number(),
     passed: z.boolean(),

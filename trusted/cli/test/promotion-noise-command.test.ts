@@ -153,6 +153,9 @@ describe("hone promotion-noise", () => {
     const base = ["capsule", "--out", "noise.json", "--headless", "--backend", backend];
     await expect(promotionNoiseCommand([...base, "--epoch", EPOCH, "--repeats", "6"], io)).rejects.toThrow(/below the calibration minimums/);
     await expect(promotionNoiseCommand([...base, "--epoch", EPOCH, "--seeds", "2", "--repeats", "20"], io)).rejects.toThrow(/below the calibration minimums/);
+    // Fixture envelope: 100 evaluator invocations. 100 seeds would end the run as `budget`, never `completed`.
+    await expect(promotionNoiseCommand([...base, "--epoch", EPOCH, "--seeds", "100", "--repeats", "3"], io))
+      .rejects.toThrow(/needs more than 100 evaluator invocations to complete under its budget, but the run budget allows 100/);
     await expect(promotionNoiseCommand([...base, "--epoch", "bad\nepoch"], io)).rejects.toThrow(/--epoch/);
     await expect(promotionNoiseCommand(["capsule", "--out", "noise.json", "--headless"], io)).rejects.toThrow(/usage: hone promotion-noise/);
     expect(starts(root)).toEqual([]);

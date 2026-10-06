@@ -911,6 +911,7 @@ type EmittableEvent =
   | {
       type: "gate.paired";
       episode: number;
+      candidate: ArtifactRef;
       parentScore: number;
       childScore: number;
       passed: boolean;
@@ -4924,6 +4925,7 @@ export class Broker {
         events.push({
           type: "gate.paired",
           episode: tagged.episode,
+          candidate: { hash: record.artifactHash },
           parentScore: gate.parentScore,
           childScore: gate.childScore,
           passed: gate.passed,

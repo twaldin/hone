@@ -2175,8 +2175,8 @@ describe("sealed hone run search authority", () => {
     expect(calibrated.b.events.filter((event) => event.type === "incumbent.new").map((event) => event.type === "incumbent.new" ? event.artifact.hash : null))
       .toEqual([calibrated.first, second]);
     expect(calibrated.b.events.filter((event) => event.type === "gate.paired")).toEqual([
-      expect.objectContaining({ episode: 0, decision: "promote", noiseEnvelope: expect.closeTo(0.45) }),
-      expect.objectContaining({ episode: 1, decision: "promote", noiseEnvelope: expect.closeTo(0.45) }),
+      expect.objectContaining({ episode: 0, candidate: { hash: calibrated.first }, decision: "promote", noiseEnvelope: expect.closeTo(0.45) }),
+      expect.objectContaining({ episode: 1, candidate: { hash: second }, decision: "promote", noiseEnvelope: expect.closeTo(0.45) }),
     ]);
     // A third distinct episode is refused by the trusted episode cap.
     await calibrated.b.broker.completeEpisode({ episode: 1 }, CLIENT);

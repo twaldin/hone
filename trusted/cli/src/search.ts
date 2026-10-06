@@ -121,9 +121,11 @@ export function sealNoiseCalibrationConfig(
   if (group === undefined || group.visibility === "holdout") {
     throw new UsageError(`noiseCalibration.assetGroupId ${noise.assetGroupId} is not a registered non-holdout asset group`);
   }
-  if (noise.seeds.length > budget.maxEvaluatorInvocations) {
+  // The broker ends a run as `budget` once spent reaches the envelope, so a
+  // noise run must finish strictly below it to complete.
+  if (noise.seeds.length >= budget.maxEvaluatorInvocations) {
     throw new UsageError(
-      `noiseCalibration measures ${noise.seeds.length} seeds, but the run budget allows ${budget.maxEvaluatorInvocations} evaluator invocations`,
+      `noiseCalibration measures ${noise.seeds.length} seeds, so it needs more than ${noise.seeds.length} evaluator invocations to complete under its budget, but the run budget allows ${budget.maxEvaluatorInvocations}`,
     );
   }
   return NoiseCalibrationRunConfig.parse(noise);
@@ -197,7 +199,8 @@ export interface SearchReport {
  */
 export function searchReport(events: readonly RunEvent[], search: SearchRunConfig, manifest: CapsuleManifest): SearchReport {
   const parents = new Map<number, string>();
-  const gatesByEpisode = new Map<number, Extract<RunEvent, { type: "gate.paired" }>[]>();
+  // Broker-authored gate per candidate: each candidate is gated once, on its first trusted measurement.
+  const gatesByCandidate = new Map<string, Extract<RunEvent, { type: "gate.paired" }>>();
   const incumbents = new Map<string, Extract<RunEvent, { type: "incumbent.new" }>>();
   const gates: Partial<Record<PromotionGateDecision, number>> = {};
   let completed = 0;
@@ -212,7 +215,7 @@ export function searchReport(events: readonly RunEvent[], search: SearchRunConfi
         completed += 1;
         break;
       case "gate.paired": {
-        gatesByEpisode.set(event.episode, [...(gatesByEpisode.get(event.episode) ?? []), event]);
+        if (event.candidate !== undefined) gatesByCandidate.set(event.candidate.hash, event);
         const decision = event.decision ?? (event.passed ? "promote" : null);
         if (decision !== null) gates[decision] = (gates[decision] ?? 0) + 1;
         break;
@@ -235,8 +238,7 @@ export function searchReport(events: readonly RunEvent[], search: SearchRunConfi
     const incumbent = incumbents.get(hash);
     if (incumbent === undefined) break;
     const parent = parents.get(incumbent.episode) ?? null;
-    const gate = (gatesByEpisode.get(incumbent.episode) ?? [])
-      .find((candidate) => candidate.passed && candidate.childScore === incumbent.aggregate);
+    const gate = gatesByCandidate.get(hash);
     lineage.unshift({
       episode: incumbent.episode,
       parent: parent ?? "unknown",

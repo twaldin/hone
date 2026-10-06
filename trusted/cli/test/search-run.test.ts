@@ -260,25 +260,28 @@ describe("hone run without search: M0 unchanged", () => {
 });
 
 describe("search report", () => {
-  it("walks the best incumbent's promotions back to the baseline with each broker-paired delta", () => {
+  it("walks the best incumbent's promotions back to the baseline, pairing each with its own candidate's gate", () => {
     const runId = "run_report";
-    const [b, c1, c3] = [fakeHash("b"), fakeHash("c"), fakeHash("e")];
-    const gate = (episode: number, parentScore: number, childScore: number, passed: boolean, decision: string) => ({
-      runId, at: at(), type: "gate.paired" as const, episode, parentScore, childScore, passed,
+    const [b, c1, c2, c3, r3] = [fakeHash("b"), fakeHash("c"), fakeHash("d"), fakeHash("e"), fakeHash("f")];
+    const gate = (episode: number, candidate: string, parentScore: number, childScore: number, passed: boolean, decision: string) => ({
+      runId, at: at(), type: "gate.paired" as const, episode, candidate: { hash: candidate }, parentScore, childScore, passed,
       gateVersion: PROMOTION_GATE_VERSION, calibrationEvidenceVersion: "v", delta: childScore - parentScore,
       noiseFloor: 0.03, noiseEnvelope: 0.045, decision: decision as "promote",
     });
     const events = [
       { runId, at: at(), type: "episode.started" as const, episode: 0, parent: { hash: b } },
-      gate(0, 0.5, 0.6, true, "promote"),
-      { runId, at: at(), type: "incumbent.new" as const, artifact: { hash: c1 }, aggregate: 0.6, deltaVsBaseline: 0.1, episode: 0 },
+      gate(0, c1, 0.5, 0.6, true, "promote"),
+      // The incumbent aggregate averages every trusted coordinate, so it need not equal the gate's childScore.
+      { runId, at: at(), type: "incumbent.new" as const, artifact: { hash: c1 }, aggregate: 0.61, deltaVsBaseline: 0.1, episode: 0 },
       { runId, at: at(), type: "episode.completed" as const, episode: 0 },
       { runId, at: at(), type: "episode.started" as const, episode: 1, parent: { hash: c1 } },
-      gate(1, 0.6, 0.62, false, "refuse-within-noise"),
+      gate(1, c2, 0.6, 0.62, false, "refuse-within-noise"),
       { runId, at: at(), type: "episode.completed" as const, episode: 1 },
+      // Episode 2 gates two candidates; the lineage takes the promoted one's own gate, not the episode's first pass.
       { runId, at: at(), type: "episode.started" as const, episode: 2, parent: { hash: c1 } },
-      gate(2, 0.61, 0.7, true, "promote"),
-      { runId, at: at(), type: "incumbent.new" as const, artifact: { hash: c3 }, aggregate: 0.7, deltaVsBaseline: 0.2, episode: 2 },
+      gate(2, r3, 0.61, 0.66, true, "promote"),
+      gate(2, c3, 0.61, 0.7, true, "promote"),
+      { runId, at: at(), type: "incumbent.new" as const, artifact: { hash: c3 }, aggregate: 0.69, deltaVsBaseline: 0.2, episode: 2 },
       { runId, at: at(), type: "episode.completed" as const, episode: 2 },
     ];
     const search = RunConfig.parse({
@@ -293,10 +296,10 @@ describe("search report", () => {
     const report = searchReport(RunEvent.array().parse(events), search, manifestObject());
     expect(report.calibrated).toBe(true);
     expect(report.episodes).toEqual({ planned: 4, completed: 3 });
-    expect(report.gates).toEqual({ promote: 2, "refuse-within-noise": 1 });
-    expect(report.lineage.map((step) => [step.episode, step.parent, step.artifact, step.delta, step.deltaVsBaseline])).toEqual([
-      [0, b, c1, expect.closeTo(0.1), 0.1],
-      [2, c1, c3, expect.closeTo(0.09), 0.2],
+    expect(report.gates).toEqual({ promote: 3, "refuse-within-noise": 1 });
+    expect(report.lineage.map((step) => [step.episode, step.parent, step.artifact, step.parentScore, step.childScore, step.delta, step.deltaVsBaseline])).toEqual([
+      [0, b, c1, 0.5, 0.61, expect.closeTo(0.1), 0.1],
+      [2, c1, c3, 0.61, 0.69, expect.closeTo(0.09), 0.2],
     ]);
   });
 });
