@@ -79,7 +79,8 @@ function makeCtx(root: string, run: RunCommand, barriers: { cleanup: (p: Promise
       routing: { mutation: { model: "m" } },
       headless: true,
     }),
-    env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network" },
+    // The upstream is required (no default); nothing dials it in this setup-only pass.
+    env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network", HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9" },
     // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
     admissionReview: "off",
     optimizerDigest: fakeHash("0"),

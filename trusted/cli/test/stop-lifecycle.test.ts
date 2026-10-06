@@ -452,6 +452,8 @@ describe("abort during resume startup (P1: reconcile before any terminal)", () =
       env: {
         PATH: process.env["PATH"] ?? "",
         HONE_EGRESS: "socket",
+        // The upstream is required (no default); nothing dials it in this setup-only pass.
+        HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9",
         HONE_OPTIMIZER_CMD: `${process.execPath} ${optimizerEntry}`,
       },
       // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.

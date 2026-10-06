@@ -1046,7 +1046,8 @@ describe("full local backend: TCP broker + one build feeding the single one-shot
         routing: { mutation: { model: "m" } },
         headless: true,
       }),
-      env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network" },
+      // The upstream is required (no default); the scripted optimizer never dials it.
+      env: { PATH: process.env["PATH"] ?? "", HONE_EGRESS: "network", HONE_UPSTREAM_BASE_URL: "http://127.0.0.1:9" },
       // Direct backend fixture: frozen assets/run.started already exist; this is the post-seal byte recheck.
       admissionReview: "off",
       optimizerDigest: computeOptimizerDigest(FIX_IMAGE),
