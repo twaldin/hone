@@ -88,11 +88,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   Broker,
   CasStore,
+  assertSandboxCpuset,
+  operatorSandboxCpuset,
   packDirAsArtifact,
   runCommand,
-  type CallContext,
-  type RunCommand,
 } from "@hone/broker";
+import type { CallContext, RunCommand } from "@hone/broker";
 import {
   CapsuleManifest,
   DIAGNOSTIC_ORDERING_REPORT_VERSION,
@@ -409,12 +410,15 @@ export function loadCapsuleConfig(capsuleDir: string = CAPSULE_DIR): CapsuleConf
  * capsule whose evaluator legitimately needs longer than the broker's default
  * 600 s can be admitted at all.
  */
-export function orderingBrokerResources(manifest: CapsuleManifest): {
+export function orderingBrokerResources(manifest: CapsuleManifest, env: NodeJS.ProcessEnv = process.env): {
   sandboxMemoryBytes?: number;
   sandboxCpus?: number;
+  sandboxCpuset?: string;
   evalTimeoutSec?: number;
 } {
+  const cpuset = operatorSandboxCpuset(env);
   return {
+    ...(cpuset === undefined ? {} : { sandboxCpuset: assertSandboxCpuset(cpuset) }),
     ...(manifest.sandbox === undefined
       ? {}
       : {

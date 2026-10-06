@@ -15,6 +15,7 @@ export {
   scratchSnapshotArchiveCapBytes,
   scratchRestoreMemoryBytes,
   assertSandboxCpuset,
+  operatorSandboxCpuset,
   isBrokerAuthoredEvent,
   hashCorpusSnapshot,
   hashChildRunLaunchReceipt,

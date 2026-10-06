@@ -72,6 +72,8 @@ Keep credentials in the operator's local environment. Campaign routes belong to 
 
 On a shared host, `HONE_SANDBOX_CPUSET` (a cpuset list such as `1-4`) pins every container a run creates to those CPUs: the stopped lease donor (for a uniform record; it never runs), the egress relay containers (macOS, or `HONE_EGRESS=network`), the scratch keeper, each mutation sandbox and evaluator, the optimizer build, the toolbelt preflight, and each optimizer invocation. A campaign's candidate-optimizer conformance check applies the same set to its three containers (trusted stub, build and candidate run). Give concurrent runs disjoint sets. An invalid list is rejected rather than ignored. It is operator placement and not part of the capsule digest.
 
+The capsule-kit `ordering-check` and its baseline Broker measurements honor the same `HONE_SANDBOX_CPUSET`: every evaluator phase (and any scratch keeper) receives one `--cpuset-cpus` pair. Unset or empty preserves unpinned behavior; invalid placement is rejected before any container launch.
+
 Production execution verifies the capsule's assets, baseline and Gate-2 admission receipt chain. Publishing files does not transfer the original operator's local admission ledger or runtime images. The public-clone admission and image bootstrap is unfinished; do not disable review checks to make an example run.
 
 The authoring workflow supports gate decisions and durable session requests. Its default session boundary queues those requests rather than starting coding workers. A trusted authoring integration must complete the requested work before approval and execution are possible.

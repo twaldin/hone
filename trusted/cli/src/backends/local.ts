@@ -21,6 +21,7 @@ import {
 import {
   CasStore,
   assertSandboxCpuset,
+  operatorSandboxCpuset,
   SCRATCH_SNAPSHOT_SCRIPT,
   finalizeScratchSnapshot,
   newScratchSnapshotAttemptName,
@@ -128,22 +129,6 @@ const RELAY_JS = [
   "c.on('error',drop);u.on('error',drop);",
   `}).listen(${RELAY_PORT},'0.0.0.0');`,
 ].join("");
-
-/**
- * Operator CPU placement (HONE_SANDBOX_CPUSET, e.g. "1-4"): the one reader of
- * the variable, shared by every launch of this backend that carries the run's
- * cpuset — the lease donor, the egress relays, the broker's scratch keeper,
- * mutation sandboxes and evaluators, and the optimizer build, toolbelt
- * preflight and invocations (the last three via the prepared runtime).
- * Unset or empty => undefined (no affinity). Validation is the consumer's
- * (the broker's assertSandboxCpuset), so every launch rejects a bad value the
- * same way. It reserves nothing: operators assign disjoint sets to concurrent
- * runs and keep other host work off them. Not part of the capsule digest.
- */
-export function operatorSandboxCpuset(env: NodeJS.ProcessEnv): string | undefined {
-  const value = env["HONE_SANDBOX_CPUSET"];
-  return value === undefined || value === "" ? undefined : value;
-}
 
 /**
  * Trusted pre-flight drift gate (defense in depth behind runCommand's frozen

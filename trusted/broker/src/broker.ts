@@ -457,6 +457,17 @@ export function assertSandboxCpuset(value: string): string {
   }
   return value;
 }
+
+/**
+ * Shared reader of operator CPU placement for CLI runs and capsule-kit measurements.
+ * Unset or empty means no affinity. Consumers validate with assertSandboxCpuset
+ * before launching any containers; placement is not part of the capsule digest.
+ */
+export function operatorSandboxCpuset(env: NodeJS.ProcessEnv): string | undefined {
+  const value = env["HONE_SANDBOX_CPUSET"];
+  return value === undefined || value === "" ? undefined : value;
+}
+
 /** tmpfs inode cap for the /scratch volume — bounds how many archive entries a hostile tree can mint. */
 export const SCRATCH_INODE_LIMIT = 131072;
 /**

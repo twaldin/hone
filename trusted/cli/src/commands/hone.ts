@@ -16,6 +16,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
   CasStore,
   assertSandboxCpuset,
+  operatorSandboxCpuset,
   RecursiveResourceLedger,
   hashChildRunLaunchReceipt,
   packDirAsArtifact,
@@ -183,7 +184,6 @@ import {
   type OptimizerArtifactSeal,
   type ResolvedCandidateOptimizer,
 } from "../optimizer-artifact.js";
-import { operatorSandboxCpuset } from "../backends/local.js";
 import {
   collectOptimizerSnapshot,
   optimizerOverridden,
