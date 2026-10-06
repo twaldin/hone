@@ -2169,6 +2169,8 @@ describe("sealed hone run search authority", () => {
     const second = await saveCandidate(calibrated.b, candidate2Tar, calibrated.first);
     await calibrated.b.broker.evaluate({ artifact: { hash: calibrated.first }, assetGroupId: "train", seed: 1 }, CLIENT);
     await calibrated.b.broker.evaluate({ artifact: { hash: second }, assetGroupId: "train", seed: 1 }, CLIENT);
+    // As the seed loop does, the baseline is re-measured at this coordinate for deltaVsBaseline.
+    await calibrated.b.broker.evaluate({ artifact: { hash: baselineHash }, assetGroupId: "train", seed: 1 }, CLIENT);
     expect(calibrated.b.broker.reportIncumbent({ artifact: { hash: second } }, CLIENT)).toEqual({});
     expect(calibrated.b.events.filter((event) => event.type === "incumbent.new").map((event) => event.type === "incumbent.new" ? event.artifact.hash : null))
       .toEqual([calibrated.first, second]);

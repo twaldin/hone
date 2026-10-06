@@ -441,8 +441,9 @@ async function runProbeFlow(opts: {
       const out = argv.find((a) => typeof a === "string" && a.startsWith("HONE_SCRATCH_SNAPSHOT_OUT="));
       const snapshotDir = join(runDir, "scratch-snapshot");
       mkdirSync(snapshotDir, { recursive: true });
-      // Publish exactly the minted per-attempt basename (docker semantics).
-      writeFileSync(join(snapshotDir, out === undefined ? "scratch.tar.tmp" : out.slice("HONE_SCRATCH_SNAPSHOT_OUT=".length)), "snapshot");
+      // Publish exactly the minted per-attempt basename (docker semantics): a
+      // valid empty tar, so a resumed broker can restore it.
+      writeFileSync(join(snapshotDir, out === undefined ? "scratch.tar.tmp" : out.slice("HONE_SCRATCH_SNAPSHOT_OUT=".length)), Buffer.alloc(10240));
     }
     return Promise.resolve(res());
   };
