@@ -9,7 +9,7 @@ import { CapsuleManifest, DEFAULT_PROMOTION_RULE, RunConfig, capsuleDigest } fro
 import { runCommand } from "@hone/broker";
 import type { CmdResult, RunCommand } from "@hone/broker";
 import { freezeCapsuleAssets } from "../src/admission.js";
-import { createBackend, runOptimizer } from "../src/backends/local.js";
+import { createBackend, operatorSandboxCpuset, runOptimizer } from "../src/backends/local.js";
 import {
   OPTIMIZER_CONTAINER_UID,
   optimizerBuildArgs,
@@ -291,6 +291,23 @@ describe("run container create/start argv exactness (two-phase)", () => {
     expect(leaseIdx).toBeLessThan(argv.indexOf(FIX_IMAGE));
     // Phase two: bounded, killable attach-start of the registered container.
     expect(optimizerStartArgs(baseOpts.name)).toEqual(["docker", "start", "-a", baseOpts.name]);
+  });
+
+  it("pins the container to the operator cpuset only when one is given; an invalid list is rejected with the broker's message", () => {
+    const transport = { kind: "unix", hostSocketPath: "/runs/r/broker.sock", token: "a".repeat(64) } as const;
+    const free = optimizerCreateArgs({ ...baseOpts, transport });
+    expect(free).not.toContain("--cpuset-cpus");
+    const pinned = optimizerCreateArgs({ ...baseOpts, transport, cpuset: "1-4" });
+    const at = pinned.indexOf("--cpuset-cpus");
+    expect(pinned[at + 1]).toBe("1-4");
+    expect(at).toBeLessThan(pinned.indexOf(FIX_IMAGE));
+    // The pinned argv is the free argv plus exactly the one flag pair.
+    expect([...pinned.slice(0, at), ...pinned.slice(at + 2)]).toEqual(free);
+    for (const bad of ["1-4; --privileged", "0,4-1", "", "a"]) {
+      expect(() => optimizerCreateArgs({ ...baseOpts, transport, cpuset: bad })).toThrow(
+        `sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got ${JSON.stringify(bad)}`,
+      );
+    }
   });
 });
 
@@ -704,6 +721,42 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
     expect(seen.argvs[0]?.slice(0, 2)).toEqual(["docker", "create"]);
     expect(seen.argvs[1]?.slice(0, 3)).toEqual(["docker", "start", "-a"]);
     expect(seen.argvs[1]?.[3]).toBe("hone-opt-run_host-1");
+  });
+
+  it("pins the optimizer container to HONE_SANDBOX_CPUSET only when one is set; an invalid list launches nothing", async () => {
+    const launch = async (
+      cpuset: string | undefined,
+      seen = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] },
+    ): Promise<string[][]> => {
+      const root = makeRoot();
+      const runDir = join(root, ".hone-runs", "run_cpuset");
+      mkdirSync(runDir, { recursive: true });
+      const script = join(root, "opt.mjs");
+      writeFileSync(script, "process.exit(0);\n");
+      const ctx = optCtx(root, runDir, "run_cpuset");
+      if (cpuset !== undefined) ctx.env["HONE_SANDBOX_CPUSET"] = cpuset;
+      await runOptimizer(
+        ctx,
+        testOptimizerRuntime({ runId: "run_cpuset", argv: [process.execPath, script], spawnImpl: fakeOptimizerSpawn(FIX_IMAGE, seen) }),
+      );
+      return seen.argvs;
+    };
+
+    const pinned = await launch("1-4");
+    expect(pinned[0]?.slice(0, 2)).toEqual(["docker", "create"]);
+    expect(flagValue(pinned[0] ?? [], "--cpuset-cpus")).toBe("1-4");
+    // The attach-start inherits the created container's placement; it carries no flag of its own.
+    expect(pinned[1]).not.toContain("--cpuset-cpus");
+
+    expect((await launch(undefined))[0]).not.toContain("--cpuset-cpus");
+    expect((await launch(""))[0]).not.toContain("--cpuset-cpus"); // empty == unset, as for the broker
+    expect(operatorSandboxCpuset({})).toBeUndefined();
+    expect(operatorSandboxCpuset({ HONE_SANDBOX_CPUSET: "" })).toBeUndefined();
+    expect(operatorSandboxCpuset({ HONE_SANDBOX_CPUSET: "1,3" })).toBe("1,3");
+
+    const refused = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] };
+    await expect(launch("0,4-1", refused)).rejects.toThrow('sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got "0,4-1"');
+    expect(refused.argvs).toEqual([]);
   });
 
   it("forwards the sealed run-config session no-yield ceiling into the optimizer", async () => {
