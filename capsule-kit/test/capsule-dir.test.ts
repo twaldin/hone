@@ -42,7 +42,8 @@ vi.mock("@hone/broker", async importOriginal => {
     throw new Error(`CAS/Docker seam reached: ${name}`);
   };
   return {
-    ...actual,
+    assertSandboxCpuset: actual.assertSandboxCpuset,
+    operatorSandboxCpuset: actual.operatorSandboxCpuset,
     Broker: class {
       constructor() {
         touch("new Broker()");
