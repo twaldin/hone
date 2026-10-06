@@ -14,6 +14,7 @@ export {
   newScratchSnapshotAttemptName,
   scratchSnapshotArchiveCapBytes,
   scratchRestoreMemoryBytes,
+  assertSandboxCpuset,
   isBrokerAuthoredEvent,
   hashCorpusSnapshot,
   hashChildRunLaunchReceipt,

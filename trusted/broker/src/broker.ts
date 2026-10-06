@@ -350,9 +350,11 @@ export interface BrokerConfig {
   /** docker --cpus for every container this broker spawns. Default 2. */
   sandboxCpus?: number | undefined;
   /**
-   * docker --cpuset-cpus for every mutation sandbox and evaluator container
-   * (cpuset list syntax, e.g. "1-4" or "1,3"). Absent => no affinity: the
-   * containers may run on any host CPU under their --cpus quota.
+   * docker --cpuset-cpus for every mutation sandbox, evaluator, and scratch
+   * keeper container this broker spawns (cpuset list syntax, e.g. "1-4" or
+   * "1,3"). Absent => no affinity: the containers may run on any host CPU
+   * under their --cpus quota. The CLI applies the same set to the optimizer
+   * container.
    */
   sandboxCpuset?: string | undefined;
   /**
@@ -433,6 +435,17 @@ function isCpusetList(value: string): boolean {
     const [start, end] = part.split("-");
     return end === undefined || BigInt(start!) <= BigInt(end);
   });
+}
+/**
+ * The one validator for an operator cpuset: returns `value` when it is valid
+ * docker --cpuset-cpus list syntax, otherwise throws the canonical rejection.
+ * Every container launch that honors the operator cpuset goes through it.
+ */
+export function assertSandboxCpuset(value: string): string {
+  if (!isCpusetList(value)) {
+    throw new Error(`sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got ${JSON.stringify(value)}`);
+  }
+  return value;
 }
 /** tmpfs inode cap for the /scratch volume — bounds how many archive entries a hostile tree can mint. */
 export const SCRATCH_INODE_LIMIT = 131072;
@@ -1916,10 +1929,7 @@ export class Broker {
     this.sandboxPidsLimit = config.sandboxPidsLimit ?? 512;
     this.sandboxMemoryBytes = config.sandboxMemoryBytes ?? 2 * 1024 * 1024 * 1024;
     this.sandboxCpus = config.sandboxCpus ?? 2;
-    if (config.sandboxCpuset !== undefined && !isCpusetList(config.sandboxCpuset)) {
-      throw new Error(`sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got ${JSON.stringify(config.sandboxCpuset)}`);
-    }
-    this.sandboxCpuset = config.sandboxCpuset;
+    this.sandboxCpuset = config.sandboxCpuset === undefined ? undefined : assertSandboxCpuset(config.sandboxCpuset);
     this.leaseArgs = config.containerLease !== undefined ? ["--volumes-from", `${config.containerLease}:ro`] : [];
     this.episodeOrdinal = config.episodeOrigin ?? 0;
     this.measurementEpoch = `${this.bootNonce}:startup`;
@@ -3130,6 +3140,7 @@ export class Broker {
         "--memory", String(keeperMemoryBytes),
         "--memory-swap", String(keeperMemoryBytes),
         "--cpus", "0.1",
+        ...(this.sandboxCpuset === undefined ? [] : ["--cpuset-cpus", this.sandboxCpuset]),
         "--log-driver", "none",
         "-v", `${name}:/scratch`,
         "-v", `${this.scratchSnapshotDir}:/snapshot`,

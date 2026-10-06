@@ -7,6 +7,7 @@ import {
   MUTATION_SANDBOX_HOME,
   MUTATION_SANDBOX_USER,
   WORKSPACE_TMPFS_INODES,
+  assertSandboxCpuset,
   type RunCommand,
 } from "@hone/broker";
 import type { DockerCreateGate } from "../docker-create-gate.js";
@@ -225,6 +226,8 @@ export interface OptimizerCreateOptions {
   env: Record<string, string>;
   /** Docker-run lease (stopped per-epoch donor) name; attaches `--volumes-from <lease>:ro` before the image. */
   containerLease: string;
+  /** Operator cpuset (HONE_SANDBOX_CPUSET) for `--cpuset-cpus`; validated by the broker's assertSandboxCpuset. Absent => no affinity. */
+  cpuset?: string | undefined;
 }
 
 function optimizerCreateArgsWithToken(opts: OptimizerCreateOptions, tokenEnv: string): string[] {
@@ -243,6 +246,7 @@ function optimizerCreateArgsWithToken(opts: OptimizerCreateOptions, tokenEnv: st
     "-e", "HOME=/tmp",
     "--user", `${OPTIMIZER_CONTAINER_UID}:${OPTIMIZER_CONTAINER_UID}`,
     ...HARDENING_ARGS,
+    ...(opts.cpuset === undefined ? [] : ["--cpuset-cpus", assertSandboxCpuset(opts.cpuset)]),
   ];
   if (opts.bundleDir !== null) argv.push("-v", `${opts.bundleDir}:${BUNDLE_MOUNT}:ro`);
   if (opts.transport.kind === "unix") argv.push("-v", `${opts.transport.hostSocketPath}:${CONTAINER_BROKER_SOCK}`);

@@ -67,6 +67,7 @@ async function makeFakeDockerBroker(
   opts: {
     failRemove?: ReadonlySet<string>;
     containerLease?: string;
+    sandboxCpuset?: string;
     scratchQuotaBytes?: number;
     /** Per-attempt override of the snapshot exec; receives the attempt basename, 1-based attempt ordinal, host snapshot dir, and all names so far. */
     snapshotExec?: (ctx: { name: string; attempt: number; snapshotDir: string; names: readonly string[] }) => Promise<CmdResult> | CmdResult;
@@ -124,6 +125,7 @@ async function makeFakeDockerBroker(
     scratchVolume: true,
     runCommand: run,
     ...(opts.containerLease !== undefined ? { containerLease: opts.containerLease } : {}),
+    ...(opts.sandboxCpuset !== undefined ? { sandboxCpuset: opts.sandboxCpuset } : {}),
     ...(opts.scratchQuotaBytes !== undefined ? { scratchQuotaBytes: opts.scratchQuotaBytes } : {}),
   };
   const broker = new Broker(config);
@@ -212,6 +214,25 @@ describe("scratch snapshot bounds (kernel cap + deadline wired into the keeper)"
     expect(sandboxRun).toBeDefined();
     expect(hasPair(sandboxRun ?? [], "--volumes-from", "hone-lease-y:ro")).toBe(true);
     await h.broker.close();
+  });
+
+  it("pins the scratch keeper to the operator cpuset, and only when one is set", async () => {
+    const pinned = await makeFakeDockerBroker("cpuset-pinned", { sandboxCpuset: "1-4" });
+    const pinnedKeeper = pinned.calls[findCall(pinned.calls, "docker", "run", "-d", "--name", pinned.keeperName)];
+    expect(pinnedKeeper).toBeDefined();
+    expect(hasPair(pinnedKeeper ?? [], "--cpuset-cpus", "1-4")).toBe(true);
+    await pinned.broker.close();
+
+    const free = await makeFakeDockerBroker("cpuset-free");
+    const freeKeeper = free.calls[findCall(free.calls, "docker", "run", "-d", "--name", free.keeperName)];
+    expect(freeKeeper).toBeDefined();
+    expect(freeKeeper).not.toContain("--cpuset-cpus");
+    await free.broker.close();
+
+    // Rejected at construction, before any keeper exists — same text as the sandbox/evaluator path.
+    await expect(makeFakeDockerBroker("cpuset-bad", { sandboxCpuset: "0,4-1" })).rejects.toThrow(
+      'sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got "0,4-1"',
+    );
   });
 
   it("close() skips snapshot, keeper removal, and volume removal while any work container cannot be reaped", async () => {
