@@ -152,6 +152,19 @@ function flagValue(argv: readonly string[], flag: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
+/** `argv` with its one `flag value` pair removed: a pinned argv minus the pin must equal the unpinned argv. */
+function withoutPair(argv: readonly string[], flag: string): string[] {
+  const at = argv.indexOf(flag);
+  return at < 0 ? [...argv] : [...argv.slice(0, at), ...argv.slice(at + 2)];
+}
+
+/** The broker's canonical rejection of an invalid operator cpuset list. */
+function cpusetRejection(bad: string): string {
+  return `sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got ${JSON.stringify(bad)}`;
+}
+
+const INVALID_CPUSETS = ["1-4; --privileged", "0,4-1", "", "a"];
+
 /** A real create gate over a throwaway WAL dir (unit tests never resume it). */
 function testGate(runId: string) {
   return openDockerCreateGate(mkdtempSync(join(tmpdir(), "hone-gate-")), runId);
@@ -218,6 +231,31 @@ describe("build container argv exactness", () => {
     expect(leaseIdx).toBeGreaterThan(0);
     expect(argv[leaseIdx + 1]).toBe("hone-lease-run_b:ro");
     expect(leaseIdx).toBeLessThan(argv.indexOf(FIX_IMAGE));
+  });
+
+  it("pins the build to the operator cpuset only when one is given; an invalid list is rejected with the broker's message", () => {
+    const base = {
+      runId: "run_b",
+      safeRunId: "run_b",
+      image: FIX_IMAGE,
+      stagingDir: "/tmp/src",
+      runtimeDir: "/tmp/runtime",
+      outDir: "/tmp/out",
+      containerLease: "hone-lease-run_b-e1",
+      hostUid: 1234,
+      hostGid: 5678,
+    };
+    const free = optimizerBuildArgs(base);
+    expect(free).not.toContain("--cpuset-cpus");
+    const pinned = optimizerBuildArgs({ ...base, cpuset: "1-4" });
+    expect(pinned.filter((a) => a === "--cpuset-cpus")).toHaveLength(1);
+    expect(flagValue(pinned, "--cpuset-cpus")).toBe("1-4");
+    expect(pinned.indexOf("--cpuset-cpus")).toBeLessThan(pinned.indexOf(FIX_IMAGE));
+    // The pinned argv is the free argv plus exactly the one flag pair.
+    expect(withoutPair(pinned, "--cpuset-cpus")).toEqual(free);
+    for (const bad of INVALID_CPUSETS) {
+      expect(() => optimizerBuildArgs({ ...base, cpuset: bad })).toThrow(cpusetRejection(bad));
+    }
   });
 });
 
@@ -354,6 +392,9 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
     });
     expect(argvs.filter(isBuild).length).toBe(1);
     expect(runtime.bundleDir).not.toBeNull();
+    // No operator cpuset in the ctx: the build argv is unchanged and the runtime carries none.
+    expect(runtime.cpuset).toBeUndefined();
+    expect(argvs.filter(isBuild)[0]).not.toContain("--cpuset-cpus");
     expect(runtime.runArgv).toEqual(OPTIMIZER_BUILD_CONTRACT.run);
     const bundleDir = runtime.bundleDir ?? "";
     expect(existsSync(join(bundleDir, "optimizer.mjs"))).toBe(true);
@@ -386,6 +427,40 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
         runtimeSourceDir: TEST_RUNTIME_SOURCE,
       }),
     ).rejects.toThrow(/produced no .*worker\.mjs/);
+  });
+
+  it("pins the build to the operator cpuset and keeps it on the runtime; an invalid list is refused before staging or any docker call", async () => {
+    const argvs: string[][] = [];
+    const run: RunCommand = (argv) => {
+      argvs.push([...argv]);
+      if (isBuild(argv)) writeBuiltArtifacts(mountsOf(argv)[1]?.split(":")[0] ?? "");
+      return Promise.resolve(res());
+    };
+    const prepare = (cpuset: string | undefined): Promise<OptimizerRuntime> =>
+      prepareOptimizerRuntime(ctxSlice(computeOptimizerDigest(FIX_IMAGE)), {
+        image: FIX_IMAGE,
+        transport: { kind: "unix", hostSocketPath: "/dev/null", token: "a".repeat(64) },
+        run,
+        spawnImpl: fakeOptimizerSpawn(FIX_IMAGE),
+        containerLease: "hone-lease-run_prep-e1",
+        gate: testGate("run_prep"),
+        clientEnv: { PATH: process.env["PATH"] ?? "" },
+        runtimeSourceDir: TEST_RUNTIME_SOURCE,
+        cpuset,
+      });
+
+    const pinned = await prepare("1-4");
+    expect(pinned.cpuset).toBe("1-4");
+    const builds = argvs.filter(isBuild);
+    expect(builds).toHaveLength(1);
+    expect(builds[0]?.filter((a) => a === "--cpuset-cpus")).toHaveLength(1);
+    expect(flagValue(builds[0] ?? [], "--cpuset-cpus")).toBe("1-4");
+    await pinned.cleanup();
+
+    // An invalid list refuses before anything is staged: no docker call of any kind.
+    argvs.length = 0;
+    await expect(prepare("0,4-1")).rejects.toThrow(cpusetRejection("0,4-1"));
+    expect(argvs).toEqual([]);
   });
   let smokeOrdinal = 0;
   async function preparedSmokeRuntime(
@@ -466,6 +541,34 @@ describe("prepareOptimizerRuntime: exact snapshot proof + one-time build", () =>
       expect(argv.at(-1)).not.toContain("--toolbelt-selftest");
       expect(argv).toContain("none");
       expect(argv.join("\0")).not.toContain("HONE_PROXY");
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+
+  it("pins the toolbelt preflight to the operator cpuset only when one is set; an invalid list launches nothing", async () => {
+    const { runtime, argvs } = await preparedSmokeRuntime(res({ stdout: Buffer.from(`${JSON.stringify(validToolbeltResult)}\n`) }));
+    const smokes = (): string[][] =>
+      argvs.filter((entry) => entry[1] === "run" && entry.includes(`hone-toolbelt-${runtime.safeRunId}`));
+    try {
+      await runMutationToolbeltSmoke(runtime);
+      const free = smokes()[0] ?? [];
+      expect(free).not.toContain("--cpuset-cpus");
+
+      // Same runtime, same bundle: the pin is the only difference.
+      runtime.cpuset = "1-4";
+      await runMutationToolbeltSmoke(runtime);
+      const pinned = smokes()[1] ?? [];
+      expect(pinned.filter((a) => a === "--cpuset-cpus")).toHaveLength(1);
+      expect(flagValue(pinned, "--cpuset-cpus")).toBe("1-4");
+      expect(pinned.indexOf("--cpuset-cpus")).toBeLessThan(pinned.indexOf(runtime.image));
+      expect(withoutPair(pinned, "--cpuset-cpus")).toEqual(free);
+
+      for (const bad of INVALID_CPUSETS) {
+        runtime.cpuset = bad;
+        await expect(runMutationToolbeltSmoke(runtime)).rejects.toThrow(cpusetRejection(bad));
+      }
+      expect(smokes()).toHaveLength(2);
     } finally {
       await runtime.cleanup();
     }
@@ -723,7 +826,7 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
     expect(seen.argvs[1]?.[3]).toBe("hone-opt-run_host-1");
   });
 
-  it("pins the optimizer container to HONE_SANDBOX_CPUSET only when one is set; an invalid list launches nothing", async () => {
+  it("pins the optimizer container to the runtime's operator cpuset only when one is set; an invalid list launches nothing", async () => {
     const launch = async (
       cpuset: string | undefined,
       seen = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] },
@@ -734,28 +837,33 @@ describe("runOptimizer: docker-only two-phase launch, token hygiene", () => {
       const script = join(root, "opt.mjs");
       writeFileSync(script, "process.exit(0);\n");
       const ctx = optCtx(root, runDir, "run_cpuset");
-      if (cpuset !== undefined) ctx.env["HONE_SANDBOX_CPUSET"] = cpuset;
       await runOptimizer(
         ctx,
-        testOptimizerRuntime({ runId: "run_cpuset", argv: [process.execPath, script], spawnImpl: fakeOptimizerSpawn(FIX_IMAGE, seen) }),
+        testOptimizerRuntime({
+          runId: "run_cpuset",
+          argv: [process.execPath, script],
+          spawnImpl: fakeOptimizerSpawn(FIX_IMAGE, seen),
+          cpuset,
+        }),
       );
       return seen.argvs;
     };
 
     const pinned = await launch("1-4");
     expect(pinned[0]?.slice(0, 2)).toEqual(["docker", "create"]);
+    expect(pinned[0]?.filter((a) => a === "--cpuset-cpus")).toHaveLength(1);
     expect(flagValue(pinned[0] ?? [], "--cpuset-cpus")).toBe("1-4");
     // The attach-start inherits the created container's placement; it carries no flag of its own.
     expect(pinned[1]).not.toContain("--cpuset-cpus");
 
     expect((await launch(undefined))[0]).not.toContain("--cpuset-cpus");
-    expect((await launch(""))[0]).not.toContain("--cpuset-cpus"); // empty == unset, as for the broker
+    // The backend reads the variable once at start: unset and empty both mean no affinity.
     expect(operatorSandboxCpuset({})).toBeUndefined();
     expect(operatorSandboxCpuset({ HONE_SANDBOX_CPUSET: "" })).toBeUndefined();
     expect(operatorSandboxCpuset({ HONE_SANDBOX_CPUSET: "1,3" })).toBe("1,3");
 
     const refused = { argvs: [] as string[][], envs: [] as NodeJS.ProcessEnv[] };
-    await expect(launch("0,4-1", refused)).rejects.toThrow('sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got "0,4-1"');
+    await expect(launch("0,4-1", refused)).rejects.toThrow(cpusetRejection("0,4-1"));
     expect(refused.argvs).toEqual([]);
   });
 

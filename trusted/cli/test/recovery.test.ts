@@ -333,6 +333,41 @@ describe("setupEgress network create (finding 10 — idempotent after cleanup)",
     expect(relayRuns.length).toBeGreaterThanOrEqual(1);
     for (const argv of relayRuns) expect(argv).not.toContain("--volumes-from");
   });
+
+  it("pins BOTH relay containers to the caller's captured cpuset only when one is given — never a second read of ctx.env; an invalid list is refused before the network exists", async () => {
+    const base = ctx(makeRoot());
+    const relayRuns = async (cpuset: string | undefined, env: NodeJS.ProcessEnv = base.env): Promise<string[][]> => {
+      const { calls, run } = fakeRunner(() => undefined);
+      const egress = await setupEgress({ ...base, env }, fakeProxy(43210), "img:latest", run, "hone-lease-run_y", cpuset);
+      await egress.exposeBroker(54321);
+      return calls.filter((argv) => argv[0] === "docker" && argv[1] === "run");
+    };
+
+    const free = await relayRuns(undefined);
+    const pinned = await relayRuns("1-4");
+    expect(free).toHaveLength(2); // proxy relay + broker relay
+    expect(pinned).toHaveLength(2);
+    pinned.forEach((argv, i) => {
+      const at = argv.indexOf("--cpuset-cpus");
+      expect(argv.filter((arg) => arg === "--cpuset-cpus")).toHaveLength(1);
+      expect(argv[at + 1]).toBe("1-4");
+      expect(at).toBeLessThan(argv.indexOf("img:latest"));
+      // The pinned argv is the free argv plus exactly the one flag pair.
+      expect(free[i]).not.toContain("--cpuset-cpus");
+      expect([...argv.slice(0, at), ...argv.slice(at + 2)]).toEqual(free[i]);
+    });
+
+    // The captured value wins over whatever ctx.env says now: a mutated env can neither unpin nor re-pin the relays.
+    const drifted = { ...base.env, HONE_SANDBOX_CPUSET: "5-6" };
+    for (const argv of await relayRuns("1-4", drifted)) expect(argv[argv.indexOf("--cpuset-cpus") + 1]).toBe("1-4");
+    for (const argv of await relayRuns(undefined, drifted)) expect(argv).not.toContain("--cpuset-cpus");
+
+    const { calls, run } = fakeRunner(() => undefined);
+    await expect(
+      setupEgress(base, fakeProxy(43210), "img:latest", run, "hone-lease-run_y", "0,4-1"),
+    ).rejects.toThrow('sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got "0,4-1"');
+    expect(calls).toEqual([]);
+  });
 });
 
 const FIX_BUDGET: BudgetState = {

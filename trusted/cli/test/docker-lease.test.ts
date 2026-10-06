@@ -61,6 +61,40 @@ describe("makeDockerRunLease (per-epoch donor create/remove semantics)", () => {
     expect(argvs.at(-1)).toEqual(["docker", "rm", "-f", "-v", DONOR]);
   });
 
+  it("pins the donor to the operator cpuset only when one is given; an invalid list is rejected before any create", async () => {
+    const image = "img@sha256:deadbeef";
+    const create = async (cpuset?: string): Promise<readonly string[]> => {
+      const argvs: (readonly string[])[] = [];
+      const run: RunCommand = (argv) => {
+        argvs.push(argv);
+        return Promise.resolve(res({ stdout: Buffer.from("cid\n") }));
+      };
+      await makeDockerRunLease(RUN_ID, image, run, 1, cpuset).start();
+      return argvs[0] ?? [];
+    };
+    const free = await create();
+    expect(free).not.toContain("--cpuset-cpus");
+    const pinned = await create("1-4");
+    const at = pinned.indexOf("--cpuset-cpus");
+    expect(pinned.filter((arg) => arg === "--cpuset-cpus")).toHaveLength(1);
+    expect(pinned[at + 1]).toBe("1-4");
+    expect(at).toBeLessThan(pinned.indexOf(image));
+    // The pinned argv is the free argv plus exactly the one flag pair.
+    expect([...pinned.slice(0, at), ...pinned.slice(at + 2)]).toEqual(free);
+
+    let creates = 0;
+    const never: RunCommand = () => {
+      creates += 1;
+      return Promise.resolve(res());
+    };
+    for (const bad of ["1-4; --privileged", "0,4-1", "", "a"]) {
+      expect(() => makeDockerRunLease(RUN_ID, image, never, 1, bad)).toThrow(
+        `sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got ${JSON.stringify(bad)}`,
+      );
+    }
+    expect(creates).toBe(0);
+  });
+
   it("close tolerates an already-missing donor but never a live removal failure", async () => {
     const missing: RunCommand = (argv) =>
       Promise.resolve(
@@ -266,6 +300,37 @@ describe("donor lifecycle through the local backend (gated creates)", () => {
     const wal = readFileSync(join(runDir, DOCKER_CREATE_WAL), "utf8");
     expect(wal).toContain(`"name":"${DONOR}"`);
     expect(wal).toContain('"t":"settled"');
+  });
+
+  it("HONE_SANDBOX_CPUSET pins the donor, the proxy relay and the scratch keeper with one flag pair each; unset pins nothing; an invalid list creates nothing", { timeout: 30_000 }, async () => {
+    const boot = async (cpuset: string | undefined, argvs: (readonly string[])[] = []): Promise<(readonly string[])[]> => {
+      const root = makeRoot();
+      const run = scriptedDocker(join(root, ".hone-runs", RUN_ID), argvs);
+      const ctx = makeCtx(root, run, { cleanup: () => {} });
+      if (cpuset !== undefined) ctx.env["HONE_SANDBOX_CPUSET"] = cpuset;
+      await createBackend({ run, createHelper: scriptedCreateHelper(run) }).start(ctx);
+      return argvs.filter((a) => a[0] === "docker" && a[1] === "create");
+    };
+    const nameOf = (argv: readonly string[]): string => argv[argv.indexOf("--name") + 1] ?? "";
+
+    const pinned = await boot("1-4");
+    const names = pinned.map(nameOf);
+    expect(names).toContain(DONOR);
+    expect(names.some((name) => name.startsWith("hone-proxy-"))).toBe(true);
+    expect(names.some((name) => name.startsWith("hone-scratch-keeper-"))).toBe(true);
+    for (const argv of pinned) {
+      expect(argv.filter((arg) => arg === "--cpuset-cpus"), nameOf(argv)).toHaveLength(1);
+      expect(argv[argv.indexOf("--cpuset-cpus") + 1], nameOf(argv)).toBe("1-4");
+    }
+
+    const free = await boot(undefined);
+    expect(free.length).toBeGreaterThan(0);
+    for (const argv of free) expect(argv, nameOf(argv)).not.toContain("--cpuset-cpus");
+
+    // An invalid list refuses at the donor — the first container — so nothing is created.
+    const refused: (readonly string[])[] = [];
+    await expect(boot("0,4-1", refused)).rejects.toThrow('sandboxCpuset must be a cpuset list such as "1-4" or "1,3", got "0,4-1"');
+    expect(refused.filter((a) => a[0] === "docker" && a[1] === "create")).toEqual([]);
   });
 
   it("an uncertain donor create (signaled client) fails setup, leaves a durable open intent, AND rejects the cleanup barrier — the run stays unterminalizable", { timeout: 30_000 }, async () => {

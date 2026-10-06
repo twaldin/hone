@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
   CasStore,
+  assertSandboxCpuset,
   RecursiveResourceLedger,
   hashChildRunLaunchReceipt,
   packDirAsArtifact,
@@ -182,6 +183,7 @@ import {
   type OptimizerArtifactSeal,
   type ResolvedCandidateOptimizer,
 } from "../optimizer-artifact.js";
+import { operatorSandboxCpuset } from "../backends/local.js";
 import {
   collectOptimizerSnapshot,
   optimizerOverridden,
@@ -745,6 +747,8 @@ interface CandidateGateOptions {
   readonly baseSnapshot: OptimizerSnapshot;
   readonly comparisonImage: string;
   readonly controls: readonly RegisteredControl[];
+  /** Operator cpuset (HONE_SANDBOX_CPUSET) for the conformance containers; validated when the gate is built, so a bad value is a campaign error and never candidate feedback. */
+  readonly cpuset?: string | undefined;
 }
 
 /** Seal accepted candidate bytes against the image that will actually boot them. */
@@ -768,6 +772,7 @@ class CliCandidateGate implements RecursiveCandidateGate {
   private readonly inFlight = new Map<Sha256Digest, Promise<CandidateGateResult>>();
 
   constructor(private readonly opts: CandidateGateOptions) {
+    if (opts.cpuset !== undefined) assertSandboxCpuset(opts.cpuset);
     this.baseDigest = snapshotDigest(opts.comparisonImage, opts.baseSnapshot) as Sha256Digest;
     for (const control of opts.controls) this.controls.set(control.sourceArtifact, control);
     const historicalBaseDigests = new Set(
@@ -896,7 +901,7 @@ class CliCandidateGate implements RecursiveCandidateGate {
       }
       return;
     }
-    const receipt = await conformCandidateOptimizer(candidate, this.opts.comparisonImage);
+    const receipt = await conformCandidateOptimizer(candidate, this.opts.comparisonImage, { cpuset: this.opts.cpuset });
     if (receipt.receiptDigest !== conformanceReceiptDigest(receipt)) {
       throw new UsageError("candidate conformance returned an invalid receipt digest");
     }
@@ -4463,6 +4468,7 @@ export async function honeCommand(args: string[], io: CmdIo): Promise<number> {
     baseSnapshot: seedSnapshot,
     comparisonImage,
     controls: [brokenControl, degradedControl],
+    cpuset: operatorSandboxCpuset(io.env),
   });
   const modelRegistry = new CampaignModelRegistry(campaignDir, configHash, io.root);
   const outerRunId = `run_meta_outer_${configHash.slice("sha256:".length)}`;
@@ -5083,6 +5089,7 @@ export async function recursiveCommand(
     baseSnapshot: target.snapshot,
     comparisonImage,
     controls: [controls.broken, controls.degraded],
+    cpuset: operatorSandboxCpuset(io.env),
   });
   const modelRegistry = new CampaignModelRegistry(campaignDir, configHash, io.root);
   const childSupervisor = new CliChildSupervisor(
