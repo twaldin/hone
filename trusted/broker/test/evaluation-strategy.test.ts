@@ -11,17 +11,15 @@ import {
   PROMOTION_GATE_VERSION,
   PromotionNoiseCalibration,
   runScopedEvaluationCacheNamespace,
-  type RecursiveEvaluationPlan,
-  type RecursiveTask,
 } from "@hone/schema";
+import type { RecursiveEvaluationPlan, RecursiveTask } from "@hone/schema";
 import { CasStore } from "../src/cas.js";
 import { packDirAsArtifact } from "../src/artifact.js";
 import {
   Broker,
   readBrokerJournalEvaluations,
-  type BrokerConfig,
-  type TrustedEvaluationStrategyInput,
 } from "../src/broker.js";
+import type { BrokerConfig, TrustedEvaluationStrategyInput } from "../src/broker.js";
 import { RecursiveResourceLedger } from "../src/recursive.js";
 import { startBroker } from "../src/server.js";
 import { TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST, buildTestCapsule } from "./helpers.js";
@@ -197,7 +195,7 @@ describe("trusted broker evaluation strategy", () => {
       const task = broker.getTask({ privileged: false });
       const calibration = task.promotionGateCalibrations.find((entry) => entry.assetGroupId === "secret")!;
       const optimizerPayload = JSON.stringify(task);
-      for (const privateField of ["perExampleBits", "baselineRuns", "scoreHash"]) {
+      for (const privateField of ["perExampleBits", "baselineRuns", "scoreHash", "sourceCohortSha256"]) {
         expect(optimizerPayload).not.toContain(`${JSON.stringify(privateField)}:`);
       }
       expect(PromotionNoiseCalibration.safeParse(calibration).success).toBe(false);

@@ -233,7 +233,7 @@ export const PromotionGateCalibration = z.union([
     (calibration): calibration is LegacyPromotionNoiseCalibration =>
       calibration.estimator !== DETERMINISTIC_ZERO_NOISE_ESTIMATOR,
   ),
-  DeterministicZeroNoiseCalibration.omit({ baselineRuns: true, scoreHash: true }),
+  DeterministicZeroNoiseCalibration.omit({ baselineRuns: true, scoreHash: true, sourceCohortSha256: true }),
 ]);
 export type PromotionGateCalibration = z.infer<typeof PromotionGateCalibration>;
 

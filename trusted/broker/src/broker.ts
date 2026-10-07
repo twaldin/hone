@@ -3537,7 +3537,7 @@ export class Broker {
       budget: this.budgetStateNow(),
       promotionGateCalibrations: Array.from(this.promotionNoiseCalibrations.values(), (calibration) => {
         if (calibration.estimator !== DETERMINISTIC_ZERO_NOISE_ESTIMATOR) return calibration;
-        const { baselineRuns, scoreHash, ...gateCalibration } = calibration;
+        const { baselineRuns, scoreHash, sourceCohortSha256, ...gateCalibration } = calibration;
         return gateCalibration;
       }),
       ...(this.recursive?.evaluationTask === undefined
