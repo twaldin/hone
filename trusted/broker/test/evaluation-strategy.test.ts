@@ -1,17 +1,25 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
-import { EvaluationRecord, type RecursiveEvaluationPlan, type RecursiveTask } from "@hone/schema";
+import {
+  assessPromotion,
+  deterministicBaselineScoreHash,
+  EvaluationRecord,
+  GetTaskResult,
+  PROMOTION_GATE_VERSION,
+  PromotionNoiseCalibration,
+  runScopedEvaluationCacheNamespace,
+} from "@hone/schema";
+import type { RecursiveEvaluationPlan, RecursiveTask } from "@hone/schema";
 import { CasStore } from "../src/cas.js";
 import { packDirAsArtifact } from "../src/artifact.js";
 import {
   Broker,
   readBrokerJournalEvaluations,
-  type BrokerConfig,
-  type TrustedEvaluationStrategyInput,
 } from "../src/broker.js";
+import type { BrokerConfig, TrustedEvaluationStrategyInput } from "../src/broker.js";
 import { RecursiveResourceLedger } from "../src/recursive.js";
 import { startBroker } from "../src/server.js";
 import { TEST_CAPSULE_DIGEST, TEST_IMAGE, TEST_OPTIMIZER_DIGEST, buildTestCapsule } from "./helpers.js";
@@ -106,6 +114,97 @@ describe("trusted broker evaluation strategy", () => {
     expect(evidence.journalHash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(evidence.lineCount).toBeGreaterThan(0);
     await broker.close();
+  });
+
+  test("preserves original negative-zero example bits after journal numbers lose their sign", async () => {
+    const config = await configFor("score_bits_zero", async (input) => {
+      const record = recordFor(input);
+      record.output.perExample.one!.score = -0;
+      return record;
+    });
+    const broker = new Broker(config);
+    try {
+      const result = await broker.evaluate({ artifact: { hash: BASELINE }, assetGroupId: "train", seed: 0 }, { privileged: false });
+      expect(Object.is(result.output.perExample.one!.score, -0)).toBe(true);
+      const fact = readBrokerJournalEvaluations(config.runDir).facts[0]!;
+      expect(Object.is(fact.record.output.perExample.one!.score, 0)).toBe(true);
+      expect(fact.scoreBits).toEqual({
+        aggregateBits: "3ff4000000000000",
+        perExampleBits: { one: "8000000000000000" },
+      });
+    } finally {
+      await broker.close();
+      await rm(path.dirname(config.runDir), { recursive: true, force: true });
+    }
+  });
+
+  test("keeps empty example IDs eligible and preserves their original score bits", async () => {
+    const config = await configFor("score_bits_empty_id", async (input) => {
+      const record = recordFor(input);
+      record.output.perExample = { "": { score: -0 } };
+      return record;
+    });
+    const broker = new Broker(config);
+    try {
+      const result = await broker.evaluate({ artifact: { hash: BASELINE }, assetGroupId: "train", seed: 0 }, { privileged: false });
+      expect(Object.is(result.output.perExample[""]!.score, -0)).toBe(true);
+      const fact = readBrokerJournalEvaluations(config.runDir).facts[0]!;
+      expect(fact.aggregate).toBe(1.25);
+      expect(fact.scoreBits?.perExampleBits?.[""]).toBe("8000000000000000");
+    } finally {
+      await broker.close();
+      await rm(path.dirname(config.runDir), { recursive: true, force: true });
+    }
+  });
+
+  test("keeps protected baseline example evidence out of the optimizer task without losing the gate", async () => {
+    const config = await configFor("private_zero_noise", async (input) => recordFor(input));
+    const epoch = "private-zero-noise";
+    const scores = [{
+      seed: 0,
+      aggregateBits: "3ff4000000000000",
+      perExampleBits: { "protected-example": "3fd0000000000000" },
+    }];
+    config.measurementEpoch = epoch;
+    config.promotionNoiseCalibrations = [PromotionNoiseCalibration.parse({
+      gateVersion: PROMOTION_GATE_VERSION,
+      evidenceVersion: "hone-baseline-noise-v1",
+      calibratedAt: AT,
+      capsuleId: config.manifest.id,
+      admittedCapsuleDigest: TEST_CAPSULE_DIGEST,
+      executionImage: TEST_IMAGE,
+      assetGroupId: "secret",
+      measurementEpoch: epoch,
+      sourceCohortSha256: [`sha256:${"e".repeat(64)}`],
+      maxObservedPairDelta: 0,
+      noiseFloor: 0,
+      noiseEnvelope: 0,
+      informationFreePairs: 3,
+      informationFreePositive: 0,
+      estimator: "deterministic-zero-noise-v1",
+      baselineArtifactHash: BASELINE,
+      baselineRuns: [0, 1, 2].map((repeat) => {
+        const runId = `private_baseline_${repeat}`;
+        return { runId, evaluationCacheNamespace: runScopedEvaluationCacheNamespace(epoch, runId), scores };
+      }),
+      scoreHash: deterministicBaselineScoreHash(scores),
+      informationFreeMeasurements: 3,
+    })];
+    const broker = new Broker(config);
+    try {
+      const task = broker.getTask({ privileged: false });
+      const calibration = task.promotionGateCalibrations.find((entry) => entry.assetGroupId === "secret")!;
+      const optimizerPayload = JSON.stringify(task);
+      for (const privateField of ["perExampleBits", "baselineRuns", "scoreHash", "sourceCohortSha256"]) {
+        expect(optimizerPayload).not.toContain(`${JSON.stringify(privateField)}:`);
+      }
+      expect(PromotionNoiseCalibration.safeParse(calibration).success).toBe(false);
+      const visible = GetTaskResult.parse(JSON.parse(optimizerPayload));
+      expect(assessPromotion(1.25, 1.375, visible.promotionGateCalibrations[0]!).decision).toBe("promote");
+    } finally {
+      await broker.close();
+      await rm(path.dirname(config.runDir), { recursive: true, force: true });
+    }
   });
 
   test("memoizes a repeated request while the broker owns the cached bit", async () => {

@@ -25,7 +25,7 @@ usage:
   hone "<objective>" [author/run flags]
   hone run <capsule-dir> [--headless] [--budget-usd N] [--apply none|branch|pr|auto] [--repo <dir>] [--resume [--run <id>]]
            [--backend stub|local] [--config <json>] [--calibration <file>]
-  hone promotion-noise <capsule-dir> --epoch <name> --out <calibration.json> --headless [--seeds K] [--repeats R]
+  hone promotion-noise <capsule-dir> --epoch <name> --out <calibration.json> --headless [--deterministic] [--seeds K] [--repeats R]
   hone author <capsule-objective> [--repo DIR] [--headless] [--acknowledge-dirty]
   hone hone --campaign <path> --headless
   hone calibration --campaign <path> --headless [--state <.hone-runs/path>] [--resume] [--dry-structure] [--smoke-cell N]

@@ -13,7 +13,7 @@ hone run <capsule-dir> [--headless] [--budget-usd N]
   [--optimizer-artifact sha256:…]
 
 hone promotion-noise <capsule-dir> --epoch NAME --out FILE --headless
-  [--seeds K] [--repeats R]
+  [--seeds K] [--repeats R] [--deterministic]
 
 hone author <objective> [--repo DIR] [--headless] [--acknowledge-dirty]
 hone author --workflow ID
@@ -61,6 +61,18 @@ hone promotion-noise capsules/compress --epoch compress-2026-10 --out compress-n
 It runs `--repeats R` (default 7) sealed noise runs through the ordinary trusted `hone run` path. Each measures only the frozen baseline, once per seed `0…K−1` (`--seeds`, default 3), on the search's asset group, in the chosen epoch; no optimizer starts and no model is called. Each repeat is a separate run, so repeats land in separate broker boots. The pooled within-seed standard deviation over the K×R cross-run measurements gives the pooled-score calibration (`noiseEnvelope = max(4.5 × SD, largest observed pair delta)`). The cohort must meet the schema minimums: K ≥ 3, R ≥ 3, K×R ≥ 21 and K×(R−1) ≥ 18. Each noise run spends K evaluator invocations of the capsule's budget, and K must stay below `maxEvaluatorInvocations` so the run completes rather than ending on budget.
 
 Run ids derive from the capsule, epoch, seeds and repeats, so re-running the same command resumes an interrupted repeat and reuses finished ones instead of measuring again. The raw observations are kept under `.hone-runs/promotion-noise-<hash>/`. Use the same capsule digest and image for the search; a different epoch, digest or image refuses the calibration.
+
+For bit-stable evaluators, opt into a zero-noise calibration:
+
+```sh
+hone promotion-noise capsules/compress --epoch compress-2026-10 --out compress-zero-noise.json --headless --deterministic
+```
+
+Deterministic mode defaults to one seed and three repeats. It requires at least three baseline-only runs with distinct run ids and actual run-scoped evaluator cache namespaces. For each seed, the trusted aggregate and every available per-example score must be bit-identical across repeats; missing or changed example-score sets also refuse. The broker captures finite IEEE754 bits before JSON serialization, preserving the distinction between positive and negative zero. The `deterministic-zero-noise-v1` evidence records `aggregateBits`, `perExampleBits` and their score hash, binds the same capsule/digest/image/group/epoch identity, and sets `noiseFloor = noiseEnvelope = 0`. A strictly better paired score can promote; equal or worse cannot.
+
+Full deterministic score-bit evidence remains in trusted calibration and observation files. The optimizer's `getTask` receives only the deterministic gate summary, without baseline run vectors or their score/cohort hashes; a task summary is not admissible calibration evidence. Existing pooled/direct task payloads are unchanged.
+
+Any mismatch exits nonzero without publishing a calibration or observations, and requires the full default three-seed × seven-repeat calibration. The command never silently changes estimators. Deterministic and pooled plans have separate run identities; resumes reuse only their own completed runs.
 
 ### Resuming after a reboot
 
