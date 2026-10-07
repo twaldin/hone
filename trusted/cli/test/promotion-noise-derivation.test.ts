@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { DETERMINISTIC_ZERO_NOISE_ESTIMATOR, canonicalJson } from "@hone/schema";
+import { DETERMINISTIC_ZERO_NOISE_ESTIMATOR, canonicalJson, runScopedEvaluationCacheNamespace } from "@hone/schema";
 import {
   BASELINE_NOISE_EVIDENCE_VERSION,
   deriveBaselineNoiseCalibration,
@@ -365,11 +365,13 @@ describe("deterministic baseline-only calibration", () => {
     return Array.from({ length: 3 }, (_, repeat) => ({
       runId: `run_noise_r${repeat}`,
       facts: seeds.map((seed) => ({
-        evaluationCacheNamespace: `eval-run-${createHash("sha256").update(canonicalJson({
-          measurementEpoch: identity.measurementEpoch, runId: `run_noise_r${repeat}`,
-        })).digest("hex")}`,
+        evaluationCacheNamespace: runScopedEvaluationCacheNamespace(identity.measurementEpoch, `run_noise_r${repeat}`),
         measurementEpoch: identity.measurementEpoch,
         aggregate: 0.5 + seed,
+        scoreBits: {
+          aggregateBits: seed === 0 ? "3fe0000000000000" : "3ff8000000000000",
+          perExampleBits: { a: "3fd0000000000000", b: "3fe8000000000000" },
+        },
         record: {
           capsuleId: NOISY,
           artifactHash: BASELINE,
@@ -400,9 +402,10 @@ describe("deterministic baseline-only calibration", () => {
     expect(calibration.informationFreePairs).toBe(seeds.length === 1 ? 3 : 6);
     expect(observations.baselineRuns).toHaveLength(3);
     expect(observations.baselineRuns[0]?.scores[0]).toEqual({
-      seed: 0, aggregate: 0.5, perExample: { a: 0.25, b: 0.75 },
+      seed: 0, aggregateBits: "3fe0000000000000", perExampleBits: { a: "3fd0000000000000", b: "3fe8000000000000" },
     });
     expect(observations.identity.baselineArtifactHash).toBe(BASELINE);
+    expect(observations.version).toBe("hone-deterministic-zero-noise-observations-v1");
   });
 
   it("refuses a common wrong artifact instead of learning baseline identity from the first fact", () => {
@@ -414,7 +417,50 @@ describe("deterministic baseline-only calibration", () => {
     expect(() => deriveDeterministicBaselineNoiseCalibration(cohort(), missing, at)).toThrow(/admitted baseline artifact hash/);
   });
 
+  it.each(["0000000000000000", "8000000000000000"])("preserves equal finite signed-zero vectors %s after JSON roundtrip", (zeroBits) => {
+    const runs = cohort().map((run) => ({
+      ...run,
+      facts: run.facts.map((fact) => ({
+        ...fact, aggregate: -0,
+        scoreBits: { aggregateBits: zeroBits, perExampleBits: { a: zeroBits, b: zeroBits } },
+        record: { ...fact.record, output: { ...fact.record.output, perExample: { a: { score: -0 }, b: { score: -0 } } } },
+      })),
+    }));
+    const journalRuns = JSON.parse(JSON.stringify(runs)) as BaselineNoiseRun[];
+    const { calibration, observations } = deriveDeterministicBaselineNoiseCalibration(journalRuns, identity, at);
+    expect(calibration.noiseEnvelope).toBe(0);
+    expect(JSON.parse(JSON.stringify(observations)).baselineRuns[0].scores[0]).toEqual({
+      seed: 0, aggregateBits: zeroBits, perExampleBits: { a: zeroBits, b: zeroBits },
+    });
+  });
+
+  it.each(["aggregate", "example"])("refuses mixed signed-zero %s bits even when JSON journal numbers are all zero", (coordinate) => {
+    const runs = cohort().map((run, repeat) => ({
+      ...run,
+      facts: run.facts.map((fact) => ({
+        ...fact, aggregate: 0,
+        scoreBits: {
+          aggregateBits: coordinate === "aggregate" && repeat === 1 ? "8000000000000000" : "0000000000000000",
+          perExampleBits: { a: coordinate === "example" && repeat === 1 ? "8000000000000000" : "0000000000000000" },
+        },
+        record: { ...fact.record, output: { ...fact.record.output, perExample: { a: { score: -0 } } } },
+      })),
+    }));
+    expect(() => deriveDeterministicBaselineNoiseCalibration(JSON.parse(JSON.stringify(runs)), identity, at)).toThrow();
+  });
+
   const invalidFacts: Array<[string, (fact: BaselineNoiseRun["facts"][number]) => BaselineNoiseRun["facts"][number]]> = [
+    ["missing trusted score bits", (fact) => {
+      const missing = { ...fact };
+      delete missing.scoreBits;
+      return missing;
+    }],
+    ["invalid trusted score bits", (fact) => ({ ...fact, scoreBits: { aggregateBits: "invalid" } })],
+    ["nonfinite trusted score bits", (fact) => ({ ...fact, scoreBits: { ...fact.scoreBits!, aggregateBits: "7ff0000000000000" } })],
+    ["aggregate bits tampered", (fact) => ({ ...fact, scoreBits: { ...fact.scoreBits!, aggregateBits: "3fe8000000000000" } })],
+    ["example bits tampered", (fact) => ({ ...fact, scoreBits: { ...fact.scoreBits!, perExampleBits: { a: "3fd0000000000000", b: "3fd0000000000000" } } })],
+    ["missing example bit stamp", (fact) => ({ ...fact, scoreBits: { aggregateBits: "3fe0000000000000" } })],
+    ["different example bit keys", (fact) => ({ ...fact, scoreBits: { ...fact.scoreBits!, perExampleBits: { a: "3fd0000000000000", c: "3fe8000000000000" } } })],
     ["aggregate differs", (fact) => ({ ...fact, aggregate: 0.5000000000000001 })],
     ["example score differs despite equal aggregate", (fact) => ({
       ...fact, record: { ...fact.record, output: { ...fact.record.output, perExample: { a: { score: 0.25 }, b: { score: 0.76 } } } },

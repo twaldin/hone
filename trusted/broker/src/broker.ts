@@ -22,6 +22,7 @@ import {
   assessPromotion,
   BudgetState,
   canonicalJson,
+  encodeFiniteScoreBits,
   CapsuleRuntimeIdentity,
   CapsuleManifest,
   ChildRunAdmission,
@@ -33,6 +34,7 @@ import {
   CorpusPanelEvidence,
   CorpusPublicDocument,
   EvaluatorIsolationRecord,
+  EvaluatorScoreBits,
   EvaluationRecord,
   EvaluatorOutput,
   EvalPhaseContinue,
@@ -58,6 +60,7 @@ import {
   PromotionGateDecision,
   PromotionNoiseCalibration,
   PROMOTION_GATE_VERSION,
+  runScopedEvaluationCacheNamespace,
   HoldoutNullControlRecord,
   PromotionHoldoutRecord,
   PromotionHoldoutSplit,
@@ -1065,6 +1068,8 @@ const StatePayload = z.discriminatedUnion("t", [
     measurementEpoch: z.string().optional(),
     /** Actual evaluator cache domain; absent only on legacy journal facts. */
     evaluationCacheNamespace: z.string().min(1).optional(),
+    /** Exact finite score bits captured before lossy JSON number serialization. */
+    scoreBits: EvaluatorScoreBits.optional(),
     /** Monotone trusted mint ordinal of `epoch` (see mintEpochSeq); pre-ordinal lines rank by first appearance in the journal. */
     epochSeq: z.number().int().nonnegative().optional(),
     /** Persisted parent-first same-epoch gate identity (see recordEvaluation). */
@@ -1308,6 +1313,8 @@ export interface BrokerJournalEvaluationFact {
   measurementEpoch: string | undefined;
   /** Actual evaluator cache domain used for this fact; legacy journals omit it. */
   evaluationCacheNamespace?: string;
+  /** Exact finite score bits captured by the trusted broker; legacy journals omit it. */
+  scoreBits?: EvaluatorScoreBits;
   /** The broker's own promotion scalarization of the record; null when ineligible. */
   aggregate: number | null;
 }
@@ -1343,6 +1350,7 @@ export function readBrokerJournalEvaluations(runDir: string): BrokerJournalEvalu
         record: line.record,
         measurementEpoch: line.measurementEpoch,
         ...(line.evaluationCacheNamespace !== undefined ? { evaluationCacheNamespace: line.evaluationCacheNamespace } : {}),
+        ...(line.scoreBits !== undefined ? { scoreBits: line.scoreBits } : {}),
         aggregate: eligibleAggregate(line.record) ?? null,
       });
     }
@@ -1778,7 +1786,7 @@ export class Broker {
       config.measurementEpoch === undefined
         ? "eval"
         : config.runScopedEvaluationCache === true
-          ? `eval-run-${createHash("sha256").update(canonicalJson({ measurementEpoch: config.measurementEpoch, runId: config.runId })).digest("hex")}`
+          ? runScopedEvaluationCacheNamespace(config.measurementEpoch, config.runId)
           : `eval-${createHash("sha256").update(config.measurementEpoch).digest("hex")}`;
     this.evaluationStrategy = config.evaluationStrategy;
     if (this.evaluationStrategy !== undefined && this.manifest.evalPhases !== undefined) {
@@ -4904,6 +4912,20 @@ export class Broker {
     const pairKey = `${record.assetGroupId}|${record.seed}`;
     if (this.trusted.get(`${epoch}|${record.artifactHash}`)?.has(pairKey) === true) return;
 
+    let scoreBits: EvaluatorScoreBits | undefined;
+    const perExampleBits = Object.create(null) as Record<string, string>;
+    let finiteExamples = true;
+    for (const [id, result] of Object.entries(record.output.perExample)) {
+      if (!Number.isFinite(result.score)) {
+        finiteExamples = false;
+        break;
+      }
+      perExampleBits[id] = encodeFiniteScoreBits(result.score);
+    }
+    if (finiteExamples) {
+      scoreBits = { aggregateBits: encodeFiniteScoreBits(aggregate), perExampleBits };
+    }
+
     // Gate derivation BEFORE the child's own insertion: parent-before-child
     // within the SAME epoch, at the same coordinate, and only as the
     // candidate's first-ever trusted evidence (global taint — any prior
@@ -4967,6 +4989,7 @@ export class Broker {
       epoch,
       epochSeq,
       evaluationCacheNamespace: this.evaluationCacheNamespace,
+      ...(scoreBits !== undefined ? { scoreBits } : {}),
       ...(this.trustedMeasurementEpoch !== undefined ? { measurementEpoch: this.trustedMeasurementEpoch } : {}),
       ...(gate !== undefined ? { gate } : {}),
     }, events);

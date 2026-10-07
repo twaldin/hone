@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical.js";
+import { EvaluatorScoreBits, encodeFiniteScoreBits } from "./evaluator.js";
 
 /**
  * Versioned promotion semantics. Historical gates without this marker retain
@@ -55,20 +56,12 @@ const DirectDeltaCalibration = CalibrationIdentity.extend({
   localArmBaselineHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
 }).strict();
 
-// Ordinary JSON erases negative zero. Refuse it rather than publish evidence
-// whose bitwise identity would change when the calibration is read back.
-const SerializableFiniteScore = z.number().finite().refine(
-  (value) => !Object.is(value, -0),
-  "negative zero cannot be preserved in JSON score evidence",
-);
-const DeterministicBaselineScoreSchema = z.object({
+const DeterministicBaselineScoreSchema = EvaluatorScoreBits.extend({
   seed: z.number().finite().int().nonnegative().refine(
     (value) => !Object.is(value, -0),
     "negative zero cannot be preserved in JSON seed evidence",
   ),
-  aggregate: SerializableFiniteScore,
-  perExample: z.record(z.string().min(1), SerializableFiniteScore).optional(),
-}).strict();
+});
 export type DeterministicBaselineScore = z.infer<typeof DeterministicBaselineScoreSchema>;
 
 const DeterministicBaselineRunSchema = z.object({
@@ -83,20 +76,20 @@ export type DeterministicBaselineRun = z.infer<typeof DeterministicBaselineRunSc
  * sorted example identities, and big-endian IEEE754 bits (including -0).
  */
 export function deterministicBaselineScoreHash(scores: readonly DeterministicBaselineScore[]): string {
-  const bytes = Buffer.allocUnsafe(8);
-  const bits = (value: number): string => {
-    if (!Number.isFinite(value)) throw new RangeError("score hashes require finite numbers");
-    bytes.writeDoubleBE(value);
-    return bytes.toString("hex");
-  };
   const identity = scores.map((score) => ({
-    seed: bits(score.seed),
-    aggregate: bits(score.aggregate),
-    perExample: score.perExample === undefined
+    seed: encodeFiniteScoreBits(score.seed),
+    aggregateBits: score.aggregateBits,
+    perExampleBits: score.perExampleBits === undefined
       ? null
-      : Object.keys(score.perExample).sort().map((id) => [id, bits(score.perExample![id]!)]),
+      : Object.keys(score.perExampleBits).sort().map((id) => [id, score.perExampleBits![id]!]),
   }));
   return `sha256:${createHash("sha256").update(canonicalJson(identity)).digest("hex")}`;
+}
+
+/** One cache identity formula shared by trusted execution and evidence validation. */
+export function runScopedEvaluationCacheNamespace(measurementEpoch: string, runId: string): string {
+  const identity = canonicalJson({ measurementEpoch, runId });
+  return `eval-run-${createHash("sha256").update(identity).digest("hex")}`;
 }
 
 const LiteralPositiveZero = z.literal(0).refine((value) => !Object.is(value, -0));
@@ -138,8 +131,7 @@ export const PromotionNoiseCalibration = z.discriminatedUnion("estimator", [
       if (namespaces.has(run.evaluationCacheNamespace)) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baselineRuns", runIndex, "evaluationCacheNamespace"], message: "baseline runs must use distinct run-scoped evaluation caches" });
       }
-      const namespaceIdentity = canonicalJson({ measurementEpoch: calibration.measurementEpoch, runId: run.runId });
-      const expectedNamespace = `eval-run-${createHash("sha256").update(namespaceIdentity).digest("hex")}`;
+      const expectedNamespace = runScopedEvaluationCacheNamespace(calibration.measurementEpoch, run.runId);
       if (run.evaluationCacheNamespace !== expectedNamespace) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baselineRuns", runIndex, "evaluationCacheNamespace"], message: "run-scoped cache namespace must bind the run ID and measurement epoch" });
       }
@@ -160,18 +152,18 @@ export const PromotionNoiseCalibration = z.discriminatedUnion("estimator", [
         if (!Object.is(score.seed, expected.seed)) {
           ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "seed"], message: "baseline runs must have the same ordered seed coordinates" });
         }
-        if (!Object.is(score.aggregate, expected.aggregate)) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "aggregate"], message: "baseline aggregate scores must have identical IEEE754 bits" });
+        if (score.aggregateBits !== expected.aggregateBits) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "aggregateBits"], message: "baseline aggregate scores must have identical IEEE754 bits" });
         }
-        if ((score.perExample === undefined) !== (expected.perExample === undefined)) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "perExample"], message: "baseline per-example availability must match" });
-        } else if (score.perExample !== undefined && expected.perExample !== undefined) {
-          const keys = Object.keys(score.perExample).sort();
-          const expectedKeys = Object.keys(expected.perExample).sort();
+        if ((score.perExampleBits === undefined) !== (expected.perExampleBits === undefined)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "perExampleBits"], message: "baseline per-example availability must match" });
+        } else if (score.perExampleBits !== undefined && expected.perExampleBits !== undefined) {
+          const keys = Object.keys(score.perExampleBits).sort();
+          const expectedKeys = Object.keys(expected.perExampleBits).sort();
           if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "perExample"], message: "baseline per-example identities must match" });
-          } else if (keys.some((key) => !Object.is(score.perExample![key], expected.perExample![key]))) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "perExample"], message: "baseline per-example scores must have identical IEEE754 bits" });
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "perExampleBits"], message: "baseline per-example identities must match" });
+          } else if (keys.some((key) => score.perExampleBits![key] !== expected.perExampleBits![key])) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "perExampleBits"], message: "baseline per-example scores must have identical IEEE754 bits" });
           }
         }
       }
@@ -184,11 +176,9 @@ export const PromotionNoiseCalibration = z.discriminatedUnion("estimator", [
     if (calibration.informationFreePairs !== seedCount * runCount * (runCount - 1) / 2) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "informationFreePairs must equal seedCount * choose(runCount, 2)" });
     }
-    // Number refinements can be dirty rather than aborted: do not hash invalid
-    // arithmetic and turn safeParse into an exception.
-    const finiteBaseline = baseline.scores.every((score) =>
-      Number.isFinite(score.seed) && Number.isFinite(score.aggregate)
-      && (score.perExample === undefined || Object.values(score.perExample).every(Number.isFinite)));
+    // Number refinements can be dirty rather than aborted: never encode a
+    // nonfinite seed and turn safeParse into an exception.
+    const finiteBaseline = baseline.scores.every((score) => Number.isFinite(score.seed));
     if (finiteBaseline && calibration.scoreHash !== deterministicBaselineScoreHash(baseline.scores)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["scoreHash"], message: "scoreHash must bind the baseline score evidence" });
     }

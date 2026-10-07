@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DETERMINISTIC_ZERO_NOISE_ESTIMATOR, PromotionNoiseCalibration, RunConfig, capsuleDigest } from "@hone/schema";
@@ -44,30 +45,48 @@ function noiseBackend(root: string): string {
           const namespace = "eval-run-" + createHash("sha256").update(JSON.stringify({
             measurementEpoch: ctx.measurementEpoch, runId: ctx.runId,
           })).digest("hex");
-          const lines = ctx.config.noiseCalibration.seeds.map((seed) => JSON.stringify({
-            t: "eval",
-            measurementEpoch: ctx.measurementEpoch,
-            ...(ctx.env.NOISE_MISSING_NAMESPACE === "1" ? {} : {
-              evaluationCacheNamespace: ctx.env.NOISE_SHARED_NAMESPACE === "1" ? "eval-run-" + "1".repeat(64) : namespace,
-            }),
-            record: {
-              capsuleId: ctx.admittedManifest.id,
-              artifactHash: ctx.env.NOISE_WRONG_BASELINE === "1" ? ${JSON.stringify(fakeHash("a"))} : ${JSON.stringify(fakeHash("b"))},
-              assetGroupId: ctx.config.noiseCalibration.assetGroupId,
-              seed,
-              output: {
-                valid: true,
-                objectives: { score: deterministic ? 0.5 + seed * 0.1 + (vary ? 0.001 : 0) : 0.5 + seed * 0.1 + (repeat % 2 === 0 ? 0.01 : -0.01) },
-                constraints: {},
-                perExample: { a: { score: ctx.env.NOISE_EXAMPLE_VARY === "1" && repeat === 1 ? 0.26 : 0.25 }, b: { score: 0.75 } },
+          const bits = (value) => {
+            const bytes = Buffer.alloc(8);
+            bytes.writeDoubleBE(value);
+            return bytes.toString("hex");
+          };
+          const lines = ctx.config.noiseCalibration.seeds.map((seed) => {
+            const score = ctx.env.NOISE_ZERO === "1" ? -0
+              : deterministic ? 0.5 + seed * 0.1 + (vary ? 0.001 : 0)
+              : 0.5 + seed * 0.1 + (repeat % 2 === 0 ? 0.01 : -0.01);
+            const a = ctx.env.NOISE_ZERO === "1" || ctx.env.NOISE_MIXED_ZERO === "1"
+              ? (ctx.env.NOISE_MIXED_ZERO === "1" && repeat !== 1 ? 0 : -0)
+              : ctx.env.NOISE_EXAMPLE_VARY === "1" && repeat === 1 ? 0.26 : 0.25;
+            const b = ctx.env.NOISE_ZERO === "1" ? -0 : 0.75;
+            const scoreBits = {
+              aggregateBits: bits(score),
+              perExampleBits: { a: bits(a), b: bits(b) },
+            };
+            if (ctx.env.NOISE_BITS_TAMPER === "1") scoreBits.aggregateBits = bits(score + 1);
+            return JSON.stringify({
+              t: "eval",
+              measurementEpoch: ctx.measurementEpoch,
+              ...(deterministic && ctx.env.NOISE_MISSING_BITS !== "1" ? { scoreBits } : {}),
+              ...(ctx.env.NOISE_MISSING_NAMESPACE === "1" ? {} : {
+                evaluationCacheNamespace: ctx.env.NOISE_SHARED_NAMESPACE === "1" ? "eval-run-" + "1".repeat(64) : namespace,
+              }),
+              record: {
+                capsuleId: ctx.admittedManifest.id,
+                artifactHash: ctx.env.NOISE_WRONG_BASELINE === "1" ? ${JSON.stringify(fakeHash("a"))} : ${JSON.stringify(fakeHash("b"))},
+                assetGroupId: ctx.config.noiseCalibration.assetGroupId,
+                seed,
+                output: {
+                  valid: true, objectives: { score }, constraints: {},
+                  perExample: { a: { score: a }, b: { score: b } },
+                },
+                costUsd: 0,
+                durationMs: 1,
+                cached: ctx.env.NOISE_MEMO === "1",
+                evaluatedAt: new Date().toISOString(),
               },
-              costUsd: 0,
-              durationMs: 1,
-              cached: ctx.env.NOISE_MEMO === "1",
-              evaluatedAt: new Date().toISOString(),
-            },
-            events: [],
-          }));
+              events: [],
+            });
+          });
           appendFileSync(join(ctx.runDir, "broker-state.ndjson"), lines.join("\\n") + "\\n");
         },
       };
@@ -180,7 +199,10 @@ describe("hone promotion-noise", () => {
     });
     if (calibration.estimator !== DETERMINISTIC_ZERO_NOISE_ESTIMATOR) throw new Error("unexpected estimator");
     expect(new Set(calibration.baselineRuns.map((run) => run.evaluationCacheNamespace)).size).toBe(3);
-    expect(calibration.baselineRuns[0]?.scores).toEqual([{ seed: 0, aggregate: 0.5, perExample: { a: 0.25, b: 0.75 } }]);
+    expect(calibration.baselineRuns[0]?.scores).toEqual([{
+      seed: 0, aggregateBits: "3fe0000000000000",
+      perExampleBits: { a: "3fd0000000000000", b: "3fe8000000000000" },
+    }]);
     const before = readFileSync(join(root, "zero.json"), "utf8");
     expect(await promotionNoiseCommand(args, io)).toBe(0);
     expect(starts(root)).toHaveLength(3);
@@ -208,7 +230,75 @@ describe("hone promotion-noise", () => {
     expect(searchConfig.search?.calibrations).toEqual([calibration]);
   });
 
+  it("reuses independently preseeded legacy pooled plan runs without adding fresh measurements", { timeout: 180_000 }, async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const backend = noiseBackend(root);
+    const { io } = makeIo(root, BASE_ENV);
+    // The released plan's sorted JSON wire shape, built without the command
+    // or canonicalJson, supplies the existing state/run identities.
+    const legacyPlan = JSON.stringify({
+      admittedCapsuleDigest: capsuleDigest(manifestObject()),
+      assetGroupId: "train",
+      capsuleId: CAP_ID,
+      executionImage: FIX_IMAGE,
+      measurementEpoch: EPOCH,
+      repeats: 7,
+      seeds: [0, 1, 2],
+      version: 1,
+    });
+    const legacyHash = createHash("sha256").update(legacyPlan).digest("hex");
+    const stateDir = join(root, ".hone-runs", "promotion-noise-" + legacyHash.slice(0, 16));
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "plan.json"), legacyPlan + "\n");
+    const configPath = join(stateDir, "noise-run-config.json");
+    writeFileSync(configPath, JSON.stringify({
+      headless: true, apply: "none",
+      noiseCalibration: { measurementEpoch: EPOCH, assetGroupId: "train", seeds: [0, 1, 2] },
+    }));
+    const legacyRunIds = Array.from({ length: 7 }, (_, repeat) => "run_noise_" + legacyHash.slice(0, 12) + "_r" + repeat);
+    for (const runId of legacyRunIds) {
+      expect(await cliRunCommand(["capsule", "--headless", "--config", configPath, "--backend", backend], io, { runId })).toBe(0);
+    }
+    expect(starts(root).map((start) => start.runId)).toEqual(legacyRunIds);
+    expect(await promotionNoiseCommand([
+      "capsule", "--epoch", EPOCH, "--out", "legacy.json", "--headless", "--backend", backend,
+    ], io)).toBe(0);
+    expect(starts(root).map((start) => start.runId)).toEqual(legacyRunIds);
+    expect(readFileSync(join(stateDir, "plan.json"), "utf8")).toBe(legacyPlan + "\n");
+    const observations = JSON.parse(readFileSync(join(stateDir, "observations.json"), "utf8"));
+    expect(observations.version).toBe("hone-baseline-noise-observations-v1");
+    expect(observations.runIds).toEqual(legacyRunIds);
+    expect(observations).not.toHaveProperty("baselineRuns");
+    expect(PromotionNoiseCalibration.parse(JSON.parse(readFileSync(join(root, "legacy.json"), "utf8"))).estimator)
+      .toBe("pooled-within-coordinate-sd-v1");
+  });
+
+  it("publishes equal negative-zero bits from JSON journals without losing provenance", { timeout: 90_000 }, async () => {
+    const root = makeRoot();
+    makeCapsule(root);
+    const backend = noiseBackend(root);
+    const { io } = makeIo(root, { ...BASE_ENV, NOISE_DETERMINISTIC: "1", NOISE_ZERO: "1" });
+    expect(await promotionNoiseCommand([
+      "capsule", "--epoch", EPOCH, "--out", "zero.json", "--headless", "--deterministic", "--backend", backend,
+    ], io)).toBe(0);
+    const calibration = PromotionNoiseCalibration.parse(JSON.parse(readFileSync(join(root, "zero.json"), "utf8")));
+    expect(calibration.noiseEnvelope).toBe(0);
+    if (calibration.estimator !== DETERMINISTIC_ZERO_NOISE_ESTIMATOR) throw new Error("unexpected estimator");
+    expect(calibration.baselineRuns.every((run) => run.scores.every((score) =>
+      score.aggregateBits === "8000000000000000"
+      && score.perExampleBits?.a === "8000000000000000"
+      && score.perExampleBits?.b === "8000000000000000"))).toBe(true);
+    const state = readdirSync(join(root, ".hone-runs")).find((name) => name.startsWith("promotion-noise-"));
+    const observations = JSON.parse(readFileSync(join(root, ".hone-runs", state!, "observations.json"), "utf8"));
+    expect(observations.version).toBe("hone-deterministic-zero-noise-observations-v1");
+    expect(observations.baselineRuns).toEqual(calibration.baselineRuns);
+  });
+
   it.each([
+    { name: "missing trusted score bits", env: { NOISE_MISSING_BITS: "1" } },
+    { name: "numeric-bit tampering", env: { NOISE_BITS_TAMPER: "1" } },
+    { name: "mixed signed-zero example bits after JSON", env: { NOISE_MIXED_ZERO: "1" } },
     { name: "changed aggregate", env: { NOISE_VARY: "1" } },
     { name: "changed example despite identical aggregate", env: { NOISE_EXAMPLE_VARY: "1" } },
     { name: "wrong baseline in every run", env: { NOISE_WRONG_BASELINE: "1" } },

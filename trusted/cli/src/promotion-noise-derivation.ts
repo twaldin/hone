@@ -6,6 +6,7 @@ import type { BrokerJournalEvaluationFact } from "@hone/broker";
 import {
   CapsuleManifest,
   DETERMINISTIC_ZERO_NOISE_ESTIMATOR,
+  EvaluatorScoreBits,
   POOLED_SCORE_SD_ESTIMATOR,
   PROMOTION_GATE_VERSION,
   PromotionNoiseCalibration,
@@ -366,6 +367,8 @@ export function deriveNoiseCalibrations(
 
 export const BASELINE_NOISE_EVIDENCE_VERSION = "hone-baseline-noise-v1" as const;
 export const BASELINE_NOISE_OBSERVATIONS_VERSION = "hone-baseline-noise-observations-v1" as const;
+export const DETERMINISTIC_BASELINE_NOISE_OBSERVATIONS_VERSION =
+  "hone-deterministic-zero-noise-observations-v1" as const;
 
 /** The identity a baseline-only noise cohort is measured under; the calibration binds every field. */
 export interface BaselineNoiseIdentity {
@@ -465,7 +468,8 @@ export function deriveBaselineNoiseCalibration(
   return { calibration, observations };
 }
 
-export interface DeterministicBaselineNoiseObservations extends BaselineNoiseObservations {
+export interface DeterministicBaselineNoiseObservations extends Omit<BaselineNoiseObservations, "version"> {
+  version: typeof DETERMINISTIC_BASELINE_NOISE_OBSERVATIONS_VERSION;
   baselineRuns: DeterministicBaselineRun[];
   scoreHash: string;
 }
@@ -510,23 +514,39 @@ export function deriveDeterministicBaselineNoiseCalibration(
         throw new Error(`noise run ${run.runId} holds ${measured.length} measurements of seed ${seed}, expected exactly 1`);
       }
       const fact = measured[0]!;
-      return {
-        seed,
-        aggregate: fact.aggregate!,
-        perExample: Object.fromEntries(Object.entries(fact.record.output.perExample).map(([id, result]) => [id, result.score])),
-      };
+      const parsed = EvaluatorScoreBits.safeParse(fact.scoreBits);
+      if (!parsed.success) {
+        throw new Error(`noise run ${run.runId} seed ${seed} is missing or has invalid trusted score bits`);
+      }
+      const bits = parsed.data;
+      const decode = (value: string): number => Buffer.from(value, "hex").readDoubleBE();
+      const examples = fact.record.output.perExample;
+      const exampleBits = bits.perExampleBits;
+      if (decode(bits.aggregateBits) !== fact.aggregate
+        || exampleBits === undefined
+        || Object.keys(examples).length !== Object.keys(exampleBits).length
+        || Object.entries(examples).some(([id, result]) =>
+          !Object.hasOwn(exampleBits, id)
+          || !Number.isFinite(result.score)
+          || decode(exampleBits[id]!) !== result.score)) {
+        throw new Error(`noise run ${run.runId} seed ${seed} has trusted score bits inconsistent with its journaled scores`);
+      }
+      return { seed, ...bits };
     });
     if (evaluationCacheNamespace === undefined) throw new Error(`noise run ${run.runId} holds no fresh baseline measurement`);
     return { runId: run.runId, evaluationCacheNamespace, scores };
   });
   const scoreHash = deterministicBaselineScoreHash(baselineRuns[0]?.scores ?? []);
   const observations: DeterministicBaselineNoiseObservations = {
-    version: BASELINE_NOISE_OBSERVATIONS_VERSION,
+    version: DETERMINISTIC_BASELINE_NOISE_OBSERVATIONS_VERSION,
     identity: { ...identity, seeds: [...identity.seeds], baselineArtifactHash },
     runIds: runs.map((run) => run.runId),
-    coordinates: identity.seeds.map((seed, index) => ({
+    coordinates: identity.seeds.map((seed) => ({
       seed,
-      observations: baselineRuns.map((run) => ({ runId: run.runId, score: run.scores[index]!.aggregate })),
+      observations: runs.map((run) => ({
+        runId: run.runId,
+        score: run.facts.find((fact) => fact.record.seed === seed)!.aggregate!,
+      })),
     })),
     baselineRuns,
     scoreHash,

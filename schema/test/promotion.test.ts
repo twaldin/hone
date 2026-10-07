@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   DETERMINISTIC_ZERO_NOISE_ESTIMATOR,
@@ -7,8 +6,10 @@ import {
   PROMOTION_GATE_VERSION,
   PromotionNoiseCalibration,
   assessPromotion,
-  canonicalJson,
+  EvaluatorScoreBits,
   deterministicBaselineScoreHash,
+  encodeFiniteScoreBits,
+  runScopedEvaluationCacheNamespace,
 } from "../src/index.js";
 import type { DeterministicBaselineRun, DeterministicBaselineScore } from "../src/index.js";
 
@@ -25,17 +26,24 @@ const identity = {
   sourceCohortSha256: [hash("c")],
 };
 
-function runNamespace(runId: string, measurementEpoch = identity.measurementEpoch): string {
-  return `eval-run-${createHash("sha256").update(canonicalJson({ measurementEpoch, runId })).digest("hex")}`;
+
+function score(seed: number, aggregate: number, perExample?: Record<string, number>): DeterministicBaselineScore {
+  return {
+    seed,
+    aggregateBits: encodeFiniteScoreBits(aggregate),
+    ...(perExample === undefined ? {} : {
+      perExampleBits: Object.fromEntries(Object.entries(perExample).map(([id, value]) => [id, encodeFiniteScoreBits(value)])),
+    }),
+  };
 }
 
-function deterministicInput(scores: DeterministicBaselineScore[] = [{ seed: 7, aggregate: 1 }], runCount = 3) {
+function deterministicInput(scores: DeterministicBaselineScore[] = [score(7, 1)], runCount = 3) {
   const baselineRuns: DeterministicBaselineRun[] = Array.from({ length: runCount }, (_, index) => ({
     runId: `noise-run-${index}`,
-    evaluationCacheNamespace: runNamespace(`noise-run-${index}`),
+    evaluationCacheNamespace: runScopedEvaluationCacheNamespace(identity.measurementEpoch, `noise-run-${index}`),
     scores: scores.map((score) => ({
       ...score,
-      ...(score.perExample === undefined ? {} : { perExample: { ...score.perExample } }),
+      ...(score.perExampleBits === undefined ? {} : { perExampleBits: { ...score.perExampleBits } }),
     })),
   }));
   return {
@@ -88,9 +96,67 @@ function directInput() {
 }
 
 const perExampleScores: DeterministicBaselineScore[] = [
-  { seed: 7, aggregate: 0.3, perExample: { first: 0.25, second: 0.35 } },
-  { seed: 11, aggregate: 0.5, perExample: { first: 0.4, second: 0.6 } },
+  score(7, 0.3, { first: 0.25, second: 0.35 }),
+  score(11, 0.5, { first: 0.4, second: 0.6 }),
 ];
+
+describe("finite evaluator score bits", () => {
+  it.each([
+    [0, "0000000000000000"],
+    [-0, "8000000000000000"],
+    [Number.MIN_VALUE, "0000000000000001"],
+    [-Number.MIN_VALUE, "8000000000000001"],
+    [Number.MAX_VALUE, "7fefffffffffffff"],
+    [-Number.MAX_VALUE, "ffefffffffffffff"],
+    [1, "3ff0000000000000"],
+    [-1, "bff0000000000000"],
+    [0.30000000000000004, "3fd3333333333334"],
+  ] as const)("preserves finite %s as %s through JSON", (value, bits) => {
+    expect(encodeFiniteScoreBits(value)).toBe(bits);
+    const input = { aggregateBits: bits, perExampleBits: { example: bits } };
+    expect(EvaluatorScoreBits.parse(JSON.parse(JSON.stringify(input)))).toEqual(input);
+    expect(Object.is(Buffer.from(bits, "hex").readDoubleBE(), value)).toBe(true);
+    const calibration = deterministicInput([score(7, value, { example: value })]);
+    expect(PromotionNoiseCalibration.parse(JSON.parse(JSON.stringify(calibration)))).toEqual(calibration);
+  });
+
+  it.each([NaN, Infinity, -Infinity])("rejects nonfinite encoder input %s", (value) => {
+    expect(() => encodeFiniteScoreBits(value)).toThrow(RangeError);
+  });
+
+  it.each([
+    "", "0", "0".repeat(15), "0".repeat(17), "0".repeat(32),
+    "000000000000000g", "3FF0000000000000", " 0000000000000000",
+    "0000000000000000\n",
+    "7ff0000000000000", "fff0000000000000",
+    "7ff8000000000000", "7ff0000000000001", "fff8000000000000",
+  ])("refuses invalid or nonfinite bitstring %j without throwing", (bits) => {
+    for (const field of ["aggregateBits", "perExampleBits"] as const) {
+      const evidence = {
+        aggregateBits: encodeFiniteScoreBits(1),
+        perExampleBits: { example: encodeFiniteScoreBits(1) },
+      };
+      if (field === "aggregateBits") evidence.aggregateBits = bits;
+      else evidence.perExampleBits.example = bits;
+      expect(EvaluatorScoreBits.safeParse(evidence).success).toBe(false);
+      const calibration = deterministicInput([score(7, 1, { example: 1 })]);
+      Object.assign(calibration.baselineRuns[0]!.scores[0]!, evidence);
+      expect(PromotionNoiseCalibration.safeParse(calibration).success).toBe(false);
+    }
+  });
+
+  it.each([null, 0, {}, []])("refuses nonstring bit evidence %j without throwing", (bits) => {
+    expect(EvaluatorScoreBits.safeParse({ aggregateBits: bits }).success).toBe(false);
+    expect(EvaluatorScoreBits.safeParse({ aggregateBits: encodeFiniteScoreBits(1), perExampleBits: { example: bits } }).success).toBe(false);
+  });
+
+  it("refuses numeric score fields instead of accepting a lossy compatibility wire", () => {
+    expect(EvaluatorScoreBits.safeParse({ aggregate: 1, perExample: { example: 1 } }).success).toBe(false);
+    const calibration = deterministicInput();
+    Object.assign(calibration.baselineRuns[0]!.scores[0]!, { aggregate: 1 });
+    expect(PromotionNoiseCalibration.safeParse(calibration).success).toBe(false);
+  });
+});
 
 describe("deterministic zero-noise calibration evidence", () => {
   it("accepts three independent baseline runs on one seed and survives JSON publication", () => {
@@ -101,14 +167,12 @@ describe("deterministic zero-noise calibration evidence", () => {
 
   it("accepts multiple seeds and derives counts per seed, not by pooling coordinates", () => {
     const input = deterministicInput(perExampleScores, 4);
-    expect(input.informationFreeMeasurements).toBe(8);
-    expect(input.informationFreePairs).toBe(12);
     expect(PromotionNoiseCalibration.parse(input)).toEqual(input);
   });
 
   it("accepts identical per-example scores regardless of object insertion order", () => {
     const input = deterministicInput(perExampleScores);
-    input.baselineRuns[1]!.scores[0]!.perExample = { second: 0.35, first: 0.25 };
+    input.baselineRuns[1]!.scores[0]!.perExampleBits = { second: encodeFiniteScoreBits(0.35), first: encodeFiniteScoreBits(0.25) };
     expect(PromotionNoiseCalibration.safeParse(input).success).toBe(true);
   });
 
@@ -147,7 +211,7 @@ describe("deterministic zero-noise calibration evidence", () => {
   });
 
   it("refuses duplicate seeds even when every run and the hash agree", () => {
-    const input = deterministicInput([{ seed: 7, aggregate: 1 }, { seed: 7, aggregate: 1 }]);
+    const input = deterministicInput([score(7, 1), score(7, 1)]);
     expect(PromotionNoiseCalibration.safeParse(input).success).toBe(false);
   });
 
@@ -165,48 +229,56 @@ describe("deterministic zero-noise calibration evidence", () => {
 
   it("refuses bitwise aggregate disagreement even below a typical epsilon tolerance", () => {
     const input = deterministicInput(perExampleScores);
-    input.baselineRuns[1]!.scores[0]!.aggregate = 0.30000000000000004;
+    input.baselineRuns[1]!.scores[0]!.aggregateBits = encodeFiniteScoreBits(0.30000000000000004);
     expect(PromotionNoiseCalibration.safeParse(input).success).toBe(false);
   });
 
   it("refuses changed per-example availability, identities, or score bits", () => {
     const unavailable = deterministicInput(perExampleScores);
-    delete unavailable.baselineRuns[1]!.scores[0]!.perExample;
+    delete unavailable.baselineRuns[1]!.scores[0]!.perExampleBits;
     const missing = deterministicInput(perExampleScores);
-    delete missing.baselineRuns[1]!.scores[0]!.perExample!.second;
+    delete missing.baselineRuns[1]!.scores[0]!.perExampleBits!.second;
     const renamed = deterministicInput(perExampleScores);
-    renamed.baselineRuns[1]!.scores[0]!.perExample = { first: 0.25, renamed: 0.35 };
+    renamed.baselineRuns[1]!.scores[0]!.perExampleBits = { first: encodeFiniteScoreBits(0.25), renamed: encodeFiniteScoreBits(0.35) };
     const changed = deterministicInput(perExampleScores);
-    changed.baselineRuns[1]!.scores[0]!.perExample!.first = 0.25000000000000006;
+    changed.baselineRuns[1]!.scores[0]!.perExampleBits!.first = encodeFiniteScoreBits(0.25000000000000006);
     const newlyAvailable = deterministicInput();
-    newlyAvailable.baselineRuns[1]!.scores[0]!.perExample = {};
+    newlyAvailable.baselineRuns[1]!.scores[0]!.perExampleBits = {};
     for (const input of [unavailable, missing, renamed, changed, newlyAvailable]) {
       expect(PromotionNoiseCalibration.safeParse(input).success).toBe(false);
     }
   });
 
-  it.each([NaN, Infinity, -Infinity])("refuses nonfinite score evidence %s without throwing from safeParse", (value) => {
-    for (const field of ["seed", "aggregate", "perExample"] as const) {
-      const input = deterministicInput(perExampleScores);
-      if (field === "perExample") input.baselineRuns[0]!.scores[0]!.perExample!.first = value;
-      else input.baselineRuns[0]!.scores[0]![field] = value;
-      expect(PromotionNoiseCalibration.safeParse(input).success).toBe(false);
-    }
+  it.each([NaN, Infinity, -Infinity])("refuses nonfinite seeds %s without throwing from safeParse", (seed) => {
+    const input = deterministicInput(perExampleScores);
+    input.baselineRuns[0]!.scores[0]!.seed = seed;
+    expect(PromotionNoiseCalibration.safeParse(input).success).toBe(false);
   });
 
   it.each([-1, 0.5])("refuses invalid seed coordinate %s", (seed) => {
-    const input = deterministicInput([{ seed, aggregate: 1 }]);
+    const input = deterministicInput([score(seed, 1)]);
     expect(PromotionNoiseCalibration.safeParse(input).success).toBe(false);
   });
 
-  it.each(["seed", "aggregate", "perExample"] as const)("fails closed on signed-zero %s evidence before JSON can erase it", (field) => {
-    const input = deterministicInput();
-    for (const run of input.baselineRuns) {
-      if (field === "perExample") run.scores[0]!.perExample = { example: -0 };
-      else run.scores[0]![field] = -0;
-    }
-    input.scoreHash = deterministicBaselineScoreHash(input.baselineRuns[0]!.scores);
+  it("refuses negative-zero seeds before JSON erases their identity", () => {
+    const input = deterministicInput([score(-0, 1)]);
     expect(PromotionNoiseCalibration.safeParse(input).success).toBe(false);
+  });
+
+  it("accepts equal negative-zero aggregate and per-example bits through JSON publication", () => {
+    const input = deterministicInput([score(7, -0, { example: -0 })]);
+    expect(PromotionNoiseCalibration.parse(input)).toEqual(input);
+    expect(PromotionNoiseCalibration.parse(JSON.parse(JSON.stringify(input)))).toEqual(input);
+    expect(input.baselineRuns[0]!.scores[0]).toMatchObject({
+      aggregateBits: "8000000000000000",
+      perExampleBits: { example: "8000000000000000" },
+    });
+  });
+
+  it.each(["aggregateBits", "perExampleBits"] as const)("refuses mixed signed-zero %s after JSON publication", (field) => {
+    const input = deterministicInput([score(7, 0, { example: 0 })]);
+    if (field === "aggregateBits") input.baselineRuns[1]!.scores[0]!.aggregateBits = encodeFiniteScoreBits(-0);
+    else input.baselineRuns[1]!.scores[0]!.perExampleBits!.example = encodeFiniteScoreBits(-0);
     expect(PromotionNoiseCalibration.safeParse(JSON.parse(JSON.stringify(input))).success).toBe(false);
   });
 
@@ -227,7 +299,7 @@ describe("deterministic zero-noise calibration evidence", () => {
   it("refuses a tampered hash or changed scores even when all repeats agree", () => {
     const input = deterministicInput(perExampleScores);
     expect(PromotionNoiseCalibration.safeParse({ ...input, scoreHash: hash("e") }).success).toBe(false);
-    for (const run of input.baselineRuns) run.scores[0]!.aggregate = 0.4;
+    for (const run of input.baselineRuns) run.scores[0]!.aggregateBits = encodeFiniteScoreBits(0.4);
     expect(PromotionNoiseCalibration.safeParse(input).success).toBe(false);
   });
 
@@ -262,34 +334,34 @@ describe("bitwise baseline score hashing", () => {
   it("ignores example object order but binds score order, seeds, examples, and available score bits", () => {
     const original = deterministicBaselineScoreHash(perExampleScores);
     expect(deterministicBaselineScoreHash([
-      { ...perExampleScores[0]!, perExample: { second: 0.35, first: 0.25 } },
+      score(7, 0.3, { second: 0.35, first: 0.25 }),
       perExampleScores[1]!,
     ])).toBe(original);
     for (const changed of [
       [...perExampleScores].reverse(),
       [{ ...perExampleScores[0]!, seed: 8 }, perExampleScores[1]!],
-      [{ ...perExampleScores[0]!, aggregate: 0.30000000000000004 }, perExampleScores[1]!],
-      [{ ...perExampleScores[0]!, perExample: { first: 0.25, renamed: 0.35 } }, perExampleScores[1]!],
-      [{ ...perExampleScores[0]!, perExample: { first: 0.25000000000000006, second: 0.35 } }, perExampleScores[1]!],
+      [score(7, 0.30000000000000004, { first: 0.25, second: 0.35 }), perExampleScores[1]!],
+      [score(7, 0.3, { first: 0.25, renamed: 0.35 }), perExampleScores[1]!],
+      [score(7, 0.3, { first: 0.25000000000000006, second: 0.35 }), perExampleScores[1]!],
     ]) {
       expect(deterministicBaselineScoreHash(changed)).not.toBe(original);
     }
-    expect(deterministicBaselineScoreHash([{ seed: 7, aggregate: 1 }])).not.toBe(
-      deterministicBaselineScoreHash([{ seed: 7, aggregate: 1, perExample: {} }]),
+    expect(deterministicBaselineScoreHash([score(7, 1)])).not.toBe(
+      deterministicBaselineScoreHash([score(7, 1, {})]),
     );
   });
 
   it("distinguishes positive and negative zero rather than letting JSON normalize their bits", () => {
-    expect(deterministicBaselineScoreHash([{ seed: 7, aggregate: 0 }])).not.toBe(
-      deterministicBaselineScoreHash([{ seed: 7, aggregate: -0 }]),
+    expect(deterministicBaselineScoreHash([score(7, 0)])).not.toBe(
+      deterministicBaselineScoreHash([score(7, -0)]),
     );
-    expect(deterministicBaselineScoreHash([{ seed: 7, aggregate: 1, perExample: { example: 0 } }])).not.toBe(
-      deterministicBaselineScoreHash([{ seed: 7, aggregate: 1, perExample: { example: -0 } }]),
+    expect(deterministicBaselineScoreHash([score(7, 1, { example: 0 })])).not.toBe(
+      deterministicBaselineScoreHash([score(7, 1, { example: -0 })]),
     );
   });
 
-  it.each([NaN, Infinity, -Infinity])("refuses nonfinite hash inputs %s", (aggregate) => {
-    expect(() => deterministicBaselineScoreHash([{ seed: 7, aggregate }])).toThrow(RangeError);
+  it.each([NaN, Infinity, -Infinity])("refuses nonfinite hash seeds %s", (seed) => {
+    expect(() => deterministicBaselineScoreHash([score(seed, 1)])).toThrow(RangeError);
   });
 });
 

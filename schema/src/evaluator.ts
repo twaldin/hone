@@ -25,6 +25,26 @@ export const EvaluatorOutput = z.object({
 });
 export type EvaluatorOutput = z.infer<typeof EvaluatorOutput>;
 
+/** Lossless, JSON-safe big-endian IEEE754 evidence for finite evaluator scores. */
+const FiniteScoreBits = z.string().refine((value) => {
+  // Refine may run after a dirty string check: never decode malformed bytes.
+  if (value.length !== 16 || !/^[0-9a-f]{16}$/.test(value)) return false;
+  return Number.isFinite(Buffer.from(value, "hex").readDoubleBE());
+}, "score bits must encode a finite double as 16 lowercase hexadecimal digits");
+
+export const EvaluatorScoreBits = z.object({
+  aggregateBits: FiniteScoreBits,
+  perExampleBits: z.record(z.string().min(1), FiniteScoreBits).optional(),
+}).strict();
+export type EvaluatorScoreBits = z.infer<typeof EvaluatorScoreBits>;
+
+export function encodeFiniteScoreBits(value: number): string {
+  if (!Number.isFinite(value)) throw new RangeError("score bits require a finite number");
+  const bytes = Buffer.allocUnsafe(8);
+  bytes.writeDoubleBE(value);
+  return bytes.toString("hex");
+}
+
 /** Host real-uid pool reserved for collision-free evaluator invocations. */
 export const RESERVED_EVALUATOR_UID_MIN = 20_000;
 export const RESERVED_EVALUATOR_UID_MAX = 20_031;

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -106,6 +106,28 @@ describe("trusted broker evaluation strategy", () => {
     expect(evidence.journalHash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(evidence.lineCount).toBeGreaterThan(0);
     await broker.close();
+  });
+
+  test("preserves original negative-zero example bits after journal numbers lose their sign", async () => {
+    const config = await configFor("score_bits_zero", async (input) => {
+      const record = recordFor(input);
+      record.output.perExample.one!.score = -0;
+      return record;
+    });
+    const broker = new Broker(config);
+    try {
+      const result = await broker.evaluate({ artifact: { hash: BASELINE }, assetGroupId: "train", seed: 0 }, { privileged: false });
+      expect(Object.is(result.output.perExample.one!.score, -0)).toBe(true);
+      const fact = readBrokerJournalEvaluations(config.runDir).facts[0]!;
+      expect(Object.is(fact.record.output.perExample.one!.score, 0)).toBe(true);
+      expect(fact.scoreBits).toEqual({
+        aggregateBits: "3ff4000000000000",
+        perExampleBits: { one: "8000000000000000" },
+      });
+    } finally {
+      await broker.close();
+      await rm(path.dirname(config.runDir), { recursive: true, force: true });
+    }
   });
 
   test("memoizes a repeated request while the broker owns the cached bit", async () => {
