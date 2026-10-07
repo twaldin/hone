@@ -22,6 +22,7 @@ import {
   assessPromotion,
   BudgetState,
   canonicalJson,
+  DETERMINISTIC_ZERO_NOISE_ESTIMATOR,
   encodeFiniteScoreBits,
   CapsuleRuntimeIdentity,
   CapsuleManifest,
@@ -3534,7 +3535,11 @@ export class Broker {
         .filter((group) => group.visibility !== "holdout" || this.terminalHoldoutAssetGroupIds.has(group.id))
         .map((group) => group.id),
       budget: this.budgetStateNow(),
-      promotionGateCalibrations: [...this.promotionNoiseCalibrations.values()],
+      promotionGateCalibrations: Array.from(this.promotionNoiseCalibrations.values(), (calibration) => {
+        if (calibration.estimator !== DETERMINISTIC_ZERO_NOISE_ESTIMATOR) return calibration;
+        const { baselineRuns, scoreHash, ...gateCalibration } = calibration;
+        return gateCalibration;
+      }),
       ...(this.recursive?.evaluationTask === undefined
         ? {}
         : { recursiveTask: this.recursive.evaluationTask }),

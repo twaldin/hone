@@ -222,6 +222,21 @@ export const PromotionNoiseCalibration = z.discriminatedUnion("estimator", [
 });
 export type PromotionNoiseCalibration = z.infer<typeof PromotionNoiseCalibration>;
 
+type LegacyPromotionNoiseCalibration = Exclude<
+  PromotionNoiseCalibration,
+  { estimator: typeof DETERMINISTIC_ZERO_NOISE_ESTIMATOR }
+>;
+
+/** Optimizer-facing gate metadata, not evidence admissible as a calibration. */
+export const PromotionGateCalibration = z.union([
+  PromotionNoiseCalibration.refine(
+    (calibration): calibration is LegacyPromotionNoiseCalibration =>
+      calibration.estimator !== DETERMINISTIC_ZERO_NOISE_ESTIMATOR,
+  ),
+  DeterministicZeroNoiseCalibration.omit({ baselineRuns: true, scoreHash: true }),
+]);
+export type PromotionGateCalibration = z.infer<typeof PromotionGateCalibration>;
+
 export interface PromotionGateAssessment {
   gateVersion: typeof PROMOTION_GATE_VERSION;
   calibrationEvidenceVersion: string | null;
@@ -236,7 +251,7 @@ export interface PromotionGateAssessment {
 export function assessPromotion(
   parentScore: number,
   childScore: number,
-  calibration: PromotionNoiseCalibration | null,
+  calibration: PromotionGateCalibration | null,
 ): PromotionGateAssessment {
   if (!Number.isFinite(parentScore) || !Number.isFinite(childScore)) {
     throw new RangeError("promotion scores must be finite");

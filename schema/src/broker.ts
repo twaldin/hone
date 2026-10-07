@@ -3,7 +3,7 @@ import { BudgetEnvelope } from "./capsule.js";
 import {
   PROMOTION_GATE_VERSION,
   PromotionGateDecision,
-  PromotionNoiseCalibration,
+  PromotionGateCalibration,
 } from "./promotion.js";
 import {
   HoldoutNullControlRecord,
@@ -77,8 +77,8 @@ export const GetTaskResult = z.object({
   /** Asset group ids visible to the optimizer (never contents of protected/holdout). */
   visibleAssetGroups: z.array(z.string()),
   budget: BudgetState,
-  /** Exact capsule/evaluator/group/measurement-epoch calibrations trusted for this run. */
-  promotionGateCalibrations: z.array(PromotionNoiseCalibration),
+  /** Identity-bound gate metadata; private deterministic baseline evidence never crosses this wire. */
+  promotionGateCalibrations: z.array(PromotionGateCalibration),
   /** Present only when trusted orchestration configured a development-panel recursive evaluator. */
   recursiveTask: RecursiveTask.optional(),
 });
