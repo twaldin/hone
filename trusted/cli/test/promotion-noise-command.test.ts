@@ -197,8 +197,7 @@ describe("hone promotion-noise", () => {
       "capsule", "--epoch", EPOCH, "--out", "pooled.json", "--headless", "--seeds", "3", "--repeats", "7", "--backend", backend,
     ], io)).toBe(0);
     const pooled = PromotionNoiseCalibration.parse(JSON.parse(readFileSync(join(root, "pooled.json"), "utf8")));
-    expect(pooled.estimator).toBe("pooled-within-coordinate-sd-v1");
-    expect(pooled.informationFreeMeasurements).toBe(21);
+    expect(pooled).toMatchObject({ estimator: "pooled-within-coordinate-sd-v1", informationFreeMeasurements: 21 });
     expect(starts(root)).toHaveLength(17);
     expect(starts(root).slice(10).every((start) => !deterministicRunIds.has(start.runId))).toBe(true);
 

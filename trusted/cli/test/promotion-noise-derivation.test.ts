@@ -433,7 +433,11 @@ describe("deterministic baseline-only calibration", () => {
     ["wrong epoch", (fact) => ({ ...fact, measurementEpoch: "other" })],
     ["wrong artifact", (fact) => ({ ...fact, record: { ...fact.record, artifactHash: ARTIFACT_1 } })],
     ["unplanned seed", (fact) => ({ ...fact, record: { ...fact.record, seed: 2 } })],
-    ["missing cache namespace", (fact) => ({ ...fact, evaluationCacheNamespace: undefined })],
+    ["missing cache namespace", (fact) => {
+      const missing = { ...fact };
+      delete missing.evaluationCacheNamespace;
+      return missing;
+    }],
     ["shared cache namespace", (fact) => ({ ...fact, evaluationCacheNamespace: `eval-run-${"1".repeat(64)}` })],
     ["non-run cache namespace", (fact) => ({ ...fact, evaluationCacheNamespace: "eval" })],
     ["signed-zero aggregate", (fact) => ({ ...fact, aggregate: -0 })],

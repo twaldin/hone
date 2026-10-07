@@ -4,6 +4,7 @@ import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { BrokerJournalEvaluationFact } from "@hone/broker";
 import {
+  CapsuleManifest,
   DETERMINISTIC_ZERO_NOISE_ESTIMATOR,
   POOLED_SCORE_SD_ESTIMATOR,
   PROMOTION_GATE_VERSION,
@@ -12,7 +13,7 @@ import {
   capsuleDigest,
   deterministicBaselineScoreHash,
 } from "@hone/schema";
-import type { CapsuleManifest, DeterministicBaselineRun, DeterministicBaselineScore } from "@hone/schema";
+import type { DeterministicBaselineRun, DeterministicBaselineScore } from "@hone/schema";
 
 export const PROMOTION_NOISE_OBSERVATIONS_VERSION =
   "campaign-12-promotion-noise-observations-v2" as const;
