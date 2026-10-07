@@ -1068,7 +1068,7 @@ const StatePayload = z.discriminatedUnion("t", [
     measurementEpoch: z.string().optional(),
     /** Actual evaluator cache domain; absent only on legacy journal facts. */
     evaluationCacheNamespace: z.string().min(1).optional(),
-    /** Exact finite score bits captured before lossy JSON number serialization. */
+    /** Fresh finite score bits captured before lossy JSON number serialization; cached facts omit them. */
     scoreBits: EvaluatorScoreBits.optional(),
     /** Monotone trusted mint ordinal of `epoch` (see mintEpochSeq); pre-ordinal lines rank by first appearance in the journal. */
     epochSeq: z.number().int().nonnegative().optional(),
@@ -1313,7 +1313,7 @@ export interface BrokerJournalEvaluationFact {
   measurementEpoch: string | undefined;
   /** Actual evaluator cache domain used for this fact; legacy journals omit it. */
   evaluationCacheNamespace?: string;
-  /** Exact finite score bits captured by the trusted broker; legacy journals omit it. */
+  /** Fresh finite score bits captured by the trusted broker; cached and legacy facts omit them. */
   scoreBits?: EvaluatorScoreBits;
   /** The broker's own promotion scalarization of the record; null when ineligible. */
   aggregate: number | null;
@@ -4913,17 +4913,19 @@ export class Broker {
     if (this.trusted.get(`${epoch}|${record.artifactHash}`)?.has(pairKey) === true) return;
 
     let scoreBits: EvaluatorScoreBits | undefined;
-    const perExampleBits = Object.create(null) as Record<string, string>;
-    let finiteExamples = true;
-    for (const [id, result] of Object.entries(record.output.perExample)) {
-      if (!Number.isFinite(result.score)) {
-        finiteExamples = false;
-        break;
+    if (!record.cached) {
+      const perExampleBits = Object.create(null) as Record<string, string>;
+      let finiteExamples = true;
+      for (const [id, result] of Object.entries(record.output.perExample)) {
+        if (!Number.isFinite(result.score)) {
+          finiteExamples = false;
+          break;
+        }
+        perExampleBits[id] = encodeFiniteScoreBits(result.score);
       }
-      perExampleBits[id] = encodeFiniteScoreBits(result.score);
-    }
-    if (finiteExamples) {
-      scoreBits = { aggregateBits: encodeFiniteScoreBits(aggregate), perExampleBits };
+      if (finiteExamples) {
+        scoreBits = { aggregateBits: encodeFiniteScoreBits(aggregate), perExampleBits };
+      }
     }
 
     // Gate derivation BEFORE the child's own insertion: parent-before-child

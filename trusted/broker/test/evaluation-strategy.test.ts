@@ -130,6 +130,25 @@ describe("trusted broker evaluation strategy", () => {
     }
   });
 
+  test("keeps empty example IDs eligible and preserves their original score bits", async () => {
+    const config = await configFor("score_bits_empty_id", async (input) => {
+      const record = recordFor(input);
+      record.output.perExample = { "": { score: -0 } };
+      return record;
+    });
+    const broker = new Broker(config);
+    try {
+      const result = await broker.evaluate({ artifact: { hash: BASELINE }, assetGroupId: "train", seed: 0 }, { privileged: false });
+      expect(Object.is(result.output.perExample[""]!.score, -0)).toBe(true);
+      const fact = readBrokerJournalEvaluations(config.runDir).facts[0]!;
+      expect(fact.aggregate).toBe(1.25);
+      expect(fact.scoreBits?.perExampleBits?.[""]).toBe("8000000000000000");
+    } finally {
+      await broker.close();
+      await rm(path.dirname(config.runDir), { recursive: true, force: true });
+    }
+  });
+
   test("memoizes a repeated request while the broker owns the cached bit", async () => {
     let calls = 0;
     const config = await configFor("memo", async (input) => {

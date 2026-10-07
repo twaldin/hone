@@ -34,7 +34,7 @@ const FiniteScoreBits = z.string().refine((value) => {
 
 export const EvaluatorScoreBits = z.object({
   aggregateBits: FiniteScoreBits,
-  perExampleBits: z.record(z.string().min(1), FiniteScoreBits).optional(),
+  perExampleBits: z.record(z.string(), FiniteScoreBits).optional(),
 }).strict();
 export type EvaluatorScoreBits = z.infer<typeof EvaluatorScoreBits>;
 
