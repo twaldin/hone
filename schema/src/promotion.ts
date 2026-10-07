@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
+import { canonicalJson } from "./canonical.js";
 
 /**
  * Versioned promotion semantics. Historical gates without this marker retain
@@ -7,6 +9,7 @@ import { z } from "zod";
 export const PROMOTION_GATE_VERSION = "noise-envelope-v3" as const;
 export const POOLED_SCORE_SD_ESTIMATOR = "pooled-within-coordinate-sd-v1" as const;
 export const DIRECT_PAIRED_DELTA_SD_ESTIMATOR = "direct-local-paired-delta-sd-v1" as const;
+export const DETERMINISTIC_ZERO_NOISE_ESTIMATOR = "deterministic-zero-noise-v1" as const;
 
 export const PromotionGateDecision = z.enum([
   "promote",
@@ -52,16 +55,145 @@ const DirectDeltaCalibration = CalibrationIdentity.extend({
   localArmBaselineHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
 }).strict();
 
+// Ordinary JSON erases negative zero. Refuse it rather than publish evidence
+// whose bitwise identity would change when the calibration is read back.
+const SerializableFiniteScore = z.number().finite().refine(
+  (value) => !Object.is(value, -0),
+  "negative zero cannot be preserved in JSON score evidence",
+);
+const DeterministicBaselineScoreSchema = z.object({
+  seed: z.number().finite().int().nonnegative().refine(
+    (value) => !Object.is(value, -0),
+    "negative zero cannot be preserved in JSON seed evidence",
+  ),
+  aggregate: SerializableFiniteScore,
+  perExample: z.record(z.string().min(1), SerializableFiniteScore).optional(),
+}).strict();
+export type DeterministicBaselineScore = z.infer<typeof DeterministicBaselineScoreSchema>;
+
+const DeterministicBaselineRunSchema = z.object({
+  runId: z.string().min(1),
+  evaluationCacheNamespace: z.string().regex(/^eval-run-[0-9a-f]{64}$/),
+  scores: z.array(DeterministicBaselineScoreSchema).min(1),
+}).strict();
+export type DeterministicBaselineRun = z.infer<typeof DeterministicBaselineRunSchema>;
+
 /**
- * Identity-bound, cohort-bound, minimum-powered calibration of the quantity
- * the gate compares. A schedule-faithful local arm uses its direct paired-
- * delta SD; only capsules without one may infer delta noise from pooled score
- * SD. Max observed excursion is a conservative tail guard, not the estimator.
+ * Bind the ordered baseline score vector, including per-example availability,
+ * sorted example identities, and big-endian IEEE754 bits (including -0).
+ */
+export function deterministicBaselineScoreHash(scores: readonly DeterministicBaselineScore[]): string {
+  const bytes = Buffer.allocUnsafe(8);
+  const bits = (value: number): string => {
+    if (!Number.isFinite(value)) throw new RangeError("score hashes require finite numbers");
+    bytes.writeDoubleBE(value);
+    return bytes.toString("hex");
+  };
+  const identity = scores.map((score) => ({
+    seed: bits(score.seed),
+    aggregate: bits(score.aggregate),
+    perExample: score.perExample === undefined
+      ? null
+      : Object.keys(score.perExample).sort().map((id) => [id, bits(score.perExample![id]!)]),
+  }));
+  return `sha256:${createHash("sha256").update(canonicalJson(identity)).digest("hex")}`;
+}
+
+const LiteralPositiveZero = z.literal(0).refine((value) => !Object.is(value, -0));
+const DeterministicZeroNoiseCalibration = CalibrationIdentity.extend({
+  estimator: z.literal(DETERMINISTIC_ZERO_NOISE_ESTIMATOR),
+  measurementEpoch: z.string().min(1),
+  baselineArtifactHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  baselineRuns: z.array(DeterministicBaselineRunSchema).min(3),
+  scoreHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  informationFreeMeasurements: z.number().int().safe().min(3),
+  informationFreePairs: z.number().int().safe().min(3),
+  informationFreePositive: LiteralPositiveZero,
+  maxObservedPairDelta: LiteralPositiveZero,
+  noiseFloor: LiteralPositiveZero,
+  noiseEnvelope: LiteralPositiveZero,
+}).strict();
+
+/**
+ * Identity-bound, cohort-bound calibration of the quantity the gate compares.
+ * Bitwise-identical fresh baseline repeats establish deterministic zero noise.
+ * Otherwise a schedule-faithful local arm uses its direct paired-delta SD; only
+ * capsules without one may infer delta noise from pooled score SD. Max observed
+ * excursion is a conservative tail guard, not the estimator.
  */
 export const PromotionNoiseCalibration = z.discriminatedUnion("estimator", [
   PooledScoreCalibration,
   DirectDeltaCalibration,
+  DeterministicZeroNoiseCalibration,
 ]).superRefine((calibration, ctx) => {
+  if (calibration.estimator === DETERMINISTIC_ZERO_NOISE_ESTIMATOR) {
+    const baseline = calibration.baselineRuns[0];
+    if (baseline === undefined) return;
+    const runIds = new Set<string>();
+    const namespaces = new Set<string>();
+    for (const [runIndex, run] of calibration.baselineRuns.entries()) {
+      if (runIds.has(run.runId)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baselineRuns", runIndex, "runId"], message: "baseline run IDs must be unique" });
+      }
+      if (namespaces.has(run.evaluationCacheNamespace)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baselineRuns", runIndex, "evaluationCacheNamespace"], message: "baseline runs must use distinct run-scoped evaluation caches" });
+      }
+      const namespaceIdentity = canonicalJson({ measurementEpoch: calibration.measurementEpoch, runId: run.runId });
+      const expectedNamespace = `eval-run-${createHash("sha256").update(namespaceIdentity).digest("hex")}`;
+      if (run.evaluationCacheNamespace !== expectedNamespace) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baselineRuns", runIndex, "evaluationCacheNamespace"], message: "run-scoped cache namespace must bind the run ID and measurement epoch" });
+      }
+      runIds.add(run.runId);
+      namespaces.add(run.evaluationCacheNamespace);
+      const seeds = new Set<number>();
+      if (run.scores.length !== baseline.scores.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baselineRuns", runIndex, "scores"], message: "baseline runs must have the same seed coordinates" });
+      }
+      for (const [scoreIndex, score] of run.scores.entries()) {
+        const path = ["baselineRuns", runIndex, "scores", scoreIndex];
+        if (seeds.has(score.seed)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "seed"], message: "baseline seed coordinates must be unique" });
+        }
+        seeds.add(score.seed);
+        const expected = baseline.scores[scoreIndex];
+        if (expected === undefined) continue;
+        if (!Object.is(score.seed, expected.seed)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "seed"], message: "baseline runs must have the same ordered seed coordinates" });
+        }
+        if (!Object.is(score.aggregate, expected.aggregate)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "aggregate"], message: "baseline aggregate scores must have identical IEEE754 bits" });
+        }
+        if ((score.perExample === undefined) !== (expected.perExample === undefined)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "perExample"], message: "baseline per-example availability must match" });
+        } else if (score.perExample !== undefined && expected.perExample !== undefined) {
+          const keys = Object.keys(score.perExample).sort();
+          const expectedKeys = Object.keys(expected.perExample).sort();
+          if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "perExample"], message: "baseline per-example identities must match" });
+          } else if (keys.some((key) => !Object.is(score.perExample![key], expected.perExample![key]))) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...path, "perExample"], message: "baseline per-example scores must have identical IEEE754 bits" });
+          }
+        }
+      }
+    }
+    const runCount = calibration.baselineRuns.length;
+    const seedCount = baseline.scores.length;
+    if (calibration.informationFreeMeasurements !== runCount * seedCount) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "informationFreeMeasurements must equal runCount * seedCount" });
+    }
+    if (calibration.informationFreePairs !== seedCount * runCount * (runCount - 1) / 2) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "informationFreePairs must equal seedCount * choose(runCount, 2)" });
+    }
+    // Number refinements can be dirty rather than aborted: do not hash invalid
+    // arithmetic and turn safeParse into an exception.
+    const finiteBaseline = baseline.scores.every((score) =>
+      Number.isFinite(score.seed) && Number.isFinite(score.aggregate)
+      && (score.perExample === undefined || Object.values(score.perExample).every(Number.isFinite)));
+    if (finiteBaseline && calibration.scoreHash !== deterministicBaselineScoreHash(baseline.scores)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["scoreHash"], message: "scoreHash must bind the baseline score evidence" });
+    }
+    return;
+  }
   const close = (left: number, right: number): boolean =>
     Math.abs(left - right) <= Number.EPSILON * Math.max(1, Math.abs(left), Math.abs(right)) * 8;
   if (calibration.informationFreePositive > calibration.informationFreePairs) {
@@ -116,7 +248,21 @@ export function assessPromotion(
   childScore: number,
   calibration: PromotionNoiseCalibration | null,
 ): PromotionGateAssessment {
+  if (!Number.isFinite(parentScore) || !Number.isFinite(childScore)) {
+    throw new RangeError("promotion scores must be finite");
+  }
+  if (calibration !== null && (
+    !Number.isFinite(calibration.noiseFloor)
+    || !Number.isFinite(calibration.noiseEnvelope)
+    || calibration.noiseFloor < 0
+    || calibration.noiseEnvelope < calibration.noiseFloor
+  )) {
+    throw new RangeError("promotion calibration must have finite ordered noise bounds");
+  }
   const delta = childScore - parentScore;
+  if (!Number.isFinite(delta)) {
+    throw new RangeError("promotion score delta must be finite");
+  }
   if (!(delta > 0)) {
     return {
       gateVersion: PROMOTION_GATE_VERSION,

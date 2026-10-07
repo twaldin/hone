@@ -4,13 +4,15 @@ import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { BrokerJournalEvaluationFact } from "@hone/broker";
 import {
-  CapsuleManifest,
+  DETERMINISTIC_ZERO_NOISE_ESTIMATOR,
   POOLED_SCORE_SD_ESTIMATOR,
   PROMOTION_GATE_VERSION,
   PromotionNoiseCalibration,
   canonicalJson,
   capsuleDigest,
+  deterministicBaselineScoreHash,
 } from "@hone/schema";
+import type { CapsuleManifest, DeterministicBaselineRun, DeterministicBaselineScore } from "@hone/schema";
 
 export const PROMOTION_NOISE_OBSERVATIONS_VERSION =
   "campaign-12-promotion-noise-observations-v2" as const;
@@ -372,6 +374,7 @@ export interface BaselineNoiseIdentity {
   assetGroupId: string;
   measurementEpoch: string;
   seeds: readonly number[];
+  baselineArtifactHash?: string;
 }
 
 /** One completed noise run: its id and its journaled trusted evaluation facts. */
@@ -457,6 +460,96 @@ export function deriveBaselineNoiseCalibration(
     coordinateGroups: estimate.sampleDepths.length,
     pooledDegreesOfFreedom: estimate.pooledDegreesOfFreedom,
     pooledWithinCoordinateSd: estimate.pooledWithinCoordinateSd,
+  });
+  return { calibration, observations };
+}
+
+export interface DeterministicBaselineNoiseObservations extends BaselineNoiseObservations {
+  baselineRuns: DeterministicBaselineRun[];
+  scoreHash: string;
+}
+
+/** Fresh baseline-only repeats -> zero-noise evidence, never a pooled fallback. */
+export function deriveDeterministicBaselineNoiseCalibration(
+  runs: readonly BaselineNoiseRun[],
+  identity: BaselineNoiseIdentity,
+  calibratedAt: string,
+): { calibration: PromotionNoiseCalibration; observations: DeterministicBaselineNoiseObservations } {
+  const baselineArtifactHash = identity.baselineArtifactHash;
+  if (baselineArtifactHash === undefined) throw new Error("deterministic noise calibration requires the admitted baseline artifact hash");
+  const baselineRuns: DeterministicBaselineRun[] = runs.map((run) => {
+    let evaluationCacheNamespace: string | undefined;
+    for (const fact of run.facts) {
+      if (fact.measurementEpoch !== identity.measurementEpoch
+        || fact.record.assetGroupId !== identity.assetGroupId
+        || fact.record.capsuleId !== identity.capsuleId) {
+        throw new Error(`noise run ${run.runId} contains a measurement outside the admitted capsule, group or epoch`);
+      }
+      if (fact.record.artifactHash !== baselineArtifactHash) {
+        throw new Error(`noise run ${run.runId} measured ${fact.record.artifactHash}, not the admitted baseline ${baselineArtifactHash}`);
+      }
+      if (!identity.seeds.includes(fact.record.seed)) {
+        throw new Error(`noise run ${run.runId} contains an unplanned seed ${fact.record.seed}`);
+      }
+      if (fact.record.cached !== false) throw new Error(`noise run ${run.runId} seed ${fact.record.seed} is a memo hit, not a fresh measurement`);
+      if (fact.aggregate === null || !Number.isFinite(fact.aggregate)) {
+        throw new Error(`noise run ${run.runId} seed ${fact.record.seed}: the baseline measurement is not eligible`);
+      }
+      if (fact.evaluationCacheNamespace === undefined) {
+        throw new Error(`noise run ${run.runId} is missing its trusted run-scoped evaluation cache namespace`);
+      }
+      evaluationCacheNamespace ??= fact.evaluationCacheNamespace;
+      if (fact.evaluationCacheNamespace !== evaluationCacheNamespace) {
+        throw new Error(`noise run ${run.runId} contains inconsistent evaluation cache namespaces`);
+      }
+    }
+    const scores: DeterministicBaselineScore[] = identity.seeds.map((seed) => {
+      const measured = run.facts.filter((fact) => fact.record.seed === seed);
+      if (measured.length !== 1) {
+        throw new Error(`noise run ${run.runId} holds ${measured.length} measurements of seed ${seed}, expected exactly 1`);
+      }
+      const fact = measured[0]!;
+      return {
+        seed,
+        aggregate: fact.aggregate!,
+        perExample: Object.fromEntries(Object.entries(fact.record.output.perExample).map(([id, result]) => [id, result.score])),
+      };
+    });
+    if (evaluationCacheNamespace === undefined) throw new Error(`noise run ${run.runId} holds no fresh baseline measurement`);
+    return { runId: run.runId, evaluationCacheNamespace, scores };
+  });
+  const scoreHash = deterministicBaselineScoreHash(baselineRuns[0]?.scores ?? []);
+  const observations: DeterministicBaselineNoiseObservations = {
+    version: BASELINE_NOISE_OBSERVATIONS_VERSION,
+    identity: { ...identity, seeds: [...identity.seeds], baselineArtifactHash },
+    runIds: runs.map((run) => run.runId),
+    coordinates: identity.seeds.map((seed, index) => ({
+      seed,
+      observations: baselineRuns.map((run) => ({ runId: run.runId, score: run.scores[index]!.aggregate })),
+    })),
+    baselineRuns,
+    scoreHash,
+  };
+  const calibration = PromotionNoiseCalibration.parse({
+    gateVersion: PROMOTION_GATE_VERSION,
+    evidenceVersion: BASELINE_NOISE_EVIDENCE_VERSION,
+    calibratedAt,
+    capsuleId: identity.capsuleId,
+    admittedCapsuleDigest: identity.admittedCapsuleDigest,
+    executionImage: identity.executionImage,
+    assetGroupId: identity.assetGroupId,
+    measurementEpoch: identity.measurementEpoch,
+    sourceCohortSha256: [sha256(Buffer.from(canonicalJson(observations), "utf8"))],
+    estimator: DETERMINISTIC_ZERO_NOISE_ESTIMATOR,
+    baselineArtifactHash,
+    baselineRuns,
+    scoreHash,
+    informationFreeMeasurements: runs.length * identity.seeds.length,
+    informationFreePairs: identity.seeds.length * runs.length * (runs.length - 1) / 2,
+    informationFreePositive: 0,
+    maxObservedPairDelta: 0,
+    noiseFloor: 0,
+    noiseEnvelope: 0,
   });
   return { calibration, observations };
 }

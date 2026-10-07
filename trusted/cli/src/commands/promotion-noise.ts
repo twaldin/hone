@@ -1,19 +1,21 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { readBrokerJournalEvaluations } from "@hone/broker";
-import { MeasurementEpoch, canonicalJson, capsuleDigest } from "@hone/schema";
+import { CasStore, readBrokerJournalEvaluations } from "@hone/broker";
+import { DETERMINISTIC_ZERO_NOISE_ESTIMATOR, MeasurementEpoch, canonicalJson, capsuleDigest } from "@hone/schema";
 import { admitCapsule, readCapsuleSnapshot } from "../admission.js";
 import { UsageError, boolFlag, parseFlags, strFlag } from "../args.js";
+import { measureBaseline } from "../backends/local.js";
 import { replayRun, writeFileDurable } from "../eventlog.js";
 import type { CmdIo } from "../io.js";
-import { deriveBaselineNoiseCalibration, type BaselineNoiseIdentity } from "../promotion-noise-derivation.js";
+import { deriveBaselineNoiseCalibration, deriveDeterministicBaselineNoiseCalibration } from "../promotion-noise-derivation.js";
+import type { BaselineNoiseIdentity } from "../promotion-noise-derivation.js";
 import { casRoot, loadRunConfigFile, runsRoot } from "../runs.js";
 import { searchAssetGroupId } from "../search.js";
 import { runCommand } from "../supervisor.js";
 
 const USAGE =
-  "usage: hone promotion-noise <capsule-dir> --epoch <name> --out <calibration.json> --headless [--seeds K] [--repeats R] [--backend local|stub]";
+  "usage: hone promotion-noise <capsule-dir> --epoch <name> --out <calibration.json> --headless [--deterministic] [--seeds K] [--repeats R] [--backend local|stub]";
 
 /** Schema minimums for the pooled-score estimator; never lowered here. */
 const MIN_SEEDS = 3;
@@ -38,14 +40,14 @@ function positiveInt(flags: Record<string, string | boolean>, name: string, fall
  * epoch, capsule digest and evaluator image as the later search: it measures
  * the frozen baseline once per seed and calls no model. Run ids derive from
  * the frozen plan, so re-running the command resumes or reuses every repeat
- * instead of paying for it again. Once all R are complete, the pooled-score
- * estimator (promotion-noise-derivation.ts) turns the K seeds × R repeats into
- * a PromotionNoiseCalibration written to --out, ready for
- * `hone run … --calibration`.
+ * instead of paying for it again. By default the pooled-score estimator uses
+ * K seeds × R repeats. Opt-in --deterministic requires identical fresh score
+ * vectors and emits zero-noise evidence, or refuses without falling back.
+ * The result is written to --out, ready for `hone run … --calibration`.
  */
 export async function promotionNoiseCommand(args: string[], io: CmdIo): Promise<number> {
   const { positionals, flags } = parseFlags(args, {
-    booleans: ["headless"],
+    booleans: ["headless", "deterministic"],
     strings: ["epoch", "out", "seeds", "repeats", "backend"],
   });
   const capsuleArg = positionals[0];
@@ -56,14 +58,18 @@ export async function promotionNoiseCommand(args: string[], io: CmdIo): Promise<
   }
   const epoch = MeasurementEpoch.safeParse(epochFlag);
   if (!epoch.success) throw new UsageError(`--epoch: ${epoch.error.issues.map((issue) => issue.message).join("; ")}`);
-  const seedCount = positiveInt(flags, "seeds", MIN_SEEDS);
-  const repeats = positiveInt(flags, "repeats", 7);
-  if (
+  const deterministic = boolFlag(flags, "deterministic");
+  const seedCount = positiveInt(flags, "seeds", deterministic ? 1 : MIN_SEEDS);
+  const repeats = positiveInt(flags, "repeats", deterministic ? MIN_REPEATS : 7);
+  if (deterministic && repeats < MIN_REPEATS) {
+    throw new UsageError("--deterministic requires at least 3 fresh baseline repeats; otherwise run the full default 3 × 7 calibration without --deterministic");
+  }
+  if (!deterministic && (
     seedCount < MIN_SEEDS
     || repeats < MIN_REPEATS
     || seedCount * repeats < MIN_MEASUREMENTS
     || seedCount * (repeats - 1) < MIN_DEGREES_OF_FREEDOM
-  ) {
+  )) {
     throw new UsageError(
       `--seeds ${seedCount} --repeats ${repeats} is below the calibration minimums: at least ${MIN_SEEDS} seeds, `
         + `${MIN_REPEATS} repeats, ${MIN_MEASUREMENTS} measurements and seeds × (repeats − 1) ≥ ${MIN_DEGREES_OF_FREEDOM} (default 3 × 7)`,
@@ -83,7 +89,16 @@ export async function promotionNoiseCommand(args: string[], io: CmdIo): Promise<
     measurementEpoch: epoch.data,
     seeds: Array.from({ length: seedCount }, (_, seed) => seed),
   };
-  const plan = { version: 1, ...identity, repeats };
+  if (deterministic) {
+    identity.baselineArtifactHash = admitted.manifest.baseline.kind === "cas"
+      ? admitted.manifest.baseline.hash
+      : await measureBaseline(capsuleDir, admitted.manifest, new CasStore(casRoot(io.root)));
+  }
+  // Keep the default plan's canonical bytes unchanged; the opt-in estimator
+  // gets separate persisted plans, run ids and therefore cache namespaces.
+  const plan = deterministic
+    ? { version: 1, ...identity, repeats, estimator: DETERMINISTIC_ZERO_NOISE_ESTIMATOR }
+    : { version: 1, ...identity, repeats };
   const planHash = createHash("sha256").update(canonicalJson(plan)).digest("hex");
   const stateDir = join(runsRoot(io.root), `promotion-noise-${planHash.slice(0, 16)}`);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
@@ -143,9 +158,12 @@ export async function promotionNoiseCommand(args: string[], io: CmdIo): Promise<
     .reduce((latest, at) => (at > latest ? at : latest), "");
   let derived;
   try {
-    derived = deriveBaselineNoiseCalibration(runs, identity, calibratedAt);
+    derived = deterministic
+      ? deriveDeterministicBaselineNoiseCalibration(runs, identity, calibratedAt)
+      : deriveBaselineNoiseCalibration(runs, identity, calibratedAt);
   } catch (error) {
-    throw new UsageError(`promotion-noise derivation refused: ${error instanceof Error ? error.message : String(error)}`);
+    const required = deterministic ? "; run the full default 3 × 7 calibration without --deterministic" : "";
+    throw new UsageError(`promotion-noise derivation refused: ${error instanceof Error ? error.message : String(error)}${required}`);
   }
   writeFileDurable(join(stateDir, "observations.json"), `${canonicalJson(derived.observations)}\n`);
   const body = `${JSON.stringify(derived.calibration, null, 2)}\n`;

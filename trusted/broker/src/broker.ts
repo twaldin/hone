@@ -1063,6 +1063,8 @@ const StatePayload = z.discriminatedUnion("t", [
     epoch: z.string().optional(),
     /** Trusted M1 replicate identity; absent on M0 and legacy journal facts. */
     measurementEpoch: z.string().optional(),
+    /** Actual evaluator cache domain; absent only on legacy journal facts. */
+    evaluationCacheNamespace: z.string().min(1).optional(),
     /** Monotone trusted mint ordinal of `epoch` (see mintEpochSeq); pre-ordinal lines rank by first appearance in the journal. */
     epochSeq: z.number().int().nonnegative().optional(),
     /** Persisted parent-first same-epoch gate identity (see recordEvaluation). */
@@ -1304,6 +1306,8 @@ export interface BrokerJournalEvaluationFact {
   record: EvaluationRecord;
   /** Trusted measurement epoch stamped on the fact; absent on M0 and legacy facts. */
   measurementEpoch: string | undefined;
+  /** Actual evaluator cache domain used for this fact; legacy journals omit it. */
+  evaluationCacheNamespace?: string;
   /** The broker's own promotion scalarization of the record; null when ineligible. */
   aggregate: number | null;
 }
@@ -1335,7 +1339,12 @@ export function readBrokerJournalEvaluations(runDir: string): BrokerJournalEvalu
     }
     if (line.t === "eval") {
       records.push(line.record);
-      facts.push({ record: line.record, measurementEpoch: line.measurementEpoch, aggregate: eligibleAggregate(line.record) ?? null });
+      facts.push({
+        record: line.record,
+        measurementEpoch: line.measurementEpoch,
+        ...(line.evaluationCacheNamespace !== undefined ? { evaluationCacheNamespace: line.evaluationCacheNamespace } : {}),
+        aggregate: eligibleAggregate(line.record) ?? null,
+      });
     }
   }
   return {
@@ -4876,6 +4885,7 @@ export class Broker {
         memoKey,
         epoch,
         epochSeq,
+        evaluationCacheNamespace: this.evaluationCacheNamespace,
         ...(this.trustedMeasurementEpoch !== undefined ? { measurementEpoch: this.trustedMeasurementEpoch } : {}),
       }, events);
       try {
@@ -4956,6 +4966,7 @@ export class Broker {
       memoKey,
       epoch,
       epochSeq,
+      evaluationCacheNamespace: this.evaluationCacheNamespace,
       ...(this.trustedMeasurementEpoch !== undefined ? { measurementEpoch: this.trustedMeasurementEpoch } : {}),
       ...(gate !== undefined ? { gate } : {}),
     }, events);
