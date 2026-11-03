@@ -1,4 +1,3 @@
-"""Development search policies. Every deployment evaluation and model call is brokered."""
 from __future__ import annotations
 
 import importlib.metadata
@@ -80,7 +79,7 @@ def _policy(seed: int, episode: int, parent: float, child: float, noise: dict) -
 
 
 def _project_noise(noise: dict, n: int) -> tuple[dict, dict]:
-    source_n = noise.get("noise_design", {}).get("rows_per_arm", 8)
+    source_n = noise["noise_design"]["rows_per_arm"]
     factor = math.sqrt(source_n / n)
     calibration = dict(noise.get("calibration", noise))
     for field in ("pairedDeltaSd", "maxObservedPairDelta", "noiseFloor", "noiseEnvelope"):
@@ -125,9 +124,7 @@ def _contract(task: Task, noise: dict) -> dict:
                                                     "Skip other language blocks; an unclosed eligible block consumes the rest. "
                                                     "Use the whole answer if no eligible block exists. Do not repair Python.",
                       "solution_semantics": "Execute extracted candidate source, official development setup and every assertion "
-                                            "as Python in the same namespace in the sandbox. Native objects and mutations are supported. "
-                                            "Require runner completion receipt and zero exit status. Stdout alone cannot pass. "
-                                            "Assertions are not secret from adversarial same-interpreter code."}
+                                            "as Python in the same namespace in the sandbox. Native objects and mutations are supported."}
     return {"task": task.name, "deployment_contract": deployment,
             "editable_artifact": task.seed_candidate,
             "artifact_format": "Mapping with exact seed keys and nonempty string values; "
@@ -212,13 +209,12 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state, re
             continue
         if error is None:
             state["valid_proposals"] += 1
-        if method == "hone" and error is not None:
+        if error is not None:
             continue
         if method == "hone":
             passed = False
             for size in TRAIN_SIZES:
                 paired = _batch(task, seed, episode, size)
-                # Fresh paired measurements use the same complete slice, including at n=8.
                 before = evaluate(parent, paired)
                 after = evaluate(child, paired)
                 _mean(before, paired)

@@ -301,7 +301,13 @@ def replay(args) -> None:
         rows = {row["id"]: row for row in task.train + task.selection}
         for line in evaluations.read_text().splitlines():
             record = json.loads(line)
-            scores = [score_output(task, rows[row_id], output) for row_id, output in zip(record["row_ids"], record["outputs"], strict=True)]
+            scores = []
+            for row_id, output in zip(record["row_ids"], record["outputs"], strict=True):
+                try:
+                    score = score_output(task, rows[row_id], output)
+                except ValueError:
+                    score = 0.0
+                scores.append(score)
             if scores != record["scores"]:
                 raise ValueError("Replay metric disagrees with a retained evaluation")
             checked += len(scores)
@@ -339,6 +345,17 @@ def main():
     elif args.command == "probe":
         route_proof(pool, env, args.out)
     else:
+        from .tasks import load_task
+        verify_bundle(args.controls)
+        bundle = json.loads((args.controls / "bundle.json").read_text())
+        for name in TASKS:
+            filename = f"{name}/controls.json"
+            if filename not in bundle["files"]:
+                raise ValueError("Controls missing from sealed bundle")
+            control = json.loads((args.controls / filename).read_text())
+            if (not control.get("ranking_passed") or not control.get("noise_passed")
+                    or control.get("identity") != evaluator_identity(load_task(name, args.cache))):
+                raise ValueError("Controls missing, failed, or not bound to this evaluator/data/route identity")
         rows = []
         tasks = ("mbpp",) if args.command == "smoke" and args.task == "all" else TASKS if args.task == "all" else (args.task,)
         seeds = (args.seed,) if args.command == "smoke" else (0, 1, 2)

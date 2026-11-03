@@ -154,7 +154,6 @@ os._exit(0)
             def pause_after_exit(name, paused):
                 names.append(name)
                 if paused:
-                    # Wait for the real candidate exit before the real Docker pause.
                     subprocess.run(["docker", "wait", name], stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, timeout=15, check=False)
                 original_pause(name, paused)
