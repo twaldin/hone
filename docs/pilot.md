@@ -2,7 +2,7 @@
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
-The first two admission epochs stopped on measurement-contract defects; their evidence remains immutable. [Predeclaration 3](../evidence/pilot/predeclaration-3.md) replaces MBPP's shared-interpreter verdict with a process-separated, data-only boundary. This epoch admits no search until its adversarial zero-score controls and all three tasks' unchanged ranking and noise gates pass.
+**Epoch 3 stopped at the unchanged IFBench ranking gate.** The repaired MBPP boundary passed all 300 adversarial checks and its ordinary ranking/noise gates. IFBench's known-improved control scored 0.866667, below naive at 0.933333. No IFBench noise, AIME controls, smoke search or 27-run pilot followed. [Handoff 3](../evidence/pilot/handoff-3.md) records the evidence. [Predeclaration 3](../evidence/pilot/predeclaration-3.md) remains unchanged; no control prompts or cohorts were retuned.
 
 ## Prepare the runtime
 
@@ -82,7 +82,7 @@ Keep the requested $10 ceiling rather than increase it to favor Hone's more expe
 
 ## Run and replay
 
-Only after current adversarial proof and all three control/noise gates pass, run the three-method, seed-0 MBPP smoke:
+The interface below remains blocked for the failed epoch. Successful adversarial proof alone is insufficient; every task's ranking and noise gates must also pass:
 
 ```sh
 nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-3 --out evidence/pilot/smoke-3
@@ -90,7 +90,7 @@ nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THR
 
 Smoke permits one real proposal per method and requires both a successful proposer response and a valid complete proposed artifact. It exercises the official GEPA reflection callable through the subscription route but does not spend the full budget. Hone imports the existing engine's 0.2 restart probability, deterministic restart draw, one format repair, and native promotion gate. It uses paired training slices of 8, 16, and 32 and fresh paired full-selection measurements. GEPA edits native `prompt` and optional `program` components directly, retaining its renderer, parser, round-robin component selection, Pareto selection, strict improvement, eight-example reflection minibatch, and 10,000-metric-call safety cap. Perfect training minibatches are skipped natively; smoke keeps sampling until a real proposal or a budget bound. The plain loop proposes from training traces and greedily retains strict full-selection improvements. Every method starts from the same artifact and uses the same deployment limits.
 
-The next lane runs the 27-search development pilot only after the assistant reviews admitted smoke evidence. The accounting decision permits this pilot to use disclosed reported usage and measured hidden-attempt rates. Complete omp attempt and failed-call receipts remain a prerequisite for the later full benchmark matrix, not an extra spending cap on this development pilot.
+No next-lane search is authorized with the failed `controls-3` bundle. A future epoch needs an explicitly authorized predeclaration and admitted smoke evidence. The accounting decision permits the development pilot to use disclosed reported usage and measured hidden-attempt rates; complete omp attempt and failed-call receipts remain prerequisites for the later full benchmark matrix.
 
 ```sh
 nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-3 --out .pilot-runs/pilot-27

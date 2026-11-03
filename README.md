@@ -83,7 +83,7 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 The pilot is an admission experiment, not an optimizer-quality claim. Its accounting accepts disclosed token undercounts from internal retries and failed calls; complete attempt and failed-call receipts are required before a full comparison. See [the pilot contract and commands](docs/pilot.md).
 
-The first two admission epochs exposed MBPP contract defects, including judge tampering in a shared Python interpreter. [Predeclaration 3](evidence/pilot/predeclaration-3.md) freezes a separate candidate process, data-only trusted comparisons, adversarial controls and a fresh 20-row draw. Earlier failure evidence remains unchanged. Searches stay gated on renewed evaluator admission.
+The first two epochs exposed MBPP contract defects. [Predeclaration 3](evidence/pilot/predeclaration-3.md) replaced the shared interpreter with a separate candidate process and trusted data comparisons. All 300 MBPP adversarial checks passed, but IFBench failed the unchanged control ranking. [Handoff 3](evidence/pilot/handoff-3.md) records the stop. No search is admitted.
 
 ## Status and limitations
 
