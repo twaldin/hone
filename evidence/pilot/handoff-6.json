@@ -1,0 +1,250 @@
+{
+  "accounting_limit": "Only omp-reported usage is priced; opaque failed/internal-attempt token volume remains unknown. Complete credential-opaque attempt receipts inside omp are prerequisite to the later full benchmark matrix. No upstream issue filed.",
+  "aime_snapshot": {
+    "completed_noise_pairs_observed": 1,
+    "failed_call_prefix": 0,
+    "means": {
+      "broken": 0.0,
+      "known-improved": 0.275,
+      "naive": 0.2,
+      "shortcut": 0.0
+    },
+    "noise_passed": null,
+    "observed_hidden_attempt_prefix": 0,
+    "ranking_passed": true,
+    "reported_token_prefix": 244562,
+    "required_noise_pairs": 16,
+    "scope": "Single completed-prefix snapshot after PID wait; not current or final totals",
+    "settled_call_prefix": 206,
+    "usd_equivalent_prefix": 2.433798
+  },
+  "code_or_statistical_rules_changed_this_run": false,
+  "completed_controls": {
+    "ifbench": {
+      "bundle_hash": "sha256:8e2b2585d1a78b9808e81ec34e3124c877462f0d07d5c5431de65347db9af99d",
+      "hash_verification": "passed this run",
+      "means": {
+        "broken": 0.0,
+        "known-improved": 0.95,
+        "naive": 0.8,
+        "shortcut": 0.2125
+      },
+      "metric_replay_this_run": false,
+      "noise": {
+        "admittedCapsuleDigest": "sha256:5e068e835844164387daafa45c227ef2240a6fa85b792ce0a5fa9b49852fcc82",
+        "assetGroupId": "development-calibration",
+        "calibratedAt": "2026-11-03T18:43:38.263017Z",
+        "capsuleId": "cap_5e068e835844",
+        "estimator": "direct-local-paired-delta-sd-v1",
+        "evidenceVersion": "pilot-direct-paired-v1",
+        "executionImage": "python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487",
+        "gateVersion": "noise-envelope-v3",
+        "informationFreePairs": 16,
+        "informationFreePositive": 6,
+        "localArmBaselineHash": "sha256:d55ebb022ec6d4c833f23cd56e7f3f092c34e6dd15be954f339df2131ef3ef8f",
+        "maxObservedPairDelta": 0.04166666666666652,
+        "measurementEpoch": "sha256:5e068e835844164387daafa45c227ef2240a6fa85b792ce0a5fa9b49852fcc82",
+        "noiseEnvelope": 0.06740879254592823,
+        "noiseFloor": 0.044939195030618814,
+        "pairedDeltaDegreesOfFreedom": 15,
+        "pairedDeltaSd": 0.021184539698143576,
+        "pairedDeltaTrials": 16,
+        "sourceCohortSha256": [
+          "sha256:7a312e1a362e16c8b9403ac52bca1708b794a6e0c3815ecce24e63f4aba87194",
+          "sha256:75743598880f497e53a6224de06333844ec9d036fe3ed054fc26e6ac623f6932",
+          "sha256:0a34d43c09cb32611a7e37c38f3aa520c6ad724565a5d2abf30adfe0663f0626",
+          "sha256:3f8fbfdf589b925479e1ec07351ed66eaad6f836504687a5e7229f407bb837dd",
+          "sha256:89831e793932f074e19d7a25bde0ad8d500f4953780eca8d5418020eb44c4088",
+          "sha256:39a893ebca0c966524f0ddf925759ee5902e9596d310b47443006d47ae24ea06",
+          "sha256:b59c3e60a7bb0b2462e828418627a4312fa664fefb3c92ad73ebb857c1b58480",
+          "sha256:9aacdcff61dad2e30079bb9649bfe0554e199acbb61b158ec38a921f4ae3a55b",
+          "sha256:68b5a31cf07ab306c4910c491a07b06775e565cb56e13166810bd9cdfac364bf",
+          "sha256:ab72e2d1341f91b4d8969a4121795872634ec0d4316f8d66c872ee37e0722afb",
+          "sha256:16690885d3905fbd14d8d1f4335c98fdf6ae870aec79ee098cec7a654df49072",
+          "sha256:a1913eaf396e0c47c40130ed959adae7f2cb55137ad979e46ce62cd284f78c72",
+          "sha256:e165b6c7402b53756dad36ffa4afa466fedf16ac37cdd8e8b94cd462fe584969",
+          "sha256:c43647a31b716361d308fa312fad4671b0c0483074dae0f87d9c806c181370e4",
+          "sha256:3811a8b05d15fa62dd0fffacef643212a5583188fbf909ff7022a6ea011f91ae",
+          "sha256:3f0451edb043cd9ba38da7c79204fda001eac1ffa29b4585e95b8c2b81712c6e"
+        ]
+      },
+      "noise_passed": true,
+      "ranking_passed": true,
+      "usage": {
+        "active_seconds": 13626.49656193622,
+        "binding_cap": null,
+        "calls": 2521,
+        "calls_with_hidden_attempts": 0,
+        "failed_calls": 0,
+        "hidden_attempt_rate": 0.0,
+        "hidden_attempts": 0,
+        "pause_seconds": 0,
+        "pauses": 0,
+        "poll_seconds": 4222.096608638763,
+        "proposer_calls": 0,
+        "proposer_success_calls": 0,
+        "retry_log_events": 0,
+        "retry_rate_flag": false,
+        "throttle_seconds": 4222.096608638763,
+        "tokens": 1655348,
+        "usage_missing_calls": 0,
+        "usd_equivalent": 15.855540000000016,
+        "wall_seconds": 17848.593170574983
+      }
+    },
+    "mbpp": {
+      "means": {
+        "broken": 0.0,
+        "known-improved": 0.95,
+        "naive": 0.7,
+        "shortcut": 0.0
+      },
+      "noise": {
+        "admittedCapsuleDigest": "sha256:7d2f9a534c683ed72d9ec165eb38b30e45bf2545855cca111e2658d8df0878e5",
+        "assetGroupId": "development-calibration",
+        "calibratedAt": "2026-11-03T13:24:26.470647Z",
+        "capsuleId": "cap_7d2f9a534c68",
+        "estimator": "direct-local-paired-delta-sd-v1",
+        "evidenceVersion": "pilot-direct-paired-v1",
+        "executionImage": "python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487",
+        "gateVersion": "noise-envelope-v3",
+        "informationFreePairs": 16,
+        "informationFreePositive": 4,
+        "localArmBaselineHash": "sha256:55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b",
+        "maxObservedPairDelta": 0.04999999999999993,
+        "measurementEpoch": "sha256:7d2f9a534c683ed72d9ec165eb38b30e45bf2545855cca111e2658d8df0878e5",
+        "noiseEnvelope": 0.08653485569410733,
+        "noiseFloor": 0.05768990379607155,
+        "pairedDeltaDegreesOfFreedom": 15,
+        "pairedDeltaSd": 0.02719528145346783,
+        "pairedDeltaTrials": 16,
+        "sourceCohortSha256": [
+          "sha256:19282ba4c73ef62cc432e438c23bab075ed4f5bba991bad19356b6998e764c9a",
+          "sha256:da6439a4ad45c780b18285fd7a008e8a5afa8a052783f7027c963e479436ee83",
+          "sha256:9e603bb056eb3d635ffcdadab6e25141ba308ec911d40028148e8ae24aa4347e",
+          "sha256:9ff78d7653948128049149e29aac3cb42d059c062b34712502c165409596c549",
+          "sha256:033d87686318205cd7cf36d968e1dec6031be9979909bce0a4dc1eaa5c647684",
+          "sha256:d31284fb5bb90fa17c2a04fefa5902bdb14c9f3dd643e9a1a4c3d49fb395d535",
+          "sha256:7e69b0f3900e5c8b5013eeb154849acf665748b439c83d2a9b4b136a0b15566e",
+          "sha256:8553527446764b6d334fb079ed1d5af37d79b0ed18d6f78ce164aa04535d4fae",
+          "sha256:3876abb0fe8f08b5b30cf35738c05928942790182e099d1e05dd88a6d5d4a4df",
+          "sha256:c1a523044df411b69175c0c80095338b72b3d23bf3049b1f04c3df76c2d0e36e",
+          "sha256:32cea770aee0d24d4dab85da81998fe2ab8ab71eda87b1782054aaafaf8e4cff",
+          "sha256:70a5b2952dedc6eb0d70f402de91d0235bb60ca303896a044048ca7d5cecbd67",
+          "sha256:0997df0098a7ed9839dcec12709d06e0518c89dc9572535f17517c11ab773433",
+          "sha256:83b04b4e7c6d28d5b59318aff2b728357785e51e69c598bc01fe0f1beca36a3a",
+          "sha256:c19fb4a2d2659e405482c4bfa2a15106a604f943585e3c9218e41c2eaed3c4ff",
+          "sha256:eccf39e56f9a1bffba8be1301c3909299879b9b0bc12663084a8680243b9f24a"
+        ]
+      },
+      "noise_passed": true,
+      "ranking_passed": true,
+      "usage": {
+        "active_seconds": 1078.699005010887,
+        "binding_cap": null,
+        "calls": 660,
+        "calls_with_hidden_attempts": 0,
+        "failed_calls": 0,
+        "hidden_attempt_rate": 0.0,
+        "hidden_attempts": 0,
+        "pause_seconds": 0,
+        "pauses": 0,
+        "poll_seconds": 1000.735603094101,
+        "proposer_calls": 0,
+        "proposer_success_calls": 0,
+        "retry_log_events": 0,
+        "retry_rate_flag": false,
+        "throttle_seconds": 1000.735603094101,
+        "tokens": 89469,
+        "usage_missing_calls": 0,
+        "usd_equivalent": 0.6974310000000009,
+        "wall_seconds": 2079.434608104988
+      }
+    }
+  },
+  "next_actions": [
+    "Wait for controller 410703; do not invoke controls again or restart its gateway",
+    "If any control or noise gate fails, stop and hand back without retuning",
+    "If all selected tasks pass, run smoke with controls-4a and smoke-4a, then replay and report hidden-attempt counts",
+    "Only then complete PR, green CI and exact-head cross-family READY; never merge in this lane"
+  ],
+  "owned_unit": {
+    "active_state": "active",
+    "controller_pid": 410703,
+    "current_gateway_pid": 881483,
+    "externally_restarted": false,
+    "gateway_pid_reported_at_resume": 449312,
+    "name": "hone-hone-pilot-harness-1-controls4a.service",
+    "sub_state": "running",
+    "wait_method": "Linux pidfd exit wait for 18000 seconds; timed out with original controller still alive"
+  },
+  "parent_head": "28dc1b7f0adfe19fe4eed8fdc2f8fee4084beb3c",
+  "pilot_plan": {
+    "authorized": false,
+    "ifbench_feasibility_projection": {
+      "model_evaluated_training_rows": 1360,
+      "scope": "Inference from aggregate calibration, not a pilot-run estimate",
+      "three_selection_pass_usd_equivalent_before_training_or_proposal": 10.492636764705892,
+      "tokens_per_300_row_selection_pass": 365150.2941176471,
+      "usd_equivalent_per_300_row_selection_pass": 3.4975455882352975
+    },
+    "next_lane_command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-4a --out .pilot-runs/pilot-27",
+    "point_estimate": "Deferred until AIME noise and the three real smokes finish",
+    "quota_check_and_pause_wall_time": "Additional; not bounded by the active-time ceiling",
+    "reported_caps": {
+      "active_hours": 54,
+      "runs": 27,
+      "tokens": 324000000,
+      "usd_equivalent": 270
+    }
+  },
+  "recorded_at_utc": "2026-11-03T19:26:52.565654+00:00",
+  "smokes": {
+    "gepa": "not started; real subscription reflection unexercised",
+    "hone": "not started",
+    "per_method_hidden_attempt_counts": "not measured",
+    "plain": "not started"
+  },
+  "source_freeze_head": "9889dce7b99b9702cedbfee9af388fdb47a1ab3d",
+  "status": "partial-deadline-handoff-controls-still-running",
+  "task_panel": {
+    "all_admitted": false,
+    "headroom_threshold": 0.9,
+    "ifbench_naive_mean": 0.8,
+    "prospective_tasks": [
+      "mbpp",
+      "ifbench",
+      "aime"
+    ],
+    "replace_with_hover": false
+  },
+  "throttle_proof": {
+    "allowed_domains": {
+      "gmail.com": 2,
+      "purdue.edu": 1
+    },
+    "dispatched": [
+      "after-resume-only"
+    ],
+    "forced_high_used_fraction": 0.99,
+    "outage_behavior": "pause and resume, not failure",
+    "pause_seconds": 0.11356163024902344,
+    "pauses": 1,
+    "readings": [
+      "high",
+      "outage",
+      "live-normal"
+    ],
+    "real_broker_interrupted": false,
+    "threshold": 0.8
+  },
+  "verification": {
+    "ci_conclusion": "success",
+    "ci_head": "28dc1b7f0adfe19fe4eed8fdc2f8fee4084beb3c",
+    "ci_url": "https://github.com/twaldin/hone/actions/runs/41648967023",
+    "final_cross_family_READY": false,
+    "last_local_failures": 0,
+    "last_local_tests": 143,
+    "preflight_verdict": "SAFE_TO_MEASURE only"
+  }
+}
