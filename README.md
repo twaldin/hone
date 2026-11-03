@@ -85,6 +85,8 @@ The pilot is an admission experiment, not an optimizer-quality claim. Its accoun
 
 The first two epochs exposed MBPP contract defects. [Predeclaration 3](evidence/pilot/predeclaration-3.md) separated candidate execution from trusted grading, and all 300 MBPP adversarial checks passed. IFBench then failed its control ranking. [Predeclaration 4](evidence/pilot/predeclaration-4.md) fixes external P controls and the IFBench headroom rule before new model calls. [Correction 4a](evidence/pilot/predeclaration-4a.md) fixes transport placement and infrastructure-error scoring, requiring MBPP re-admission without changing its cohort or gates. [The pilot guide](docs/pilot.md) records the commands.
 
+Contract 4 admission stopped without searches. AIME's 16-pair noise envelope was 0.07616286, above its 0.075 positive-control contrast. MBPP and IFBench passed. The $10 search cap and selection sets were not changed. [The final admission handoff](evidence/pilot/handoff-7.json) retains the results, usage and zero-call replay evidence. No optimizer comparison is claimed.
+
 ## Status and limitations
 
 - **Running a capsule from a fresh clone is not smooth yet.** Production runs require an admission receipt and the pinned image, and there is no public command that builds both for you.

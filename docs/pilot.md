@@ -4,6 +4,8 @@ The pilot decides whether Hone's proposed search policy warrants a larger compar
 
 [Predeclaration 4](../evidence/pilot/predeclaration-4.md), committed as `030c792` before new model calls, replaces the authored P controls with published optimized instructions and a fresh 40-row draw. [Correction 4a](../evidence/pilot/predeclaration-4a.md) removes a CPU-0 gateway override and prevents provider failures from deciding calibration scores. The transport change requires MBPP re-admission; contract-3 measurements alone cannot authorize the corrected harness. [Handoff 3](../evidence/pilot/handoff-3.md) records the earlier IFBench ranking failure.
 
+Current result: admission stopped under the predeclared AIME noise gate. Its envelope, 0.07616286, exceeds the 0.075 improved-minus-naive contrast. MBPP and IFBench passed, but no complete admitted panel was produced. No smoke, real GEPA reflection, or 27-run pilot was started. The cap and selection sets remain unchanged. [The final handoff](../evidence/pilot/handoff-7.json) records all controls and usage; offline replay matched all 2,880 retained P scores without model calls. The commands below document the frozen procedure, not authorization to run it after this failed gate.
+
 ## Prepare the runtime
 
 Run from the repository root on Linux with Docker, Bun, uv, pnpm, and omp 18.16.0 installed. Configure the auth broker through omp itself. Do not supply credentials to this repository.
