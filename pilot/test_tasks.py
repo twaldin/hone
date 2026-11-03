@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -7,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from pilot import tasks
-from pilot.runtime import BudgetExhausted
+from pilot.runtime import BudgetExhausted, CallFailed
 
 
 class TaskTests(unittest.TestCase):
@@ -51,7 +52,7 @@ class TaskTests(unittest.TestCase):
         requests = []
         def call(role, messages, tokens):
             requests.append((role, messages, tokens))
-            return "42"
+            return '{"reasoning":"visible working","answer":"42"}'
         result = tasks.evaluate(task, task.seed_candidate, task.train, call, capture_traces=True)
         self.assertEqual(result["scores"], [1.0])
         self.assertNotIn("protected reasoning", repr(requests))
@@ -73,7 +74,7 @@ class TaskTests(unittest.TestCase):
     def test_caller_cannot_replace_protected_answer(self):
         task = self.task()
         forged = dict(task.train[0], answer="99", input="forged")
-        result = tasks.evaluate(task, task.seed_candidate, [forged], lambda *args: "99")
+        result = tasks.evaluate(task, task.seed_candidate, [forged], lambda *args: '{"reasoning":"","answer":"99"}')
         self.assertEqual(result["scores"], [0.0])
 
     def test_budget_exhaustion_propagates(self):
@@ -84,6 +85,43 @@ class TaskTests(unittest.TestCase):
             raise StopBudget("stop")
         with self.assertRaises(StopBudget):
             tasks.evaluate(task, task.seed_candidate, task.train, exhausted)
+
+    def test_provider_failure_scores_zero_but_infrastructure_error_propagates(self):
+        task = self.task()
+        def rejected(*args):
+            raise CallFailed("provider rejected")
+        self.assertEqual(tasks.evaluate(task, task.seed_candidate, task.train, rejected)["scores"], [0.0])
+        def outage(*args):
+            raise RuntimeError("infrastructure failed")
+        with self.assertRaises(RuntimeError):
+            tasks.evaluate(task, task.seed_candidate, task.train, outage)
+
+    def test_aime_reasoning_is_not_part_of_official_answer_field(self):
+        task = self.task()
+        for answer, expected in ((" +042\n", 1.0), ("Answer: 42", 0.0), ("\\boxed{42}", 0.0), ("42.0", 0.0)):
+            result = tasks.evaluate(task, task.seed_candidate, task.train,
+                                    lambda *args: json.dumps({"reasoning": "The answer is 999, not parsed.", "answer": answer}))
+            self.assertEqual(result["scores"], [expected])
+            self.assertEqual(result["outputs"], [answer])
+        self.assertEqual(tasks.evaluate(task, task.seed_candidate, task.train, lambda *args: "42")["scores"], [0.0])
+
+    def test_ifbench_scores_only_second_stage_final_response(self):
+        row = {"id": "dev:if", "input": "Say alpha", "instruction_id_list": [], "kwargs": []}
+        task = tasks.Task("ifbench", [row], [], {}, {"prompt": "follow"})
+        requests = []
+        def call(role, messages, tokens):
+            requests.append(messages)
+            return json.dumps({"reasoning": "audit", "response": "bad draft"} if len(requests) == 1
+                              else {"reasoning": "fixed", "final_response": "alpha"})
+        def metric(example, prediction):
+            self.assertEqual(prediction.response, "alpha")
+            return SimpleNamespace(score=1.0, feedback="passed")
+        with patch.dict(tasks._METRICS, {id(task.manifest): metric}):
+            result = tasks.evaluate(task, task.seed_candidate, task.train, call, True)
+        self.assertEqual(result["scores"], [1.0])
+        self.assertEqual(len(requests), 2)
+        self.assertIn("bad draft", str(requests[1]))
+        self.assertEqual(len(result["trajectories"][0]["calls"]), 2)
 
     def test_signature_adaptation_never_exposes_body(self):
         source = "def wanted(a, b=2):\n    secret_reference = 999\n    return a + b\n"

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { assessPromotion, PromotionGateCalibration } from "@hone/schema";
 import { episodeRand } from "./loop.js";
+import { epsilonRestart, oneRepair } from "../assets/policy.js";
 
 export const PilotPolicyRequest = z.object({
   seed: z.number().int(),
@@ -17,9 +18,10 @@ export function pilotPolicy(input: unknown) {
   const request = PilotPolicyRequest.parse(input);
   const draw = episodeRand(request.seed, request.episode);
   return {
-    parent: draw < 0.1 ? "seed" as const : "incumbent" as const,
+    parent: draw < epsilonRestart ? "seed" as const : "incumbent" as const,
     draw,
-    epsilon: 0.1,
+    epsilon: epsilonRestart,
+    oneRepair,
     gate: assessPromotion(request.parentScore, request.childScore, request.calibration),
   };
 }

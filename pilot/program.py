@@ -12,6 +12,8 @@ import time
 import uuid
 from collections.abc import Callable
 
+from .runtime import IMAGE
+
 MAX_CALLS = 2
 MAX_OUTPUT_TOKENS = 4096
 MAX_PROMPT_BYTES = 65536
@@ -31,7 +33,7 @@ class ProgramError(ValueError):
 
 
 def docker_command(name: str, program: Path | None = None) -> list[str]:
-    image = os.environ.get("PILOT_PYTHON_IMAGE", "python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487")
+    image = os.environ.get("PILOT_PYTHON_IMAGE", IMAGE)
     if not re.fullmatch(r"[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}", image):
         raise RuntimeError("PILOT_PYTHON_IMAGE must be an explicit image@sha256 digest")
     args = ["docker", "run", "--rm", "--name", name, "--network", "none", "--read-only",
@@ -54,6 +56,10 @@ def _remove(name: str, process: subprocess.Popen[bytes]) -> None:
                    stderr=subprocess.DEVNULL, timeout=15, check=False)
 
 
+def _pause(name: str, paused: bool) -> None:
+    subprocess.run(["docker", "pause" if paused else "unpause", name],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15, check=True)
+
 def run_program(candidate: dict[str, str], task_input: str,
                 call: Callable[[str, list[dict], int], str]) -> tuple[str, list[dict]]:
     source = candidate.get("program", "")
@@ -69,7 +75,8 @@ def run_program(candidate: dict[str, str], task_input: str,
         path.chmod(0o444)
         Path(directory).chmod(0o755)
         name = "hone-pilot-" + uuid.uuid4().hex
-        process = subprocess.Popen(docker_command(name, path) + ["/candidate.py"],
+        process = subprocess.Popen(docker_command(name, path) + [
+            "-c", "import os; os.nice(10); exec(compile(open('/candidate.py').read(), '/candidate.py', 'exec'))"],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         assert process.stdin is not None and process.stdout is not None
         selector = selectors.DefaultSelector()
@@ -120,9 +127,13 @@ def run_program(candidate: dict[str, str], task_input: str,
                     requested_tokens += tokens
                     if len(traces) >= MAX_CALLS or requested_tokens > MAX_OUTPUT_TOKENS or prompt_bytes > MAX_PROMPT_BYTES:
                         raise ProgramError("Candidate exceeded deployment call/token/prompt cap")
+                    _pause(name, True)
                     before = time.monotonic()
-                    text = call("task", messages, tokens)
-                    deadline += time.monotonic() - before
+                    try:
+                        text = call("task", messages, tokens)
+                    finally:
+                        deadline += time.monotonic() - before
+                        _pause(name, False)
                     traces.append({"messages": messages, "output": text, "max_tokens": tokens})
                     process.stdin.write(json.dumps({"text": text}).encode() + b"\n")
                     process.stdin.flush()
@@ -136,7 +147,8 @@ def run_program(candidate: dict[str, str], task_input: str,
 def score_solution(code: str, setup: str, tests: list[str], function_names: list[str]) -> float:
     if len(code.encode()) > MAX_WIRE_BYTES or not function_names:
         return 0.0
-    runner = r"""import ast,json,sys
+    runner = r"""import ast,json,sys,os
+os.nice(10)
 wire_in,wire_out=sys.stdin,sys.stdout
 source=json.loads(wire_in.readline())['code']
 scope={}

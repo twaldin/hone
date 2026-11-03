@@ -1,13 +1,14 @@
 import importlib.metadata
 import importlib.util
 import json
-from pathlib import Path
+import math
 import tempfile
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
-from pilot.runtime import BudgetExhausted
-from pilot.search import GEPA_COMMIT, _artifact, run_search
+from pilot.runtime import BudgetExhausted, CallFailed
+from pilot.search import GEPA_COMMIT, _artifact, _project_noise, run_search
 from pilot.tasks import Task
 
 
@@ -81,7 +82,7 @@ class SearchTests(unittest.TestCase):
             value = float(candidate["prompt"] == "better")
             return {"scores": [value] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
         def policy(seed, episode, parent, child, noise):
-            return {"parent": "incumbent", "gate": {"passed": child > parent}}
+            return {"parent": "incumbent", "epsilon": 0.2, "oneRepair": True, "gate": {"passed": child > parent}}
         with tempfile.TemporaryDirectory() as directory, patch("pilot.search._policy", policy):
             result = run_search("hone", task(), lambda *args: '{"prompt":"better"}', evaluate,
                                 lambda: True, {"noiseFloor": 0, "noiseEnvelope": 0}, 0, Path(directory), 1)
@@ -95,18 +96,105 @@ class SearchTests(unittest.TestCase):
         seen = []
         def evaluate(candidate, rows, capture_traces=False):
             seen.append((candidate["prompt"], len(rows)))
-            score = 0.15 if candidate["prompt"] == "uncertain" else 0
+            score = 0.09 if candidate["prompt"] == "uncertain" else 0
             return {"scores": [score] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
         with tempfile.TemporaryDirectory() as directory, patch(
-            "pilot.search._policy", return_value={"parent": "incumbent", "gate": {"passed": False}}
+            "pilot.search._policy", return_value={"parent": "incumbent", "epsilon": 0.2, "oneRepair": True, "gate": {"passed": False}}
         ):
             result = run_search("hone", task(), lambda *args: '{"prompt":"uncertain"}', evaluate,
-                                lambda: True, {"noiseFloor": 0.1, "noiseEnvelope": 0.2},
+                                lambda: True, {"noiseFloor": 0.05, "noiseEnvelope": 0.2},
                                 0, Path(directory), 1)
         self.assertEqual([n for prompt, n in seen if prompt == "uncertain"], [8, 16, 32])
         self.assertEqual(result["candidate"], {"prompt": "seed"})
         self.assertFalse(result["trajectory"][0]["accepted"])
         self.assertEqual(sum(n == 3 for _, n in seen), 1)
+
+    def test_noise_projection_preserves_identity_trials_and_equivalent_bounds(self):
+        calibration = {"pairedDeltaSd": 0.1, "maxObservedPairDelta": 0.15,
+                       "noiseFloor": 0.3 / math.sqrt(2), "noiseEnvelope": 0.45 / math.sqrt(2),
+                       "pairedDeltaTrials": 16, "sourceCohortSha256": ["frozen"], "measurementEpoch": "original"}
+        for n in (8, 16, 32, 45, 90, 300):
+            projected, metadata = _project_noise(
+                {"calibration": calibration, "noise_design": {"rows_per_arm": 8}}, n)
+            result = projected["calibration"]
+            factor = math.sqrt(8 / n)
+            for field in ("pairedDeltaSd", "maxObservedPairDelta", "noiseFloor", "noiseEnvelope"):
+                self.assertAlmostEqual(result[field], calibration[field] * factor)
+            self.assertAlmostEqual(result["noiseFloor"], result["pairedDeltaSd"] * 3 / math.sqrt(2))
+            self.assertAlmostEqual(result["noiseEnvelope"], result["pairedDeltaSd"] * 4.5 / math.sqrt(2))
+            self.assertEqual(result["pairedDeltaTrials"], 16)
+            self.assertEqual(result["sourceCohortSha256"], ["frozen"])
+            self.assertEqual(result["measurementEpoch"], "original")
+            self.assertEqual(metadata["target_rows_per_arm"], n)
+        projected, _ = _project_noise({"calibration": calibration, "noise_design": {"rows_per_arm": 16}}, 64)
+        self.assertEqual(projected["calibration"]["pairedDeltaSd"], 0.05)
+        self.assertEqual(calibration["pairedDeltaSd"], 0.1)
+
+    def test_failed_proposer_retains_seed_and_records_rejection(self):
+        for method in ("plain", "hone"):
+            def evaluate(candidate, rows, capture_traces=False):
+                return {"scores": [0.5] * len(rows), "outputs": [""] * len(rows),
+                        "trajectories": [{}] * len(rows)}
+            with tempfile.TemporaryDirectory() as directory, patch(
+                "pilot.search._policy", return_value={"parent": "incumbent", "epsilon": 0.2, "oneRepair": True}
+            ):
+                result = run_search(method, task(), lambda *args: (_ for _ in ()).throw(CallFailed("refused")),
+                                    evaluate, lambda: True, {}, 0, Path(directory), 1)
+            self.assertEqual(result["candidate"], {"prompt": "seed"})
+            self.assertEqual(result["selection_score"], 0.5)
+            self.assertFalse(result["trajectory"][0]["accepted"])
+            self.assertIn("refused", result["trajectory"][0]["call_failure"])
+
+    def test_hone_malformed_proposal_gets_one_repair_without_parent_gate_work(self):
+        for repair_output in ("still malformed", CallFailed("repair refused")):
+            evaluated, roles = [], []
+            def evaluate(candidate, rows, capture_traces=False):
+                evaluated.append((candidate, len(rows)))
+                return {"scores": [0] * len(rows), "outputs": [""] * len(rows),
+                        "trajectories": [{}] * len(rows)}
+            def call(role, messages, max_tokens):
+                roles.append((role, max_tokens))
+                if role == "repair" and isinstance(repair_output, Exception):
+                    raise repair_output
+                return repair_output if role == "repair" else "not JSON"
+            with tempfile.TemporaryDirectory() as directory, patch(
+                "pilot.search._policy", return_value={"parent": "incumbent", "epsilon": 0.2, "oneRepair": True}
+            ):
+                result = run_search("hone", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
+            self.assertEqual(roles, [("proposer", 2048), ("repair", 2048)])
+            self.assertEqual([n for _, n in evaluated], [3, 8])
+            self.assertEqual(result["candidate"], {"prompt": "seed"})
+            self.assertFalse(result["trajectory"][0]["accepted"])
+
+    def test_plain_equal_scores_strictly_retain_seed(self):
+        def evaluate(candidate, rows, capture_traces=False):
+            return {"scores": [0.5] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("plain", task(), lambda *args: '{"prompt":"equal"}', evaluate,
+                                lambda: True, {}, 0, Path(directory), 1)
+        self.assertEqual(result["candidate"], {"prompt": "seed"})
+        self.assertFalse(result["trajectory"][0]["accepted"])
+
+    def test_incomplete_candidate_never_becomes_incumbent(self):
+        def evaluate(candidate, rows, capture_traces=False):
+            count = len(rows) - 1 if candidate == {"prompt": "incomplete"} else len(rows)
+            return {"scores": [1] * count, "outputs": [""] * count, "trajectories": [{}] * count}
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, "incomplete"):
+            run_search("plain", task(), lambda *args: '{"prompt":"incomplete"}', evaluate,
+                       lambda: True, {}, 0, Path(directory), 1)
+
+    def test_budget_exhaustion_records_known_binding_cap(self):
+        def evaluate(candidate, rows, capture_traces=False):
+            if candidate == {"prompt": "unfinished"}:
+                error = BudgetExhausted("next call would exceed token cap")
+                error.binding_cap = "tokens"
+                raise error
+            return {"scores": [0] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("plain", task(), lambda *args: '{"prompt":"unfinished"}', evaluate,
+                                lambda: True, {}, 0, Path(directory), 1)
+        self.assertEqual(result["candidate"], {"prompt": "seed"})
+        self.assertEqual(result["binding_cap"], "tokens")
 
     @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
     def test_real_native_gepa_reflection_and_budget_retention(self):
@@ -132,6 +220,78 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "proposer")
         self.assertEqual(calls[0][2], 2048)
         self.assertEqual(sum(n == 3 for _, n in seen), 2)
+        self.assertEqual(json.dumps(calls[0][1]).count("selection_feedback"), 1)
+
+    def test_hone_repaired_artifact_can_promote_with_projected_selection_gate(self):
+        calls, gate_calibrations = [], []
+        def evaluate(candidate, rows, capture_traces=False):
+            score = 1.0 if candidate == {"prompt": "better"} else 0.0
+            return {"scores": [score] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
+        def call(role, messages, max_tokens):
+            calls.append(role)
+            return '{"prompt":"better"}' if role == "repair" else "bad JSON"
+        def policy(seed, episode, parent, child, noise):
+            if child > parent:
+                gate_calibrations.append(noise["calibration"])
+            return {"parent": "incumbent", "epsilon": 0.2, "oneRepair": True, "gate": {"passed": child > parent}}
+        calibration = {"noiseFloor": 0.01, "noiseEnvelope": 0.02}
+        with tempfile.TemporaryDirectory() as directory, patch("pilot.search._policy", policy):
+            result = run_search("hone", task(), call, evaluate, lambda: True,
+                                {"calibration": calibration, "noise_design": {"rows_per_arm": 8}},
+                                0, Path(directory), 1)
+        self.assertEqual(calls, ["proposer", "repair"])
+        self.assertEqual(result["candidate"], {"prompt": "better"})
+        self.assertTrue(result["trajectory"][0]["accepted"])
+        self.assertEqual(len(gate_calibrations), 2)
+        for projected in gate_calibrations:
+            self.assertAlmostEqual(projected["noiseEnvelope"], 0.02 * math.sqrt(8 / 3))
+
+    def test_hone_training_gate_does_not_double_count_empirical_standard_error(self):
+        def evaluate(candidate, rows, capture_traces=False):
+            scores = ([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+                      if candidate == {"prompt": "variable"} and len(rows) == 8
+                      else [float(candidate == {"prompt": "variable"})] * len(rows))
+            return {"scores": scores, "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "pilot.search._policy",
+            return_value={"parent": "incumbent", "epsilon": 0.2, "oneRepair": True, "gate": {"passed": True}}
+        ):
+            result = run_search("hone", task(), lambda *args: '{"prompt":"variable"}', evaluate,
+                                lambda: True, {"noiseFloor": 0.1, "noiseEnvelope": 0.2}, 0, Path(directory), 1)
+        self.assertTrue(result["trajectory"][0]["accepted"])
+        self.assertEqual([gate["n"] for gate in result["trajectory"][0]["training_gates"]], [8])
+
+    @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
+    def test_gepa_perfect_minibatch_keeps_sampling_until_real_proposal(self):
+        calls, captures = [], []
+        def evaluate(candidate, rows, capture_traces=False):
+            if capture_traces:
+                captures.append([row["id"] for row in rows])
+            score = 1.0 if capture_traces and len(captures) == 1 else 0.0
+            return {"scores": [score] * len(rows), "outputs": ["answer"] * len(rows),
+                    "trajectories": [{"feedback": "training"}] * len(rows)}
+        def call(role, messages, max_tokens):
+            calls.append(role)
+            return '```json\n{"prompt":"better"}\n```'
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
+        self.assertGreaterEqual(len(captures), 2)
+        self.assertEqual(calls, ["proposer"])
+        self.assertEqual(result["proposals"], 1)
+
+    @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
+    def test_gepa_all_perfect_train_stops_at_metric_cap_without_false_proposal(self):
+        def evaluate(candidate, rows, capture_traces=False):
+            return {"scores": [1.0] * len(rows), "outputs": ["answer"] * len(rows),
+                    "trajectories": [{}] * len(rows)}
+        def call(*args):
+            self.fail("Native perfect-skip must remain enabled")
+        with tempfile.TemporaryDirectory() as directory, patch("pilot.search.GEPA_METRIC_CALL_CAP", 30):
+            result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
+        self.assertEqual(result["candidate"], {"prompt": "seed"})
+        self.assertEqual(result["proposals"], 0)
+        self.assertEqual(result["binding_cap"], "gepa_metric_calls")
+        self.assertNotEqual(result["stop_reason"], "max_proposals")
 
     @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
     def test_real_native_gepa_interrupt_keeps_seed(self):
@@ -149,3 +309,30 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result["candidate"], {"prompt": "seed"})
         self.assertEqual(result["selection_score"], 0)
         self.assertEqual(result["stop_reason"], "budget_exhausted")
+
+    @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
+    def test_real_native_gepa_rejects_failed_reflection_then_can_improve(self):
+        attempts = [0]
+        def call(*args):
+            attempts[0] += 1
+            if attempts[0] <= 2:
+                raise CallFailed("provider refusal")
+            return '```json\n{"prompt":"better"}\n```'
+        def evaluate(candidate, rows, capture_traces=False):
+            score = float(candidate == {"prompt": "better"})
+            return {"scores": [score] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 2)
+        self.assertEqual(result["candidate"], {"prompt": "better"})
+        self.assertEqual(result["selection_score"], 1)
+        self.assertEqual(result["proposals"], 2)
+
+    @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
+    def test_real_native_gepa_does_not_swallow_evaluator_failure(self):
+        def evaluate(candidate, rows, capture_traces=False):
+            if capture_traces:
+                raise ValueError("metric unavailable")
+            return {"scores": [0] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, "metric unavailable"):
+            run_search("gepa", task(), lambda *args: self.fail("No proposal before feedback"), evaluate,
+                       lambda: True, {}, 0, Path(directory), 2)

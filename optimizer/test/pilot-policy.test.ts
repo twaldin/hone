@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { assessPromotion, PromotionGateCalibration } from "@hone/schema";
-import { episodeRand } from "../src/loop.js";
 import { pilotPolicy } from "../src/pilot-policy.js";
+import { episodeRand } from "../src/loop.js";
 
 const calibration = {
   gateVersion: "noise-envelope-v3",
@@ -30,28 +29,34 @@ function request(parentScore = 0.2, childScore = 0.4) {
 }
 
 describe("pilot native policy", () => {
-  it("uses the exact native promotion assessment", () => {
-    const parsed = PromotionGateCalibration.parse(calibration);
-    expect(pilotPolicy(request()).gate).toEqual(assessPromotion(0.2, 0.4, parsed));
+  it("promotes only gains beyond calibrated uncertainty", () => {
+    expect(pilotPolicy(request()).gate.passed).toBe(true);
     expect(pilotPolicy(request(0.2, 0.21)).gate.passed).toBe(false);
     expect(pilotPolicy(request(0.2, 0.2)).gate.passed).toBe(false);
   });
 
-  it("uses native episode randomness for predeclared epsilon0.1 restarts", () => {
-    let seedParents = 0;
-    let incumbentParents = 0;
-    for (let episode = 0; episode < 100; episode += 1) {
-      const result = pilotPolicy({ ...request(), seed: 7, episode });
-      const draw = episodeRand(7, episode);
-      expect(result.draw).toBe(draw);
-      expect(result.parent).toBe(draw < 0.1 ? "seed" : "incumbent");
-      expect(result.epsilon).toBe(0.1);
-      if (result.parent === "seed") seedParents += 1;
-      else incumbentParents += 1;
-    }
-    expect(seedParents).toBeGreaterThan(0);
-    expect(incumbentParents).toBeGreaterThan(0);
+  it("uses the native restart region rather than the former pilot-only region", () => {
+    let episode = 0;
+    while (episode < 1000 && !(episodeRand(0, episode) > 0.1 && episodeRand(0, episode) < 0.2)) episode++;
+    expect(episode).toBeLessThan(1000);
+    expect(pilotPolicy({ ...request(), episode }).parent).toBe("seed");
   });
+
+  it("admits equivalent projected calibration bounds for full-selection sizes", () => {
+    for (const n of [45, 90, 300]) {
+      const scale = Math.sqrt(8 / n);
+      const projected = {
+        ...calibration,
+        pairedDeltaSd: calibration.pairedDeltaSd * scale,
+        maxObservedPairDelta: calibration.maxObservedPairDelta * scale,
+        noiseFloor: calibration.noiseFloor * scale,
+        noiseEnvelope: calibration.noiseEnvelope * scale,
+      };
+      expect(pilotPolicy({ ...request(0.2, 0.2 + 0.04 * scale), calibration: projected }).gate.passed).toBe(true);
+      expect(pilotPolicy({ ...request(0.2, 0.2 + 0.02 * scale), calibration: projected }).gate.passed).toBe(false);
+    }
+  });
+
 
   it("refuses bare bounds, forged estimator bounds, and nonfinite scores", () => {
     expect(() => pilotPolicy({ ...request(), calibration: { noiseFloor: 0, noiseEnvelope: 0 } })).toThrow();

@@ -10,14 +10,13 @@ import statistics
 import subprocess
 from typing import Callable
 
-from pilot.runtime import BudgetExhausted
+from pilot.runtime import BudgetExhausted, CallFailed, LIMITS, append_json
 from pilot.tasks import Task
 
 GEPA_COMMIT = "8c7b697a71977980afc7537dac0881e784eef99f"
 MAX_ARTIFACT_BYTES = 65536
 TRAIN_SIZES = (8, 16, 32)
-PUBLIC_BUDGET = {"usd_equivalent": 10, "tokens": 12000000, "seconds": 7200,
-                 "model_calls": 30000, "proposer_calls": 500}
+GEPA_METRIC_CALL_CAP = 10000
 
 
 def _json(value: object) -> str:
@@ -75,11 +74,38 @@ def _policy(seed: int, episode: int, parent: float, child: float, noise: dict) -
     return json.loads(completed.stdout)
 
 
+def _project_noise(noise: dict, n: int) -> tuple[dict, dict]:
+    source_n = noise.get("noise_design", {}).get("rows_per_arm", 8)
+    factor = math.sqrt(source_n / n)
+    calibration = dict(noise.get("calibration", noise))
+    for field in ("pairedDeltaSd", "maxObservedPairDelta", "noiseFloor", "noiseEnvelope"):
+        if field in calibration:
+            calibration[field] *= factor
+    projection = {"source_rows_per_arm": source_n, "target_rows_per_arm": n, "scale": factor,
+                  "assumption": "Pilot independent-row mean approximation; not a final-test confidence interval."}
+    return {"calibration": calibration}, projection
+
+
 def _contract(task: Task, noise: dict) -> dict:
-    return {"task": task.name, "deployment_contract": task.manifest.get("deployment_contract", task.manifest),
+    from pilot.program import MAX_CALLS, MAX_OUTPUT_TOKENS, MAX_PROMPT_BYTES, MAX_WIRE_BYTES
+    deployment = {"model_calls_per_row": 1, "max_output_tokens": 4096,
+                  "format": "System prompt plus task input; return the task answer as text."}
+    if "program" in task.seed_candidate:
+        deployment = {"model_calls_per_row": MAX_CALLS, "total_requested_output_tokens": MAX_OUTPUT_TOKENS,
+                      "total_prompt_bytes": MAX_PROMPT_BYTES, "max_wire_bytes": MAX_WIRE_BYTES,
+                      "active_program_seconds": 30, "memory_mb": 256, "cpu_count": 1,
+                      "pids": 32, "open_files": 64, "file_size_bytes": 1048576,
+                      "network": False, "read_only": True, "solution_seconds": 10,
+                      "solution_function_calls": 100, "solution_call_input_bytes": MAX_PROMPT_BYTES,
+                      "solution_source_bytes": MAX_WIRE_BYTES, "solution_output_bytes": MAX_WIRE_BYTES,
+                      "format": 'Python stdin JSON {input,prompt}; stdout JSON lines: '
+                                '{type:"model",messages:[{role,content}],max_tokens} receives {text}; '
+                                'finish with {type:"result",code:"Python solution source"}. '
+                                'Message roles: system/user/assistant. No markdown protocol frames.'}
+    return {"task": task.name, "deployment_contract": deployment,
             "editable_artifact": task.seed_candidate,
             "artifact_format": "One JSON object, exact seed keys, nonempty string values; no markdown; max 65536 UTF-8 bytes.",
-            "public_budget": noise.get("budget", PUBLIC_BUDGET),
+            "public_budget": dict(LIMITS),
             "selection_feedback": "Only aggregate selection score is available. Selection labels are sealed."}
 
 
@@ -97,31 +123,39 @@ def run_search(method: str, task: Task, call: Callable, evaluate: Callable,
     state = {"candidate": None, "selection_score": None, "stop_reason": "budget_exhausted",
              "proposals": 0, "trajectory": [], "method": method, "seed": seed,
              "contract": _contract(task, noise)}
+    def retain(candidate, score):
+        record = {"candidate": dict(candidate), "selection_score": score}
+        append_json(outdir / "incumbents.jsonl", record)
+        state.update(record)
     try:
         if method == "gepa":
-            _gepa(task, call, evaluate, available, noise, seed, max_proposals, state)
+            _gepa(task, call, evaluate, available, noise, seed, max_proposals, state, retain)
         else:
-            _loop(method, task, call, evaluate, available, noise, seed, max_proposals, state)
-    except BudgetExhausted:
+            _loop(method, task, call, evaluate, available, noise, seed, max_proposals, state, retain)
+    except BudgetExhausted as error:
         state["stop_reason"] = "budget_exhausted"
+        state["budget_exhaustion"] = str(error)
+        if getattr(error, "binding_cap", None) is not None:
+            state["binding_cap"] = error.binding_cap
     (outdir / "search.json").write_text(_json(state) + "\n", encoding="utf-8")
     return state
 
 
-def _loop(method, task, call, evaluate, available, noise, seed, limit, state):
+def _loop(method, task, call, evaluate, available, noise, seed, limit, state, retain):
     initial = evaluate(task.seed_candidate, task.selection)
-    state.update(candidate=dict(task.seed_candidate), selection_score=_mean(initial, task.selection))
+    retain(task.seed_candidate, _mean(initial, task.selection))
     keys = set(task.seed_candidate)
-    calibration = noise.get("calibration", noise)
     state["policy"] = {"train_sizes": TRAIN_SIZES, "paired_train_gate":
-        "pass if delta > noiseEnvelope + 1.96*SE; reject if delta + 1.96*SE <= noiseFloor; otherwise double to32, reject unresolved",
-        "selection": "native assessPromotion on fresh paired full-selection vectors" if method == "hone" else "strict aggregate improvement",
-        "epsilon_restart": 0.1 if method == "hone" else 0}
+        "pass if delta > projected noiseEnvelope; reject if delta <= projected noiseFloor; otherwise double to32, reject unresolved",
+        "selection": "native assessPromotion on projected full-selection calibration" if method == "hone" else "strict aggregate improvement"}
     while available() and (limit is None or state["proposals"] < limit):
         episode = state["proposals"]
         parent = state["candidate"]
-        if method == "hone" and _policy(seed, episode, 0, 0, noise)["parent"] == "seed":
-            parent = task.seed_candidate
+        native_policy = _policy(seed, episode, 0, 0, noise) if method == "hone" else None
+        if native_policy is not None:
+            state["policy"].update(epsilon_restart=native_policy["epsilon"], one_repair=native_policy["oneRepair"])
+            if native_policy["parent"] == "seed":
+                parent = task.seed_candidate
         rows = _batch(task, seed, episode, 8)
         feedback = evaluate(parent, rows, capture_traces=True)
         _mean(feedback, rows)
@@ -130,12 +164,25 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state):
                    "training_feedback": feedback,
                    "instruction": "Read training failures and traces. Return one complete improved editable artifact JSON."}
         state["proposals"] += 1
-        raw = call("proposer", [{"role": "user", "content": _json(message)}], 2048)
-        child, error = _decode(raw, keys)
-        event = {"episode": episode, "artifact_error": error, "training_gates": [],
-                 "parent_artifact": dict(parent), "proposal": raw,
-                 "feedback_row_ids": [row["id"] for row in rows]}
+        event = {"episode": episode, "training_gates": [], "parent_artifact": dict(parent),
+                 "feedback_row_ids": [row["id"] for row in rows], "accepted": False}
         state["trajectory"].append(event)
+        try:
+            raw = call("proposer", [{"role": "user", "content": _json(message)}], 2048)
+            event["proposal"] = raw
+            child, error = _decode(raw, keys)
+            event["artifact_error"] = error
+            if error is not None and native_policy is not None and native_policy["oneRepair"]:
+                repair = {"contract": state["contract"], "invalid_artifact": raw, "artifact_error": error,
+                          "instruction": "Repair the artifact format only. Return one complete artifact JSON."}
+                raw = call("repair", [{"role": "user", "content": _json(repair)}], 2048)
+                child, error = _decode(raw, keys)
+                event.update(repair=raw, repair_error=error)
+        except CallFailed as failure:
+            event["call_failure"] = str(failure)
+            continue
+        if method == "hone" and error is not None:
+            continue
         if method == "hone":
             passed = False
             for size in TRAIN_SIZES:
@@ -145,12 +192,13 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state):
                 after = evaluate(child, paired)
                 _mean(before, paired)
                 _mean(after, paired)
-                deltas = [b - a for a, b in zip(before["scores"], after["scores"])]
-                delta = statistics.fmean(deltas)
-                margin = 1.96 * statistics.stdev(deltas) / math.sqrt(len(deltas)) if len(deltas) > 1 else 0
-                passed = error is None and delta > calibration["noiseEnvelope"] + margin
-                rejected = error is not None or delta + margin <= calibration["noiseFloor"]
-                event["training_gates"].append({"n": len(paired), "delta": delta, "margin": margin,
+                delta = statistics.fmean(b - a for a, b in zip(before["scores"], after["scores"]))
+                projected, projection = _project_noise(noise, len(paired))
+                calibration = projected["calibration"]
+                passed = delta > calibration["noiseEnvelope"]
+                rejected = delta <= calibration["noiseFloor"]
+                event["training_gates"].append({"n": len(paired), "delta": delta,
+                                                 "noise_projection": projection, "calibration": calibration,
                                                  "row_ids": [row["id"] for row in paired],
                                                  "passed": passed, "rejected": rejected})
                 if passed or rejected or len(paired) == len(task.train):
@@ -164,20 +212,22 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state):
             if parent != state["candidate"]:
                 incumbent_score = _mean(evaluate(state["candidate"], task.selection), task.selection)
             child_score = _mean(evaluate(child, task.selection), task.selection)
-            gate = _policy(seed, episode, parent_score, child_score, noise)["gate"]
-            incumbent_gate = _policy(seed, episode, incumbent_score, child_score, noise)["gate"]
-            event.update(gate=gate, incumbent_gate=incumbent_gate)
+            projected, projection = _project_noise(noise, len(task.selection))
+            gate = _policy(seed, episode, parent_score, child_score, projected)["gate"]
+            incumbent_gate = _policy(seed, episode, incumbent_score, child_score, projected)["gate"]
+            event.update(gate=gate, incumbent_gate=incumbent_gate,
+                         selection_noise_projection=projection, selection_calibration=projected["calibration"])
             accepted = error is None and gate["passed"] and incumbent_gate["passed"]
         else:
             child_score = _mean(evaluate(child, task.selection), task.selection)
             accepted = error is None and child_score > state["selection_score"]
         event.update(selection_score=child_score, accepted=accepted)
         if accepted:
-            state.update(candidate=child, selection_score=child_score)
+            retain(child, child_score)
     state["stop_reason"] = "max_proposals" if limit is not None and state["proposals"] >= limit else "budget_exhausted"
 
 
-def _gepa(task, call, evaluate, available, noise, seed, limit, state):
+def _gepa(task, call, evaluate, available, noise, seed, limit, state, retain):
     from gepa import optimize
     from gepa.core.adapter import EvaluationBatch
 
@@ -189,11 +239,13 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state):
     state["native"] = {"commit": installed_commit, "version": distribution.version,
                        "candidate_selection_strategy": "pareto", "acceptance_criterion": "strict_improvement",
                        "reflection_minibatch_size": 8, "cache_evaluation": False, "run_dir": None,
+                       "max_metric_calls": GEPA_METRIC_CALL_CAP, "skip_perfect_score": True,
                        "propose_new_texts": None, "seed": seed}
     keys = set(task.seed_candidate)
     expected_ids = set(range(len(task.selection)))
     training_ids = {row["id"] for row in task.train}
     stopped = False
+    terminal_error = None
 
     class Adapter:
         propose_new_texts = None
@@ -217,9 +269,10 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state):
 
         def make_reflective_dataset(self, candidate, eval_batch, components_to_update):
             records = [{"Inputs": trace["input"], "Generated Outputs": trace["output"],
-                        "Feedback": trace, "pilot_contract": state["contract"],
-                        "recent_selection_score": state["selection_score"]}
+                        "Feedback": trace, "recent_selection_score": state["selection_score"]}
                        for trace in eval_batch.trajectories]
+            if records:
+                records[0]["pilot_contract"] = state["contract"]
             return {component: records for component in components_to_update}
 
     class Callback:
@@ -238,22 +291,37 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state):
             candidate, error = _decode(event["candidate"]["artifact"], keys)
             score = statistics.fmean(event["scores_by_val_id"].values())
             if error is None and (state["selection_score"] is None or score > state["selection_score"]):
-                state.update(candidate=candidate, selection_score=score)
+                retain(candidate, score)
 
     def stopper(native_state):
         nonlocal stopped
-        reached_limit = limit is not None and native_state.i >= limit - 1
-        stopped = stopped or not available() or reached_limit
+        reached_limit = limit is not None and state["proposals"] >= limit
+        stopped = stopped or terminal_error is not None or not available() or reached_limit
         if stopped:
             state["stop_reason"] = "max_proposals" if reached_limit else "budget_exhausted"
         return stopped
 
     def reflection(prompt):
+        nonlocal terminal_error
+        if terminal_error is not None:
+            raise terminal_error
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
-        return call("proposer", messages, 2048)
+        try:
+            return call("proposer", messages, 2048)
+        except CallFailed as failure:
+            state["trajectory"].append({"accepted": False, "call_failure": str(failure)})
+            raise
+        except Exception as error:
+            terminal_error = error
+            raise
 
     optimize(seed_candidate={"artifact": _json(task.seed_candidate)}, trainset=task.train,
              valset=task.selection, adapter=Adapter(), reflection_lm=reflection,
-             reflection_minibatch_size=8, stop_callbacks=stopper, callbacks=[Callback()],
+             reflection_minibatch_size=8, max_metric_calls=GEPA_METRIC_CALL_CAP,
+             stop_callbacks=stopper, callbacks=[Callback()],
              run_dir=None, cache_evaluation=False, raise_on_exception=True, seed=seed,
              display_progress_bar=False, use_merge=False)
+    if terminal_error is not None:
+        raise terminal_error
+    if not stopped:
+        state.update(stop_reason="budget_exhausted", binding_cap="gepa_metric_calls")

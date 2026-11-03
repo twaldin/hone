@@ -1,10 +1,15 @@
 import json
 import os
 import sys
+import signal
 import unittest
+import tempfile
+import time
+from pathlib import Path
 from unittest.mock import patch
 
 from pilot import program
+from pilot.controls import SHORTCUT_CODE
 
 
 def local_command(name, path=None):
@@ -20,10 +25,48 @@ def local_remove(name, process):
             stream.close()
 
 
+
 class ProgramTests(unittest.TestCase):
     def execute(self, source, call):
-        with patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove):
+        original_popen = program.subprocess.Popen
+        owned = []
+        def spawn(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            owned.append(process)
+            return process
+        def pause(name, paused):
+            os.kill(owned[0].pid, signal.SIGSTOP if paused else signal.SIGCONT)
+            if paused:
+                os.waitpid(owned[0].pid, os.WUNTRACED)
+        with (patch.object(program, "docker_command", local_command),
+              patch.object(program, "_remove", local_remove),
+              patch.object(program.subprocess, "Popen", spawn),
+              patch.object(program, "_pause", pause)):
             return program.run_program({"prompt": "solve", "program": source}, "def target(x):", call)
+
+    def test_owned_process_cannot_work_while_provider_is_waiting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress = Path(directory) / "progress"
+            source = f'''import json,sys,threading
+sys.stdin.readline()
+def burn():
+    n=0
+    while True:
+        n+=1
+        with open({str(progress)!r},'w') as stream:
+            stream.write(str(n))
+threading.Thread(target=burn,daemon=True).start()
+print(json.dumps({{"type":"model","messages":[{{"role":"user","content":"solve"}}],"max_tokens":1}}),flush=True)
+sys.stdin.readline()
+print(json.dumps({{"type":"result","code":"done"}}),flush=True)
+'''
+            def call(*args):
+                before = progress.read_bytes() if progress.exists() else None
+                time.sleep(0.05)
+                after = progress.read_bytes() if progress.exists() else None
+                self.assertEqual(before, after)
+                return "answer"
+            self.assertEqual(self.execute(source, call)[0], "done")
 
 
     def test_third_call_is_denied(self):
@@ -87,6 +130,25 @@ def target(x): return -1
         with patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove):
             score = program.score_solution(source, "", ["assert target(7) == 42"], ["target"])
         self.assertEqual(score, 0.0)
+
+    def test_spoofed_worker_frames_do_not_bypass_real_assertions(self):
+        with patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove):
+            score = program.score_solution(SHORTCUT_CODE, "", ["assert target(7) == 42"], ["target"])
+        self.assertEqual(score, 0.0)
+
+    def test_always_equal_object_cannot_cross_literal_boundary(self):
+        source = """class AlwaysEqual:
+    def __eq__(self, other): return True
+    def __repr__(self): return 'AlwaysEqual()'
+def target(x): return AlwaysEqual()
+"""
+        with patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove):
+            score = program.score_solution(source, "", ["assert target(7) == 42"], ["target"])
+        self.assertEqual(score, 0.0)
+
+    @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
+    def test_docker_spoofed_rpc_frames_score_zero(self):
+        self.assertEqual(program.score_solution(SHORTCUT_CODE, "", ["assert target(7) == 42"], ["target"]), 0.0)
 
     @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
     def test_docker_worker_never_receives_assertions(self):

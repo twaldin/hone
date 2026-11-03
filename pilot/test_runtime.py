@@ -1,11 +1,12 @@
-import copy
+from io import StringIO
+from types import SimpleNamespace
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from pilot.runtime import BudgetExhausted, Ledger, LIMITS, Throttle, TransportError, capacity_reason, create_pool, retry_comparison
+from pilot.runtime import BudgetExhausted, CallFailed, Gateway, Ledger, LIMITS, ModelCalls, Throttle, TransportError, capacity_reason, create_pool, open_gateway, retry_comparison
 
 POOL = {"*": False, "anthropic": {"accounts": ["email:pilot@example.org|org:personal"], "apiKeys": False}}
 
@@ -105,6 +106,79 @@ class RuntimeTests(unittest.TestCase):
             pool = create_pool(self.path / "pool.json")
         self.assertEqual(pool, {"*": False, "anthropic": {"accounts": ["email:a@gmail.com|org:personal"], "apiKeys": False}})
         self.assertEqual((self.path / "pool.json").stat().st_mode & 0o777, 0o600)
+
+    def test_broker_move_reconnects_even_when_new_health_is_already_good(self):
+        class Endpoint:
+            def __init__(self, fail):
+                self.fail, self.closed = fail, False
+            def request(self, body):
+                if self.fail:
+                    raise TransportError("old broker endpoint")
+                return response()
+            def close(self):
+                self.closed = True
+        old, new = Endpoint(True), Endpoint(False)
+        ledger = Ledger(self.path / "move")
+        throttle = Throttle(POOL, {}, self.path / "pauses", reader=lambda: usage(), clock=lambda: 1000)
+        call = ModelCalls(old, ledger, throttle)
+        self.addCleanup(call.close)
+        with patch("pilot.runtime.broker_healthy", return_value=True), patch("pilot.runtime.open_gateway", return_value=new):
+            self.assertEqual(call("task", [{"role": "user", "content": "x"}], 32), "answer")
+        self.assertTrue(old.closed)
+        self.assertEqual(ledger.calls, 2)
+        self.assertEqual(ledger.tokens, 190)
+        self.assertEqual(ledger.usage_missing, 1)
+
+    def test_provider_rejection_is_charged_then_bounded_as_call_failure(self):
+        class Rejected:
+            def request(self, body):
+                frame = response()
+                frame["status"] = 502
+                return frame
+            def close(self):
+                pass
+        gateway = Rejected()
+        ledger = Ledger(self.path / "reject")
+        throttle = Throttle(POOL, {}, self.path / "pauses", reader=lambda: usage(), clock=lambda: 1000)
+        call = ModelCalls(gateway, ledger, throttle)
+        with patch("pilot.runtime.broker_healthy", return_value=True), patch("pilot.runtime.open_gateway", return_value=gateway):
+            with self.assertRaises(CallFailed):
+                call("proposer", [{"role": "user", "content": "x"}], 32)
+        self.assertEqual(ledger.calls, 2)
+        self.assertEqual(ledger.proposer_calls, 2)
+        self.assertEqual(ledger.proposer_success_calls, 0)
+        self.assertEqual(ledger.tokens, 380)
+
+    def test_poll_time_does_not_exhaust_active_work_budget(self):
+        now = [1000.0]
+        ledger = Ledger(self.path / "time", clock=lambda: now[0], limits=dict(LIMITS, active_seconds=1))
+        def read():
+            now[0] += 2
+            return usage()
+        throttle = Throttle(POOL, {}, self.path / "pauses", reader=read, clock=lambda: now[0])
+        throttle.wait()
+        self.assertTrue(ledger.available(throttle.accounted_seconds))
+        self.assertEqual(ledger.summary(throttle)["active_seconds"], 0)
+        self.assertEqual(ledger.summary(throttle)["poll_seconds"], 2)
+        self.assertEqual(throttle.pauses, 0)
+
+    def test_startup_broker_outage_waits_before_reconnect(self):
+        throttle = Throttle(POOL, {}, self.path / "pauses", reader=lambda: usage(), clock=lambda: 1000)
+        endpoint = object()
+        with patch("pilot.runtime.Gateway", side_effect=[TransportError("outage"), endpoint]), patch("pilot.runtime.broker_healthy", return_value=False):
+            self.assertIs(open_gateway(throttle), endpoint)
+
+    def test_dead_gateway_pipe_does_not_prevent_cleanup_or_reconnect(self):
+        class DeadPipe:
+            closed = False
+            def close(self):
+                raise BrokenPipeError("broker moved")
+        stdout = StringIO()
+        gateway = Gateway.__new__(Gateway)
+        gateway.process = SimpleNamespace(stdin=DeadPipe(), stdout=stdout, wait=lambda timeout: 0)
+        gateway.close()
+        gateway.close()
+        self.assertTrue(stdout.closed)
 
 
 if __name__ == "__main__":

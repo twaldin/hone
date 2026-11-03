@@ -15,7 +15,7 @@ from types import ModuleType, SimpleNamespace
 import urllib.request
 
 from .program import ProgramError, SEED_PROGRAM, run_program, score_solution
-from .runtime import BudgetExhausted
+from .runtime import BudgetExhausted, CallFailed
 
 ARTIFACT_REV = "cbefbc1aa0f43dd39874ec4bf42211365dbda42e"
 ARTIFACT = f"https://raw.githubusercontent.com/gepa-ai/gepa-artifact/{ARTIFACT_REV}/gepa_artifact/benchmarks/IFBench/"
@@ -137,12 +137,20 @@ def load_task(name: str, cache: Path) -> Task:
                 rows.append({"id": f"aime:historical:{index}", "input": row["problem"],
                              "answer": row["answer"], "solution": row.get("solution", "")})
         train, selection = partition(name, rows)
-        seed = {"prompt": "Follow the user's instructions precisely." if name == "ifbench" else "Solve the mathematics problem. Return only the final integer answer, with no other text."}
+        seed = {"prompt": "Respond to the query." if name == "ifbench" else "Solve the problem and provide the answer in the correct format."}
     manifest = {"task": name, "development_only": True, "sources": sources,
                 "train_ids": [row["id"] for row in train], "selection_ids": [row["id"] for row in selection],
                 "scored_final_tests_loaded": False, "metric_artifact_revision": ARTIFACT_REV,
                 "adaptation": "Reference AST function declarations only; no bodies, examples or test assertions. Bounded Python agent-program adaptation, not official optimizer artifact." if name == "mbpp" else "Official development transformations; AIME Random(0) 45/45, IFBench source rows 300:600 training and 0:300 selection.",
                 "license": "CC-BY-4.0" if name == "mbpp" else "See pinned source"}
+    if name in {"aime", "ifbench"}:
+        manifest["program_protocol"] = {
+            "adaptation": "Current subscription model, not historical DSPy/model reproduction. Visible JSON reasoning substitutes for DSPy ChainOfThought fields; hidden reasoning is not required.",
+            "official_program": ARTIFACT.replace("IFBench/", "") + ("AIME/AIME_program.py" if name == "aime" else "IFBench/ifbench_program.py"),
+            "stages": ["reasoning, answer"] if name == "aime" else ["reasoning, response", "reasoning, final_response"],
+            "editable_instruction": "The same prompt instruction applies to each stage; field protocols and stage order are protected and identical for every method.",
+            "metric_input": "Extracted answer with official int(answer) semantics." if name == "aime" else "Extracted final_response passed unchanged as metric response.",
+        }
     if name == "mbpp":
         manifest["solution_evaluator"] = {
             "assertions": "Official development setup and assertions execute only in trusted host process.",
@@ -248,6 +256,21 @@ def score_output(task: Task, row: dict, output: str) -> float:
         return float(_ifbench_result(task, row, output).score)
     return score_solution(output, row["test_setup_code"], row["test_list"], row["function_names"])
 
+def _response(call: Callable, messages: list[dict], field: str, traces: list[dict]) -> str:
+    protocol = (
+        f"Return only one JSON object with exactly two string fields: reasoning and {field}. "
+        f"Put visible reasoning in reasoning and only the requested answer in {field}. "
+        "No markdown fences or text outside JSON."
+    )
+    messages = [{"role": "system", "content": protocol}] + messages
+    raw = call("task", messages, 4096)
+    traces.append({"messages": messages, "output": raw, "max_tokens": 4096})
+    parsed = json.loads(raw)
+    if (not isinstance(parsed, dict) or set(parsed) != {"reasoning", field}
+            or any(not isinstance(value, str) for value in parsed.values())):
+        raise ValueError("Invalid protected response fields")
+    return parsed[field]
+
 
 def evaluate(task: Task, candidate: dict[str, str], rows: list[dict],
              call: Callable[[str, list[dict], int], str], capture_traces: bool = False) -> dict:
@@ -274,17 +297,22 @@ def evaluate(task: Task, candidate: dict[str, str], rows: list[dict],
                 feedback = "Solution passed development assertions." if score else "Solution failed development assertions or execution."
             else:
                 messages = [{"role": "system", "content": candidate["prompt"]}, {"role": "user", "content": row["input"]}]
-                output = call("task", messages, 4096)
-                traces = [{"messages": messages, "output": output, "max_tokens": 4096}]
+                output = _response(call, messages, "answer" if task.name == "aime" else "response", traces)
                 if task.name == "aime":
                     score = aime_score(output, row["answer"])
                     feedback = f"Correct integer answer: {row['answer']}. " + row.get("solution", "")
                 else:
+                    revision = [
+                        {"role": "system", "content": candidate["prompt"]},
+                        {"role": "system", "content": "Ensure the response is correct and adheres to the given constraints. Your response will be used as the final response."},
+                        {"role": "user", "content": json.dumps({"query": row["input"], "response": output})},
+                    ]
+                    output = _response(call, revision, "final_response", traces)
                     result = _ifbench_result(task, row, output)
                     score, feedback = float(result.score), result.feedback
         except BudgetExhausted:
             raise
-        except (ProgramError, SyntaxError, KeyError, ValueError, TypeError):
+        except (CallFailed, ProgramError, SyntaxError, KeyError, ValueError, TypeError):
             score, feedback = 0.0, "Candidate crashed or returned invalid output."
         scores.append(score)
         outputs.append(output)

@@ -21,10 +21,16 @@ LIMITS = {"usd": 10.0, "tokens": 12_000_000, "calls": 30_000, "proposer_calls": 
 
 
 class BudgetExhausted(Exception):
-    pass
+    def __init__(self, message: str, binding_cap: str | None = None):
+        super().__init__(message)
+        self.binding_cap = binding_cap
 
 
 class TransportError(Exception):
+    pass
+
+
+class CallFailed(TransportError):
     pass
 
 
@@ -110,6 +116,7 @@ class Throttle:
     journal: Path
     interval: float = 30
     paused_seconds: float = 0
+    accounted_seconds: float = 0
     pauses: int = 0
     reader: Callable[[], dict] | None = None
     sleep: Callable[[float], None] = time.sleep
@@ -125,6 +132,7 @@ class Throttle:
 
     def wait(self) -> None:
         started = None
+        entered = self.clock()
         while True:
             try:
                 reason = capacity_reason(self.read(), self.pool, self.clock())
@@ -135,6 +143,7 @@ class Throttle:
                     elapsed = max(0, self.clock() - started)
                     self.paused_seconds += elapsed
                     append_json(self.journal, {"event": "resumed", "at": self.clock(), "seconds": elapsed})
+                self.accounted_seconds += max(0, self.clock() - entered)
                 return
             if started is None:
                 started = self.clock()
@@ -150,6 +159,7 @@ class Ledger:
     clock: Callable[[], float] = time.monotonic
     calls: int = 0
     proposer_calls: int = 0
+    proposer_success_calls: int = 0
     tokens: int = 0
     usd: float = 0
     hidden_attempts: int = 0
@@ -157,24 +167,34 @@ class Ledger:
     retry_log_events: int = 0
     usage_missing: int = 0
     started: float = field(init=False)
+    binding_cap: str | None = None
 
     def __post_init__(self) -> None:
         self.started = self.clock()
 
     def available(self, paused: float = 0) -> bool:
-        return self.calls < self.limits["calls"] and self.proposer_calls < self.limits["proposer_calls"] and self.tokens < self.limits["tokens"] and self.usd < self.limits["usd"] and self.clock() - self.started - paused < self.limits["active_seconds"]
+        values = {"calls": self.calls, "proposer_calls": self.proposer_calls, "tokens": self.tokens, "usd": self.usd,
+                  "active_seconds": self.clock() - self.started - paused}
+        self.binding_cap = next((key for key, value in values.items() if value >= self.limits[key]), None)
+        return self.binding_cap is None
 
     def admit(self, role: str, messages: list[dict], max_tokens: int, paused: float = 0) -> None:
         if role not in {"task", "proposer", "judge", "repair"} or not 1 <= max_tokens <= 4096:
             raise ValueError("Invalid model request contract")
         input_bound = len(canonical(messages).encode()) + 4096
         reservation = (input_bound * max(PRICES["input"], PRICES["cacheWrite"]) + max_tokens * PRICES["output"]) / 1_000_000
-        if not self.available(paused) or self.usd + reservation > self.limits["usd"] or self.tokens + input_bound + max_tokens > self.limits["tokens"]:
-            raise BudgetExhausted("Reported-usage budget cannot admit the next call")
+        if not self.available(paused):
+            raise BudgetExhausted("Reported-usage cap exhausted", self.binding_cap)
+        if self.usd + reservation > self.limits["usd"]:
+            self.binding_cap = "usd_reservation"
+            raise BudgetExhausted("Reported-usage dollar reservation exhausted", self.binding_cap)
+        if self.tokens + input_bound + max_tokens > self.limits["tokens"]:
+            self.binding_cap = "token_reservation"
+            raise BudgetExhausted("Reported-usage token reservation exhausted", self.binding_cap)
 
     def settle(self, role: str, request: dict, frame: dict, seconds: float) -> str:
         self.calls += 1
-        self.proposer_calls += role == "proposer"
+        self.proposer_calls += role in {"proposer", "repair"}
         observation = frame.get("body", {}).get("retryObservation", {})
         hidden = observation.get("hiddenAttempts", 0)
         logs = observation.get("logEvents", 0)
@@ -198,13 +218,16 @@ class Ledger:
         text = "".join(block.get("text", "") for block in message.get("content", []) if block.get("type") == "text")
         append_json(self.journal, {"call": self.calls, "role": role, "model": MODEL, "request_hash": digest(request), "response_hash": digest(text), "status": frame.get("status"), "stop_reason": message.get("stopReason"), "reported_usage": counts, "reported_tokens": tokens, "usd_equivalent": usd, "seconds": seconds, "retry_observation": observation, "usage_missing": not usage_valid})
         if frame.get("status") != 200 or message.get("stopReason") not in {"stop", "length"} or not usage_valid:
-            raise TransportError("Provider call failed; consumed reported usage retained")
+            raise CallFailed("Provider call failed; consumed reported usage retained")
+        self.proposer_success_calls += role in {"proposer", "repair"}
         return text
 
     def summary(self, throttle: Throttle) -> dict:
         wall = self.clock() - self.started
         rate = self.hidden_attempts / self.calls if self.calls else 0
-        return {"calls": self.calls, "proposer_calls": self.proposer_calls, "tokens": self.tokens, "usd_equivalent": self.usd, "wall_seconds": wall, "active_seconds": max(0, wall - throttle.paused_seconds), "pauses": throttle.pauses, "pause_seconds": throttle.paused_seconds, "hidden_attempts": self.hidden_attempts, "calls_with_hidden_attempts": self.calls_with_hidden_attempts, "hidden_attempt_rate": rate, "retry_log_events": self.retry_log_events, "usage_missing_calls": self.usage_missing, "retry_rate_flag": rate > 0.01}
+        result = {"proposer_success_calls": self.proposer_success_calls}
+        result.update({"calls": self.calls, "proposer_calls": self.proposer_calls, "tokens": self.tokens, "usd_equivalent": self.usd, "wall_seconds": wall, "active_seconds": max(0, wall - throttle.accounted_seconds), "pauses": throttle.pauses, "pause_seconds": throttle.paused_seconds, "throttle_seconds": throttle.accounted_seconds, "poll_seconds": max(0, throttle.accounted_seconds - throttle.paused_seconds), "binding_cap": self.binding_cap, "hidden_attempts": self.hidden_attempts, "calls_with_hidden_attempts": self.calls_with_hidden_attempts, "hidden_attempt_rate": rate, "retry_log_events": self.retry_log_events, "usage_missing_calls": self.usage_missing, "retry_rate_flag": rate > 0.01})
+        return result
 
 
 class Gateway:
@@ -218,6 +241,9 @@ class Gateway:
             ready = self.read(120)
             if ready.get("ready") is not True or ready.get("version") != "18.16.0":
                 raise TransportError("Pilot requires omp 18.16.0")
+            self.route_identity = ready.get("routeIdentity")
+            if not isinstance(self.route_identity, dict) or self.route_identity.get("oauth_only_session") is not True:
+                raise TransportError("Gateway did not establish OAuth-only account restrictions")
         except Exception:
             self.close()
             raise
@@ -249,7 +275,10 @@ class Gateway:
 
     def close(self) -> None:
         if self.process.stdin is not None and not self.process.stdin.closed:
-            self.process.stdin.close()
+            try:
+                self.process.stdin.close()
+            except OSError:
+                pass
         try:
             self.process.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -259,6 +288,26 @@ class Gateway:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
+        finally:
+            if self.process.stdout is not None:
+                self.process.stdout.close()
+
+
+def broker_healthy(env: dict[str, str]) -> bool:
+    try:
+        return omp_json(["auth-broker", "status", "--json"], env).get("ok") is True
+    except (OSError, ValueError, TransportError, subprocess.TimeoutExpired):
+        return False
+
+
+def open_gateway(throttle: Throttle) -> Gateway:
+    while True:
+        throttle.wait()
+        try:
+            return Gateway(throttle.env)
+        except TransportError:
+            if broker_healthy(throttle.env):
+                raise
 
 
 class ModelCalls:
@@ -266,9 +315,10 @@ class ModelCalls:
         self.gateway, self.ledger, self.throttle = gateway, ledger, throttle
 
     def __call__(self, role: str, messages: list[dict], max_tokens: int) -> str:
+        healthy_failures = 0
         while True:
             self.throttle.wait()
-            self.ledger.admit(role, messages, max_tokens, self.throttle.paused_seconds)
+            self.ledger.admit(role, messages, max_tokens, self.throttle.accounted_seconds)
             system = [message["content"] for message in messages if message["role"] == "system"]
             body = {"model": MODEL, "context": {"systemPrompt": system, "messages": [{**message, "timestamp": 0} for message in messages if message["role"] != "system"]}, "options": {"maxTokens": max_tokens, "temperature": 0, "forceReasoningOff": True, "cacheRetention": "none", "preferWebsockets": False}, "stream": False}
             started = time.monotonic()
@@ -278,16 +328,13 @@ class ModelCalls:
                 frame = {"status": 599, "body": {}}
             try:
                 return self.ledger.settle(role, body, frame, time.monotonic() - started)
-            except TransportError:
-                try:
-                    healthy = omp_json(["auth-broker", "status", "--json"], self.throttle.env).get("ok") is True
-                except (OSError, ValueError, TransportError, subprocess.TimeoutExpired):
-                    healthy = False
-                if healthy:
+            except CallFailed:
+                if broker_healthy(self.throttle.env):
+                    healthy_failures += 1
+                if healthy_failures >= 2:
                     raise
                 self.gateway.close()
-                self.throttle.wait()
-                self.gateway = Gateway(self.throttle.env)
+                self.gateway = open_gateway(self.throttle)
 
     def close(self) -> None:
         self.gateway.close()
