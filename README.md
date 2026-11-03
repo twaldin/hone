@@ -83,6 +83,8 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 The pilot is an admission experiment, not an optimizer-quality claim. Its accounting accepts disclosed token undercounts from internal retries and failed calls; complete attempt and failed-call receipts are required before a full comparison. See [the pilot contract and commands](docs/pilot.md).
 
+Admission stopped at the MBPP control gate; no searches ran. See the [failed admission evidence and handoff](evidence/pilot/handoff.md).
+
 ## Status and limitations
 
 - **Running a capsule from a fresh clone is not smooth yet.** Production runs require an admission receipt and the pinned image, and there is no public command that builds both for you.

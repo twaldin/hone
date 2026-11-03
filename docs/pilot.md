@@ -2,6 +2,8 @@
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
+Admission is blocked: the fresh MBPP naive control scored zero and tied both negative controls. Noise measurement and every search stopped. Do not run the matrix or rerun controls without a new assistant decision. See the [retained failure and handoff](../evidence/pilot/handoff.md).
+
 ## Prepare the runtime
 
 Run from the repository root on Linux with Docker, Bun, uv, pnpm, and omp 18.16.0 installed. Configure the auth broker through omp itself. Do not supply credentials to this repository.
