@@ -1,0 +1,38 @@
+{
+  "full_suite": {
+    "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-harness-1/.pilot-cache/nltk pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -v",
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests_run": 144,
+    "tool_wall_seconds": 20.56,
+    "unittest_wall_seconds": 20.356
+  },
+  "new_admission_requirements": [
+    "Completed seal lists controls, call/evaluation records, usage, source contract, adversarial proof and audit",
+    "660 successful task calls and nonempty naive/noise outputs",
+    "Offline replay matches every retained score before audit is sealed",
+    "Smoke/pilot enforce CPU6 before auth",
+    "Startup failures retained; no automatic restart"
+  ],
+  "provider_model_calls": 0,
+  "scope": "Completed-seal admission and execution-health checks before new pilot model calls",
+  "source_files": {
+    "evidence/pilot/predeclaration-4a.md": "sha256:8d539ab8d3b309ecc6ff4265f438c0e8f6951033e3bc0bf5bc2de583d675fdfd",
+    "pilot/__main__.py": "sha256:3dfe88dbf40ad949d9e2bda46aba12aa145bbab0450d1ae327ad2e14bee650d4",
+    "pilot/test_preflight.py": "sha256:d59f45137a0c432662d85d5f41f99772d3cfd98fd99e75f048a9449b38f1818e"
+  },
+  "unsealed_control_regression": {
+    "after": {
+      "errors": 0,
+      "failures": 0,
+      "skipped": 0,
+      "tests_run": 144
+    },
+    "before": {
+      "failures": 1,
+      "observed_failure": "ValueError not raised: incomplete seal accepted injected controls",
+      "tests_run": 1
+    }
+  }
+}

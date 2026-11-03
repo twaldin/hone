@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -191,10 +192,11 @@ def readmit_mbpp(args) -> None:
     finally:
         seal(args.out / "adversarial")
         seal(args.out)
-    pool, env = environment(args.pool)
     out = args.out / "mbpp"
-    call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100, active_seconds=86_400))
+    call = None
     try:
+        pool, env = environment(args.pool)
+        call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100, active_seconds=86_400))
         save(out / "manifest.json", {"identity": identities["mbpp"], "route_identity": call.gateway.route_identity,
              "account_domains": pool_domains(pool), "measurement_budget": ledger.limits,
              "adversarial_hash": digest(proof)})
@@ -203,15 +205,48 @@ def readmit_mbpp(args) -> None:
                 rows=representative_rows(mbpp), adversarial=proof)
     except Exception as error:
         save(out / "failure.json", {"error_type": type(error).__name__,
-             "status": "infrastructure-failure" if isinstance(error, TransportError) else "admission-failed"})
+             "status": "infrastructure-failure" if call is None or isinstance(error, TransportError) else "admission-failed",
+             "stage": "startup" if call is None else "measurement"})
         raise
     finally:
-        call.close()
-        summary = ledger.summary(throttle)
-        save(out / "usage.json", summary)
+        if call is not None:
+            call.close()
+            summary = ledger.summary(throttle)
+            save(out / "usage.json", summary)
         seal(out)
         seal(args.out)
+    try:
+        audit = audit_mbpp_measurement(args)
+        save(args.out / "audit.json", audit)
+    except Exception as error:
+        save(out / "failure.json", {"error_type": type(error).__name__,
+             "status": "infrastructure-failure", "stage": "execution-audit"})
+        seal(out)
+        raise
+    finally:
+        seal(args.out)
     print(canonical({"task": "mbpp", "controls": "passed", **summary}), flush=True)
+
+
+def audit_mbpp_measurement(args) -> dict:
+    from .controls import PAIRS
+    started = time.monotonic()
+    verify_bundle(args.out)
+    out = args.out / "mbpp"
+    control = json.loads((out / "controls.json").read_text())
+    calls = [json.loads(line) for line in (out / "calls.jsonl").read_text().splitlines()]
+    records = [json.loads(line) for line in (out / "evaluations.jsonl").read_text().splitlines()]
+    expected = len(control["rows"]) * (1 + 2 * PAIRS)
+    successful = [call for call in calls if not call["failed"]]
+    outputs = [output for record in records if record["control"] in {"naive", "unchanged"} for output in record["outputs"]]
+    if (len(successful) != expected or any(call["role"] != "task" for call in successful)
+            or len(outputs) != expected or any(not isinstance(output, str) or not output.strip() for output in outputs)):
+        raise TransportError("MBPP calibration execution is incomplete; no admission")
+    replay(args)
+    return {"passed": True, "successful_task_calls": len(successful), "expected_successful_task_calls": expected,
+            "nonempty_outputs": len(outputs), "replayed_rollouts": sum(len(record["outputs"]) for record in records),
+            "model_calls": 0, "wall_seconds": time.monotonic() - started,
+            "input_hashes": {name: file_hash(out / name) for name in ("controls.json", "calls.jsonl", "evaluations.jsonl")}}
 
 
 def offline_adversarial(args) -> None:
@@ -287,9 +322,18 @@ def reuse_mbpp(task) -> tuple[dict, dict]:
     source = ROOT / "evidence/pilot/mbpp-readmission-4a"
     proof_path = source / "adversarial"
     verify_bundle(source)
+    members = json.loads((source / "bundle.json").read_text())["files"]
+    if not {"source-contract.json", "audit.json", "adversarial/adversarial.json", "mbpp/controls.json",
+            "mbpp/calls.jsonl", "mbpp/evaluations.jsonl", "mbpp/usage.json", "mbpp/bundle.json"}.issubset(members):
+        raise ValueError("MBPP admission is incomplete or its scores are not sealed")
     verify_bundle(proof_path)
     proof = json.loads((proof_path / "adversarial.json").read_text())
     validate_result(proof, proof.get("identities", {}), proof.get("cohorts", {}))
+    audit = json.loads((source / "audit.json").read_text())
+    if (audit.get("passed") is not True or audit.get("model_calls") != 0
+            or audit.get("input_hashes") != {name: file_hash(source / "mbpp" / name)
+                for name in ("controls.json", "calls.jsonl", "evaluations.jsonl")}):
+        raise ValueError("MBPP execution audit failed or changed")
     control = json.loads((source / "mbpp/controls.json").read_text())
     baseline = json.loads((source / "source-contract.json").read_text())
     original = control["identity"]
@@ -686,6 +730,7 @@ def main():
                 raise ValueError("Control rows differ from sealed cohort")
         if args.task != "all" and args.task not in selected:
             raise ValueError("Requested task is not in the admitted pilot panel")
+        machine_proof(args.out)
         if args.command == "smoke":
             for command in (["docker", "info"], ["docker", "image", "inspect", IMAGE]):
                 subprocess.run(command, check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -8,12 +8,12 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from pilot.__main__ import TASKS, controls as run_controls, evaluator_identity, file_hash, main, machine_proof, offline_adversarial, replay, save, seal
-from pilot.controls import ControlsFailed, P_CONTROL_SEED, representative_rows
-from pilot.runtime import ROOT, CallFailed, TransportError, digest
+from pilot.__main__ import TASKS, audit_mbpp_measurement, controls as run_controls, evaluator_identity, file_hash, main, machine_proof, offline_adversarial, replay, reuse_mbpp, save, seal
+from pilot.controls import ControlsFailed, PAIRS, P_CONTROL_SEED, representative_rows
+from pilot.runtime import ROOT, CallFailed, TransportError, append_json, digest
 from pilot.tasks import Task
-from pilot.test_adversarial import fixture_tasks
-from pilot.admission import text_admission
+from pilot.test_adversarial import admission_fixture, fixture_tasks
+from pilot.admission import MBPP_FILES, mbpp_source_contract, text_admission
 from pilot import tasks as task_module
 from pilot import hover
 
@@ -140,6 +140,54 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual(order, expected)
                 self.assertEqual(json.loads((out / "panel.json").read_text())["tasks"],
                                  ["mbpp", "hover", "aime"] if replaced else ["mbpp", "ifbench", "aime"])
+
+    def test_missing_calls_or_empty_outputs_cannot_fake_zero_mbpp_noise(self):
+        for defect in ("missing-noise-calls", "empty-output"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                out = root / "mbpp"
+                rows = list(range(20))
+                save(out / "controls.json", {"rows": rows, "ranking_passed": True, "noise_passed": True})
+                count = 20 if defect == "missing-noise-calls" else 20 * (1 + 2 * PAIRS)
+                for _ in range(count):
+                    append_json(out / "calls.jsonl", {"role": "task", "failed": False})
+                append_json(out / "evaluations.jsonl", {"control": "naive", "outputs": ["def target(): return 1"] * 20})
+                for arm in range(2 * PAIRS):
+                    outputs = ["def target(): return 1"] * 20
+                    if defect == "empty-output" and arm == 0:
+                        outputs[0] = ""
+                    append_json(out / "evaluations.jsonl", {"control": "unchanged", "outputs": outputs})
+                seal(root)
+                with self.assertRaises(TransportError):
+                    audit_mbpp_measurement(argparse.Namespace(out=root, cache=root / "cache"))
+
+    def test_incomplete_mbpp_seal_cannot_authorize_an_injected_control(self):
+        tasks = fixture_tasks()
+        mbpp = next(task for task in tasks if task.name == "mbpp")
+        proof = admission_fixture(tasks)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = set(proof["identities"]["mbpp"]["evaluator_files"]) | {
+                "pilot/search.py", "evidence/pilot/predeclaration-4.md", "evidence/pilot/predeclaration-4a.md"}
+            for path in paths:
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(ROOT / path)
+            source = root / "evidence/pilot/mbpp-readmission-4a"
+            save(source / "adversarial/adversarial.json", proof)
+            seal(source / "adversarial")
+            save(source / "source-contract.json", {
+                "baseline_files": {path: file_hash(ROOT / path) for path in (*MBPP_FILES, "pilot/tasks.py", "pilot/search.py")},
+                "execution_contract": mbpp_source_contract(ROOT)})
+            seal(source)
+            save(source / "mbpp/controls.json", {
+                "identity": proof["identities"]["mbpp"], "adversarial_hash": digest(proof),
+                "ranking_passed": True, "noise_passed": True,
+                "rows": [row["id"] for row in representative_rows(mbpp)],
+                "noise_design": {"seed_artifact_hash": digest(mbpp.seed_candidate)}})
+            with patch("pilot.__main__.ROOT", root):
+                with self.assertRaises(ValueError):
+                    reuse_mbpp(mbpp)
 
     def test_provider_outage_aborts_calibration_without_choosing_panel(self):
         with tempfile.TemporaryDirectory() as directory, self.offline_fixture(Path(directory)) as (_, admission, cache):

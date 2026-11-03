@@ -14,6 +14,8 @@ The gate owner's rule permits MBPP reruns when its code changes. Re-admit MBPP w
 
 The new `readmit-mbpp` entrypoint must freeze the execution-source contract and adversarial proof before auth/model bootstrap, then produce a separate sealed bundle at `evidence/pilot/mbpp-readmission-4a`. Old control and adversarial bundles remain immutable historical evidence, not authorization for the corrected transport. Later P-only work may reuse only this newly admitted MBPP source contract.
 
+Before accepting re-admission, require exactly `20 * (1 + 2 * 16) = 660` successful task calls, nonempty program outputs for all naive and unchanged-control rows, and an offline replay of every recorded score. This detects missing candidate executions and scorer-side Docker failures that could otherwise fake a zero noise floor. A failed integrity audit is an infrastructure abort, not a revised score. Its input hashes and result must be sealed before reuse. Partial or unsealed score files cannot authorize admission. No automatic restart is authorized after any abort; retain the bundle and hand back.
+
 ## P rules remain predeclaration 4
 
 Seed `20261105`, 40 training rows each, published pinned GEPA positives, official seed naive programs, inclusive IFBench naive >= 0.90 replacement by HoVer, and AIME's unchanged rule remain fixed. No fresh P model result has been seen. Regenerate zero-call protocol admissions under the corrected source identities at `adversarial-4a`; measure controls at `controls-4a` and smokes at `smoke-4a`. No search until all selected task controls and noise pass.
