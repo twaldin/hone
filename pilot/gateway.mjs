@@ -27,18 +27,21 @@ const client = {
 };
 let active = false;
 let httpAttempts = 0;
+let apiKeyHeaderRejections = 0;
 let logEvents = 0;
 const dispose = registerLogSink((event) => {
   if (active && /retrying|slow mode retry|retry attempt|resampl/i.test(event.message) && !/without retry|no retry|not retry/i.test(event.message)) logEvents++;
 });
 const router = createAuthGatewayRouter({
   storage,
-  client,
   resolveModel: (id) => id === selector ? model : undefined,
   fetch: (input, init) => {
     const headers = init?.headers ?? (input instanceof Request ? input.headers : undefined);
     const apiKeyPresent = headers instanceof Headers ? headers.has("x-api-key") : Array.isArray(headers) ? headers.some(([name]) => name.toLowerCase() === "x-api-key") : headers && Object.keys(headers).some((name) => name.toLowerCase() === "x-api-key");
-    if (apiKeyPresent) throw new Error("API-key authentication forbidden in subscription pilot");
+    if (apiKeyPresent) {
+      apiKeyHeaderRejections++;
+      throw new Error("API-key authentication forbidden in subscription pilot");
+    }
     httpAttempts++;
     return fetch(input, init);
   },
@@ -56,11 +59,12 @@ try {
       if (new URL(request.url).pathname !== "/v1/pi/stream") return Response.json({ error: "Unsupported pilot route" }, { status: 404 });
       active = true;
       httpAttempts = 0;
+      apiKeyHeaderRejections = 0;
       logEvents = 0;
       try {
-        const response = await router.route(request, "hone-development-pilot");
+        const response = await router.route(request, "hone-development-pilot", client);
         const body = await response.json();
-        const retryObservation = { httpAttempts, hiddenAttempts: Math.max(0, httpAttempts - 1), logEvents, coverage: "Anthropic SDK opaque fetch override plus omp logger" };
+        const retryObservation = { httpAttempts, apiKeyHeaderRejections, hiddenAttempts: Math.max(0, httpAttempts - 1), logEvents, coverage: "Anthropic SDK opaque fetch override plus omp logger" };
         if (response.status !== 200) return Response.json({ error: "Provider request failed", retryObservation }, { status: response.status });
         return Response.json({ ...body, retryObservation });
       } finally {

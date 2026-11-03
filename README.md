@@ -77,6 +77,12 @@ node trusted/cli/bin/hone.js diff --stat
 
 Without either setting, Hone looks for capsules in `./capsules` under the directory you run it from. [Getting started](docs/getting-started.md) has the details.
 
+## Development optimizer pilot
+
+[`pilot/`](pilot/) compares Hone's paired, noise-calibrated policy, pinned official GEPA, and a plain agent loop on development-only IFBench, historical AIME, and bounded MBPP agent programs. It uses one subscription route, an account allowlist, usage throttling, and matched reported-usage budgets. Final-test data stays sealed.
+
+The pilot is an admission experiment, not an optimizer-quality claim. Its accounting accepts disclosed token undercounts from internal retries and failed calls; complete attempt and failed-call receipts are required before a full comparison. See [the pilot contract and commands](docs/pilot.md).
+
 ## Status and limitations
 
 - **Running a capsule from a fresh clone is not smooth yet.** Production runs require an admission receipt and the pinned image, and there is no public command that builds both for you.
@@ -97,6 +103,7 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 | [Methodology](docs/methodology.md) | Experiment levels and what each one can show. |
 | [Recursive experiment status](docs/m2-readiness.md) | What the recursive campaigns did and what is still missing. |
 | [Results](docs/results.md) | What a published result has to include. |
+| [Development optimizer pilot](docs/pilot.md) | Tasks, protected evaluation, subscription accounting, controls, smoke, and the 27-run handoff. |
 
 ## License
 

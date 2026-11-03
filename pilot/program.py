@@ -57,8 +57,12 @@ def _remove(name: str, process: subprocess.Popen[bytes]) -> None:
 
 
 def _pause(name: str, paused: bool) -> None:
-    subprocess.run(["docker", "pause" if paused else "unpause", name],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15, check=True)
+    try:
+        subprocess.run(["docker", "pause" if paused else "unpause", name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15, check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise ProgramError("Candidate container could not be paused" if paused else
+                           "Candidate container could not be resumed") from error
 
 def run_program(candidate: dict[str, str], task_input: str,
                 call: Callable[[str, list[dict], int], str]) -> tuple[str, list[dict]]:
@@ -87,8 +91,11 @@ def run_program(candidate: dict[str, str], task_input: str,
         prompt_bytes = 0
         requested_tokens = 0
         try:
-            process.stdin.write(json.dumps(initial).encode() + b"\n")
-            process.stdin.flush()
+            try:
+                process.stdin.write(json.dumps(initial).encode() + b"\n")
+                process.stdin.flush()
+            except BrokenPipeError as error:
+                raise ProgramError("Candidate protocol failed") from error
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
@@ -133,12 +140,14 @@ def run_program(candidate: dict[str, str], task_input: str,
                         text = call("task", messages, tokens)
                     finally:
                         deadline += time.monotonic() - before
-                        _pause(name, False)
+                    # Failed provider calls leave the container paused until removal.
+                    _pause(name, False)
                     traces.append({"messages": messages, "output": text, "max_tokens": tokens})
-                    process.stdin.write(json.dumps({"text": text}).encode() + b"\n")
-                    process.stdin.flush()
-        except (BrokenPipeError, OSError) as error:
-            raise ProgramError("Candidate protocol failed") from error
+                    try:
+                        process.stdin.write(json.dumps({"text": text}).encode() + b"\n")
+                        process.stdin.flush()
+                    except BrokenPipeError as error:
+                        raise ProgramError("Candidate protocol failed") from error
         finally:
             selector.close()
             _remove(name, process)

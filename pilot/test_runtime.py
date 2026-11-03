@@ -44,6 +44,8 @@ class RuntimeTests(unittest.TestCase):
         rows = [json.loads(line) for line in (self.path / "calls").read_text().splitlines()]
         self.assertEqual(rows[-1]["status"], 502)
         self.assertEqual(rows[-1]["reported_tokens"], 190)
+        self.assertTrue(rows[-1]["failed"])
+        self.assertEqual(ledger.failed_calls, 1)
 
     def test_budget_reserves_before_call_and_stops_at_each_cap(self):
         for key, value in (("usd", 0.000001), ("tokens", 1), ("calls", 0), ("proposer_calls", 0), ("active_seconds", 0)):
@@ -61,6 +63,18 @@ class RuntimeTests(unittest.TestCase):
             ledger.settle("task", {}, frame, 1)
         self.assertEqual(ledger.usage_missing, 1)
         self.assertEqual(ledger.calls, 1)
+        self.assertEqual(ledger.failed_calls, 1)
+
+    def test_failed_call_without_usage_is_not_invented_as_zero_cost_success(self):
+        ledger = Ledger(self.path / "provider-failure")
+        with self.assertRaises(CallFailed):
+            ledger.settle("task", {}, {"status": 502, "body": {}}, 1)
+        row = json.loads((self.path / "provider-failure").read_text())
+        self.assertTrue(row["failed"])
+        self.assertTrue(row["usage_missing"])
+        self.assertEqual(ledger.failed_calls, 1)
+        self.assertEqual(ledger.tokens, 0)
+        self.assertEqual(ledger.usd, 0)
 
     def test_throttle_waits_through_high_usage_and_outage(self):
         readings = iter([usage(0.99), TransportError("outage"), usage(0.1)])

@@ -1,15 +1,25 @@
 {
-  "implementation_head": "271a82778c67015984085f772aae0f7ba78badd8",
+  "tested_source_sha256": {
+    "pilot/__main__.py": "4a476e4743e49574e626f122b5f4822437ddaa24c4af466548871cc92ecf251a",
+    "pilot/controls.py": "282ad7bc55c9d9544a5fd279d9d830695b73d88228d8470b1d3476b30aff8645",
+    "pilot/gateway.mjs": "cee1f462a6d5f84bda3268f7b0d1b3fc710516fe627abe22de9dc366f9fe94c2",
+    "pilot/program.py": "820aaf1a9590fbf5fb950a9fb122e659e32a4ad35352de0c29441236745bcdf4",
+    "pilot/runtime.py": "36cf5519f6ea77169db4556c2e25692cbb70d245c52da5c10ade1d69a1d5d4bd",
+    "pilot/search.py": "c6bfa32c8a90735706d047725c096fb2619a55503bdd0a8c07c1b5d9a265355e",
+    "pilot/tasks.py": "7ceeeb36cfd0dbc270bc7bad1e025232aba5000623b96249b27b589d42ea789b",
+    "optimizer/src/pilot-policy.ts": "dc737f814ca1e3bb547a1914b367a589ec204f065c841414a5cd125ac4fc4541",
+    "optimizer/test/pilot-policy.test.ts": "f2ee64d894cd7fdae9d05d78f0303ec6eaf35832173c0f3742cae0e36ab9327a"
+  },
   "pilot": {
-    "command": "nice -n 10 taskset -c 0 env NLTK_DATA=$PWD/.pilot-cache/nltk PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -v",
-    "passed": 67,
+    "command": "nice -n 10 taskset -c 0 env NLTK_DATA=$PWD/.pilot-cache/nltk PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -q",
+    "passed": 79,
     "failed": 0,
     "skipped": 0,
     "real_artifacts": ["Docker candidate and solution boundaries", "pinned official IFBench metric", "pinned official GEPA optimizer and reflection parser"]
   },
   "native_optimizer": {
     "command": "nice -n 10 taskset -c 0 pnpm --dir optimizer exec vitest run --maxWorkers=2 --minWorkers=1",
-    "passed": 72,
+    "passed": 71,
     "failed": 0
   },
   "typecheck": {

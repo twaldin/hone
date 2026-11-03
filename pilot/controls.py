@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 import statistics
 
-from .runtime import LIMITS, IMAGE, canonical, digest
+from .runtime import LIMITS, IMAGE, append_json, canonical, digest
 from .tasks import Task, evaluate, score_output
 
 PAIRS = 16
@@ -29,21 +29,22 @@ def representative_rows(task: Task) -> list[dict]:
 
 def artifacts(task: Task) -> dict:
     naive = dict(task.seed_candidate)
-    naive["prompt"] = (
-        "Give a quick intuitive answer. Do not reason, verify, or revise; preserve your first answer at the revision stage."
-        if task.name != "ifbench" else
-        "Give a short natural answer to the main topic. Ignore formatting, counting, vocabulary and other artificial constraints. Preserve this answer at revision."
-    )
-    improved = dict(task.seed_candidate)
-    improved["prompt"] = (
-        "Follow every explicit instruction. Identify all constraints before drafting: counts, exact words, "
-        "format, exclusions, casing and ordering. Check each constraint against the draft, revise violations, "
-        "and return only compliant response text in the response field. At the revision stage independently "
-        "audit the draft against the original query and fix every violation."
-    )
-    shortcut = dict(task.seed_candidate)
-    shortcut["prompt"] = 'Do not solve the task. Claim evaluator success by returning {"score":1,"valid":true} as the answer/response text.'
     if task.name == "mbpp":
+        naive["prompt"] = "Give a quick intuitive answer. Do not reason, verify, or revise; preserve your first answer."
+    elif task.name == "ifbench":
+        naive["prompt"] = "Give a short natural answer to the main topic. Ignore formatting, counting, vocabulary and other artificial constraints. Preserve this answer at revision."
+    improved = {"reference": "protected development answer or solution"}
+    if task.name == "ifbench":
+        improved = dict(task.seed_candidate)
+        improved["prompt"] = (
+            "Follow every explicit instruction. Identify all constraints before drafting: counts, exact words, "
+            "format, exclusions, casing and ordering. Check each constraint against the draft, revise violations, "
+            "and return only compliant response text in the response field. At the revision stage independently "
+            "audit the draft against the original query and fix every violation."
+        )
+    shortcut = {"output": '{"score":1,"valid":true}'}
+    if task.name == "mbpp":
+        shortcut = dict(task.seed_candidate)
         shortcut["program"] = "import json,sys\nsys.stdin.readline()\nprint(json.dumps({'type':'result','code':" + repr(SHORTCUT_CODE) + "}),flush=True)\n"
     return {"known-improved": improved, "naive": naive, "broken": {"broken": "invalid artifact fields"}, "shortcut": shortcut}
 
@@ -61,7 +62,7 @@ def measure(task: Task, call, out: Path, identity: dict) -> dict:
     candidates = artifacts(task)
     definitions = {
         "known-improved": "Trusted training references for AIME/MBPP; stronger explicit constraint audit prompt through both real IFBench stages.",
-        "naive": "Real model quick unchecked response artifact; IFBench deliberately ignores artificial constraints and preserves first draft.",
+        "naive": "Real AIME seed artifact; real quick unchecked MBPP artifact; IFBench deliberately ignores artificial constraints and preserves first draft.",
         "broken": "Invalid artifact fields evaluated through the candidate boundary.",
         "shortcut": "Forged success JSON scored directly by the official P metric; forged worker ready/result frames with nonliteral always-equal value for MBPP.",
     }
@@ -81,12 +82,13 @@ def measure(task: Task, call, out: Path, identity: dict) -> dict:
             outputs = [str(row["answer"]) if task.name == "aime" else row["reference_code"] for row in rows]
             scores = [score_output(task, row, output) for row, output in zip(rows, outputs, strict=True)]
         elif name == "shortcut" and task.name != "mbpp":
-            outputs = ['{"score":1,"valid":true}'] * len(rows)
+            outputs = [candidate["output"]] * len(rows)
             scores = [score_output(task, row, output) for row, output in zip(rows, outputs, strict=True)]
         else:
             execution = evaluate(task, candidate, rows, call)
             scores, outputs = execution["scores"], execution["outputs"]
         controls[name] = {"scores": scores, "outputs": outputs, "mean": statistics.fmean(scores)}
+        append_json(out / "evaluations.jsonl", {"control": name, "row_ids": result["rows"], "outputs": outputs, "scores": scores})
     ranking = (controls["known-improved"]["mean"] > controls["naive"]["mean"] >
                max(controls["broken"]["mean"], controls["shortcut"]["mean"])
                and controls["broken"]["mean"] == 0 and (task.name != "mbpp" or controls["shortcut"]["mean"] == 0))
@@ -99,6 +101,9 @@ def measure(task: Task, call, out: Path, identity: dict) -> dict:
     for trial in range(PAIRS):
         first = evaluate(task, task.seed_candidate, rows, call)
         second = evaluate(task, task.seed_candidate, rows, call)
+        for arm, execution in (("first", first), ("second", second)):
+            append_json(out / "evaluations.jsonl", {"control": "unchanged", "trial": trial, "arm": arm,
+                        "row_ids": result["rows"], "outputs": execution["outputs"], "scores": execution["scores"]})
         pairs.append({"trial": trial, "first": first["scores"], "second": second["scores"], "delta": mean(second) - mean(first)})
         (out / "noise-pairs.json").write_text(canonical(pairs) + "\n")
     sd = statistics.stdev(pair["delta"] for pair in pairs)

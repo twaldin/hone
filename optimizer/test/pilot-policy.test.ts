@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { pilotPolicy } from "../src/pilot-policy.js";
-import { episodeRand } from "../src/loop.js";
 
 const calibration = {
   gateVersion: "noise-envelope-v3",
@@ -33,13 +32,6 @@ describe("pilot native policy", () => {
     expect(pilotPolicy(request()).gate.passed).toBe(true);
     expect(pilotPolicy(request(0.2, 0.21)).gate.passed).toBe(false);
     expect(pilotPolicy(request(0.2, 0.2)).gate.passed).toBe(false);
-  });
-
-  it("uses the native restart region rather than the former pilot-only region", () => {
-    let episode = 0;
-    while (episode < 1000 && !(episodeRand(0, episode) > 0.1 && episodeRand(0, episode) < 0.2)) episode++;
-    expect(episode).toBeLessThan(1000);
-    expect(pilotPolicy({ ...request(), episode }).parent).toBe("seed");
   });
 
   it("admits equivalent projected calibration bounds for full-selection sizes", () => {

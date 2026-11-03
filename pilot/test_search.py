@@ -8,7 +8,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from pilot.runtime import BudgetExhausted, CallFailed
-from pilot.search import GEPA_COMMIT, _artifact, _project_noise, run_search
+from pilot.search import GEPA_COMMIT, _artifact, _project_noise, _validate_artifact, run_search
 from pilot.tasks import Task
 
 
@@ -25,6 +25,15 @@ class SearchTests(unittest.TestCase):
             with self.subTest(raw=raw[:80]), self.assertRaises(ValueError):
                 _artifact(raw, {"prompt"})
 
+    def test_complete_mapping_validation_does_not_parse_component_text(self):
+        candidate = {"prompt": "Explain the task.", "program": "print('not JSON')"}
+        self.assertEqual(_validate_artifact(candidate, {"prompt", "program"}), candidate)
+        for invalid in ({"prompt": "x"}, {"prompt": "x", "program": " "},
+                        {"prompt": "x", "program": 1},
+                        {"prompt": "é" * 15000, "program": "x" * 40000}):
+            with self.subTest(candidate=str(invalid)[:80]), self.assertRaises(ValueError):
+                _validate_artifact(invalid, {"prompt", "program"})
+
     def test_plain_charges_seed_and_does_not_rescore_winner(self):
         evaluated, calls = [], []
         def evaluate(candidate, rows, capture_traces=False):
@@ -40,6 +49,8 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result["candidate"], {"prompt": "better"})
         self.assertEqual(result["selection_score"], 1)
         self.assertEqual(result["stop_reason"], "max_proposals")
+        self.assertEqual(result["valid_proposals"], 1)
+        self.assertEqual(result["policy"], {"selection": "strict aggregate improvement"})
         self.assertEqual(len(evaluated), 3)
         self.assertEqual(calls[0][0], "proposer")
         self.assertEqual(calls[0][2], 2048)
@@ -62,6 +73,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result["candidate"], {"prompt": "better"})
         self.assertEqual(result["selection_score"], 0.5)
         self.assertEqual(result["stop_reason"], "budget_exhausted")
+        self.assertEqual(result["valid_proposals"], 2)
 
     def test_malformed_artifact_is_charged_and_cannot_replace_seed(self):
         evaluated = []
@@ -74,6 +86,7 @@ class SearchTests(unittest.TestCase):
         self.assertIn("__invalid_artifact__", evaluated[-1])
         self.assertEqual(result["candidate"], task().seed_candidate)
         self.assertIsNotNone(result["trajectory"][0]["artifact_error"])
+        self.assertEqual(result["valid_proposals"], 0)
 
     def test_hone_refreshes_full_paired_parent_before_child(self):
         seen = []
@@ -144,6 +157,7 @@ class SearchTests(unittest.TestCase):
             self.assertEqual(result["selection_score"], 0.5)
             self.assertFalse(result["trajectory"][0]["accepted"])
             self.assertIn("refused", result["trajectory"][0]["call_failure"])
+            self.assertEqual(result["valid_proposals"], 0)
 
     def test_hone_malformed_proposal_gets_one_repair_without_parent_gate_work(self):
         for repair_output in ("still malformed", CallFailed("repair refused")):
@@ -165,6 +179,7 @@ class SearchTests(unittest.TestCase):
             self.assertEqual([n for _, n in evaluated], [3, 8])
             self.assertEqual(result["candidate"], {"prompt": "seed"})
             self.assertFalse(result["trajectory"][0]["accepted"])
+            self.assertEqual(result["valid_proposals"], 0)
 
     def test_plain_equal_scores_strictly_retain_seed(self):
         def evaluate(candidate, rows, capture_traces=False):
@@ -174,6 +189,7 @@ class SearchTests(unittest.TestCase):
                                 lambda: True, {}, 0, Path(directory), 1)
         self.assertEqual(result["candidate"], {"prompt": "seed"})
         self.assertFalse(result["trajectory"][0]["accepted"])
+        self.assertEqual(result["valid_proposals"], 1)
 
     def test_incomplete_candidate_never_becomes_incumbent(self):
         def evaluate(candidate, rows, capture_traces=False):
@@ -205,7 +221,7 @@ class SearchTests(unittest.TestCase):
         def call(role, messages, max_tokens):
             calls.append((role, messages, max_tokens))
             self.assertNotIn("never expose", json.dumps(messages))
-            return '```json\n{"prompt":"better"}\n```'
+            return "```\nbetter\n```"
         def evaluate(candidate, rows, capture_traces=False):
             seen.append((candidate, len(rows)))
             score = float(candidate == {"prompt": "better"})
@@ -216,6 +232,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result["candidate"], {"prompt": "better"})
         self.assertEqual(result["selection_score"], 1)
         self.assertEqual(result["proposals"], 1)
+        self.assertEqual(result["valid_proposals"], 1)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "proposer")
         self.assertEqual(calls[0][2], 2048)
@@ -242,6 +259,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(calls, ["proposer", "repair"])
         self.assertEqual(result["candidate"], {"prompt": "better"})
         self.assertTrue(result["trajectory"][0]["accepted"])
+        self.assertEqual(result["valid_proposals"], 1)
         self.assertEqual(len(gate_calibrations), 2)
         for projected in gate_calibrations:
             self.assertAlmostEqual(projected["noiseEnvelope"], 0.02 * math.sqrt(8 / 3))
@@ -272,12 +290,13 @@ class SearchTests(unittest.TestCase):
                     "trajectories": [{"feedback": "training"}] * len(rows)}
         def call(role, messages, max_tokens):
             calls.append(role)
-            return '```json\n{"prompt":"better"}\n```'
+            return "better"
         with tempfile.TemporaryDirectory() as directory:
             result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
         self.assertGreaterEqual(len(captures), 2)
         self.assertEqual(calls, ["proposer"])
         self.assertEqual(result["proposals"], 1)
+        self.assertEqual(result["valid_proposals"], 1)
 
     @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
     def test_gepa_all_perfect_train_stops_at_metric_cap_without_false_proposal(self):
@@ -290,6 +309,7 @@ class SearchTests(unittest.TestCase):
             result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
         self.assertEqual(result["candidate"], {"prompt": "seed"})
         self.assertEqual(result["proposals"], 0)
+        self.assertEqual(result["valid_proposals"], 0)
         self.assertEqual(result["binding_cap"], "gepa_metric_calls")
         self.assertNotEqual(result["stop_reason"], "max_proposals")
 
@@ -304,11 +324,12 @@ class SearchTests(unittest.TestCase):
             score = float(candidate == {"prompt": "better"})
             return {"scores": [score] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
         with tempfile.TemporaryDirectory() as directory:
-            result = run_search("gepa", task(), lambda *args: '```json\n{"prompt":"better"}\n```',
+            result = run_search("gepa", task(), lambda *args: "```\nbetter\n```",
                                 evaluate, lambda: True, {}, 0, Path(directory), 1)
         self.assertEqual(result["candidate"], {"prompt": "seed"})
         self.assertEqual(result["selection_score"], 0)
         self.assertEqual(result["stop_reason"], "budget_exhausted")
+        self.assertEqual(result["valid_proposals"], 1)
 
     @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
     def test_real_native_gepa_rejects_failed_reflection_then_can_improve(self):
@@ -317,7 +338,7 @@ class SearchTests(unittest.TestCase):
             attempts[0] += 1
             if attempts[0] <= 2:
                 raise CallFailed("provider refusal")
-            return '```json\n{"prompt":"better"}\n```'
+            return "better"
         def evaluate(candidate, rows, capture_traces=False):
             score = float(candidate == {"prompt": "better"})
             return {"scores": [score] * len(rows), "outputs": [""] * len(rows), "trajectories": [{}] * len(rows)}
@@ -326,6 +347,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result["candidate"], {"prompt": "better"})
         self.assertEqual(result["selection_score"], 1)
         self.assertEqual(result["proposals"], 2)
+        self.assertEqual(result["valid_proposals"], 1)
 
     @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
     def test_real_native_gepa_does_not_swallow_evaluator_failure(self):
@@ -336,3 +358,82 @@ class SearchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, "metric unavailable"):
             run_search("gepa", task(), lambda *args: self.fail("No proposal before feedback"), evaluate,
                        lambda: True, {}, 0, Path(directory), 2)
+
+    @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
+    def test_native_gepa_edits_components_and_retains_unaffected_fields(self):
+        current = task()
+        current.name = "mbpp"
+        current.seed_candidate = {"prompt": "seed", "program": "print('seed')"}
+        program = "print('improved program')"
+        replies = iter(["```\nbetter\n```", f"```python\n{program}\n```"])
+        seen = []
+        def evaluate(candidate, rows, capture_traces=False):
+            seen.append(dict(candidate))
+            score = 0.25 * (candidate.get("prompt") == "better") + 0.25 * (candidate.get("program") == program)
+            return {"scores": [score] * len(rows), "outputs": [""] * len(rows),
+                    "trajectories": [{}] * len(rows)}
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("gepa", current, lambda *args: next(replies), evaluate,
+                                lambda: True, {}, 0, Path(directory), 2)
+        self.assertIn({"prompt": "better", "program": "print('seed')"}, seen)
+        self.assertEqual(result["candidate"], {"prompt": "better", "program": program})
+        self.assertEqual(result["valid_proposals"], 2)
+        self.assertTrue(all(set(candidate) == {"prompt", "program"} for candidate in seen))
+
+    @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
+    def test_native_gepa_invalid_proposal_cannot_count_toward_smoke(self):
+        for reply in ("```\n \n```", "x" * 30000):
+            current = task()
+            current.seed_candidate = {"prompt": "seed", "program": "x" * 40000}
+            seen = []
+            def evaluate(candidate, rows, capture_traces=False):
+                seen.append(candidate)
+                return {"scores": [0] * len(rows), "outputs": [""] * len(rows),
+                        "trajectories": [{}] * len(rows)}
+            with self.subTest(reply_length=len(reply)), tempfile.TemporaryDirectory() as directory:
+                result = run_search("gepa", current, lambda *args: reply, evaluate,
+                                    lambda: True, {}, 0, Path(directory), 1)
+                self.assertEqual(result["proposals"], 1)
+                self.assertEqual(result["valid_proposals"], 0)
+                self.assertEqual(result["candidate"], current.seed_candidate)
+                if len(reply) == 30000:
+                    self.assertIn("UTF-8 bytes", result["trajectory"][0]["artifact_error"])
+                    self.assertTrue(any("__invalid_artifact__" in candidate for candidate in seen))
+
+    @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
+    def test_native_gepa_budget_interrupt_retains_accepted_incumbent(self):
+        replies = iter(["better", "unfinished"])
+        def evaluate(candidate, rows, capture_traces=False):
+            if candidate == {"prompt": "unfinished"} and rows[0]["id"].startswith("s"):
+                raise BudgetExhausted("selection interrupted")
+            score = {"seed": 0, "better": 0.25, "unfinished": 0.5}[candidate["prompt"]]
+            return {"scores": [score] * len(rows), "outputs": [""] * len(rows),
+                    "trajectories": [{}] * len(rows)}
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("gepa", task(), lambda *args: next(replies), evaluate,
+                                lambda: True, {}, 0, Path(directory), 2)
+        self.assertEqual(result["candidate"], {"prompt": "better"})
+        self.assertEqual(result["selection_score"], 0.25)
+        self.assertEqual(result["valid_proposals"], 2)
+        self.assertEqual(result["stop_reason"], "budget_exhausted")
+
+    @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
+    def test_native_gepa_fatal_reflection_failure_does_not_retry_transport(self):
+        for failure in (BudgetExhausted("proposer budget exhausted"), ValueError("fatal proposer failure")):
+            calls = []
+            def call(*args):
+                calls.append(args)
+                raise failure
+            def evaluate(candidate, rows, capture_traces=False):
+                return {"scores": [0] * len(rows), "outputs": [""] * len(rows),
+                        "trajectories": [{}] * len(rows)}
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory:
+                if isinstance(failure, BudgetExhausted):
+                    result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
+                    self.assertEqual(result["candidate"], {"prompt": "seed"})
+                    self.assertEqual(result["stop_reason"], "budget_exhausted")
+                    self.assertEqual(result["valid_proposals"], 0)
+                else:
+                    with self.assertRaisesRegex(ValueError, "fatal proposer failure"):
+                        run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
+                self.assertEqual(len(calls), 1)

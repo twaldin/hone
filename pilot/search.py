@@ -23,6 +23,16 @@ def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+def _validate_artifact(value: object, keys: set[str]) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ValueError("artifact keys must exactly match the seed")
+    if not all(isinstance(text, str) and text.strip() for text in value.values()):
+        raise ValueError("artifact fields must be nonempty strings")
+    if len(_json(value).encode("utf-8")) > MAX_ARTIFACT_BYTES:
+        raise ValueError("artifact exceeds 65536 UTF-8 bytes")
+    return value
+
+
 def _artifact(raw: str, keys: set[str]) -> dict[str, str]:
     if len(raw.encode("utf-8")) > MAX_ARTIFACT_BYTES:
         raise ValueError("artifact exceeds 65536 UTF-8 bytes")
@@ -33,12 +43,7 @@ def _artifact(raw: str, keys: set[str]) -> dict[str, str]:
                 raise ValueError("duplicate artifact key")
             result[key] = value
         return result
-    value = json.loads(raw, object_pairs_hook=unique)
-    if not isinstance(value, dict) or set(value) != keys:
-        raise ValueError("artifact keys must exactly match the seed")
-    if not all(isinstance(text, str) and text.strip() for text in value.values()):
-        raise ValueError("artifact fields must be nonempty strings")
-    return value
+    return _validate_artifact(json.loads(raw, object_pairs_hook=unique), keys)
 
 
 def _decode(raw: str, keys: set[str]) -> tuple[dict[str, str], str | None]:
@@ -90,6 +95,20 @@ def _contract(task: Task, noise: dict) -> dict:
     from pilot.program import MAX_CALLS, MAX_OUTPUT_TOKENS, MAX_PROMPT_BYTES, MAX_WIRE_BYTES
     deployment = {"model_calls_per_row": 1, "max_output_tokens": 4096,
                   "format": "System prompt plus task input; return the task answer as text."}
+    if task.name in {"aime", "ifbench"}:
+        fields = ["answer"] if task.name == "aime" else ["response", "final_response"]
+        deployment.update(
+            model_calls_per_row=len(fields),
+            protected_response_fields=[["reasoning", field] for field in fields],
+            format="Each call returns only one JSON object with exactly the two listed string fields. "
+                   "Visible reasoning goes in reasoning; the requested answer goes in the other field. "
+                   "No markdown fences or text outside JSON. "
+                   + ("The answer string is scored as an integer." if task.name == "aime" else
+                      "First generate response from the task input, then revise it into final_response "
+                      "using the original query and response. Only final_response is scored."),
+            editable_scope="The prompt supplies task instructions on every call. "
+                           "The response protocol, JSON decoder and scorer are protected and not editable.",
+        )
     if "program" in task.seed_candidate:
         deployment = {"model_calls_per_row": MAX_CALLS, "total_requested_output_tokens": MAX_OUTPUT_TOKENS,
                       "total_prompt_bytes": MAX_PROMPT_BYTES, "max_wire_bytes": MAX_WIRE_BYTES,
@@ -104,7 +123,8 @@ def _contract(task: Task, noise: dict) -> dict:
                                 'Message roles: system/user/assistant. No markdown protocol frames.'}
     return {"task": task.name, "deployment_contract": deployment,
             "editable_artifact": task.seed_candidate,
-            "artifact_format": "One JSON object, exact seed keys, nonempty string values; no markdown; max 65536 UTF-8 bytes.",
+            "artifact_format": "Mapping with exact seed keys and nonempty string values; "
+                               "max 65536 UTF-8 bytes in its JSON serialization.",
             "public_budget": dict(LIMITS),
             "selection_feedback": "Only aggregate selection score is available. Selection labels are sealed."}
 
@@ -118,10 +138,10 @@ def run_search(method: str, task: Task, call: Callable, evaluate: Callable,
         raise ValueError("max_proposals must be nonnegative")
     if not task.train or not task.selection:
         raise ValueError("training and selection must both be nonempty")
-    _artifact(_json(task.seed_candidate), set(task.seed_candidate))
+    _validate_artifact(task.seed_candidate, set(task.seed_candidate))
     outdir.mkdir(parents=True, exist_ok=True)
     state = {"candidate": None, "selection_score": None, "stop_reason": "budget_exhausted",
-             "proposals": 0, "trajectory": [], "method": method, "seed": seed,
+             "proposals": 0, "valid_proposals": 0, "trajectory": [], "method": method, "seed": seed,
              "contract": _contract(task, noise)}
     def retain(candidate, score):
         record = {"candidate": dict(candidate), "selection_score": score}
@@ -145,9 +165,11 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state, re
     initial = evaluate(task.seed_candidate, task.selection)
     retain(task.seed_candidate, _mean(initial, task.selection))
     keys = set(task.seed_candidate)
-    state["policy"] = {"train_sizes": TRAIN_SIZES, "paired_train_gate":
-        "pass if delta > projected noiseEnvelope; reject if delta <= projected noiseFloor; otherwise double to32, reject unresolved",
-        "selection": "native assessPromotion on projected full-selection calibration" if method == "hone" else "strict aggregate improvement"}
+    state["policy"] = {"selection": "strict aggregate improvement"}
+    if method == "hone":
+        state["policy"] = {"train_sizes": TRAIN_SIZES, "paired_train_gate":
+            "pass if delta > projected noiseEnvelope; reject if delta <= projected noiseFloor; otherwise double to32, reject unresolved",
+            "selection": "native assessPromotion on projected full-selection calibration"}
     while available() and (limit is None or state["proposals"] < limit):
         episode = state["proposals"]
         parent = state["candidate"]
@@ -181,6 +203,8 @@ def _loop(method, task, call, evaluate, available, noise, seed, limit, state, re
         except CallFailed as failure:
             event["call_failure"] = str(failure)
             continue
+        if error is None:
+            state["valid_proposals"] += 1
         if method == "hone" and error is not None:
             continue
         if method == "hone":
@@ -251,7 +275,10 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state, retain):
         propose_new_texts = None
 
         def evaluate(self, batch, candidate, capture_traces=False):
-            decoded, error = _decode(candidate["artifact"], keys)
+            try:
+                decoded, error = _validate_artifact(candidate, keys), None
+            except (ValueError, TypeError) as failure:
+                decoded, error = {"__invalid_artifact__": _json(candidate)}, str(failure)
             training = all(row["id"] in training_ids for row in batch)
             if capture_traces and not training:
                 raise RuntimeError("selection trajectories cannot enter reflection")
@@ -276,21 +303,37 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state, retain):
             return {component: records for component in components_to_update}
 
     class Callback:
+        def __init__(self):
+            self.parent = None
+
         def on_proposal_start(self, event):
             state["proposals"] += 1
+            self.parent = dict(event["parent_candidate"])
 
         def on_proposal_end(self, event):
+            candidate = {**self.parent, **event["new_instructions"]}
+            try:
+                _validate_artifact(candidate, keys)
+                error = None
+            except (ValueError, TypeError) as failure:
+                error = str(failure)
+            if event["new_instructions"] and error is None:
+                state["valid_proposals"] += 1
             state["trajectory"].append({"iteration": event["iteration"],
                                         "raw_lm_outputs": event["raw_lm_outputs"],
-                                        "new_instructions": event["new_instructions"]})
+                                        "new_instructions": event["new_instructions"],
+                                        "candidate": candidate, "artifact_error": error})
 
         def on_valset_evaluated(self, event):
             if (set(event["scores_by_val_id"]) != expected_ids
                     or event["num_examples_evaluated"] != len(expected_ids)):
                 return
-            candidate, error = _decode(event["candidate"]["artifact"], keys)
+            try:
+                candidate = _validate_artifact(event["candidate"], keys)
+            except (ValueError, TypeError):
+                return
             score = statistics.fmean(event["scores_by_val_id"].values())
-            if error is None and (state["selection_score"] is None or score > state["selection_score"]):
+            if state["selection_score"] is None or score > state["selection_score"]:
                 retain(candidate, score)
 
     def stopper(native_state):
@@ -315,7 +358,7 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state, retain):
             terminal_error = error
             raise
 
-    optimize(seed_candidate={"artifact": _json(task.seed_candidate)}, trainset=task.train,
+    optimize(seed_candidate=dict(task.seed_candidate), trainset=task.train,
              valset=task.selection, adapter=Adapter(), reflection_lm=reflection,
              reflection_minibatch_size=8, max_metric_calls=GEPA_METRIC_CALL_CAP,
              stop_callbacks=stopper, callbacks=[Callback()],

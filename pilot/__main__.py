@@ -13,7 +13,7 @@ from .runtime import (ROOT, MODEL, IMAGE, LIMITS, PRICES, PRICE_SOURCE, Gateway,
                       ModelCalls, Throttle, TransportError, CallFailed, append_json, canonical,
                       create_pool, digest, open_gateway, pool_domains, retry_comparison)
 
-TASKS = ("ifbench", "aime", "mbpp")
+TASKS = ("mbpp", "ifbench", "aime")
 METHODS = ("hone", "gepa", "plain")
 
 
@@ -119,14 +119,15 @@ def route_proof(pool: dict, env: dict, out: Path) -> None:
         try:
             negative.admit("task", body["context"]["messages"], 1)
             frame = gateway.request(body)
-            if frame.get("status") == 200 or frame.get("body", {}).get("retryObservation", {}).get("httpAttempts") != 0:
+            observation = frame.get("body", {}).get("retryObservation", {})
+            if frame.get("status") == 200 or observation.get("httpAttempts") != 0 or observation.get("apiKeyHeaderRejections") != 0:
                 raise ValueError("OAuth-only restriction allowed credential fallback")
             try:
                 negative.settle("task", body, frame, 0)
             except CallFailed:
                 pass
             save(out / "negative-auth.json", {"configured_environment_fallbacks": "non-secret fixture values",
-                 "allowed_oauth_accounts_present": 0, "provider_http_attempts": 0, "status": frame["status"],
+                 "allowed_oauth_accounts_present": 0, "provider_http_attempts": 0, "api_key_header_rejections": 0, "status": frame["status"],
                  "reported_calls": negative.calls, "reported_tokens": negative.tokens, "fallback_refused": True})
         finally:
             gateway.close()
@@ -144,20 +145,25 @@ def controls(args, pool, env):
     for name in TASKS if args.task == "all" else (args.task,):
         task = load_task(name, args.cache)
         out = args.out / name
-        if (out / "controls.json").exists():
+        if out.exists() and any(out.iterdir()):
             raise ValueError("Control evidence already exists; preserve it instead of rerunning to a favorable result")
-        call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100))
+        call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100, active_seconds=86_400))
         try:
+            identity = evaluator_identity(task)
+            save(out / "manifest.json", {"identity": identity, "route_identity": call.gateway.route_identity,
+                 "account_domains": pool_domains(pool), "measurement_budget": ledger.limits})
             save(out / "measurement-budget.json", ledger.limits)
-            measure(task, call, out, evaluator_identity(task))
+            measure(task, call, out, identity)
         except Exception as error:
             save(out / "failure.json", {"error_type": type(error).__name__, "status": "admission-failed"})
             raise
         finally:
-            save(out / "usage.json", ledger.summary(throttle))
             call.close()
-        save(out / "usage.json", ledger.summary(throttle))
-        print(canonical({"task": name, "controls": "passed", **ledger.summary(throttle)}), flush=True)
+            summary = ledger.summary(throttle)
+            save(out / "usage.json", summary)
+            seal(out)
+        print(canonical({"task": name, "controls": "passed", **summary}), flush=True)
+    seal(args.out)
 
 
 def seal(out: Path) -> None:
@@ -196,6 +202,7 @@ def resume_result(out: Path, task_name: str, seed: int, method: str, error_type:
               "calls": len(calls), "tokens": sum(call["reported_tokens"] for call in calls),
               "usd_equivalent": sum(call["usd_equivalent"] for call in calls), "hidden_attempts": hidden,
               "hidden_attempt_rate": hidden / len(calls) if calls else 0, "usage_missing_calls": sum(call.get("usage_missing", False) for call in calls),
+              "failed_calls": sum(call.get("failed", call.get("status") != 200 or call.get("stop_reason") not in {"stop", "length"} or call.get("usage_missing", False)) for call in calls),
               "proposer_calls": sum(call.get("role") in {"proposer", "repair"} for call in calls),
               "stop_reason": error_type, "accounting_incomplete": True}
     save(out / "failure.json", {"error_type": error_type, "rerun_policy": "Never rerun this cell; retain its durable usage prefix and last accepted incumbent."})
@@ -239,7 +246,7 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
     try:
         result = run_search(method, task, call, protected_evaluate, lambda: ledger.available(throttle.accounted_seconds), control, seed, out, max_proposals=1 if smoke else None)
         summary = {"task": task_name, "seed": seed, "method": method, "status": "completed", "selection_score": result["selection_score"],
-                   "candidate_hash": digest(result["candidate"]), "rollouts": rollouts, "proposals": result["proposals"],
+                   "candidate_hash": digest(result["candidate"]), "rollouts": rollouts, "proposals": result["proposals"], "valid_proposals": result["valid_proposals"],
                    "stop_reason": result["stop_reason"], **ledger.summary(throttle)}
         if result.get("binding_cap") is not None:
             summary["binding_cap"] = result["binding_cap"]
@@ -254,8 +261,8 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
                 "smoke_proposal_cap": 1 if smoke else None, "historical_snapshot_replication": False})
         if result["candidate"] is None:
             raise RuntimeError("No fully evaluated eligible artifact returned")
-        if smoke and ledger.proposer_success_calls < 1:
-            raise RuntimeError("Smoke did not exercise a real proposer request")
+        if smoke and (ledger.proposer_success_calls < 1 or result["valid_proposals"] < 1):
+            raise RuntimeError("Smoke requires a successful proposer call and a valid complete proposed artifact")
         seal(out)
         print(canonical(summary), flush=True)
         return summary

@@ -1,0 +1,16 @@
+{
+  "scenario": "A candidate prints a valid model frame and exits; wait for that owned container to exit before invoking the production Docker pause command.",
+  "before": {
+    "commit": "c7784c547dc43d33c7dec1cc2be3e101a7281714",
+    "source": "pilot/program.py loaded directly from the Git object in an isolated Python module",
+    "observed": "subprocess.CalledProcessError escaped the candidate boundary",
+    "provider_calls": 0
+  },
+  "after": {
+    "program_sha256": "820aaf1a9590fbf5fb950a9fb122e659e32a4ad35352de0c29441236745bcdf4",
+    "command": "nice -n 10 taskset -c 0 env PILOT_DOCKER_TESTS=1 pilot/.venv/bin/python -m unittest pilot.test_program.ProgramTests.test_docker_model_frame_then_exit_is_program_error_and_zero pilot.test_program.ProgramTests.test_docker_candidate_is_paused_during_provider_wait_and_resumes -v",
+    "passed": 2,
+    "observed": ["candidate exit becomes ProgramError", "protected evaluation scores the exited candidate zero", "provider is not called after candidate exit", "real Docker container is paused during the provider wait", "successful provider return resumes the real candidate", "no owned container remains running, paused, or restarting"]
+  },
+  "test_limit": "An initial test required immediate disappearance of Docker metadata and failed once; later docker ps -a showed no harness containers. That incidental assertion was removed. The regression checks the consumer-visible resource invariant instead: no active owned container."
+}

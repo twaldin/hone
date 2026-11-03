@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import signal
+import subprocess
 import unittest
 import tempfile
 import time
@@ -10,6 +11,8 @@ from unittest.mock import patch
 
 from pilot import program
 from pilot.controls import SHORTCUT_CODE
+from pilot.runtime import BudgetExhausted, TransportError
+from pilot.tasks import Task, evaluate
 
 
 def local_command(name, path=None):
@@ -27,7 +30,7 @@ def local_remove(name, process):
 
 
 class ProgramTests(unittest.TestCase):
-    def execute(self, source, call):
+    def execute(self, source, call, unpause_error=None):
         original_popen = program.subprocess.Popen
         owned = []
         def spawn(*args, **kwargs):
@@ -35,6 +38,8 @@ class ProgramTests(unittest.TestCase):
             owned.append(process)
             return process
         def pause(name, paused):
+            if not paused and unpause_error is not None:
+                raise unpause_error
             os.kill(owned[0].pid, signal.SIGSTOP if paused else signal.SIGCONT)
             if paused:
                 os.waitpid(owned[0].pid, os.WUNTRACED)
@@ -102,6 +107,104 @@ sys.stdin.readline()
     def test_unknown_protocol_cannot_request_tools(self):
         with self.assertRaises(program.ProgramError):
             self.execute('import sys\nsys.stdin.readline()\nprint(\'{"type":"tool","name":"shell"}\',flush=True)', lambda *args: self.fail("called"))
+
+    def test_container_control_failures_are_program_errors(self):
+        for paused in (True, False):
+            command = ["docker", "pause" if paused else "unpause", "owned"]
+            for error in (subprocess.CalledProcessError(1, command),
+                          subprocess.TimeoutExpired(command, 15)):
+                with self.subTest(paused=paused, error=type(error).__name__):
+                    with patch.object(program.subprocess, "run", side_effect=error):
+                        with self.assertRaises(program.ProgramError) as caught:
+                            program._pause("owned", paused)
+                    self.assertIs(caught.exception.__cause__, error)
+
+    def test_missing_container_runtime_is_not_a_program_error(self):
+        error = FileNotFoundError("docker")
+        with patch.object(program.subprocess, "run", side_effect=error):
+            with self.assertRaises(FileNotFoundError) as caught:
+                program._pause("owned", True)
+        self.assertIs(caught.exception, error)
+
+    def test_provider_errors_survive_without_resuming_candidate(self):
+        errors = (BudgetExhausted("cap"), TransportError("provider"),
+                  OSError("provider"), BrokenPipeError("provider"),
+                  RuntimeError("unexpected provider bug"))
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                def call(*args):
+                    raise error
+                with self.assertRaises(type(error)) as caught:
+                    self.execute(program.SEED_PROGRAM, call,
+                                 unpause_error=AssertionError("Failed call resumed candidate"))
+                self.assertIs(caught.exception, error)
+
+    @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
+    def test_docker_model_frame_then_exit_is_program_error_and_zero(self):
+        source = '''import json,os,sys
+sys.stdin.readline()
+print(json.dumps({"type":"model","messages":[{"role":"user","content":"solve"}],"max_tokens":1}),flush=True)
+os._exit(0)
+'''
+        candidate = {"prompt": "solve", "program": source}
+        row = {"id": "dev:exit", "input": "solve"}
+        task = Task("mbpp", [row], [], {}, candidate)
+        original_pause = program._pause
+        for through_evaluate in (False, True):
+            names = []
+            def pause_after_exit(name, paused):
+                names.append(name)
+                if paused:
+                    # Wait for the real candidate exit before the real Docker pause.
+                    subprocess.run(["docker", "wait", name], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=15, check=False)
+                original_pause(name, paused)
+            with self.subTest(through_evaluate=through_evaluate):
+                with patch.object(program, "_pause", pause_after_exit):
+                    call = lambda *args: self.fail("Exited candidate called provider")
+                    if through_evaluate:
+                        self.assertEqual(evaluate(task, candidate, [row], call)["scores"], [0.0])
+                    else:
+                        with self.assertRaises(program.ProgramError) as caught:
+                            program.run_program(candidate, "solve", call)
+                        self.assertIsInstance(caught.exception.__cause__, subprocess.CalledProcessError)
+                self.assertEqual(len(names), 1)
+                state = subprocess.run(["docker", "ps", "-a", "--filter", f"name=^{names[0]}$", "--format", "{{.State}}"],
+                                       capture_output=True, text=True, timeout=15, check=True)
+                self.assertNotIn(state.stdout.strip(), {"running", "paused", "restarting"})
+
+    @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
+    def test_docker_candidate_is_paused_during_provider_wait_and_resumes(self):
+        source = '''import json,sys,threading
+sys.stdin.readline()
+def burn():
+    while True:
+        pass
+threading.Thread(target=burn,daemon=True).start()
+print(json.dumps({"type":"model","messages":[{"role":"user","content":"solve"}],"max_tokens":1}),flush=True)
+answer=json.loads(sys.stdin.readline())["text"]
+print(json.dumps({"type":"result","code":answer}),flush=True)
+'''
+        names = []
+        original_command = program.docker_command
+        def command(name, path=None):
+            names.append(name)
+            return original_command(name, path)
+        def call(*args):
+            for _ in range(2):
+                paused = subprocess.run(["docker", "inspect", "--format", "{{.State.Paused}}", names[0]],
+                                        capture_output=True, text=True, timeout=15, check=True)
+                self.assertEqual(paused.stdout.strip(), "true")
+                time.sleep(0.05)
+            return "def target(x): return x + 1"
+        with patch.object(program, "docker_command", command):
+            code, traces = program.run_program({"prompt": "solve", "program": source},
+                                               "def target(x):", call)
+        self.assertEqual(code, "def target(x): return x + 1")
+        self.assertEqual(len(traces), 1)
+        state = subprocess.run(["docker", "ps", "-a", "--filter", f"name=^{names[0]}$", "--format", "{{.State}}"],
+                               capture_output=True, text=True, timeout=15, check=True)
+        self.assertNotIn(state.stdout.strip(), {"running", "paused", "restarting"})
 
     def test_literal_rpc_preserves_supported_return_types(self):
         source = "def target(x): return (x + 1, {'items': [1, 2]}, {3, 4})"

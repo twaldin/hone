@@ -166,6 +166,7 @@ class Ledger:
     calls_with_hidden_attempts: int = 0
     retry_log_events: int = 0
     usage_missing: int = 0
+    failed_calls: int = 0
     started: float = field(init=False)
     binding_cap: str | None = None
 
@@ -216,16 +217,18 @@ class Ledger:
         self.tokens += tokens
         self.usd += usd
         text = "".join(block.get("text", "") for block in message.get("content", []) if block.get("type") == "text")
-        append_json(self.journal, {"call": self.calls, "role": role, "model": MODEL, "request_hash": digest(request), "response_hash": digest(text), "status": frame.get("status"), "stop_reason": message.get("stopReason"), "reported_usage": counts, "reported_tokens": tokens, "usd_equivalent": usd, "seconds": seconds, "retry_observation": observation, "usage_missing": not usage_valid})
-        if frame.get("status") != 200 or message.get("stopReason") not in {"stop", "length"} or not usage_valid:
-            raise CallFailed("Provider call failed; consumed reported usage retained")
+        failed = frame.get("status") != 200 or message.get("stopReason") not in {"stop", "length"} or not usage_valid
+        self.failed_calls += failed
+        append_json(self.journal, {"call": self.calls, "role": role, "model": MODEL, "request_hash": digest(request), "response_hash": digest(text), "status": frame.get("status"), "stop_reason": message.get("stopReason"), "reported_usage": counts, "reported_tokens": tokens, "usd_equivalent": usd, "seconds": seconds, "retry_observation": observation, "usage_missing": not usage_valid, "failed": failed})
+        if failed:
+            raise CallFailed("Provider call failed; only reported usage charged")
         self.proposer_success_calls += role in {"proposer", "repair"}
         return text
 
     def summary(self, throttle: Throttle) -> dict:
         wall = self.clock() - self.started
         rate = self.hidden_attempts / self.calls if self.calls else 0
-        result = {"proposer_success_calls": self.proposer_success_calls}
+        result = {"proposer_success_calls": self.proposer_success_calls, "failed_calls": self.failed_calls}
         result.update({"calls": self.calls, "proposer_calls": self.proposer_calls, "tokens": self.tokens, "usd_equivalent": self.usd, "wall_seconds": wall, "active_seconds": max(0, wall - throttle.accounted_seconds), "pauses": throttle.pauses, "pause_seconds": throttle.paused_seconds, "throttle_seconds": throttle.accounted_seconds, "poll_seconds": max(0, throttle.accounted_seconds - throttle.paused_seconds), "binding_cap": self.binding_cap, "hidden_attempts": self.hidden_attempts, "calls_with_hidden_attempts": self.calls_with_hidden_attempts, "hidden_attempt_rate": rate, "retry_log_events": self.retry_log_events, "usage_missing_calls": self.usage_missing, "retry_rate_flag": rate > 0.01})
         return result
 
@@ -343,4 +346,4 @@ class ModelCalls:
 def retry_comparison(summaries: dict[str, dict]) -> dict:
     rates = {method: summary["hidden_attempt_rate"] for method, summary in summaries.items()}
     spread = max(rates.values()) - min(rates.values()) if rates else 0
-    return {"rates": rates, "spread": spread, "flagged": spread > 0.01 or any(rate > 0.01 for rate in rates.values()), "limit": "Reported tokens omit internal failed-attempt tokens. Observed HTTP attempts and retry logs measure retry incidence, not omitted token volume. Credential-opaque attempt receipts are required before the full matrix."}
+    return {"rates": rates, "spread": spread, "flagged": spread > 0.01 or any(rate > 0.01 for rate in rates.values()), "limit": "Reported tokens omit internal failed-attempt tokens and non-200 calls whose usage omp does not return. Failed calls are counted, but their unreported token volume is unknown. Observed HTTP attempts and retry logs measure retry incidence, not omitted tokens. Credential-opaque per-attempt and failed-call usage receipts are required before the full matrix."}
