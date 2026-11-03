@@ -6,3 +6,8 @@ dist/
 /tmp/
 .hone-sources/
 /capsules/
+/.pilot-cache/
+/.pilot-state/
+/.pilot-runs/
+/pilot/.venv/
+/pilot/__pycache__/

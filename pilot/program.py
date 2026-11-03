@@ -1,0 +1,216 @@
+from __future__ import annotations
+
+import ast
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import subprocess
+import tempfile
+import time
+import uuid
+from collections.abc import Callable
+
+MAX_CALLS = 2
+MAX_OUTPUT_TOKENS = 4096
+MAX_PROMPT_BYTES = 65536
+MAX_WIRE_BYTES = 262144
+SEED_PROGRAM = '''import json, sys
+row = json.loads(sys.stdin.readline())
+print(json.dumps({"type": "model", "messages": [{"role": "system", "content": row["prompt"]}, {"role": "user", "content": row["input"]}], "max_tokens": 4096}), flush=True)
+answer = json.loads(sys.stdin.readline())["text"]
+if answer.strip().startswith("```"):
+    answer = "\\n".join(answer.strip().splitlines()[1:-1])
+print(json.dumps({"type": "result", "code": answer}), flush=True)
+'''
+
+
+class ProgramError(ValueError):
+    pass
+
+
+def docker_command(name: str, program: Path | None = None) -> list[str]:
+    image = os.environ.get("PILOT_PYTHON_IMAGE", "python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487")
+    if not re.fullmatch(r"[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}", image):
+        raise RuntimeError("PILOT_PYTHON_IMAGE must be an explicit image@sha256 digest")
+    args = ["docker", "run", "--rm", "--name", name, "--network", "none", "--read-only",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "32",
+            "--memory", "256m", "--memory-swap", "256m", "--cpus", "1", "--cpuset-cpus", "0",
+            "--user", "65534:65534", "--ulimit", "nofile=64:64", "--ulimit", "fsize=1048576:1048576", "-i"]
+    if program is not None:
+        args += ["--mount", f"type=bind,src={program.resolve()},dst=/candidate.py,readonly"]
+    return args + [image, "python", "-I", "-B"]
+
+
+def _remove(name: str, process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        process.kill()
+    process.wait()
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
+    subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=15, check=False)
+
+
+def run_program(candidate: dict[str, str], task_input: str,
+                call: Callable[[str, list[dict], int], str]) -> tuple[str, list[dict]]:
+    source = candidate.get("program", "")
+    if not isinstance(source, str) or len(source.encode()) > MAX_WIRE_BYTES:
+        raise ProgramError("Candidate program exceeds source limit")
+    initial = {"input": task_input, "prompt": candidate.get("prompt", "")}
+    if len(json.dumps(initial).encode()) > MAX_PROMPT_BYTES:
+        raise ProgramError("Initial prompt exceeds byte limit")
+    traces: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="hone-pilot-") as directory:
+        path = Path(directory) / "candidate.py"
+        path.write_text(source)
+        path.chmod(0o444)
+        Path(directory).chmod(0o755)
+        name = "hone-pilot-" + uuid.uuid4().hex
+        process = subprocess.Popen(docker_command(name, path) + ["/candidate.py"],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        assert process.stdin is not None and process.stdout is not None
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + 30
+        buffer = b""
+        wire_bytes = 0
+        prompt_bytes = 0
+        requested_tokens = 0
+        try:
+            process.stdin.write(json.dumps(initial).encode() + b"\n")
+            process.stdin.flush()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise ProgramError("Candidate program timed out")
+                chunk = os.read(process.stdout.fileno(), 8192)
+                if not chunk:
+                    raise ProgramError("Candidate exited without a result")
+                wire_bytes += len(chunk)
+                if wire_bytes > MAX_WIRE_BYTES:
+                    raise ProgramError("Candidate exceeded output byte limit")
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    try:
+                        request = json.loads(line)
+                    except (ValueError, UnicodeError) as error:
+                        raise ProgramError("Invalid JSON protocol") from error
+                    if not isinstance(request, dict):
+                        raise ProgramError("Protocol request must be an object")
+                    if request.get("type") == "result":
+                        code = request.get("code")
+                        if not isinstance(code, str):
+                            raise ProgramError("Result code must be a string")
+                        return code, traces
+                    if request.get("type") != "model":
+                        raise ProgramError("Unknown protocol request")
+                    messages, tokens = request.get("messages"), request.get("max_tokens")
+                    if (not isinstance(messages, list) or not messages or
+                        any(not isinstance(message, dict) or set(message) != {"role", "content"} or
+                            message["role"] not in ("system", "user", "assistant") or
+                            not isinstance(message["content"], str) for message in messages)):
+                        raise ProgramError("Invalid model messages")
+                    if type(tokens) is not int or tokens < 1:
+                        raise ProgramError("Invalid output token limit")
+                    prompt_bytes += len(json.dumps(messages).encode())
+                    requested_tokens += tokens
+                    if len(traces) >= MAX_CALLS or requested_tokens > MAX_OUTPUT_TOKENS or prompt_bytes > MAX_PROMPT_BYTES:
+                        raise ProgramError("Candidate exceeded deployment call/token/prompt cap")
+                    before = time.monotonic()
+                    text = call("task", messages, tokens)
+                    deadline += time.monotonic() - before
+                    traces.append({"messages": messages, "output": text, "max_tokens": tokens})
+                    process.stdin.write(json.dumps({"text": text}).encode() + b"\n")
+                    process.stdin.flush()
+        except (BrokenPipeError, OSError) as error:
+            raise ProgramError("Candidate protocol failed") from error
+        finally:
+            selector.close()
+            _remove(name, process)
+
+
+def score_solution(code: str, setup: str, tests: list[str], function_names: list[str]) -> float:
+    if len(code.encode()) > MAX_WIRE_BYTES or not function_names:
+        return 0.0
+    runner = r"""import ast,json,sys
+wire_in,wire_out=sys.stdin,sys.stdout
+source=json.loads(wire_in.readline())['code']
+scope={}
+exec(compile(source,'solution','exec'),scope)
+wire_out.write('ready\n')
+wire_out.flush()
+for line in wire_in:
+    request=json.loads(line)
+    args=ast.literal_eval(request['args'])
+    kwargs=ast.literal_eval(request['kwargs'])
+    result=scope[request['function']](*args,**kwargs)
+    wire_out.write(json.dumps({'result':repr(result)})+'\n')
+    wire_out.flush()
+"""
+    name = "hone-pilot-score-" + uuid.uuid4().hex
+    process = subprocess.Popen(docker_command(name) + ["-c", runner], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    selector = selectors.DefaultSelector()
+    assert process.stdout is not None and process.stdin is not None
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + 10
+    buffer = b""
+    received = 0
+    calls = 0
+
+    def receive() -> bytes:
+        nonlocal buffer, received
+        while b"\n" not in buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise ProgramError("Solution worker timed out")
+            chunk = os.read(process.stdout.fileno(), 8192)
+            if not chunk:
+                raise ProgramError("Solution worker exited")
+            received += len(chunk)
+            if received > MAX_WIRE_BYTES:
+                raise ProgramError("Solution worker output exceeded limit")
+            buffer += chunk
+        line, buffer = buffer.split(b"\n", 1)
+        return line
+
+    def proxy(function: str) -> Callable:
+        def invoke(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls > 100:
+                raise ProgramError("Solution function-call limit exceeded")
+            # Only literal call inputs cross into the worker; assertions stay here.
+            args_text, kwargs_text = repr(args), repr(kwargs)
+            ast.literal_eval(args_text)
+            ast.literal_eval(kwargs_text)
+            request = json.dumps({"function": function, "args": args_text, "kwargs": kwargs_text}).encode() + b"\n"
+            if len(request) > MAX_PROMPT_BYTES:
+                raise ProgramError("Solution call inputs exceeded byte limit")
+            process.stdin.write(request)
+            process.stdin.flush()
+            reply = json.loads(receive())
+            if not isinstance(reply, dict) or set(reply) != {"result"} or not isinstance(reply["result"], str):
+                raise ProgramError("Invalid solution worker reply")
+            return ast.literal_eval(reply["result"])
+        return invoke
+
+    try:
+        process.stdin.write(json.dumps({"code": code}).encode() + b"\n")
+        process.stdin.flush()
+        if receive() != b"ready":
+            return 0.0
+        scope = {function: proxy(function) for function in function_names}
+        exec(compile(setup, "official-development-setup", "exec"), scope)
+        for test in tests:
+            exec(compile(test, "official-development-assertion", "exec"), scope)
+        return 1.0
+    except (Exception, SystemExit):
+        return 0.0
+    finally:
+        selector.close()
+        _remove(name, process)
