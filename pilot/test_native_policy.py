@@ -4,7 +4,7 @@ import shutil
 import tempfile
 import unittest
 
-from pilot.controls import CONTROL_ROWS, measure
+from pilot.controls import CONTROL_ROWS
 from pilot.search import _policy, _project_noise
 from pilot import test_controls
 
@@ -27,7 +27,7 @@ class NativePolicyTests(unittest.TestCase):
             return output
 
         with tempfile.TemporaryDirectory() as directory:
-            noise = measure(fixture.task(), provider, Path(directory), {"evaluator": "synthetic-native-policy"})
+            noise = fixture.measure(fixture.task(), provider, Path(directory), {"evaluator": "synthetic-native-policy"})
         self.assertEqual(noise["noise_design"]["rows_per_arm"], 20)
         self.assertGreater(noise["calibration"]["noiseEnvelope"], 0)
         for size in (8, 90):

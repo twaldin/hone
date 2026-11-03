@@ -7,18 +7,28 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pilot.__main__ import TASKS, evaluator_identity, main, replay, save, seal
+from pilot.__main__ import TASKS, evaluator_identity, file_hash, main, machine_proof, replay, save, seal
+from pilot.controls import CONTROL_SEED
+from pilot.runtime import ROOT, digest
 from pilot.tasks import Task
+from pilot.test_adversarial import admission_fixture, fixture_tasks
 
 
 class PreflightTests(unittest.TestCase):
     def fixture(self, root):
-        tasks = {name: Task(name, [], [], {"task": name}, {"prompt": "answer"}) for name in TASKS}
+        tasks = {task.name: task for task in fixture_tasks()}
         controls = root / "controls"
+        proof = admission_fixture(list(tasks.values()))
+        save(controls / "adversarial.json", proof)
+        save(controls / "cohorts.json", {"seed": CONTROL_SEED,
+             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-3.md"),
+             "cohorts": proof["cohorts"], "adversarial_hash": digest(proof)})
         for name, task in tasks.items():
             save(controls / name / "controls.json", {
                 "ranking_passed": True, "noise_passed": True,
                 "identity": evaluator_identity(task),
+                "adversarial_hash": digest(proof),
+                "rows": proof["cohorts"][name]["rows"],
             })
         seal(controls)
         pool = root / "pool.json"
@@ -33,7 +43,7 @@ class PreflightTests(unittest.TestCase):
     def test_other_task_admission_blocks_every_search_before_transport(self):
         for command in ("smoke", "pilot"):
             for name in ("ifbench", "aime"):
-                for defect in ("ranking", "noise", "missing", "unsealed", "tampered", "identity"):
+                for defect in ("ranking", "noise", "missing", "unsealed", "tampered", "identity", "adversarial"):
                     with self.subTest(command=command, task=name, defect=defect), tempfile.TemporaryDirectory() as directory:
                         root = Path(directory)
                         tasks, controls, pool = self.fixture(root)
@@ -47,6 +57,8 @@ class PreflightTests(unittest.TestCase):
                         else:
                             if defect in {"ranking", "noise"}:
                                 control[defect + "_passed"] = False
+                            elif defect == "adversarial":
+                                del control["adversarial_hash"]
                             else:
                                 control["identity"] = {"stale": True}
                             save(path, control)
@@ -75,8 +87,56 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual({json.loads(path.read_text())["task"] for path in results}, {"mbpp"})
             self.assertEqual({json.loads(path.read_text())["method"] for path in results}, {"hone", "gepa", "plain"})
 
+    def test_old_or_incomplete_adversarial_proofs_block_all_search(self):
+        for defect in ("missing", "unsealed", "old", "positive", "incomplete"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tasks, controls, pool = self.fixture(root)
+                path = controls / "adversarial.json"
+                proof = json.loads(path.read_text())
+                if defect in {"missing", "unsealed"}:
+                    path.unlink()
+                    seal(controls)
+                    if defect == "unsealed":
+                        save(path, proof)
+                else:
+                    if defect == "old":
+                        proof["version"] = "pilot-adversarial-v2"
+                    elif defect == "positive":
+                        proof["mbpp"][0]["score"] = 1
+                    else:
+                        del proof["text_only"]["aime"]
+                    save(path, proof)
+                    seal(controls)
+                argv, loader = self.invoke(root, tasks, controls, pool, "smoke")
+                with argv, loader, patch("pilot.__main__.environment") as auth, patch("pilot.__main__.open_gateway") as transport:
+                    with self.assertRaises((ValueError, FileNotFoundError)):
+                        main()
+                    transport.assert_not_called()
+                    auth.assert_not_called()
+
+    def test_machine_proof_records_inherited_cpu_six_and_avoidance(self):
+        with tempfile.TemporaryDirectory() as directory, patch("os.sched_getaffinity", return_value={6}), patch(
+            "os.getpriority", return_value=10
+        ):
+            machine_proof(Path(directory))
+            proof = json.loads((Path(directory) / "machine.json").read_text())
+        self.assertEqual(proof["selected_cpu"], 6)
+        self.assertEqual(proof["permitted_cpus"], [6])
+        self.assertTrue(proof["inherited_affinity"])
+        self.assertTrue(proof["avoidance_passed"])
+        self.assertTrue({0, 1, 2, 3, 4, 5, 13, 14, 15, 16} <= set(proof["avoided_cpus"]))
+
+    def test_machine_proof_refuses_unsafe_or_unpinned_affinity(self):
+        for affinity in ({0}, {0, 5}, {6, 7}):
+            with self.subTest(affinity=affinity), tempfile.TemporaryDirectory() as directory, patch(
+                "os.sched_getaffinity", return_value=affinity
+            ), self.assertRaises(ValueError):
+                machine_proof(Path(directory))
+
+
     def test_replay_unencodable_output_scores_zero_without_model_calls(self):
-        task = Task("mbpp", [{"id": "dev:1", "test_setup_code": "", "test_list": []}], [],
+        task = Task("mbpp", [{"id": "dev:1", "reference_code": "def target(): return 0", "test_setup_code": "", "test_list": []}], [],
                     {"task": "mbpp"}, {"prompt": "answer"})
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)

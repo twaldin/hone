@@ -1,16 +1,24 @@
 import json
+import random
 from pathlib import Path
 import tempfile
 import unittest
 
-from pilot.controls import CONTROL_ROWS, PREVIOUS_MBPP_ROWS, ControlsFailed, measure, representative_rows
+from pilot.controls import CONTROL_ROWS, CONTROL_SEED, PREVIOUS_MBPP_ROWS, ControlsFailed, measure, representative_rows
 from pilot.tasks import Task
+from pilot.test_adversarial import admission_fixture, fixture_tasks
 
 
 class ControlTests(unittest.TestCase):
     def task(self):
         return Task("aime", [{"id": str(index), "input": "problem " + str(index), "answer": "42"}
                              for index in range(45)], [], {}, {"prompt": "baseline"})
+
+    def measure(self, task, call, out, identity):
+        tasks = [task if value.name == task.name else value for value in fixture_tasks()]
+        identities = {value.name: identity if value.name == task.name else {"fixture": value.name} for value in tasks}
+        proof = admission_fixture(tasks, identities)
+        return measure(task, call, out, identity, rows=representative_rows(task), adversarial=proof)
 
     def provider(self, noise=False):
         baseline = [0]
@@ -26,7 +34,7 @@ class ControlTests(unittest.TestCase):
     def test_real_artifact_rank_and_fresh_unchanged_noise(self):
         call = self.provider()
         with tempfile.TemporaryDirectory() as directory:
-            result = measure(self.task(), call, Path(directory), {"evaluator": "frozen"})
+            result = self.measure(self.task(), call, Path(directory), {"evaluator": "frozen"})
             declaration = json.loads((Path(directory) / "controls-declaration.json").read_text())
         values = {name: value["mean"] for name, value in result["controls"].items()}
         self.assertEqual(values["known-improved"], 1)
@@ -44,14 +52,14 @@ class ControlTests(unittest.TestCase):
             return '{"reasoning":"","answer":"0"}'
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ControlsFailed):
-                measure(self.task(), call, Path(directory), {})
+                self.measure(self.task(), call, Path(directory), {})
             self.assertFalse((Path(directory) / "noise-pairs.json").exists())
 
     def test_unchanged_noise_can_refuse_admission(self):
         call = self.provider(noise=True)
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ControlsFailed, "noise"):
-                measure(self.task(), call, Path(directory), {})
+                self.measure(self.task(), call, Path(directory), {})
 
     def test_existing_evidence_is_not_overwritten(self):
         call = self.provider()
@@ -59,7 +67,7 @@ class ControlTests(unittest.TestCase):
             path = Path(directory) / "controls-declaration.json"
             path.write_text("prior evidence")
             with self.assertRaises(FileExistsError):
-                measure(self.task(), call, Path(directory), {})
+                self.measure(self.task(), call, Path(directory), {})
             self.assertEqual(path.read_text(), "prior evidence")
 
     def test_fresh_mbpp_draw_excludes_prior_rows_without_mutating_partition(self):
@@ -70,6 +78,10 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(len(chosen), 20)
         self.assertEqual(len({row["id"] for row in chosen}), 20)
         self.assertTrue({row["id"] for row in chosen}.isdisjoint(PREVIOUS_MBPP_ROWS))
+        self.assertEqual(CONTROL_SEED, 20261104)
+        self.assertEqual(len(PREVIOUS_MBPP_ROWS), 28)
+        eligible = sorted((row for row in rows if row["id"] not in PREVIOUS_MBPP_ROWS), key=lambda row: row["id"])
+        self.assertEqual(chosen, random.Random(20261104).sample(eligible, 20))
         self.assertEqual([row["id"] for row in current.train], original_ids)
         current.train = list(reversed(rows))
         self.assertEqual(chosen, representative_rows(current))

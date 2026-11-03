@@ -11,8 +11,12 @@ from .tasks import Task, evaluate, score_output
 
 PAIRS = 16
 CONTROL_ROWS = 20
-CONTROL_SEED = 20261103
-PREVIOUS_MBPP_ROWS = frozenset(f"mbpp:train:{value}" for value in (601, 654, 707, 760, 814, 867, 920, 974))
+CONTROL_SEED = 20261104
+PREVIOUS_MBPP_ROWS = frozenset(f"mbpp:train:{value}" for value in (
+    601, 654, 707, 760, 814, 867, 920, 974,
+    647, 676, 686, 702, 925, 923, 671, 629, 877, 734, 878, 956,
+    967, 866, 661, 694, 837, 699, 771, 937,
+))
 
 EXPECTED_RANK = "known-improved > naive > max(broken, shortcut); broken = 0; MBPP shortcut = 0"
 SHORTCUT_CODE = '''import json,sys
@@ -62,8 +66,9 @@ def mean(result: dict) -> float:
     return statistics.fmean(result["scores"])
 
 
-def measure(task: Task, call, out: Path, identity: dict) -> dict:
-    rows = representative_rows(task)
+def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], adversarial: dict) -> dict:
+    from .adversarial import validate_task_admission
+    validate_task_admission(adversarial, task, identity, rows)
     candidates = artifacts(task)
     definitions = {
         "known-improved": "Trusted training references for AIME/MBPP; stronger explicit constraint audit prompt through both real IFBench stages.",
@@ -72,6 +77,7 @@ def measure(task: Task, call, out: Path, identity: dict) -> dict:
         "shortcut": "Forged success JSON scored directly by the official P metric; forged worker ready/result frames with nonliteral always-equal value for MBPP.",
     }
     result = {"task": task.name, "identity": identity, "rows": [row["id"] for row in rows],
+              "adversarial_hash": digest(adversarial),
               "expected_rank": EXPECTED_RANK, "definitions": definitions, "artifacts": candidates,
               "noise_design": {"paired_trials": PAIRS, "rows_per_arm": CONTROL_ROWS, "model_calls_cached": False,
                                "draw_seed": CONTROL_SEED, "excluded_prior_mbpp_rows": sorted(PREVIOUS_MBPP_ROWS) if task.name == "mbpp" else [],

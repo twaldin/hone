@@ -2,21 +2,21 @@
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
-**Admission stopped again: the native MBPP grader permits judge tampering. Do not run searches with this epoch.** [Handoff 2](../evidence/pilot/handoff-2.md) records the stop and retained prefix. [Predeclaration 2](../evidence/pilot/predeclaration-2.md) was committed before the renewed model calls; its ordinary MBPP controls and noise check passed, but independent Docker probes scored assertion bypasses as correct. IFBench noise calibration was interrupted and AIME controls were not run. No smoke search or 27-run pilot is authorized.
+The first two admission epochs stopped on measurement-contract defects; their evidence remains immutable. [Predeclaration 3](../evidence/pilot/predeclaration-3.md) replaces MBPP's shared-interpreter verdict with a process-separated, data-only boundary. This epoch admits no search until its adversarial zero-score controls and all three tasks' unchanged ranking and noise gates pass.
 
 ## Prepare the runtime
 
 Run from the repository root on Linux with Docker, Bun, uv, pnpm, and omp 18.16.0 installed. Configure the auth broker through omp itself. Do not supply credentials to this repository.
 
 ```sh
-nice -n 10 taskset -c 0 uv sync --project pilot --frozen
-nice -n 10 taskset -c 0 pnpm install --frozen-lockfile --ignore-scripts --network-concurrency=2 --child-concurrency=1
-nice -n 10 taskset -c 0 pilot/.venv/bin/python -m nltk.downloader -d .pilot-cache/nltk punkt punkt_tab stopwords averaged_perceptron_tagger_eng
+nice -n 10 taskset -c 6 uv sync --project pilot --frozen
+nice -n 10 taskset -c 6 pnpm install --frozen-lockfile --ignore-scripts --network-concurrency=2 --child-concurrency=1
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m nltk.downloader -d .pilot-cache/nltk punkt punkt_tab stopwords averaged_perceptron_tagger_eng
 nice -n 10 docker pull python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487
-nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot prepare --out .pilot-state/preparation
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot prepare --out .pilot-state/preparation-3
 ```
 
-Check the live venue's CPU affinities before using CPU 0 on another machine or date. The retained machine evidence identifies the affinity sets observed during this lane. The runner uses one model request at a time and one candidate measurement at a time.
+Check the live venue's CPU affinities before choosing a CPU on another machine or date. The current venue worker is pinned to CPUs 0 and 5; this epoch uses CPU 6 and avoids the previously reserved 1–4 and 13–16. The runner uses one model request at a time and one CPU-heavy worker at a time.
 
 The prepare command creates an ignored pilot-specific account-pool file from `omp usage accounts`. It permits only Anthropic OAuth identities on `gmail.com` and `purdue.edu`. It excludes `lindy.ai`, every other provider, and every API key. The gateway also installs an OAuth-only native credential-session restriction: environment/configuration fallbacks cannot escape the pool. It selects the bundled model directly, without loading local model overrides. Public manifests record domain counts and the pool hash, not full account identities. Never commit `.pilot-state` or `.pilot-cache`.
 
@@ -25,12 +25,12 @@ Auth and usage child processes receive only an explicit allowlist of home, execu
 ## Admit the evaluator before search
 
 ```sh
-nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot probe --out .pilot-runs/route-proof
-nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot throttle-proof --out .pilot-runs/throttle-proof
-nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot controls --out evidence/pilot/controls-2
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-3
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot throttle-proof --out evidence/pilot/throttle-proof-3
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot controls --out evidence/pilot/controls-3
 ```
 
-Controls run first on MBPP, then IFBench and AIME, on 20 training rows per task. Before any model dispatch, the runner records every ordered cohort and hash. Each draw is `random.Random(20261103).sample(eligible, 20)` after sorting stable row IDs; MBPP excludes the eight previously seen control IDs from this draw only, not from training or search. The known-improved control uses protected development references for AIME and MBPP and a stronger constraint-auditing prompt through both IFBench stages. AIME's naive artifact is the seed; MBPP uses the unchanged quick-answer artifact; IFBench deliberately ignores artificial constraints. Broken artifacts and MBPP stdout-forgery shortcuts must fail. P shortcuts send forged success JSON through the official metric. These are evaluator diagnostics, not optimizer baselines.
+Controls run first on MBPP, then IFBench and AIME, on 20 training rows per task. Before model dispatch, the runner freezes every ordered cohort and requires current, sealed adversarial proof. Each draw uses `random.Random(20261104).sample(eligible, 20)` after sorting stable IDs. MBPP excludes the 28 earlier control rows from this draw only, never from training or search. The original control prompts, strict ranking and noise formulas remain unchanged. Every named adversarial candidate must score zero on every fresh MBPP control row before ordinary controls spend any model calls.
 
 Admission requires known-improved > naive > both broken and shortcut. Sixteen fresh unchanged-seed pairs measure score noise on the same 20-row cohort, without cached model responses. The native Hone direct-paired calibration uses those deltas and their maximum excursion. Search is refused if the envelope obscures the positive-control contrast. For another slice size, all four calibration bounds scale by `sqrt(20/n)`; training uses one projected noise envelope, not another standard-error penalty. This independent-row approximation is a development calibration, not a final-test confidence interval or guarantee for future candidates.
 
@@ -54,11 +54,11 @@ MBPP is a declared agent-program adaptation, not a claim to reproduce an officia
 
 The mutable MBPP artifact contains a prompt and Python program. The program runs in a non-root, read-only, network-disabled Docker container without credentials or host home directories. It can make at most two brokered task-model calls, request at most 4,096 output tokens in total, and send at most 65,536 prompt bytes. Program execution has a 30-second bound excluding model wait; its owned container is paused while waiting, so candidates cannot compute free of that bound. Container processes run at nice 10. The model transport has a 600-second per-request bound.
 
-The answer is program text. The shared MBPP scoring boundary extracts the first python-tagged or bare fenced block, or uses the whole output if none exists; exact fence behavior is frozen in predeclaration 2. Candidate source, official setup and every assertion execute as Python in one namespace inside the pinned, non-root, read-only, network-disabled Docker sandbox, with a ten-second timeout. Pair objects, custom types and mutations retain native Python semantics. The literal-only RPC scorer is gone; no rows or assertions are filtered. A successful exit and runner completion receipt are required; candidate stdout is not a verdict. Assertions are not supplied to task-model calls or selection reflection, but they are necessarily visible to adversarial code inside the scoring interpreter. This is not an assertion-secrecy guarantee.
+The answer is program text. The common extractor takes the first python-tagged or bare fenced block, otherwise the whole output. A trusted planner uses official reference code, setup and assertions in a bounded pinned-Python process without candidate code. It produces function calls with plain-data arguments and protected expected results. A separate fresh candidate container per row receives only candidate source and call arguments. The trusted parent validates returned tagged JSON and decides every equality. No test files, expected values, host directories or credentials enter the candidate container.
 
-The receipt is a completion check for ordinary solutions, not a tamper-resistant verdict. Real Docker probes in `evidence/pilot/receipt-limit-proof.json` show that replacing built-in execution or accessing the same-interpreter receipt scores 1.0 without running the assertions. This triggers the predeclared measurement-contract gate against altering the judge. Removing proposer hints or manually auditing gains does not repair that contract. The scorer and completed evidence remain unchanged for reproduction; the gate owner must decide the replacement verification boundary before any new model calls.
+Tagged data preserves exact builtin types, sequence order and order-independent mappings and sets. Official wrappers, including `int`, run on the trusted side before comparison. Pair and Node inputs are class-name and field records, reconstructed without candidate constructors. A custom result is compared structurally against the trusted expected class name and field schema. Candidate `__eq__`, `__hash__` and `__repr__` cannot decide the grade. Executable values, unsupported subclasses, cycles, malformed data, extra output, timeouts and failed exits do not pass. Every row remains in the denominator; any safely unrepresentable official row is listed as ungradeable and scores zero for every method.
 
-Scoring currently collapses sandbox startup/daemon failures, timeouts and absent receipts into zero without retaining a structured cause. Noise calibration includes such zeros, and offline replay may disagree after a transient infrastructure failure. This is a known diagnostic limit, not evidence that every zero is a wrong solution. The frozen MBPP shortcut artifact predates the native-assertion contract: its forged worker frames and `AlwaysEqual` do not define the required functions. Its zero checks that artifact only; early-exit and stdout-verdict defenses are covered separately by Docker tests.
+Adversarial admission exercises execution replacement, always-equal objects, early exits, verdict and receipt forgery, checker monkeypatches, expected-value reads and atexit rewrites. The previous shortcut remains unchanged. IFBench and AIME only accept strings through protected JSON protocols; those strings never execute in their trusted checkers. These controls test the declared boundary, not a general proof against every possible candidate.
 
 ## Matched reported-usage accounting
 
@@ -82,22 +82,26 @@ Keep the requested $10 ceiling rather than increase it to favor Hone's more expe
 
 ## Run and replay
 
-The command below documents the smoke interface, not permission to execute this rejected epoch. A corrected, predeclared contract and successful admission on all three tasks are required first:
+Only after current adversarial proof and all three control/noise gates pass, run the three-method, seed-0 MBPP smoke:
 
 ```sh
-nice -n 10 taskset -c 0 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-2 --out evidence/pilot/smoke-2
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-3 --out evidence/pilot/smoke-3
 ```
 
 Smoke permits one real proposal per method and requires both a successful proposer response and a valid complete proposed artifact. It exercises the official GEPA reflection callable through the subscription route but does not spend the full budget. Hone imports the existing engine's 0.2 restart probability, deterministic restart draw, one format repair, and native promotion gate. It uses paired training slices of 8, 16, and 32 and fresh paired full-selection measurements. GEPA edits native `prompt` and optional `program` components directly, retaining its renderer, parser, round-robin component selection, Pareto selection, strict improvement, eight-example reflection minibatch, and 10,000-metric-call safety cap. Perfect training minibatches are skipped natively; smoke keeps sampling until a real proposal or a budget bound. The plain loop proposes from training traces and greedily retains strict full-selection improvements. Every method starts from the same artifact and uses the same deployment limits.
 
-The 27-search development pilot remains unrun and blocked by the measurement-contract stop. Its eventual launch also requires the assistant's review of admitted smoke evidence. The accounting decision permits this development pilot to use disclosed reported usage and measured hidden-attempt rates. Complete omp attempt/failed-call receipts are a prerequisite for the later full benchmark matrix, not an additional spending cap on the 27-run pilot.
+The next lane runs the 27-search development pilot only after the assistant reviews admitted smoke evidence. The accounting decision permits this pilot to use disclosed reported usage and measured hidden-attempt rates. Complete omp attempt and failed-call receipts remain a prerequisite for the later full benchmark matrix, not an extra spending cap on this development pilot.
 
-There is no authorized next-lane search command for the rejected `controls-2` epoch. The `pilot` subcommand runs three methods on three tasks with seeds 0, 1, and 2; a corrected evaluator needs its own predeclared admission evidence, not a relabeled copy of this bundle. Existing complete cells are hash-verified and reused. Interrupted cells retain their durable usage prefix and last accepted incumbent and are never selectively rerun. No final test phase is implemented or authorized here.
+```sh
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-3 --out .pilot-runs/pilot-27
+```
+
+The `pilot` command runs three methods on three tasks with seeds 0, 1 and 2. Existing complete cells are hash-verified and reused. Interrupted cells retain their durable usage prefix and last accepted incumbent and are never selectively rerun. No final test phase is implemented or authorized here.
 
 Each run includes candidate artifacts, scored outputs, usage records, calibration identity, task membership, routes, budgets, and file hashes. Verify a retained bundle without model calls:
 
 ```sh
-pilot/.venv/bin/python -m pilot verify --out .pilot-runs/smoke
+pilot/.venv/bin/python -m pilot verify --out evidence/pilot/smoke-3
 ```
 
 Hash verification checks retained evidence integrity. It does not promise byte-identical stochastic provider responses on a fresh model replay.
@@ -107,7 +111,7 @@ Reported selection scores are adaptive: they select incumbents and are not unbia
 Recompute every retained rollout's score from the pinned development data and archived task-model outputs, without provider credentials or model calls:
 
 ```sh
-nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot replay --out .pilot-runs/smoke
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot replay --out evidence/pilot/smoke-3
 ```
 
 Replay first verifies the bundle hashes and task-resource identities, then runs the protected metrics again. MBPP replay executes archived solution code in the same isolated worker boundary.
@@ -116,6 +120,6 @@ Replay first verifies the bundle hashes and task-resource identities, then runs 
 
 ## CI and baseline failures
 
-The Pilot GitHub Actions workflow runs frozen Python dependencies, pinned development metric resources, and the full pilot unittest suite with real Docker and official metrics enabled. It makes no broker or model calls. Sandbox CPU affinity follows the runner's inherited affinity; the shared-machine harness remains pinned to CPU 0.
+The Pilot GitHub Actions workflow runs frozen dependencies, pinned development metric resources, real Docker, the official metrics and the real Python-to-Bun Hone calibration bridge. It makes no broker or model calls. Container CPU affinity follows the runner's inherited affinity; this shared-machine epoch uses CPU 6.
 
 The three reported CLI failures reproduced on isolated unmodified main at `b91d374b4b8ad4c99df3afcedf12007adad32639`: stale lock metadata, the host Bun digest mismatch, and replaced-socket identity handling. The one requested baseline run recorded 72 passing, three failing and one skipped test. See [main-baseline.json](../evidence/pilot/main-baseline.json); these are pre-existing, not suppressed pilot regressions.

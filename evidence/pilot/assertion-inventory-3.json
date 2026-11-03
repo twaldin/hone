@@ -1,0 +1,27 @@
+{
+  "source_epoch": "predeclaration-3",
+  "inspection": "AST inventory of pinned official MBPP full train and validation files only",
+  "training_rows": 374,
+  "selection_rows": 90,
+  "assertions": 1392,
+  "single_equality_assertions": 1392,
+  "left_hand_call_expressions": 1392,
+  "custom_argument_constructors": ["Pair"],
+  "nonempty_setup_rows": 1,
+  "nonempty_setup_kind": "Node trees constructed by official development setup",
+  "trusted_wrapper": "int(lobb_num(...))",
+  "scored_final_tests_loaded": false,
+  "runtime_sensitive_expected_expression": "sys.getsizeof(tuple)",
+  "model_calls": 0,
+  "machine": {
+    "load_average": [0.25, 0.40, 0.58],
+    "logical_cpus": 24,
+    "live_venue_pid": 2707250,
+    "observed_live_venue_affinity": [0, 5],
+    "pilot_cpu": 6,
+    "nice": 10,
+    "max_inflight_model_requests": 1,
+    "max_cpu_heavy_workers": 1
+  },
+  "scope": "Grammar inventory only. Gradeability and reference behavior require the real new boundary proof before admission."
+}

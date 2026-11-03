@@ -123,33 +123,49 @@ class TaskTests(unittest.TestCase):
         self.assertIn("bad draft", str(requests[1]))
         self.assertEqual(len(result["trajectories"][0]["calls"]), 2)
 
+    def test_invalid_ifbench_revision_discards_unscored_draft(self):
+        row = {"id": "dev:revision", "input": "Say alpha", "instruction_id_list": [], "kwargs": []}
+        task = tasks.Task("ifbench", [row], [], {}, {"prompt": "follow"})
+        responses = iter((json.dumps({"reasoning": "", "response": "alpha"}), "not-json"))
+        result = tasks.evaluate(task, task.seed_candidate, task.train, lambda *args: next(responses), True)
+        self.assertEqual(result["scores"], [0.0])
+        self.assertEqual(result["outputs"], [""])
+        self.assertEqual(result["trajectories"][0]["output"], "")
+
     def test_signature_adaptation_never_exposes_body(self):
         source = "def wanted(a, b=2):\n    secret_reference = 999\n    return a + b\n"
         self.assertEqual(tasks._signature(source), "def wanted(a, b=2):")
 
-    def test_mbpp_load_keeps_every_row_without_literal_interface_metadata(self):
-        source = "class Pair:\n    pass\ndef target(pair):\n    return pair.first\n"
+    def test_mbpp_load_keeps_every_row_and_publishes_gradeability(self):
+        from pilot import program, verification
+        from pilot.test_program import local_command, local_remove
+        source = "class Pair:\n    def __init__(self, first):\n        self.first = first\ndef target(pair):\n    return pair.first\n"
+        def tests(index):
+            return ["assert target(pair) != 7" if index % 3 == 0 else "assert target(pair) == 7"]
         def data(cache, name):
             count = 374 if name == "mbpp_train" else 90
-            return ([{"task_id": index, "text": "Read the first value.",
-                      "code": source, "test_setup_code": "pair = Pair()",
-                      "test_list": ["assert target(pair) == 7"]} for index in range(count)],
+            return ([{"task_id": index, "text": "Read the first value.", "code": source,
+                      "test_setup_code": "pair = Pair(7)", "test_list": tests(index)} for index in range(count)],
                     {"source": name})
-        with patch.object(tasks, "_data", side_effect=data):
+        with (patch.object(tasks, "_data", side_effect=data), patch.dict(verification._PLANS, clear=True),
+              patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove)):
             task = tasks.load_task("mbpp", Path("unused"))
+        rows = task.train + task.selection
         self.assertEqual((len(task.train), len(task.selection)), (374, 90))
-        self.assertEqual(len({row["id"] for row in task.train + task.selection}), 464)
-        for row in task.train + task.selection:
+        self.assertEqual(len({row["id"] for row in rows}), 464)
+        for row in rows:
             self.assertNotIn("function_names", row)
             self.assertEqual(row["reference_code"], source)
-            self.assertEqual(row["test_setup_code"], "pair = Pair()")
-            self.assertEqual(row["test_list"], ["assert target(pair) == 7"])
+            self.assertEqual(row["test_setup_code"], "pair = Pair(7)")
             self.assertIn("def target(pair):", row["input"])
             self.assertNotIn("return pair.first", row["input"])
             self.assertNotIn("assert target", row["input"])
+        inventory = task.manifest["gradeability"]
+        unsupported = [row["id"] for row in rows if int(row["id"].rsplit(":", 1)[1]) % 3 == 0]
+        self.assertEqual(inventory["gradeable_ids"], [row["id"] for row in rows if row["id"] not in unsupported])
+        self.assertEqual([entry["id"] for entry in inventory["ungradeable"]], unsupported)
+        self.assertTrue(all(isinstance(entry["reason"], str) and entry["reason"] for entry in inventory["ungradeable"]))
         self.assertFalse(task.manifest["scored_final_tests_loaded"])
-        self.assertEqual(task.manifest["solution_evaluator"]["limits"]["worker_seconds"], 10)
-        self.assertNotIn("function_calls", task.manifest["solution_evaluator"]["limits"])
 
     def test_mbpp_replay_reference_and_evaluation_share_extraction(self):
         from pilot import program
@@ -173,7 +189,7 @@ class TaskTests(unittest.TestCase):
     def test_mbpp_model_calls_never_receive_assertions_or_setup(self):
         row = {"id": "mbpp:train:synthetic", "input": "Increment.",
                "test_setup_code": "protected_setup = 349827",
-               "test_list": ["assert target(349827) == 349828"]}
+               "test_list": ["assert target(349827) == 349828"], "reference_code": "def target(x): return x + 1"}
         candidate = {"prompt": "Solve.", "program": tasks.SEED_PROGRAM}
         task = tasks.Task("mbpp", [row], [], {}, candidate)
         from pilot.test_program import ProgramTests

@@ -123,8 +123,11 @@ def _contract(task: Task, noise: dict) -> dict:
                                                     "```python or bare ``` with surrounding horizontal whitespace allowed. "
                                                     "Skip other language blocks; an unclosed eligible block consumes the rest. "
                                                     "Use the whole answer if no eligible block exists. Do not repair Python.",
-                      "solution_semantics": "Execute extracted candidate source, official development setup and every assertion "
-                                            "as Python in the same namespace in the sandbox. Native objects and mutations are supported."}
+                      "solution_semantics": "Execute extracted source in a fresh isolated Python worker. "
+                                            "Only tagged plain-data arguments and results cross to a separate trusted grader. "
+                                            "Builtin result types are exact, including bool/int and list/tuple. "
+                                            "Custom objects use class-name and field records, never their equality or repr methods. "
+                                            "All official development assertions must pass; no expected values or test source enter the worker."}
     return {"task": task.name, "deployment_contract": deployment,
             "editable_artifact": task.seed_candidate,
             "artifact_format": "Mapping with exact seed keys and nonempty string values; "

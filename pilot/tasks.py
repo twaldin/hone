@@ -14,8 +14,9 @@ import sys
 from types import ModuleType, SimpleNamespace
 import urllib.request
 
-from .program import ProgramError, SEED_PROGRAM, run_program, score_solution
-from .runtime import BudgetExhausted, CallFailed
+from .program import MAX_WIRE_BYTES, ProgramError, SEED_PROGRAM, run_program
+from .runtime import BudgetExhausted, CallFailed, digest
+from .verification import PLAN_SECONDS, WORKER_SECONDS, plan_digest, prepare_plan, score_solution
 
 ARTIFACT_REV = "cbefbc1aa0f43dd39874ec4bf42211365dbda42e"
 ARTIFACT = f"https://raw.githubusercontent.com/gepa-ai/gepa-artifact/{ARTIFACT_REV}/gepa_artifact/benchmarks/IFBench/"
@@ -152,11 +153,18 @@ def load_task(name: str, cache: Path) -> Task:
     if name == "mbpp":
         manifest["solution_evaluator"] = {
             "answer_extraction": "First exactly python-tagged or bare triple-backtick block, with surrounding horizontal whitespace allowed; unclosed eligible block consumes the remainder; whole output if none. Applied once at shared scoring boundary.",
-            "assertions": "Candidate source, official development setup, and every official assertion execute as Python in one namespace inside the pinned non-root, read-only, network-disabled Docker sandbox.",
-            "worker_inputs": "Extracted solution source, unmodified official setup and assertions.",
-            "completion": "Successful runner completion receipt plus zero exit status; candidate stdout is never a score.",
-            "limits": {"worker_seconds": 10, "source_bytes": 262144, "wire_output_bytes": 262144},
-            "semantics": "Native Python objects and mutations, without literal-only RPC restrictions. Assertions are not secret from adversarial code in the same interpreter.",
+            "trusted_plan": "A separate bounded pinned-image invocation per row receives only the official reference, setup and assertions. Each assertion must be one equality whose left side is a positional call to an official reference function, optionally inside the official int wrapper. Arguments and the expected right side are evaluated there and returned as tagged plain data, cached by row contents only.",
+            "worker": "A fresh network-disabled, read-only, non-root container per candidate row, without host mounts or host environment, receives only extracted source, target function names and tagged arguments. Custom argument objects are rebuilt from class name and fields without constructors, using the candidate class when defined. Calls run in official assertion order and return one bounded tagged-JSON frame.",
+            "decision": "The trusted parent alone validates the frame and compares exact canonical builtin types and values, or class name plus exact fields for structural records, after any official int wrapper. A zero exit and one well-formed frame are necessary, never sufficient; failures, extra output and unsupported values score zero.",
+            "limits": {"plan_seconds": PLAN_SECONDS, "worker_seconds": WORKER_SECONDS,
+                       "source_bytes": MAX_WIRE_BYTES, "wire_output_bytes": MAX_WIRE_BYTES},
+        }
+        plans = [(row["id"], prepare_plan(row["reference_code"], row["test_setup_code"], row["test_list"]))
+                 for row in train + selection]
+        manifest["gradeability"] = {
+            "gradeable_ids": [key for key, plan in plans if plan["gradeable"]],
+            "ungradeable": [{"id": key, "reason": plan["reason"]} for key, plan in plans if not plan["gradeable"]],
+            "plans": digest([plan_digest(plan) for _, plan in plans]),
         }
     if name == "ifbench":
         metric, receipts = _official_metric(cache)
@@ -253,7 +261,7 @@ def score_output(task: Task, row: dict, output: str) -> float:
         return aime_score(output, row["answer"])
     if task.name == "ifbench":
         return float(_ifbench_result(task, row, output).score)
-    return score_solution(output, row["test_setup_code"], row["test_list"])
+    return score_solution(output, row["reference_code"], row["test_setup_code"], row["test_list"])
 
 def _response(call: Callable, messages: list[dict], field: str, traces: list[dict]) -> str:
     protocol = (
@@ -312,6 +320,7 @@ def evaluate(task: Task, candidate: dict[str, str], rows: list[dict],
         except BudgetExhausted:
             raise
         except (CallFailed, ProgramError, SyntaxError, KeyError, ValueError, TypeError):
+            output = ""
             score, feedback = 0.0, "Candidate crashed or returned invalid output."
         scores.append(score)
         outputs.append(output)

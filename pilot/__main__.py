@@ -27,9 +27,10 @@ def file_hash(path: Path) -> str:
 
 
 def evaluator_identity(task) -> dict:
-    paths = ("pilot/tasks.py", "pilot/program.py", "pilot/controls.py", "pilot/runtime.py", "pilot/gateway.mjs")
-    return {"task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
-            "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-2.md"),
+    paths = ("pilot/tasks.py", "pilot/program.py", "pilot/verification.py", "pilot/adversarial.py",
+             "pilot/controls.py", "pilot/runtime.py", "pilot/gateway.mjs", "pilot/__main__.py")
+    return {"contract": 3, "task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
+            "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-3.md"),
             "route": MODEL, "decoding": {"temperature": 0, "forceReasoningOff": True, "max_output_tokens": 4096, "cacheRetention": "none"},
             "image": IMAGE}
 
@@ -84,8 +85,12 @@ def throttle_proof(pool: dict, env: dict, out: Path) -> None:
 
 def machine_proof(out: Path) -> None:
     permitted = sorted(os.sched_getaffinity(0))
-    if 0 not in permitted:
-        raise ValueError("CPU 0 is not available to this runner")
+    avoided = {0, 1, 2, 3, 4, 5, 13, 14, 15, 16}
+    if permitted != [6]:
+        raise ValueError("Pilot execution must inherit affinity pinned to CPU 6")
+    priority = os.getpriority(os.PRIO_PROCESS, 0)
+    if priority < 10:
+        raise ValueError("Pilot execution must inherit nice 10 or lower scheduling priority")
     affinities = Counter()
     for entry in Path("/proc").iterdir():
         if entry.name.isdigit():
@@ -93,9 +98,20 @@ def machine_proof(out: Path) -> None:
                 affinities[tuple(sorted(os.sched_getaffinity(int(entry.name))))] += 1
             except OSError:
                 pass
-    save(out / "machine.json", {"selected_cpu": 0, "permitted_cpus": permitted,
+    live = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit() and int(entry.name) != os.getpid():
+            try:
+                cpus = sorted(os.sched_getaffinity(int(entry.name)))
+                if cpus == [0, 5]:
+                    live.append({"pid": int(entry.name), "cpus": cpus})
+            except OSError:
+                pass
+    save(out / "machine.json", {"selected_cpu": permitted[0], "permitted_cpus": permitted,
+         "inherited_affinity": True, "avoided_cpus": sorted(avoided),
+         "avoidance_passed": not bool(set(permitted) & avoided), "observed_live_pinned_processes": live,
          "observed_process_affinity_sets": [{"cpus": list(cpus), "processes": count} for cpus, count in affinities.items()],
-         "max_model_requests_inflight": 1, "max_cpu_heavy_workers": 1, "nice": 10})
+         "max_model_requests_inflight": 1, "max_cpu_heavy_workers": 1, "nice": priority})
 
 
 def route_proof(pool: dict, env: dict, out: Path) -> None:
@@ -140,30 +156,74 @@ def calls_for(pool: dict, env: dict, out: Path, limits: dict | None = None):
     return ModelCalls(open_gateway(throttle), ledger, throttle), ledger, throttle
 
 
-def controls(args, pool, env):
-    from .controls import CONTROL_SEED, measure, representative_rows
+def offline_adversarial(args) -> None:
+    from .adversarial import run
     from .tasks import load_task
     if args.out.exists() and any(args.out.iterdir()):
+        raise FileExistsError("Adversarial output already contains evidence")
+    os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
+    prepared = [load_task(name, args.cache) for name in TASKS]
+    try:
+        machine_proof(args.out)
+        proof = run(prepared, {task.name: evaluator_identity(task) for task in prepared}, args.out / "checks")
+        save(args.out / "adversarial.json", proof)
+    except Exception as error:
+        save(args.out / "failure.json", {"error_type": type(error).__name__, "status": "admission-failed"})
+        raise
+    finally:
+        seal(args.out)
+    print(canonical({"adversarial": "passed", "model_calls": 0, "proof_hash": digest(proof)}))
+
+
+def load_adversarial(out: Path, prepared: list) -> dict:
+    from .adversarial import ATTACKS, cohort_manifest, solution, validate_result
+    verify_bundle(out)
+    bundle = json.loads((out / "bundle.json").read_text())
+    if "adversarial.json" not in bundle["files"]:
+        raise ValueError("Adversarial proof is not in the sealed bundle")
+    proof = json.loads((out / "adversarial.json").read_text())
+    validate_result(proof, {task.name: evaluator_identity(task) for task in prepared}, cohort_manifest(prepared))
+    mbpp = next(task for task in prepared if task.name == "mbpp")
+    expected_ids = [row["id"] for row in mbpp.train + mbpp.selection]
+    if [row["id"] for row in proof["gradeability"]] != expected_ids:
+        raise ValueError("Adversarial gradeability proof omits development rows")
+    rows = {row["id"]: row for row in mbpp.train}
+    attacks = {attack.name: attack for attack in ATTACKS}
+    if any(record["source"] != solution(attacks[record["attack"]], rows[record["row_id"]]) for record in proof["mbpp"]):
+        raise ValueError("Adversarial artifacts differ from the current published functions")
+    return proof
+
+
+def controls(args, pool=None, env=None):
+    from .adversarial import cohort_manifest
+    from .controls import CONTROL_SEED, measure, representative_rows
+    from .tasks import load_task
+    if args.task != "all":
+        raise ValueError("Controls require all three frozen cohorts")
+    if args.out.exists() and any(args.out.iterdir()):
         raise ValueError("Control evidence already exists; use the authorized fresh output directory")
-    prepared = [load_task(name, args.cache) for name in (TASKS if args.task == "all" else (args.task,))]
-    cohorts = {}
-    for task in prepared:
-        ids = [row["id"] for row in representative_rows(task)]
-        cohorts[task.name] = {"rows": ids, "cohort_hash": digest(ids)}
-    save(args.out / "cohorts.json", {"seed": CONTROL_SEED, "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-2.md"),
-                                  "cohorts": cohorts})
+    prepared = [load_task(name, args.cache) for name in TASKS]
+    proof = load_adversarial(args.adversarial, prepared)
+    cohorts = cohort_manifest(prepared)
+    frozen = {task.name: representative_rows(task) for task in prepared}
+    save(args.out / "cohorts.json", {"seed": CONTROL_SEED, "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-3.md"),
+                                  "cohorts": cohorts, "adversarial_hash": digest(proof)})
+    save(args.out / "adversarial.json", proof)
+    machine_proof(args.out)
+    if pool is None:
+        pool, env = environment(args.pool)
     for task in prepared:
         name = task.name
         out = args.out / name
-        if out.exists() and any(out.iterdir()):
-            raise ValueError("Control evidence already exists; preserve it instead of rerunning to a favorable result")
         call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100, active_seconds=86_400))
         try:
             identity = evaluator_identity(task)
             save(out / "manifest.json", {"identity": identity, "route_identity": call.gateway.route_identity,
-                 "account_domains": pool_domains(pool), "measurement_budget": ledger.limits})
+                 "account_domains": pool_domains(pool), "measurement_budget": ledger.limits,
+                 "adversarial_hash": digest(proof)})
             save(out / "measurement-budget.json", ledger.limits)
-            measure(task, call, out, identity)
+            measure(task, call, out, identity, rows=frozen[name], adversarial=proof)
         except Exception as error:
             save(out / "failure.json", {"error_type": type(error).__name__, "status": "admission-failed"})
             raise
@@ -228,8 +288,12 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
     task = load_task(task_name, args.cache)
     identity = evaluator_identity(task)
     control = json.loads((args.controls / task_name / "controls.json").read_text())
-    if not control.get("ranking_passed") or not control.get("noise_passed") or control["identity"] != identity:
+    if control.get("ranking_passed") is not True or control.get("noise_passed") is not True or control["identity"] != identity:
         raise ValueError("Controls missing, failed, or not bound to this evaluator/data/route identity")
+    proof = load_adversarial(args.controls, [load_task(name, args.cache) for name in TASKS])
+    if (control.get("adversarial_hash") != digest(proof)
+            or control.get("rows") != proof["cohorts"][task_name]["rows"]):
+        raise ValueError("Controls lack the current adversarial admission proof")
     out = args.out / task_name / str(seed) / method
     if out.exists():
         return resume_result(out, task_name, seed, method)
@@ -288,6 +352,13 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
 def replay(args) -> None:
     from .tasks import load_task, score_output
     os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    if (args.out / "checks" / "mbpp.jsonl").exists():
+        from .adversarial import replay_proof
+        prepared = [load_task(name, args.cache) for name in TASKS]
+        proof = load_adversarial(args.out, prepared)
+        checked = replay_proof(proof, prepared)
+        print(canonical({"replayed_adversarial_checks": checked, "model_calls": 0, "scored_final_tests_loaded": False}))
+        return
     tasks = {}
     checked = 0
     for evaluations in sorted(args.out.rglob("evaluations.jsonl")):
@@ -318,21 +389,33 @@ def replay(args) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Frozen development-only Hone optimizer pilot")
-    parser.add_argument("command", choices=("prepare", "probe", "throttle-proof", "controls", "smoke", "pilot", "verify", "replay"))
+    parser.add_argument("command", choices=("prepare", "probe", "throttle-proof", "adversarial", "controls", "smoke", "pilot", "verify", "replay"))
     parser.add_argument("--cache", type=Path, default=ROOT / ".pilot-cache")
     parser.add_argument("--pool", type=Path, default=ROOT / ".pilot-state/account-pool.json")
-    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-2")
-    parser.add_argument("--out", type=Path, default=ROOT / "evidence/pilot/smoke-2")
+    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-3")
+    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-3")
+    parser.add_argument("--out", type=Path)
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    if args.out is None:
+        args.out = ROOT / "evidence/pilot" / (
+            "adversarial-3" if args.command == "adversarial" else "controls-3" if args.command == "controls" else "smoke-3")
     if args.command in {"verify", "replay"}:
         verify_bundle(args.out)
         print("Evidence hashes verified")
         if args.command == "replay":
             replay(args)
         return
-    pool, env = environment(args.pool)
+    if args.command == "adversarial":
+        offline_adversarial(args)
+        return
+    if args.command == "controls":
+        os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+        controls(args)
+        return
+    if args.command in {"prepare", "probe", "throttle-proof"}:
+        pool, env = environment(args.pool)
     if args.command == "throttle-proof":
         throttle_proof(pool, env, args.out)
     elif args.command == "prepare":
@@ -340,22 +423,32 @@ def main():
         save(args.out / "tasks.json", {name: load_task(name, args.cache).manifest for name in TASKS})
         save(args.out / "account-domains.json", {"domains": pool_domains(pool), "api_keys_allowed": False, "pool_hash": digest(pool)})
         machine_proof(args.out)
-    elif args.command == "controls":
-        controls(args, pool, env)
     elif args.command == "probe":
         route_proof(pool, env, args.out)
     else:
         from .tasks import load_task
         verify_bundle(args.controls)
         bundle = json.loads((args.controls / "bundle.json").read_text())
+        prepared = [load_task(name, args.cache) for name in TASKS]
+        proof = load_adversarial(args.controls, prepared)
+        from .controls import CONTROL_SEED
+        if "cohorts.json" not in bundle["files"]:
+            raise ValueError("Frozen cohorts missing from sealed controls")
+        frozen = json.loads((args.controls / "cohorts.json").read_text())
+        if frozen != {"seed": CONTROL_SEED, "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-3.md"),
+                      "cohorts": proof["cohorts"], "adversarial_hash": digest(proof)}:
+            raise ValueError("Control cohorts differ from the current offline admission")
         for name in TASKS:
             filename = f"{name}/controls.json"
             if filename not in bundle["files"]:
                 raise ValueError("Controls missing from sealed bundle")
             control = json.loads((args.controls / filename).read_text())
-            if (not control.get("ranking_passed") or not control.get("noise_passed")
-                    or control.get("identity") != evaluator_identity(load_task(name, args.cache))):
+            if (control.get("ranking_passed") is not True or control.get("noise_passed") is not True
+                    or control.get("identity") != evaluator_identity(next(task for task in prepared if task.name == name))
+                    or control.get("adversarial_hash") != digest(proof)
+                    or control.get("rows") != proof["cohorts"][name]["rows"]):
                 raise ValueError("Controls missing, failed, or not bound to this evaluator/data/route identity")
+        pool, env = environment(args.pool)
         rows = []
         tasks = ("mbpp",) if args.command == "smoke" and args.task == "all" else TASKS if args.task == "all" else (args.task,)
         seeds = (args.seed,) if args.command == "smoke" else (0, 1, 2)
