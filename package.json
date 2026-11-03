@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.1",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "typecheck": "pnpm -r exec tsc --noEmit",
@@ -12,6 +12,6 @@
   },
   "devDependencies": {
     "typescript": "^5.5.0",
-    "vitest": "^2.1.0"
+    "vitest": "3.2.6"
   }
 }
