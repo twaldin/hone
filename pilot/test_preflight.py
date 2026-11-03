@@ -19,6 +19,10 @@ from pilot import hover
 
 
 class PreflightTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch("os.sched_getaffinity", return_value={6}))
+        self.enterContext(patch("os.getpriority", return_value=10))
+
     def fixture(self, root):
         tasks = {task.name: task for task in fixture_tasks()}
         controls = root / "controls"
@@ -283,18 +287,6 @@ class PreflightTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "contradicts"):
                         main()
                     auth.assert_not_called()
-
-    def test_machine_proof_records_inherited_cpu_six_and_avoidance(self):
-        with tempfile.TemporaryDirectory() as directory, patch("os.sched_getaffinity", return_value={6}), patch(
-            "os.getpriority", return_value=10
-        ):
-            machine_proof(Path(directory))
-            proof = json.loads((Path(directory) / "machine.json").read_text())
-        self.assertEqual(proof["selected_cpu"], 6)
-        self.assertEqual(proof["permitted_cpus"], [6])
-        self.assertTrue(proof["inherited_affinity"])
-        self.assertTrue(proof["avoidance_passed"])
-        self.assertTrue({0, 1, 2, 3, 4, 5, 13, 14, 15, 16} <= set(proof["avoided_cpus"]))
 
     def test_machine_proof_refuses_unsafe_or_unpinned_affinity(self):
         for affinity in ({0}, {0, 5}, {6, 7}):

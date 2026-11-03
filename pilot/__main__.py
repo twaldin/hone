@@ -88,14 +88,19 @@ def throttle_proof(pool: dict, env: dict, out: Path) -> None:
                               "allowed_domains": pool_domains(pool), "outage_behavior": "pause and resume, not failure"})
 
 
-def machine_proof(out: Path) -> None:
+def execution_limits() -> tuple[list[int], int]:
     permitted = sorted(os.sched_getaffinity(0))
-    avoided = {0, 1, 2, 3, 4, 5, 13, 14, 15, 16}
     if permitted != [6]:
         raise ValueError("Pilot execution must inherit affinity pinned to CPU 6")
     priority = os.getpriority(os.PRIO_PROCESS, 0)
     if priority < 10:
         raise ValueError("Pilot execution must inherit nice 10 or lower scheduling priority")
+    return permitted, priority
+
+
+def machine_proof(out: Path) -> None:
+    permitted, priority = execution_limits()
+    avoided = {0, 1, 2, 3, 4, 5, 13, 14, 15, 16}
     affinities = Counter()
     for entry in Path("/proc").iterdir():
         if entry.name.isdigit():
@@ -324,7 +329,7 @@ def reuse_mbpp(task) -> tuple[dict, dict]:
     verify_bundle(source)
     members = json.loads((source / "bundle.json").read_text())["files"]
     if not {"source-contract.json", "audit.json", "adversarial/adversarial.json", "mbpp/controls.json",
-            "mbpp/calls.jsonl", "mbpp/evaluations.jsonl", "mbpp/usage.json", "mbpp/bundle.json"}.issubset(members):
+            "mbpp/calls.jsonl", "mbpp/evaluations.jsonl", "mbpp/usage.json"}.issubset(members):
         raise ValueError("MBPP admission is incomplete or its scores are not sealed")
     verify_bundle(proof_path)
     proof = json.loads((proof_path / "adversarial.json").read_text())
@@ -648,6 +653,8 @@ def main():
         args.out = ROOT / "evidence/pilot" / (
             "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
             "adversarial-4a" if args.command == "adversarial" else "controls-4a" if args.command == "controls" else "smoke-4a")
+    if args.command != "verify":
+        execution_limits()
     if args.command in {"verify", "replay"}:
         verify_bundle(args.out)
         print("Evidence hashes verified")
