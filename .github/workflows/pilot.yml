@@ -1,0 +1,87 @@
+name: Pilot
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - lane/hone-hone-pilot-harness-1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pilot-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pilot:
+    name: Pilot unittest and Docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      BLIS_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+      UV_CONCURRENT_BUILDS: '1'
+      UV_CONCURRENT_INSTALLS: '1'
+      UV_CONCURRENT_DOWNLOADS: '2'
+      PILOT_DOCKER_TESTS: '1'
+      PILOT_OFFICIAL_METRIC_TESTS: '1'
+      NLTK_DATA: ${{ github.workspace }}/.pilot-cache/nltk
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.5'
+          python-version: '3.12.12'
+          enable-cache: false
+      - name: Select an available CPU
+        run: |
+          python3 - <<'PY'
+          import os
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'PILOT_CI_CPU={min(os.sched_getaffinity(0))}\n')
+          PY
+      - name: Install frozen Python dependencies
+        run: nice -n 10 taskset -c "$PILOT_CI_CPU" uv sync --project pilot --frozen
+      - name: Bootstrap pinned development metric resources and Docker image
+        run: |
+          nice -n 10 taskset -c "$PILOT_CI_CPU" pilot/.venv/bin/python - <<'PY'
+          import io
+          import os
+          from pathlib import Path
+          import subprocess
+          import urllib.request
+          import zipfile
+          from pilot.runtime import IMAGE
+          from pilot.tasks import load_task
+
+          revision = '550b6625bcef1f2abff2ff770a5a0d272c9c6b2a'
+          root = Path(os.environ['NLTK_DATA'])
+          for category, name in (
+              ('tokenizers', 'punkt'),
+              ('tokenizers', 'punkt_tab'),
+              ('corpora', 'stopwords'),
+              ('taggers', 'averaged_perceptron_tagger_eng'),
+          ):
+              url = f'https://raw.githubusercontent.com/nltk/nltk_data/{revision}/packages/{category}/{name}.zip'
+              with urllib.request.urlopen(url, timeout=60) as response:
+                  archive = response.read()
+              with zipfile.ZipFile(io.BytesIO(archive)) as package:
+                  package.extractall(root / category)
+          task = load_task('ifbench', Path('.pilot-cache'))
+          assert task.manifest['development_only']
+          assert not task.manifest['scored_final_tests_loaded']
+          subprocess.run(['docker', 'pull', IMAGE], check=True, timeout=180)
+          PY
+      - name: Run all pilot unittests with real Docker and official metrics
+        run: nice -n 10 taskset -c "$PILOT_CI_CPU" pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -v

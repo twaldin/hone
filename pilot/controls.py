@@ -3,13 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import math
 from pathlib import Path
+import random
 import statistics
 
 from .runtime import LIMITS, IMAGE, append_json, canonical, digest
 from .tasks import Task, evaluate, score_output
 
 PAIRS = 16
-CONTROL_ROWS = 8
+CONTROL_ROWS = 20
+CONTROL_SEED = 20261103
+PREVIOUS_MBPP_ROWS = frozenset(f"mbpp:train:{value}" for value in (601, 654, 707, 760, 814, 867, 920, 974))
 
 EXPECTED_RANK = "known-improved > naive > max(broken, shortcut); broken = 0; MBPP shortcut = 0"
 SHORTCUT_CODE = '''import json,sys
@@ -22,9 +25,11 @@ class AlwaysEqual:
 
 
 def representative_rows(task: Task) -> list[dict]:
-    if len(task.train) < CONTROL_ROWS:
-        raise ValueError("Controls require eight training rows")
-    return [task.train[index * (len(task.train) - 1) // (CONTROL_ROWS - 1)] for index in range(CONTROL_ROWS)]
+    eligible = sorted((row for row in task.train if task.name != "mbpp" or row["id"] not in PREVIOUS_MBPP_ROWS),
+                      key=lambda row: row["id"])
+    if len(eligible) < CONTROL_ROWS:
+        raise ValueError("Controls require twenty eligible training rows")
+    return random.Random(CONTROL_SEED).sample(eligible, CONTROL_ROWS)
 
 
 def artifacts(task: Task) -> dict:
@@ -69,6 +74,7 @@ def measure(task: Task, call, out: Path, identity: dict) -> dict:
     result = {"task": task.name, "identity": identity, "rows": [row["id"] for row in rows],
               "expected_rank": EXPECTED_RANK, "definitions": definitions, "artifacts": candidates,
               "noise_design": {"paired_trials": PAIRS, "rows_per_arm": CONTROL_ROWS, "model_calls_cached": False,
+                               "draw_seed": CONTROL_SEED, "excluded_prior_mbpp_rows": sorted(PREVIOUS_MBPP_ROWS) if task.name == "mbpp" else [],
                                "seed_artifact_hash": digest(task.seed_candidate), "cohort_hash": digest([row["id"] for row in rows])}}
     out.mkdir(parents=True, exist_ok=True)
     if (out / "controls.json").exists() or (out / "noise-pairs.json").exists():

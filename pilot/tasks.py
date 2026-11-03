@@ -119,9 +119,7 @@ def load_task(name: str, cache: Path) -> Task:
             return {"id": f"mbpp:{split}:{raw['task_id']}",
                     "input": raw["text"] + "\n\nRequired function declarations (implement bodies):\n" + _signature(raw["code"]),
                     "test_setup_code": raw["test_setup_code"] or "", "test_list": raw["test_list"],
-                    "reference_code": raw["code"],
-                    "function_names": [node.name for node in ast.parse(raw["code"]).body
-                                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]}
+                    "reference_code": raw["code"]}
         train = [convert(row, "train") for row in train_raw]
         selection = [convert(row, "validation") for row in selection_raw]
         seed = {"prompt": "Write Python code solving the problem. Preserve the required function names and signatures. Return only solution code, no markdown.", "program": SEED_PROGRAM}
@@ -153,11 +151,12 @@ def load_task(name: str, cache: Path) -> Task:
         }
     if name == "mbpp":
         manifest["solution_evaluator"] = {
-            "assertions": "Official development setup and assertions execute only in trusted host process.",
-            "worker_inputs": "Solution source, then function name and literal call args/kwargs only.",
-            "worker_outputs": "repr parsed only with ast.literal_eval; nonliteral values score zero.",
-            "limits": {"function_calls": 100, "worker_seconds": 10, "wire_output_bytes": 262144},
-            "semantics": "Literal values preserve types. Remote mutation of caller arguments is not propagated.",
+            "answer_extraction": "First exactly python-tagged or bare triple-backtick block, with surrounding horizontal whitespace allowed; unclosed eligible block consumes the remainder; whole output if none. Applied once at shared scoring boundary.",
+            "assertions": "Candidate source, official development setup, and every official assertion execute as Python in one namespace inside the pinned non-root, read-only, network-disabled Docker sandbox.",
+            "worker_inputs": "Extracted solution source, unmodified official setup and assertions.",
+            "completion": "Successful runner completion receipt plus zero exit status; candidate stdout is never a score.",
+            "limits": {"worker_seconds": 10, "source_bytes": 262144, "wire_output_bytes": 262144},
+            "semantics": "Native Python objects and mutations, without literal-only RPC restrictions. Assertions are not secret from adversarial code in the same interpreter.",
         }
     if name == "ifbench":
         metric, receipts = _official_metric(cache)
@@ -254,7 +253,7 @@ def score_output(task: Task, row: dict, output: str) -> float:
         return aime_score(output, row["answer"])
     if task.name == "ifbench":
         return float(_ifbench_result(task, row, output).score)
-    return score_solution(output, row["test_setup_code"], row["test_list"], row["function_names"])
+    return score_solution(output, row["test_setup_code"], row["test_list"])
 
 def _response(call: Callable, messages: list[dict], field: str, traces: list[dict]) -> str:
     protocol = (

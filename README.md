@@ -83,7 +83,7 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 The pilot is an admission experiment, not an optimizer-quality claim. Its accounting accepts disclosed token undercounts from internal retries and failed calls; complete attempt and failed-call receipts are required before a full comparison. See [the pilot contract and commands](docs/pilot.md).
 
-Admission stopped at the MBPP control gate; no searches ran. See the [failed admission evidence and handoff](evidence/pilot/handoff.md).
+The first admission exposed an MBPP harness contract bug. [Predeclaration 2](evidence/pilot/predeclaration-2.md) freezes the authorized correction and fresh 20-row control draw; the [original failed evidence](evidence/pilot/handoff.md) remains unchanged. Searches stay gated on renewed evaluator admission.
 
 ## Status and limitations
 

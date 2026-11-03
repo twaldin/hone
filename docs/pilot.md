@@ -2,7 +2,7 @@
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
-Admission is blocked: the fresh MBPP naive control scored zero and tied both negative controls. Noise measurement and every search stopped. Do not run the matrix or rerun controls without a new assistant decision. See the [retained failure and handoff](../evidence/pilot/handoff.md).
+The first admission stopped at a harness contract bug; its [failure evidence](../evidence/pilot/handoff.md) is retained unchanged. The assistant authorized [predeclaration 2](../evidence/pilot/predeclaration-2.md), committed before new model calls. The corrected contract and fresh control draw below govern renewed admission; no search is allowed until every task passes.
 
 ## Prepare the runtime
 
@@ -27,12 +27,12 @@ Auth and usage child processes receive only an explicit allowlist of home, execu
 ```sh
 nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot probe --out .pilot-runs/route-proof
 nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot throttle-proof --out .pilot-runs/throttle-proof
-nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot controls --out .pilot-runs/controls
+nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot controls --out evidence/pilot/controls-2
 ```
 
-Controls run first on MBPP, then IFBench and AIME, on eight evenly spaced training examples per task. The known-improved control uses protected development references for AIME and MBPP, and a stronger constraint-auditing prompt through both real IFBench stages. AIME's naive artifact is the real seed prompt; MBPP uses a real quick, unchecked artifact; IFBench deliberately ignores artificial constraints. Broken artifacts must fail. P shortcut controls send forged success JSON directly through the official metric; legitimate partial instruction matches are not mistaken for evaluator trust in that JSON. MBPP shortcut controls forge worker frames and a nonliteral always-equal result, which must score zero. These are evaluator diagnostics, not competing optimizer baselines.
+Controls run first on MBPP, then IFBench and AIME, on 20 training rows per task. Before any model dispatch, the runner records every ordered cohort and hash. Each draw is `random.Random(20261103).sample(eligible, 20)` after sorting stable row IDs; MBPP excludes the eight previously seen control IDs from this draw only, not from training or search. The known-improved control uses protected development references for AIME and MBPP and a stronger constraint-auditing prompt through both IFBench stages. AIME's naive artifact is the seed; MBPP uses the unchanged quick-answer artifact; IFBench deliberately ignores artificial constraints. Broken artifacts and MBPP stdout-forgery shortcuts must fail. P shortcuts send forged success JSON through the official metric. These are evaluator diagnostics, not optimizer baselines.
 
-Admission requires known-improved > naive > both broken and shortcut. Sixteen fresh unchanged-seed pairs then measure score noise on the same eight-example slice. The native Hone direct-paired calibration uses those deltas and their maximum excursion. Search is refused if the envelope obscures the positive-control contrast. For another slice size, all four calibration bounds scale by `sqrt(8/n)`; training uses one projected noise envelope, not an additional standard-error penalty. This independent-row approximation is a development calibration, not a final-test confidence interval or a guarantee for every future candidate.
+Admission requires known-improved > naive > both broken and shortcut. Sixteen fresh unchanged-seed pairs measure score noise on the same 20-row cohort, without cached model responses. The native Hone direct-paired calibration uses those deltas and their maximum excursion. Search is refused if the envelope obscures the positive-control contrast. For another slice size, all four calibration bounds scale by `sqrt(20/n)`; training uses one projected noise envelope, not another standard-error penalty. This independent-row approximation is a development calibration, not a final-test confidence interval or guarantee for future candidates.
 
 The AIME/MBPP positive controls check that the metric credits trusted correct answers; their oracle-to-naive contrast is not evidence that small optimizer gains are distinguishable. A zero or perfect naive cohort still fails the strict predeclared ranking; it is not repaired after observing results. A zero estimated noise envelope means the native threshold becomes strict improvement, not proof of a noiseless evaluator. Every control and unchanged arm archives its metric inputs in `evaluations.jsonl`, so the same offline replay command can recompute their scores.
 
@@ -54,7 +54,7 @@ MBPP is a declared agent-program adaptation, not a claim to reproduce an officia
 
 The mutable MBPP artifact contains a prompt and Python program. The program runs in a non-root, read-only, network-disabled Docker container without credentials or host home directories. It can make at most two brokered task-model calls, request at most 4,096 output tokens in total, and send at most 65,536 prompt bytes. Program execution has a 30-second bound excluding model wait; its owned container is paused while waiting, so candidates cannot compute free of that bound. Container processes run at nice 10. The model transport has a 600-second per-request bound.
 
-Solution assertions stay in the trusted evaluator. An isolated solution worker receives only function names and literal arguments. Results return through `repr` and `ast.literal_eval`, never pickle or executable return text. The adaptation supports literal-valued arguments and results, at most 100 function calls, and ten seconds of solution execution. Mutation of caller-owned arguments does not propagate across this boundary. These limits apply identically to every optimizer and can cause a development example to fail even when a less restricted native Python solution would pass.
+The answer is program text. The shared MBPP scoring boundary extracts the first python-tagged or bare fenced block, or uses the whole output if none exists; exact fence behavior is frozen in predeclaration 2. Candidate source, official setup and every assertion execute as Python in one namespace inside the pinned, non-root, read-only, network-disabled Docker sandbox, with a ten-second timeout. Pair objects, custom types and mutations retain native Python semantics. The literal-only RPC scorer is gone; no rows or assertions are filtered. A successful exit and runner completion receipt are required; candidate stdout is not a verdict. Assertions are not supplied to task-model calls or selection reflection, but they are necessarily visible to adversarial code inside the scoring interpreter. This is not an assertion-secrecy guarantee.
 
 ## Matched reported-usage accounting
 
@@ -79,7 +79,7 @@ Keep the requested $10 ceiling rather than increase it to favor Hone's more expe
 After controls pass, run the three-method, one-seed MBPP smoke:
 
 ```sh
-nice -n 10 taskset -c 0 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot smoke --controls .pilot-runs/controls --out .pilot-runs/smoke
+nice -n 10 taskset -c 0 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-2 --out evidence/pilot/smoke-2
 ```
 
 Smoke permits one real proposal per method and requires both a successful proposer response and a valid complete proposed artifact. It exercises the official GEPA reflection callable through the subscription route but does not spend the full budget. Hone imports the existing engine's 0.2 restart probability, deterministic restart draw, one format repair, and native promotion gate. It uses paired training slices of 8, 16, and 32 and fresh paired full-selection measurements. GEPA edits native `prompt` and optional `program` components directly, retaining its renderer, parser, round-robin component selection, Pareto selection, strict improvement, eight-example reflection minibatch, and 10,000-metric-call safety cap. Perfect training minibatches are skipped natively; smoke keeps sampling until a real proposal or a budget bound. The plain loop proposes from training traces and greedily retains strict full-selection improvements. Every method starts from the same artifact and uses the same deployment limits.
@@ -87,7 +87,7 @@ Smoke permits one real proposal per method and requires both a successful propos
 The next lane runs the full 27 searches only after the assistant reviews the smoke evidence and the required omp attempt/failed-call receipts are available:
 
 ```sh
-nice -n 10 taskset -c 0 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls --out .pilot-runs/pilot-27
+nice -n 10 taskset -c 0 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-2 --out .pilot-runs/pilot-27
 ```
 
 The command runs three methods on three tasks with seeds 0, 1, and 2. Existing complete cells are hash-verified and reused. Interrupted cells retain their durable usage prefix and last accepted incumbent, become explicit infrastructure-failure rows, and are never selectively rerun; the remaining cells continue. No final test phase is implemented or authorized here. A budget interruption retains the last completely evaluated eligible artifact.
@@ -111,3 +111,9 @@ nice -n 10 taskset -c 0 pilot/.venv/bin/python -m pilot replay --out .pilot-runs
 Replay first verifies the bundle hashes and task-resource identities, then runs the protected metrics again. MBPP replay executes archived solution code in the same isolated worker boundary.
 
 `prepare`, `probe`, and `throttle-proof` regenerate the machine/task manifests, real route check, no-account/environment-fallback rejection check, and forced-high/outage pause proof. Current route evidence is `route-proof-v4`; earlier route, preparation and throttle directories carry explicit superseded status files. `aborted-controls-v1` remains inadmissible measurement evidence, not a passing control run.
+
+## CI and baseline failures
+
+The Pilot GitHub Actions workflow runs frozen Python dependencies, pinned development metric resources, and the full pilot unittest suite with real Docker and official metrics enabled. It makes no broker or model calls. Sandbox CPU affinity follows the runner's inherited affinity; the shared-machine harness remains pinned to CPU 0.
+
+The three reported CLI failures reproduced on isolated unmodified main at `b91d374b4b8ad4c99df3afcedf12007adad32639`: stale lock metadata, the host Bun digest mismatch, and replaced-socket identity handling. The one requested baseline run recorded 72 passing, three failing and one skipped test. See [main-baseline.json](../evidence/pilot/main-baseline.json); these are pre-existing, not suppressed pilot regressions.

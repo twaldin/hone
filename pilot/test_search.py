@@ -56,6 +56,34 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(calls[0][2], 2048)
         self.assertNotIn("never expose", json.dumps(calls))
 
+    def test_mbpp_proposer_receives_native_scoring_contract_without_assertions(self):
+        mbpp = Task("mbpp",
+                    [{"id": "mbpp:train:1", "input": "Increment.", "test_list": ["assert training_secret"]}],
+                    [{"id": "mbpp:validation:1", "input": "Increment.", "test_list": ["assert selection_secret"]}],
+                    {}, {"prompt": "seed", "program": "original program"})
+        requests = []
+        def evaluate(candidate, rows, capture_traces=False):
+            return {"scores": [0.0] * len(rows), "outputs": [""] * len(rows),
+                    "trajectories": [{"feedback": "failed"}] * len(rows) if capture_traces else []}
+        def call(role, messages, tokens):
+            requests.append(messages)
+            return json.dumps(mbpp.seed_candidate)
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_search("plain", mbpp, call, evaluate, lambda: True, {}, 0, Path(directory), 1)
+        contract = json.loads(requests[0][0]["content"])["contract"]["deployment_contract"]
+        self.assertEqual(contract["model_calls_per_row"], 2)
+        self.assertEqual(contract["total_requested_output_tokens"], 4096)
+        self.assertEqual(contract["solution_seconds"], 10)
+        self.assertNotIn("solution_function_calls", contract)
+        self.assertNotIn("solution_call_input_bytes", contract)
+        self.assertIn("```python", contract["solution_answer_extraction"])
+        self.assertIn("same namespace", contract["solution_semantics"])
+        self.assertIn("completion receipt", contract["solution_semantics"])
+        self.assertIn("not secret", contract["solution_semantics"])
+        self.assertNotIn("training_secret", json.dumps(requests))
+        self.assertNotIn("selection_secret", json.dumps(requests))
+        self.assertEqual(result["candidate"], mbpp.seed_candidate)
+
     def test_budget_interrupt_retains_last_complete_candidate(self):
         full = 0
         def evaluate(candidate, rows, capture_traces=False):

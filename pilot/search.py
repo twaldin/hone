@@ -115,12 +115,19 @@ def _contract(task: Task, noise: dict) -> dict:
                       "active_program_seconds": 30, "memory_mb": 256, "cpu_count": 1,
                       "pids": 32, "open_files": 64, "file_size_bytes": 1048576,
                       "network": False, "read_only": True, "solution_seconds": 10,
-                      "solution_function_calls": 100, "solution_call_input_bytes": MAX_PROMPT_BYTES,
                       "solution_source_bytes": MAX_WIRE_BYTES, "solution_output_bytes": MAX_WIRE_BYTES,
                       "format": 'Python stdin JSON {input,prompt}; stdout JSON lines: '
                                 '{type:"model",messages:[{role,content}],max_tokens} receives {text}; '
-                                'finish with {type:"result",code:"Python solution source"}. '
-                                'Message roles: system/user/assistant. No markdown protocol frames.'}
+                                'finish with {type:"result",code:"candidate program text"}. '
+                                'Message roles: system/user/assistant. No markdown protocol frames.',
+                      "solution_answer_extraction": "At the shared scoring boundary, use the first block opened by exactly "
+                                                    "```python or bare ``` with surrounding horizontal whitespace allowed. "
+                                                    "Skip other language blocks; an unclosed eligible block consumes the rest. "
+                                                    "Use the whole answer if no eligible block exists. Do not repair Python.",
+                      "solution_semantics": "Execute extracted candidate source, official development setup and every assertion "
+                                            "as Python in the same namespace in the sandbox. Native objects and mutations are supported. "
+                                            "Require runner completion receipt and zero exit status. Stdout alone cannot pass. "
+                                            "Assertions are not secret from adversarial same-interpreter code."}
     return {"task": task.name, "deployment_contract": deployment,
             "editable_artifact": task.seed_candidate,
             "artifact_format": "Mapping with exact seed keys and nonempty string values; "

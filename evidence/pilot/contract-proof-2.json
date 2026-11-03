@@ -1,0 +1,10 @@
+{
+  "assertion_execution": "native Python inside pinned isolated Docker sandbox",
+  "fenced_reference_score": 1.0,
+  "final_test_material_loaded": false,
+  "model_calls": 0,
+  "plain_reference_score": 1.0,
+  "row": "mbpp:train:601",
+  "selection_rows": 90,
+  "train_rows": 374
+}

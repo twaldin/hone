@@ -29,6 +29,7 @@ def file_hash(path: Path) -> str:
 def evaluator_identity(task) -> dict:
     paths = ("pilot/tasks.py", "pilot/program.py", "pilot/controls.py", "pilot/runtime.py", "pilot/gateway.mjs")
     return {"task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
+            "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-2.md"),
             "route": MODEL, "decoding": {"temperature": 0, "forceReasoningOff": True, "max_output_tokens": 4096, "cacheRetention": "none"},
             "image": IMAGE}
 
@@ -140,10 +141,19 @@ def calls_for(pool: dict, env: dict, out: Path, limits: dict | None = None):
 
 
 def controls(args, pool, env):
-    from .controls import measure
+    from .controls import CONTROL_SEED, measure, representative_rows
     from .tasks import load_task
-    for name in TASKS if args.task == "all" else (args.task,):
-        task = load_task(name, args.cache)
+    if args.out.exists() and any(args.out.iterdir()):
+        raise ValueError("Control evidence already exists; use the authorized fresh output directory")
+    prepared = [load_task(name, args.cache) for name in (TASKS if args.task == "all" else (args.task,))]
+    cohorts = {}
+    for task in prepared:
+        ids = [row["id"] for row in representative_rows(task)]
+        cohorts[task.name] = {"rows": ids, "cohort_hash": digest(ids)}
+    save(args.out / "cohorts.json", {"seed": CONTROL_SEED, "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-2.md"),
+                                  "cohorts": cohorts})
+    for task in prepared:
+        name = task.name
         out = args.out / name
         if out.exists() and any(out.iterdir()):
             raise ValueError("Control evidence already exists; preserve it instead of rerunning to a favorable result")
@@ -162,6 +172,7 @@ def controls(args, pool, env):
             summary = ledger.summary(throttle)
             save(out / "usage.json", summary)
             seal(out)
+            seal(args.out)
         print(canonical({"task": name, "controls": "passed", **summary}), flush=True)
     seal(args.out)
 
@@ -304,8 +315,8 @@ def main():
     parser.add_argument("command", choices=("prepare", "probe", "throttle-proof", "controls", "smoke", "pilot", "verify", "replay"))
     parser.add_argument("--cache", type=Path, default=ROOT / ".pilot-cache")
     parser.add_argument("--pool", type=Path, default=ROOT / ".pilot-state/account-pool.json")
-    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls")
-    parser.add_argument("--out", type=Path, default=ROOT / "evidence/pilot/smoke")
+    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-2")
+    parser.add_argument("--out", type=Path, default=ROOT / "evidence/pilot/smoke-2")
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()

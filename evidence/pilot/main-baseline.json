@@ -1,0 +1,111 @@
+{
+  "schema": "hone.pilot.main-baseline.v1",
+  "purpose": "Determine whether the three previously failing trusted CLI tests also fail on isolated, unmodified origin/main. No fixes or model calls.",
+  "classification": "all_three_failures_reproduced_on_unmodified_main",
+  "origin_main_sha": "b91d374b4b8ad4c99df3afcedf12007adad32639",
+  "fetch": {
+    "command": "git fetch origin main && git rev-parse origin/main",
+    "exit_code": 0,
+    "authentication": "Existing Git authentication; no credential files or credential-valued environment variables inspected."
+  },
+  "isolation": {
+    "scratch_creation_command": "mktemp -d /tmp/hone-main-baseline.XXXXXXXX",
+    "scratch_path": "/tmp/hone-main-baseline.cLyTDFOS",
+    "worktree_command": "git worktree add --detach /tmp/hone-main-baseline.cLyTDFOS b91d374b4b8ad4c99df3afcedf12007adad32639",
+    "head_before_test": "b91d374b4b8ad4c99df3afcedf12007adad32639",
+    "tracked_source_clean_before_test": true,
+    "source_check_command": "git diff --quiet b91d374b4b8ad4c99df3afcedf12007adad32639 --",
+    "dependency_strategy": "Fresh frozen installation in the scratch worktree, ignore lifecycle scripts, copy package imports; no lane node_modules symlink.",
+    "observed_workspace_dependency_targets": {
+      "@hone/broker": "/tmp/hone-main-baseline.cLyTDFOS/trusted/broker",
+      "@hone/meta": "/tmp/hone-main-baseline.cLyTDFOS/trusted/meta",
+      "@hone/schema": "/tmp/hone-main-baseline.cLyTDFOS/schema",
+      "@hone/scoring": "/tmp/hone-main-baseline.cLyTDFOS/trusted/scoring"
+    },
+    "existing_worktrees_reset_stashed_or_checked_out": false
+  },
+  "dependencies": {
+    "started_at": "2026-11-03T04:20:49.650852+00:00",
+    "cwd": "/tmp/hone-main-baseline.cLyTDFOS",
+    "command": "nice -n 10 taskset -c 0 pnpm install --frozen-lockfile --ignore-scripts --network-concurrency=1 --child-concurrency=1 --package-import-method=copy",
+    "exit_code": 0,
+    "pnpm_version": "12.14.0",
+    "node_version": "v24.18.0",
+    "host_bun_version": "1.4.4"
+  },
+  "proof": {
+    "started_at": "2026-11-03T04:21:01.468097+00:00",
+    "cwd": "/tmp/hone-main-baseline.cLyTDFOS",
+    "command": "nice -n 10 taskset -c 0 pnpm --filter @hone/cli exec vitest run test/lock-lease.test.ts test/optimizer-container.test.ts test/stop-engine-seal.test.ts --maxWorkers=1 --minWorkers=1 --reporter=json --outputFile=/tmp/hone-main-baseline-private-my_oksyo/results.json",
+    "runs": 1,
+    "exit_code": 1,
+    "cpu": 0,
+    "nice": 10,
+    "max_workers": 1,
+    "vitest_version": "2.1.9",
+    "total_tests": 76,
+    "passed_tests": 72,
+    "failed_tests": 3,
+    "skipped_tests": 1,
+    "files": [
+      {
+        "path": "trusted/cli/test/lock-lease.test.ts",
+        "status": "failed",
+        "passed": 7,
+        "failed": 1,
+        "skipped": 0,
+        "failure": {
+          "test": "A-release/B-bind-before-B-publish (metadata is pinned to the socket incarnation) A's stale metadata is never confirmed against B's live socket",
+          "location": "trusted/cli/test/lock-lease.test.ts:106:50",
+          "message": "AssertionError: expected { …(5) } to be null"
+        }
+      },
+      {
+        "path": "trusted/cli/test/optimizer-container.test.ts",
+        "status": "failed",
+        "passed": 53,
+        "failed": 1,
+        "skipped": 1,
+        "failure": {
+          "test": "full local backend: TCP broker + one build feeding the single one-shot probe invocation network egress opens the authenticated public TCP listener; the one-shot probe is the only optimizer invocation",
+          "location": "trusted/cli/test/optimizer-container.test.ts:1173:5",
+          "origin": "trusted/cli/src/backends/optimizer-container.ts:470:13",
+          "message": "Error: pinned runtime source /home/tim/.bun/bin/bun hashes 10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235 != pinned 9fd36f87e4b90b07632b987a2e4ec81ca15a62c81bf983190cea6d715be2ad74 — refusing",
+          "classification": "Existing main test reaches the same host Bun pin mismatch; this does not establish a valid optimizer runtime."
+        },
+        "skipped_test": "REAL docker: host-uid build into the 0700-rooted handoff prepareOptimizerRuntime truly builds inside the image as the numeric host uid; the output seals, verifies, and a tamper refuses",
+        "skip_condition": "Existing test skips when Docker info or hone-mutation:latest image inspection is unavailable; the proof did not distinguish those two alternatives."
+      },
+      {
+        "path": "trusted/cli/test/stop-engine-seal.test.ts",
+        "status": "failed",
+        "passed": 12,
+        "failed": 1,
+        "skipped": 0,
+        "failure": {
+          "test": "openStopDockerClient — one frozen, explicit endpoint for the whole stop attempt production: DOCKER_HOST symlinks are canonicalized (a retargeted symlink steers nothing) and the socket INCARNATION is pinned — a replaced socket fails closed",
+          "location": "trusted/cli/test/stop-engine-seal.test.ts:271:47",
+          "message": "TypeError: .toMatch() expects to receive a string, but got object"
+        }
+      }
+    ]
+  },
+  "cleanup": {
+    "command": "git worktree remove --force /tmp/hone-main-baseline.cLyTDFOS",
+    "exit_code": 0,
+    "scratch_path_exists_after_cleanup": false,
+    "scope": "Only the exact scratch worktree created for this proof was removed."
+  },
+  "private_logs": {
+    "directory": "/tmp/hone-main-baseline-private-my_oksyo",
+    "directory_mode": "0700",
+    "files": ["install.log", "tests.log", "results.json"],
+    "publication": "Raw logs retained privately and not copied into repository evidence. Only failure messages and source locations are reproduced here."
+  },
+  "limits": [
+    "The requested three-file proof fails on main; it is not a passing regression gate.",
+    "One existing real-Docker test was skipped, so its runtime behavior is unproven.",
+    "No production code, tests, existing evidence, or existing user worktree contents were changed by this assignment.",
+    "No fixes, retuning, additional verification runs, or model/provider calls were performed."
+  ]
+}

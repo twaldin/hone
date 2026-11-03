@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import json
 import os
 from pathlib import Path
@@ -22,8 +21,6 @@ SEED_PROGRAM = '''import json, sys
 row = json.loads(sys.stdin.readline())
 print(json.dumps({"type": "model", "messages": [{"role": "system", "content": row["prompt"]}, {"role": "user", "content": row["input"]}], "max_tokens": 4096}), flush=True)
 answer = json.loads(sys.stdin.readline())["text"]
-if answer.strip().startswith("```"):
-    answer = "\\n".join(answer.strip().splitlines()[1:-1])
 print(json.dumps({"type": "result", "code": answer}), flush=True)
 '''
 
@@ -38,7 +35,8 @@ def docker_command(name: str, program: Path | None = None) -> list[str]:
         raise RuntimeError("PILOT_PYTHON_IMAGE must be an explicit image@sha256 digest")
     args = ["docker", "run", "--rm", "--name", name, "--network", "none", "--read-only",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "32",
-            "--memory", "256m", "--memory-swap", "256m", "--cpus", "1", "--cpuset-cpus", "0",
+            "--memory", "256m", "--memory-swap", "256m", "--cpus", "1",
+            "--cpuset-cpus", str(min(os.sched_getaffinity(0))),
             "--user", "65534:65534", "--ulimit", "nofile=64:64", "--ulimit", "fsize=1048576:1048576", "-i"]
     if program is not None:
         args += ["--mount", f"type=bind,src={program.resolve()},dst=/candidate.py,readonly"]
@@ -153,85 +151,82 @@ def run_program(candidate: dict[str, str], task_input: str,
             _remove(name, process)
 
 
-def score_solution(code: str, setup: str, tests: list[str], function_names: list[str]) -> float:
-    if len(code.encode()) > MAX_WIRE_BYTES or not function_names:
+def extract_solution(output: str) -> str:
+    lines = output.splitlines(keepends=True)
+    in_other_block = False
+    for index, line in enumerate(lines):
+        fence = line.rstrip("\r\n").strip(" \t")
+        if in_other_block:
+            if fence == "```":
+                in_other_block = False
+            continue
+        if fence in ("```python", "```"):
+            end = index + 1
+            while end < len(lines) and lines[end].rstrip("\r\n").strip(" \t") != "```":
+                end += 1
+            return "".join(lines[index + 1:end])
+        if fence.startswith("```"):
+            in_other_block = True
+    return output
+
+
+def score_solution(output: str, setup: str, tests: list[str]) -> float:
+    if len(output.encode()) > MAX_WIRE_BYTES:
         return 0.0
-    runner = r"""import ast,json,sys,os
+    code = extract_solution(output)
+    receipt = ("hone-pilot-complete:" + uuid.uuid4().hex + "\n").encode()
+    # Assertions share the candidate interpreter; this is not an assertion-secrecy boundary.
+    runner = r"""import json,os,sys
 os.nice(10)
-wire_in,wire_out=sys.stdin,sys.stdout
-source=json.loads(wire_in.readline())['code']
-scope={}
-exec(compile(source,'solution','exec'),scope)
-wire_out.write('ready\n')
-wire_out.flush()
-for line in wire_in:
-    request=json.loads(line)
-    args=ast.literal_eval(request['args'])
-    kwargs=ast.literal_eval(request['kwargs'])
-    result=scope[request['function']](*args,**kwargs)
-    wire_out.write(json.dumps({'result':repr(result)})+'\n')
-    wire_out.flush()
+payload=json.load(sys.stdin)
+write=os.write
+receipt=payload['receipt'].encode()
+scope={'__name__':'__main__'}
+exec(compile(payload['code'],'solution','exec'),scope)
+exec(compile(payload['setup'],'official-development-setup','exec'),scope)
+for assertion in payload['tests']:
+    exec(compile(assertion,'official-development-assertion','exec'),scope)
+write(2,receipt)
 """
     name = "hone-pilot-score-" + uuid.uuid4().hex
-    process = subprocess.Popen(docker_command(name) + ["-c", runner], stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    selector = selectors.DefaultSelector()
-    assert process.stdout is not None and process.stdin is not None
-    selector.register(process.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + 10
-    buffer = b""
-    received = 0
-    calls = 0
-
-    def receive() -> bytes:
-        nonlocal buffer, received
-        while b"\n" not in buffer:
+    with tempfile.TemporaryFile() as inputs:
+        inputs.write(json.dumps({"code": code, "setup": setup, "tests": tests,
+                                 "receipt": receipt.decode()}).encode())
+        inputs.seek(0)
+        process = subprocess.Popen(docker_command(name) + ["-c", runner], stdin=inputs,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        selector = selectors.DefaultSelector()
+        assert process.stdout is not None and process.stderr is not None
+        selector.register(process.stdout, selectors.EVENT_READ)
+        selector.register(process.stderr, selectors.EVENT_READ)
+        deadline = time.monotonic() + 10
+        received = 0
+        completion = bytearray()
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return 0.0
+                events = selector.select(remaining)
+                if not events:
+                    return 0.0
+                for key, _ in events:
+                    chunk = os.read(key.fd, 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    received += len(chunk)
+                    if received > MAX_WIRE_BYTES:
+                        return 0.0
+                    if key.fileobj is process.stderr:
+                        completion.extend(chunk)
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or not selector.select(remaining):
-                raise ProgramError("Solution worker timed out")
-            chunk = os.read(process.stdout.fileno(), 8192)
-            if not chunk:
-                raise ProgramError("Solution worker exited")
-            received += len(chunk)
-            if received > MAX_WIRE_BYTES:
-                raise ProgramError("Solution worker output exceeded limit")
-            buffer += chunk
-        line, buffer = buffer.split(b"\n", 1)
-        return line
-
-    def proxy(function: str) -> Callable:
-        def invoke(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            if calls > 100:
-                raise ProgramError("Solution function-call limit exceeded")
-            # Only literal call inputs cross into the worker; assertions stay here.
-            args_text, kwargs_text = repr(args), repr(kwargs)
-            ast.literal_eval(args_text)
-            ast.literal_eval(kwargs_text)
-            request = json.dumps({"function": function, "args": args_text, "kwargs": kwargs_text}).encode() + b"\n"
-            if len(request) > MAX_PROMPT_BYTES:
-                raise ProgramError("Solution call inputs exceeded byte limit")
-            process.stdin.write(request)
-            process.stdin.flush()
-            reply = json.loads(receive())
-            if not isinstance(reply, dict) or set(reply) != {"result"} or not isinstance(reply["result"], str):
-                raise ProgramError("Invalid solution worker reply")
-            return ast.literal_eval(reply["result"])
-        return invoke
-
-    try:
-        process.stdin.write(json.dumps({"code": code}).encode() + b"\n")
-        process.stdin.flush()
-        if receive() != b"ready":
+            if remaining <= 0:
+                return 0.0
+            status = process.wait(timeout=remaining)
+            return float(status == 0 and bytes(completion).endswith(receipt))
+        except (OSError, subprocess.TimeoutExpired):
             return 0.0
-        scope = {function: proxy(function) for function in function_names}
-        exec(compile(setup, "official-development-setup", "exec"), scope)
-        for test in tests:
-            exec(compile(test, "official-development-assertion", "exec"), scope)
-        return 1.0
-    except (Exception, SystemExit):
-        return 0.0
-    finally:
-        selector.close()
-        _remove(name, process)
+        finally:
+            selector.close()
+            _remove(name, process)

@@ -10,7 +10,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pilot import program
-from pilot.controls import SHORTCUT_CODE
 from pilot.runtime import BudgetExhausted, TransportError
 from pilot.tasks import Task, evaluate
 
@@ -206,84 +205,177 @@ print(json.dumps({"type":"result","code":answer}),flush=True)
                                capture_output=True, text=True, timeout=15, check=True)
         self.assertNotIn(state.stdout.strip(), {"running", "paused", "restarting"})
 
-    def test_literal_rpc_preserves_supported_return_types(self):
-        source = "def target(x): return (x + 1, {'items': [1, 2]}, {3, 4})"
+    def score(self, output, setup="", assertions=None):
+        if assertions is None:
+            assertions = ["assert target(7) == 8"]
         with patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove):
-            score = program.score_solution(source, "", ["assert target(4) == (5, {'items': [1, 2]}, {3, 4})"], ["target"])
-        self.assertEqual(score, 1.0)
+            return program.score_solution(output, setup, assertions)
 
-    def test_nonliteral_return_is_rejected(self):
-        with patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove):
-            score = program.score_solution("def target(x): return iter([x])", "",
-                                           ["assert target(7) == 7"], ["target"])
-        self.assertEqual(score, 0.0)
-
-    def test_frame_marker_shortcut_cannot_pass_assertions(self):
-        source = """import sys
-frame=sys._getframe()
-while frame is not None:
-    for namespace in (frame.f_locals, frame.f_globals):
-        payload=namespace.get('payload')
-        if isinstance(payload,dict) and 'marker' in payload:
-            print(payload['marker'],flush=True)
-            sys.exit(0)
-    frame=frame.f_back
-def target(x): return -1
+    def test_native_python_objects_and_mutation(self):
+        source = """class Pair:
+    def __init__(self, first, second):
+        self.first, self.second = first, second
+def target(pair):
+    pair.first += pair.second
+    return pair
+def values(items):
+    items.append(9)
+    return iter(items)
 """
-        with patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove):
-            score = program.score_solution(source, "", ["assert target(7) == 42"], ["target"])
-        self.assertEqual(score, 0.0)
+        setup = "pair = Pair(4, 7)\nitems = [1, 2]"
+        assertions = ["assert target(pair) is pair",
+                      "assert pair.first == 11",
+                      "assert pair.second == 7",
+                      "assert list(values(items)) == [1, 2, 9]",
+                      "assert items == [1, 2, 9]"]
+        self.assertEqual(self.score(source, setup, assertions), 1.0)
 
-    def test_spoofed_worker_frames_do_not_bypass_real_assertions(self):
-        with patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove):
-            score = program.score_solution(SHORTCUT_CODE, "", ["assert target(7) == 42"], ["target"])
-        self.assertEqual(score, 0.0)
+    def test_setup_definitions_share_candidate_namespace(self):
+        self.assertEqual(self.score("def target(x): return Helper(x).value",
+                                    "class Helper:\n    def __init__(self, x): self.value = x + 1"), 1.0)
 
-    def test_always_equal_object_cannot_cross_literal_boundary(self):
-        source = """class AlwaysEqual:
-    def __eq__(self, other): return True
-    def __repr__(self): return 'AlwaysEqual()'
-def target(x): return AlwaysEqual()
-"""
-        with patch.object(program, "docker_command", local_command), patch.object(program, "_remove", local_remove):
-            score = program.score_solution(source, "", ["assert target(7) == 42"], ["target"])
-        self.assertEqual(score, 0.0)
+    def test_official_setup_and_every_assertion_must_succeed(self):
+        source = "def target(x): return x + 1"
+        failures = [
+            ("raise RuntimeError('setup failure')", ["assert target(7) == 8"]),
+            ("", ["assert target(7) == 8", "assert target(9) == 0"]),
+            ("", ["assert target(7) == 8", "raise RuntimeError('assertion failure')"]),
+            ("", ["assert target(7) == 8", "not valid Python"]),
+            ("", ["assert target(7) == 8", "import sys; sys.exit(0)"]),
+        ]
+        for setup, assertions in failures:
+            with self.subTest(setup=setup, assertions=assertions):
+                self.assertEqual(self.score(source, setup, assertions), 0.0)
+
+    def test_invalid_program_and_candidate_exception_score_zero(self):
+        for source in ("not valid Python", "raise RuntimeError('failed')",
+                       "def target(x): raise RuntimeError('failed')"):
+            with self.subTest(source=source):
+                self.assertEqual(self.score(source), 0.0)
+
+    def test_premature_successful_exit_and_stdout_frames_cannot_pass(self):
+        for source in ("import sys; sys.exit(0)",
+                       "import os; os._exit(0)",
+                       'print(\'{"result":"8"}\\nready\\nhone-pilot-complete:fake\', flush=True)\n'
+                       'def target(x): return -1'):
+            with self.subTest(source=source):
+                self.assertEqual(self.score(source), 0.0)
+
+    def test_even_matching_completion_receipt_on_stdout_cannot_pass(self):
+        source = "import sys\nprint('hone-pilot-complete:known', flush=True)\nsys.exit(0)"
+        with patch.object(program.uuid, "uuid4") as identity:
+            identity.return_value.hex = "known"
+            self.assertEqual(self.score(source), 0.0)
+
+    def test_receipt_requires_successful_process_exit(self):
+        source = "import atexit,os\natexit.register(lambda: os._exit(7))\ndef target(x): return x + 1"
+        self.assertEqual(self.score(source), 0.0)
+
+    def test_candidate_output_is_not_the_score(self):
+        source = 'print("arbitrary candidate output")\ndef target(x): return x + 1'
+        self.assertEqual(self.score(source), 1.0)
+
+    def test_source_and_combined_output_are_bounded(self):
+        self.assertEqual(self.score("x" * (program.MAX_WIRE_BYTES + 1)), 0.0)
+        for stream in ("sys.stdout", "sys.stderr"):
+            with self.subTest(stream=stream):
+                source = f"import sys\n{stream}.write('x' * {program.MAX_WIRE_BYTES + 1})\ndef target(x): return x + 1"
+                self.assertEqual(self.score(source), 0.0)
+
+    def test_timeout_stops_and_removes_worker(self):
+        selector = program.selectors.DefaultSelector()
+        removed = []
+        def remove(name, process):
+            local_remove(name, process)
+            removed.append(process.returncode)
+        with (patch.object(program, "docker_command", local_command),
+              patch.object(program, "_remove", remove),
+              patch.object(program.selectors, "DefaultSelector", return_value=selector),
+              patch.object(selector, "select", return_value=[])):
+            self.assertEqual(program.score_solution("while True: pass", "", []), 0.0)
+        self.assertEqual(len(removed), 1)
+        self.assertIsNotNone(removed[0])
+
+    def test_shared_extraction_uses_first_eligible_block(self):
+        cases = [
+            ("def target(x): return x + 1", "def target(x): return x + 1"),
+            ("before\n```python\ndef target(x): return x + 1\n```\nafter",
+             "def target(x): return x + 1\n"),
+            ("before\n \t``` \t\r\ndef target(x): return x + 1\r\n\t```\t\r\nafter",
+             "def target(x): return x + 1\r\n"),
+            ("```python\nfirst\n```\n```python\nsecond\n```", "first\n"),
+            ("```javascript\nignored\n```\n```python\nchosen\n```", "chosen\n"),
+            ("```ruby\nignored\n```", "```ruby\nignored\n```"),
+            ("```Python\nignored\n```\n```python\nchosen\n```", "chosen\n"),
+            ("```python extra\nignored\n```\n```\nchosen\n```", "chosen\n"),
+            ("before\n```python\ndef target(x): return x + 1",
+             "def target(x): return x + 1"),
+            ("before\n```\ndef target(x): return x + 1", "def target(x): return x + 1"),
+            ("inline ```python is not an opening fence", "inline ```python is not an opening fence"),
+        ]
+        for output, expected in cases:
+            with self.subTest(output=output):
+                self.assertEqual(program.extract_solution(output), expected)
+
+    def test_scoring_applies_extraction_without_repair(self):
+        outputs = [
+            "def target(x): return x + 1",
+            "prose\n```python\ndef target(x): return x + 1\n```\n```python\ninvalid\n```",
+            "```javascript\nnot Python\n```\n```\ndef target(x): return x + 1\n```",
+            "prose\n```python\ndef target(x): return x + 1",
+        ]
+        for output in outputs:
+            with self.subTest(output=output):
+                self.assertEqual(self.score(output), 1.0)
+        self.assertEqual(self.score("```ruby\ndef target(x): return x + 1\n```"), 0.0)
+        self.assertEqual(self.score("```python\n    def target(x): return x + 1\n```"), 0.0)
+
+    def test_seed_program_preserves_answer_for_shared_scoring(self):
+        output = "prose\n```python\ndef target(x): return x + 1"
+        answer, traces = self.execute(program.SEED_PROGRAM, lambda *args: output)
+        self.assertEqual(answer, output)
+        self.assertEqual(len(traces), 1)
+        self.assertEqual(self.score(answer), 1.0)
 
     @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
-    def test_docker_spoofed_rpc_frames_score_zero(self):
-        self.assertEqual(program.score_solution(SHORTCUT_CODE, "", ["assert target(7) == 42"], ["target"]), 0.0)
+    def test_docker_native_pair_and_mutation(self):
+        source = """class Pair:
+    def __init__(self, first, second): self.first, self.second = first, second
+def target(pair):
+    pair.first += pair.second
+    return pair
+"""
+        self.assertEqual(program.score_solution(source, "pair = Pair(4, 7)",
+                         ["assert target(pair) is pair", "assert pair.first == 11"]), 1.0)
 
     @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
-    def test_docker_worker_never_receives_assertions(self):
-        source = """import sys
-def target(x):
-    frame=sys._getframe()
-    while frame is not None:
-        for namespace in (frame.f_locals,frame.f_globals):
-            assert 'payload' not in namespace
-            assert 'tests' not in namespace
-            assert 'marker' not in namespace
-        frame=frame.f_back
-    return x + 1
-"""
-        self.assertEqual(program.score_solution(source, "", ["assert target(7) == 8"], ["target"]), 1.0)
-        attack = """import sys
-frame=sys._getframe()
-while frame is not None:
-    for namespace in (frame.f_locals,frame.f_globals):
-        payload=namespace.get('payload')
-        if isinstance(payload,dict) and 'marker' in payload:
-            print(payload['marker'],flush=True)
-            sys.exit(0)
-    frame=frame.f_back
-def target(x): return -1
-"""
-        self.assertEqual(program.score_solution(attack, "", ["assert target(7) == 8"], ["target"]), 0.0)
+    def test_docker_native_assertion_failures_and_premature_exit(self):
+        cases = [
+            ("def target(x): return x + 1", "raise RuntimeError('setup failure')", ["assert target(7) == 8"]),
+            ("def target(x): return x + 1", "", ["assert target(7) == 8", "assert target(9) == 0"]),
+            ("import os; os._exit(0)", "", ["assert target(7) == 8"]),
+            ("import sys; sys.exit(0)", "", ["assert target(7) == 8"]),
+            ("import atexit,os\natexit.register(lambda: os._exit(7))\ndef target(x): return x + 1",
+             "", ["assert target(7) == 8"]),
+        ]
+        for source, setup, assertions in cases:
+            with self.subTest(source=source, setup=setup):
+                self.assertEqual(program.score_solution(source, setup, assertions), 0.0)
+
+    @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
+    def test_docker_scoring_timeout(self):
+        self.assertEqual(program.score_solution("while True: pass", "", []), 0.0)
 
     def test_unpinned_runtime_image_is_rejected(self):
         with patch("pilot.program.os.environ", {"PILOT_PYTHON_IMAGE": "python:latest"}):
             with self.assertRaises(RuntimeError):
                 program.docker_command("owned-name")
+
+    def test_container_cpu_matches_explicit_process_affinity(self):
+        with patch.object(program.os, "sched_getaffinity", return_value={7, 3}):
+            command = program.docker_command("owned-name")
+        self.assertEqual(command[command.index("--cpuset-cpus") + 1], "3")
+        self.assertEqual(command[command.index("--cpus") + 1], "1")
 
     @unittest.skipUnless(os.environ.get("PILOT_DOCKER_TESTS") == "1", "Parent-controlled real Docker smoke")
     def test_container_denies_host_credentials_and_network(self):

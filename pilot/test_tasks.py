@@ -127,6 +127,70 @@ class TaskTests(unittest.TestCase):
         source = "def wanted(a, b=2):\n    secret_reference = 999\n    return a + b\n"
         self.assertEqual(tasks._signature(source), "def wanted(a, b=2):")
 
+    def test_mbpp_load_keeps_every_row_without_literal_interface_metadata(self):
+        source = "class Pair:\n    pass\ndef target(pair):\n    return pair.first\n"
+        def data(cache, name):
+            count = 374 if name == "mbpp_train" else 90
+            return ([{"task_id": index, "text": "Read the first value.",
+                      "code": source, "test_setup_code": "pair = Pair()",
+                      "test_list": ["assert target(pair) == 7"]} for index in range(count)],
+                    {"source": name})
+        with patch.object(tasks, "_data", side_effect=data):
+            task = tasks.load_task("mbpp", Path("unused"))
+        self.assertEqual((len(task.train), len(task.selection)), (374, 90))
+        self.assertEqual(len({row["id"] for row in task.train + task.selection}), 464)
+        for row in task.train + task.selection:
+            self.assertNotIn("function_names", row)
+            self.assertEqual(row["reference_code"], source)
+            self.assertEqual(row["test_setup_code"], "pair = Pair()")
+            self.assertEqual(row["test_list"], ["assert target(pair) == 7"])
+            self.assertIn("def target(pair):", row["input"])
+            self.assertNotIn("return pair.first", row["input"])
+            self.assertNotIn("assert target", row["input"])
+        self.assertFalse(task.manifest["scored_final_tests_loaded"])
+        self.assertEqual(task.manifest["solution_evaluator"]["limits"]["worker_seconds"], 10)
+        self.assertNotIn("function_calls", task.manifest["solution_evaluator"]["limits"])
+
+    def test_mbpp_replay_reference_and_evaluation_share_extraction(self):
+        from pilot import program
+        from pilot.test_program import local_command, local_remove
+        row = {"id": "mbpp:train:synthetic", "input": "Increment.",
+               "test_setup_code": "value = 7", "test_list": ["assert target(value) == 8"],
+               "reference_code": "def target(x): return x + 1"}
+        candidate = {"prompt": "Solve.", "program": "candidate"}
+        task = tasks.Task("mbpp", [row], [], {}, candidate)
+        output = "prose\n```javascript\nignored\n```\n```python\ndef target(x): return x + 1"
+        with (patch.object(program, "docker_command", local_command),
+              patch.object(program, "_remove", local_remove)):
+            reference = tasks.score_output(task, row, row["reference_code"])
+            replay = tasks.score_output(task, row, output)
+            with patch.object(tasks, "run_program", return_value=(output, [])):
+                result = tasks.evaluate(task, candidate, [row], lambda *args: self.fail("called"), True)
+        self.assertEqual((reference, replay, result["scores"]), (1.0, 1.0, [1.0]))
+        self.assertEqual(result["outputs"], [output])
+        self.assertNotIn("assert target", repr(result["trajectories"]))
+
+    def test_mbpp_model_calls_never_receive_assertions_or_setup(self):
+        row = {"id": "mbpp:train:synthetic", "input": "Increment.",
+               "test_setup_code": "protected_setup = 349827",
+               "test_list": ["assert target(349827) == 349828"]}
+        candidate = {"prompt": "Solve.", "program": tasks.SEED_PROGRAM}
+        task = tasks.Task("mbpp", [row], [], {}, candidate)
+        from pilot.test_program import ProgramTests
+        requests = []
+        def call(role, messages, tokens):
+            requests.append(messages)
+            return "```python\ndef target(x): return x + 1\n```"
+        def run(candidate, task_input, provider):
+            return ProgramTests().execute(candidate["program"], provider)
+        with (patch.object(tasks, "run_program", side_effect=run),
+              patch.object(tasks, "score_solution", return_value=1.0)):
+            result = tasks.evaluate(task, candidate, [row], call, True)
+        self.assertEqual(result["scores"], [1.0])
+        self.assertNotIn("protected_setup", repr(requests))
+        self.assertNotIn("349827", repr(requests))
+        self.assertNotIn("assert target", repr(result["trajectories"]))
+
     def test_download_removal_preserves_checker_logic(self):
         tree = ast.parse("import nltk\nnltk.download('punkt')\ndef checker(x):\n    nltk.download('stopwords')\n    return x == 'yes'\n")
         tree = ast.fix_missing_locations(tasks._DisableDownloads().visit(tree))
