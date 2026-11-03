@@ -30,6 +30,30 @@ class ReplayTests(unittest.TestCase):
             with patch("pilot.tasks.load_task", return_value=task), self.assertRaisesRegex(ValueError, "disagrees"):
                 replay(args)
 
+    def test_controls_root_replays_nested_rollouts_and_rejects_a_forged_score(self):
+        task = Task("hover", [{"id": "dev:1", "supporting_facts": [{"key": "Alpha"}]}],
+                    [{"id": "dev:2", "supporting_facts": [{"key": "Beta"}]}],
+                    {"task": "hover"}, {})
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            save(out / "adversarial.json", {"version": "pilot-adversarial-v5"})
+            save(out / "hover/manifest.json", {"identity": {"task": task.manifest}})
+            record = {"row_ids": ["dev:1", "dev:2"], "outputs": ['["Alpha | abstract"]', "invalid"],
+                      "scores": [1.0, 0.0]}
+            save(out / "hover/evaluations.jsonl", record)
+            proof = {"checks": {"records": []}, "passed": True}
+            args = argparse.Namespace(out=out, cache=out / "cache")
+            with patch("pilot.__main__.load_admission", return_value=({}, {}, proof)), patch(
+                "pilot.tasks.load_task", return_value=task
+            ):
+                with redirect_stdout(StringIO()) as stream:
+                    replay(args)
+                self.assertEqual(json.loads(stream.getvalue()).get("replayed_rollouts"), 2)
+                record["scores"][1] = 1.0
+                save(out / "hover/evaluations.jsonl", record)
+                with self.assertRaisesRegex(ValueError, "disagrees"):
+                    replay(args)
+
     def test_interrupted_cell_preserves_usage_prefix_and_last_accepted_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)

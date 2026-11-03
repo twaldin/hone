@@ -17,7 +17,6 @@ def panel_tasks(hover_status: str) -> tuple[str, ...]:
 
 
 def reuse_control(task) -> tuple[dict, dict]:
-    # CLI helpers are imported at call time because the CLI imports this module.
     from . import __main__ as cli
     from .admission import validate_text_admission
     from .controls import artifacts, representative_rows

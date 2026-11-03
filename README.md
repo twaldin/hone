@@ -109,7 +109,7 @@ Contract 4 admission stopped without searches. AIME's 16-pair noise envelope was
 | [Methodology](docs/methodology.md) | Experiment levels and what each one can show. |
 | [Recursive experiment status](docs/m2-readiness.md) | What the recursive campaigns did and what is still missing. |
 | [Results](docs/results.md) | What a published result has to include. |
-| [Development optimizer pilot](docs/pilot.md) | Tasks, protected evaluation, subscription accounting, controls, smoke, and the 27-run handoff. |
+| [Development optimizer pilot](docs/pilot.md) | Tasks, protected evaluation, subscription accounting, controls, smoke, and the gated pilot handoff. |
 
 ## License
 

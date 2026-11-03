@@ -1,0 +1,31 @@
+{
+  "author_model": "openai-codex/gpt-6.1-sol",
+  "reviewed_head": "0eb5cd9babd0054a85c6e16c53b6cf5799d7884d",
+  "verdict_scope": "Pre-measurement safety only. Not final READY; no new pilot model calls or smokes existed at review.",
+  "reviews": [
+    {"reviewer_model": "anthropic/claude-opus-5-5", "verdict": "SAFE_TO_MEASURE", "blocking_findings": 0},
+    {"reviewer_model": "xai-oauth/grok-4.7", "verdict": "SAFE_TO_MEASURE", "blocking_findings": 0}
+  ],
+  "findings_verified_before_fresh_admission": [
+    {"finding": "Root controls replay returned after protocol admission and skipped retained HoVer rollouts.", "reproduction": "pilot.test_replay.ReplayTests.test_controls_root_replays_nested_rollouts_and_rejects_a_forged_score failed before the fix: None != 2.", "action": "Replay validates admission, then rescores every nested evaluation journal. Only an admission-only bundle returns the protocol-only result."},
+    {"finding": "The spend reporter was coupled to metric identity despite not changing a score.", "action": "Move its hash to smoke engine provenance and include reporter_sha256 in each spend report. No scoring, gate or pricing change."},
+    {"finding": "The output-directory guard does not prevent a manually chosen second directory.", "action": "Document the exact enforcement and the prohibition on a second attempt. This lane uses controls-5 only; no automatic restart."},
+    {"finding": "Two current documentation sentences retained contract-4 task wording.", "action": "Describe HoVer replacing withdrawn AIME and the active IFBench/HoVer string boundary."}
+  ],
+  "comments_audit": {
+    "reviewer_model": "openai-codex/gpt-6.1-sol",
+    "applied_deletions": 1,
+    "deletion": "Remove the new panel module's import-cycle explanation.",
+    "retained_frozen_comment": "pilot/program.py: Failed provider calls leave the container paused until removal.",
+    "retention_reason": "program.py is an unchanged literal execution dependency of admitted MBPP and IFBench. Deleting old prose would invalidate their required source contract. No runtime refactor or behavior change was made."
+  },
+  "deliberate_limits": [
+    "Ordered evaluation spans do not independently timestamp phase boundaries; unfinished tails remain explicitly unassigned.",
+    "Only transport-reported usage is priced. Opaque internal failed-attempt tokens and non-200 usage remain unknown.",
+    "Repeated unchanged-source verification is retained rather than changing the measurement path for a launch-time optimization.",
+    "Complete credential-opaque omp attempt and failed-call receipts remain prerequisite to the later full benchmark matrix. No upstream issue filed."
+  ],
+  "source_ci": {"head": "0eb5cd9babd0054a85c6e16c53b6cf5799d7884d", "url": "https://github.com/twaldin/hone/actions/runs/41737931469", "conclusion": "success", "tests": 165},
+  "no_new_pilot_model_calls_before_predeclaration_5_commit": true,
+  "predeclaration_5_commit": "0bd3067"
+}

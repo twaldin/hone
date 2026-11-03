@@ -36,7 +36,7 @@ def evaluator_identity(task) -> dict:
     paths = ("pilot/tasks.py", "pilot/program.py", "pilot/verification.py", "pilot/adversarial.py",
              "pilot/controls.py", "pilot/runtime.py", "pilot/gateway.mjs", "pilot/__main__.py",
              "pilot/admission.py", "pilot/hover.py", "pilot/published.py", "pilot/published-controls.json",
-             "pilot/panel.py", "pilot/spend.py")
+             "pilot/panel.py")
     return {"contract": 5, "task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-5.md"),
             "prior_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4.md"),
@@ -639,7 +639,7 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
                 "account_pool_hash": digest(pool), "account_domains": pool_domains(pool), "api_keys_allowed": False,
                 "retrieval_receipt": json.loads((args.controls / "cohorts.json").read_text()).get("retrieval_receipt") if task_name == "hover" else None,
                 "engine_files": {path: file_hash(ROOT / path) for path in (
-                    "pilot/__main__.py", "pilot/search.py", "optimizer/src/pilot-policy.ts", "optimizer/assets/policy.ts",
+                    "pilot/__main__.py", "pilot/search.py", "pilot/spend.py", "optimizer/src/pilot-policy.ts", "optimizer/assets/policy.ts",
                     "optimizer/src/loop.ts", "schema/src/promotion.ts", "package.json", "pnpm-lock.yaml",
                     "optimizer/worker/Dockerfile.mutation")},
                 "limits": retry_comparison({method: summary})["limit"], "current_subscription_panel": True,
@@ -668,13 +668,15 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
 def replay(args) -> None:
     from .tasks import load_task, score_output
     os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    evaluation_paths = sorted(args.out.rglob("evaluations.jsonl"))
     admission_manifest = args.out / "adversarial.json"
     if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v5":
         _, _, proof = load_admission(args.out, args.cache)
-        print(canonical({"replayed_hover_adversarial_records": len(proof["checks"]["records"]),
-                         "carried_tasks": ["mbpp", "ifbench"], "hover_adversarial_passed": proof["passed"],
-                         "model_calls": 0, "scored_final_tests_loaded": False}))
-        return
+        if not evaluation_paths:
+            print(canonical({"replayed_hover_adversarial_records": len(proof["checks"]["records"]),
+                             "carried_tasks": ["mbpp", "ifbench"], "hover_adversarial_passed": proof["passed"],
+                             "model_calls": 0, "scored_final_tests_loaded": False}))
+            return
     if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v4":
         from .admission import validate_text_admission
         from .controls import representative_rows
@@ -711,7 +713,7 @@ def replay(args) -> None:
         return
     tasks = {}
     checked = 0
-    for evaluations in sorted(args.out.rglob("evaluations.jsonl")):
+    for evaluations in evaluation_paths:
         manifest = json.loads((evaluations.parent / "manifest.json").read_text())
         name = manifest["identity"]["task"]["task"]
         if name not in tasks:

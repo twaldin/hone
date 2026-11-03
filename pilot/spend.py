@@ -148,6 +148,7 @@ def report_spend(run_root: Path) -> dict:
             or not _same_dollars(math.fsum(bucket["usd_equivalent"] for bucket in buckets.values()), total["usd_equivalent"])):
         raise ValueError("spend buckets do not conserve ledger totals")
     return {"schema": "pilot-spend-v1", "status": "incomplete" if issues else "complete",
+            "reporter_sha256": _hash(Path(__file__).read_bytes()),
             "buckets": buckets, "total": total, "by_role": {role: _totals(records) for role, records in by_role.items()},
             "hidden_attempts": hidden, "calls_with_hidden_attempts": affected,
             "hidden_attempt_rate": hidden / len(calls) if calls else 0,

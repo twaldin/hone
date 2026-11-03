@@ -20,7 +20,7 @@ nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THR
 
 Inspect the live venue's CPU affinities before every heavy run. This epoch uses CPU 6 and avoids CPUs 0–5 and 13–16, including the venue's earlier 0/5 pin. The runner uses one model request and one CPU-heavy worker at a time.
 
-Preparation builds the pinned HoVer index before any IFBench score can select that alternate. The observed cold preparation called the real `prepare` entrypoint through a measured launcher: 310.97 seconds and 7.32 GiB peak RSS on one CPU. It indexed all 5,233,330 published corpus rows, including the empty metadata row. [Preparation evidence](../evidence/pilot/preparation-4) distinguishes that launcher from the equivalent public replay command. Corpus and numeric-index hashes enter sealed admission evidence. Setup failures occur before model dispatch and cannot become row scores or trigger a new headroom draw.
+Preparation verifies the pinned HoVer index before its admission attempt. The observed cold preparation called the real `prepare` entrypoint through a measured launcher: 310.97 seconds and 7.32 GiB peak RSS on one CPU. It indexed all 5,233,330 published corpus rows, including the empty metadata row. [Preparation evidence](../evidence/pilot/preparation-4) distinguishes that launcher from the equivalent public replay command. Corpus and numeric-index hashes enter sealed admission evidence. Setup failures occur before model dispatch and cannot become row scores or authorize a smaller panel.
 
 The prepare command creates an ignored pilot-specific account-pool file from `omp usage accounts`. It permits only Anthropic OAuth identities on `gmail.com` and `purdue.edu`. It excludes `lindy.ai`, every other provider, and every API key. The gateway also installs an OAuth-only native credential-session restriction: environment/configuration fallbacks cannot escape the pool. It selects the bundled model directly, without loading local model overrides. Public manifests record domain counts and the pool hash, not full account identities. Never commit `.pilot-state` or `.pilot-cache`.
 
@@ -41,7 +41,7 @@ HoVer reuses the ordered contract-4a draw from `Random(20261105).sample(eligible
 
 Admission requires known-improved > naive > both broken and shortcut, with broken = 0 and MBPP shortcut = 0. P positives execute published optimized instructions, not trusted answers or a prompt authored here. Sixteen fresh paired unchanged-seed trials measure noise without response caching. Keep `noiseFloor = 3/sqrt(2)*s` and `noiseEnvelope = max(4.5/sqrt(2)*s, max_abs_delta)`. The envelope must be strictly below the positive-control contrast. Projection uses `sqrt(source_rows/n)`: 40 for P and 20 for MBPP. A HoVer tie, reversed rank or obscured contrast selects the declared two-task fallback without retuning. Zero estimated noise is not proof of a noiseless evaluator.
 
-A failed control command preserves its evidence and cannot be restarted. Only a recorded HoVer checker, ranking or noise failure authorizes the two-task fallback. Missing results and infrastructure failures never do.
+A failed control command preserves its evidence. The runner refuses to overwrite that output folder. A second folder would be a prohibited second attempt, not a fresh authorization, and would create another external call ledger. This lane uses only `evidence/pilot/controls-5`. Only a recorded HoVer checker, ranking or noise failure authorizes the two-task fallback. Missing results and infrastructure failures never do.
 
 ## Published P controls
 
@@ -88,7 +88,7 @@ The answer is program text. The common extractor takes the first python-tagged o
 
 Tagged data preserves exact builtin types, sequence order and order-independent mappings and sets. Official wrappers, including `int`, run on the trusted side before comparison. Pair and Node inputs are class-name and field records, reconstructed without candidate constructors. A custom result is compared structurally against the trusted expected class name and field schema. Candidate `__eq__`, `__hash__` and `__repr__` cannot decide the grade. Executable values, unsupported subclasses, cycles, malformed data, extra output, timeouts and failed exits do not pass. Every row remains in the denominator; any safely unrepresentable official row is listed as ungradeable and scores zero for every method.
 
-Adversarial admission exercises execution replacement, always-equal objects, early exits, verdict and receipt forgery, checker monkeypatches, expected-value reads and atexit rewrites. The previous shortcut remains unchanged. IFBench and AIME only accept strings through protected JSON protocols; those strings never execute in their trusted checkers. These controls test the declared boundary, not a general proof against every possible candidate.
+Adversarial admission exercises execution replacement, always-equal objects, early exits, verdict and receipt forgery, checker monkeypatches, expected-value reads and atexit rewrites. The previous shortcut remains unchanged. IFBench and HoVer accept strings only through protected JSON protocols; those strings never execute in their trusted checkers. The archived AIME checker has the same separation. These controls test the declared boundary, not a general proof against every possible candidate.
 
 ## Matched reported-usage accounting
 
@@ -108,7 +108,7 @@ Credential-opaque per-attempt admission and usage receipts, including failed-cal
 
 ### Fixed-budget feasibility
 
-Keep the requested $10 ceiling rather than increase it to favor Hone's more expensive gate. The inadmissible v1 IFBench run still provides observed transport costs: 166 calls cost $0.995589-equivalent. A simple projection at that old mean is about $3.60 for a two-call, 300-row selection pass, and $10.80 for Hone's seed/parent/child passes before training or reflection. This is an inference, not a lower bound: the corrected structured two-stage program has not yet been priced. Hone may exhaust the dollar or two-hour active-work cap before its first IFBench promotion. That overhead is part of the fixed-budget result, not grounds to omit the task or grant Hone more budget. The assistant must review the measured feasibility before authorizing the matrix.
+Keep the $10 ceiling and complete selection sets. Contract-4a IFBench calibration spent $15.85554-equivalent and 1,655,348 reported tokens across 1,360 model-evaluated rollouts. Scaling that observed mean gives about $3.49755 and 365,150 tokens for one 300-row selection pass, or $10.49264 for three passes before training or proposal. This is an inference from calibration, not a measured search or a lower bound. The three MBPP smokes report actual phase spend. Selection overhead is part of the fixed-budget result, not grounds to omit rows or grant Hone more budget. The assistant reviews those measured costs before authorizing the pilot.
 
 ## Run and replay
 
