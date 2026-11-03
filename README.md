@@ -79,13 +79,15 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 ## Development optimizer pilot
 
-[`pilot/`](pilot/) compares Hone's paired, noise-calibrated policy, pinned official GEPA, and a plain agent loop on development-only IFBench or its HoVer alternate, historical AIME, and bounded MBPP agent programs. It uses one subscription route, an account allowlist, usage throttling, and matched reported-usage budgets. Final-test labels stay sealed.
+[`pilot/`](pilot/) compares Hone's paired, noise-calibrated policy, pinned official GEPA, and a plain agent loop on development-only IFBench, bounded MBPP agent programs, and HoVer if its one admission attempt passes. It uses one subscription route, an account allowlist, usage throttling, and matched reported-usage budgets. Final-test labels stay sealed.
 
 The pilot is an admission experiment, not an optimizer-quality claim. Its accounting accepts disclosed token undercounts from internal retries and failed calls; complete attempt and failed-call receipts are required before a full comparison. See [the pilot contract and commands](docs/pilot.md).
 
 The first two epochs exposed MBPP contract defects. [Predeclaration 3](evidence/pilot/predeclaration-3.md) separated candidate execution from trusted grading, and all 300 MBPP adversarial checks passed. IFBench then failed its control ranking. [Predeclaration 4](evidence/pilot/predeclaration-4.md) fixes external P controls and the IFBench headroom rule before new model calls. [Correction 4a](evidence/pilot/predeclaration-4a.md) fixes transport placement and infrastructure-error scoring, requiring MBPP re-admission without changing its cohort or gates. [The pilot guide](docs/pilot.md) records the commands.
 
 Contract 4 admission stopped without searches. AIME's 16-pair noise envelope was 0.07616286, above its 0.075 positive-control contrast. MBPP and IFBench passed. The $10 search cap and selection sets were not changed. [The final admission handoff](evidence/pilot/handoff-7.json) retains the results, usage and zero-call replay evidence. No optimizer comparison is claimed.
+
+[Predeclaration 5](evidence/pilot/predeclaration-5.md), committed before new pilot calls, withdraws AIME without changing its failed evidence. It admits the previously named HoVer reserve once with the same 40-row controls and 16-pair noise gate. If HoVer fails, the panel is MBPP + IFBench only, labelled a two-task development pilot. There are no further substitutions. The larger pilot remains unauthorized pending review of the three method smokes.
 
 ## Status and limitations
 

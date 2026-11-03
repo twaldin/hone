@@ -15,9 +15,12 @@ from .runtime import (ROOT, MODEL, IMAGE, LIMITS, PRICES, PRICE_SOURCE, Gateway,
                       ModelCalls, Throttle, TransportError, CallFailed, append_json, canonical,
                       create_pool, digest, open_gateway, pool_domains, retry_comparison)
 
-TASKS = ("mbpp", "ifbench", "aime")
-P_TASKS = ("ifbench", "aime", "hover")
+from .panel import WITH_HOVER, panel_tasks, reuse_control
+
+TASKS = WITH_HOVER
+ARCHIVED_TASKS = ("mbpp", "ifbench", "aime")
 METHODS = ("hone", "gepa", "plain")
+FROZEN_ADMISSION = ROOT / "evidence/pilot/adversarial-4a"
 
 
 def save(path: Path, value: object) -> None:
@@ -32,9 +35,11 @@ def file_hash(path: Path) -> str:
 def evaluator_identity(task) -> dict:
     paths = ("pilot/tasks.py", "pilot/program.py", "pilot/verification.py", "pilot/adversarial.py",
              "pilot/controls.py", "pilot/runtime.py", "pilot/gateway.mjs", "pilot/__main__.py",
-             "pilot/admission.py", "pilot/hover.py", "pilot/published.py", "pilot/published-controls.json")
-    return {"contract": 4, "task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
-            "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4.md"),
+             "pilot/admission.py", "pilot/hover.py", "pilot/published.py", "pilot/published-controls.json",
+             "pilot/panel.py", "pilot/spend.py")
+    return {"contract": 5, "task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
+            "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-5.md"),
+            "prior_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4.md"),
             "transport_correction_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4a.md"),
             "route": MODEL, "decoding": {"temperature": 0, "forceReasoningOff": True, "max_output_tokens": 4096, "cacheRetention": "none"},
             "image": IMAGE}
@@ -184,7 +189,7 @@ def readmit_mbpp(args) -> None:
         raise FileExistsError("MBPP re-admission output already contains evidence")
     os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
     os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
-    prepared = [load_task(name, args.cache) for name in TASKS]
+    prepared = [load_task(name, args.cache) for name in ARCHIVED_TASKS]
     identities = {task.name: evaluator_identity(task) for task in prepared}
     mbpp = next(task for task in prepared if task.name == "mbpp")
     machine_proof(args.out)
@@ -254,51 +259,58 @@ def audit_mbpp_measurement(args) -> dict:
             "input_hashes": {name: file_hash(out / name) for name in ("controls.json", "calls.jsonl", "evaluations.jsonl")}}
 
 
+def frozen_hover(task, receipt: dict) -> str:
+    from .controls import P_CONTROL_SEED, representative_rows
+    verify_bundle(FROZEN_ADMISSION)
+    original = json.loads((FROZEN_ADMISSION / "cohorts.json").read_text())
+    ids = [row["id"] for row in representative_rows(task)]
+    if (original["version"] != 4 or original["seed"] != P_CONTROL_SEED
+            or original["retrieval_receipt"] != receipt
+            or original["cohorts"]["hover"] != {"rows": ids, "cohort_hash": digest(ids)}):
+        raise ValueError("HoVer differs from its frozen contract-4a cohort or retrieval")
+    return file_hash(FROZEN_ADMISSION / "cohorts.json")
+
+
 def offline_adversarial(args) -> None:
     from .admission import text_admission
-    from .controls import ControlsFailed, P_CONTROL_SEED, representative_rows
+    from .controls import P_CONTROL_SEED, representative_rows
     from .hover import prepare_retrieval
     from .tasks import load_task
     if args.task != "all":
-        raise ValueError("Offline admission freezes all proposed development tasks")
+        raise ValueError("Offline admission freezes the complete contract-5 panel")
     if args.out.exists() and any(args.out.iterdir()):
         raise FileExistsError("Adversarial output already contains evidence")
     os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
     os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
-    prepared = {"mbpp": load_task("mbpp", args.cache)}
-    old_control, receipt = reuse_mbpp(prepared["mbpp"])
-    retrieval_receipt = prepare_retrieval(args.cache)
-    prepared.update((name, load_task(name, args.cache)) for name in P_TASKS)
+    prepared = {name: load_task(name, args.cache) for name in TASKS}
+    carried = {name: reuse_control(prepared[name]) for name in ("mbpp", "ifbench")}
+    receipt = prepare_retrieval(args.cache)
     frozen = {name: representative_rows(task) for name, task in prepared.items()}
-    identities = {name: evaluator_identity(task) for name, task in prepared.items()}
-    declaration = {"version": 4, "seed": P_CONTROL_SEED,
-         "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4.md"),
+    source_cohorts_hash = frozen_hover(prepared["hover"], receipt)
+    declaration = {"version": 5, "seed": P_CONTROL_SEED,
+         "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-5.md"),
+         "source_cohorts_hash": source_cohorts_hash,
          "cohorts": {name: {"rows": [row["id"] for row in rows], "cohort_hash": digest([row["id"] for row in rows])}
-                     for name, rows in frozen.items()}, "mbpp_admission_hash": digest(receipt),
-         "text_admission_hashes": {}, "retrieval_receipt": retrieval_receipt}
-    manifest = {"version": "pilot-adversarial-v4", "passed": False, "model_calls": 0, "mbpp_checks_reused": 300}
-    save(args.out / "cohorts.json", declaration)
-    save(args.out / "mbpp/controls.json", old_control)
-    save(args.out / "mbpp/admission.json", receipt)
+                     for name, rows in frozen.items()},
+         "carried_admission_hashes": {name: digest(value[1]) for name, value in carried.items()},
+         "retrieval_receipt": receipt}
+    for name, (control, admission) in carried.items():
+        save(args.out / name / "controls.json", control)
+        save(args.out / name / "admission.json", admission)
     machine_proof(args.out)
-    try:
-        for name in P_TASKS:
-            proof = text_admission(prepared[name], identities[name], frozen[name])
-            declaration["text_admission_hashes"][name] = digest(proof)
-            save(args.out / name / "admission.json", proof)
-            save(args.out / "cohorts.json", declaration)
-            if not proof["passed"]:
-                raise ControlsFailed(f"{name}: checker or protocol adversarial control failed; stop without retuning")
-        manifest["passed"] = True
-    except Exception as error:
-        save(args.out / "failure.json", {"error_type": type(error).__name__, "status": "admission-failed", "model_calls": 0})
-        raise
-    finally:
-        manifest["cohorts_hash"] = digest(declaration)
-        save(args.out / "adversarial.json", manifest)
-        seal(args.out)
-    print(canonical({"adversarial": "passed", "model_calls": 0, "fresh_p_records": 102,
-                     "mbpp_checks_reused": 300, "proof_hash": digest(manifest)}))
+    proof = text_admission(prepared["hover"], evaluator_identity(prepared["hover"]), frozen["hover"])
+    declaration["hover_admission_hash"] = digest(proof)
+    save(args.out / "hover/admission.json", proof)
+    save(args.out / "cohorts.json", declaration)
+    manifest = {"version": "pilot-adversarial-v5", "passed": proof["passed"], "model_calls": 0,
+                "hover_status": "passed" if proof["passed"] else "failed-gate",
+                "carried_tasks": ["mbpp", "ifbench"], "cohorts_hash": digest(declaration)}
+    if not proof["passed"]:
+        save(args.out / "hover/failure.json", {"status": "admission-failed", "gate": "adversarial"})
+    save(args.out / "adversarial.json", manifest)
+    seal(args.out)
+    print(canonical({"hover_adversarial": manifest["hover_status"], "model_calls": 0,
+                     "carried_tasks": manifest["carried_tasks"], "proof_hash": digest(manifest)}))
 
 
 def load_adversarial(out: Path, prepared: list) -> dict:
@@ -360,94 +372,162 @@ def reuse_mbpp(task) -> tuple[dict, dict]:
     return control, receipt
 
 
-def controls(args, pool=None, env=None):
-    from .admission import validate_text_admission
-    from .controls import P_CONTROL_SEED, measure, representative_rows
+def load_admission(out: Path, cache: Path) -> tuple[dict, dict, dict]:
+    from .admission import text_admission, validate_text_admission
+    from .controls import P_CONTROL_SEED, representative_rows
     from .hover import prepare_retrieval
     from .tasks import load_task
+    verify_bundle(out)
+    members = json.loads((out / "bundle.json").read_text())["files"]
+    required = {"cohorts.json", "adversarial.json", "hover/admission.json"} | {
+        f"{name}/{filename}.json" for name in ("mbpp", "ifbench") for filename in ("controls", "admission")}
+    if not required.issubset(members):
+        raise ValueError("Sealed contract-5 admission is incomplete")
+    declaration = json.loads((out / "cohorts.json").read_text())
+    manifest = json.loads((out / "adversarial.json").read_text())
+    if (declaration.get("version") != 5 or declaration.get("seed") != P_CONTROL_SEED
+            or declaration.get("predeclaration_hash") != file_hash(ROOT / "evidence/pilot/predeclaration-5.md")
+            or manifest.get("version") != "pilot-adversarial-v5" or manifest.get("model_calls") != 0
+            or manifest.get("cohorts_hash") != digest(declaration)
+            or manifest.get("carried_tasks") != ["mbpp", "ifbench"]):
+        raise ValueError("Admission differs from predeclaration 5")
+    prepared = {name: load_task(name, cache) for name in TASKS}
+    expected = {name: {"rows": [row["id"] for row in representative_rows(task)],
+                       "cohort_hash": digest([row["id"] for row in representative_rows(task)])}
+                for name, task in prepared.items()}
+    receipt = prepare_retrieval(cache)
+    if (declaration.get("cohorts") != expected or declaration.get("retrieval_receipt") != receipt
+            or declaration.get("source_cohorts_hash") != frozen_hover(prepared["hover"], receipt)):
+        raise ValueError("Frozen development cohorts or retrieval changed")
+    carried_hashes = {}
+    for name in ("mbpp", "ifbench"):
+        original, current = reuse_control(prepared[name])
+        if (json.loads((out / name / "controls.json").read_text()) != original
+                or json.loads((out / name / "admission.json").read_text()) != current):
+            raise ValueError("Carried measurements differ from their unchanged admission")
+        carried_hashes[name] = digest(current)
+    if declaration.get("carried_admission_hashes") != carried_hashes:
+        raise ValueError("Carried admission hashes changed")
+    proof = json.loads((out / "hover/admission.json").read_text())
+    if (declaration.get("hover_admission_hash") != digest(proof)
+            or type(proof.get("passed")) is not bool or manifest.get("passed") is not proof["passed"]
+            or manifest.get("hover_status") != ("passed" if proof["passed"] else "failed-gate")):
+        raise ValueError("HoVer checker status differs from the sealed proof")
+    if proof["passed"]:
+        validate_text_admission(proof, prepared["hover"], evaluator_identity(prepared["hover"]),
+                                representative_rows(prepared["hover"]))
+    elif proof != text_admission(prepared["hover"], evaluator_identity(prepared["hover"]),
+                                 representative_rows(prepared["hover"])):
+        raise ValueError("HoVer checker failure cannot be reproduced without model calls")
+    return prepared, declaration, proof
+
+
+def hover_status(out: Path, task, proof: dict) -> str:
+    from .controls import representative_rows
+    members = json.loads((out / "bundle.json").read_text())["files"]
+    failure_path = out / "hover/failure.json"
+    failure = None
+    if failure_path.exists():
+        if "hover/failure.json" not in members:
+            raise ValueError("HoVer failure is not sealed")
+        failure = json.loads(failure_path.read_text())
+        if failure.get("status") != "admission-failed":
+            raise ValueError("Infrastructure failure cannot authorize a smaller panel")
+    if not proof["passed"]:
+        if failure is None or failure.get("gate") != "adversarial" or (out / "hover/controls.json").exists():
+            raise ValueError("HoVer checker failure differs from the declared fallback")
+        return "failed-gate"
+    if "hover/controls.json" not in members:
+        raise ValueError("HoVer measurement is missing or unsealed")
+    control = json.loads((out / "hover/controls.json").read_text())
+    if (control.get("identity") != evaluator_identity(task) or control.get("adversarial_hash") != digest(proof)
+            or control.get("rows") != [row["id"] for row in representative_rows(task)]):
+        raise ValueError("HoVer measurement identity or cohort changed")
+    if failure is not None:
+        if (failure.get("gate") == "ranking" and control.get("ranking_passed") is False
+                or failure.get("gate") == "noise" and control.get("ranking_passed") is True
+                and control.get("noise_passed") is False):
+            return "failed-gate"
+        raise ValueError("HoVer failure does not match the measured gate")
+    if control.get("ranking_passed") is not True or control.get("noise_passed") is not True:
+        raise ValueError("HoVer lacks a complete measured admission outcome")
+    return "passed"
+
+
+def controls(args, pool=None, env=None):
+    from .controls import ControlsFailed, measure, representative_rows
     if args.task != "all":
-        raise ValueError("Controls require all predeclared task cohorts")
+        raise ValueError("Controls require the complete predeclared panel")
     if args.out.exists() and any(args.out.iterdir()):
-        raise ValueError("Control evidence already exists; use the authorized fresh output directory")
-    verify_bundle(args.adversarial)
-    source_bundle = json.loads((args.adversarial / "bundle.json").read_text())
-    required = {"adversarial.json", "cohorts.json", "mbpp/controls.json", "mbpp/admission.json"} | {
-        f"{name}/admission.json" for name in P_TASKS}
-    if not required.issubset(source_bundle["files"]):
-        raise ValueError("Sealed offline admission is incomplete")
-    manifest = json.loads((args.adversarial / "adversarial.json").read_text())
-    declaration = json.loads((args.adversarial / "cohorts.json").read_text())
-    if (manifest.get("version") != "pilot-adversarial-v4" or manifest.get("passed") is not True
-            or manifest.get("model_calls") != 0 or manifest.get("cohorts_hash") != digest(declaration)
-            or declaration.get("version") != 4 or declaration.get("seed") != P_CONTROL_SEED
-            or declaration.get("predeclaration_hash") != file_hash(ROOT / "evidence/pilot/predeclaration-4.md")):
-        raise ValueError("Offline admission failed or differs from the current declaration")
-    prepared = {"mbpp": load_task("mbpp", args.cache)}
-    old_control, receipt = reuse_mbpp(prepared["mbpp"])
-    if (json.loads((args.adversarial / "mbpp/controls.json").read_text()) != old_control
-            or json.loads((args.adversarial / "mbpp/admission.json").read_text()) != receipt
-            or declaration["mbpp_admission_hash"] != digest(receipt)):
-        raise ValueError("Offline admission changed the admitted MBPP measurements")
-    retrieval_receipt = prepare_retrieval(args.cache)
-    if retrieval_receipt != declaration["retrieval_receipt"]:
-        raise ValueError("Offline admission retrieval assets changed")
-    prepared.update((name, load_task(name, args.cache)) for name in P_TASKS)
-    frozen = {name: representative_rows(task) for name, task in prepared.items()}
-    identities = {name: evaluator_identity(task) for name, task in prepared.items()}
-    expected_cohorts = {name: {"rows": [row["id"] for row in rows], "cohort_hash": digest([row["id"] for row in rows])}
-                        for name, rows in frozen.items()}
-    if declaration["cohorts"] != expected_cohorts:
-        raise ValueError("Offline admission cohorts changed")
-    proofs = {}
-    for name in P_TASKS:
-        proof = json.loads((args.adversarial / name / "admission.json").read_text())
-        validate_text_admission(proof, prepared[name], identities[name], frozen[name])
-        if declaration["text_admission_hashes"][name] != digest(proof):
-            raise ValueError("Offline text admission hash changed")
-        proofs[name] = proof
-    save(args.out / "cohorts.json", dict(declaration, source_admission_bundle_hash=source_bundle["bundle_hash"]))
-    save(args.out / "mbpp/controls.json", old_control)
-    save(args.out / "mbpp/admission.json", receipt)
-    for name, proof in proofs.items():
-        save(args.out / name / "admission.json", proof)
+        raise ValueError("Control evidence already exists; the HoVer attempt cannot restart")
+    prepared, declaration, proof = load_admission(args.adversarial, args.cache)
+    for filename in ("cohorts.json", "adversarial.json", "hover/admission.json",
+                     "mbpp/controls.json", "mbpp/admission.json", "ifbench/controls.json", "ifbench/admission.json"):
+        save(args.out / filename, json.loads((args.adversarial / filename).read_text()))
     machine_proof(args.out)
-    pending = ["ifbench", "aime"]
-    selected = ["mbpp"]
-    if pool is None:
-        pool, env = environment(args.pool)
-    while pending:
-        name = pending.pop(0)
-        task = prepared[name]
-        out = args.out / name
-        if name == "hover":
-            save(out / "retrieval.json", retrieval_receipt)
-        call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100, active_seconds=86_400))
+    out = args.out / "hover"
+    if not proof["passed"]:
+        save(out / "failure.json", {"status": "admission-failed", "gate": "adversarial"})
+    else:
+        call = None
         try:
-            identity = identities[name]
+            if pool is None:
+                pool, env = environment(args.pool)
+            call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100, active_seconds=86_400))
+            task = prepared["hover"]
+            identity = evaluator_identity(task)
+            save(out / "retrieval.json", declaration["retrieval_receipt"])
             save(out / "manifest.json", {"identity": identity, "route_identity": call.gateway.route_identity,
                  "account_domains": pool_domains(pool), "measurement_budget": ledger.limits,
-                 "adversarial_hash": digest(proofs[name])})
+                 "adversarial_hash": digest(proof)})
             save(out / "measurement-budget.json", ledger.limits)
-            result = measure(task, calibration_transport(call), out, identity, rows=frozen[name], adversarial=proofs[name])
+            measure(task, calibration_transport(call), out, identity, rows=representative_rows(task), adversarial=proof)
+        except ControlsFailed as error:
+            control = json.loads((out / "controls.json").read_text())
+            save(out / "failure.json", {"error_type": type(error).__name__, "status": "admission-failed",
+                 "gate": "ranking" if control.get("ranking_passed") is False else "noise"})
         except Exception as error:
-            save(out / "failure.json", {"error_type": type(error).__name__,
-                 "status": "infrastructure-failure" if isinstance(error, TransportError) else "admission-failed"})
+            save(out / "failure.json", {"error_type": type(error).__name__, "status": "infrastructure-failure"})
             raise
         finally:
-            call.close()
-            summary = ledger.summary(throttle)
-            save(out / "usage.json", summary)
+            if call is not None:
+                call.close()
+                summary = ledger.summary(throttle)
+                save(out / "usage.json", summary)
+                print(canonical({"task": "hover", **summary}), flush=True)
             seal(out)
             seal(args.out)
-        if result.get("headroom_replacement") == "hover":
-            pending.insert(0, "hover")
-            print(canonical({"task": name, "headroom_replacement": "hover", **summary}), flush=True)
-        else:
-            selected.append(name)
-            print(canonical({"task": name, "controls": "passed", **summary}), flush=True)
-    save(args.out / "panel.json", {"version": 4, "tasks": selected, "all_admitted": True,
-                                 "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4.md")})
+    seal(out)
     seal(args.out)
+    status = hover_status(args.out, prepared["hover"], proof)
+    selected = panel_tasks(status)
+    save(args.out / "panel.json", {"version": 5, "tasks": list(selected), "all_admitted": True,
+         "hover_status": status, "withdrawn": ["aime"], "claim_scope": f"{len(selected)}-task development pilot",
+         "cohorts_hash": digest(declaration),
+         "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-5.md")})
+    seal(args.out)
+    print(canonical({"panel": list(selected), "hover_status": status, "full_pilot_authorized": False}), flush=True)
+
+
+def load_panel(args) -> tuple[str, ...]:
+    prepared, declaration, proof = load_admission(args.controls, args.cache)
+    members = json.loads((args.controls / "bundle.json").read_text())["files"]
+    if "panel.json" not in members:
+        raise ValueError("Complete admitted panel missing from sealed controls")
+    panel = json.loads((args.controls / "panel.json").read_text())
+    status = hover_status(args.controls, prepared["hover"], proof)
+    selected = panel_tasks(status)
+    if (panel.get("version") != 5 or panel.get("all_admitted") is not True
+            or panel.get("predeclaration_hash") != file_hash(ROOT / "evidence/pilot/predeclaration-5.md")
+            or panel.get("cohorts_hash") != digest(declaration) or panel.get("tasks") != list(selected)
+            or panel.get("hover_status") != status or panel.get("withdrawn") != ["aime"]
+            or panel.get("claim_scope") != f"{len(selected)}-task development pilot"):
+        raise ValueError("Panel contradicts the frozen HoVer outcome or AIME withdrawal")
+    for name in selected:
+        load_control(args, prepared[name])
+    if args.task != "all" and args.task not in selected:
+        raise ValueError("Requested task is not in the admitted panel")
+    return selected
 
 
 def load_control(args, task) -> dict:
@@ -455,10 +535,10 @@ def load_control(args, task) -> dict:
     from .controls import representative_rows
     control = json.loads((args.controls / task.name / "controls.json").read_text())
     admission = json.loads((args.controls / task.name / "admission.json").read_text())
-    if task.name == "mbpp":
-        original, current = reuse_mbpp(task)
+    if task.name in ("mbpp", "ifbench"):
+        original, current = reuse_control(task)
         if control != original or admission != current:
-            raise ValueError("MBPP carryover differs from the admitted unchanged execution")
+            raise ValueError("Carryover differs from the admitted unchanged execution")
     else:
         validate_text_admission(admission, task, evaluator_identity(task), representative_rows(task))
         if (control.get("identity") != evaluator_identity(task) or control.get("adversarial_hash") != digest(admission)
@@ -558,7 +638,10 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
                 "control_hash": digest(control), "budget": LIMITS, "budget_hash": digest(LIMITS), "price_per_million": PRICES, "price_source": PRICE_SOURCE,
                 "account_pool_hash": digest(pool), "account_domains": pool_domains(pool), "api_keys_allowed": False,
                 "retrieval_receipt": json.loads((args.controls / "cohorts.json").read_text()).get("retrieval_receipt") if task_name == "hover" else None,
-                "engine_files": {path: file_hash(ROOT / path) for path in ("pilot/__main__.py", "pilot/search.py", "optimizer/src/pilot-policy.ts", "optimizer/assets/policy.ts", "optimizer/src/loop.ts", "schema/src/promotion.ts")},
+                "engine_files": {path: file_hash(ROOT / path) for path in (
+                    "pilot/__main__.py", "pilot/search.py", "optimizer/src/pilot-policy.ts", "optimizer/assets/policy.ts",
+                    "optimizer/src/loop.ts", "schema/src/promotion.ts", "package.json", "pnpm-lock.yaml",
+                    "optimizer/worker/Dockerfile.mutation")},
                 "limits": retry_comparison({method: summary})["limit"], "current_subscription_panel": True,
                 "smoke_proposal_cap": 1 if smoke else None, "historical_snapshot_replication": False})
         if result["candidate"] is None:
@@ -571,7 +654,13 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
     except Exception as error:
         save(out / "manifest.json", {"identity": identity, "budget": LIMITS, "price_per_million": PRICES,
              "account_domains": pool_domains(pool), "failure": True})
-        return resume_result(out, task_name, seed, method, type(error).__name__)
+        result = resume_result(out, task_name, seed, method, type(error).__name__)
+        timing = ledger.summary(throttle)
+        result.update({key: timing[key] for key in (
+            "wall_seconds", "active_seconds", "pauses", "pause_seconds", "throttle_seconds", "poll_seconds")})
+        save(out / "result.json", result)
+        seal(out)
+        return result
     finally:
         call.close()
 
@@ -580,6 +669,12 @@ def replay(args) -> None:
     from .tasks import load_task, score_output
     os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
     admission_manifest = args.out / "adversarial.json"
+    if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v5":
+        _, _, proof = load_admission(args.out, args.cache)
+        print(canonical({"replayed_hover_adversarial_records": len(proof["checks"]["records"]),
+                         "carried_tasks": ["mbpp", "ifbench"], "hover_adversarial_passed": proof["passed"],
+                         "model_calls": 0, "scored_final_tests_loaded": False}))
+        return
     if admission_manifest.exists() and json.loads(admission_manifest.read_text()).get("version") == "pilot-adversarial-v4":
         from .admission import validate_text_admission
         from .controls import representative_rows
@@ -589,14 +684,18 @@ def replay(args) -> None:
             raise ValueError("Offline admission failed or changed")
         mbpp = load_task("mbpp", args.cache)
         control, receipt = reuse_mbpp(mbpp)
-        if (json.loads((args.out / "mbpp/admission.json").read_text()) != receipt
+        recorded = json.loads((args.out / "mbpp/admission.json").read_text())
+        if ({key: value for key, value in recorded.items() if key != "current_identity"}
+                != {key: value for key, value in receipt.items() if key != "current_identity"}
                 or json.loads((args.out / "mbpp/controls.json").read_text()) != control):
             raise ValueError("MBPP admission carryover changed")
         checked = 0
-        for name in P_TASKS:
+        for name in ("ifbench", "aime", "hover"):
             task = load_task(name, args.cache)
             proof = json.loads((args.out / name / "admission.json").read_text())
-            validate_text_admission(proof, task, evaluator_identity(task), representative_rows(task))
+            if proof["identity"]["task"] != task.manifest:
+                raise ValueError("Archived text admission task resources changed")
+            validate_text_admission(proof, task, proof["identity"], representative_rows(task))
             if declaration["text_admission_hashes"][name] != digest(proof):
                 raise ValueError("Offline text admission hash changed")
             checked += len(proof["checks"]["records"])
@@ -605,7 +704,7 @@ def replay(args) -> None:
         return
     if (args.out / "checks" / "mbpp.jsonl").exists():
         from .adversarial import replay_proof
-        prepared = [load_task(name, args.cache) for name in TASKS]
+        prepared = [load_task(name, args.cache) for name in ARCHIVED_TASKS]
         proof = load_adversarial(args.out, prepared)
         checked = replay_proof(proof, prepared)
         print(canonical({"replayed_adversarial_checks": checked, "model_calls": 0, "scored_final_tests_loaded": False}))
@@ -643,16 +742,16 @@ def main():
     parser.add_argument("command", choices=("prepare", "probe", "throttle-proof", "readmit-mbpp", "adversarial", "controls", "smoke", "pilot", "verify", "replay"))
     parser.add_argument("--cache", type=Path, default=ROOT / ".pilot-cache")
     parser.add_argument("--pool", type=Path, default=ROOT / ".pilot-state/account-pool.json")
-    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-4a")
-    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-4a")
+    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-5")
+    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-5")
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--task", choices=(*TASKS, "hover", "all"), default="all")
+    parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (
             "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
-            "adversarial-4a" if args.command == "adversarial" else "controls-4a" if args.command == "controls" else "smoke-4a")
+            "adversarial-5" if args.command == "adversarial" else "controls-5" if args.command == "controls" else "smoke-5")
     if args.command != "verify":
         execution_limits()
     if args.command in {"verify", "replay"}:
@@ -679,64 +778,14 @@ def main():
         from .tasks import load_task
         from .hover import prepare_retrieval
         save(args.out / "retrieval.json", prepare_retrieval(args.cache))
-        save(args.out / "tasks.json", {name: load_task(name, args.cache).manifest for name in ("mbpp", *P_TASKS)})
+        save(args.out / "tasks.json", {name: load_task(name, args.cache).manifest for name in TASKS})
         save(args.out / "account-domains.json", {"domains": pool_domains(pool), "api_keys_allowed": False, "pool_hash": digest(pool)})
         machine_proof(args.out)
     elif args.command == "probe":
         route_proof(pool, env, args.out)
     else:
-        from .tasks import load_task
-        verify_bundle(args.controls)
-        bundle = json.loads((args.controls / "bundle.json").read_text())
-        if not {"cohorts.json", "panel.json"}.issubset(bundle["files"]):
-            raise ValueError("Frozen admitted task panel missing from sealed controls")
-        panel = json.loads((args.controls / "panel.json").read_text())
-        declaration = file_hash(ROOT / "evidence/pilot/predeclaration-4.md")
-        selected = panel.get("tasks")
-        if (panel.get("version") != 4 or panel.get("all_admitted") is not True
-                or panel.get("predeclaration_hash") != declaration
-                or selected not in (["mbpp", "ifbench", "aime"], ["mbpp", "hover", "aime"])):
-            raise ValueError("Task panel differs from the predeclared headroom decision")
-        frozen = json.loads((args.controls / "cohorts.json").read_text())
-        if frozen.get("version") != 4 or frozen.get("predeclaration_hash") != declaration:
-            raise ValueError("Control cohorts differ from the frozen declaration")
-        from .admission import validate_text_admission
-        from .controls import P_CONTROL_SEED, representative_rows
-        import statistics
-        if frozen.get("seed") != P_CONTROL_SEED:
-            raise ValueError("Control draw seed differs from the declaration")
-        if not {"ifbench/controls.json", "ifbench/admission.json"}.issubset(bundle["files"]):
-            raise ValueError("Sealed IFBench headroom evidence missing")
-        ifbench = load_task("ifbench", args.cache)
-        headroom = json.loads((args.controls / "ifbench/controls.json").read_text())
-        proof = json.loads((args.controls / "ifbench/admission.json").read_text())
-        validate_text_admission(proof, ifbench, evaluator_identity(ifbench), representative_rows(ifbench))
-        values = headroom.get("controls", {}).get("naive", {}).get("scores")
-        if (headroom.get("identity") != evaluator_identity(ifbench) or headroom.get("adversarial_hash") != digest(proof)
-                or headroom.get("rows") != [row["id"] for row in representative_rows(ifbench)]
-                or headroom.get("artifacts", {}).get("naive") != ifbench.seed_candidate
-                or not isinstance(values, list) or len(values) != 40
-                or any(type(value) not in (int, float) or not 0 <= value <= 1 for value in values)):
-            raise ValueError("IFBench headroom is not bound to the official seed and fresh cohort")
-        mean = statistics.fmean(values)
-        replacement = selected[1] == "hover"
-        if (mean != headroom["controls"]["naive"].get("mean") or replacement != (mean >= 0.90)
-                or replacement != (headroom.get("headroom_replacement") == "hover")
-                or replacement and set(headroom["controls"]) != {"naive"}):
-            raise ValueError("Task panel contradicts the measured predeclared headroom branch")
-        if "hover" in selected:
-            from .hover import prepare_retrieval
-            if prepare_retrieval(args.cache) != frozen.get("retrieval_receipt"):
-                raise ValueError("HoVer retrieval differs from the frozen corpus and numeric index")
-        for name in selected:
-            if not {f"{name}/controls.json", f"{name}/admission.json"}.issubset(bundle["files"]):
-                raise ValueError("Controls missing from sealed bundle")
-            task = load_task(name, args.cache)
-            control = load_control(args, task)
-            if control["rows"] != frozen["cohorts"][name]["rows"]:
-                raise ValueError("Control rows differ from sealed cohort")
-        if args.task != "all" and args.task not in selected:
-            raise ValueError("Requested task is not in the admitted pilot panel")
+        from .spend import report_spend
+        selected = load_panel(args)
         machine_proof(args.out)
         if args.command == "smoke":
             for command in (["docker", "info"], ["docker", "image", "inspect", IMAGE]):
@@ -748,7 +797,12 @@ def main():
         for task in tasks:
             for seed in seeds:
                 for method in METHODS:
-                    rows.append(search_one(args, pool, env, task, seed, method, args.command == "smoke"))
+                    result = search_one(args, pool, env, task, seed, method, args.command == "smoke")
+                    out = args.out / task / str(seed) / method
+                    spend = report_spend(out)
+                    save(out / "spend.json", spend)
+                    seal(out)
+                    rows.append(dict(result, spend=spend))
         totals = {method: {"hidden_attempt_rate": sum(row["hidden_attempts"] for row in rows if row["method"] == method) / max(1, sum(row["calls"] for row in rows if row["method"] == method))} for method in METHODS}
         save(args.out / "comparison.json", {"runs": rows, "retry_comparison": retry_comparison(totals)})
         seal(args.out)
