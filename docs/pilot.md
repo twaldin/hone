@@ -2,7 +2,7 @@
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
-The first admission stopped at a harness contract bug; its [failure evidence](../evidence/pilot/handoff.md) is retained unchanged. The assistant authorized [predeclaration 2](../evidence/pilot/predeclaration-2.md), committed before new model calls. The corrected contract and fresh control draw below govern renewed admission; no search is allowed until every task passes.
+**Admission stopped again: the native MBPP grader permits judge tampering. Do not run searches with this epoch.** [Handoff 2](../evidence/pilot/handoff-2.md) records the stop and retained prefix. [Predeclaration 2](../evidence/pilot/predeclaration-2.md) was committed before the renewed model calls; its ordinary MBPP controls and noise check passed, but independent Docker probes scored assertion bypasses as correct. IFBench noise calibration was interrupted and AIME controls were not run. No smoke search or 27-run pilot is authorized.
 
 ## Prepare the runtime
 
@@ -56,7 +56,7 @@ The mutable MBPP artifact contains a prompt and Python program. The program runs
 
 The answer is program text. The shared MBPP scoring boundary extracts the first python-tagged or bare fenced block, or uses the whole output if none exists; exact fence behavior is frozen in predeclaration 2. Candidate source, official setup and every assertion execute as Python in one namespace inside the pinned, non-root, read-only, network-disabled Docker sandbox, with a ten-second timeout. Pair objects, custom types and mutations retain native Python semantics. The literal-only RPC scorer is gone; no rows or assertions are filtered. A successful exit and runner completion receipt are required; candidate stdout is not a verdict. Assertions are not supplied to task-model calls or selection reflection, but they are necessarily visible to adversarial code inside the scoring interpreter. This is not an assertion-secrecy guarantee.
 
-The receipt is a completion check for ordinary solutions, not a tamper-resistant verdict. Real Docker probes in `evidence/pilot/receipt-limit-proof.json` show that replacing built-in execution or accessing the same-interpreter receipt can bypass assertions. The proposer contract does not advertise these internals. Before trusting any MBPP gain, audit retained programs and answers for execution replacement, runner introspection, premature exits and always-true comparisons; a flagged gain is not valid optimization evidence. Full-matrix admission requires this audit as well as complete omp attempt receipts.
+The receipt is a completion check for ordinary solutions, not a tamper-resistant verdict. Real Docker probes in `evidence/pilot/receipt-limit-proof.json` show that replacing built-in execution or accessing the same-interpreter receipt scores 1.0 without running the assertions. This triggers the predeclared measurement-contract gate against altering the judge. Removing proposer hints or manually auditing gains does not repair that contract. The scorer and completed evidence remain unchanged for reproduction; the gate owner must decide the replacement verification boundary before any new model calls.
 
 Scoring currently collapses sandbox startup/daemon failures, timeouts and absent receipts into zero without retaining a structured cause. Noise calibration includes such zeros, and offline replay may disagree after a transient infrastructure failure. This is a known diagnostic limit, not evidence that every zero is a wrong solution. The frozen MBPP shortcut artifact predates the native-assertion contract: its forged worker frames and `AlwaysEqual` do not define the required functions. Its zero checks that artifact only; early-exit and stdout-verdict defenses are covered separately by Docker tests.
 
@@ -82,7 +82,7 @@ Keep the requested $10 ceiling rather than increase it to favor Hone's more expe
 
 ## Run and replay
 
-After controls pass, run the three-method, one-seed MBPP smoke:
+The command below documents the smoke interface, not permission to execute this rejected epoch. A corrected, predeclared contract and successful admission on all three tasks are required first:
 
 ```sh
 nice -n 10 taskset -c 0 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-2 --out evidence/pilot/smoke-2
@@ -90,13 +90,9 @@ nice -n 10 taskset -c 0 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THR
 
 Smoke permits one real proposal per method and requires both a successful proposer response and a valid complete proposed artifact. It exercises the official GEPA reflection callable through the subscription route but does not spend the full budget. Hone imports the existing engine's 0.2 restart probability, deterministic restart draw, one format repair, and native promotion gate. It uses paired training slices of 8, 16, and 32 and fresh paired full-selection measurements. GEPA edits native `prompt` and optional `program` components directly, retaining its renderer, parser, round-robin component selection, Pareto selection, strict improvement, eight-example reflection minibatch, and 10,000-metric-call safety cap. Perfect training minibatches are skipped natively; smoke keeps sampling until a real proposal or a budget bound. The plain loop proposes from training traces and greedily retains strict full-selection improvements. Every method starts from the same artifact and uses the same deployment limits.
 
-The next lane runs the full 27 searches only after the assistant reviews the smoke evidence and the required omp attempt/failed-call receipts are available:
+The 27-search development pilot remains unrun and blocked by the measurement-contract stop. Its eventual launch also requires the assistant's review of admitted smoke evidence. The accounting decision permits this development pilot to use disclosed reported usage and measured hidden-attempt rates. Complete omp attempt/failed-call receipts are a prerequisite for the later full benchmark matrix, not an additional spending cap on the 27-run pilot.
 
-```sh
-nice -n 10 taskset -c 0 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-2 --out .pilot-runs/pilot-27
-```
-
-The command runs three methods on three tasks with seeds 0, 1, and 2. Existing complete cells are hash-verified and reused. Interrupted cells retain their durable usage prefix and last accepted incumbent, become explicit infrastructure-failure rows, and are never selectively rerun; the remaining cells continue. No final test phase is implemented or authorized here. A budget interruption retains the last completely evaluated eligible artifact.
+There is no authorized next-lane search command for the rejected `controls-2` epoch. The `pilot` subcommand runs three methods on three tasks with seeds 0, 1, and 2; a corrected evaluator needs its own predeclared admission evidence, not a relabeled copy of this bundle. Existing complete cells are hash-verified and reused. Interrupted cells retain their durable usage prefix and last accepted incumbent and are never selectively rerun. No final test phase is implemented or authorized here.
 
 Each run includes candidate artifacts, scored outputs, usage records, calibration identity, task membership, routes, budgets, and file hashes. Verify a retained bundle without model calls:
 

@@ -1,7 +1,9 @@
 {
   "predeclaration_commit": "cf46763ccfcfe551cd7f436f0aa3595902a5c70e",
   "implementation_commit": "05444a4a20201cc230a575cef3dcdc68d936a5cd",
+  "review_fix_commit": "32a4cbf5c48c67333973052a6b888e974d503757",
   "local_pilot_tests": {
+    "head": "05444a4a20201cc230a575cef3dcdc68d936a5cd",
     "command": "nice -n 10 taskset -c 0 env NLTK_DATA=$PWD/.pilot-cache/nltk PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -q",
     "passed": 95,
     "failed": 0,
@@ -10,16 +12,17 @@
   },
   "ci": {
     "workflow": ".github/workflows/pilot.yml",
-    "url": "https://github.com/twaldin/hone/actions/runs/41579107102",
-    "head": "05444a4a20201cc230a575cef3dcdc68d936a5cd",
+    "url": "https://github.com/twaldin/hone/actions/runs/41582251076",
+    "head": "32a4cbf5c48c67333973052a6b888e974d503757",
     "conclusion": "success",
     "job": "Pilot unittest and Docker",
-    "passed": 95,
+    "passed": 99,
     "failed": 0,
     "skipped": 0,
     "python": "3.12.12",
     "docker_tests_enabled": true,
     "official_metric_tests_enabled": true,
+    "real_native_hone_bridge": "measure-generated 20-row calibration projected to n=8 and n=90, below/above-threshold gate behavior",
     "model_calls": 0
   },
   "baseline": {
@@ -35,6 +38,13 @@
     "training_rows": 374,
     "selection_rows": 90,
     "model_calls": 0
+  },
+  "receipt_limit": {
+    "evidence": "receipt-limit-proof.json",
+    "real_docker": true,
+    "model_calls": 0,
+    "assertion_bypasses_observed": 2,
+    "required_before_trusting_gains": "Audit retained MBPP programs and answers for assertion bypass."
   },
   "limits": [
     "Official assertions share the isolated candidate interpreter and are not secret from adversarial code.",
