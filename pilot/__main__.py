@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -33,6 +34,7 @@ def evaluator_identity(task) -> dict:
              "pilot/admission.py", "pilot/hover.py", "pilot/published.py", "pilot/published-controls.json")
     return {"contract": 4, "task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4.md"),
+            "transport_correction_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4a.md"),
             "route": MODEL, "decoding": {"temperature": 0, "forceReasoningOff": True, "max_output_tokens": 4096, "cacheRetention": "none"},
             "image": IMAGE}
 
@@ -158,6 +160,60 @@ def calls_for(pool: dict, env: dict, out: Path, limits: dict | None = None):
     return ModelCalls(open_gateway(throttle), ledger, throttle), ledger, throttle
 
 
+def calibration_transport(call):
+    def checked(role, messages, max_tokens):
+        try:
+            return call(role, messages, max_tokens)
+        except CallFailed as error:
+            raise TransportError("Calibration provider failure; no candidate score recorded") from error
+    return checked
+
+
+def readmit_mbpp(args) -> None:
+    from .admission import MBPP_FILES, mbpp_source_contract
+    from .adversarial import run, validate_result
+    from .controls import measure, representative_rows
+    from .tasks import load_task
+    if args.out.exists() and any(args.out.iterdir()):
+        raise FileExistsError("MBPP re-admission output already contains evidence")
+    os.environ["NLTK_DATA"] = str((args.cache / "nltk").resolve())
+    os.environ["PILOT_PYTHON_IMAGE"] = IMAGE
+    prepared = [load_task(name, args.cache) for name in TASKS]
+    identities = {task.name: evaluator_identity(task) for task in prepared}
+    mbpp = next(task for task in prepared if task.name == "mbpp")
+    machine_proof(args.out)
+    save(args.out / "source-contract.json", {
+        "baseline_files": {path: file_hash(ROOT / path) for path in (*MBPP_FILES, "pilot/tasks.py", "pilot/search.py")},
+        "execution_contract": mbpp_source_contract(ROOT)})
+    try:
+        proof = run(prepared, identities, args.out / "adversarial")
+        validate_result(proof, identities, proof["cohorts"])
+    finally:
+        seal(args.out / "adversarial")
+        seal(args.out)
+    pool, env = environment(args.pool)
+    out = args.out / "mbpp"
+    call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100, active_seconds=86_400))
+    try:
+        save(out / "manifest.json", {"identity": identities["mbpp"], "route_identity": call.gateway.route_identity,
+             "account_domains": pool_domains(pool), "measurement_budget": ledger.limits,
+             "adversarial_hash": digest(proof)})
+        save(out / "measurement-budget.json", ledger.limits)
+        measure(mbpp, calibration_transport(call), out, identities["mbpp"],
+                rows=representative_rows(mbpp), adversarial=proof)
+    except Exception as error:
+        save(out / "failure.json", {"error_type": type(error).__name__,
+             "status": "infrastructure-failure" if isinstance(error, TransportError) else "admission-failed"})
+        raise
+    finally:
+        call.close()
+        summary = ledger.summary(throttle)
+        save(out / "usage.json", summary)
+        seal(out)
+        seal(args.out)
+    print(canonical({"task": "mbpp", "controls": "passed", **summary}), flush=True)
+
+
 def offline_adversarial(args) -> None:
     from .admission import text_admission
     from .controls import ControlsFailed, P_CONTROL_SEED, representative_rows
@@ -225,19 +281,19 @@ def load_adversarial(out: Path, prepared: list) -> dict:
 
 
 def reuse_mbpp(task) -> tuple[dict, dict]:
-    from .admission import MBPP_BASELINE, mbpp_source_contract
+    from .admission import mbpp_source_contract
     from .adversarial import validate_result
     from .controls import representative_rows
-    source = ROOT / "evidence/pilot/controls-3"
-    proof_path = ROOT / "evidence/pilot/adversarial-3"
+    source = ROOT / "evidence/pilot/mbpp-readmission-4a"
+    proof_path = source / "adversarial"
     verify_bundle(source)
     verify_bundle(proof_path)
     proof = json.loads((proof_path / "adversarial.json").read_text())
     validate_result(proof, proof.get("identities", {}), proof.get("cohorts", {}))
     control = json.loads((source / "mbpp/controls.json").read_text())
-    baseline = json.loads((ROOT / "evidence/pilot/mbpp-source-contract-3.json").read_text())
+    baseline = json.loads((source / "source-contract.json").read_text())
     original = control["identity"]
-    if (baseline["baseline_commit"] != MBPP_BASELINE or mbpp_source_contract(ROOT) != baseline["execution_contract"]
+    if (mbpp_source_contract(ROOT) != baseline["execution_contract"]
             or any(original["evaluator_files"][path] != expected for path, expected in baseline["baseline_files"].items()
                    if path in original["evaluator_files"])
             or original != proof["identities"]["mbpp"] or control["adversarial_hash"] != digest(proof)
@@ -247,7 +303,7 @@ def reuse_mbpp(task) -> tuple[dict, dict]:
             or control["rows"] != [row["id"] for row in representative_rows(task)]
             or control["noise_design"]["seed_artifact_hash"] != digest(task.seed_candidate)):
         raise ValueError("Admitted MBPP execution, data, route or proof changed; old measurements cannot be reused")
-    receipt = {"kind": "unchanged-mbpp-admission", "source": "evidence/pilot/controls-3",
+    receipt = {"kind": "unchanged-mbpp-admission", "source": "evidence/pilot/mbpp-readmission-4a",
                "source_bundle_hash": json.loads((source / "bundle.json").read_text())["bundle_hash"],
                "source_control_hash": digest(control), "source_adversarial_hash": digest(proof),
                "source_contract_hash": digest(baseline), "current_identity": evaluator_identity(task),
@@ -323,9 +379,10 @@ def controls(args, pool=None, env=None):
                  "account_domains": pool_domains(pool), "measurement_budget": ledger.limits,
                  "adversarial_hash": digest(proofs[name])})
             save(out / "measurement-budget.json", ledger.limits)
-            result = measure(task, call, out, identity, rows=frozen[name], adversarial=proofs[name])
+            result = measure(task, calibration_transport(call), out, identity, rows=frozen[name], adversarial=proofs[name])
         except Exception as error:
-            save(out / "failure.json", {"error_type": type(error).__name__, "status": "admission-failed"})
+            save(out / "failure.json", {"error_type": type(error).__name__,
+                 "status": "infrastructure-failure" if isinstance(error, TransportError) else "admission-failed"})
             raise
         finally:
             call.close()
@@ -534,23 +591,27 @@ def replay(args) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Frozen development-only Hone optimizer pilot")
-    parser.add_argument("command", choices=("prepare", "probe", "throttle-proof", "adversarial", "controls", "smoke", "pilot", "verify", "replay"))
+    parser.add_argument("command", choices=("prepare", "probe", "throttle-proof", "readmit-mbpp", "adversarial", "controls", "smoke", "pilot", "verify", "replay"))
     parser.add_argument("--cache", type=Path, default=ROOT / ".pilot-cache")
     parser.add_argument("--pool", type=Path, default=ROOT / ".pilot-state/account-pool.json")
-    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-4")
-    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-4")
+    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-4a")
+    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-4a")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--task", choices=(*TASKS, "hover", "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (
-            "adversarial-4" if args.command == "adversarial" else "controls-4" if args.command == "controls" else "smoke-4")
+            "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
+            "adversarial-4a" if args.command == "adversarial" else "controls-4a" if args.command == "controls" else "smoke-4a")
     if args.command in {"verify", "replay"}:
         verify_bundle(args.out)
         print("Evidence hashes verified")
         if args.command == "replay":
             replay(args)
+        return
+    if args.command == "readmit-mbpp":
+        readmit_mbpp(args)
         return
     if args.command == "adversarial":
         offline_adversarial(args)
@@ -625,6 +686,9 @@ def main():
                 raise ValueError("Control rows differ from sealed cohort")
         if args.task != "all" and args.task not in selected:
             raise ValueError("Requested task is not in the admitted pilot panel")
+        if args.command == "smoke":
+            for command in (["docker", "info"], ["docker", "image", "inspect", IMAGE]):
+                subprocess.run(command, check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         pool, env = environment(args.pool)
         rows = []
         tasks = ("mbpp",) if args.command == "smoke" and args.task == "all" else selected if args.task == "all" else (args.task,)

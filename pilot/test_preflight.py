@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from pilot.__main__ import TASKS, controls as run_controls, evaluator_identity, file_hash, main, machine_proof, offline_adversarial, replay, save, seal
 from pilot.controls import ControlsFailed, P_CONTROL_SEED, representative_rows
-from pilot.runtime import ROOT, digest
+from pilot.runtime import ROOT, CallFailed, TransportError, digest
 from pilot.tasks import Task
 from pilot.test_adversarial import fixture_tasks
 from pilot.admission import text_admission
@@ -140,6 +140,23 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual(order, expected)
                 self.assertEqual(json.loads((out / "panel.json").read_text())["tasks"],
                                  ["mbpp", "hover", "aime"] if replaced else ["mbpp", "ifbench", "aime"])
+
+    def test_provider_outage_aborts_calibration_without_choosing_panel(self):
+        with tempfile.TemporaryDirectory() as directory, self.offline_fixture(Path(directory)) as (_, admission, cache):
+            with redirect_stdout(StringIO()):
+                offline_adversarial(argparse.Namespace(task="all", out=admission, cache=cache))
+            out = Path(directory) / "failed-controls"
+            call = Mock(side_effect=CallFailed("synthetic exhausted provider outage"))
+            call.gateway = SimpleNamespace(route_identity={"fixture": True})
+            ledger = SimpleNamespace(limits={}, summary=lambda throttle: {"calls": 2, "usage_missing_calls": 2})
+            args = argparse.Namespace(task="all", out=out, cache=cache, adversarial=admission)
+            pool = json.loads((Path(directory) / "pool.json").read_text())
+            with patch("pilot.__main__.calls_for", return_value=(call, ledger, SimpleNamespace())):
+                with self.assertRaisesRegex(TransportError, "no candidate score"):
+                    run_controls(args, pool, {})
+            self.assertEqual(json.loads((out / "ifbench/failure.json").read_text())["status"], "infrastructure-failure")
+            self.assertFalse((out / "ifbench/controls.json").exists())
+            self.assertFalse((out / "panel.json").exists())
 
     def test_other_task_admission_blocks_every_search_before_transport(self):
         for command in ("smoke", "pilot"):

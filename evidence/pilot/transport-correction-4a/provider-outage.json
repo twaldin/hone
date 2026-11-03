@@ -1,0 +1,8 @@
+{
+  "after": "TransportError propagated; no score or gate decision",
+  "before_scores": [
+    0.0
+  ],
+  "message": "Calibration provider failure; no candidate score recorded",
+  "provider_model_calls": 0
+}

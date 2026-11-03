@@ -6,7 +6,6 @@ from pathlib import Path
 
 from .runtime import digest
 
-MBPP_BASELINE = "b893aab6549a5e19c58090070982cd0c063851c2"
 MBPP_FILES = ("pilot/program.py", "pilot/verification.py", "pilot/runtime.py", "pilot/gateway.mjs")
 
 

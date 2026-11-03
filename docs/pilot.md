@@ -2,7 +2,7 @@
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
-[Predeclaration 4](../evidence/pilot/predeclaration-4.md), committed as `030c792` before new model calls, replaces the authored P controls with published optimized instructions and a fresh 40-row draw. It preserves MBPP's admitted contract-3 measurements. [Handoff 3](../evidence/pilot/handoff-3.md) records the earlier IFBench ranking failure. Search still requires a sealed, fully admitted current panel.
+[Predeclaration 4](../evidence/pilot/predeclaration-4.md), committed as `030c792` before new model calls, replaces the authored P controls with published optimized instructions and a fresh 40-row draw. [Correction 4a](../evidence/pilot/predeclaration-4a.md) removes a CPU-0 gateway override and prevents provider failures from deciding calibration scores. The transport change requires MBPP re-admission; contract-3 measurements alone cannot authorize the corrected harness. [Handoff 3](../evidence/pilot/handoff-3.md) records the earlier IFBench ranking failure.
 
 ## Prepare the runtime
 
@@ -18,7 +18,7 @@ nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THR
 
 Inspect the live venue's CPU affinities before every heavy run. This epoch uses CPU 6 and avoids CPUs 0–5 and 13–16, including the venue's earlier 0/5 pin. The runner uses one model request and one CPU-heavy worker at a time.
 
-Preparation builds the pinned HoVer index before any IFBench score can select that alternate. The observed cold preparation took 310.97 seconds and peaked at 7.32 GiB RSS on one CPU. It indexed all 5,233,330 published corpus rows, including the empty metadata row. Corpus and numeric-index hashes enter the sealed admission evidence. Setup failures occur before model dispatch and cannot become row scores or trigger a new headroom draw.
+Preparation builds the pinned HoVer index before any IFBench score can select that alternate. The observed cold preparation called the real `prepare` entrypoint through a measured launcher: 310.97 seconds and 7.32 GiB peak RSS on one CPU. It indexed all 5,233,330 published corpus rows, including the empty metadata row. [Preparation evidence](../evidence/pilot/preparation-4) distinguishes that launcher from the equivalent public replay command. Corpus and numeric-index hashes enter sealed admission evidence. Setup failures occur before model dispatch and cannot become row scores or trigger a new headroom draw.
 
 The prepare command creates an ignored pilot-specific account-pool file from `omp usage accounts`. It permits only Anthropic OAuth identities on `gmail.com` and `purdue.edu`. It excludes `lindy.ai`, every other provider, and every API key. The gateway also installs an OAuth-only native credential-session restriction: environment/configuration fallbacks cannot escape the pool. It selects the bundled model directly, without loading local model overrides. Public manifests record domain counts and the pool hash, not full account identities. Never commit `.pilot-state` or `.pilot-cache`.
 
@@ -27,16 +27,17 @@ Auth and usage child processes receive only an explicit allowlist of home, execu
 ## Admit the evaluator before search
 
 ```sh
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-4
-nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot throttle-proof --out evidence/pilot/throttle-proof-4
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-4 --out evidence/pilot/controls-4
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot readmit-mbpp --out evidence/pilot/mbpp-readmission-4a
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-4a
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot throttle-proof --out evidence/pilot/throttle-proof-4a
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-4a --out evidence/pilot/controls-4a
 ```
 
-The offline admission command preserves the MBPP contract-3 control and adversarial evidence without rerunning its measurements. It checks unchanged worker, scorer, transport, MBPP-specialized task/search code, data, route, decoding, cohort and seed hashes. Fresh P attacks pass through direct scoring and every protected response stage in both JSON and raw-protocol modes. A positive attack stops before auth or model bootstrap and retains the failing artifact.
+The first command re-admits MBPP after its transport code changes: full adversarial checks, unchanged controls and unchanged noise procedure. It freezes the source contract and completes offline checks before auth or model bootstrap. The next command carries only that corrected admission forward, checking worker, scorer, transport, MBPP-specialized task/search code, data, route, decoding, cohort and seed hashes. Fresh P attacks pass through direct scoring and every protected response stage in both JSON and raw-protocol modes. A positive attack stops before auth and retains its artifact. Calibration transport failures abort as infrastructure failures, not zero candidate scores or measured gate failures.
 
-P draws use `random.Random(20261105).sample(eligible, 40)` after sorting official training IDs. All proposed cohorts and admissions are sealed before the first model call. IFBench's official naive seed runs first. A score at least 0.90 replaces IFBench with HoVer without measuring its improved control or noise. AIME keeps its own strict ranking and noise rule, without a replacement. MBPP retains its previous 20-row draw and 16 paired trials; its earlier row exclusions affect that draw only, never training or search.
+P draws use `random.Random(20261105).sample(eligible, 40)` after sorting official training IDs. Their proposed cohorts and admissions are sealed before P model calls. IFBench's official naive seed runs first. A score at least 0.90 replaces IFBench with HoVer without measuring its improved control or noise. AIME keeps its own strict ranking and noise rule, without a replacement. MBPP re-admission keeps its previous 20-row draw, seed and 16 paired trials; its earlier row exclusions affect that draw only, never training or search.
 
-Admission requires known-improved > naive > both broken and shortcut, with broken = 0 and MBPP shortcut = 0. P positives execute the published optimized instructions, not trusted answers or a prompt authored here. Sixteen fresh paired unchanged-seed trials measure P noise on the same 40 rows without response caching. Keep `noiseFloor = 3/sqrt(2)*s` and `noiseEnvelope = max(4.5/sqrt(2)*s, max_abs_delta)`. The envelope must be strictly below the positive-control contrast. Projection uses `sqrt(source_rows/n)`, so P uses 40 and carried MBPP uses 20. A tie, reversed rank or obscured contrast stops without retuning. Zero estimated noise is not proof of a noiseless evaluator.
+Admission requires known-improved > naive > both broken and shortcut, with broken = 0 and MBPP shortcut = 0. P positives execute published optimized instructions, not trusted answers or a prompt authored here. Sixteen fresh paired unchanged-seed trials measure noise without response caching. Keep `noiseFloor = 3/sqrt(2)*s` and `noiseEnvelope = max(4.5/sqrt(2)*s, max_abs_delta)`. The envelope must be strictly below the positive-control contrast. Projection uses `sqrt(source_rows/n)`: 40 for P and 20 for MBPP. A tie, reversed rank or obscured contrast stops without retuning. Zero estimated noise is not proof of a noiseless evaluator.
 
 A failed control command preserves its evidence. The runner refuses to overwrite it. Stop and inspect the measurement contract instead of rerunning until it passes.
 
@@ -111,15 +112,15 @@ Keep the requested $10 ceiling rather than increase it to favor Hone's more expe
 Successful offline admission alone is insufficient. Every selected task's ranking and noise gates must pass, and the assistant must review the smoke evidence before authorizing the next lane:
 
 ```sh
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-4 --out evidence/pilot/smoke-4
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-4a --out evidence/pilot/smoke-4a
 ```
 
 Smoke permits one real proposal per method and requires both a successful proposer response and a valid complete proposed artifact. It exercises official GEPA's real subscription reflection callable without spending the full budget. Hone retains the engine's 0.2 restart probability, deterministic restart draw, one format repair, paired training slices of 8, 16 and 32, and fresh paired full-selection promotion measurements. GEPA edits the task's named native components, including separate IFBench and HoVer modules, while retaining its renderer, parser, round-robin component selection, Pareto selection, strict improvement, eight-example reflection minibatch and 10,000-metric-call safety cap. Perfect training minibatches are skipped natively until a proposal or a budget bound. Plain uses training traces and strict full-selection improvement. Every method starts from the same task seed artifact and deployment limits.
 
-The failed `controls-3` bundle cannot authorize a search. Contract 4 carries only its independently admitted MBPP evidence, through an explicit unchanged-execution receipt. The development pilot accepts disclosed reported usage and measured hidden-attempt rates. The command below is for the second lane only after the assistant approves all three smoke results.
+The failed `controls-3` bundle and superseded transport-4 admission cannot authorize a search. Only the corrected MBPP re-admission and passing fresh P controls can do so. The development pilot accepts disclosed reported usage and measured hidden-attempt rates. The command below is for the second lane only after the assistant approves all three smoke results.
 
 ```sh
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-4 --out .pilot-runs/pilot-27
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-4a --out .pilot-runs/pilot-27
 ```
 
 The `pilot` command runs three methods on three tasks with seeds 0, 1 and 2. Existing complete cells are hash-verified and reused. Interrupted cells retain their durable usage prefix and last accepted incumbent and are never selectively rerun. No final test phase is implemented or authorized here.
@@ -127,7 +128,7 @@ The `pilot` command runs three methods on three tasks with seeds 0, 1 and 2. Exi
 Each run includes candidate artifacts, scored outputs, usage records, calibration identity, task membership, routes, budgets, and file hashes. Verify a retained bundle without model calls:
 
 ```sh
-pilot/.venv/bin/python -m pilot verify --out evidence/pilot/smoke-4
+pilot/.venv/bin/python -m pilot verify --out evidence/pilot/smoke-4a
 ```
 
 Hash verification checks retained evidence integrity. It does not promise byte-identical stochastic provider responses on a fresh model replay.
@@ -137,7 +138,7 @@ Reported selection scores are adaptive: they select incumbents and are not unbia
 Recompute every retained rollout's score from the pinned development data and archived task-model outputs, without provider credentials or model calls:
 
 ```sh
-nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot replay --out evidence/pilot/smoke-4
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot replay --out evidence/pilot/smoke-4a
 ```
 
 Replay first verifies the bundle hashes and task-resource identities, then runs the protected metrics again. MBPP replay executes archived solution code in the same isolated worker boundary.

@@ -238,7 +238,7 @@ class Gateway:
         omp = shutil.which("omp")
         if omp is None:
             raise TransportError("omp is not installed")
-        self.process = subprocess.Popen(["nice", "-n", "10", "taskset", "-c", "0", "bun", str(ROOT / "pilot/gateway.mjs"), os.path.realpath(omp)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
+        self.process = subprocess.Popen(["nice", "-n", "10", "bun", str(ROOT / "pilot/gateway.mjs"), os.path.realpath(omp)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
         self.ordinal = 0
         try:
             ready = self.read(120)

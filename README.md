@@ -83,7 +83,7 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 The pilot is an admission experiment, not an optimizer-quality claim. Its accounting accepts disclosed token undercounts from internal retries and failed calls; complete attempt and failed-call receipts are required before a full comparison. See [the pilot contract and commands](docs/pilot.md).
 
-The first two epochs exposed MBPP contract defects. [Predeclaration 3](evidence/pilot/predeclaration-3.md) separated candidate execution from trusted grading, and all 300 MBPP adversarial checks passed. IFBench then failed its control ranking. [Predeclaration 4](evidence/pilot/predeclaration-4.md) retains admitted MBPP evidence, uses externally published optimized P controls, and fixes the IFBench headroom rule before new model calls. [The pilot guide](docs/pilot.md) records the current admission and run commands.
+The first two epochs exposed MBPP contract defects. [Predeclaration 3](evidence/pilot/predeclaration-3.md) separated candidate execution from trusted grading, and all 300 MBPP adversarial checks passed. IFBench then failed its control ranking. [Predeclaration 4](evidence/pilot/predeclaration-4.md) fixes external P controls and the IFBench headroom rule before new model calls. [Correction 4a](evidence/pilot/predeclaration-4a.md) fixes transport placement and infrastructure-error scoring, requiring MBPP re-admission without changing its cohort or gates. [The pilot guide](docs/pilot.md) records the commands.
 
 ## Status and limitations
 
