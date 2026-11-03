@@ -8,3 +8,6 @@ allowBuilds:
   onnxruntime-node: false
   protobufjs: false
   sharp: false
+overrides:
+  handlebars: 4.7.10
+  tinypool: 2.1.2
