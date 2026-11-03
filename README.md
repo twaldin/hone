@@ -55,7 +55,7 @@ The fixed-compute solver is in [`hone-capsules/capsules/leduc-cfr-exploitability
 
 ## Quickstart
 
-You need Node 18+ and pnpm 10.
+You need Node 20+ and pnpm 10.
 
 ```sh
 git clone https://github.com/twaldin/hone.git
