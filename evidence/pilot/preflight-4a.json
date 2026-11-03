@@ -1,0 +1,38 @@
+{
+  "head": "9889dce7b99b9702cedbfee9af388fdb47a1ab3d",
+  "author_model": "openai-codex/gpt-6.1-sol",
+  "scope": "Preflight only: safe for one-shot MBPP re-admission, then fresh P controls; not final READY or a quality-gate result",
+  "pilot_model_calls_before_launch": 0,
+  "reviews": [
+    {
+      "reviewer_model": "anthropic/claude-opus-5-5",
+      "verdict": "SAFE_TO_MEASURE",
+      "reviewer_ran_tests_or_pilot_calls": false
+    },
+    {
+      "reviewer_model": "xai-oauth/grok-4.7",
+      "verdict": "SAFE_TO_MEASURE",
+      "reviewer_ran_tests_or_pilot_calls": false
+    }
+  ],
+  "ci": {
+    "head": "9889dce7b99b9702cedbfee9af388fdb47a1ab3d",
+    "url": "https://github.com/twaldin/hone/actions/runs/41638016885",
+    "conclusion": "success"
+  },
+  "local_tests": {
+    "tests_run": 143,
+    "failures": 0,
+    "errors": 0,
+    "real_docker_and_official_metrics": true,
+    "evidence": "evidence/pilot/pre-measurement-4a.json"
+  },
+  "launch_requested": {
+    "unit": "hone-hone-pilot-harness-1-mbpp4a",
+    "stdout": "systemd user journal",
+    "command": "pilot/.venv/bin/python -m pilot readmit-mbpp --out evidence/pilot/mbpp-readmission-4a",
+    "nice": 10,
+    "cpus": [6],
+    "automatic_restart": false
+  }
+}
