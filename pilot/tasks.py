@@ -107,8 +107,11 @@ def _signature(source: str) -> str:
 
 
 def load_task(name: str, cache: Path) -> Task:
+    if name == "hover":
+        from .hover import load_hover
+        return load_hover(cache)
     if name not in ("ifbench", "aime", "mbpp"):
-        raise ValueError("Only explicit development tasks ifbench, aime, mbpp are allowed")
+        raise ValueError("Only explicit development tasks ifbench, aime, mbpp, hover are allowed")
     sources = []
     if name == "mbpp":
         train_raw, train_source = _data(cache, "mbpp_train")
@@ -136,7 +139,9 @@ def load_task(name: str, cache: Path) -> Task:
                 rows.append({"id": f"aime:historical:{index}", "input": row["problem"],
                              "answer": row["answer"], "solution": row.get("solution", "")})
         train, selection = partition(name, rows)
-        seed = {"prompt": "Respond to the query." if name == "ifbench" else "Solve the problem and provide the answer in the correct format."}
+        seed = ({"prompt": "Respond to the query",
+                 "revision_prompt": "Ensure the response is correct and adheres to the given constraints. Your response will be used as the final response."}
+                if name == "ifbench" else {"prompt": "Solve the problem and provide the answer in the correct format."})
     manifest = {"task": name, "development_only": True, "sources": sources,
                 "train_ids": [row["id"] for row in train], "selection_ids": [row["id"] for row in selection],
                 "scored_final_tests_loaded": False, "metric_artifact_revision": ARTIFACT_REV,
@@ -144,10 +149,14 @@ def load_task(name: str, cache: Path) -> Task:
                 "license": "CC-BY-4.0" if name == "mbpp" else "See pinned source"}
     if name in {"aime", "ifbench"}:
         manifest["program_protocol"] = {
-            "adaptation": "Current subscription model, not historical DSPy/model reproduction. Visible JSON reasoning substitutes for DSPy ChainOfThought fields; hidden reasoning is not required.",
+            "adaptation": "Current subscription model and fixed deployment limits, identical across methods; not the historical GPT-4.1-mini DSPy panel. Visible JSON reasoning substitutes for DSPy ChainOfThought fields; hidden reasoning is not required.",
             "official_program": ARTIFACT.replace("IFBench/", "") + ("AIME/AIME_program.py" if name == "aime" else "IFBench/ifbench_program.py"),
             "stages": ["reasoning, answer"] if name == "aime" else ["reasoning, response", "reasoning, final_response"],
-            "editable_instruction": "The same prompt instruction applies to each stage; field protocols and stage order are protected and identical for every method.",
+            "editable_modules": ({"prompt": "GenerateResponse"} if name == "aime" else
+                                 {"prompt": "GenerateResponse", "revision_prompt": "EnsureCorrectResponse"}),
+            "protected_stage_order": (["prompt -> reasoning, answer"] if name == "aime" else
+                                      ["prompt -> reasoning, response", "revision_prompt + query + response -> reasoning, final_response"]),
+            "instruction_scope": "Each module receives only its own editable instruction; JSON fields, stage order and host-side scoring are protected and identical for every method.",
             "metric_input": "Extracted answer with official int(answer) semantics." if name == "aime" else "Extracted final_response passed unchanged as metric response.",
         }
     if name == "mbpp":
@@ -257,6 +266,9 @@ def _ifbench_result(task: Task, row: dict, output: str) -> SimpleNamespace:
 
 
 def score_output(task: Task, row: dict, output: str) -> float:
+    if task.name == "hover":
+        from .hover import score_hover_output
+        return score_hover_output(task, row, output)
     if task.name == "aime":
         return aime_score(output, row["answer"])
     if task.name == "ifbench":
@@ -287,8 +299,14 @@ def evaluate(task: Task, candidate: dict[str, str], rows: list[dict],
     train_ids = {row["id"] for row in task.train}
     if capture_traces and any(row["id"] not in train_ids for row in rows):
         raise ValueError("Selection labels and feedback cannot be captured")
-    valid_candidate = (set(candidate) == ({"prompt", "program"} if task.name == "mbpp" else {"prompt"})
+    valid_candidate = ((task.name == "mbpp" or isinstance(candidate, dict))
+                       and set(candidate) == ({"prompt", "program"} if task.name == "mbpp" else
+                                              {"prompt", "revision_prompt"} if task.name == "ifbench" else
+                                              {"prompt"} if task.name == "aime" else set(task.seed_candidate))
                        and all(isinstance(value, str) for value in candidate.values()))
+    if task.name == "hover" and valid_candidate:
+        from .hover import evaluate_hover
+        return evaluate_hover(task, candidate, [allowed[row["id"]] for row in rows], call, capture_traces)
     scores, outputs, trajectories = [], [], []
     for row in rows:
         row = allowed[row["id"]]
@@ -310,8 +328,7 @@ def evaluate(task: Task, candidate: dict[str, str], rows: list[dict],
                     feedback = f"Correct integer answer: {row['answer']}. " + row.get("solution", "")
                 else:
                     revision = [
-                        {"role": "system", "content": candidate["prompt"]},
-                        {"role": "system", "content": "Ensure the response is correct and adheres to the given constraints. Your response will be used as the final response."},
+                        {"role": "system", "content": candidate["revision_prompt"]},
                         {"role": "user", "content": json.dumps({"query": row["input"], "response": output})},
                     ]
                     output = _response(call, revision, "final_response", traces)

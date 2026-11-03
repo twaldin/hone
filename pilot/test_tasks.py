@@ -63,7 +63,8 @@ class TaskTests(unittest.TestCase):
         task = self.task()
         def forbidden(*args):
             self.fail("Invalid candidate made a model call")
-        for candidate in ({}, {"__invalid_artifact__": "bad"}, {"prompt": "ok", "program": "extra"}):
+        for candidate in ({}, {"__invalid_artifact__": "bad"}, {"prompt": "ok", "program": "extra"},
+                          {"prompt": "ok", "revision_prompt": "extra"}, {"prompt": None}, ["prompt"]):
             self.assertEqual(tasks.evaluate(task, candidate, task.train, forbidden)["scores"], [0.0])
 
     def test_selection_feedback_rejected_before_call(self):
@@ -105,32 +106,112 @@ class TaskTests(unittest.TestCase):
             self.assertEqual(result["outputs"], [answer])
         self.assertEqual(tasks.evaluate(task, task.seed_candidate, task.train, lambda *args: "42")["scores"], [0.0])
 
-    def test_ifbench_scores_only_second_stage_final_response(self):
-        row = {"id": "dev:if", "input": "Say alpha", "instruction_id_list": [], "kwargs": []}
-        task = tasks.Task("ifbench", [row], [], {}, {"prompt": "follow"})
-        requests = []
-        def call(role, messages, tokens):
-            requests.append(messages)
-            return json.dumps({"reasoning": "audit", "response": "bad draft"} if len(requests) == 1
-                              else {"reasoning": "fixed", "final_response": "alpha"})
-        def metric(example, prediction):
-            self.assertEqual(prediction.response, "alpha")
-            return SimpleNamespace(score=1.0, feedback="passed")
-        with patch.dict(tasks._METRICS, {id(task.manifest): metric}):
-            result = tasks.evaluate(task, task.seed_candidate, task.train, call, True)
-        self.assertEqual(result["scores"], [1.0])
-        self.assertEqual(len(requests), 2)
-        self.assertIn("bad draft", str(requests[1]))
-        self.assertEqual(len(result["trajectories"][0]["calls"]), 2)
+    def test_ifbench_stages_isolate_editable_instructions_and_score_only_final(self):
+        row = {"id": "dev:if", "input": "Say alpha", "instruction_id_list": ["protected-checker"],
+               "kwargs": [{"protected-count": 1}]}
+        candidate = {"prompt": "GENERATION-ONLY", "revision_prompt": "REVISION-ONLY"}
+        task = tasks.Task("ifbench", [row], [], {}, candidate)
+        for draft, final, expected in (("bad draft", "alpha", 1.0), ("alpha", "bad final", 0.0)):
+            with self.subTest(draft=draft, final=final):
+                requests, checked = [], []
+                def call(role, messages, tokens):
+                    requests.append((role, messages, tokens))
+                    return json.dumps({"reasoning": "audit", "response": draft} if len(requests) == 1
+                                      else {"reasoning": "fixed", "final_response": final})
+                def metric(example, prediction):
+                    checked.append(prediction.response)
+                    return SimpleNamespace(score=float(prediction.response == "alpha"), feedback="checked")
+                with patch.dict(tasks._METRICS, {id(task.manifest): metric}):
+                    result = tasks.evaluate(task, candidate, task.train, call, True)
+                self.assertEqual(result["scores"], [expected])
+                self.assertEqual(result["outputs"], [final])
+                self.assertEqual(checked, [final])
+                self.assertEqual(len(requests), 2)
+                self.assertEqual([request[0] for request in requests], ["task", "task"])
+                self.assertEqual([request[2] for request in requests], [4096, 4096])
+                first, second = requests[0][1], requests[1][1]
+                self.assertEqual([message["content"] for message in first if message["role"] == "system"][1:],
+                                 ["GENERATION-ONLY"])
+                self.assertEqual([message["content"] for message in second if message["role"] == "system"][1:],
+                                 ["REVISION-ONLY"])
+                self.assertNotIn("REVISION-ONLY", json.dumps(first))
+                self.assertNotIn("GENERATION-ONLY", json.dumps(second))
+                self.assertEqual(json.loads(second[-1]["content"]), {"query": "Say alpha", "response": draft})
+                self.assertNotIn("protected-checker", json.dumps(requests))
+                self.assertNotIn("protected-count", json.dumps(requests))
+                self.assertEqual(len(result["trajectories"][0]["calls"]), 2)
 
     def test_invalid_ifbench_revision_discards_unscored_draft(self):
         row = {"id": "dev:revision", "input": "Say alpha", "instruction_id_list": [], "kwargs": []}
-        task = tasks.Task("ifbench", [row], [], {}, {"prompt": "follow"})
+        task = tasks.Task("ifbench", [row], [], {}, {"prompt": "follow", "revision_prompt": "revise"})
         responses = iter((json.dumps({"reasoning": "", "response": "alpha"}), "not-json"))
         result = tasks.evaluate(task, task.seed_candidate, task.train, lambda *args: next(responses), True)
         self.assertEqual(result["scores"], [0.0])
         self.assertEqual(result["outputs"], [""])
         self.assertEqual(result["trajectories"][0]["output"], "")
+
+    def test_ifbench_requires_exact_two_module_candidate(self):
+        row = {"id": "dev:shape", "input": "Say alpha", "instruction_id_list": [], "kwargs": []}
+        seed = {"prompt": "generate", "revision_prompt": "revise"}
+        task = tasks.Task("ifbench", [row], [], {}, seed)
+        invalid = ({}, {"prompt": "generate"}, {"revision_prompt": "revise"},
+                   dict(seed, program="extra"), dict(seed, revision_prompt=None), ["prompt", "revision_prompt"])
+        for candidate in invalid:
+            with self.subTest(candidate=candidate):
+                result = tasks.evaluate(task, candidate, [row], lambda *args: self.fail("called"), True)
+                self.assertEqual(result["scores"], [0.0])
+                self.assertEqual(result["outputs"], [""])
+                self.assertEqual(result["trajectories"][0]["calls"], [])
+
+    def test_ifbench_rejects_invalid_json_fields_at_either_stage(self):
+        row = {"id": "dev:fields", "input": "Say alpha", "instruction_id_list": [], "kwargs": []}
+        seed = {"prompt": "generate", "revision_prompt": "revise"}
+        task = tasks.Task("ifbench", [row], [], {}, seed)
+        for stage, field in ((0, "response"), (1, "final_response")):
+            for invalid in ({"reasoning": "", field: "alpha", "score": 1},
+                            {field: "alpha"}, {"reasoning": "", field: 1},
+                            {"reasoning": "", "answer": "alpha"}):
+                with self.subTest(stage=stage, invalid=invalid):
+                    frames = ([json.dumps({"reasoning": "", "response": "alpha"})] if stage else [])
+                    frames.append(json.dumps(invalid))
+                    requests = []
+                    def call(*args):
+                        requests.append(args)
+                        return frames[len(requests) - 1]
+                    result = tasks.evaluate(task, seed, [row], call)
+                    self.assertEqual(result["scores"], [0.0])
+                    self.assertEqual(result["outputs"], [""])
+                    self.assertEqual(len(requests), stage + 1)
+
+    def test_ifbench_caller_cannot_replace_protected_query_or_checks(self):
+        row = {"id": "dev:frozen", "input": "Original query", "instruction_id_list": ["original"],
+               "kwargs": [{"count": 1}]}
+        seed = {"prompt": "generate", "revision_prompt": "revise"}
+        task = tasks.Task("ifbench", [row], [], {}, seed)
+        forged = dict(row, input="Forged query", instruction_id_list=[], kwargs=[])
+        requests = []
+        def call(role, messages, tokens):
+            requests.append(messages)
+            return json.dumps({"reasoning": "", "response": "draft"} if len(requests) == 1
+                              else {"reasoning": "", "final_response": "final"})
+        def metric(example, prediction):
+            self.assertEqual(example.prompt, "Original query")
+            self.assertEqual(example.instruction_id_list, ["original"])
+            self.assertEqual(example.kwargs, [{"count": 1}])
+            return SimpleNamespace(score=0.0, feedback="protected")
+        with patch.dict(tasks._METRICS, {id(task.manifest): metric}):
+            result = tasks.evaluate(task, seed, [forged], call)
+        self.assertEqual(result["scores"], [0.0])
+        self.assertNotIn("Forged query", json.dumps(requests))
+
+    def test_ifbench_membership_and_capture_guards_precede_model_calls(self):
+        train = {"id": "if:train", "input": "Train", "instruction_id_list": [], "kwargs": []}
+        selection = dict(train, id="if:selection", input="Selection")
+        seed = {"prompt": "generate", "revision_prompt": "revise"}
+        task = tasks.Task("ifbench", [train], [selection], {}, seed)
+        for rows, capture in (([dict(train, id="outside")], False), ([selection], True)):
+            with self.subTest(capture=capture), self.assertRaises(ValueError):
+                tasks.evaluate(task, seed, rows, lambda *args: self.fail("called"), capture)
 
     def test_signature_adaptation_never_exposes_body(self):
         source = "def wanted(a, b=2):\n    secret_reference = 999\n    return a + b\n"

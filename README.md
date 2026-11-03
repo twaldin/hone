@@ -79,11 +79,11 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 ## Development optimizer pilot
 
-[`pilot/`](pilot/) compares Hone's paired, noise-calibrated policy, pinned official GEPA, and a plain agent loop on development-only IFBench, historical AIME, and bounded MBPP agent programs. It uses one subscription route, an account allowlist, usage throttling, and matched reported-usage budgets. Final-test data stays sealed.
+[`pilot/`](pilot/) compares Hone's paired, noise-calibrated policy, pinned official GEPA, and a plain agent loop on development-only IFBench or its HoVer alternate, historical AIME, and bounded MBPP agent programs. It uses one subscription route, an account allowlist, usage throttling, and matched reported-usage budgets. Final-test labels stay sealed.
 
 The pilot is an admission experiment, not an optimizer-quality claim. Its accounting accepts disclosed token undercounts from internal retries and failed calls; complete attempt and failed-call receipts are required before a full comparison. See [the pilot contract and commands](docs/pilot.md).
 
-The first two epochs exposed MBPP contract defects. [Predeclaration 3](evidence/pilot/predeclaration-3.md) replaced the shared interpreter with a separate candidate process and trusted data comparisons. All 300 MBPP adversarial checks passed, but IFBench failed the unchanged control ranking. [Handoff 3](evidence/pilot/handoff-3.md) records the stop. No search is admitted.
+The first two epochs exposed MBPP contract defects. [Predeclaration 3](evidence/pilot/predeclaration-3.md) separated candidate execution from trusted grading, and all 300 MBPP adversarial checks passed. IFBench then failed its control ranking. [Predeclaration 4](evidence/pilot/predeclaration-4.md) retains admitted MBPP evidence, uses externally published optimized P controls, and fixes the IFBench headroom rule before new model calls. [The pilot guide](docs/pilot.md) records the current admission and run commands.
 
 ## Status and limitations
 

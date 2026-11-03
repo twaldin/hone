@@ -11,6 +11,8 @@ from .tasks import Task, evaluate, score_output
 
 VERSION = "pilot-adversarial-v3"
 TASK_NAMES = ("mbpp", "ifbench", "aime")
+TEXT_FIELDS = {"aime": ("answer",), "ifbench": ("response", "final_response"),
+               "hover": ("summary", "query", "summary", "query")}
 
 
 @dataclass(frozen=True)
@@ -93,10 +95,42 @@ def string_task(task: Task) -> tuple[Task, dict, str]:
         row = {"id": "adversarial:ifbench:synthetic", "input": "Include the word heliotropeproofword.",
                "instruction_id_list": ["keywords:existence"], "kwargs": [{"keywords": ["heliotropeproofword"]}]}
         good = "heliotropeproofword"
+    elif task.name == "hover":
+        row = {"id": "adversarial:hover:synthetic", "input": "Find support.",
+               "supporting_facts": [{"key": "heliotropeproofword", "value": 0}]}
+        good = json.dumps(["heliotropeproofword | trusted abstract"])
     else:
         row = {"id": "adversarial:aime:synthetic", "input": "Return the integer 739.", "answer": "739"}
         good = "739"
     return Task(task.name, [row], [], task.manifest, task.seed_candidate), row, good
+
+
+def text_checks(task: Task) -> dict:
+    synthetic, row, good = string_task(task)
+    checks = {"row": row, "positive_output": good, "positive_score": score_output(synthetic, row, good),
+              "records": [], "passed": False}
+    if checks["positive_score"] != 1:
+        return checks
+    fields = TEXT_FIELDS[task.name]
+    for payload in text_manifest():
+        source = payload["source"]
+        direct = score_output(synthetic, row, source)
+        for mode in ("protected-json", "raw-protocol"):
+            frames = []
+            def call(role, messages, tokens):
+                field = fields[len(frames)]
+                raw = json.dumps({"reasoning": "", field: source}) if mode == "protected-json" else source
+                frames.append(raw)
+                return raw
+            execution = evaluate(synthetic, task.seed_candidate, [row], call)
+            record = {"attack": payload["name"], "mode": mode, "source": source, "frames": frames,
+                      "direct_score": direct, "outputs": execution["outputs"], "scores": execution["scores"]}
+            checks["records"].append(record)
+            expected_frames = len(fields) if mode == "protected-json" else 1
+            if direct != 0 or execution["scores"] != [0.0] or len(frames) != expected_frames:
+                return checks
+    checks["passed"] = True
+    return checks
 
 
 def run(tasks: list[Task], identities: dict, out: Path) -> dict:
@@ -136,28 +170,12 @@ def run(tasks: list[Task], identities: dict, out: Path) -> dict:
         for task in tasks:
             if task.name == "mbpp":
                 continue
-            synthetic, row, good = string_task(task)
-            checks = {"row": row, "positive_output": good, "positive_score": score_output(synthetic, row, good), "records": []}
+            checks = text_checks(task)
             proof["text_only"][task.name] = checks
-            if checks["positive_score"] != 1:
-                raise ControlsFailed(f"{task.name}: synthetic trusted checker positive control failed")
-            for payload in text_manifest():
-                source = payload["source"]
-                direct = score_output(synthetic, row, source)
-                for mode in ("protected-json", "raw-protocol"):
-                    frames = []
-                    def call(role, messages, tokens):
-                        field = "answer" if task.name == "aime" else "response" if not frames else "final_response"
-                        raw = json.dumps({"reasoning": "", field: source}) if mode == "protected-json" else source
-                        frames.append(raw)
-                        return raw
-                    execution = evaluate(synthetic, task.seed_candidate, [row], call)
-                    record = {"attack": payload["name"], "mode": mode, "source": source, "frames": frames,
-                              "direct_score": direct, "outputs": execution["outputs"], "scores": execution["scores"]}
-                    checks["records"].append(record)
-                    append_json(out / f"{task.name}.jsonl", record)
-                    if direct != 0 or execution["scores"] != [0.0]:
-                        raise ControlsFailed(f"Adversarial text positive: {task.name}/{payload['name']}/{mode}; stop epoch")
+            for record in checks["records"]:
+                append_json(out / f"{task.name}.jsonl", record)
+            if not checks["passed"]:
+                raise ControlsFailed(f"{task.name}: text checker or protocol adversarial control failed; stop epoch")
         proof["passed"] = True
         return proof
     finally:

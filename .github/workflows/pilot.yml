@@ -64,7 +64,7 @@ jobs:
       - name: Install frozen native policy workspace dependencies
         run: nice -n 10 taskset -c "$PILOT_CI_CPU" pnpm install --frozen-lockfile --ignore-scripts --child-concurrency=1 --network-concurrency=2
       - name: Install frozen Python dependencies
-        run: nice -n 10 taskset -c "$PILOT_CI_CPU" uv sync --project pilot --frozen
+        run: nice -n 10 taskset -c "$PILOT_CI_CPU" uv sync --project pilot --frozen --extra retrieval
       - name: Bootstrap pinned development metric resources and Docker image
         run: |
           nice -n 10 taskset -c "$PILOT_CI_CPU" pilot/.venv/bin/python - <<'PY'

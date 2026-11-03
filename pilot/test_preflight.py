@@ -1,35 +1,52 @@
 import argparse
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from io import StringIO
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from pilot.__main__ import TASKS, evaluator_identity, file_hash, main, machine_proof, replay, save, seal
-from pilot.controls import CONTROL_SEED
+from pilot.__main__ import TASKS, controls as run_controls, evaluator_identity, file_hash, main, machine_proof, offline_adversarial, replay, save, seal
+from pilot.controls import ControlsFailed, P_CONTROL_SEED, representative_rows
 from pilot.runtime import ROOT, digest
 from pilot.tasks import Task
-from pilot.test_adversarial import admission_fixture, fixture_tasks
+from pilot.test_adversarial import fixture_tasks
+from pilot.admission import text_admission
+from pilot import tasks as task_module
+from pilot import hover
 
 
 class PreflightTests(unittest.TestCase):
     def fixture(self, root):
         tasks = {task.name: task for task in fixture_tasks()}
         controls = root / "controls"
-        proof = admission_fixture(list(tasks.values()))
-        save(controls / "adversarial.json", proof)
-        save(controls / "cohorts.json", {"seed": CONTROL_SEED,
-             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-3.md"),
-             "cohorts": proof["cohorts"], "adversarial_hash": digest(proof)})
-        for name, task in tasks.items():
-            save(controls / name / "controls.json", {
-                "ranking_passed": True, "noise_passed": True,
-                "identity": evaluator_identity(task),
-                "adversarial_hash": digest(proof),
-                "rows": proof["cohorts"][name]["rows"],
-            })
+        declaration = file_hash(ROOT / "evidence/pilot/predeclaration-4.md")
+        self.metrics = {id(tasks["ifbench"].manifest): lambda row, pred: SimpleNamespace(
+            score=float(pred.response == "heliotropeproofword"), feedback="checked")}
+        self.reused = ({"ranking_passed": True, "noise_passed": True,
+                        "rows": [row["id"] for row in representative_rows(tasks["mbpp"])]},
+                       {"fixture": "already admitted unchanged MBPP"})
+        save(controls / "panel.json", {"version": 4, "tasks": list(TASKS), "all_admitted": True,
+                                     "predeclaration_hash": declaration})
+        save(controls / "cohorts.json", {"version": 4, "seed": P_CONTROL_SEED,
+             "predeclaration_hash": declaration,
+             "cohorts": {name: {"rows": [row["id"] for row in representative_rows(task)]} for name, task in tasks.items()}})
+        save(controls / "mbpp/controls.json", self.reused[0])
+        save(controls / "mbpp/admission.json", self.reused[1])
+        with patch.dict(task_module._METRICS, self.metrics):
+            for name in ("ifbench", "aime"):
+                task = tasks[name]
+                rows = representative_rows(task)
+                proof = text_admission(task, evaluator_identity(task), rows)
+                save(controls / name / "admission.json", proof)
+                save(controls / name / "controls.json", {
+                    "ranking_passed": True, "noise_passed": True, "identity": evaluator_identity(task),
+                    "adversarial_hash": digest(proof), "rows": [row["id"] for row in rows],
+                    "artifacts": {"naive": task.seed_candidate},
+                    "controls": {"naive": {"scores": [0.8] * len(rows), "mean": 0.8}},
+                })
         seal(controls)
         pool = root / "pool.json"
         save(pool, {"*": False, "anthropic": {"accounts": ["email:pilot@gmail.com"], "apiKeys": False}})
@@ -38,7 +55,91 @@ class PreflightTests(unittest.TestCase):
     def invoke(self, root, tasks, controls, pool, command):
         argv = ["pilot", command, "--task", "mbpp", "--controls", str(controls),
                 "--pool", str(pool), "--cache", str(root / "cache"), "--out", str(root / "out")]
-        return patch("sys.argv", argv), patch("pilot.tasks.load_task", side_effect=lambda name, cache: tasks[name])
+        return (patch("sys.argv", argv), patch("pilot.tasks.load_task", side_effect=lambda name, cache: tasks[name]),
+                patch("pilot.__main__.reuse_mbpp", return_value=self.reused), patch.dict(task_module._METRICS, self.metrics))
+
+    @contextmanager
+    def offline_fixture(self, root):
+        tasks, _, _ = self.fixture(root)
+        cache = root / "cache"
+        task = Task("hover", [{"id": f"hover:train:{index}", "input": f"claim {index}",
+                              "supporting_facts": [{"key": "Alpha", "value": 0}, {"key": "Beta", "value": 0},
+                                                   {"key": "Gamma", "value": 0}]} for index in range(40)],
+                    [], {"task": "hover", "fixture": True}, dict(hover.SEED))
+        tasks["hover"] = task
+        receipt = {"fixture": "frozen numeric retrieval index"}
+        prepared = hover.PreparedRetrieval(lambda query, k: ["Unrelated | abstract"], receipt)
+        with patch("pilot.tasks.load_task", side_effect=lambda name, cache: tasks[name]), patch(
+            "pilot.__main__.reuse_mbpp", return_value=self.reused
+        ), patch("pilot.hover.prepare_retrieval", return_value=receipt), patch(
+            "pilot.__main__.machine_proof"
+        ), patch.dict(task_module._METRICS, self.metrics), patch.dict(
+            hover._CACHES, {id(task.manifest): cache}
+        ), patch.dict(hover._RETRIEVERS, {cache / "hover-retrieval": prepared}):
+            yield tasks, root / "admission", cache
+
+    def test_offline_cli_admits_protocols_without_auth_or_model_bootstrap(self):
+        with tempfile.TemporaryDirectory() as directory, self.offline_fixture(Path(directory)) as (_, out, cache):
+            argv = ["pilot", "adversarial", "--out", str(out), "--cache", str(cache), "--pool", "/must-not-open"]
+            with patch("sys.argv", argv), patch("pilot.__main__.environment") as auth, patch(
+                "pilot.__main__.create_pool"
+            ) as pool, patch("pilot.__main__.calls_for") as transport, redirect_stdout(StringIO()):
+                main()
+            self.assertTrue(json.loads((out / "adversarial.json").read_text())["passed"])
+            auth.assert_not_called()
+            pool.assert_not_called()
+            transport.assert_not_called()
+
+    def test_failed_protocol_proof_is_retained_and_blocks_controls(self):
+        with tempfile.TemporaryDirectory() as directory, self.offline_fixture(Path(directory)) as (tasks, out, cache):
+            def unsafe(row, prediction):
+                return SimpleNamespace(score=float(prediction.response == "heliotropeproofword" or
+                                                    "AlwaysEqual" in prediction.response), feedback="unsafe fixture")
+            with patch.dict(task_module._METRICS, {id(tasks["ifbench"].manifest): unsafe}), redirect_stdout(StringIO()):
+                with self.assertRaisesRegex(ControlsFailed, "stop"):
+                    offline_adversarial(argparse.Namespace(task="all", out=out, cache=cache))
+            proof = json.loads((out / "ifbench/admission.json").read_text())
+            self.assertFalse(proof["passed"])
+            self.assertEqual(proof["checks"]["records"][0]["scores"], [1.0])
+            self.assertFalse((out / "aime/admission.json").exists())
+            args = argparse.Namespace(task="all", out=Path(directory) / "new-controls", adversarial=out, cache=cache)
+            with patch("pilot.__main__.environment") as auth, patch("pilot.__main__.calls_for") as transport:
+                with self.assertRaises(ValueError):
+                    run_controls(args)
+                auth.assert_not_called()
+                transport.assert_not_called()
+
+    def test_headroom_transition_freezes_inputs_and_keeps_panel_order(self):
+        for replaced in (False, True):
+            with self.subTest(replaced=replaced), tempfile.TemporaryDirectory() as directory, self.offline_fixture(
+                Path(directory)
+            ) as (_, admission, cache), redirect_stdout(StringIO()):
+                offline_adversarial(argparse.Namespace(task="all", out=admission, cache=cache))
+                out = Path(directory) / "measured-controls"
+                order = []
+                def transport(pool, env, destination, limits):
+                    frozen = json.loads((out / "cohorts.json").read_text())
+                    self.assertEqual(set(frozen["cohorts"]), {"mbpp", "ifbench", "aime", "hover"})
+                    for name in ("ifbench", "aime", "hover"):
+                        self.assertIn(name, frozen["text_admission_hashes"])
+                        self.assertTrue((out / name / "admission.json").exists())
+                    order.append(destination.name)
+                    call = Mock(side_effect=AssertionError("State-transition fixture cannot dispatch a model"))
+                    call.gateway = SimpleNamespace(route_identity={"fixture": True})
+                    ledger = SimpleNamespace(limits=limits, summary=lambda throttle: {"calls": 0})
+                    return call, ledger, SimpleNamespace()
+                def measurement(task, call, destination, identity, **kwargs):
+                    result = {"headroom_replacement": "hover"} if replaced and task.name == "ifbench" else {
+                        "ranking_passed": True, "noise_passed": True}
+                    save(destination / "controls.json", result)
+                    return result
+                args = argparse.Namespace(task="all", out=out, cache=cache, adversarial=admission)
+                with patch("pilot.__main__.calls_for", side_effect=transport), patch("pilot.controls.measure", side_effect=measurement):
+                    run_controls(args, json.loads((Path(directory) / "pool.json").read_text()), {})
+                expected = ["ifbench", "hover", "aime"] if replaced else ["ifbench", "aime"]
+                self.assertEqual(order, expected)
+                self.assertEqual(json.loads((out / "panel.json").read_text())["tasks"],
+                                 ["mbpp", "hover", "aime"] if replaced else ["mbpp", "ifbench", "aime"])
 
     def test_other_task_admission_blocks_every_search_before_transport(self):
         for command in ("smoke", "pilot"):
@@ -64,35 +165,20 @@ class PreflightTests(unittest.TestCase):
                             save(path, control)
                             if defect != "tampered":
                                 seal(controls)
-                        argv, loader = self.invoke(root, tasks, controls, pool, command)
-                        with argv, loader, patch("pilot.__main__.open_gateway") as transport:
+                        argv, loader, reused, metric = self.invoke(root, tasks, controls, pool, command)
+                        with argv, loader, reused, metric, patch("pilot.__main__.open_gateway") as transport:
                             with self.assertRaises((ValueError, FileNotFoundError)):
                                 main()
                             transport.assert_not_called()
                         self.assertFalse((root / "out").exists())
 
-    def test_all_pass_admits_requested_mbpp_cells_to_transport(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            tasks, controls, pool = self.fixture(root)
-            argv, loader = self.invoke(root, tasks, controls, pool, "smoke")
-            with argv, loader, redirect_stdout(StringIO()), patch(
-                "pilot.__main__.open_gateway", side_effect=RuntimeError("offline transport")
-            ) as transport:
-                with self.assertRaisesRegex(RuntimeError, "Smoke failed"):
-                    main()
-            self.assertEqual(transport.call_count, 3)
-            results = sorted((root / "out").rglob("result.json"))
-            self.assertEqual(len(results), 3)
-            self.assertEqual({json.loads(path.read_text())["task"] for path in results}, {"mbpp"})
-            self.assertEqual({json.loads(path.read_text())["method"] for path in results}, {"hone", "gepa", "plain"})
 
-    def test_old_or_incomplete_adversarial_proofs_block_all_search(self):
+    def test_stale_or_incomplete_text_admission_blocks_all_search(self):
         for defect in ("missing", "unsealed", "old", "positive", "incomplete"):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tasks, controls, pool = self.fixture(root)
-                path = controls / "adversarial.json"
+                path = controls / "aime/admission.json"
                 proof = json.loads(path.read_text())
                 if defect in {"missing", "unsealed"}:
                     path.unlink()
@@ -101,18 +187,36 @@ class PreflightTests(unittest.TestCase):
                         save(path, proof)
                 else:
                     if defect == "old":
-                        proof["version"] = "pilot-adversarial-v2"
+                        proof["version"] = "pilot-text-admission-v3"
                     elif defect == "positive":
-                        proof["mbpp"][0]["score"] = 1
+                        proof["checks"]["records"][0]["scores"] = [1.0]
                     else:
-                        del proof["text_only"]["aime"]
+                        proof["checks"]["records"].pop()
                     save(path, proof)
                     seal(controls)
-                argv, loader = self.invoke(root, tasks, controls, pool, "smoke")
-                with argv, loader, patch("pilot.__main__.environment") as auth, patch("pilot.__main__.open_gateway") as transport:
+                argv, loader, reused, metric = self.invoke(root, tasks, controls, pool, "smoke")
+                with argv, loader, reused, metric, patch("pilot.__main__.environment") as auth, patch("pilot.__main__.open_gateway") as transport:
                     with self.assertRaises((ValueError, FileNotFoundError)):
                         main()
                     transport.assert_not_called()
+                    auth.assert_not_called()
+
+    def test_panel_cannot_contradict_the_measured_headroom_branch(self):
+        for mean, selected in ((0.8, ["mbpp", "hover", "aime"]), (0.95, list(TASKS))):
+            with self.subTest(mean=mean), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tasks, controls, pool = self.fixture(root)
+                panel = json.loads((controls / "panel.json").read_text())
+                panel["tasks"] = selected
+                save(controls / "panel.json", panel)
+                control = json.loads((controls / "ifbench/controls.json").read_text())
+                control["controls"]["naive"] = {"scores": [mean] * 40, "mean": mean}
+                save(controls / "ifbench/controls.json", control)
+                seal(controls)
+                argv, loader, reused, metric = self.invoke(root, tasks, controls, pool, "smoke")
+                with argv, loader, reused, metric, patch("pilot.__main__.environment") as auth:
+                    with self.assertRaisesRegex(ValueError, "contradicts"):
+                        main()
                     auth.assert_not_called()
 
     def test_machine_proof_records_inherited_cpu_six_and_avoidance(self):

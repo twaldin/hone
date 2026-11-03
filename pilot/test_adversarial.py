@@ -1,7 +1,4 @@
-import argparse
 import copy
-from contextlib import redirect_stdout
-from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -10,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from pilot import adversarial
-from pilot.__main__ import controls, evaluator_identity, main, save, seal
+from pilot.__main__ import evaluator_identity, load_adversarial, save, seal
 from pilot.controls import CONTROL_SEED, ControlsFailed, representative_rows
 from pilot.runtime import digest
 from pilot.tasks import Task
@@ -22,7 +19,8 @@ def fixture_tasks():
         rows = [{"id": f"{name}:train:{index}", "input": "Implement.\ndef target(value):",
                  "reference_code": "def target(value): return value + 1", "test_setup_code": "",
                  "test_list": ["assert target(1) == 2"], "answer": "42"} for index in range(100, 140)]
-        tasks.append(Task(name, rows, [], {"task": name}, {"prompt": "answer"}))
+        seed = ({"prompt": "answer", "revision_prompt": "revise"} if name == "ifbench" else {"prompt": "answer"})
+        tasks.append(Task(name, rows, [], {"task": name}, seed))
     return tasks
 
 
@@ -112,62 +110,26 @@ class AdversarialTests(unittest.TestCase):
             with self.subTest(defect=defect), self.assertRaises(ValueError):
                 adversarial.validate_result(broken, proof["identities"], proof["cohorts"])
 
-    def test_controls_refuse_positive_proof_before_pool_or_model_bootstrap(self):
+    def test_historical_proof_replays_its_own_identity_and_still_rejects_positives(self):
         tasks = fixture_tasks()
-        proof = admission_fixture(tasks)
-        proof["mbpp"][0]["score"] = 1
+        identities = {task.name: {"contract": 3, "fixture": task.name} for task in tasks}
+        proof = admission_fixture(tasks, identities)
+        for name in ("ifbench", "aime"):
+            rows = proof["cohorts"][name]["rows"][:20]
+            proof["cohorts"][name] = {"rows": rows, "cohort_hash": digest(rows)}
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            save(root / "adversarial" / "adversarial.json", proof)
-            seal(root / "adversarial")
-            args = argparse.Namespace(task="all", out=root / "controls", adversarial=root / "adversarial", cache=root)
-            with patch("pilot.tasks.load_task", side_effect=lambda name, cache: next(t for t in tasks if t.name == name)), patch(
-                "pilot.__main__.environment"
-            ) as auth, patch("pilot.__main__.calls_for") as transport:
-                with self.assertRaises(ValueError):
-                    controls(args)
-                auth.assert_not_called()
-                transport.assert_not_called()
-            self.assertFalse(args.out.exists())
+            out = Path(directory)
+            save(out / "adversarial.json", proof)
+            seal(out)
+            self.assertTrue(load_adversarial(out, tasks)["passed"])
+            proof["mbpp"][0]["score"] = 1.0
+            save(out / "adversarial.json", proof)
+            seal(out)
+            with self.assertRaises(ValueError):
+                load_adversarial(out, tasks)
 
-    def test_controls_freeze_all_cohorts_before_first_model_transport(self):
-        tasks = fixture_tasks()
-        proof = admission_fixture(tasks)
-        class Stop(RuntimeError):
-            pass
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            save(root / "adversarial" / "adversarial.json", proof)
-            seal(root / "adversarial")
-            args = argparse.Namespace(task="all", out=root / "controls", adversarial=root / "adversarial", cache=root)
-            def first_transport(*args):
-                cohorts = json.loads((root / "controls" / "cohorts.json").read_text())
-                self.assertEqual(cohorts["cohorts"], proof["cohorts"])
-                self.assertEqual(cohorts["adversarial_hash"], digest(proof))
-                raise Stop("Frozen before transport")
-            with patch("pilot.tasks.load_task", side_effect=lambda name, cache: next(t for t in tasks if t.name == name)), patch(
-                "pilot.__main__.machine_proof"
-            ), patch("pilot.__main__.calls_for", side_effect=first_transport):
-                with self.assertRaises(Stop):
-                    controls(args, {}, {})
 
-    def test_offline_cli_never_bootstraps_auth_pool_or_transport(self):
-        tasks = fixture_tasks()
-        proof = admission_fixture(tasks)
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "proof"
-            argv = ["pilot", "adversarial", "--out", str(out), "--pool", "/must-not-open"]
-            with patch("sys.argv", argv), patch("pilot.tasks.load_task", side_effect=lambda name, cache: next(t for t in tasks if t.name == name)), patch(
-                "pilot.adversarial.run", return_value=proof
-            ), patch("pilot.__main__.machine_proof"), patch("pilot.__main__.environment") as auth, patch(
-                "pilot.__main__.create_pool"
-            ) as pool, patch("pilot.__main__.open_gateway") as transport, redirect_stdout(StringIO()):
-                main()
-            auth.assert_not_called()
-            pool.assert_not_called()
-            transport.assert_not_called()
-            self.assertTrue((out / "bundle.json").exists())
-            self.assertTrue(json.loads((out / "adversarial.json").read_text())["passed"])
+
 
     @unittest.skipUnless(os.environ.get("PILOT_OFFICIAL_METRIC_TESTS") == "1", "Parent-controlled pinned official checker proof")
     def test_official_text_checkers_treat_every_attack_as_data(self):

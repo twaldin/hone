@@ -94,8 +94,9 @@ def _contract(task: Task, noise: dict) -> dict:
     from pilot.program import MAX_CALLS, MAX_OUTPUT_TOKENS, MAX_PROMPT_BYTES, MAX_WIRE_BYTES
     deployment = {"model_calls_per_row": 1, "max_output_tokens": 4096,
                   "format": "System prompt plus task input; return the task answer as text."}
-    if task.name in {"aime", "ifbench"}:
-        fields = ["answer"] if task.name == "aime" else ["response", "final_response"]
+    if task.name in {"aime", "ifbench", "hover"}:
+        fields = (["answer"] if task.name == "aime" else ["response", "final_response"] if task.name == "ifbench"
+                  else ["summary", "query", "summary", "query"])
         deployment.update(
             model_calls_per_row=len(fields),
             protected_response_fields=[["reasoning", field] for field in fields],
@@ -104,9 +105,13 @@ def _contract(task: Task, noise: dict) -> dict:
                    "No markdown fences or text outside JSON. "
                    + ("The answer string is scored as an integer." if task.name == "aime" else
                       "First generate response from the task input, then revise it into final_response "
-                      "using the original query and response. Only final_response is scored."),
-            editable_scope="The prompt supplies task instructions on every call. "
-                           "The response protocol, JSON decoder and scorer are protected and not editable.",
+                      "using the original query and response. Only final_response is scored." if task.name == "ifbench" else
+                      "Summarize initial claim retrieval, generate hop-2 query, summarize hop-2 passages with "
+                      "summary_1, then generate hop-3 query from both summaries. Retrieve 7, 7 and 10 documents. "
+                      "Score the union by the official supporting-title subset metric."),
+            editable_scope="Only each named module's instruction is editable. IFBench prompt is generation-only "
+                           "and revision_prompt is revision-only. HoVer has four separate module instructions. "
+                           "The response protocol, retrieval recipe, JSON decoder and scorer are protected.",
         )
     if "program" in task.seed_candidate:
         deployment = {"model_calls_per_row": MAX_CALLS, "total_requested_output_tokens": MAX_OUTPUT_TOKENS,

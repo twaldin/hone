@@ -1,0 +1,84 @@
+{
+  "expected_title": "Friends of the Parks",
+  "hover_source_sha256": "d14d7b8ff83ae5feb1236e06ecdec17d871b78f7c3d0656e6e355995034a54bb",
+  "peak_rss_kib": 3017936,
+  "provider_model_calls": 0,
+  "query": "Friends of the Parks FOTP Chicago Illinois",
+  "resource_receipt": {
+    "corpus_archive_sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
+    "corpus_sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
+    "dependencies": {
+      "PyStemmer": "2.2.0.3",
+      "bm25s": "0.2.12",
+      "jax": "0.6.0",
+      "jaxlib": "0.6.0"
+    },
+    "documents": 5233330,
+    "index_sha256": {
+      "data.csc.index.npy": "66574350c13aaab3e0573d8db5331852b185970de0c1fdf2b151e38a5059da2d",
+      "indices.csc.index.npy": "ade1a43143a12df60712e44001de789f5e8df6629c3673f988810c49bc6770a1",
+      "indptr.csc.index.npy": "6ded75207cbfaf340339b1e8d9ddad0a1829975460df87a469e137fd672c19a5",
+      "params.index.json": "7d61f293719da341d547cc5b6c991d200b5b58aa7890dea8f3b6401fe5c14a3c",
+      "vocab.index.json": "788eb76beab87d1c3511485f23759582bf98f5295d22d6865d7bf85b5b447bbc"
+    },
+    "recipe": {
+      "b": 0.4,
+      "k1": 0.9,
+      "n_threads": 1,
+      "selection": "jax",
+      "stemmer": "english",
+      "stopwords": "en"
+    }
+  },
+  "retrieved_titles": [
+    "Friends of the Parks",
+    "Rogers Park (band)",
+    "L.A.T.E. Ride",
+    "Douglas Park (Chicago)",
+    "Jackson Bark",
+    "Park Ridge, Illinois",
+    "Necia H. Apfel",
+    "Friends of the Parks",
+    "Rogers Park (band)",
+    "L.A.T.E. Ride",
+    "Douglas Park (Chicago)",
+    "Jackson Bark",
+    "Park Ridge, Illinois",
+    "Necia H. Apfel",
+    "Friends of the Parks",
+    "Rogers Park (band)",
+    "L.A.T.E. Ride",
+    "Douglas Park (Chicago)",
+    "Jackson Bark",
+    "Park Ridge, Illinois",
+    "Necia H. Apfel",
+    "Independence Park (Chicago)",
+    "Edison Park (Chicago park)",
+    "Park Forest, Illinois"
+  ],
+  "scope": "Real pinned retrieval and four-stage protocol; synthetic public-corpus row, not pilot model or search results",
+  "score": 1.0,
+  "synthetic_protocol_frames": [
+    {
+      "field": "summary",
+      "max_tokens": 4096,
+      "role": "task"
+    },
+    {
+      "field": "query",
+      "max_tokens": 4096,
+      "role": "task"
+    },
+    {
+      "field": "summary",
+      "max_tokens": 4096,
+      "role": "task"
+    },
+    {
+      "field": "query",
+      "max_tokens": 4096,
+      "role": "task"
+    }
+  ],
+  "wall_seconds": 13.654237242997624
+}

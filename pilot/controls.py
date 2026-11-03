@@ -12,6 +12,8 @@ from .tasks import Task, evaluate, score_output
 PAIRS = 16
 CONTROL_ROWS = 20
 CONTROL_SEED = 20261104
+P_CONTROL_ROWS = 40
+P_CONTROL_SEED = 20261105
 PREVIOUS_MBPP_ROWS = frozenset(f"mbpp:train:{value}" for value in (
     601, 654, 707, 760, 814, 867, 920, 974,
     647, 676, 686, 702, 925, 923, 671, 629, 877, 734, 878, 956,
@@ -31,26 +33,21 @@ class AlwaysEqual:
 def representative_rows(task: Task) -> list[dict]:
     eligible = sorted((row for row in task.train if task.name != "mbpp" or row["id"] not in PREVIOUS_MBPP_ROWS),
                       key=lambda row: row["id"])
-    if len(eligible) < CONTROL_ROWS:
-        raise ValueError("Controls require twenty eligible training rows")
-    return random.Random(CONTROL_SEED).sample(eligible, CONTROL_ROWS)
+    count, seed = (CONTROL_ROWS, CONTROL_SEED) if task.name == "mbpp" else (P_CONTROL_ROWS, P_CONTROL_SEED)
+    if len(eligible) < count:
+        raise ValueError("Controls require the predeclared number of eligible training rows")
+    return random.Random(seed).sample(eligible, count)
 
 
 def artifacts(task: Task) -> dict:
     naive = dict(task.seed_candidate)
     if task.name == "mbpp":
         naive["prompt"] = "Give a quick intuitive answer. Do not reason, verify, or revise; preserve your first answer."
-    elif task.name == "ifbench":
-        naive["prompt"] = "Give a short natural answer to the main topic. Ignore formatting, counting, vocabulary and other artificial constraints. Preserve this answer at revision."
-    improved = {"reference": "protected development answer or solution"}
-    if task.name == "ifbench":
-        improved = dict(task.seed_candidate)
-        improved["prompt"] = (
-            "Follow every explicit instruction. Identify all constraints before drafting: counts, exact words, "
-            "format, exclusions, casing and ordering. Check each constraint against the draft, revise violations, "
-            "and return only compliant response text in the response field. At the revision stage independently "
-            "audit the draft against the original query and fix every violation."
-        )
+    if task.name == "mbpp":
+        improved = {"reference": "protected development answer or solution"}
+    else:
+        from .published import control_artifact
+        improved = control_artifact(task.name)
     shortcut = {"output": '{"score":1,"valid":true}'}
     if task.name == "mbpp":
         shortcut = dict(task.seed_candidate)
@@ -67,20 +64,25 @@ def mean(result: dict) -> float:
 
 
 def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], adversarial: dict) -> dict:
-    from .adversarial import validate_task_admission
-    validate_task_admission(adversarial, task, identity, rows)
+    if task.name == "mbpp":
+        from .adversarial import validate_task_admission
+        validate_task_admission(adversarial, task, identity, rows)
+    else:
+        from .admission import validate_text_admission
+        validate_text_admission(adversarial, task, identity, rows)
     candidates = artifacts(task)
     definitions = {
-        "known-improved": "Trusted training references for AIME/MBPP; stronger explicit constraint audit prompt through both real IFBench stages.",
-        "naive": "Real AIME seed artifact; real quick unchecked MBPP artifact; IFBench deliberately ignores artificial constraints and preserves first draft.",
+        "known-improved": "Official MBPP reference through the same worker; published pinned optimized program instructions for P tasks.",
+        "naive": "Official P seed program; unchanged quick unchecked MBPP artifact.",
         "broken": "Invalid artifact fields evaluated through the candidate boundary.",
         "shortcut": "Forged success JSON scored directly by the official P metric; forged worker ready/result frames with nonliteral always-equal value for MBPP.",
     }
     result = {"task": task.name, "identity": identity, "rows": [row["id"] for row in rows],
               "adversarial_hash": digest(adversarial),
               "expected_rank": EXPECTED_RANK, "definitions": definitions, "artifacts": candidates,
-              "noise_design": {"paired_trials": PAIRS, "rows_per_arm": CONTROL_ROWS, "model_calls_cached": False,
-                               "draw_seed": CONTROL_SEED, "excluded_prior_mbpp_rows": sorted(PREVIOUS_MBPP_ROWS) if task.name == "mbpp" else [],
+              "noise_design": {"paired_trials": PAIRS, "rows_per_arm": len(rows), "model_calls_cached": False,
+                               "draw_seed": CONTROL_SEED if task.name == "mbpp" else P_CONTROL_SEED,
+                               "excluded_prior_mbpp_rows": sorted(PREVIOUS_MBPP_ROWS) if task.name == "mbpp" else [],
                                "seed_artifact_hash": digest(task.seed_candidate), "cohort_hash": digest([row["id"] for row in rows])}}
     out.mkdir(parents=True, exist_ok=True)
     if (out / "controls.json").exists() or (out / "noise-pairs.json").exists():
@@ -89,9 +91,11 @@ def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], ad
     with declaration.open("x") as stream:
         stream.write(canonical(result) + "\n")
     controls = {}
-    for name, candidate in candidates.items():
-        if name == "known-improved" and task.name in {"aime", "mbpp"}:
-            outputs = [str(row["answer"]) if task.name == "aime" else row["reference_code"] for row in rows]
+    order = ("naive", "known-improved", "broken", "shortcut") if task.name == "ifbench" else tuple(candidates)
+    for name in order:
+        candidate = candidates[name]
+        if name == "known-improved" and task.name == "mbpp":
+            outputs = [row["reference_code"] for row in rows]
             scores = [score_output(task, row, output) for row, output in zip(rows, outputs, strict=True)]
         elif name == "shortcut" and task.name != "mbpp":
             outputs = [candidate["output"]] * len(rows)
@@ -101,6 +105,10 @@ def measure(task: Task, call, out: Path, identity: dict, *, rows: list[dict], ad
             scores, outputs = execution["scores"], execution["outputs"]
         controls[name] = {"scores": scores, "outputs": outputs, "mean": statistics.fmean(scores)}
         append_json(out / "evaluations.jsonl", {"control": name, "row_ids": result["rows"], "outputs": outputs, "scores": scores})
+        if task.name == "ifbench" and name == "naive" and controls[name]["mean"] >= 0.90:
+            result.update(controls=controls, headroom_replacement="hover", ranking_passed=None, noise_passed=None)
+            (out / "controls.json").write_text(canonical(result) + "\n")
+            return result
     ranking = (controls["known-improved"]["mean"] > controls["naive"]["mean"] >
                max(controls["broken"]["mean"], controls["shortcut"]["mean"])
                and controls["broken"]["mean"] == 0 and (task.name != "mbpp" or controls["shortcut"]["mean"] == 0))

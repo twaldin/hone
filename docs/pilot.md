@@ -2,21 +2,23 @@
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-usage budget.
 
-**Epoch 3 stopped at the unchanged IFBench ranking gate.** The repaired MBPP boundary passed all 300 adversarial checks and its ordinary ranking/noise gates. IFBench's known-improved control scored 0.866667, below naive at 0.933333. No IFBench noise, AIME controls, smoke search or 27-run pilot followed. [Handoff 3](../evidence/pilot/handoff-3.md) records the evidence. [Predeclaration 3](../evidence/pilot/predeclaration-3.md) remains unchanged; no control prompts or cohorts were retuned.
+[Predeclaration 4](../evidence/pilot/predeclaration-4.md), committed as `030c792` before new model calls, replaces the authored P controls with published optimized instructions and a fresh 40-row draw. It preserves MBPP's admitted contract-3 measurements. [Handoff 3](../evidence/pilot/handoff-3.md) records the earlier IFBench ranking failure. Search still requires a sealed, fully admitted current panel.
 
 ## Prepare the runtime
 
 Run from the repository root on Linux with Docker, Bun, uv, pnpm, and omp 18.16.0 installed. Configure the auth broker through omp itself. Do not supply credentials to this repository.
 
 ```sh
-nice -n 10 taskset -c 6 uv sync --project pilot --frozen
+nice -n 10 taskset -c 6 uv sync --project pilot --frozen --extra retrieval
 nice -n 10 taskset -c 6 pnpm install --frozen-lockfile --ignore-scripts --network-concurrency=2 --child-concurrency=1
 nice -n 10 taskset -c 6 pilot/.venv/bin/python -m nltk.downloader -d .pilot-cache/nltk punkt punkt_tab stopwords averaged_perceptron_tagger_eng
 nice -n 10 docker pull python@sha256:623674a14ef93d052bb9b0de4dbf5f28eb578a35263838941cc8aa43213c1487
-nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot prepare --out .pilot-state/preparation-3
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot prepare --out .pilot-state/preparation-4
 ```
 
-Check the live venue's CPU affinities before choosing a CPU on another machine or date. The current venue worker is pinned to CPUs 0 and 5; this epoch uses CPU 6 and avoids the previously reserved 1–4 and 13–16. The runner uses one model request at a time and one CPU-heavy worker at a time.
+Inspect the live venue's CPU affinities before every heavy run. This epoch uses CPU 6 and avoids CPUs 0–5 and 13–16, including the venue's earlier 0/5 pin. The runner uses one model request and one CPU-heavy worker at a time.
+
+Preparation builds the pinned HoVer index before any IFBench score can select that alternate. The observed cold preparation took 310.97 seconds and peaked at 7.32 GiB RSS on one CPU. It indexed all 5,233,330 published corpus rows, including the empty metadata row. Corpus and numeric-index hashes enter the sealed admission evidence. Setup failures occur before model dispatch and cannot become row scores or trigger a new headroom draw.
 
 The prepare command creates an ignored pilot-specific account-pool file from `omp usage accounts`. It permits only Anthropic OAuth identities on `gmail.com` and `purdue.edu`. It excludes `lindy.ai`, every other provider, and every API key. The gateway also installs an OAuth-only native credential-session restriction: environment/configuration fallbacks cannot escape the pool. It selects the bundled model directly, without loading local model overrides. Public manifests record domain counts and the pool hash, not full account identities. Never commit `.pilot-state` or `.pilot-cache`.
 
@@ -25,30 +27,54 @@ Auth and usage child processes receive only an explicit allowlist of home, execu
 ## Admit the evaluator before search
 
 ```sh
-nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-3
-nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot throttle-proof --out evidence/pilot/throttle-proof-3
-nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot controls --out evidence/pilot/controls-3
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-4
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot throttle-proof --out evidence/pilot/throttle-proof-4
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-4 --out evidence/pilot/controls-4
 ```
 
-Controls run first on MBPP, then IFBench and AIME, on 20 training rows per task. Before model dispatch, the runner freezes every ordered cohort and requires current, sealed adversarial proof. Each draw uses `random.Random(20261104).sample(eligible, 20)` after sorting stable IDs. MBPP excludes the 28 earlier control rows from this draw only, never from training or search. The original control prompts, strict ranking and noise formulas remain unchanged. Every named adversarial candidate must score zero on every fresh MBPP control row before ordinary controls spend any model calls.
+The offline admission command preserves the MBPP contract-3 control and adversarial evidence without rerunning its measurements. It checks unchanged worker, scorer, transport, MBPP-specialized task/search code, data, route, decoding, cohort and seed hashes. Fresh P attacks pass through direct scoring and every protected response stage in both JSON and raw-protocol modes. A positive attack stops before auth or model bootstrap and retains the failing artifact.
 
-Admission requires known-improved > naive > both broken and shortcut. Sixteen fresh unchanged-seed pairs measure score noise on the same 20-row cohort, without cached model responses. The native Hone direct-paired calibration uses those deltas and their maximum excursion. Search is refused if the envelope obscures the positive-control contrast. For another slice size, all four calibration bounds scale by `sqrt(20/n)`; training uses one projected noise envelope, not another standard-error penalty. This independent-row approximation is a development calibration, not a final-test confidence interval or guarantee for future candidates.
+P draws use `random.Random(20261105).sample(eligible, 40)` after sorting official training IDs. All proposed cohorts and admissions are sealed before the first model call. IFBench's official naive seed runs first. A score at least 0.90 replaces IFBench with HoVer without measuring its improved control or noise. AIME keeps its own strict ranking and noise rule, without a replacement. MBPP retains its previous 20-row draw and 16 paired trials; its earlier row exclusions affect that draw only, never training or search.
 
-The AIME/MBPP positive controls check that the metric credits trusted correct answers; their oracle-to-naive contrast is not evidence that small optimizer gains are distinguishable. A zero or perfect naive cohort still fails the strict predeclared ranking; it is not repaired after observing results. A zero estimated noise envelope means the native threshold becomes strict improvement, not proof of a noiseless evaluator. Every control and unchanged arm archives its metric inputs in `evaluations.jsonl`, so the same offline replay command can recompute their scores.
+Admission requires known-improved > naive > both broken and shortcut, with broken = 0 and MBPP shortcut = 0. P positives execute the published optimized instructions, not trusted answers or a prompt authored here. Sixteen fresh paired unchanged-seed trials measure P noise on the same 40 rows without response caching. Keep `noiseFloor = 3/sqrt(2)*s` and `noiseEnvelope = max(4.5/sqrt(2)*s, max_abs_delta)`. The envelope must be strictly below the positive-control contrast. Projection uses `sqrt(source_rows/n)`, so P uses 40 and carried MBPP uses 20. A tie, reversed rank or obscured contrast stops without retuning. Zero estimated noise is not proof of a noiseless evaluator.
 
 A failed control command preserves its evidence. The runner refuses to overwrite it. Stop and inspect the measurement contract instead of rerunning until it passes.
+
+## Published P controls
+
+The pinned [GEPA artifact](https://github.com/gepa-ai/gepa-artifact/tree/cbefbc1aa0f43dd39874ec4bf42211365dbda42e) publishes final programs under MIT, copyright 2025 Lakshya A Agrawal. The retained [license](../pilot/published-controls.LICENSE) covers the extracted instructions. Selection is fixed to seed 0, GPT-4.1-mini, GEPA-MERGE, falling back to GEPA only when that optimizer directory is absent. AIME uses that metadata-only fallback. No pilot or final-test score chooses a checkpoint.
+
+| External historical validation | Official seed | Compile-selected program | Checkpoint |
+| --- | ---: | ---: | ---: |
+| IFBench | 81.89 | 90.03 | 7 |
+| AIME | 46.67 | 60.00 | 27 |
+| HoVer | 44.67 | 52.67 | 17 |
+
+These are published validation percentages, not current-model pilot results. The final exports match the selected checkpoint bytes exactly. [The extracted controls](../pilot/published-controls.json) record program, development-state and archive hashes. The inert reader never executes pickle reducers, constructors or imports. Non-instruction strings stay opaque; attached LMs, demos, training examples, traces and callbacks are rejected before export.
+
+```sh
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot.published --archive .pilot-cache/upstream-gepa/experiment_runs_data.tar.gz --output pilot/published-controls.json
+```
+
+The replay input is the pinned archive at `https://media.githubusercontent.com/media/gepa-ai/gepa-artifact/cbefbc1aa0f43dd39874ec4bf42211365dbda42e/experiment_runs_data.tar.gz`, SHA256 `0e1db10331bbbdd48701443b0690d5b7b8abef841a73b76882d26853b3f38dd7`, 1,931,042,598 bytes. A published gain need not transfer to Sonnet; the unchanged current-model ranking gate decides admission.
+
 
 ## Development tasks
 
 | Task | Training | Selection | Metric and source | Why this task |
 | --- | ---: | ---: | --- | --- |
 | P IFBench | 300 | 300 | Official loose instruction fraction from GEPA artifact `cbefbc1aa0f43dd39874ec4bf42211365dbda42e`. Selection is development-file rows 0–299, training is rows 300–599. This follows released code rather than the plan's 150-training figure. | Tests prompt optimization against explicit instruction constraints and a non-LLM checker. |
+| P HoVer, conditional alternate | 150 | 300 | Official GEPA three-support-document partition, 40% test, 40% validation, 20% train after seed-0 shuffle, with independent seed-1 caps. Discrete normalized supporting-title subset metric. | Replaces IFBench only at the predeclared headroom threshold; adds four-module retrieval optimization without an LLM judge. |
 | P AIME | 45 | 45 | Historical 90-question development data at `project-numina/aimo-validation-aime`, revision `13f9e12f613e720c2a2b2f345dd04b998a29494d`. Preserve `Random(0).shuffle`, then halves. The protected response separates `reasoning` and `answer`; apply official `int(pred.answer)` only to `answer`, with no boxed-answer recovery. | Adds reasoning-heavy exact-answer tasks without opening the AIME2025 final panel. |
 | A MBPP | 374 | 90 | Official full training and validation files at `google-research-datasets/mbpp`, revision `4bb6404fdc6cacfda99d4ac4205087b89d32030c`. Score all published development assertions passing. | Supplies a CC-BY-4.0 executable agent-program task with deterministic assertions and a bounded, isolated deployment. |
 
-Only explicit development files are fetched. The eager upstream constructors, AIME2025 final dataset, and MBPP test files are never loaded. Ordered membership, source hashes, checker hashes, package versions, and NLP asset hashes are recorded. IFBench scoring code is fetched at runtime from its licensed source. Only download statements and the `dspy.Prediction` container dependency are adapted. Its loose-response variants remain unchanged. Checker randomness is fixed by row identity and the language detector seed is zero.
+Only explicit development labels are decoded. The eager upstream constructors, AIME2025 final dataset, and MBPP test files are never loaded. HoVer first establishes exact membership using opaque canonical JSON title-token equality, then decodes only the 150 training and 300 selection rows. No held-out row reaches the JSON decoder. Ordered membership, source hashes, checker hashes, package versions, and NLP asset hashes are recorded. IFBench's licensed checker retains every loose-response variant; only download statements and the `dspy.Prediction` container dependency are adapted. Its randomness is fixed by row identity and the language detector seed is zero.
 
-IFBench preserves the released two-stage program: generate `reasoning`/`response`, then independently correct it into `reasoning`/`final_response`. Only `final_response` enters the official checker. Both calls are metered task calls. The task prompt is editable; the structured response protocol and metric remain protected.
+IFBench preserves the released two-stage program. Editable `prompt` supplies generation instructions and editable `revision_prompt` supplies revision instructions. Each stage receives only its own instruction. Generation returns `reasoning` and `response`; revision receives the original query and draft and returns `reasoning` and `final_response`. Only `final_response` enters the official checker. Both calls are metered task calls, and the JSON protocol and metric remain protected.
+
+HoVer preserves the four official modules: initial retrieval, summary, hop-2 query, retrieval, contextual summary, hop-3 query, retrieval. It retrieves 7, 7 and 10 passages and scores their ordered concatenation by gold-title coverage. The corpus pin, BM25S 0.2.12, PyStemmer 2.2.0.3, CPU JAX 0.6.0, English stopwords/stemming and `k1=0.9,b=0.4` are fixed across methods. Public indices with different parameters are not substituted. HoVer data is CC-BY-SA-4.0. The Wikipedia corpus is fetched at runtime, not committed; archived excerpts retain Wikipedia attribution.
+
+HoVer claims and support annotations are attributed to the [HoVer authors](https://github.com/hover-nlp/hover/tree/39b84697f196308f398a251a7aea9b82ae0f0562) under [CC-BY-SA-4.0](https://creativecommons.org/licenses/by-sa/4.0/). Retrieval excerpts are attributed to Wikipedia contributors, from the 2017 snapshot under [CC-BY-SA-3.0](https://creativecommons.org/licenses/by-sa/3.0/), via the [pinned DSPy repack](https://github.com/dspy/cache/tree/ef6a5e72a98b47cef31574a400fea8fe149559a3). Each archived passage retains its article-title prefix: its attribution and revision history are `https://en.wikipedia.org/wiki/{URL-encoded title}` and that URL plus `?action=history`. The repack supplies no separate license grant; this harness redistributes neither the full corpus nor the retrieval index.
 
 MBPP is a declared agent-program adaptation, not a claim to reproduce an official optimizer program. Its dataset is [Mostly Basic Python Problems](https://huggingface.co/datasets/google-research-datasets/mbpp), released by Google Research under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/), associated with [Austin et al., Program Synthesis with Large Language Models](https://arxiv.org/abs/2108.07732). The input adds function declarations derived from reference ASTs, never reference bodies or assertions. No Terrarium source or data is used.
 
@@ -74,7 +100,7 @@ The retry allowance above applies to each external transport invocation. Native 
 
 **Known accounting limits:** omp's final completion usage can omit tokens from internal failed attempts. Non-200 calls currently do not return usage either: their unreported token volume and dollar-equivalent are unknown, not evidence of free failures. The pilot accepts these disclosed undercounts and reports failed-call counts per method. The gateway counts provider HTTP attempts through omp's opaque fetch override and retry logger events. It checks header names only to reject API-key authentication, and separately counts those rejections so the negative auth proof cannot confuse the header guard with a native credential refusal. It never reads credential values or request bodies. Hidden attempts are provider attempts beyond the first per external call. Logger-event counts are reported separately, not added again to HTTP-attempt counts. A method is flagged above one hidden attempt per 100 calls, or when method rates differ by more than one percentage point. Zero observed hidden retries is not proof that omitted token volume is zero.
 
-Credential-opaque per-attempt admission and usage receipts, including failed-call usage, inside omp are required before the full matrix. No upstream issue is filed by this task.
+Credential-opaque per-attempt admission and usage receipts, including failed-call usage, inside omp are required before the later full benchmark matrix beyond this development pilot. No upstream issue is filed by this task.
 
 ### Fixed-budget feasibility
 
@@ -82,18 +108,18 @@ Keep the requested $10 ceiling rather than increase it to favor Hone's more expe
 
 ## Run and replay
 
-The interface below remains blocked for the failed epoch. Successful adversarial proof alone is insufficient; every task's ranking and noise gates must also pass:
+Successful offline admission alone is insufficient. Every selected task's ranking and noise gates must pass, and the assistant must review the smoke evidence before authorizing the next lane:
 
 ```sh
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-3 --out evidence/pilot/smoke-3
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot smoke --controls evidence/pilot/controls-4 --out evidence/pilot/smoke-4
 ```
 
-Smoke permits one real proposal per method and requires both a successful proposer response and a valid complete proposed artifact. It exercises the official GEPA reflection callable through the subscription route but does not spend the full budget. Hone imports the existing engine's 0.2 restart probability, deterministic restart draw, one format repair, and native promotion gate. It uses paired training slices of 8, 16, and 32 and fresh paired full-selection measurements. GEPA edits native `prompt` and optional `program` components directly, retaining its renderer, parser, round-robin component selection, Pareto selection, strict improvement, eight-example reflection minibatch, and 10,000-metric-call safety cap. Perfect training minibatches are skipped natively; smoke keeps sampling until a real proposal or a budget bound. The plain loop proposes from training traces and greedily retains strict full-selection improvements. Every method starts from the same artifact and uses the same deployment limits.
+Smoke permits one real proposal per method and requires both a successful proposer response and a valid complete proposed artifact. It exercises official GEPA's real subscription reflection callable without spending the full budget. Hone retains the engine's 0.2 restart probability, deterministic restart draw, one format repair, paired training slices of 8, 16 and 32, and fresh paired full-selection promotion measurements. GEPA edits the task's named native components, including separate IFBench and HoVer modules, while retaining its renderer, parser, round-robin component selection, Pareto selection, strict improvement, eight-example reflection minibatch and 10,000-metric-call safety cap. Perfect training minibatches are skipped natively until a proposal or a budget bound. Plain uses training traces and strict full-selection improvement. Every method starts from the same task seed artifact and deployment limits.
 
-No next-lane search is authorized with the failed `controls-3` bundle. A future epoch needs an explicitly authorized predeclaration and admitted smoke evidence. The accounting decision permits the development pilot to use disclosed reported usage and measured hidden-attempt rates; complete omp attempt and failed-call receipts remain prerequisites for the later full benchmark matrix.
+The failed `controls-3` bundle cannot authorize a search. Contract 4 carries only its independently admitted MBPP evidence, through an explicit unchanged-execution receipt. The development pilot accepts disclosed reported usage and measured hidden-attempt rates. The command below is for the second lane only after the assistant approves all three smoke results.
 
 ```sh
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-3 --out .pilot-runs/pilot-27
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-4 --out .pilot-runs/pilot-27
 ```
 
 The `pilot` command runs three methods on three tasks with seeds 0, 1 and 2. Existing complete cells are hash-verified and reused. Interrupted cells retain their durable usage prefix and last accepted incumbent and are never selectively rerun. No final test phase is implemented or authorized here.
@@ -101,7 +127,7 @@ The `pilot` command runs three methods on three tasks with seeds 0, 1 and 2. Exi
 Each run includes candidate artifacts, scored outputs, usage records, calibration identity, task membership, routes, budgets, and file hashes. Verify a retained bundle without model calls:
 
 ```sh
-pilot/.venv/bin/python -m pilot verify --out evidence/pilot/smoke-3
+pilot/.venv/bin/python -m pilot verify --out evidence/pilot/smoke-4
 ```
 
 Hash verification checks retained evidence integrity. It does not promise byte-identical stochastic provider responses on a fresh model replay.
@@ -111,7 +137,7 @@ Reported selection scores are adaptive: they select incumbents and are not unbia
 Recompute every retained rollout's score from the pinned development data and archived task-model outputs, without provider credentials or model calls:
 
 ```sh
-nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot replay --out evidence/pilot/smoke-3
+nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot replay --out evidence/pilot/smoke-4
 ```
 
 Replay first verifies the bundle hashes and task-resource identities, then runs the protected metrics again. MBPP replay executes archived solution code in the same isolated worker boundary.

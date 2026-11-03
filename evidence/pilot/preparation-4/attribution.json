@@ -1,0 +1,30 @@
+{
+  "hover_annotations": {
+    "attribution": "HoVer authors",
+    "license": "CC-BY-SA-4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+    "source": "https://github.com/hover-nlp/hover/tree/39b84697f196308f398a251a7aea9b82ae0f0562"
+  },
+  "mbpp": {
+    "attribution": "Google Research; Austin et al., Program Synthesis with Large Language Models",
+    "license": "CC-BY-4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "source": "https://github.com/google-research-datasets/mbpp/tree/4bb6404fdc6cacfda99d4ac4205087b89d32030c"
+  },
+  "optimized_instructions": {
+    "copyright": "Copyright (c) 2025 Lakshya A Agrawal",
+    "license": "MIT",
+    "notice": "../../../pilot/published-controls.LICENSE",
+    "source": "https://github.com/gepa-ai/gepa-artifact/tree/cbefbc1aa0f43dd39874ec4bf42211365dbda42e"
+  },
+  "retrieval_excerpts": {
+    "article_url_template": "https://en.wikipedia.org/wiki/{URL-encoded title}",
+    "attribution": "Wikipedia contributors, article named by each passage title prefix",
+    "full_corpus_or_index_redistributed": false,
+    "history_url_template": "https://en.wikipedia.org/wiki/{URL-encoded title}?action=history",
+    "license": "CC-BY-SA-3.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/3.0/",
+    "snapshot": "2017",
+    "source_repack": "https://github.com/dspy/cache/tree/ef6a5e72a98b47cef31574a400fea8fe149559a3"
+  }
+}
