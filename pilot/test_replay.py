@@ -15,7 +15,7 @@ from pilot.tasks import Task
 class ReplayTests(unittest.TestCase):
     def test_recomputes_scores_and_rejects_forged_success(self):
         task = Task("aime", [{"id": "dev:1", "input": "p", "answer": "42"}], [{"id": "dev:2", "input": "q", "answer": "7"}], {"task": "aime"}, {"prompt": "answer"})
-        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ"):
+        with tempfile.TemporaryDirectory() as directory, patch("pilot.__main__.os.environ", {}):
             out = Path(directory)
             save(out / "manifest.json", {"identity": {"task": task.manifest}})
             record = {"row_ids": ["dev:1", "dev:2"], "outputs": ["42", "not an integer"], "scores": [1.0, 0.0]}

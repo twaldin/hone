@@ -1,0 +1,35 @@
+{
+  "implementation_head": "271a82778c67015984085f772aae0f7ba78badd8",
+  "pilot": {
+    "command": "nice -n 10 taskset -c 0 env NLTK_DATA=$PWD/.pilot-cache/nltk PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -v",
+    "passed": 67,
+    "failed": 0,
+    "skipped": 0,
+    "real_artifacts": ["Docker candidate and solution boundaries", "pinned official IFBench metric", "pinned official GEPA optimizer and reflection parser"]
+  },
+  "native_optimizer": {
+    "command": "nice -n 10 taskset -c 0 pnpm --dir optimizer exec vitest run --maxWorkers=2 --minWorkers=1",
+    "passed": 72,
+    "failed": 0
+  },
+  "typecheck": {
+    "command": "nice -n 10 taskset -c 0 pnpm --workspace-concurrency=1 -r exec tsc --noEmit",
+    "exit_code": 0
+  },
+  "repository_suites": {
+    "command": "nice -n 10 taskset -c 0 pnpm -r --workspace-concurrency=1 exec vitest run --maxWorkers=2 --minWorkers=1",
+    "status": "failed in unmodified trusted/cli files; no baseline rerun performed",
+    "failures": [
+      {"path": "trusted/cli/test/lock-lease.test.ts:106", "observed": "stale metadata confirmed against a replacement live socket"},
+      {"path": "trusted/cli/test/optimizer-container.test.ts:1173", "observed": "installed Bun digest differs from the trusted runtime pin"},
+      {"path": "trusted/cli/test/stop-engine-seal.test.ts:271", "observed": "verifyEngine returned an object where the test expected a changed-identity string"}
+    ],
+    "cli_passed": 1038,
+    "cli_failed": 3,
+    "cli_skipped": 8,
+    "remaining_capsule_kit": {"command": "nice -n 10 taskset -c 0 pnpm --dir capsule-kit exec vitest run --maxWorkers=2 --minWorkers=1", "passed": 70, "failed": 0}
+  },
+  "github_actions": {"command": "gh api repos/twaldin/hone/actions/workflows --jq .total_count", "workflow_count": 0},
+  "forge": "gh; Origin executable is absent",
+  "cleanup_skills": "unslop and no-comments applied; deslop is not installed"
+}

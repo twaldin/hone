@@ -115,7 +115,7 @@ def measure(task: Task, call, out: Path, identity: dict) -> dict:
                    "pairedDeltaSd": sd, "localArmBaselineHash": digest(task.seed_candidate)}
     contrast = controls["known-improved"]["mean"] - controls["naive"]["mean"]
     result.update(calibration=calibration, noise_passed=envelope < contrast,
-                  budget=dict(LIMITS), calibration_scope="Conservative pilot envelope from unchanged seed, fixed training slice. Not a final-test confidence interval or calibration of all future candidates.")
+                  search_budget=dict(LIMITS), calibration_scope="Conservative pilot envelope from unchanged seed, fixed training slice. Not a final-test confidence interval or calibration of all future candidates.")
     (out / "controls.json").write_text(canonical(result) + "\n")
     if not result["noise_passed"]:
         raise ControlsFailed(f"{task.name}: unchanged-control noise obscures the positive-control contrast")

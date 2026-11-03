@@ -42,7 +42,10 @@ def environment(pool_path: Path) -> tuple[dict, dict]:
     identities = pool["anthropic"].get("accounts", [])
     if not identities or any(not isinstance(identity, str) or not identity.startswith("email:") or identity.split("|", 1)[0].rsplit("@", 1)[-1] not in {"gmail.com", "purdue.edu"} for identity in identities):
         raise ValueError("Pilot pool contains an unapproved account domain")
-    env = os.environ.copy()
+    env = {key: os.environ[key] for key in (
+        "HOME", "PATH", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+        "PI_CODING_AGENT_DIR", "OMP_AGENT_DIR",
+    ) if key in os.environ}
     env["OMP_AUTH_BROKER_ACCOUNT_POOL_FILE"] = str(pool_path.resolve())
     env["NLTK_DATA"] = str((ROOT / ".pilot-cache/nltk").resolve())
     env["PILOT_PYTHON_IMAGE"] = IMAGE
@@ -145,6 +148,7 @@ def controls(args, pool, env):
             raise ValueError("Control evidence already exists; preserve it instead of rerunning to a favorable result")
         call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100))
         try:
+            save(out / "measurement-budget.json", ledger.limits)
             measure(task, call, out, evaluator_identity(task))
         except Exception as error:
             save(out / "failure.json", {"error_type": type(error).__name__, "status": "admission-failed"})

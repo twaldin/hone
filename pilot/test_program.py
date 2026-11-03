@@ -178,7 +178,7 @@ def target(x): return -1
         self.assertEqual(program.score_solution(attack, "", ["assert target(7) == 8"], ["target"]), 0.0)
 
     def test_unpinned_runtime_image_is_rejected(self):
-        with patch.dict(os.environ, {"PILOT_PYTHON_IMAGE": "python:latest"}):
+        with patch("pilot.program.os.environ", {"PILOT_PYTHON_IMAGE": "python:latest"}):
             with self.assertRaises(RuntimeError):
                 program.docker_command("owned-name")
 
