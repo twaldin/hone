@@ -1,0 +1,440 @@
+{
+  "cells": [
+    {
+      "accounting": {
+        "calls_with_hidden_attempts": null,
+        "failed_calls": null,
+        "hidden_attempts": null,
+        "refusals": null,
+        "retry_observation_missing_calls": null,
+        "transport_failures": null,
+        "usage_missing_calls": null
+      },
+      "binding_cap": null,
+      "changed_artifact_retained": null,
+      "evidence": {
+        "reason": "missing_pair_inputs"
+      },
+      "inference": null,
+      "input_hashes": {},
+      "issues": [
+        {
+          "file": "manifest.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "search.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "result.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "spend.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "evaluations.jsonl",
+          "reason": "missing_file"
+        },
+        {
+          "file": "calls.jsonl",
+          "reason": "missing_file"
+        }
+      ],
+      "method": "hone",
+      "retained_selection_score": null,
+      "seed": 0,
+      "spend": null,
+      "status": "missing",
+      "stop_reason": null,
+      "task": "mbpp",
+      "timing": {
+        "active_seconds": null,
+        "pause_seconds": null,
+        "pauses": null,
+        "poll_seconds": null,
+        "throttle_seconds": null,
+        "wall_seconds": null
+      },
+      "unknown_usage": "Internal failed-attempt tokens and unreported failed-call usage remain unknown; conservative estimates are not reported usage."
+    },
+    {
+      "accounting": {
+        "calls_with_hidden_attempts": null,
+        "failed_calls": null,
+        "hidden_attempts": null,
+        "refusals": null,
+        "retry_observation_missing_calls": null,
+        "transport_failures": null,
+        "usage_missing_calls": null
+      },
+      "binding_cap": null,
+      "changed_artifact_retained": null,
+      "evidence": {
+        "reason": "missing_pair_inputs"
+      },
+      "inference": null,
+      "input_hashes": {},
+      "issues": [
+        {
+          "file": "manifest.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "search.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "result.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "spend.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "evaluations.jsonl",
+          "reason": "missing_file"
+        },
+        {
+          "file": "calls.jsonl",
+          "reason": "missing_file"
+        }
+      ],
+      "method": "gepa",
+      "retained_selection_score": null,
+      "seed": 0,
+      "spend": null,
+      "status": "missing",
+      "stop_reason": null,
+      "task": "mbpp",
+      "timing": {
+        "active_seconds": null,
+        "pause_seconds": null,
+        "pauses": null,
+        "poll_seconds": null,
+        "throttle_seconds": null,
+        "wall_seconds": null
+      },
+      "unknown_usage": "Internal failed-attempt tokens and unreported failed-call usage remain unknown; conservative estimates are not reported usage."
+    },
+    {
+      "accounting": {
+        "calls_with_hidden_attempts": null,
+        "failed_calls": null,
+        "hidden_attempts": null,
+        "refusals": null,
+        "retry_observation_missing_calls": null,
+        "transport_failures": null,
+        "usage_missing_calls": null
+      },
+      "binding_cap": null,
+      "changed_artifact_retained": null,
+      "evidence": {
+        "reason": "missing_pair_inputs"
+      },
+      "inference": null,
+      "input_hashes": {},
+      "issues": [
+        {
+          "file": "manifest.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "search.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "result.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "spend.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "evaluations.jsonl",
+          "reason": "missing_file"
+        },
+        {
+          "file": "calls.jsonl",
+          "reason": "missing_file"
+        }
+      ],
+      "method": "plain",
+      "retained_selection_score": null,
+      "seed": 0,
+      "spend": null,
+      "status": "missing",
+      "stop_reason": null,
+      "task": "mbpp",
+      "timing": {
+        "active_seconds": null,
+        "pause_seconds": null,
+        "pauses": null,
+        "poll_seconds": null,
+        "throttle_seconds": null,
+        "wall_seconds": null
+      },
+      "unknown_usage": "Internal failed-attempt tokens and unreported failed-call usage remain unknown; conservative estimates are not reported usage."
+    },
+    {
+      "accounting": {
+        "calls_with_hidden_attempts": null,
+        "failed_calls": null,
+        "hidden_attempts": null,
+        "refusals": null,
+        "retry_observation_missing_calls": null,
+        "transport_failures": null,
+        "usage_missing_calls": null
+      },
+      "binding_cap": null,
+      "changed_artifact_retained": null,
+      "evidence": {
+        "reason": "missing_pair_inputs"
+      },
+      "inference": null,
+      "input_hashes": {},
+      "issues": [
+        {
+          "file": "manifest.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "search.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "result.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "spend.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "evaluations.jsonl",
+          "reason": "missing_file"
+        },
+        {
+          "file": "calls.jsonl",
+          "reason": "missing_file"
+        }
+      ],
+      "method": "hone",
+      "retained_selection_score": null,
+      "seed": 0,
+      "spend": null,
+      "status": "missing",
+      "stop_reason": null,
+      "task": "hover",
+      "timing": {
+        "active_seconds": null,
+        "pause_seconds": null,
+        "pauses": null,
+        "poll_seconds": null,
+        "throttle_seconds": null,
+        "wall_seconds": null
+      },
+      "unknown_usage": "Internal failed-attempt tokens and unreported failed-call usage remain unknown; conservative estimates are not reported usage."
+    },
+    {
+      "accounting": {
+        "calls_with_hidden_attempts": null,
+        "failed_calls": null,
+        "hidden_attempts": null,
+        "refusals": null,
+        "retry_observation_missing_calls": null,
+        "transport_failures": null,
+        "usage_missing_calls": null
+      },
+      "binding_cap": null,
+      "changed_artifact_retained": null,
+      "evidence": {
+        "reason": "missing_pair_inputs"
+      },
+      "inference": null,
+      "input_hashes": {},
+      "issues": [
+        {
+          "file": "manifest.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "search.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "result.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "spend.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "evaluations.jsonl",
+          "reason": "missing_file"
+        },
+        {
+          "file": "calls.jsonl",
+          "reason": "missing_file"
+        }
+      ],
+      "method": "gepa",
+      "retained_selection_score": null,
+      "seed": 0,
+      "spend": null,
+      "status": "missing",
+      "stop_reason": null,
+      "task": "hover",
+      "timing": {
+        "active_seconds": null,
+        "pause_seconds": null,
+        "pauses": null,
+        "poll_seconds": null,
+        "throttle_seconds": null,
+        "wall_seconds": null
+      },
+      "unknown_usage": "Internal failed-attempt tokens and unreported failed-call usage remain unknown; conservative estimates are not reported usage."
+    },
+    {
+      "accounting": {
+        "calls_with_hidden_attempts": null,
+        "failed_calls": null,
+        "hidden_attempts": null,
+        "refusals": null,
+        "retry_observation_missing_calls": null,
+        "transport_failures": null,
+        "usage_missing_calls": null
+      },
+      "binding_cap": null,
+      "changed_artifact_retained": null,
+      "evidence": {
+        "reason": "missing_pair_inputs"
+      },
+      "inference": null,
+      "input_hashes": {},
+      "issues": [
+        {
+          "file": "manifest.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "search.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "result.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "spend.json",
+          "reason": "missing_file"
+        },
+        {
+          "file": "evaluations.jsonl",
+          "reason": "missing_file"
+        },
+        {
+          "file": "calls.jsonl",
+          "reason": "missing_file"
+        }
+      ],
+      "method": "plain",
+      "retained_selection_score": null,
+      "seed": 0,
+      "spend": null,
+      "status": "missing",
+      "stop_reason": null,
+      "task": "hover",
+      "timing": {
+        "active_seconds": null,
+        "pause_seconds": null,
+        "pauses": null,
+        "poll_seconds": null,
+        "throttle_seconds": null,
+        "wall_seconds": null
+      },
+      "unknown_usage": "Internal failed-attempt tokens and unreported failed-call usage remain unknown; conservative estimates are not reported usage."
+    }
+  ],
+  "label": "Adaptive development selection; descriptive uncertainty only, no superiority claim. No Holm correction.",
+  "matrix_status": "partial_or_stopped",
+  "methods": {
+    "gepa": {
+      "accounting": {
+        "available_cells": 2,
+        "expected_cells": 2,
+        "observed_subtotals": {},
+        "totals": {}
+      },
+      "inference": null,
+      "paired_tasks": [],
+      "phases": {},
+      "spend": {
+        "available_cells": 0,
+        "expected_cells": 2,
+        "observed_subtotals": {},
+        "totals": {}
+      },
+      "timing": {
+        "available_cells": 2,
+        "expected_cells": 2,
+        "observed_subtotals": {},
+        "totals": {}
+      }
+    },
+    "hone": {
+      "accounting": {
+        "available_cells": 2,
+        "expected_cells": 2,
+        "observed_subtotals": {},
+        "totals": {}
+      },
+      "inference": null,
+      "paired_tasks": [],
+      "phases": {},
+      "spend": {
+        "available_cells": 0,
+        "expected_cells": 2,
+        "observed_subtotals": {},
+        "totals": {}
+      },
+      "timing": {
+        "available_cells": 2,
+        "expected_cells": 2,
+        "observed_subtotals": {},
+        "totals": {}
+      }
+    },
+    "plain": {
+      "accounting": {
+        "available_cells": 2,
+        "expected_cells": 2,
+        "observed_subtotals": {},
+        "totals": {}
+      },
+      "inference": null,
+      "paired_tasks": [],
+      "phases": {},
+      "spend": {
+        "available_cells": 0,
+        "expected_cells": 2,
+        "observed_subtotals": {},
+        "totals": {}
+      },
+      "timing": {
+        "available_cells": 2,
+        "expected_cells": 2,
+        "observed_subtotals": {},
+        "totals": {}
+      }
+    }
+  },
+  "reporter_sha256": "sha256:a6187d3a252dad0f4b6d7f930916cec788009711d66f4324ec056ef2abf684c3",
+  "schema": "pilot-results-v1",
+  "seed": 0
+}

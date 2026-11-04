@@ -1,0 +1,74 @@
+{
+  "admission": {
+    "evidence": "evidence/pilot/seed0-9/preflight-stop.json",
+    "gate_rerun_after_failure": false,
+    "original_admitted_receipt_located": "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/.pilot-cache/hover-retrieval/index-receipt.json",
+    "original_index_copied": false,
+    "original_index_file_bytes_verified": false,
+    "original_receipt_equals_admitted": true,
+    "reason": "Frozen development cohorts or retrieval changed",
+    "retrieval_hash_mismatches": [
+      "data.csc.index.npy",
+      "indices.csc.index.npy",
+      "indptr.csc.index.npy",
+      "vocab.index.json"
+    ],
+    "seconds": 147.5,
+    "status": "failed-before-search"
+  },
+  "failing_before": {
+    "command": "nice -n 10 taskset -c 6 python3 -m unittest pilot.test_dispatch -v",
+    "exit_code": 1,
+    "failing_assertions_including_subtests": 10,
+    "observed_dispatches_per_fixture": 18,
+    "source_head": "cdb1e75fc76c2c3e44f313208e8f86d92ee50291",
+    "tests": 9
+  },
+  "limits": [
+    "Tests do not replace the real admission gate, which failed.",
+    "No optimizer performance was measured.",
+    "The original cache receipt matches; its underlying numeric index files were not rehashed or reused in this stopped run."
+  ],
+  "offline_report": {
+    "command": "nice -n 10 taskset -c 6 python3 -m pilot.results --runs evidence/pilot/seed0-9 --out evidence/pilot/results-9.json",
+    "complete_pairs": 0,
+    "exit_code": 0,
+    "matrix_status": "partial_or_stopped"
+  },
+  "passing_after": {
+    "full_python": {
+      "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 NLTK_DATA=<worktree>/.pilot-cache/nltk pilot/.venv/bin/python -m unittest discover -s pilot -p test_*.py -v",
+      "docker_enabled": true,
+      "exit_code": 0,
+      "official_metrics_enabled": true,
+      "seconds": 46.777,
+      "tests": 260
+    },
+    "native_receipts": {
+      "assertions": 70,
+      "command": "nice -n 10 taskset -c 6 bun test --max-concurrency=1 pilot/gateway-receipts.test.mjs",
+      "exit_code": 0,
+      "tests": 12
+    },
+    "targeted": {
+      "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu python3 -m unittest pilot.test_dispatch pilot.test_transition pilot.test_results pilot.test_runtime -v",
+      "exit_code": 0,
+      "seconds": 2.52,
+      "tests": 69
+    }
+  },
+  "pilot_model_calls": 0,
+  "predeclaration_commit": "a5ebc90",
+  "runtime": {
+    "bun_version": "1.4.4",
+    "cpu": 6,
+    "locked_pnpm_packages": 306,
+    "locked_python_packages": 61,
+    "nice": 10,
+    "numeric_threads": 1,
+    "omp_version": "18.16.0",
+    "python": "3.12.3"
+  },
+  "schema": "pilot-verification-v9",
+  "scored_final_tests_loaded": false
+}

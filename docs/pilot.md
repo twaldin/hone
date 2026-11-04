@@ -10,7 +10,9 @@
 
 Call 2507 answered after one internal retry, so final-call receipts report no transport failure while the failed attempt's token usage remains unknown. This run's observed hidden-attempt rate was 1/2616, or 0.03823%, below the 1% flag threshold. [The verification record](../evidence/pilot/verification-8a.json) binds source-audit provenance and the zero-model replay and test results.
 
-The [first-seed preflight](../evidence/pilot/seed0-preflight-9/README.md) stopped before any search. The frozen `pilot` dispatcher ignores `--seed 0` and selects all three seeds. An offline dispatch diagnostic also continued after two synthetic infrastructure failures with over-threshold hidden attempts and unknown usage. The authorized six-cell run therefore did not start. Predeclaration 9 remains unfinalized, and no optimizer comparison or final-test evaluation was performed.
+The [initial first-seed preflight](../evidence/pilot/seed0-preflight-9/README.md) stopped before any search at the frozen source because `pilot --seed 0` selected all three seeds and did not enforce dispatcher stop rules. That historical diagnostic remains bound to its original source head. The assistant then authorized the corrections and specified the interval method. [Predeclaration 9](../evidence/pilot/predeclaration-9.md), committed before search, fixes six seed-0 cells, the paired and hierarchical bootstrap, and the 2-point practical threshold. No final-test evaluation is authorized.
+
+The corrected runner then [stopped at real admission](../evidence/pilot/seed0-9/README.md), before any search: the freshly prepared HoVer index differs from the admitted receipt in four hashes. The pinned corpus, package versions and recipe match, but exact index equality does not. No gate was relaxed or rerun. All six cells remain unstarted with zero model spend; no optimizer comparison is available.
 
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-plus-estimated charged budget.
 
@@ -140,13 +142,13 @@ nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THR
 
 Smoke permits one real proposal per method and requires both a successful proposer response and a valid complete proposed artifact. It exercises official GEPA's real subscription reflection callable without spending the full budget. Hone retains the engine's 0.2 restart probability, deterministic restart draw, one format repair, paired training slices of 8, 16 and 32, and fresh paired full-selection promotion measurements. GEPA edits the task's named native components, including separate IFBench and HoVer modules, while retaining its renderer, parser, round-robin component selection, Pareto selection, strict improvement, eight-example reflection minibatch and 10,000-metric-call safety cap. Perfect training minibatches are skipped natively until a proposal or a budget bound. Plain uses training traces and strict full-selection improvement. Every method starts from the same task seed artifact and deployment limits.
 
-Earlier IFBench bundles, including the `controls-8` infrastructure abort, cannot authorize a search. The terminal `controls-7b` outcome selects only MBPP + HoVer after unchanged-execution validation. Each method's existing `spend.json` reconciles ordered calls to proposal, training-evaluation and selection-evaluation spend. Repairs are proposal spend; failed calls and external retries remain counted. Incomplete evaluation tails remain explicitly unassigned. The command below is for another lane only after the assistant reviews the valid measured plan, complete credential-opaque attempt receipts are available, and the assistant explicitly authorizes it.
+Earlier IFBench bundles, including the `controls-8` infrastructure abort, cannot authorize a search. The terminal `controls-7b` outcome selects only MBPP + HoVer after unchanged-execution validation. Each method's `spend.json` reconciles ordered calls to proposal, training-evaluation and selection-evaluation spend. Repairs, failed calls and external retries remain counted; incomplete evaluation tails remain explicitly unassigned. Predeclaration 9 authorizes only the following six-cell development run after unchanged admission, green CI and an exact-head cross-family READY.
 
 ```sh
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-7b --out .pilot-runs/pilot
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-7b --seed 0 --out .pilot-runs/pilot-seed0-9
 ```
 
-The `pilot` command runs three methods with seeds 0, 1 and 2 on the admitted panel: 27 searches for three tasks or 18 for the narrowed two-task pilot. Neither is authorized in this lane. Existing complete cells are hash-verified and reused. Interrupted cells retain their durable usage prefix and last accepted incumbent and are never selectively rerun. No final-test phase is implemented or authorized here.
+The `pilot` command honors exactly its `--seed`, defaulting to 0, on the admitted panel. It runs cells serially and checks finished receipts before the next cell: run-wide hidden attempts above 1%, any cell's unknown usage above 1%, or two consecutive infrastructure failures stop new dispatch. Exactly 1% is allowed. `stop.json` and `comparison.json` preserve the reason and counts; the active cell finishes before a rate-based stop. The throttle also enforces the remaining six-hour total pause allowance. Existing complete cells are hash-verified and reused; interrupted cells retain durable usage and are never selectively rerun. Seeds 1 and 2 and all final-test evaluation remain out of scope.
 
 Each run includes candidate artifacts, scored outputs, usage records, calibration identity, task membership, routes, budgets, and file hashes. Verify a retained bundle without model calls:
 
@@ -158,6 +160,8 @@ Hash verification checks retained evidence integrity. It does not promise byte-i
 
 Reported selection scores are adaptive: they select incumbents and are not unbiased estimates of deployment quality. No free postselection reevaluation or separate confirmation budget is added to this matched-budget smoke. Independent confirmation belongs to a separately authorized larger evaluation, not a public claim from these development scores.
 
+For seed 0, `python -m pilot.results --runs .pilot-runs/pilot-seed0-9 --out evidence/pilot/results-9.json` computes inference entirely from archived development outputs. It resamples unique paired selection instances 10,000 times for each task and method, then uses a task-and-instance hierarchical bootstrap for the equal-weight two-task mean. Both report 95% percentile intervals. An unchanged artifact compares the same baseline vector with itself, so stochastic rescoring cannot masquerade as an artifact improvement. The report labels adaptive selection, the 2-point practical threshold, and no superiority claim or Holm correction.
+
 Recompute every retained rollout's score from the pinned development data and archived task-model outputs, without provider credentials or model calls:
 
 ```sh
@@ -167,6 +171,10 @@ nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot replay --out evidence/pi
 Replay first verifies the bundle hashes and task-resource identities, then runs the protected metrics again. MBPP replay executes archived solution code in the same isolated worker boundary.
 
 `prepare`, `probe`, and `throttle-proof` regenerate the machine/task manifests, real route check, no-account/environment-fallback rejection check, and forced-high/outage pause proof. Current route evidence is `route-proof-v4`; earlier route, preparation and throttle directories carry explicit superseded status files. `aborted-controls-v1` remains inadmissible measurement evidence, not a passing control run.
+
+## Contract-9 verification and admission stop
+
+[Verification 9](../evidence/pilot/verification-9.json) records 260 passing Python tests with real Docker and official metrics, twelve passing native receipt tests, and the failing-before dispatcher regressions. It also records the real admission failure and zero-model stopped-run report replay. The [source transition](../evidence/pilot/source-transition-9.json) preserves the authenticated contract-8a execution baseline without changing archived control bundles.
 
 ## Contract-8 verification and setup
 

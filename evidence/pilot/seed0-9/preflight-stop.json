@@ -1,0 +1,107 @@
+{
+  "at": "2026-11-04T21:17:54.780124+00:00",
+  "differing_index_hashes": {
+    "data.csc.index.npy": {
+      "admitted": "66574350c13aaab3e0573d8db5331852b185970de0c1fdf2b151e38a5059da2d",
+      "prepared": "322c55b543c46e25dd3cc2eafc26da38754fad5c5d2f4c084244a4f7f38acad0"
+    },
+    "indices.csc.index.npy": {
+      "admitted": "ade1a43143a12df60712e44001de789f5e8df6629c3673f988810c49bc6770a1",
+      "prepared": "917fec3b246a2e95894b2b3254d75fc65bc5111f7f8605593a206686f472116d"
+    },
+    "indptr.csc.index.npy": {
+      "admitted": "6ded75207cbfaf340339b1e8d9ddad0a1829975460df87a469e137fd672c19a5",
+      "prepared": "ad667f887c23efd42c74162898d5c9c5d52a14520f0ca8411442af92d578907d"
+    },
+    "vocab.index.json": {
+      "admitted": "788eb76beab87d1c3511485f23759582bf98f5295d22d6865d7bf85b5b447bbc",
+      "prepared": "7e00c9fd8f525a202a48fadf1ea165077107a27c0fc3730dd98b83a89a88d8b6"
+    }
+  },
+  "elapsed_wall_seconds": 147.5,
+  "exception": "ValueError",
+  "failed_command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu NLTK_DATA=<worktree>/.pilot-cache/nltk pilot/.venv/bin/python -c \"load_panel(args)\"",
+  "failure_location": "pilot/__main__.py:428 in load_admission",
+  "final_test_labels_read": false,
+  "frozen_retrieval": {
+    "corpus_archive_sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
+    "corpus_sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
+    "dependencies": {
+      "PyStemmer": "2.2.0.3",
+      "bm25s": "0.2.12",
+      "jax": "0.6.0",
+      "jaxlib": "0.6.0"
+    },
+    "documents": 5233330,
+    "index_sha256": {
+      "data.csc.index.npy": "66574350c13aaab3e0573d8db5331852b185970de0c1fdf2b151e38a5059da2d",
+      "indices.csc.index.npy": "ade1a43143a12df60712e44001de789f5e8df6629c3673f988810c49bc6770a1",
+      "indptr.csc.index.npy": "6ded75207cbfaf340339b1e8d9ddad0a1829975460df87a469e137fd672c19a5",
+      "params.index.json": "7d61f293719da341d547cc5b6c991d200b5b58aa7890dea8f3b6401fe5c14a3c",
+      "vocab.index.json": "788eb76beab87d1c3511485f23759582bf98f5295d22d6865d7bf85b5b447bbc"
+    },
+    "recipe": {
+      "b": 0.4,
+      "k1": 0.9,
+      "n_threads": 1,
+      "selection": "jax",
+      "stemmer": "english",
+      "stopwords": "en"
+    }
+  },
+  "live_pid_started": null,
+  "matching_fields": [
+    "corpus_archive_sha256",
+    "corpus_sha256",
+    "dependencies",
+    "documents",
+    "recipe",
+    "index_sha256.params.index.json"
+  ],
+  "pilot_estimated_tokens": 0,
+  "pilot_model_calls": 0,
+  "pilot_reported_tokens": 0,
+  "pilot_usd_equivalent": 0,
+  "predeclaration_commit": "a5ebc90",
+  "predeclaration_hash": "sha256:2ea1f4e7b68e8ddd0d9fe04326a69abdfd624c9650e4eaa1c8aaf4e5b5f0b940",
+  "prepared_retrieval": {
+    "corpus_archive_sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
+    "corpus_sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
+    "dependencies": {
+      "PyStemmer": "2.2.0.3",
+      "bm25s": "0.2.12",
+      "jax": "0.6.0",
+      "jaxlib": "0.6.0"
+    },
+    "documents": 5233330,
+    "index_sha256": {
+      "data.csc.index.npy": "322c55b543c46e25dd3cc2eafc26da38754fad5c5d2f4c084244a4f7f38acad0",
+      "indices.csc.index.npy": "917fec3b246a2e95894b2b3254d75fc65bc5111f7f8605593a206686f472116d",
+      "indptr.csc.index.npy": "ad667f887c23efd42c74162898d5c9c5d52a14520f0ca8411442af92d578907d",
+      "params.index.json": "7d61f293719da341d547cc5b6c991d200b5b58aa7890dea8f3b6401fe5c14a3c",
+      "vocab.index.json": "7e00c9fd8f525a202a48fadf1ea165077107a27c0fc3730dd98b83a89a88d8b6"
+    },
+    "recipe": {
+      "b": 0.4,
+      "k1": 0.9,
+      "n_threads": 1,
+      "selection": "jax",
+      "stemmer": "english",
+      "stopwords": "en"
+    }
+  },
+  "reason": "Frozen development cohorts or retrieval changed",
+  "schema": "pilot-preflight-stop-v9",
+  "search_cells_completed": 0,
+  "search_cells_started": 0,
+  "semantic_retrieval_equivalence": "not measured; exact receipt equality is required by the existing gate",
+  "sources": {
+    "evidence/pilot/source-transition-9.json": "sha256:8da68a33bcd48c888edcfc21475403f3511b6ad1c63b7b91e75cee05e37507c7",
+    "pilot/__main__.py": "sha256:167f9ce955f5b17f03d8d27653891b9204843ddf1d8ed4623141b8a494f06562",
+    "pilot/admission.py": "sha256:e88381b0cec60b9ed6584e5b2d8d4d4e54ac85851f8a3f079415da65d693867b",
+    "pilot/hover.py": "sha256:439e1b64550a35711b9b1b58c647be8f39d9d3a644669e1826885c258b800c37",
+    "pilot/runtime.py": "sha256:0df06978ed8a053cc6fd6a5b6751d09d8731fea15ef034177a3db0737db24f41"
+  },
+  "status": "STOP_BEFORE_FIRST_SEARCH",
+  "systemd_unit_started": null
+}
