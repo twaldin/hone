@@ -1,0 +1,33 @@
+{
+  "after": {
+    "accepted_complete": true,
+    "rejected_incomplete": true,
+    "source_control_hash": "sha256:fc47363c34fed836ae68836719ef979ea4cece4ee5d3b4511f378c69a79aed97"
+  },
+  "before": {
+    "complete_admission_rejected": true,
+    "reason": "Parent seal omits nested bundle.json but reuse required it"
+  },
+  "early_guard": {
+    "actual_cpus": [
+      6
+    ],
+    "provider_model_calls": 0,
+    "rejected_before_loading_or_auth": [
+      "readmit-mbpp",
+      "adversarial",
+      "controls",
+      "smoke",
+      "pilot",
+      "replay",
+      "prepare",
+      "probe",
+      "throttle-proof"
+    ],
+    "scope": "Synthetic unsafe-affinity report; actual process remains on CPU6"
+  },
+  "harness_sha256": "e5a35d38071412ca33ed3da8d8262ae742fb8a8934765346af6c3c84ce67303b",
+  "provider_model_calls": 0,
+  "scope": "Synthetic artifact-schema and early-guard smoke, not model calibration or a pilot search",
+  "script_sha256": "95285bde7502c064722f4a9796554657a5a97fd9bb021532ad6b0b1c9cc3d941"
+}

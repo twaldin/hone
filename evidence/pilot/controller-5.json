@@ -1,0 +1,48 @@
+{
+  "commands": [
+    "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-5",
+    "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-5 --out evidence/pilot/controls-5"
+  ],
+  "cpu_affinity": [
+    6
+  ],
+  "full_pilot_authorized": false,
+  "local_verification": {
+    "official_metrics": true,
+    "real_docker": true,
+    "regression": "Nested controls replay failed before fix and passed after.",
+    "result": "passed",
+    "tests": 166
+  },
+  "log": ".pilot-state/controls-5.log",
+  "main_pid": 1870139,
+  "max_cpu_heavy_workers": 1,
+  "max_model_requests_inflight": 1,
+  "next_condition": "Wait for this PID/unit. Never re-invoke controls. At completion check the security merge before smoke.",
+  "nice": 10,
+  "offline_output": "evidence/pilot/adversarial-5",
+  "output": "evidence/pilot/controls-5",
+  "pilot_model_calls_before_predeclaration_5": 0,
+  "restart": "no",
+  "source_head": "ed8f64cca716a38a65792cb8f46e408b2063b905",
+  "started_at": "2026-11-03T23:51:01Z",
+  "unit": "hone-hone-pilot-harness-1-controls5.service",
+  "venue_workers": [
+    {
+      "cpus": [
+        0,
+        5
+      ],
+      "executable": "python",
+      "pid": 1861496
+    },
+    {
+      "cpus": [
+        0,
+        5
+      ],
+      "executable": "python",
+      "pid": 1861502
+    }
+  ]
+}

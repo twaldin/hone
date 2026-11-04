@@ -1,0 +1,26 @@
+{
+  "baseline_commit": "b893aab6549a5e19c58090070982cd0c063851c2",
+  "baseline_files": {
+    "pilot/gateway.mjs": "sha256:cee1f462a6d5f84bda3268f7b0d1b3fc710516fe627abe22de9dc366f9fe94c2",
+    "pilot/program.py": "sha256:bf7f9e03771b401e95660123bd3206e2ca98ecd05d72a94365ecb918f57650c0",
+    "pilot/runtime.py": "sha256:36cf5519f6ea77169db4556c2e25692cbb70d245c52da5c10ade1d69a1d5d4bd",
+    "pilot/search.py": "sha256:d92a8b19ab45154cd83d50a5d122bd35fc8ad1f563d8ed22422c07ba9aa526ef",
+    "pilot/tasks.py": "sha256:7a65fd156b7d2775c601735db27c302c8875043f58be7fccc4a8e5f2612e8f3b",
+    "pilot/verification.py": "sha256:5b8cfac4162f31b154695b77172dd4b32da9e7ac7deb863f6053d575ed36b13d"
+  },
+  "execution_contract": {
+    "literal_files": {
+      "pilot/gateway.mjs": "sha256:cee1f462a6d5f84bda3268f7b0d1b3fc710516fe627abe22de9dc366f9fe94c2",
+      "pilot/program.py": "sha256:bf7f9e03771b401e95660123bd3206e2ca98ecd05d72a94365ecb918f57650c0",
+      "pilot/runtime.py": "sha256:36cf5519f6ea77169db4556c2e25692cbb70d245c52da5c10ade1d69a1d5d4bd",
+      "pilot/verification.py": "sha256:5b8cfac4162f31b154695b77172dd4b32da9e7ac7deb863f6053d575ed36b13d"
+    },
+    "specialization": "Only load_task, score_output, evaluate and search._contract specialize name/task.name to mbpp. All remaining module AST and literal files must match. No other expressions execute during comparison.",
+    "specialized_ast": {
+      "pilot/search.py": "sha256:bb686c397b0680f939ab9e40f4ac0d2e5aacf88d3433569eb5e72fcb3a48f61d",
+      "pilot/tasks.py": "sha256:80f89e2d0123d11e8fea8d9a3faab3e133a32df4950f315d649080aa3ee493cc"
+    }
+  },
+  "mbpp_controls_rerun": false,
+  "model_calls": 0
+}

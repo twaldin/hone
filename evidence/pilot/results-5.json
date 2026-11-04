@@ -1,0 +1,433 @@
+{
+  "account_pool": {
+    "allowed_domains": {
+      "gmail.com": 2,
+      "purdue.edu": 1
+    },
+    "api_keys_allowed": false,
+    "lindy_ai_allowed": false
+  },
+  "controls": [
+    {
+      "contrast": 0.25,
+      "means": {
+        "broken": 0.0,
+        "known-improved": 0.95,
+        "naive": 0.7,
+        "shortcut": 0.0
+      },
+      "noise_envelope": 0.08653485569410733,
+      "noise_floor": 0.05768990379607155,
+      "noise_passed": true,
+      "paired_delta_sd": 0.02719528145346783,
+      "paired_trials": 16,
+      "ranking_passed": true,
+      "source": "evidence/pilot/controls-5/mbpp/controls.json",
+      "task": "mbpp",
+      "training_rows": 20
+    },
+    {
+      "contrast": 0.1499999999999999,
+      "means": {
+        "broken": 0.0,
+        "known-improved": 0.95,
+        "naive": 0.8,
+        "shortcut": 0.2125
+      },
+      "noise_envelope": 0.06740879254592823,
+      "noise_floor": 0.044939195030618814,
+      "noise_passed": true,
+      "paired_delta_sd": 0.021184539698143576,
+      "paired_trials": 16,
+      "ranking_passed": true,
+      "source": "evidence/pilot/controls-5/ifbench/controls.json",
+      "task": "ifbench",
+      "training_rows": 40
+    },
+    {
+      "contrast": 0.27499999999999997,
+      "means": {
+        "broken": 0.0,
+        "known-improved": 0.6,
+        "naive": 0.325,
+        "shortcut": 0.0
+      },
+      "noise_envelope": 0.1787652965482954,
+      "noise_floor": 0.11917686436553025,
+      "noise_passed": true,
+      "paired_delta_sd": 0.05618051263561057,
+      "paired_trials": 16,
+      "ranking_passed": true,
+      "source": "evidence/pilot/controls-5/hover/controls.json",
+      "task": "hover",
+      "training_rows": 40
+    }
+  ],
+  "created_at": "2026-11-04T05:57:59Z",
+  "hidden_attempt_comparison": {
+    "flagged": false,
+    "limit": "Reported tokens omit internal failed-attempt tokens and non-200 calls whose usage omp does not return. Failed calls are counted, but their unreported token volume is unknown. Observed HTTP attempts and retry logs measure retry incidence, not omitted tokens. Credential-opaque per-attempt and failed-call usage receipts are required before the full matrix.",
+    "rates": {
+      "gepa": 0.0,
+      "hone": 0.0,
+      "plain": 0.0
+    },
+    "spread": 0.0
+  },
+  "known_limits": [
+    "All three methods retained the same seed artifact; selection-score differences are measurement variation, not optimizer improvement.",
+    "GEPA exercised the real reflection bridge but returned an unchanged prompt; no real successful promotion is claimed.",
+    "Only final transport-reported usage is priced; omitted internal failed-attempt and non-200 usage is unknown.",
+    "Phase allocation reconstructs complete ordered evaluation spans; it is not independently timestamped.",
+    "Only the Python execution image and host Bun policy bridge were exercised, not the full containerized optimizer/mutation launcher."
+  ],
+  "methods": [
+    {
+      "active_seconds": 206.9343909752788,
+      "calls": 115,
+      "candidate_hash": "sha256:55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b",
+      "failed_calls": 0,
+      "hidden_attempt_rate": 0.0,
+      "hidden_attempts": 0,
+      "method": "hone",
+      "pause_seconds": 0,
+      "pauses": 0,
+      "poll_seconds": 178.4065523147583,
+      "proposals": 1,
+      "proposer_success_calls": 1,
+      "retained_seed_artifact": true,
+      "retry_observation_missing_calls": 0,
+      "rollouts": 114,
+      "seed": 0,
+      "selection_score": 0.7666666666666667,
+      "source": "evidence/pilot/smoke-5/mbpp/0/hone",
+      "spend": {
+        "proposal": {
+          "calls": 1,
+          "tokens": 4327,
+          "usd_equivalent": 0.016053
+        },
+        "selection_evaluation": {
+          "calls": 90,
+          "tokens": 13670,
+          "usd_equivalent": 0.116382
+        },
+        "training_evaluation": {
+          "calls": 24,
+          "tokens": 3664,
+          "usd_equivalent": 0.032064
+        },
+        "unassigned": {
+          "calls": 0,
+          "tokens": 0,
+          "usd_equivalent": 0.0
+        }
+      },
+      "spend_status": "complete",
+      "status": "completed",
+      "stop_reason": "max_proposals",
+      "task": "mbpp",
+      "tokens": 21661,
+      "usage_missing_calls": 0,
+      "usd_equivalent": 0.16449899999999998,
+      "valid_proposals": 1,
+      "wall_seconds": 385.3409432900371
+    },
+    {
+      "active_seconds": 189.3614977146499,
+      "calls": 107,
+      "candidate_hash": "sha256:55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b",
+      "failed_calls": 0,
+      "hidden_attempt_rate": 0.0,
+      "hidden_attempts": 0,
+      "method": "gepa",
+      "pause_seconds": 0,
+      "pauses": 0,
+      "poll_seconds": 185.7013862133026,
+      "proposals": 1,
+      "proposer_success_calls": 1,
+      "retained_seed_artifact": true,
+      "retry_observation_missing_calls": 0,
+      "rollouts": 106,
+      "seed": 0,
+      "selection_score": 0.7666666666666667,
+      "source": "evidence/pilot/smoke-5/mbpp/0/gepa",
+      "spend": {
+        "proposal": {
+          "calls": 1,
+          "tokens": 5491,
+          "usd_equivalent": 0.016845
+        },
+        "selection_evaluation": {
+          "calls": 90,
+          "tokens": 13408,
+          "usd_equivalent": 0.112452
+        },
+        "training_evaluation": {
+          "calls": 16,
+          "tokens": 2376,
+          "usd_equivalent": 0.020376000000000002
+        },
+        "unassigned": {
+          "calls": 0,
+          "tokens": 0,
+          "usd_equivalent": 0.0
+        }
+      },
+      "spend_status": "complete",
+      "status": "completed",
+      "stop_reason": "max_proposals",
+      "task": "mbpp",
+      "tokens": 21275,
+      "usage_missing_calls": 0,
+      "usd_equivalent": 0.14967300000000003,
+      "valid_proposals": 1,
+      "wall_seconds": 375.0628839279525
+    },
+    {
+      "active_seconds": 333.8234055379871,
+      "calls": 189,
+      "candidate_hash": "sha256:55ce6835c4571021bf712efa6f3eb527c1dbd8c2ff7db0df15c8833dfd686e7b",
+      "failed_calls": 0,
+      "hidden_attempt_rate": 0.0,
+      "hidden_attempts": 0,
+      "method": "plain",
+      "pause_seconds": 0,
+      "pauses": 0,
+      "poll_seconds": 314.029913187027,
+      "proposals": 1,
+      "proposer_success_calls": 1,
+      "retained_seed_artifact": true,
+      "retry_observation_missing_calls": 0,
+      "rollouts": 188,
+      "seed": 0,
+      "selection_score": 0.7777777777777778,
+      "source": "evidence/pilot/smoke-5/mbpp/0/plain",
+      "spend": {
+        "proposal": {
+          "calls": 1,
+          "tokens": 4327,
+          "usd_equivalent": 0.016053
+        },
+        "selection_evaluation": {
+          "calls": 180,
+          "tokens": 27534,
+          "usd_equivalent": 0.235674
+        },
+        "training_evaluation": {
+          "calls": 8,
+          "tokens": 1236,
+          "usd_equivalent": 0.010908
+        },
+        "unassigned": {
+          "calls": 0,
+          "tokens": 0,
+          "usd_equivalent": 0.0
+        }
+      },
+      "spend_status": "complete",
+      "status": "completed",
+      "stop_reason": "max_proposals",
+      "task": "mbpp",
+      "tokens": 33097,
+      "usage_missing_calls": 0,
+      "usd_equivalent": 0.2626350000000001,
+      "valid_proposals": 1,
+      "wall_seconds": 647.8533187250141
+    }
+  ],
+  "next_lane": {
+    "authorized": false,
+    "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-5 --out .pilot-runs/pilot",
+    "conditions": [
+      "Assistant reviews the measured smoke evidence and explicitly authorizes the matrix.",
+      "Credential-opaque per-attempt and failed-call usage receipts in omp remain a prerequisite for the full matrix.",
+      "Check live venue CPU affinities again and retain reserved subscription capacity."
+    ],
+    "matrix_searches_executed": 0
+  },
+  "panel": {
+    "all_admitted": true,
+    "claim_scope": "3-task development pilot",
+    "cohorts_hash": "sha256:32b82338b0aec93830623d174dae48620440c5f07c2fd21e41ff36446d8899db",
+    "hover_status": "passed",
+    "predeclaration_hash": "sha256:2e33fff4407601da83954868e349b86e9934ce8c66f0e178ed9482e26b2a7b5f",
+    "tasks": [
+      "mbpp",
+      "ifbench",
+      "hover"
+    ],
+    "version": 5,
+    "withdrawn": [
+      "aime"
+    ]
+  },
+  "replay": {
+    "controls": {
+      "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot replay --out evidence/pilot/controls-5",
+      "model_calls": 0,
+      "replayed_rollouts": 1440,
+      "scored_final_tests_loaded": false,
+      "wall_seconds": 121.18
+    },
+    "smokes": {
+      "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot replay --out evidence/pilot/smoke-5",
+      "model_calls": 0,
+      "replayed_rollouts": 408,
+      "scored_final_tests_loaded": false,
+      "wall_seconds": 213.07
+    }
+  },
+  "schema": "pilot-contract-5-complete-v1",
+  "scope": "Recorded development pilot attempt; the runner-reported three-task admission is invalid because IFBench omitted the official 150-row training cap. Seed-0 MBPP smokes are retained evidence, not a quality claim or matrix authorization.",
+  "security": {
+    "committed_before_smoke": true,
+    "merge": "ba38511431f0dd5f0fd506ddea406ae274e68e3e",
+    "scoring_source_hashes_unchanged": true,
+    "seal": "evidence/pilot/security-seal-5.json",
+    "seal_digest": "sha256:561c9d10fbbe7768a725921c4c54ac8bc24d412eed6f060834e85fcc192772ce",
+    "smoke_source_head": "ce6c45fd7d6c72dcb24e74f67ff90368d60c407d"
+  },
+  "selection_cost_risk": {
+    "hover": {
+      "cap_unchanged_usd_equivalent": 10,
+      "model_evaluated_rollouts": 1360,
+      "projected_one_pass_usd_equivalent": 3.6734896323529562,
+      "projected_three_pass_usd_equivalent": 11.02046889705887,
+      "selection_rows": 300,
+      "source": "evidence/pilot/controls-5/hover/usage.json",
+      "status": "INFERENCE_FROM_CONTROLS_NOT_MEASURED_SEARCH"
+    },
+    "ifbench": {
+      "cap_unchanged_usd_equivalent": 10,
+      "model_evaluated_rollouts": 1360,
+      "projected_one_pass_usd_equivalent": 3.4975455882352975,
+      "projected_three_pass_usd_equivalent": 10.492636764705892,
+      "selection_rows": 300,
+      "source": "evidence/pilot/controls-4a/ifbench/usage.json",
+      "status": "INFERENCE_FROM_CONTROLS_NOT_MEASURED_SEARCH"
+    }
+  },
+  "status": "blocked-official-ifbench-partition",
+  "admission_valid": false,
+  "blocking_review": "evidence/pilot/review-stop-5.json",
+  "throttle": {
+    "dispatch": "after-resume-only",
+    "forced_high_fraction": 0.99,
+    "hover_control_pause_seconds": 31.98144793510437,
+    "hover_control_pauses": 1,
+    "pause_seconds": 0.11356163024902344,
+    "pauses": 1,
+    "proof": "evidence/pilot/throttle-proof-4a/result.json",
+    "real_broker_interrupted": false,
+    "sequence": [
+      "high",
+      "outage",
+      "live-normal"
+    ],
+    "smoke_pauses": 0,
+    "threshold": 0.8
+  },
+  "totals": {
+    "active_seconds": 730.1192942279158,
+    "calls": 411,
+    "tokens": 76033,
+    "usd_equivalent": 0.5768070000000001,
+    "wall_seconds": 1408.2571459430037
+  },
+  "upstream_issues_filed": false,
+  "usage_projection": {
+    "assumptions": [
+      "Future proposal frequency, artifact behavior, provider latency and quota/polling duty resemble the measured samples; this is uncertain.",
+      "Native proposal/rollout safety caps, one-time preparation and account-capacity changes are not modeled.",
+      "Serial runner, one model request and one CPU-heavy worker; broker/quota outages can extend wall time without bound."
+    ],
+    "authorized": false,
+    "ceilings": {
+      "active_hours": 54,
+      "reported_tokens": 324000000,
+      "runs": 27,
+      "usd_equivalent": 270,
+      "wall_hours_upper_bound": null
+    },
+    "method": "Linear scaling of observed task-specific token, cost, active-time and elapsed-time ratios to the first common $10/2h/12M-token/30k-call cap; 9 cells per task. MBPP uses pooled actual smoke totals; P tasks use admitted calibration totals.",
+    "projected_tokens": 35317518.15433966,
+    "projected_usd_equivalent": 216.5932167515312,
+    "projected_wall_hours": 86.87964797572617,
+    "rows": [
+      {
+        "active_hours_per_run": 2.0,
+        "binding_projection": "active_seconds",
+        "runs": 9,
+        "scale": 9.861402180329767,
+        "task": "mbpp",
+        "tokens_per_run": 749791.9919770132,
+        "usd_equivalent_per_run": 5.688125807429473,
+        "wall_hours_per_run": 3.8576083581853644
+      },
+      {
+        "active_hours_per_run": 2.0,
+        "binding_projection": "active_seconds",
+        "runs": 9,
+        "scale": 0.5283823297700914,
+        "task": "ifbench",
+        "tokens_per_run": 874656.6328202612,
+        "usd_equivalent_per_run": 8.377787164962882,
+        "wall_hours_per_run": 2.619689234051931
+      },
+      {
+        "active_hours_per_run": 1.7515840968923557,
+        "binding_projection": "usd_equivalent",
+        "runs": 9,
+        "scale": 0.6004868867775346,
+        "task": "hover",
+        "tokens_per_run": 2299720.059018244,
+        "usd_equivalent_per_run": 10.0,
+        "wall_hours_per_run": 3.175996627287835
+      }
+    ],
+    "status": "SUPERSEDED_INFERENCE_INVALID_IFBENCH_BASIS"
+  },
+  "verification": {
+    "capsule_kit_vitest": {
+      "passed": 70,
+      "version": "3.2.6"
+    },
+    "optimizer_vitest": {
+      "passed": 71,
+      "version": "3.2.6"
+    },
+    "pilot_unittests": {
+      "docker": true,
+      "official_metrics": true,
+      "passed": 166,
+      "seconds": 21.327
+    },
+    "preexisting_cli_failures": {
+      "failed": 3,
+      "failures": [
+        "lock-lease",
+        "optimizer-container Bun digest",
+        "stop-engine-seal"
+      ],
+      "passed": 72,
+      "rerun_this_continuation": false,
+      "skipped": 1,
+      "source": "evidence/pilot/main-baseline.json",
+      "untouched_main": "b91d374b4b8ad4c99df3afcedf12007adad32639"
+    },
+    "schema_vitest": {
+      "passed": 234,
+      "version": "3.2.6"
+    },
+    "workspace_typescript": "pnpm -r --workspace-concurrency=1 exec tsc --noEmit: passed"
+  },
+  "withdrawn_aime": {
+    "contrast": 0.07500000000000001,
+    "evidence_changed": false,
+    "noise_envelope": 0.07616286004346215,
+    "noise_passed": false,
+    "ranking_passed": true,
+    "source": "evidence/pilot/controls-4a/aime"
+  }
+}

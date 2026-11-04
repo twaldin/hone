@@ -1,0 +1,26 @@
+{
+  "author_model": "openai-codex/gpt-6.1-sol",
+  "head": "616579c85e1c2de19926896047e8fd34c46e421d",
+  "new_pilot_model_calls": 0,
+  "next_gate": "Correct transport source, then re-admit MBPP without changing its cohort or statistical rules",
+  "prior_head_ci": {
+    "conclusion": "success",
+    "url": "https://github.com/twaldin/hone/actions/runs/41624704529"
+  },
+  "reviews": [
+    {
+      "reviewer_model": "anthropic/claude-opus-5-5",
+      "scope": "runtime and admission integration",
+      "verdict": "BLOCKED_FOR_MEASUREMENT",
+      "verified_findings": [
+        "Gateway overrides inherited CPU 6 with CPU 0",
+        "Exhausted provider failures can become zero control scores"
+      ]
+    },
+    {
+      "reviewer_model": "xai-oauth/grok-4.7",
+      "scope": "external artifact, partition, license and statistical provenance",
+      "verdict": "NO_PROVENANCE_BLOCKER"
+    }
+  ]
+}

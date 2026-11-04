@@ -1,0 +1,22 @@
+{
+  "positive_roundtrip": "evidence/pilot/admission-roundtrip-4a.json",
+  "provider_model_calls": 0,
+  "removed_test": "Incidental mocked machine-record field copies; real gateway placement and unsafe-affinity rejection remain covered",
+  "scope": "Final source freeze before fresh MBPP/P model measurement",
+  "source_files": {
+    "evidence/pilot/predeclaration-4a.md": "sha256:8d539ab8d3b309ecc6ff4265f438c0e8f6951033e3bc0bf5bc2de583d675fdfd",
+    "pilot/__main__.py": "sha256:e5a35d38071412ca33ed3da8d8262ae742fb8a8934765346af6c3c84ce67303b",
+    "pilot/runtime.py": "sha256:87f64fcf17ceb8099d19b725d97efe33ff1fcf9e03ea8d75521fd8e3f9ef353b",
+    "pilot/test_preflight.py": "sha256:2f51ac90ff4af43317fc3811a13b46edbdf288db48b950743cc7da799b9cad9b"
+  },
+  "tests": {
+    "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-harness-1/.pilot-cache/nltk pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -v",
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests_run": 143,
+    "tool_wall_seconds": 29.54,
+    "unittest_wall_seconds": 29.287
+  },
+  "throttle_proof": "evidence/pilot/throttle-proof-4a/result.json"
+}

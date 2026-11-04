@@ -1,0 +1,13 @@
+{
+  "generated_at_ms": 1793682887299,
+  "source": "omp usage --json --no-extensions, after broker health check, using the pilot pool",
+  "capacity_reason": null,
+  "allowed_domains": {"gmail.com": 2, "purdue.edu": 1},
+  "anonymous_account_max_used_fractions": [0, 0.11, 0.11],
+  "pause_threshold": 0.8,
+  "observed_limit_window": "7d",
+  "earliest_observed_reset_at_ms": 1794060000000,
+  "latest_observed_reset_at_ms": 1794128400000,
+  "model_calls": 0,
+  "interpretation": "All three allowed accounts currently have reserve below the threshold. Percent utilization does not expose an absolute token allowance. Shared workload and weekly resets prevent a guaranteed future throttle duration; do not infer token quota from this snapshot."
+}

@@ -1,0 +1,17 @@
+{
+  "source_head": "05444a4a20201cc230a575cef3dcdc68d936a5cd",
+  "scorer_source_sha256": "7abdaf2a29ae4a000edef28204d95bfbf3bfe4bab1008ebc3349af3a6d78a3f2",
+  "execution": "Real pinned Docker scorer, nice 10, CPU 0, sequential",
+  "model_calls": 0,
+  "official_task_labels_loaded": false,
+  "setup": "",
+  "assertions": ["assert target(1) == 2"],
+  "cases": [
+    {"name": "missing_function", "program": "", "observed_score": 0.0},
+    {"name": "ordinary_solution", "program": "def target(value): return value + 1", "observed_score": 1.0},
+    {"name": "replace_builtin_exec", "program": "import builtins; builtins.exec = lambda *args, **kwargs: None", "observed_score": 1.0},
+    {"name": "forge_same_interpreter_receipt", "program": "import os,sys; os.write(2,sys.modules['__main__'].receipt); os._exit(0)", "observed_score": 1.0}
+  ],
+  "conclusion": "The completion receipt rejects ordinary missing solutions but is not tamper-resistant against arbitrary Python in the same interpreter. The host sandbox and native Python assertion semantics are unchanged.",
+  "admission": "Do not trust any MBPP optimization gain before auditing retained programs and answers for assertion bypass. Such a gain is not valid task quality. The proposer contract omits these implementation hints."
+}

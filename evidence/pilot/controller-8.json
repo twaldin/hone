@@ -1,0 +1,68 @@
+{
+  "command": [
+    "/usr/bin/nice",
+    "-n",
+    "10",
+    "/usr/bin/taskset",
+    "-c",
+    "6",
+    "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python",
+    "-m",
+    "pilot",
+    "controls",
+    "--adversarial",
+    "evidence/pilot/adversarial-8-dispatch",
+    "--out",
+    "evidence/pilot/controls-8"
+  ],
+  "environment_keys_passed": [
+    "HOME",
+    "PATH",
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "JAX_PLATFORMS"
+  ],
+  "initial_predeclaration_commit": "e81965cb178c030abcc86d5234c24e53105321f3",
+  "launched_once": true,
+  "matrix_authorized": false,
+  "output": "evidence/pilot/controls-8",
+  "pid": 793392,
+  "predeclaration_hash": "sha256:b0431b3b4dd0de1138ebd6ea16bd5024a64dd6f76aa08f6e8a7c30683b5a2494",
+  "private_log": ".pilot-state/controls-8.log",
+  "proof": "evidence/pilot/adversarial-8-dispatch",
+  "release_predeclaration_commit": "464f62913478171e87c008fa59a656b9467259a9",
+  "resource_check": {
+    "avoided_cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      13,
+      14,
+      15,
+      16
+    ],
+    "max_cpu_heavy_workers": 1,
+    "max_model_requests_inflight": 1,
+    "narrow_nonkernel_pins_observed_before_start": [],
+    "nice": 10,
+    "prior_pid_exited": true,
+    "prior_pinned_pid": 378375,
+    "selected_cpu": 6
+  },
+  "restart_policy": "no",
+  "source_head": "464f62913478171e87c008fa59a656b9467259a9",
+  "started_at_utc": "2026-11-04T10:54:10.783565+00:00",
+  "status_at_start": {
+    "ActiveEnterTimestamp": "Wed 2026-11-04 10:54:10 UTC",
+    "ActiveState": "active",
+    "MainPID": "793392",
+    "Result": "success",
+    "SubState": "running"
+  },
+  "unit": "hone-hone-pilot-harness-1-controls8.service"
+}

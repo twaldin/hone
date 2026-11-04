@@ -1,0 +1,174 @@
+{
+  "attempt_count": 1,
+  "controller": {
+    "carried_tasks": [
+      "mbpp",
+      "hover"
+    ],
+    "command": "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-6 --out evidence/pilot/controls-6",
+    "log": ".pilot-state/controls-6.log",
+    "main_pid": 3603995,
+    "matrix_authorized": false,
+    "max_cpu_heavy_workers": 1,
+    "max_model_requests_inflight": 1,
+    "new_control_task": "ifbench",
+    "output": "evidence/pilot/controls-6",
+    "predeclaration_commit": "c8b55d2042d07104aedeca54dba7e715df83f57c",
+    "restart": "no",
+    "source_head": "204ee498761e1a280601445d6898fb85dd1ace49",
+    "started_at": "2026-11-04T06:51:22Z",
+    "unit": "hone-hone-pilot-harness-1-controls6.service",
+    "version": 6
+  },
+  "controller_finished": true,
+  "corrected_ifbench": {
+    "cohort_hash": "sha256:7d71794c42e9b6d7a7789ced7001c225e4fd2760b62539f99da20619f0e1bf04",
+    "completed_controls": [
+      "naive"
+    ],
+    "control_draw_seed": 20261106,
+    "control_rows": 40,
+    "failure": {
+      "error_type": "TransportError",
+      "failed_call_ids": [
+        127,
+        128
+      ],
+      "http_status": 502,
+      "missing_usage_calls": 2,
+      "allowed_transport_retry": "Call128 is the single allowed externally metered retry of call127; the control attempt itself was never restarted.",
+      "root_cause": "Not available in retained transport receipts; no cause inferred from HTTP status alone.",
+      "status": "infrastructure-failure",
+      "unreported_failed_call_tokens": "unknown"
+    },
+    "improved_complete": false,
+    "naive_mean": 0.8416666666666666,
+    "noise_pairs_complete": 0,
+    "partition": "Random(1).sample(source[300:600],150),source[:300]",
+    "ranking_complete": false,
+    "selection_rows": 300,
+    "source": "evidence/pilot/controls-6",
+    "training_rows": 150,
+    "usage": {
+      "active_seconds": 885.1414653882384,
+      "binding_cap": null,
+      "calls": 128,
+      "calls_with_hidden_attempts": 0,
+      "failed_calls": 2,
+      "hidden_attempt_rate": 0.0,
+      "hidden_attempts": 0,
+      "pause_seconds": 254.48911571502686,
+      "pauses": 1,
+      "poll_seconds": 225.71488523483276,
+      "proposer_calls": 0,
+      "proposer_success_calls": 0,
+      "retry_log_events": 0,
+      "retry_rate_flag": false,
+      "throttle_seconds": 480.2040009498596,
+      "tokens": 141064,
+      "usage_missing_calls": 2,
+      "usd_equivalent": 1.1603279999999996,
+      "wall_seconds": 1365.345466338098
+    }
+  },
+  "fallback_selected": false,
+  "known_limits": [
+    "Transport-reported usage omits unknown internal failed-attempt and non-200 tokens.",
+    "The real GEPA reflection bridge previously returned an unchanged prompt; no successful promotion or optimizer advantage is claimed.",
+    "No new model calls, controls, smokes or matrix ran after the infrastructure abort.",
+    "Credential-opaque per-attempt/failed-call receipts in omp remain prerequisites for the full matrix. No upstream issue was filed."
+  ],
+  "matrix_searches_executed": 0,
+  "measurement_source_head": "204ee498761e1a280601445d6898fb85dd1ace49",
+  "merged": false,
+  "model_calls_after_abort": 0,
+  "next_decision": {
+    "question": "Authorize another predeclared IFBench admission after the HTTP502 route failure is understood, or explicitly narrow the panel to MBPP+HoVer?",
+    "recommendation": "Resolve the transport failure and authorize a new identical-contract attempt; do not silently classify an infrastructure abort as a measured gate failure."
+  },
+  "predeclaration_commit": "c8b55d2042d07104aedeca54dba7e715df83f57c",
+  "prior_ifbench_evidence": {
+    "inventory": "evidence/pilot/invalid-ifbench-cohorts-6.json",
+    "status": "invalid cohort",
+    "unchanged": true
+  },
+  "reference_audit": {
+    "gradeable": 464,
+    "model_calls": 0,
+    "reference_passes": 452,
+    "reference_rate_is_mathematical_ceiling": false,
+    "rows": 464,
+    "selection_passes": 88,
+    "source": "evidence/pilot/reference-audit-6/report.json",
+    "train_passes": 364,
+    "verifier_changed": false
+  },
+  "replay": {
+    "controls6": {
+      "model_calls": 0,
+      "replayed_rollouts": 40,
+      "scored_final_tests_loaded": false,
+      "seconds": 264.43
+    },
+    "invalid_ifbench4a": {
+      "model_calls": 0,
+      "replayed_rollouts": 1440,
+      "seconds": 2.72
+    },
+    "limit": "Only the completed40-row naive evaluation replays; the interrupted improved evaluation has no completed score record. Every settled invocation remains in the call ledger."
+  },
+  "restarted": false,
+  "run_plan": {
+    "full_matrix_projection_available": false,
+    "prospective_two_task_projection": {
+      "admitted": false,
+      "authorized": false,
+      "ceilings": {
+        "active_hours": 36.0,
+        "elapsed_wall_hours_upper_bound": null,
+        "reported_tokens": 216000000,
+        "usd_equivalent": 180.0
+      },
+      "projection": {
+        "active_hours": 33.764256872031204,
+        "observed_pause_hours": 0.04801110026297159,
+        "retained_admission_setup_hours": 0.4867611927685276,
+        "tokens": 27526799.384408392,
+        "total_wall_hours_including_measured_setup": 63.77184277973406,
+        "usage_polling_hours": 29.472813614671363,
+        "usd_equivalent": 141.2371495131079,
+        "wall_hours": 63.28508158696553
+      },
+      "projection_available": true,
+      "searches": 18,
+      "tasks": [
+        "mbpp",
+        "hover"
+      ]
+    },
+    "selected_or_authorized": false,
+    "source": "evidence/pilot/run-plan-6.json",
+    "why_full_matrix_blocked": "Corrected IFBench improved/noise calibration is incomplete; using invalid-cohort or partial-call rates would not repair admission."
+  },
+  "schema": "pilot-contract-6-terminal-v1",
+  "selected_panel": null,
+  "standing_admissions": [
+    "mbpp",
+    "hover"
+  ],
+  "status": "infrastructure-aborted-no-panel-no-fallback",
+  "verification": {
+    "baseline_cli_failures": "Pre-existing on untouched main; not rerun or suppressed.",
+    "docker": true,
+    "frozen_evaluator_files_modified_after_dispatch": false,
+    "official_metrics": true,
+    "pilot_tests_passed": 178,
+    "red_before_green_after": [
+      "Official IFBench ordered150-row partition regression.",
+      "Authentic original12-file MBPP source inventory/older orchestration snapshot.",
+      "Run-plan reporter with a sealed infrastructure abort and no panel.",
+      "Reporter rejects an unsealed panel and never projects from infrastructure-aborted partial controls."
+    ],
+    "seconds": 20.507
+  }
+}

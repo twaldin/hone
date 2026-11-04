@@ -1,0 +1,1 @@
+{"allowed_domains":{"gmail.com":2,"purdue.edu":1},"dispatched":["after-resume-only"],"forced_high_used_fraction":0.99,"outage_behavior":"pause and resume, not failure","pause_seconds":0.10283708572387695,"pauses":1,"readings":["high","outage","live-normal"],"real_broker_interrupted":false,"threshold":0.8}

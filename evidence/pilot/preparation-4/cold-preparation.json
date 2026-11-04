@@ -1,0 +1,21 @@
+{
+  "actual_launcher": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python /tmp/hone-published-export.WeN6w6/prepare.py",
+  "argv": [
+    "pilot",
+    "prepare",
+    "--out",
+    ".pilot-state/preparation-4"
+  ],
+  "cold_wall_seconds": 310.9742993459804,
+  "documents": 5233330,
+  "max_cpu_heavy_workers": 1,
+  "model_calls": 0,
+  "nice": 10,
+  "peak_rss_kib": 7679720,
+  "replay_command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot prepare --out .pilot-state/preparation-4",
+  "resource_receipt_hash": "sha256:a6339f9222c34624c3321ab63695026d154e0c5969d4bf4f5a3726146b5f8a9f",
+  "scope": "Real pilot.__main__.main prepare entrypoint with CLI argv; no model dispatch",
+  "worker_cpus": [
+    6
+  ]
+}

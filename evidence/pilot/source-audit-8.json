@@ -1,0 +1,70 @@
+{
+  "failing_before": {
+    "conservative_unknown_usage": "Old code recorded zero refusal tokens; upper-bound regression failed before fix.",
+    "gepa_reflection": "Pinned GEPA retried terminal refusal twice before bridge latch; regression observed2 calls vs1.",
+    "reservation": "Short input admitted under0.02USD before native-envelope reservation fix; BudgetExhausted regression failed before fix.",
+    "terminal_refusal_all_roles": "Old code raised CallFailed and retried; behavioral regression failed in all four roles before fix."
+  },
+  "limits": [
+    "Synthetic successful-path dispatch comparison proves request compatibility, not model quality.",
+    "No provider model calls or additional MBPP/HoVer model controls were used.",
+    "Exact source hashes, archived all-success ledgers and score replay authenticate carryover; new refusal behavior is intentionally different."
+  ],
+  "probe_setup_correction": "Initial throwaway compatibility probe supplied an incomplete calibration object and native policy rejected it before model dispatch. Replaced only this proof-script fixture with the complete retained MBPP calibration; no harness or measured control was changed.",
+  "replay_command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -c <replay_python> <fresh-scratch-directory>",
+  "replay_python": "import hashlib,json,sys,types\nfrom pathlib import Path\nfrom pilot import search as current\nfrom pilot.tasks import Task\nroot=Path.cwd(); scratch=Path(sys.argv[1])/\"fixed-calibration\"\nsnapshot=json.loads((root/\"evidence/pilot/source-snapshot-7.json\").read_text())\nold=types.ModuleType(\"pilot_before_refusal\"); old.__file__=str(root/\"pilot/search.py\")\nexec(compile(snapshot[\"files\"][\"pilot/search.py\"],old.__file__,\"exec\"),old.__dict__)\ntask=Task(\"synthetic\",[{\"id\":f\"t{i}\",\"input\":\"train\"} for i in range(40)],[{\"id\":f\"s{i}\",\"input\":\"selection\"} for i in range(3)],{}, {\"prompt\":\"seed\"})\nnoise=json.loads((root/\"evidence/pilot/mbpp-readmission-4a/mbpp/controls.json\").read_text())\nrows=[]\nfor method in (\"hone\",\"gepa\",\"plain\"):\n    captured=[]; results=[]\n    for label,module in ((\"before\",old),(\"after\",current)):\n        calls=[]\n        def call(role,messages,max_tokens):\n            calls.append([role,messages,max_tokens])\n            return \"better\" if method==\"gepa\" else '{\"prompt\":\"better\"}'\n        def evaluate(candidate,batch,capture_traces=False):\n            result={\"scores\":[0.0]*len(batch),\"outputs\":[\"\"]*len(batch),\"trajectories\":[{\"id\":row[\"id\"],\"input\":row[\"input\"],\"output\":\"\",\"score\":0.0,\"feedback\":\"synthetic failure\",\"calls\":[]} for row in batch] if capture_traces else []}\n            if label==\"after\": result.update(refusals=[],refusals_by_row={})\n            return result\n        results.append(module.run_search(method,task,call,evaluate,lambda:True,noise,0,scratch/(method+\"-\"+label),1))\n        captured.append(calls)\n    assert captured[0]==captured[1],method\n    assert results[0][\"candidate\"]==results[1][\"candidate\"] and results[0][\"selection_score\"]==results[1][\"selection_score\"],method\n    rows.append({\"method\":method,\"calls_before\":len(captured[0]),\"calls_after\":len(captured[1]),\"identical_role_messages_and_max_tokens\":True,\"request_sequence_sha256\":hashlib.sha256(json.dumps(captured[1],sort_keys=True,separators=(\",\",\":\"),allow_nan=False).encode()).hexdigest(),\"same_retained_artifact_and_score\":True})\nprint(json.dumps({\"probes\":rows,\"model_requests\":0,\"actual_native_gepa_and_hone_policy_exercised\":True},sort_keys=True))\n",
+  "retained_answered_call_proofs": {
+    "hover": {
+      "calls": 5440,
+      "path": "evidence/pilot/controls-5/hover/calls.jsonl",
+      "sha256": "sha256:36e45b3977fb4e772c920fb8e0ca96c60af97ddee1487138471567227ec1781f"
+    },
+    "mbpp": {
+      "calls": 660,
+      "path": "evidence/pilot/mbpp-readmission-4a/mbpp/calls.jsonl",
+      "sha256": "sha256:960792010b3da0674c0962aa1c68b82b769fbbf819844100f223cfeb04fda0a1"
+    }
+  },
+  "source_head": "ed610b55c95beea8ee4810dc2a709786f790d04c",
+  "source_transition_hash": "sha256:825950fd1884488cc6c96c86746a053fa7fdd73c67c7c09cd9b30efe00a769c7",
+  "successful_request_compatibility": {
+    "actual_native_gepa_and_hone_policy_exercised": true,
+    "model_requests": 0,
+    "probes": [
+      {
+        "calls_after": 1,
+        "calls_before": 1,
+        "identical_role_messages_and_max_tokens": true,
+        "method": "hone",
+        "request_sequence_sha256": "5ec20f8a503ffe98020c89038f81d9305b3745e8f02b759eeb57e0632abef4e5",
+        "same_retained_artifact_and_score": true
+      },
+      {
+        "calls_after": 1,
+        "calls_before": 1,
+        "identical_role_messages_and_max_tokens": true,
+        "method": "gepa",
+        "request_sequence_sha256": "9758f93735d4acdc5d8f9eb6270a2d4fb8b8d149d5dcfea8f8d8d720641b53ab",
+        "same_retained_artifact_and_score": true
+      },
+      {
+        "calls_after": 1,
+        "calls_before": 1,
+        "identical_role_messages_and_max_tokens": true,
+        "method": "plain",
+        "request_sequence_sha256": "5ec20f8a503ffe98020c89038f81d9305b3745e8f02b759eeb57e0632abef4e5",
+        "same_retained_artifact_and_score": true
+      }
+    ]
+  },
+  "tests": {
+    "bun_failures": 0,
+    "bun_passed": 5,
+    "docker_enabled": true,
+    "installed_native_router_exercised_offline": true,
+    "official_metrics_enabled": true,
+    "python_passed": 213,
+    "python_seconds": 29.365
+  },
+  "version": "pilot-refusal-source-audit-v8"
+}

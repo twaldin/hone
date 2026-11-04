@@ -1,0 +1,65 @@
+{
+  "carried": {
+    "ifbench": {
+      "control_hash": "sha256:8f7d4109ec571f0655a2d62e0128581666be4329c54679f909a5feed42084a31",
+      "controls_rerun": false,
+      "noise_passed": true,
+      "ranking_passed": true,
+      "receipt_hash": "sha256:d6f944f7da5c487f28244e9cdb067559e52512c8c9a7fde478374371942f9396",
+      "rows": 40,
+      "source_bundle_hash": "sha256:058c326ebf1f4fbcb6c12941f2f9e06e1e13c51ed4d8e09a9d499ec73a860f05"
+    },
+    "mbpp": {
+      "control_hash": "sha256:05bc581e8e03d6c2471a21e62ce4ae086029dee4801693b5ff213ba12b73a580",
+      "controls_rerun": false,
+      "noise_passed": true,
+      "ranking_passed": true,
+      "receipt_hash": "sha256:66d4bf0e758b0f7e464e494acbb45cf545e558029a3ae65eefb4fc006dbf8a20",
+      "rows": 20,
+      "source_bundle_hash": "sha256:bbe1575af61e96434bb1baaa23dd593631942fe47aa3ef97a86d445621adb365"
+    }
+  },
+  "diagnostic_progress": [
+    {
+      "seconds": 0.03325069905258715,
+      "stage": "load-task",
+      "task": "mbpp"
+    },
+    {
+      "seconds": 229.39608208602294,
+      "stage": "reuse-control",
+      "task": "mbpp"
+    },
+    {
+      "seconds": 229.4219260220416,
+      "stage": "load-task",
+      "task": "ifbench"
+    },
+    {
+      "seconds": 230.49670546909329,
+      "stage": "reuse-control",
+      "task": "ifbench"
+    },
+    {
+      "seconds": 231.05755168909673,
+      "stage": "load-hover"
+    },
+    {
+      "seconds": 232.00355660705827,
+      "stage": "prepare-retrieval"
+    }
+  ],
+  "earlier_180_second_setup_timeout": true,
+  "hover": {
+    "identity_hash": "sha256:11a49e6d80b7071b9ef4f8abdd01b4a8dbfb452ae07d0f72d115352f35a58624",
+    "rows": 40,
+    "scored_final_tests_loaded": false,
+    "selection_rows": 300,
+    "source_cohorts_hash": "sha256:e2914173fc3f1281c63a23ef5a12153761f48fdb02e7cc840a0a9041a91c444a",
+    "train_rows": 150
+  },
+  "model_calls": 0,
+  "passed": true,
+  "source_head": "0eb5cd9babd0054a85c6e16c53b6cf5799d7884d",
+  "wall_seconds": 251.34985225007404
+}

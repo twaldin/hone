@@ -1,0 +1,12 @@
+{
+  "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-harness-1/.pilot-cache/nltk pilot/.venv/bin/python -m unittest discover -s pilot -p 'test_*.py' -v",
+  "errors": 0,
+  "failures": 0,
+  "preexisting_main_failures_record": "evidence/pilot/main-baseline.json",
+  "provider_model_calls": 0,
+  "scope": "Pilot suite with real Docker sandbox tests and official IFBench metrics",
+  "skipped": 0,
+  "tests_run": 142,
+  "tool_wall_seconds": 20.13,
+  "unittest_wall_seconds": 19.939
+}

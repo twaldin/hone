@@ -1,0 +1,1 @@
+{"status":"ABORTED_INADMISSIBLE_MEASUREMENT","searches_started":0,"reason":"Independent review found constructed naive controls, missing OAuth-only session restrictions, and noise envelopes used at mismatched sample sizes. Run cancelled before admission; evidence is retained and is not a passing evaluator result."}

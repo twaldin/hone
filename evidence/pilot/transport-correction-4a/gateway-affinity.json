@@ -1,0 +1,12 @@
+{
+  "gateway_cpus": [
+    6
+  ],
+  "gateway_nice": 19,
+  "oauth_only_session": true,
+  "parent_cpus": [
+    6
+  ],
+  "provider_model_calls": 0,
+  "scope": "Actual installed omp/Bun gateway startup, no completion request"
+}

@@ -1,0 +1,249 @@
+{
+  "accounting_limit": "Only omp-reported usage was priced. Zero observed hidden attempts is not proof of zero opaque retry usage. Credential-opaque per-attempt and failed-call receipts inside omp remain prerequisite to the later full benchmark matrix. No upstream issue filed.",
+  "calibration_total_reported_usage": {
+    "active_seconds": 26207.725070019136,
+    "calls": 4541,
+    "failed_calls": 0,
+    "hidden_attempts": 0,
+    "pause_seconds": 414.7151165008545,
+    "pauses": 1,
+    "tokens": 2873836,
+    "usage_missing_calls": 0,
+    "usd_equivalent": 29.511696000000008,
+    "wall_seconds": 34048.32847048796
+  },
+  "cap_changed": false,
+  "controller_exited": true,
+  "controller_or_controls_restarted_by_lane": false,
+  "controller_pid": 410703,
+  "controls": {
+    "aime": {
+      "control_rows": 40,
+      "max_abs_paired_delta": 0.05000000000000002,
+      "means": {
+        "broken": 0.0,
+        "known-improved": 0.275,
+        "naive": 0.2,
+        "shortcut": 0.0
+      },
+      "noise_envelope": 0.07616286004346215,
+      "noise_floor": 0.050775240028974766,
+      "noise_passed": false,
+      "paired_delta_sd": 0.02393567769390846,
+      "paired_trials": 16,
+      "positive_contrast": 0.07500000000000001,
+      "ranking_passed": true,
+      "usage": {
+        "active_seconds": 11502.52950307203,
+        "binding_cap": null,
+        "calls": 1360,
+        "calls_with_hidden_attempts": 0,
+        "failed_calls": 0,
+        "hidden_attempt_rate": 0.0,
+        "hidden_attempts": 0,
+        "pause_seconds": 414.7151165008545,
+        "pauses": 1,
+        "poll_seconds": 2203.0560722351074,
+        "proposer_calls": 0,
+        "proposer_success_calls": 0,
+        "retry_log_events": 0,
+        "retry_rate_flag": false,
+        "throttle_seconds": 2617.771188735962,
+        "tokens": 1129019,
+        "usage_missing_calls": 0,
+        "usd_equivalent": 12.95872499999999,
+        "wall_seconds": 14120.300691807992
+      }
+    },
+    "ifbench": {
+      "control_rows": 40,
+      "max_abs_paired_delta": 0.04166666666666652,
+      "means": {
+        "broken": 0.0,
+        "known-improved": 0.95,
+        "naive": 0.8,
+        "shortcut": 0.2125
+      },
+      "noise_envelope": 0.06740879254592823,
+      "noise_floor": 0.044939195030618814,
+      "noise_passed": true,
+      "paired_delta_sd": 0.021184539698143576,
+      "paired_trials": 16,
+      "positive_contrast": 0.1499999999999999,
+      "ranking_passed": true,
+      "usage": {
+        "active_seconds": 13626.49656193622,
+        "binding_cap": null,
+        "calls": 2521,
+        "calls_with_hidden_attempts": 0,
+        "failed_calls": 0,
+        "hidden_attempt_rate": 0.0,
+        "hidden_attempts": 0,
+        "pause_seconds": 0,
+        "pauses": 0,
+        "poll_seconds": 4222.096608638763,
+        "proposer_calls": 0,
+        "proposer_success_calls": 0,
+        "retry_log_events": 0,
+        "retry_rate_flag": false,
+        "throttle_seconds": 4222.096608638763,
+        "tokens": 1655348,
+        "usage_missing_calls": 0,
+        "usd_equivalent": 15.855540000000016,
+        "wall_seconds": 17848.593170574983
+      }
+    },
+    "mbpp": {
+      "control_rows": 20,
+      "max_abs_paired_delta": 0.04999999999999993,
+      "means": {
+        "broken": 0.0,
+        "known-improved": 0.95,
+        "naive": 0.7,
+        "shortcut": 0.0
+      },
+      "noise_envelope": 0.08653485569410733,
+      "noise_floor": 0.05768990379607155,
+      "noise_passed": true,
+      "paired_delta_sd": 0.02719528145346783,
+      "paired_trials": 16,
+      "positive_contrast": 0.25,
+      "ranking_passed": true,
+      "usage": {
+        "active_seconds": 1078.699005010887,
+        "binding_cap": null,
+        "calls": 660,
+        "calls_with_hidden_attempts": 0,
+        "failed_calls": 0,
+        "hidden_attempt_rate": 0.0,
+        "hidden_attempts": 0,
+        "pause_seconds": 0,
+        "pauses": 0,
+        "poll_seconds": 1000.735603094101,
+        "proposer_calls": 0,
+        "proposer_success_calls": 0,
+        "retry_log_events": 0,
+        "retry_rate_flag": false,
+        "throttle_seconds": 1000.735603094101,
+        "tokens": 89469,
+        "usage_missing_calls": 0,
+        "usd_equivalent": 0.6974310000000009,
+        "wall_seconds": 2079.434608104988
+      }
+    }
+  },
+  "delivery": {
+    "PR": null,
+    "final_cross_family_READY": false,
+    "merged": false,
+    "preflight_only": "SAFE_TO_MEASURE at9889dce, not final READY"
+  },
+  "failure": {
+    "excess": 0.0011628600434621522,
+    "meaning": "Assistant admission gate failed; no Hone-versus-baseline optimizer claim or Tim H7 kill-gate result",
+    "noise_envelope": 0.07616286004346215,
+    "positive_contrast": 0.075,
+    "required": "noise_envelope < positive_contrast",
+    "retuned": false,
+    "status": "admission-failed",
+    "task": "aime",
+    "type": "ControlsFailed"
+  },
+  "next_action": "Hand back to the gate owner. No model command, rerun, threshold change or new declaration is authorized by this result.",
+  "parent_head": "6fb68fb606c3682d9a8e92f039ac581ff3a7629e",
+  "pilot_plan": {
+    "authorized": false,
+    "point_estimate": "Not measured because all searches were blocked by the predeclared admission failure",
+    "reference_command_not_authorized": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls evidence/pilot/controls-4a --out .pilot-runs/pilot-27",
+    "reported_hard_caps": {
+      "active_hours": 54,
+      "runs": 27,
+      "tokens": 324000000,
+      "usd_equivalent": 270
+    },
+    "wall_time_limit": "Quota checks and pauses add wall time; no full-pilot wall-time estimate is claimed"
+  },
+  "real_GEPA_subscription_reflection_exercised": false,
+  "recorded_at_utc": "2026-11-03T22:44:10.533577+00:00",
+  "runtime_code_changed_this_run": false,
+  "search_cap_usd_equivalent": 10,
+  "search_model_calls_started": 0,
+  "search_spend_usd_equivalent": 0,
+  "selection_set_changed": false,
+  "smokes": {
+    "gepa": {
+      "calls": null,
+      "observed_hidden_attempts": null,
+      "pauses": null,
+      "selection_score": null,
+      "spend_split": {
+        "proposal": null,
+        "selection_evaluation": null,
+        "training_evaluation": null
+      },
+      "spend_split_measured": false,
+      "status": "not-run-admission-gate-failed",
+      "tokens": null,
+      "usd_equivalent": null,
+      "wall_seconds": null
+    },
+    "hone": {
+      "calls": null,
+      "observed_hidden_attempts": null,
+      "pauses": null,
+      "selection_score": null,
+      "spend_split": {
+        "proposal": null,
+        "selection_evaluation": null,
+        "training_evaluation": null
+      },
+      "spend_split_measured": false,
+      "status": "not-run-admission-gate-failed",
+      "tokens": null,
+      "usd_equivalent": null,
+      "wall_seconds": null
+    },
+    "plain": {
+      "calls": null,
+      "observed_hidden_attempts": null,
+      "pauses": null,
+      "selection_score": null,
+      "spend_split": {
+        "proposal": null,
+        "selection_evaluation": null,
+        "training_evaluation": null
+      },
+      "spend_split_measured": false,
+      "status": "not-run-admission-gate-failed",
+      "tokens": null,
+      "usd_equivalent": null,
+      "wall_seconds": null
+    }
+  },
+  "source_freeze_head": "9889dce7b99b9702cedbfee9af388fdb47a1ab3d",
+  "status": "stopped-predeclared-AIME-noise-gate-failed",
+  "task_choice": {
+    "all_admitted": false,
+    "headroom_replacement_threshold": 0.9,
+    "hover_used": false,
+    "ifbench_naive": 0.8,
+    "panel_json_exists": false,
+    "tasks": [
+      "ifbench",
+      "aime",
+      "mbpp"
+    ]
+  },
+  "verification": {
+    "bundle_hash_verification": "passed",
+    "control_bundle_hash": "sha256:058c326ebf1f4fbcb6c12941f2f9e06e1e13c51ed4d8e09a9d499ec73a860f05",
+    "last_observed_CI_conclusion": "success",
+    "last_observed_CI_head": "6fb68fb606c3682d9a8e92f039ac581ff3a7629e",
+    "last_observed_CI_url": "https://github.com/twaldin/hone/actions/runs/41703413961",
+    "offline_replayed_rollouts": 2880,
+    "prior_local_failures": 0,
+    "prior_local_tests": 143,
+    "replay_model_calls": 0,
+    "scored_final_tests_loaded": false
+  }
+}
