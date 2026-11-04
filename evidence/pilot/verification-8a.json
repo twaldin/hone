@@ -1,0 +1,47 @@
+{
+  "admission_audit": "evidence/pilot/admission-audit-8a.json",
+  "admission_audit_sha256": "sha256:f480ff39f7b09570c220c4496bf1994efa3bdd5e1effb254a8dd31d4fd3929e3",
+  "limits": [
+    "The unittest replay command quotes test_*.py when run in a shell; the recorded NLTK_DATA path is the equivalent repository-relative form of the absolute path used.",
+    "CI has no installed omp and skips the four native-router cases; all twelve pass on the host.",
+    "Source audit and admission audit are unchanged; hashes here bind their exact byte content.",
+    "The source/audit checks and estimator can be recomputed from the referenced files; the replay command recomputes raw rollout scores, not this metadata record.",
+    "Internal failed-attempt token usage remains unknown; call2507 had two provider HTTP attempts and one reported final completion.",
+    "No new search or matrix was run. Neither matrix nor merge is authorized."
+  ],
+  "model_calls": 0,
+  "production_sources_verified": 15,
+  "results": [
+    {
+      "command": "nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot verify --out evidence/pilot/controls-7b",
+      "exit_code": 0,
+      "result": "Evidence hashes verified"
+    },
+    {
+      "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot replay --out evidence/pilot/controls-7b",
+      "exit_code": 0,
+      "model_calls": 0,
+      "replayed_rollouts": 1440,
+      "scored_final_tests_loaded": false
+    },
+    {
+      "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu PILOT_DOCKER_TESTS=1 PILOT_OFFICIAL_METRIC_TESTS=1 NLTK_DATA=.pilot-cache/nltk pilot/.venv/bin/python -m unittest discover -s pilot -p test_*.py -q",
+      "exit_code": 0,
+      "skipped": 0,
+      "tests": 224
+    },
+    {
+      "assertions": 70,
+      "command": "nice -n 10 taskset -c 6 bun test --max-concurrency=1 pilot/gateway-receipts.test.mjs",
+      "exit_code": 0,
+      "failed": 0,
+      "native_router_cases": 4,
+      "passed": 12,
+      "runtime": "Bun1.4.4"
+    }
+  ],
+  "schema": "pilot-terminal-verification-v8a",
+  "source_audit": "evidence/pilot/source-audit-8a.json",
+  "source_audit_sha256": "sha256:8fdfeca8f67fc88e34b2fd077a56cef3bf8d494e0bf8ff42fbf9923536270a06",
+  "verified_admission_head": "5bd430d94f1df7382fd356cd5263e82af8486925"
+}
