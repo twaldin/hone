@@ -17,6 +17,44 @@
     675,
     676
   ],
+  "toy_command_argv_by_pythonhashseed": {
+    "1": [
+      "nice",
+      "-n",
+      "10",
+      "taskset",
+      "-c",
+      "6",
+      "env",
+      "PYTHONHASHSEED=1",
+      "OPENBLAS_NUM_THREADS=1",
+      "OMP_NUM_THREADS=1",
+      "MKL_NUM_THREADS=1",
+      "pilot/.venv/bin/python",
+      "-c",
+      "import bm25s, Stemmer, json; result=bm25s.tokenize([\"alpha beta gamma delta epsilon zeta eta theta\",\"iota kappa lambda mu nu xi omicron pi\"],stemmer=Stemmer.Stemmer(\"english\"),show_progress=False); print(json.dumps(result.vocab,sort_keys=True))"
+    ],
+    "2": [
+      "nice",
+      "-n",
+      "10",
+      "taskset",
+      "-c",
+      "6",
+      "env",
+      "PYTHONHASHSEED=2",
+      "OPENBLAS_NUM_THREADS=1",
+      "OMP_NUM_THREADS=1",
+      "MKL_NUM_THREADS=1",
+      "pilot/.venv/bin/python",
+      "-c",
+      "import bm25s, Stemmer, json; result=bm25s.tokenize([\"alpha beta gamma delta epsilon zeta eta theta\",\"iota kappa lambda mu nu xi omicron pi\"],stemmer=Stemmer.Stemmer(\"english\"),show_progress=False); print(json.dumps(result.vocab,sort_keys=True))"
+    ]
+  },
+  "toy_input_texts": [
+    "alpha beta gamma delta epsilon zeta eta theta",
+    "iota kappa lambda mu nu xi omicron pi"
+  ],
   "toy_tokenization_only": true,
   "toy_vocab_by_pythonhashseed": {
     "1": {

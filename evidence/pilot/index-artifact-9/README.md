@@ -14,6 +14,8 @@ nice -n 10 taskset -c 6 cp -a /home/tim/worktrees/hone/hone-hone-pilot-harness-1
 
 Every copied file was hashed again. [Copy verification](copy-verification.json) records an identical eight-file inventory, sizes and hashes. The harness's existing `.pilot-cache` path therefore resolves to this lane's verified copy, never the source directory. No source artifact, receipt, model route, account pool, broker configuration or BM25S code was modified. These checks made zero model calls and read no final-test labels.
 
+The verified copy replaced this lane's failed fresh-build files in place. Those fresh bytes no longer remain for inspection; their four differing hashes survive unchanged in `seed0-9/preflight-stop.json`.
+
 The unchanged [admission entrypoint passed](admission.json) on this copy, selecting MBPP + HoVer at CPU 6 and nice 10. It took 471.88 seconds, made zero model calls and reported no final-test labels loaded. No controls were rerun and no gate was relaxed.
 
 ## Known limit: reuse, do not rebuild

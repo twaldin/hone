@@ -170,6 +170,8 @@ Reported selection scores are adaptive: they select incumbents and are not unbia
 
 For seed 0, `python -m pilot.results --runs .pilot-runs/pilot-seed0-9 --out evidence/pilot/results-9-seed0.json` computes inference entirely from archived development outputs. It resamples unique paired selection instances 10,000 times for each task and method, then uses a task-and-instance hierarchical bootstrap for the equal-weight two-task mean. Both report 95% percentile intervals. An unchanged artifact compares the same baseline vector with itself, so stochastic rescoring cannot masquerade as an artifact improvement. The report labels adaptive selection, the 2-point practical threshold, and no superiority claim or Holm correction. The earlier `results-9.json` remains the historical no-search stop report.
 
+Interrupted pause prefixes retain their per-cell `pause_accounting_incomplete` marker. Their per-method exact pause total is unavailable; `timing.lower_bounds.pause_seconds` reports the summed known prefix instead. [The precision regression and zero-model CLI smoke](../evidence/pilot/report-precision-9.json) cover both incomplete and complete timing, with 264 passing Python tests.
+
 Recompute every retained rollout's score from the pinned development data and archived task-model outputs, without provider credentials or model calls:
 
 ```sh

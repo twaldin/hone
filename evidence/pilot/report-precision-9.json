@@ -1,0 +1,42 @@
+{
+  "docker_enabled": true,
+  "engine_changed": false,
+  "failing_before": "Both incomplete=True/False cases raised KeyError: pause_accounting_incomplete",
+  "failing_before_head": "924f7dbf68ca16695aa3d1a007cb513d5fbcf714",
+  "full_python_seconds": 37.123,
+  "full_python_tests": 264,
+  "model_calls": 0,
+  "official_metrics_enabled": true,
+  "regression": "test_interrupted_pause_prefix_is_not_an_exact_aggregate_total",
+  "reporter_sha256": "sha256:51452196dcd1fcf16105aa8ed357c31c6f2108e261e3db6d748fb7e9a5b8b3ec",
+  "review_comment": "https://github.com/twaldin/hone/pull/37#discussion_r4474150490",
+  "schema": "pilot-report-pause-precision-v9",
+  "smoke": {
+    "aggregate_incomplete": true,
+    "aggregate_pause_lower_bound_seconds": 12602.0,
+    "exact_aggregate_pause_seconds": null,
+    "input_receipts": [
+      {
+        "calls": 0,
+        "method": "hone",
+        "pause_accounting_incomplete": true,
+        "pause_seconds": 12600,
+        "seed": 0,
+        "status": "infrastructure_failure",
+        "task": "mbpp"
+      },
+      {
+        "calls": 0,
+        "method": "hone",
+        "pause_accounting_incomplete": false,
+        "pause_seconds": 2,
+        "seed": 0,
+        "status": "completed",
+        "task": "hover"
+      }
+    ],
+    "model_calls": 0,
+    "per_cell_incomplete": true
+  },
+  "statistical_contract_changed": false
+}

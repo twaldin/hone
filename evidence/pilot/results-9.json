@@ -44,6 +44,7 @@
         }
       ],
       "method": "hone",
+      "pause_accounting_incomplete": null,
       "retained_selection_score": null,
       "seed": 0,
       "spend": null,
@@ -104,6 +105,7 @@
         }
       ],
       "method": "gepa",
+      "pause_accounting_incomplete": null,
       "retained_selection_score": null,
       "seed": 0,
       "spend": null,
@@ -164,6 +166,7 @@
         }
       ],
       "method": "plain",
+      "pause_accounting_incomplete": null,
       "retained_selection_score": null,
       "seed": 0,
       "spend": null,
@@ -224,6 +227,7 @@
         }
       ],
       "method": "hone",
+      "pause_accounting_incomplete": null,
       "retained_selection_score": null,
       "seed": 0,
       "spend": null,
@@ -284,6 +288,7 @@
         }
       ],
       "method": "gepa",
+      "pause_accounting_incomplete": null,
       "retained_selection_score": null,
       "seed": 0,
       "spend": null,
@@ -344,6 +349,7 @@
         }
       ],
       "method": "plain",
+      "pause_accounting_incomplete": null,
       "retained_selection_score": null,
       "seed": 0,
       "spend": null,
@@ -383,7 +389,9 @@
       "timing": {
         "available_cells": 0,
         "expected_cells": 2,
+        "lower_bounds": {},
         "observed_subtotals": {},
+        "pause_accounting_incomplete": null,
         "totals": {}
       }
     },
@@ -406,7 +414,9 @@
       "timing": {
         "available_cells": 0,
         "expected_cells": 2,
+        "lower_bounds": {},
         "observed_subtotals": {},
+        "pause_accounting_incomplete": null,
         "totals": {}
       }
     },
@@ -429,12 +439,14 @@
       "timing": {
         "available_cells": 0,
         "expected_cells": 2,
+        "lower_bounds": {},
         "observed_subtotals": {},
+        "pause_accounting_incomplete": null,
         "totals": {}
       }
     }
   },
-  "reporter_sha256": "sha256:4ef0246909e8d3734d98d222625feebba8ac65af97e019155497e8d1e892b5c8",
+  "reporter_sha256": "sha256:51452196dcd1fcf16105aa8ed357c31c6f2108e261e3db6d748fb7e9a5b8b3ec",
   "schema": "pilot-results-v1",
   "seed": 0
 }

@@ -240,6 +240,7 @@ def report_results(runs: Path) -> dict:
                               if evidence.get("chosen_artifact_hash") is not None else None,
                           "inference": paired_bootstrap(*pair) if pair else None, "evidence": evidence,
                           "spend": spend, "timing": {key: result.get(key) for key in TIMING},
+                          "pause_accounting_incomplete": result.get("pause_accounting_incomplete", False) if result else None,
                           "accounting": {key: spend.get(key, result.get(key)) if spend else result.get(key) for key in COUNTERS},
                           "unknown_usage": "Internal failed-attempt tokens and unreported failed-call usage remain unknown; conservative estimates are not reported usage.",
                           "input_hashes": hashes, "issues": issues})
@@ -248,11 +249,18 @@ def report_results(runs: Path) -> dict:
         selected = [cell for cell in cells if cell["method"] == method]
         complete_pairs = {task: pairs[task, method] for task in TASKS if (task, method) in pairs}
         phases = sorted({phase for cell in selected if cell["spend"] for phase in cell["spend"].get("buckets", {})})
+        timing = _sum_available([{key: value for key, value in cell["timing"].items() if value is not None} for cell in selected])
+        pause_flags = [cell["pause_accounting_incomplete"] for cell in selected if cell["pause_accounting_incomplete"] is not None]
+        timing["pause_accounting_incomplete"] = any(pause_flags) if pause_flags else None
+        timing["lower_bounds"] = {}
+        if timing["pause_accounting_incomplete"]:
+            timing["lower_bounds"]["pause_seconds"] = timing["observed_subtotals"].get("pause_seconds")
+            timing["totals"]["pause_seconds"] = None
         aggregates[method] = {"inference": hierarchical_bootstrap(complete_pairs) if len(complete_pairs) == 2 else None,
                               "paired_tasks": list(complete_pairs),
                               "spend": _sum_available([cell["spend"].get("total") if cell["spend"] else None for cell in selected]),
                               "phases": {phase: _sum_available([cell["spend"].get("buckets", {}).get(phase) if cell["spend"] else None for cell in selected]) for phase in phases},
-                              "timing": _sum_available([{key: value for key, value in cell["timing"].items() if value is not None} for cell in selected]),
+                              "timing": timing,
                               "accounting": _sum_available([{key: value for key, value in cell["accounting"].items() if value is not None} for cell in selected])}
     return {"schema": "pilot-results-v1", "seed": 0, "label": LABEL,
             "matrix_status": "complete" if len(pairs) == 6 and all(cell["status"] == "completed" for cell in cells) else "partial_or_stopped",

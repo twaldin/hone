@@ -243,6 +243,29 @@ class ReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             report_results(self.root)
 
+    def test_interrupted_pause_prefix_is_not_an_exact_aggregate_total(self):
+        cell_root = self.write_cell()
+        self.write_cell(task="hover")
+        result = json.loads((cell_root / "result.json").read_text())
+        for incomplete in (True, False):
+            with self.subTest(incomplete=incomplete):
+                result.update(pause_seconds=12600, pause_accounting_incomplete=incomplete)
+                (cell_root / "result.json").write_text(json.dumps(result))
+                report = report_results(self.root)
+                cell = report["cells"][0]
+                timing = report["methods"]["hone"]["timing"]
+                self.assertEqual(cell["pause_accounting_incomplete"], incomplete)
+                self.assertEqual(cell["timing"]["pause_seconds"], 12600)
+                self.assertFalse(report["cells"][3]["pause_accounting_incomplete"])
+                self.assertEqual(timing["pause_accounting_incomplete"], incomplete)
+                self.assertEqual(timing["observed_subtotals"]["pause_seconds"], 12602)
+                if incomplete:
+                    self.assertIsNone(timing["totals"]["pause_seconds"])
+                    self.assertEqual(timing["lower_bounds"], {"pause_seconds": 12602})
+                else:
+                    self.assertEqual(timing["totals"]["pause_seconds"], 12602)
+                    self.assertEqual(timing["lower_bounds"], {})
+
     def test_complete_method_sums_phases_and_equal_weight_task_inference(self):
         self.write_cell()
         self.write_cell(task="hover")
