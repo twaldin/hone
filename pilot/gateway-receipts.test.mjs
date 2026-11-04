@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createProviderReceiptObserver, providerResult } from "./gateway-receipts.mjs";
 
 const encoder = new TextEncoder();
@@ -49,11 +50,26 @@ test("fragmented SSE counts the exact provider JSON and strips private fields", 
   expect(JSON.stringify(value)).not.toContain("headers");
 });
 
-test("arbitrary model text, JSON error bodies, and unstructured stops are not refusal evidence", async () => {
+test.each(["refusal", "sensitive"])("bare terminal %s is credential-opaque refusal evidence", async (reason) => {
+  const terminal = { type: "message_delta", delta: { stop_reason: reason }, usage: { output_tokens: 2 } };
+  const observer = observerFor(event(start) + event(terminal) + event(stop));
+  const response = await observer.fetch("https://api.anthropic.com/v1/messages", { body: wire });
+  await response.text();
+  const safe = await providerResult(Response.json({ error: "private fixture explanation", headers: { private: "fixture" } }, { status: 502 }), observer, { httpAttempts: 1 });
+  const value = await safe.json();
+  expect(value.providerReceipt.refusal).toEqual({
+    type: "refusal", category: "unspecified", provenance: "anthropic.message_delta.stop_reason",
+  });
+  expect(value.providerReceipt.inputTokenUpperBound).toBe(4216);
+  expect(value.providerReceipt.reportedUsage).toEqual({ input: 12, output: 2 });
+  expect(JSON.stringify(value)).not.toContain("private fixture");
+  expect(JSON.stringify(value)).not.toContain("headers");
+});
+
+test("arbitrary model text, JSON error bodies, and non-refusal stops are not refusal evidence", async () => {
   for (const body of [
     JSON.stringify({ error: "Refusal (general_harms)", stop_details: { type: "refusal" } }),
     event({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: JSON.stringify(refusal()) } }) + event(stop),
-    event({ type: "message_delta", delta: { stop_reason: "refusal" } }) + event(stop),
     event({ type: "message_delta", delta: { stop_reason: "end_turn" } }) + event(refusal()) + event(stop),
     event(refusal()).replace("event: message_delta", "event: unknown") + event(stop),
     event(refusal()).replace("event: message_delta", "event: error") + event(refusal()) + event(stop),
@@ -74,7 +90,11 @@ test("an oversized event is bounded and cannot supply refusal evidence", async (
 });
 
 const omp = Bun.which("omp");
-test.skipIf(!omp)("installed native router preserves a real structured refusal through its synthesized 502 offline", async () => {
+test.skipIf(!omp).each([
+  [refusal(), "general_harms", "anthropic.message_delta.stop_details"],
+  [{ type: "message_delta", delta: { stop_reason: "refusal" }, usage: { output_tokens: 2 } }, "unspecified", "anthropic.message_delta.stop_reason"],
+  [{ type: "message_delta", delta: { stop_reason: "sensitive" }, usage: { output_tokens: 2 } }, "unspecified", "anthropic.message_delta.stop_reason"],
+])("installed native router preserves terminal refusal %j through its synthesized 502 offline", async (terminal, category, provenance) => {
   const entry = realpathSync(omp);
   const load = (name) => import(import.meta.resolve(name, entry));
   const { createAuthGatewayRouter } = await load("@oh-my-pi/pi-ai/auth-gateway");
@@ -88,7 +108,7 @@ test.skipIf(!omp)("installed native router preserves a real structured refusal t
     fetch: async (_input, init) => {
       attempts++;
       sent = typeof init.body === "string" ? init.body : new TextDecoder().decode(init.body);
-      return new Response(event(start) + event(refusal()) + event(stop), { headers: { "content-type": "text/event-stream" } });
+      return new Response(event(start) + event(terminal) + event(stop), { headers: { "content-type": "text/event-stream" } });
     },
   });
   const storage = {
@@ -105,11 +125,45 @@ test.skipIf(!omp)("installed native router preserves a real structured refusal t
     const value = await response.json();
     expect(response.status).toBe(502);
     expect(attempts).toBe(1);
-    expect(value.providerReceipt.refusal.category).toBe("general_harms");
+    expect(value.providerReceipt.refusal).toEqual({ type: "refusal", category, provenance });
     expect(value.providerReceipt.inputTokens).toBe(countTokens(sent, Encoding.ClaudeV3));
     expect(value.providerReceipt.inputTokenUpperBound).toBe(countTokens(sent, Encoding.ClaudeV3) + 4096);
     expect(JSON.stringify(value)).not.toContain("private fixture");
     expect(JSON.stringify(value)).not.toContain("sk-ant-");
+    expect(JSON.stringify(value)).not.toContain("headers");
+    const settled = Bun.spawnSync([fileURLToPath(new URL("./.venv/bin/python", import.meta.url)), "-c", `
+import json
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
+from pilot.runtime import Ledger, ModelCalls, ProviderRefusal, call_scope
+
+frame = json.load(sys.stdin)
+attempts = []
+def request(body):
+    attempts.append(body)
+    return frame
+with tempfile.TemporaryDirectory() as directory:
+    ledger = Ledger(Path(directory) / "calls.jsonl", history_paths=[])
+    gateway = SimpleNamespace(request=request, close=lambda: None)
+    throttle = SimpleNamespace(wait=lambda: None, accounted_seconds=0, env={})
+    with patch("pilot.runtime.broker_healthy", return_value=True), patch("pilot.runtime.open_gateway", return_value=gateway), call_scope(row_id="row-17", arm="naive"):
+        try:
+            ModelCalls(gateway, ledger, throttle)("task", [{"role": "user", "content": "fixture"}], 32)
+        except ProviderRefusal:
+            pass
+        else:
+            raise AssertionError("Terminal refusal must reach the ledger caller")
+    row = json.loads(ledger.journal.read_text())
+    assert len(attempts) == 1, "Terminal refusal must never be redispatched"
+    assert row["outcome"] == "refusal" and row["row_id"] == "row-17"
+    assert row["refusal"] == frame["body"]["providerReceipt"]["refusal"]
+    assert row["charged_tokens"] == frame["body"]["providerReceipt"]["inputTokenUpperBound"] + 32
+    assert ledger.transport_failures == 0
+`], { cwd: `${import.meta.dir}/..`, stdin: encoder.encode(JSON.stringify({ status: response.status, body: value })) });
+    expect(settled.exitCode, new TextDecoder().decode(settled.stderr)).toBe(0);
   } finally {
     router.close();
   }

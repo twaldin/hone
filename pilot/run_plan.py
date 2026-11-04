@@ -11,7 +11,8 @@ from .spend import report_spend
 
 
 PROJECTION_TOTALS = ("tokens", "charged_tokens", "reported_tokens", "estimated_tokens", "usd_equivalent",
-                     "reported_usd_equivalent", "estimated_usd_equivalent", "refusals", "active_hours",
+                     "reported_usd_equivalent", "estimated_usd_equivalent", "refusals",
+                     "usage_missing_calls", "unbounded_missing_usage_calls", "active_hours",
                      "usage_polling_hours", "observed_pause_hours", "wall_hours")
 TERMINAL_STOPS = {"infrastructure-failure", "refusal-nondeterminism"}
 
@@ -32,8 +33,15 @@ def project(sample: dict) -> dict:
                    for value in (estimated_usd, reported_usd))
             or not math.isclose(resources["usd"], estimated_usd + reported_usd, rel_tol=1e-9, abs_tol=1e-9)):
         raise ValueError("Projection charged and reported/estimated usage do not reconcile")
-    if sample.get("usage_missing_calls", 0) and not estimated:
-        raise ValueError("Missing usage without conservative estimated charges cannot supply a projection")
+    missing = sample.get("usage_missing_calls", 0)
+    unbounded = sample.get("unbounded_missing_usage_calls", 0)
+    if (any(type(value) is not int or value < 0 for value in (missing, unbounded))
+            or not unbounded <= missing <= sample["calls"]):
+        raise ValueError("Invalid missing-usage call classification")
+    if missing and "unbounded_missing_usage_calls" not in sample:
+        raise ValueError("Missing usage requires receipt-derived refusal/unknown classification")
+    if missing > unbounded and not estimated:
+        raise ValueError("Missing refusal usage requires conservative estimated charges")
     ratios = {key: LIMITS[key] / value for key, value in resources.items()}
     binding = min(ratios, key=ratios.get)
     scale = ratios[binding]
@@ -51,6 +59,11 @@ def project(sample: dict) -> dict:
             "usd_equivalent": sample["usd_equivalent"] * scale,
             "reported_usd_equivalent": reported_usd * scale, "estimated_usd_equivalent": estimated_usd * scale,
             "refusals": refusals * scale,
+            "usage_missing_calls": missing * scale,
+            "unbounded_missing_usage_calls": unbounded * scale,
+            "usage_accounting": "conditional-known-charge-lower-bound" if unbounded else "reported-plus-estimated-charges",
+            "usage_limit": ("Known-charge lower-bound forecast only: non-refusal calls with missing usage have unbounded omitted token/dollar volume. Refusal estimates do not bound these omissions; caps bind recorded charges, not an exact total."
+                            if unbounded else "Reported usage and conservative refusal estimates are separate charges, not an exact forecast of future reported usage. Internal failed-attempt usage remains unknown."),
             "active_hours": sample["active_seconds"] * scale / 3600,
             "usage_polling_hours": polling * scale / 3600,
             "observed_pause_hours": pause * scale / 3600,
@@ -76,15 +89,28 @@ def build(controls: Path) -> dict:
     from .__main__ import verify_bundle
     verify_bundle(controls)
     members = json.loads((controls / "bundle.json").read_text())["files"]
-    for name in ("panel.json", "ifbench/failure.json", "ifbench/controls.json", "ifbench/usage.json", "ifbench/noise-pairs.json"):
+    for name in ("panel.json", "ifbench/failure.json", "ifbench/controls.json", "ifbench/usage.json",
+                 "ifbench/noise-pairs.json", "ifbench/calls.jsonl", "ifbench/manifest.json"):
         if (controls / name).exists() and name not in members:
             raise ValueError("Run-plan outcome or measurement is not sealed")
     inputs = {}
 
-    def load(path):
+    def load(path, *, jsonl=False):
         data = path.read_bytes()
         inputs[str(path.relative_to(ROOT))] = "sha256:" + hashlib.sha256(data).hexdigest()
-        return json.loads(data)
+        return [json.loads(line) for line in data.splitlines()] if jsonl else json.loads(data)
+
+    def load_usage(path):
+        usage = load(path / "usage.json")
+        calls = load(path / "calls.jsonl", jsonl=True)
+        if len(calls) != usage["calls"] or any(type(call.get("usage_missing")) is not bool for call in calls):
+            raise ValueError("Calibration call receipts and usage summary disagree")
+        missing = sum(call["usage_missing"] for call in calls)
+        if usage.get("usage_missing_calls", missing) != missing:
+            raise ValueError("Calibration missing-usage summary disagrees with call receipts")
+        return {**usage, "usage_missing_calls": missing,
+                "unbounded_missing_usage_calls": sum(call["usage_missing"] and call.get("outcome") != "refusal"
+                                                      for call in calls)}
 
     load(controls / "bundle.json")
     panel = load(controls / "panel.json") if (controls / "panel.json").exists() else None
@@ -106,7 +132,10 @@ def build(controls: Path) -> dict:
         if (panel["ifbench_status"] == "passed" and failure is not None
                 or panel["ifbench_status"] == "failed-gate" and stop != "admission-failed"):
             raise ValueError("Panel and sealed gate outcome disagree")
-    setup = load(ROOT / "evidence/pilot/setup-overhead-6.json")
+    manifest_path = controls / "ifbench/manifest.json"
+    manifest = load(manifest_path) if manifest_path.exists() else {}
+    current_setup = panel is not None and panel.get("version") == 8 or manifest.get("identity", {}).get("contract") == 8
+    setup = load(ROOT / f"evidence/pilot/setup-overhead-{8 if current_setup else 6}.json")
     setup_hours = (setup["cold_mbpp_load_seconds"] + setup["revalidations_per_matrix"] * setup["warm_mbpp_revalidation_seconds"]) / 3600
     incomplete = None
     calibration_paths = {"mbpp": ROOT / "evidence/pilot/mbpp-readmission-4a/mbpp",
@@ -116,7 +145,7 @@ def build(controls: Path) -> dict:
     for task, path in calibration_paths.items():
         if task == "ifbench" and stop in TERMINAL_STOPS:
             incomplete = {"status": stop + "-not-a-gate-failure",
-                          "failure": failure, "usage": load(path / "usage.json"),
+                          "failure": failure, "usage": load_usage(path),
                           "complete_calibration": False, "usable_for_projection": False,
                           "reason": "Terminal stop does not establish admission or a complete calibration. No completed prefix is projected."}
             continue
@@ -127,7 +156,7 @@ def build(controls: Path) -> dict:
                 continue
             raise ValueError("Calibration results missing: " + task)
         verify_bundle(path.parent)
-        usage = load(path / "usage.json")
+        usage = load_usage(path)
         control = load(path / "controls.json")
         if task == "ifbench":
             identity = control.get("identity", {})
@@ -198,6 +227,11 @@ def build(controls: Path) -> dict:
         if available:
             plans[name]["projection"].update(retained_admission_setup_hours=setup_hours,
                 total_wall_hours_including_measured_setup=plans[name]["projection"]["wall_hours"] + setup_hours)
+            projection = plans[name]["projection"]
+            projection["usage_accounting"] = ("conditional-known-charge-lower-bound"
+                                               if projection["unbounded_missing_usage_calls"] else "reported-plus-estimated-charges")
+            projection["usage_limit"] = ("Summed conditional known-charge forecasts exclude the disclosed unbounded non-refusal token/dollar omissions; refusal estimates do not cover them. Neither exact total usage nor a finite total-usage upper bound is supplied."
+                                         if projection["unbounded_missing_usage_calls"] else "Reported and estimated charges remain separate; internal failed-attempt usage remains unknown.")
     return {"schema": "pilot-measured-run-plan-v8", "status": "INFERENCE_NOT_EXECUTED",
             "selected_panel": panel, "calibrations": calibrations, "smokes": smokes,
             "cell_projections": rows, "plans": plans, "input_hashes": inputs,
@@ -211,7 +245,7 @@ def build(controls: Path) -> dict:
                        "P calibration has no proposer calls. Its projection does not measure future proposal overhead or candidate-dependent deployment changes; all such calls must fit the same cap, and can lower the amount of task evaluation purchased.",
                        "Token reservations, proposer/rollout safety caps and future latency can stop runs earlier than this fluid-rate estimate. Measured cold MBPP planning plus eleven retained-admission validations are added outside cell time; corpus download/index creation and other small orchestration overhead are separate.",
                        "Observed pause duty is included, not guaranteed. Before every call all allowed accounts must remain at or below80%; missing/stale usage and broker outage pause dispatch every30seconds. Arbitrary outage/quota delay has no finite upper bound.",
-                       "Charged usage includes reported usage and conservative estimated refusal charges. Hidden failed-attempt token volume remains unknown, not free. Scaling the observed mix and refusal frequency is an assumption, not a measurement of future usage.",
+                       "Charged usage includes reported usage and conservative estimated refusal charges. Receipt-derived unbounded_missing_usage_calls counts non-refusal calls whose token/dollar volume is unbounded, even when other calls have refusal estimates. Forecasts with these omissions are conditional known-charge lower bounds, not exact totals or free usage. Hidden failed-attempt volume remains separately unknown. Scaling observed mixes and refusal frequency is an assumption.",
                        "Neither matrix is authorized. The assistant reviews this plan first. Complete credential-opaque per-attempt and failed-call receipts remain prerequisites for the full matrix."],
             "next_lane_command_not_authorized": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot pilot --controls " + str(controls.relative_to(ROOT)) + " --out .pilot-runs/pilot",
             "matrix_searches_executed": 0}

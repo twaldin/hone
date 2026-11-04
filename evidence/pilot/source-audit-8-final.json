@@ -1,0 +1,109 @@
+{
+  "baseline_source_head": "ed610b55c95beea8ee4810dc2a709786f790d04c",
+  "budgeted_attempts": 0,
+  "forecast_proof": "Each calibration call receipt classifies missing non-refusal usage separately; all consumed journal hashes enter plan inputs, and omissions produce conditional-known-charge lower-bound labels.",
+  "global_history_proof": "Sibling nonpublic run roots and persistent root-only stop markers block current/reopened/new cells before another dispatch. Charged conflict receipt remains durable.",
+  "limits": [
+    "Compatibility probes are synthetic callback execution through real Hone policy and pinned official GEPA, not model-quality evidence.",
+    "The active source transition and declaration were corrected before any new pilot model call; original offline proof and initial source configuration remain retained.",
+    "Native internal failed-attempt usage remains unknown, not free; complete credential-opaque attempt receipts remain a full-matrix prerequisite."
+  ],
+  "model_calls": 0,
+  "replay_command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 pilot/.venv/bin/python -c <replay_python> <fresh-scratch-directory>",
+  "replay_python": "import hashlib,json,sys,types\nfrom pathlib import Path\nfrom pilot import search as current\nfrom pilot.tasks import Task\nroot=Path.cwd(); scratch=Path(sys.argv[1])/\"fixed-calibration\"\nsnapshot=json.loads((root/\"evidence/pilot/source-snapshot-7.json\").read_text())\nold=types.ModuleType(\"pilot_before_refusal\"); old.__file__=str(root/\"pilot/search.py\")\nexec(compile(snapshot[\"files\"][\"pilot/search.py\"],old.__file__,\"exec\"),old.__dict__)\ntask=Task(\"synthetic\",[{\"id\":f\"t{i}\",\"input\":\"train\"} for i in range(40)],[{\"id\":f\"s{i}\",\"input\":\"selection\"} for i in range(3)],{}, {\"prompt\":\"seed\"})\nnoise=json.loads((root/\"evidence/pilot/mbpp-readmission-4a/mbpp/controls.json\").read_text())\nrows=[]\nfor method in (\"hone\",\"gepa\",\"plain\"):\n    captured=[]; results=[]\n    for label,module in ((\"before\",old),(\"after\",current)):\n        calls=[]\n        def call(role,messages,max_tokens):\n            calls.append([role,messages,max_tokens])\n            return \"better\" if method==\"gepa\" else '{\"prompt\":\"better\"}'\n        def evaluate(candidate,batch,capture_traces=False):\n            result={\"scores\":[0.0]*len(batch),\"outputs\":[\"\"]*len(batch),\"trajectories\":[{\"id\":row[\"id\"],\"input\":row[\"input\"],\"output\":\"\",\"score\":0.0,\"feedback\":\"synthetic failure\",\"calls\":[]} for row in batch] if capture_traces else []}\n            if label==\"after\": result.update(refusals=[],refusals_by_row={})\n            return result\n        results.append(module.run_search(method,task,call,evaluate,lambda:True,noise,0,scratch/(method+\"-\"+label),1))\n        captured.append(calls)\n    assert captured[0]==captured[1],method\n    assert results[0][\"candidate\"]==results[1][\"candidate\"] and results[0][\"selection_score\"]==results[1][\"selection_score\"],method\n    rows.append({\"method\":method,\"calls_before\":len(captured[0]),\"calls_after\":len(captured[1]),\"identical_role_messages_and_max_tokens\":True,\"request_sequence_sha256\":hashlib.sha256(json.dumps(captured[1],sort_keys=True,separators=(\",\",\":\"),allow_nan=False).encode()).hexdigest(),\"same_retained_artifact_and_score\":True})\nprint(json.dumps({\"probes\":rows,\"model_requests\":0,\"actual_native_gepa_and_hone_policy_exercised\":True},sort_keys=True))\n",
+  "retained_answered_call_proofs": {
+    "hover": {
+      "calls": 5440,
+      "path": "evidence/pilot/controls-5/hover/calls.jsonl",
+      "sha256": "sha256:36e45b3977fb4e772c920fb8e0ca96c60af97ddee1487138471567227ec1781f"
+    },
+    "mbpp": {
+      "calls": 660,
+      "path": "evidence/pilot/mbpp-readmission-4a/mbpp/calls.jsonl",
+      "sha256": "sha256:960792010b3da0674c0962aa1c68b82b769fbbf819844100f223cfeb04fda0a1"
+    }
+  },
+  "review_corrections": "evidence/pilot/preflight-revisions-8.json",
+  "source_files": {
+    "pilot/__main__.py": "sha256:482add3a3782d4a493ebe41b9fed5d915afeaf1b416d2b2aa7f64c5a2c96697a",
+    "pilot/admission.py": "sha256:b27f9e7f7bdeada523ec5a41d186861cfe6c0faa70ea83183efcb11b631960ef",
+    "pilot/adversarial.py": "sha256:eb0630056646d1ac4aafd505971582a1c7f56a6d785ff9c9aa4e2cc0724c39fe",
+    "pilot/controls.py": "sha256:c4756705a590110f9afb33c622143bc36a332ff5cf3a5f6c24afd9fe160aedc9",
+    "pilot/gateway-receipts.mjs": "sha256:6e922a1227caca622077d2e25242dec356fff9f0fc2c85f84cf39726ce248329",
+    "pilot/gateway.mjs": "sha256:a81a1fff9b8ad9859875da1c46f8a4039df2b996cc0819a935573ce7d67e9cb4",
+    "pilot/hover.py": "sha256:439e1b64550a35711b9b1b58c647be8f39d9d3a644669e1826885c258b800c37",
+    "pilot/panel.py": "sha256:874de0610d12e50805f379bc9eb17e0b824987be0175d1d1a99dd50616309e71",
+    "pilot/program.py": "sha256:5a09799538b382d6212c744bd4e6e72abe009e764dc505d1aa034f51929cdd53",
+    "pilot/published-controls.json": "sha256:3800220f9484db58af0cfb4985ba5806179da1ecb0a3cfa6a265363a74edbfd9",
+    "pilot/published.py": "sha256:a01e391ab349b5687c34b720929672ffdb9fc44b722d59482e28f482ec199938",
+    "pilot/runtime.py": "sha256:64290440a241a9e730e608e3ebd6f16567304903538f77188096250ed95e2e68",
+    "pilot/search.py": "sha256:cd80943fe956b11c8269c37a8cd487f000489cb9496ff247218579488043f8b0",
+    "pilot/tasks.py": "sha256:95248dd235a525636af1726e25ab2e9bd15a75a584dc2535ff85713878a0a3d0",
+    "pilot/verification.py": "sha256:5b8cfac4162f31b154695b77172dd4b32da9e7ac7deb863f6053d575ed36b13d"
+  },
+  "source_transition_hash": "sha256:a4d639eb509b3de1ab7837a6000f0aa0bcade5e52a6a371fb562ac1470177c1a",
+  "successful_request_compatibility": {
+    "actual_native_gepa_and_hone_policy_exercised": true,
+    "model_requests": 0,
+    "probes": [
+      {
+        "calls_after": 1,
+        "calls_before": 1,
+        "identical_role_messages_and_max_tokens": true,
+        "method": "hone",
+        "request_sequence_sha256": "5ec20f8a503ffe98020c89038f81d9305b3745e8f02b759eeb57e0632abef4e5",
+        "same_retained_artifact_and_score": true
+      },
+      {
+        "calls_after": 1,
+        "calls_before": 1,
+        "identical_role_messages_and_max_tokens": true,
+        "method": "gepa",
+        "request_sequence_sha256": "9758f93735d4acdc5d8f9eb6270a2d4fb8b8d149d5dcfea8f8d8d720641b53ab",
+        "same_retained_artifact_and_score": true
+      },
+      {
+        "calls_after": 1,
+        "calls_before": 1,
+        "identical_role_messages_and_max_tokens": true,
+        "method": "plain",
+        "request_sequence_sha256": "5ec20f8a503ffe98020c89038f81d9305b3745e8f02b759eeb57e0632abef4e5",
+        "same_retained_artifact_and_score": true
+      }
+    ]
+  },
+  "tests": {
+    "bun_failures": 0,
+    "bun_passed": 9,
+    "docker_enabled": true,
+    "native_receipts_settled_in_python_ledger": true,
+    "native_router_forms_exercised_offline": [
+      "stop_details refusal",
+      "bare refusal",
+      "bare sensitive"
+    ],
+    "official_metrics_enabled": true,
+    "python_passed": 220,
+    "python_seconds": 41.104
+  },
+  "uniform_proposal_refusal_regression": {
+    "first_refused": true,
+    "logical_proposals": 2,
+    "methods": [
+      "hone",
+      "gepa",
+      "plain"
+    ],
+    "model_requests": 0,
+    "provider_dispatches_each": 2,
+    "same_iteration_refusal_redispatches": 0,
+    "second_answered": true,
+    "second_artifact_retained_each": true
+  },
+  "verification_fixture_corrections": [
+    "Native test now uses the repository Python environment instead of an unavailable python binary.",
+    "Bun.spawnSync receives UTF-8 stdin bytes, not an unsupported string.",
+    "Removed a duplicate Python test-runner wrapper; the direct Bun suite and CI step exercise the same cases once."
+  ],
+  "version": "pilot-refusal-source-audit-v8-final"
+}

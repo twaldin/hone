@@ -168,9 +168,9 @@ def route_proof(pool: dict, env: dict, out: Path) -> None:
             gateway.close()
 
 
-def calls_for(pool: dict, env: dict, out: Path, limits: dict | None = None):
+def calls_for(pool: dict, env: dict, out: Path, limits: dict | None = None, history_roots: list[Path] | None = None):
     throttle = Throttle(pool, env, out / "pauses.jsonl")
-    ledger = Ledger(out / "calls.jsonl", limits=dict(limits or LIMITS))
+    ledger = Ledger(out / "calls.jsonl", limits=dict(limits or LIMITS), history_roots=history_roots or [])
     return ModelCalls(open_gateway(throttle), ledger, throttle), ledger, throttle
 
 
@@ -498,7 +498,7 @@ def controls(args, pool=None, env=None):
         try:
             if pool is None:
                 pool, env = environment(args.pool)
-            call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100, active_seconds=86_400))
+            call, ledger, throttle = calls_for(pool, env, out, dict(LIMITS, usd=100, active_seconds=86_400), history_roots=[args.out])
             task = prepared["ifbench"]
             identity = evaluator_identity(task)
             save(out / "manifest.json", {"identity": identity, "route_identity": call.gateway.route_identity,
@@ -640,7 +640,7 @@ def search_one(args, pool, env, task_name: str, seed: int, method: str, smoke: b
         return resume_result(out, task_name, seed, method)
     out.mkdir(parents=True)
     try:
-        call, ledger, throttle = calls_for(pool, env, out)
+        call, ledger, throttle = calls_for(pool, env, out, history_roots=[args.out])
     except RefusalNondeterminism as error:
         save(out / "failure.json", {"status": "refusal-nondeterminism", "evidence": error.evidence})
         seal(out)
@@ -868,7 +868,7 @@ def main():
     parser.add_argument("--cache", type=Path, default=ROOT / ".pilot-cache")
     parser.add_argument("--pool", type=Path, default=ROOT / ".pilot-state/account-pool.json")
     parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-8")
-    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-8")
+    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-8-final")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
@@ -876,7 +876,7 @@ def main():
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (
             "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
-            "adversarial-8" if args.command == "adversarial" else "controls-8" if args.command == "controls" else "smoke-8")
+            "adversarial-8-final" if args.command == "adversarial" else "controls-8" if args.command == "controls" else "smoke-8")
     if args.command != "verify":
         execution_limits()
     if args.command in {"verify", "replay"}:

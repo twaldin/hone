@@ -198,6 +198,7 @@ class Ledger:
     started: float = field(init=False)
     binding_cap: str | None = None
     history_paths: list[Path] | None = None
+    history_roots: list[Path] | None = None
     reported_tokens: int = 0
     estimated_tokens: int = 0
     reported_usd: float = 0
@@ -214,10 +215,7 @@ class Ledger:
     def __post_init__(self) -> None:
         self.started = self.clock()
         self.journal = Path(self.journal)
-        marker = self.journal.parent / "refusal-nondeterminism.json"
-        if marker.is_file():
-            self.refusal_nondeterminism = json.loads(marker.read_text())
-            self._stop_written = True
+        self.history_roots = [Path(root) for root in self.history_roots or []]
         self._refresh_history()
 
     def _observe_outcome(self, row: dict, journal: Path) -> None:
@@ -236,9 +234,14 @@ class Ledger:
             self.refusal_nondeterminism = {"request_hash": request_hash, "outcomes": list(outcomes.values())}
 
     def _refresh_history(self) -> None:
+        for directory in dict.fromkeys([self.journal.parent, *self.history_roots]):
+            marker = directory / "refusal-nondeterminism.json"
+            if self.refusal_nondeterminism is None and marker.is_file():
+                self.refusal_nondeterminism = json.loads(marker.read_text())
         paths = self.history_paths
         if paths is None:
-            paths = list((ROOT / "evidence" / "pilot").rglob("*calls*.jsonl"))
+            paths = [path for root in (ROOT / "evidence" / "pilot", *self.history_roots)
+                     for path in root.rglob("*calls*.jsonl")]
         for path in dict.fromkeys([*map(Path, paths), self.journal]):
             if not path.is_file():
                 continue
@@ -267,7 +270,10 @@ class Ledger:
     def _raise_if_stopped(self) -> None:
         if self.refusal_nondeterminism is not None:
             if not self._stop_written:
-                append_json(self.journal.parent / "refusal-nondeterminism.json", self.refusal_nondeterminism)
+                for directory in dict.fromkeys([self.journal.parent, *self.history_roots]):
+                    marker = directory / "refusal-nondeterminism.json"
+                    if not marker.is_file():
+                        append_json(marker, self.refusal_nondeterminism)
                 self._stop_written = True
             raise RefusalNondeterminism(self.refusal_nondeterminism)
 
@@ -308,7 +314,11 @@ class Ledger:
         message = body.get("message", {})
         provider_receipt = body.get("providerReceipt", {})
         refusal = provider_receipt.get("refusal", {})
-        is_refusal = refusal.get("type") == "refusal" and refusal.get("provenance") == "anthropic.message_delta.stop_details"
+        is_refusal = refusal.get("type") == "refusal" and refusal.get("provenance") in {
+            "anthropic.message_delta.stop_details", "anthropic.message_delta.stop_reason",
+        }
+        if is_refusal and (not isinstance(refusal.get("category"), str) or not refusal["category"].strip()):
+            raise TransportError("Invalid refusal category receipt")
         usage = message.get("usage")
         usage_valid = isinstance(usage, dict) and all(type(usage.get(key)) is int and usage[key] >= 0 for key in PRICES)
         counts = {key: usage[key] for key in PRICES} if usage_valid else {}

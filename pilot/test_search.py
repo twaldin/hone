@@ -432,21 +432,27 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result["stop_reason"], "budget_exhausted")
 
     @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
-    def test_native_gepa_terminal_refusal_is_not_retried_or_infrastructure_failure(self):
-        from pilot.runtime import ProviderRefusal
-        calls = []
-        def call(*args):
-            calls.append(args)
-            raise ProviderRefusal("Provider refused the response")
-        def evaluate(candidate, rows, capture_traces=False):
-            return {"scores": [0] * len(rows), "outputs": [""] * len(rows),
-                    "trajectories": [{}] * len(rows)}
-        with tempfile.TemporaryDirectory() as directory:
-            result = run_search("gepa", task(), call, evaluate, lambda: True, {}, 0, Path(directory), 1)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(result["candidate"], {"prompt": "seed"})
-        self.assertEqual(result["valid_proposals"], 0)
-        self.assertEqual(result["stop_reason"], "provider_refusal")
+    def test_every_method_continues_after_one_refused_proposal_without_retry(self):
+        from pilot.runtime import ProviderRefusal, ROOT
+        noise = json.loads((ROOT / "evidence/pilot/mbpp-readmission-4a/mbpp/controls.json").read_text())
+        for method in ("hone", "gepa", "plain"):
+            calls = []
+            def call(role, messages, max_tokens):
+                calls.append((role, messages, max_tokens))
+                if len(calls) == 1:
+                    raise ProviderRefusal("Provider refused the response")
+                return "better" if method == "gepa" else '{"prompt":"better"}'
+            def evaluate(candidate, rows, capture_traces=False):
+                score = float(candidate == {"prompt": "better"})
+                return {"scores": [score] * len(rows), "outputs": [""] * len(rows),
+                        "trajectories": [{"id": row["id"], "output": "", "feedback": "training"} for row in rows]}
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
+                result = run_search(method, task(), call, evaluate, lambda: True, noise, 0, Path(directory), 2)
+                self.assertEqual(len(calls), 2)
+                self.assertNotEqual(calls[0][1], calls[1][1])
+                self.assertEqual(result["candidate"], {"prompt": "better"})
+                self.assertEqual(result["proposals"], 2)
+                self.assertEqual(result["valid_proposals"], 1)
 
     @unittest.skipUnless(importlib.util.find_spec("gepa"), "official GEPA package is not installed")
     def test_native_gepa_fatal_reflection_failure_does_not_retry_transport(self):

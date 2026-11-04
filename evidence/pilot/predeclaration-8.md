@@ -6,7 +6,9 @@ This declaration records the gate owner's ruling before any new pilot task, prop
 
 The official DSPy Evaluate failure score is zero. The official IFBench metric scores an empty response zero. A terminal provider refusal ends the current program call and rollout with an empty response and score zero. Do not continue later stages of that rollout, retry the refusal, switch accounts or models to evade it, filter the row, or reinterpret it as an infrastructure abort. A refused proposal is an unsuccessful proposal, not a usable artifact or a new retry opportunity.
 
-Classify refusals only from the provider's structured terminal refusal event, not candidate text, substring matches on arbitrary HTTP errors, or the generic synthesized 502 status. Preserve the refusal category without forwarding its explanation, credentials or headers. Keep native omp credential resolution and the existing OAuth-only account restriction.
+A refused proposal consumes one proposal step. Every method may continue to the next logical proposal if budget remains. A bridge must block redispatch inside the refused proposal without terminating GEPA's entire remaining search budget.
+
+Classify refusals only from the provider's structured terminal refusal event, including a refusal or sensitive stop reason when stop details are absent. Preserve the supplied refusal category, or record `unspecified` with stop-reason provenance when unavailable. Never classify candidate text, arbitrary HTTP error substrings or a generic synthesized 502 as a refusal. Do not forward explanations, credentials or headers. Keep native omp credential resolution and the existing OAuth-only account restriction.
 
 ## Receipts and conservative unknown usage
 
@@ -24,7 +26,7 @@ The offline scan before this declaration found the known refused hash `sha256:e1
 
 ## One identical IFBench admission
 
-Use `evidence/pilot/adversarial-8` for zero-model setup and `evidence/pilot/controls-8` for the new complete attempt. Never overwrite earlier evidence. Retain the official ordered training partition `Random(1).sample(source_rows[300:600], 150)`, selection `source_rows[:300]`, and the ordered 40-row training draw with seed `20261106` and hash `sha256:7d71794c42e9b6d7a7789ced7001c225e4fd2760b62539f99da20619f0e1bf04`.
+Preserve the first zero-model setup at `evidence/pilot/adversarial-8` unchanged as superseded source evidence. Pre-dispatch review found implementation gaps before any new pilot call; the corrected exact-source setup uses `evidence/pilot/adversarial-8-final`. The single budgeted attempt still uses only `evidence/pilot/controls-8`. This is not a new draw or a replacement model attempt. Retain the official ordered training partition `Random(1).sample(source_rows[300:600], 150)`, selection `source_rows[:300]`, and the ordered 40-row training draw with seed `20261106` and hash `sha256:7d71794c42e9b6d7a7789ced7001c225e4fd2760b62539f99da20619f0e1bf04`.
 
 Keep the same official naive seed, pinned licensed published improved instructions, broken and shortcut controls, task/proposer model, decoding, image, budgets and protected-checker attacks. Require known-improved > naive > max(broken, shortcut), broken = 0, naive < 0.90 and every protected-checker attack = 0. After ranking passes, run exactly 16 fresh paired unchanged-seed trials without response caching. Keep `noiseFloor = 3/sqrt(2)*s` and `noiseEnvelope = max(4.5/sqrt(2)*s, max_abs_delta)`, strictly below the improved-minus-naive contrast. Keep the `sqrt(40/n)` projection. Do not retune rows, controls or gates after results.
 

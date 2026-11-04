@@ -1,0 +1,15 @@
+{
+  "version": 8,
+  "source_head": "31b4e3e9d4c3faa5e89aa5d1d24fffe943787911",
+  "cold_mbpp_load_seconds": 226.72625751595479,
+  "warm_mbpp_revalidation_seconds": 349.5237954260083,
+  "revalidations_per_matrix": 11,
+  "revalidation_rollouts": 720,
+  "model_calls": 0,
+  "nice": 10,
+  "cpu_affinity": [6],
+  "observations": 1,
+  "retained_calls": 660,
+  "limits": "One current-refusal-source measurement, not a latency distribution or hard bound. Eleven validations are two startup checks plus nine MBPP cells in either matrix; corpus/index preparation remains separate. Later pre-dispatch refusal fixes preserve the entirely answered archive and same scoring workload; carrying this setup timing forward is an inference, not a second measurement.",
+  "replay": "Measure load_task('mbpp', Path('.pilot-cache')) in a fresh process, then reuse_control(task), with perf_counter/monotonic around each. Use nice10, CPU6, one thread and no model calls."
+}

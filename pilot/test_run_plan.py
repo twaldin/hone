@@ -73,6 +73,7 @@ class ProjectionTests(unittest.TestCase):
     def test_estimated_refusals_bind_caps_without_becoming_reported_projection(self):
         sample = {"usd_equivalent": 5, "tokens": 100, "reported_tokens": 20, "estimated_tokens": 80,
                   "reported_usd_equivalent": 1, "estimated_usd_equivalent": 4, "refusals": 2,
+                  "usage_missing_calls": 2, "unbounded_missing_usage_calls": 0,
                   "calls": 10, "active_seconds": 10, "wall_seconds": 15, "throttle_seconds": 5}
         for limits, binding, scale in (({"usd": 10, "tokens": 1000, "calls": 1000, "active_seconds": 60}, "usd", 2),
                                        ({"usd": 100, "tokens": 150, "calls": 1000, "active_seconds": 60}, "tokens", 1.5)):
@@ -85,13 +86,39 @@ class ProjectionTests(unittest.TestCase):
                 self.assertEqual(result["reported_usd_equivalent"], scale)
                 self.assertEqual(result["estimated_usd_equivalent"], 4 * scale)
                 self.assertEqual(result["refusals"], 2 * scale)
+                self.assertEqual(result["usage_accounting"], "reported-plus-estimated-charges")
+                self.assertEqual(result["unbounded_missing_usage_calls"], 0)
                 self.assertIn("assumption", result)
         for field, value in (("reported_tokens", 21), ("estimated_tokens", -1),
                              ("reported_usd_equivalent", 2), ("usd_equivalent", float("nan"))):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 project(dict(sample, **{field: value}))
 
-    def current_controls(self, directory, *, failure=None, pairs=16, admitted=True):
+    def test_unknown_transport_is_not_bounded_by_another_calls_refusal_estimate(self):
+        sample = {"usd_equivalent": 5, "tokens": 100, "reported_tokens": 20, "estimated_tokens": 80,
+                  "reported_usd_equivalent": 1, "estimated_usd_equivalent": 4, "refusals": 1,
+                  "usage_missing_calls": 2, "unbounded_missing_usage_calls": 1,
+                  "calls": 10, "active_seconds": 10, "wall_seconds": 15, "throttle_seconds": 5}
+        with patch("pilot.run_plan.LIMITS", {"usd": 10, "tokens": 1000, "calls": 1000, "active_seconds": 60}):
+            result = project(sample)
+        self.assertEqual(result["charged_tokens"], 200)
+        self.assertEqual(result["reported_tokens"], 40)
+        self.assertEqual(result["estimated_tokens"], 160)
+        self.assertEqual(result["usage_missing_calls"], 4)
+        self.assertEqual(result["unbounded_missing_usage_calls"], 2)
+        self.assertEqual(result["usage_accounting"], "conditional-known-charge-lower-bound")
+        self.assertIn("unbounded", result["usage_limit"])
+
+    def test_missing_usage_without_receipt_classification_cannot_borrow_an_estimate(self):
+        sample = {"usd_equivalent": 5, "tokens": 100, "reported_tokens": 20, "estimated_tokens": 80,
+                  "reported_usd_equivalent": 1, "estimated_usd_equivalent": 4,
+                  "usage_missing_calls": 1, "calls": 10, "active_seconds": 10,
+                  "wall_seconds": 15, "throttle_seconds": 5}
+        with self.assertRaises(ValueError):
+            project(sample)
+
+    def current_controls(self, directory, *, failure=None, pairs=16, admitted=True,
+                         missing_transport=False, estimated_refusals=True):
         from pilot.__main__ import seal
         controls = Path(directory) / "controls"
         local = controls / "ifbench"
@@ -99,6 +126,7 @@ class ProjectionTests(unittest.TestCase):
         declaration_hash = "sha256:" + hashlib.sha256(
             (ROOT / "evidence/pilot/predeclaration-8.md").read_bytes()).hexdigest()
         identity = {"contract": 8, "predeclaration_hash": declaration_hash}
+        (local / "manifest.json").write_text(json.dumps({"identity": identity}))
         if failure is not None:
             (local / "failure.json").write_text(json.dumps({"status": failure}))
         else:
@@ -121,6 +149,23 @@ class ProjectionTests(unittest.TestCase):
             "reported_usd_equivalent": 1, "estimated_usd_equivalent": 4, "refusals": 2,
             "refusals_by_row": {"row": 2}, "refusals_by_arm": {"naive": 2},
             "calls": 10, "active_seconds": 10, "wall_seconds": 15, "throttle_seconds": 5}))
+        usage_path = local / "usage.json"
+        usage = json.loads(usage_path.read_text())
+        calls = [{"call": number, "usage_missing": number <= 2,
+                  "outcome": "refusal" if number <= 2 else "answered", "status": 502 if number <= 2 else 200}
+                 for number in range(1, 11)]
+        if not estimated_refusals:
+            usage.update(reported_tokens=100, estimated_tokens=0,
+                         reported_usd_equivalent=5, estimated_usd_equivalent=0, refusals=0,
+                         refusals_by_row={}, refusals_by_arm={})
+            for call in calls:
+                call.update(usage_missing=False, outcome="answered", status=200)
+        if missing_transport:
+            calls[-1].update(usage_missing=True, status=502)
+            calls[-1].pop("outcome")
+        usage["usage_missing_calls"] = sum(call["usage_missing"] for call in calls)
+        usage_path.write_text(json.dumps(usage))
+        (local / "calls.jsonl").write_text("".join(json.dumps(call) + "\n" for call in calls))
         seal(controls)
         return controls
 
@@ -160,6 +205,51 @@ class ProjectionTests(unittest.TestCase):
             seal(controls)
             with self.assertRaises(ValueError):
                 build(controls)
+
+    def test_calibration_discloses_unknown_transport_separately_from_estimated_refusals(self):
+        for estimated_refusals in (True, False):
+            with self.subTest(estimated_refusals=estimated_refusals), tempfile.TemporaryDirectory(
+                    prefix=".pilot-plan-test-", dir=ROOT) as directory:
+                controls = self.current_controls(
+                    directory, missing_transport=True, estimated_refusals=estimated_refusals)
+                result = build(controls)
+                calibration = result["calibrations"]["ifbench"]
+                self.assertEqual(calibration["usage"]["unbounded_missing_usage_calls"], 1)
+                self.assertEqual(calibration["usage"]["usage_missing_calls"], 3 if estimated_refusals else 1)
+                projection = calibration["projection"]
+                self.assertEqual(projection["usage_accounting"], "conditional-known-charge-lower-bound")
+                self.assertGreater(projection["unbounded_missing_usage_calls"], 0)
+                self.assertEqual(projection["estimated_tokens"] > 0, estimated_refusals)
+                calls = controls / "ifbench/calls.jsonl"
+                self.assertEqual(result["input_hashes"][str(calls.relative_to(ROOT))],
+                                 "sha256:" + hashlib.sha256(calls.read_bytes()).hexdigest())
+                matrix = result["plans"]["three_task"]
+                self.assertTrue(matrix["projection_available"])
+                self.assertFalse(matrix["authorized"])
+                self.assertEqual(matrix["projection"]["usage_accounting"], "conditional-known-charge-lower-bound")
+                self.assertAlmostEqual(matrix["projection"]["unbounded_missing_usage_calls"],
+                                       projection["unbounded_missing_usage_calls"] * 9)
+
+    def test_current_setup_is_added_once_for_current_panels_and_terminal_manifests(self):
+        setup_path = ROOT / "evidence/pilot/setup-overhead-8.json"
+        setup = json.loads(setup_path.read_text())
+        setup_hours = (setup["cold_mbpp_load_seconds"]
+                       + setup["revalidations_per_matrix"] * setup["warm_mbpp_revalidation_seconds"]) / 3600
+        for failure in (None, "infrastructure-failure"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(
+                    prefix=".pilot-plan-test-", dir=ROOT) as directory:
+                controls = self.current_controls(directory, failure=failure)
+                result = build(controls)
+                self.assertEqual(result["measured_setup"], setup)
+                self.assertEqual(result["input_hashes"][str(setup_path.relative_to(ROOT))],
+                                 "sha256:" + hashlib.sha256(setup_path.read_bytes()).hexdigest())
+                self.assertNotIn("evidence/pilot/setup-overhead-6.json", result["input_hashes"])
+                for plan in result["plans"].values():
+                    if plan["projection_available"]:
+                        projection = plan["projection"]
+                        self.assertEqual(projection["retained_admission_setup_hours"], setup_hours)
+                        self.assertEqual(projection["total_wall_hours_including_measured_setup"],
+                                         projection["wall_hours"] + setup_hours)
 
     def test_historical_abort_preserves_every_available_forecast(self):
         retained = json.loads((ROOT / "evidence/pilot/run-plan-6.json").read_text())

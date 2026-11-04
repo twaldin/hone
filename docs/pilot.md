@@ -35,13 +35,15 @@ Auth and usage child processes receive only an explicit allowlist of home, execu
 Contract 8 uses fresh evidence directories. Never overwrite or restart a directory that already contains evidence. The offline command performs no model calls. The controls command consumes the one replacement attempt authorized by predeclaration 8 and reuses the unchanged IFBench cohort and gates.
 
 ```sh
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-8
-nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-8 --out evidence/pilot/controls-8
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot adversarial --out evidence/pilot/adversarial-8-final
+nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-8-final --out evidence/pilot/controls-8
 ```
+
+The first zero-model `adversarial-8` setup remains unchanged and is superseded by the corrected exact-source proof at `adversarial-8-final`. Pre-dispatch review found gaps before any pilot call. This is a source correction, not a second model attempt, cohort draw or gate retune.
 
 The first command carries MBPP and HoVer forward without model calls after sealed-evidence and exact old/new source checks. It runs IFBench checker/protocol attacks outside candidate control before auth. The second command measures IFBench once. Terminal refusals are zero-score task responses; transport errors remain infrastructure failures, never candidate scores or measured gate failures. Both the transport and official GEPA reflection bridge prevent refusal redispatch.
 
-Refusal receipts expose only category, request hash, role and row/arm context. A cloned provider stream supplies structured terminal evidence; model text and generic 502 messages cannot classify refusals. Caller metadata never enters task requests. Reported usage stays separate from estimated charges. Unknown refusal usage uses offline Claude-v3 counting of the provider JSON, a 4096-token input allowance, and the full requested output maximum. Charged totals enforce the shared budget. Before dispatch, a separate conservative reservation covers caller bytes, native framing and maximum output. [The source audit](../evidence/pilot/source-audit-8.json) records failing-before regressions, the offline native-router exercise and unchanged successful-path proposer requests for all three methods.
+Refusal receipts expose only category, request hash, role and row/arm context. A cloned provider stream supplies structured terminal evidence, including bare refusal/sensitive stop reasons with category `unspecified`; model text and generic 502 messages cannot classify refusals. Caller metadata never enters task requests. Reported usage stays separate from estimated charges. Unknown refusal usage uses offline Claude-v3 counting of provider JSON, a 4096-token input allowance and the full requested output maximum. Charged totals enforce the shared budget. [The final source audit](../evidence/pilot/source-audit-8-final.json) records failing-before regressions, native-router/ledger exercises and unchanged successful-path proposer requests for all three methods.
 
 MBPP re-admission is accepted only after 660 successful task calls, nonempty naive/noise outputs and a complete offline score replay. The sealed `audit.json` binds these checks to the control, call and evaluation files. This rejects a silent Docker outage that could fake zero noise. Reuse also requires every consumed score and audit file to be listed in the completed seal. Startup failures are retained; no automatic restart is authorized. Smoke and pilot enforce CPU 6 themselves, not only through the documented shell prefix.
 
@@ -157,6 +159,14 @@ nice -n 10 taskset -c 6 pilot/.venv/bin/python -m pilot replay --out evidence/pi
 Replay first verifies the bundle hashes and task-resource identities, then runs the protected metrics again. MBPP replay executes archived solution code in the same isolated worker boundary.
 
 `prepare`, `probe`, and `throttle-proof` regenerate the machine/task manifests, real route check, no-account/environment-fallback rejection check, and forced-high/outage pause proof. Current route evidence is `route-proof-v4`; earlier route, preparation and throttle directories carry explicit superseded status files. `aborted-controls-v1` remains inadmissible measurement evidence, not a passing control run.
+
+## Contract-8 verification and setup
+
+The corrected source passes 220 Python tests with real Docker and official metrics, plus nine Bun receipt tests. Native-router fixtures cover full, bare-refusal and bare-sensitive terminal events through ledger settlement with one dispatch each. A two-proposal regression proves that Hone, official GEPA and plain each count a refused proposal once, continue to the next logical proposal and retain its successful artifact. Run-root history and durable stop markers prevent later cells from hiding refusal-versus-answer conflicts.
+
+[The current-source setup measurement](../evidence/pilot/setup-overhead-8.json) records one cold MBPP load at 226.73 seconds and one warm 720-rollout retained-admission validation at 349.52 seconds, on CPU 6 at nice 10 without model calls. Eleven validations per matrix plus that load imply 1.13 setup hours. This is a single observation, not a latency distribution or hard bound. Carrying it across the later refusal-only pre-dispatch fixes is an explicit inference; corpus/index preparation is separate.
+
+Forecasts inspect every calibration call receipt. Estimated refusal charges cannot conceal missing transport usage. Unknown non-refusal volume is disclosed separately, and any affected projection is a conditional known-charge lower bound, not an exact total-dollar forecast. Both matrices remain unauthorized.
 
 ## Historical contract-6 result and prospective plan
 

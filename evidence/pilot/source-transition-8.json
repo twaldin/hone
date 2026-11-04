@@ -1,7 +1,7 @@
 {
   "files": {
     "pilot/__main__.py": {
-      "after": "sha256:344dc83866c46b32dc828a69eebc2f25f6f586e1615680a90982a57d8a527b6e",
+      "after": "sha256:482add3a3782d4a493ebe41b9fed5d915afeaf1b416d2b2aa7f64c5a2c96697a",
       "before": "sha256:6b1f54b998334ca2601382d1c4b8372cc1575ebab076c9637ac5877e89fb7bf7"
     },
     "pilot/admission.py": {
@@ -17,7 +17,7 @@
       "before": "sha256:df763dc3e99092540ce9503abfb2ba3723704470419c6f1b3924859d603fc1c3"
     },
     "pilot/gateway-receipts.mjs": {
-      "after": "sha256:07fbaaf83ffb92e2713c402c374444e672dbcc8320421a73764a74d2da1b6177",
+      "after": "sha256:6e922a1227caca622077d2e25242dec356fff9f0fc2c85f84cf39726ce248329",
       "before": null
     },
     "pilot/gateway.mjs": {
@@ -45,11 +45,11 @@
       "before": "sha256:a01e391ab349b5687c34b720929672ffdb9fc44b722d59482e28f482ec199938"
     },
     "pilot/runtime.py": {
-      "after": "sha256:f49bf9b9c485da2b800c2a0512556def414b48f5fc53212d4fa0d349acadbaae",
+      "after": "sha256:64290440a241a9e730e608e3ebd6f16567304903538f77188096250ed95e2e68",
       "before": "sha256:87f64fcf17ceb8099d19b725d97efe33ff1fcf9e03ea8d75521fd8e3f9ef353b"
     },
     "pilot/search.py": {
-      "after": "sha256:59be09caa400ec40d0ca0f14ef4408680b493dd0b488b99caf90aa37bfb093ad",
+      "after": "sha256:cd80943fe956b11c8269c37a8cd487f000489cb9496ff247218579488043f8b0",
       "before": "sha256:e30e49a842d8dc5cf53be32f5ed032919fafb53dc8bde5c0557505ba4b72bbee"
     },
     "pilot/tasks.py": {
@@ -63,7 +63,7 @@
   },
   "history_hash": "sha256:99ad46f04f123066488f1c4f2a6d95abea33b68e50321308b5b678923bee703a",
   "model_calls": 0,
-  "predeclaration_hash": "sha256:855646e42433d111821512c83201f40b9198f5914b5635d46c5d5b881704a7cc",
+  "predeclaration_hash": "sha256:d4747b113d16d878253052505bdc20c25848fa52e57040e17249115f66a80202",
   "retained_calls": {
     "hover": {
       "calls": 5440,

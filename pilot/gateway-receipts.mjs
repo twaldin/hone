@@ -60,11 +60,14 @@ async function observe(response, input, countTokens) {
           const delta = event.delta;
           if (delta?.stop_reason) {
             terminal = true;
-            if (["refusal", "sensitive"].includes(delta.stop_reason) && delta.stop_details?.type === "refusal") {
-              const category = typeof delta.stop_details.category === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(delta.stop_details.category) ? delta.stop_details.category : "unspecified";
+            if (["refusal", "sensitive"].includes(delta.stop_reason)) {
+              const details = delta.stop_details;
+              const hasCategory = details?.type === "refusal" && typeof details.category === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(details.category);
+              const category = hasCategory ? details.category : "unspecified";
+              const provenance = hasCategory ? PROVENANCE : "anthropic.message_delta.stop_reason";
               const validFinalUsage = event.usage && Object.keys(USAGE_FIELDS).every((key) => event.usage[key] === undefined || Number.isSafeInteger(event.usage[key]) && event.usage[key] >= 0);
               const usageComplete = validFinalUsage && Number.isSafeInteger(event.usage.output_tokens) && Object.values(USAGE_FIELDS).every((key) => key in usage);
-              receipt = countedReceipt({ type: "refusal", category, provenance: PROVENANCE }, usage, usageComplete, input, countTokens);
+              receipt = countedReceipt({ type: "refusal", category, provenance }, usage, usageComplete, input, countTokens);
             }
           }
         }

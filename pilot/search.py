@@ -164,8 +164,6 @@ def run_search(method: str, task: Task, call: Callable, evaluate: Callable,
             _gepa(task, call, evaluate, available, noise, seed, max_proposals, state, retain)
         else:
             _loop(method, task, call, evaluate, available, noise, seed, max_proposals, state, retain)
-    except ProviderRefusal:
-        state["stop_reason"] = "provider_refusal"
     except BudgetExhausted as error:
         state["stop_reason"] = "budget_exhausted"
         state["budget_exhaustion"] = str(error)
@@ -323,6 +321,9 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state, retain):
             self.parent = None
 
         def on_proposal_start(self, event):
+            nonlocal terminal_error
+            if isinstance(terminal_error, ProviderRefusal):
+                terminal_error = None
             state["proposals"] += 1
             self.parent = dict(event["parent_candidate"])
 
@@ -355,7 +356,8 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state, retain):
     def stopper(native_state):
         nonlocal stopped
         reached_limit = limit is not None and state["proposals"] >= limit
-        stopped = stopped or terminal_error is not None or not available() or reached_limit
+        fatal_error = terminal_error is not None and not isinstance(terminal_error, ProviderRefusal)
+        stopped = stopped or fatal_error or not available() or reached_limit
         if stopped:
             state["stop_reason"] = "max_proposals" if reached_limit else "budget_exhausted"
         return stopped
@@ -384,7 +386,7 @@ def _gepa(task, call, evaluate, available, noise, seed, limit, state, retain):
              stop_callbacks=stopper, callbacks=[Callback()],
              run_dir=None, cache_evaluation=False, raise_on_exception=True, seed=seed,
              display_progress_bar=False, use_merge=False)
-    if terminal_error is not None:
+    if terminal_error is not None and not isinstance(terminal_error, ProviderRefusal):
         raise terminal_error
     if not stopped:
         state.update(stop_reason="budget_exhausted", binding_cap="gepa_metric_calls")
