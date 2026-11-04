@@ -225,8 +225,12 @@ class ProjectionTests(unittest.TestCase):
                 self.assertEqual(result["incomplete_ifbench_calibration"]["usage"]["calls"], 0)
                 self.assertFalse(result["incomplete_ifbench_calibration"]["usable_for_projection"])
                 self.assertIn("no-panel-no-fallback", result["admission_status"])
-                self.assertEqual(result["measured_setup"], json.loads(
-                    (ROOT / "evidence/pilot/setup-overhead-8.json").read_text()))
+                setup = json.loads((ROOT / "evidence/pilot/setup-overhead-8.json").read_text())
+                setup_hours = (setup["cold_mbpp_load_seconds"]
+                               + setup["revalidations_per_matrix"] * setup["warm_mbpp_revalidation_seconds"]) / 3600
+                projection = result["plans"]["two_task_fallback"]["projection"]
+                self.assertAlmostEqual(projection["total_wall_hours_including_measured_setup"]
+                                       - projection["wall_hours"], setup_hours)
 
     def test_current_panel_requires_the_frozen_predeclaration(self):
         from pilot.__main__ import seal
@@ -273,7 +277,6 @@ class ProjectionTests(unittest.TestCase):
                     prefix=".pilot-plan-test-", dir=ROOT) as directory:
                 controls = self.current_controls(directory, failure=failure)
                 result = build(controls)
-                self.assertEqual(result["measured_setup"], setup)
                 self.assertEqual(result["input_hashes"][str(setup_path.relative_to(ROOT))],
                                  "sha256:" + hashlib.sha256(setup_path.read_bytes()).hexdigest())
                 self.assertNotIn("evidence/pilot/setup-overhead-6.json", result["input_hashes"])

@@ -248,6 +248,28 @@ class PreflightTests(unittest.TestCase):
             self.assertFalse((out / "ifbench/controls.json").exists())
             self.assertFalse((out / "panel.json").exists())
 
+    def test_real_controller_startup_abort_has_unavailable_usage_and_no_panel(self):
+        from pilot.run_plan import build
+        with tempfile.TemporaryDirectory(prefix=".pilot-startup-test-", dir=ROOT) as directory, \
+                self.offline_fixture(Path(directory)) as (_, admission, cache):
+            with redirect_stdout(StringIO()):
+                offline_adversarial(argparse.Namespace(task="all", out=admission, cache=cache))
+            out = Path(directory) / "startup-abort"
+            args = argparse.Namespace(task="all", out=out, cache=cache, adversarial=admission)
+            pool = json.loads((Path(directory) / "pool.json").read_text())
+            with patch("pilot.__main__.calls_for", side_effect=TransportError("synthetic gateway startup failure")):
+                with self.assertRaises(TransportError):
+                    run_controls(args, pool, {})
+            self.assertFalse((out / "ifbench/usage.json").exists())
+            self.assertFalse((out / "ifbench/calls.jsonl").exists())
+            result = build(out)
+            self.assertEqual(result["admission_status"], "infrastructure-aborted-no-panel-no-fallback")
+            self.assertIsNone(result["incomplete_ifbench_calibration"]["usage"])
+            self.assertIsNone(result["selected_panel"])
+            self.assertIsNone(result["plans"]["three_task"]["projection"])
+            self.assertFalse(result["plans"]["two_task_fallback"]["admitted"])
+            self.assertFalse(result["plans"]["two_task_fallback"]["authorized"])
+
     def test_other_task_admission_blocks_every_search_before_transport(self):
         for command in ("smoke", "pilot"):
             for name in ("ifbench", "hover"):

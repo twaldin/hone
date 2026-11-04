@@ -1,0 +1,85 @@
+{
+  "files": {
+    "pilot/__main__.py": {
+      "after": "sha256:34b410e85e7341df95bdd710d49d5e258ffb9d2a5b2b61dd6770f0d25914bd75",
+      "before": "sha256:6b1f54b998334ca2601382d1c4b8372cc1575ebab076c9637ac5877e89fb7bf7"
+    },
+    "pilot/admission.py": {
+      "after": "sha256:182254568cac939694aa24da65b2fa0c20e1f8f967999e2cbe7257aee9fb0167",
+      "before": "sha256:db4bc3022a127035dfe0f290a06312e2c98d3f1b3859e23700d428676017b1f9"
+    },
+    "pilot/adversarial.py": {
+      "after": "sha256:eb0630056646d1ac4aafd505971582a1c7f56a6d785ff9c9aa4e2cc0724c39fe",
+      "before": "sha256:eb0630056646d1ac4aafd505971582a1c7f56a6d785ff9c9aa4e2cc0724c39fe"
+    },
+    "pilot/controls.py": {
+      "after": "sha256:c4756705a590110f9afb33c622143bc36a332ff5cf3a5f6c24afd9fe160aedc9",
+      "before": "sha256:df763dc3e99092540ce9503abfb2ba3723704470419c6f1b3924859d603fc1c3"
+    },
+    "pilot/gateway-receipts.mjs": {
+      "after": "sha256:78b1a32c3525a6f546a8a1452116d11eb34caca6725c0ad4f55721182a377a0a",
+      "before": null
+    },
+    "pilot/gateway.mjs": {
+      "after": "sha256:a81a1fff9b8ad9859875da1c46f8a4039df2b996cc0819a935573ce7d67e9cb4",
+      "before": "sha256:cee1f462a6d5f84bda3268f7b0d1b3fc710516fe627abe22de9dc366f9fe94c2"
+    },
+    "pilot/hover.py": {
+      "after": "sha256:439e1b64550a35711b9b1b58c647be8f39d9d3a644669e1826885c258b800c37",
+      "before": "sha256:d14d7b8ff83ae5feb1236e06ecdec17d871b78f7c3d0656e6e355995034a54bb"
+    },
+    "pilot/panel.py": {
+      "after": "sha256:874de0610d12e50805f379bc9eb17e0b824987be0175d1d1a99dd50616309e71",
+      "before": "sha256:d6d9f597afee76b89bcefcac12e1fe06f0645e279d8c0ea5aa3e4d1b5e89458a"
+    },
+    "pilot/program.py": {
+      "after": "sha256:5a09799538b382d6212c744bd4e6e72abe009e764dc505d1aa034f51929cdd53",
+      "before": "sha256:bf7f9e03771b401e95660123bd3206e2ca98ecd05d72a94365ecb918f57650c0"
+    },
+    "pilot/published-controls.json": {
+      "after": "sha256:3800220f9484db58af0cfb4985ba5806179da1ecb0a3cfa6a265363a74edbfd9",
+      "before": "sha256:3800220f9484db58af0cfb4985ba5806179da1ecb0a3cfa6a265363a74edbfd9"
+    },
+    "pilot/published.py": {
+      "after": "sha256:a01e391ab349b5687c34b720929672ffdb9fc44b722d59482e28f482ec199938",
+      "before": "sha256:a01e391ab349b5687c34b720929672ffdb9fc44b722d59482e28f482ec199938"
+    },
+    "pilot/runtime.py": {
+      "after": "sha256:64290440a241a9e730e608e3ebd6f16567304903538f77188096250ed95e2e68",
+      "before": "sha256:87f64fcf17ceb8099d19b725d97efe33ff1fcf9e03ea8d75521fd8e3f9ef353b"
+    },
+    "pilot/search.py": {
+      "after": "sha256:cd80943fe956b11c8269c37a8cd487f000489cb9496ff247218579488043f8b0",
+      "before": "sha256:e30e49a842d8dc5cf53be32f5ed032919fafb53dc8bde5c0557505ba4b72bbee"
+    },
+    "pilot/tasks.py": {
+      "after": "sha256:95248dd235a525636af1726e25ab2e9bd15a75a584dc2535ff85713878a0a3d0",
+      "before": "sha256:cc504ddf1530f271c8e42579aa46d6d84b18609d6b9ce8c0fea895a85e9afdba"
+    },
+    "pilot/verification.py": {
+      "after": "sha256:5b8cfac4162f31b154695b77172dd4b32da9e7ac7deb863f6053d575ed36b13d",
+      "before": "sha256:5b8cfac4162f31b154695b77172dd4b32da9e7ac7deb863f6053d575ed36b13d"
+    }
+  },
+  "history_hash": "sha256:99ad46f04f123066488f1c4f2a6d95abea33b68e50321308b5b678923bee703a",
+  "model_calls": 0,
+  "predeclaration_hash": "sha256:b0431b3b4dd0de1138ebd6ea16bd5024a64dd6f76aa08f6e8a7c30683b5a2494",
+  "prior_source_transition_hash": "sha256:50322abe3e2d04823e05a924cc2da3849c0a6d108ecc7f3fc9251148f7778268",
+  "request_encoding_correction_hash": "sha256:3042ff35168efcf60843913f94468805bae2080582ac82dcb9efb20a2586c756",
+  "retained_calls": {
+    "hover": {
+      "calls": 5440,
+      "path": "evidence/pilot/controls-5/hover/calls.jsonl",
+      "sha256": "sha256:36e45b3977fb4e772c920fb8e0ca96c60af97ddee1487138471567227ec1781f"
+    },
+    "mbpp": {
+      "calls": 660,
+      "path": "evidence/pilot/mbpp-readmission-4a/mbpp/calls.jsonl",
+      "sha256": "sha256:960792010b3da0674c0962aa1c68b82b769fbbf819844100f223cfeb04fda0a1"
+    }
+  },
+  "scope": "Exact reviewed source transition for uniform terminal refusal classification, zero score, no retry, conservative unknown-usage charging and contextual receipts. No archived retained call refused or lacked usage. Original task/program/grader/data/route/decoding/cohort identities and raw results remain authenticated and re-scored. Changes outside these exact source hashes invalidate carryover. The shared call factory also authenticates project-private history and publishes durable global stops for every model-capable command. Native gzip request observation is deferred until a structured refusal, bounded-decoded and counted as original JSON. Ordinary native request bytes pass unchanged. Contract8 and the prior transition remain immutable; only the final predeclared controls7b infrastructure allowance is enabled.",
+  "source_head": "ed610b55c95beea8ee4810dc2a709786f790d04c",
+  "source_snapshot_hash": "sha256:a191462c549135af7dbbd4ee8cc10b1a22660aada493ae6689a95c5d8d4ee533",
+  "version": "pilot-refusal-transition-v8a"
+}

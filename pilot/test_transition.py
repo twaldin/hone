@@ -22,13 +22,17 @@ class TransitionTests(unittest.TestCase):
         self.source = self.root / "pilot/runtime.py"
         self.source.write_text("new = 'refusal-aware'\n")
         (self.evidence / "predeclaration-8.md").write_text("frozen refusal policy\n")
+        (self.evidence / "predeclaration-8a.md").write_text("native gzip observation only\n")
+        (self.evidence / "source-transition-8.json").write_text('{"prior": "frozen refusal grant"}\n')
         snapshot = {"source_head": "ed610b55c95beea8ee4810dc2a709786f790d04c",
                     "files": {"pilot/runtime.py": "old = 'answered'\n"}}
         self.snapshot = self.evidence / "source-snapshot-7.json"
         self.snapshot.write_text(json.dumps(snapshot))
-        self.receipt = {"version": "pilot-refusal-transition-v8", "source_head": snapshot["source_head"],
+        self.receipt = {"version": "pilot-refusal-transition-v8a", "source_head": snapshot["source_head"],
                         "source_snapshot_hash": sha(self.snapshot.read_bytes()),
                         "predeclaration_hash": sha((self.evidence / "predeclaration-8.md").read_bytes()),
+                        "request_encoding_correction_hash": sha((self.evidence / "predeclaration-8a.md").read_bytes()),
+                        "prior_source_transition_hash": sha((self.evidence / "source-transition-8.json").read_bytes()),
                         "files": {"pilot/runtime.py": {"before": sha(snapshot["files"]["pilot/runtime.py"].encode()),
                                                        "after": sha(self.source.read_bytes())}},
                         "retained_calls": {}}
@@ -42,7 +46,7 @@ class TransitionTests(unittest.TestCase):
         self.save()
 
     def save(self):
-        (self.evidence / "source-transition-8.json").write_text(json.dumps(self.receipt))
+        (self.evidence / "source-transition-8a.json").write_text(json.dumps(self.receipt))
 
     def test_exact_transition_accepts_answered_archive_but_rejects_unreviewed_runtime(self):
         self.assertEqual(transition_source(self.root, "pilot/runtime.py"), "old = 'answered'\n")
@@ -62,6 +66,16 @@ class TransitionTests(unittest.TestCase):
         (self.evidence / "predeclaration-8.md").write_text("different policy\n")
         with self.assertRaises(ValueError):
             transition_source(self.root, "pilot/runtime.py")
+
+    def test_encoding_policy_and_prior_grant_changes_cannot_authorize_carryover(self):
+        for filename in ("predeclaration-8a.md", "source-transition-8.json"):
+            with self.subTest(filename=filename):
+                path = self.evidence / filename
+                original = path.read_text()
+                path.write_text(original + " ")
+                with self.assertRaises(ValueError):
+                    transition_source(self.root, "pilot/runtime.py")
+                path.write_text(original)
 
     def test_even_resealed_refusal_or_unknown_usage_cannot_carry_a_task_admission(self):
         for defect in ("refusal", "unknown", "failed", "empty"):

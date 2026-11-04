@@ -146,18 +146,20 @@ def task_source_ast(source: str, task_name: str) -> str:
 def transition_source(root: Path, path: str) -> str:
     import hashlib
     import json
-    declaration = root / "evidence/pilot/source-transition-8.json"
+    declaration = root / "evidence/pilot/source-transition-8a.json"
     if not declaration.exists():
         return (root / path).read_text()
     receipt = json.loads(declaration.read_text())
     snapshot_path = root / "evidence/pilot/source-snapshot-7.json"
     snapshot = json.loads(snapshot_path.read_text())
     sha = lambda data: "sha256:" + hashlib.sha256(data).hexdigest()
-    if (receipt.get("version") != "pilot-refusal-transition-v8"
+    if (receipt.get("version") != "pilot-refusal-transition-v8a"
             or receipt.get("source_head") != "ed610b55c95beea8ee4810dc2a709786f790d04c"
             or snapshot.get("source_head") != receipt["source_head"]
             or receipt.get("source_snapshot_hash") != sha(snapshot_path.read_bytes())
             or receipt.get("predeclaration_hash") != sha((root / "evidence/pilot/predeclaration-8.md").read_bytes())
+            or receipt.get("request_encoding_correction_hash") != sha((root / "evidence/pilot/predeclaration-8a.md").read_bytes())
+            or receipt.get("prior_source_transition_hash") != sha((root / "evidence/pilot/source-transition-8.json").read_bytes())
             or not set(snapshot["files"]).issubset(receipt["files"])):
         raise ValueError("Refusal source transition does not authenticate its baseline")
     for filename, hashes in receipt["files"].items():
@@ -173,7 +175,7 @@ def transition_source(root: Path, path: str) -> str:
 def retained_transport_proof(root: Path, task_name: str) -> dict | None:
     import hashlib
     import json
-    path = root / "evidence/pilot/source-transition-8.json"
+    path = root / "evidence/pilot/source-transition-8a.json"
     if not path.exists():
         return None
     receipt = json.loads(path.read_text())

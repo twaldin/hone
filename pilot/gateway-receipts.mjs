@@ -1,3 +1,7 @@
+import { promisify } from "node:util";
+import { gunzip } from "node:zlib";
+
+const gunzipBody = promisify(gunzip);
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_STREAM_BYTES = 16 * 1024 * 1024;
 const COUNTING_METHOD = "@oh-my-pi/pi-natives:ClaudeV3:serialized-provider-json+4096";
@@ -5,13 +9,31 @@ const PROVENANCE = "anthropic.message_delta.stop_details";
 const USAGE_FIELDS = { input_tokens: "input", output_tokens: "output", cache_read_input_tokens: "cacheRead", cache_creation_input_tokens: "cacheWrite" };
 const MESSAGE_EVENTS = new Set(["message_start", "message_delta", "message_stop", "content_block_start", "content_block_delta", "content_block_stop"]);
 
-async function wireText(input, init) {
-  const body = init?.body;
+function inputEncoding(input, init) {
+  const headers = init?.headers ?? (input instanceof Request ? input.headers : undefined);
+  const encoding = headers instanceof Headers ? headers.get("content-encoding")
+    : Array.isArray(headers) ? headers.find(([name]) => name.toLowerCase() === "content-encoding")?.[1]
+    : headers?.[Object.keys(headers).find((name) => name.toLowerCase() === "content-encoding")];
+  return typeof encoding === "string" ? encoding.trim().toLowerCase() : "";
+}
+
+async function wireText(body, encoding) {
   let text;
-  if (typeof body === "string") text = body;
-  else if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) text = new TextDecoder("utf-8", { fatal: true }).decode(body);
-  else if (body === undefined && input instanceof Request) text = await input.clone().text();
-  else throw new Error("Unsupported provider input encoding");
+  if (typeof body === "string" && (!encoding || encoding === "identity")) text = body;
+  else {
+    let bytes;
+    if (typeof body === "string") bytes = new TextEncoder().encode(body);
+    else if (body instanceof ArrayBuffer) bytes = new Uint8Array(body);
+    else if (ArrayBuffer.isView(body)) bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    else if (body instanceof Request) bytes = new Uint8Array(await body.arrayBuffer());
+    else throw new Error("Unsupported provider input encoding");
+    if (bytes.byteLength > MAX_STREAM_BYTES) throw new Error("Provider input exceeds receipt limit");
+    if (encoding && encoding !== "identity") {
+      if (encoding !== "gzip") throw new Error("Unsupported provider content encoding");
+      bytes = await gunzipBody(bytes, { maxOutputLength: MAX_STREAM_BYTES });
+    }
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  }
   if (Buffer.byteLength(text, "utf8") > MAX_STREAM_BYTES) throw new Error("Provider input exceeds receipt limit");
   return text;
 }
@@ -23,9 +45,10 @@ function updateUsage(target, source) {
   }
 }
 
-function countedReceipt(refusal, usage, usageComplete, input, countTokens) {
+async function countedReceipt(refusal, usage, usageComplete, body, encoding, countTokens) {
   const receipt = { refusal, reportedUsage: { ...usage }, usageComplete, countingMethod: COUNTING_METHOD, framingAllowance: 4096 };
   try {
+    const input = await wireText(body, encoding);
     const inputTokens = countTokens(input);
     const maxOutputTokens = JSON.parse(input).max_tokens;
     if (!Number.isSafeInteger(inputTokens) || inputTokens < 0 || !Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 4096) throw new Error("Invalid count");
@@ -35,7 +58,7 @@ function countedReceipt(refusal, usage, usageComplete, input, countTokens) {
   }
 }
 
-async function observe(response, input, countTokens) {
+async function observe(response, body, encoding, countTokens) {
   const reader = response.body?.getReader();
   if (!reader) return undefined;
   const decoder = new TextDecoder();
@@ -67,7 +90,7 @@ async function observe(response, input, countTokens) {
               const provenance = hasCategory ? PROVENANCE : "anthropic.message_delta.stop_reason";
               const validFinalUsage = event.usage && Object.keys(USAGE_FIELDS).every((key) => event.usage[key] === undefined || Number.isSafeInteger(event.usage[key]) && event.usage[key] >= 0);
               const usageComplete = validFinalUsage && Number.isSafeInteger(event.usage.output_tokens) && Object.values(USAGE_FIELDS).every((key) => key in usage);
-              receipt = countedReceipt({ type: "refusal", category, provenance }, usage, usageComplete, input, countTokens);
+              receipt = countedReceipt({ type: "refusal", category, provenance }, usage, usageComplete, body, encoding, countTokens);
             }
           }
         }
@@ -109,10 +132,11 @@ export function createProviderReceiptObserver({ fetch: fetchImpl, countTokens })
   return {
     reset() { observations = []; },
     fetch: async (input, init) => {
-      const inputText = await wireText(input, init);
+      const body = init?.body ?? (input instanceof Request ? input.clone() : undefined);
+      const encoding = inputEncoding(input, init);
       const response = await fetchImpl(input, init);
       if (response.ok && response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream")) {
-        observations.push(observe(response.clone(), inputText, countTokens));
+        observations.push(observe(response.clone(), body, encoding, countTokens));
       }
       return response;
     },

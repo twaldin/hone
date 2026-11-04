@@ -79,7 +79,7 @@ Without either setting, Hone looks for capsules in `./capsules` under the direct
 
 ## Development optimizer pilot
 
-[Predeclaration 8](evidence/pilot/predeclaration-8.md) keeps IFBench and treats terminal provider refusals as ordinary failed responses: empty output, official metric score zero, no retry. Unknown refusal usage receives a labelled conservative charge. The shared transport records category, role, request hash and row/arm context, and stops if an identical request is both refused and answered. All earlier evidence remains unchanged. The corrected IFBench admission must finish before a complete panel or new measured plan exists; neither matrix nor merge is authorized.
+[Correction 8a](evidence/pilot/predeclaration-8a.md) fixes native gzip request observation after an infrastructure abort before the first IFBench row completed. [Contract 8](evidence/pilot/predeclaration-8.md) remains unchanged: terminal provider refusals are empty zero-score responses, never retried, with conservative unknown-usage charges and credential-opaque receipts. A refused-versus-answered request hash stops all later pilot calls. Earlier evidence remains unchanged. The final approved infrastructure allowance is `controls-7b`; no panel, matrix or merge is authorized by the aborted attempt.
 
 [`pilot/`](pilot/) compares Hone's paired, noise-calibrated policy, pinned official GEPA, and a plain agent loop on development-only IFBench, bounded MBPP agent programs, and HoVer. MBPP and HoVer admissions stand; IFBench remains unadmitted. The runner uses one subscription route, an account allowlist, usage throttling, and matched reported-plus-estimated charged budgets. Final-test labels stay sealed.
 

@@ -150,8 +150,10 @@ def build(controls: Path) -> dict:
     calibrations = {}
     for task, path in calibration_paths.items():
         if task == "ifbench" and stop in TERMINAL_STOPS:
+            usage = (load_usage(path) if any((path / name).exists()
+                     for name in ("usage.json", "calls.jsonl")) else None)
             incomplete = {"status": stop + "-not-a-gate-failure",
-                          "failure": failure, "usage": load_usage(path),
+                          "failure": failure, "usage": usage,
                           "complete_calibration": False, "usable_for_projection": False,
                           "reason": "Terminal stop does not establish admission or a complete calibration. No completed prefix is projected."}
             continue
@@ -259,7 +261,7 @@ def build(controls: Path) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate the measured pilot run plan without model calls")
-    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-8")
+    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-7b")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     report = build(args.controls.resolve())

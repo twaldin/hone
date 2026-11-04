@@ -21,7 +21,7 @@ TASKS = OFFICIAL_PANEL
 ARCHIVED_TASKS = ("mbpp", "ifbench", "aime")
 METHODS = ("hone", "gepa", "plain")
 FROZEN_ADMISSION = ROOT / "evidence/pilot/adversarial-4a"
-AUTHORIZED_CONTROL_OUTPUT = ROOT / "evidence/pilot/controls-8"
+AUTHORIZED_CONTROL_OUTPUT = ROOT / "evidence/pilot/controls-7b"
 
 
 def save(path: Path, value: object) -> None:
@@ -41,7 +41,8 @@ def evaluator_identity(task) -> dict:
     return {"contract": 8, "task": task.manifest, "evaluator_files": {path: file_hash(ROOT / path) for path in paths},
             "predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-8.md"),
             "prior_predeclaration_hash": file_hash(ROOT / "evidence/pilot/predeclaration-6.md"),
-            "source_transition_hash": file_hash(ROOT / "evidence/pilot/source-transition-8.json"),
+            "source_transition_hash": file_hash(ROOT / "evidence/pilot/source-transition-8a.json"),
+            "request_encoding_correction_hash": file_hash(ROOT / "evidence/pilot/predeclaration-8a.md"),
             "refusal_history_hash": file_hash(ROOT / "evidence/pilot/history-8.json"),
             "transport_correction_hash": file_hash(ROOT / "evidence/pilot/predeclaration-4a.md"),
             "route": MODEL, "decoding": {"temperature": 0, "forceReasoningOff": True, "max_output_tokens": 4096, "cacheRetention": "none"},
@@ -481,7 +482,7 @@ def ifbench_status(out: Path, task, proof: dict) -> str:
 def controls(args, pool=None, env=None):
     from .controls import ControlsFailed, measure, representative_rows
     if args.out.resolve() != AUTHORIZED_CONTROL_OUTPUT.resolve():
-        raise ValueError("Contract 8 authorizes only evidence/pilot/controls-8; no replacement attempt directory")
+        raise ValueError("Contract 8a authorizes only evidence/pilot/controls-7b; no further replacement directory")
     if args.task != "all":
         raise ValueError("Controls require the complete predeclared panel")
     if args.out.exists() and any(args.out.iterdir()):
@@ -868,8 +869,8 @@ def main():
     parser.add_argument("command", choices=("prepare", "probe", "throttle-proof", "readmit-mbpp", "adversarial", "controls", "smoke", "pilot", "verify", "replay"))
     parser.add_argument("--cache", type=Path, default=ROOT / ".pilot-cache")
     parser.add_argument("--pool", type=Path, default=ROOT / ".pilot-state/account-pool.json")
-    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-8")
-    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-8-dispatch")
+    parser.add_argument("--controls", type=Path, default=ROOT / "evidence/pilot/controls-7b")
+    parser.add_argument("--adversarial", type=Path, default=ROOT / "evidence/pilot/adversarial-8a")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--task", choices=(*TASKS, "all"), default="all")
     parser.add_argument("--seed", type=int, default=0)
@@ -877,7 +878,7 @@ def main():
     if args.out is None:
         args.out = ROOT / "evidence/pilot" / (
             "mbpp-readmission-4a" if args.command == "readmit-mbpp" else
-            "adversarial-8-dispatch" if args.command == "adversarial" else "controls-8" if args.command == "controls" else "smoke-8")
+            "adversarial-8a" if args.command == "adversarial" else "controls-7b" if args.command == "controls" else "smoke-8")
     if args.command != "verify":
         execution_limits()
     if args.command in {"verify", "replay"}:
