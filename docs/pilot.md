@@ -16,6 +16,10 @@ Replay the historical `seed0-preflight-9/check.py` only at commit `fb813867adf95
 
 The corrected runner then [stopped at real admission](../evidence/pilot/seed0-9/README.md), before any search: the freshly prepared HoVer index differs from the admitted receipt in four hashes. The pinned corpus, package versions and recipe match, but exact index equality does not. No gate was relaxed or rerun. All six cells remain unstarted with zero model spend; no optimizer comparison is available.
 
+The owner then authorized [exact admitted-artifact reuse](../evidence/pilot/index-artifact-9/README.md). All eight source files matched the admitted artifact and the `cp -a` copy rehashed identically. The source remains read-only; only this lane's copy enters the harness. Fresh rebuilds are not byte-reproducible under the pinned recipe, so future admitted reruns must reuse this artifact rather than rebuild or re-admit it.
+
+The unchanged admission entrypoint passed on the verified copy, selecting MBPP + HoVer without model calls or final-test labels. [The result](../evidence/pilot/index-artifact-9/admission.json) records this authorized continuation separately from the preserved earlier stops.
+
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-plus-estimated charged budget.
 
 [Predeclaration 4](../evidence/pilot/predeclaration-4.md), committed as `030c792` before new model calls, replaces the authored P controls with published optimized instructions and a fresh 40-row draw. [Correction 4a](../evidence/pilot/predeclaration-4a.md) removes a CPU-0 gateway override and prevents provider failures from deciding calibration scores. The transport change requires MBPP re-admission; contract-3 measurements alone cannot authorize the corrected harness. [Handoff 3](../evidence/pilot/handoff-3.md) records the earlier IFBench ranking failure.
@@ -25,6 +29,8 @@ Contract 4a stopped under AIME's noise gate. Its envelope, 0.07616286, exceeded 
 ## Prepare the runtime
 
 Run from the repository root on Linux with Docker, Bun, uv, pnpm, and omp 18.16.0 installed. Configure the auth broker through omp itself. Do not supply credentials to this repository.
+
+Before `prepare` or any admission/search command, verify and copy the admitted HoVer retrieval artifact using the [predeclaration-9 reuse evidence](../evidence/pilot/index-artifact-9/README.md). Do not let an empty cache trigger a fresh index build for an admitted rerun. A source or copy hash mismatch requires handback, not rebuilding or relaxing the exact gate.
 
 ```sh
 nice -n 10 taskset -c 6 uv sync --project pilot --frozen --extra retrieval
@@ -162,7 +168,7 @@ Hash verification checks retained evidence integrity. It does not promise byte-i
 
 Reported selection scores are adaptive: they select incumbents and are not unbiased estimates of deployment quality. No free postselection reevaluation or separate confirmation budget is added to this matched-budget smoke. Independent confirmation belongs to a separately authorized larger evaluation, not a public claim from these development scores.
 
-For seed 0, `python -m pilot.results --runs .pilot-runs/pilot-seed0-9 --out evidence/pilot/results-9.json` computes inference entirely from archived development outputs. It resamples unique paired selection instances 10,000 times for each task and method, then uses a task-and-instance hierarchical bootstrap for the equal-weight two-task mean. Both report 95% percentile intervals. An unchanged artifact compares the same baseline vector with itself, so stochastic rescoring cannot masquerade as an artifact improvement. The report labels adaptive selection, the 2-point practical threshold, and no superiority claim or Holm correction.
+For seed 0, `python -m pilot.results --runs .pilot-runs/pilot-seed0-9 --out evidence/pilot/results-9-seed0.json` computes inference entirely from archived development outputs. It resamples unique paired selection instances 10,000 times for each task and method, then uses a task-and-instance hierarchical bootstrap for the equal-weight two-task mean. Both report 95% percentile intervals. An unchanged artifact compares the same baseline vector with itself, so stochastic rescoring cannot masquerade as an artifact improvement. The report labels adaptive selection, the 2-point practical threshold, and no superiority claim or Holm correction. The earlier `results-9.json` remains the historical no-search stop report.
 
 Recompute every retained rollout's score from the pinned development data and archived task-model outputs, without provider credentials or model calls:
 

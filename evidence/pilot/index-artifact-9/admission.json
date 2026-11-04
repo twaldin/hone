@@ -1,0 +1,25 @@
+{
+  "at": "2026-11-04T22:20:29.013971+00:00",
+  "cache": ".pilot-cache",
+  "command": "nice -n 10 taskset -c 6 env OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 JAX_PLATFORMS=cpu NLTK_DATA=<worktree>/.pilot-cache/nltk pilot/.venv/bin/python -c \"load_panel(args)\"",
+  "controls": "evidence/pilot/controls-7b",
+  "elapsed_seconds": 471.88155545305926,
+  "execution_limits": [
+    [
+      6
+    ],
+    10
+  ],
+  "exit_code": 0,
+  "fresh_admission_controls_run": false,
+  "gates_relaxed": false,
+  "model_calls": 0,
+  "original_failed_attempt_preserved": true,
+  "schema": "pilot-copied-artifact-admission-v9",
+  "scored_final_tests_loaded": false,
+  "selected_panel": [
+    "mbpp",
+    "hover"
+  ],
+  "source_tree_commit": "16fa4914577f5fcd9ada96eb793e581c889fa81a"
+}
