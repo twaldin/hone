@@ -1,0 +1,20 @@
+{
+  "carried_tasks": [
+    "mbpp",
+    "hover"
+  ],
+  "command": "/home/tim/worktrees/hone/hone-hone-pilot-harness-1/pilot/.venv/bin/python -m pilot controls --adversarial evidence/pilot/adversarial-6 --out evidence/pilot/controls-6",
+  "log": ".pilot-state/controls-6.log",
+  "main_pid": 3603995,
+  "matrix_authorized": false,
+  "max_cpu_heavy_workers": 1,
+  "max_model_requests_inflight": 1,
+  "new_control_task": "ifbench",
+  "output": "evidence/pilot/controls-6",
+  "predeclaration_commit": "c8b55d2042d07104aedeca54dba7e715df83f57c",
+  "restart": "no",
+  "source_head": "204ee498761e1a280601445d6898fb85dd1ace49",
+  "started_at": "2026-11-04T06:51:22Z",
+  "unit": "hone-hone-pilot-harness-1-controls6.service",
+  "version": 6
+}
