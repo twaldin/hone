@@ -10,6 +10,8 @@
 
 Call 2507 answered after one internal retry, so final-call receipts report no transport failure while the failed attempt's token usage remains unknown. This run's observed hidden-attempt rate was 1/2616, or 0.03823%, below the 1% flag threshold. [The verification record](../evidence/pilot/verification-8a.json) binds source-audit provenance and the zero-model replay and test results.
 
+The [first-seed preflight](../evidence/pilot/seed0-preflight-9/README.md) stopped before any search. The frozen `pilot` dispatcher ignores `--seed 0` and selects all three seeds. An offline dispatch diagnostic also continued after two synthetic infrastructure failures with over-threshold hidden attempts and unknown usage. The authorized six-cell run therefore did not start. Predeclaration 9 remains unfinalized, and no optimizer comparison or final-test evaluation was performed.
+
 The pilot decides whether Hone's proposed search policy warrants a larger comparison. It does not support a public optimizer-quality claim. It compares Hone, pinned official GEPA, and a plain agent loop with the same current subscription model and reported-plus-estimated charged budget.
 
 [Predeclaration 4](../evidence/pilot/predeclaration-4.md), committed as `030c792` before new model calls, replaces the authored P controls with published optimized instructions and a fresh 40-row draw. [Correction 4a](../evidence/pilot/predeclaration-4a.md) removes a CPU-0 gateway override and prevents provider failures from deciding calibration scores. The transport change requires MBPP re-admission; contract-3 measurements alone cannot authorize the corrected harness. [Handoff 3](../evidence/pilot/handoff-3.md) records the earlier IFBench ranking failure.
