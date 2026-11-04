@@ -44,6 +44,8 @@ def build(controls: Path) -> dict:
         return json.loads(data)
 
     inputs[str((controls / "bundle.json").relative_to(ROOT))] = "sha256:" + hashlib.sha256((controls / "bundle.json").read_bytes()).hexdigest()
+    setup = load(ROOT / "evidence/pilot/setup-overhead-6.json")
+    setup_hours = (setup["cold_mbpp_load_seconds"] + setup["revalidations_per_matrix"] * setup["warm_mbpp_revalidation_seconds"]) / 3600
     calibration_paths = {"mbpp": ROOT / "evidence/pilot/mbpp-readmission-4a/mbpp",
                          "hover": ROOT / "evidence/pilot/controls-5/hover",
                          "ifbench": controls / "ifbench"}
@@ -99,14 +101,18 @@ def build(controls: Path) -> dict:
                                     "elapsed_wall_hours_upper_bound": None},
                        "projection": {key: sum(row["projection_per_cell"][key] * 3 for row in selected)
                                       for key in ("tokens", "usd_equivalent", "active_hours", "usage_polling_hours", "observed_pause_hours", "wall_hours")} if available else None}
+        if available:
+            plans[name]["projection"].update(retained_admission_setup_hours=setup_hours,
+                total_wall_hours_including_measured_setup=plans[name]["projection"]["wall_hours"] + setup_hours)
     return {"schema": "pilot-measured-run-plan-v6", "status": "INFERENCE_NOT_EXECUTED",
             "selected_panel": panel, "calibrations": calibrations, "smokes": smokes,
             "cell_projections": rows, "plans": plans, "input_hashes": inputs,
+            "measured_setup": setup,
             "generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "method": "Linearly scale observed task-specific usage and time to the first common dollar/token/call/active-time cap; sum three seeds per method. MBPP uses each actual smoke. P tasks use calibration ratios for every method, not invented method-search results.",
             "limits": ["One real smoke per method; calibration and smoke mixes differ from longer searches. No statistical precision or optimizer advantage is claimed.",
                        "P calibration has no proposer calls. Its projection does not measure future proposal overhead or candidate-dependent deployment changes; all such calls must fit the same cap, and can lower the amount of task evaluation purchased.",
-                       "Token reservations, proposer/rollout safety caps, one-time preparation and future latency can stop runs earlier than this fluid-rate estimate.",
+                       "Token reservations, proposer/rollout safety caps and future latency can stop runs earlier than this fluid-rate estimate. Measured cold MBPP planning plus eleven retained-admission validations are added outside cell time; corpus download/index creation and other small orchestration overhead are separate.",
                        "Observed pause duty is included, not guaranteed. Before every call all allowed accounts must remain at or below80%; missing/stale usage and broker outage pause dispatch every30seconds. Arbitrary outage/quota delay has no finite upper bound.",
                        "Usage is omp transport-reported only. Hidden failed-attempt and non-200 token volume is unknown, not free.",
                        "Neither matrix is authorized. The assistant reviews this plan first. Credential-opaque per-attempt and failed-call receipts remain prerequisites for the full matrix."],

@@ -146,6 +146,42 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(json.loads((target / "panel.json").read_text())["tasks"], ["mbpp", "hover"])
             self.assertFalse((target / "aime").exists())
 
+    def test_real_headroom_measurement_seals_two_task_fallback_without_a_second_attempt(self):
+        from pilot.panel import validate_measurement
+        from pilot.runtime import Ledger
+        with tempfile.TemporaryDirectory() as directory, self.offline_fixture(Path(directory)) as (tasks, admission, cache):
+            for row in tasks["ifbench"].train:
+                row.update(instruction_id_list=[], kwargs=[])
+            with redirect_stdout(StringIO()):
+                offline_adversarial(argparse.Namespace(task="all", out=admission, cache=cache))
+            out = Path(directory) / "headroom-controls"
+            calls = []
+            ledger = Ledger(out / "ifbench/calls.jsonl")
+            throttle = SimpleNamespace(accounted_seconds=0, pauses=0, paused_seconds=0)
+            def provider(role, messages, max_tokens):
+                calls.append(role)
+                field = "response" if len(calls) % 2 else "final_response"
+                ledger.admit(role, messages, max_tokens)
+                frame = {"status": 200, "body": {"message": {
+                    "content": [{"type": "text", "text": json.dumps({"reasoning": "", field: "heliotropeproofword"})}],
+                    "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0}, "stopReason": "stop"}}}
+                return ledger.settle(role, {"messages": messages}, frame, 0)
+            provider.gateway = SimpleNamespace(route_identity={"fixture": True})
+            provider.close = lambda: None
+            args = argparse.Namespace(task="all", out=out, cache=cache, adversarial=admission)
+            with patch("pilot.__main__.validate_measurement", side_effect=validate_measurement), patch(
+                "pilot.__main__.calls_for", return_value=(provider, ledger, throttle)
+            ), redirect_stdout(StringIO()):
+                run_controls(args, json.loads((Path(directory) / "pool.json").read_text()), {})
+                self.assertEqual(list(load_panel(SimpleNamespace(controls=out, cache=cache, task="all"))), ["mbpp", "hover"])
+                with self.assertRaises(ValueError):
+                    run_controls(args, {}, {})
+            self.assertEqual(json.loads((out / "ifbench/failure.json").read_text())["gate"], "headroom")
+            self.assertEqual(json.loads((out / "panel.json").read_text())["tasks"], ["mbpp", "hover"])
+            self.assertEqual(json.loads((out / "ifbench/controls.json").read_text())["controls"]["naive"]["mean"], 1.0)
+            self.assertEqual(calls, ["task"] * 80)
+            self.assertFalse((out / "ifbench/noise-pairs.json").exists())
+
 
     def test_missing_calls_or_empty_outputs_cannot_fake_zero_mbpp_noise(self):
         for defect in ("missing-noise-calls", "empty-output"):

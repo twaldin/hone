@@ -1,5 +1,7 @@
 import copy
 import json
+import math
+import statistics
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -119,6 +121,57 @@ class PanelTests(unittest.TestCase):
 
     def test_current_ifbench_validates_raw_measurements(self):
         self.assertEqual(validate_measurement(self.local, self.task, self.original, self.proof), "passed")
+
+    def test_headroom_failure_requires_complete_naive_measurement(self):
+        naive = {"scores": [1.0] * 40, "outputs": ["1"] * 40, "mean": 1.0}
+        self.control.update(controls={"naive": naive}, ranking_passed=None, noise_passed=None)
+        self.evaluations = [{"control": "naive", "row_ids": self.ids, **{key: naive[key] for key in ("scores", "outputs")}}]
+        self.seal_fixture()
+        self.assertEqual(validate_measurement(self.local, self.task, self.original, self.proof, allow_failure=True), "headroom")
+        with self.assertRaises(ValueError):
+            validate_measurement(self.local, self.task, self.original, self.proof)
+        self.evaluations[0]["outputs"].pop()
+        self.seal_fixture()
+        with self.assertRaises(ValueError):
+            validate_measurement(self.local, self.task, self.original, self.proof, allow_failure=True)
+
+    def test_ranking_failure_is_measured_not_a_flag(self):
+        self.control["controls"]["known-improved"] = copy.deepcopy(self.control["controls"]["naive"])
+        self.control["ranking_passed"] = False
+        self.evaluations = [record for record in self.evaluations if record["control"] != "unchanged"]
+        for record in self.evaluations:
+            if record["control"] == "known-improved":
+                record.update({key: self.control["controls"]["known-improved"][key] for key in ("scores", "outputs")})
+        self.seal_fixture()
+        self.assertEqual(validate_measurement(self.local, self.task, self.original, self.proof, allow_failure=True), "ranking")
+        with self.assertRaises(ValueError):
+            validate_measurement(self.local, self.task, self.original, self.proof)
+
+    def test_noise_failure_requires_the_original_envelope_arithmetic(self):
+        self.pairs = []
+        self.evaluations = [record for record in self.evaluations if record["control"] != "unchanged"]
+        for trial in range(16):
+            first = [float(trial % 2)] * 40
+            second = [1.0 - first[0]] * 40
+            self.pairs.append({"trial": trial, "first": first, "second": second, "delta": second[0] - first[0]})
+            for arm, scores in (("first", first), ("second", second)):
+                self.evaluations.append({"control": "unchanged", "trial": trial, "arm": arm,
+                                         "row_ids": self.ids, "scores": scores, "outputs": [str(int(value)) for value in scores]})
+        sd = statistics.stdev(pair["delta"] for pair in self.pairs)
+        calibration = self.control["calibration"]
+        calibration.update(noiseFloor=3 / math.sqrt(2) * sd, noiseEnvelope=4.5 / math.sqrt(2) * sd,
+                           pairedDeltaSd=sd, maxObservedPairDelta=1.0, informationFreePositive=8,
+                           sourceCohortSha256=[cli.digest({"identity": self.original, "rows": self.ids,
+                              "seed": self.task.seed_candidate, "pair": pair}) for pair in self.pairs])
+        self.control["noise_passed"] = False
+        self.seal_fixture()
+        self.assertEqual(validate_measurement(self.local, self.task, self.original, self.proof, allow_failure=True), "noise")
+        with self.assertRaises(ValueError):
+            validate_measurement(self.local, self.task, self.original, self.proof)
+        calibration["noiseEnvelope"] = 0.0
+        self.seal_fixture()
+        with self.assertRaises(ValueError):
+            validate_measurement(self.local, self.task, self.original, self.proof, allow_failure=True)
 
     def test_changed_current_identity_or_cohort_is_rejected(self):
         changed = copy.deepcopy(self.original)
