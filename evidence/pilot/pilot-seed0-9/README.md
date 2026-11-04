@@ -49,7 +49,7 @@ No unassigned incomplete evaluation tail exists. Hidden-attempt and unknown-usag
 | GEPA | 0 / 2 | 0 | 0 / 0 | $0 / $0 | $0 / $0 / $0 | 0 / 0 | — / — | Not assessed | Not assessed |
 | Plain | 0 / 2 | 0 | 0 / 0 | $0 / $0 | $0 / $0 / $0 | 0 / 0 | — / — | Not assessed | Not assessed |
 
-No optimizer comparison or practical-threshold assessment is available. This is not evidence that any method succeeds or fails to improve the unchanged seed. The [machine-readable report](../results-9-seed0.json) explicitly retains all missing cell inputs and unavailable inference.
+No optimizer comparison or practical-threshold assessment is available. This is not evidence that any method succeeds or fails to improve the unchanged seed. Offline replay of this attempt is byte-identical to the existing [no-search report](../results-9.json), which retains all missing cell inputs and unavailable inference. That shared report is not a completed-search result. `results-9-seed0.json` remains reserved for a future authorized search, so that output cannot overwrite this stop's report.
 
 ## Replay and next prerequisite
 
@@ -59,10 +59,11 @@ Verify the raw attempt bundle without data loaders, credentials or models:
 python3 -m pilot verify --out evidence/pilot/pilot-seed0-9
 ```
 
-Recompute the no-search report with the current offline reporter and compare it with `results-9-seed0.json`:
+Recompute this stop's no-search report with the recorded offline reporter and compare it with the existing `results-9.json`:
 
 ```sh
-nice -n 10 taskset -c 6 python3 -m pilot.results --runs evidence/pilot/pilot-seed0-9 --out .pilot-state/results-9-seed0-replay.json
+nice -n 10 taskset -c 6 python3 -m pilot.results --runs evidence/pilot/pilot-seed0-9 --out .pilot-state/startup-stop-9-replay.json
+cmp evidence/pilot/results-9.json .pilot-state/startup-stop-9-replay.json
 ```
 
 The concrete next launch prerequisite is to supply `NLTK_DATA=/home/tim/worktrees/hone/hone-hone-pilot-seed0-1/.pilot-cache/nltk` before Python starts, matching the successful preflight. No asset download, index rebuild, re-admission or optimizer change is needed to address this observed lookup error. This is a handoff recommendation, not an executed retry or permission to ignore the stop rule.
